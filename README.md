@@ -16,9 +16,9 @@ Main UI ✅⚠️
 ❌ - Not implemented/Doesn't work   
 
 ## Build requirements
-VS 2026 (I didn't test with anything else)
-CMake 3.20+ (tested with CMake 4.2.2)
-Access to internet (to download dependencies)
+VS 2026 (I didn't test with anything else)  
+CMake 3.20+ (tested with CMake 4.2.2)  
+Access to internet (to download dependencies)  
 
 # Build
 Run `cmake -S . -B build-vs -G "Visual Studio 18 2026" -A x64`  
