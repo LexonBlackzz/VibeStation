@@ -117,6 +117,7 @@ void System::reset() {
   timers_.reset();
   dma_.reset();
   cdrom_.reset();
+  mdec_.reset();
   sio_.reset();
   gpu_.reset();
   spu_.reset();
@@ -250,6 +251,12 @@ void System::run_frame() {
   boot_diag_.display_width = static_cast<u16>(std::max(0, display_sample.width));
   boot_diag_.display_height =
       static_cast<u16>(std::max(0, display_sample.height));
+  boot_diag_.display_x_start =
+      static_cast<u16>(std::max(0, display_sample.x_start));
+  boot_diag_.display_y_start =
+      static_cast<u16>(std::max(0, display_sample.y_start));
+  boot_diag_.display_is_24bit = display_sample.is_24bit ? 1u : 0u;
+  boot_diag_.display_enabled = display_sample.display_enabled ? 1u : 0u;
   const u64 pixel_count = static_cast<u64>(std::max(1, display_sample.width)) *
                           static_cast<u64>(std::max(1, display_sample.height));
   const bool logo_visible_now =
@@ -292,8 +299,10 @@ u8 System::read8(u32 addr) {
     return ram_.read8(phys & 0x1FFFFF);
 
   // BIOS
-  if (phys >= 0x1FC00000 && phys < 0x1FC80000)
-    return bios_.read8(phys - 0x1FC00000);
+  if (phys >= psx::BIOS_BASE &&
+      static_cast<u64>(phys) <
+          (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
+    return bios_.read8(phys - psx::BIOS_BASE);
 
   // Scratchpad
   if (phys >= 0x1F800000 && phys < 0x1F800400)
@@ -311,6 +320,12 @@ u8 System::read8(u32 addr) {
     if (io >= 0x800 && io < 0x804) {
       note_cdrom_io(phys);
       return cdrom_.read8(io - 0x800);
+    }
+    // MDEC
+    if (io >= 0x820 && io < 0x828) {
+      const u32 reg = (io & 0x4u) ? mdec_.read_status() : mdec_.read_data();
+      const u32 shift = (io & 0x3u) * 8u;
+      return static_cast<u8>((reg >> shift) & 0xFFu);
     }
     // Expansion 2
     if (phys == 0x1F802041)
@@ -344,8 +359,10 @@ u16 System::read16(u32 addr) {
     return ram_.read16(phys);
   if (phys >= 0x00200000 && phys < 0x00800000)
     return ram_.read16(phys & 0x1FFFFF);
-  if (phys >= 0x1FC00000 && phys < 0x1FC80000)
-    return bios_.read16(phys - 0x1FC00000);
+  if (phys >= psx::BIOS_BASE &&
+      static_cast<u64>(phys) <
+          (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
+    return bios_.read16(phys - psx::BIOS_BASE);
   if (phys >= 0x1F800000 && phys < 0x1F800400)
     return ram_.scratch_read16(phys - 0x1F800000);
 
@@ -368,6 +385,12 @@ u16 System::read16(u32 addr) {
       u16 lo = cdrom_.read8(io - 0x800);
       u16 hi = cdrom_.read8(std::min<u32>(io - 0x800 + 1, 3));
       return lo | static_cast<u16>(hi << 8);
+    }
+    // MDEC
+    if (io >= 0x820 && io < 0x828) {
+      const u32 reg = (io & 0x4u) ? mdec_.read_status() : mdec_.read_data();
+      const u32 shift = (io & 0x2u) ? 16u : 0u;
+      return static_cast<u16>((reg >> shift) & 0xFFFFu);
     }
     // SPU
     if (io >= 0xC00 && io < 0x1000)
@@ -395,8 +418,10 @@ u32 System::read32(u32 addr) {
     return ram_.read32(phys);
   if (phys >= 0x00200000 && phys < 0x00800000)
     return ram_.read32(phys & 0x1FFFFF);
-  if (phys >= 0x1FC00000 && phys < 0x1FC80000)
-    return bios_.read32(phys - 0x1FC00000);
+  if (phys >= psx::BIOS_BASE &&
+      static_cast<u64>(phys) <
+          (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size()))
+    return bios_.read32(phys - psx::BIOS_BASE);
   if (phys >= 0x1F800000 && phys < 0x1F800400)
     return ram_.scratch_read32(phys - 0x1F800000);
 
@@ -435,6 +460,13 @@ u32 System::read32(u32 addr) {
       u32 b2 = cdrom_.read8(std::min<u32>(io - 0x800 + 2, 3));
       u32 b3 = cdrom_.read8(std::min<u32>(io - 0x800 + 3, 3));
       return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    }
+    // MDEC
+    if (io == 0x820) {
+      return mdec_.read_data();
+    }
+    if (io == 0x824) {
+      return mdec_.read_status();
     }
     // SPU
     if (io >= 0xC00 && io < 0x1000) {
@@ -491,6 +523,10 @@ void System::write8(u32 addr, u8 val) {
     if (io >= 0x800 && io < 0x804) {
       note_cdrom_io(phys);
       cdrom_.write8(io - 0x800, val);
+      return;
+    }
+    if (io >= 0x820 && io < 0x828) {
+      // MDEC is normally programmed via 32-bit accesses; ignore byte writes.
       return;
     }
     // Expansion 2 (POST register, etc.)
@@ -553,6 +589,10 @@ void System::write16(u32 addr, u16 val) {
       cdrom_.write8(io - 0x800, static_cast<u8>(val & 0xFF));
       cdrom_.write8(std::min<u32>(io - 0x800 + 1, 3),
                     static_cast<u8>((val >> 8) & 0xFF));
+      return;
+    }
+    if (io >= 0x820 && io < 0x828) {
+      // MDEC is normally programmed via 32-bit accesses; ignore halfword writes.
       return;
     }
     if (io >= 0xC00 && io < 0x1000) {
@@ -642,6 +682,15 @@ void System::write32(u32 addr, u32 val) {
                     static_cast<u8>((val >> 16) & 0xFF));
       cdrom_.write8(std::min<u32>(io - 0x800 + 3, 3),
                     static_cast<u8>((val >> 24) & 0xFF));
+      return;
+    }
+    // MDEC
+    if (io == 0x820) {
+      mdec_.write_command(val);
+      return;
+    }
+    if (io == 0x824) {
+      mdec_.write_control(val);
       return;
     }
     // SPU

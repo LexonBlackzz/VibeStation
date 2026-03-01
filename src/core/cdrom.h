@@ -162,6 +162,17 @@ private:
   bool read_whole_sector_ = false;
   bool pending_read_start_ = false;
   bool pending_reads_mode_ = false;
+  bool cdda_playing_ = false;
+  bool cdda_cmd_muted_ = false;
+  bool cdda_adp_muted_ = false;
+  int adpcm_busy_cycles_ = 0;
+  std::array<u8, 4> atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  std::array<u8, 4> atv_active_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  std::array<s16, 2> xa_hist1_ = {};
+  std::array<s16, 2> xa_hist2_ = {};
+  bool xa_stream_valid_ = false;
+  u8 xa_stream_file_ = 0;
+  u8 xa_stream_channel_ = 0;
 
   // Status byte
   u8 stat_byte() const;
@@ -170,6 +181,7 @@ private:
   void execute_command(u8 cmd);
   void cmd_getstat();
   void cmd_setloc();
+  void cmd_play();
   void cmd_readn();
   void cmd_pause();
   void cmd_init();
@@ -198,7 +210,14 @@ private:
   void schedule_second_response(int delay_cycles, u8 irq,
                                 std::vector<u8> response);
   void start_read_stream(bool reads_mode);
+  bool read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
+                               const CdTrack **track_out = nullptr);
+  int track_end_lba(const CdTrack *track) const;
+  bool stream_cdda_sector();
+  bool cd_audio_muted() const;
+  void apply_host_audio_matrix(std::vector<s16> &samples) const;
   bool read_sector();
+  void maybe_decode_xa_audio(const std::vector<u8> &raw_sector);
   void fire_irq(u8 irq_num);
   void enqueue_irq(u8 irq_num, std::vector<u8> response,
                    bool wait_for_command_idle = true);

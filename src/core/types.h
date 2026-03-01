@@ -92,6 +92,8 @@ inline u32 g_trace_burst_timer = 64;
 inline u32 g_trace_stride_timer = 2048;
 inline u32 g_trace_burst_sio = 64;
 inline u32 g_trace_stride_sio = 2048;
+inline bool g_experimental_bios_size_mode = false;
+inline bool g_unsafe_ps2_bios_mode = false;
 
 inline constexpr u32 log_category_bit(LogCategory cat) {
   return static_cast<u32>(cat);

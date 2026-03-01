@@ -209,6 +209,9 @@ void DmaController::dma_block(int channel) {
       u32 data = sys_->read32(current_addr);
       // Send to device
       switch (channel) {
+      case 0: // MDEC in
+        sys_->mdec_dma_write(data);
+        break;
       case 2: // GPU
         sys_->gpu_gp0(data);
         break;
@@ -223,6 +226,9 @@ void DmaController::dma_block(int channel) {
       u32 data = 0;
       // Read from device
       switch (channel) {
+      case 1: // MDEC out
+        data = sys_->mdec_dma_read();
+        break;
       case 2: // GPU (GPUREAD)
         data = sys_->gpu_read();
         break;
@@ -309,6 +315,10 @@ bool DmaController::request_active(int channel) const {
   }
 
   switch (channel) {
+  case 0:
+    return sys_->mdec_dma_in_request();
+  case 1:
+    return sys_->mdec_dma_out_request();
   case 2:
     return sys_->gpu_dma_request();
   case 3:

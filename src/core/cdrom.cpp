@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace {
@@ -81,6 +82,28 @@ std::string parse_file_name(const std::string &line) {
   return name;
 }
 
+s16 sat16(s32 v) {
+  if (v < -32768) {
+    return -32768;
+  }
+  if (v > 32767) {
+    return 32767;
+  }
+  return static_cast<s16>(v);
+}
+
+int xa_filter_index(u8 header) {
+  const int idx = (header >> 4) & 0x0F;
+  if (idx > 3) {
+    return 0;
+  }
+  return idx;
+}
+
+bool is_audio_track_type(const std::string &track_type) {
+  return upper_copy(track_type) == "AUDIO";
+}
+
 } // namespace
 
 // -- Disc Loading --------------------------------------------------------------
@@ -137,8 +160,19 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   read_whole_sector_ = false;
   pending_read_start_ = false;
   pending_reads_mode_ = false;
+  cdda_playing_ = false;
+  cdda_cmd_muted_ = false;
+  cdda_adp_muted_ = false;
+  adpcm_busy_cycles_ = 0;
+  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  atv_active_ = atv_pending_;
   host_audio_regs_.fill(0);
   host_audio_apply_ = 0;
+  xa_hist1_ = {};
+  xa_hist2_ = {};
+  xa_stream_valid_ = false;
+  xa_stream_file_ = 0;
+  xa_stream_channel_ = 0;
 
   const std::filesystem::path cue_fs(cue_path);
   const std::filesystem::path cue_dir = cue_fs.parent_path();
@@ -279,8 +313,19 @@ void CdRom::reset() {
   read_whole_sector_ = false;
   pending_read_start_ = false;
   pending_reads_mode_ = false;
+  cdda_playing_ = false;
+  cdda_cmd_muted_ = false;
+  cdda_adp_muted_ = false;
+  adpcm_busy_cycles_ = 0;
+  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  atv_active_ = atv_pending_;
   host_audio_regs_.fill(0);
   host_audio_apply_ = 0;
+  xa_hist1_ = {};
+  xa_hist2_ = {};
+  xa_stream_valid_ = false;
+  xa_stream_file_ = 0;
+  xa_stream_channel_ = 0;
 }
 
 bool CdRom::parse_cue(const std::string &cue_path,
@@ -388,7 +433,10 @@ u8 CdRom::read8(u32 offset) {
   switch (offset) {
   case 0: {
     u8 status = static_cast<u8>(index_reg_ & 0x3);
-    // Bit2 ADPBUSY is intentionally left clear in this model.
+    // Bit2 ADPBUSY: XA ADPCM decoder active.
+    if (adpcm_busy_cycles_ > 0) {
+      status |= (1u << 2);
+    }
     // Bit3 PRMEMPT: parameter FIFO empty.
     if (param_fifo_.empty()) {
       status |= (1u << 3);
@@ -477,10 +525,13 @@ void CdRom::write8(u32 offset, u8 value) {
       host_audio_regs_[0] = value;
       break;
     case 2:
+      // Coding info command register (not used in this model yet).
       host_audio_regs_[1] = value;
       break;
     case 3:
-      host_audio_apply_ = value;
+      // ATV2: right-to-right volume.
+      host_audio_regs_[5] = value;
+      atv_pending_[2] = value;
       break;
     default:
       LOG_WARN("CDROM: Write to port 1 index %u = 0x%02X", index_reg_, value);
@@ -497,10 +548,14 @@ void CdRom::write8(u32 offset, u8 value) {
       refresh_irq_line();
       break;
     case 2:
+      // ATV0: left-to-left volume.
       host_audio_regs_[2] = value;
+      atv_pending_[0] = value;
       break;
     case 3:
+      // ATV3: right-to-left volume.
       host_audio_regs_[3] = value;
+      atv_pending_[3] = value;
       break;
     default:
       LOG_WARN("CDROM: Write to port 2 index %u = 0x%02X", index_reg_, value);
@@ -529,8 +584,8 @@ void CdRom::write8(u32 offset, u8 value) {
       }
       if (irq_cleared) {
         // HCLRCTL bits0..4 acknowledge pending HINTSTS flags.
-        // On real hardware this also drains the current result FIFO, allowing
-        // queued responses/IRQs to promote.
+        // Keep legacy behavior: ACK also drains the current result FIFO so
+        // queued follow-up responses can promote immediately.
         interrupt_flag_ = 0;
         response_fifo_.clear();
         response_index_ = 0;
@@ -550,11 +605,18 @@ void CdRom::write8(u32 offset, u8 value) {
       break;
     }
     case 2:
+      // ATV1: left-to-right volume.
       host_audio_regs_[4] = value;
+      atv_pending_[1] = value;
       break;
     case 3:
-      host_audio_regs_[5] = value;
+      // ADPCTL: bit0=ADPMUTE, bit5=CHNGATV.
+      host_audio_regs_[6] = value;
       host_audio_apply_ = value;
+      cdda_adp_muted_ = (value & 0x01u) != 0;
+      if (value & 0x20u) {
+        atv_active_ = atv_pending_;
+      }
       break;
     default:
       LOG_WARN("CDROM: Write to port 3 index %u = 0x%02X", index_reg_, value);
@@ -592,6 +654,13 @@ void CdRom::execute_command(u8 cmd) {
   case 0x02:
     saw_setloc_ = true;
     cmd_setloc();
+    break;
+  case 0x03:
+    cmd_play();
+    break;
+  case 0x04: // Forward (CDDA)
+  case 0x05: // Backward (CDDA)
+    enqueue_irq(3, {stat_byte()});
     break;
   case 0x06:
     saw_readn_or_reads_ = true;
@@ -675,6 +744,8 @@ u8 CdRom::stat_byte() const {
     stat |= 0x20;
   if (state_ == State::Seeking)
     stat |= 0x40;
+  if (cdda_playing_)
+    stat |= 0x80;
   return stat;
 }
 
@@ -694,15 +765,41 @@ void CdRom::cmd_setloc() {
   enqueue_irq(3, {stat_byte()});
 }
 
+void CdRom::cmd_play() {
+  motor_on_ = true;
+  state_ = State::Idle;
+  pending_read_start_ = false;
+
+  if (!param_fifo_.empty()) {
+    const u8 track_bcd = param_fifo_[0];
+    const int track_no = from_bcd(track_bcd);
+    if (track_no >= 1 && track_no <= static_cast<int>(tracks_.size())) {
+      read_lba_ = std::max(0, tracks_[static_cast<size_t>(track_no - 1)].index01_abs_lba - 150);
+      seek_target_valid_ = false;
+      seek_complete_ = true;
+    }
+  } else if (seek_target_valid_) {
+    read_lba_ = seek_target_lba_;
+    seek_complete_ = true;
+  }
+
+  cdda_playing_ = true;
+  pending_cycles_ = std::max(1, read_period_for_mode());
+  enqueue_irq(3, {stat_byte()});
+}
+
 void CdRom::cmd_readn() {
+  cdda_playing_ = false;
   start_read_stream(false);
 }
 
 void CdRom::cmd_reads() {
+  cdda_playing_ = false;
   start_read_stream(true);
 }
 
 void CdRom::cmd_pause() {
+  cdda_playing_ = false;
   state_ = State::Idle;
   read_period_cycles_ = 0;
   pending_read_start_ = false;
@@ -711,6 +808,11 @@ void CdRom::cmd_pause() {
 }
 
 void CdRom::cmd_init() {
+  cdda_playing_ = false;
+  cdda_cmd_muted_ = false;
+  cdda_adp_muted_ = false;
+  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  atv_active_ = atv_pending_;
   state_ = State::Idle;
   read_period_cycles_ = 0;
   pending_read_start_ = false;
@@ -730,6 +832,7 @@ void CdRom::cmd_setmode() {
 }
 
 void CdRom::cmd_stop() {
+  cdda_playing_ = false;
   state_ = State::Idle;
   motor_on_ = false;
   read_period_cycles_ = 0;
@@ -739,6 +842,7 @@ void CdRom::cmd_stop() {
 }
 
 void CdRom::cmd_standby() {
+  cdda_playing_ = false;
   state_ = State::Idle;
   motor_on_ = true;
   read_period_cycles_ = 0;
@@ -747,9 +851,15 @@ void CdRom::cmd_standby() {
   schedule_second_response(40000, 2, {stat_byte()});
 }
 
-void CdRom::cmd_mute() { enqueue_irq(3, {stat_byte()}); }
+void CdRom::cmd_mute() {
+  cdda_cmd_muted_ = true;
+  enqueue_irq(3, {stat_byte()});
+}
 
-void CdRom::cmd_demute() { enqueue_irq(3, {stat_byte()}); }
+void CdRom::cmd_demute() {
+  cdda_cmd_muted_ = false;
+  enqueue_irq(3, {stat_byte()});
+}
 
 void CdRom::cmd_setfilter() {
   if (param_fifo_.size() >= 2) {
@@ -789,6 +899,7 @@ void CdRom::cmd_getloc_p() {
 }
 
 void CdRom::cmd_seekl() {
+  cdda_playing_ = false;
   motor_on_ = true;
   if (seek_target_valid_) {
     read_lba_ = seek_target_lba_;
@@ -881,6 +992,8 @@ int CdRom::command_busy_for(u8 cmd) const {
   case 0x02: // Setloc
   case 0x0E: // Setmode
     return 2000;
+  case 0x03: // Play
+    return 2400;
   case 0x06: // ReadN
   case 0x1B: // ReadS
     return 2400;
@@ -943,14 +1056,270 @@ void CdRom::start_read_stream(bool reads_mode) {
   enqueue_irq(3, {stat_byte()});
 }
 
+bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
+                                    const CdTrack **track_out) {
+  if (!disc_loaded_ || !bin_file_.is_open()) {
+    return false;
+  }
+
+  const CdTrack *track = track_for_lba(psx_lba);
+  const int sector_size = (track != nullptr) ? track->sector_size : 2352;
+  if (sector_size <= 0) {
+    return false;
+  }
+
+  const int abs_lba = std::max(psx_lba, 0) + 150;
+  u64 raw_sector_offset =
+      static_cast<u64>(std::max(psx_lba, 0)) * static_cast<u64>(sector_size);
+  if (track != nullptr) {
+    const int track_relative_lba = std::max(0, abs_lba - track->index01_abs_lba);
+    const u64 file_sector = static_cast<u64>(
+        std::max(0, track->index01_file_lba + track_relative_lba));
+    raw_sector_offset =
+        file_sector * static_cast<u64>(std::max(track->sector_size, 1));
+  }
+
+  if (bin_size_ > 0 &&
+      raw_sector_offset + static_cast<u64>(sector_size) > bin_size_) {
+    return false;
+  }
+
+  bin_file_.clear();
+  bin_file_.seekg(static_cast<std::streamoff>(raw_sector_offset), std::ios::beg);
+  raw_sector.resize(static_cast<size_t>(sector_size));
+  bin_file_.read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
+  if (bin_file_.gcount() != sector_size) {
+    return false;
+  }
+
+  if (track_out != nullptr) {
+    *track_out = track;
+  }
+  return true;
+}
+
+int CdRom::track_end_lba(const CdTrack *track) const {
+  if (track == nullptr || tracks_.empty()) {
+    return std::numeric_limits<int>::max();
+  }
+
+  for (size_t i = 0; i + 1 < tracks_.size(); ++i) {
+    if (&tracks_[i] == track) {
+      return std::max(0, tracks_[i + 1].index01_abs_lba - 150);
+    }
+  }
+
+  if (bin_size_ > 0) {
+    const int sectors = static_cast<int>(
+        bin_size_ / static_cast<u64>(std::max(1, track->sector_size)));
+    const int end_abs =
+        track->index01_abs_lba + std::max(0, sectors - track->index01_file_lba);
+    return std::max(0, end_abs - 150);
+  }
+  return std::numeric_limits<int>::max();
+}
+
+bool CdRom::cd_audio_muted() const {
+  return cdda_cmd_muted_ || cdda_adp_muted_;
+}
+
+void CdRom::apply_host_audio_matrix(std::vector<s16> &samples) const {
+  if (samples.empty()) {
+    return;
+  }
+
+  const s32 atv0 = static_cast<s32>(atv_active_[0]);
+  const s32 atv1 = static_cast<s32>(atv_active_[1]);
+  const s32 atv2 = static_cast<s32>(atv_active_[2]);
+  const s32 atv3 = static_cast<s32>(atv_active_[3]);
+
+  for (size_t i = 0; i + 1 < samples.size(); i += 2) {
+    const s32 in_l = static_cast<s32>(samples[i]);
+    const s32 in_r = static_cast<s32>(samples[i + 1]);
+    const s32 out_l = (in_l * atv0 + in_r * atv3) / 128;
+    const s32 out_r = (in_l * atv1 + in_r * atv2) / 128;
+    samples[i] = sat16(out_l);
+    samples[i + 1] = sat16(out_r);
+  }
+}
+
+bool CdRom::stream_cdda_sector() {
+  const int current_lba = std::max(0, read_lba_);
+  const CdTrack *track = track_for_lba(current_lba);
+  if (track == nullptr) {
+    return false;
+  }
+
+  const int track_end = track_end_lba(track);
+  if ((mode_ & 0x02u) != 0 && current_lba >= track_end) {
+    cdda_playing_ = false;
+    enqueue_irq(4, {stat_byte()}, false);
+    return false;
+  }
+
+  std::vector<u8> raw_sector;
+  if (!read_raw_sector_for_lba(current_lba, raw_sector, nullptr)) {
+    cdda_playing_ = false;
+    return false;
+  }
+
+  if (!cd_audio_muted() && is_audio_track_type(track->type) &&
+      raw_sector.size() >= 2352) {
+    std::vector<s16> pcm;
+    pcm.reserve((2352u / 4u) * 2u);
+    for (size_t i = 0; i + 3 < 2352; i += 4) {
+      const s16 l = static_cast<s16>(
+          static_cast<u16>(raw_sector[i]) |
+          (static_cast<u16>(raw_sector[i + 1]) << 8));
+      const s16 r = static_cast<s16>(
+          static_cast<u16>(raw_sector[i + 2]) |
+          (static_cast<u16>(raw_sector[i + 3]) << 8));
+      pcm.push_back(l);
+      pcm.push_back(r);
+    }
+    apply_host_audio_matrix(pcm);
+    if (sys_ != nullptr) {
+      sys_->push_cd_audio_samples(pcm, 44100u);
+    }
+  }
+
+  ++read_lba_;
+  return true;
+}
+
+void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
+  if (raw_sector.size() < 2352) {
+    return;
+  }
+  // XA ADPCM output is enabled by Setmode bit6.
+  if ((mode_ & 0x40u) == 0) {
+    return;
+  }
+  if (cd_audio_muted()) {
+    return;
+  }
+
+  // Mode2 subheader bytes.
+  const u8 file = raw_sector[16];
+  const u8 channel = raw_sector[17];
+  const u8 submode = raw_sector[18];
+  const u8 coding = raw_sector[19];
+
+  // Decode XA sectors when Submode Audio bit is set.
+  // Some titles/streams do not keep the Real-Time bit asserted consistently.
+  if ((submode & 0x04u) == 0) {
+    return;
+  }
+  // Optional Setfilter gating.
+  if ((mode_ & 0x08u) != 0) {
+    if (file != filter_file_ || channel != filter_channel_) {
+      return;
+    }
+  }
+  if (!xa_stream_valid_ || xa_stream_file_ != file ||
+      xa_stream_channel_ != channel) {
+    xa_hist1_ = {};
+    xa_hist2_ = {};
+    xa_stream_valid_ = true;
+    xa_stream_file_ = file;
+    xa_stream_channel_ = channel;
+  }
+
+  const bool stereo = (coding & 0x01u) != 0;
+  const bool sample_18900 = (coding & 0x04u) != 0;
+  const bool bits_8 = (coding & 0x10u) != 0;
+  const u32 sample_rate = sample_18900 ? 18900u : 37800u;
+  static constexpr int kFilterA[4] = {0, 60, 115, 98};
+  static constexpr int kFilterB[4] = {0, 0, -52, -55};
+
+  std::vector<s16> left;
+  std::vector<s16> right;
+  left.reserve(stereo ? 2016 : 4032);
+  right.reserve(2016);
+
+  for (int group = 0; group < 18; ++group) {
+    const size_t group_off = 24 + static_cast<size_t>(group) * 128u;
+    const u8 *g = raw_sector.data() + group_off;
+
+    const int unit_count = bits_8 ? 4 : 8;
+    for (int unit = 0; unit < unit_count; ++unit) {
+      const u8 unit_hdr = g[4 + unit];
+      const int shift = unit_hdr & 0x0F;
+      const int filter = xa_filter_index(unit_hdr);
+      const int ch = stereo ? (unit & 1) : 0;
+      std::vector<s16> &dst = (ch == 0) ? left : right;
+      s16 &h1 = xa_hist1_[ch];
+      s16 &h2 = xa_hist2_[ch];
+
+      for (int i = 0; i < 28; ++i) {
+        s32 sample = 0;
+        if (bits_8) {
+          const s8 pcm = static_cast<s8>(g[16 + i * 4 + unit]);
+          sample = static_cast<s32>(pcm) << 8;
+          sample >>= shift;
+        } else {
+          const u8 packed = g[16 + i * 4 + (unit >> 1)];
+          s32 nibble = (unit & 1) ? ((packed >> 4) & 0x0F) : (packed & 0x0F);
+          if (nibble & 0x8) {
+            nibble -= 16;
+          }
+          sample = nibble << 12;
+          sample >>= shift;
+        }
+
+        sample +=
+            (kFilterA[filter] * static_cast<s32>(h1) +
+             kFilterB[filter] * static_cast<s32>(h2) + 32) >>
+            6;
+        const s16 out = sat16(sample);
+        h2 = h1;
+        h1 = out;
+        dst.push_back(out);
+      }
+    }
+  }
+
+  if (left.empty()) {
+    return;
+  }
+  size_t frames = stereo ? std::min(left.size(), right.size()) : left.size();
+  if (frames == 0) {
+    return;
+  }
+
+  std::vector<s16> interleaved;
+  interleaved.reserve(frames * 2);
+  for (size_t i = 0; i < frames; ++i) {
+    interleaved.push_back(left[i]);
+    interleaved.push_back(stereo ? right[i] : left[i]);
+  }
+  apply_host_audio_matrix(interleaved);
+
+  if (sys_ != nullptr) {
+    sys_->push_cd_audio_samples(interleaved, sample_rate);
+  }
+  adpcm_busy_cycles_ = std::max(adpcm_busy_cycles_, read_period_for_mode() / 2);
+}
+
 bool CdRom::read_sector() {
   if (!disc_loaded_ || !bin_file_.is_open()) {
     return false;
   }
 
-  const CdTrack *track = track_for_lba(read_lba_);
+  const int psx_lba = std::max(read_lba_, 0);
+  const int abs_lba = psx_lba + 150;
+  const CdTrack *track = nullptr;
+  std::vector<u8> raw_sector;
+  if (!read_raw_sector_for_lba(psx_lba, raw_sector, &track)) {
+    data_buffer_.clear();
+    data_index_ = 0;
+    data_ready_ = false;
+    state_ = State::Idle;
+    return false;
+  }
+
   const std::string track_type = (track != nullptr) ? track->type : "MODE2/2352";
-  const int sector_size = (track != nullptr) ? track->sector_size : 2352;
+  const int sector_size = static_cast<int>(raw_sector.size());
 
   int payload_offset = 24;
   int payload_size = 2048;
@@ -965,28 +1334,21 @@ bool CdRom::read_sector() {
   if (sector_size == 2048) {
     payload_offset = 0;
     payload_size = 2048;
+  } else if (is_audio_track_type(track_type)) {
+    payload_offset = 0;
+    payload_size = 2352;
   } else if ((mode_ & 0x20) || read_whole_sector_) {
     payload_offset = 12;
     payload_size = 2340;
   }
 
-  const int psx_lba = std::max(read_lba_, 0);
-  const int abs_lba = psx_lba + 150;
-
-  u64 raw_sector_offset =
-      static_cast<u64>(psx_lba) * static_cast<u64>(std::max(sector_size, 1));
-  if (track != nullptr) {
-    const int track_relative_lba = std::max(0, abs_lba - track->index01_abs_lba);
-
-    const u64 file_sector = static_cast<u64>(
-        std::max(0, track->index01_file_lba + track_relative_lba));
-    raw_sector_offset = file_sector * static_cast<u64>(std::max(track->sector_size, 1));
+  if (sector_size >= 2352 && !is_audio_track_type(track_type)) {
+    maybe_decode_xa_audio(raw_sector);
   }
 
-  const u64 payload_offset_bytes =
-      raw_sector_offset + static_cast<u64>(std::max(payload_offset, 0));
-  if (bin_size_ > 0 &&
-      payload_offset_bytes + static_cast<u64>(payload_size) > bin_size_) {
+  const int available =
+      static_cast<int>(raw_sector.size()) - std::max(payload_offset, 0);
+  if (payload_offset < 0 || payload_size <= 0 || available < payload_size) {
     data_buffer_.clear();
     data_index_ = 0;
     data_ready_ = false;
@@ -994,20 +1356,8 @@ bool CdRom::read_sector() {
     return false;
   }
 
-  bin_file_.clear();
-  bin_file_.seekg(static_cast<std::streamoff>(payload_offset_bytes),
-                  std::ios::beg);
-
-  data_buffer_.resize(static_cast<size_t>(payload_size));
-  bin_file_.read(reinterpret_cast<char *>(data_buffer_.data()), payload_size);
-  if (bin_file_.gcount() != payload_size) {
-    data_buffer_.clear();
-    data_index_ = 0;
-    data_ready_ = false;
-    state_ = State::Idle;
-    return false;
-  }
-
+  data_buffer_.assign(raw_sector.begin() + payload_offset,
+                      raw_sector.begin() + payload_offset + payload_size);
   data_index_ = 0;
   data_ready_ = true;
   saw_sector_visible_ = true;
@@ -1133,6 +1483,11 @@ const CdTrack *CdRom::track_for_lba(int lba) const {
 }
 
 void CdRom::tick(u32 cycles) {
+  if (adpcm_busy_cycles_ > 0) {
+    adpcm_busy_cycles_ =
+        std::max(0, adpcm_busy_cycles_ - static_cast<int>(cycles));
+  }
+
   if (command_busy_cycles_ > 0) {
     command_busy_cycles_ -= static_cast<int>(cycles);
     if (command_busy_cycles_ <= 0) {
@@ -1163,23 +1518,28 @@ void CdRom::tick(u32 cycles) {
     }
   }
 
+  if (cdda_playing_ && state_ != State::Reading) {
+    pending_cycles_ -= static_cast<int>(cycles);
+    while (cdda_playing_ && pending_cycles_ <= 0) {
+      if (!stream_cdda_sector()) {
+        break;
+      }
+      if ((mode_ & 0x04u) != 0) {
+        enqueue_irq(1, {stat_byte()}, false);
+      }
+      pending_cycles_ += std::max(1, read_period_for_mode());
+    }
+    if (state_ != State::Reading) {
+      return;
+    }
+  }
+
   if (state_ != State::Reading) {
     return;
   }
 
   pending_cycles_ -= static_cast<int>(cycles);
   if (pending_cycles_ <= 0) {
-    const bool irq_backpressure =
-        ((interrupt_flag_ & 0x1F) != 0) ||
-        (response_index_ < static_cast<int>(response_fifo_.size())) ||
-        !pending_irqs_.empty();
-    if (irq_backpressure) {
-      ++read_buffer_stall_count_;
-      refresh_read_period();
-      pending_cycles_ = std::max(1, read_period_cycles_);
-      return;
-    }
-
     if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
       ++read_buffer_stall_count_;
       refresh_read_period();

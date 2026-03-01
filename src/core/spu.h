@@ -21,6 +21,21 @@ public:
     u64 capture_frames = 0;
     u64 reverb_mix_frames = 0;
     u64 reverb_ram_writes = 0;
+    u64 key_on_events = 0;
+    u64 key_off_events = 0;
+    u64 end_flag_events = 0;
+    u64 loop_end_events = 0;
+    u64 nonloop_end_events = 0;
+    u64 release_to_off_events = 0;
+    u64 kon_retrigger_events = 0;
+    u64 koff_high_env_events = 0;
+    u64 release_samples_total = 0;
+    u32 release_samples_min = 0;
+    u32 release_samples_max = 0;
+    u64 release_fast_events = 0;
+    u64 active_voice_samples = 0;
+    u64 active_voice_accum = 0;
+    u32 active_voice_peak = 0;
     u64 clip_events_dry = 0;
     u64 clip_events_wet = 0;
     u64 clip_events_out = 0;
@@ -46,7 +61,11 @@ public:
   void write16(u32 offset, u16 value);
   void dma_write(u32 value);
   u32 dma_read();
-  bool dma_request() const { return (spucnt_ & 0x0030u) != 0; }
+  bool dma_request() const {
+    const u16 transfer_mode = static_cast<u16>((spucnt_ >> 4) & 0x3u);
+    return transfer_mode == 2u || transfer_mode == 3u;
+  }
+  void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate);
 
   // Produce audio samples (stub: silence)
   void tick(u32 cycles);
@@ -74,18 +93,27 @@ private:
       static_cast<size_t>(SAMPLE_RATE) * 2 * 4;
   static constexpr size_t CAPTURE_MAX_SAMPLES =
       static_cast<size_t>(SAMPLE_RATE) * 2 * 180;
+  static constexpr size_t CD_INPUT_MAX_SAMPLES =
+      static_cast<size_t>(SAMPLE_RATE) * 2 * 8;
 
   struct VoiceState {
     bool key_on = false;
     u32 addr = 0;
     u32 repeat_addr = 0;
     int sample_index = 28;
+    bool end_reached = false;
+    bool release_tracking = false;
+    u64 release_start_sample = 0;
     u32 pitch_counter = 0; // 12.0 fixed-point sample counter
     std::array<s16, 28> decoded{};
     s16 hist1 = 0;
     s16 hist2 = 0;
     std::array<s16, 4> gauss_hist{};
     bool gauss_ready = false;
+    s16 current_vol_l = 0;
+    s16 current_vol_r = 0;
+    s16 sweep_vol_l = 0; // per-voice volume sweep state (left)
+    s16 sweep_vol_r = 0; // per-voice volume sweep state (right)
 
     // ADSR envelope
     enum class AdsrPhase { Off, Attack, Decay, Sustain, Release };
@@ -175,6 +203,9 @@ private:
   AudioDiag audio_diag_{};
   std::vector<s16> host_staging_samples_{};
   std::vector<s16> capture_samples_{};
+  std::vector<s16> cd_input_samples_{};
+  size_t cd_input_read_pos_ = 0;
+  u64 sample_clock_ = 0;
 
   // SPU RAM (512KB)
   std::array<u8, 512 * 1024> spu_ram_{};
@@ -200,4 +231,10 @@ private:
   static float soft_clip(float value);
   void queue_host_audio(const std::vector<s16> &samples);
   void tick_adsr(VoiceState &vs);
+  void key_on_voice(int voice);
+  void key_off_voice(int voice);
+  void apply_pending_key_strobes();
+
+  u32 pending_kon_mask_ = 0;
+  u32 pending_koff_mask_ = 0;
 };

@@ -5,6 +5,7 @@
 #include "dma.h"
 #include "gpu.h"
 #include "interrupt.h"
+#include "mdec.h"
 #include "ram.h"
 #include "sio.h"
 #include "spu.h"
@@ -63,6 +64,10 @@ public:
     u32 display_hash = 0;
     u16 display_width = 0;
     u16 display_height = 0;
+    u16 display_x_start = 0;
+    u16 display_y_start = 0;
+    u8 display_is_24bit = 0;
+    u8 display_enabled = 0;
   };
 
   System() = default;
@@ -95,6 +100,9 @@ public:
   const std::vector<s16> &spu_audio_capture_samples() const {
     return spu_.audio_capture_samples();
   }
+  void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate) {
+    spu_.push_cd_audio_samples(samples, sample_rate);
+  }
 
   // Memory bus interface
   u8 read8(u32 addr);
@@ -111,6 +119,10 @@ public:
   bool gpu_dma_request() const { return gpu_.dma_request(); }
   u32 cdrom_dma_read() { return cdrom_.dma_read(); }
   bool cdrom_dma_request() const { return cdrom_.dma_request(); }
+  void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
+  u32 mdec_dma_read() { return mdec_.dma_read(); }
+  bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
+  bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
   void spu_dma_write(u32 val) { spu_.dma_write(val); }
   u32 spu_dma_read() { return spu_.dma_read(); }
   bool spu_dma_request() const { return spu_.dma_request(); }
@@ -131,6 +143,7 @@ private:
   InterruptController irq_;
   Timers timers_;
   Spu spu_;
+  Mdec mdec_;
   Sio sio_;
   CdRom cdrom_;
   DmaController dma_;

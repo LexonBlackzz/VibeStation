@@ -1,9 +1,13 @@
 #include "bios.h"
+#include <algorithm>
 #include <fstream>
+#include <vector>
 
 bool Bios::load(const std::string &path) {
   loaded_ = false;
   info_.clear();
+  mapped_size_ = psx::BIOS_SIZE;
+  data_.clear();
 
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -12,18 +16,44 @@ bool Bios::load(const std::string &path) {
   }
 
   auto size = file.tellg();
-  if (size != psx::BIOS_SIZE) {
-    LOG_ERROR("BIOS: Invalid size %lld (expected %u)", (long long)size,
-              psx::BIOS_SIZE);
-    return false;
+  const bool size_is_standard =
+      (size == static_cast<std::streamoff>(psx::BIOS_SIZE));
+  if (!size_is_standard) {
+    const bool size_is_kb_aligned =
+        (size > 0) && ((static_cast<u64>(size) % 1024u) == 0u);
+    const bool size_covers_window =
+        size >= static_cast<std::streamoff>(psx::BIOS_SIZE);
+    if (!g_experimental_bios_size_mode || !size_is_kb_aligned ||
+        !size_covers_window) {
+      LOG_ERROR("BIOS: Invalid size %lld (expected %u)", (long long)size,
+                psx::BIOS_SIZE);
+      return false;
+    }
   }
 
   file.seekg(0);
-  file.read(reinterpret_cast<char *>(data_.data()), psx::BIOS_SIZE);
-  if (!file || file.gcount() != psx::BIOS_SIZE) {
-    LOG_ERROR("BIOS: Failed to read full image (%lld/%u bytes)",
-              (long long)file.gcount(), psx::BIOS_SIZE);
+  const size_t file_size = static_cast<size_t>(size);
+  data_.resize(file_size);
+  file.read(reinterpret_cast<char *>(data_.data()), size);
+  if (!file || file.gcount() != size) {
+    LOG_ERROR("BIOS: Failed to read image (%lld/%lld bytes)",
+              (long long)file.gcount(), (long long)size);
     return false;
+  }
+
+  if (size_is_standard) {
+    mapped_size_ = psx::BIOS_SIZE;
+  } else {
+    if (g_unsafe_ps2_bios_mode) {
+      mapped_size_ = static_cast<u32>(file_size);
+      LOG_WARN("BIOS: UNSAFE PS2 BIOS mode active (%lld bytes mapped).",
+               (long long)size);
+    } else {
+      mapped_size_ = psx::BIOS_SIZE;
+      LOG_WARN(
+          "BIOS: Experimental size mode active (%lld bytes). Using first %u bytes.",
+          (long long)size, psx::BIOS_SIZE);
+    }
   }
 
   loaded_ = true;
@@ -35,8 +65,9 @@ bool Bios::load(const std::string &path) {
 
 void Bios::identify() {
   // Try to identify the BIOS version by scanning for known strings
-  std::string content(reinterpret_cast<const char *>(data_.data()),
-                      psx::BIOS_SIZE);
+  const size_t scan_size =
+      std::min<size_t>(data_.size(), static_cast<size_t>(psx::BIOS_SIZE));
+  std::string content(reinterpret_cast<const char *>(data_.data()), scan_size);
 
   struct BiosInfo {
     const char *search;
@@ -109,19 +140,22 @@ void Bios::identify() {
 }
 
 u8 Bios::read8(u32 offset) const {
-  return data_[offset & (psx::BIOS_SIZE - 1)];
+  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  return data_[static_cast<size_t>(offset % size)];
 }
 
 u16 Bios::read16(u32 offset) const {
-  u32 off = offset & (psx::BIOS_SIZE - 1);
-  u16 val;
-  std::memcpy(&val, &data_[off], sizeof(u16));
-  return val;
+  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  const u16 lo = data_[static_cast<size_t>(offset % size)];
+  const u16 hi = data_[static_cast<size_t>((offset + 1) % size)];
+  return static_cast<u16>(lo | (hi << 8));
 }
 
 u32 Bios::read32(u32 offset) const {
-  u32 off = offset & (psx::BIOS_SIZE - 1);
-  u32 val;
-  std::memcpy(&val, &data_[off], sizeof(u32));
-  return val;
+  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  const u32 b0 = data_[static_cast<size_t>(offset % size)];
+  const u32 b1 = data_[static_cast<size_t>((offset + 1) % size)];
+  const u32 b2 = data_[static_cast<size_t>((offset + 2) % size)];
+  const u32 b3 = data_[static_cast<size_t>((offset + 3) % size)];
+  return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }

@@ -574,7 +574,7 @@ void App::panel_settings() {
       if (ImGui::BeginTabItem("Audio")) {
         ImGui::Text("SPU emulation: Gaussian + reverb core (stage 2)");
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
-                           "CDDA/XA and advanced modulation are still in progress.");
+                           "XA/CDDA baseline is live; advanced modulation is still in progress.");
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("System")) {
@@ -582,6 +582,18 @@ void App::panel_settings() {
                                     ? "Not loaded"
                                     : system_->bios().get_info().c_str());
         ImGui::Text("CPU Clock: 33.8688 MHz");
+        ImGui::Checkbox("Experimental BIOS size mode",
+                        &g_experimental_bios_size_mode);
+        ImGui::Checkbox("Unsafe PS2 BIOS mode", &g_unsafe_ps2_bios_mode);
+        if (g_unsafe_ps2_bios_mode) {
+          g_experimental_bios_size_mode = true;
+        }
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
+            "Experimental mode accepts KB-aligned BIOS files.");
+        ImGui::TextColored(
+            ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
+            "Unsafe PS2 mode maps full BIOS size and is expected to be unstable.");
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Logging")) {

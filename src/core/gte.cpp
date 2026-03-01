@@ -553,7 +553,10 @@ u32 Gte::divide(u16 h_val, u16 sz3_val) {
     flags |= (1u << 17); // Division overflow
     return 0x1FFFF;
   }
-  u64 result = ((u64)h_val * 0x20000 + sz3_val / 2) / sz3_val;
+  // PSX-SPX:
+  //   div = (((H*0x20000)/SZ3)+1)/2  (saturate to 0x1FFFF)
+  // Keep integer ordering to avoid precision loss.
+  u64 result = ((static_cast<u64>(h_val) * 0x20000u) / sz3_val + 1u) >> 1;
   if (result > 0x1FFFF) {
     flags |= (1u << 17);
     return 0x1FFFF;
@@ -582,17 +585,23 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   }
 
   // MAC1-3 = TR + RT * V
+  s64 raw_mac[3] = {};
   for (int i = 0; i < 3; i++) {
     s64 result = static_cast<s64>(translation[i]) << 12;
     result += static_cast<s64>(rotation[i][0]) * v[0];
     result += static_cast<s64>(rotation[i][1]) * v[1];
     result += static_cast<s64>(rotation[i][2]) * v[2];
+    raw_mac[i] = result;
     set_mac(i + 1, result);
     set_ir(i + 1, mac[i + 1], lm);
   }
 
-  // Push SZ FIFO
-  u16 sz_val = static_cast<u16>(clamp(mac[3] >> 12, 0, 0xFFFF, 1u << 18));
+  // Push SZ FIFO.
+  // PSX-SPX: SZ3 = MAC3 SAR ((1-sf)*12). Since MAC3 already applies sf shift,
+  // this resolves to raw MAC3 >> 12 for both sf=0 and sf=1.
+  u16 sz_val =
+      static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> 12), 0, 0xFFFF,
+                             1u << 18));
   push_sz(sz_val);
 
   // Perspective division

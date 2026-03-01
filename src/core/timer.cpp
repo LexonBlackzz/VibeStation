@@ -93,7 +93,9 @@ void Timers::tick(u32 cycles) {
     u32 ticks = 0;
 
     if (i == 2) {
-      if (source == 1 || source == 3) {
+      // PSX-SPX timer2 clock source:
+      //   0/1 = System Clock, 2/3 = System Clock / 8
+      if (source == 2 || source == 3) {
         ticks = cycles / 8;
       } else {
         ticks = cycles;
@@ -179,13 +181,21 @@ void Timers::set_vblank(bool active) {
 }
 
 bool Timers::is_paused_by_sync(int index) const {
-  if (index < 0 || index > 1) {
+  if (index < 0 || index > 2) {
     return false;
   }
 
   const Timer &t = timers_[index];
   if (!t.sync_enable()) {
     return false;
+  }
+
+  if (index == 2) {
+    // PSX-SPX timer2 sync modes:
+    //   mode 0 or 3: stop counter
+    //   mode 1 or 2: free run (same as sync disabled)
+    const u8 mode = t.sync_mode();
+    return mode == 0 || mode == 3;
   }
 
   const bool blank_active = (index == 0) ? hblank_active_ : vblank_active_;

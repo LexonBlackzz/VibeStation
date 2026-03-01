@@ -628,7 +628,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
       "sio_irq_assert=%llu sio_irq_ack=%llu "
       "cdread_count=%llu cd_irq1=%llu cd_irq3=%llu "
       "cd_resp_promotions=%llu cd_read_stalls=%llu cd_status_e0=%llu cd_status_e0_streak=%llu "
-      "display_hash=0x%08X display_non_black=%llu display_wh=%ux%u final_pc=0x%08X",
+      "display_hash=0x%08X display_non_black=%llu display_wh=%ux%u "
+      "display_start=%u,%u display_enabled=%u display_24=%u final_pc=0x%08X",
       saw_cd_read_cmd ? 1 : 0, saw_cd_sector_visible ? 1 : 0,
       saw_tx_cmd42 ? 1 : 0, saw_full_pad_poll ? 1 : 0, saw_cd_getid ? 1 : 0,
       saw_cd_setloc ? 1 : 0, saw_cd_seekl ? 1 : 0,
@@ -664,7 +665,11 @@ static int run_frame_test(const std::string &bios_path, int frames,
       diag.display_hash,
       static_cast<unsigned long long>(diag.display_non_black_pixels),
       static_cast<unsigned>(diag.display_width),
-      static_cast<unsigned>(diag.display_height), sys->cpu().pc());
+      static_cast<unsigned>(diag.display_height),
+      static_cast<unsigned>(diag.display_x_start),
+      static_cast<unsigned>(diag.display_y_start),
+      static_cast<unsigned>(diag.display_enabled),
+      static_cast<unsigned>(diag.display_is_24bit), sys->cpu().pc());
   LOG_INFO("Frame test complete");
   if (owns_log && g_log_file) {
     log_flush_repeats();
@@ -750,7 +755,11 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
       "SPU_SUMMARY gaussian_active=%d reverb_enabled=%d "
       "reverb_config_seen=%d generated_frames=%llu queued_frames=%llu "
       "dropped_frames=%llu overrun_events=%llu capture_frames=%llu "
-      "reverb_mix_frames=%llu reverb_ram_writes=%llu queue_peak_bytes=%u "
+      "reverb_mix_frames=%llu reverb_ram_writes=%llu key_on=%llu key_off=%llu "
+      "end_flag=%llu loop_end=%llu nonloop_end=%llu release_to_off=%llu "
+      "kon_retrigger=%llu koff_high_env=%llu active_voice_peak=%u active_voice_avg_x100=%llu "
+      "queue_peak_bytes=%u "
+      "release_total=%llu release_min=%u release_max=%u release_fast=%llu "
       "queue_last_bytes=%u clip_dry=%llu clip_wet=%llu clip_out=%llu "
       "reverb_guard=%llu peak_dry_l=%.4f peak_dry_r=%.4f "
       "peak_wet_l=%.4f peak_wet_r=%.4f peak_mix_l=%.4f peak_mix_r=%.4f "
@@ -764,7 +773,24 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
       static_cast<unsigned long long>(diag.capture_frames),
       static_cast<unsigned long long>(diag.reverb_mix_frames),
       static_cast<unsigned long long>(diag.reverb_ram_writes),
-      diag.queue_peak_bytes, diag.queue_last_bytes,
+      static_cast<unsigned long long>(diag.key_on_events),
+      static_cast<unsigned long long>(diag.key_off_events),
+      static_cast<unsigned long long>(diag.end_flag_events),
+      static_cast<unsigned long long>(diag.loop_end_events),
+      static_cast<unsigned long long>(diag.nonloop_end_events),
+      static_cast<unsigned long long>(diag.release_to_off_events),
+      static_cast<unsigned long long>(diag.kon_retrigger_events),
+      static_cast<unsigned long long>(diag.koff_high_env_events),
+      static_cast<unsigned>(diag.active_voice_peak),
+      static_cast<unsigned long long>(
+          (diag.active_voice_samples != 0)
+              ? ((diag.active_voice_accum * 100ull) / diag.active_voice_samples)
+              : 0ull),
+      diag.queue_peak_bytes,
+      static_cast<unsigned long long>(diag.release_samples_total),
+      diag.release_samples_min, diag.release_samples_max,
+      static_cast<unsigned long long>(diag.release_fast_events),
+      diag.queue_last_bytes,
       static_cast<unsigned long long>(diag.clip_events_dry),
       static_cast<unsigned long long>(diag.clip_events_wet),
       static_cast<unsigned long long>(diag.clip_events_out),
@@ -1063,8 +1089,9 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
                "sioio=%llu pad42=%d tx42=%d padid=%d fullpad=%d padbtn=0x%04X "
                "joy_stat=0x%04X joy_ctrl=0x%04X cdrd=%d cdvis=%d getid=%d "
                "setloc=%d seekl=%d readcmd=%d logo=%d logo_present=%d "
-               "fell_back=%d disp_hash=0x%08X disp_non_black=%llu i_stat=0x%08X "
-               "i_mask=0x%08X",
+               "fell_back=%d disp_hash=0x%08X disp_non_black=%llu "
+               "disp_wh=%ux%u disp_xy=%u,%u disp_en=%u disp_24=%u "
+               "i_stat=0x%08X i_mask=0x%08X",
                i + 1, pc, static_cast<unsigned long long>(cmd_count),
                static_cast<unsigned long long>(sector_count),
                static_cast<unsigned long long>(diag.cd_io_count),
@@ -1082,6 +1109,12 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
                logo_candidate ? 1 : 0, diag.saw_logo_present ? 1 : 0,
                diag.fell_back_to_bios_after_non_bios ? 1 : 0, diag.display_hash,
                static_cast<unsigned long long>(diag.display_non_black_pixels),
+               static_cast<unsigned>(diag.display_width),
+               static_cast<unsigned>(diag.display_height),
+               static_cast<unsigned>(diag.display_x_start),
+               static_cast<unsigned>(diag.display_y_start),
+               static_cast<unsigned>(diag.display_enabled),
+               static_cast<unsigned>(diag.display_is_24bit),
                sys->irq().stat(), sys->irq().mask());
     }
   }
@@ -1121,6 +1154,7 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            "cd_resp_fifo=%zu cd_param_fifo=%zu cd_resp_promotions=%llu cd_read_stalls=%llu "
            "cd_status_e0=%llu cd_status_e0_streak=%llu "
            "display_hash=0x%08X display_non_black=%llu display_wh=%ux%u "
+           "display_start=%u,%u display_enabled=%u display_24=%u "
            "irq_vblank=%llu irq_cdrom=%llu irq_dma=%llu irq_t0=%llu irq_t1=%llu "
            "irq_t2=%llu final_pc=0x%08X",
            saw_cd_command ? 1 : 0, saw_cd_sector ? 1 : 0,
@@ -1176,6 +1210,10 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            static_cast<unsigned long long>(diag.display_non_black_pixels),
            static_cast<unsigned>(diag.display_width),
            static_cast<unsigned>(diag.display_height),
+           static_cast<unsigned>(diag.display_x_start),
+           static_cast<unsigned>(diag.display_y_start),
+           static_cast<unsigned>(diag.display_enabled),
+           static_cast<unsigned>(diag.display_is_24bit),
            static_cast<unsigned long long>(irq_vblank),
            static_cast<unsigned long long>(irq_cdrom),
            static_cast<unsigned long long>(irq_dma),
@@ -1270,6 +1308,48 @@ int main(int argc, char *argv[]) {
     if (a == "--wav-out" && (i + 1) < args.size()) {
       wav_out_path = args[i + 1];
       ++i;
+      continue;
+    }
+    if (a == "--experimental-bios-size") {
+      if ((i + 1) < args.size()) {
+        std::string v = args[i + 1];
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
+        const bool looks_bool =
+            (v == "1" || v == "0" || v == "on" || v == "off" ||
+             v == "true" || v == "false");
+        if (looks_bool) {
+          g_experimental_bios_size_mode =
+              !(v == "0" || v == "off" || v == "false");
+          ++i;
+          continue;
+        }
+      }
+      g_experimental_bios_size_mode = true;
+      continue;
+    }
+    if (a == "--unsafe-ps2-bios-mode") {
+      if ((i + 1) < args.size()) {
+        std::string v = args[i + 1];
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
+        const bool looks_bool =
+            (v == "1" || v == "0" || v == "on" || v == "off" ||
+             v == "true" || v == "false");
+        if (looks_bool) {
+          g_unsafe_ps2_bios_mode =
+              !(v == "0" || v == "off" || v == "false");
+          if (g_unsafe_ps2_bios_mode) {
+            g_experimental_bios_size_mode = true;
+          }
+          ++i;
+          continue;
+        }
+      }
+      g_unsafe_ps2_bios_mode = true;
+      g_experimental_bios_size_mode = true;
       continue;
     }
     passthrough.push_back(a);

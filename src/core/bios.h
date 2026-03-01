@@ -1,7 +1,7 @@
 #pragma once
 #include "types.h"
-#include <array>
 #include <string>
+#include <vector>
 
 
 // ── BIOS ROM (512KB) ───────────────────────────────────────────────
@@ -16,13 +16,15 @@ public:
   u8 read8(u32 offset) const;
   u16 read16(u32 offset) const;
   u32 read32(u32 offset) const;
+  u32 mapped_size() const { return mapped_size_; }
 
   const std::string &get_info() const { return info_; }
 
 private:
-  std::array<u8, psx::BIOS_SIZE> data_{};
+  std::vector<u8> data_{};
   bool loaded_ = false;
   std::string info_;
+  u32 mapped_size_ = psx::BIOS_SIZE;
 
   void identify();
 };

@@ -124,6 +124,8 @@ private:
   bool texture_disable_ = false;
   bool semi_transparency_mode_ = false;
   u8 semi_transparency_ = 0;
+  bool tex_rect_x_flip_ = false;
+  bool tex_rect_y_flip_ = false;
   bool irq1_pending_ = false;
   bool force_set_mask_bit_ = false;
   bool check_mask_before_draw_ = false;
@@ -147,7 +149,9 @@ private:
   void gp0_mono_rect_8();
   void gp0_mono_rect_16();
   void gp0_mono_line();
+  void gp0_mono_polyline_start();
   void gp0_shaded_line();
+  void gp0_shaded_polyline_start();
   void gp0_draw_mode();
   void gp0_tex_window();
   void gp0_draw_area_top_left();
@@ -181,9 +185,15 @@ private:
   void draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color c);
   void draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2);
   void draw_rect(s16 x, s16 y, u16 w, u16 h, Color c);
+  void draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent);
 
   void set_pixel(s16 x, s16 y, u16 color, bool semi_transparent = false);
   u16 read_texel(u8 u, u8 v) const;
+  static bool is_polyline_terminator(u32 word) {
+    return (word & 0xF000F000u) == 0x50005000u;
+  }
+  Vertex decode_vertex_word(u32 word) const;
+  void handle_polyline_word(u32 word);
 
   // Edge function for triangle rasterization
   static s32 edge(const Vertex &a, const Vertex &b, s16 px, s16 py) {
@@ -193,4 +203,13 @@ private:
 
   // Lookup table for GP0 command lengths
   static u32 gp0_command_length(u8 opcode);
+
+  // Variable-length polyline stream state.
+  bool polyline_active_ = false;
+  bool polyline_gouraud_ = false;
+  bool polyline_waiting_vertex_ = false;
+  Vertex polyline_prev_vertex_{};
+  Color polyline_flat_color_{};
+  Color polyline_prev_color_{};
+  u32 polyline_pending_color_word_ = 0;
 };

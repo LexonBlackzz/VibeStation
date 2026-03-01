@@ -86,11 +86,29 @@ u32 Gpu::gp0_command_length(u8 opcode) {
   case 0x42:
   case 0x43:
     return 3; // Mono line
+  case 0x48:
+  case 0x49:
+  case 0x4A:
+  case 0x4B:
+  case 0x4C:
+  case 0x4D:
+  case 0x4E:
+  case 0x4F:
+    return 3; // Mono polyline (variable tail)
   case 0x50:
   case 0x51:
   case 0x52:
   case 0x53:
     return 4; // Shaded line
+  case 0x58:
+  case 0x59:
+  case 0x5A:
+  case 0x5B:
+  case 0x5C:
+  case 0x5D:
+  case 0x5E:
+  case 0x5F:
+    return 4; // Shaded polyline (variable tail)
   case 0x60:
   case 0x61:
   case 0x62:
@@ -111,6 +129,11 @@ u32 Gpu::gp0_command_length(u8 opcode) {
   case 0x72:
   case 0x73:
     return 2; // Mono rect 8x8
+  case 0x74:
+  case 0x75:
+  case 0x76:
+  case 0x77:
+    return 3; // Textured rect 8x8
   case 0x78:
   case 0x79:
   case 0x7A:
@@ -165,12 +188,21 @@ void Gpu::reset() {
   texture_disable_ = false;
   semi_transparency_mode_ = false;
   semi_transparency_ = 0;
+  tex_rect_x_flip_ = false;
+  tex_rect_y_flip_ = false;
   irq1_pending_ = false;
   force_set_mask_bit_ = false;
   check_mask_before_draw_ = false;
   interlace_field_ = false;
   gpuread_latch_ = 0;
   frame_complete_ = false;
+  polyline_active_ = false;
+  polyline_gouraud_ = false;
+  polyline_waiting_vertex_ = false;
+  polyline_prev_vertex_ = {};
+  polyline_flat_color_ = {};
+  polyline_prev_color_ = {};
+  polyline_pending_color_word_ = 0;
 }
 
 // ── GP0 (Rendering Commands) ──────────────────────────────────────
@@ -210,6 +242,11 @@ void Gpu::gp0(u32 command) {
     if (vram_tx_pos_ >= vram_tx_total_) {
       gp0_mode_ = Gp0Mode::Command;
     }
+    return;
+  }
+
+  if (polyline_active_) {
+    handle_polyline_word(command);
     return;
   }
 
@@ -295,11 +332,31 @@ void Gpu::gp0(u32 command) {
   case 0x43:
     gp0_mono_line();
     break;
+  case 0x48:
+  case 0x49:
+  case 0x4A:
+  case 0x4B:
+  case 0x4C:
+  case 0x4D:
+  case 0x4E:
+  case 0x4F:
+    gp0_mono_polyline_start();
+    break;
   case 0x50:
   case 0x51:
   case 0x52:
   case 0x53:
     gp0_shaded_line();
+    break;
+  case 0x58:
+  case 0x59:
+  case 0x5A:
+  case 0x5B:
+  case 0x5C:
+  case 0x5D:
+  case 0x5E:
+  case 0x5F:
+    gp0_shaded_polyline_start();
     break;
   case 0x60:
   case 0x61:
@@ -324,6 +381,12 @@ void Gpu::gp0(u32 command) {
   case 0x72:
   case 0x73:
     gp0_mono_rect_8();
+    break;
+  case 0x74:
+  case 0x75:
+  case 0x76:
+  case 0x77:
+    gp0_textured_rect();
     break;
   case 0x78:
   case 0x79:
@@ -514,56 +577,121 @@ void Gpu::gp0_shaded_textured_quad() {
 
 void Gpu::gp0_mono_line() {
   Color c(gp0_buffer_[0]);
-  s16 x0 = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y0 = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
-  s16 x1 = static_cast<s16>(gp0_buffer_[2] & 0xFFFF) + draw_x_offset_;
-  s16 y1 = static_cast<s16>(gp0_buffer_[2] >> 16) + draw_y_offset_;
-  // Bresenham line — simplified
-  u16 color15 = c.to_15bit();
-  int dx = abs(x1 - x0), dy = abs(y1 - y0);
-  int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
+  Vertex v1 = decode_vertex_word(gp0_buffer_[2]);
+  draw_line_segment(v0, v1, c, semi_transparency_mode_);
+}
+
+void Gpu::gp0_mono_polyline_start() {
+  const Color c(gp0_buffer_[0]);
+  const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
+  const Vertex v1 = decode_vertex_word(gp0_buffer_[2]);
+  draw_line_segment(v0, v1, c, semi_transparency_mode_);
+
+  polyline_active_ = true;
+  polyline_gouraud_ = false;
+  polyline_waiting_vertex_ = false;
+  polyline_prev_vertex_ = v1;
+  polyline_flat_color_ = c;
+  polyline_prev_color_ = c;
+  polyline_pending_color_word_ = 0;
+}
+
+void Gpu::gp0_shaded_line() {
+  // Keep line shading simple for now: use color of first vertex.
+  const Color c(gp0_buffer_[0]);
+  const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
+  const Vertex v1 = decode_vertex_word(gp0_buffer_[3]);
+  draw_line_segment(v0, v1, c, semi_transparency_mode_);
+}
+
+void Gpu::gp0_shaded_polyline_start() {
+  const Color c0(gp0_buffer_[0]);
+  const Color c1(gp0_buffer_[2]);
+  const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
+  const Vertex v1 = decode_vertex_word(gp0_buffer_[3]);
+  draw_line_segment(v0, v1, c0, semi_transparency_mode_);
+
+  polyline_active_ = true;
+  polyline_gouraud_ = true;
+  polyline_waiting_vertex_ = false;
+  polyline_prev_vertex_ = v1;
+  polyline_flat_color_ = c0;
+  polyline_prev_color_ = c1;
+  polyline_pending_color_word_ = 0;
+}
+
+Vertex Gpu::decode_vertex_word(u32 word) const {
+  Vertex v{};
+  v.x = static_cast<s16>(word & 0xFFFF) + draw_x_offset_;
+  v.y = static_cast<s16>(word >> 16) + draw_y_offset_;
+  return v;
+}
+
+void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) {
+  s16 x0 = a.x;
+  s16 y0 = a.y;
+  const s16 x1 = b.x;
+  const s16 y1 = b.y;
+  const u16 color15 = c.to_15bit();
+  int dx = abs(x1 - x0);
+  int dy = abs(y1 - y0);
+  const int sx = (x0 < x1) ? 1 : -1;
+  const int sy = (y0 < y1) ? 1 : -1;
   int err = dx - dy;
   while (true) {
-    set_pixel(x0, y0, color15, semi_transparency_mode_);
-    if (x0 == x1 && y0 == y1)
+    set_pixel(x0, y0, color15, semi_transparent);
+    if (x0 == x1 && y0 == y1) {
       break;
-    int e2 = 2 * err;
+    }
+    const int e2 = err * 2;
     if (e2 > -dy) {
       err -= dy;
-      x0 += static_cast<s16>(sx);
+      x0 = static_cast<s16>(x0 + sx);
     }
     if (e2 < dx) {
       err += dx;
-      y0 += static_cast<s16>(sy);
+      y0 = static_cast<s16>(y0 + sy);
     }
   }
 }
 
-void Gpu::gp0_shaded_line() {
-  // Simplified: use first vertex color
-  Color c(gp0_buffer_[0]);
-  s16 x0 = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y0 = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
-  s16 x1 = static_cast<s16>(gp0_buffer_[3] & 0xFFFF) + draw_x_offset_;
-  s16 y1 = static_cast<s16>(gp0_buffer_[3] >> 16) + draw_y_offset_;
-  u16 color15 = c.to_15bit();
-  int dx = abs(x1 - x0), dy = abs(y1 - y0);
-  int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-  int err = dx - dy;
-  while (true) {
-    set_pixel(x0, y0, color15, semi_transparency_mode_);
-    if (x0 == x1 && y0 == y1)
-      break;
-    int e2 = 2 * err;
-    if (e2 > -dy) {
-      err -= dy;
-      x0 += static_cast<s16>(sx);
+void Gpu::handle_polyline_word(u32 word) {
+  if (!polyline_gouraud_) {
+    if (is_polyline_terminator(word)) {
+      polyline_active_ = false;
+      polyline_waiting_vertex_ = false;
+      polyline_pending_color_word_ = 0;
+      return;
     }
-    if (e2 < dx) {
-      err += dx;
-      y0 += static_cast<s16>(sy);
-    }
+
+    const Vertex next = decode_vertex_word(word);
+    draw_line_segment(polyline_prev_vertex_, next, polyline_flat_color_,
+                      semi_transparency_mode_);
+    polyline_prev_vertex_ = next;
+    return;
   }
+
+  if (!polyline_waiting_vertex_) {
+    if (is_polyline_terminator(word)) {
+      polyline_active_ = false;
+      polyline_waiting_vertex_ = false;
+      polyline_pending_color_word_ = 0;
+      return;
+    }
+
+    polyline_pending_color_word_ = word;
+    polyline_waiting_vertex_ = true;
+    return;
+  }
+
+  const Vertex next = decode_vertex_word(word);
+  // Keep Gouraud polyline visual path simple: draw segment using prior color.
+  draw_line_segment(polyline_prev_vertex_, next, polyline_prev_color_,
+                    semi_transparency_mode_);
+  polyline_prev_color_ = Color(polyline_pending_color_word_);
+  polyline_prev_vertex_ = next;
+  polyline_waiting_vertex_ = false;
 }
 
 void Gpu::gp0_mono_rect() {
@@ -584,7 +712,10 @@ void Gpu::gp0_textured_rect() {
   clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
   u16 w, h;
   u8 opcode = gp0_command_;
-  if (opcode >= 0x7C && opcode <= 0x7F) {
+  if (opcode >= 0x74 && opcode <= 0x77) {
+    w = 8;
+    h = 8;
+  } else if (opcode >= 0x7C && opcode <= 0x7F) {
     w = 16;
     h = 16;
   } else if (gp0_buffer_.size() >= 4) {
@@ -600,7 +731,11 @@ void Gpu::gp0_textured_rect() {
   // read_texel).
   for (u16 dy = 0; dy < h; ++dy) {
     for (u16 dx = 0; dx < w; ++dx) {
-      u16 texel = read_texel(static_cast<u8>(u + dx), static_cast<u8>(v + dy));
+      const u16 src_dx = tex_rect_x_flip_ ? static_cast<u16>(w - 1 - dx) : dx;
+      const u16 src_dy = tex_rect_y_flip_ ? static_cast<u16>(h - 1 - dy) : dy;
+      const u8 src_u = static_cast<u8>(u + src_dx);
+      const u8 src_v = static_cast<u8>(v + src_dy);
+      u16 texel = read_texel(src_u, src_v);
       if ((texel & 0x7FFF) == 0) {
         continue; // Color 0 transparent in many textured modes.
       }
@@ -640,6 +775,8 @@ void Gpu::gp0_draw_mode() {
   texpage_ = static_cast<u16>(val & 0x1FF);
   semi_transparency_ = static_cast<u8>((val >> 5) & 0x3);
   texture_disable_ = (val >> 11) & 1;
+  tex_rect_x_flip_ = ((val >> 12) & 0x1u) != 0;
+  tex_rect_y_flip_ = ((val >> 13) & 0x1u) != 0;
 }
 
 void Gpu::gp0_tex_window() {
@@ -831,6 +968,9 @@ void Gpu::gp1_reset_command_buffer() {
   gp0_buffer_.clear();
   gp0_words_remaining_ = 0;
   gp0_mode_ = Gp0Mode::Command;
+  polyline_active_ = false;
+  polyline_waiting_vertex_ = false;
+  polyline_pending_color_word_ = 0;
 }
 
 void Gpu::gp1_ack_irq() {
@@ -878,6 +1018,8 @@ u32 Gpu::gp1_info_value(u32 index) const {
   case 0x00: { // Draw mode setting
     u32 value = texpage_ & 0x1FFu;
     value |= (texture_disable_ ? 1u : 0u) << 11;
+    value |= (tex_rect_x_flip_ ? 1u : 0u) << 12;
+    value |= (tex_rect_y_flip_ ? 1u : 0u) << 13;
     return value;
   }
   case 0x01: // Texture window setting
