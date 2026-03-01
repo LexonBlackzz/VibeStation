@@ -52,6 +52,7 @@ set(VIBESTATION_SOURCES
     src/core/sio.cpp
     src/core/cdrom.cpp
     src/core/dma.cpp
+    src/core/mdec.cpp
     src/core/gpu.cpp
     src/core/gte.cpp
     src/core/cpu.cpp
