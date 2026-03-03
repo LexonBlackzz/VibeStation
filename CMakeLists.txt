@@ -60,6 +60,7 @@ set(VIBESTATION_SOURCES
     src/core/renderer.cpp
     src/input/controller.cpp
     src/input/input_manager.cpp
+    src/ui/emu_runner.cpp
     src/ui/app.cpp
 )
 
