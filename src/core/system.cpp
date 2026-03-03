@@ -1,9 +1,21 @@
 #include "system.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace {
+// PSX-SPX vertical refresh rates (native region clock):
+// NTSC interlaced     ~59.940 Hz
+// NTSC non-interlaced ~59.826 Hz
+// PAL  interlaced     ~50.000 Hz
+// PAL  non-interlaced ~49.761 Hz
+constexpr double kNtscInterlacedFps = 60000.0 / 1001.0;
+constexpr double kNtscProgressiveFps = 59.826;
+constexpr double kPalInterlacedFps = 50.0;
+constexpr double kPalProgressiveFps = 49.761;
+
 bool is_menu_idle_pc(u32 pc) {
   return ((pc >= 0x80059D00 && pc <= 0x80059FFF) ||
           (pc >= 0xA0059D00 && pc <= 0xA0059FFF) ||
@@ -47,6 +59,26 @@ void System::note_sio_io(u32 phys_addr) {
     boot_diag_.first_sio_io_cycle = cpu_.cycle_count();
     boot_diag_.first_sio_io_addr = phys_addr;
   }
+}
+
+void System::sync_spu_to_cpu() {
+  const u64 target_cycle = cpu_.cycle_count();
+  if (target_cycle <= spu_synced_cpu_cycle_) {
+    spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+    return;
+  }
+
+  u64 delta = target_cycle - spu_synced_cpu_cycle_;
+  while (delta > 0) {
+    const u32 step =
+        (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
+            ? std::numeric_limits<u32>::max()
+            : static_cast<u32>(delta);
+    spu_.tick(step);
+    delta -= step;
+  }
+  spu_synced_cpu_cycle_ = target_cycle;
+  spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
 void System::init_hardware() {
@@ -123,8 +155,11 @@ void System::reset() {
   gpu_.reset();
   spu_.reset();
   cpu_.reset();
+  spu_synced_cpu_cycle_ = cpu_.cycle_count();
+  spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
   ram_.reset();
   frame_cycles_ = 0;
+  frame_cycle_remainder_ = 0.0;
   boot_diag_ = {};
   saw_non_bios_exec_ = false;
   bios_menu_streak_after_non_bios_ = 0;
@@ -137,7 +172,12 @@ void System::reset() {
 void System::shutdown() { spu_.shutdown(); }
 
 double System::target_fps() const {
-  return 60.0;
+  const DisplayMode &mode = gpu_.display_mode();
+  const bool effective_interlaced = mode.interlaced && (mode.vres != 0);
+  if (mode.is_pal) {
+    return effective_interlaced ? kPalInterlacedFps : kPalProgressiveFps;
+  }
+  return effective_interlaced ? kNtscInterlacedFps : kNtscProgressiveFps;
 }
 
 void System::run_frame(bool sample_display_diag) {
@@ -148,7 +188,12 @@ void System::run_frame(bool sample_display_diag) {
   const bool pal = gpu_.display_mode().is_pal;
   const u32 scanlines_per_frame = pal ? 314 : 263;
   const u32 vblank_scanline = pal ? 288 : 240;
-  const u32 cycles_per_frame = psx::CPU_CLOCK_HZ / 60;
+  const double fps = target_fps();
+  const double cycles_exact = static_cast<double>(psx::CPU_CLOCK_HZ) / fps;
+  frame_cycle_remainder_ += cycles_exact;
+  const u32 cycles_per_frame = std::max<u32>(
+      1u, static_cast<u32>(std::floor(frame_cycle_remainder_)));
+  frame_cycle_remainder_ -= static_cast<double>(cycles_per_frame);
   const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
   const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
   static constexpr u32 kCpuSliceCycles = 32;
@@ -215,7 +260,7 @@ void System::run_frame(bool sample_display_diag) {
     }
 
     cdrom_.tick(cycles_this_scanline);
-    spu_.tick(cycles_this_scanline);
+    sync_spu_to_cpu();
     if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
       boot_diag_.saw_pad_cmd42 = true;
     }
@@ -334,7 +379,20 @@ void System::update_display_diag(const DisplaySampleInfo &display_sample) {
   }
 }
 
-void System::step() { cpu_.step(); }
+void System::step() {
+  cpu_.step();
+  sync_spu_to_cpu();
+}
+
+void System::spu_dma_write(u32 val) {
+  sync_spu_to_cpu();
+  spu_.dma_write(val);
+}
+
+u32 System::spu_dma_read() {
+  sync_spu_to_cpu();
+  return spu_.dma_read();
+}
 
 // ── Memory Bus ─────────────────────────────────────────────────────
 // The PS1 memory map translated to hardware component dispatches.
@@ -449,8 +507,10 @@ u16 System::read16(u32 addr) {
       return static_cast<u16>((reg >> shift) & 0xFFFFu);
     }
     // SPU
-    if (io >= 0xC00 && io < 0x1000)
+    if (io >= 0xC00 && io < 0x1000) {
+      sync_spu_to_cpu();
       return spu_.read16(io - 0xC00);
+    }
 
     LOG_WARN("BUS: Unhandled read16 at I/O 0x%08X", phys);
     return 0;
@@ -526,6 +586,7 @@ u32 System::read32(u32 addr) {
     }
     // SPU
     if (io >= 0xC00 && io < 0x1000) {
+      sync_spu_to_cpu();
       u16 lo = spu_.read16(io - 0xC00);
       u16 hi = spu_.read16(io - 0xC00 + 2);
       return lo | (static_cast<u32>(hi) << 16);
@@ -652,6 +713,7 @@ void System::write16(u32 addr, u16 val) {
       return;
     }
     if (io >= 0xC00 && io < 0x1000) {
+      sync_spu_to_cpu();
       spu_.write16(io - 0xC00, val);
       return;
     }
@@ -751,6 +813,7 @@ void System::write32(u32 addr, u32 val) {
     }
     // SPU
     if (io >= 0xC00 && io < 0x1000) {
+      sync_spu_to_cpu();
       spu_.write16(io - 0xC00, static_cast<u16>(val));
       spu_.write16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
       return;

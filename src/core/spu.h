@@ -26,16 +26,93 @@ public:
     u64 end_flag_events = 0;
     u64 loop_end_events = 0;
     u64 nonloop_end_events = 0;
+    u64 off_due_to_end_flag = 0;
+    u64 off_due_to_release_env0 = 0;
     u64 release_to_off_events = 0;
     u64 kon_retrigger_events = 0;
     u64 koff_high_env_events = 0;
+    u64 kon_to_retrigger_events = 0;
+    u64 kon_to_retrigger_total_samples = 0;
+    u32 kon_to_retrigger_min_samples = 0;
+    u32 kon_to_retrigger_max_samples = 0;
+    u64 kon_to_koff_events = 0;
+    u64 kon_to_koff_total_samples = 0;
+    u32 kon_to_koff_min_samples = 0;
+    u32 kon_to_koff_max_samples = 0;
+    u32 kon_to_koff_min_voice = 0xFFFFFFFFu;
+    u32 kon_to_koff_min_addr = 0;
+    u16 kon_to_koff_min_pitch = 0;
+    u16 kon_to_koff_min_adsr2 = 0;
+    u64 koff_short_window_events = 0;
+    u64 v16_kon_write_events = 0;
+    u64 v16_koff_write_events = 0;
+    u64 v16_kon_write_to_koff_events = 0;
+    u64 v16_kon_write_to_koff_total_cpu_cycles = 0;
+    u64 v16_kon_write_to_koff_min_cpu_cycles = 0;
+    u64 v16_kon_write_to_koff_max_cpu_cycles = 0;
+    u64 v16_kon_write_to_koff_total_samples = 0;
+    u32 v16_kon_write_to_koff_min_samples = 0;
+    u32 v16_kon_write_to_koff_max_samples = 0;
+    u64 v16_kon_apply_events = 0;
+    u64 v16_koff_apply_events = 0;
+    u64 v16_kon_to_koff_apply_events = 0;
+    u64 v16_kon_to_koff_apply_total_samples = 0;
+    u32 v16_kon_to_koff_apply_min_samples = 0;
+    u32 v16_kon_to_koff_apply_max_samples = 0;
+    u64 v16_kon_reapply_without_koff = 0;
+    u64 v16_koff_without_kon = 0;
+    u64 v16_strobe_samples_with_kon = 0;
+    u64 v16_strobe_samples_with_koff = 0;
+    u64 v16_strobe_samples_with_both = 0;
+    u64 key_write_unsynced_events = 0;
+    u64 key_write_unsynced_max_cpu_lag = 0;
+    u64 key_write_while_spu_disabled = 0;
+    u64 keyon_ignored_while_disabled = 0;
+    u64 keyoff_ignored_while_disabled = 0;
+    u64 spucnt_enable_set_events = 0;
+    u64 spucnt_enable_clear_events = 0;
+    u64 spu_disable_forced_off_voices = 0;
+    u64 spu_disable_span_events = 0;
+    u64 spu_disable_span_total_samples = 0;
+    u32 spu_disable_span_min_samples = 0;
+    u32 spu_disable_span_max_samples = 0;
     u64 release_samples_total = 0;
     u32 release_samples_min = 0;
     u32 release_samples_max = 0;
     u64 release_fast_events = 0;
+    u64 logical_voice_samples = 0;
+    u64 logical_voice_accum = 0;
+    u32 logical_voice_peak = 0;
+    u64 logical_voice_peak_sample = 0;
+    u64 logical_voice_peak_key_on_events = 0;
+    u64 logical_voice_peak_key_off_events = 0;
+    u32 logical_voice_peak_endx_mask = 0;
+    u64 env_voice_samples = 0;
+    u64 env_voice_accum = 0;
+    u32 env_voice_peak = 0;
+    u64 env_voice_peak_sample = 0;
+    u64 env_voice_peak_key_on_events = 0;
+    u64 env_voice_peak_key_off_events = 0;
+    u32 env_voice_peak_endx_mask = 0;
+    u64 audible_voice_samples = 0;
+    u64 audible_voice_accum = 0;
+    u32 audible_voice_peak = 0;
+    u64 audible_voice_peak_sample = 0;
+    u64 audible_voice_peak_key_on_events = 0;
+    u64 audible_voice_peak_key_off_events = 0;
+    u32 audible_voice_peak_endx_mask = 0;
     u64 active_voice_samples = 0;
     u64 active_voice_accum = 0;
     u32 active_voice_peak = 0;
+    u64 voice_cap_frames = 0;
+    u64 no_voice_frames = 0;
+    u64 muted_output_frames = 0;
+    u64 cd_frames_mixed = 0;
+    u64 spucnt_writes = 0;
+    u64 spucnt_mute_toggle_events = 0;
+    u64 spucnt_mute_set_events = 0;
+    u64 spucnt_mute_clear_events = 0;
+    u16 spucnt_last = 0;
     u64 clip_events_dry = 0;
     u64 clip_events_wet = 0;
     u64 clip_events_out = 0;
@@ -62,17 +139,20 @@ public:
   void dma_write(u32 value);
   u32 dma_read();
   bool dma_request() const {
-    const u16 transfer_mode = static_cast<u16>((spucnt_ >> 4) & 0x3u);
+    const u16 transfer_mode =
+        static_cast<u16>((spucnt_effective() >> 4) & 0x3u);
     return transfer_mode == 2u || transfer_mode == 3u;
   }
   void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate);
 
   // Produce audio samples (stub: silence)
   void tick(u32 cycles);
+  void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
 
   // Status register
   u16 status() const { return spustat_; }
   const AudioDiag &audio_diag() const { return audio_diag_; }
+  void reset_audio_diag() { audio_diag_ = AudioDiag{}; }
 
   void set_audio_capture(bool enabled) { capture_enabled_ = enabled; }
   bool audio_capture_enabled() const { return capture_enabled_; }
@@ -85,8 +165,11 @@ private:
   static constexpr int SAMPLE_RATE = 44100;
   static constexpr int NUM_VOICES = 24;
   static constexpr int VOICE_REG_STRIDE = 0x10;
+  static constexpr int TRACE_VOICE = 16;
+  static constexpr u32 KOFF_DEBOUNCE_SAMPLES = 64u;
   static constexpr u32 SPU_RAM_MASK = 0x7FFFFu;
   static constexpr u32 SPU_RAM_WORD_MASK = 0x7FFFEu;
+  static constexpr u32 SPUCNT_MODE_APPLY_DELAY_CYCLES = 0x100u;
   static constexpr u32 HOST_TARGET_QUEUE_BYTES = 8192u;
   static constexpr u32 HOST_MAX_QUEUE_BYTES = 24576u;
   static constexpr size_t HOST_STAGING_MAX_SAMPLES =
@@ -100,6 +183,8 @@ private:
     bool key_on = false;
     u32 addr = 0;
     u32 repeat_addr = 0;
+    u32 last_block_addr = 0;
+    u8 last_adpcm_flags = 0;
     int sample_index = 28;
     bool end_reached = false;
     bool release_tracking = false;
@@ -179,11 +264,17 @@ private:
   // Key SPU registers
   u16 spucnt_ = 0;  // SPU Control (0x1F801DAA)
   u16 spustat_ = 0; // SPU Status  (0x1F801DAE)
+  u16 spucnt_mode_latched_ = 0;
+  u16 spucnt_mode_pending_ = 0;
+  u32 spucnt_mode_delay_cycles_ = 0;
+  u32 irq_addr_ = 0;
   u32 transfer_addr_ = 0;
   u32 transfer_busy_cycles_ = 0;
   u8 capture_half_ = 0;
   double sample_accum_ = 0.0;
   std::array<VoiceState, NUM_VOICES> voices_{};
+  u32 pitch_mod_mask_ = 0;
+  u32 noise_on_mask_ = 0;
   u32 reverb_on_mask_ = 0;
   u32 endx_mask_ = 0;
   s16 master_vol_l_ = 0x3FFF;
@@ -194,18 +285,29 @@ private:
   s16 cd_vol_r_ = 0;
   s16 ext_vol_l_ = 0;
   s16 ext_vol_r_ = 0;
-  u32 reverb_base_addr_ = 0;
-  u32 reverb_cursor_ = 0;
-  bool reverb_half_rate_phase_ = false;
-  float reverb_hold_l_ = 0.0f;
-  float reverb_hold_r_ = 0.0f;
+  u32 reverb_base_addr_ = 0;    // byte address (even)
+  u32 reverb_current_addr_ = 0; // word address
+  std::array<std::array<s16, 128>, 2> reverb_downsample_buffer_{};
+  std::array<std::array<s16, 64>, 2> reverb_upsample_buffer_{};
+  u32 reverb_resample_pos_ = 0;
   ReverbRegs reverb_regs_{};
   AudioDiag audio_diag_{};
   std::vector<s16> host_staging_samples_{};
   std::vector<s16> capture_samples_{};
   std::vector<s16> cd_input_samples_{};
+  std::array<u64, NUM_VOICES> last_kon_sample_{};
+  std::array<bool, NUM_VOICES> has_last_kon_{};
+  u64 v16_last_kon_write_cpu_cycle_ = 0;
+  u64 v16_last_kon_write_sample_ = 0;
+  bool v16_has_last_kon_write_ = false;
+  u64 v16_last_kon_apply_sample_ = 0;
+  bool v16_has_last_kon_apply_ = false;
+  bool v16_waiting_for_koff_ = false;
   size_t cd_input_read_pos_ = 0;
   u64 sample_clock_ = 0;
+  u64 last_synced_cpu_cycle_ = 0;
+  s16 noise_level_ = 1;
+  s32 noise_timer_ = 0;
 
   // SPU RAM (512KB)
   std::array<u8, 512 * 1024> spu_ram_{};
@@ -221,20 +323,25 @@ private:
   void write_reverb_reg(u32 offset, u16 value);
   void tick_volume_sweep();
   void mix_reverb(float in_l, float in_r, float &wet_l, float &wet_r);
-  u32 reverb_work_area_span() const;
-  u32 reverb_wrap_addr(s32 addr) const;
-  u32 reverb_addr_from_reg(s16 reg, s32 extra = 0) const;
-  s16 reverb_read_s16(u32 addr) const;
-  void reverb_write_s16(u32 addr, s16 value);
+  u32 reverb_memory_address(u32 address_words) const;
+  s16 reverb_read_s16(u32 address_words, s32 offset_words = 0) const;
+  void reverb_write_s16(u32 address_words, s16 value);
   static s16 sat16(s32 value);
   static s32 mul_q15(s32 a, s32 b);
-  static float soft_clip(float value);
+  s16 next_noise_sample();
+  void clear_irq9_flag();
+  void maybe_raise_irq9_for_ram_access(u32 start_addr, u32 byte_count);
+  u16 spucnt_effective() const;
+  void tick_spucnt_mode_delay(u32 cycles);
   void queue_host_audio(const std::vector<s16> &samples);
-  void tick_adsr(VoiceState &vs);
+  void tick_adsr(int voice, VoiceState &vs);
   void key_on_voice(int voice);
   void key_off_voice(int voice);
+  void force_off_all_voices_immediate();
   void apply_pending_key_strobes();
 
+  bool spu_disabled_window_active_ = false;
+  u64 spu_disable_start_sample_ = 0;
   u32 pending_kon_mask_ = 0;
   u32 pending_koff_mask_ = 0;
 };

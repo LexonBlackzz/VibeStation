@@ -343,6 +343,8 @@ void App::render_ui() {
     panel_vram();
   if (show_perf_)
     panel_performance();
+  if (show_sound_status_)
+    panel_sound_status();
 }
 
 void App::menu_bar() {
@@ -450,6 +452,7 @@ void App::menu_bar() {
       ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
       ImGui::MenuItem("Performance", "F11", &show_perf_);
+      ImGui::MenuItem("Sound Status", nullptr, &show_sound_status_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("About", nullptr, &show_about_);
       ImGui::EndMenu();
@@ -610,6 +613,10 @@ void App::panel_settings() {
         ImGui::Text("SPU emulation: Gaussian + reverb core (stage 2)");
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                            "XA/CDDA baseline is live; advanced modulation is still in progress.");
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Sound Status")) {
+        draw_sound_status_content();
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("System")) {
@@ -865,6 +872,117 @@ void App::panel_settings() {
       }
       ImGui::EndTabBar();
     }
+  }
+  ImGui::End();
+}
+
+void App::draw_sound_status_content() {
+  const auto &diag = runtime_snapshot_.spu_audio;
+  const auto avg_count = [](u64 accum, u64 samples) -> float {
+    const u64 denom = std::max<u64>(samples, 1);
+    return static_cast<float>(accum) / static_cast<float>(denom);
+  };
+  const float avg_logical =
+      avg_count(diag.logical_voice_accum, diag.logical_voice_samples);
+  const float avg_env = avg_count(diag.env_voice_accum, diag.env_voice_samples);
+  const float avg_audible =
+      avg_count(diag.audible_voice_accum, diag.audible_voice_samples);
+  const float queue_kb =
+      static_cast<float>(diag.queue_last_bytes) / 1024.0f;
+  const float queue_peak_kb =
+      static_cast<float>(diag.queue_peak_bytes) / 1024.0f;
+
+  ImGui::Text("Realtime SPU voice monitor (updates every emulated frame).");
+  if (ImGui::Button("Reset Sound Stats")) {
+    const bool was_running = emu_runner_.is_running();
+    if (was_running) {
+      emu_runner_.pause_and_wait_idle();
+    }
+    system_->reset_spu_audio_diag();
+    runtime_snapshot_.spu_audio = system_->spu_audio_diag();
+    status_message_ = "SPU sound stats reset";
+    if (was_running) {
+      emu_runner_.set_running(true);
+    }
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled("Use after BIOS boot to isolate gameplay peaks.");
+  ImGui::Separator();
+  ImGui::Text("Running: %s", runtime_snapshot_.running ? "Yes" : "No");
+  ImGui::Text("Reverb: %s", diag.reverb_enabled ? "Enabled" : "Disabled");
+  ImGui::Text("Generated/Queued Frames: %llu / %llu",
+              static_cast<unsigned long long>(diag.generated_frames),
+              static_cast<unsigned long long>(diag.queued_frames));
+  ImGui::Text("Dropped Frames: %llu (Overruns: %llu)",
+              static_cast<unsigned long long>(diag.dropped_frames),
+              static_cast<unsigned long long>(diag.overrun_events));
+  ImGui::Text("Audio Queue: %.1f KB (peak %.1f KB)", queue_kb, queue_peak_kb);
+  ImGui::Text("Voices Logical (phase!=off): avg %.2f / peak %u",
+              avg_logical, static_cast<unsigned>(diag.logical_voice_peak));
+  ImGui::Text("Voices Env>0: avg %.2f / peak %u",
+              avg_env, static_cast<unsigned>(diag.env_voice_peak));
+  ImGui::Text("Voices Audible (nonzero out): avg %.2f / peak %u",
+              avg_audible, static_cast<unsigned>(diag.audible_voice_peak));
+  ImGui::Text("Logical peak ctx: sample %llu | KON/KOFF %llu/%llu | ENDX 0x%06X",
+              static_cast<unsigned long long>(diag.logical_voice_peak_sample),
+              static_cast<unsigned long long>(diag.logical_voice_peak_key_on_events),
+              static_cast<unsigned long long>(diag.logical_voice_peak_key_off_events),
+              static_cast<unsigned>(diag.logical_voice_peak_endx_mask & 0x00FFFFFFu));
+  ImGui::Text("Env>0 peak ctx: sample %llu | KON/KOFF %llu/%llu | ENDX 0x%06X",
+              static_cast<unsigned long long>(diag.env_voice_peak_sample),
+              static_cast<unsigned long long>(diag.env_voice_peak_key_on_events),
+              static_cast<unsigned long long>(diag.env_voice_peak_key_off_events),
+              static_cast<unsigned>(diag.env_voice_peak_endx_mask & 0x00FFFFFFu));
+  ImGui::Text("Audible peak ctx: sample %llu | KON/KOFF %llu/%llu | ENDX 0x%06X",
+              static_cast<unsigned long long>(diag.audible_voice_peak_sample),
+              static_cast<unsigned long long>(diag.audible_voice_peak_key_on_events),
+              static_cast<unsigned long long>(diag.audible_voice_peak_key_off_events),
+              static_cast<unsigned>(diag.audible_voice_peak_endx_mask & 0x00FFFFFFu));
+  ImGui::Text("KEY ON/OFF Events: %llu / %llu",
+              static_cast<unsigned long long>(diag.key_on_events),
+              static_cast<unsigned long long>(diag.key_off_events));
+  ImGui::Text("ENDX Mask: 0x%06X",
+              static_cast<unsigned>(runtime_snapshot_.spu_endx_mask & 0x00FFFFFFu));
+
+  ImGui::Spacing();
+  ImGui::Text("Voice Levels");
+  ImGuiTableFlags table_flags =
+      ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+  if (ImGui::BeginTable("SPUSoundStatusVoices", 4, table_flags)) {
+    for (size_t voice = 0; voice < runtime_snapshot_.spu_voice_level_l.size();
+         ++voice) {
+      if ((voice % 4u) == 0u) {
+        ImGui::TableNextRow();
+      }
+      ImGui::TableSetColumnIndex(static_cast<int>(voice % 4u));
+
+      const s16 level_l = runtime_snapshot_.spu_voice_level_l[voice];
+      const s16 level_r = runtime_snapshot_.spu_voice_level_r[voice];
+      const int abs_l = (level_l < 0) ? -static_cast<int>(level_l)
+                                      : static_cast<int>(level_l);
+      const int abs_r = (level_r < 0) ? -static_cast<int>(level_r)
+                                      : static_cast<int>(level_r);
+      const int peak = std::max(abs_l, abs_r);
+      const float meter = std::min(1.0f, static_cast<float>(peak) / 32767.0f);
+      const bool active = runtime_snapshot_.spu_voice_active[voice];
+
+      ImGui::TextColored(active ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                : ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                         "V%02u", static_cast<unsigned>(voice));
+      ImGui::SameLine();
+      ImGui::TextUnformatted(active ? "ON" : "OFF");
+      ImGui::ProgressBar(meter, ImVec2(-1.0f, 0.0f));
+      ImGui::Text("L:%6d  R:%6d", static_cast<int>(level_l),
+                  static_cast<int>(level_r));
+    }
+    ImGui::EndTable();
+  }
+}
+
+void App::panel_sound_status() {
+  ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Sound Status", &show_sound_status_)) {
+    draw_sound_status_content();
   }
   ImGui::End();
 }
