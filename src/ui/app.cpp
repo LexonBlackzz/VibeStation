@@ -6,6 +6,7 @@
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <vector>
 
@@ -151,6 +152,17 @@ bool App::init_runtime() {
     return false;
   }
 
+  if (!emu_runner_.start(system_.get())) {
+    LOG_ERROR("EmuRunner failed to start");
+    printf("[App::init_runtime] EmuRunner FAILED\n");
+    fflush(stdout);
+    renderer_.reset();
+    input_.reset();
+    system_.reset();
+    return false;
+  }
+  emu_runner_.set_speed(1.0);
+
   runtime_ready_ = true;
   printf("[App::init_runtime] Runtime ready\n");
   fflush(stdout);
@@ -164,10 +176,8 @@ void App::run() {
 
   bool quit = false;
   last_fps_time_ = SDL_GetTicks();
-  perf_last_counter_ = SDL_GetPerformanceCounter();
   const u64 perf_freq = SDL_GetPerformanceFrequency();
   const double target_frame_sec = 1.0 / 60.0;
-  emu_frame_accum_sec_ = 0.0;
 
   while (!quit) {
     const u64 loop_start_counter = SDL_GetPerformanceCounter();
@@ -192,6 +202,7 @@ void App::run() {
 
     process_events(quit);
     update();
+    runtime_snapshot_ = emu_runner_.runtime_snapshot();
 
     const u64 emu_start_counter = SDL_GetPerformanceCounter();
     int emu_steps = 0;
@@ -226,11 +237,7 @@ void App::run() {
     glClearColor(0.05f, 0.03f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // Render emulator output if running
-    if (system_->is_running()) {
-      renderer_->render(system_->gpu());
-    }
-
+    const auto present_start = std::chrono::high_resolution_clock::now();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     SDL_GL_SwapWindow(window_);
     const u64 render_end_counter = SDL_GetPerformanceCounter();
@@ -263,14 +270,15 @@ void App::run() {
         if (delay_ms > 0) {
           SDL_Delay(delay_ms);
         }
-      }
-      while (true) {
-        const u64 now_counter = SDL_GetPerformanceCounter();
-        const double elapsed =
-            static_cast<double>(now_counter - loop_start_counter) /
-            static_cast<double>(perf_freq);
-        if (elapsed >= target_frame_sec) {
-          break;
+        while (true) {
+          const u64 now_counter = SDL_GetPerformanceCounter();
+          const double total_sec =
+              static_cast<double>(now_counter - loop_start_counter) /
+              static_cast<double>(perf_freq);
+          if (total_sec >= target_frame_sec) {
+            break;
+          }
+          SDL_Delay(0);
         }
       }
       const u64 waited_until_counter = SDL_GetPerformanceCounter();
@@ -322,17 +330,24 @@ void App::process_events(bool &quit) {
 void App::update() {
   input_->update();
 
-  // Push controller state to the system
+  // Push controller state into lock-free mailbox consumed by the emu thread.
   const u16 buttons = input_->controller().button_state();
-  system_->sio().set_button_state(buttons);
-  system_->sio().set_analog_state(
-      input_->controller().lx(), input_->controller().ly(),
-      input_->controller().rx(), input_->controller().ry());
-  last_button_state_ = buttons;
-  emu_input_focused_ =
-      system_ && system_->is_running() &&
-      ((SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) != 0);
+  const u8 lx = input_->controller().lx();
+  const u8 ly = input_->controller().ly();
+  const u8 rx = input_->controller().rx();
+  const u8 ry = input_->controller().ry();
+  emu_runner_.set_input_state(buttons, lx, ly, rx, ry);
 
+  // Keep input visible for paused-step workflows.
+  if (!emu_runner_.is_running()) {
+    system_->sio().set_button_state(buttons);
+    system_->sio().set_analog_state(lx, ly, rx, ry);
+  }
+
+  last_button_state_ = buttons;
+  emu_input_focused_ = emu_runner_.is_running() &&
+                       ((SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) !=
+                        0);
 }
 
 void App::render_ui() {
@@ -377,15 +392,19 @@ void App::render_ui() {
 
 void App::menu_bar() {
   if (ImGui::BeginMainMenuBar()) {
+    const bool emu_running = emu_runner_.is_running();
+    const bool bios_loaded = system_->bios_loaded();
+    const bool disc_loaded = system_->disc_loaded();
+
     if (ImGui::BeginMenu("File")) {
       if (ImGui::MenuItem("Load BIOS...", "Ctrl+B")) {
         std::string path = open_file_dialog(
             "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
         if (!path.empty()) {
+          emu_runner_.pause_and_wait_idle();
           if (system_->load_bios(path)) {
             bios_path_ = path;
             has_started_emulation_ = false;
-            system_->set_running(false);
             status_message_ = "BIOS loaded: " + system_->bios().get_info();
           } else {
             status_message_ = "Failed to load BIOS!";
@@ -406,11 +425,11 @@ void App::menu_bar() {
             ImGui::EndMainMenuBar();
             return;
           }
+          emu_runner_.pause_and_wait_idle();
           if (system_->load_game(bin, cue)) {
             game_bin_path_ = bin;
             game_cue_path_ = cue;
             has_started_emulation_ = false;
-            system_->set_running(false);
             status_message_ = "Disc loaded: " +
                               std::filesystem::path(cue).filename().string() +
                               " (Emulation > Boot Disc)";
@@ -432,8 +451,8 @@ void App::menu_bar() {
     }
     if (ImGui::BeginMenu("Emulation")) {
       if (ImGui::MenuItem("Boot Disc", "Ctrl+F5", false,
-                          system_->bios_loaded() && !system_->is_running() &&
-                              (system_->disc_loaded() || !game_cue_path_.empty()))) {
+                          bios_loaded && !emu_running &&
+                              (disc_loaded || !game_cue_path_.empty()))) {
         if (!boot_disc_from_ui()) {
           ImGui::EndMenu();
           ImGui::EndMainMenuBar();
@@ -441,28 +460,30 @@ void App::menu_bar() {
         }
       }
       if (ImGui::MenuItem("Start / Resume", "F5", false,
-                          system_->bios_loaded() && !system_->is_running())) {
+                          bios_loaded && !emu_running)) {
         if (has_started_emulation_) {
-          system_->set_running(true);
+          emu_runner_.set_running(true);
           status_message_ = "Emulation resumed";
-        } else if (system_->disc_loaded() || !game_cue_path_.empty()) {
+        } else if (disc_loaded || !game_cue_path_.empty()) {
           if (!boot_disc_from_ui()) {
             ImGui::EndMenu();
             ImGui::EndMainMenuBar();
             return;
           }
         } else {
+          emu_runner_.pause_and_wait_idle();
           system_->reset();
-          system_->set_running(true);
           has_started_emulation_ = true;
+          emu_runner_.set_running(true);
           status_message_ = "Emulation started (BIOS)";
         }
       }
-      if (ImGui::MenuItem("Pause", "F6", false, system_->is_running())) {
-        system_->set_running(false);
+      if (ImGui::MenuItem("Pause", "F6", false, emu_running)) {
+        emu_runner_.pause_and_wait_idle();
         status_message_ = "Emulation paused";
       }
-      if (ImGui::MenuItem("Reset", "F7", false, system_->bios_loaded())) {
+      if (ImGui::MenuItem("Reset", "F7", false, bios_loaded)) {
+        emu_runner_.pause_and_wait_idle();
         system_->reset();
         has_started_emulation_ = false;
         status_message_ = "System reset";
@@ -473,6 +494,7 @@ void App::menu_bar() {
       ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
       ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
+      ImGui::MenuItem("Performance", "F11", &show_perf_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("Performance HUD", nullptr, &show_perf_hud_);
       ImGui::MenuItem("About", nullptr, &show_about_);
@@ -480,7 +502,6 @@ void App::menu_bar() {
     }
 
     // Status bar on the right
-    const bool disc_loaded = system_->disc_loaded();
     const char *disc_text = disc_loaded ? "Disc: Loaded" : "Disc: None";
     const float status_width = ImGui::CalcTextSize(status_message_.c_str()).x + 16.0f;
     const float disc_width = ImGui::CalcTextSize(disc_text).x + 16.0f;
@@ -508,7 +529,7 @@ bool App::should_route_keyboard_to_emu(const SDL_Event &event,
   if (!keyboard_event) {
     return false;
   }
-  if (!system_ || !system_->is_running()) {
+  if (!emu_runner_.is_running()) {
     return false;
   }
   if ((SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) == 0) {
@@ -526,7 +547,7 @@ bool App::should_route_keyboard_to_emu(const SDL_Event &event,
 }
 
 void App::panel_emulator_screen() {
-  if (!system_->is_running()) {
+  if (!has_started_emulation_) {
     // Show a centered welcome message
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetCursorPos(ImVec2(center.x - 200, center.y - 60));
@@ -584,12 +605,13 @@ void App::panel_settings() {
         ImGui::Spacing();
         ImGui::Text("Input Focus: %s", emu_input_focused_ ? "Active" : "Inactive");
         ImGui::Text("Buttons (active-low): 0x%04X", last_button_state_);
+        const auto &diag = runtime_snapshot_.boot_diag;
         ImGui::Text("SIO TX/RX: 0x%02X / 0x%02X",
-                    static_cast<unsigned>(system_->boot_diag().last_sio_tx),
-                    static_cast<unsigned>(system_->boot_diag().last_sio_rx));
+                    static_cast<unsigned>(diag.last_sio_tx),
+                    static_cast<unsigned>(diag.last_sio_rx));
         ImGui::Text("SIO tx42/full-poll: %s / %s",
-                    system_->boot_diag().saw_tx_cmd42 ? "Yes" : "No",
-                    system_->boot_diag().saw_full_pad_poll ? "Yes" : "No");
+                    diag.saw_tx_cmd42 ? "Yes" : "No",
+                    diag.saw_full_pad_poll ? "Yes" : "No");
         ImGui::Spacing();
 
         if (ImGui::Button("Reset to Defaults")) {
@@ -647,6 +669,20 @@ void App::panel_settings() {
         ImGui::TextColored(
             ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
             "Unsafe PS2 mode maps full BIOS size and is expected to be unstable.");
+
+        ImGui::Separator();
+        ImGui::Text("Performance");
+        ImGui::Text("Emulation pacing: fixed 60 Hz");
+        if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
+          SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+        }
+        ImGui::Checkbox("Detailed Profiling", &g_profile_detailed_timing);
+        if (ImGui::Checkbox("Low-spec Mode", &config_low_spec_mode_)) {
+            g_low_spec_mode = config_low_spec_mode_;
+        }
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Reduces audio complexity and internal precision.");
+
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Logging")) {
@@ -873,6 +909,48 @@ void App::panel_settings() {
   ImGui::End();
 }
 
+void App::panel_performance() {
+  ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Performance Profiler", &show_perf_)) {
+    if (!has_started_emulation_) {
+      ImGui::Text("Emulation not running.");
+      ImGui::End();
+      return;
+    }
+
+    const auto &stats = runtime_snapshot_.profiling;
+    ImGui::Text("Frame Time Breakdown:");
+    ImGui::Separator();
+
+    auto row = [](const char *label, double ms, ImVec4 color) {
+      ImGui::Text("%-10s:", label);
+      ImGui::SameLine(100);
+      ImGui::TextColored(color, "%.3f ms", ms);
+    };
+
+    if (g_profile_detailed_timing) {
+      row("CPU", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+      row("GPU", stats.gpu_ms, ImVec4(0.8f, 0.4f, 0.4f, 1.0f));
+      row("SPU", stats.spu_ms, ImVec4(0.4f, 0.4f, 0.8f, 1.0f));
+      row("DMA", stats.dma_ms, ImVec4(0.8f, 0.8f, 0.4f, 1.0f));
+      row("Timers", stats.timers_ms, ImVec4(0.4f, 0.8f, 0.8f, 1.0f));
+      row("CDROM", stats.cdrom_ms, ImVec4(0.8f, 0.4f, 0.8f, 1.0f));
+    } else {
+      ImGui::TextDisabled("Detailed subsystem timings are disabled.");
+    }
+    ImGui::Separator();
+    row("Core", runtime_snapshot_.core_frame_ms, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    row("Present", present_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
+
+    float budget_ms = 1000.0f / 60.0f;
+    float usage = static_cast<float>(runtime_snapshot_.core_frame_ms / budget_ms);
+    ImGui::Spacing();
+    ImGui::Text("Core Frame Budget Usage (%.1f%%):", usage * 100.0f);
+    ImGui::ProgressBar(usage, ImVec2(-1.0f, 0.0f));
+  }
+  ImGui::End();
+}
+
 void App::panel_about() {
   ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("About VibeStation", &show_about_,
@@ -895,40 +973,52 @@ void App::panel_about() {
 void App::panel_debug_cpu() {
   ImGui::SetNextWindowSize(ImVec2(450, 500), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("CPU Debug", &show_debug_cpu_)) {
-    ImGui::Text("PC: 0x%08X", system_->cpu().pc());
-    ImGui::Text("Cycles: %llu",
-                (unsigned long long)system_->cpu().cycle_count());
-    ImGui::Separator();
+    const bool running = emu_runner_.is_running();
+    if (running) {
+      ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
+                         "Pause emulation to inspect registers.");
+    } else {
+      ImGui::Text("PC: 0x%08X", system_->cpu().pc());
+      ImGui::Text("Cycles: %llu",
+                  (unsigned long long)system_->cpu().cycle_count());
+      ImGui::Separator();
 
-    if (ImGui::BeginTable("Registers", 4,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-      const char *reg_names[] = {
-          "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
-          "t3",   "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
-          "s6",   "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
-      for (int i = 0; i < 32; i++) {
-        ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.6f, 0.5f, 0.9f, 1.0f), "$%s", reg_names[i]);
-        ImGui::SameLine(55);
-        ImGui::Text("0x%08X", system_->cpu().reg(i));
+      if (ImGui::BeginTable("Registers", 4,
+                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        const char *reg_names[] = {
+            "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
+            "t3",   "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
+            "s6",   "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
+        for (int i = 0; i < 32; i++) {
+          ImGui::TableNextColumn();
+          ImGui::TextColored(ImVec4(0.6f, 0.5f, 0.9f, 1.0f), "$%s",
+                             reg_names[i]);
+          ImGui::SameLine(55);
+          ImGui::Text("0x%08X", system_->cpu().reg(i));
+        }
+        ImGui::EndTable();
       }
-      ImGui::EndTable();
     }
 
     ImGui::Spacing();
-    if (ImGui::Button("Step") && !system_->is_running()) {
+    if (ImGui::Button("Step") && !running) {
       system_->step();
     }
     ImGui::SameLine();
-    if (ImGui::Button(system_->is_running() ? "Pause" : "Run")) {
-      system_->set_running(!system_->is_running());
+    if (ImGui::Button(running ? "Pause" : "Run")) {
+      if (running) {
+        emu_runner_.pause_and_wait_idle();
+      } else {
+        has_started_emulation_ = true;
+        emu_runner_.set_running(true);
+      }
     }
   }
   ImGui::End();
 }
 
 void App::update_vram_debug_texture() {
-  if (!system_) {
+  if (!system_ || emu_runner_.is_running()) {
     return;
   }
 
@@ -960,6 +1050,13 @@ void App::update_vram_debug_texture() {
 void App::panel_vram() {
   ImGui::SetNextWindowSize(ImVec2(980, 620), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("VRAM Debug", &show_vram_)) {
+    if (emu_runner_.is_running()) {
+      ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
+                         "Pause emulation to inspect raw VRAM safely.");
+      ImGui::End();
+      return;
+    }
+
     ImGui::Text("Raw VRAM 1024x512 (15-bit)");
     ImGui::Separator();
 
@@ -1059,6 +1156,8 @@ bool App::resolve_disc_paths(const std::string &selected_path,
 }
 
 bool App::boot_disc_from_ui() {
+  emu_runner_.pause_and_wait_idle();
+
   if (!system_->bios_loaded()) {
     status_message_ = "Load a BIOS before booting a disc.";
     return false;
@@ -1082,6 +1181,7 @@ bool App::boot_disc_from_ui() {
   }
 
   has_started_emulation_ = true;
+  emu_runner_.set_running(true);
   status_message_ = "Booting disc from BIOS...";
   return true;
 }
@@ -1106,6 +1206,7 @@ std::string App::open_file_dialog(const char *filter, const char *title) {
 }
 
 void App::shutdown() {
+  emu_runner_.stop();
   if (renderer_) {
     renderer_->shutdown();
   }

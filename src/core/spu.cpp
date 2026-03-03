@@ -1,5 +1,7 @@
 #include "spu.h"
+#include "system.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -836,7 +838,7 @@ static s16 clamp_fb_coef(s16 value, s16 limit = 0x6000) {
 void Spu::mix_reverb(float in_l, float in_r, float &wet_l, float &wet_r) {
   wet_l = 0.0f;
   wet_r = 0.0f;
-  if ((spucnt_ & 0x0080u) == 0) {
+  if ((spucnt_ & 0x0080u) == 0 || g_low_spec_mode) {
     reverb_half_rate_phase_ = false;
     reverb_hold_l_ = 0.0f;
     reverb_hold_r_ = 0.0f;
@@ -1104,6 +1106,11 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
 }
 
 void Spu::tick(u32 cycles) {
+  const bool profile_detailed = g_profile_detailed_timing;
+  std::chrono::high_resolution_clock::time_point start{};
+  if (profile_detailed) {
+    start = std::chrono::high_resolution_clock::now();
+  }
   if (transfer_busy_cycles_ > 0) {
     transfer_busy_cycles_ =
         (transfer_busy_cycles_ > cycles) ? (transfer_busy_cycles_ - cycles) : 0;
@@ -1267,6 +1274,11 @@ void Spu::tick(u32 cycles) {
   }
 
   queue_host_audio(out);
+  if (profile_detailed && sys_) {
+    const auto end = std::chrono::high_resolution_clock::now();
+    sys_->add_spu_time(
+        std::chrono::duration<double, std::milli>(end - start).count());
+  }
 }
 
 void Spu::tick_adsr(VoiceState &vs) {

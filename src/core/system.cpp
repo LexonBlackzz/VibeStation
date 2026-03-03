@@ -1,5 +1,6 @@
 #include "system.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace {
@@ -139,14 +140,21 @@ double System::target_fps() const {
   return 60.0;
 }
 
-void System::run_frame() {
+void System::run_frame(bool sample_display_diag) {
+  auto start_total = std::chrono::high_resolution_clock::now();
+  reset_profiling_stats();
+  const bool profile_detailed = g_profile_detailed_timing;
+
   const bool pal = gpu_.display_mode().is_pal;
   const u32 scanlines_per_frame = pal ? 314 : 263;
   const u32 vblank_scanline = pal ? 288 : 240;
   const u32 cycles_per_frame = psx::CPU_CLOCK_HZ / 60;
   const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
   const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
+  static constexpr u32 kCpuSliceCycles = 32;
+  static constexpr u32 kDmaTickStride = 16;
   u32 extra_cycle_error = 0;
+  u32 dma_tick_budget = 0;
 
   for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
     u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -159,16 +167,53 @@ void System::run_frame() {
     const bool in_vblank = scanline >= vblank_scanline;
     timers_.set_vblank(in_vblank);
 
-    for (u32 c = 0; c < cycles_this_scanline; c++) {
-      cpu_.step();
-      dma_.tick();
-      sio_.tick(1);
-      frame_cycles_++;
+    std::chrono::high_resolution_clock::time_point start_loop{};
+    if (profile_detailed) {
+      start_loop = std::chrono::high_resolution_clock::now();
     }
+    u32 cycles_remaining = cycles_this_scanline;
+    while (cycles_remaining > 0) {
+      const u32 slice = std::min(cycles_remaining, kCpuSliceCycles);
+      for (u32 c = 0; c < slice; ++c) {
+        cpu_.step();
+        ++frame_cycles_;
+      }
+      cycles_remaining -= slice;
+
+      dma_tick_budget += slice;
+      while (dma_tick_budget >= kDmaTickStride) {
+        dma_.tick();
+        dma_tick_budget -= kDmaTickStride;
+      }
+    }
+    if (dma_tick_budget > 0) {
+      dma_.tick();
+      dma_tick_budget = 0;
+    }
+    if (profile_detailed) {
+      const auto end_loop = std::chrono::high_resolution_clock::now();
+      add_cpu_time(
+          std::chrono::duration<double, std::milli>(end_loop - start_loop)
+              .count());
+    }
+
+    sio_.tick(cycles_this_scanline);
+
     // Batch devices that already accept cycle counts to reduce per-cycle call
     // overhead.
+    std::chrono::high_resolution_clock::time_point start_timers{};
+    if (profile_detailed) {
+      start_timers = std::chrono::high_resolution_clock::now();
+    }
     timers_.tick(cycles_this_scanline);
     timers_.hblank_pulse();
+    if (profile_detailed) {
+      const auto end_timers = std::chrono::high_resolution_clock::now();
+      add_timers_time(
+          std::chrono::duration<double, std::milli>(end_timers - start_timers)
+              .count());
+    }
+
     cdrom_.tick(cycles_this_scanline);
     spu_.tick(cycles_this_scanline);
     if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
@@ -245,7 +290,18 @@ void System::run_frame() {
     bios_menu_streak_after_non_bios_ = 0;
   }
 
-  const DisplaySampleInfo display_sample = gpu_.build_display_rgba(nullptr);
+  if (sample_display_diag) {
+    const DisplaySampleInfo display_sample = gpu_.build_display_rgba(nullptr);
+    update_display_diag(display_sample);
+  }
+
+  auto end_total = std::chrono::high_resolution_clock::now();
+  set_total_time(
+      std::chrono::duration<double, std::milli>(end_total - start_total)
+          .count());
+}
+
+void System::update_display_diag(const DisplaySampleInfo &display_sample) {
   boot_diag_.display_hash = display_sample.hash;
   boot_diag_.display_non_black_pixels = display_sample.non_black_pixels;
   boot_diag_.display_width = static_cast<u16>(std::max(0, display_sample.width));

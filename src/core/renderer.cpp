@@ -1,5 +1,4 @@
 #include "renderer.h"
-#include "gpu.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>

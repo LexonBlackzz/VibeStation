@@ -87,6 +87,8 @@ public:
   // VBlank
   void vblank();
 
+  System *sys() const { return sys_; }
+
 private:
   System *sys_ = nullptr;
 

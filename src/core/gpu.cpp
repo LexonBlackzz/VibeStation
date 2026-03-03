@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "system.h"
+#include <chrono>
 
 namespace {
 int clamp_display_dimension(int value, int fallback, int max_value) {
@@ -208,10 +209,15 @@ void Gpu::reset() {
 // ── GP0 (Rendering Commands) ──────────────────────────────────────
 
 void Gpu::gp0(u32 command) {
+  const bool profile_detailed = g_profile_detailed_timing;
+  std::chrono::high_resolution_clock::time_point start{};
+  if (profile_detailed) {
+    start = std::chrono::high_resolution_clock::now();
+  }
   static u64 gp0_count = 0;
   if (g_trace_gpu &&
       trace_should_log(gp0_count, g_trace_burst_gpu, g_trace_stride_gpu)) {
-    LOG_DEBUG("GPU: GP0[%llu] = 0x%08X mode=%d",
+    LOG_CAT_DEBUG(LogCategory::Gpu, "GPU: GP0[%llu] = 0x%08X mode=%d",
               static_cast<unsigned long long>(gp0_count), command,
               static_cast<int>(gp0_mode_));
   }
@@ -436,6 +442,11 @@ void Gpu::gp0(u32 command) {
   }
 
   gp0_buffer_.clear();
+  if (profile_detailed && sys_) {
+    const auto end = std::chrono::high_resolution_clock::now();
+    sys_->add_gpu_time(
+        std::chrono::duration<double, std::milli>(end - start).count());
+  }
 }
 
 // ── GP0 Command Implementations ────────────────────────────────────
@@ -894,7 +905,7 @@ void Gpu::gp1(u32 command) {
   static u64 gp1_count = 0;
   if (g_trace_gpu &&
       trace_should_log(gp1_count, g_trace_burst_gpu, g_trace_stride_gpu)) {
-    LOG_DEBUG("GPU: GP1[%llu] = 0x%08X",
+    LOG_CAT_DEBUG(LogCategory::Gpu, "GPU: GP1[%llu] = 0x%08X",
               static_cast<unsigned long long>(gp1_count), command);
   }
   u8 op = (command >> 24) & 0x3F;
@@ -1193,8 +1204,13 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba) const {
   const int row_bytes = static_cast<int>(psx::VRAM_WIDTH * sizeof(u16));
   u32 hash = 2166136261u;
   u64 non_black = 0;
-  const bool interlaced_field_output = display_.interlaced && (display_.vres != 0);
-  const int field_parity = interlaced_field_output ? (interlace_field_ ? 1 : 0) : 0;
+  const bool interlaced_field_output =
+      display_.interlaced && (display_.vres != 0);
+  const int field_parity = interlaced_field_output
+                               ? (interlace_field_ ? 1 : 0)
+                               : 0;
+  const DeinterlaceMode deinterlace_mode =
+      interlaced_field_output ? g_deinterlace_mode : DeinterlaceMode::Weave;
 
   auto sample_byte = [&](int vram_y, int byte_index) -> u8 {
     if (vram_y < 0 || vram_y >= static_cast<int>(psx::VRAM_HEIGHT) ||
@@ -1208,55 +1224,85 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32> *rgba) const {
                             : static_cast<u8>(word & 0xFF);
   };
 
-  for (int y = 0; y < info.height; ++y) {
-    int vram_y = info.y_start + y;
-    if (interlaced_field_output) {
-      // In interlaced 480-line output, each field uses alternating source lines.
-      vram_y = info.y_start + ((y >> 1) * 2) + field_parity;
-    }
+  auto read_rgb = [&](int vram_y, int x, u8 &r, u8 &g, u8 &b) -> bool {
     if (vram_y < 0 || vram_y >= static_cast<int>(psx::VRAM_HEIGHT)) {
-      continue;
+      return false;
     }
-    const size_t row_base =
-        static_cast<size_t>(y) * static_cast<size_t>(info.width);
+    const int vram_x = info.x_start + x;
+    if (vram_x < 0 || vram_x >= static_cast<int>(psx::VRAM_WIDTH)) {
+      return false;
+    }
+
     if (!display_.is_24bit) {
-      for (int x = 0; x < info.width; ++x) {
-        const int vram_x = info.x_start + x;
-        if (vram_x < 0 || vram_x >= static_cast<int>(psx::VRAM_WIDTH)) {
-          continue;
-        }
-        const u16 pixel = vram_[static_cast<size_t>(vram_y) * psx::VRAM_WIDTH +
-                                static_cast<size_t>(vram_x)];
-        const u8 r5 = static_cast<u8>(pixel & 0x1F);
-        const u8 g5 = static_cast<u8>((pixel >> 5) & 0x1F);
-        const u8 b5 = static_cast<u8>((pixel >> 10) & 0x1F);
-        const u8 r = static_cast<u8>((r5 << 3) | (r5 >> 2));
-        const u8 g = static_cast<u8>((g5 << 3) | (g5 >> 2));
-        const u8 b = static_cast<u8>((b5 << 3) | (b5 >> 2));
-        if (rgba != nullptr) {
-          (*rgba)[row_base + static_cast<size_t>(x)] =
-              static_cast<u32>(r) | (static_cast<u32>(g) << 8) |
-              (static_cast<u32>(b) << 16) | 0xFF000000u;
-        }
-        hash ^= r;
-        hash *= 16777619u;
-        hash ^= g;
-        hash *= 16777619u;
-        hash ^= b;
-        hash *= 16777619u;
-        if ((r | g | b) != 0) {
-          ++non_black;
-        }
-      }
-      continue;
+      const u16 pixel = vram_[static_cast<size_t>(vram_y) * psx::VRAM_WIDTH +
+                              static_cast<size_t>(vram_x)];
+      const u8 r5 = static_cast<u8>(pixel & 0x1F);
+      const u8 g5 = static_cast<u8>((pixel >> 5) & 0x1F);
+      const u8 b5 = static_cast<u8>((pixel >> 10) & 0x1F);
+      r = static_cast<u8>((r5 << 3) | (r5 >> 2));
+      g = static_cast<u8>((g5 << 3) | (g5 >> 2));
+      b = static_cast<u8>((b5 << 3) | (b5 >> 2));
+      return true;
     }
 
     const int row_start_byte = info.x_start * 2;
+    const int byte_index = row_start_byte + x * 3;
+    r = sample_byte(vram_y, byte_index + 0);
+    g = sample_byte(vram_y, byte_index + 1);
+    b = sample_byte(vram_y, byte_index + 2);
+    return true;
+  };
+
+  for (int y = 0; y < info.height; ++y) {
+    int vram_y0 = info.y_start + y;
+    int vram_y1 = vram_y0;
+    bool blend_fields = false;
+
+    if (interlaced_field_output) {
+      switch (deinterlace_mode) {
+      case DeinterlaceMode::Bob:
+        vram_y0 = info.y_start + ((y >> 1) * 2) + field_parity;
+        break;
+      case DeinterlaceMode::Blend:
+        vram_y0 = info.y_start + ((y >> 1) * 2) + field_parity;
+        vram_y1 = vram_y0 + (field_parity ? -1 : 1);
+        blend_fields = true;
+        break;
+      case DeinterlaceMode::Weave:
+      default:
+        // Stable placement: map output lines directly to source scanlines.
+        vram_y0 = info.y_start + y;
+        break;
+      }
+    }
+    if (vram_y0 < 0 || vram_y0 >= static_cast<int>(psx::VRAM_HEIGHT)) {
+      continue;
+    }
+    if (blend_fields &&
+        (vram_y1 < 0 || vram_y1 >= static_cast<int>(psx::VRAM_HEIGHT))) {
+      blend_fields = false;
+      vram_y1 = vram_y0;
+    }
+
+    const size_t row_base =
+        static_cast<size_t>(y) * static_cast<size_t>(info.width);
     for (int x = 0; x < info.width; ++x) {
-      const int byte_index = row_start_byte + x * 3;
-      const u8 r = sample_byte(vram_y, byte_index + 0);
-      const u8 g = sample_byte(vram_y, byte_index + 1);
-      const u8 b = sample_byte(vram_y, byte_index + 2);
+      u8 r = 0;
+      u8 g = 0;
+      u8 b = 0;
+      if (!read_rgb(vram_y0, x, r, g, b)) {
+        continue;
+      }
+      if (blend_fields) {
+        u8 r1 = 0;
+        u8 g1 = 0;
+        u8 b1 = 0;
+        if (read_rgb(vram_y1, x, r1, g1, b1)) {
+          r = static_cast<u8>((static_cast<u16>(r) + r1) / 2u);
+          g = static_cast<u8>((static_cast<u16>(g) + g1) / 2u);
+          b = static_cast<u8>((static_cast<u16>(b) + b1) / 2u);
+        }
+      }
       if (rgba != nullptr) {
         (*rgba)[row_base + static_cast<size_t>(x)] =
             static_cast<u32>(r) | (static_cast<u32>(g) << 8) |

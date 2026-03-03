@@ -94,6 +94,21 @@ inline u32 g_trace_burst_sio = 64;
 inline u32 g_trace_stride_sio = 2048;
 inline bool g_experimental_bios_size_mode = false;
 inline bool g_unsafe_ps2_bios_mode = false;
+inline bool g_low_spec_mode = false;
+inline bool g_profile_detailed_timing =
+#if defined(NDEBUG)
+    false;
+#else
+    true;
+#endif
+
+enum class DeinterlaceMode : u8 {
+  Weave = 0,
+  Bob = 1,
+  Blend = 2,
+};
+
+inline DeinterlaceMode g_deinterlace_mode = DeinterlaceMode::Weave;
 
 inline constexpr u32 log_category_bit(LogCategory cat) {
   return static_cast<u32>(cat);
@@ -224,17 +239,16 @@ inline void log_flush_repeats() {
   g_log_repeat_count = 0;
 }
 
-inline void log_write(const char *prefix, const char *fmt, ...) {
+inline void log_write_categorized(LogCategory cat, const char *prefix, const char *fmt, ...) {
+  if (!log_category_enabled(cat)) {
+    return;
+  }
+
   char buffer[2048];
   va_list args;
   va_start(args, fmt);
   std::vsnprintf(buffer, sizeof(buffer), fmt, args);
   va_end(args);
-
-  const LogCategory cat = log_detect_category(buffer);
-  if (!log_category_enabled(cat)) {
-    return;
-  }
 
   std::string composed(prefix);
   composed += buffer;
@@ -257,23 +271,52 @@ inline void log_write(const char *prefix, const char *fmt, ...) {
 
 #define LOG_DEBUG(fmt, ...)                                                     \
   do {                                                                          \
-    if (g_log_level <= LogLevel::Debug)                                         \
-      log_write("[DBG] ", fmt, ##__VA_ARGS__);                                 \
+    if (g_log_level <= LogLevel::Debug) {                                       \
+      static LogCategory _cat = log_detect_category(fmt);                       \
+      log_write_categorized(_cat, "[DBG] ", fmt, ##__VA_ARGS__);                 \
+    }                                                                           \
   } while (0)
 #define LOG_INFO(fmt, ...)                                                      \
   do {                                                                          \
-    if (g_log_level <= LogLevel::Info)                                          \
-      log_write("[INF] ", fmt, ##__VA_ARGS__);                                 \
+    if (g_log_level <= LogLevel::Info) {                                        \
+      static LogCategory _cat = log_detect_category(fmt);                       \
+      log_write_categorized(_cat, "[INF] ", fmt, ##__VA_ARGS__);                 \
+    }                                                                           \
   } while (0)
 #define LOG_WARN(fmt, ...)                                                      \
   do {                                                                          \
-    if (g_log_level <= LogLevel::Warn)                                          \
-      log_write("[WRN] ", fmt, ##__VA_ARGS__);                                 \
+    if (g_log_level <= LogLevel::Warn) {                                        \
+      static LogCategory _cat = log_detect_category(fmt);                       \
+      log_write_categorized(_cat, "[WRN] ", fmt, ##__VA_ARGS__);                 \
+    }                                                                           \
   } while (0)
 #define LOG_ERROR(fmt, ...)                                                     \
   do {                                                                          \
+    if (g_log_level <= LogLevel::Error) {                                       \
+      static LogCategory _cat = log_detect_category(fmt);                       \
+      log_write_categorized(_cat, "[ERR] ", fmt, ##__VA_ARGS__);                 \
+    }                                                                           \
+  } while (0)
+
+#define LOG_CAT_DEBUG(cat, fmt, ...)                                            \
+  do {                                                                          \
+    if (g_log_level <= LogLevel::Debug)                                         \
+      log_write_categorized(cat, "[DBG] ", fmt, ##__VA_ARGS__);                \
+  } while (0)
+#define LOG_CAT_INFO(cat, fmt, ...)                                             \
+  do {                                                                          \
+    if (g_log_level <= LogLevel::Info)                                          \
+      log_write_categorized(cat, "[INF] ", fmt, ##__VA_ARGS__);                \
+  } while (0)
+#define LOG_CAT_WARN(cat, fmt, ...)                                             \
+  do {                                                                          \
+    if (g_log_level <= LogLevel::Warn)                                          \
+      log_write_categorized(cat, "[WRN] ", fmt, ##__VA_ARGS__);                \
+  } while (0)
+#define LOG_CAT_ERROR(cat, fmt, ...)                                            \
+  do {                                                                          \
     if (g_log_level <= LogLevel::Error)                                         \
-      log_write("[ERR] ", fmt, ##__VA_ARGS__);                                 \
+      log_write_categorized(cat, "[ERR] ", fmt, ##__VA_ARGS__);                \
   } while (0)
 
 // PS1 constants

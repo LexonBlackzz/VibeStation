@@ -87,8 +87,8 @@ private:
   static constexpr int VOICE_REG_STRIDE = 0x10;
   static constexpr u32 SPU_RAM_MASK = 0x7FFFFu;
   static constexpr u32 SPU_RAM_WORD_MASK = 0x7FFFEu;
-  static constexpr u32 HOST_TARGET_QUEUE_BYTES = 4096u;
-  static constexpr u32 HOST_MAX_QUEUE_BYTES = 12288u;
+  static constexpr u32 HOST_TARGET_QUEUE_BYTES = 8192u;
+  static constexpr u32 HOST_MAX_QUEUE_BYTES = 24576u;
   static constexpr size_t HOST_STAGING_MAX_SAMPLES =
       static_cast<size_t>(SAMPLE_RATE) * 2 * 4;
   static constexpr size_t CAPTURE_MAX_SAMPLES =
