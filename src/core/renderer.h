@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <vector>
 
 // ── OpenGL Renderer ────────────────────────────────────────────────
 // Takes the GPU's VRAM and displays the active display area on screen
@@ -30,6 +31,9 @@ private:
   unsigned int shader_ = 0;
   int last_frame_width_ = 320;
   int last_frame_height_ = 240;
+  int texture_width_ = 0;
+  int texture_height_ = 0;
+  std::vector<u32> frame_rgba_;
 
   bool create_shader();
   bool create_texture();

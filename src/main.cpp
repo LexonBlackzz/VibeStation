@@ -14,6 +14,13 @@
 #include <sstream>
 #include <vector>
 
+#ifdef _WIN32
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 static u32 fnv1a_hash_file(const std::string &path, bool &ok) {
   ok = false;
   std::ifstream file(path, std::ios::binary);

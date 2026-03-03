@@ -1,6 +1,8 @@
 #include "renderer.h"
 #include "gpu.h"
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <vector>
 
 #ifdef _WIN32
@@ -68,6 +70,33 @@ static bool load_gl_functions() {
   return true;
 }
 
+static const char *gl_string_or_unknown(GLenum name) {
+  const GLubyte *value = glGetString(name);
+  if (!value) {
+    return "unknown";
+  }
+  return reinterpret_cast<const char *>(value);
+}
+
+static bool contains_case_insensitive(const char *text, const char *needle) {
+  if (!text || !needle || !*needle) {
+    return false;
+  }
+  const size_t nlen = std::strlen(needle);
+  for (const char *p = text; *p; ++p) {
+    size_t i = 0;
+    while (i < nlen && p[i] &&
+           std::tolower(static_cast<unsigned char>(p[i])) ==
+               std::tolower(static_cast<unsigned char>(needle[i]))) {
+      ++i;
+    }
+    if (i == nlen) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool Renderer::init(SDL_Window *window) {
   window_ = window;
 
@@ -102,7 +131,24 @@ bool Renderer::init(SDL_Window *window) {
                          (void *)(2 * sizeof(float)));
   vs_EnableVertexAttribArray(1);
 
-  LOG_INFO("Renderer: Initialized OpenGL %s", glGetString(GL_VERSION));
+  const char *version = gl_string_or_unknown(GL_VERSION);
+  const char *vendor = gl_string_or_unknown(GL_VENDOR);
+  const char *renderer = gl_string_or_unknown(GL_RENDERER);
+  const char *glsl = gl_string_or_unknown(GL_SHADING_LANGUAGE_VERSION);
+  LOG_INFO("Renderer: OpenGL version=%s vendor=%s renderer=%s glsl=%s",
+           version, vendor, renderer, glsl);
+
+  const bool software_renderer =
+      contains_case_insensitive(vendor, "microsoft") ||
+      contains_case_insensitive(renderer, "gdi generic") ||
+      contains_case_insensitive(renderer, "swiftshader") ||
+      contains_case_insensitive(renderer, "llvmpipe") ||
+      contains_case_insensitive(renderer, "software");
+  if (software_renderer) {
+    LOG_WARN("Renderer: Software OpenGL renderer detected; performance will "
+             "be significantly reduced.");
+  }
+
   return true;
 }
 
@@ -124,7 +170,9 @@ bool Renderer::create_texture() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, psx::VRAM_WIDTH, psx::VRAM_HEIGHT, 0,
+  texture_width_ = psx::VRAM_WIDTH;
+  texture_height_ = psx::VRAM_HEIGHT;
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texture_width_, texture_height_, 0,
                GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
   return true;
 }
@@ -175,14 +223,20 @@ bool Renderer::create_shader() {
 }
 
 void Renderer::render(const Gpu &gpu) {
-  std::vector<u32> rgba;
-  const DisplaySampleInfo sample = gpu.build_display_rgba(rgba);
+  const DisplaySampleInfo sample = gpu.build_display_rgba(frame_rgba_);
   const int w = (std::max)(1, sample.width);
   const int h = (std::max)(1, sample.height);
   last_frame_width_ = w;
   last_frame_height_ = h;
 
   glBindTexture(GL_TEXTURE_2D, texture_id_);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-               rgba.data());
+  if (w != texture_width_ || h != texture_height_) {
+    texture_width_ = w;
+    texture_height_ = h;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 frame_rgba_.data());
+  } else {
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE,
+                    frame_rgba_.data());
+  }
 }

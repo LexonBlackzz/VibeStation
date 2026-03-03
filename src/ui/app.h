@@ -37,6 +37,7 @@ private:
   bool show_debug_cpu_ = false;
   bool show_vram_ = false;
   bool show_logging_ = false;
+  bool show_perf_hud_ = true;
   std::string bios_path_;
   std::string game_bin_path_;
   std::string game_cue_path_;
@@ -52,6 +53,11 @@ private:
   u32 last_fps_time_ = 0;
   u64 perf_last_counter_ = 0;
   double emu_frame_accum_sec_ = 0.0;
+  float frame_time_ms_ = 0.0f;
+  float emu_time_ms_ = 0.0f;
+  float render_time_ms_ = 0.0f;
+  float wait_time_ms_ = 0.0f;
+  int emu_steps_last_frame_ = 0;
   unsigned int vram_debug_texture_ = 0;
 
   void process_events(bool &quit);
@@ -67,6 +73,7 @@ private:
   void panel_about();
   void panel_debug_cpu();
   void panel_vram();
+  void panel_perf_hud();
   void update_vram_debug_texture();
 
   // File dialog helpers
