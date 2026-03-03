@@ -32,6 +32,7 @@ bool App::init() {
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+  SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
   printf("[App::init] Creating window...\n");
@@ -58,7 +59,17 @@ bool App::init() {
     return false;
   }
   SDL_GL_MakeCurrent(window_, gl_context_);
-  SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+  SDL_GL_SetSwapInterval(0); // Uncapped render loop; emulator speed is time-driven.
+  int actual_major = 0;
+  int actual_minor = 0;
+  int actual_profile = 0;
+  int accelerated_visual = 0;
+  SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &actual_major);
+  SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &actual_minor);
+  SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &actual_profile);
+  SDL_GL_GetAttribute(SDL_GL_ACCELERATED_VISUAL, &accelerated_visual);
+  LOG_INFO("SDL GL context: version=%d.%d profile=%d accelerated_visual=%d",
+           actual_major, actual_minor, actual_profile, accelerated_visual);
   printf("[App::init] GL Context OK\n");
   fflush(stdout);
 
@@ -170,24 +181,47 @@ void App::run() {
 
   while (!quit) {
     const u64 loop_start_counter = SDL_GetPerformanceCounter();
+    const auto to_ms = [perf_freq](u64 ticks) -> float {
+      return static_cast<float>((static_cast<double>(ticks) * 1000.0) /
+                                static_cast<double>(perf_freq));
+    };
+    const auto smooth = [](float &dst, float sample) {
+      const float alpha = 0.10f;
+      if (dst <= 0.0f) {
+        dst = sample;
+      } else {
+        dst = dst + (sample - dst) * alpha;
+      }
+    };
+    const double delta_sec =
+        static_cast<double>(loop_start_counter - perf_last_counter_) /
+        static_cast<double>(perf_freq);
+    perf_last_counter_ = loop_start_counter;
+
+    emu_frame_accum_sec_ += std::min(delta_sec, 0.25);
+
     process_events(quit);
     update();
     runtime_snapshot_ = emu_runner_.runtime_snapshot();
 
-    FrameSnapshot frame;
-    if (emu_runner_.consume_latest_frame(frame)) {
-      renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-      runtime_snapshot_ = emu_runner_.runtime_snapshot();
+    const u64 emu_start_counter = SDL_GetPerformanceCounter();
+    int emu_steps = 0;
+    if (system_->is_running()) {
+      const double frame_time = 1.0 / system_->target_fps();
+      while (emu_frame_accum_sec_ >= frame_time && emu_steps < 4) {
+        system_->run_frame();
+        emu_frame_accum_sec_ -= frame_time;
+        ++emu_steps;
+      }
+    } else {
+      emu_frame_accum_sec_ = 0.0;
     }
 
-    u32 now_ms = SDL_GetTicks();
-    if (!emu_runner_.is_running() &&
-        (show_vram_ || (now_ms - last_vram_update_ms_) >= 1000)) {
-      update_vram_debug_texture();
-      last_vram_update_ms_ = now_ms;
-    }
+    update_vram_debug_texture();
+    const u64 emu_end_counter = SDL_GetPerformanceCounter();
 
     // Start ImGui frame
+    const u64 render_start_counter = SDL_GetPerformanceCounter();
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
@@ -206,10 +240,7 @@ void App::run() {
     const auto present_start = std::chrono::high_resolution_clock::now();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     SDL_GL_SwapWindow(window_);
-    const auto present_end = std::chrono::high_resolution_clock::now();
-    present_ms_ =
-        std::chrono::duration<double, std::milli>(present_end - present_start)
-            .count();
+    const u64 render_end_counter = SDL_GetPerformanceCounter();
 
     // FPS counter
     frame_count_++;
@@ -226,19 +257,18 @@ void App::run() {
       SDL_SetWindowTitle(window_, title);
     }
 
-    if (!config_vsync_) {
-      const u64 loop_end_counter = SDL_GetPerformanceCounter();
-      const double elapsed_sec =
-          static_cast<double>(loop_end_counter - loop_start_counter) /
-          static_cast<double>(perf_freq);
-      if (elapsed_sec < target_frame_sec) {
-        const double remain_sec = target_frame_sec - elapsed_sec;
-        if (remain_sec > 0.002) {
-          const u32 delay_ms =
-              static_cast<u32>((remain_sec - 0.001) * 1000.0);
-          if (delay_ms > 0) {
-            SDL_Delay(delay_ms);
-          }
+    const u64 loop_end_counter = SDL_GetPerformanceCounter();
+    const double loop_elapsed_sec = static_cast<double>(loop_end_counter -
+                                                         loop_start_counter) /
+                                    static_cast<double>(perf_freq);
+    float wait_ms_sample = 0.0f;
+    if (loop_elapsed_sec < target_frame_sec) {
+      const double remaining_sec = target_frame_sec - loop_elapsed_sec;
+      if (remaining_sec > 0.002) {
+        const u32 delay_ms =
+            static_cast<u32>((remaining_sec - 0.001) * 1000.0);
+        if (delay_ms > 0) {
+          SDL_Delay(delay_ms);
         }
         while (true) {
           const u64 now_counter = SDL_GetPerformanceCounter();
@@ -251,7 +281,22 @@ void App::run() {
           SDL_Delay(0);
         }
       }
+      const u64 waited_until_counter = SDL_GetPerformanceCounter();
+      wait_ms_sample =
+          to_ms(waited_until_counter - loop_end_counter);
     }
+
+    const u64 frame_end_counter = SDL_GetPerformanceCounter();
+    const float emu_ms_sample = to_ms(emu_end_counter - emu_start_counter);
+    const float render_ms_sample =
+        to_ms(render_end_counter - render_start_counter);
+    const float frame_ms_sample =
+        to_ms(frame_end_counter - loop_start_counter);
+    smooth(emu_time_ms_, emu_ms_sample);
+    smooth(render_time_ms_, render_ms_sample);
+    smooth(wait_time_ms_, wait_ms_sample);
+    smooth(frame_time_ms_, frame_ms_sample);
+    emu_steps_last_frame_ = emu_steps;
   }
 }
 
@@ -341,8 +386,8 @@ void App::render_ui() {
     panel_debug_cpu();
   if (show_vram_)
     panel_vram();
-  if (show_perf_)
-    panel_performance();
+  if (show_perf_hud_)
+    panel_perf_hud();
 }
 
 void App::menu_bar() {
@@ -451,6 +496,7 @@ void App::menu_bar() {
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
       ImGui::MenuItem("Performance", "F11", &show_perf_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
+      ImGui::MenuItem("Performance HUD", nullptr, &show_perf_hud_);
       ImGui::MenuItem("About", nullptr, &show_about_);
       ImGui::EndMenu();
     }
@@ -586,22 +632,16 @@ void App::panel_settings() {
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Video")) {
-        const int frame_w = std::max(1, renderer_->last_frame_width());
-        const int frame_h = std::max(1, renderer_->last_frame_height());
-        ImGui::Text("Resolution: %dx%d", frame_w, frame_h);
-        ImGui::Text("Display Area: %ux%u",
-                    static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
-                    static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
-        const char *deinterlace_modes[] = {"Weave (Stable)", "Bob (Field)",
-                                           "Blend (Soft)"};
-        int deinterlace_index = static_cast<int>(g_deinterlace_mode);
-        if (ImGui::Combo("Deinterlace", &deinterlace_index, deinterlace_modes,
-                         IM_ARRAYSIZE(deinterlace_modes))) {
-          deinterlace_index = std::max(0, std::min(2, deinterlace_index));
-          g_deinterlace_mode =
-              static_cast<DeinterlaceMode>(deinterlace_index);
-        }
+        ImGui::Text("Resolution: %dx%d", system_->gpu().display_mode().width(),
+                    system_->gpu().display_mode().height());
         ImGui::Text("Internal Upscaling: 1x (native)");
+        ImGui::Separator();
+        ImGui::Text("Performance (smoothed)");
+        ImGui::Text("Frame:  %.2f ms", frame_time_ms_);
+        ImGui::Text("Emu:    %.2f ms", emu_time_ms_);
+        ImGui::Text("Render: %.2f ms", render_time_ms_);
+        ImGui::Text("Wait:   %.2f ms", wait_time_ms_);
+        ImGui::Text("Emu steps/frame: %d", emu_steps_last_frame_);
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                            "PGXP: Not yet implemented");
         ImGui::EndTabItem();
@@ -1030,6 +1070,30 @@ void App::panel_vram() {
       ImGui::Image((ImTextureID)(intptr_t)vram_debug_texture_, draw_size,
                    ImVec2(0, 0), ImVec2(1, 1));
     }
+  }
+  ImGui::End();
+}
+
+void App::panel_perf_hud() {
+  ImGuiViewport *viewport = ImGui::GetMainViewport();
+  const ImVec2 pad(12.0f, 36.0f);
+  ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad.x,
+                                 viewport->WorkPos.y + pad.y),
+                          ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.70f);
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                           ImGuiWindowFlags_NoMove |
+                           ImGuiWindowFlags_NoSavedSettings |
+                           ImGuiWindowFlags_NoNav |
+                           ImGuiWindowFlags_AlwaysAutoResize;
+  if (ImGui::Begin("Perf HUD", nullptr, flags)) {
+    ImGui::Text("FPS: %.1f", fps_);
+    ImGui::Separator();
+    ImGui::Text("Frame  %.2f ms", frame_time_ms_);
+    ImGui::Text("Emu    %.2f ms", emu_time_ms_);
+    ImGui::Text("Render %.2f ms", render_time_ms_);
+    ImGui::Text("Wait   %.2f ms", wait_time_ms_);
+    ImGui::Text("Steps  %d", emu_steps_last_frame_);
   }
   ImGui::End();
 }
