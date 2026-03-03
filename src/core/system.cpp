@@ -1,5 +1,6 @@
 #include "system.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace {
@@ -140,6 +141,9 @@ double System::target_fps() const {
 }
 
 void System::run_frame() {
+  auto start_total = std::chrono::high_resolution_clock::now();
+  reset_profiling_stats();
+
   const bool pal = gpu_.display_mode().is_pal;
   const u32 scanlines_per_frame = pal ? 314 : 263;
   const u32 vblank_scanline = pal ? 288 : 240;
@@ -159,16 +163,25 @@ void System::run_frame() {
     const bool in_vblank = scanline >= vblank_scanline;
     timers_.set_vblank(in_vblank);
 
+    auto start_loop = std::chrono::high_resolution_clock::now();
     for (u32 c = 0; c < cycles_this_scanline; c++) {
       cpu_.step();
       dma_.tick();
-      sio_.tick(1);
       frame_cycles_++;
     }
+    auto end_loop = std::chrono::high_resolution_clock::now();
+    add_cpu_time(std::chrono::duration<double, std::milli>(end_loop - start_loop).count());
+
+    sio_.tick(cycles_this_scanline);
+
     // Batch devices that already accept cycle counts to reduce per-cycle call
     // overhead.
+    auto start_timers = std::chrono::high_resolution_clock::now();
     timers_.tick(cycles_this_scanline);
     timers_.hblank_pulse();
+    auto end_timers = std::chrono::high_resolution_clock::now();
+    add_timers_time(std::chrono::duration<double, std::milli>(end_timers - start_timers).count());
+
     cdrom_.tick(cycles_this_scanline);
     spu_.tick(cycles_this_scanline);
     if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
@@ -276,6 +289,9 @@ void System::run_frame() {
     }
     boot_diag_.logo_visible_run_frames = 0;
   }
+
+  auto end_total = std::chrono::high_resolution_clock::now();
+  set_total_time(std::chrono::duration<double, std::milli>(end_total - start_total).count());
 }
 
 void System::step() { cpu_.step(); }

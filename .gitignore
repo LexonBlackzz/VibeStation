@@ -1,0 +1,10 @@
+build-vs/
+*.o
+*.a
+*.so
+*.exe
+vibestation_runtime.log
+bios_test.log
+boot_disc_test.log
+spu_audio_test.log
+*.ppm

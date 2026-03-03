@@ -1,6 +1,7 @@
 #include "cdrom.h"
 #include "system.h"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <iomanip>
@@ -1483,6 +1484,7 @@ const CdTrack *CdRom::track_for_lba(int lba) const {
 }
 
 void CdRom::tick(u32 cycles) {
+  auto start = std::chrono::high_resolution_clock::now();
   if (adpcm_busy_cycles_ > 0) {
     adpcm_busy_cycles_ =
         std::max(0, adpcm_busy_cycles_ - static_cast<int>(cycles));
@@ -1553,5 +1555,9 @@ void CdRom::tick(u32 cycles) {
 
     refresh_read_period();
     pending_cycles_ = std::max(1, read_period_cycles_);
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+  if (sys_) {
+    sys_->add_cdrom_time(std::chrono::duration<double, std::milli>(end - start).count());
   }
 }

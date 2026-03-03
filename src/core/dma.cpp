@@ -1,5 +1,6 @@
 #include "dma.h"
 #include "system.h"
+#include <chrono>
 
 void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
   const bool old_master = (dicr_ & 0x80000000u) != 0;
@@ -300,7 +301,12 @@ void DmaController::tick() {
   // Check if any channels need to start
   for (int i = 0; i < 7; i++) {
     if (channels_[i].is_active() && channel_enabled(i) && request_active(i)) {
+      auto start = std::chrono::high_resolution_clock::now();
       execute_dma(i);
+      auto end = std::chrono::high_resolution_clock::now();
+      if (sys_) {
+        sys_->add_dma_time(std::chrono::duration<double, std::milli>(end - start).count());
+      }
     }
   }
 }

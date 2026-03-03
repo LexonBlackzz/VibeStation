@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "system.h"
+#include <chrono>
 
 namespace {
 int clamp_display_dimension(int value, int fallback, int max_value) {
@@ -208,10 +209,11 @@ void Gpu::reset() {
 // ── GP0 (Rendering Commands) ──────────────────────────────────────
 
 void Gpu::gp0(u32 command) {
+  auto start = std::chrono::high_resolution_clock::now();
   static u64 gp0_count = 0;
   if (g_trace_gpu &&
       trace_should_log(gp0_count, g_trace_burst_gpu, g_trace_stride_gpu)) {
-    LOG_DEBUG("GPU: GP0[%llu] = 0x%08X mode=%d",
+    LOG_CAT_DEBUG(LogCategory::Gpu, "GPU: GP0[%llu] = 0x%08X mode=%d",
               static_cast<unsigned long long>(gp0_count), command,
               static_cast<int>(gp0_mode_));
   }
@@ -436,6 +438,10 @@ void Gpu::gp0(u32 command) {
   }
 
   gp0_buffer_.clear();
+  auto end = std::chrono::high_resolution_clock::now();
+  if (sys_) {
+    sys_->add_gpu_time(std::chrono::duration<double, std::milli>(end - start).count());
+  }
 }
 
 // ── GP0 Command Implementations ────────────────────────────────────
@@ -894,7 +900,7 @@ void Gpu::gp1(u32 command) {
   static u64 gp1_count = 0;
   if (g_trace_gpu &&
       trace_should_log(gp1_count, g_trace_burst_gpu, g_trace_stride_gpu)) {
-    LOG_DEBUG("GPU: GP1[%llu] = 0x%08X",
+    LOG_CAT_DEBUG(LogCategory::Gpu, "GPU: GP1[%llu] = 0x%08X",
               static_cast<unsigned long long>(gp1_count), command);
   }
   u8 op = (command >> 24) & 0x3F;

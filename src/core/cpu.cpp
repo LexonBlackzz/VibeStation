@@ -280,13 +280,13 @@ void Cpu::step() {
       ++trace_repeat;
       const u32 repeat_stride = std::max<u32>(4096u, g_trace_stride_cpu);
       if ((trace_repeat % static_cast<u64>(repeat_stride)) == 0) {
-        LOG_DEBUG("CPU: repeat pc=0x%08X instr=0x%08X repeats=%llu",
+        LOG_CAT_DEBUG(LogCategory::Cpu, "CPU: repeat pc=0x%08X instr=0x%08X repeats=%llu",
                   current_pc_, instruction,
                   static_cast<unsigned long long>(trace_repeat));
       }
     } else {
       if (trace_repeat > 0) {
-        LOG_DEBUG("CPU: previous pc=0x%08X instr=0x%08X repeated %llu times",
+        LOG_CAT_DEBUG(LogCategory::Cpu, "CPU: previous pc=0x%08X instr=0x%08X repeated %llu times",
                   trace_last_pc, trace_last_instr,
                   static_cast<unsigned long long>(trace_repeat));
         trace_repeat = 0;
@@ -294,7 +294,7 @@ void Cpu::step() {
       if (trace_step_counter <= static_cast<u64>(g_trace_burst_cpu) ||
           (g_trace_stride_cpu > 0 &&
            (trace_step_counter % static_cast<u64>(g_trace_stride_cpu)) == 0)) {
-        LOG_DEBUG(
+        LOG_CAT_DEBUG(LogCategory::Cpu,
             "CPU: step=%llu pc=0x%08X instr=0x%08X sr=0x%08X cause=0x%08X",
             static_cast<unsigned long long>(trace_step_counter), current_pc_,
             instruction, cop0_sr_, cop0_cause_);

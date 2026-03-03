@@ -70,6 +70,16 @@ public:
     u8 display_enabled = 0;
   };
 
+  struct ProfilingStats {
+    double cpu_ms = 0.0;
+    double gpu_ms = 0.0;
+    double spu_ms = 0.0;
+    double dma_ms = 0.0;
+    double timers_ms = 0.0;
+    double cdrom_ms = 0.0;
+    double total_ms = 0.0;
+  };
+
   System() = default;
 
   // Initialization (called when user loads BIOS)
@@ -92,6 +102,15 @@ public:
   bool disc_loaded() const { return cdrom_.is_disc_inserted(); }
   bool hardware_ready() const { return hw_init_; }
   const BootDiagnostics &boot_diag() const { return boot_diag_; }
+  const ProfilingStats &profiling_stats() const { return profiling_stats_; }
+  void reset_profiling_stats() { profiling_stats_ = {}; }
+  void add_cpu_time(double ms) { profiling_stats_.cpu_ms += ms; }
+  void add_gpu_time(double ms) { profiling_stats_.gpu_ms += ms; }
+  void add_cdrom_time(double ms) { profiling_stats_.cdrom_ms += ms; }
+  void add_spu_time(double ms) { profiling_stats_.spu_ms += ms; }
+  void add_dma_time(double ms) { profiling_stats_.dma_ms += ms; }
+  void add_timers_time(double ms) { profiling_stats_.timers_ms += ms; }
+  void set_total_time(double ms) { profiling_stats_.total_ms = ms; }
   u64 irq_request_count(Interrupt irq) const { return irq_.request_count(irq); }
   const Spu::AudioDiag &spu_audio_diag() const { return spu_.audio_diag(); }
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
@@ -162,6 +181,7 @@ private:
   u32 cache_ctrl_ = 0;
   u8 post_reg_ = 0;
   BootDiagnostics boot_diag_ = {};
+  ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
 

@@ -173,7 +173,7 @@ void App::run() {
     if (system_->is_running()) {
       const double frame_time = 1.0 / system_->target_fps();
       int steps = 0;
-      while (emu_frame_accum_sec_ >= frame_time && steps < 4) {
+      while (emu_frame_accum_sec_ >= frame_time && steps < config_max_catchup_) {
         system_->run_frame();
         emu_frame_accum_sec_ -= frame_time;
         ++steps;
@@ -182,7 +182,11 @@ void App::run() {
       emu_frame_accum_sec_ = 0.0;
     }
 
-    update_vram_debug_texture();
+    u32 now_ms = SDL_GetTicks();
+    if (show_vram_ || (now_ms - last_vram_update_ms_) >= 1000) {
+      update_vram_debug_texture();
+      last_vram_update_ms_ = now_ms;
+    }
 
     // Start ImGui frame
     ImGui_ImplOpenGL3_NewFrame();
@@ -328,6 +332,8 @@ void App::render_ui() {
     panel_debug_cpu();
   if (show_vram_)
     panel_vram();
+  if (show_perf_)
+    panel_performance();
 }
 
 void App::menu_bar() {
@@ -428,6 +434,7 @@ void App::menu_bar() {
       ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
       ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
+      ImGui::MenuItem("Performance", "F11", &show_perf_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("About", nullptr, &show_about_);
       ImGui::EndMenu();
@@ -594,6 +601,16 @@ void App::panel_settings() {
         ImGui::TextColored(
             ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
             "Unsafe PS2 mode maps full BIOS size and is expected to be unstable.");
+
+        ImGui::Separator();
+        ImGui::Text("Performance");
+        ImGui::SliderInt("Max Catch-up Frames", &config_max_catchup_, 1, 8);
+        if (ImGui::Checkbox("Low-spec Mode", &config_low_spec_mode_)) {
+            g_low_spec_mode = config_low_spec_mode_;
+        }
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Reduces audio complexity and internal precision.");
+
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Logging")) {
@@ -816,6 +833,43 @@ void App::panel_settings() {
       }
       ImGui::EndTabBar();
     }
+  }
+  ImGui::End();
+}
+
+void App::panel_performance() {
+  ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Performance Profiler", &show_perf_)) {
+    if (!system_ || !system_->is_running()) {
+      ImGui::Text("Emulation not running.");
+      ImGui::End();
+      return;
+    }
+
+    const auto &stats = system_->profiling_stats();
+    ImGui::Text("Frame Time Breakdown:");
+    ImGui::Separator();
+
+    auto row = [](const char *label, double ms, ImVec4 color) {
+      ImGui::Text("%-10s:", label);
+      ImGui::SameLine(100);
+      ImGui::TextColored(color, "%.3f ms", ms);
+    };
+
+    row("CPU", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+    row("GPU", stats.gpu_ms, ImVec4(0.8f, 0.4f, 0.4f, 1.0f));
+    row("SPU", stats.spu_ms, ImVec4(0.4f, 0.4f, 0.8f, 1.0f));
+    row("DMA", stats.dma_ms, ImVec4(0.8f, 0.8f, 0.4f, 1.0f));
+    row("Timers", stats.timers_ms, ImVec4(0.4f, 0.8f, 0.8f, 1.0f));
+    row("CDROM", stats.cdrom_ms, ImVec4(0.8f, 0.4f, 0.8f, 1.0f));
+    ImGui::Separator();
+    row("Total", stats.total_ms, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+    float budget_ms = 1000.0f / 60.0f;
+    float usage = (float)stats.total_ms / budget_ms;
+    ImGui::Spacing();
+    ImGui::Text("Frame Budget Usage (%.1f%%):", usage * 100.0f);
+    ImGui::ProgressBar(usage, ImVec2(-1.0f, 0.0f));
   }
   ImGui::End();
 }

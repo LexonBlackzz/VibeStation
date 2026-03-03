@@ -1,6 +1,8 @@
 #include "renderer.h"
 #include "gpu.h"
+#include "system.h"
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #ifdef _WIN32
@@ -175,6 +177,7 @@ bool Renderer::create_shader() {
 }
 
 void Renderer::render(const Gpu &gpu) {
+  auto start = std::chrono::high_resolution_clock::now();
   std::vector<u32> rgba;
   const DisplaySampleInfo sample = gpu.build_display_rgba(rgba);
   const int w = (std::max)(1, sample.width);
@@ -185,4 +188,6 @@ void Renderer::render(const Gpu &gpu) {
   glBindTexture(GL_TEXTURE_2D, texture_id_);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                rgba.data());
+  auto end = std::chrono::high_resolution_clock::now();
+  const_cast<Gpu&>(gpu).sys()->add_gpu_time(std::chrono::duration<double, std::milli>(end - start).count());
 }
