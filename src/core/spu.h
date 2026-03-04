@@ -224,6 +224,49 @@ private:
 
   struct ReverbRegs {
     std::array<u16, 32> raw = {};
+    u16 d_apf1 = 0;
+    u16 d_apf2 = 0;
+    s16 v_iir = 0;
+    s16 v_comb1 = 0;
+    s16 v_comb2 = 0;
+    s16 v_comb3 = 0;
+    s16 v_comb4 = 0;
+    s16 v_wall = 0;
+    s16 v_apf1 = 0;
+    s16 v_apf2 = 0;
+    u16 m_lsame = 0;
+    u16 m_rsame = 0;
+    u16 m_lcomb1 = 0;
+    u16 m_rcomb1 = 0;
+    u16 m_lcomb2 = 0;
+    u16 m_rcomb2 = 0;
+    u16 d_lsame = 0;
+    u16 d_rsame = 0;
+    u16 m_ldiff = 0;
+    u16 m_rdiff = 0;
+    u16 m_lcomb3 = 0;
+    u16 m_rcomb3 = 0;
+    u16 m_lcomb4 = 0;
+    u16 m_rcomb4 = 0;
+    u16 d_ldiff = 0;
+    u16 d_rdiff = 0;
+    u16 m_lapf1 = 0;
+    u16 m_rapf1 = 0;
+    u16 m_lapf2 = 0;
+    u16 m_rapf2 = 0;
+    s16 v_lin = 0;
+    s16 v_rin = 0;
+  };
+
+  struct ReverbState {
+    bool process_right = false;
+    u32 cursor = 0;
+    std::array<s16, 39> in_hist_l = {};
+    std::array<s16, 39> in_hist_r = {};
+    std::array<s16, 39> out_hist_l = {};
+    std::array<s16, 39> out_hist_r = {};
+    s16 last_in_l = 0;
+    s16 last_in_r = 0;
   };
 
   System *sys_ = nullptr;
@@ -261,6 +304,7 @@ private:
 
   u32 reverb_base_addr_ = 0;
   ReverbRegs reverb_regs_ = {};
+  ReverbState reverb_state_ = {};
 
   double sample_accum_ = 0.0;
   u64 sample_clock_ = 0;
@@ -320,6 +364,15 @@ private:
   s16 next_noise_sample();
 
   void write_reverb_reg(u32 offset, u16 value);
+  void decode_reverb_regs();
+  u32 reverb_work_size_bytes() const;
+  u32 reverb_addr_from_reg(u16 reg, s32 delta_bytes);
+  s16 read_spu_s16(u32 addr);
+  void write_spu_s16(u32 addr, s16 value, bool reverb_write);
+  s16 fir39_q15(const std::array<s16, 39> &history) const;
+  s16 step_reverb_channel(bool right_channel, s16 lin, s16 rin,
+                          bool writes_enabled, bool same_diff_enabled);
+  std::array<float, 2> step_reverb(float send_l, float send_r, u16 spucnt_eff);
   void queue_host_audio(const std::vector<s16> &samples);
 
   u16 spucnt_effective() const;
@@ -327,4 +380,3 @@ private:
   void clear_irq9_flag();
   void maybe_raise_irq9_for_ram_access(u32 start_addr, u32 byte_count);
 };
-

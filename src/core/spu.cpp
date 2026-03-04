@@ -17,6 +17,20 @@ constexpr std::array<s16, 512> kGaussTable = {
 #include "spu_gauss_table.inc"
 };
 
+constexpr std::array<s16, 39> kReverbFirTable = {
+    -1,    0,     2,    0,     -10,   0,     35,   0,     -103, 0,
+    266,   0,     -616, 0,     1332,  0,     -2960, 0,    10246, 16384,
+    10246, 0,     -2960, 0,    1332,  0,     -616, 0,     266,  0,
+    -103,  0,     35,   0,     -10,   0,     2,    0,     -1,
+};
+
+void push_history(std::array<s16, 39> &history, s16 sample) {
+  for (size_t i = 0; i + 1 < history.size(); ++i) {
+    history[i] = history[i + 1];
+  }
+  history[history.size() - 1] = sample;
+}
+
 inline s16 decode_fixed_volume_q15(u16 raw) {
   s32 value = static_cast<s32>(raw & 0x7FFFu);
   if ((value & 0x4000) != 0) {
@@ -165,6 +179,7 @@ void Spu::reset() {
   ext_vol_r_ = 0;
   reverb_base_addr_ = 0;
   reverb_regs_ = {};
+  reverb_state_ = {};
   sample_accum_ = 0.0;
   sample_clock_ = 0;
   last_synced_cpu_cycle_ = 0;
@@ -297,6 +312,44 @@ u16 Spu::read16(u32 offset) const {
   return 0;
 }
 
+void Spu::decode_reverb_regs() {
+  auto u = [&](size_t index) -> u16 { return reverb_regs_.raw[index]; };
+  auto s = [&](size_t index) -> s16 { return static_cast<s16>(reverb_regs_.raw[index]); };
+
+  reverb_regs_.d_apf1 = u(0);
+  reverb_regs_.d_apf2 = u(1);
+  reverb_regs_.v_iir = s(2);
+  reverb_regs_.v_comb1 = s(3);
+  reverb_regs_.v_comb2 = s(4);
+  reverb_regs_.v_comb3 = s(5);
+  reverb_regs_.v_comb4 = s(6);
+  reverb_regs_.v_wall = s(7);
+  reverb_regs_.v_apf1 = s(8);
+  reverb_regs_.v_apf2 = s(9);
+  reverb_regs_.m_lsame = u(10);
+  reverb_regs_.m_rsame = u(11);
+  reverb_regs_.m_lcomb1 = u(12);
+  reverb_regs_.m_rcomb1 = u(13);
+  reverb_regs_.m_lcomb2 = u(14);
+  reverb_regs_.m_rcomb2 = u(15);
+  reverb_regs_.d_lsame = u(16);
+  reverb_regs_.d_rsame = u(17);
+  reverb_regs_.m_ldiff = u(18);
+  reverb_regs_.m_rdiff = u(19);
+  reverb_regs_.m_lcomb3 = u(20);
+  reverb_regs_.m_rcomb3 = u(21);
+  reverb_regs_.m_lcomb4 = u(22);
+  reverb_regs_.m_rcomb4 = u(23);
+  reverb_regs_.d_ldiff = u(24);
+  reverb_regs_.d_rdiff = u(25);
+  reverb_regs_.m_lapf1 = u(26);
+  reverb_regs_.m_rapf1 = u(27);
+  reverb_regs_.m_lapf2 = u(28);
+  reverb_regs_.m_rapf2 = u(29);
+  reverb_regs_.v_lin = s(30);
+  reverb_regs_.v_rin = s(31);
+}
+
 void Spu::write_reverb_reg(u32 offset, u16 value) {
   if (offset < 0x1C0u || offset > 0x1FEu || (offset & 1u) != 0u) {
     return;
@@ -304,6 +357,7 @@ void Spu::write_reverb_reg(u32 offset, u16 value) {
   const size_t index = static_cast<size_t>((offset - 0x1C0u) / 2u);
   if (index < reverb_regs_.raw.size()) {
     reverb_regs_.raw[index] = value;
+    decode_reverb_regs();
   }
   audio_diag_.saw_reverb_config_write = true;
 }
@@ -505,6 +559,11 @@ void Spu::write16(u32 offset, u16 value) {
   case 0x1A2:
     reverb_base_addr_ =
         (static_cast<u32>(value) * 8u) & static_cast<u32>(SPU_RAM_WORD_MASK);
+    if (const u32 work_size = reverb_work_size_bytes(); work_size > 0u) {
+      reverb_state_.cursor %= work_size;
+    } else {
+      reverb_state_.cursor = 0;
+    }
     audio_diag_.saw_reverb_config_write = true;
     break;
   case 0x1A4:
@@ -873,6 +932,215 @@ u32 Spu::popcount32(u32 value) {
   }
   return c;
 }
+
+u32 Spu::reverb_work_size_bytes() const {
+  const u32 base = reverb_base_addr_ & SPU_RAM_WORD_MASK;
+  if (base >= 0x80000u) {
+    return 0;
+  }
+  return 0x80000u - base;
+}
+
+u32 Spu::reverb_addr_from_reg(u16 reg, s32 delta_bytes) {
+  const u32 work_size = reverb_work_size_bytes();
+  if (work_size < 2u) {
+    ++audio_diag_.reverb_guard_events;
+    return reverb_base_addr_ & SPU_RAM_WORD_MASK;
+  }
+
+  const u32 cursor = reverb_state_.cursor % work_size;
+  const s64 rel = static_cast<s64>(cursor) +
+                  static_cast<s64>(static_cast<u32>(reg) * 8u) +
+                  static_cast<s64>(delta_bytes);
+  s64 wrapped = rel % static_cast<s64>(work_size);
+  if (wrapped < 0) {
+    wrapped += static_cast<s64>(work_size);
+  }
+  u32 wrapped_u = static_cast<u32>(wrapped);
+  if ((wrapped_u & 1u) != 0u) {
+    wrapped_u &= ~1u;
+    ++audio_diag_.reverb_guard_events;
+  }
+
+  return ((reverb_base_addr_ & SPU_RAM_WORD_MASK) + wrapped_u) & SPU_RAM_WORD_MASK;
+}
+
+s16 Spu::read_spu_s16(u32 addr) {
+  const u32 a = addr & SPU_RAM_WORD_MASK;
+  maybe_raise_irq9_for_ram_access(a, 2);
+  const u16 lo = static_cast<u16>(spu_ram_[a & SPU_RAM_MASK]);
+  const u16 hi = static_cast<u16>(spu_ram_[(a + 1u) & SPU_RAM_MASK]);
+  return static_cast<s16>(static_cast<u16>(lo | static_cast<u16>(hi << 8)));
+}
+
+void Spu::write_spu_s16(u32 addr, s16 value, bool reverb_write) {
+  const u32 a = addr & SPU_RAM_WORD_MASK;
+  maybe_raise_irq9_for_ram_access(a, 2);
+  const u16 raw = static_cast<u16>(value);
+  spu_ram_[a & SPU_RAM_MASK] = static_cast<u8>(raw & 0x00FFu);
+  spu_ram_[(a + 1u) & SPU_RAM_MASK] = static_cast<u8>((raw >> 8) & 0x00FFu);
+  if (reverb_write) {
+    ++audio_diag_.reverb_ram_writes;
+  }
+}
+
+s16 Spu::fir39_q15(const std::array<s16, 39> &history) const {
+  s64 acc = 0;
+  for (size_t i = 0; i < history.size(); ++i) {
+    acc += static_cast<s64>(history[i]) * static_cast<s64>(kReverbFirTable[i]);
+  }
+  if (acc >= 0) {
+    return sat16(static_cast<s32>((acc + 0x4000) >> 15));
+  }
+  return sat16(static_cast<s32>((acc - 0x4000) >> 15));
+}
+
+s16 Spu::step_reverb_channel(bool right_channel, s16 lin, s16 rin,
+                             bool writes_enabled, bool same_diff_enabled) {
+  const u16 m_same = right_channel ? reverb_regs_.m_rsame : reverb_regs_.m_lsame;
+  const u16 d_same = right_channel ? reverb_regs_.d_rsame : reverb_regs_.d_lsame;
+  const u16 m_diff = right_channel ? reverb_regs_.m_rdiff : reverb_regs_.m_ldiff;
+  const u16 d_cross =
+      right_channel ? reverb_regs_.d_ldiff : reverb_regs_.d_rdiff;
+  const u16 m_comb1 =
+      right_channel ? reverb_regs_.m_rcomb1 : reverb_regs_.m_lcomb1;
+  const u16 m_comb2 =
+      right_channel ? reverb_regs_.m_rcomb2 : reverb_regs_.m_lcomb2;
+  const u16 m_comb3 =
+      right_channel ? reverb_regs_.m_rcomb3 : reverb_regs_.m_lcomb3;
+  const u16 m_comb4 =
+      right_channel ? reverb_regs_.m_rcomb4 : reverb_regs_.m_lcomb4;
+  const u16 m_apf1 =
+      right_channel ? reverb_regs_.m_rapf1 : reverb_regs_.m_lapf1;
+  const u16 m_apf2 =
+      right_channel ? reverb_regs_.m_rapf2 : reverb_regs_.m_lapf2;
+
+  const s16 in_same = right_channel ? rin : lin;
+  const s16 in_cross = right_channel ? lin : rin;
+
+  if (same_diff_enabled) {
+    const s16 same_tap = read_spu_s16(reverb_addr_from_reg(d_same, 0));
+    const s16 diff_tap = read_spu_s16(reverb_addr_from_reg(d_cross, 0));
+
+    const s16 same_ref =
+        sat16(static_cast<s32>(in_same) +
+              mul_q15(static_cast<s32>(reverb_regs_.v_wall),
+                      static_cast<s32>(same_tap)));
+    const s16 diff_ref =
+        sat16(static_cast<s32>(in_cross) +
+              mul_q15(static_cast<s32>(reverb_regs_.v_wall),
+                      static_cast<s32>(diff_tap)));
+
+    const s16 same_prev = read_spu_s16(reverb_addr_from_reg(m_same, -2));
+    const s16 diff_prev = read_spu_s16(reverb_addr_from_reg(m_diff, -2));
+    const s32 iir_alpha = static_cast<s32>(reverb_regs_.v_iir);
+    const s32 iir_beta = 0x7FFF - iir_alpha;
+
+    const s16 same_out =
+        sat16(mul_q15(iir_alpha, static_cast<s32>(same_ref)) +
+              mul_q15(iir_beta, static_cast<s32>(same_prev)));
+    const s16 diff_out =
+        sat16(mul_q15(iir_alpha, static_cast<s32>(diff_ref)) +
+              mul_q15(iir_beta, static_cast<s32>(diff_prev)));
+
+    if (writes_enabled) {
+      write_spu_s16(reverb_addr_from_reg(m_same, 0), same_out, true);
+      write_spu_s16(reverb_addr_from_reg(m_diff, 0), diff_out, true);
+    }
+  }
+
+  s32 comb = 0;
+  comb += mul_q15(static_cast<s32>(reverb_regs_.v_comb1),
+                  static_cast<s32>(read_spu_s16(reverb_addr_from_reg(m_comb1, 0))));
+  comb += mul_q15(static_cast<s32>(reverb_regs_.v_comb2),
+                  static_cast<s32>(read_spu_s16(reverb_addr_from_reg(m_comb2, 0))));
+  comb += mul_q15(static_cast<s32>(reverb_regs_.v_comb3),
+                  static_cast<s32>(read_spu_s16(reverb_addr_from_reg(m_comb3, 0))));
+  comb += mul_q15(static_cast<s32>(reverb_regs_.v_comb4),
+                  static_cast<s32>(read_spu_s16(reverb_addr_from_reg(m_comb4, 0))));
+  s16 out = sat16(comb);
+
+  const s16 apf1_tap =
+      read_spu_s16(reverb_addr_from_reg(m_apf1, -static_cast<s32>(reverb_regs_.d_apf1) * 8));
+  s16 apf1_in =
+      sat16(static_cast<s32>(out) -
+            mul_q15(static_cast<s32>(reverb_regs_.v_apf1), static_cast<s32>(apf1_tap)));
+  if (writes_enabled) {
+    write_spu_s16(reverb_addr_from_reg(m_apf1, 0), apf1_in, true);
+  } else {
+    apf1_in = read_spu_s16(reverb_addr_from_reg(m_apf1, 0));
+  }
+  out = sat16(mul_q15(static_cast<s32>(reverb_regs_.v_apf1), static_cast<s32>(apf1_in)) +
+              static_cast<s32>(apf1_tap));
+
+  const s16 apf2_tap =
+      read_spu_s16(reverb_addr_from_reg(m_apf2, -static_cast<s32>(reverb_regs_.d_apf2) * 8));
+  s16 apf2_in =
+      sat16(static_cast<s32>(out) -
+            mul_q15(static_cast<s32>(reverb_regs_.v_apf2), static_cast<s32>(apf2_tap)));
+  if (writes_enabled) {
+    write_spu_s16(reverb_addr_from_reg(m_apf2, 0), apf2_in, true);
+  } else {
+    apf2_in = read_spu_s16(reverb_addr_from_reg(m_apf2, 0));
+  }
+  out = sat16(mul_q15(static_cast<s32>(reverb_regs_.v_apf2), static_cast<s32>(apf2_in)) +
+              static_cast<s32>(apf2_tap));
+
+  return out;
+}
+
+std::array<float, 2> Spu::step_reverb(float send_l, float send_r, u16 spucnt_eff) {
+  if (g_low_spec_mode) {
+    return {0.0f, 0.0f};
+  }
+
+  const s16 in_l = sat16(static_cast<s32>(
+      std::lround(std::clamp(send_l, -1.0f, 1.0f) * 32767.0f)));
+  const s16 in_r = sat16(static_cast<s32>(
+      std::lround(std::clamp(send_r, -1.0f, 1.0f) * 32767.0f)));
+  reverb_state_.last_in_l = in_l;
+  reverb_state_.last_in_r = in_r;
+  push_history(reverb_state_.in_hist_l, in_l);
+  push_history(reverb_state_.in_hist_r, in_r);
+
+  const s16 down_l = fir39_q15(reverb_state_.in_hist_l);
+  const s16 down_r = fir39_q15(reverb_state_.in_hist_r);
+  const s16 lin = sat16(mul_q15(static_cast<s32>(reverb_regs_.v_lin),
+                                static_cast<s32>(down_l)));
+  const s16 rin = sat16(mul_q15(static_cast<s32>(reverb_regs_.v_rin),
+                                static_cast<s32>(down_r)));
+
+  const bool reverb_master_enable = (spucnt_eff & 0x0080u) != 0u;
+  const bool writes_enabled = reverb_master_enable;
+  const bool same_diff_enabled = reverb_master_enable;
+
+  s16 wet_22050_l = 0;
+  s16 wet_22050_r = 0;
+  if (reverb_state_.process_right) {
+    wet_22050_r = step_reverb_channel(true, lin, rin, writes_enabled, same_diff_enabled);
+    reverb_state_.process_right = false;
+    const u32 work_size = reverb_work_size_bytes();
+    if (work_size >= 2u) {
+      reverb_state_.cursor = (reverb_state_.cursor + 2u) % work_size;
+    }
+    push_history(reverb_state_.out_hist_l, 0);
+    push_history(reverb_state_.out_hist_r, wet_22050_r);
+  } else {
+    wet_22050_l = step_reverb_channel(false, lin, rin, writes_enabled, same_diff_enabled);
+    reverb_state_.process_right = true;
+    push_history(reverb_state_.out_hist_l, wet_22050_l);
+    push_history(reverb_state_.out_hist_r, 0);
+  }
+
+  ++audio_diag_.reverb_mix_frames;
+
+  const s32 up_l = static_cast<s32>(fir39_q15(reverb_state_.out_hist_l)) * 2;
+  const s32 up_r = static_cast<s32>(fir39_q15(reverb_state_.out_hist_r)) * 2;
+  const s16 wet_l = sat16(mul_q15(static_cast<s32>(reverb_depth_l_), up_l));
+  const s16 wet_r = sat16(mul_q15(static_cast<s32>(reverb_depth_r_), up_r));
+  return {q15_to_float(wet_l), q15_to_float(wet_r)};
+}
+
 bool Spu::decode_adpcm_block(int voice) {
   static constexpr int kFilterA[5] = {0, 60, 115, 98, 122};
   static constexpr int kFilterB[5] = {0, 0, -52, -55, -60};
@@ -1524,9 +1792,10 @@ void Spu::tick(u32 cycles) {
 
     float wet_l = 0.0f;
     float wet_r = 0.0f;
-    if (audio_diag_.reverb_enabled &&
-        (std::abs(rev_send_l) > 0.0f || std::abs(rev_send_r) > 0.0f)) {
-      ++audio_diag_.reverb_guard_events;
+    if (!g_low_spec_mode) {
+      const std::array<float, 2> wet = step_reverb(rev_send_l, rev_send_r, spucnt_eff);
+      wet_l = wet[0];
+      wet_r = wet[1];
     }
     audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));
     audio_diag_.peak_wet_r = std::max(audio_diag_.peak_wet_r, std::abs(wet_r));
