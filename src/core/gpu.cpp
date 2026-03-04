@@ -9,7 +9,7 @@ int clamp_display_dimension(int value, int fallback, int max_value) {
 }
 
 inline s16 sign_extend_11(u32 value) {
-  return static_cast<s16>(static_cast<s16>((value & 0x7FFu) << 5) >> 5);
+    return static_cast<s16>(static_cast<s16>((value & 0x7FFu) << 5) >> 5);
 }
 
 int horizontal_divisor(u8 hres_mode) {
@@ -281,19 +281,19 @@ void Gpu::gp0(u32 command) {
     u16 pixel1 = command >> 16;
 
     if (vram_tx_pos_ < vram_tx_total_) {
-      const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                                     (psx::VRAM_WIDTH - 1));
-      const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                                     (psx::VRAM_HEIGHT - 1));
-      vram_[y * psx::VRAM_WIDTH + x] = pixel0;
+        const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+            (psx::VRAM_WIDTH - 1));
+        const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+            (psx::VRAM_HEIGHT - 1));
+        vram_[y * psx::VRAM_WIDTH + x] = pixel0;
       vram_tx_pos_++;
     }
     if (vram_tx_pos_ < vram_tx_total_) {
-      const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                                     (psx::VRAM_WIDTH - 1));
-      const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                                     (psx::VRAM_HEIGHT - 1));
-      vram_[y * psx::VRAM_WIDTH + x] = pixel1;
+        const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+            (psx::VRAM_WIDTH - 1));
+        const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+            (psx::VRAM_HEIGHT - 1));
+        vram_[y * psx::VRAM_WIDTH + x] = pixel1;
       vram_tx_pos_++;
     }
 
@@ -535,7 +535,7 @@ void Gpu::gp0_mono_quad() {
   Color c(gp0_buffer_[0]);
   Vertex v[4];
   for (int i = 0; i < 4; i++) {
-    v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
+      v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
   }
   draw_flat_triangle(v[0], v[1], v[2], c);
   draw_flat_triangle(v[1], v[2], v[3], c);
@@ -1124,18 +1124,18 @@ u32 Gpu::read_data() {
   if (gp0_mode_ == Gp0Mode::VramRead && vram_tx_pos_ < vram_tx_total_) {
     u16 p0 = 0, p1 = 0;
     u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                             (psx::VRAM_WIDTH - 1));
+        (psx::VRAM_WIDTH - 1));
     u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                             (psx::VRAM_HEIGHT - 1));
+        (psx::VRAM_HEIGHT - 1));
     p0 = vram_[y * psx::VRAM_WIDTH + x];
     vram_tx_pos_++;
 
     if (vram_tx_pos_ < vram_tx_total_) {
-      x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                           (psx::VRAM_WIDTH - 1));
-      y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                           (psx::VRAM_HEIGHT - 1));
-      p1 = vram_[y * psx::VRAM_WIDTH + x];
+        x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+            (psx::VRAM_WIDTH - 1));
+        y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+            (psx::VRAM_HEIGHT - 1));
+        p1 = vram_[y * psx::VRAM_WIDTH + x];
       vram_tx_pos_++;
     }
 

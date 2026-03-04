@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <vector>
 
 #ifdef _WIN32
@@ -20,6 +21,22 @@
 
 namespace {
 constexpr const char *kAppConfigFileName = "vibestation_config.ini";
+struct GrimReaperRange {
+  const char *label;
+  const char *slug;
+  u32 start;
+  u32 end;
+};
+
+constexpr GrimReaperRange kGrimReaperRanges[] = {
+    {"Intro/Bootmenu (0x18000-0x63FFF)", "intro", 0x18000u, 0x63FFFu},
+    {"Character Sets (0x64000-0x7FF31)", "charset", 0x64000u, 0x7FF31u},
+    {"End (0x7FF32-0x7FFFF)", "end", 0x7FF32u, 0x7FFFFu},
+    {"Custom (Hex Range)", "custom", 0x00000u, 0x00000u},
+};
+
+constexpr int kGrimReaperRangeCount =
+    static_cast<int>(sizeof(kGrimReaperRanges) / sizeof(kGrimReaperRanges[0]));
 }
 
 bool App::init() {
@@ -193,9 +210,9 @@ void App::run() {
     u32 now_ms = SDL_GetTicks();
     if (show_vram_ ||
         (!emu_runner_.is_running() &&
-         (now_ms - last_vram_update_ms_) >= 1000)) {
-      update_vram_debug_texture();
-      last_vram_update_ms_ = now_ms;
+            (now_ms - last_vram_update_ms_) >= 1000)) {
+        update_vram_debug_texture();
+        last_vram_update_ms_ = now_ms;
     }
 
     // Start ImGui frame
@@ -274,9 +291,96 @@ void App::process_events(bool &quit) {
     if (event.type == SDL_QUIT) {
       quit = true;
     }
-    if (event.type == SDL_KEYDOWN && !event.key.repeat &&
-        event.key.keysym.sym == SDLK_F10) {
-      show_vram_ = !show_vram_;
+    if (event.type == SDL_KEYDOWN && !event.key.repeat) {
+      const SDL_Keycode key = event.key.keysym.sym;
+      const u16 mods = static_cast<u16>(event.key.keysym.mod);
+      const bool ctrl = (mods & KMOD_CTRL) != 0;
+      const bool alt = (mods & KMOD_ALT) != 0;
+      const bool gui = (mods & KMOD_GUI) != 0;
+      const bool no_mod = !ctrl && !alt && !gui;
+
+      if (ctrl && key == SDLK_b) {
+        std::string path = open_file_dialog(
+            "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
+        if (!path.empty()) {
+          emu_runner_.pause_and_wait_idle();
+          if (system_->load_bios(path)) {
+            bios_path_ = path;
+            save_persistent_config();
+            has_started_emulation_ = false;
+            set_grim_reaper_mode(false);
+          status_message_ = "BIOS loaded: " + system_->bios().get_info();
+          } else {
+            status_message_ = "Failed to load BIOS!";
+          }
+        }
+      } else if (ctrl && key == SDLK_o) {
+        std::string path = open_file_dialog(
+            "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
+            "Select PS1 Game");
+        if (!path.empty()) {
+          std::string bin;
+          std::string cue;
+          std::string error;
+          if (!resolve_disc_paths(path, bin, cue, error)) {
+            status_message_ = error;
+          } else {
+            emu_runner_.pause_and_wait_idle();
+            if (system_->load_game(bin, cue)) {
+              game_bin_path_ = bin;
+              game_cue_path_ = cue;
+              has_started_emulation_ = false;
+              status_message_ = "Disc loaded: " +
+                                std::filesystem::path(cue).filename().string() +
+                                " (Emulation > Boot Disc)";
+              if (!system_->cdrom().track_map_valid()) {
+                status_message_ += " [track map warning]";
+              }
+            } else {
+              status_message_ = "Failed to load game image";
+            }
+          }
+        }
+      } else if (ctrl && key == SDLK_COMMA) {
+        show_settings_ = !show_settings_;
+      } else if (ctrl && key == SDLK_F5) {
+        if (system_->bios_loaded() && !emu_runner_.is_running() &&
+            (system_->disc_loaded() || !game_cue_path_.empty())) {
+          boot_disc_from_ui();
+        }
+      } else if (no_mod && key == SDLK_F5) {
+        if (system_->bios_loaded() && !emu_runner_.is_running()) {
+          if (has_started_emulation_) {
+            emu_runner_.set_running(true);
+            status_message_ = "Emulation resumed";
+          } else if (system_->disc_loaded() || !game_cue_path_.empty()) {
+            boot_disc_from_ui();
+          } else {
+            emu_runner_.pause_and_wait_idle();
+            system_->reset();
+            has_started_emulation_ = true;
+            emu_runner_.set_running(true);
+            status_message_ = "Emulation started (BIOS)";
+          }
+        }
+      } else if (no_mod && key == SDLK_F6) {
+        if (emu_runner_.is_running()) {
+          emu_runner_.pause_and_wait_idle();
+          status_message_ = "Emulation paused";
+        }
+      } else if (no_mod && key == SDLK_F7) {
+        if (system_->bios_loaded() && has_started_emulation_) {
+          emu_runner_.pause_and_wait_idle();
+          has_started_emulation_ = false;
+          status_message_ = "Emulation stopped";
+        }
+      } else if (no_mod && key == SDLK_F9) {
+        show_debug_cpu_ = !show_debug_cpu_;
+      } else if (no_mod && key == SDLK_F10) {
+        show_vram_ = !show_vram_;
+      } else if (no_mod && key == SDLK_F11) {
+        show_perf_ = !show_perf_;
+      }
     }
 
     const ImGuiIO &io = ImGui::GetIO();
@@ -346,6 +450,8 @@ void App::render_ui() {
   }
   if (show_settings_)
     panel_settings();
+  if (show_grim_reaper_)
+    panel_grim_reaper();
   if (show_about_)
     panel_about();
   if (show_debug_cpu_)
@@ -374,7 +480,8 @@ void App::menu_bar() {
             bios_path_ = path;
             save_persistent_config();
             has_started_emulation_ = false;
-            status_message_ = "BIOS loaded: " + system_->bios().get_info();
+            set_grim_reaper_mode(false);
+          status_message_ = "BIOS loaded: " + system_->bios().get_info();
           } else {
             status_message_ = "Failed to load BIOS!";
           }
@@ -451,11 +558,23 @@ void App::menu_bar() {
         emu_runner_.pause_and_wait_idle();
         status_message_ = "Emulation paused";
       }
-      if (ImGui::MenuItem("Reset", "F7", false, bios_loaded)) {
+      if (ImGui::MenuItem("Stop", "F7", false,
+                          bios_loaded && has_started_emulation_)) {
         emu_runner_.pause_and_wait_idle();
-        system_->reset();
         has_started_emulation_ = false;
-        status_message_ = "System reset";
+        status_message_ = "Emulation stopped";
+      }
+      if (ImGui::MenuItem("Restart BIOS", nullptr, false, bios_loaded)) {
+        emu_runner_.pause_and_wait_idle();
+        set_grim_reaper_mode(false);
+        if (!bios_path_.empty() && !system_->load_bios(bios_path_)) {
+          status_message_ = "Failed to reload original BIOS";
+        } else {
+          system_->reset();
+          has_started_emulation_ = true;
+          emu_runner_.set_running(true);
+          status_message_ = "BIOS emulation restarted";
+        }
       }
       ImGui::EndMenu();
     }
@@ -467,6 +586,10 @@ void App::menu_bar() {
       ImGui::MenuItem("Sound Status", nullptr, &show_sound_status_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("About", nullptr, &show_about_);
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Grim Reaper")) {
+      ImGui::MenuItem("Open Panel", nullptr, &show_grim_reaper_);
       ImGui::EndMenu();
     }
 
@@ -517,22 +640,101 @@ bool App::should_route_keyboard_to_emu(const SDL_Event &event,
 
 void App::panel_emulator_screen() {
   if (!has_started_emulation_) {
+    const bool bios_loaded = system_->bios_loaded();
+    const bool disc_loaded = system_->disc_loaded();
+
     // Show a centered welcome message
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetCursorPos(ImVec2(center.x - 200, center.y - 60));
+    ImGui::SetCursorPos(ImVec2(center.x - 200, center.y - 80));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.4f, 0.8f, 1.0f));
     ImGui::SetWindowFontScale(2.0f);
     ImGui::Text("VibeStation");
     ImGui::SetWindowFontScale(1.0f);
     ImGui::PopStyleColor();
 
-    ImGui::SetCursorPos(ImVec2(center.x - 180, center.y));
+    ImGui::SetCursorPos(ImVec2(center.x - 180, center.y - 20));
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f),
                        "Load a BIOS (File > Load BIOS) to get started.");
 
-    ImGui::SetCursorPos(ImVec2(center.x - 180, center.y + 25));
+    ImGui::SetCursorPos(ImVec2(center.x - 180, center.y + 5));
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f),
                        "Then load a game and use Emulation > Boot Disc.");
+
+    const char *bios_button_label = bios_loaded ? "Change BIOS" : "Load BIOS";
+    const ImVec2 button_size(120.0f, 0.0f);
+
+    ImGui::SetCursorPos(ImVec2(center.x - 200, center.y + 42));
+    if (ImGui::Button(bios_button_label, button_size)) {
+      std::string path = open_file_dialog(
+          "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
+      if (!path.empty()) {
+        emu_runner_.pause_and_wait_idle();
+        if (system_->load_bios(path)) {
+          bios_path_ = path;
+          save_persistent_config();
+          has_started_emulation_ = false;
+          set_grim_reaper_mode(false);
+          status_message_ = "BIOS loaded: " + system_->bios().get_info();
+        } else {
+          status_message_ = "Failed to load BIOS!";
+        }
+      }
+    }
+
+    ImGui::SameLine();
+    if (!bios_loaded) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Load Game", button_size)) {
+      std::string path = open_file_dialog(
+          "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
+          "Select PS1 Game");
+      if (!path.empty()) {
+        std::string bin;
+        std::string cue;
+        std::string error;
+        if (!resolve_disc_paths(path, bin, cue, error)) {
+          status_message_ = error;
+        } else {
+          emu_runner_.pause_and_wait_idle();
+          if (system_->load_game(bin, cue)) {
+            game_bin_path_ = bin;
+            game_cue_path_ = cue;
+            has_started_emulation_ = false;
+            status_message_ = "Disc loaded: " +
+                              std::filesystem::path(cue).filename().string() +
+                              " (Emulation > Boot Disc)";
+            if (!system_->cdrom().track_map_valid()) {
+              status_message_ += " [track map warning]";
+            }
+          } else {
+            status_message_ = "Failed to load game image";
+          }
+        }
+      }
+    }
+    if (!bios_loaded) {
+      ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+    if (!bios_loaded) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Start Emulation", button_size)) {
+      if (disc_loaded || !game_cue_path_.empty()) {
+        boot_disc_from_ui();
+      } else {
+        emu_runner_.pause_and_wait_idle();
+        system_->reset();
+        has_started_emulation_ = true;
+        emu_runner_.set_running(true);
+        status_message_ = "Emulation started (BIOS)";
+      }
+    }
+    if (!bios_loaded) {
+      ImGui::EndDisabled();
+    }
   } else {
     ImVec2 avail = ImGui::GetContentRegionAvail();
     // Safe presentation baseline for BIOS/logo recovery: fixed 4:3 letterbox.
@@ -653,6 +855,26 @@ void App::panel_settings() {
                                     ? "Not loaded"
                                     : system_->bios().get_info().c_str());
         ImGui::Text("CPU Clock: 33.8688 MHz");
+        ImGui::Separator();
+        ImGui::Text("Performance");
+        ImGui::Text("Emulation pacing: fixed 60 Hz");
+        if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
+          SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+        }
+        ImGui::Checkbox("Detailed Profiling", &g_profile_detailed_timing);
+        if (ImGui::Checkbox("Low-spec Mode", &config_low_spec_mode_)) {
+            g_low_spec_mode = config_low_spec_mode_;
+        }
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Reduces audio complexity and internal precision.");
+
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Experimental")) {
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                           "Disabled by default. Enable only for targeted testing.");
+        ImGui::Separator();
+
         ImGui::Checkbox("Experimental BIOS size mode",
                         &g_experimental_bios_size_mode);
         ImGui::Checkbox("Unsafe PS2 BIOS mode", &g_unsafe_ps2_bios_mode);
@@ -667,17 +889,11 @@ void App::panel_settings() {
             "Unsafe PS2 mode maps full BIOS size and is expected to be unstable.");
 
         ImGui::Separator();
-        ImGui::Text("Performance");
-        ImGui::Text("Emulation pacing: fixed 60 Hz");
-        if (ImGui::Checkbox("VSync Playback", &config_vsync_)) {
-          SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
-        }
-        ImGui::Checkbox("Detailed Profiling", &g_profile_detailed_timing);
-        if (ImGui::Checkbox("Low-spec Mode", &config_low_spec_mode_)) {
-            g_low_spec_mode = config_low_spec_mode_;
-        }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                           "Reduces audio complexity and internal precision.");
+        ImGui::Checkbox("Unhandled SPECIAL fallback (rd <- 0)",
+                        &g_experimental_unhandled_special_returns_zero);
+        ImGui::TextColored(
+            ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
+            "When enabled, unknown SPECIAL funct values write 0 to rd instead of raising Reserved Instruction.");
 
         ImGui::EndTabItem();
       }
@@ -1089,6 +1305,120 @@ void App::panel_performance() {
   ImGui::End();
 }
 
+void App::panel_grim_reaper() {
+  ImGui::SetNextWindowSize(ImVec2(540, 330), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Grim Reaper", &show_grim_reaper_)) {
+    ImGui::End();
+    return;
+  }
+
+  ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f),
+                     "Experimental BIOS corruption. Original BIOS is never modified.");
+
+  grim_reaper_area_index_ =
+      std::max(0, std::min(kGrimReaperRangeCount - 1, grim_reaper_area_index_));
+  const char *grim_area_labels[kGrimReaperRangeCount] = {};
+  for (int i = 0; i < kGrimReaperRangeCount; ++i) {
+    grim_area_labels[i] = kGrimReaperRanges[i].label;
+  }
+  ImGui::Combo("Target Area", &grim_reaper_area_index_, grim_area_labels,
+               kGrimReaperRangeCount);
+
+  const bool grim_intro_mode = (grim_reaper_area_index_ == 0);
+  const float grim_slider_max = grim_intro_mode ? 0.1f : 100.0f;
+  grim_reaper_random_percent_ =
+      std::max(0.001f, std::min(grim_slider_max, grim_reaper_random_percent_));
+  ImGui::SliderFloat("Random Strike (%)", &grim_reaper_random_percent_, 0.001f,
+                     grim_slider_max, "%.3f%%");
+  if (grim_intro_mode) {
+    const float p = grim_reaper_random_percent_;
+    if (p >= 0.1f - 1e-6f) {
+      ImGui::TextColored(ImVec4(0.5f, 0.0f, 0.0f, 1.0f),
+                         "Absolute Death - Boot is very likely to fail.");
+    } else if (p >= 0.05f) {
+      ImGui::TextColored(
+          ImVec4(0.95f, 0.2f, 0.2f, 1.0f),
+          "Danger - Very unstable, may not work, extreme corruption.");
+    } else if (p >= 0.02f) {
+      ImGui::TextColored(
+          ImVec4(1.0f, 0.55f, 0.1f, 1.0f),
+          "Warning - Unstable, heavy corruptions.");
+    } else if (p >= 0.01f) {
+      ImGui::TextColored(
+          ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+          "Recommended - Stable corruptions.");
+    } else {
+      ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                         "Very mild corruption range.");
+    }
+  }
+  if (grim_reaper_area_index_ == (kGrimReaperRangeCount - 1)) {
+    ImGui::InputText("Custom Start (hex)", grim_reaper_custom_start_hex_,
+                     IM_ARRAYSIZE(grim_reaper_custom_start_hex_));
+    ImGui::InputText("Custom End (hex)", grim_reaper_custom_end_hex_,
+                     IM_ARRAYSIZE(grim_reaper_custom_end_hex_));
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                       "Set end to 0 for end-of-file.");
+  }
+  if (!system_->bios_loaded() || bios_path_.empty()) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Reap && Reboot BIOS")) {
+    reap_and_reboot_bios();
+  }
+  if (!system_->bios_loaded() || bios_path_.empty()) {
+    ImGui::EndDisabled();
+    ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.3f, 1.0f), "Load a BIOS first.");
+  }
+
+  ImGui::SameLine();
+  if (!has_started_emulation_) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Stop")) {
+    emu_runner_.pause_and_wait_idle();
+    has_started_emulation_ = false;
+    status_message_ = "Emulation stopped";
+  }
+  if (!has_started_emulation_) {
+    ImGui::EndDisabled();
+  }
+
+  ImGui::SameLine();
+  if (grim_reaper_last_output_path_.empty()) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Restart Corrupted BIOS")) {
+    emu_runner_.pause_and_wait_idle();
+    set_grim_reaper_mode(true);
+    if (!system_->load_bios(grim_reaper_last_output_path_)) {
+      set_grim_reaper_mode(false);
+      status_message_ = "Failed to load last corrupted BIOS copy.";
+    } else {
+      has_started_emulation_ = false;
+      system_->reset();
+      has_started_emulation_ = true;
+      emu_runner_.set_running(true);
+      status_message_ = "Corrupted BIOS emulation restarted";
+    }
+  }
+  if (grim_reaper_last_output_path_.empty()) {
+    ImGui::EndDisabled();
+  }
+
+  if (!grim_reaper_last_output_path_.empty()) {
+    ImGui::Text("Last Corrupted BIOS: %s", grim_reaper_last_output_path_.c_str());
+    ImGui::Text("Last Mutations: %u",
+                static_cast<unsigned>(grim_reaper_last_mutations_));
+  }
+
+  ImGui::TextColored(grim_reaper_mode_active_ ? ImVec4(0.9f, 0.6f, 0.3f, 1.0f)
+                                               : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                     "Console logging: %s",
+                     grim_reaper_mode_active_ ? "Suppressed" : "Normal");
+
+  ImGui::End();
+}
 void App::panel_about() {
   ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("About VibeStation", &show_about_,
@@ -1156,9 +1486,9 @@ void App::panel_debug_cpu() {
 }
 
 void App::update_vram_debug_texture() {
-  if (!system_) {
-    return;
-  }
+    if (!system_) {
+        return;
+    }
 
   if (vram_debug_texture_ == 0) {
     glGenTextures(1, &vram_debug_texture_);
@@ -1186,10 +1516,12 @@ void App::update_vram_debug_texture() {
 }
 
 void App::panel_vram() {
-  ImGui::SetNextWindowSize(ImVec2(980, 620), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("VRAM Debug", &show_vram_)) {
-    ImGui::Text("Raw VRAM 1024x512 (15-bit)");
-    ImGui::Separator();
+    ImGui::SetNextWindowSize(ImVec2(980, 620), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("VRAM Debug", &show_vram_)) {
+        ImGui::Text("Raw VRAM 1024x512 (15-bit)");
+        ImGui::Separator();
+
+
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     const float tex_w = static_cast<float>(psx::VRAM_WIDTH);
@@ -1293,6 +1625,176 @@ bool App::boot_disc_from_ui() {
   return true;
 }
 
+
+void App::set_grim_reaper_mode(bool enabled) {
+  if (enabled) {
+    grim_reaper_mode_active_ = true;
+    if (!grim_reaper_logs_suppressed_) {
+      grim_reaper_saved_log_mask_ = g_log_category_mask;
+      grim_reaper_saved_log_level_ = g_log_level;
+      grim_reaper_logs_suppressed_ = true;
+    }
+    g_log_category_mask = 0;
+    g_log_level = LogLevel::Error;
+    return;
+  }
+
+  grim_reaper_mode_active_ = false;
+  if (grim_reaper_logs_suppressed_) {
+    g_log_category_mask = grim_reaper_saved_log_mask_;
+    g_log_level = grim_reaper_saved_log_level_;
+    grim_reaper_logs_suppressed_ = false;
+  }
+}
+bool App::reap_and_reboot_bios() {
+  if (!system_ || bios_path_.empty()) {
+    status_message_ = "Load a BIOS first.";
+    return false;
+  }
+
+  std::ifstream in(bios_path_, std::ios::binary);
+  if (!in.is_open()) {
+    status_message_ = "Failed to open source BIOS file.";
+    return false;
+  }
+
+  in.seekg(0, std::ios::end);
+  const std::streamoff size_off = in.tellg();
+  if (size_off <= 0) {
+    status_message_ = "Source BIOS is empty or unreadable.";
+    return false;
+  }
+  const size_t bios_size = static_cast<size_t>(size_off);
+  in.seekg(0, std::ios::beg);
+
+  std::vector<u8> bios_data(bios_size, 0);
+  in.read(reinterpret_cast<char *>(bios_data.data()),
+          static_cast<std::streamsize>(bios_data.size()));
+  if (!in) {
+    status_message_ = "Failed reading source BIOS.";
+    return false;
+  }
+
+  grim_reaper_area_index_ =
+      std::max(0, std::min(kGrimReaperRangeCount - 1, grim_reaper_area_index_));
+
+  auto parse_hex = [](const char *text, size_t &out) -> bool {
+    if (!text) {
+      return false;
+    }
+    while (*text != '\0' && std::isspace(static_cast<unsigned char>(*text))) {
+      ++text;
+    }
+    if (*text == '\0') {
+      return false;
+    }
+    char *end_ptr = nullptr;
+    const unsigned long long value = std::strtoull(text, &end_ptr, 16);
+    if (end_ptr == text) {
+      return false;
+    }
+    while (*end_ptr != '\0' && std::isspace(static_cast<unsigned char>(*end_ptr))) {
+      ++end_ptr;
+    }
+    if (*end_ptr != '\0') {
+      return false;
+    }
+    out = static_cast<size_t>(value);
+    return true;
+  };
+
+  size_t start = 0;
+  size_t end = bios_data.size() - 1u;
+  std::string range_slug;
+
+  if (grim_reaper_area_index_ == (kGrimReaperRangeCount - 1)) {
+    size_t custom_start = 0;
+    if (!parse_hex(grim_reaper_custom_start_hex_, custom_start)) {
+      status_message_ = "Invalid custom start hex.";
+      return false;
+    }
+
+    size_t custom_end = 0;
+    bool has_custom_end = parse_hex(grim_reaper_custom_end_hex_, custom_end);
+    if (!has_custom_end || custom_end == 0) {
+      custom_end = bios_data.size() - 1u;
+    }
+
+    start = std::min(custom_start, bios_data.size() - 1u);
+    end = std::min(custom_end, bios_data.size() - 1u);
+    range_slug = "custom";
+  } else {
+    const GrimReaperRange range = kGrimReaperRanges[grim_reaper_area_index_];
+    if (bios_data.size() <= static_cast<size_t>(range.start)) {
+      status_message_ = "Selected corruption range is outside BIOS size.";
+      return false;
+    }
+    start = static_cast<size_t>(range.start);
+    end = std::min(static_cast<size_t>(range.end), bios_data.size() - 1u);
+    range_slug = range.slug;
+  }
+
+  if (end < start) {
+    status_message_ = "Selected corruption range is invalid.";
+    return false;
+  }
+
+  const size_t span = end - start + 1u;
+  const float pct_max = (grim_reaper_area_index_ == 0) ? 0.1f : 100.0f;
+  const float pct = std::max(0.001f, std::min(pct_max, grim_reaper_random_percent_));
+  size_t mutations =
+      static_cast<size_t>((pct / 100.0f) * static_cast<float>(span));
+  if (mutations == 0) {
+    mutations = 1;
+  }
+
+  std::random_device rd;
+  std::mt19937 rng(rd());
+  std::uniform_int_distribution<size_t> index_dist(start, end);
+  std::uniform_int_distribution<int> value_dist(0, 255);
+
+  for (size_t i = 0; i < mutations; ++i) {
+    const size_t idx = index_dist(rng);
+    bios_data[idx] = static_cast<u8>(value_dist(rng));
+  }
+
+  const std::filesystem::path src_path = std::filesystem::path(bios_path_);
+  const std::filesystem::path out_path =
+      src_path.parent_path() /
+      (src_path.stem().string() + "_grim_" + range_slug + src_path.extension().string());
+
+  std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    status_message_ = "Failed to create corrupted BIOS copy.";
+    return false;
+  }
+  out.write(reinterpret_cast<const char *>(bios_data.data()),
+            static_cast<std::streamsize>(bios_data.size()));
+  if (!out) {
+    status_message_ = "Failed writing corrupted BIOS copy.";
+    return false;
+  }
+
+  emu_runner_.pause_and_wait_idle();
+  set_grim_reaper_mode(true);
+  if (!system_->load_bios(out_path.string())) {
+    set_grim_reaper_mode(false);
+    status_message_ = "Failed to load corrupted BIOS copy.";
+    return false;
+  }
+
+  grim_reaper_last_mutations_ = static_cast<u32>(mutations);
+  grim_reaper_last_output_path_ = out_path.string();
+
+  has_started_emulation_ = false;
+  system_->reset();
+  has_started_emulation_ = true;
+  emu_runner_.set_running(true);
+
+  status_message_ = "Reaped BIOS copy loaded: " + out_path.filename().string();
+  return true;
+}
+
 std::string App::open_file_dialog(const char *filter, const char *title) {
 #ifdef _WIN32
   OPENFILENAMEA ofn = {};
@@ -1369,6 +1871,9 @@ void App::load_persistent_config() {
       g_experimental_bios_size_mode = parse_bool(value, g_experimental_bios_size_mode);
     } else if (key == "unsafe_ps2_bios_mode") {
       g_unsafe_ps2_bios_mode = parse_bool(value, g_unsafe_ps2_bios_mode);
+    } else if (key == "experimental_unhandled_special_returns_zero") {
+      g_experimental_unhandled_special_returns_zero =
+          parse_bool(value, g_experimental_unhandled_special_returns_zero);
     } else if (key == "deinterlace_mode") {
       const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
       const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
@@ -1398,6 +1903,8 @@ void App::save_persistent_config() const {
   out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
   out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
   out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";
+  out << "experimental_unhandled_special_returns_zero=" <<
+      (g_experimental_unhandled_special_returns_zero ? 1 : 0) << "\n";
   out << "deinterlace_mode=" << static_cast<int>(g_deinterlace_mode) << "\n";
   out << "output_resolution_mode=" << static_cast<int>(g_output_resolution_mode) << "\n";
 }
@@ -1455,8 +1962,6 @@ void App::shutdown() {
   }
   SDL_Quit();
 }
-
-
 
 
 

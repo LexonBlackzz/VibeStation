@@ -566,12 +566,12 @@ void CdRom::write8(u32 offset, u8 value) {
   case 3:
     switch (index_reg_) {
     case 0:
-      // Bit7 gates host/DMA visibility of the data FIFO.
-      // Do not rewind data_index_ here: games may toggle this bit between
-      // multiple DMA bursts while expecting a continuous stream.
+        // Bit7 gates host/DMA visibility of the data FIFO.
+        // Do not rewind data_index_ here: games may toggle this bit between
+        // multiple DMA bursts while expecting a continuous stream.
       data_request_ = (value & 0x80) != 0;
       if (data_request_) {
-        data_ready_ = (data_index_ < static_cast<int>(data_buffer_.size()));
+          data_ready_ = (data_index_ < static_cast<int>(data_buffer_.size()));
       }
       break;
     case 1: {
@@ -692,13 +692,13 @@ void CdRom::execute_command(u8 cmd) {
     cmd_setfilter();
     break;
   case 0x10:
-    cmd_getloc_l();
+      cmd_getloc_l();
     break;
   case 0x11:
     cmd_getloc_p();
     break;
   case 0x12:
-    cmd_setsession();
+      cmd_setsession();
     break;
   case 0x15:
     saw_seekl_ = true;
@@ -880,8 +880,8 @@ void CdRom::cmd_getloc_l() {
   const int mm = abs_lba / (60 * 75);
   const int ss = (abs_lba / 75) % 60;
   const int ff = abs_lba % 75;
-  enqueue_irq(3, {to_bcd(static_cast<u8>(mm)), to_bcd(static_cast<u8>(ss)),
-                  to_bcd(static_cast<u8>(ff)), 0x02, 0x00, 0x00, 0x00, 0x00});
+  enqueue_irq(3, { to_bcd(static_cast<u8>(mm)), to_bcd(static_cast<u8>(ss)),
+                  to_bcd(static_cast<u8>(ff)), 0x02, 0x00, 0x00, 0x00, 0x00 });
 }
 
 void CdRom::cmd_getloc_p() {
@@ -893,9 +893,9 @@ void CdRom::cmd_getloc_p() {
   if (const CdTrack *t = track_for_lba(read_lba_)) {
     track = static_cast<u8>(std::max(1, t->number));
   }
-  enqueue_irq(3, {to_bcd(track), 0x01, to_bcd(static_cast<u8>(mm)),
+  enqueue_irq(3, { to_bcd(track), 0x01, to_bcd(static_cast<u8>(mm)),
                   to_bcd(static_cast<u8>(ss)), to_bcd(static_cast<u8>(ff)),
-                  0x00, 0x00, 0x00});
+                  0x00, 0x00, 0x00 });
 }
 
 void CdRom::cmd_seekl() {
@@ -1549,10 +1549,13 @@ void CdRom::tick(u32 cycles) {
   pending_cycles_ -= static_cast<int>(cycles);
   if (pending_cycles_ <= 0) {
     if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
-      // Do not hard-stall the stream on partially consumed sectors.
-      // Hardware continues delivering sectors; unread bytes are effectively
-      // lost once a newer sector arrives.
+        // Do not hard-stall the stream on partially consumed sectors.
+        // Hardware continues delivering sectors; unread bytes are effectively
+        // lost once a newer sector arrives.
       ++read_buffer_stall_count_;
+      refresh_read_period();
+      pending_cycles_ = std::max(1, read_period_cycles_);
+      return;
     }
 
     if (read_sector()) {

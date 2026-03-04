@@ -94,6 +94,7 @@ inline u32 g_trace_burst_sio = 64;
 inline u32 g_trace_stride_sio = 2048;
 inline bool g_experimental_bios_size_mode = false;
 inline bool g_unsafe_ps2_bios_mode = false;
+inline bool g_experimental_unhandled_special_returns_zero = false;
 inline bool g_low_spec_mode = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_profile_detailed_timing =

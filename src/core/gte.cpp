@@ -466,58 +466,63 @@ void Gte::execute(u32 command) {
 // ── Helpers ────────────────────────────────────────────────────────
 
 s64 Gte::set_mac(int idx, s64 value) {
-  // MAC0 is 32-bit signed range, MAC1..3 are 44-bit signed range.
-  if (idx == 0) {
-    if (value > 0x7FFFFFFFLL) {
-      flags |= (1u << 16);
+    // MAC0 is 32-bit signed range, MAC1..3 are 44-bit signed range.
+    if (idx == 0) {
+        if (value > 0x7FFFFFFFLL) {
+            flags |= (1u << 16);
+        }
+        if (value < -0x80000000LL) {
+            flags |= (1u << 15);
+        }
     }
-    if (value < -0x80000000LL) {
-      flags |= (1u << 15);
+    else {
+        constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;  // +2^43-1
+        constexpr s64 kMacNegLimit = -0x80000000000LL; // -2^43
+        if (value > kMacPosLimit) {
+            flags |= (1u << (31 - idx)); // bits 30..28 for MAC1..3 positive overflow
+        }
+        if (value < kMacNegLimit) {
+            flags |= (1u << (28 - idx)); // bits 27..25 for MAC1..3 negative overflow
+        }
     }
-  } else {
-    constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;  // +2^43-1
-    constexpr s64 kMacNegLimit = -0x80000000000LL; // -2^43
-    if (value > kMacPosLimit) {
-      flags |= (1u << (31 - idx)); // bits 30..28 for MAC1..3 positive overflow
-    }
-    if (value < kMacNegLimit) {
-      flags |= (1u << (28 - idx)); // bits 27..25 for MAC1..3 negative overflow
-    }
-  }
-  mac[idx] = static_cast<s32>(idx == 0 ? value : (value >> sf));
-  return value;
+    mac[idx] = static_cast<s32>(idx == 0 ? value : (value >> sf));
+    return value;
 }
 
 void Gte::set_ir(int idx, s32 value, bool lm_flag) {
-  // IR0 uses a dedicated 0..0x1000 clamp/flag, independent of LM.
-  if (idx == 0) {
-    const s32 lower = 0;
-    const s32 upper = 0x1000;
-    if (value < lower) {
-      ir[0] = static_cast<s16>(lower);
-      flags |= (1u << 12);
-    } else if (value > upper) {
-      ir[0] = static_cast<s16>(upper);
-      flags |= (1u << 12);
-    } else {
-      ir[0] = static_cast<s16>(value);
+    // IR0 uses a dedicated 0..0x1000 clamp/flag, independent of LM.
+    if (idx == 0) {
+        const s32 lower = 0;
+        const s32 upper = 0x1000;
+        if (value < lower) {
+            ir[0] = static_cast<s16>(lower);
+            flags |= (1u << 12);
+        }
+        else if (value > upper) {
+            ir[0] = static_cast<s16>(upper);
+            flags |= (1u << 12);
+        }
+        else {
+            ir[0] = static_cast<s16>(value);
+        }
+        return;
     }
-    return;
-  }
 
-  const s32 lower = lm_flag ? 0 : -0x8000;
-  const s32 upper = 0x7FFF;
-  const u32 sat_flag = (1u << (25 - idx)); // IR1/2/3 -> bits 24/23/22
+    const s32 lower = lm_flag ? 0 : -0x8000;
+    const s32 upper = 0x7FFF;
+    const u32 sat_flag = (1u << (25 - idx)); // IR1/2/3 -> bits 24/23/22
 
-  if (value < lower) {
-    ir[idx] = static_cast<s16>(lower);
-    flags |= sat_flag;
-  } else if (value > upper) {
-    ir[idx] = static_cast<s16>(upper);
-    flags |= sat_flag;
-  } else {
-    ir[idx] = static_cast<s16>(value);
-  }
+    if (value < lower) {
+        ir[idx] = static_cast<s16>(lower);
+        flags |= sat_flag;
+    }
+    else if (value > upper) {
+        ir[idx] = static_cast<s16>(upper);
+        flags |= sat_flag;
+    }
+    else {
+        ir[idx] = static_cast<s16>(value);
+    }
 }
 
 void Gte::push_sx(s16 val) {

@@ -41,6 +41,7 @@ private:
   bool show_perf_ = false;
   bool show_logging_ = false;
   bool show_sound_status_ = false;
+  bool show_grim_reaper_ = false;
   std::string bios_path_;
   std::string game_bin_path_;
   std::string game_cue_path_;
@@ -62,6 +63,17 @@ private:
   // Configurable performance options
   bool config_vsync_ = true;
   bool config_low_spec_mode_ = false;
+  // Grim Reaper (experimental BIOS corruption sandbox)
+  int grim_reaper_area_index_ = 0;
+  float grim_reaper_random_percent_ = 0.15f;
+  char grim_reaper_custom_start_hex_[32] = "18000";
+  char grim_reaper_custom_end_hex_[32] = "0";
+  u32 grim_reaper_last_mutations_ = 0;
+  std::string grim_reaper_last_output_path_;
+  bool grim_reaper_mode_active_ = false;
+  bool grim_reaper_logs_suppressed_ = false;
+  u32 grim_reaper_saved_log_mask_ = 0xFFFFFFFFu;
+  LogLevel grim_reaper_saved_log_level_ = LogLevel::Info;
 
   void process_events(bool &quit);
   bool should_route_keyboard_to_emu(const SDL_Event &event,
@@ -78,6 +90,7 @@ private:
   void panel_vram();
   void panel_performance();
   void panel_sound_status();
+  void panel_grim_reaper();
   void draw_sound_status_content();
   void update_vram_debug_texture();
 
@@ -86,6 +99,8 @@ private:
   bool resolve_disc_paths(const std::string &selected_path, std::string &bin_path,
                           std::string &cue_path, std::string &error) const;
   bool boot_disc_from_ui();
+  bool reap_and_reboot_bios();
+  void set_grim_reaper_mode(bool enabled);
 
   // Deferred heavy initialization to avoid large stack allocations on startup.
   bool init_runtime();
@@ -93,3 +108,4 @@ private:
   void save_persistent_config() const;
   void try_autoload_bios_from_config();
 };
+

@@ -528,6 +528,13 @@ void Cpu::op_special(u32 i) {
     op_sltu(i);
     break;
   default:
+    if (g_experimental_unhandled_special_returns_zero) {
+      // Experimental behavior: treat unknown SPECIAL as writing 0 to rd.
+      set_reg(rd(i), 0);
+      LOG_WARN("CPU: Experimental fallback for SPECIAL funct 0x%02X at PC=0x%08X (rd <- 0)",
+               funct(i), current_pc_);
+      break;
+    }
     LOG_WARN("CPU: Unhandled SPECIAL funct 0x%02X at PC=0x%08X", funct(i),
              current_pc_);
     exception(Exception::ReservedInst);
@@ -916,10 +923,11 @@ void Cpu::op_cop0(u32 i) {
       u32 mode = cop0_sr_ & 0x3F;
       cop0_sr_ &= ~0x3Fu;
       cop0_sr_ |= (mode >> 2);
-    } else {
-      LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,
-               current_pc_);
-      exception(Exception::ReservedInst);
+    }
+    else {
+        LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,
+            current_pc_);
+        exception(Exception::ReservedInst);
     }
     break;
 
