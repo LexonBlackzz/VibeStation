@@ -40,6 +40,7 @@ private:
   bool show_vram_ = false;
   bool show_perf_ = false;
   bool show_logging_ = false;
+  bool show_sound_status_ = false;
   std::string bios_path_;
   std::string game_bin_path_;
   std::string game_cue_path_;
@@ -76,6 +77,8 @@ private:
   void panel_debug_cpu();
   void panel_vram();
   void panel_performance();
+  void panel_sound_status();
+  void draw_sound_status_content();
   void update_vram_debug_texture();
 
   // File dialog helpers

@@ -763,9 +763,28 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
       "reverb_config_seen=%d generated_frames=%llu queued_frames=%llu "
       "dropped_frames=%llu overrun_events=%llu capture_frames=%llu "
       "reverb_mix_frames=%llu reverb_ram_writes=%llu key_on=%llu key_off=%llu "
-      "end_flag=%llu loop_end=%llu nonloop_end=%llu release_to_off=%llu "
-      "kon_retrigger=%llu koff_high_env=%llu active_voice_peak=%u active_voice_avg_x100=%llu "
-      "queue_peak_bytes=%u "
+      "end_flag=%llu loop_end=%llu nonloop_end=%llu "
+      "off_end_flag=%llu off_release_env0=%llu release_to_off=%llu "
+      "kon_retrigger=%llu koff_high_env=%llu "
+      "kon_to_retrigger_events=%llu kon_to_retrigger_min=%u kon_to_retrigger_max=%u kon_to_retrigger_avg=%llu "
+      "kon_to_koff_events=%llu kon_to_koff_min=%u kon_to_koff_max=%u kon_to_koff_avg=%llu "
+      "kon_to_koff_min_voice=%u kon_to_koff_min_addr=0x%05X kon_to_koff_min_pitch=0x%04X kon_to_koff_min_adsr2=0x%04X "
+      "koff_short_window=%llu "
+      "key_write_unsynced=%llu key_write_unsynced_max_lag=%llu key_write_spu_off=%llu "
+      "keyon_ignored_off=%llu keyoff_ignored_off=%llu "
+      "spucnt_en_set=%llu spucnt_en_clear=%llu "
+      "spu_dis_forced_off=%llu spu_dis_span_events=%llu spu_dis_span_min=%u spu_dis_span_max=%u spu_dis_span_avg=%llu "
+      "v16_kon_w=%llu v16_koff_w=%llu "
+      "v16_kw2kw_events=%llu v16_kw2kw_min_cycles=%llu v16_kw2kw_max_cycles=%llu v16_kw2kw_avg_cycles=%llu "
+      "v16_kw2kw_min_samples=%u v16_kw2kw_max_samples=%u v16_kw2kw_avg_samples=%llu "
+      "v16_kon_a=%llu v16_koff_a=%llu "
+      "v16_ka2ko_events=%llu v16_ka2ko_min=%u v16_ka2ko_max=%u v16_ka2ko_avg=%llu "
+      "v16_kon_reapply=%llu v16_koff_wo_kon=%llu "
+      "v16_strobe_kon=%llu v16_strobe_koff=%llu v16_strobe_both=%llu "
+      "active_voice_peak=%u active_voice_avg_x100=%llu "
+      "voice_cap_frames=%llu no_voice_frames=%llu muted_output_frames=%llu cd_frames_mixed=%llu "
+      "spucnt_writes=%llu spucnt_mute_toggles=%llu spucnt_mute_set=%llu spucnt_mute_clear=%llu "
+      "spucnt_last=0x%04X queue_peak_bytes=%u "
       "release_total=%llu release_min=%u release_max=%u release_fast=%llu "
       "queue_last_bytes=%u clip_dry=%llu clip_wet=%llu clip_out=%llu "
       "reverb_guard=%llu peak_dry_l=%.4f peak_dry_r=%.4f "
@@ -785,14 +804,91 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
       static_cast<unsigned long long>(diag.end_flag_events),
       static_cast<unsigned long long>(diag.loop_end_events),
       static_cast<unsigned long long>(diag.nonloop_end_events),
+      static_cast<unsigned long long>(diag.off_due_to_end_flag),
+      static_cast<unsigned long long>(diag.off_due_to_release_env0),
       static_cast<unsigned long long>(diag.release_to_off_events),
       static_cast<unsigned long long>(diag.kon_retrigger_events),
       static_cast<unsigned long long>(diag.koff_high_env_events),
+      static_cast<unsigned long long>(diag.kon_to_retrigger_events),
+      diag.kon_to_retrigger_min_samples, diag.kon_to_retrigger_max_samples,
+      static_cast<unsigned long long>(
+          (diag.kon_to_retrigger_events != 0)
+              ? (diag.kon_to_retrigger_total_samples /
+                 diag.kon_to_retrigger_events)
+              : 0ull),
+      static_cast<unsigned long long>(diag.kon_to_koff_events),
+      diag.kon_to_koff_min_samples, diag.kon_to_koff_max_samples,
+      static_cast<unsigned long long>(
+          (diag.kon_to_koff_events != 0)
+              ? (diag.kon_to_koff_total_samples / diag.kon_to_koff_events)
+              : 0ull),
+      static_cast<unsigned>(diag.kon_to_koff_min_voice),
+      static_cast<unsigned>(diag.kon_to_koff_min_addr),
+      static_cast<unsigned>(diag.kon_to_koff_min_pitch),
+      static_cast<unsigned>(diag.kon_to_koff_min_adsr2),
+      static_cast<unsigned long long>(diag.koff_short_window_events),
+      static_cast<unsigned long long>(diag.key_write_unsynced_events),
+      static_cast<unsigned long long>(diag.key_write_unsynced_max_cpu_lag),
+      static_cast<unsigned long long>(diag.key_write_while_spu_disabled),
+      static_cast<unsigned long long>(diag.keyon_ignored_while_disabled),
+      static_cast<unsigned long long>(diag.keyoff_ignored_while_disabled),
+      static_cast<unsigned long long>(diag.spucnt_enable_set_events),
+      static_cast<unsigned long long>(diag.spucnt_enable_clear_events),
+      static_cast<unsigned long long>(diag.spu_disable_forced_off_voices),
+      static_cast<unsigned long long>(diag.spu_disable_span_events),
+      diag.spu_disable_span_min_samples,
+      diag.spu_disable_span_max_samples,
+      static_cast<unsigned long long>(
+          (diag.spu_disable_span_events != 0)
+              ? (diag.spu_disable_span_total_samples /
+                 diag.spu_disable_span_events)
+              : 0ull),
+      static_cast<unsigned long long>(diag.v16_kon_write_events),
+      static_cast<unsigned long long>(diag.v16_koff_write_events),
+      static_cast<unsigned long long>(diag.v16_kon_write_to_koff_events),
+      static_cast<unsigned long long>(diag.v16_kon_write_to_koff_min_cpu_cycles),
+      static_cast<unsigned long long>(diag.v16_kon_write_to_koff_max_cpu_cycles),
+      static_cast<unsigned long long>(
+          (diag.v16_kon_write_to_koff_events != 0)
+              ? (diag.v16_kon_write_to_koff_total_cpu_cycles /
+                 diag.v16_kon_write_to_koff_events)
+              : 0ull),
+      diag.v16_kon_write_to_koff_min_samples,
+      diag.v16_kon_write_to_koff_max_samples,
+      static_cast<unsigned long long>(
+          (diag.v16_kon_write_to_koff_events != 0)
+              ? (diag.v16_kon_write_to_koff_total_samples /
+                 diag.v16_kon_write_to_koff_events)
+              : 0ull),
+      static_cast<unsigned long long>(diag.v16_kon_apply_events),
+      static_cast<unsigned long long>(diag.v16_koff_apply_events),
+      static_cast<unsigned long long>(diag.v16_kon_to_koff_apply_events),
+      diag.v16_kon_to_koff_apply_min_samples,
+      diag.v16_kon_to_koff_apply_max_samples,
+      static_cast<unsigned long long>(
+          (diag.v16_kon_to_koff_apply_events != 0)
+              ? (diag.v16_kon_to_koff_apply_total_samples /
+                 diag.v16_kon_to_koff_apply_events)
+              : 0ull),
+      static_cast<unsigned long long>(diag.v16_kon_reapply_without_koff),
+      static_cast<unsigned long long>(diag.v16_koff_without_kon),
+      static_cast<unsigned long long>(diag.v16_strobe_samples_with_kon),
+      static_cast<unsigned long long>(diag.v16_strobe_samples_with_koff),
+      static_cast<unsigned long long>(diag.v16_strobe_samples_with_both),
       static_cast<unsigned>(diag.active_voice_peak),
       static_cast<unsigned long long>(
           (diag.active_voice_samples != 0)
               ? ((diag.active_voice_accum * 100ull) / diag.active_voice_samples)
               : 0ull),
+      static_cast<unsigned long long>(diag.voice_cap_frames),
+      static_cast<unsigned long long>(diag.no_voice_frames),
+      static_cast<unsigned long long>(diag.muted_output_frames),
+      static_cast<unsigned long long>(diag.cd_frames_mixed),
+      static_cast<unsigned long long>(diag.spucnt_writes),
+      static_cast<unsigned long long>(diag.spucnt_mute_toggle_events),
+      static_cast<unsigned long long>(diag.spucnt_mute_set_events),
+      static_cast<unsigned long long>(diag.spucnt_mute_clear_events),
+      static_cast<unsigned>(diag.spucnt_last),
       diag.queue_peak_bytes,
       static_cast<unsigned long long>(diag.release_samples_total),
       diag.release_samples_min, diag.release_samples_max,

@@ -113,6 +113,7 @@ public:
   void set_total_time(double ms) { profiling_stats_.total_ms = ms; }
   u64 irq_request_count(Interrupt irq) const { return irq_.request_count(irq); }
   const Spu::AudioDiag &spu_audio_diag() const { return spu_.audio_diag(); }
+  void reset_spu_audio_diag() { spu_.reset_audio_diag(); }
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
   bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
   void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
@@ -143,8 +144,8 @@ public:
   u32 mdec_dma_read() { return mdec_.dma_read(); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
-  void spu_dma_write(u32 val) { spu_.dma_write(val); }
-  u32 spu_dma_read() { return spu_.dma_read(); }
+  void spu_dma_write(u32 val);
+  u32 spu_dma_read();
   bool spu_dma_request() const { return spu_.dma_request(); }
 
   // Public component access
@@ -173,6 +174,7 @@ private:
   bool running_ = false;
   bool hw_init_ = false;
   u64 frame_cycles_ = 0;
+  double frame_cycle_remainder_ = 0.0;
   std::string last_disc_bin_path_;
   std::string last_disc_cue_path_;
 
@@ -185,9 +187,11 @@ private:
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
+  u64 spu_synced_cpu_cycle_ = 0;
 
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
+  void sync_spu_to_cpu();
 };
 
 // Timer IRQ helper (called from timer.cpp)

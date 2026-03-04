@@ -174,6 +174,25 @@ void EmuRunner::worker_main() {
     snapshot.boot_diag = system_->boot_diag();
     snapshot.profiling = system_->profiling_stats();
     snapshot.core_frame_ms = snapshot.profiling.total_ms;
+    snapshot.spu_audio = system_->spu_audio_diag();
+
+    const auto &spu = system_->spu();
+    const auto abs16 = [](s16 value) -> int {
+      const int v = static_cast<int>(value);
+      return (v < 0) ? -v : v;
+    };
+    for (size_t voice = 0; voice < snapshot.spu_voice_level_l.size(); ++voice) {
+      const u32 base = 0x200u + (static_cast<u32>(voice) * 4u);
+      const s16 level_l = static_cast<s16>(spu.read16(base + 0u));
+      const s16 level_r = static_cast<s16>(spu.read16(base + 2u));
+      snapshot.spu_voice_level_l[voice] = level_l;
+      snapshot.spu_voice_level_r[voice] = level_r;
+      snapshot.spu_voice_active[voice] =
+          (abs16(level_l) != 0) || (abs16(level_r) != 0);
+    }
+    const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
+    const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
+    snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
 
     publish_frame(std::move(frame), snapshot);
 

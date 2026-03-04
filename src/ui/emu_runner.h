@@ -2,6 +2,7 @@
 
 #include "../core/system.h"
 #include "../core/types.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -23,6 +24,11 @@ public:
     System::BootDiagnostics boot_diag{};
     System::ProfilingStats profiling{};
     double core_frame_ms = 0.0;
+    Spu::AudioDiag spu_audio{};
+    std::array<s16, 24> spu_voice_level_l{};
+    std::array<s16, 24> spu_voice_level_r{};
+    std::array<bool, 24> spu_voice_active{};
+    u32 spu_endx_mask = 0;
   };
 
   ~EmuRunner();
