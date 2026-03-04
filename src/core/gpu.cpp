@@ -8,6 +8,10 @@ int clamp_display_dimension(int value, int fallback, int max_value) {
   return std::max(1, std::min(candidate, max_value));
 }
 
+inline s16 sign_extend_11(u32 value) {
+  return static_cast<s16>(static_cast<s16>((value & 0x7FFu) << 5) >> 5);
+}
+
 int horizontal_divisor(u8 hres_mode) {
   static const int kDivisors[] = {10, 8, 5, 4, 7};
   if (hres_mode < 5) {
@@ -277,19 +281,19 @@ void Gpu::gp0(u32 command) {
     u16 pixel1 = command >> 16;
 
     if (vram_tx_pos_ < vram_tx_total_) {
-      u16 x = vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_);
-      u16 y = vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_);
-      if (x < psx::VRAM_WIDTH && y < psx::VRAM_HEIGHT) {
-        vram_[y * psx::VRAM_WIDTH + x] = pixel0;
-      }
+      const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+                                     (psx::VRAM_WIDTH - 1));
+      const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+                                     (psx::VRAM_HEIGHT - 1));
+      vram_[y * psx::VRAM_WIDTH + x] = pixel0;
       vram_tx_pos_++;
     }
     if (vram_tx_pos_ < vram_tx_total_) {
-      u16 x = vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_);
-      u16 y = vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_);
-      if (x < psx::VRAM_WIDTH && y < psx::VRAM_HEIGHT) {
-        vram_[y * psx::VRAM_WIDTH + x] = pixel1;
-      }
+      const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+                                     (psx::VRAM_WIDTH - 1));
+      const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+                                     (psx::VRAM_HEIGHT - 1));
+      vram_[y * psx::VRAM_WIDTH + x] = pixel1;
       vram_tx_pos_++;
     }
 
@@ -520,14 +524,10 @@ void Gpu::gp0_fill_rect() {
 }
 
 void Gpu::gp0_mono_tri() {
-  Vertex v0, v1, v2;
   Color c(gp0_buffer_[0]);
-  v0.x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  v0.y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
-  v1.x = static_cast<s16>(gp0_buffer_[2] & 0xFFFF) + draw_x_offset_;
-  v1.y = static_cast<s16>(gp0_buffer_[2] >> 16) + draw_y_offset_;
-  v2.x = static_cast<s16>(gp0_buffer_[3] & 0xFFFF) + draw_x_offset_;
-  v2.y = static_cast<s16>(gp0_buffer_[3] >> 16) + draw_y_offset_;
+  const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
+  const Vertex v1 = decode_vertex_word(gp0_buffer_[2]);
+  const Vertex v2 = decode_vertex_word(gp0_buffer_[3]);
   draw_flat_triangle(v0, v1, v2, c);
 }
 
@@ -535,8 +535,7 @@ void Gpu::gp0_mono_quad() {
   Color c(gp0_buffer_[0]);
   Vertex v[4];
   for (int i = 0; i < 4; i++) {
-    v[i].x = static_cast<s16>(gp0_buffer_[1 + i] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[1 + i] >> 16) + draw_y_offset_;
+    v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
   }
   draw_flat_triangle(v[0], v[1], v[2], c);
   draw_flat_triangle(v[1], v[2], v[3], c);
@@ -547,16 +546,13 @@ void Gpu::gp0_textured_tri() {
   clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
   texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
   Vertex v[3];
-  v[0].x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  v[0].y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  v[0] = decode_vertex_word(gp0_buffer_[1]);
   v[0].u = gp0_buffer_[2] & 0xFF;
   v[0].v = (gp0_buffer_[2] >> 8) & 0xFF;
-  v[1].x = static_cast<s16>(gp0_buffer_[3] & 0xFFFF) + draw_x_offset_;
-  v[1].y = static_cast<s16>(gp0_buffer_[3] >> 16) + draw_y_offset_;
+  v[1] = decode_vertex_word(gp0_buffer_[3]);
   v[1].u = gp0_buffer_[4] & 0xFF;
   v[1].v = (gp0_buffer_[4] >> 8) & 0xFF;
-  v[2].x = static_cast<s16>(gp0_buffer_[5] & 0xFFFF) + draw_x_offset_;
-  v[2].y = static_cast<s16>(gp0_buffer_[5] >> 16) + draw_y_offset_;
+  v[2] = decode_vertex_word(gp0_buffer_[5]);
   v[2].u = gp0_buffer_[6] & 0xFF;
   v[2].v = (gp0_buffer_[6] >> 8) & 0xFF;
   v[0].color = c;
@@ -572,8 +568,7 @@ void Gpu::gp0_textured_quad() {
   Vertex v[4];
   for (int i = 0; i < 4; i++) {
     int base = 1 + i * 2;
-    v[i].x = static_cast<s16>(gp0_buffer_[base] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[base] >> 16) + draw_y_offset_;
+    v[i] = decode_vertex_word(gp0_buffer_[base]);
     v[i].u = gp0_buffer_[base + 1] & 0xFF;
     v[i].v = (gp0_buffer_[base + 1] >> 8) & 0xFF;
     v[i].color = c;
@@ -586,8 +581,9 @@ void Gpu::gp0_shaded_tri() {
   Vertex v[3];
   for (int i = 0; i < 3; i++) {
     v[i].color = Color(gp0_buffer_[i * 2]);
-    v[i].x = static_cast<s16>(gp0_buffer_[i * 2 + 1] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[i * 2 + 1] >> 16) + draw_y_offset_;
+    const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
+    v[i].x = pos.x;
+    v[i].y = pos.y;
   }
   draw_shaded_triangle(v[0], v[1], v[2]);
 }
@@ -596,8 +592,9 @@ void Gpu::gp0_shaded_quad() {
   Vertex v[4];
   for (int i = 0; i < 4; i++) {
     v[i].color = Color(gp0_buffer_[i * 2]);
-    v[i].x = static_cast<s16>(gp0_buffer_[i * 2 + 1] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[i * 2 + 1] >> 16) + draw_y_offset_;
+    const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
+    v[i].x = pos.x;
+    v[i].y = pos.y;
   }
   draw_shaded_triangle(v[0], v[1], v[2]);
   draw_shaded_triangle(v[1], v[2], v[3]);
@@ -610,8 +607,9 @@ void Gpu::gp0_shaded_textured_tri() {
   for (int i = 0; i < 3; i++) {
     int base = i * 3;
     v[i].color = Color(gp0_buffer_[base]);
-    v[i].x = static_cast<s16>(gp0_buffer_[base + 1] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[base + 1] >> 16) + draw_y_offset_;
+    const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
+    v[i].x = pos.x;
+    v[i].y = pos.y;
     v[i].u = gp0_buffer_[base + 2] & 0xFF;
     v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
   }
@@ -625,8 +623,9 @@ void Gpu::gp0_shaded_textured_quad() {
   for (int i = 0; i < 4; i++) {
     int base = i * 3;
     v[i].color = Color(gp0_buffer_[base]);
-    v[i].x = static_cast<s16>(gp0_buffer_[base + 1] & 0xFFFF) + draw_x_offset_;
-    v[i].y = static_cast<s16>(gp0_buffer_[base + 1] >> 16) + draw_y_offset_;
+    const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
+    v[i].x = pos.x;
+    v[i].y = pos.y;
     v[i].u = gp0_buffer_[base + 2] & 0xFF;
     v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
   }
@@ -682,8 +681,8 @@ void Gpu::gp0_shaded_polyline_start() {
 
 Vertex Gpu::decode_vertex_word(u32 word) const {
   Vertex v{};
-  v.x = static_cast<s16>(word & 0xFFFF) + draw_x_offset_;
-  v.y = static_cast<s16>(word >> 16) + draw_y_offset_;
+  v.x = static_cast<s16>(sign_extend_11(word) + draw_x_offset_);
+  v.y = static_cast<s16>(sign_extend_11(word >> 16) + draw_y_offset_);
   return v;
 }
 
@@ -755,8 +754,9 @@ void Gpu::handle_polyline_word(u32 word) {
 
 void Gpu::gp0_mono_rect() {
   Color c(gp0_buffer_[0]);
-  s16 x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
+  s16 x = origin.x;
+  s16 y = origin.y;
   u16 w = gp0_buffer_[2] & 0xFFFF;
   u16 h = gp0_buffer_[2] >> 16;
   draw_rect(x, y, w, h, c);
@@ -764,8 +764,9 @@ void Gpu::gp0_mono_rect() {
 
 void Gpu::gp0_textured_rect() {
   Color c(gp0_buffer_[0]);
-  s16 x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
+  s16 x = origin.x;
+  s16 y = origin.y;
   u8 u = gp0_buffer_[2] & 0xFF;
   u8 v = (gp0_buffer_[2] >> 8) & 0xFF;
   clut_ = static_cast<u16>(gp0_buffer_[2] >> 16);
@@ -818,22 +819,25 @@ void Gpu::gp0_textured_rect() {
 
 void Gpu::gp0_mono_rect_1() {
   Color c(gp0_buffer_[0]);
-  s16 x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
+  s16 x = origin.x;
+  s16 y = origin.y;
   draw_rect(x, y, 1, 1, c);
 }
 
 void Gpu::gp0_mono_rect_8() {
   Color c(gp0_buffer_[0]);
-  s16 x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
+  s16 x = origin.x;
+  s16 y = origin.y;
   draw_rect(x, y, 8, 8, c);
 }
 
 void Gpu::gp0_mono_rect_16() {
   Color c(gp0_buffer_[0]);
-  s16 x = static_cast<s16>(gp0_buffer_[1] & 0xFFFF) + draw_x_offset_;
-  s16 y = static_cast<s16>(gp0_buffer_[1] >> 16) + draw_y_offset_;
+  const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
+  s16 x = origin.x;
+  s16 y = origin.y;
   draw_rect(x, y, 16, 16, c);
 }
 
@@ -1119,17 +1123,19 @@ u32 Gpu::gp1_info_value(u32 index) const {
 u32 Gpu::read_data() {
   if (gp0_mode_ == Gp0Mode::VramRead && vram_tx_pos_ < vram_tx_total_) {
     u16 p0 = 0, p1 = 0;
-    u16 x = vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_);
-    u16 y = vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_);
-    if (x < psx::VRAM_WIDTH && y < psx::VRAM_HEIGHT)
-      p0 = vram_[y * psx::VRAM_WIDTH + x];
+    u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+                             (psx::VRAM_WIDTH - 1));
+    u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+                             (psx::VRAM_HEIGHT - 1));
+    p0 = vram_[y * psx::VRAM_WIDTH + x];
     vram_tx_pos_++;
 
     if (vram_tx_pos_ < vram_tx_total_) {
-      x = vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_);
-      y = vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_);
-      if (x < psx::VRAM_WIDTH && y < psx::VRAM_HEIGHT)
-        p1 = vram_[y * psx::VRAM_WIDTH + x];
+      x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+                           (psx::VRAM_WIDTH - 1));
+      y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+                           (psx::VRAM_HEIGHT - 1));
+      p1 = vram_[y * psx::VRAM_WIDTH + x];
       vram_tx_pos_++;
     }
 

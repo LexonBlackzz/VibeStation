@@ -191,8 +191,9 @@ void App::run() {
     }
 
     u32 now_ms = SDL_GetTicks();
-    if (!emu_runner_.is_running() &&
-        (show_vram_ || (now_ms - last_vram_update_ms_) >= 1000)) {
+    if (show_vram_ ||
+        (!emu_runner_.is_running() &&
+         (now_ms - last_vram_update_ms_) >= 1000)) {
       update_vram_debug_texture();
       last_vram_update_ms_ = now_ms;
     }
@@ -1155,7 +1156,7 @@ void App::panel_debug_cpu() {
 }
 
 void App::update_vram_debug_texture() {
-  if (!system_ || emu_runner_.is_running()) {
+  if (!system_) {
     return;
   }
 
@@ -1187,13 +1188,6 @@ void App::update_vram_debug_texture() {
 void App::panel_vram() {
   ImGui::SetNextWindowSize(ImVec2(980, 620), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("VRAM Debug", &show_vram_)) {
-    if (emu_runner_.is_running()) {
-      ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
-                         "Pause emulation to inspect raw VRAM safely.");
-      ImGui::End();
-      return;
-    }
-
     ImGui::Text("Raw VRAM 1024x512 (15-bit)");
     ImGui::Separator();
 

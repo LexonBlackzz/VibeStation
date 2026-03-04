@@ -406,10 +406,8 @@ u8 System::read8(u32 addr) {
     }
   }
 
-  // RAM (mirrored 4 times in first 8MB)
-  if (phys < 0x00200000)
-    return ram_.read8(phys);
-  if (phys >= 0x00200000 && phys < 0x00800000)
+  // Main RAM (2MB) mirrored across the low physical region.
+  if (phys < 0x1F000000)
     return ram_.read8(phys & 0x1FFFFF);
 
   // BIOS
@@ -425,6 +423,10 @@ u8 System::read8(u32 addr) {
   // I/O Ports
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
+    if (io >= 0x130 && io < 0x140) {
+      return 0xFF;
+    }
     // SIO (controller)
     if (io >= 0x040 && io < 0x050) {
       note_sio_io(phys);
@@ -448,7 +450,7 @@ u8 System::read8(u32 addr) {
       return 0xFF;
 
     LOG_WARN("BUS: Unhandled read8 at I/O 0x%08X", phys);
-    return 0;
+    return 0xFF;
   }
 
   // Expansion 1
@@ -456,7 +458,7 @@ u8 System::read8(u32 addr) {
     return 0xFF;
 
   LOG_WARN("BUS: Unhandled read8 at 0x%08X", phys);
-  return 0;
+  return 0xFF;
 }
 
 u16 System::read16(u32 addr) {
@@ -469,9 +471,7 @@ u16 System::read16(u32 addr) {
     }
   }
 
-  if (phys < 0x00200000)
-    return ram_.read16(phys);
-  if (phys >= 0x00200000 && phys < 0x00800000)
+  if (phys < 0x1F000000)
     return ram_.read16(phys & 0x1FFFFF);
   if (phys >= psx::BIOS_BASE &&
       static_cast<u64>(phys) <
@@ -482,6 +482,10 @@ u16 System::read16(u32 addr) {
 
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
+    if (io >= 0x130 && io < 0x140) {
+      return 0xFFFF;
+    }
     // Interrupt controller
     if (io >= 0x070 && io < 0x078)
       return static_cast<u16>(irq_.read(io - 0x070));
@@ -513,11 +517,11 @@ u16 System::read16(u32 addr) {
     }
 
     LOG_WARN("BUS: Unhandled read16 at I/O 0x%08X", phys);
-    return 0;
+    return 0xFFFF;
   }
 
   LOG_WARN("BUS: Unhandled read16 at 0x%08X", phys);
-  return 0;
+  return 0xFFFF;
 }
 
 u32 System::read32(u32 addr) {
@@ -530,9 +534,7 @@ u32 System::read32(u32 addr) {
     }
   }
 
-  if (phys < 0x00200000)
-    return ram_.read32(phys);
-  if (phys >= 0x00200000 && phys < 0x00800000)
+  if (phys < 0x1F000000)
     return ram_.read32(phys & 0x1FFFFF);
   if (phys >= psx::BIOS_BASE &&
       static_cast<u64>(phys) <
@@ -543,6 +545,10 @@ u32 System::read32(u32 addr) {
 
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
+    if (io >= 0x130 && io < 0x140) {
+      return 0xFFFFFFFFu;
+    }
     // Memory control
     if (io < 0x024)
       return mem_ctrl_[io / 4];
@@ -593,7 +599,7 @@ u32 System::read32(u32 addr) {
     }
 
     LOG_WARN("BUS: Unhandled read32 at I/O 0x%08X", phys);
-    return 0;
+    return 0xFFFFFFFFu;
   }
 
   // Expansion 1
@@ -605,7 +611,7 @@ u32 System::read32(u32 addr) {
     return cache_ctrl_;
 
   LOG_WARN("BUS: Unhandled read32 at 0x%08X", phys);
-  return 0;
+  return 0xFFFFFFFFu;
 }
 
 void System::write8(u32 addr, u8 val) {
@@ -617,11 +623,7 @@ void System::write8(u32 addr, u8 val) {
     }
   }
 
-  if (phys < 0x00200000) {
-    ram_.write8(phys, val);
-    return;
-  }
-  if (phys >= 0x00200000 && phys < 0x00800000) {
+  if (phys < 0x1F000000) {
     ram_.write8(phys & 0x1FFFFF, val);
     return;
   }
@@ -632,6 +634,10 @@ void System::write8(u32 addr, u8 val) {
 
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
+    if (io >= 0x130 && io < 0x140) {
+      return;
+    }
     if (io >= 0x040 && io < 0x050) {
       note_sio_io(phys);
       sio_.write8(io - 0x040, val);
@@ -673,11 +679,7 @@ void System::write16(u32 addr, u16 val) {
     }
   }
 
-  if (phys < 0x00200000) {
-    ram_.write16(phys, val);
-    return;
-  }
-  if (phys >= 0x00200000 && phys < 0x00800000) {
+  if (phys < 0x1F000000) {
     ram_.write16(phys & 0x1FFFFF, val);
     return;
   }
@@ -688,6 +690,10 @@ void System::write16(u32 addr, u16 val) {
 
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
+    if (io >= 0x130 && io < 0x140) {
+      return;
+    }
     if (io >= 0x070 && io < 0x078) {
       irq_.write(io - 0x070, val);
       return;
@@ -735,11 +741,7 @@ void System::write32(u32 addr, u32 val) {
     }
   }
 
-  if (phys < 0x00200000) {
-    ram_.write32(phys, val);
-    return;
-  }
-  if (phys >= 0x00200000 && phys < 0x00800000) {
+  if (phys < 0x1F000000) {
     ram_.write32(phys & 0x1FFFFF, val);
     return;
   }
@@ -750,6 +752,10 @@ void System::write32(u32 addr, u32 val) {
 
   if (phys >= 0x1F801000 && phys < 0x1F803000) {
     u32 io = phys - 0x1F801000;
+    // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
+    if (io >= 0x130 && io < 0x140) {
+      return;
+    }
     // Memory control
     if (io < 0x024) {
       mem_ctrl_[io / 4] = val;

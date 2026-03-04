@@ -916,12 +916,17 @@ void Cpu::op_cop0(u32 i) {
       u32 mode = cop0_sr_ & 0x3F;
       cop0_sr_ &= ~0x3Fu;
       cop0_sr_ |= (mode >> 2);
+    } else {
+      LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,
+               current_pc_);
+      exception(Exception::ReservedInst);
     }
     break;
 
   default:
     LOG_WARN("CPU: Unhandled COP0 sub-op 0x%02X at PC=0x%08X", sub,
              current_pc_);
+    exception(Exception::ReservedInst);
     break;
   }
 }
