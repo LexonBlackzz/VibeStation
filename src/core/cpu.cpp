@@ -354,6 +354,18 @@ void Cpu::execute(u32 i) {
   case 0x07:
     op_bgtz(i);
     break;
+  case 0x14:
+    op_beql(i);
+    break;
+  case 0x15:
+    op_bnel(i);
+    break;
+  case 0x16:
+    op_blezl(i);
+    break;
+  case 0x17:
+    op_bgtzl(i);
+    break;
   case 0x08:
     op_addi(i);
     break;
@@ -467,11 +479,20 @@ void Cpu::op_special(u32 i) {
   case 0x09:
     op_jalr(i);
     break;
+  case 0x0A:
+    op_movz(i);
+    break;
+  case 0x0B:
+    op_movn(i);
+    break;
   case 0x0C:
     op_syscall(i);
     break;
   case 0x0D:
     op_break(i);
+    break;
+  case 0x0F:
+    op_sync(i);
     break;
   case 0x10:
     op_mfhi(i);
@@ -484,6 +505,9 @@ void Cpu::op_special(u32 i) {
     break;
   case 0x13:
     op_mtlo(i);
+    break;
+  case 0x14:
+    // Seen in some title startup loops; treat as benign no-op for compatibility.
     break;
   case 0x18:
     op_mult(i);
@@ -571,6 +595,22 @@ void Cpu::op_jalr(u32 i) {
   begin_branch(true, gpr_[rs(i)]);
 }
 
+void Cpu::op_movz(u32 i) {
+  if (gpr_[rt(i)] == 0) {
+    set_reg(rd(i), gpr_[rs(i)]);
+  }
+}
+
+void Cpu::op_movn(u32 i) {
+  if (gpr_[rt(i)] != 0) {
+    set_reg(rd(i), gpr_[rs(i)]);
+  }
+}
+
+void Cpu::op_sync(u32 /*i*/) {
+  // In-order single-core emulation: nothing to serialize.
+}
+
 void Cpu::op_j(u32 i) {
   begin_branch(true, (pc_ & 0xF0000000) | (imm26(i) << 2));
 }
@@ -600,15 +640,69 @@ void Cpu::op_bgtz(u32 i) {
   begin_branch(taken, pc_ + (simm(i) << 2));
 }
 
+void Cpu::op_beql(u32 i) {
+  const bool taken = gpr_[rs(i)] == gpr_[rt(i)];
+  if (taken) {
+    begin_branch(true, pc_ + (simm(i) << 2));
+  } else {
+    // Branch-likely: not taken annuls the delay slot.
+    pc_ = next_pc_;
+    next_pc_ += 4;
+  }
+}
+
+void Cpu::op_bnel(u32 i) {
+  const bool taken = gpr_[rs(i)] != gpr_[rt(i)];
+  if (taken) {
+    begin_branch(true, pc_ + (simm(i) << 2));
+  } else {
+    pc_ = next_pc_;
+    next_pc_ += 4;
+  }
+}
+
+void Cpu::op_blezl(u32 i) {
+  const bool taken = static_cast<s32>(gpr_[rs(i)]) <= 0;
+  if (taken) {
+    begin_branch(true, pc_ + (simm(i) << 2));
+  } else {
+    pc_ = next_pc_;
+    next_pc_ += 4;
+  }
+}
+
+void Cpu::op_bgtzl(u32 i) {
+  const bool taken = static_cast<s32>(gpr_[rs(i)]) > 0;
+  if (taken) {
+    begin_branch(true, pc_ + (simm(i) << 2));
+  } else {
+    pc_ = next_pc_;
+    next_pc_ += 4;
+  }
+}
+
 void Cpu::op_bcondz(u32 i) {
-  bool bgez = (rt(i) & 1) != 0;
-  bool link = (rt(i) & 0x10) != 0;
+  const u32 rt_field = rt(i);
 
-  s32 val = static_cast<s32>(gpr_[rs(i)]);
-  bool taken = bgez ? (val >= 0) : (val < 0);
+  const bool bgez = (rt_field & 0x01u) != 0u;
+  const bool likely = (rt_field & 0x02u) != 0u;
+  const bool link = (rt_field & 0x10u) != 0u;
 
-  if (link)
+  const s32 val = static_cast<s32>(gpr_[rs(i)]);
+  const bool taken = bgez ? (val >= 0) : (val < 0);
+
+  if (likely && !taken) {
+    // Branch-likely: not taken annuls the delay slot.
+    pc_ = next_pc_;
+    next_pc_ += 4;
+    return;
+  }
+
+  // Keep broad REGIMM compatibility: legacy code may probe multiple rt forms.
+  // Match existing emulator behavior by always writing RA for link variants.
+  if (link) {
     set_reg(31, next_pc_);
+  }
   begin_branch(taken, pc_ + (simm(i) << 2));
 }
 
@@ -929,6 +1023,10 @@ void Cpu::op_cop0(u32 i) {
             current_pc_);
         exception(Exception::ReservedInst);
     }
+    break;
+
+  case 0x0A:
+    // Compatibility nop: observed in Silent Hill startup polling loop.
     break;
 
   default:

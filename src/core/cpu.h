@@ -116,6 +116,10 @@ private:
   void op_bne(u32 i);
   void op_blez(u32 i);
   void op_bgtz(u32 i);
+  void op_beql(u32 i);
+  void op_bnel(u32 i);
+  void op_blezl(u32 i);
+  void op_bgtzl(u32 i);
   void op_addi(u32 i);
   void op_addiu(u32 i);
   void op_slti(u32 i);
@@ -152,6 +156,9 @@ private:
   void op_srav(u32 i);
   void op_jr(u32 i);
   void op_jalr(u32 i);
+  void op_movz(u32 i);
+  void op_movn(u32 i);
+  void op_sync(u32 i);
   void op_syscall(u32 i);
   void op_break(u32 i);
   void op_mfhi(u32 i);

@@ -434,6 +434,13 @@ u8 System::read8(u32 addr) {
             note_sio_io(phys);
             return sio_.read8(io - 0x040);
         }
+        // DMA registers (byte access)
+        if (io >= 0x080 && io < 0x100) {
+            const u32 reg_off = io & ~0x3u;
+            const u32 word = dma_.read(reg_off);
+            const u32 shift = (io & 0x3u) * 8u;
+            return static_cast<u8>((word >> shift) & 0xFFu);
+        }
         // CDROM
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
@@ -457,6 +464,9 @@ u8 System::read8(u32 addr) {
 
     // Expansion 1
     if (phys >= 0x1F000000 && phys < 0x1F800000)
+        return 0xFF;
+    // KSEG2/unused high virtual space: model as open bus.
+    if (phys >= 0xC0000000u)
         return 0xFF;
 
     LOG_WARN("BUS: Unhandled read8 at 0x%08X", phys);
@@ -491,6 +501,13 @@ u16 System::read16(u32 addr) {
         // Interrupt controller
         if (io >= 0x070 && io < 0x078)
             return static_cast<u16>(irq_.read(io - 0x070));
+        // DMA registers (halfword access)
+        if (io >= 0x080 && io < 0x100) {
+            const u32 reg_off = io & ~0x3u;
+            const u32 word = dma_.read(reg_off);
+            const u32 shift = (io & 0x2u) * 8u;
+            return static_cast<u16>((word >> shift) & 0xFFFFu);
+        }
         // Timers
         if (io >= 0x100 && io < 0x130)
             return static_cast<u16>(timers_.read(io - 0x100));
@@ -522,6 +539,8 @@ u16 System::read16(u32 addr) {
         return 0xFFFF;
     }
 
+    if (phys >= 0xC0000000u)
+        return 0xFFFF;
     LOG_WARN("BUS: Unhandled read16 at 0x%08X", phys);
     return 0xFFFF;
 }
@@ -611,6 +630,8 @@ u32 System::read32(u32 addr) {
     // KSEG2 (cache control)
     if (addr == 0xFFFE0130)
         return cache_ctrl_;
+    if (phys >= 0xC0000000u)
+        return 0xFFFFFFFFu;
 
     LOG_WARN("BUS: Unhandled read32 at 0x%08X", phys);
     return 0xFFFFFFFFu;
@@ -645,6 +666,15 @@ void System::write8(u32 addr, u8 val) {
             sio_.write8(io - 0x040, val);
             return;
         }
+        if (io >= 0x080 && io < 0x100) {
+            const u32 reg_off = io & ~0x3u;
+            const u32 shift = (io & 0x3u) * 8u;
+            const u32 mask = 0xFFu << shift;
+            const u32 merged =
+                (dma_.read(reg_off) & ~mask) | (static_cast<u32>(val) << shift);
+            dma_.write(reg_off, merged);
+            return;
+        }
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
             cdrom_.write8(io - 0x800, val);
@@ -667,6 +697,8 @@ void System::write8(u32 addr, u8 val) {
 
     if (phys >= 0x1F000000 && phys < 0x1F800000)
         return; // Expansion 1
+    if (phys >= 0xC0000000u)
+        return;
 
     LOG_WARN("BUS: Unhandled write8 at 0x%08X = 0x%02X", phys, val);
 }
@@ -700,6 +732,15 @@ void System::write16(u32 addr, u16 val) {
             irq_.write(io - 0x070, val);
             return;
         }
+        if (io >= 0x080 && io < 0x100) {
+            const u32 reg_off = io & ~0x3u;
+            const u32 shift = (io & 0x2u) * 8u;
+            const u32 mask = 0xFFFFu << shift;
+            const u32 merged =
+                (dma_.read(reg_off) & ~mask) | (static_cast<u32>(val) << shift);
+            dma_.write(reg_off, merged);
+            return;
+        }
         if (io >= 0x100 && io < 0x130) {
             timers_.write(io - 0x100, val);
             return;
@@ -730,6 +771,8 @@ void System::write16(u32 addr, u16 val) {
         return;
     }
 
+    if (phys >= 0xC0000000u)
+        return;
     LOG_WARN("BUS: Unhandled write16 at 0x%08X = 0x%04X", phys, val);
 }
 
@@ -840,6 +883,8 @@ void System::write32(u32 addr, u32 val) {
         cache_ctrl_ = val;
         return;
     }
+    if (phys >= 0xC0000000u)
+        return;
 
     LOG_WARN("BUS: Unhandled write32 at 0x%08X = 0x%08X", phys, val);
 }

@@ -1553,9 +1553,6 @@ void CdRom::tick(u32 cycles) {
         // Hardware continues delivering sectors; unread bytes are effectively
         // lost once a newer sector arrives.
       ++read_buffer_stall_count_;
-      refresh_read_period();
-      pending_cycles_ = std::max(1, read_period_cycles_);
-      return;
     }
 
     if (read_sector()) {
