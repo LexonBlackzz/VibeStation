@@ -29,6 +29,8 @@ public:
 
   // Binding management
   void set_key_binding(SDL_Scancode key, PsxButton button);
+  void clear_key_binding(PsxButton button);
+  SDL_Scancode key_for_button(PsxButton button) const;
   void set_default_bindings();
 
   // Gamepad

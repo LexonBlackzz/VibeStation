@@ -123,7 +123,9 @@ bool Renderer::create_texture() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, psx::VRAM_WIDTH, psx::VRAM_HEIGHT, 0,
+  texture_width_ = 320;
+  texture_height_ = 240;
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texture_width_, texture_height_, 0,
                GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
   return true;
 }
@@ -187,6 +189,14 @@ void Renderer::upload_frame(const std::vector<u32> &rgba, int width,
   last_frame_height_ = h;
 
   glBindTexture(GL_TEXTURE_2D, texture_id_);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-               rgba.data());
+  if (texture_width_ != w || texture_height_ != h) {
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, rgba.data());
+    texture_width_ = w;
+    texture_height_ = h;
+    return;
+  }
+
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE,
+                  rgba.data());
 }

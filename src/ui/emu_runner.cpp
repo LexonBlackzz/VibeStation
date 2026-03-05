@@ -1,6 +1,7 @@
 #include "emu_runner.h"
 #include <algorithm>
 #include <chrono>
+#include <SDL.h>
 
 EmuRunner::~EmuRunner() { stop(); }
 
@@ -134,6 +135,14 @@ void EmuRunner::apply_input_state(System &system) {
   system.sio().set_analog_state(lx, ly, rx, ry);
 }
 
+bool EmuRunner::should_capture_frame() const {
+  if (!g_gpu_fast_mode) {
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(frame_mutex_);
+  return !has_pending_frame_;
+}
+
 void EmuRunner::publish_frame(FrameSnapshot &&frame,
                               const RuntimeSnapshot &snapshot) {
   {
@@ -147,54 +156,67 @@ void EmuRunner::publish_frame(FrameSnapshot &&frame,
   }
 }
 
+void EmuRunner::publish_snapshot(const RuntimeSnapshot &snapshot) {
+  std::lock_guard<std::mutex> lock(snapshot_mutex_);
+  latest_snapshot_ = snapshot;
+}
+
 void EmuRunner::worker_main() {
+  SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+
   using steady_clock = std::chrono::steady_clock;
   auto next_tick = steady_clock::now();
 
   auto run_one_frame = [&]() {
     frame_active_.store(true, std::memory_order_release);
 
-    FrameSnapshot frame{};
     RuntimeSnapshot snapshot{};
 
     apply_input_state(*system_);
     system_->run_frame(false);
 
-    std::vector<u32> rgba;
-    const DisplaySampleInfo sample = system_->gpu().build_display_rgba(rgba);
-    system_->update_display_diag(sample);
-
-    frame.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
-    frame.width = std::max(1, sample.width);
-    frame.height = std::max(1, sample.height);
-    frame.rgba = std::move(rgba);
-
-    snapshot.frame_id = frame.frame_id;
+    snapshot.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
     snapshot.running = running_.load(std::memory_order_acquire);
     snapshot.boot_diag = system_->boot_diag();
     snapshot.profiling = system_->profiling_stats();
     snapshot.core_frame_ms = snapshot.profiling.total_ms;
     snapshot.spu_audio = system_->spu_audio_diag();
 
-    const auto &spu = system_->spu();
-    const auto abs16 = [](s16 value) -> int {
-      const int v = static_cast<int>(value);
-      return (v < 0) ? -v : v;
-    };
-    for (size_t voice = 0; voice < snapshot.spu_voice_level_l.size(); ++voice) {
-      const u32 base = 0x200u + (static_cast<u32>(voice) * 4u);
-      const s16 level_l = static_cast<s16>(spu.read16(base + 0u));
-      const s16 level_r = static_cast<s16>(spu.read16(base + 2u));
-      snapshot.spu_voice_level_l[voice] = level_l;
-      snapshot.spu_voice_level_r[voice] = level_r;
-      snapshot.spu_voice_active[voice] =
-          (abs16(level_l) != 0) || (abs16(level_r) != 0);
+    if (g_spu_advanced_sound_status) {
+      const auto &spu = system_->spu();
+      const auto abs16 = [](s16 value) -> int {
+        const int v = static_cast<int>(value);
+        return (v < 0) ? -v : v;
+      };
+      for (size_t voice = 0; voice < snapshot.spu_voice_level_l.size(); ++voice) {
+        const u32 base = 0x200u + (static_cast<u32>(voice) * 4u);
+        const s16 level_l = static_cast<s16>(spu.read16(base + 0u));
+        const s16 level_r = static_cast<s16>(spu.read16(base + 2u));
+        snapshot.spu_voice_level_l[voice] = level_l;
+        snapshot.spu_voice_level_r[voice] = level_r;
+        snapshot.spu_voice_active[voice] =
+            (abs16(level_l) != 0) || (abs16(level_r) != 0);
+      }
+      const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
+      const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
+      snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
     }
-    const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
-    const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
-    snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
 
-    publish_frame(std::move(frame), snapshot);
+    if (should_capture_frame()) {
+      FrameSnapshot frame{};
+      std::vector<u32> rgba;
+      const DisplaySampleInfo sample =
+          system_->gpu().build_display_rgba(rgba, !g_gpu_fast_mode);
+
+      frame.frame_id = snapshot.frame_id;
+      frame.width = std::max(1, sample.width);
+      frame.height = std::max(1, sample.height);
+      frame.rgba = std::move(rgba);
+
+      publish_frame(std::move(frame), snapshot);
+    } else {
+      publish_snapshot(snapshot);
+    }
 
     frame_active_.store(false, std::memory_order_release);
     idle_cv_.notify_all();

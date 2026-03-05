@@ -96,6 +96,8 @@ inline bool g_experimental_bios_size_mode = false;
 inline bool g_unsafe_ps2_bios_mode = false;
 inline bool g_experimental_unhandled_special_returns_zero = false;
 inline bool g_low_spec_mode = false;
+inline bool g_gpu_fast_mode = false;
+inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_profile_detailed_timing =
 #if defined(NDEBUG)

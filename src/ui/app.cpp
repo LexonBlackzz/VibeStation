@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -37,6 +39,32 @@ constexpr GrimReaperRange kGrimReaperRanges[] = {
 
 constexpr int kGrimReaperRangeCount =
     static_cast<int>(sizeof(kGrimReaperRanges) / sizeof(kGrimReaperRanges[0]));
+
+struct KeyboardBindEntry {
+  const char *label;
+  const char *config_key;
+  PsxButton button;
+};
+
+constexpr KeyboardBindEntry kKeyboardBindEntries[] = {
+    {"Cross", "bind_cross", PsxButton::Cross},
+    {"Circle", "bind_circle", PsxButton::Circle},
+    {"Square", "bind_square", PsxButton::Square},
+    {"Triangle", "bind_triangle", PsxButton::Triangle},
+    {"L1", "bind_l1", PsxButton::L1},
+    {"R1", "bind_r1", PsxButton::R1},
+    {"L2", "bind_l2", PsxButton::L2},
+    {"R2", "bind_r2", PsxButton::R2},
+    {"Start", "bind_start", PsxButton::Start},
+    {"Select", "bind_select", PsxButton::Select},
+    {"D-Pad Up", "bind_up", PsxButton::Up},
+    {"D-Pad Down", "bind_down", PsxButton::Down},
+    {"D-Pad Left", "bind_left", PsxButton::Left},
+    {"D-Pad Right", "bind_right", PsxButton::Right},
+};
+
+constexpr int kKeyboardBindEntryCount =
+    static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
 }
 
 bool App::init() {
@@ -52,6 +80,9 @@ bool App::init() {
   printf("[App::init] SDL OK\n");
   fflush(stdout);
 
+  if (!input_) {
+    input_ = std::make_unique<InputManager>();
+  }
   load_persistent_config();
 
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -154,7 +185,9 @@ bool App::init_runtime() {
 
   system_ = std::make_unique<System>();
   renderer_ = std::make_unique<Renderer>();
-  input_ = std::make_unique<InputManager>();
+  if (!input_) {
+    input_ = std::make_unique<InputManager>();
+  }
 
   try_autoload_bios_from_config();
 
@@ -291,6 +324,22 @@ void App::process_events(bool &quit) {
     if (event.type == SDL_QUIT) {
       quit = true;
     }
+    if (pending_bind_index_ >= 0 && event.type == SDL_KEYDOWN &&
+        !event.key.repeat) {
+      const int bind_index = pending_bind_index_;
+      const SDL_Scancode scancode = event.key.keysym.scancode;
+      pending_bind_index_ = -1;
+      if (scancode == SDL_SCANCODE_ESCAPE) {
+        status_message_ = "Keyboard rebinding canceled";
+      } else {
+        input_->set_key_binding(scancode, kKeyboardBindEntries[bind_index].button);
+        save_persistent_config();
+        status_message_ = std::string("Bound ") +
+                          kKeyboardBindEntries[bind_index].label + " to " +
+                          SDL_GetScancodeName(scancode);
+      }
+      continue;
+    }
     if (event.type == SDL_KEYDOWN && !event.key.repeat) {
       const SDL_Keycode key = event.key.keysym.sym;
       const u16 mods = static_cast<u16>(event.key.keysym.mod);
@@ -418,6 +467,44 @@ void App::update() {
   emu_input_focused_ = emu_runner_.is_running() &&
                        ((SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) !=
                         0);
+  if (has_started_emulation_) {
+    static constexpr u32 kUnderrunNoticeSamplePeriodMs = 1000;
+    static constexpr u64 kUnderrunNoticeThreshold = 3;
+    const u64 underruns = runtime_snapshot_.spu_audio.underrun_events;
+    const u32 now_ms = SDL_GetTicks();
+    if (underrun_notice_last_tick_ms_ == 0) {
+      underrun_notice_last_tick_ms_ = now_ms;
+      underrun_notice_last_events_ = underruns;
+    } else if ((now_ms - underrun_notice_last_tick_ms_) >=
+               kUnderrunNoticeSamplePeriodMs) {
+      const u32 bucket_value =
+          static_cast<u32>(std::min<u64>(underruns - underrun_notice_last_events_,
+                                         std::numeric_limits<u32>::max()));
+      if (underrun_notice_bucket_count_ < underrun_notice_buckets_.size()) {
+        ++underrun_notice_bucket_count_;
+      } else {
+        underrun_notice_bucket_sum_ -=
+            underrun_notice_buckets_[underrun_notice_bucket_index_];
+      }
+      underrun_notice_buckets_[underrun_notice_bucket_index_] = bucket_value;
+      underrun_notice_bucket_sum_ += bucket_value;
+      underrun_notice_bucket_index_ =
+          (underrun_notice_bucket_index_ + 1u) % underrun_notice_buckets_.size();
+      show_fast_mode_notice_ =
+          (underrun_notice_bucket_count_ >= underrun_notice_buckets_.size()) &&
+          (underrun_notice_bucket_sum_ >= kUnderrunNoticeThreshold);
+      underrun_notice_last_tick_ms_ = now_ms;
+      underrun_notice_last_events_ = underruns;
+    }
+  } else {
+    show_fast_mode_notice_ = false;
+    underrun_notice_buckets_.fill(0);
+    underrun_notice_bucket_index_ = 0;
+    underrun_notice_bucket_count_ = 0;
+    underrun_notice_bucket_sum_ = 0;
+    underrun_notice_last_tick_ms_ = 0;
+    underrun_notice_last_events_ = 0;
+  }
 }
 
 void App::render_ui() {
@@ -583,7 +670,7 @@ void App::menu_bar() {
       ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
       ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
       ImGui::MenuItem("Performance", "F11", &show_perf_);
-      ImGui::MenuItem("Sound Status", nullptr, &show_sound_status_);
+      ImGui::MenuItem("Voice Levels", nullptr, &show_sound_status_);
       ImGui::MenuItem("Logging", nullptr, &show_logging_);
       ImGui::MenuItem("About", nullptr, &show_about_);
       ImGui::EndMenu();
@@ -736,6 +823,14 @@ void App::panel_emulator_screen() {
       ImGui::EndDisabled();
     }
   } else {
+    if (show_fast_mode_notice_) {
+      ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f),
+                         "%s",
+                         g_gpu_fast_mode
+                             ? "Increase in underruns with Fast Mode, disable unnecessary logging!"
+                             : "Increase in underruns, enable Fast Mode!");
+      ImGui::Spacing();
+    }
     ImVec2 avail = ImGui::GetContentRegionAvail();
     // Safe presentation baseline for BIOS/logo recovery: fixed 4:3 letterbox.
     const float display_aspect = 4.0f / 3.0f;
@@ -774,6 +869,11 @@ void App::panel_settings() {
         ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
                            "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
         ImGui::Spacing();
+        if (pending_bind_index_ >= 0) {
+          ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
+                             "Press a key for %s (Esc to cancel)",
+                             kKeyboardBindEntries[pending_bind_index_].label);
+        }
         ImGui::Text("Input Focus: %s", emu_input_focused_ ? "Active" : "Inactive");
         ImGui::Text("Buttons (active-low): 0x%04X", last_button_state_);
         const auto &diag = runtime_snapshot_.boot_diag;
@@ -787,6 +887,35 @@ void App::panel_settings() {
 
         if (ImGui::Button("Reset to Defaults")) {
           input_->set_default_bindings();
+          pending_bind_index_ = -1;
+          save_persistent_config();
+        }
+
+        ImGui::Spacing();
+        for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
+          const SDL_Scancode scancode =
+              input_->key_for_button(kKeyboardBindEntries[i].button);
+          const char *key_name =
+              (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
+                                                 : "Unbound";
+          ImGui::Text("%s", kKeyboardBindEntries[i].label);
+          ImGui::SameLine(140.0f);
+          std::string assign_label =
+              std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
+              "##bind_" + kKeyboardBindEntries[i].config_key;
+          if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
+            pending_bind_index_ = i;
+          }
+          ImGui::SameLine();
+          std::string clear_label =
+              std::string("Clear##") + kKeyboardBindEntries[i].config_key;
+          if (ImGui::Button(clear_label.c_str())) {
+            input_->clear_key_binding(kKeyboardBindEntries[i].button);
+            if (pending_bind_index_ == i) {
+              pending_bind_index_ = -1;
+            }
+            save_persistent_config();
+          }
         }
 
         ImGui::Spacing();
@@ -809,6 +938,10 @@ void App::panel_settings() {
         ImGui::Text("Display Area: %ux%u",
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
+        ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode);
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            "Uses optimized GPU paths for lower CPU usage at the cost of possible artifacting.");
         const char *deinterlace_modes[] = {"Weave (Stable)", "Bob (Field)",
                                            "Blend (Soft)"};
         int deinterlace_index = static_cast<int>(g_deinterlace_mode);
@@ -828,8 +961,6 @@ void App::panel_settings() {
               static_cast<OutputResolutionMode>(resolution_index);
         }
         ImGui::Text("Internal Upscaling: 1x (native)");
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
-                           "PGXP: Not yet implemented");
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Audio")) {
@@ -843,6 +974,9 @@ void App::panel_settings() {
           g_spu_desired_samples = static_cast<u32>(desired_samples);
         }
         ImGui::TextDisabled("Applied on next audio device init.");
+        ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                           "Enables per-sample SPU diagnostics and per-frame voice snapshots.");
 
         ImGui::EndTabItem();
       }
@@ -1158,10 +1292,18 @@ void App::draw_sound_status_content() {
   ImGui::Text("Generated/Queued Frames: %llu / %llu",
               static_cast<unsigned long long>(diag.generated_frames),
               static_cast<unsigned long long>(diag.queued_frames));
-  ImGui::Text("Dropped Frames: %llu (Overruns: %llu)",
+  ImGui::Text("Dropped Frames: %llu (Overruns: %llu, Underruns: %llu)",
               static_cast<unsigned long long>(diag.dropped_frames),
-              static_cast<unsigned long long>(diag.overrun_events));
+              static_cast<unsigned long long>(diag.overrun_events),
+              static_cast<unsigned long long>(diag.underrun_events));
   ImGui::Text("Audio Queue: %.1f KB (peak %.1f KB)", queue_kb, queue_peak_kb);
+  if (!g_spu_advanced_sound_status) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.35f, 1.0f),
+                       "Advanced sound status logging is disabled.");
+    ImGui::TextDisabled("Enable it in Settings > Audio for voice peaks, ENDX, and detailed SPU counters.");
+    return;
+  }
   ImGui::Text("Voices Logical (phase!=off): avg %.2f / peak %u",
               avg_logical, static_cast<unsigned>(diag.logical_voice_peak));
   ImGui::Text("Voices Env>0: avg %.2f / peak %u",
@@ -1257,12 +1399,54 @@ void App::draw_sound_status_content() {
 
 void App::panel_sound_status() {
   ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Sound Status", &show_sound_status_)) {
-    draw_sound_status_content();
+  if (ImGui::Begin("Voice Levels", &show_sound_status_)) {
+    ImGui::Text("Voice Levels");
+    ImGuiTableFlags table_flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_SizingStretchSame;
+    const float voice_row_height =
+        (ImGui::GetTextLineHeight() * 2.0f) + ImGui::GetFrameHeight() +
+        (ImGui::GetStyle().ItemSpacing.y * 3.0f);
+    if (ImGui::BeginTable("SPUVoiceLevelsOnly", 4, table_flags)) {
+      ImGui::TableSetupColumn("##voice_col_0", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_1", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_2", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      ImGui::TableSetupColumn("##voice_col_3", ImGuiTableColumnFlags_WidthStretch,
+                              1.0f);
+      for (size_t voice = 0; voice < runtime_snapshot_.spu_voice_level_l.size();
+           ++voice) {
+        if ((voice % 4u) == 0u) {
+          ImGui::TableNextRow(ImGuiTableRowFlags_None, voice_row_height);
+        }
+        ImGui::TableSetColumnIndex(static_cast<int>(voice % 4u));
+
+        const s16 level_l = runtime_snapshot_.spu_voice_level_l[voice];
+        const s16 level_r = runtime_snapshot_.spu_voice_level_r[voice];
+        const int abs_l = (level_l < 0) ? -static_cast<int>(level_l)
+                                        : static_cast<int>(level_l);
+        const int abs_r = (level_r < 0) ? -static_cast<int>(level_r)
+                                        : static_cast<int>(level_r);
+        const int peak = std::max(abs_l, abs_r);
+        const float meter = std::min(1.0f, static_cast<float>(peak) / 32767.0f);
+        const bool active = runtime_snapshot_.spu_voice_active[voice];
+
+        ImGui::TextColored(active ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                  : ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                           "V%02u", static_cast<unsigned>(voice));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(active ? "ON" : "OFF");
+        ImGui::ProgressBar(meter, ImVec2(-1.0f, 0.0f));
+        ImGui::Text("L:%6d  R:%6d", static_cast<int>(level_l),
+                    static_cast<int>(level_r));
+      }
+      ImGui::EndTable();
+    }
   }
   ImGui::End();
 }
-
 void App::panel_performance() {
   ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Performance Profiler", &show_perf_)) {
@@ -1283,12 +1467,13 @@ void App::panel_performance() {
     };
 
     if (g_profile_detailed_timing) {
-      row("CPU", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+      row("CPU*", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
       row("GPU", stats.gpu_ms, ImVec4(0.8f, 0.4f, 0.4f, 1.0f));
       row("SPU", stats.spu_ms, ImVec4(0.4f, 0.4f, 0.8f, 1.0f));
       row("DMA", stats.dma_ms, ImVec4(0.8f, 0.8f, 0.4f, 1.0f));
       row("Timers", stats.timers_ms, ImVec4(0.4f, 0.8f, 0.8f, 1.0f));
       row("CDROM", stats.cdrom_ms, ImVec4(0.8f, 0.4f, 0.8f, 1.0f));
+      ImGui::TextDisabled("*CPU excludes time already attributed to GPU.");
     } else {
       ImGui::TextDisabled("Detailed subsystem timings are disabled.");
     }
@@ -1360,11 +1545,44 @@ void App::panel_grim_reaper() {
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                        "Set end to 0 for end-of-file.");
   }
+
+  ImGui::Separator();
+  ImGui::Text("Corruption Seed");
+  ImGui::Checkbox("Use Custom Seed", &grim_use_custom_seed_);
+  if (grim_use_custom_seed_) {
+    ImGui::InputScalar("Seed", ImGuiDataType_U32, &grim_seed_);
+  }
+  if (ImGui::Checkbox(
+          "Do not suppress console logs when corrupting (may freeze emulator!)",
+          &grim_reaper_keep_console_logs_)) {
+    if (grim_reaper_mode_active_) {
+      if (grim_reaper_keep_console_logs_ && grim_reaper_logs_suppressed_) {
+        g_log_category_mask = grim_reaper_saved_log_mask_;
+        g_log_level = grim_reaper_saved_log_level_;
+        grim_reaper_logs_suppressed_ = false;
+      } else if (!grim_reaper_keep_console_logs_ &&
+                 !grim_reaper_logs_suppressed_) {
+        grim_reaper_saved_log_mask_ = g_log_category_mask;
+        grim_reaper_saved_log_level_ = g_log_level;
+        grim_reaper_logs_suppressed_ = true;
+        g_log_category_mask = 0;
+        g_log_level = LogLevel::Error;
+      }
+    }
+  }
+  ImGui::Text("Last Used Seed: %u", static_cast<unsigned>(grim_last_used_seed_));
   if (!system_->bios_loaded() || bios_path_.empty()) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Reap && Reboot BIOS")) {
     reap_and_reboot_bios();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Boot Input Seed")) {
+    const bool prev_use_custom_seed = grim_use_custom_seed_;
+    grim_use_custom_seed_ = true;
+    reap_and_reboot_bios();
+    grim_use_custom_seed_ = prev_use_custom_seed;
   }
   if (!system_->bios_loaded() || bios_path_.empty()) {
     ImGui::EndDisabled();
@@ -1406,19 +1624,80 @@ void App::panel_grim_reaper() {
     ImGui::EndDisabled();
   }
 
+
+
+  ImGui::Separator();
+  ImGui::Text("Batch Corruption");
+  ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                     "Select multiple ranges and apply random strike per range.");
+
+  ImGui::Checkbox("Intro/Bootmenu", &grim_batch_intro_enabled_);
+  if (grim_batch_intro_enabled_) {
+    grim_batch_intro_percent_ =
+        std::max(0.001f, std::min(0.1f, grim_batch_intro_percent_));
+    ImGui::SliderFloat("Intro Strike (%)", &grim_batch_intro_percent_, 0.001f,
+                       0.1f, "%.3f%%");
+
+    const float p = grim_batch_intro_percent_;
+    if (p >= 0.1f - 1e-6f) {
+      ImGui::TextColored(ImVec4(0.5f, 0.0f, 0.0f, 1.0f),
+                         "Absolute Death - Boot is very likely to fail.");
+    } else if (p >= 0.05f) {
+      ImGui::TextColored(
+          ImVec4(0.95f, 0.2f, 0.2f, 1.0f),
+          "Danger - Very unstable, may not work, extreme corruption.");
+    } else if (p >= 0.02f) {
+      ImGui::TextColored(
+          ImVec4(1.0f, 0.55f, 0.1f, 1.0f),
+          "Warning - Unstable, heavy corruptions.");
+    } else if (p >= 0.01f) {
+      ImGui::TextColored(
+          ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+          "Recommended - Stable corruptions.");
+    }
+  }
+
+  ImGui::Checkbox("Character Sets", &grim_batch_charset_enabled_);
+  if (grim_batch_charset_enabled_) {
+    grim_batch_charset_percent_ =
+        std::max(0.001f, std::min(100.0f, grim_batch_charset_percent_));
+    ImGui::SliderFloat("Charset Strike (%)", &grim_batch_charset_percent_, 0.001f,
+                       100.0f, "%.3f%%");
+  }
+
+  ImGui::Checkbox("End", &grim_batch_end_enabled_);
+  if (grim_batch_end_enabled_) {
+    grim_batch_end_percent_ =
+        std::max(0.001f, std::min(100.0f, grim_batch_end_percent_));
+    ImGui::SliderFloat("End Strike (%)", &grim_batch_end_percent_, 0.001f,
+                       100.0f, "%.3f%%");
+  }
+
+  const bool batch_has_any_selection =
+      grim_batch_intro_enabled_ || grim_batch_charset_enabled_ || grim_batch_end_enabled_;
+  if (!system_->bios_loaded() || bios_path_.empty() || !batch_has_any_selection) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Batch Corrupt && Start")) {
+    reap_and_reboot_bios_batch();
+  }
+  if (!system_->bios_loaded() || bios_path_.empty() || !batch_has_any_selection) {
+    ImGui::EndDisabled();
+  }
+
   if (!grim_reaper_last_output_path_.empty()) {
     ImGui::Text("Last Corrupted BIOS: %s", grim_reaper_last_output_path_.c_str());
     ImGui::Text("Last Mutations: %u",
                 static_cast<unsigned>(grim_reaper_last_mutations_));
   }
-
   ImGui::TextColored(grim_reaper_mode_active_ ? ImVec4(0.9f, 0.6f, 0.3f, 1.0f)
                                                : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                      "Console logging: %s",
-                     grim_reaper_mode_active_ ? "Suppressed" : "Normal");
+                     grim_reaper_logs_suppressed_ ? "Suppressed" : "Normal");
 
   ImGui::End();
 }
+
 void App::panel_about() {
   ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("About VibeStation", &show_about_,
@@ -1629,6 +1908,9 @@ bool App::boot_disc_from_ui() {
 void App::set_grim_reaper_mode(bool enabled) {
   if (enabled) {
     grim_reaper_mode_active_ = true;
+    if (grim_reaper_keep_console_logs_) {
+      return;
+    }
     if (!grim_reaper_logs_suppressed_) {
       grim_reaper_saved_log_mask_ = g_log_category_mask;
       grim_reaper_saved_log_level_ = g_log_level;
@@ -1748,16 +2030,17 @@ bool App::reap_and_reboot_bios() {
     mutations = 1;
   }
 
-  std::random_device rd;
-  std::mt19937 rng(rd());
-  std::uniform_int_distribution<size_t> index_dist(start, end);
-  std::uniform_int_distribution<int> value_dist(0, 255);
+  const u32 seed = grim_use_custom_seed_
+                       ? grim_seed_
+                       : static_cast<u32>(std::random_device{}());
+  grim_last_used_seed_ = seed;
+  grim_seed_ = seed;
+  std::mt19937 rng(seed);
 
   for (size_t i = 0; i < mutations; ++i) {
-    const size_t idx = index_dist(rng);
-    bios_data[idx] = static_cast<u8>(value_dist(rng));
+    const size_t idx = start + (static_cast<size_t>(rng()) % span);
+    bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
   }
-
   const std::filesystem::path src_path = std::filesystem::path(bios_path_);
   const std::filesystem::path out_path =
       src_path.parent_path() /
@@ -1791,7 +2074,143 @@ bool App::reap_and_reboot_bios() {
   has_started_emulation_ = true;
   emu_runner_.set_running(true);
 
-  status_message_ = "Reaped BIOS copy loaded: " + out_path.filename().string();
+  status_message_ = "Reaped BIOS copy loaded (seed " + std::to_string(seed) + "): " +
+                    out_path.filename().string();
+  return true;
+}
+
+bool App::reap_and_reboot_bios_batch() {
+  if (!system_ || bios_path_.empty()) {
+    status_message_ = "Load a BIOS first.";
+    return false;
+  }
+
+  const bool do_intro = grim_batch_intro_enabled_;
+  const bool do_charset = grim_batch_charset_enabled_;
+  const bool do_end = grim_batch_end_enabled_;
+  if (!do_intro && !do_charset && !do_end) {
+    status_message_ = "Select at least one batch corruption range.";
+    return false;
+  }
+
+  std::ifstream in(bios_path_, std::ios::binary);
+  if (!in.is_open()) {
+    status_message_ = "Failed to open source BIOS file.";
+    return false;
+  }
+
+  in.seekg(0, std::ios::end);
+  const std::streamoff size_off = in.tellg();
+  if (size_off <= 0) {
+    status_message_ = "Source BIOS is empty or unreadable.";
+    return false;
+  }
+  const size_t bios_size = static_cast<size_t>(size_off);
+  in.seekg(0, std::ios::beg);
+
+  std::vector<u8> bios_data(bios_size, 0);
+  in.read(reinterpret_cast<char *>(bios_data.data()),
+          static_cast<std::streamsize>(bios_data.size()));
+  if (!in) {
+    status_message_ = "Failed reading source BIOS.";
+    return false;
+  }
+
+  const u32 seed = grim_use_custom_seed_
+                       ? grim_seed_
+                       : static_cast<u32>(std::random_device{}());
+  grim_last_used_seed_ = seed;
+  grim_seed_ = seed;
+  std::mt19937 rng(seed);
+
+  size_t total_mutations = 0;
+  auto apply_range = [&](const GrimReaperRange &range, float percent,
+                         float max_percent) -> bool {
+    if (bios_data.size() <= static_cast<size_t>(range.start)) {
+      return false;
+    }
+
+    const size_t start = static_cast<size_t>(range.start);
+    const size_t end = std::min(static_cast<size_t>(range.end), bios_data.size() - 1u);
+    if (end < start) {
+      return false;
+    }
+
+    const float pct = std::max(0.001f, std::min(max_percent, percent));
+    const size_t span = end - start + 1u;
+    size_t mutations =
+        static_cast<size_t>((pct / 100.0f) * static_cast<float>(span));
+    if (mutations == 0) {
+      mutations = 1;
+    }
+
+    for (size_t i = 0; i < mutations; ++i) {
+      const size_t idx = start + (static_cast<size_t>(rng()) % span);
+      bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
+    }
+
+    total_mutations += mutations;
+    return true;
+  };
+
+  std::string slug = "batch";
+  if (do_intro) {
+    if (!apply_range(kGrimReaperRanges[0], grim_batch_intro_percent_, 0.1f)) {
+      status_message_ = "Intro range is outside BIOS size.";
+      return false;
+    }
+    slug += "_intro";
+  }
+  if (do_charset) {
+    if (!apply_range(kGrimReaperRanges[1], grim_batch_charset_percent_, 100.0f)) {
+      status_message_ = "Character Sets range is outside BIOS size.";
+      return false;
+    }
+    slug += "_charset";
+  }
+  if (do_end) {
+    if (!apply_range(kGrimReaperRanges[2], grim_batch_end_percent_, 100.0f)) {
+      status_message_ = "End range is outside BIOS size.";
+      return false;
+    }
+    slug += "_end";
+  }
+
+    const std::filesystem::path src_path = std::filesystem::path(bios_path_);
+  const std::filesystem::path out_path =
+      src_path.parent_path() /
+      (src_path.stem().string() + "_grim_" + slug + src_path.extension().string());
+
+  std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    status_message_ = "Failed to create corrupted BIOS copy.";
+    return false;
+  }
+  out.write(reinterpret_cast<const char *>(bios_data.data()),
+            static_cast<std::streamsize>(bios_data.size()));
+  if (!out) {
+    status_message_ = "Failed writing corrupted BIOS copy.";
+    return false;
+  }
+
+  emu_runner_.pause_and_wait_idle();
+  set_grim_reaper_mode(true);
+  if (!system_->load_bios(out_path.string())) {
+    set_grim_reaper_mode(false);
+    status_message_ = "Failed to load corrupted BIOS copy.";
+    return false;
+  }
+
+  grim_reaper_last_mutations_ = static_cast<u32>(total_mutations);
+  grim_reaper_last_output_path_ = out_path.string();
+
+  has_started_emulation_ = false;
+  system_->reset();
+  has_started_emulation_ = true;
+  emu_runner_.set_running(true);
+
+  status_message_ = "Batch reaped BIOS loaded (seed " + std::to_string(seed) + "): " +
+                    out_path.filename().string();
   return true;
 }
 
@@ -1813,6 +2232,7 @@ std::string App::open_file_dialog(const char *filter, const char *title) {
 #endif
   return "";
 }
+
 
 void App::load_persistent_config() {
   std::ifstream in(kAppConfigFileName);
@@ -1861,10 +2281,28 @@ void App::load_persistent_config() {
     } else if (key == "low_spec_mode") {
       config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
       g_low_spec_mode = config_low_spec_mode_;
+    } else if (key == "gpu_fast_mode") {
+      g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
+    } else if (key.rfind("bind_", 0) == 0) {
+      const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+      const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
+      for (const auto &entry : kKeyboardBindEntries) {
+        if (key == entry.config_key) {
+          if (scancode == SDL_SCANCODE_UNKNOWN) {
+            input_->clear_key_binding(entry.button);
+          } else {
+            input_->set_key_binding(scancode, entry.button);
+          }
+          break;
+        }
+      }
     } else if (key == "spu_desired_samples") {
       const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
       const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
       g_spu_desired_samples = clamped;
+    } else if (key == "advanced_sound_status_logging") {
+      g_spu_advanced_sound_status =
+          parse_bool(value, g_spu_advanced_sound_status);
     } else if (key == "detailed_profiling") {
       g_profile_detailed_timing = parse_bool(value, g_profile_detailed_timing);
     } else if (key == "experimental_bios_size_mode") {
@@ -1899,7 +2337,13 @@ void App::save_persistent_config() const {
   out << "bios_path=" << bios_path_ << "\n";
   out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
   out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
+  out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
+  for (const auto &entry : kKeyboardBindEntries) {
+    out << entry.config_key << "="
+        << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
+  }
   out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
+  out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
   out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
   out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
   out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";

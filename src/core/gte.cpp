@@ -1000,3 +1000,4 @@ void Gte::cmd_cc() {
   u8 b = static_cast<u8>(clamp(mac[3] >> 4, 0, 0xFF, 1u << 19));
   push_rgb(r | (g << 8) | (b << 16) | (rgbc[3] << 24));
 }
+

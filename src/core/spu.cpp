@@ -1484,6 +1484,7 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   if (audio_started_) {
     const u32 starve_threshold = std::max(host_buffer_bytes_ / 8u, 1024u);
     if (queued <= starve_threshold) {
+      ++audio_diag_.underrun_events;
       SDL_PauseAudioDevice(audio_device_, 1);
       audio_started_ = false;
     }
@@ -1703,7 +1704,7 @@ void Spu::tick(u32 cycles) {
     return;
   }
 
-  const bool track_sample_diag = g_profile_detailed_timing;
+  const bool track_sample_diag = g_spu_advanced_sound_status;
   audio_diag_.gaussian_active = true;
   audio_diag_.reverb_enabled = (spucnt_eff & 0x0080u) != 0u;
   for (int s = 0; s < samples_to_generate; ++s) {

@@ -52,7 +52,9 @@ private:
   static void unpack_input(u64 packed, u16 &buttons, u8 &lx, u8 &ly, u8 &rx,
                            u8 &ry);
   void apply_input_state(System &system);
+  bool should_capture_frame() const;
   void publish_frame(FrameSnapshot &&frame, const RuntimeSnapshot &snapshot);
+  void publish_snapshot(const RuntimeSnapshot &snapshot);
   void worker_main();
   void wait_until_idle();
 
@@ -78,4 +80,3 @@ private:
   mutable std::mutex snapshot_mutex_;
   RuntimeSnapshot latest_snapshot_{};
 };
-

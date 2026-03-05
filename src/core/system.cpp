@@ -214,6 +214,7 @@ void System::run_frame(bool sample_display_diag) {
         timers_.set_vblank(in_vblank);
 
         std::chrono::high_resolution_clock::time_point start_loop{};
+        const double gpu_ms_before_loop = profiling_stats_.gpu_ms;
         if (profile_detailed) {
             start_loop = std::chrono::high_resolution_clock::now();
         }
@@ -238,9 +239,12 @@ void System::run_frame(bool sample_display_diag) {
         }
         if (profile_detailed) {
             const auto end_loop = std::chrono::high_resolution_clock::now();
-            add_cpu_time(
+            const double loop_ms =
                 std::chrono::duration<double, std::milli>(end_loop - start_loop)
-                .count());
+                    .count();
+            const double gpu_ms_inside_loop =
+                profiling_stats_.gpu_ms - gpu_ms_before_loop;
+            add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
 
         sio_.tick(cycles_this_scanline);

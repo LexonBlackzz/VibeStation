@@ -25,6 +25,7 @@ void InputManager::set_default_bindings() {
 }
 
 void InputManager::set_key_binding(SDL_Scancode key, PsxButton button) {
+  key_bindings_.erase(key);
   // Remove any existing binding for this button
   for (auto it = key_bindings_.begin(); it != key_bindings_.end();) {
     if (it->second == button) {
@@ -34,6 +35,25 @@ void InputManager::set_key_binding(SDL_Scancode key, PsxButton button) {
     }
   }
   key_bindings_[key] = button;
+}
+
+void InputManager::clear_key_binding(PsxButton button) {
+  for (auto it = key_bindings_.begin(); it != key_bindings_.end();) {
+    if (it->second == button) {
+      it = key_bindings_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+SDL_Scancode InputManager::key_for_button(PsxButton button) const {
+  for (const auto &entry : key_bindings_) {
+    if (entry.second == button) {
+      return entry.first;
+    }
+  }
+  return SDL_SCANCODE_UNKNOWN;
 }
 
 void InputManager::process_event(const SDL_Event &event) {

@@ -14,6 +14,7 @@ public:
     u64 queued_frames = 0;
     u64 dropped_frames = 0;
     u64 overrun_events = 0;
+    u64 underrun_events = 0;
     u64 capture_frames = 0;
     u64 reverb_mix_frames = 0;
     u64 reverb_ram_writes = 0;
