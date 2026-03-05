@@ -7,9 +7,8 @@ Game loading ⚠️❌
 Bindings ✅⚠️  
 CD-ROM ⚠️  
 Graphics/VRAM ⚠️  
-Audio ✅ 
-
-CPU/RAM/DMA ⚠️  
+Audio ✅  
+CPU/RAM/DMA ✅   
 Main UI ✅ 
 
 ✅ - Implemented  
