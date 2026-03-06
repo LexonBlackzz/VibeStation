@@ -47,6 +47,13 @@ namespace {
         }
         return cfg;
     }
+
+    void seed_mt19937(std::mt19937& rng, u64 seed) {
+        const u32 lo = static_cast<u32>(seed & 0xFFFFFFFFull);
+        const u32 hi = static_cast<u32>((seed >> 32) & 0xFFFFFFFFull);
+        std::seed_seq seq{ lo, hi, 0x9E3779B9u, 0x243F6A88u };
+        rng.seed(seq);
+    }
 } // namespace
 
 // Timer IRQ helper
@@ -465,9 +472,12 @@ void System::apply_ram_reaper_for_frame() {
     }
 
     if (reseed) {
-        const u32 seed =
-            cfg.use_custom_seed ? cfg.seed : static_cast<u32>(std::random_device{}());
-        ram_reaper_rng_.seed(seed);
+        const u64 seed =
+            cfg.use_custom_seed
+                ? cfg.seed
+                : ((static_cast<u64>(std::random_device{}()) << 32) ^
+                   static_cast<u64>(std::random_device{}()));
+        seed_mt19937(ram_reaper_rng_, seed);
         ram_reaper_last_seed_.store(seed, std::memory_order_release);
         ram_reaper_rng_seeded_ = true;
     }

@@ -4,6 +4,7 @@
 #include "../core/system.h"
 #include "../core/types.h"
 #include "../input/input_manager.h"
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@ private:
   bool show_logging_ = false;
   bool show_sound_status_ = false;
   bool show_grim_reaper_ = false;
+  bool show_corruption_presets_ = false;
   std::string bios_path_;
   std::string game_bin_path_;
   std::string game_cue_path_;
@@ -87,9 +89,13 @@ private:
   float grim_batch_intro_percent_ = 0.02f;
   float grim_batch_charset_percent_ = 89.0f;
   float grim_batch_end_percent_ = 100.0f;
+  bool grim_batch_use_custom_seeds_ = false;
+  u64 grim_batch_intro_seed_ = 1u;
+  u64 grim_batch_charset_seed_ = 1u;
+  u64 grim_batch_end_seed_ = 1u;
   bool grim_use_custom_seed_ = false;
-  u32 grim_seed_ = 1u;
-  u32 grim_last_used_seed_ = 0u;
+  u64 grim_seed_ = 1u;
+  u64 grim_last_used_seed_ = 0u;
   bool ram_reaper_enabled_ = false;
   u32 ram_reaper_writes_per_frame_ = 64u;
   float ram_reaper_intensity_percent_ = 35.0f;
@@ -99,9 +105,21 @@ private:
   u32 ram_reaper_range_start_ = 0u;
   u32 ram_reaper_range_end_ = psx::RAM_SIZE - 1u;
   bool ram_reaper_use_custom_seed_ = false;
-  u32 ram_reaper_seed_ = 1u;
-  u32 ram_reaper_active_seed_ = 0u;
+  u64 ram_reaper_seed_ = 1u;
+  u64 ram_reaper_active_seed_ = 0u;
   u64 ram_reaper_total_mutations_ = 0;
+  char grim_preset_name_[64] = "grim_preset";
+  char batch_preset_name_[64] = "grim_batch";
+  char ram_preset_name_[64] = "ram_reaper";
+  int selected_corruption_preset_index_ = -1;
+
+  struct CorruptionPresetListEntry {
+    std::string file_name;
+    std::string display_name;
+    std::string preset_type;
+    std::filesystem::path path;
+  };
+  std::vector<CorruptionPresetListEntry> corruption_presets_;
 
   void process_events(bool &quit);
   bool should_route_keyboard_to_emu(const SDL_Event &event,
@@ -119,6 +137,7 @@ private:
   void panel_performance();
   void panel_sound_status();
   void panel_grim_reaper();
+  void panel_corruption_presets();
   void draw_sound_status_content();
   void update_vram_debug_texture();
 
@@ -126,9 +145,14 @@ private:
   std::string open_file_dialog(const char *filter, const char *title);
   bool resolve_disc_paths(const std::string &selected_path, std::string &bin_path,
                           std::string &cue_path, std::string &error) const;
+  bool load_disc_from_ui(const std::string &bin_path, const std::string &cue_path);
   bool boot_disc_from_ui();
   bool reap_and_reboot_bios();
   bool reap_and_reboot_bios_batch();
+  bool save_current_grim_preset(bool batch_mode);
+  bool save_current_ram_preset();
+  bool load_corruption_preset(const std::filesystem::path &path);
+  void refresh_corruption_preset_list();
   void set_grim_reaper_mode(bool enabled);
   void sync_ram_reaper_config();
   void disable_ram_reaper_mode();

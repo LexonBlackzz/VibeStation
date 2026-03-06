@@ -174,6 +174,9 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   xa_stream_valid_ = false;
   xa_stream_file_ = 0;
   xa_stream_channel_ = 0;
+  insert_probe_active_ = false;
+  insert_probe_delay_cycles_ = 0;
+  insert_probe_stage_ = 0;
 
   const std::filesystem::path cue_fs(cue_path);
   const std::filesystem::path cue_dir = cue_fs.parent_path();
@@ -263,6 +266,131 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   return true;
 }
 
+bool CdRom::swap_disc_image(const std::string &bin_path,
+                            const std::string &cue_path) {
+  const std::vector<CdTrack> old_tracks = tracks_;
+  const std::string old_resolved_disc_path = resolved_disc_path_;
+  const bool old_track_map_valid = track_map_valid_;
+  const bool old_disc_loaded = disc_loaded_;
+  const u64 old_bin_size = bin_size_;
+
+  std::ifstream replacement_bin;
+  std::vector<CdTrack> parsed_tracks;
+
+  if (bin_file_.is_open()) {
+    bin_file_.close();
+  }
+
+  tracks_.clear();
+  const std::filesystem::path cue_fs(cue_path);
+  const std::filesystem::path cue_dir = cue_fs.parent_path();
+  if (!parse_cue(cue_path, cue_dir.string())) {
+    tracks_ = old_tracks;
+    resolved_disc_path_ = old_resolved_disc_path;
+    track_map_valid_ = old_track_map_valid;
+    disc_loaded_ = old_disc_loaded;
+    bin_size_ = old_bin_size;
+    if (!old_resolved_disc_path.empty()) {
+      bin_file_.open(old_resolved_disc_path, std::ios::binary);
+    }
+    LOG_ERROR("CDROM: Failed to parse CUE file for live disc insert: %s",
+              cue_path.c_str());
+    return false;
+  }
+  parsed_tracks = tracks_;
+
+  std::filesystem::path resolved_bin_path = bin_path;
+  if (resolved_bin_path.empty() && !parsed_tracks.empty() &&
+      !parsed_tracks.front().filename.empty()) {
+    resolved_bin_path = cue_dir / parsed_tracks.front().filename;
+  }
+  if (resolved_bin_path.empty()) {
+    tracks_ = old_tracks;
+    resolved_disc_path_ = old_resolved_disc_path;
+    track_map_valid_ = old_track_map_valid;
+    disc_loaded_ = old_disc_loaded;
+    bin_size_ = old_bin_size;
+    if (!old_resolved_disc_path.empty()) {
+      bin_file_.open(old_resolved_disc_path, std::ios::binary);
+    }
+    LOG_ERROR("CDROM: No BIN file could be resolved from CUE during live insert");
+    return false;
+  }
+
+  replacement_bin.open(resolved_bin_path, std::ios::binary);
+  if (!replacement_bin.is_open() && !parsed_tracks.empty() &&
+      !parsed_tracks.front().filename.empty()) {
+    const std::filesystem::path cue_referenced =
+        cue_dir / parsed_tracks.front().filename;
+    if (cue_referenced != resolved_bin_path) {
+      replacement_bin.clear();
+      replacement_bin.open(cue_referenced, std::ios::binary);
+      if (replacement_bin.is_open()) {
+        resolved_bin_path = cue_referenced;
+      }
+    }
+  }
+  if (!replacement_bin.is_open()) {
+    tracks_ = old_tracks;
+    resolved_disc_path_ = old_resolved_disc_path;
+    track_map_valid_ = old_track_map_valid;
+    disc_loaded_ = old_disc_loaded;
+    bin_size_ = old_bin_size;
+    if (!old_resolved_disc_path.empty()) {
+      bin_file_.open(old_resolved_disc_path, std::ios::binary);
+    }
+    LOG_ERROR("CDROM: Failed to open BIN file for live insert: %s",
+              resolved_bin_path.string().c_str());
+    return false;
+  }
+
+  std::error_code ec;
+  const u64 replacement_size = std::filesystem::file_size(resolved_bin_path, ec);
+  bin_size_ = ec ? 0 : replacement_size;
+
+  bool single_file = true;
+  bool monotonic = true;
+  int first_index01 = 0;
+  int prev_index01 = 0;
+  if (!parsed_tracks.empty()) {
+    first_index01 = parsed_tracks.front().index01_file_lba;
+    prev_index01 = first_index01;
+  }
+  const std::string first_track_file =
+      parsed_tracks.empty() ? std::string() : lower_copy(parsed_tracks.front().filename);
+  for (CdTrack &track : parsed_tracks) {
+    if (!first_track_file.empty() &&
+        lower_copy(track.filename) != first_track_file) {
+      single_file = false;
+    }
+    if (track.index01_file_lba < prev_index01) {
+      monotonic = false;
+    }
+    prev_index01 = track.index01_file_lba;
+    track.index01_file_offset =
+        static_cast<u64>(std::max(track.index01_file_lba, 0)) *
+        static_cast<u64>(std::max(track.sector_size, 1));
+  }
+
+  track_map_valid_ = !parsed_tracks.empty() && single_file && monotonic;
+  for (CdTrack &track : parsed_tracks) {
+    const int delta = std::max(0, track.index01_file_lba - first_index01);
+    track.index01_abs_lba = 150 + delta;
+  }
+
+  tracks_ = std::move(parsed_tracks);
+  bin_file_ = std::move(replacement_bin);
+  resolved_disc_path_ = resolved_bin_path.string();
+  disc_loaded_ = true;
+
+  LOG_INFO("CDROM: Live inserted disc - %zu track(s) from %s", tracks_.size(),
+           resolved_disc_path_.c_str());
+  if (!track_map_valid_) {
+    LOG_WARN("CDROM: Track map is not fully deterministic (multi-file or non-monotonic CUE)");
+  }
+  return true;
+}
+
 void CdRom::reset() {
   index_reg_ = 0;
   interrupt_enable_ = 0;
@@ -327,6 +455,18 @@ void CdRom::reset() {
   xa_stream_valid_ = false;
   xa_stream_file_ = 0;
   xa_stream_channel_ = 0;
+  insert_probe_active_ = false;
+  insert_probe_delay_cycles_ = 0;
+  insert_probe_stage_ = 0;
+}
+
+void CdRom::notify_disc_inserted() {
+  if (!disc_loaded_) {
+    return;
+  }
+  insert_probe_active_ = true;
+  insert_probe_delay_cycles_ = 1;
+  insert_probe_stage_ = 0;
 }
 
 bool CdRom::parse_cue(const std::string &cue_path,
@@ -975,6 +1115,25 @@ void CdRom::cmd_readtoc() {
   schedule_second_response(33868, 2, {stat_byte()});
 }
 
+void CdRom::execute_internal_command(u8 cmd, std::initializer_list<u8> params) {
+  if (command_busy_ || command_busy_cycles_ > 0) {
+    return;
+  }
+  if ((interrupt_flag_ & 0x1F) != 0) {
+    return;
+  }
+  if (response_index_ < static_cast<int>(response_fifo_.size())) {
+    return;
+  }
+
+  param_fifo_.assign(params.begin(), params.end());
+  last_command_ = cmd;
+  command_busy_cycles_ = command_busy_for(cmd);
+  command_busy_ = command_busy_cycles_ > 0;
+  execute_command(cmd);
+  param_fifo_.clear();
+}
+
 // -- Helpers ------------------------------------------------------------------
 
 int CdRom::msf_to_lba(u8 mm, u8 ss, u8 ff) const {
@@ -1505,6 +1664,34 @@ void CdRom::tick(u32 cycles) {
       command_busy_ = false;
     } else {
       command_busy_ = true;
+    }
+  }
+
+  if (insert_probe_active_) {
+    insert_probe_delay_cycles_ -= static_cast<int>(cycles);
+    if (insert_probe_delay_cycles_ <= 0) {
+      switch (insert_probe_stage_) {
+      case 0:
+        execute_internal_command(0x19, {0x20});
+        break;
+      case 1:
+        execute_internal_command(0x01, {});
+        break;
+      case 2:
+        execute_internal_command(0x01, {});
+        break;
+      default:
+        insert_probe_active_ = false;
+        break;
+      }
+
+      if (insert_probe_active_) {
+        ++insert_probe_stage_;
+        insert_probe_delay_cycles_ = 4000;
+        if (insert_probe_stage_ > 2) {
+          insert_probe_active_ = false;
+        }
+      }
     }
   }
 
