@@ -15,11 +15,13 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
 #include <Windows.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #endif
 
@@ -1091,11 +1093,100 @@ void App::panel_emulator_screen() {
     if (!bios_loaded) {
       ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Start Emulation", button_size)) {
-      start_bios_from_ui();
+    const bool has_selected_game = !game_cue_path_.empty() || system_->disc_loaded();
+    const char *start_button_label =
+        has_selected_game ? "Boot Selected Game" : "Start Emulation";
+    const ImVec2 start_button_size(150.0f, 0.0f);
+    if (ImGui::Button(start_button_label, start_button_size)) {
+      if (has_selected_game) {
+        boot_disc_from_ui();
+      } else {
+        start_bios_from_ui();
+      }
     }
     if (!bios_loaded) {
       ImGui::EndDisabled();
+    }
+
+    const bool rom_dir_valid =
+        !rom_directory_.empty() &&
+        std::filesystem::exists(rom_directory_) &&
+        std::filesystem::is_directory(rom_directory_);
+    if (game_library_dirty_ || (rom_dir_valid &&
+                                (SDL_GetTicks() - game_library_last_scan_ms_ > 2000u))) {
+      refresh_game_library();
+    }
+
+    ImGui::SetCursorPos(ImVec2(center.x - 300, center.y + 90));
+    ImGui::BeginChild("IdleGameLibrary", ImVec2(600, 230), true);
+    ImGui::TextColored(ImVec4(0.75f, 0.72f, 0.95f, 1.0f), "Game Library");
+    if (rom_dir_valid) {
+      ImGui::TextDisabled("ROM Directory: %s", rom_directory_.c_str());
+    } else {
+      ImGui::TextDisabled("ROM Directory: not set");
+    }
+    if (ImGui::Button("Set ROM Directory", ImVec2(150.0f, 0.0f))) {
+      const std::string selected = open_folder_dialog("Select ROM Directory");
+      if (!selected.empty()) {
+        rom_directory_ = selected;
+        game_library_dirty_ = true;
+        save_persistent_config();
+        refresh_game_library();
+        status_message_ = "ROM directory set: " + rom_directory_;
+      }
+    }
+    ImGui::SameLine();
+    if (!rom_dir_valid) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Refresh", ImVec2(90.0f, 0.0f))) {
+      game_library_dirty_ = true;
+      refresh_game_library();
+    }
+    if (!rom_dir_valid) {
+      ImGui::EndDisabled();
+    }
+    ImGui::Separator();
+
+    if (!rom_dir_valid) {
+      ImGui::TextColored(ImVec4(0.88f, 0.45f, 0.45f, 1.0f),
+                         "No ROM directory configured.");
+      ImGui::TextWrapped("Set a ROM directory to scan and list games here.");
+    } else if (game_library_.empty()) {
+      ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.45f, 1.0f),
+                         "No playable .cue/.bin pairs found.");
+    } else {
+      for (size_t i = 0; i < game_library_.size(); ++i) {
+        const auto &entry = game_library_[i];
+        std::string label = entry.title + "##game_" + std::to_string(i);
+        if (ImGui::Selectable(label.c_str(), false)) {
+          load_disc_from_ui(entry.bin_path, entry.cue_path);
+        }
+      }
+    }
+    ImGui::EndChild();
+
+    if (!rom_dir_valid) {
+      const char *warning =
+          "No ROM directory in vibestation_config.ini. Set one to enable the game list.";
+      const ImVec2 text_size = ImGui::CalcTextSize(warning);
+      const float warning_y = ImGui::GetWindowHeight() - 60.0f;
+      ImGui::SetCursorPos(ImVec2((ImGui::GetWindowWidth() - text_size.x) * 0.5f, warning_y));
+      ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1.0f), "%s", warning);
+
+      const ImVec2 button_size(170.0f, 0.0f);
+      ImGui::SetCursorPos(
+          ImVec2((ImGui::GetWindowWidth() - button_size.x) * 0.5f, warning_y + 22.0f));
+      if (ImGui::Button("Set ROM Directory##warning", button_size)) {
+        const std::string selected = open_folder_dialog("Select ROM Directory");
+        if (!selected.empty()) {
+          rom_directory_ = selected;
+          game_library_dirty_ = true;
+          save_persistent_config();
+          refresh_game_library();
+          status_message_ = "ROM directory set: " + rom_directory_;
+        }
+      }
     }
   } else {
     if (show_fast_mode_notice_) {
@@ -2738,9 +2829,11 @@ bool App::boot_disc_from_ui() {
     return false;
   }
 
-  if (!system_->disc_loaded() && !game_cue_path_.empty()) {
+  if (!game_cue_path_.empty()) {
+    // Always (re)attach the currently selected game so changing selection
+    // after a prior boot takes effect.
     if (!system_->load_game(game_bin_path_, game_cue_path_)) {
-      status_message_ = "Failed to reattach loaded disc image.";
+      status_message_ = "Failed to attach selected disc image.";
       return false;
     }
   }
@@ -3183,6 +3276,133 @@ std::string App::open_file_dialog(const char *filter, const char *title) {
   return "";
 }
 
+std::string App::open_folder_dialog(const char *title) {
+#ifdef _WIN32
+  BROWSEINFOA bi = {};
+  bi.hwndOwner = nullptr;
+  bi.lpszTitle = title;
+  bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+  LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+  if (pidl == nullptr) {
+    return "";
+  }
+
+  char folder_path[MAX_PATH] = "";
+  if (!SHGetPathFromIDListA(pidl, folder_path)) {
+    CoTaskMemFree(pidl);
+    return "";
+  }
+  CoTaskMemFree(pidl);
+  return std::string(folder_path);
+#else
+  (void)title;
+  return "";
+#endif
+}
+
+void App::refresh_game_library() {
+  game_library_.clear();
+  game_library_last_scan_ms_ = SDL_GetTicks();
+  game_library_dirty_ = false;
+
+  if (rom_directory_.empty()) {
+    return;
+  }
+
+  std::error_code ec;
+  if (!std::filesystem::exists(rom_directory_, ec) ||
+      !std::filesystem::is_directory(rom_directory_, ec)) {
+    return;
+  }
+
+  std::vector<std::filesystem::path> cue_paths;
+  std::vector<std::filesystem::path> bin_paths;
+  std::filesystem::recursive_directory_iterator it(
+      rom_directory_, std::filesystem::directory_options::skip_permission_denied, ec);
+  std::filesystem::recursive_directory_iterator end;
+  if (ec) {
+    return;
+  }
+
+  for (; it != end; it.increment(ec)) {
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    if (!it->is_regular_file(ec)) {
+      continue;
+    }
+
+    std::filesystem::path file = it->path();
+    std::string ext = file.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    if (ext == ".cue") {
+      cue_paths.push_back(file);
+    } else if (ext == ".bin") {
+      bin_paths.push_back(file);
+    }
+  }
+
+  auto key_for_path = [](const std::filesystem::path &p) {
+    std::string key =
+        (p.parent_path() / p.stem()).lexically_normal().string();
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    return key;
+  };
+
+  std::unordered_set<std::string> listed_keys;
+  listed_keys.reserve(cue_paths.size() + bin_paths.size());
+
+  for (const auto &cue : cue_paths) {
+    std::string bin;
+    std::string cue_path;
+    std::string error;
+    if (!resolve_disc_paths(cue.string(), bin, cue_path, error) || bin.empty()) {
+      continue;
+    }
+    GameLibraryEntry entry{};
+    entry.title = cue.stem().string();
+    entry.bin_path = bin;
+    entry.cue_path = cue_path;
+    game_library_.push_back(std::move(entry));
+    listed_keys.insert(key_for_path(cue));
+  }
+
+  for (const auto &bin : bin_paths) {
+    const std::string key = key_for_path(bin);
+    if (listed_keys.find(key) != listed_keys.end()) {
+      continue;
+    }
+    std::string bin_path;
+    std::string cue_path;
+    std::string error;
+    if (!resolve_disc_paths(bin.string(), bin_path, cue_path, error) ||
+        bin_path.empty() || cue_path.empty()) {
+      continue;
+    }
+    GameLibraryEntry entry{};
+    entry.title = bin.stem().string();
+    entry.bin_path = bin_path;
+    entry.cue_path = cue_path;
+    game_library_.push_back(std::move(entry));
+    listed_keys.insert(key);
+  }
+
+  std::sort(game_library_.begin(), game_library_.end(),
+            [](const GameLibraryEntry &a, const GameLibraryEntry &b) {
+              if (a.title == b.title) {
+                return a.cue_path < b.cue_path;
+              }
+              return a.title < b.title;
+            });
+}
+
 
 void App::load_persistent_config() {
   std::ifstream in(kAppConfigFileName);
@@ -3226,6 +3446,9 @@ void App::load_persistent_config() {
 
     if (key == "bios_path") {
       bios_path_ = value;
+    } else if (key == "rom_directory") {
+      rom_directory_ = value;
+      game_library_dirty_ = true;
     } else if (key == "vsync") {
       config_vsync_ = parse_bool(value, config_vsync_);
     } else if (key == "low_spec_mode") {
@@ -3285,6 +3508,7 @@ void App::save_persistent_config() const {
   }
 
   out << "bios_path=" << bios_path_ << "\n";
+  out << "rom_directory=" << rom_directory_ << "\n";
   out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
   out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
   out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";

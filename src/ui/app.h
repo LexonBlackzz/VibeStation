@@ -42,6 +42,7 @@ private:
   bool show_grim_reaper_ = false;
   bool show_corruption_presets_ = false;
   std::string bios_path_;
+  std::string rom_directory_;
   std::string game_bin_path_;
   std::string game_cue_path_;
   std::string status_message_ = "Welcome to VibeStation!";
@@ -135,6 +136,15 @@ private:
   char gpu_preset_name_[64] = "gpu_reaper";
   char sound_preset_name_[64] = "sound_reaper";
   int selected_corruption_preset_index_ = -1;
+  bool game_library_dirty_ = true;
+  u32 game_library_last_scan_ms_ = 0;
+
+  struct GameLibraryEntry {
+    std::string title;
+    std::string bin_path;
+    std::string cue_path;
+  };
+  std::vector<GameLibraryEntry> game_library_;
 
   struct CorruptionPresetListEntry {
     std::string file_name;
@@ -166,8 +176,10 @@ private:
 
   // File dialog helpers
   std::string open_file_dialog(const char *filter, const char *title);
+  std::string open_folder_dialog(const char *title);
   bool resolve_disc_paths(const std::string &selected_path, std::string &bin_path,
                           std::string &cue_path, std::string &error) const;
+  void refresh_game_library();
   bool load_disc_from_ui(const std::string &bin_path, const std::string &cue_path);
   bool start_bios_from_ui();
   bool boot_disc_from_ui();

@@ -1,33 +1,53 @@
 #include "mdec.h"
 #include <algorithm>
 #include <array>
-#include <cmath>
 
 namespace {
-constexpr double kPi = 3.14159265358979323846;
-
 constexpr std::array<int, 64> kZigZag = {
-    0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
-    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13,  6,  7, 14, 21, 28,
-    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
-    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+  0 ,1 ,5 ,6 ,14,15,27,28,
+  2 ,4 ,7 ,13,16,26,29,42,
+  3 ,8 ,12,17,25,30,41,43,
+  9 ,11,18,24,31,40,44,53,
+  10,19,23,32,39,45,52,54,
+  20,22,33,38,46,51,55,60,
+  21,34,37,47,50,56,59,61,
+  35,36,48,49,57,58,62,63,
 };
 
-const std::array<std::array<double, 8>, 8> &idct_basis() {
-  static const std::array<std::array<double, 8>, 8> basis = [] {
-    std::array<std::array<double, 8>, 8> table{};
-    for (int x = 0; x < 8; ++x) {
-      for (int u = 0; u < 8; ++u) {
-        const double cu = (u == 0) ? (1.0 / std::sqrt(2.0)) : 1.0;
-        table[x][u] =
-            cu * std::cos(((2.0 * static_cast<double>(x)) + 1.0) *
-                          static_cast<double>(u) * kPi / 16.0);
-      }
-    }
-    return table;
-  }();
-  return basis;
-}
+constexpr std::array<s16, 64> kDefaultScaleTable = {
+    static_cast<s16>(0x5A82), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x5A82), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x5A82), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x5A82), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x7D8A), static_cast<s16>(0x6A6D),
+    static_cast<s16>(0x471C), static_cast<s16>(0x18F8),
+    static_cast<s16>(0xE707), static_cast<s16>(0xB8E3),
+    static_cast<s16>(0x9592), static_cast<s16>(0x8275),
+    static_cast<s16>(0x7641), static_cast<s16>(0x30FB),
+    static_cast<s16>(0xCF04), static_cast<s16>(0x89BE),
+    static_cast<s16>(0x89BE), static_cast<s16>(0xCF04),
+    static_cast<s16>(0x30FB), static_cast<s16>(0x7641),
+    static_cast<s16>(0x6A6D), static_cast<s16>(0xE707),
+    static_cast<s16>(0x8275), static_cast<s16>(0xB8E3),
+    static_cast<s16>(0x471C), static_cast<s16>(0x7D8A),
+    static_cast<s16>(0x18F8), static_cast<s16>(0x9592),
+    static_cast<s16>(0x5A82), static_cast<s16>(0xA57D),
+    static_cast<s16>(0xA57D), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x5A82), static_cast<s16>(0xA57D),
+    static_cast<s16>(0xA57D), static_cast<s16>(0x5A82),
+    static_cast<s16>(0x471C), static_cast<s16>(0x8275),
+    static_cast<s16>(0x18F8), static_cast<s16>(0x6A6D),
+    static_cast<s16>(0x9592), static_cast<s16>(0xE707),
+    static_cast<s16>(0x7D8A), static_cast<s16>(0xB8E3),
+    static_cast<s16>(0x30FB), static_cast<s16>(0x89BE),
+    static_cast<s16>(0x7641), static_cast<s16>(0xCF04),
+    static_cast<s16>(0xCF04), static_cast<s16>(0x7641),
+    static_cast<s16>(0x89BE), static_cast<s16>(0x30FB),
+    static_cast<s16>(0x18F8), static_cast<s16>(0xB8E3),
+    static_cast<s16>(0x6A6D), static_cast<s16>(0x8275),
+    static_cast<s16>(0x7D8A), static_cast<s16>(0x9592),
+    static_cast<s16>(0x471C), static_cast<s16>(0xE707),
+};
 } // namespace
 
 void Mdec::reset() {
@@ -40,7 +60,7 @@ void Mdec::reset() {
   input_words_.clear();
   quant_luma_.fill(1);
   quant_chroma_.fill(1);
-  scale_table_.fill(0);
+  scale_table_ = kDefaultScaleTable;
   status_command_bits_ = 0;
   current_block_ = 4;
   output_depth_ = 2;
@@ -419,42 +439,26 @@ bool Mdec::decode_block(const std::vector<u16> &src, size_t &pos, Block &block,
 }
 
 void Mdec::idct(const Block &coeffs, Block &pixels) const {
-  bool dc_only = true;
-  for (size_t i = 1; i < coeffs.size(); ++i) {
-    if (coeffs[i] != 0) {
-      dc_only = false;
-      break;
-    }
-  }
-  if (dc_only) {
-    const int dc = static_cast<int>(std::lround(static_cast<double>(coeffs[0]) / 8.0));
-    pixels.fill(dc);
-    return;
-  }
-
-  const auto &basis = idct_basis();
-  std::array<std::array<double, 8>, 8> temp{};
-
-  for (int y = 0; y < 8; ++y) {
+  Block src = coeffs;
+  Block dst{};
+  for (int pass = 0; pass < 2; ++pass) {
     for (int x = 0; x < 8; ++x) {
-      double sum = 0.0;
-      for (int u = 0; u < 8; ++u) {
-        sum += basis[x][u] * static_cast<double>(coeffs[static_cast<size_t>(y) * 8 + u]);
+      for (int y = 0; y < 8; ++y) {
+        s64 sum = 0;
+        for (int z = 0; z < 8; ++z) {
+          const int sample = src[static_cast<size_t>(y) + static_cast<size_t>(z) * 8];
+          const int scale = static_cast<int>(scale_table_[static_cast<size_t>(x) +
+                                                          static_cast<size_t>(z) * 8]) >>
+                            3;
+          sum += static_cast<s64>(sample) * static_cast<s64>(scale);
+        }
+        dst[static_cast<size_t>(x) + static_cast<size_t>(y) * 8] =
+            static_cast<int>((sum + 0x0FFF) >> 13);
       }
-      temp[static_cast<size_t>(y)][static_cast<size_t>(x)] = sum * 0.5;
     }
+    src = dst;
   }
-
-  for (int y = 0; y < 8; ++y) {
-    for (int x = 0; x < 8; ++x) {
-      double sum = 0.0;
-      for (int v = 0; v < 8; ++v) {
-        sum += basis[y][v] * temp[static_cast<size_t>(v)][static_cast<size_t>(x)];
-      }
-      pixels[static_cast<size_t>(y) * 8 + x] =
-          static_cast<int>(std::lround(sum * 0.5));
-    }
-  }
+  pixels = src;
 }
 
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
@@ -489,9 +493,9 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
         push_output_byte(static_cast<u8>(rgb15 & 0xFFu));
         push_output_byte(static_cast<u8>(rgb15 >> 8));
       } else {
-        push_output_byte(encode_component(r));
-        push_output_byte(encode_component(g));
         push_output_byte(encode_component(b));
+        push_output_byte(encode_component(g));
+        push_output_byte(encode_component(r));
       }
     }
   }
