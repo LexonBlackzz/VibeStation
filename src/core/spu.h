@@ -146,6 +146,7 @@ public:
   u16 read16(u32 offset) const;
   void write16(u32 offset, u16 value);
   void corrupt_ram_byte(u32 offset, u8 value);
+  void corrupt_runtime_state(u32 selector, u32 value);
   void dma_write(u32 value);
   u32 dma_read();
   bool dma_request() const;

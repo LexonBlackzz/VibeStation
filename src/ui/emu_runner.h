@@ -44,6 +44,8 @@ public:
   double speed() const { return speed_.load(std::memory_order_acquire); }
 
   void set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry);
+  void request_live_disc_insert(const std::string &bin_path,
+                                const std::string &cue_path);
   bool consume_latest_frame(FrameSnapshot &out_frame);
   RuntimeSnapshot runtime_snapshot() const;
 
@@ -52,6 +54,7 @@ private:
   static void unpack_input(u64 packed, u16 &buttons, u8 &lx, u8 &ly, u8 &rx,
                            u8 &ry);
   void apply_input_state(System &system);
+  void apply_pending_disc_insert();
   bool should_capture_frame() const;
   void publish_frame(FrameSnapshot &&frame, const RuntimeSnapshot &snapshot);
   void publish_snapshot(const RuntimeSnapshot &snapshot);
@@ -79,4 +82,9 @@ private:
 
   mutable std::mutex snapshot_mutex_;
   RuntimeSnapshot latest_snapshot_{};
+
+  mutable std::mutex disc_request_mutex_;
+  bool has_pending_disc_request_ = false;
+  std::string pending_disc_bin_path_;
+  std::string pending_disc_cue_path_;
 };

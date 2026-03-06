@@ -31,6 +31,8 @@ public:
   void reset();
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
+  bool swap_disc_image(const std::string &bin_path, const std::string &cue_path);
+  void notify_disc_inserted();
   bool is_disc_inserted() const { return disc_loaded_; }
   bool track_map_valid() const { return track_map_valid_; }
   const std::string &resolved_disc_path() const { return resolved_disc_path_; }
@@ -173,6 +175,9 @@ private:
   bool xa_stream_valid_ = false;
   u8 xa_stream_file_ = 0;
   u8 xa_stream_channel_ = 0;
+  bool insert_probe_active_ = false;
+  int insert_probe_delay_cycles_ = 0;
+  int insert_probe_stage_ = 0;
 
   // Status byte
   u8 stat_byte() const;
@@ -201,6 +206,7 @@ private:
   void cmd_getloc_l();
   void cmd_getloc_p();
   void cmd_readtoc();
+  void execute_internal_command(u8 cmd, std::initializer_list<u8> params);
 
   // Helpers
   int msf_to_lba(u8 mm, u8 ss, u8 ff) const;

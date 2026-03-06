@@ -247,6 +247,96 @@ void Spu::corrupt_ram_byte(u32 offset, u8 value) {
   spu_ram_[addr] = value;
 }
 
+void Spu::corrupt_runtime_state(u32 selector, u32 value) {
+  switch (selector % 8u) {
+  case 0: {
+    const int voice = static_cast<int>(value % NUM_VOICES);
+    const u32 base = static_cast<u32>(voice) * VOICE_REG_STRIDE;
+    const u16 pitch = regs_[(base + 0x4u) / 2u];
+    const int semitone = static_cast<int>((value >> 8) & 0x0Fu) - 8;
+    const double scale = std::pow(2.0, static_cast<double>(semitone) / 12.0);
+    const u32 next = static_cast<u32>(std::clamp(
+        static_cast<int>(std::lround(static_cast<double>(pitch) * scale)), 1,
+        0x3FFF));
+    regs_[(base + 0x4u) / 2u] = static_cast<u16>(next);
+    break;
+  }
+  case 1: {
+    const int voice = static_cast<int>(value % NUM_VOICES);
+    VoiceState &vs = voices_[voice];
+    vs.release_shift = static_cast<u8>((value >> 4) & 0x1Fu);
+    vs.release_exp = ((value >> 9) & 0x1u) != 0;
+    vs.sustain_shift = static_cast<u8>((value >> 10) & 0x1Fu);
+    vs.sustain_step = static_cast<u8>((value >> 15) & 0x3u);
+    vs.sustain_exp = ((value >> 17) & 0x1u) != 0;
+    vs.sustain_decrease = ((value >> 18) & 0x1u) != 0;
+    break;
+  }
+  case 2: {
+    const int voice = static_cast<int>(value % NUM_VOICES);
+    VoiceState &vs = voices_[voice];
+    vs.attack_shift = static_cast<u8>((value >> 0) & 0x1Fu);
+    vs.attack_step = static_cast<u8>((value >> 5) & 0x3u);
+    vs.attack_exp = ((value >> 7) & 0x1u) != 0;
+    vs.decay_shift = static_cast<u8>((value >> 8) & 0x0Fu);
+    vs.sustain_level = static_cast<u16>(value & 0x7FFFu);
+    break;
+  }
+  case 3: {
+    const size_t index = static_cast<size_t>(value % reverb_regs_.raw.size());
+    reverb_regs_.raw[index] ^= static_cast<u16>(value & 0xFFFFu);
+    decode_reverb_regs();
+    audio_diag_.saw_reverb_config_write = true;
+    break;
+  }
+  case 4:
+    reverb_depth_l_ = sat16(static_cast<s32>(reverb_depth_l_) +
+                            static_cast<s32>(static_cast<int>(value & 0xFFu) - 128) *
+                                128);
+    reverb_depth_r_ = sat16(static_cast<s32>(reverb_depth_r_) +
+                            static_cast<s32>(static_cast<int>((value >> 8) & 0xFFu) -
+                                             128) *
+                                128);
+    master_vol_l_ = sat16(static_cast<s32>(master_vol_l_) +
+                          static_cast<s32>(static_cast<int>((value >> 16) & 0xFFu) -
+                                           128) *
+                              128);
+    master_vol_r_ = sat16(static_cast<s32>(master_vol_r_) +
+                          static_cast<s32>(static_cast<int>((value >> 24) & 0xFFu) -
+                                           128) *
+                              128);
+    break;
+  case 5:
+    cd_vol_l_ = sat16(static_cast<s32>(cd_vol_l_) +
+                      static_cast<s32>(static_cast<int>(value & 0xFFu) - 128) * 128);
+    cd_vol_r_ = sat16(static_cast<s32>(cd_vol_r_) +
+                      static_cast<s32>(static_cast<int>((value >> 8) & 0xFFu) - 128) *
+                          128);
+    ext_vol_l_ = sat16(static_cast<s32>(ext_vol_l_) +
+                       static_cast<s32>(static_cast<int>((value >> 16) & 0xFFu) - 128) *
+                           128);
+    ext_vol_r_ = sat16(static_cast<s32>(ext_vol_r_) +
+                       static_cast<s32>(static_cast<int>((value >> 24) & 0xFFu) - 128) *
+                           128);
+    break;
+  case 6:
+    reverb_on_mask_ ^= value & 0x00FFFFFFu;
+    pitch_mod_mask_ ^= ((value << 5) | (value >> 7)) & 0x00FFFFFFu;
+    noise_on_mask_ ^= ((value << 11) | (value >> 3)) & 0x00FFFFFFu;
+    break;
+  case 7:
+    reverb_base_addr_ =
+        ((reverb_base_addr_ ^ ((value & 0xFFFFu) * 8u)) & SPU_RAM_WORD_MASK);
+    reverb_state_.cursor =
+        (reverb_state_.cursor + ((value >> 16) & 0x3FFu)) %
+        std::max<u32>(1u, reverb_work_size_bytes());
+    audio_diag_.saw_reverb_config_write = true;
+    break;
+  default:
+    break;
+  }
+}
+
 u16 Spu::spucnt_effective() const {
   return static_cast<u16>((spucnt_ & 0xFFC0u) | (spucnt_mode_latched_ & 0x003Fu));
 }

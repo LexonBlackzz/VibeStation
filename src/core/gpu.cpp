@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "system.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 
@@ -273,6 +274,166 @@ void Gpu::corrupt_vram_word(u32 index, u16 value) {
   vram_[safe_index] = value;
 }
 
+void Gpu::corrupt_render_state(u32 selector, u32 value) {
+  switch (selector % 10u) {
+  case 0:
+    draw_x_offset_ = sign_extend_11(value);
+    draw_y_offset_ = sign_extend_11(value >> 11);
+    break;
+  case 1:
+    draw_x_min_ = static_cast<s16>(value % psx::VRAM_WIDTH);
+    draw_y_min_ = static_cast<s16>((value >> 10) % psx::VRAM_HEIGHT);
+    if (draw_x_max_ < draw_x_min_) {
+      draw_x_max_ = draw_x_min_;
+    }
+    if (draw_y_max_ < draw_y_min_) {
+      draw_y_max_ = draw_y_min_;
+    }
+    break;
+  case 2:
+    draw_x_max_ = static_cast<s16>(value % psx::VRAM_WIDTH);
+    draw_y_max_ = static_cast<s16>((value >> 10) % psx::VRAM_HEIGHT);
+    if (draw_x_min_ > draw_x_max_) {
+      draw_x_min_ = draw_x_max_;
+    }
+    if (draw_y_min_ > draw_y_max_) {
+      draw_y_min_ = draw_y_max_;
+    }
+    break;
+  case 3:
+    texpage_ = static_cast<u16>(value & 0x1FFu);
+    semi_transparency_ = static_cast<u8>((value >> 9) & 0x3u);
+    dither_enabled_ = ((value >> 11) & 0x1u) != 0;
+    texture_disable_ = ((value >> 12) & 0x1u) != 0;
+    tex_rect_x_flip_ = ((value >> 13) & 0x1u) != 0;
+    tex_rect_y_flip_ = ((value >> 14) & 0x1u) != 0;
+    break;
+  case 4:
+    clut_ = static_cast<u16>(value & 0x7FFFu);
+    break;
+  case 5:
+    tex_window_mask_x_ = static_cast<u16>((value & 0x1Fu) * 8u);
+    tex_window_mask_y_ = static_cast<u16>(((value >> 5) & 0x1Fu) * 8u);
+    tex_window_off_x_ = static_cast<u16>(((value >> 10) & 0x1Fu) * 8u);
+    tex_window_off_y_ = static_cast<u16>(((value >> 15) & 0x1Fu) * 8u);
+    break;
+  case 6:
+    display_.x_start = static_cast<u16>(value & 0x3FEu);
+    display_.y_start = static_cast<u16>((value >> 10) & 0x1FFu);
+    break;
+  case 7:
+    display_.hres = static_cast<u8>(value % 5u);
+    display_.vres = static_cast<u8>((value >> 3) & 0x1u);
+    display_.is_pal = ((value >> 4) & 0x1u) != 0;
+    display_.is_24bit = ((value >> 5) & 0x1u) != 0;
+    display_.interlaced = ((value >> 6) & 0x1u) != 0;
+    display_.display_enabled = ((value >> 7) & 0x1u) == 0;
+    break;
+  case 8:
+    draw_to_display_ = ((value >> 0) & 0x1u) != 0;
+    force_set_mask_bit_ = ((value >> 1) & 0x1u) != 0;
+    check_mask_before_draw_ = ((value >> 2) & 0x1u) != 0;
+    irq1_pending_ = ((value >> 3) & 0x1u) != 0;
+    break;
+  case 9:
+    if (!gp0_buffer_.empty()) {
+      const size_t index = static_cast<size_t>(value) % gp0_buffer_.size();
+      gp0_buffer_[index] ^= (value | 1u);
+    } else {
+      gpuread_latch_ ^= value;
+    }
+    break;
+  default:
+    break;
+  }
+}
+
+void Gpu::set_reaper_pulse(u32 geometry_mutations, u32 texture_mutations,
+                           u32 seed) {
+  reaper_pending_geometry_ = geometry_mutations;
+  reaper_pending_texture_ = texture_mutations;
+  reaper_state_ = seed ? seed : 0xA341316Cu;
+}
+
+u32 Gpu::next_reaper_noise() {
+  reaper_state_ ^= (reaper_state_ << 13);
+  reaper_state_ ^= (reaper_state_ >> 17);
+  reaper_state_ ^= (reaper_state_ << 5);
+  return reaper_state_;
+}
+
+bool Gpu::is_textured_primitive_opcode(u8 opcode) {
+  return (opcode >= 0x24 && opcode <= 0x27) ||
+         (opcode >= 0x2C && opcode <= 0x2F) ||
+         (opcode >= 0x34 && opcode <= 0x37) ||
+         (opcode >= 0x3C && opcode <= 0x3F) ||
+         (opcode >= 0x64 && opcode <= 0x67) ||
+         (opcode >= 0x74 && opcode <= 0x77) ||
+         (opcode >= 0x7C && opcode <= 0x7F);
+}
+
+bool Gpu::is_draw_primitive_opcode(u8 opcode) {
+  return opcode >= 0x20 && opcode <= 0x7F;
+}
+
+u32 Gpu::mutate_vertex_word(u32 word, u32 noise) {
+  s32 x = static_cast<s16>(word & 0xFFFFu);
+  s32 y = static_cast<s16>((word >> 16) & 0xFFFFu);
+  x += static_cast<s32>(static_cast<int>(noise & 0xFFu) - 128);
+  y += static_cast<s32>(static_cast<int>((noise >> 8) & 0xFFu) - 128);
+  x = std::max<s32>(-1024, std::min<s32>(1023, x));
+  y = std::max<s32>(-512, std::min<s32>(511, y));
+  return (static_cast<u32>(static_cast<u16>(x)) & 0xFFFFu) |
+         ((static_cast<u32>(static_cast<u16>(y)) & 0xFFFFu) << 16);
+}
+
+void Gpu::apply_reaper_to_gp0_command() {
+  if (gp0_buffer_.empty()) {
+    return;
+  }
+
+  const u8 opcode = static_cast<u8>(gp0_command_);
+  if (reaper_pending_geometry_ > 0 && is_draw_primitive_opcode(opcode)) {
+    std::vector<size_t> vertex_indices;
+    for (size_t i = 1; i < gp0_buffer_.size(); ++i) {
+      if ((i % 2u) == 1u) {
+        vertex_indices.push_back(i);
+      }
+    }
+    if (!vertex_indices.empty()) {
+      const u32 noise = next_reaper_noise();
+      const size_t slot = vertex_indices[noise % vertex_indices.size()];
+      gp0_buffer_[slot] = mutate_vertex_word(gp0_buffer_[slot], noise);
+      --reaper_pending_geometry_;
+    }
+  }
+
+  if (reaper_pending_texture_ == 0) {
+    return;
+  }
+
+  if (is_textured_primitive_opcode(opcode)) {
+    std::vector<size_t> texture_indices;
+    for (size_t i = 2; i < gp0_buffer_.size(); ++i) {
+      if ((i % 2u) == 0u) {
+        texture_indices.push_back(i);
+      }
+    }
+    if (!texture_indices.empty()) {
+      const u32 noise = next_reaper_noise();
+      const size_t slot = texture_indices[noise % texture_indices.size()];
+      gp0_buffer_[slot] ^= noise;
+      --reaper_pending_texture_;
+    }
+    return;
+  }
+
+  if (opcode >= 0xE1 && opcode <= 0xE2) {
+    gp0_buffer_[0] ^= (next_reaper_noise() & 0x00FFFFFFu);
+    --reaper_pending_texture_;
+  }
+}
+
 void Gpu::gp0(u32 command) {
   const bool profile_detailed = g_profile_detailed_timing;
   std::chrono::high_resolution_clock::time_point start{};
@@ -334,6 +495,8 @@ void Gpu::gp0(u32 command) {
 
   if (gp0_words_remaining_ > 0)
     return;
+
+  apply_reaper_to_gp0_command();
 
   // Full command received — dispatch
   u8 op = gp0_command_;

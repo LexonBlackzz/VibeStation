@@ -76,6 +76,8 @@ public:
   // VRAM access
   const u16 *vram() const { return vram_.data(); }
   void corrupt_vram_word(u32 index, u16 value);
+  void corrupt_render_state(u32 selector, u32 value);
+  void set_reaper_pulse(u32 geometry_mutations, u32 texture_mutations, u32 seed);
   const DisplayMode &display_mode() const { return display_; }
   DisplaySampleInfo build_display_rgba(std::vector<u32> *rgba,
                                        bool include_stats = true) const;
@@ -223,4 +225,13 @@ private:
   Color polyline_flat_color_{};
   Color polyline_prev_color_{};
   u32 polyline_pending_color_word_ = 0;
+  u32 reaper_pending_geometry_ = 0;
+  u32 reaper_pending_texture_ = 0;
+  u32 reaper_state_ = 0;
+
+  u32 next_reaper_noise();
+  void apply_reaper_to_gp0_command();
+  static bool is_textured_primitive_opcode(u8 opcode);
+  static bool is_draw_primitive_opcode(u8 opcode);
+  static u32 mutate_vertex_word(u32 word, u32 noise);
 };

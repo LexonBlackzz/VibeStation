@@ -88,6 +88,14 @@ void EmuRunner::set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry) {
                        std::memory_order_release);
 }
 
+void EmuRunner::request_live_disc_insert(const std::string &bin_path,
+                                         const std::string &cue_path) {
+  std::lock_guard<std::mutex> lock(disc_request_mutex_);
+  pending_disc_bin_path_ = bin_path;
+  pending_disc_cue_path_ = cue_path;
+  has_pending_disc_request_ = true;
+}
+
 bool EmuRunner::consume_latest_frame(FrameSnapshot &out_frame) {
   std::lock_guard<std::mutex> lock(frame_mutex_);
   if (!has_pending_frame_) {
@@ -161,6 +169,30 @@ void EmuRunner::publish_snapshot(const RuntimeSnapshot &snapshot) {
   latest_snapshot_ = snapshot;
 }
 
+void EmuRunner::apply_pending_disc_insert() {
+  std::string bin_path;
+  std::string cue_path;
+  {
+    std::lock_guard<std::mutex> lock(disc_request_mutex_);
+    if (!has_pending_disc_request_) {
+      return;
+    }
+    bin_path = pending_disc_bin_path_;
+    cue_path = pending_disc_cue_path_;
+    has_pending_disc_request_ = false;
+    pending_disc_bin_path_.clear();
+    pending_disc_cue_path_.clear();
+  }
+
+  if (system_ == nullptr) {
+    return;
+  }
+
+  if (system_->swap_disc_image(bin_path, cue_path)) {
+    system_->notify_disc_inserted();
+  }
+}
+
 void EmuRunner::worker_main() {
   SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
 
@@ -173,6 +205,7 @@ void EmuRunner::worker_main() {
     RuntimeSnapshot snapshot{};
 
     apply_input_state(*system_);
+    apply_pending_disc_insert();
     system_->run_frame(false);
 
     snapshot.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
@@ -182,25 +215,23 @@ void EmuRunner::worker_main() {
     snapshot.core_frame_ms = snapshot.profiling.total_ms;
     snapshot.spu_audio = system_->spu_audio_diag();
 
-    if (g_spu_advanced_sound_status) {
-      const auto &spu = system_->spu();
-      const auto abs16 = [](s16 value) -> int {
-        const int v = static_cast<int>(value);
-        return (v < 0) ? -v : v;
-      };
-      for (size_t voice = 0; voice < snapshot.spu_voice_level_l.size(); ++voice) {
-        const u32 base = 0x200u + (static_cast<u32>(voice) * 4u);
-        const s16 level_l = static_cast<s16>(spu.read16(base + 0u));
-        const s16 level_r = static_cast<s16>(spu.read16(base + 2u));
-        snapshot.spu_voice_level_l[voice] = level_l;
-        snapshot.spu_voice_level_r[voice] = level_r;
-        snapshot.spu_voice_active[voice] =
-            (abs16(level_l) != 0) || (abs16(level_r) != 0);
-      }
-      const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
-      const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
-      snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
+    const auto &spu = system_->spu();
+    const auto abs16 = [](s16 value) -> int {
+      const int v = static_cast<int>(value);
+      return (v < 0) ? -v : v;
+    };
+    for (size_t voice = 0; voice < snapshot.spu_voice_level_l.size(); ++voice) {
+      const u32 base = 0x200u + (static_cast<u32>(voice) * 4u);
+      const s16 level_l = static_cast<s16>(spu.read16(base + 0u));
+      const s16 level_r = static_cast<s16>(spu.read16(base + 2u));
+      snapshot.spu_voice_level_l[voice] = level_l;
+      snapshot.spu_voice_level_r[voice] = level_r;
+      snapshot.spu_voice_active[voice] =
+          (abs16(level_l) != 0) || (abs16(level_r) != 0);
     }
+    const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
+    const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
+    snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
 
     if (should_capture_frame()) {
       FrameSnapshot frame{};

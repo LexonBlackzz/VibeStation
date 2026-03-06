@@ -47,6 +47,29 @@ namespace {
         }
         return cfg;
     }
+
+    System::GpuReaperConfig sanitize_gpu_reaper_config(
+        const System::GpuReaperConfig& input) {
+        System::GpuReaperConfig cfg = input;
+        cfg.writes_per_frame = std::min(cfg.writes_per_frame, 5000u);
+        cfg.intensity_percent = std::max(0.0f, std::min(100.0f, cfg.intensity_percent));
+        return cfg;
+    }
+
+    System::SoundReaperConfig sanitize_sound_reaper_config(
+        const System::SoundReaperConfig& input) {
+        System::SoundReaperConfig cfg = input;
+        cfg.writes_per_frame = std::min(cfg.writes_per_frame, 5000u);
+        cfg.intensity_percent = std::max(0.0f, std::min(100.0f, cfg.intensity_percent));
+        return cfg;
+    }
+
+    void seed_mt19937(std::mt19937& rng, u64 seed) {
+        const u32 lo = static_cast<u32>(seed & 0xFFFFFFFFull);
+        const u32 hi = static_cast<u32>((seed >> 32) & 0xFFFFFFFFull);
+        std::seed_seq seq{ lo, hi, 0x9E3779B9u, 0x243F6A88u };
+        rng.seed(seq);
+    }
 } // namespace
 
 // Timer IRQ helper
@@ -200,6 +223,8 @@ void System::run_frame(bool sample_display_diag) {
     reset_profiling_stats();
     const bool profile_detailed = g_profile_detailed_timing;
     apply_ram_reaper_for_frame();
+    apply_gpu_reaper_for_frame();
+    apply_sound_reaper_for_frame();
 
     const bool pal = gpu_.display_mode().is_pal;
     const u32 scanlines_per_frame = pal ? 314 : 263;
@@ -448,6 +473,93 @@ void System::disable_ram_reaper() {
     set_ram_reaper_config(cfg);
 }
 
+void System::set_gpu_reaper_config(const GpuReaperConfig& config) {
+    const GpuReaperConfig sanitized = sanitize_gpu_reaper_config(config);
+    gpu_reaper_enabled_.store(sanitized.enabled, std::memory_order_release);
+    gpu_reaper_writes_per_frame_.store(sanitized.writes_per_frame,
+        std::memory_order_release);
+    const u32 intensity_x10 = static_cast<u32>(std::lround(
+        static_cast<double>(sanitized.intensity_percent) * 10.0));
+    gpu_reaper_intensity_x10_.store(intensity_x10, std::memory_order_release);
+    gpu_reaper_affect_geometry_.store(sanitized.affect_geometry,
+        std::memory_order_release);
+    gpu_reaper_affect_texture_state_.store(sanitized.affect_texture_state,
+        std::memory_order_release);
+    gpu_reaper_affect_display_state_.store(sanitized.affect_display_state,
+        std::memory_order_release);
+    gpu_reaper_use_custom_seed_.store(sanitized.use_custom_seed,
+        std::memory_order_release);
+    gpu_reaper_seed_.store(sanitized.seed, std::memory_order_release);
+}
+
+System::GpuReaperConfig System::gpu_reaper_config() const {
+    GpuReaperConfig cfg{};
+    cfg.enabled = gpu_reaper_enabled_.load(std::memory_order_acquire);
+    cfg.writes_per_frame =
+        gpu_reaper_writes_per_frame_.load(std::memory_order_acquire);
+    cfg.intensity_percent =
+        static_cast<float>(gpu_reaper_intensity_x10_.load(std::memory_order_acquire)) /
+        10.0f;
+    cfg.affect_geometry =
+        gpu_reaper_affect_geometry_.load(std::memory_order_acquire);
+    cfg.affect_texture_state =
+        gpu_reaper_affect_texture_state_.load(std::memory_order_acquire);
+    cfg.affect_display_state =
+        gpu_reaper_affect_display_state_.load(std::memory_order_acquire);
+    cfg.use_custom_seed =
+        gpu_reaper_use_custom_seed_.load(std::memory_order_acquire);
+    cfg.seed = gpu_reaper_seed_.load(std::memory_order_acquire);
+    return sanitize_gpu_reaper_config(cfg);
+}
+
+void System::disable_gpu_reaper() {
+    GpuReaperConfig cfg = gpu_reaper_config();
+    cfg.enabled = false;
+    set_gpu_reaper_config(cfg);
+}
+
+void System::set_sound_reaper_config(const SoundReaperConfig& config) {
+    const SoundReaperConfig sanitized = sanitize_sound_reaper_config(config);
+    sound_reaper_enabled_.store(sanitized.enabled, std::memory_order_release);
+    sound_reaper_writes_per_frame_.store(sanitized.writes_per_frame,
+        std::memory_order_release);
+    const u32 intensity_x10 = static_cast<u32>(std::lround(
+        static_cast<double>(sanitized.intensity_percent) * 10.0));
+    sound_reaper_intensity_x10_.store(intensity_x10, std::memory_order_release);
+    sound_reaper_affect_pitch_.store(sanitized.affect_pitch, std::memory_order_release);
+    sound_reaper_affect_envelope_.store(sanitized.affect_envelope,
+        std::memory_order_release);
+    sound_reaper_affect_reverb_.store(sanitized.affect_reverb, std::memory_order_release);
+    sound_reaper_affect_mixer_.store(sanitized.affect_mixer, std::memory_order_release);
+    sound_reaper_use_custom_seed_.store(sanitized.use_custom_seed,
+        std::memory_order_release);
+    sound_reaper_seed_.store(sanitized.seed, std::memory_order_release);
+}
+
+System::SoundReaperConfig System::sound_reaper_config() const {
+    SoundReaperConfig cfg{};
+    cfg.enabled = sound_reaper_enabled_.load(std::memory_order_acquire);
+    cfg.writes_per_frame =
+        sound_reaper_writes_per_frame_.load(std::memory_order_acquire);
+    cfg.intensity_percent =
+        static_cast<float>(sound_reaper_intensity_x10_.load(std::memory_order_acquire)) /
+        10.0f;
+    cfg.affect_pitch = sound_reaper_affect_pitch_.load(std::memory_order_acquire);
+    cfg.affect_envelope = sound_reaper_affect_envelope_.load(std::memory_order_acquire);
+    cfg.affect_reverb = sound_reaper_affect_reverb_.load(std::memory_order_acquire);
+    cfg.affect_mixer = sound_reaper_affect_mixer_.load(std::memory_order_acquire);
+    cfg.use_custom_seed =
+        sound_reaper_use_custom_seed_.load(std::memory_order_acquire);
+    cfg.seed = sound_reaper_seed_.load(std::memory_order_acquire);
+    return sanitize_sound_reaper_config(cfg);
+}
+
+void System::disable_sound_reaper() {
+    SoundReaperConfig cfg = sound_reaper_config();
+    cfg.enabled = false;
+    set_sound_reaper_config(cfg);
+}
+
 void System::apply_ram_reaper_for_frame() {
     const RamReaperConfig cfg = ram_reaper_config();
     if (!cfg.enabled) {
@@ -465,9 +577,12 @@ void System::apply_ram_reaper_for_frame() {
     }
 
     if (reseed) {
-        const u32 seed =
-            cfg.use_custom_seed ? cfg.seed : static_cast<u32>(std::random_device{}());
-        ram_reaper_rng_.seed(seed);
+        const u64 seed =
+            cfg.use_custom_seed
+                ? cfg.seed
+                : ((static_cast<u64>(std::random_device{}()) << 32) ^
+                   static_cast<u64>(std::random_device{}()));
+        seed_mt19937(ram_reaper_rng_, seed);
         ram_reaper_last_seed_.store(seed, std::memory_order_release);
         ram_reaper_rng_seeded_ = true;
     }
@@ -551,6 +666,204 @@ void System::apply_ram_reaper_for_frame() {
         }
     }
     ram_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
+}
+
+void System::apply_gpu_reaper_for_frame() {
+    const GpuReaperConfig cfg = gpu_reaper_config();
+    if (!cfg.enabled) {
+        gpu_reaper_prev_enabled_ = false;
+        gpu_reaper_rng_seeded_ = false;
+        gpu_.set_reaper_pulse(0, 0, 0);
+        return;
+    }
+
+    bool reseed = !gpu_reaper_rng_seeded_ || !gpu_reaper_prev_enabled_;
+    if (cfg.use_custom_seed != gpu_reaper_prev_use_custom_seed_) {
+        reseed = true;
+    }
+    if (cfg.use_custom_seed && (cfg.seed != gpu_reaper_prev_seed_)) {
+        reseed = true;
+    }
+
+    if (reseed) {
+        const u64 seed =
+            cfg.use_custom_seed
+                ? cfg.seed
+                : ((static_cast<u64>(std::random_device{}()) << 32) ^
+                   static_cast<u64>(std::random_device{}()));
+        seed_mt19937(gpu_reaper_rng_, seed);
+        gpu_reaper_last_seed_.store(seed, std::memory_order_release);
+        gpu_reaper_rng_seeded_ = true;
+    }
+
+    gpu_reaper_prev_enabled_ = true;
+    gpu_reaper_prev_use_custom_seed_ = cfg.use_custom_seed;
+    gpu_reaper_prev_seed_ = cfg.seed;
+
+    if (cfg.writes_per_frame == 0 || cfg.intensity_percent <= 0.0f) {
+        return;
+    }
+
+    const u32 target_count = static_cast<u32>(cfg.affect_geometry ? 1u : 0u) +
+        static_cast<u32>(cfg.affect_texture_state ? 1u : 0u) +
+        static_cast<u32>(cfg.affect_display_state ? 1u : 0u);
+    if (target_count == 0) {
+        return;
+    }
+
+    const double desired_writes =
+        static_cast<double>(cfg.writes_per_frame) *
+        (static_cast<double>(cfg.intensity_percent) / 100.0);
+    u32 writes_this_frame = static_cast<u32>(std::floor(desired_writes));
+    const double frac = desired_writes - static_cast<double>(writes_this_frame);
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    if (unit_dist(gpu_reaper_rng_) < frac) {
+        ++writes_this_frame;
+    }
+    if (writes_this_frame == 0) {
+        return;
+    }
+
+    std::uniform_int_distribution<u32> pct_dist(0u, 99u);
+    const u32 burst_chance = static_cast<u32>(cfg.intensity_percent * 0.40f);
+    if (pct_dist(gpu_reaper_rng_) < burst_chance) {
+        const u32 burst_cap = std::max<u32>(1u, writes_this_frame / 2u + 1u);
+        std::uniform_int_distribution<u32> burst_dist(1u, burst_cap);
+        writes_this_frame += burst_dist(gpu_reaper_rng_);
+    }
+
+    std::uniform_int_distribution<u32> target_dist(0u, target_count - 1u);
+    u32 geometry_mutations = 0;
+    u32 texture_mutations = 0;
+    u64 mutations = 0;
+    for (u32 i = 0; i < writes_this_frame; ++i) {
+        const u32 target_index = target_dist(gpu_reaper_rng_);
+        u32 cursor = 0;
+        if (cfg.affect_geometry) {
+            if (cursor == target_index) {
+                ++geometry_mutations;
+                ++mutations;
+                continue;
+            }
+            ++cursor;
+        }
+        if (cfg.affect_texture_state) {
+            if (cursor == target_index) {
+                ++texture_mutations;
+                ++mutations;
+                continue;
+            }
+            ++cursor;
+        }
+        if (cfg.affect_display_state && cursor == target_index) {
+            gpu_.corrupt_render_state(6u + (gpu_reaper_rng_() % 3u),
+                gpu_reaper_rng_());
+            ++mutations;
+        }
+    }
+    gpu_.set_reaper_pulse(geometry_mutations, texture_mutations, gpu_reaper_rng_());
+    gpu_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
+}
+
+void System::apply_sound_reaper_for_frame() {
+    const SoundReaperConfig cfg = sound_reaper_config();
+    if (!cfg.enabled) {
+        sound_reaper_prev_enabled_ = false;
+        sound_reaper_rng_seeded_ = false;
+        return;
+    }
+
+    bool reseed = !sound_reaper_rng_seeded_ || !sound_reaper_prev_enabled_;
+    if (cfg.use_custom_seed != sound_reaper_prev_use_custom_seed_) {
+        reseed = true;
+    }
+    if (cfg.use_custom_seed && (cfg.seed != sound_reaper_prev_seed_)) {
+        reseed = true;
+    }
+
+    if (reseed) {
+        const u64 seed =
+            cfg.use_custom_seed
+                ? cfg.seed
+                : ((static_cast<u64>(std::random_device{}()) << 32) ^
+                   static_cast<u64>(std::random_device{}()));
+        seed_mt19937(sound_reaper_rng_, seed);
+        sound_reaper_last_seed_.store(seed, std::memory_order_release);
+        sound_reaper_rng_seeded_ = true;
+    }
+
+    sound_reaper_prev_enabled_ = true;
+    sound_reaper_prev_use_custom_seed_ = cfg.use_custom_seed;
+    sound_reaper_prev_seed_ = cfg.seed;
+
+    if (cfg.writes_per_frame == 0 || cfg.intensity_percent <= 0.0f) {
+        return;
+    }
+
+    const u32 target_count = static_cast<u32>(cfg.affect_pitch ? 1u : 0u) +
+        static_cast<u32>(cfg.affect_envelope ? 1u : 0u) +
+        static_cast<u32>(cfg.affect_reverb ? 1u : 0u) +
+        static_cast<u32>(cfg.affect_mixer ? 1u : 0u);
+    if (target_count == 0) {
+        return;
+    }
+
+    const double desired_writes =
+        static_cast<double>(cfg.writes_per_frame) *
+        (static_cast<double>(cfg.intensity_percent) / 100.0);
+    u32 writes_this_frame = static_cast<u32>(std::floor(desired_writes));
+    const double frac = desired_writes - static_cast<double>(writes_this_frame);
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    if (unit_dist(sound_reaper_rng_) < frac) {
+        ++writes_this_frame;
+    }
+    if (writes_this_frame == 0) {
+        return;
+    }
+
+    std::uniform_int_distribution<u32> pct_dist(0u, 99u);
+    const u32 burst_chance = static_cast<u32>(cfg.intensity_percent * 0.35f);
+    if (pct_dist(sound_reaper_rng_) < burst_chance) {
+        const u32 burst_cap = std::max<u32>(1u, writes_this_frame / 2u + 1u);
+        std::uniform_int_distribution<u32> burst_dist(1u, burst_cap);
+        writes_this_frame += burst_dist(sound_reaper_rng_);
+    }
+
+    std::uniform_int_distribution<u32> target_dist(0u, target_count - 1u);
+    u64 mutations = 0;
+    for (u32 i = 0; i < writes_this_frame; ++i) {
+        const u32 target_index = target_dist(sound_reaper_rng_);
+        u32 cursor = 0;
+        if (cfg.affect_pitch) {
+          if (cursor == target_index) {
+            spu_.corrupt_runtime_state(sound_reaper_rng_() % 1u, sound_reaper_rng_());
+            ++mutations;
+            continue;
+          }
+          ++cursor;
+        }
+        if (cfg.affect_envelope) {
+          if (cursor == target_index) {
+            spu_.corrupt_runtime_state(1u + (sound_reaper_rng_() % 2u), sound_reaper_rng_());
+            ++mutations;
+            continue;
+          }
+          ++cursor;
+        }
+        if (cfg.affect_reverb) {
+          if (cursor == target_index) {
+            spu_.corrupt_runtime_state(3u + (sound_reaper_rng_() % 2u), sound_reaper_rng_());
+            ++mutations;
+            continue;
+          }
+          ++cursor;
+        }
+        if (cfg.affect_mixer && cursor == target_index) {
+          spu_.corrupt_runtime_state(5u + (sound_reaper_rng_() % 3u), sound_reaper_rng_());
+          ++mutations;
+        }
+    }
+    sound_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
 }
 
 void System::step() {
