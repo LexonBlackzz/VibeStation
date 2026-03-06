@@ -13,8 +13,8 @@ Main UI ✅
 Real-time corrupter/BIOS corruption ✅
 
 ✅ - Implemented  
-⚠️ - Implemented, buggy 
-🚩 - Incomplete 
+⚠️ - Implemented, buggy  
+🚩 - Incomplete  
 ❌ - Not implemented/Doesn't work   
 
 ## Build requirements
