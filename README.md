@@ -1,4 +1,4 @@
-<img width="547" height="47" alt="image" src="https://github.com/user-attachments/assets/2f8cca92-22ed-48f1-ba97-ae7758d3f59b" /># VibeStation
+# VibeStation
 This is a fully vibe-coded PS1 emulator for fun. It is written in C++.
 
 ## Things implemented:
