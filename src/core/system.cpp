@@ -7,9 +7,68 @@
 
 namespace {
     constexpr u32 kMainRamMirrorWindow = 0x00800000u;
-    constexpr u32 kRamWatchStart = 0x00094000u;
-    constexpr u32 kRamWatchEnd = 0x00098000u;
-    constexpr u32 kRamWatchLogLimit = 48u;
+    constexpr u32 kRamWatchStart = 0x000479D0u;
+    constexpr u32 kRamWatchEnd = 0x00047A10u;
+    constexpr u32 kRamWatchWord0 = 0x000479D0u;
+    constexpr u32 kRamWatchLogLimit = 64u;
+
+    struct BusWarnLimiter {
+        u32 last_addr = 0xFFFFFFFFu;
+        u64 suppressed = 0;
+        u64 total = 0;
+    };
+
+void log_unhandled_bus_read(BusWarnLimiter& limiter, const char* width,
+        u32 phys, bool io_space) {
+        ++limiter.total;
+        if (phys == limiter.last_addr) {
+            ++limiter.suppressed;
+            if (limiter.suppressed <= 3 ||
+                (limiter.suppressed % 256u) == 0u) {
+                if (io_space) {
+                    LOG_WARN("BUS: Unhandled %s at I/O 0x%08X (repeat=%llu total=%llu)",
+                        width, phys,
+                        static_cast<unsigned long long>(limiter.suppressed),
+                        static_cast<unsigned long long>(limiter.total));
+                }
+                else {
+                    LOG_WARN("BUS: Unhandled %s at 0x%08X (repeat=%llu total=%llu)",
+                        width, phys,
+                        static_cast<unsigned long long>(limiter.suppressed),
+                        static_cast<unsigned long long>(limiter.total));
+                }
+            }
+            return;
+        }
+
+        if (limiter.suppressed > 3) {
+            LOG_WARN("BUS: Previous unhandled read at 0x%08X repeated %llu times",
+                limiter.last_addr,
+                static_cast<unsigned long long>(limiter.suppressed));
+        }
+
+        limiter.last_addr = phys;
+        limiter.suppressed = 0;
+        if (io_space) {
+            LOG_WARN("BUS: Unhandled %s at I/O 0x%08X (total=%llu)",
+                width, phys, static_cast<unsigned long long>(limiter.total));
+        }
+        else {
+            LOG_WARN("BUS: Unhandled %s at 0x%08X (total=%llu)",
+                width, phys, static_cast<unsigned long long>(limiter.total));
+        }
+    }
+
+    void log_ram_size_access(const char* op, u32 value, u32 pc, u32 sp, u32 ra) {
+        static u32 count = 0;
+        if (count >= 16u) {
+            return;
+        }
+        ++count;
+        LOG_WARN(
+            "BUS: RAM_SIZE %s val=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
+            op, value, pc, sp, ra);
+    }
 
     // PSX-SPX vertical refresh rates (native region clock):
     // NTSC interlaced     ~59.940 Hz
@@ -105,18 +164,55 @@ void System::note_sio_io(u32 phys_addr) {
 
 void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes) {
     static u32 watch_log_count = 0;
+    static u32 last_code_dump_pc = 0xFFFFFFFFu;
     const u32 ram_off = phys_addr & 0x001FFFFFu;
     if (ram_off < kRamWatchStart || ram_off >= kRamWatchEnd) {
+        return;
+    }
+    const u32 word0_end = kRamWatchWord0 + 4u;
+    if ((ram_off + size_bytes) <= kRamWatchWord0 || ram_off >= word0_end) {
+        return;
+    }
+    if (is_bios_rom_pc(cpu_.pc())) {
         return;
     }
     if (watch_log_count >= kRamWatchLogLimit) {
         return;
     }
+    u32 old_word = ram_.read32(kRamWatchWord0);
+    u32 new_word = old_word;
+    for (u32 i = 0; i < size_bytes; ++i) {
+        const u32 byte_addr = ram_off + i;
+        if (byte_addr < kRamWatchWord0 || byte_addr >= word0_end) {
+            continue;
+        }
+        const u32 shift = (byte_addr - kRamWatchWord0) * 8u;
+        const u32 byte_val = (value >> (i * 8u)) & 0xFFu;
+        new_word = (new_word & ~(0xFFu << shift)) | (byte_val << shift);
+    }
     ++watch_log_count;
     LOG_WARN(
-        "BUS: RAM watch write%u off=0x%08X phys=0x%08X val=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
-        size_bytes * 8u, ram_off, phys_addr, value, cpu_.pc(), cpu_.reg(29),
-        cpu_.reg(31));
+        "BUS: RAM watch write%u off=0x%08X phys=0x%08X val=0x%08X word0=0x%08X->0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
+        size_bytes * 8u, ram_off, phys_addr, value, old_word, new_word, cpu_.pc(),
+        cpu_.reg(29), cpu_.reg(31));
+
+    if (ram_off == kRamWatchWord0) {
+        LOG_WARN(
+            "BUS: stream-word0 write%u val=0x%08X slot=0x%08X sp=0x%08X ra=0x%08X",
+            size_bytes * 8u, value, ram_off, cpu_.reg(29), cpu_.reg(31));
+    }
+
+    if (ram_off == kRamWatchWord0 || (ram_off + size_bytes) > kRamWatchWord0) {
+        const u32 pc = cpu_.pc() & 0x1FFFFFFFu;
+        if (pc != last_code_dump_pc) {
+            last_code_dump_pc = pc;
+            LOG_WARN(
+                "BUS: watch code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+                pc - 0x08u, read32(pc - 0x08u), pc - 0x04u, read32(pc - 0x04u),
+                pc + 0x00u, read32(pc + 0x00u), pc + 0x04u, read32(pc + 0x04u),
+                pc + 0x08u, read32(pc + 0x08u));
+        }
+    }
 }
 
 void System::sync_spu_to_cpu() {
@@ -915,6 +1011,8 @@ u32 System::spu_dma_read() {
 // The PS1 memory map translated to hardware component dispatches.
 
 u8 System::read8(u32 addr) {
+    static BusWarnLimiter unhandled_r8_io;
+    static BusWarnLimiter unhandled_r8;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_r8_count = 0;
@@ -973,7 +1071,7 @@ u8 System::read8(u32 addr) {
         if (phys >= 0x1F802000)
             return 0xFF;
 
-        LOG_WARN("BUS: Unhandled read8 at I/O 0x%08X", phys);
+        log_unhandled_bus_read(unhandled_r8_io, "read8", phys, true);
         return 0xFF;
     }
 
@@ -984,11 +1082,13 @@ u8 System::read8(u32 addr) {
     if (phys >= 0xC0000000u)
         return 0xFF;
 
-    LOG_WARN("BUS: Unhandled read8 at 0x%08X", phys);
+    log_unhandled_bus_read(unhandled_r8, "read8", phys, false);
     return 0xFF;
 }
 
 u16 System::read16(u32 addr) {
+    static BusWarnLimiter unhandled_r16_io;
+    static BusWarnLimiter unhandled_r16;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_r16_count = 0;
@@ -1050,17 +1150,19 @@ u16 System::read16(u32 addr) {
             return spu_.read16(io - 0xC00);
         }
 
-        LOG_WARN("BUS: Unhandled read16 at I/O 0x%08X", phys);
+        log_unhandled_bus_read(unhandled_r16_io, "read16", phys, true);
         return 0xFFFF;
     }
 
     if (phys >= 0xC0000000u)
         return 0xFFFF;
-    LOG_WARN("BUS: Unhandled read16 at 0x%08X", phys);
+    log_unhandled_bus_read(unhandled_r16, "read16", phys, false);
     return 0xFFFF;
 }
 
 u32 System::read32(u32 addr) {
+    static BusWarnLimiter unhandled_r32_io;
+    static BusWarnLimiter unhandled_r32;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_r32_count = 0;
@@ -1089,8 +1191,11 @@ u32 System::read32(u32 addr) {
         if (io < 0x024)
             return mem_ctrl_[io / 4];
         // RAM size
-        if (io == 0x060)
+        if (io == 0x060) {
+            log_ram_size_access("read", ram_size_, cpu_.pc(), cpu_.reg(29),
+                cpu_.reg(31));
             return ram_size_;
+        }
         // Interrupt controller
         if (io >= 0x070 && io < 0x078)
             return irq_.read(io - 0x070);
@@ -1134,7 +1239,7 @@ u32 System::read32(u32 addr) {
             return lo | (static_cast<u32>(hi) << 16);
         }
 
-        LOG_WARN("BUS: Unhandled read32 at I/O 0x%08X", phys);
+        log_unhandled_bus_read(unhandled_r32_io, "read32", phys, true);
         return 0xFFFFFFFFu;
     }
 
@@ -1148,7 +1253,7 @@ u32 System::read32(u32 addr) {
     if (phys >= 0xC0000000u)
         return 0xFFFFFFFFu;
 
-    LOG_WARN("BUS: Unhandled read32 at 0x%08X", phys);
+    log_unhandled_bus_read(unhandled_r32, "read32", phys, false);
     return 0xFFFFFFFFu;
 }
 
@@ -1345,6 +1450,8 @@ void System::write32(u32 addr, u32 val) {
         }
         // RAM size
         if (io == 0x060) {
+            log_ram_size_access("write", val, cpu_.pc(), cpu_.reg(29),
+                cpu_.reg(31));
             ram_size_ = val;
             return;
         }

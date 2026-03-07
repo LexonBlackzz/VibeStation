@@ -32,6 +32,245 @@ void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
       cd.block_ctrl, cd.channel_ctrl,
       static_cast<unsigned long long>(cd.cpu_cycle), cd.from_ram ? 1u : 0u);
 }
+
+bool is_plausible_exec_addr(u32 addr) {
+  if (addr >= 0x00000000u && addr < 0x00800000u) {
+    return true;
+  }
+  if (addr >= 0x80000000u && addr < 0x80800000u) {
+    return true;
+  }
+  if (addr >= 0xA0000000u && addr < 0xA0800000u) {
+    return true;
+  }
+  if (addr >= 0xBFC00000u && addr < 0xBFC80000u) {
+    return true;
+  }
+  return false;
+}
+
+bool is_low_helper_addr(u32 addr) {
+  const u32 phys = addr & 0x1FFFFFFFu;
+  return phys >= 0x00002400u && phys <= 0x00002450u;
+}
+
+void log_stack_window(System *sys, const char *label, u32 sp) {
+  if (sys == nullptr || (sp & 3u) != 0u || !is_plausible_exec_addr(sp)) {
+    return;
+  }
+
+  LOG_WARN(
+      "%s sp=0x%08X [sp+10]=0x%08X [sp+14]=0x%08X [sp+18]=0x%08X [sp+1C]=0x%08X",
+      label, sp, sys->read32(sp + 0x10u), sys->read32(sp + 0x14u),
+      sys->read32(sp + 0x18u), sys->read32(sp + 0x1Cu));
+}
+
+void log_low_helper_call(System *sys, u32 pc, u32 ret_pc, const u32 *gpr,
+                         u32 target, const char *kind) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_target = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && target == last_target) {
+    return;
+  }
+  last_pc = pc;
+  last_target = target;
+
+  const u32 base = pc & 0x1FFFFFFFu;
+  LOG_WARN(
+      "CPU: low-helper call kind=%s pc=0x%08X target=0x%08X ret=0x%08X sp=0x%08X ra=0x%08X",
+      kind, pc, target, ret_pc, gpr[29], gpr[31]);
+  LOG_WARN(
+      "CPU: caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+      base - 0x08u, sys->read32(base - 0x08u), base - 0x04u,
+      sys->read32(base - 0x04u), base + 0x00u, sys->read32(base + 0x00u),
+      base + 0x04u, sys->read32(base + 0x04u), base + 0x08u,
+      sys->read32(base + 0x08u));
+  log_stack_window(sys, "CPU: low-helper caller frame", gpr[29]);
+}
+
+void log_suspicious_jump(System *sys, u32 pc, const u32 *gpr, u32 target,
+                         u32 rs_index) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_target = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && target == last_target) {
+    return;
+  }
+  last_pc = pc;
+  last_target = target;
+
+  const u32 sp = gpr[29];
+  u32 sp0 = 0;
+  u32 sp4 = 0;
+  u32 sp8 = 0;
+  if ((sp & 3u) == 0u && is_plausible_exec_addr(sp)) {
+    sp0 = sys->read32(sp + 0);
+    sp4 = sys->read32(sp + 4);
+    sp8 = sys->read32(sp + 8);
+  }
+
+  LOG_WARN(
+      "CPU: suspicious jump pc=0x%08X rs=r%u target=0x%08X sp=0x%08X ra=0x%08X stack=[%08X,%08X,%08X]",
+      pc, rs_index, target, sp, gpr[31], sp0, sp4, sp8);
+}
+
+void log_suspicious_ra_load(System *sys, u32 pc, const u32 *gpr, u32 addr,
+                            u32 value) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_value = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && value == last_value) {
+    return;
+  }
+  last_pc = pc;
+  last_value = value;
+
+  LOG_WARN(
+      "CPU: suspicious ra load pc=0x%08X addr=0x%08X val=0x%08X sp=0x%08X ra=0x%08X",
+      pc, addr, value, gpr[29], gpr[31]);
+}
+
+void log_suspicious_sp_write(System *sys, u32 pc, u32 old_sp, u32 new_sp,
+                             u32 ra) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_new_sp = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && new_sp == last_new_sp) {
+    return;
+  }
+  last_pc = pc;
+  last_new_sp = new_sp;
+
+  LOG_WARN(
+      "CPU: suspicious sp write pc=0x%08X old_sp=0x%08X new_sp=0x%08X ra=0x%08X",
+      pc, old_sp, new_sp, ra);
+
+  if ((pc >= 0x00002440u && pc <= 0x00002458u) ||
+      (pc >= 0x80002440u && pc <= 0x80002458u)) {
+    static bool dumped = false;
+    if (!dumped) {
+      dumped = true;
+      const u32 base = pc & 0x1FFFFFFFu;
+      const u32 line0 = base - 0x08u;
+      const u32 line1 = base - 0x04u;
+      const u32 line2 = base + 0x00u;
+      const u32 line3 = base + 0x04u;
+      const u32 line4 = base + 0x08u;
+      LOG_WARN(
+          "CPU: nearby code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          line0, sys->read32(line0), line1, sys->read32(line1), line2,
+          sys->read32(line2), line3, sys->read32(line3), line4,
+          sys->read32(line4));
+    }
+  }
+}
+
+void log_high_mirror_sp_write(System *sys, u32 pc, u32 old_sp, u32 new_sp,
+                              u32 ra) {
+  static bool logged = false;
+  if (sys == nullptr || logged) {
+    return;
+  }
+  logged = true;
+  LOG_WARN(
+      "CPU: high-mirror sp write pc=0x%08X old_sp=0x%08X new_sp=0x%08X ra=0x%08X",
+      pc, old_sp, new_sp, ra);
+  const u32 base = pc & 0x1FFFFFFFu;
+  LOG_WARN(
+      "CPU: high-mirror code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+      base - 0x08u, sys->read32(base - 0x08u), base - 0x04u,
+      sys->read32(base - 0x04u), base + 0x00u, sys->read32(base + 0x00u),
+      base + 0x04u, sys->read32(base + 0x04u), base + 0x08u,
+      sys->read32(base + 0x08u));
+}
+
+void log_suspicious_ra_write(System *sys, u32 pc, u32 old_ra, u32 new_ra,
+                             u32 sp) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 last_new_ra = 0xFFFFFFFFu;
+  if (sys == nullptr) {
+    return;
+  }
+  if (pc == last_pc && new_ra == last_new_ra) {
+    return;
+  }
+  last_pc = pc;
+  last_new_ra = new_ra;
+
+  LOG_WARN(
+      "CPU: suspicious ra write pc=0x%08X old_ra=0x%08X new_ra=0x%08X sp=0x%08X",
+      pc, old_ra, new_ra, sp);
+
+  if (((old_ra & 0x1FFFFFFFu) == 0x000152ACu) ||
+      ((new_ra & 0x1FFFFFFFu) == 0x000152ACu)) {
+    static bool dumped_low_helper_caller = false;
+    if (!dumped_low_helper_caller) {
+      dumped_low_helper_caller = true;
+      LOG_WARN(
+          "CPU: low-helper caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001529Cu, sys->read32(0x0001529Cu), 0x000152A0u,
+          sys->read32(0x000152A0u), 0x000152A4u, sys->read32(0x000152A4u),
+          0x000152A8u, sys->read32(0x000152A8u), 0x000152ACu,
+          sys->read32(0x000152ACu));
+      LOG_WARN(
+          "CPU: low-helper caller code %08X=%08X %08X=%08X %08X=%08X",
+          0x000152B0u, sys->read32(0x000152B0u), 0x000152B4u,
+          sys->read32(0x000152B4u), 0x000152B8u, sys->read32(0x000152B8u));
+      log_stack_window(sys, "CPU: low-helper saved-ra frame", sp);
+    }
+  }
+
+  if ((pc >= 0x80043920u && pc <= 0x80043940u) ||
+      (pc >= 0x00043920u && pc <= 0x00043940u)) {
+    static bool dumped = false;
+    if (!dumped) {
+      dumped = true;
+      const u32 base = pc & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: ra-write code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          base - 0x08u, sys->read32(base - 0x08u), base - 0x04u,
+          sys->read32(base - 0x04u), base + 0x00u, sys->read32(base + 0x00u),
+          base + 0x04u, sys->read32(base + 0x04u), base + 0x08u,
+          sys->read32(base + 0x08u));
+    }
+  }
+}
+
+const char *exception_name(Exception cause) {
+  switch (cause) {
+  case Exception::Interrupt:
+    return "Interrupt";
+  case Exception::AddrLoadErr:
+    return "AddrLoadErr";
+  case Exception::AddrStoreErr:
+    return "AddrStoreErr";
+  case Exception::BusErrInstr:
+    return "BusErrInstr";
+  case Exception::BusErrData:
+    return "BusErrData";
+  case Exception::Syscall:
+    return "Syscall";
+  case Exception::Break:
+    return "Break";
+  case Exception::ReservedInst:
+    return "ReservedInst";
+  case Exception::CopUnusable:
+    return "CopUnusable";
+  case Exception::Overflow:
+    return "Overflow";
+  default:
+    return "Unknown";
+  }
+}
 } // namespace
 
 // ── Init / Reset ───────────────────────────────────────────────────
@@ -72,6 +311,31 @@ void Cpu::set_reg(u32 index, u32 value) {
   if (index == 0) {
     gpr_[0] = 0;
     return;
+  }
+
+  if (index == 29) {
+    const bool entered_high_mirror =
+        (value >= 0x807F0000u && value < 0x80800000u) &&
+        (gpr_[29] < 0x807F0000u || gpr_[29] >= 0x80800000u);
+    if (entered_high_mirror) {
+      log_high_mirror_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
+    }
+
+    const bool suspicious_sp =
+        (value >= 0x80800000u && value < 0x81000000u) ||
+        (value < 0x80000000u && value >= 0x00800000u);
+    if (suspicious_sp) {
+      log_suspicious_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
+    }
+  }
+
+  if (index == 31) {
+    const bool suspicious_ra =
+        (value == 0u) ||
+        (!is_plausible_exec_addr(value) && value != next_pc_);
+    if (suspicious_ra) {
+      log_suspicious_ra_write(sys_, current_pc_, gpr_[31], value, gpr_[29]);
+    }
   }
 
   // Cancel any pending load to the same register
@@ -141,6 +405,14 @@ void Cpu::raise_cop_unusable(u32 cop_index) {
 }
 
 void Cpu::apply_pending_load() {
+  if (load_.reg == 31) {
+    const bool suspicious_ra =
+        (load_.value == 0u) || !is_plausible_exec_addr(load_.value);
+    if (suspicious_ra) {
+      log_suspicious_ra_write(sys_, current_pc_, gpr_[31], load_.value,
+                              gpr_[29]);
+    }
+  }
   if (load_.reg != 0) {
     gpr_[load_.reg] = load_.value;
   }
@@ -220,6 +492,7 @@ void Cpu::store8(u32 addr, u8 value) {
 // ── Exception Handling ─────────────────────────────────────────────
 
 void Cpu::exception(Exception cause) {
+  static u32 logged_exception_count = 0;
   exception_raised_ = true;
 
   u32 handler;
@@ -251,6 +524,14 @@ void Cpu::exception(Exception cause) {
   }
 
   // Jump to exception handler
+  if (cause != Exception::Interrupt && logged_exception_count < 32) {
+    ++logged_exception_count;
+    LOG_WARN(
+        "CPU: exception cause=%s pc=0x%08X handler=0x%08X sr=0x%08X sp=0x%08X ra=0x%08X",
+        exception_name(cause), current_pc_, handler, cop0_sr_, gpr_[29],
+        gpr_[31]);
+  }
+
   pc_ = handler;
   next_pc_ = handler + 4;
   in_delay_slot_ = false;
@@ -279,6 +560,7 @@ u32 Cpu::step() {
   static u32 trace_last_pc = 0;
   static u32 trace_last_instr = 0;
   static u64 trace_repeat = 0;
+  static u32 prev_pc_for_diag = 0;
   current_pc_ = pc_;
   exception_raised_ = false;
   next_load_ = {0, 0};
@@ -312,6 +594,182 @@ u32 Cpu::step() {
     constexpr u32 fault_cycles = 2;
     cycles_ += fault_cycles;
     return fault_cycles;
+  }
+
+  if (current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
+    static bool logged_low_helper_caller_entry = false;
+    if (!logged_low_helper_caller_entry) {
+      logged_low_helper_caller_entry = true;
+      LOG_WARN(
+          "CPU: near low-helper caller prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001529Cu, sys_->read32(0x0001529Cu), 0x000152A0u,
+          sys_->read32(0x000152A0u), 0x000152A4u, sys_->read32(0x000152A4u),
+          0x000152A8u, sys_->read32(0x000152A8u), 0x000152ACu,
+          sys_->read32(0x000152ACu));
+      LOG_WARN(
+          "CPU: caller code %08X=%08X %08X=%08X %08X=%08X",
+          0x000152B0u, sys_->read32(0x000152B0u), 0x000152B4u,
+          sys_->read32(0x000152B4u), 0x000152B8u, sys_->read32(0x000152B8u));
+      log_stack_window(sys_, "CPU: caller frame", gpr_[29]);
+    }
+  }
+  if (current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
+    static bool logged_low_helper_chain_entry = false;
+    if (!logged_low_helper_chain_entry) {
+      logged_low_helper_chain_entry = true;
+      LOG_WARN(
+          "CPU: near 0x8001ECA4 chain prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: chain code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EC9Cu, sys_->read32(0x0001EC9Cu), 0x0001ECA0u,
+          sys_->read32(0x0001ECA0u), 0x0001ECA4u, sys_->read32(0x0001ECA4u),
+          0x0001ECA8u, sys_->read32(0x0001ECA8u), 0x0001ECACu,
+          sys_->read32(0x0001ECACu));
+      LOG_WARN(
+          "CPU: chain code %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ECB0u, sys_->read32(0x0001ECB0u), 0x0001ECB4u,
+          sys_->read32(0x0001ECB4u), 0x0001ECB8u, sys_->read32(0x0001ECB8u));
+      log_stack_window(sys_, "CPU: chain frame", gpr_[29]);
+    }
+  }
+  if (current_pc_ >= 0x8001ECBCu && current_pc_ <= 0x8001ED10u) {
+    static bool logged_low_helper_chain_tail = false;
+    if (!logged_low_helper_chain_tail) {
+      logged_low_helper_chain_tail = true;
+      LOG_WARN(
+          "CPU: near low-helper chain tail prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: chain tail %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ECBCu, sys_->read32(0x0001ECBCu), 0x0001ECC0u,
+          sys_->read32(0x0001ECC0u), 0x0001ECC4u, sys_->read32(0x0001ECC4u),
+          0x0001ECC8u, sys_->read32(0x0001ECC8u), 0x0001ECCCu,
+          sys_->read32(0x0001ECCCu));
+      LOG_WARN(
+          "CPU: chain tail %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ECD0u, sys_->read32(0x0001ECD0u), 0x0001ECD4u,
+          sys_->read32(0x0001ECD4u), 0x0001ECD8u, sys_->read32(0x0001ECD8u),
+          0x0001ECDCu, sys_->read32(0x0001ECDCu), 0x0001ECE0u,
+          sys_->read32(0x0001ECE0u));
+      LOG_WARN(
+          "CPU: chain tail %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ECE4u, sys_->read32(0x0001ECE4u), 0x0001ECE8u,
+          sys_->read32(0x0001ECE8u), 0x0001ECECu, sys_->read32(0x0001ECECu),
+          0x0001ECF0u, sys_->read32(0x0001ECF0u));
+      LOG_WARN(
+          "CPU: chain tail %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ECF4u, sys_->read32(0x0001ECF4u), 0x0001ECF8u,
+          sys_->read32(0x0001ECF8u), 0x0001ECFCu, sys_->read32(0x0001ECFCu),
+          0x0001ED00u, sys_->read32(0x0001ED00u), 0x0001ED04u,
+          sys_->read32(0x0001ED04u));
+      LOG_WARN(
+          "CPU: chain tail %08X=%08X %08X=%08X %08X=%08X",
+          0x0001ED08u, sys_->read32(0x0001ED08u), 0x0001ED0Cu,
+          sys_->read32(0x0001ED0Cu), 0x0001ED10u, sys_->read32(0x0001ED10u));
+      LOG_WARN(
+          "CPU: chain tail regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X",
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9]);
+      log_stack_window(sys_, "CPU: chain tail frame", gpr_[29]);
+    }
+  }
+  if (current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
+    static bool logged_low_helper_leadin = false;
+    if (!logged_low_helper_leadin) {
+      logged_low_helper_leadin = true;
+      LOG_WARN(
+          "CPU: entered low-helper lead-in prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: low lead-in %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000023D0u, sys_->read32(0x000023D0u), 0x000023D4u,
+          sys_->read32(0x000023D4u), 0x000023D8u, sys_->read32(0x000023D8u),
+          0x000023DCu, sys_->read32(0x000023DCu), 0x000023E0u,
+          sys_->read32(0x000023E0u));
+      LOG_WARN(
+          "CPU: low lead-in %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000023E4u, sys_->read32(0x000023E4u), 0x000023E8u,
+          sys_->read32(0x000023E8u), 0x000023ECu, sys_->read32(0x000023ECu),
+          0x000023F0u, sys_->read32(0x000023F0u), 0x000023F4u,
+          sys_->read32(0x000023F4u));
+      LOG_WARN(
+          "CPU: low lead-in %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000023F8u, sys_->read32(0x000023F8u), 0x000023FCu,
+          sys_->read32(0x000023FCu), 0x00002400u, sys_->read32(0x00002400u),
+          0x00002404u, sys_->read32(0x00002404u), 0x00002408u,
+          sys_->read32(0x00002408u));
+      LOG_WARN(
+          "CPU: low lead-in regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t6=0x%08X t7=0x%08X t8=0x%08X t9=0x%08X",
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[14], gpr_[15], gpr_[24],
+          gpr_[25]);
+      if (is_plausible_exec_addr(gpr_[6])) {
+        LOG_WARN(
+            "CPU: low lead-in a2 mem [0]=0x%08X [4]=0x%08X [8]=0x%08X [C]=0x%08X",
+            sys_->read32(gpr_[6] + 0x00u), sys_->read32(gpr_[6] + 0x04u),
+            sys_->read32(gpr_[6] + 0x08u), sys_->read32(gpr_[6] + 0x0Cu));
+      }
+      log_stack_window(sys_, "CPU: low lead-in frame", gpr_[29]);
+    }
+  }
+  if (current_pc_ >= 0x00002400u && current_pc_ <= 0x00002424u) {
+    static bool logged_low_prologue_entry = false;
+    if (!logged_low_prologue_entry) {
+      logged_low_prologue_entry = true;
+      LOG_WARN(
+          "CPU: entered low-helper prologue prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: low-helper code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00002400u, sys_->read32(0x00002400u), 0x00002404u,
+          sys_->read32(0x00002404u), 0x00002408u, sys_->read32(0x00002408u),
+          0x0000240Cu, sys_->read32(0x0000240Cu), 0x00002410u,
+          sys_->read32(0x00002410u));
+      LOG_WARN(
+          "CPU: low-helper code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00002414u, sys_->read32(0x00002414u), 0x00002418u,
+          sys_->read32(0x00002418u), 0x0000241Cu, sys_->read32(0x0000241Cu),
+          0x00002420u, sys_->read32(0x00002420u), 0x00002424u,
+          sys_->read32(0x00002424u));
+      log_stack_window(sys_, "CPU: low-helper prologue frame", gpr_[29]);
+    }
+  }
+  if (current_pc_ >= 0x00002440u && current_pc_ <= 0x00002454u) {
+    static bool logged_low_epilogue_entry = false;
+    if (!logged_low_epilogue_entry) {
+      logged_low_epilogue_entry = true;
+      LOG_WARN(
+          "CPU: entered 0x000024xx prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: low-epilogue code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00002420u, sys_->read32(0x00002420u), 0x00002424u,
+          sys_->read32(0x00002424u), 0x00002428u, sys_->read32(0x00002428u),
+          0x0000242Cu, sys_->read32(0x0000242Cu), 0x00002430u,
+          sys_->read32(0x00002430u), 0x00002434u, sys_->read32(0x00002434u),
+          0x00002438u, sys_->read32(0x00002438u), 0x0000243Cu,
+          sys_->read32(0x0000243Cu));
+      LOG_WARN(
+          "CPU: low-epilogue code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00002440u, sys_->read32(0x00002440u), 0x00002444u,
+          sys_->read32(0x00002444u), 0x00002448u, sys_->read32(0x00002448u),
+          0x0000244Cu, sys_->read32(0x0000244Cu), 0x00002450u,
+          sys_->read32(0x00002450u));
+    }
+  }
+  if (current_pc_ >= 0x00002420u && current_pc_ <= 0x00002450u) {
+    static bool logged_low_func_call = false;
+    const bool came_from_outside =
+        !(prev_pc_for_diag >= 0x00002420u && prev_pc_for_diag <= 0x00002450u);
+    if (!logged_low_func_call && came_from_outside) {
+      logged_low_func_call = true;
+      LOG_WARN(
+          "CPU: entered low helper prev_pc=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X v0=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+          prev_pc_for_diag, current_pc_, gpr_[29], gpr_[31], gpr_[2], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7]);
+    }
   }
 
   if (g_trace_cpu) {
@@ -368,6 +826,7 @@ u32 Cpu::step() {
 
   const u32 consumed_cycles = instruction_cycles(instruction);
   cycles_ += consumed_cycles;
+  prev_pc_for_diag = current_pc_;
   return consumed_cycles;
 }
 
@@ -654,12 +1113,26 @@ void Cpu::op_srav(u32 i) {
 // ── Jump / Branch Instructions ─────────────────────────────────────
 
 void Cpu::op_jr(u32 i) {
-  begin_branch(true, gpr_[rs(i)]);
+  const u32 target = gpr_[rs(i)];
+  if (!is_plausible_exec_addr(target)) {
+    log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
+  }
+  if (is_low_helper_addr(target)) {
+    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jr");
+  }
+  begin_branch(true, target);
 }
 
 void Cpu::op_jalr(u32 i) {
+  const u32 target = gpr_[rs(i)];
+  if (!is_plausible_exec_addr(target)) {
+    log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
+  }
+  if (is_low_helper_addr(target)) {
+    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jalr");
+  }
   set_reg(rd(i), next_pc_); // Save return address
-  begin_branch(true, gpr_[rs(i)]);
+  begin_branch(true, target);
 }
 
 void Cpu::op_movz(u32 i) {
@@ -738,12 +1211,20 @@ void Cpu::op_sync(u32 /*i*/) {
 }
 
 void Cpu::op_j(u32 i) {
-  begin_branch(true, (pc_ & 0xF0000000) | (imm26(i) << 2));
+  const u32 target = (pc_ & 0xF0000000) | (imm26(i) << 2);
+  if (is_low_helper_addr(target)) {
+    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "j");
+  }
+  begin_branch(true, target);
 }
 
 void Cpu::op_jal(u32 i) {
+  const u32 target = (pc_ & 0xF0000000) | (imm26(i) << 2);
+  if (is_low_helper_addr(target)) {
+    log_low_helper_call(sys_, current_pc_, next_pc_, gpr_, target, "jal");
+  }
   set_reg(31, next_pc_); // $ra
-  begin_branch(true, (pc_ & 0xF0000000) | (imm26(i) << 2));
+  begin_branch(true, target);
 }
 
 void Cpu::op_beq(u32 i) {
@@ -986,6 +1467,9 @@ void Cpu::op_lw(u32 i) {
   u32 val = load32(addr);
   if (exception_raised_)
     return;
+  if (rt(i) == 31 && !is_plausible_exec_addr(val)) {
+    log_suspicious_ra_load(sys_, current_pc_, gpr_, addr, val);
+  }
   schedule_load(rt(i), val);
 }
 
