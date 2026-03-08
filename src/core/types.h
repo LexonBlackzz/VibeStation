@@ -105,6 +105,7 @@ inline bool g_gpu_fast_mode = false;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_spu_enable_audio_queue = true;
+inline bool g_spu_force_audio_queue = false;
 inline u32 g_spu_output_latency_ms = 90u;
 inline u32 g_spu_xa_latency_ms = 120u;
 inline bool g_profile_detailed_timing =

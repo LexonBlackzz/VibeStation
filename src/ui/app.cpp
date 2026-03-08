@@ -156,6 +156,14 @@ namespace {
         return static_cast<double>(normalize_turbo_speed_percent(percent)) / 100.0;
     }
 
+    int normalize_slowdown_speed_percent(int percent) {
+        return std::max(10, std::min(100, percent));
+    }
+
+    double slowdown_speed_multiplier_from_percent(int percent) {
+        return static_cast<double>(normalize_slowdown_speed_percent(percent)) / 100.0;
+    }
+
     bool parse_u64_value(const std::string& value, u64& out) {
         char* end_ptr = nullptr;
         const unsigned long long parsed = std::strtoull(value.c_str(), &end_ptr, 10);
@@ -741,10 +749,15 @@ void App::run() {
 }
 
 void App::process_events(bool& quit) {
-    auto apply_turbo_speed = [this]() {
-        const double turbo_speed =
-            turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
-        emu_runner_.set_speed(turbo_hold_active_ ? turbo_speed : 1.0);
+    auto apply_speed_override = [this]() {
+        double speed = 1.0;
+        if (turbo_hold_active_) {
+            speed = turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
+        }
+        else if (slowdown_hold_active_) {
+            speed = slowdown_speed_multiplier_from_percent(config_slowdown_speed_percent_);
+        }
+        emu_runner_.set_speed(speed);
         };
 
     SDL_Event event;
@@ -758,7 +771,11 @@ void App::process_events(bool& quit) {
             event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
             if (turbo_hold_active_) {
                 turbo_hold_active_ = false;
-                apply_turbo_speed();
+                apply_speed_override();
+            }
+            if (slowdown_hold_active_) {
+                slowdown_hold_active_ = false;
+                apply_speed_override();
             }
         }
         if (pending_bind_index_ >= 0 && event.type == SDL_KEYDOWN &&
@@ -786,14 +803,27 @@ void App::process_events(bool& quit) {
             const bool gui = (mods & KMOD_GUI) != 0;
             if (!ctrl && !alt && !gui) {
                 turbo_hold_active_ = true;
-                apply_turbo_speed();
+                apply_speed_override();
                 continue;
             }
         }
         if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_BACKSPACE) {
             if (turbo_hold_active_) {
                 turbo_hold_active_ = false;
-                apply_turbo_speed();
+                apply_speed_override();
+            }
+            continue;
+        }
+        if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+            event.key.keysym.sym == SDLK_RSHIFT) {
+            slowdown_hold_active_ = true;
+            apply_speed_override();
+            continue;
+        }
+        if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_RSHIFT) {
+            if (slowdown_hold_active_) {
+                slowdown_hold_active_ = false;
+                apply_speed_override();
             }
             continue;
         }
@@ -904,6 +934,7 @@ void App::process_events(bool& quit) {
 
 void App::update() {
     input_->update();
+    g_spu_force_audio_queue = slowdown_hold_active_ && !g_spu_enable_audio_queue;
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
@@ -1550,9 +1581,26 @@ void App::panel_settings() {
                 if (ImGui::Combo("Turbo Speed (Hold Backspace)", &turbo_mode_index,
                     turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
                     config_turbo_speed_percent_ = (turbo_mode_index == 1) ? 400 : 200;
-                    if (turbo_hold_active_) {
-                        emu_runner_.set_speed(
-                            turbo_speed_multiplier_from_percent(config_turbo_speed_percent_));
+                    if (turbo_hold_active_ || slowdown_hold_active_) {
+                        const double speed = turbo_hold_active_
+                            ? turbo_speed_multiplier_from_percent(config_turbo_speed_percent_)
+                            : slowdown_speed_multiplier_from_percent(
+                                config_slowdown_speed_percent_);
+                        emu_runner_.set_speed(speed);
+                    }
+                    save_persistent_config();
+                }
+                int slowdown_speed_percent = config_slowdown_speed_percent_;
+                if (ImGui::SliderInt("Slowdown Speed (Hold Right Shift)",
+                    &slowdown_speed_percent, 10, 100, "%d%%")) {
+                    config_slowdown_speed_percent_ =
+                        normalize_slowdown_speed_percent(slowdown_speed_percent);
+                    if (turbo_hold_active_ || slowdown_hold_active_) {
+                        const double speed = turbo_hold_active_
+                            ? turbo_speed_multiplier_from_percent(config_turbo_speed_percent_)
+                            : slowdown_speed_multiplier_from_percent(
+                                config_slowdown_speed_percent_);
+                        emu_runner_.set_speed(speed);
                     }
                     save_persistent_config();
                 }
@@ -3694,6 +3742,10 @@ void App::load_persistent_config() {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
             config_turbo_speed_percent_ = normalize_turbo_speed_percent(parsed);
         }
+        else if (key == "slowdown_speed_percent") {
+            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+            config_slowdown_speed_percent_ = normalize_slowdown_speed_percent(parsed);
+        }
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
         }
@@ -3775,6 +3827,7 @@ void App::save_persistent_config() const {
     out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
     out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
+    out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
     for (const auto& entry : kKeyboardBindEntries) {
         out << entry.config_key << "="

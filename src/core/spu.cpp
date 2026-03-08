@@ -258,7 +258,7 @@ void Spu::reset() {
   cd_resample_prev_valid_ = false;
   cd_resample_prev_l_ = 0;
   cd_resample_prev_r_ = 0;
-  turbo_resample_src_pos_ = 1.0;
+  turbo_resample_src_pos_ = 0.0;
   turbo_resample_in_rate_ = SAMPLE_RATE;
   turbo_resample_prev_valid_ = false;
   turbo_resample_prev_l_ = 0;
@@ -1520,17 +1520,17 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   const std::vector<s16> *queue_samples = &samples;
   std::vector<s16> turbo_adjusted_samples;
   const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
-  if (output_speed > 1.001) {
+  if (output_speed > 1.001 || output_speed < 0.999) {
     const double scaled_rate =
-        static_cast<double>(SAMPLE_RATE) * std::min(output_speed, 4.0);
+        static_cast<double>(SAMPLE_RATE) * std::clamp(output_speed, 0.25, 4.0);
     const u32 in_rate =
         static_cast<u32>(std::clamp<int>(static_cast<int>(std::lround(scaled_rate)),
-                                         SAMPLE_RATE, SAMPLE_RATE * 4));
+                                         SAMPLE_RATE / 4, SAMPLE_RATE * 4));
     const size_t in_frames = samples.size() / 2;
     if (in_frames > 0) {
       if (turbo_resample_in_rate_ != in_rate) {
         turbo_resample_in_rate_ = in_rate;
-        turbo_resample_src_pos_ = 1.0;
+        turbo_resample_src_pos_ = 0.0;
         turbo_resample_prev_valid_ = false;
       }
 
@@ -1546,12 +1546,12 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
       const bool ratio_is_integer = (in_rate % SAMPLE_RATE) == 0u;
       const u32 ratio_step = ratio_is_integer ? (in_rate / SAMPLE_RATE) : 0u;
       auto read_frame = [&](int idx, s16 &l, s16 &r) {
-        if (idx <= 0) {
+        if (idx < 0) {
           l = turbo_resample_prev_l_;
           r = turbo_resample_prev_r_;
           return;
         }
-        const size_t frame = static_cast<size_t>(idx - 1);
+        const size_t frame = static_cast<size_t>(idx);
         if (frame >= in_frames) {
           l = samples[(in_frames - 1) * 2 + 0];
           r = samples[(in_frames - 1) * 2 + 1];
@@ -1609,7 +1609,7 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
       queue_samples = &turbo_adjusted_samples;
     }
   } else {
-    turbo_resample_src_pos_ = 1.0;
+    turbo_resample_src_pos_ = 0.0;
     turbo_resample_in_rate_ = SAMPLE_RATE;
     turbo_resample_prev_valid_ = false;
     turbo_resample_prev_l_ = 0;
@@ -1639,7 +1639,9 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
-  if (!g_spu_enable_audio_queue) {
+  const bool audio_queue_enabled =
+      g_spu_enable_audio_queue || g_spu_force_audio_queue;
+  if (!audio_queue_enabled) {
     host_staging_samples_.clear();
     host_staging_read_pos_ = 0;
 
@@ -1648,8 +1650,13 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     audio_diag_.queue_peak_bytes =
         std::max(audio_diag_.queue_peak_bytes, queued_before);
 
+    const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
+    const u32 slowdown_scale = (queue_speed < 0.999)
+                                   ? static_cast<u32>(std::clamp(
+                                         static_cast<int>(std::lround(1.0 / queue_speed)), 1, 8))
+                                   : 1u;
     const u32 direct_queue_cap =
-        std::max(host_buffer_bytes_ * 2u, 4096u);
+        std::max(host_buffer_bytes_ * (2u * slowdown_scale), 4096u);
     if (queued_before > direct_queue_cap) {
       SDL_ClearQueuedAudio(audio_device_);
       audio_diag_.dropped_frames +=
@@ -1676,10 +1683,16 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
 
   // Allow runtime latency tuning without reinitializing the device.
   const u32 latency_ms = std::clamp<u32>(g_spu_output_latency_ms, 16u, 1000u);
+  const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
+  const u32 slowdown_scale = (queue_speed < 0.999)
+                                 ? static_cast<u32>(std::clamp(
+                                       static_cast<int>(std::lround(1.0 / queue_speed)), 1, 8))
+                                 : 1u;
+  const u32 effective_latency_ms = std::min<u32>(1000u, latency_ms * slowdown_scale);
   const u64 bytes_per_second =
       static_cast<u64>(SAMPLE_RATE) * 2u * static_cast<u64>(sizeof(s16));
   const u32 latency_bytes =
-      static_cast<u32>((bytes_per_second * latency_ms + 999u) / 1000u);
+      static_cast<u32>((bytes_per_second * effective_latency_ms + 999u) / 1000u);
   host_target_queue_bytes_ =
       std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, latency_bytes});
   host_max_queue_bytes_ =
@@ -1704,8 +1717,10 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
   }
 
   const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-  if (unread + queue_samples->size() > HOST_STAGING_MAX_SAMPLES) {
-    size_t drop = unread + queue_samples->size() - HOST_STAGING_MAX_SAMPLES;
+  const size_t staging_max_samples =
+      HOST_STAGING_MAX_SAMPLES * static_cast<size_t>(slowdown_scale);
+  if (unread + queue_samples->size() > staging_max_samples) {
+    size_t drop = unread + queue_samples->size() - staging_max_samples;
     drop = std::min(drop, unread);
     drop &= ~static_cast<size_t>(1);
     if (drop > 0) {

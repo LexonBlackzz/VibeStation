@@ -244,6 +244,10 @@ void Gpu::reset() {
     draw_y_offset_ = 0;
     texpage_ = 0;
     clut_ = 0;
+    tex_window_mask_x_ = 0;
+    tex_window_mask_y_ = 0;
+    tex_window_off_x_ = 0;
+    tex_window_off_y_ = 0;
     dma_direction_ = 0;
     dither_enabled_ = false;
     draw_to_display_ = false;
@@ -936,8 +940,8 @@ void Gpu::gp0_mono_rect() {
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
     s16 y = origin.y;
-    u16 w = gp0_buffer_[2] & 0xFFFF;
-    u16 h = gp0_buffer_[2] >> 16;
+    u16 w = static_cast<u16>(gp0_buffer_[2] & 0x3FFu);
+    u16 h = static_cast<u16>((gp0_buffer_[2] >> 16) & 0x1FFu);
     draw_rect(x, y, w, h, c);
 }
 
@@ -960,8 +964,8 @@ void Gpu::gp0_textured_rect() {
         h = 16;
     }
     else if (gp0_buffer_.size() >= 4) {
-        w = gp0_buffer_[3] & 0xFFFF;
-        h = gp0_buffer_[3] >> 16;
+        w = static_cast<u16>(gp0_buffer_[3] & 0x3FFu);
+        h = static_cast<u16>((gp0_buffer_[3] >> 16) & 0x1FFu);
     }
     else {
         w = 1;
@@ -978,7 +982,7 @@ void Gpu::gp0_textured_rect() {
             const u8 src_u = static_cast<u8>(u + src_dx);
             const u8 src_v = static_cast<u8>(v + src_dy);
             u16 texel = read_texel(src_u, src_v);
-            if ((texel & 0x7FFF) == 0) {
+            if (texel == 0) {
                 continue; // Color 0 transparent in many textured modes.
             }
 
@@ -1664,11 +1668,12 @@ void Gpu::set_pixel_clipped(s16 x, s16 y, u16 color, bool semi_transparent) {
         return;
     }
 
-    u16 out = color;
+    const u16 color15 = static_cast<u16>(color & 0x7FFFu);
+    u16 out = color15;
     if (semi_transparent) {
-        const int fr = color & 0x1F;
-        const int fg = (color >> 5) & 0x1F;
-        const int fb = (color >> 10) & 0x1F;
+        const int fr = color15 & 0x1F;
+        const int fg = (color15 >> 5) & 0x1F;
+        const int fb = (color15 >> 10) & 0x1F;
         const int br = dst & 0x1F;
         const int bg = (dst >> 5) & 0x1F;
         const int bb = (dst >> 10) & 0x1F;
@@ -1696,7 +1701,7 @@ void Gpu::set_pixel_clipped(s16 x, s16 y, u16 color, bool semi_transparent) {
             break;
         }
         out = static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
-            ((rb & 0x1F) << 10) | (color & 0x8000u));
+            ((rb & 0x1F) << 10));
     }
 
     if (force_set_mask_bit_) {
@@ -1711,7 +1716,7 @@ void Gpu::write_pixel_opaque_clipped(s16 x, s16 y, u16 color) {
         return;
     }
 
-    u16 out = color;
+    u16 out = static_cast<u16>(color & 0x7FFFu);
     if (force_set_mask_bit_) {
         out |= 0x8000u;
     }
@@ -1719,10 +1724,13 @@ void Gpu::write_pixel_opaque_clipped(s16 x, s16 y, u16 color) {
 }
 
 u16 Gpu::read_texel(u8 u, u8 v) const {
-    const u16 uw = static_cast<u16>((static_cast<u16>(u) & ~tex_window_mask_x_) |
-        (tex_window_off_x_ & tex_window_mask_x_));
-    const u16 vw = static_cast<u16>((static_cast<u16>(v) & ~tex_window_mask_y_) |
-        (tex_window_off_y_ & tex_window_mask_y_));
+    // Texture window operates on 8-bit UV domain.
+    const u8 mask_x = static_cast<u8>(tex_window_mask_x_ & 0xFFu);
+    const u8 mask_y = static_cast<u8>(tex_window_mask_y_ & 0xFFu);
+    const u8 off_x = static_cast<u8>(tex_window_off_x_ & 0xFFu);
+    const u8 off_y = static_cast<u8>(tex_window_off_y_ & 0xFFu);
+    const u8 uw = static_cast<u8>((u & static_cast<u8>(~mask_x)) | (off_x & mask_x));
+    const u8 vw = static_cast<u8>((v & static_cast<u8>(~mask_y)) | (off_y & mask_y));
 
     const u16 tex_base_x = static_cast<u16>((texpage_ & 0xF) * 64);
     const u16 tex_base_y = static_cast<u16>(((texpage_ >> 4) & 1) * 256);
@@ -1972,7 +1980,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                     const u8 v_coord =
                         static_cast<u8>((w0 * v0.v + w1 * v1.v + w2 * v2.v) / area);
                     const u16 texel = read_texel(u, v_coord);
-                    if ((texel & 0x7FFF) != 0) {
+                    if (texel != 0) {
                         u16 out15 = texel;
                         if (!raw_texture) {
                             if (dither_enabled_) {
@@ -2054,11 +2062,12 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         for (s16 x = min_x; x <= max_x; ++x) {
             if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
                 : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                const u8 u = static_cast<u8>(std::clamp(static_cast<int>(u_value), 0, 255));
+                const u8 u =
+                    static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
-                    static_cast<u8>(std::clamp(static_cast<int>(v_value), 0, 255));
+                    static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
                 const u16 texel = read_texel(u, v_coord);
-                if ((texel & 0x7FFF) != 0) {
+                if (texel != 0) {
                     u16 out15 = texel;
                     if (!raw_texture) {
                         if (dither_enabled_) {
@@ -2125,7 +2134,7 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                 const u8 v_coord =
                     static_cast<u8>((w0 * v0.v + w1 * v1.v + w2 * v2.v) / area);
                 const u16 texel = read_texel(u, v_coord);
-                if ((texel & 0x7FFF) == 0) {
+                if (texel == 0) {
                     continue;
                 }
 
@@ -2254,11 +2263,12 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         for (s16 x = min_x; x <= max_x; ++x) {
             if (positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
                 : (w0 <= 0 && w1 <= 0 && w2 <= 0)) {
-                const u8 u = static_cast<u8>(std::clamp(static_cast<int>(u_value), 0, 255));
+                const u8 u =
+                    static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
-                    static_cast<u8>(std::clamp(static_cast<int>(v_value), 0, 255));
+                    static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
                 const u16 texel = read_texel(u, v_coord);
-                if ((texel & 0x7FFF) != 0) {
+                if (texel != 0) {
                     const u8 mr = static_cast<u8>(std::clamp(static_cast<int>(r_value), 0, 255));
                     const u8 mg = static_cast<u8>(std::clamp(static_cast<int>(g_value), 0, 255));
                     const u8 mb = static_cast<u8>(std::clamp(static_cast<int>(b_value), 0, 255));

@@ -350,7 +350,7 @@ private:
   bool cd_resample_prev_valid_ = false;
   s16 cd_resample_prev_l_ = 0;
   s16 cd_resample_prev_r_ = 0;
-  double turbo_resample_src_pos_ = 1.0;
+  double turbo_resample_src_pos_ = 0.0;
   u32 turbo_resample_in_rate_ = SAMPLE_RATE;
   bool turbo_resample_prev_valid_ = false;
   s16 turbo_resample_prev_l_ = 0;

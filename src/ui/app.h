@@ -76,7 +76,9 @@ private:
 	bool config_vsync_ = true;
 	bool config_low_spec_mode_ = false;
 	int config_turbo_speed_percent_ = 200;
+	int config_slowdown_speed_percent_ = 50;
 	bool turbo_hold_active_ = false;
+	bool slowdown_hold_active_ = false;
 
 	// Grim Reaper (experimental BIOS corruption sandbox)
 	int grim_reaper_area_index_ = 0;
