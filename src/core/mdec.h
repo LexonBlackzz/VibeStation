@@ -28,7 +28,6 @@ private:
   using Block = std::array<int, kBlockSize>;
 
   void begin_command(u32 value);
-  void finish_command();
   void execute_command();
   void execute_decode();
   void execute_set_quant_table();
@@ -53,7 +52,10 @@ private:
   u8 command_id_ = 0;
   u32 command_word_ = 0;
   u32 in_words_remaining_ = 0;
-  std::vector<u32> input_words_{};
+  bool in_unlimited_ = false;
+  std::vector<u32> in_buffer_{};
+  size_t in_buffer_pos_ = 0;
+
   std::array<u8, kBlockSize> quant_luma_{};
   std::array<u8, kBlockSize> quant_chroma_{};
   std::array<s16, kBlockSize> scale_table_{};
@@ -69,4 +71,3 @@ private:
   std::deque<u32> out_fifo_{};
   std::deque<u8> out_block_fifo_{};
 };
-
