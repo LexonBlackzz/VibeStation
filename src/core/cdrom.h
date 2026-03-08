@@ -37,6 +37,9 @@ public:
   bool track_map_valid() const { return track_map_valid_; }
   const std::string &resolved_disc_path() const { return resolved_disc_path_; }
   u64 command_count() const { return command_counter_; }
+  u64 command_count_for(u8 cmd) const {
+    return command_hist_[static_cast<size_t>(cmd)];
+  }
   u64 sector_count() const { return sector_counter_; }
   u8 last_irq_code() const { return last_irq_code_; }
   int busy_cycles_remaining() const { return command_busy_cycles_; }
@@ -58,7 +61,10 @@ public:
   bool saw_seekl() const { return saw_seekl_; }
   bool saw_readn_or_reads() const { return saw_readn_or_reads_; }
   u64 irq_int1_count() const { return irq_int1_count_; }
+  u64 irq_int2_count() const { return irq_int2_count_; }
   u64 irq_int3_count() const { return irq_int3_count_; }
+  u64 irq_int4_count() const { return irq_int4_count_; }
+  u64 irq_int5_count() const { return irq_int5_count_; }
   u64 read_buffer_stall_count() const { return read_buffer_stall_count_; }
   u64 response_promotion_count() const { return response_promotion_count_; }
   u64 status_e0_poll_count() const { return status_e0_poll_count_; }
@@ -114,7 +120,6 @@ private:
   // State
   enum class State {
     Idle,
-    ReadingCommand,
     Seeking,
     Reading,
   };
@@ -150,6 +155,7 @@ private:
   std::array<u8, 8> host_audio_regs_ = {};
   u8 host_audio_apply_ = 0;
   u64 command_counter_ = 0;
+  std::array<u64, 256> command_hist_ = {};
   u64 sector_counter_ = 0;
   bool saw_read_command_ = false;
   bool saw_getid_ = false;
@@ -159,7 +165,10 @@ private:
   bool saw_sector_visible_ = false;
   u64 read_command_count_ = 0;
   u64 irq_int1_count_ = 0;
+  u64 irq_int2_count_ = 0;
   u64 irq_int3_count_ = 0;
+  u64 irq_int4_count_ = 0;
+  u64 irq_int5_count_ = 0;
   u64 read_buffer_stall_count_ = 0;
   u64 response_promotion_count_ = 0;
   u64 status_e0_poll_count_ = 0;

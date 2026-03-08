@@ -1,20 +1,17 @@
 #include "cdrom.h"
+#include "interrupt.h"
 #include "system.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <filesystem>
-#include <iomanip>
-#include <limits>
 #include <sstream>
 
 namespace {
-u8 irq_code_to_enable_bit(u8 irq_code) {
-  if (irq_code >= 1 && irq_code <= 5) {
-    return static_cast<u8>(1u << (irq_code - 1));
-  }
-  return 0;
-}
+constexpr u8 kHintTypeMask = 0x07u;
+constexpr u8 kHintMaskAll = 0x1Fu;
+constexpr size_t kFifoCapacity = 16u;
 
 std::string trim_copy(const std::string &text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -22,14 +19,7 @@ std::string trim_copy(const std::string &text) {
     return {};
   }
   const size_t end = text.find_last_not_of(" \t\r\n");
-  return text.substr(begin, end - begin + 1);
-}
-
-std::string lower_copy(std::string text) {
-  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return text;
+  return text.substr(begin, end - begin + 1u);
 }
 
 std::string upper_copy(std::string text) {
@@ -39,43 +29,28 @@ std::string upper_copy(std::string text) {
   return text;
 }
 
-bool starts_with_ci(const std::string &line, const char *token) {
-  const size_t n = std::strlen(token);
-  if (line.size() < n) {
-    return false;
-  }
-  for (size_t i = 0; i < n; ++i) {
-    if (std::tolower(static_cast<unsigned char>(line[i])) !=
-        std::tolower(static_cast<unsigned char>(token[i]))) {
+bool starts_with_ci(const std::string &line, const char *prefix) {
+  for (size_t i = 0; prefix[i] != '\0'; ++i) {
+    if (i >= line.size()) {
+      return false;
+    }
+    const unsigned char a = static_cast<unsigned char>(line[i]);
+    const unsigned char b = static_cast<unsigned char>(prefix[i]);
+    if (std::tolower(a) != std::tolower(b)) {
       return false;
     }
   }
   return true;
 }
 
-int parse_msf(const std::string &text) {
-  const std::string msf = trim_copy(text);
-  int mm = 0;
-  int ss = 0;
-  int ff = 0;
-  char c1 = '\0';
-  char c2 = '\0';
-  std::istringstream iss(msf);
-  if (!(iss >> mm >> c1 >> ss >> c2 >> ff) || c1 != ':' || c2 != ':') {
-    return -1;
-  }
-  return mm * 60 * 75 + ss * 75 + ff;
-}
-
 std::string parse_file_name(const std::string &line) {
-  const size_t q1 = line.find('"');
-  if (q1 != std::string::npos) {
-    const size_t q2 = line.find('"', q1 + 1);
-    if (q2 != std::string::npos && q2 > q1 + 1) {
-      return line.substr(q1 + 1, q2 - q1 - 1);
+  const size_t q0 = line.find('"');
+  if (q0 != std::string::npos) {
+    const size_t q1 = line.find('"', q0 + 1u);
+    if (q1 != std::string::npos && q1 > q0 + 1u) {
+      return line.substr(q0 + 1u, q1 - q0 - 1u);
     }
   }
-
   std::istringstream iss(line);
   std::string token;
   std::string name;
@@ -83,31 +58,188 @@ std::string parse_file_name(const std::string &line) {
   return name;
 }
 
-s16 sat16(s32 v) {
-  if (v < -32768) {
+int parse_msf_text(const std::string &msf) {
+  int mm = 0;
+  int ss = 0;
+  int ff = 0;
+  char c0 = '\0';
+  char c1 = '\0';
+  std::istringstream iss(msf);
+  if (!(iss >> mm >> c0 >> ss >> c1 >> ff) || c0 != ':' || c1 != ':') {
+    return -1;
+  }
+  if (mm < 0 || ss < 0 || ff < 0) {
+    return -1;
+  }
+  return mm * 60 * 75 + ss * 75 + ff;
+}
+
+bool is_audio_track(const CdTrack *track) {
+  return track != nullptr && upper_copy(track->type) == "AUDIO";
+}
+
+u8 clip_u8(int value) {
+  return static_cast<u8>(std::clamp(value, 0, 255));
+}
+
+u8 to_bcd8(u8 value) { return static_cast<u8>(((value / 10) << 4) | (value % 10)); }
+
+s16 sat16(s32 value) {
+  if (value < -32768) {
     return -32768;
   }
-  if (v > 32767) {
+  if (value > 32767) {
     return 32767;
   }
-  return static_cast<s16>(v);
+  return static_cast<s16>(value);
 }
 
-int xa_filter_index(u8 header) {
-  const int idx = (header >> 4) & 0x0F;
-  if (idx > 3) {
-    return 0;
+u8 irq_to_hint(u8 irq) { return static_cast<u8>(irq & kHintTypeMask); }
+
+u8 hint_to_mask(u8 hint_type) {
+  if (hint_type >= 1u && hint_type <= 5u) {
+    return static_cast<u8>(1u << (hint_type - 1u));
   }
-  return idx;
+  return 0u;
 }
 
-bool is_audio_track_type(const std::string &track_type) {
-  return upper_copy(track_type) == "AUDIO";
+std::vector<u8> make_error_response(u8 stat, u8 error_code) {
+  return {static_cast<u8>(stat | 0x01u), error_code};
 }
 
+void lba_to_msf_bcd(int abs_lba, u8 &mm, u8 &ss, u8 &ff) {
+  const int lba = std::max(0, abs_lba);
+  const int m = lba / (60 * 75);
+  const int s = (lba / 75) % 60;
+  const int f = lba % 75;
+  mm = to_bcd8(clip_u8(m % 100));
+  ss = to_bcd8(clip_u8(s));
+  ff = to_bcd8(clip_u8(f));
+}
+
+constexpr std::array<s32, 4> kXaPosFilter = {0, 60, 115, 98};
+constexpr std::array<s32, 4> kXaNegFilter = {0, 0, -52, -55};
+
+int xa_shift_from_header(u8 header) {
+  int shift = static_cast<int>(header & 0x0Fu);
+  // Reserved values 13..15 behave like 9 on real hardware.
+  if (shift > 12) {
+    shift = 9;
+  }
+  return shift;
+}
+
+int xa_sign_extend_4(u8 value) {
+  int sample = static_cast<int>(value & 0x0Fu);
+  if ((sample & 0x08) != 0) {
+    sample -= 0x10;
+  }
+  return sample;
+}
+
+int xa_sign_extend_8(u8 value) {
+  return static_cast<int>(static_cast<s8>(value));
+}
+
+s16 xa_decode_sample(int packed_sample, bool eight_bit, int shift,
+                     int filter, s32 &old, s32 &older) {
+  const int clamped_filter = std::clamp(filter, 0, 3);
+  const s32 f0 = kXaPosFilter[static_cast<size_t>(clamped_filter)];
+  const s32 f1 = kXaNegFilter[static_cast<size_t>(clamped_filter)];
+
+  s32 sample = static_cast<s32>(packed_sample) << (eight_bit ? 8 : 12);
+  sample >>= shift;
+  sample += ((old * f0) + (older * f1) + 32) >> 6;
+  sample = std::clamp<s32>(sample, -32768, 32767);
+
+  older = old;
+  old = sample;
+  return static_cast<s16>(sample);
+}
 } // namespace
 
-// -- Disc Loading --------------------------------------------------------------
+void CdRom::reset() {
+  index_reg_ = 0;
+  interrupt_enable_ = 0;
+  interrupt_flag_ = 0;
+
+  param_fifo_.clear();
+  response_fifo_.clear();
+  response_index_ = 0;
+
+  data_buffer_.clear();
+  data_index_ = 0;
+  data_ready_ = false;
+  data_request_ = false;
+
+  state_ = State::Idle;
+  pending_second_ = {};
+  pending_irqs_.clear();
+
+  seek_mm_ = 0;
+  seek_ss_ = 0;
+  seek_ff_ = 0;
+  read_lba_ = 0;
+  pending_cycles_ = 0;
+  read_period_cycles_ = read_period_for_mode();
+  command_busy_ = false;
+  command_busy_cycles_ = 0;
+  last_command_ = 0;
+  last_irq_code_ = 0;
+  mode_ = 0x20u;
+  filter_file_ = 0;
+  filter_channel_ = 0;
+  host_audio_regs_.fill(0);
+  host_audio_apply_ = 0;
+
+  command_counter_ = 0;
+  command_hist_.fill(0);
+  sector_counter_ = 0;
+  saw_read_command_ = false;
+  saw_getid_ = false;
+  saw_setloc_ = false;
+  saw_seekl_ = false;
+  saw_readn_or_reads_ = false;
+  saw_sector_visible_ = false;
+  read_command_count_ = 0;
+  irq_int1_count_ = 0;
+  irq_int2_count_ = 0;
+  irq_int3_count_ = 0;
+  irq_int4_count_ = 0;
+  irq_int5_count_ = 0;
+  read_buffer_stall_count_ = 0;
+  response_promotion_count_ = 0;
+  status_e0_poll_count_ = 0;
+  status_e0_streak_max_ = 0;
+  status_e0_streak_current_ = 0;
+
+  seek_target_lba_ = 0;
+  seek_target_valid_ = false;
+  seek_complete_ = false;
+  read_whole_sector_ = true;
+  pending_read_start_ = false;
+  pending_reads_mode_ = false;
+  cdda_playing_ = false;
+  cdda_cmd_muted_ = false;
+  cdda_adp_muted_ = false;
+  adpcm_busy_cycles_ = 0;
+
+  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
+  atv_active_ = atv_pending_;
+  xa_hist1_ = {};
+  xa_hist2_ = {};
+  xa_stream_valid_ = false;
+  xa_stream_file_ = 0;
+  xa_stream_channel_ = 0;
+  insert_probe_active_ = false;
+  insert_probe_delay_cycles_ = 0;
+  insert_probe_stage_ = 0;
+
+  motor_on_ = false;
+  shell_open_ = false;
+  seek_error_ = false;
+  id_error_ = false;
+}
 
 bool CdRom::load_bin_cue(const std::string &bin_path,
                          const std::string &cue_path) {
@@ -116,69 +248,10 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   }
   tracks_.clear();
   disc_loaded_ = false;
-  resolved_disc_path_.clear();
   track_map_valid_ = false;
-  state_ = State::Idle;
-  response_fifo_.clear();
-  response_index_ = 0;
-  data_buffer_.clear();
-  data_index_ = 0;
-  data_ready_ = false;
-  data_request_ = false;
-  motor_on_ = false;
-  shell_open_ = false;
-  seek_error_ = false;
-  id_error_ = false;
-  interrupt_enable_ = 0;
-  interrupt_flag_ = 0;
-  pending_second_ = {};
-  pending_irqs_.clear();
+  resolved_disc_path_.clear();
   bin_size_ = 0;
-  read_period_cycles_ = 0;
-  command_busy_ = false;
-  command_busy_cycles_ = 0;
-  last_command_ = 0;
-  last_irq_code_ = 0;
-  command_counter_ = 0;
-  sector_counter_ = 0;
-  saw_read_command_ = false;
-  saw_getid_ = false;
-  saw_setloc_ = false;
-  saw_seekl_ = false;
-  saw_readn_or_reads_ = false;
-  saw_sector_visible_ = false;
-  read_command_count_ = 0;
-  irq_int1_count_ = 0;
-  irq_int3_count_ = 0;
-  read_buffer_stall_count_ = 0;
-  response_promotion_count_ = 0;
-  status_e0_poll_count_ = 0;
-  status_e0_streak_max_ = 0;
-  status_e0_streak_current_ = 0;
-  seek_target_lba_ = 0;
-  seek_target_valid_ = false;
-  seek_complete_ = false;
-  read_whole_sector_ = false;
-  pending_read_start_ = false;
-  pending_reads_mode_ = false;
-  cdda_playing_ = false;
-  cdda_cmd_muted_ = false;
-  cdda_adp_muted_ = false;
-  adpcm_busy_cycles_ = 0;
-  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
-  atv_active_ = atv_pending_;
-  host_audio_regs_.fill(0);
-  host_audio_apply_ = 0;
-  xa_hist1_ = {};
-  xa_hist2_ = {};
-  xa_stream_valid_ = false;
-  xa_stream_file_ = 0;
-  xa_stream_channel_ = 0;
-  insert_probe_active_ = false;
-  insert_probe_delay_cycles_ = 0;
-  insert_probe_stage_ = 0;
 
-  std::filesystem::path resolved_bin_path = bin_path;
   std::filesystem::path cue_dir;
   if (!cue_path.empty()) {
     const std::filesystem::path cue_fs(cue_path);
@@ -187,321 +260,115 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
       LOG_ERROR("CDROM: Failed to parse CUE file: %s", cue_path.c_str());
       return false;
     }
-    if (resolved_bin_path.empty() && !tracks_.empty() &&
-        !tracks_.front().filename.empty()) {
-      resolved_bin_path = cue_dir / tracks_.front().filename;
-    }
   }
 
-  if (resolved_bin_path.empty()) {
-    LOG_ERROR("CDROM: No BIN file could be resolved");
+  std::filesystem::path bin_fs(bin_path);
+  if (bin_fs.empty() && !tracks_.empty() && !tracks_.front().filename.empty()) {
+    bin_fs = tracks_.front().filename;
+  }
+  if (!bin_fs.empty() && !bin_fs.is_absolute() && !cue_dir.empty()) {
+    bin_fs = cue_dir / bin_fs;
+  }
+
+  if (bin_fs.empty()) {
+    LOG_ERROR("CDROM: No BIN image specified");
     return false;
   }
 
-  bin_file_.clear();
-  bin_file_.open(resolved_bin_path, std::ios::binary);
-  if (!bin_file_.is_open() && !tracks_.empty() &&
-      !tracks_.front().filename.empty()) {
-    const std::filesystem::path cue_referenced = cue_dir / tracks_.front().filename;
-    if (cue_referenced != resolved_bin_path) {
-      bin_file_.clear();
-      bin_file_.open(cue_referenced, std::ios::binary);
-      if (bin_file_.is_open()) {
-        resolved_bin_path = cue_referenced;
-      }
-    }
-  }
+  bin_file_.open(bin_fs, std::ios::binary);
   if (!bin_file_.is_open()) {
-    LOG_ERROR("CDROM: Failed to open BIN file: %s",
-              resolved_bin_path.string().c_str());
+    LOG_ERROR("CDROM: Failed opening BIN image: %s", bin_fs.string().c_str());
     return false;
   }
 
   std::error_code ec;
-  bin_size_ = std::filesystem::file_size(resolved_bin_path, ec);
+  bin_size_ = std::filesystem::file_size(bin_fs, ec);
   if (ec) {
     bin_size_ = 0;
   }
 
   if (tracks_.empty()) {
-    CdTrack fallback{};
-    fallback.number = 1;
-    fallback.type = "MODE2/2352";
-    fallback.filename = resolved_bin_path.filename().string();
-    fallback.sector_size = 2352;
-    fallback.pregap_sectors = 0;
-    fallback.index01_file_lba = 0;
-    fallback.index01_abs_lba = 150;
-    fallback.index01_file_offset = 0;
-    tracks_.push_back(fallback);
+    CdTrack track;
+    track.number = 1;
+    track.type = "MODE2/2352";
+    track.filename = bin_fs.string();
+    track.sector_size = 2352;
+    track.index01_file_lba = 0;
+    track.index01_abs_lba = 150;
+    track.index01_file_offset = 0;
+    tracks_.push_back(track);
   }
 
+  const std::string first_file = tracks_.front().filename;
   bool single_file = true;
   bool monotonic = true;
-  int first_index01 = 0;
-  int prev_index01 = 0;
-  if (!tracks_.empty()) {
-    first_index01 = tracks_.front().index01_file_lba;
-    prev_index01 = first_index01;
-  }
-  const std::string first_track_file =
-      tracks_.empty() ? std::string() : lower_copy(tracks_.front().filename);
+  const int first_index01 = tracks_.front().index01_file_lba;
+  int prev_file_lba = first_index01;
   for (CdTrack &track : tracks_) {
-    if (!first_track_file.empty() &&
-        lower_copy(track.filename) != first_track_file) {
+    if (track.filename.empty()) {
+      track.filename = first_file;
+    }
+    if (track.filename != first_file) {
       single_file = false;
     }
-    if (track.index01_file_lba < prev_index01) {
+    if (track.sector_size <= 0) {
+      track.sector_size = 2352;
+    }
+    if (track.index01_file_lba < prev_file_lba) {
       monotonic = false;
     }
-    prev_index01 = track.index01_file_lba;
-    track.index01_file_offset = static_cast<u64>(std::max(track.index01_file_lba, 0)) *
-                                static_cast<u64>(std::max(track.sector_size, 1));
-  }
-
-  track_map_valid_ = !tracks_.empty() && single_file && monotonic;
-  for (CdTrack &track : tracks_) {
+    prev_file_lba = track.index01_file_lba;
     const int delta = std::max(0, track.index01_file_lba - first_index01);
     track.index01_abs_lba = 150 + delta;
+    track.index01_file_offset =
+        static_cast<u64>(std::max(0, track.index01_file_lba)) *
+        static_cast<u64>(track.sector_size);
   }
 
+  if (!single_file) {
+    LOG_WARN("CDROM: Multi-file CUE detected; this implementation currently "
+             "supports single-file read mapping only");
+  }
+
+  resolved_disc_path_ = bin_fs.string();
   disc_loaded_ = true;
-  // Boot-disc flow should start from a closed-lid, inserted-disc state.
-  motor_on_ = true;
-  shell_open_ = false;
-  seek_error_ = false;
-  id_error_ = false;
-  resolved_disc_path_ = resolved_bin_path.string();
+  track_map_valid_ = single_file && monotonic;
 
-  LOG_INFO("CDROM: Loaded disc - %zu track(s) from %s", tracks_.size(),
-           resolved_disc_path_.c_str());
-  if (!track_map_valid_) {
-    LOG_WARN("CDROM: Track map is not fully deterministic (multi-file or non-monotonic CUE)");
-  }
+  reset();
+  notify_disc_inserted();
+  LOG_INFO("CDROM: Loaded image: %s", resolved_disc_path_.c_str());
   return true;
 }
 
 bool CdRom::swap_disc_image(const std::string &bin_path,
                             const std::string &cue_path) {
-  const std::vector<CdTrack> old_tracks = tracks_;
-  const std::string old_resolved_disc_path = resolved_disc_path_;
-  const bool old_track_map_valid = track_map_valid_;
-  const bool old_disc_loaded = disc_loaded_;
-  const u64 old_bin_size = bin_size_;
-
-  std::ifstream replacement_bin;
-  std::vector<CdTrack> parsed_tracks;
-
-  if (bin_file_.is_open()) {
-    bin_file_.close();
+  const bool ok = load_bin_cue(bin_path, cue_path);
+  if (ok) {
+    notify_disc_inserted();
   }
-
-  std::filesystem::path resolved_bin_path = bin_path;
-  std::filesystem::path cue_dir;
-  tracks_.clear();
-  if (!cue_path.empty()) {
-    const std::filesystem::path cue_fs(cue_path);
-    cue_dir = cue_fs.parent_path();
-    if (!parse_cue(cue_path, cue_dir.string())) {
-      tracks_ = old_tracks;
-      resolved_disc_path_ = old_resolved_disc_path;
-      track_map_valid_ = old_track_map_valid;
-      disc_loaded_ = old_disc_loaded;
-      bin_size_ = old_bin_size;
-      if (!old_resolved_disc_path.empty()) {
-        bin_file_.open(old_resolved_disc_path, std::ios::binary);
-      }
-      LOG_ERROR("CDROM: Failed to parse CUE file for live disc insert: %s",
-                cue_path.c_str());
-      return false;
-    }
-    parsed_tracks = tracks_;
-    if (resolved_bin_path.empty() && !parsed_tracks.empty() &&
-        !parsed_tracks.front().filename.empty()) {
-      resolved_bin_path = cue_dir / parsed_tracks.front().filename;
-    }
-  }
-
-  if (resolved_bin_path.empty()) {
-    tracks_ = old_tracks;
-    resolved_disc_path_ = old_resolved_disc_path;
-    track_map_valid_ = old_track_map_valid;
-    disc_loaded_ = old_disc_loaded;
-    bin_size_ = old_bin_size;
-    if (!old_resolved_disc_path.empty()) {
-      bin_file_.open(old_resolved_disc_path, std::ios::binary);
-    }
-    LOG_ERROR("CDROM: No BIN file could be resolved during live insert");
-    return false;
-  }
-
-  replacement_bin.open(resolved_bin_path, std::ios::binary);
-  if (!replacement_bin.is_open() && !parsed_tracks.empty() &&
-      !parsed_tracks.front().filename.empty()) {
-    const std::filesystem::path cue_referenced =
-        cue_dir / parsed_tracks.front().filename;
-    if (cue_referenced != resolved_bin_path) {
-      replacement_bin.clear();
-      replacement_bin.open(cue_referenced, std::ios::binary);
-      if (replacement_bin.is_open()) {
-        resolved_bin_path = cue_referenced;
-      }
-    }
-  }
-  if (!replacement_bin.is_open()) {
-    tracks_ = old_tracks;
-    resolved_disc_path_ = old_resolved_disc_path;
-    track_map_valid_ = old_track_map_valid;
-    disc_loaded_ = old_disc_loaded;
-    bin_size_ = old_bin_size;
-    if (!old_resolved_disc_path.empty()) {
-      bin_file_.open(old_resolved_disc_path, std::ios::binary);
-    }
-    LOG_ERROR("CDROM: Failed to open BIN file for live insert: %s",
-              resolved_bin_path.string().c_str());
-    return false;
-  }
-
-  std::error_code ec;
-  const u64 replacement_size = std::filesystem::file_size(resolved_bin_path, ec);
-  bin_size_ = ec ? 0 : replacement_size;
-
-  if (parsed_tracks.empty()) {
-    CdTrack fallback{};
-    fallback.number = 1;
-    fallback.type = "MODE2/2352";
-    fallback.filename = resolved_bin_path.filename().string();
-    fallback.sector_size = 2352;
-    fallback.pregap_sectors = 0;
-    fallback.index01_file_lba = 0;
-    fallback.index01_abs_lba = 150;
-    fallback.index01_file_offset = 0;
-    parsed_tracks.push_back(fallback);
-  }
-
-  bool single_file = true;
-  bool monotonic = true;
-  int first_index01 = 0;
-  int prev_index01 = 0;
-  if (!parsed_tracks.empty()) {
-    first_index01 = parsed_tracks.front().index01_file_lba;
-    prev_index01 = first_index01;
-  }
-  const std::string first_track_file =
-      parsed_tracks.empty() ? std::string() : lower_copy(parsed_tracks.front().filename);
-  for (CdTrack &track : parsed_tracks) {
-    if (!first_track_file.empty() &&
-        lower_copy(track.filename) != first_track_file) {
-      single_file = false;
-    }
-    if (track.index01_file_lba < prev_index01) {
-      monotonic = false;
-    }
-    prev_index01 = track.index01_file_lba;
-    track.index01_file_offset =
-        static_cast<u64>(std::max(track.index01_file_lba, 0)) *
-        static_cast<u64>(std::max(track.sector_size, 1));
-  }
-
-  track_map_valid_ = !parsed_tracks.empty() && single_file && monotonic;
-  for (CdTrack &track : parsed_tracks) {
-    const int delta = std::max(0, track.index01_file_lba - first_index01);
-    track.index01_abs_lba = 150 + delta;
-  }
-
-  tracks_ = std::move(parsed_tracks);
-  bin_file_ = std::move(replacement_bin);
-  resolved_disc_path_ = resolved_bin_path.string();
-  disc_loaded_ = true;
-
-  LOG_INFO("CDROM: Live inserted disc - %zu track(s) from %s", tracks_.size(),
-           resolved_disc_path_.c_str());
-  if (!track_map_valid_) {
-    LOG_WARN("CDROM: Track map is not fully deterministic (multi-file or non-monotonic CUE)");
-  }
-  return true;
-}
-
-void CdRom::reset() {
-  index_reg_ = 0;
-  interrupt_enable_ = 0;
-  interrupt_flag_ = 0;
-  param_fifo_.clear();
-  response_fifo_.clear();
-  response_index_ = 0;
-  data_buffer_.clear();
-  data_index_ = 0;
-  data_ready_ = false;
-  data_request_ = false;
-  motor_on_ = disc_loaded_;
-  shell_open_ = false;
-  seek_error_ = false;
-  id_error_ = false;
-  state_ = State::Idle;
-  pending_second_ = {};
-  pending_irqs_.clear();
-  seek_mm_ = seek_ss_ = seek_ff_ = 0;
-  read_lba_ = 0;
-  pending_cycles_ = 0;
-  read_period_cycles_ = 0;
-  command_busy_ = false;
-  command_busy_cycles_ = 0;
-  last_command_ = 0;
-  last_irq_code_ = 0;
-  mode_ = 0;
-  filter_file_ = 0;
-  filter_channel_ = 0;
-  command_counter_ = 0;
-  sector_counter_ = 0;
-  saw_read_command_ = false;
-  saw_getid_ = false;
-  saw_setloc_ = false;
-  saw_seekl_ = false;
-  saw_readn_or_reads_ = false;
-  saw_sector_visible_ = false;
-  read_command_count_ = 0;
-  irq_int1_count_ = 0;
-  irq_int3_count_ = 0;
-  read_buffer_stall_count_ = 0;
-  response_promotion_count_ = 0;
-  status_e0_poll_count_ = 0;
-  status_e0_streak_max_ = 0;
-  status_e0_streak_current_ = 0;
-  seek_target_lba_ = 0;
-  seek_target_valid_ = false;
-  seek_complete_ = false;
-  read_whole_sector_ = false;
-  pending_read_start_ = false;
-  pending_reads_mode_ = false;
-  cdda_playing_ = false;
-  cdda_cmd_muted_ = false;
-  cdda_adp_muted_ = false;
-  adpcm_busy_cycles_ = 0;
-  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
-  atv_active_ = atv_pending_;
-  host_audio_regs_.fill(0);
-  host_audio_apply_ = 0;
-  xa_hist1_ = {};
-  xa_hist2_ = {};
-  xa_stream_valid_ = false;
-  xa_stream_file_ = 0;
-  xa_stream_channel_ = 0;
-  insert_probe_active_ = false;
-  insert_probe_delay_cycles_ = 0;
-  insert_probe_stage_ = 0;
+  return ok;
 }
 
 void CdRom::notify_disc_inserted() {
   if (!disc_loaded_) {
     return;
   }
-  insert_probe_active_ = true;
-  insert_probe_delay_cycles_ = 1;
+  shell_open_ = false;
+  seek_error_ = false;
+  id_error_ = false;
+  motor_on_ = true;
+  // FIX C: do NOT fire a spontaneous INT2 on insert.  DuckStation (and real
+  // hardware) simply spin up the motor and wait for the BIOS/game to issue
+  // GetID / Init — it discovers the disc through those commands, not through
+  // an unsolicited interrupt.  The spurious INT2 was arriving before the game
+  // had set up its IRQ handler and corrupting early IRQ state, causing GT2
+  // (and likely others) to hang on the disclaimer screen.
+  insert_probe_active_ = false;
   insert_probe_stage_ = 0;
+  insert_probe_delay_cycles_ = 0;
 }
 
-bool CdRom::parse_cue(const std::string &cue_path,
-                      const std::string & /*bin_dir*/) {
+bool CdRom::parse_cue(const std::string &cue_path, const std::string &bin_dir) {
   std::ifstream cue(cue_path);
   if (!cue.is_open()) {
     return false;
@@ -511,33 +378,43 @@ bool CdRom::parse_cue(const std::string &cue_path,
   std::string current_file;
   CdTrack *current_track = nullptr;
   std::string line;
-
   while (std::getline(cue, line)) {
     line = trim_copy(line);
-    if (line.empty() || line[0] == ';') {
+    if (line.empty()) {
       continue;
     }
 
     if (starts_with_ci(line, "FILE")) {
       current_file = parse_file_name(line);
+      if (!current_file.empty() && !bin_dir.empty()) {
+        std::filesystem::path fp(current_file);
+        if (!fp.is_absolute()) {
+          fp = std::filesystem::path(bin_dir) / fp;
+          current_file = fp.string();
+        }
+      }
       continue;
     }
 
     if (starts_with_ci(line, "TRACK")) {
       std::istringstream iss(line);
       std::string token;
-      std::string type;
       int number = 0;
-      if (!(iss >> token >> number >> type)) {
+      std::string type;
+      iss >> token >> number >> type;
+      if (number <= 0 || type.empty()) {
+        current_track = nullptr;
         continue;
       }
 
-      CdTrack track{};
+      CdTrack track;
       track.number = number;
       track.type = upper_copy(type);
       track.filename = current_file;
       if (track.type == "MODE1/2048") {
         track.sector_size = 2048;
+      } else if (track.type == "MODE2/2336" || track.type == "CDI/2336") {
+        track.sector_size = 2336;
       } else {
         track.sector_size = 2352;
       }
@@ -546,481 +423,865 @@ bool CdRom::parse_cue(const std::string &cue_path,
       continue;
     }
 
+    if (current_track == nullptr) {
+      continue;
+    }
+
     if (starts_with_ci(line, "PREGAP")) {
-      if (current_track == nullptr) {
-        continue;
-      }
       std::istringstream iss(line);
       std::string token;
       std::string msf;
       iss >> token >> msf;
-      const int sectors = parse_msf(msf);
-      if (sectors >= 0) {
-        current_track->pregap_sectors = sectors;
+      const int pregap = parse_msf_text(msf);
+      if (pregap >= 0) {
+        current_track->pregap_sectors = pregap;
       }
       continue;
     }
 
     if (starts_with_ci(line, "INDEX")) {
-      if (current_track == nullptr) {
-        continue;
-      }
       std::istringstream iss(line);
       std::string token;
-      std::string index_no;
+      int index_num = 0;
       std::string msf;
-      if (!(iss >> token >> index_no >> msf)) {
-        continue;
+      iss >> token >> index_num >> msf;
+      if (index_num == 1) {
+        const int lba = parse_msf_text(msf);
+        if (lba >= 0) {
+          current_track->index01_file_lba = lba;
+        }
       }
-      if (index_no != "01") {
-        continue;
-      }
-      const int sectors = parse_msf(msf);
-      if (sectors >= 0) {
-        current_track->index01_file_lba = sectors;
-        current_track->index01_file_offset =
-            static_cast<u64>(sectors) * static_cast<u64>(current_track->sector_size);
-      }
+      continue;
     }
   }
 
   return !tracks_.empty();
 }
 
-// -- Register Access -----------------------------------------------------------
-
-u8 CdRom::read8(u32 offset) {
-  auto trace_read = [&](u8 value) {
-    if (g_trace_cdrom) {
-      static u64 io_read_count = 0;
-      if (trace_should_log(io_read_count, g_trace_burst_cdrom, g_trace_stride_cdrom)) {
-        LOG_DEBUG("CDROM: R8 off=%u idx=%u -> 0x%02X", offset,
-                  static_cast<unsigned>(index_reg_),
-                  static_cast<unsigned>(value));
-      }
-    }
-    return value;
-  };
-
-  switch (offset) {
-  case 0: {
-    u8 status = static_cast<u8>(index_reg_ & 0x3);
-    // Bit2 ADPBUSY: XA ADPCM decoder active.
-    if (adpcm_busy_cycles_ > 0) {
-      status |= (1u << 2);
-    }
-    // Bit3 PRMEMPT: parameter FIFO empty.
-    if (param_fifo_.empty()) {
-      status |= (1u << 3);
-    }
-    // Bit4 PRMWRDY: parameter FIFO can accept writes.
-    if (param_fifo_.size() < 16) {
-      status |= (1u << 4);
-    }
-    // Bit5 RSLRRDY: response FIFO has unread data.
-    if (response_index_ < static_cast<int>(response_fifo_.size())) {
-      status |= (1u << 5);
-    }
-    // Bit6 DRQSTS: data buffer readable by host when requested.
-    if (data_ready_ && data_request_) {
-      status |= (1u << 6);
-    }
-    // Bit7 BUSYSTS: command processing busy window active.
-    if (command_busy_ || command_busy_cycles_ > 0) {
-      status |= (1u << 7);
-    }
-    if (status == 0xE0u) {
-      ++status_e0_poll_count_;
-      ++status_e0_streak_current_;
-      status_e0_streak_max_ =
-          std::max(status_e0_streak_max_, status_e0_streak_current_);
-    } else {
-      status_e0_streak_current_ = 0;
-    }
-    return trace_read(status);
-  }
-  case 1:
-    if (response_index_ < static_cast<int>(response_fifo_.size())) {
-      const u8 value = response_fifo_[response_index_++];
-      if (response_index_ >= static_cast<int>(response_fifo_.size())) {
-        response_fifo_.clear();
-        response_index_ = 0;
-        service_pending_irq();
-      }
-      return trace_read(value);
-    }
-    return trace_read(0);
-  case 2:
-    if (data_index_ < static_cast<int>(data_buffer_.size())) {
-      const u8 value = data_buffer_[data_index_++];
-      if (data_index_ >= static_cast<int>(data_buffer_.size())) {
-        data_ready_ = false;
-      }
-      return trace_read(value);
-    }
-    return trace_read(0);
-  case 3:
-    if (index_reg_ == 0 || index_reg_ == 2) {
-      return trace_read(static_cast<u8>(interrupt_enable_ | 0xE0));
-    }
-    return trace_read(static_cast<u8>(interrupt_flag_ | 0xE0));
-  default:
-    LOG_WARN("CDROM: Unhandled read8 at offset %u index %u", offset, index_reg_);
-    return trace_read(0);
-  }
-}
-
-void CdRom::write8(u32 offset, u8 value) {
-  if (g_trace_cdrom) {
-    static u64 io_write_count = 0;
-    if (trace_should_log(io_write_count, g_trace_burst_cdrom, g_trace_stride_cdrom)) {
-      LOG_DEBUG("CDROM: W8 off=%u idx=%u val=0x%02X", offset,
-                static_cast<unsigned>(index_reg_),
-                static_cast<unsigned>(value));
-    }
-  }
-
-  switch (offset) {
-  case 0:
-    index_reg_ = value & 0x3;
-    break;
-  case 1:
-    switch (index_reg_) {
-    case 0:
-      last_command_ = value;
-      command_busy_cycles_ = command_busy_for(value);
-      command_busy_ = command_busy_cycles_ > 0;
-      execute_command(value);
-      param_fifo_.clear();
-      break;
-    case 1:
-      host_audio_regs_[0] = value;
-      break;
-    case 2:
-      // Coding info command register (not used in this model yet).
-      host_audio_regs_[1] = value;
-      break;
-    case 3:
-      // ATV2: right-to-right volume.
-      host_audio_regs_[5] = value;
-      atv_pending_[2] = value;
-      break;
-    default:
-      LOG_WARN("CDROM: Write to port 1 index %u = 0x%02X", index_reg_, value);
-      break;
-    }
-    break;
-  case 2:
-    switch (index_reg_) {
-    case 0:
-      param_fifo_.push_back(value);
-      break;
-    case 1:
-      interrupt_enable_ = value & 0x1F;
-      refresh_irq_line();
-      break;
-    case 2:
-      // ATV0: left-to-left volume.
-      host_audio_regs_[2] = value;
-      atv_pending_[0] = value;
-      break;
-    case 3:
-      // ATV3: right-to-left volume.
-      host_audio_regs_[3] = value;
-      atv_pending_[3] = value;
-      break;
-    default:
-      LOG_WARN("CDROM: Write to port 2 index %u = 0x%02X", index_reg_, value);
-      break;
-    }
-    break;
-  case 3:
-    switch (index_reg_) {
-    case 0:
-      // Bit7 gates host/DMA visibility of the data FIFO.
-      // Do not rewind data_index_ here: games may toggle this bit between
-      // multiple DMA bursts while expecting a continuous stream.
-      data_request_ = (value & 0x80) != 0;
-      if (data_request_) {
-        data_ready_ = (data_index_ < static_cast<int>(data_buffer_.size()));
-      } else {
-        data_ready_ = false;
-      }
-      break;
-    case 1: {
-      const u8 ack_mask = static_cast<u8>(value & 0x1F);
-      bool irq_cleared = false;
-      if (interrupt_flag_ >= 1 && interrupt_flag_ <= 5) {
-        const u8 active_bit = irq_code_to_enable_bit(interrupt_flag_);
-        if ((ack_mask & active_bit) != 0) {
-          irq_cleared = true;
-        }
-      }
-      if (irq_cleared) {
-        // HCLRCTL bits0..4 acknowledge pending HINTSTS flags.
-        // Keep legacy behavior: ACK also drains the current result FIFO so
-        // queued follow-up responses can promote immediately.
-        interrupt_flag_ = 0;
-        response_fifo_.clear();
-        response_index_ = 0;
-      }
-      if (value & 0x40) {
-        // CLRPRM: clear parameter FIFO.
-        param_fifo_.clear();
-      }
-      if (value & 0x80) {
-        // CHPRST/host reset control: keep this limited to host FIFOs so active
-        // read/seek state isn't disrupted mid-boot.
-        response_fifo_.clear();
-        response_index_ = 0;
-      }
-      refresh_irq_line();
-      service_pending_irq();
-      break;
-    }
-    case 2:
-      // ATV1: left-to-right volume.
-      host_audio_regs_[4] = value;
-      atv_pending_[1] = value;
-      break;
-    case 3:
-      // ADPCTL: bit0=ADPMUTE, bit5=CHNGATV.
-      host_audio_regs_[6] = value;
-      host_audio_apply_ = value;
-      cdda_adp_muted_ = (value & 0x01u) != 0;
-      if (value & 0x20u) {
-        atv_active_ = atv_pending_;
-      }
-      break;
-    default:
-      LOG_WARN("CDROM: Write to port 3 index %u = 0x%02X", index_reg_, value);
-      break;
-    }
-    break;
-  }
-}
-
-// -- Commands -----------------------------------------------------------------
-
-void CdRom::execute_command(u8 cmd) {
-  ++command_counter_;
-  if (g_trace_cdrom &&
-      (command_counter_ <= static_cast<u64>(g_trace_burst_cdrom) ||
-       (g_trace_stride_cdrom > 0 &&
-        (command_counter_ % static_cast<u64>(g_trace_stride_cdrom)) == 0))) {
-    std::ostringstream oss;
-    oss << "CDROM: CMD#" << command_counter_ << " 0x" << std::hex
-        << std::uppercase << std::setw(2) << std::setfill('0')
-        << static_cast<unsigned>(cmd) << " params=[";
-    for (size_t i = 0; i < param_fifo_.size(); ++i) {
-      if (i)
-        oss << ' ';
-      oss << "0x" << std::setw(2) << static_cast<unsigned>(param_fifo_[i]);
-    }
-    oss << "]";
-    LOG_INFO("%s", oss.str().c_str());
-  }
-
-  switch (cmd) {
-  case 0x01:
-    cmd_getstat();
-    break;
-  case 0x02:
-    saw_setloc_ = true;
-    cmd_setloc();
-    break;
-  case 0x03:
-    cmd_play();
-    break;
-  case 0x04: // Forward (CDDA)
-  case 0x05: // Backward (CDDA)
-    enqueue_irq(3, {stat_byte()});
-    break;
-  case 0x06:
-    saw_readn_or_reads_ = true;
-    cmd_readn();
-    break;
-  case 0x07:
-    cmd_standby();
-    break;
-  case 0x08:
-    cmd_stop();
-    break;
-  case 0x09:
-    cmd_pause();
-    break;
-  case 0x0B:
-    cmd_mute();
-    break;
-  case 0x0C:
-    cmd_demute();
-    break;
-  case 0x0A:
-    cmd_init();
-    break;
-  case 0x0E:
-    cmd_setmode();
-    break;
-  case 0x0D:
-    cmd_setfilter();
-    break;
-  case 0x10:
-      cmd_getloc_l();
-    break;
-  case 0x11:
-    cmd_getloc_p();
-    break;
-  case 0x12:
-      cmd_setsession();
-    break;
-  case 0x15:
-    saw_seekl_ = true;
-    cmd_seekl();
-    break;
-  case 0x1A:
-    saw_getid_ = true;
-    cmd_getid();
-    break;
-  case 0x1B:
-    saw_readn_or_reads_ = true;
-    cmd_reads();
-    break;
-  case 0x13:
-    cmd_gettn();
-    break;
-  case 0x14:
-    cmd_gettd();
-    break;
-  case 0x19:
-    cmd_test();
-    break;
-  case 0x1E:
-    cmd_readtoc();
-    break;
-  default:
-    LOG_WARN("CDROM: Unhandled command 0x%02X", cmd);
-    enqueue_irq(3, {static_cast<u8>(stat_byte() | 0x01)});
-    break;
-  }
-}
-
 u8 CdRom::stat_byte() const {
   u8 stat = 0;
-  if (motor_on_)
-    stat |= 0x02;
-  if (seek_error_)
-    stat |= 0x04;
-  if (id_error_)
-    stat |= 0x08;
-  if (shell_open_ || !disc_loaded_)
-    stat |= 0x10;
-  if (state_ == State::Reading)
-    stat |= 0x20;
-  if (state_ == State::Seeking)
-    stat |= 0x40;
-  if (cdda_playing_)
-    stat |= 0x80;
+  if (cdda_playing_) {
+    stat |= 0x80u;
+  } else if (state_ == State::Seeking) {
+    stat |= 0x40u;
+  } else if (state_ == State::Reading) {
+    stat |= 0x20u;
+  }
+  if (shell_open_) {
+    stat |= 0x10u;
+  }
+  if (id_error_) {
+    stat |= 0x08u;
+  }
+  if (seek_error_) {
+    stat |= 0x04u;
+  }
+  if (motor_on_) {
+    stat |= 0x02u;
+  }
   return stat;
 }
 
+int CdRom::msf_to_lba(u8 mm, u8 ss, u8 ff) const {
+  const int m = from_bcd(mm);
+  const int s = from_bcd(ss);
+  const int f = from_bcd(ff);
+  if (m < 0 || s < 0 || s >= 60 || f < 0 || f >= 75) {
+    return -1;
+  }
+  return (m * 60 * 75 + s * 75 + f) - 150;
+}
+
+int CdRom::read_period_for_mode() const {
+  const bool double_speed = (mode_ & 0x80u) != 0;
+  return static_cast<int>(psx::CPU_CLOCK_HZ / (double_speed ? 150u : 75u));
+}
+
+int CdRom::command_busy_for(u8 cmd) const {
+  switch (cmd) {
+  case 0x01: // GetStat
+  case 0x10: // GetlocL
+  case 0x11: // GetlocP
+    return 1200;
+  case 0x02: // Setloc
+  case 0x0E: // Setmode
+    return 2000;
+  case 0x03: // Play
+  case 0x06: // ReadN
+  case 0x1B: // ReadS
+    return 2400;
+  case 0x15: // SeekL
+  case 0x16: // SeekP
+    return 10000;
+  case 0x1A: // GetID
+  case 0x12: // Setsession
+  case 0x1E: // ReadTOC
+    return 4000;
+  case 0x0A: // Init
+    return 6000;
+  case 0x09: // Pause
+    return 4000;
+  default:
+    return 2000;
+  }
+}
+
+void CdRom::refresh_read_period() {
+  read_period_cycles_ = std::max(1, read_period_for_mode());
+}
+
+void CdRom::schedule_second_response(int delay_cycles, u8 irq,
+                                     std::vector<u8> response) {
+  pending_second_.active = true;
+  pending_second_.delay = std::max(1, delay_cycles);
+  pending_second_.irq = irq;
+  pending_second_.response = std::move(response);
+}
+
+void CdRom::start_read_stream(bool reads_mode) {
+  pending_reads_mode_ = reads_mode;
+  if (seek_target_valid_ && seek_target_lba_ != read_lba_) {
+    state_ = State::Seeking;
+    pending_read_start_ = true;
+    pending_cycles_ = std::max(1, read_period_cycles_ / 2);
+  } else {
+    state_ = State::Reading;
+    pending_read_start_ = false;
+    pending_cycles_ = std::max(1, read_period_cycles_);
+  }
+  cdda_playing_ = false;
+  seek_complete_ = false;
+  saw_read_command_ = true;
+  saw_readn_or_reads_ = true;
+}
+
+const CdTrack *CdRom::track_for_lba(int lba) const {
+  if (tracks_.empty()) {
+    return nullptr;
+  }
+  const int abs_lba = lba + 150;
+  const CdTrack *track = &tracks_.front();
+  for (const CdTrack &candidate : tracks_) {
+    if (abs_lba >= candidate.index01_abs_lba) {
+      track = &candidate;
+    } else {
+      break;
+    }
+  }
+  return track;
+}
+
+int CdRom::track_end_lba(const CdTrack *track) const {
+  if (track == nullptr) {
+    return -1;
+  }
+  auto it = std::find_if(tracks_.begin(), tracks_.end(),
+                         [track](const CdTrack &entry) { return &entry == track; });
+  if (it == tracks_.end()) {
+    return -1;
+  }
+  const size_t idx = static_cast<size_t>(std::distance(tracks_.begin(), it));
+  if (idx + 1u < tracks_.size()) {
+    return tracks_[idx + 1u].index01_abs_lba - 151;
+  }
+  const int sectors = static_cast<int>(bin_size_ / std::max(1, track->sector_size));
+  const int rel_len = std::max(1, sectors - track->index01_file_lba);
+  return (track->index01_abs_lba - 150) + rel_len - 1;
+}
+
+bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
+                                    const CdTrack **track_out) {
+  raw_sector.clear();
+  if (!disc_loaded_ || !bin_file_.is_open()) {
+    return false;
+  }
+
+  const CdTrack *track = track_for_lba(psx_lba);
+  if (track_out != nullptr) {
+    *track_out = track;
+  }
+  if (track == nullptr) {
+    return false;
+  }
+
+  const int rel = psx_lba - (track->index01_abs_lba - 150);
+  if (rel < 0) {
+    return false;
+  }
+
+  const int file_lba = track->index01_file_lba + rel;
+  const int sector_size = std::max(1, track->sector_size);
+  const u64 offset = static_cast<u64>(file_lba) * static_cast<u64>(sector_size);
+  if (offset + static_cast<u64>(sector_size) > bin_size_) {
+    return false;
+  }
+
+  raw_sector.resize(static_cast<size_t>(sector_size));
+  bin_file_.clear();
+  bin_file_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  if (!bin_file_.good()) {
+    return false;
+  }
+  bin_file_.read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
+  return bin_file_.good();
+}
+
+bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }
+
+void CdRom::apply_host_audio_matrix(std::vector<s16> &samples) const {
+  if (samples.size() < 2u) {
+    return;
+  }
+
+  const s32 ll = static_cast<s32>(atv_active_[0]);
+  const s32 lr = static_cast<s32>(atv_active_[3]);
+  const s32 rl = static_cast<s32>(atv_active_[1]);
+  const s32 rr = static_cast<s32>(atv_active_[2]);
+  for (size_t i = 0; i + 1u < samples.size(); i += 2u) {
+    const s32 l = samples[i + 0u];
+    const s32 r = samples[i + 1u];
+    const s32 out_l = ((l * ll) + (r * lr)) / 0x80;
+    const s32 out_r = ((l * rl) + (r * rr)) / 0x80;
+    samples[i + 0u] = sat16(out_l);
+    samples[i + 1u] = sat16(out_r);
+  }
+}
+
+bool CdRom::stream_cdda_sector() {
+  std::vector<u8> raw;
+  const CdTrack *track = nullptr;
+  if (!read_raw_sector_for_lba(read_lba_, raw, &track)) {
+    return false;
+  }
+  if (raw.size() < 2352u || !is_audio_track(track)) {
+    return true;
+  }
+
+  if (!cd_audio_muted() && sys_ != nullptr) {
+    std::vector<s16> samples;
+    samples.reserve(raw.size() / 2u);
+    for (size_t i = 0; i + 3u < raw.size(); i += 4u) {
+      const s16 l = static_cast<s16>(static_cast<u16>(raw[i + 0u]) |
+                                     (static_cast<u16>(raw[i + 1u]) << 8));
+      const s16 r = static_cast<s16>(static_cast<u16>(raw[i + 2u]) |
+                                     (static_cast<u16>(raw[i + 3u]) << 8));
+      samples.push_back(l);
+      samples.push_back(r);
+    }
+    apply_host_audio_matrix(samples);
+    sys_->push_cd_audio_samples(samples, 44100u);
+  }
+  return true;
+}
+
+void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
+  if ((mode_ & 0x40u) == 0 || raw_sector.size() < 24u) {
+    return;
+  }
+  if (raw_sector[15] != 0x02u) {
+    return;
+  }
+
+  const u8 file = raw_sector[16];
+  const u8 channel = raw_sector[17];
+  const u8 submode = raw_sector[18];
+  const u8 codinginfo = raw_sector[19];
+  // Only require the Audio bit (0x04). Real hardware doesn't require the
+  // Real-Time bit (0x40) to also be set; many titles including GT2 omit it.
+  if ((submode & 0x04u) == 0) {
+    return;
+  }
+
+  if ((mode_ & 0x08u) != 0 &&
+      (file != filter_file_ || channel != filter_channel_)) {
+    return;
+  }
+
+  const bool stream_changed =
+      !xa_stream_valid_ || xa_stream_file_ != file || xa_stream_channel_ != channel;
+  if (stream_changed) {
+    xa_hist1_ = {};
+    xa_hist2_ = {};
+  }
+  xa_stream_valid_ = true;
+  xa_stream_file_ = file;
+  xa_stream_channel_ = channel;
+  adpcm_busy_cycles_ = std::max(adpcm_busy_cycles_, read_period_cycles_);
+
+  const bool stereo = (codinginfo & 0x03u) == 0x01u;
+  const bool sample_rate_18900 = (codinginfo & 0x04u) != 0;
+  const u8 bits_per_sample = static_cast<u8>((codinginfo >> 4) & 0x03u);
+  const bool eight_bit = (bits_per_sample == 0x01u);
+  const bool four_bit = (bits_per_sample == 0x00u);
+  const u32 sample_rate = sample_rate_18900 ? 18900u : 37800u;
+
+  if (!four_bit && !eight_bit) {
+    static bool warned_bad_bps = false;
+    if (!warned_bad_bps) {
+      LOG_WARN("CDROM: XA unsupported bits-per-sample coding=%u", bits_per_sample);
+      warned_bad_bps = true;
+    }
+    return;
+  }
+
+  if (!cd_audio_muted() && sys_ != nullptr && raw_sector.size() >= (24u + 18u * 128u)) {
+    std::vector<s16> samples;
+
+    if (stereo) {
+      const size_t blocks_per_group = four_bit ? 4u : 2u;
+      samples.reserve(18u * blocks_per_group * 28u * 2u);
+
+      s32 old_l = xa_hist1_[0];
+      s32 older_l = xa_hist2_[0];
+      s32 old_r = xa_hist1_[1];
+      s32 older_r = xa_hist2_[1];
+
+      for (size_t group = 0; group < 18u; ++group) {
+        const size_t base = 24u + group * 128u;
+        for (size_t blk = 0; blk < blocks_per_group; ++blk) {
+          if (four_bit) {
+            const u8 header_l = raw_sector[base + 4u + blk * 2u + 0u];
+            const u8 header_r = raw_sector[base + 4u + blk * 2u + 1u];
+            const int shift_l = xa_shift_from_header(header_l);
+            const int shift_r = xa_shift_from_header(header_r);
+            const int filter_l = static_cast<int>((header_l >> 4) & 0x03u);
+            const int filter_r = static_cast<int>((header_r >> 4) & 0x03u);
+
+            for (size_t j = 0; j < 28u; ++j) {
+              const u8 packed = raw_sector[base + 16u + blk + j * 4u];
+              const int t_l = xa_sign_extend_4(static_cast<u8>(packed & 0x0Fu));
+              const int t_r = xa_sign_extend_4(static_cast<u8>((packed >> 4) & 0x0Fu));
+              const s16 s_l = xa_decode_sample(t_l, false, shift_l, filter_l,
+                                               old_l, older_l);
+              const s16 s_r = xa_decode_sample(t_r, false, shift_r, filter_r,
+                                               old_r, older_r);
+              samples.push_back(s_l);
+              samples.push_back(s_r);
+            }
+          } else {
+            const u8 header_l = raw_sector[base + 4u + blk * 2u + 0u];
+            const u8 header_r = raw_sector[base + 4u + blk * 2u + 1u];
+            const int shift_l = xa_shift_from_header(header_l);
+            const int shift_r = xa_shift_from_header(header_r);
+            const int filter_l = static_cast<int>((header_l >> 4) & 0x03u);
+            const int filter_r = static_cast<int>((header_r >> 4) & 0x03u);
+
+            for (size_t j = 0; j < 28u; ++j) {
+              const u32 packed = static_cast<u32>(raw_sector[base + 16u + j * 4u + 0u]) |
+                                 (static_cast<u32>(raw_sector[base + 16u + j * 4u + 1u]) << 8) |
+                                 (static_cast<u32>(raw_sector[base + 16u + j * 4u + 2u]) << 16) |
+                                 (static_cast<u32>(raw_sector[base + 16u + j * 4u + 3u]) << 24);
+              const int t_l = xa_sign_extend_8(
+                  static_cast<u8>((packed >> (blk * 16u + 0u)) & 0xFFu));
+              const int t_r = xa_sign_extend_8(
+                  static_cast<u8>((packed >> (blk * 16u + 8u)) & 0xFFu));
+              const s16 s_l = xa_decode_sample(t_l, true, shift_l, filter_l,
+                                               old_l, older_l);
+              const s16 s_r = xa_decode_sample(t_r, true, shift_r, filter_r,
+                                               old_r, older_r);
+              samples.push_back(s_l);
+              samples.push_back(s_r);
+            }
+          }
+        }
+      }
+
+      xa_hist1_[0] = sat16(old_l);
+      xa_hist2_[0] = sat16(older_l);
+      xa_hist1_[1] = sat16(old_r);
+      xa_hist2_[1] = sat16(older_r);
+    } else {
+      // FIX: mono 4-bit uses 4 blocks/group, mono 8-bit uses 4 blocks/group.
+      // The original code had `four_bit ? 4u : 4u` (dead ternary). This is
+      // actually numerically correct for both cases, but clarified for intent.
+      const size_t blocks_per_group = 4u;
+      samples.reserve(18u * blocks_per_group * 28u * 2u);
+
+      s32 old = xa_hist1_[0];
+      s32 older = xa_hist2_[0];
+
+      for (size_t group = 0; group < 18u; ++group) {
+        const size_t base = 24u + group * 128u;
+        for (size_t blk = 0; blk < blocks_per_group; ++blk) {
+          if (four_bit) {
+            for (size_t nibble = 0; nibble < 2u; ++nibble) {
+              const u8 header = raw_sector[base + 4u + blk * 2u + nibble];
+              const int shift = xa_shift_from_header(header);
+              const int filter = static_cast<int>((header >> 4) & 0x03u);
+              for (size_t j = 0; j < 28u; ++j) {
+                const u8 packed = raw_sector[base + 16u + blk + j * 4u];
+                const int t = xa_sign_extend_4(
+                    static_cast<u8>((packed >> (nibble * 4u)) & 0x0Fu));
+                const s16 s = xa_decode_sample(t, false, shift, filter, old, older);
+                samples.push_back(s);
+                samples.push_back(s);
+              }
+            }
+          } else {
+            const u8 header = raw_sector[base + 4u + blk];
+            const int shift = xa_shift_from_header(header);
+            const int filter = static_cast<int>((header >> 4) & 0x03u);
+            for (size_t j = 0; j < 28u; ++j) {
+              const int t = xa_sign_extend_8(raw_sector[base + 16u + j * 4u + blk]);
+              const s16 s = xa_decode_sample(t, true, shift, filter, old, older);
+              samples.push_back(s);
+              samples.push_back(s);
+            }
+          }
+        }
+      }
+
+      xa_hist1_[0] = sat16(old);
+      xa_hist2_[0] = sat16(older);
+      xa_hist1_[1] = xa_hist1_[0];
+      xa_hist2_[1] = xa_hist2_[0];
+    }
+
+    apply_host_audio_matrix(samples);
+    sys_->push_cd_audio_samples(samples, sample_rate);
+  }
+}
+
+bool CdRom::read_sector() {
+  std::vector<u8> raw;
+  const CdTrack *track = nullptr;
+  if (!read_raw_sector_for_lba(read_lba_, raw, &track)) {
+    return false;
+  }
+
+  if (is_audio_track(track) && (mode_ & 0x01u) == 0) {
+    return false;
+  }
+
+  const bool mode2 = raw.size() >= 16u && raw[15] == 0x02u;
+  const bool has_subheader = mode2 && raw.size() >= 24u;
+  const u8 file = has_subheader ? raw[16] : 0;
+  const u8 channel = has_subheader ? raw[17] : 0;
+  const u8 submode = has_subheader ? raw[18] : 0;
+  const bool audio_realtime = has_subheader && ((submode & 0x04u) != 0);
+  const bool filter_on = (mode_ & 0x08u) != 0;
+  const bool filter_match =
+      !filter_on || (file == filter_file_ && channel == filter_channel_);
+
+  bool delivered_to_adpcm = false;
+  if ((mode_ & 0x40u) != 0 && audio_realtime && filter_match) {
+    maybe_decode_xa_audio(raw);
+    delivered_to_adpcm = true;
+  }
+
+  bool deliver_data = true;
+  if (delivered_to_adpcm) {
+    deliver_data = false;
+  }
+  if (filter_on && audio_realtime && !filter_match) {
+    deliver_data = false;
+  }
+  if (!deliver_data) {
+    return true;
+  }
+
+  std::vector<u8> payload;
+  // ReadN (06h) and ReadS (1Bh) differ in retry policy/timing, not in how the
+  // host data FIFO is formatted. Host payload width is selected via Setmode
+  // bit5 (tracked in read_whole_sector_).
+  const bool whole = read_whole_sector_;
+  if (whole) {
+    if (raw.size() >= (12u + 0x924u)) {
+      payload.assign(raw.begin() + 12, raw.begin() + 12 + 0x924u);
+    } else {
+      payload = raw;
+    }
+  } else {
+    size_t data_offset = 0;
+    size_t data_size = 0;
+    if (raw.size() >= 2352u && mode2) {
+      data_offset = 24u;
+      data_size = 0x800u;
+    } else if (raw.size() >= 2352u) {
+      data_offset = 16u;
+      data_size = 0x800u;
+    } else if (raw.size() >= 2048u) {
+      data_offset = 0u;
+      data_size = 0x800u;
+    } else {
+      data_offset = 0u;
+      data_size = raw.size();
+    }
+    if (data_offset + data_size > raw.size()) {
+      data_size = raw.size() - data_offset;
+    }
+    payload.assign(raw.begin() + static_cast<ptrdiff_t>(data_offset),
+                   raw.begin() + static_cast<ptrdiff_t>(data_offset + data_size));
+  }
+
+  if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
+    ++read_buffer_stall_count_;
+  }
+  data_buffer_ = std::move(payload);
+  data_index_ = 0;
+  data_ready_ = !data_buffer_.empty();
+  if (data_ready_) {
+    saw_sector_visible_ = true;
+  }
+  return true;
+}
+
+void CdRom::fire_irq(u8 irq_num) {
+  interrupt_flag_ = static_cast<u8>((interrupt_flag_ & 0xF8u) | irq_to_hint(irq_num));
+  last_irq_code_ = irq_num;
+  if (irq_num == 1u) {
+    ++irq_int1_count_;
+  } else if (irq_num == 2u) {
+    ++irq_int2_count_;
+  } else if (irq_num == 3u) {
+    ++irq_int3_count_;
+  } else if (irq_num == 4u) {
+    ++irq_int4_count_;
+  } else if (irq_num == 5u) {
+    ++irq_int5_count_;
+  }
+  refresh_irq_line();
+}
+
+void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
+                        bool wait_for_command_idle) {
+  const bool pending = (interrupt_flag_ & kHintTypeMask) != 0;
+  const bool response_pending =
+      response_index_ < static_cast<int>(response_fifo_.size());
+
+  if (pending || response_pending || (wait_for_command_idle && command_busy_)) {
+    pending_irqs_.push_back(PendingIrq{
+        irq_num,
+        wait_for_command_idle,
+        std::move(response),
+    });
+    return;
+  }
+
+  response_fifo_ = std::move(response);
+  if (response_fifo_.size() > kFifoCapacity) {
+    response_fifo_.resize(kFifoCapacity);
+  }
+  response_index_ = 0;
+  fire_irq(irq_num);
+}
+
+void CdRom::service_pending_irq() {
+  if (pending_irqs_.empty()) {
+    return;
+  }
+  if ((interrupt_flag_ & kHintTypeMask) != 0) {
+    return;
+  }
+
+  PendingIrq &front = pending_irqs_.front();
+  if (front.wait_for_command_idle && command_busy_) {
+    return;
+  }
+
+  response_fifo_ = std::move(front.response);
+  if (response_fifo_.size() > kFifoCapacity) {
+    response_fifo_.resize(kFifoCapacity);
+  }
+  response_index_ = 0;
+  const u8 irq = front.irq;
+  pending_irqs_.pop_front();
+  ++response_promotion_count_;
+  fire_irq(irq);
+}
+
+void CdRom::refresh_irq_line() {
+  if (sys_ == nullptr) {
+    return;
+  }
+  const u8 active_type = static_cast<u8>(interrupt_flag_ & kHintTypeMask);
+  const u8 active_mask = hint_to_mask(active_type);
+  if ((interrupt_enable_ & active_mask & kHintMaskAll) != 0) {
+    sys_->irq().request(Interrupt::CDROM);
+  }
+}
+
 void CdRom::cmd_getstat() {
-  enqueue_irq(3, {stat_byte()});
+  const u8 stat = stat_byte();
+  enqueue_irq(3, {stat});
+  if (!shell_open_) {
+    shell_open_ = false;
+  }
 }
 
 void CdRom::cmd_setloc() {
-  if (param_fifo_.size() >= 3) {
-    seek_mm_ = from_bcd(param_fifo_[0]);
-    seek_ss_ = from_bcd(param_fifo_[1]);
-    seek_ff_ = from_bcd(param_fifo_[2]);
-    seek_target_lba_ = msf_to_lba(seek_mm_, seek_ss_, seek_ff_);
-    seek_target_valid_ = true;
-    seek_complete_ = false;
+  saw_setloc_ = true;
+  if (param_fifo_.size() != 3u) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
   }
+
+  const int target = msf_to_lba(param_fifo_[0], param_fifo_[1], param_fifo_[2]);
+  if (target < 0) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x10u));
+    return;
+  }
+
+  seek_mm_ = param_fifo_[0];
+  seek_ss_ = param_fifo_[1];
+  seek_ff_ = param_fifo_[2];
+  seek_target_lba_ = target;
+  seek_target_valid_ = true;
+  seek_error_ = false;
   enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_play() {
-  motor_on_ = true;
-  state_ = State::Idle;
-  pending_read_start_ = false;
+  if (!disc_loaded_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
 
   if (!param_fifo_.empty()) {
-    const u8 track_bcd = param_fifo_[0];
-    const int track_no = from_bcd(track_bcd);
-    if (track_no >= 1 && track_no <= static_cast<int>(tracks_.size())) {
-      read_lba_ = std::max(0, tracks_[static_cast<size_t>(track_no - 1)].index01_abs_lba - 150);
-      seek_target_valid_ = false;
-      seek_complete_ = true;
+    const int track_no = from_bcd(param_fifo_[0]);
+    if (track_no > 0) {
+      auto it = std::find_if(tracks_.begin(), tracks_.end(),
+                             [track_no](const CdTrack &track) {
+                               return track.number == track_no;
+                             });
+      if (it != tracks_.end()) {
+        read_lba_ = it->index01_abs_lba - 150;
+        seek_target_lba_ = read_lba_;
+        seek_target_valid_ = true;
+      }
     }
   } else if (seek_target_valid_) {
     read_lba_ = seek_target_lba_;
-    seek_complete_ = true;
   }
 
+  motor_on_ = true;
   cdda_playing_ = true;
-  pending_cycles_ = std::max(1, read_period_for_mode());
+  state_ = State::Reading;
+  pending_cycles_ = std::max(1, read_period_cycles_);
   enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_readn() {
-  cdda_playing_ = false;
-  start_read_stream(false);
-}
+  if (!disc_loaded_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
 
-void CdRom::cmd_reads() {
-  cdda_playing_ = false;
-  start_read_stream(true);
+  if (seek_target_valid_) {
+    const CdTrack *target_track = track_for_lba(seek_target_lba_);
+    if (is_audio_track(target_track) && (mode_ & 0x01u) == 0) {
+      enqueue_irq(5, make_error_response(stat_byte(), 0x40u));
+      return;
+    }
+  }
+
+  ++read_command_count_;
+  motor_on_ = true;
+  start_read_stream(false);
+  enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_pause() {
+  const u8 first = stat_byte();
   cdda_playing_ = false;
-  state_ = State::Idle;
-  read_period_cycles_ = 0;
   pending_read_start_ = false;
-  enqueue_irq(3, {stat_byte()});
+  pending_reads_mode_ = false;
+  state_ = State::Idle;
+  seek_complete_ = true;
+  enqueue_irq(3, {first});
   schedule_second_response(25000, 2, {stat_byte()});
 }
 
 void CdRom::cmd_init() {
+  mode_ = 0x20u;
+  filter_file_ = 0;
+  filter_channel_ = 0;
+  read_whole_sector_ = true;
+  motor_on_ = true;
   cdda_playing_ = false;
   cdda_cmd_muted_ = false;
   cdda_adp_muted_ = false;
-  atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
-  atv_active_ = atv_pending_;
-  state_ = State::Idle;
-  read_period_cycles_ = 0;
+  seek_error_ = false;
+  id_error_ = false;
   pending_read_start_ = false;
+  pending_reads_mode_ = false;
+  state_ = State::Idle;
+  refresh_read_period();
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(50000, 2, {stat_byte()});
 }
 
 void CdRom::cmd_setmode() {
-  if (!param_fifo_.empty()) {
-    mode_ = param_fifo_[0];
+  if (param_fifo_.size() != 1u) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
   }
-  if (state_ == State::Reading) {
-    refresh_read_period();
-    pending_cycles_ = std::max(1, read_period_cycles_);
+
+  const u8 new_mode = param_fifo_[0];
+  if ((new_mode & 0x10u) == 0) {
+    read_whole_sector_ = (new_mode & 0x20u) != 0;
   }
+  mode_ = new_mode;
+  // id_error_ = (mode_ & 0x10u) != 0;
+  refresh_read_period();
   enqueue_irq(3, {stat_byte()});
 }
 
-void CdRom::cmd_stop() {
+void CdRom::cmd_seekl() {
+  saw_seekl_ = true;
+  if (!seek_target_valid_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x10u));
+    return;
+  }
+  motor_on_ = true;
   cdda_playing_ = false;
-  state_ = State::Idle;
-  motor_on_ = false;
-  read_period_cycles_ = 0;
   pending_read_start_ = false;
+  state_ = State::Seeking;
+  pending_cycles_ = std::max(1, read_period_cycles_ / 2);
+  seek_error_ = false;
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(33868, 2, {stat_byte()});
 }
 
-void CdRom::cmd_standby() {
+void CdRom::cmd_getid() {
+  saw_getid_ = true;
+  if (shell_open_) {
+    enqueue_irq(5, {0x11u, 0x80u}); // 0x11 = Shell Open (0x10) | Error (0x01)
+    return;
+  }
+
+  if (!disc_loaded_) {
+    enqueue_irq(3, {stat_byte()});
+    schedule_second_response(33868, 5,
+                             {static_cast<u8>(stat_byte() | 0x01u), 0x40u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u});
+    return;
+  }
+
+  const bool audio_disk = !tracks_.empty() && is_audio_track(&tracks_.front());
+  enqueue_irq(3, {stat_byte()});
+  if (audio_disk) {
+    id_error_ = true;
+    schedule_second_response(33868, 5,
+                             {static_cast<u8>(stat_byte() | 0x01u), 0x90u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u});
+  } else {
+    id_error_ = false;
+    schedule_second_response(33868, 2,
+                             {stat_byte(), 0x00u, 0x20u, 0x00u,
+                              static_cast<u8>('S'), static_cast<u8>('C'),
+                              static_cast<u8>('E'), static_cast<u8>('A')});
+    if (g_trace_cdrom) {
+      LOG_INFO("CDROM: GetID queued region=SCEA type=0x20");
+    }
+  }
+}
+
+void CdRom::cmd_reads() {
+  if (!disc_loaded_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+  ++read_command_count_;
+  motor_on_ = true;
+  start_read_stream(true);
+  enqueue_irq(3, {stat_byte()});
+}
+
+void CdRom::cmd_test() {
+  if (param_fifo_.empty()) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
+  }
+
+  switch (param_fifo_[0]) {
+  case 0x20:
+    enqueue_irq(3, {0x96u, 0x08u, 0x24u, 0xC1u});
+    break;
+  case 0x21:
+    enqueue_irq(3, {0x00u});
+    break;
+  case 0x22:
+    enqueue_irq(3, {static_cast<u8>('f'), static_cast<u8>('o'),
+                    static_cast<u8>('r'), static_cast<u8>(' '),
+                    static_cast<u8>('U'), static_cast<u8>('/'),
+                    static_cast<u8>('C')});
+    break;
+  default:
+    enqueue_irq(5, make_error_response(stat_byte(), 0x10u));
+    break;
+  }
+}
+
+void CdRom::cmd_gettn() {
+  if (!disc_loaded_ || tracks_.empty()) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+  const u8 first = to_bcd(clip_u8(std::clamp(tracks_.front().number, 1, 99)));
+  const u8 last = to_bcd(clip_u8(std::clamp(tracks_.back().number, 1, 99)));
+  enqueue_irq(3, {stat_byte(), first, last});
+}
+
+void CdRom::cmd_gettd() {
+  if (!disc_loaded_ || tracks_.empty()) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+  if (param_fifo_.size() != 1u) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
+  }
+
+  const int track_no = from_bcd(param_fifo_[0]);
+  int abs_lba = 0;
+  if (track_no == 0) {
+    const CdTrack *last = &tracks_.back();
+    abs_lba = track_end_lba(last) + 150 + 1;
+  } else {
+    auto it =
+        std::find_if(tracks_.begin(), tracks_.end(), [track_no](const CdTrack &t) {
+          return t.number == track_no;
+        });
+    if (it == tracks_.end()) {
+      enqueue_irq(5, make_error_response(stat_byte(), 0x10u));
+      return;
+    }
+    abs_lba = it->index01_abs_lba;
+  }
+
+  u8 mm = 0;
+  u8 ss = 0;
+  u8 ff = 0;
+  lba_to_msf_bcd(abs_lba, mm, ss, ff);
+  enqueue_irq(3, {stat_byte(), mm, ss});
+}
+
+void CdRom::cmd_stop() {
+  const u8 first = stat_byte();
   cdda_playing_ = false;
   state_ = State::Idle;
-  motor_on_ = true;
-  read_period_cycles_ = 0;
   pending_read_start_ = false;
+  pending_reads_mode_ = false;
+  motor_on_ = false;
+  data_ready_ = false;
+  data_buffer_.clear();
+  data_index_ = 0;
+  enqueue_irq(3, {first});
+  schedule_second_response(33868, 2, {stat_byte()});
+}
+
+// FIX: cmd_standby had inverted motor_on_ guard. Standby spins the motor up
+// from a stopped state; it should error if the motor is ALREADY on, not if
+// it is off. The original `if (motor_on_)` caused GT2's boot sequence to
+// receive INT5 instead of INT3 whenever Standby was called while the drive
+// was already spinning (the normal case), hanging the loader.
+void CdRom::cmd_standby() {
+  if (!motor_on_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
+  }
+  motor_on_ = true;
+  cdda_playing_ = false;
+  state_ = State::Idle;
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(40000, 2, {stat_byte()});
 }
@@ -1036,755 +1297,534 @@ void CdRom::cmd_demute() {
 }
 
 void CdRom::cmd_setfilter() {
-  if (param_fifo_.size() >= 2) {
-    filter_file_ = param_fifo_[0];
-    filter_channel_ = param_fifo_[1];
+  if (param_fifo_.size() != 2u) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
   }
+  filter_file_ = param_fifo_[0];
+  filter_channel_ = param_fifo_[1];
   enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_setsession() {
+  if (param_fifo_.size() != 1u) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
+  }
+  const u8 session = param_fifo_[0];
+  if (session == 0) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x10u));
+    return;
+  }
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(33868, 2, {stat_byte()});
 }
 
 void CdRom::cmd_getloc_l() {
-  const int abs_lba = std::max(read_lba_, 0) + 150;
-  const int mm = abs_lba / (60 * 75);
-  const int ss = (abs_lba / 75) % 60;
-  const int ff = abs_lba % 75;
-  enqueue_irq(3, { to_bcd(static_cast<u8>(mm)), to_bcd(static_cast<u8>(ss)),
-                  to_bcd(static_cast<u8>(ff)), 0x02, 0x00, 0x00, 0x00, 0x00 });
+  if (!disc_loaded_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+  if (state_ == State::Seeking) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+
+  const int probe_lba = std::max(0, read_lba_ - 1);
+  std::vector<u8> raw;
+  const CdTrack *track = nullptr;
+  if (!read_raw_sector_for_lba(probe_lba, raw, &track) || raw.size() < 20u ||
+      is_audio_track(track)) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
+    return;
+  }
+
+  enqueue_irq(3, {raw[12], raw[13], raw[14], raw[15], raw[16], raw[17], raw[18],
+                  raw[19]});
 }
 
 void CdRom::cmd_getloc_p() {
-  const int abs_lba = std::max(read_lba_, 0) + 150;
-  const int mm = abs_lba / (60 * 75);
-  const int ss = (abs_lba / 75) % 60;
-  const int ff = abs_lba % 75;
-  u8 track = 1;
-  if (const CdTrack *t = track_for_lba(read_lba_)) {
-    track = static_cast<u8>(std::max(1, t->number));
-  }
-  enqueue_irq(3, { to_bcd(track), 0x01, to_bcd(static_cast<u8>(mm)),
-                  to_bcd(static_cast<u8>(ss)), to_bcd(static_cast<u8>(ff)),
-                  0x00, 0x00, 0x00 });
-}
-
-void CdRom::cmd_seekl() {
-  cdda_playing_ = false;
-  motor_on_ = true;
-  if (seek_target_valid_) {
-    read_lba_ = seek_target_lba_;
-  } else {
-    read_lba_ = msf_to_lba(seek_mm_, seek_ss_, seek_ff_);
-  }
-  state_ = State::Seeking;
-  seek_complete_ = false;
-  enqueue_irq(3, {stat_byte()});
-  schedule_second_response(33868, 2, {stat_byte()});
-}
-
-void CdRom::cmd_getid() {
   if (!disc_loaded_) {
-    enqueue_irq(5, {0x11, 0x80});
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u));
     return;
   }
-  enqueue_irq(3, {stat_byte()});
-  schedule_second_response(33868, 2,
-                           {stat_byte(), 0x00, 0x20, 0x00, 'S', 'C', 'E', 'A'});
-  if (g_trace_cdrom) {
-    LOG_INFO("CDROM: GetID queued region=SCEA type=0x20");
-  }
-}
 
-void CdRom::cmd_gettn() {
-  const u8 first = 1;
-  const u8 last = static_cast<u8>(tracks_.size());
-  enqueue_irq(3, {stat_byte(), to_bcd(first), to_bcd(last)});
-}
+  const CdTrack *track = track_for_lba(read_lba_);
+  const int abs_lba = std::max(0, read_lba_ + 150);
+  const int track_start = (track != nullptr) ? track->index01_abs_lba : 150;
+  const int rel_lba = std::max(0, abs_lba - track_start);
 
-void CdRom::cmd_gettd() {
-  u8 track = 0;
-  if (!param_fifo_.empty()) {
-    track = from_bcd(param_fifo_[0]);
-  }
+  u8 mm = 0;
+  u8 ss = 0;
+  u8 ff = 0;
+  u8 amm = 0;
+  u8 ass = 0;
+  u8 aff = 0;
+  lba_to_msf_bcd(rel_lba, mm, ss, ff);
+  lba_to_msf_bcd(abs_lba, amm, ass, aff);
 
-  int lba = 0;
-  if (track == 0) {
-    if (!tracks_.empty() && bin_size_ > 0) {
-      const CdTrack &t = tracks_.front();
-      const int sectors =
-          static_cast<int>(bin_size_ / static_cast<u64>(std::max(1, t.sector_size)));
-      const int leadout_abs =
-          t.index01_abs_lba + std::max(0, sectors - t.index01_file_lba);
-      lba = std::max(0, leadout_abs - 150);
-    }
-  } else if (track <= static_cast<int>(tracks_.size())) {
-    lba = std::max(0, tracks_[track - 1].index01_abs_lba - 150);
-  }
-
-  const int mm = lba / (60 * 75);
-  const int ss = (lba / 75) % 60;
-  enqueue_irq(3, {stat_byte(), to_bcd(static_cast<u8>(mm)),
-                  to_bcd(static_cast<u8>(ss))});
-}
-
-void CdRom::cmd_test() {
-  if (!param_fifo_.empty() && param_fifo_[0] == 0x20) {
-    // CDROM BIOS date/version tuple used by common SCPH-100x boot flows.
-    enqueue_irq(3, {0x95, 0x07, 0x24, 0xC1});
-  } else {
-    enqueue_irq(3, {stat_byte()});
-  }
+  const int track_no = (track != nullptr) ? track->number : 1;
+  enqueue_irq(3, {to_bcd(clip_u8(std::clamp(track_no, 1, 99))), 0x01u, mm, ss, ff,
+                  amm, ass, aff});
 }
 
 void CdRom::cmd_readtoc() {
   motor_on_ = true;
-  state_ = State::Idle;
+  // ReadTOC handshake is INT3 (command accepted) followed by delayed INT2
+  // (command completion).
   enqueue_irq(3, {stat_byte()});
   schedule_second_response(33868, 2, {stat_byte()});
 }
 
-void CdRom::execute_internal_command(u8 cmd, std::initializer_list<u8> params) {
-  if (command_busy_ || command_busy_cycles_ > 0) {
-    return;
-  }
-  if ((interrupt_flag_ & 0x1F) != 0) {
-    return;
-  }
-  if (response_index_ < static_cast<int>(response_fifo_.size())) {
-    return;
-  }
-
+void CdRom::execute_internal_command(u8 cmd,
+                                     std::initializer_list<u8> params) {
   param_fifo_.assign(params.begin(), params.end());
-  last_command_ = cmd;
-  command_busy_cycles_ = command_busy_for(cmd);
-  command_busy_ = command_busy_cycles_ > 0;
   execute_command(cmd);
-  param_fifo_.clear();
 }
 
-// -- Helpers ------------------------------------------------------------------
-
-int CdRom::msf_to_lba(u8 mm, u8 ss, u8 ff) const {
-  return (mm * 60 * 75) + (ss * 75) + ff - 150;
-}
-
-int CdRom::read_period_for_mode() const {
-  const bool double_speed = (mode_ & 0x80) != 0;
-  const int sectors_per_second = double_speed ? 150 : 75;
-  return std::max(1, static_cast<int>(psx::CPU_CLOCK_HZ / sectors_per_second));
-}
-
-int CdRom::command_busy_for(u8 cmd) const {
+void CdRom::execute_command(u8 cmd) {
   switch (cmd) {
-  case 0x01: // Getstat
-  case 0x10: // GetlocL
-  case 0x11: // GetlocP
-    return 1200;
-  case 0x02: // Setloc
-  case 0x0E: // Setmode
-    return 2000;
-  case 0x03: // Play
-    return 2400;
-  case 0x06: // ReadN
-  case 0x1B: // ReadS
-    return 2400;
-  case 0x15: // SeekL
-    return 10000;
-  case 0x1A: // GetID
-    return 4000;
-  case 0x12: // Setsession
-  case 0x1E: // ReadTOC
-    return 4000;
-  case 0x0A: // Init
-    return 6000;
-  case 0x09: // Pause
-    return 4000;
-  default:
-    return 2000;
-  }
-}
-
-void CdRom::refresh_read_period() { read_period_cycles_ = read_period_for_mode(); }
-
-void CdRom::schedule_second_response(int delay_cycles, u8 irq,
-                                     std::vector<u8> response) {
-  pending_second_.active = true;
-  pending_second_.delay = std::max(1, delay_cycles);
-  pending_second_.irq = irq;
-  pending_second_.response = std::move(response);
-}
-
-void CdRom::start_read_stream(bool reads_mode) {
-  if (!pending_read_start_) {
-    saw_read_command_ = true;
-    saw_readn_or_reads_ = true;
-    ++read_command_count_;
-  }
-
-  // ReadN/ReadS can be issued after Setloc without an explicit SeekL command.
-  // Only defer if a real SeekL operation is currently in progress.
-  if (state_ == State::Seeking && !seek_complete_) {
-    pending_read_start_ = true;
-    pending_reads_mode_ = reads_mode;
+  case 0x01:
+    cmd_getstat();
+    break;
+  case 0x02:
+    cmd_setloc();
+    break;
+  case 0x03:
+    cmd_play();
+    break;
+  case 0x06:
+    cmd_readn();
+    break;
+  case 0x07:
+    cmd_standby();
+    break;
+  case 0x08:
+    cmd_stop();
+    break;
+  case 0x09:
+    cmd_pause();
+    break;
+  case 0x0A:
+    cmd_init();
+    break;
+  case 0x0B:
+    cmd_mute();
+    break;
+  case 0x0C:
+    cmd_demute();
+    break;
+  case 0x0D:
+    cmd_setfilter();
+    break;
+  case 0x0E:
+    cmd_setmode();
+    break;
+  case 0x0F:
+    enqueue_irq(3, {stat_byte(), mode_, 0x00u, filter_file_, filter_channel_});
+    break;
+  case 0x10:
+    cmd_getloc_l();
+    break;
+  case 0x11:
+    cmd_getloc_p();
+    break;
+  case 0x12:
+    cmd_setsession();
+    break;
+  case 0x13:
+    cmd_gettn();
+    break;
+  case 0x14:
+    cmd_gettd();
+    break;
+  case 0x15:
+  case 0x16:
+    cmd_seekl();
+    break;
+  case 0x19:
+    cmd_test();
+    break;
+  case 0x1A:
+    cmd_getid();
+    break;
+  case 0x1B:
+    cmd_reads();
+    break;
+  case 0x1C:
     enqueue_irq(3, {stat_byte()});
-    return;
+    break;
+  case 0x1E:
+    cmd_readtoc();
+    break;
+  default:
+    enqueue_irq(5, {0x11u, 0x40u});
+    break;
   }
-
-  motor_on_ = true;
-  if (seek_target_valid_) {
-    read_lba_ = seek_target_lba_;
-  } else {
-    read_lba_ = msf_to_lba(seek_mm_, seek_ss_, seek_ff_);
-  }
-  seek_complete_ = true;
-
-  read_whole_sector_ = reads_mode;
-  state_ = State::Reading;
-  data_buffer_.clear();
-  data_index_ = 0;
-  data_ready_ = false;
-  refresh_read_period();
-  pending_cycles_ = std::max(1, read_period_cycles_);
-  enqueue_irq(3, {stat_byte()});
 }
 
-bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
-                                    const CdTrack **track_out) {
-  if (!disc_loaded_ || !bin_file_.is_open()) {
-    return false;
-  }
-
-  const CdTrack *track = track_for_lba(psx_lba);
-  const int sector_size = (track != nullptr) ? track->sector_size : 2352;
-  if (sector_size <= 0) {
-    return false;
-  }
-
-  const int abs_lba = std::max(psx_lba, 0) + 150;
-  u64 raw_sector_offset =
-      static_cast<u64>(std::max(psx_lba, 0)) * static_cast<u64>(sector_size);
-  if (track != nullptr) {
-    const int track_relative_lba = std::max(0, abs_lba - track->index01_abs_lba);
-    const u64 file_sector = static_cast<u64>(
-        std::max(0, track->index01_file_lba + track_relative_lba));
-    raw_sector_offset =
-        file_sector * static_cast<u64>(std::max(track->sector_size, 1));
-  }
-
-  if (bin_size_ > 0 &&
-      raw_sector_offset + static_cast<u64>(sector_size) > bin_size_) {
-    return false;
-  }
-
-  bin_file_.clear();
-  bin_file_.seekg(static_cast<std::streamoff>(raw_sector_offset), std::ios::beg);
-  raw_sector.resize(static_cast<size_t>(sector_size));
-  bin_file_.read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
-  if (bin_file_.gcount() != sector_size) {
-    return false;
-  }
-
-  if (track_out != nullptr) {
-    *track_out = track;
-  }
-  return true;
-}
-
-int CdRom::track_end_lba(const CdTrack *track) const {
-  if (track == nullptr || tracks_.empty()) {
-    return std::numeric_limits<int>::max();
-  }
-
-  for (size_t i = 0; i + 1 < tracks_.size(); ++i) {
-    if (&tracks_[i] == track) {
-      return std::max(0, tracks_[i + 1].index01_abs_lba - 150);
+u8 CdRom::read8(u32 offset) {
+  offset &= 0x3u;
+  if (g_trace_cdrom) {
+    static u64 cdrom_read_counter = 0;
+    if (trace_should_log(cdrom_read_counter, g_trace_burst_cdrom,
+                         g_trace_stride_cdrom)) {
+      LOG_DEBUG("CDROM: read8 off=%u bank=%u", static_cast<unsigned>(offset),
+                static_cast<unsigned>(index_reg_));
     }
   }
 
-  if (bin_size_ > 0) {
-    const int sectors = static_cast<int>(
-        bin_size_ / static_cast<u64>(std::max(1, track->sector_size)));
-    const int end_abs =
-        track->index01_abs_lba + std::max(0, sectors - track->index01_file_lba);
-    return std::max(0, end_abs - 150);
-  }
-  return std::numeric_limits<int>::max();
-}
-
-bool CdRom::cd_audio_muted() const {
-  return cdda_cmd_muted_ || cdda_adp_muted_;
-}
-
-void CdRom::apply_host_audio_matrix(std::vector<s16> &samples) const {
-  if (samples.empty()) {
-    return;
-  }
-
-  const s32 atv0 = static_cast<s32>(atv_active_[0]);
-  const s32 atv1 = static_cast<s32>(atv_active_[1]);
-  const s32 atv2 = static_cast<s32>(atv_active_[2]);
-  const s32 atv3 = static_cast<s32>(atv_active_[3]);
-
-  for (size_t i = 0; i + 1 < samples.size(); i += 2) {
-    const s32 in_l = static_cast<s32>(samples[i]);
-    const s32 in_r = static_cast<s32>(samples[i + 1]);
-    const s32 out_l = (in_l * atv0 + in_r * atv3) / 128;
-    const s32 out_r = (in_l * atv1 + in_r * atv2) / 128;
-    samples[i] = sat16(out_l);
-    samples[i + 1] = sat16(out_r);
-  }
-}
-
-bool CdRom::stream_cdda_sector() {
-  const int current_lba = std::max(0, read_lba_);
-  const CdTrack *track = track_for_lba(current_lba);
-  if (track == nullptr) {
-    return false;
-  }
-
-  const int track_end = track_end_lba(track);
-  if ((mode_ & 0x02u) != 0 && current_lba >= track_end) {
-    cdda_playing_ = false;
-    enqueue_irq(4, {stat_byte()}, false);
-    return false;
-  }
-
-  std::vector<u8> raw_sector;
-  if (!read_raw_sector_for_lba(current_lba, raw_sector, nullptr)) {
-    cdda_playing_ = false;
-    return false;
-  }
-
-  if (!cd_audio_muted() && is_audio_track_type(track->type) &&
-      raw_sector.size() >= 2352) {
-    std::vector<s16> pcm;
-    pcm.reserve((2352u / 4u) * 2u);
-    for (size_t i = 0; i + 3 < 2352; i += 4) {
-      const s16 l = static_cast<s16>(
-          static_cast<u16>(raw_sector[i]) |
-          (static_cast<u16>(raw_sector[i + 1]) << 8));
-      const s16 r = static_cast<s16>(
-          static_cast<u16>(raw_sector[i + 2]) |
-          (static_cast<u16>(raw_sector[i + 3]) << 8));
-      pcm.push_back(l);
-      pcm.push_back(r);
+  switch (offset) {
+  case 0: {
+    u8 status = static_cast<u8>(index_reg_ & 0x03u);
+    if (adpcm_busy_cycles_ > 0) {
+      status |= 0x04u;
     }
-    apply_host_audio_matrix(pcm);
-    if (sys_ != nullptr) {
-      sys_->push_cd_audio_samples(pcm, 44100u);
+    if (param_fifo_.empty()) {
+      status |= 0x08u;
+    }
+    if (param_fifo_.size() < kFifoCapacity) {
+      status |= 0x10u;
+    }
+    if (response_index_ < static_cast<int>(response_fifo_.size())) {
+      status |= 0x20u;
+    }
+    if (data_ready_ && data_request_) {
+      status |= 0x40u;
+    }
+    if (command_busy_) {
+      status |= 0x80u;
+    }
+
+    if (status == 0xE0u) {
+      ++status_e0_poll_count_;
+      ++status_e0_streak_current_;
+      status_e0_streak_max_ =
+          std::max(status_e0_streak_max_, status_e0_streak_current_);
+    } else {
+      status_e0_streak_current_ = 0;
+    }
+    return status;
+  }
+
+  case 1:
+    if (response_index_ < static_cast<int>(response_fifo_.size())) {
+      const u8 value = response_fifo_[response_index_++];
+      if (response_index_ >= static_cast<int>(response_fifo_.size())) {
+        response_fifo_.clear();
+        response_index_ = 0;
+        service_pending_irq();
+      }
+      return value;
+    }
+    return 0;
+
+  case 2: {
+    if (data_ready_ && data_request_ &&
+        data_index_ < static_cast<int>(data_buffer_.size())) {
+      const u8 value = data_buffer_[static_cast<size_t>(data_index_++)];
+      if (data_index_ >= static_cast<int>(data_buffer_.size())) {
+        data_ready_ = false;
+      }
+      return value;
+    }
+    return 0;
+  }
+
+  case 3:
+    if (index_reg_ == 0 || index_reg_ == 2) {
+      return static_cast<u8>(interrupt_enable_ | 0xE0u);
+    }
+    return static_cast<u8>(interrupt_flag_ | 0xE0u);
+  }
+
+  return 0xFFu;
+}
+
+void CdRom::write8(u32 offset, u8 value) {
+  // FIX: offset masking was incorrectly commented out. Without this mask,
+  // writes with stray high bits in the offset fall through all switch cases
+  // silently, losing commands and parameters entirely.
+  offset &= 0x3u;
+  if (g_trace_cdrom) {
+    static u64 cdrom_write_counter = 0;
+    if (trace_should_log(cdrom_write_counter, g_trace_burst_cdrom,
+                         g_trace_stride_cdrom)) {
+      LOG_DEBUG("CDROM: write8 off=%u bank=%u value=%02X",
+                static_cast<unsigned>(offset), static_cast<unsigned>(index_reg_),
+                value);
     }
   }
 
-  ++read_lba_;
-  return true;
-}
+  switch (offset) {
+  case 0:
+    index_reg_ = value & 0x3;
+    return;
 
-void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
-  if (raw_sector.size() < 2352) {
-    return;
-  }
-  // XA ADPCM output is enabled by Setmode bit6.
-  if ((mode_ & 0x40u) == 0) {
-    return;
-  }
-  if (cd_audio_muted()) {
-    return;
-  }
+  case 1:
+    switch (index_reg_) {
+    case 0:
+      last_command_ = value;
+      ++command_counter_;
+      ++command_hist_[static_cast<size_t>(value)];
+      command_busy_ = true;
+      command_busy_cycles_ = command_busy_for(value);
+      execute_command(value);
+      param_fifo_.clear();
+      // BUSYSTS goes low as soon as the controller accepts the command.
+      command_busy_ = false;
+      command_busy_cycles_ = 0;
+      return;
+    case 1:
+      host_audio_regs_[6] = value;
+      return;
+    case 2:
+      host_audio_regs_[1] = value;
+      return;
+    case 3:
+      atv_pending_[2] = value;
+      return;
+    default:
+      LOG_WARN("CDROM: Write to port 1 index %u = 0x%02X", index_reg_, value);
+      return;
+    }
 
-  // Mode2 subheader bytes.
-  const u8 file = raw_sector[16];
-  const u8 channel = raw_sector[17];
-  const u8 submode = raw_sector[18];
-  const u8 coding = raw_sector[19];
+  case 2:
+    switch (index_reg_) {
+    case 0:
+      if (param_fifo_.size() < kFifoCapacity) {
+        param_fifo_.push_back(value);
+      }
+      return;
+    case 1:
+      interrupt_enable_ = static_cast<u8>(value & kHintMaskAll);
+      refresh_irq_line();
+      return;
+    case 2:
+      atv_pending_[0] = value;
+      return;
+    case 3:
+      atv_pending_[3] = value;
+      return;
+    default:
+      return;
+    }
 
-  // Decode XA sectors when Submode Audio bit is set.
-  // Some titles/streams do not keep the Real-Time bit asserted consistently.
-  if ((submode & 0x04u) == 0) {
-    return;
-  }
-  // Optional Setfilter gating.
-  if ((mode_ & 0x08u) != 0) {
-    if (file != filter_file_ || channel != filter_channel_) {
+  case 3:
+    switch (index_reg_) {
+    case 0:
+      host_audio_regs_[0] = value;
+      data_request_ = (value & 0x80u) != 0;
+      // FIX D: clearing data_request_ (BFRD=0) must reset the read position
+      // so that a subsequent set re-delivers the sector from the beginning.
+      // Metal Gear Solid: Special Missions clears BFRD between two DMAs and
+      // needs the buffer pointer reset; matches DuckStation's sb.position = 0.
+      if (!data_request_) {
+        data_index_ = 0;
+      }
+      if ((value & 0x20u) != 0) {
+        host_audio_regs_[7] = 1;
+      }
+      return;
+
+    case 1:
+      if ((value & 0x80u) != 0) {
+        reset();
+        return;
+      }
+      if ((value & 0x40u) != 0) {
+        param_fifo_.clear();
+      }
+      if ((value & 0x20u) != 0) {
+        adpcm_busy_cycles_ = 0;
+      }
+      if ((value & 0x1Fu) != 0) {
+        const u8 ack_mask = static_cast<u8>(value & 0x1Fu);
+        const u8 old_type = static_cast<u8>(interrupt_flag_ & kHintTypeMask);
+        const u8 old_mask = hint_to_mask(old_type);
+        if ((old_mask & ack_mask) != 0u) {
+          interrupt_flag_ =
+              static_cast<u8>(interrupt_flag_ & static_cast<u8>(~kHintTypeMask));
+        }
+        refresh_irq_line();
+      }
+      return;
+
+    case 2:
+      atv_pending_[1] = value;
+      return;
+
+    case 3:
+      host_audio_apply_ = value;
+      cdda_adp_muted_ = (value & 0x01u) != 0;
+      if ((value & 0x20u) != 0) {
+        atv_active_ = atv_pending_;
+      }
+      return;
+    default:
       return;
     }
   }
-  if (!xa_stream_valid_ || xa_stream_file_ != file ||
-      xa_stream_channel_ != channel) {
-    xa_hist1_ = {};
-    xa_hist2_ = {};
-    xa_stream_valid_ = true;
-    xa_stream_file_ = file;
-    xa_stream_channel_ = channel;
-  }
-
-  const bool stereo = (coding & 0x01u) != 0;
-  const bool sample_18900 = (coding & 0x04u) != 0;
-  const bool bits_8 = (coding & 0x10u) != 0;
-  const u32 sample_rate = sample_18900 ? 18900u : 37800u;
-  static constexpr int kFilterA[4] = {0, 60, 115, 98};
-  static constexpr int kFilterB[4] = {0, 0, -52, -55};
-
-  std::vector<s16> left;
-  std::vector<s16> right;
-  left.reserve(stereo ? 2016 : 4032);
-  right.reserve(2016);
-
-  for (int group = 0; group < 18; ++group) {
-    const size_t group_off = 24 + static_cast<size_t>(group) * 128u;
-    const u8 *g = raw_sector.data() + group_off;
-
-    const int unit_count = bits_8 ? 4 : 8;
-    for (int unit = 0; unit < unit_count; ++unit) {
-      const u8 unit_hdr = g[4 + unit];
-      const int shift = unit_hdr & 0x0F;
-      const int filter = xa_filter_index(unit_hdr);
-      const int ch = stereo ? (unit & 1) : 0;
-      std::vector<s16> &dst = (ch == 0) ? left : right;
-      s16 &h1 = xa_hist1_[ch];
-      s16 &h2 = xa_hist2_[ch];
-
-      for (int i = 0; i < 28; ++i) {
-        s32 sample = 0;
-        if (bits_8) {
-          const s8 pcm = static_cast<s8>(g[16 + i * 4 + unit]);
-          sample = static_cast<s32>(pcm) << 8;
-          sample >>= shift;
-        } else {
-          const u8 packed = g[16 + i * 4 + (unit >> 1)];
-          s32 nibble = (unit & 1) ? ((packed >> 4) & 0x0F) : (packed & 0x0F);
-          if (nibble & 0x8) {
-            nibble -= 16;
-          }
-          sample = nibble << 12;
-          sample >>= shift;
-        }
-
-        sample +=
-            (kFilterA[filter] * static_cast<s32>(h1) +
-             kFilterB[filter] * static_cast<s32>(h2) + 32) >>
-            6;
-        const s16 out = sat16(sample);
-        h2 = h1;
-        h1 = out;
-        dst.push_back(out);
-      }
-    }
-  }
-
-  if (left.empty()) {
-    return;
-  }
-  size_t frames = stereo ? std::min(left.size(), right.size()) : left.size();
-  if (frames == 0) {
-    return;
-  }
-
-  std::vector<s16> interleaved;
-  interleaved.reserve(frames * 2);
-  for (size_t i = 0; i < frames; ++i) {
-    interleaved.push_back(left[i]);
-    interleaved.push_back(stereo ? right[i] : left[i]);
-  }
-  apply_host_audio_matrix(interleaved);
-
-  if (sys_ != nullptr) {
-    sys_->push_cd_audio_samples(interleaved, sample_rate);
-  }
-  adpcm_busy_cycles_ = std::max(adpcm_busy_cycles_, read_period_for_mode() / 2);
-}
-
-bool CdRom::read_sector() {
-  if (!disc_loaded_ || !bin_file_.is_open()) {
-    return false;
-  }
-
-  const int psx_lba = std::max(read_lba_, 0);
-  const int abs_lba = psx_lba + 150;
-  const CdTrack *track = nullptr;
-  std::vector<u8> raw_sector;
-  if (!read_raw_sector_for_lba(psx_lba, raw_sector, &track)) {
-    data_buffer_.clear();
-    data_index_ = 0;
-    data_ready_ = false;
-    state_ = State::Idle;
-    return false;
-  }
-
-  const std::string track_type = (track != nullptr) ? track->type : "MODE2/2352";
-  const int sector_size = static_cast<int>(raw_sector.size());
-
-  int payload_offset = 24;
-  int payload_size = 2048;
-  if (track_type == "MODE1/2352") {
-    payload_offset = 16;
-    payload_size = 2048;
-  } else if (track_type == "MODE1/2048") {
-    payload_offset = 0;
-    payload_size = 2048;
-  }
-
-  if (sector_size == 2048) {
-    payload_offset = 0;
-    payload_size = 2048;
-  } else if (is_audio_track_type(track_type)) {
-    payload_offset = 0;
-    payload_size = 2352;
-  } else if ((mode_ & 0x20) || read_whole_sector_) {
-    payload_offset = 12;
-    payload_size = 2340;
-  }
-
-  if (sector_size >= 2352 && !is_audio_track_type(track_type)) {
-    maybe_decode_xa_audio(raw_sector);
-  }
-
-  const int available =
-      static_cast<int>(raw_sector.size()) - std::max(payload_offset, 0);
-  if (payload_offset < 0 || payload_size <= 0 || available < payload_size) {
-    data_buffer_.clear();
-    data_index_ = 0;
-    data_ready_ = false;
-    state_ = State::Idle;
-    return false;
-  }
-
-  data_buffer_.assign(raw_sector.begin() + payload_offset,
-                      raw_sector.begin() + payload_offset + payload_size);
-  data_index_ = 0;
-  data_ready_ = true;
-  saw_sector_visible_ = true;
-  ++sector_counter_;
-  if (g_trace_cdrom &&
-      (sector_counter_ <= static_cast<u64>(g_trace_burst_cdrom) ||
-       (g_trace_stride_cdrom > 0 &&
-        (sector_counter_ % static_cast<u64>(g_trace_stride_cdrom)) == 0))) {
-    LOG_INFO(
-        "CDROM: Sector#%llu LBA=%d abs=%d mode=0x%02X first4=%02X %02X %02X %02X",
-        static_cast<unsigned long long>(sector_counter_), read_lba_, abs_lba,
-        static_cast<unsigned>(mode_), static_cast<unsigned>(data_buffer_[0]),
-        static_cast<unsigned>(data_buffer_[1]),
-        static_cast<unsigned>(data_buffer_[2]),
-        static_cast<unsigned>(data_buffer_[3]));
-  }
-
-  ++read_lba_;
-  return true;
-}
-
-u32 CdRom::dma_read() {
-  if (data_index_ + 3 < static_cast<int>(data_buffer_.size())) {
-    u32 val = 0;
-    val |= data_buffer_[data_index_++];
-    val |= data_buffer_[data_index_++] << 8;
-    val |= data_buffer_[data_index_++] << 16;
-    val |= data_buffer_[data_index_++] << 24;
-    if (data_index_ >= static_cast<int>(data_buffer_.size())) {
-      data_ready_ = false;
-      if (state_ != State::Reading) {
-        data_request_ = false;
-      }
-    }
-    return val;
-  }
-  data_ready_ = false;
-  return 0;
-}
-
-void CdRom::fire_irq(u8 irq_num) {
-  if (irq_num < 1 || irq_num > 5) {
-    return;
-  }
-  // HINTSTS bits 0-2 are the interrupt type value (INT1..INT5), not one-hot.
-  interrupt_flag_ = static_cast<u8>(irq_num & 0x07);
-  last_irq_code_ = static_cast<u8>(irq_num & 0x07);
-  if (irq_num == 1) {
-    ++irq_int1_count_;
-  } else if (irq_num == 3) {
-    ++irq_int3_count_;
-  }
-  refresh_irq_line();
-  if (g_trace_cdrom &&
-      (command_counter_ <= static_cast<u64>(g_trace_burst_cdrom) ||
-       (g_trace_stride_cdrom > 0 &&
-        (command_counter_ % static_cast<u64>(g_trace_stride_cdrom)) == 0))) {
-    LOG_DEBUG("CDROM: IRQ INT%u flag=0x%02X enable=0x%02X",
-              static_cast<unsigned>(irq_num), static_cast<unsigned>(interrupt_flag_),
-              static_cast<unsigned>(interrupt_enable_));
-  }
-}
-
-void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
-                        bool wait_for_command_idle) {
-  const bool response_active =
-      response_index_ < static_cast<int>(response_fifo_.size());
-  const bool must_wait_for_busy =
-      wait_for_command_idle && (command_busy_ || command_busy_cycles_ > 0);
-  if (must_wait_for_busy || (interrupt_flag_ & 0x1F) != 0 || response_active) {
-    pending_irqs_.push_back(
-        PendingIrq{irq_num, wait_for_command_idle, std::move(response)});
-    return;
-  }
-  response_fifo_ = std::move(response);
-  response_index_ = 0;
-  fire_irq(irq_num);
-}
-
-void CdRom::service_pending_irq() {
-  if ((interrupt_flag_ & 0x1F) != 0) {
-    return;
-  }
-  if (response_index_ < static_cast<int>(response_fifo_.size())) {
-    return;
-  }
-  if (pending_irqs_.empty()) {
-    return;
-  }
-  if (pending_irqs_.front().wait_for_command_idle &&
-      (command_busy_ || command_busy_cycles_ > 0)) {
-    return;
-  }
-  PendingIrq next = std::move(pending_irqs_.front());
-  pending_irqs_.pop_front();
-  response_fifo_ = std::move(next.response);
-  response_index_ = 0;
-  ++response_promotion_count_;
-  fire_irq(next.irq);
-}
-
-void CdRom::refresh_irq_line() {
-  const u8 pending_bit = irq_code_to_enable_bit(interrupt_flag_);
-  if ((pending_bit & interrupt_enable_ & 0x1F) != 0 && sys_ != nullptr) {
-    sys_->irq().request(Interrupt::CDROM);
-  }
-}
-
-const CdTrack *CdRom::track_for_lba(int lba) const {
-  if (tracks_.empty()) {
-    return nullptr;
-  }
-  const int abs_lba = std::max(lba, 0) + 150;
-  const CdTrack *result = &tracks_.front();
-  for (const CdTrack &track : tracks_) {
-    if (track.index01_abs_lba <= abs_lba) {
-      result = &track;
-    } else {
-      break;
-    }
-  }
-  return result;
 }
 
 void CdRom::tick(u32 cycles) {
   const bool profile_detailed = g_profile_detailed_timing;
-  std::chrono::high_resolution_clock::time_point start{};
+  std::chrono::high_resolution_clock::time_point t0{};
   if (profile_detailed) {
-    start = std::chrono::high_resolution_clock::now();
-  }
-  if (adpcm_busy_cycles_ > 0) {
-    adpcm_busy_cycles_ =
-        std::max(0, adpcm_busy_cycles_ - static_cast<int>(cycles));
+    t0 = std::chrono::high_resolution_clock::now();
   }
 
-  if (command_busy_cycles_ > 0) {
-    command_busy_cycles_ -= static_cast<int>(cycles);
+  const int step = static_cast<int>(cycles);
+
+  if (command_busy_) {
+    command_busy_cycles_ -= step;
     if (command_busy_cycles_ <= 0) {
       command_busy_cycles_ = 0;
       command_busy_ = false;
-    } else {
-      command_busy_ = true;
+      service_pending_irq();
+    }
+  }
+
+  if (adpcm_busy_cycles_ > 0) {
+    adpcm_busy_cycles_ -= step;
+    if (adpcm_busy_cycles_ < 0) {
+      adpcm_busy_cycles_ = 0;
+    }
+  }
+
+  if (pending_second_.active) {
+    pending_second_.delay -= step;
+    if (pending_second_.delay <= 0) {
+      pending_second_.active = false;
+      enqueue_irq(pending_second_.irq, std::move(pending_second_.response), false);
+      pending_second_.response.clear();
     }
   }
 
   if (insert_probe_active_) {
-    insert_probe_delay_cycles_ -= static_cast<int>(cycles);
+    insert_probe_delay_cycles_ -= step;
     if (insert_probe_delay_cycles_ <= 0) {
-      switch (insert_probe_stage_) {
-      case 0:
-        execute_internal_command(0x19, {0x20});
+      enqueue_irq(2, {stat_byte()}, false);
+      insert_probe_active_ = false;
+      insert_probe_stage_ = 0;
+    }
+  }
+
+  if (state_ == State::Seeking) {
+    pending_cycles_ -= step;
+    if (pending_cycles_ <= 0) {
+      read_lba_ = seek_target_valid_ ? seek_target_lba_ : read_lba_;
+      seek_complete_ = true;
+      if (pending_read_start_) {
+        pending_read_start_ = false;
+        state_ = State::Reading;
+        pending_cycles_ = std::max(1, read_period_cycles_);
+      } else {
+        state_ = State::Idle;
+      }
+    }
+  }
+
+  if (state_ == State::Reading) {
+    int remaining = step;
+    while (remaining > 0 && state_ == State::Reading) {
+      if (pending_cycles_ > remaining) {
+        pending_cycles_ -= remaining;
         break;
-      case 1:
-        execute_internal_command(0x01, {});
-        break;
-      case 2:
-        execute_internal_command(0x01, {});
-        break;
-      default:
-        insert_probe_active_ = false;
+      }
+      remaining -= std::max(0, pending_cycles_);
+      pending_cycles_ = std::max(1, read_period_cycles_);
+
+      bool ok = cdda_playing_ ? stream_cdda_sector() : read_sector();
+      if (!ok) {
+        seek_error_ = true;
+        state_ = State::Idle;
+        cdda_playing_ = false;
+        enqueue_irq(5, make_error_response(stat_byte(), 0x04u), false);
         break;
       }
 
-      if (insert_probe_active_) {
-        ++insert_probe_stage_;
-        insert_probe_delay_cycles_ = 4000;
-        if (insert_probe_stage_ > 2) {
-          insert_probe_active_ = false;
+      ++sector_counter_;
+      if (!cdda_playing_) {
+        // Only fire INT1 when a real host-data sector landed in the buffer.
+        // XA ADPCM sectors are consumed silently by maybe_decode_xa_audio()
+        // and leave data_ready_ false. On real hardware those sectors do NOT
+        // generate INT1; firing it with an empty buffer corrupts the game's
+        // sector count and causes DMA reads to return zeros.
+        if (data_ready_) {
+          enqueue_irq(1, {stat_byte()}, false);
+        }
+      } else if ((mode_ & 0x04u) != 0) {
+        const int abs_lba = read_lba_ + 150;
+        if ((abs_lba % 10) == 0) {
+          const CdTrack *track = track_for_lba(read_lba_);
+          const int track_start = (track != nullptr) ? track->index01_abs_lba : 150;
+          const int rel_lba = std::max(0, abs_lba - track_start);
+          u8 rel_m = 0;
+          u8 rel_s = 0;
+          u8 rel_f = 0;
+          u8 abs_m = 0;
+          u8 abs_s = 0;
+          u8 abs_f = 0;
+          lba_to_msf_bcd(rel_lba, rel_m, rel_s, rel_f);
+          lba_to_msf_bcd(abs_lba, abs_m, abs_s, abs_f);
+          const bool rel = (abs_lba % 32) >= 16;
+          const u8 track_no = to_bcd(clip_u8(
+              std::clamp((track != nullptr) ? track->number : 1, 1, 99)));
+          const u8 ss = rel ? static_cast<u8>(rel_s | 0x80u) : abs_s;
+          const u8 mm = rel ? rel_m : abs_m;
+          const u8 ff = rel ? rel_f : abs_f;
+          enqueue_irq(1, {stat_byte(), track_no, 0x01u, mm, ss, ff, 0x00u, 0x00u},
+                      false);
         }
       }
+
+      const CdTrack *track = track_for_lba(read_lba_);
+      const int end_lba = track_end_lba(track);
+      if (end_lba >= 0 && read_lba_ >= end_lba) {
+        if (cdda_playing_) {
+          cdda_playing_ = false;
+          state_ = State::Idle;
+          if ((mode_ & 0x02u) == 0) {
+            motor_on_ = false;
+          }
+          enqueue_irq(4, {stat_byte()}, false);
+        } else {
+          state_ = State::Idle;
+        }
+        break;
+      }
+
+      ++read_lba_;
     }
   }
 
   service_pending_irq();
 
-  if (pending_second_.active) {
-    pending_second_.delay -= static_cast<int>(cycles);
-    if (pending_second_.delay <= 0 && (interrupt_flag_ & 0x1F) == 0) {
-      enqueue_irq(pending_second_.irq, pending_second_.response);
-      pending_second_.active = false;
-      if (state_ == State::Seeking) {
-        state_ = State::Idle;
-        seek_complete_ = true;
-        if (pending_read_start_) {
-          const bool reads_mode = pending_reads_mode_;
-          start_read_stream(reads_mode);
-          pending_read_start_ = false;
-          pending_reads_mode_ = false;
-        }
-      }
-    }
-  }
-
-  if (cdda_playing_ && state_ != State::Reading) {
-    pending_cycles_ -= static_cast<int>(cycles);
-    while (cdda_playing_ && pending_cycles_ <= 0) {
-      if (!stream_cdda_sector()) {
-        break;
-      }
-      if ((mode_ & 0x04u) != 0) {
-        enqueue_irq(1, {stat_byte()}, false);
-      }
-      pending_cycles_ += std::max(1, read_period_for_mode());
-    }
-    if (state_ != State::Reading) {
-      return;
-    }
-  }
-
-  if (state_ != State::Reading) {
-    return;
-  }
-
-  pending_cycles_ -= static_cast<int>(cycles);
-  if (pending_cycles_ <= 0) {
-    if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
-        // Do not hard-stall the stream on partially consumed sectors.
-        // Hardware continues delivering sectors; unread bytes are effectively
-        // lost once a newer sector arrives.
-      ++read_buffer_stall_count_;
-    }
-
-    if (read_sector()) {
-      enqueue_irq(1, {stat_byte()}, false);
-    }
-
-    refresh_read_period();
-    pending_cycles_ = std::max(1, read_period_cycles_);
-  }
-  if (profile_detailed && sys_) {
-    const auto end = std::chrono::high_resolution_clock::now();
+  if (profile_detailed && sys_ != nullptr) {
+    const auto t1 = std::chrono::high_resolution_clock::now();
     sys_->add_cdrom_time(
-        std::chrono::duration<double, std::milli>(end - start).count());
+        std::chrono::duration<double, std::milli>(t1 - t0).count());
   }
+}
+
+u32 CdRom::dma_read() {
+  if (!data_ready_ || !data_request_ ||
+      data_index_ >= static_cast<int>(data_buffer_.size())) {
+    return 0;
+  }
+
+  u32 value = 0;
+  for (int i = 0; i < 4; ++i) {
+    u8 byte = 0;
+    if (data_index_ < static_cast<int>(data_buffer_.size())) {
+      byte = data_buffer_[static_cast<size_t>(data_index_++)];
+    }
+    value |= static_cast<u32>(byte) << (i * 8u);
+  }
+
+  if (data_index_ >= static_cast<int>(data_buffer_.size())) {
+    data_ready_ = false;
+  }
+  return value;
 }

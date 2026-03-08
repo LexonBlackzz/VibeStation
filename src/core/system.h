@@ -94,7 +94,10 @@ public:
     u64 sio_irq_ack_count = 0;
     u64 cd_read_command_count = 0;
     u64 cd_irq_int1_count = 0;
+    u64 cd_irq_int2_count = 0;
     u64 cd_irq_int3_count = 0;
+    u64 cd_irq_int4_count = 0;
+    u64 cd_irq_int5_count = 0;
     u32 frame_counter = 0;
     u32 logo_visible_run_frames = 0;
     s32 first_black_after_logo_frame = -1;
@@ -215,6 +218,8 @@ public:
   u32 cdrom_dma_words_available() const { return cdrom_.dma_words_available(); }
   void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
   u32 mdec_dma_read() { return mdec_.dma_read(); }
+  u8 mdec_dma_out_block() const { return mdec_.dma_out_block(); }
+  u8 mdec_dma_out_depth() const { return mdec_.dma_out_depth(); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
   u32 mdec_dma_out_words_available() const {

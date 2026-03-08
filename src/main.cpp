@@ -513,6 +513,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
   int first_logo_candidate_frame = -1;
 
   for (int i = 0; i < frames; ++i) {
+    // Diagnostic probe: hold Start pressed (active-low bit3) for boot-test runs.
+    sys->sio().set_button_state(static_cast<u16>(0xFFFFu & ~0x0008u));
     sys->run_frame();
     const System::BootDiagnostics &diag = sys->boot_diag();
     const u32 pc = sys->cpu().pc();
@@ -1253,7 +1255,10 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            "pad_packets=%llu last_pad_buttons=0x%04X last_sio_tx=0x%02X last_sio_rx=0x%02X "
            "joy_stat=0x%04X joy_ctrl=0x%04X "
            "sio_irq_assert=%llu sio_irq_ack=%llu cdread_count=%llu "
-           "cd_irq1=%llu cd_irq3=%llu pending_irqs=%zu cd_busy=%d last_cd_irq=%u "
+           "cd_cmd01=%llu cd_cmd06=%llu cd_cmd08=%llu cd_cmd09=%llu "
+           "cd_cmd0A=%llu cd_cmd15=%llu cd_cmd1A=%llu "
+           "cd_irq1=%llu cd_irq2=%llu cd_irq3=%llu cd_irq4=%llu cd_irq5=%llu "
+           "pending_irqs=%zu cd_busy=%d last_cd_irq=%u "
            "cd_resp_fifo=%zu cd_param_fifo=%zu cd_resp_promotions=%llu cd_read_stalls=%llu "
            "cd_status_e0=%llu cd_status_e0_streak=%llu "
            "display_hash=0x%08X display_non_black=%llu display_wh=%ux%u "
@@ -1300,8 +1305,18 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            static_cast<unsigned long long>(diag.sio_irq_assert_count),
            static_cast<unsigned long long>(diag.sio_irq_ack_count),
            static_cast<unsigned long long>(diag.cd_read_command_count),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x01u)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x06u)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x08u)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x09u)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x0Au)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x15u)),
+           static_cast<unsigned long long>(sys->cdrom().command_count_for(0x1Au)),
            static_cast<unsigned long long>(diag.cd_irq_int1_count),
+           static_cast<unsigned long long>(diag.cd_irq_int2_count),
            static_cast<unsigned long long>(diag.cd_irq_int3_count),
+           static_cast<unsigned long long>(diag.cd_irq_int4_count),
+           static_cast<unsigned long long>(diag.cd_irq_int5_count),
            sys->cdrom().pending_irq_count(), sys->cdrom().busy_cycles_remaining(),
            static_cast<unsigned>(sys->cdrom().last_irq_code()),
            sys->cdrom().response_fifo_size(), sys->cdrom().param_fifo_size(),

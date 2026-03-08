@@ -32,6 +32,50 @@ void DmaController::reset() {
   }
   dpcr_ = 0x07654321;
   dicr_ = 0;
+  reset_mdec_out_reorder_state();
+}
+
+void DmaController::reset_mdec_out_reorder_state() {
+  mdec_out_reorder_active_ = false;
+  mdec_out_mb_base_addr_ = 0;
+  mdec_out_block_id_ = 0xFF;
+  mdec_out_word_index_in_block_ = 0;
+}
+
+u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
+                                          u8 depth) {
+  const u32 addr = linear_addr & 0x001FFFFCu;
+  // DMA1 block re-ordering is only needed for 15bpp colored output.
+  if (step != 4 || depth != 3u || block_id >= 4u) {
+    reset_mdec_out_reorder_state();
+    return addr;
+  }
+
+  if (!mdec_out_reorder_active_) {
+    mdec_out_reorder_active_ = true;
+    mdec_out_mb_base_addr_ = addr;
+    mdec_out_block_id_ = block_id;
+    mdec_out_word_index_in_block_ = 0;
+  } else if (block_id != mdec_out_block_id_) {
+    mdec_out_block_id_ = block_id;
+    mdec_out_word_index_in_block_ = 0;
+    if (block_id == 0u) {
+      // Y1 marks the start of a new 16x16 macroblock in destination RAM.
+      mdec_out_mb_base_addr_ = addr;
+    }
+  }
+
+  const u32 word_index = mdec_out_word_index_in_block_++;
+  if (mdec_out_word_index_in_block_ >= 32u) {
+    mdec_out_word_index_in_block_ = 0;
+  }
+
+  const u32 row = (word_index >> 2);
+  const u32 col = (word_index & 0x3u);
+  const u32 block_x_words = (block_id & 0x1u) ? 4u : 0u;
+  const u32 block_y_rows = (block_id >= 2u) ? 8u : 0u;
+  const u32 offset_words = (block_y_rows + row) * 8u + block_x_words + col;
+  return (mdec_out_mb_base_addr_ + offset_words * 4u) & 0x001FFFFCu;
 }
 
 u32 DmaController::read(u32 offset) const {
@@ -206,6 +250,9 @@ void DmaController::dma_block(int channel) {
   }
 
   bool from_ram = ch.from_ram();
+  if (channel == 1 && from_ram) {
+    reset_mdec_out_reorder_state();
+  }
   auto &dbg = last_debug_[channel];
   dbg.base_addr = addr & 0x00FFFFFFu;
   dbg.block_ctrl = ch.block_ctrl;
@@ -291,9 +338,13 @@ void DmaController::dma_block(int channel) {
       }
     } else {
       u32 data = 0;
+      u32 write_addr = current_addr;
       // Read from device
       switch (channel) {
       case 1: // MDEC out
+        write_addr = map_mdec_out_word_addr(current_addr, step,
+                                            sys_->mdec_dma_out_block(),
+                                            sys_->mdec_dma_out_depth());
         data = sys_->mdec_dma_read();
         break;
       case 2: // GPU (GPUREAD)
@@ -309,7 +360,7 @@ void DmaController::dma_block(int channel) {
         LOG_WARN("DMA: Unhandled to-RAM channel %d", channel);
         break;
       }
-      sys_->write32(current_addr, data);
+      sys_->write32(write_addr, data);
     }
 
     addr = static_cast<u32>(static_cast<s32>(addr) + step);
@@ -373,6 +424,10 @@ void DmaController::transfer_complete(int channel) {
   ch.channel_ctrl &= ~(1u << 24); // Disable
   ch.channel_ctrl &= ~(1u << 28); // Clear trigger
   ch.block_words_remaining = 0;
+  // Keep MDEC-out reorder state across DMA1 transfer boundaries.
+  // Some clients issue a sequence of DMA1 transfers while consuming one
+  // continuous MDEC output stream; resetting here can desynchronize macroblock
+  // base tracking when a transfer ends mid-macroblock.
 
   // Set completion flag in DICR and update IRQ state.
   dicr_ |= (1u << (24 + channel));

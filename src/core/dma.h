@@ -71,11 +71,17 @@ private:
   System *sys_ = nullptr;
   DmaChannel channels_[7];
   TransferDebug last_debug_[7];
+  bool mdec_out_reorder_active_ = false;
+  u32 mdec_out_mb_base_addr_ = 0;
+  u8 mdec_out_block_id_ = 0xFF;
+  u32 mdec_out_word_index_in_block_ = 0;
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register
 
   void recompute_dicr_master(bool request_irq_on_rise);
+  void reset_mdec_out_reorder_state();
+  u32 map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id, u8 depth);
   void execute_dma(int channel);
   void dma_block(int channel);
   void dma_linked_list(int channel);

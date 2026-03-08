@@ -12,6 +12,8 @@ public:
   void write_control(u32 value);
   u32 read_data();
   u32 read_status() const;
+  u8 dma_out_block() const;
+  u8 dma_out_depth() const { return out_depth_latched_; }
 
   void dma_write(u32 value) { write_command(value); }
   u32 dma_read() { return read_data(); }
@@ -62,6 +64,9 @@ private:
   bool output_set_bit15_ = false;
   u32 output_pack_word_ = 0;
   u32 output_pack_bytes_ = 0;
+  u8 output_word_block_id_ = 4;
+  u8 out_depth_latched_ = 2;
   std::deque<u32> out_fifo_{};
+  std::deque<u8> out_block_fifo_{};
 };
 

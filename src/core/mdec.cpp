@@ -3,15 +3,16 @@
 #include <array>
 
 namespace {
-constexpr std::array<int, 64> kZigZag = {
-  0 ,1 ,5 ,6 ,14,15,27,28,
-  2 ,4 ,7 ,13,16,26,29,42,
-  3 ,8 ,12,17,25,30,41,43,
-  9 ,11,18,24,31,40,44,53,
-  10,19,23,32,39,45,52,54,
-  20,22,33,38,46,51,55,60,
-  21,34,37,47,50,56,59,61,
-  35,36,48,49,57,58,62,63,
+// Run-length stream index -> 8x8 matrix index (PSX MDEC zagzig order).
+constexpr std::array<int, 64> kZagZig = {
+  0 ,1 ,8 ,16,9 ,2 ,3 ,10,
+  17,24,32,25,18,11,4 ,5 ,
+  12,19,26,33,40,48,41,34,
+  27,20,13,6 ,7 ,14,21,28,
+  35,42,49,56,57,50,43,36,
+  29,22,15,23,30,37,44,51,
+  58,59,52,45,38,31,39,46,
+  53,60,61,54,47,55,62,63,
 };
 
 constexpr std::array<s16, 64> kDefaultScaleTable = {
@@ -68,7 +69,10 @@ void Mdec::reset() {
   output_set_bit15_ = false;
   output_pack_word_ = 0;
   output_pack_bytes_ = 0;
+  output_word_block_id_ = 4;
+  out_depth_latched_ = 2;
   out_fifo_.clear();
+  out_block_fifo_.clear();
 }
 
 void Mdec::begin_command(u32 value) {
@@ -152,7 +156,17 @@ u32 Mdec::read_data() {
   }
   const u32 value = out_fifo_.front();
   out_fifo_.pop_front();
+  if (!out_block_fifo_.empty()) {
+    out_block_fifo_.pop_front();
+  }
   return value;
+}
+
+u8 Mdec::dma_out_block() const {
+  if (!out_block_fifo_.empty()) {
+    return out_block_fifo_.front();
+  }
+  return current_block_;
 }
 
 u32 Mdec::read_status() const {
@@ -171,7 +185,9 @@ u32 Mdec::read_status() const {
   }
 
   status |= (static_cast<u32>(status_command_bits_ & 0x0Fu) << 23);
-  status |= (static_cast<u32>(current_block_ & 0x7u) << 16);
+  const u8 block =
+      out_block_fifo_.empty() ? current_block_ : out_block_fifo_.front();
+  status |= (static_cast<u32>(block & 0x7u) << 16);
 
   if (!expect_command_word_ && in_words_remaining_ > 0) {
     status |= ((in_words_remaining_ - 1u) & 0xFFFFu);
@@ -243,6 +259,7 @@ void Mdec::execute_set_scale_table() {
 }
 
 void Mdec::execute_decode() {
+  out_depth_latched_ = output_depth_;
   const size_t out_before = out_fifo_.size();
   std::vector<u16> halfwords;
   halfwords.reserve(input_words_.size() * 2);
@@ -354,6 +371,7 @@ void Mdec::execute_decode() {
 
   if (output_pack_bytes_ != 0) {
     out_fifo_.push_back(output_pack_word_);
+    out_block_fifo_.push_back(output_word_block_id_);
     output_pack_word_ = 0;
     output_pack_bytes_ = 0;
   }
@@ -414,7 +432,7 @@ bool Mdec::decode_block(const std::vector<u16> &src, size_t &pos, Block &block,
   if (q_scale == 0) {
     block[0] = dequantize(first, 0, true);
   } else {
-    block[kZigZag[0]] = dequantize(first, 0, true);
+    block[kZagZig[0]] = dequantize(first, 0, true);
   }
 
   while (pos < src.size()) {
@@ -429,7 +447,7 @@ bool Mdec::decode_block(const std::vector<u16> &src, size_t &pos, Block &block,
     }
 
     const int value = dequantize(word, k, false);
-    block[(q_scale == 0) ? k : kZigZag[static_cast<size_t>(k)]] = value;
+    block[(q_scale == 0) ? k : kZagZig[static_cast<size_t>(k)]] = value;
   }
 
   Block spatial{};
@@ -439,87 +457,97 @@ bool Mdec::decode_block(const std::vector<u16> &src, size_t &pos, Block &block,
 }
 
 void Mdec::idct(const Block &coeffs, Block &pixels) const {
+  auto idct_pass = [&](const Block &src, Block &dst) {
+    for (int x = 0; x < 8; ++x) {
+      for (int y = 0; y < 8; ++y) {
+        s64 sum = 0;
+        for (int z = 0; z < 8; ++z) {
+          const int sample =
+              src[static_cast<size_t>(y) + static_cast<size_t>(z) * 8u];
+          const int scale =
+              static_cast<int>(scale_table_[static_cast<size_t>(x) +
+                                            static_cast<size_t>(z) * 8u]) >>
+              3;
+          sum += static_cast<s64>(sample) * static_cast<s64>(scale);
+        }
+        dst[static_cast<size_t>(x) + static_cast<size_t>(y) * 8u] =
+            static_cast<int>((sum + 0x0FFF) >> 13);
+      }
+    }
+  };
+
   Block temp{};
+  idct_pass(coeffs, temp);
+  idct_pass(temp, pixels);
+}
 
-  // First pass: transform rows.
-  for (int y = 0; y < 8; ++y) {
-    for (int x = 0; x < 8; ++x) {
-      s64 sum = 0;
-      for (int z = 0; z < 8; ++z) {
-        const int sample =
-            coeffs[static_cast<size_t>(y) * 8 + static_cast<size_t>(z)];
-        const int scale =
-            static_cast<int>(scale_table_[static_cast<size_t>(x) +
-                                          static_cast<size_t>(z) * 8]) >>
-            3;
-        sum += static_cast<s64>(sample) * static_cast<s64>(scale);
-      }
-      temp[static_cast<size_t>(y) * 8 + static_cast<size_t>(x)] =
-          static_cast<int>((sum + 0x0FFF) >> 13);
-    }
+u8 Mdec::encode_component(int value) const {
+  // PSX MDEC standard output is 8-bit unsigned.
+  // Internal values are typically centered around 0 if signed, or 128 if unsigned.
+  int clamped = value;
+  if (!output_signed_) {
+    clamped += 128;
   }
+  return static_cast<u8>(std::clamp(clamped, 0, 255));
+}
 
-  // Second pass: transform columns.
-  for (int y = 0; y < 8; ++y) {
-    for (int x = 0; x < 8; ++x) {
-      s64 sum = 0;
-      for (int z = 0; z < 8; ++z) {
-        const int sample =
-            temp[static_cast<size_t>(z) * 8 + static_cast<size_t>(x)];
-        const int scale =
-            static_cast<int>(scale_table_[static_cast<size_t>(y) +
-                                          static_cast<size_t>(z) * 8]) >>
-            3;
-        sum += static_cast<s64>(sample) * static_cast<s64>(scale);
-      }
-      pixels[static_cast<size_t>(y) * 8 + static_cast<size_t>(x)] =
-          static_cast<int>((sum + 0x0FFF) >> 13);
-    }
-  }
+u16 Mdec::encode_rgb15(int r, int g, int b) const {
+  const u8 rr = encode_component(r);
+  const u8 rg = encode_component(g);
+  const u8 rb = encode_component(b);
+  const u16 bit15 = output_set_bit15_ ? 0x8000u : 0u;
+  return static_cast<u16>((rr >> 3) | ((rg >> 3) << 5) | ((rb >> 3) << 10) | bit15);
 }
 
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
                                    const Block &y1, const Block &y2,
                                    const Block &y3, const Block &y4) {
-  auto y_at = [&](int x, int y) -> int {
+  // A macroblock is 16x16 pixels composed of four 8x8 luma blocks (Y1-Y4).
+  // The Cr and Cb blocks are 8x8 and cover the entire 16x16 area.
+  auto get_y = [&](int x, int y) {
     if (y < 8) {
-      if (x < 8) {
-        return y1[static_cast<size_t>(y) * 8 + x];
-      }
-      return y2[static_cast<size_t>(y) * 8 + (x - 8)];
+      return (x < 8) ? y1[y * 8 + x] : y2[y * 8 + (x - 8)];
+    } else {
+      return (x < 8) ? y3[(y - 8) * 8 + x] : y4[(y - 8) * 8 + (x - 8)];
     }
-    if (x < 8) {
-      return y3[static_cast<size_t>(y - 8) * 8 + x];
-    }
-    return y4[static_cast<size_t>(y - 8) * 8 + (x - 8)];
   };
 
   for (int y = 0; y < 16; ++y) {
     for (int x = 0; x < 16; ++x) {
-      const int chroma_index = static_cast<size_t>(y >> 1) * 8 + (x >> 1);
-      const int yy = y_at(x, y);
-      const int cbv = cb[static_cast<size_t>(chroma_index)];
-      const int crv = cr[static_cast<size_t>(chroma_index)];
+      if (y < 8) {
+        output_word_block_id_ = (x < 8) ? 0 : 1;
+      } else {
+        output_word_block_id_ = (x < 8) ? 2 : 3;
+      }
 
-      const int r = yy + ((359 * crv + 0x80) >> 8);
-      const int g = yy - ((88 * cbv + 183 * crv + 0x80) >> 8);
-      const int b = yy + ((454 * cbv + 0x80) >> 8);
+      const int yy = get_y(x, y);
+      const int cx = x >> 1;
+      const int cy = y >> 1;
+      const int crv = cr[cy * 8 + cx];
+      const int cbv = cb[cy * 8 + cx];
+
+      // CCIR 601 integer math (fixed point 12-bit):
+      const int r = yy + ((crv * 5743 + 2048) >> 12);
+      const int g = yy - ((cbv * 1410 + crv * 2925 + 2048) >> 12);
+      const int b = yy + ((cbv * 7258 + 2048) >> 12);
 
       if (output_depth_ == 3) {
         const u16 rgb15 = encode_rgb15(r, g, b);
         push_output_byte(static_cast<u8>(rgb15 & 0xFFu));
         push_output_byte(static_cast<u8>(rgb15 >> 8));
       } else {
-        push_output_byte(encode_component(b));
-        push_output_byte(encode_component(g));
+        // 24-bit RGB is stored as (R, G, B) in bytes.
         push_output_byte(encode_component(r));
+        push_output_byte(encode_component(g));
+        push_output_byte(encode_component(b));
       }
     }
   }
 }
 
 void Mdec::emit_monochrome_macroblock(const Block &y) {
-  if (output_depth_ == 0) {
+  output_word_block_id_ = 4;
+  if (output_depth_ == 0) { // 4-bit monochrome
     for (size_t i = 0; i < y.size(); i += 2) {
       const u8 lo = static_cast<u8>(encode_component(y[i]) >> 4);
       const u8 hi = static_cast<u8>(encode_component(y[i + 1]) & 0xF0u);
@@ -533,7 +561,7 @@ void Mdec::emit_monochrome_macroblock(const Block &y) {
       const u16 rgb15 = encode_rgb15(value, value, value);
       push_output_byte(static_cast<u8>(rgb15 & 0xFFu));
       push_output_byte(static_cast<u8>(rgb15 >> 8));
-    } else {
+    } else if (output_depth_ == 2) { // 8-bit monochrome
       push_output_byte(encode_component(value));
     }
   }
@@ -544,6 +572,7 @@ void Mdec::push_output_byte(u8 value) {
   ++output_pack_bytes_;
   if (output_pack_bytes_ == 4) {
     out_fifo_.push_back(output_pack_word_);
+    out_block_fifo_.push_back(output_word_block_id_);
     output_pack_word_ = 0;
     output_pack_bytes_ = 0;
   }
@@ -563,22 +592,4 @@ int Mdec::clamp_s11(int value) {
 
 int Mdec::clamp_s8(int value) {
   return std::clamp(value, -128, 127);
-}
-
-u8 Mdec::encode_component(int value) const {
-  const s8 signed_value = static_cast<s8>(clamp_s8(value));
-  u8 encoded = static_cast<u8>(signed_value);
-  if (!output_signed_) {
-    encoded ^= 0x80u;
-  }
-  return encoded;
-}
-
-u16 Mdec::encode_rgb15(int r, int g, int b) const {
-  const u8 rr = encode_component(r);
-  const u8 rg = encode_component(g);
-  const u8 rb = encode_component(b);
-  return static_cast<u16>(((rr >> 3) & 0x1Fu) | (((rg >> 3) & 0x1Fu) << 5) |
-                          (((rb >> 3) & 0x1Fu) << 10) |
-                          (output_set_bit15_ ? 0x8000u : 0u));
 }

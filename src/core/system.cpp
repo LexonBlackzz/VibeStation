@@ -388,6 +388,10 @@ void System::run_frame(bool sample_display_diag) {
                 const u32 consumed = cpu_.step();
                 spent_in_slice += consumed;
                 frame_cycles_ += consumed;
+                // Advance SIO at instruction granularity so JOYPAD serial
+                // handshakes don't stall for an entire scanline worth of CPU
+                // polling loops.
+                sio_.tick(consumed);
                 ++instructions_executed;
                 cycles_remaining =
                     (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
@@ -412,8 +416,6 @@ void System::run_frame(bool sample_display_diag) {
                 profiling_stats_.gpu_ms - gpu_ms_before_loop;
             add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
-
-        sio_.tick(cycles_this_scanline);
 
         // Batch devices that already accept cycle counts to reduce per-cycle call
         // overhead.
@@ -481,7 +483,10 @@ void System::run_frame(bool sample_display_diag) {
         }
         boot_diag_.cd_read_command_count = cdrom_.read_command_count();
         boot_diag_.cd_irq_int1_count = cdrom_.irq_int1_count();
+        boot_diag_.cd_irq_int2_count = cdrom_.irq_int2_count();
         boot_diag_.cd_irq_int3_count = cdrom_.irq_int3_count();
+        boot_diag_.cd_irq_int4_count = cdrom_.irq_int4_count();
+        boot_diag_.cd_irq_int5_count = cdrom_.irq_int5_count();
 
         if (scanline == vblank_scanline) {
             gpu_.vblank();
