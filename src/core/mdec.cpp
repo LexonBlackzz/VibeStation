@@ -447,7 +447,7 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
       s64 sum = 0;
       for (int z = 0; z < 8; ++z) {
         const int sample =
-            coeffs[static_cast<size_t>(y) * 16 + static_cast<size_t>(z)];
+            coeffs[static_cast<size_t>(y) * 8 + static_cast<size_t>(z)];
         const int scale =
             static_cast<int>(scale_table_[static_cast<size_t>(x) +
                                           static_cast<size_t>(z) * 8]) >>
@@ -465,7 +465,7 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
       s64 sum = 0;
       for (int z = 0; z < 8; ++z) {
         const int sample =
-            temp[static_cast<size_t>(z) * 16 + static_cast<size_t>(x)];
+            temp[static_cast<size_t>(z) * 8 + static_cast<size_t>(x)];
         const int scale =
             static_cast<int>(scale_table_[static_cast<size_t>(y) +
                                           static_cast<size_t>(z) * 8]) >>
