@@ -141,6 +141,9 @@ public:
   void step();
   double target_fps() const;
   void set_audio_output_speed(double speed) { spu_.set_output_speed(speed); }
+  void set_spu_reverb_mix_multiplier(double multiplier) {
+    spu_.set_reverb_mix_multiplier(multiplier);
+  }
 
   // State
   bool is_running() const { return running_; }

@@ -188,6 +188,51 @@ u8 hint_to_mask(u8 hint_type) {
   return 0u;
 }
 
+u16 read_le16(const std::vector<u8> &data, size_t offset) {
+  if (offset + 1u >= data.size()) {
+    return 0;
+  }
+  return static_cast<u16>(static_cast<u16>(data[offset]) |
+                          (static_cast<u16>(data[offset + 1u]) << 8));
+}
+
+bool looks_like_str_header_at(const std::vector<u8> &raw_sector,
+                              size_t user_offset) {
+  if (user_offset + 8u > raw_sector.size()) {
+    return false;
+  }
+
+  // Standard STR stream header starts with 0160h at user-data offset.
+  if (read_le16(raw_sector, user_offset + 0u) != 0x0160u) {
+    return false;
+  }
+
+  // Validate chunk counters to reduce false positives.
+  const u16 chunk_no = read_le16(raw_sector, user_offset + 4u);
+  const u16 chunks_per_frame = read_le16(raw_sector, user_offset + 6u);
+  if (chunks_per_frame == 0u || chunks_per_frame > 1024u) {
+    return false;
+  }
+  if (chunk_no >= chunks_per_frame) {
+    return false;
+  }
+  return true;
+}
+
+bool is_probable_str_video_sector(const std::vector<u8> &raw_sector) {
+  // Typical user-data offsets:
+  // - MODE2/2352 : +24 (12 sync + 4 header + 8 subheader)
+  // - MODE2/2336 : +8  (4 subheader + 4 copy)
+  // - 2048 dumps  : +0
+  static constexpr std::array<size_t, 4> kCandidateOffsets = {24u, 8u, 0u, 16u};
+  for (size_t offset : kCandidateOffsets) {
+    if (looks_like_str_header_at(raw_sector, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<u8> make_error_response(u8 stat, u8 error_code) {
   return {static_cast<u8>(stat | 0x01u), error_code};
 }
@@ -910,14 +955,18 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector) {
   if (raw_sector[15] != 0x02u) {
     return;
   }
+  if (is_probable_str_video_sector(raw_sector)) {
+    return;
+  }
 
   const u8 file = raw_sector[16];
   const u8 channel = raw_sector[17];
   const u8 submode = raw_sector[18];
   const u8 codinginfo = raw_sector[19];
-  // Only require the Audio bit (0x04). Real hardware doesn't require the
-  // Real-Time bit (0x40) to also be set; many titles including GT2 omit it.
-  if ((submode & 0x04u) == 0) {
+  // Treat sectors tagged as Video as non-audio, even if bit2 is noisy.
+  // Some streams carry imperfect submode flags; decoding those as XA can
+  // consume video payload and make MDEC appear to stall.
+  if ((submode & 0x04u) == 0 || (submode & 0x02u) != 0) {
     return;
   }
 
@@ -1087,13 +1136,17 @@ bool CdRom::read_sector() {
   const u8 file = has_subheader ? raw[16] : 0;
   const u8 channel = has_subheader ? raw[17] : 0;
   const u8 submode = has_subheader ? raw[18] : 0;
-  const bool audio_realtime = has_subheader && ((submode & 0x04u) != 0);
+  const bool looks_like_str_video = is_probable_str_video_sector(raw);
+  const bool is_video_sector =
+      looks_like_str_video || (has_subheader && ((submode & 0x02u) != 0));
+  const bool is_audio_sector =
+      has_subheader && ((submode & 0x04u) != 0) && !is_video_sector;
   const bool filter_on = (mode_ & 0x08u) != 0;
   const bool filter_match =
       !filter_on || (file == filter_file_ && channel == filter_channel_);
 
   bool delivered_to_adpcm = false;
-  if ((mode_ & 0x40u) != 0 && audio_realtime && filter_match) {
+  if ((mode_ & 0x40u) != 0 && is_audio_sector && filter_match) {
     maybe_decode_xa_audio(raw);
     delivered_to_adpcm = true;
   }
@@ -1102,7 +1155,7 @@ bool CdRom::read_sector() {
   if (delivered_to_adpcm) {
     deliver_data = false;
   }
-  if (filter_on && audio_realtime && !filter_match) {
+  if (filter_on && is_audio_sector && !filter_match) {
     deliver_data = false;
   }
   if (!deliver_data) {
@@ -1346,9 +1399,8 @@ void CdRom::cmd_setmode() {
   }
 
   const u8 new_mode = param_fifo_[0];
-  if ((new_mode & 0x10u) == 0) {
-    read_whole_sector_ = (new_mode & 0x20u) != 0;
-  }
+  // Setmode bit5 selects host data width unconditionally.
+  read_whole_sector_ = (new_mode & 0x20u) != 0;
   mode_ = new_mode;
   // id_error_ = (mode_ & 0x10u) != 0;
   refresh_read_period();

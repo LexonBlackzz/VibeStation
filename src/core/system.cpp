@@ -369,9 +369,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // Aggressive fast mode intentionally trades timing stability for throughput.
     const bool aggressive_fast_mode = g_gpu_fast_mode;
     const u32 cpu_instruction_slice = aggressive_fast_mode ? 128u : 32u;
-    const u32 dma_tick_stride = aggressive_fast_mode ? 64u : 16u;
+    // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
+    // Keep those devices at near-baseline cadence even in fast mode.
+    const u32 dma_tick_stride = 16u;
     const u32 spu_sync_scanline_stride = aggressive_fast_mode ? 16u : 4u;
-    const u32 cdrom_tick_scanline_stride = aggressive_fast_mode ? 4u : 1u;
+    const u32 cdrom_tick_scanline_stride = 1u;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
     u32 cdrom_tick_budget = 0;

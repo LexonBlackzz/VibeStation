@@ -157,6 +157,10 @@ public:
     const double clamped = std::max(0.25, std::min(speed, 4.0));
     audio_output_speed_.store(clamped, std::memory_order_release);
   }
+  void set_reverb_mix_multiplier(double multiplier) {
+    const double clamped = std::max(0.0, std::min(multiplier, 4.0));
+    reverb_mix_multiplier_.store(clamped, std::memory_order_release);
+  }
 
   void tick(u32 cycles);
   void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
@@ -325,6 +329,7 @@ private:
   u64 sample_clock_ = 0;
   u64 last_synced_cpu_cycle_ = 0;
   std::atomic<double> audio_output_speed_{1.0};
+  std::atomic<double> reverb_mix_multiplier_{1.0};
 
   s16 noise_level_ = 1;
   s32 noise_timer_ = 0;

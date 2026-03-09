@@ -75,6 +75,8 @@ private:
   u32 mdec_out_mb_base_addr_ = 0;
   u8 mdec_out_block_id_ = 0xFF;
   u32 mdec_out_word_index_in_block_ = 0;
+  u32 mdec_out_last_linear_addr_ = 0;
+  s32 mdec_out_last_step_ = 0;
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register

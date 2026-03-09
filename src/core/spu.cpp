@@ -2350,8 +2350,10 @@ void Spu::tick(u32 cycles) {
     float wet_r = 0.0f;
     if (!g_low_spec_mode) {
       const std::array<float, 2> wet = step_reverb(rev_send_l, rev_send_r, spucnt_eff);
-      wet_l = wet[0];
-      wet_r = wet[1];
+      const float reverb_mix =
+          static_cast<float>(reverb_mix_multiplier_.load(std::memory_order_acquire));
+      wet_l = wet[0] * reverb_mix;
+      wet_r = wet[1] * reverb_mix;
     }
     if (track_sample_diag) {
       audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));

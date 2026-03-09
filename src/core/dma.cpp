@@ -40,6 +40,8 @@ void DmaController::reset_mdec_out_reorder_state() {
   mdec_out_mb_base_addr_ = 0;
   mdec_out_block_id_ = 0xFF;
   mdec_out_word_index_in_block_ = 0;
+  mdec_out_last_linear_addr_ = 0;
+  mdec_out_last_step_ = 0;
 }
 
 u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id,
@@ -50,6 +52,20 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
   if (step != 4 || block_id >= 4u || (depth != 2u && depth != 3u)) {
     reset_mdec_out_reorder_state();
     return addr;
+  }
+
+  if (mdec_out_reorder_active_) {
+    const u32 expected =
+        static_cast<u32>(static_cast<s32>(mdec_out_last_linear_addr_) +
+                         mdec_out_last_step_) &
+        0x001FFFFCu;
+    const bool discontinuity =
+        (step != mdec_out_last_step_) || (addr != expected);
+    if (discontinuity) {
+      // DMA1 can be reprogrammed between MDEC bursts; stale reorder state
+      // causes macroblock data to be mapped onto old destinations.
+      reset_mdec_out_reorder_state();
+    }
   }
 
   const u32 words_per_row_in_block = (depth == 2u) ? 6u : 4u;
@@ -68,6 +84,10 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
       // Y1 marks the start of a new 16x16 macroblock in destination RAM.
       mdec_out_mb_base_addr_ = addr;
     }
+  } else if (block_id == 0u && mdec_out_word_index_in_block_ == 0u) {
+    // Some streams can begin a fresh DMA burst right at a Y1 block boundary.
+    // Refresh macroblock base even if block id didn't toggle.
+    mdec_out_mb_base_addr_ = addr;
   }
 
   const u32 word_index = mdec_out_word_index_in_block_++;
@@ -81,6 +101,8 @@ u32 DmaController::map_mdec_out_word_addr(u32 linear_addr, s32 step, u8 block_id
   const u32 block_y_rows = (block_id >= 2u) ? 8u : 0u;
   const u32 offset_words =
       (block_y_rows + row) * macroblock_row_words + block_x_words + col;
+  mdec_out_last_linear_addr_ = addr;
+  mdec_out_last_step_ = step;
   return (mdec_out_mb_base_addr_ + offset_words * 4u) & 0x001FFFFCu;
 }
 

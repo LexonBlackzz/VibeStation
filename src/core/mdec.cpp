@@ -49,6 +49,7 @@ constexpr std::array<s16, 64> kDefaultScaleTable = {
     static_cast<s16>(0x7D8A), static_cast<s16>(0x9592),
     static_cast<s16>(0x471C), static_cast<s16>(0xE707),
 };
+
 } // namespace
 
 void Mdec::reset() {
@@ -85,9 +86,9 @@ void Mdec::begin_command(u32 value) {
   output_set_bit15_ = (value & (1u << 25)) != 0;
   in_halfword_fifo_.clear();
 
-  const u32 length_param = value & 0x01FFFFFFu;
-  in_words_remaining_ = (length_param + 1u) / 2u;
-  in_unlimited_ = (length_param == 0xFFFFu); // Common unlimited marker
+  const u32 length_param = value & 0xFFFFu;
+  in_words_remaining_ = length_param;
+  in_unlimited_ = false;
 
   switch (command_id_) {
   case 0: // No-op / Reset?
@@ -95,6 +96,8 @@ void Mdec::begin_command(u32 value) {
     command_busy_ = false;
     break;
   case 1: // Decode macroblocks
+    in_words_remaining_ = (value & 0xFFFFu);
+    in_unlimited_ = false;
     command_busy_ = true;
     expect_command_word_ = false;
     out_depth_latched_ = output_depth_;
@@ -206,10 +209,10 @@ u32 Mdec::read_status() const {
   status |= (static_cast<u32>(block & 0x7u) << 16);
 
   if (!expect_command_word_) {
-    if (in_unlimited_) {
+    if (in_words_remaining_ == 0) {
       status |= 0xFFFFu;
     } else {
-      status |= (in_words_remaining_ & 0xFFFFu);
+      status |= ((in_words_remaining_ - 1u) & 0xFFFFu);
     }
   } else {
     status |= 0xFFFFu;
@@ -220,7 +223,7 @@ u32 Mdec::read_status() const {
 
 bool Mdec::dma_in_request() const {
   const bool dma_in_enabled = (control_ & 0x40000000u) != 0;
-  return dma_in_enabled && !expect_command_word_ && (in_unlimited_ || in_words_remaining_ > 0);
+  return dma_in_enabled && !expect_command_word_ && (in_words_remaining_ > 0);
 }
 
 bool Mdec::dma_out_request() const {
@@ -385,19 +388,18 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
   };
 
   Block temp{};
-  idct_pass(coeffs, temp, 15);
+  idct_pass(coeffs, temp, 16);
   idct_pass(temp, pixels, 16);
 }
 
 u8 Mdec::encode_component(int value) const {
-  // Bias logic: IDCT output is already roughly 0..255 for standard bitstreams.
-  // If game wants signed, we subtract 128.
-  int clamped = value;
+  // MDEC color/mono output is based on signed 8-bit components.
+  // Unsigned mode is that signed result biased by +128 (aka xor 0x80).
+  const int signed_clamped = std::clamp(value, -128, 127);
   if (output_signed_) {
-    clamped -= 128;
-    return static_cast<u8>(std::clamp(clamped, -128, 127));
+    return static_cast<u8>(static_cast<s8>(signed_clamped));
   }
-  return static_cast<u8>(std::clamp(clamped, 0, 255));
+  return static_cast<u8>(signed_clamped + 128);
 }
 
 u16 Mdec::encode_rgb15(int r, int g, int b) const {

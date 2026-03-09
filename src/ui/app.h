@@ -70,6 +70,9 @@ private:
 	double render_ms_ = 0.0;
 	double swap_ms_ = 0.0;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
+	std::vector<u32> latest_frame_rgba_{};
+	int latest_frame_width_ = 0;
+	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;
 
 	// Configurable performance options
@@ -77,6 +80,7 @@ private:
 	bool config_low_spec_mode_ = false;
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
+	bool config_spu_diagnostic_mode_ = false;
 	bool turbo_hold_active_ = false;
 	bool slowdown_hold_active_ = false;
 
@@ -192,6 +196,7 @@ private:
 	bool load_disc_from_ui(const std::string& bin_path, const std::string& cue_path);
 	bool start_bios_from_ui();
 	bool boot_disc_from_ui();
+	bool save_snapshot_png();
 	bool reap_and_reboot_bios();
 	bool reap_and_reboot_bios_batch();
 	bool save_current_grim_preset(bool batch_mode);
@@ -213,4 +218,6 @@ private:
 	void load_persistent_config();
 	void save_persistent_config() const;
 	void try_autoload_bios_from_config();
+	double current_speed_override() const;
+	void apply_speed_override();
 };
