@@ -32,7 +32,8 @@ private:
   void execute_decode();
   void execute_set_quant_table();
   void execute_set_scale_table();
-  bool decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table);
+  bool decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
+                    size_t &cursor) const;
   void idct(const Block &coeffs, Block &pixels) const;
   void emit_colored_macroblock(const Block &cr, const Block &cb,
                                const Block &y1, const Block &y2,

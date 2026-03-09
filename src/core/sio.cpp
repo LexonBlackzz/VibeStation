@@ -248,6 +248,28 @@ void Sio::write8(u32 offset, u8 val) {
       break;
     }
 
+    if (channel1 || val == 0x81) {
+      // This core only emulates a pad on channel 0.
+      // Treat channel 1 and memory-card selects as no-device open bus without
+      // entering controller protocol state.
+      state_ = State::Idle;
+      byte_index_ = 0;
+      dsr_pending_cycles_ = 0;
+      dsr_pulse_cycles_ = 0;
+      dsr_input_level_ = false;
+      irq_flag_ = false;
+      irq_pending_ = false;
+      rx_fifo_ = 0xFF;
+      last_rx_byte_ = rx_fifo_;
+      rx_not_empty_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
+      tx_ready_2_ = true;
+      transfer_active_ = false;
+      rx_pending_valid_ = false;
+      rebuild_stat();
+      break;
+    }
+
     // Do not abort an in-flight transfer on early host writes. Dropping the
     // byte can desync BIOS pad polling; queue one byte to execute right after
     // the current transfer completes.
@@ -437,11 +459,6 @@ Sio::ByteResult Sio::process_byte(u8 value) {
       // BIOS expects DSR/IRQ pacing after the initial select byte before it
       // transmits 0x42; without this pulse it retries 0x01 forever.
       return ByteResult{0xFF, true};
-    }
-    if (value == 0x81) { // Memory card select (no card connected)
-      state_ = State::Idle;
-      // No ACK/DSR: BIOS should treat this as "no card" and continue pad polls.
-      return ByteResult{0xFF, false};
     }
     ++invalid_sequence_count_;
     return ByteResult{0xFF, false};

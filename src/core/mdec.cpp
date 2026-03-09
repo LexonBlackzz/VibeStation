@@ -293,25 +293,37 @@ void Mdec::execute_decode() {
       if (in_halfword_fifo_.empty()) break;
 
       Block cr{}, cb{}, y1{}, y2{}, y3{}, y4{};
-      
-      // Need a way to backtrack if decode_block fails due to missing data.
-      // We'll use a temporary copy of the FIFO state.
-      auto backup_fifo = in_halfword_fifo_;
-      
+      size_t cursor = 0;
+
       current_block_ = 4;
-      if (!decode_block(cr, quant_chroma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(cr, quant_chroma_, cursor)) {
+        break;
+      }
       current_block_ = 5;
-      if (!decode_block(cb, quant_chroma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(cb, quant_chroma_, cursor)) {
+        break;
+      }
       current_block_ = 0;
-      if (!decode_block(y1, quant_luma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(y1, quant_luma_, cursor)) {
+        break;
+      }
       current_block_ = 1;
-      if (!decode_block(y2, quant_luma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(y2, quant_luma_, cursor)) {
+        break;
+      }
       current_block_ = 2;
-      if (!decode_block(y3, quant_luma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(y3, quant_luma_, cursor)) {
+        break;
+      }
       current_block_ = 3;
-      if (!decode_block(y4, quant_luma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(y4, quant_luma_, cursor)) {
+        break;
+      }
 
       emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
+      while (cursor-- > 0) {
+        in_halfword_fifo_.pop_front();
+      }
     }
   } else {
     while (true) {
@@ -321,19 +333,26 @@ void Mdec::execute_decode() {
       if (in_halfword_fifo_.empty()) break;
 
       Block y{};
-      auto backup_fifo = in_halfword_fifo_;
+      size_t cursor = 0;
       current_block_ = 0;
-      if (!decode_block(y, quant_luma_)) { in_halfword_fifo_ = backup_fifo; break; }
+      if (!decode_block(y, quant_luma_, cursor)) {
+        break;
+      }
       emit_monochrome_macroblock(y);
+      while (cursor-- > 0) {
+        in_halfword_fifo_.pop_front();
+      }
     }
   }
 }
 
-bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table) {
-  if (in_halfword_fifo_.empty()) return false;
+bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
+                        size_t &cursor) const {
+  if (cursor >= in_halfword_fifo_.size()) {
+    return false;
+  }
 
-  const u16 first = in_halfword_fifo_.front();
-  in_halfword_fifo_.pop_front();
+  const u16 first = in_halfword_fifo_[cursor++];
   const int q_scale = static_cast<int>((first >> 10) & 0x3Fu);
   int k = 0;
 
@@ -354,9 +373,10 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
   block[q_scale == 0 ? 0 : kZagZig[0]] = dequantize(first, 0, true);
 
   while (true) {
-    if (in_halfword_fifo_.empty()) return false; // Need more data for EOB
-    const u16 word = in_halfword_fifo_.front();
-    in_halfword_fifo_.pop_front();
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false; // Need more data for EOB
+    }
+    const u16 word = in_halfword_fifo_[cursor++];
 
     if (word == 0xFE00u) break; // EOB
 

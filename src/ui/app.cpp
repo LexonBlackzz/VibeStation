@@ -864,6 +864,7 @@ void App::run() {
             latest_frame_rgba_ = std::move(frame.rgba);
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
+        push_performance_history_sample();
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
         u32 now_ms = SDL_GetTicks();
@@ -1207,6 +1208,107 @@ void App::update() {
     }
 }
 
+void App::push_performance_history_sample() {
+    if (!has_started_emulation_) {
+        perf_history_write_index_ = 0;
+        perf_history_count_ = 0;
+        return;
+    }
+
+    const int idx = perf_history_write_index_;
+    perf_cpu_ms_history_[idx] =
+        static_cast<float>(std::max(0.0, runtime_snapshot_.profiling.cpu_ms));
+    perf_gpu_ms_history_[idx] =
+        static_cast<float>(std::max(0.0, runtime_snapshot_.profiling.gpu_ms));
+    perf_core_ms_history_[idx] =
+        static_cast<float>(std::max(0.0, runtime_snapshot_.core_frame_ms));
+
+    perf_history_write_index_ = (perf_history_write_index_ + 1) % kPerfHistorySamples;
+    if (perf_history_count_ < kPerfHistorySamples) {
+        ++perf_history_count_;
+    }
+}
+
+void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_size) {
+    if (!show_perf_ || !has_started_emulation_ || perf_history_count_ < 2) {
+        return;
+    }
+    if (image_size.x < 240.0f || image_size.y < 140.0f) {
+        return;
+    }
+
+    const float overlay_w = std::min(420.0f, image_size.x - 20.0f);
+    const float overlay_h = std::min(150.0f, image_size.y - 20.0f);
+    if (overlay_w < 220.0f || overlay_h < 100.0f) {
+        return;
+    }
+
+    const ImVec2 p0(image_pos.x + 10.0f, image_pos.y + 10.0f);
+    const ImVec2 p1(p0.x + overlay_w, p0.y + overlay_h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(8, 8, 12, 190), 6.0f);
+    dl->AddRect(p0, p1, IM_COL32(140, 140, 170, 220), 6.0f);
+
+    const auto& stats = runtime_snapshot_.profiling;
+    char header[160];
+    std::snprintf(header, sizeof(header),
+        "CPU %.2f ms   GPU %.2f ms   Core %.2f ms   FPS %.1f",
+        stats.cpu_ms, stats.gpu_ms, runtime_snapshot_.core_frame_ms, fps_);
+    dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 7.0f), IM_COL32(235, 235, 245, 255), header);
+
+    const float gx0 = p0.x + 10.0f;
+    const float gx1 = p1.x - 10.0f;
+    const float gy0 = p0.y + 28.0f;
+    const float gy1 = p1.y - 10.0f;
+    const float gw = gx1 - gx0;
+    const float gh = gy1 - gy0;
+    if (gw <= 1.0f || gh <= 1.0f) {
+        return;
+    }
+
+    float peak = 0.0f;
+    for (int i = 0; i < perf_history_count_; ++i) {
+        const int idx = (perf_history_write_index_ - perf_history_count_ + i +
+            kPerfHistorySamples) %
+            kPerfHistorySamples;
+        peak = std::max(peak, perf_cpu_ms_history_[idx]);
+        peak = std::max(peak, perf_gpu_ms_history_[idx]);
+        peak = std::max(peak, perf_core_ms_history_[idx]);
+    }
+    constexpr float kFrameBudgetMs = 1000.0f / 60.0f;
+    const float scale_max = std::max(kFrameBudgetMs, std::max(8.0f, peak * 1.2f));
+
+    const float budget_y = gy1 - (kFrameBudgetMs / scale_max) * gh;
+    dl->AddLine(ImVec2(gx0, budget_y), ImVec2(gx1, budget_y),
+        IM_COL32(220, 190, 80, 100), 1.0f);
+
+    std::array<ImVec2, kPerfHistorySamples> cpu_pts{};
+    std::array<ImVec2, kPerfHistorySamples> gpu_pts{};
+    std::array<ImVec2, kPerfHistorySamples> core_pts{};
+    const int count = perf_history_count_;
+    const float denom = static_cast<float>(std::max(1, count - 1));
+    for (int i = 0; i < count; ++i) {
+        const int idx = (perf_history_write_index_ - count + i + kPerfHistorySamples) %
+            kPerfHistorySamples;
+        const float x = gx0 + (static_cast<float>(i) / denom) * gw;
+        const float cpu_y = gy1 - std::min(perf_cpu_ms_history_[idx], scale_max) / scale_max * gh;
+        const float gpu_y = gy1 - std::min(perf_gpu_ms_history_[idx], scale_max) / scale_max * gh;
+        const float core_y = gy1 - std::min(perf_core_ms_history_[idx], scale_max) / scale_max * gh;
+        cpu_pts[i] = ImVec2(x, cpu_y);
+        gpu_pts[i] = ImVec2(x, gpu_y);
+        core_pts[i] = ImVec2(x, core_y);
+    }
+
+    dl->AddPolyline(core_pts.data(), count, IM_COL32(190, 190, 210, 200), 0, 1.0f);
+    dl->AddPolyline(cpu_pts.data(), count, IM_COL32(90, 240, 90, 255), 0, 2.0f);
+    dl->AddPolyline(gpu_pts.data(), count, IM_COL32(255, 110, 110, 255), 0, 2.0f);
+
+    const float legend_y = gy0 + 3.0f;
+    dl->AddText(ImVec2(gx0 + 6.0f, legend_y), IM_COL32(90, 240, 90, 255), "CPU");
+    dl->AddText(ImVec2(gx0 + 48.0f, legend_y), IM_COL32(255, 110, 110, 255), "GPU");
+    dl->AddText(ImVec2(gx0 + 90.0f, legend_y), IM_COL32(190, 190, 210, 255), "Core");
+}
+
 void App::render_ui() {
     menu_bar();
 
@@ -1245,8 +1347,6 @@ void App::render_ui() {
         panel_debug_cpu();
     if (show_vram_)
         panel_vram();
-    if (show_perf_)
-        panel_performance();
     if (show_sound_status_)
         panel_sound_status();
     if (show_corruption_presets_)
@@ -1377,7 +1477,7 @@ void App::menu_bar() {
             ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
             ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
             ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
-            ImGui::MenuItem("Performance", "F11", &show_perf_);
+            ImGui::MenuItem("Performance Overlay", "F11", &show_perf_);
             ImGui::MenuItem("Voice Levels", nullptr, &show_sound_status_);
             ImGui::MenuItem("Logging", nullptr, &show_logging_);
             ImGui::MenuItem("About", nullptr, &show_about_);
@@ -1647,8 +1747,10 @@ void App::panel_emulator_screen() {
         const float y_pad = (avail.y - draw_size.y) * 0.5f;
         ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(cursor.x + x_pad, cursor.y + y_pad));
+        const ImVec2 image_pos = ImGui::GetCursorScreenPos();
         ImGui::Image((ImTextureID)(intptr_t)renderer_->get_texture_id(), draw_size,
             ImVec2(0, 0), ImVec2(1, 1));
+        draw_performance_overlay(image_pos, draw_size);
     }
 }
 
