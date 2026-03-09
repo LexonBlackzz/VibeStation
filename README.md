@@ -10,6 +10,7 @@ Graphics/VRAM ✅⚠️
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
+MDEC ⚠️    
 Real-time corrupter/BIOS corruption ✅
 
 ✅ - Implemented  
