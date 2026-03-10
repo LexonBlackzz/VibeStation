@@ -33,6 +33,11 @@ bool EmuRunner::start(System* system) {
         latest_vram_snapshot_.clear();
         has_latest_vram_snapshot_ = false;
     }
+    {
+        std::lock_guard<std::mutex> lock(memcard_request_mutex_);
+        has_pending_memcard_request_ = false;
+        pending_memcard_paths_ = {};
+    }
     capture_vram_debug_.store(false, std::memory_order_release);
 
     worker_ = std::thread(&EmuRunner::worker_main, this);
@@ -65,6 +70,11 @@ void EmuRunner::stop() {
         std::lock_guard<std::mutex> lock(vram_mutex_);
         latest_vram_snapshot_.clear();
         has_latest_vram_snapshot_ = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(memcard_request_mutex_);
+        has_pending_memcard_request_ = false;
+        pending_memcard_paths_ = {};
     }
     capture_vram_debug_.store(false, std::memory_order_release);
 }
@@ -111,6 +121,13 @@ void EmuRunner::request_live_disc_insert(const std::string& bin_path,
     pending_disc_bin_path_ = bin_path;
     pending_disc_cue_path_ = cue_path;
     has_pending_disc_request_ = true;
+}
+
+void EmuRunner::request_memory_card_paths(
+    const std::array<std::string, 2>& slot_paths) {
+    std::lock_guard<std::mutex> lock(memcard_request_mutex_);
+    pending_memcard_paths_ = slot_paths;
+    has_pending_memcard_request_ = true;
 }
 
 bool EmuRunner::consume_latest_frame(FrameSnapshot& out_frame) {
@@ -196,6 +213,26 @@ void EmuRunner::publish_snapshot(const RuntimeSnapshot& snapshot) {
     latest_snapshot_ = snapshot;
 }
 
+void EmuRunner::apply_pending_memory_card_paths() {
+    std::array<std::string, 2> slot_paths{};
+    {
+        std::lock_guard<std::mutex> lock(memcard_request_mutex_);
+        if (!has_pending_memcard_request_) {
+            return;
+        }
+        slot_paths = pending_memcard_paths_;
+        has_pending_memcard_request_ = false;
+    }
+
+    if (system_ == nullptr) {
+        return;
+    }
+
+    for (u32 slot = 0; slot < slot_paths.size(); ++slot) {
+        system_->set_memory_card_slot(slot, slot_paths[slot]);
+    }
+}
+
 void EmuRunner::apply_pending_disc_insert() {
     std::string bin_path;
     std::string cue_path;
@@ -230,6 +267,7 @@ void EmuRunner::worker_main() {
                              bool force_capture) {
         frame_active_.store(true, std::memory_order_release);
 
+        apply_pending_memory_card_paths();
         apply_input_state(*system_);
         apply_pending_disc_insert();
         system_->run_frame(false, skip_audio_for_turbo);
@@ -265,6 +303,12 @@ void EmuRunner::worker_main() {
         const u32 endx_lo = static_cast<u32>(spu.read16(0x19C));
         const u32 endx_hi = static_cast<u32>(spu.read16(0x19E) & 0x00FFu);
         snapshot.spu_endx_mask = endx_lo | (endx_hi << 16);
+        for (u32 slot = 0; slot < snapshot.memory_card_inserted.size(); ++slot) {
+            snapshot.memory_card_inserted[slot] =
+                system_->memory_card_inserted(slot);
+            snapshot.memory_card_dirty[slot] = system_->memory_card_dirty(slot);
+            snapshot.memory_card_path[slot] = system_->memory_card_path(slot);
+        }
 
         if (force_capture || should_capture_frame()) {
             FrameSnapshot frame{};
