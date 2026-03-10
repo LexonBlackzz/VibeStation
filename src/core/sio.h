@@ -1,12 +1,19 @@
 #pragma once
+#include "memory_card.h"
 #include "pad_controller.h"
 #include "types.h"
+
+#include <array>
+#include <string>
 
 class System;
 
 class Sio {
 public:
+  static constexpr u32 kMemoryCardSlots = 2;
+
   void init(System *sys) { sys_ = sys; }
+  void shutdown();
   void reset();
 
   u8 read8(u32 offset) const;
@@ -18,6 +25,11 @@ public:
 
   void set_button_state(u16 buttons);
   void set_analog_state(u8 lx, u8 ly, u8 rx, u8 ry);
+  bool set_memory_card_slot(u32 slot, const std::string &path);
+  void flush_memory_cards();
+  bool memory_card_inserted(u32 slot) const;
+  bool memory_card_dirty(u32 slot) const;
+  std::string memory_card_path(u32 slot) const;
 
   void tick(u32 cycles);
   bool saw_pad_cmd42() const { return saw_pad_cmd42_; }
@@ -83,10 +95,12 @@ private:
   bool irq_pending_ = false;
   bool ack_input_ = false;
   ActiveDevice active_device_ = ActiveDevice::None;
+  u8 active_slot_ = 0;
   bool connected_ = true;
 
   // Controller protocol and state (separate from transport timing).
   PadController controller_;
+  std::array<MemoryCard, kMemoryCardSlots> memory_cards_{};
 
   // Diagnostics used by boot checks and debug UI.
   bool saw_pad_cmd42_ = false;
