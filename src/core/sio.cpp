@@ -21,13 +21,68 @@ void Sio::set_analog_state(u8 lx, u8 ly, u8 rx, u8 ry) {
   controller_.set_analog_state(lx, ly, rx, ry);
 }
 
+void Sio::shutdown() { flush_memory_cards(); }
+
+bool Sio::set_memory_card_slot(u32 slot, const std::string &path) {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+
+  bool ok = true;
+  if (path.empty()) {
+    memory_cards_[slot].eject();
+  } else {
+    ok = memory_cards_[slot].load_or_create(path);
+  }
+  if (!ok) {
+    return false;
+  }
+
+  reset_device_transfer_state();
+  return true;
+}
+
+void Sio::flush_memory_cards() {
+  for (MemoryCard &card : memory_cards_) {
+    card.save_if_dirty();
+  }
+}
+
+bool Sio::memory_card_inserted(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+  return memory_cards_[slot].inserted();
+}
+
+bool Sio::memory_card_dirty(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return false;
+  }
+  return memory_cards_[slot].dirty();
+}
+
+std::string Sio::memory_card_path(u32 slot) const {
+  if (slot >= kMemoryCardSlots) {
+    return {};
+  }
+  return memory_cards_[slot].path();
+}
+
 void Sio::reset_device_transfer_state() {
   active_device_ = ActiveDevice::None;
+  active_slot_ = 0;
   controller_.reset_transfer_state();
+  for (MemoryCard &card : memory_cards_) {
+    card.reset_transfer_state();
+  }
 }
 
 void Sio::reset() {
   controller_.reset();
+  for (MemoryCard &card : memory_cards_) {
+    card.reset();
+  }
   connected_ = true;
 
   saw_pad_cmd42_ = false;
@@ -129,6 +184,7 @@ void Sio::begin_transfer() {
 
 void Sio::do_transfer() {
   const bool slot1 = (ctrl_ & 0x2000u) != 0;
+  const u8 selected_slot = static_cast<u8>(slot1 ? 1u : 0u);
   const u8 host_byte = transmit_value_;
   u8 device_byte = kOpenBusByte;
   bool ack = false;
@@ -155,9 +211,21 @@ void Sio::do_transfer() {
     }
   };
 
+  auto consume_card_result = [&](const MemoryCard::TransferResult &card_result) {
+    device_byte = card_result.data_out;
+    ack = card_result.ack;
+    memory_card_transfer = true;
+  };
+
   switch (active_device_) {
   case ActiveDevice::None:
-    if (!slot1 && connected_) {
+    if (host_byte == 0x81 && memory_cards_[selected_slot].inserted()) {
+      consume_card_result(memory_cards_[selected_slot].transfer(host_byte));
+      if (ack) {
+        active_device_ = ActiveDevice::MemoryCard;
+        active_slot_ = selected_slot;
+      }
+    } else if (host_byte != 0x81 && !slot1 && connected_) {
       const PadController::TransferResult pad_result = controller_.transfer(host_byte);
       consume_pad_result(pad_result);
       if (host_byte == 0x01 && pad_result.ack) {
@@ -165,18 +233,30 @@ void Sio::do_transfer() {
       }
       if (ack) {
         active_device_ = ActiveDevice::Controller;
+        active_slot_ = 0;
       }
     }
     break;
   case ActiveDevice::Controller:
-    if (!slot1 && connected_) {
+    if (!slot1 && connected_ && active_slot_ == 0) {
       consume_pad_result(controller_.transfer(host_byte));
+    } else {
+      ack = false;
+      device_byte = kOpenBusByte;
     }
     break;
-  case ActiveDevice::MemoryCard:
+  case ActiveDevice::MemoryCard: {
     memory_card_transfer = true;
-    ack = false;
+    if (active_slot_ < kMemoryCardSlots &&
+        selected_slot == active_slot_ &&
+        memory_cards_[active_slot_].inserted()) {
+      consume_card_result(memory_cards_[active_slot_].transfer(host_byte));
+    } else {
+      ack = false;
+      device_byte = kOpenBusByte;
+    }
     break;
+  }
   }
 
   if (g_trace_sio &&
@@ -200,6 +280,7 @@ void Sio::do_transfer() {
 
   if (!ack) {
     active_device_ = ActiveDevice::None;
+    active_slot_ = 0;
     end_transfer();
   } else {
     transfer_state_ = TransferState::WaitingForAck;
