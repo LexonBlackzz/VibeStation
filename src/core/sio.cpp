@@ -32,6 +32,8 @@ void Sio::reset() {
   transfer_active_ = false;
   rx_pending_valid_ = false;
   rx_pending_byte_ = 0xFF;
+  tx_queued_valid_ = false;
+  tx_queued_byte_ = 0xFF;
   state_ = State::Idle;
   saw_pad_cmd42_ = false;
   saw_tx_cmd42_ = false;
@@ -228,22 +230,74 @@ void Sio::write8(u32 offset, u8 val) {
     if (val == 0x42 && joy_bus_selected) {
       saw_tx_cmd42_ = true;
     }
-    // JOY_CTRL bit13 selects the alternate channel; keep this path as
-    // controller port 1 only so BIOS memory-card probing doesn't consume
-    // controller transaction state.
-    const bool selected = joy_bus_selected && tx_ready_1_ && !transfer_active_;
-    const ByteResult result = selected ? process_byte(val)
-                                       : ByteResult{0xFF, false};
-    if (joy_bus_selected && !selected) {
-      ++invalid_sequence_count_;
+
+    if (!joy_bus_selected) {
+      // Open-bus response when JOY bus is not selected/enabled.
+      dsr_pending_cycles_ = 0;
+      dsr_pulse_cycles_ = 0;
+      dsr_input_level_ = false;
+      irq_flag_ = false;
+      rx_fifo_ = 0xFF;
+      last_rx_byte_ = rx_fifo_;
+      rx_not_empty_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
+      tx_ready_2_ = true;
+      transfer_active_ = false;
+      rx_pending_valid_ = false;
+      rebuild_stat();
+      break;
     }
-    tx_ready_1_ = false;
+
+    if (channel1 || val == 0x81) {
+      // This core only emulates a pad on channel 0.
+      // Treat channel 1 and memory-card selects as no-device open bus without
+      // entering controller protocol state.
+      state_ = State::Idle;
+      byte_index_ = 0;
+      dsr_pending_cycles_ = 0;
+      dsr_pulse_cycles_ = 0;
+      dsr_input_level_ = false;
+      irq_flag_ = false;
+      irq_pending_ = false;
+      rx_fifo_ = 0xFF;
+      last_rx_byte_ = rx_fifo_;
+      rx_not_empty_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
+      tx_ready_2_ = true;
+      transfer_active_ = false;
+      rx_pending_valid_ = false;
+      rebuild_stat();
+      break;
+    }
+
+    // Do not abort an in-flight transfer on early host writes. Dropping the
+    // byte can desync BIOS pad polling; queue one byte to execute right after
+    // the current transfer completes.
+    if (transfer_active_ || !tx_ready_1_) {
+      if (!tx_queued_valid_) {
+        tx_queued_byte_ = val;
+        tx_queued_valid_ = true;
+      } else {
+        ++invalid_sequence_count_;
+        tx_queued_byte_ = val;
+      }
+      tx_ready_1_ = false;
+      tx_ready_2_ = false;
+      rebuild_stat();
+      break;
+    }
+
+    // Keep protocol active on whichever channel BIOS currently selects.
+    // Memory-card probes (0x81) are treated as "no card connected" so they
+    // can't poison pad transaction state.
+    const ByteResult result = process_byte(val);
+    tx_ready_1_ = !tx_queued_valid_;
     tx_ready_2_ = false;
     transfer_active_ = true;
     rx_pending_byte_ = result.response;
     rx_pending_valid_ = true;
     rx_not_empty_ = false;
-    if (selected && result.pulse_dsr) {
+    if (result.pulse_dsr) {
       schedule_dsr_pulse();
     } else {
       dsr_pending_cycles_ = 0;
@@ -253,14 +307,12 @@ void Sio::write8(u32 offset, u8 val) {
       rx_fifo_ = rx_pending_byte_;
       last_rx_byte_ = rx_fifo_;
       rx_not_empty_ = true;
-      tx_ready_1_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
       tx_ready_2_ = true;
       transfer_active_ = false;
       rx_pending_valid_ = false;
     }
-    if (selected) {
-      ++byte_index_;
-    }
+    ++byte_index_;
     rebuild_stat();
     if (g_trace_sio &&
         trace_should_log(g_sio_trace_counter, g_trace_burst_sio,
@@ -301,10 +353,9 @@ void Sio::write16(u32 offset, u16 val) {
     break;
   case 0xA:
     {
-      const bool prev_select = joy_select_active_;
       ctrl_ = static_cast<u16>(val & ~0x0050u);
       joy_select_active_ = (ctrl_ & 0x0002) != 0;
-      if (prev_select && !joy_select_active_) { // /JOY_SELECT deasserted
+      if (!joy_select_active_) { // /JOY_SELECT deasserted
         state_ = State::Idle;
         byte_index_ = 0;
         transfer_active_ = false;
@@ -312,6 +363,10 @@ void Sio::write16(u32 offset, u16 val) {
         dsr_pending_cycles_ = 0;
         dsr_pulse_cycles_ = 0;
         dsr_input_level_ = false;
+        tx_queued_valid_ = false;
+        tx_queued_byte_ = 0xFF;
+        tx_ready_1_ = !tx_queued_valid_;
+        tx_ready_2_ = true;
       }
     }
     if (val & 0x0010) { // Acknowledge
@@ -325,7 +380,7 @@ void Sio::write16(u32 offset, u16 val) {
     if (val & 0x0040) { // Reset
       state_ = State::Idle;
       byte_index_ = 0;
-      tx_ready_1_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
       tx_ready_2_ = true;
       rx_not_empty_ = false;
       rx_fifo_ = 0xFF;
@@ -334,6 +389,8 @@ void Sio::write16(u32 offset, u16 val) {
       irq_pending_ = false;
       dsr_pending_cycles_ = 0;
       dsr_pulse_cycles_ = 0;
+      tx_queued_valid_ = false;
+      tx_queued_byte_ = 0xFF;
       mode_ = 0;
       ctrl_ = 0;
       baud_ = 0;
@@ -386,6 +443,14 @@ void Sio::write32(u32 offset, u32 val) {
 }
 
 Sio::ByteResult Sio::process_byte(u8 value) {
+  // BIOS can restart polling after aborted/failed exchanges without always
+  // giving us a clean state transition; treat a fresh 0x01 as resync.
+  if (value == 0x01 && state_ != State::Idle) {
+    state_ = State::SelectedPad;
+    ++pad_poll_count_;
+    return ByteResult{0xFF, true};
+  }
+
   switch (state_) {
   case State::Idle:
     if (value == 0x01) { // Pad select
@@ -480,13 +545,47 @@ void Sio::tick(u32 cycles) {
         rx_not_empty_ = true;
         rx_pending_valid_ = false;
       }
-      tx_ready_1_ = true;
+      tx_ready_1_ = !tx_queued_valid_;
       tx_ready_2_ = true;
       transfer_active_ = false;
       dsr_input_level_ = true;
       irq_flag_ = true;
       raise_sio_irq_if_enabled();
       stat_dirty = true;
+
+      if (tx_queued_valid_) {
+        if (joy_select_active_ && connected_ && tx_enabled()) {
+          const u8 queued = tx_queued_byte_;
+          tx_queued_valid_ = false;
+          tx_queued_byte_ = 0xFF;
+          const ByteResult result = process_byte(queued);
+          tx_ready_1_ = !tx_queued_valid_;
+          tx_ready_2_ = false;
+          transfer_active_ = true;
+          rx_pending_byte_ = result.response;
+          rx_pending_valid_ = true;
+          rx_not_empty_ = false;
+          if (result.pulse_dsr) {
+            schedule_dsr_pulse();
+          } else {
+            dsr_pending_cycles_ = 0;
+            dsr_pulse_cycles_ = 0;
+            dsr_input_level_ = false;
+            irq_flag_ = false;
+            rx_fifo_ = rx_pending_byte_;
+            last_rx_byte_ = rx_fifo_;
+            rx_not_empty_ = true;
+            tx_ready_1_ = !tx_queued_valid_;
+            tx_ready_2_ = true;
+            transfer_active_ = false;
+            rx_pending_valid_ = false;
+          }
+          ++byte_index_;
+        } else {
+          tx_queued_valid_ = false;
+          tx_queued_byte_ = 0xFF;
+        }
+      }
     }
   }
   if (dsr_pulse_cycles_ > 0) {

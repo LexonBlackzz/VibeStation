@@ -35,6 +35,8 @@ public:
   // Direct pointer access (for DMA)
   u8 *data() { return data_.data(); }
   const u8 *data() const { return data_.data(); }
+  u8 *scratch_data() { return scratchpad_.data(); }
+  const u8 *scratch_data() const { return scratchpad_.data(); }
 
 private:
   std::array<u8, psx::RAM_SIZE> data_;

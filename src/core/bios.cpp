@@ -1,13 +1,16 @@
 #include "bios.h"
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
 bool Bios::load(const std::string &path) {
   loaded_ = false;
+  fast_boot_patched_ = false;
   info_.clear();
   mapped_size_ = psx::BIOS_SIZE;
   data_.clear();
+  original_data_.clear();
 
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -57,10 +60,105 @@ bool Bios::load(const std::string &path) {
   }
 
   loaded_ = true;
+  original_data_ = data_;
 
   identify();
   LOG_INFO("BIOS: Loaded successfully — %s", info_.c_str());
   return true;
+}
+
+bool Bios::apply_fast_boot_patch() {
+  if (!loaded_ || data_.empty() || original_data_.empty()) {
+    return false;
+  }
+
+  // Always patch from a clean BIOS image, so toggling the mode is deterministic.
+  data_ = original_data_;
+
+  // Type1B signature used by many retail PS1 BIOSes.
+  struct PatternByte {
+    u8 value;
+    bool match;
+  };
+  static constexpr PatternByte kType1bPattern[] = {
+      {0xE0, true}, {0xFF, true}, {0xBD, true}, {0x27, true},
+      {0x1C, true}, {0x00, true}, {0xBF, true}, {0xAF, true},
+      {0x20, true}, {0x00, true}, {0xA4, true}, {0xAF, true},
+      {0x00, false}, {0x00, false}, {0x05, true}, {0x3C, true},
+      {0x00, false}, {0x00, false}, {0x06, true}, {0x3C, true},
+      {0x00, false}, {0x00, false}, {0xC6, true}, {0x34, true},
+      {0x00, false}, {0x00, false}, {0xA5, true}, {0x34, true},
+      {0x00, false}, {0x00, false}, {0x00, false}, {0x0F, true},
+  };
+
+  auto pattern_matches = [](const std::vector<u8> &blob, size_t offset) {
+    if (offset + std::size(kType1bPattern) > blob.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < std::size(kType1bPattern); ++i) {
+      if (kType1bPattern[i].match && blob[offset + i] != kType1bPattern[i].value) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  u32 patch_offset = 0x00018000u; // Type1A fallback (works on most retail PS1 BIOS images)
+  bool found_type1b = false;
+  if (data_.size() >= std::size(kType1bPattern)) {
+    const size_t max_offset = data_.size() - std::size(kType1bPattern);
+    for (size_t i = 0; i <= max_offset; ++i) {
+      if (pattern_matches(data_, i)) {
+        patch_offset = static_cast<u32>(i);
+        found_type1b = true;
+        break;
+      }
+    }
+  }
+
+  static constexpr u32 kShellReplacement[] = {
+      0x3C011F80u, // lui at, 0x1f80
+      0x3C0A0300u, // lui t2, 0x0300
+      0xAC2A1814u, // sw t2, 0x1814(at) (enable display)
+      0x03E00008u, // jr ra
+      0x00000000u, // nop
+  };
+
+  const size_t replacement_size = sizeof(kShellReplacement);
+  if (static_cast<size_t>(patch_offset) + replacement_size > data_.size()) {
+    LOG_WARN("BIOS: Fast-boot patch offset out of range (offset=0x%08X, size=%zu).",
+             patch_offset, data_.size());
+    return false;
+  }
+
+  auto write32_le = [this](size_t offset, u32 value) {
+    data_[offset + 0] = static_cast<u8>((value >> 0) & 0xFFu);
+    data_[offset + 1] = static_cast<u8>((value >> 8) & 0xFFu);
+    data_[offset + 2] = static_cast<u8>((value >> 16) & 0xFFu);
+    data_[offset + 3] = static_cast<u8>((value >> 24) & 0xFFu);
+  };
+  for (size_t i = 0; i < std::size(kShellReplacement); ++i) {
+    write32_le(static_cast<size_t>(patch_offset) + (i * 4u), kShellReplacement[i]);
+  }
+
+  fast_boot_patched_ = true;
+  if (found_type1b) {
+    LOG_INFO("BIOS: Applied direct disc boot patch at Type1B offset 0x%08X.", patch_offset);
+  } else {
+    LOG_INFO("BIOS: Applied direct disc boot patch at fallback Type1A offset 0x%08X.",
+             patch_offset);
+  }
+  return true;
+}
+
+void Bios::restore_original_image() {
+  if (!loaded_ || original_data_.empty()) {
+    return;
+  }
+  if (fast_boot_patched_) {
+    data_ = original_data_;
+    fast_boot_patched_ = false;
+  }
 }
 
 void Bios::identify() {

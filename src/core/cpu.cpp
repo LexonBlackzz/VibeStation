@@ -315,28 +315,30 @@ void Cpu::set_reg(u32 index, u32 value) {
     return;
   }
 
-  if (cpu_diag_enabled() && index == 29) {
-    const bool entered_high_mirror =
-        (value >= 0x807F0000u && value < 0x80800000u) &&
-        (gpr_[29] < 0x807F0000u || gpr_[29] >= 0x80800000u);
-    if (entered_high_mirror) {
-      log_high_mirror_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
+  if (cpu_diag_enabled()) {
+    if (index == 29) {
+      const bool entered_high_mirror =
+          (value >= 0x807F0000u && value < 0x80800000u) &&
+          (gpr_[29] < 0x807F0000u || gpr_[29] >= 0x80800000u);
+      if (entered_high_mirror) {
+        log_high_mirror_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
+      }
+
+      const bool suspicious_sp =
+          (value >= 0x80800000u && value < 0x81000000u) ||
+          (value < 0x80000000u && value >= 0x00800000u);
+      if (suspicious_sp) {
+        log_suspicious_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
+      }
     }
 
-    const bool suspicious_sp =
-        (value >= 0x80800000u && value < 0x81000000u) ||
-        (value < 0x80000000u && value >= 0x00800000u);
-    if (suspicious_sp) {
-      log_suspicious_sp_write(sys_, current_pc_, gpr_[29], value, gpr_[31]);
-    }
-  }
-
-  if (cpu_diag_enabled() && index == 31) {
-    const bool suspicious_ra =
-        (value == 0u) ||
-        (!is_plausible_exec_addr(value) && value != next_pc_);
-    if (suspicious_ra) {
-      log_suspicious_ra_write(sys_, current_pc_, gpr_[31], value, gpr_[29]);
+    if (index == 31) {
+      const bool suspicious_ra =
+          (value == 0u) ||
+          (!is_plausible_exec_addr(value) && value != next_pc_);
+      if (suspicious_ra) {
+        log_suspicious_ra_write(sys_, current_pc_, gpr_[31], value, gpr_[29]);
+      }
     }
   }
 
@@ -348,7 +350,6 @@ void Cpu::set_reg(u32 index, u32 value) {
     next_load_.reg = 0;
   }
   gpr_[index] = value;
-  gpr_[0] = 0; // $zero is hardwired to 0
 }
 
 u32 Cpu::read_cop0_reg(u32 index) const {
@@ -418,7 +419,6 @@ void Cpu::apply_pending_load() {
   if (load_.reg != 0) {
     gpr_[load_.reg] = load_.value;
   }
-  gpr_[0] = 0;
   load_ = {0, 0};
 }
 
@@ -441,13 +441,22 @@ void Cpu::begin_branch(bool taken, u32 target) {
 
 // ── Memory Access ──────────────────────────────────────────────────
 
+u32 Cpu::fetch32(u32 addr) {
+  if (addr & 3) {
+    cop0_badvaddr_ = addr;
+    exception(Exception::AddrLoadErr);
+    return 0;
+  }
+  return sys_->read32_instruction(addr);
+}
+
 u32 Cpu::load32(u32 addr) {
   if (addr & 3) {
     cop0_badvaddr_ = addr;
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  return sys_->read32(addr);
+  return sys_->read32_data(addr);
 }
 
 u16 Cpu::load16(u32 addr) {
@@ -456,10 +465,10 @@ u16 Cpu::load16(u32 addr) {
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  return sys_->read16(addr);
+  return sys_->read16_data(addr);
 }
 
-u8 Cpu::load8(u32 addr) { return sys_->read8(addr); }
+u8 Cpu::load8(u32 addr) { return sys_->read8_data(addr); }
 
 void Cpu::store32(u32 addr, u32 value) {
   if (addr & 3) {
@@ -471,7 +480,7 @@ void Cpu::store32(u32 addr, u32 value) {
   if (cop0_sr_ & (1u << 16)) {
     return; // Cache isolated, writes go nowhere
   }
-  sys_->write32(addr, value);
+  sys_->write32_data(addr, value);
 }
 
 void Cpu::store16(u32 addr, u16 value) {
@@ -482,13 +491,13 @@ void Cpu::store16(u32 addr, u16 value) {
   }
   if (cop0_sr_ & (1u << 16))
     return;
-  sys_->write16(addr, value);
+  sys_->write16_data(addr, value);
 }
 
 void Cpu::store8(u32 addr, u8 value) {
   if (cop0_sr_ & (1u << 16))
     return;
-  sys_->write8(addr, value);
+  sys_->write8_data(addr, value);
 }
 
 // ── Exception Handling ─────────────────────────────────────────────
@@ -563,6 +572,7 @@ u32 Cpu::step() {
   static u32 trace_last_instr = 0;
   static u64 trace_repeat = 0;
   static u32 prev_pc_for_diag = 0;
+  const bool cpu_diag = cpu_diag_enabled();
   current_pc_ = pc_;
   exception_raised_ = false;
   next_load_ = {0, 0};
@@ -582,24 +592,22 @@ u32 Cpu::step() {
   if (check_irq()) {
     exception(Exception::Interrupt);
     apply_pending_load();
-    gpr_[0] = 0;
     constexpr u32 irq_cycles = 2;
     cycles_ += irq_cycles;
     return irq_cycles;
   }
 
   // Fetch instruction
-  u32 instruction = load32(pc_);
+  u32 instruction = fetch32(pc_);
   if (exception_raised_) {
     apply_pending_load();
-    gpr_[0] = 0;
     constexpr u32 fault_cycles = 2;
     cycles_ += fault_cycles;
     return fault_cycles;
   }
 
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
+  if (cpu_diag) {
+    if (current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
     static bool logged_low_helper_caller_entry = false;
     if (!logged_low_helper_caller_entry) {
       logged_low_helper_caller_entry = true;
@@ -618,9 +626,8 @@ u32 Cpu::step() {
           sys_->read32(0x000152B4u), 0x000152B8u, sys_->read32(0x000152B8u));
       log_stack_window(sys_, "CPU: caller frame", gpr_[29]);
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
+    }
+    if (current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
     static bool logged_low_helper_chain_entry = false;
     if (!logged_low_helper_chain_entry) {
       logged_low_helper_chain_entry = true;
@@ -639,9 +646,8 @@ u32 Cpu::step() {
           sys_->read32(0x0001ECB4u), 0x0001ECB8u, sys_->read32(0x0001ECB8u));
       log_stack_window(sys_, "CPU: chain frame", gpr_[29]);
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x8001ECBCu && current_pc_ <= 0x8001ED10u) {
+    }
+    if (current_pc_ >= 0x8001ECBCu && current_pc_ <= 0x8001ED10u) {
     static bool logged_low_helper_chain_tail = false;
     if (!logged_low_helper_chain_tail) {
       logged_low_helper_chain_tail = true;
@@ -680,9 +686,8 @@ u32 Cpu::step() {
           gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9]);
       log_stack_window(sys_, "CPU: chain tail frame", gpr_[29]);
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
+    }
+    if (current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
     static bool logged_low_helper_leadin = false;
     if (!logged_low_helper_leadin) {
       logged_low_helper_leadin = true;
@@ -719,9 +724,8 @@ u32 Cpu::step() {
       }
       log_stack_window(sys_, "CPU: low lead-in frame", gpr_[29]);
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x00002400u && current_pc_ <= 0x00002424u) {
+    }
+    if (current_pc_ >= 0x00002400u && current_pc_ <= 0x00002424u) {
     static bool logged_low_prologue_entry = false;
     if (!logged_low_prologue_entry) {
       logged_low_prologue_entry = true;
@@ -742,9 +746,8 @@ u32 Cpu::step() {
           sys_->read32(0x00002424u));
       log_stack_window(sys_, "CPU: low-helper prologue frame", gpr_[29]);
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x00002440u && current_pc_ <= 0x00002454u) {
+    }
+    if (current_pc_ >= 0x00002440u && current_pc_ <= 0x00002454u) {
     static bool logged_low_epilogue_entry = false;
     if (!logged_low_epilogue_entry) {
       logged_low_epilogue_entry = true;
@@ -766,9 +769,8 @@ u32 Cpu::step() {
           0x0000244Cu, sys_->read32(0x0000244Cu), 0x00002450u,
           sys_->read32(0x00002450u));
     }
-  }
-  if (cpu_diag_enabled() &&
-      current_pc_ >= 0x00002420u && current_pc_ <= 0x00002450u) {
+    }
+    if (current_pc_ >= 0x00002420u && current_pc_ <= 0x00002450u) {
     static bool logged_low_func_call = false;
     const bool came_from_outside =
         !(prev_pc_for_diag >= 0x00002420u && prev_pc_for_diag <= 0x00002450u);
@@ -778,6 +780,7 @@ u32 Cpu::step() {
           "CPU: entered low helper prev_pc=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X v0=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
           prev_pc_for_diag, current_pc_, gpr_[29], gpr_[31], gpr_[2], gpr_[4],
           gpr_[5], gpr_[6], gpr_[7]);
+    }
     }
   }
 
@@ -829,9 +832,6 @@ u32 Cpu::step() {
   } else {
     load_ = {0, 0};
   }
-
-  // Ensure $zero stays 0
-  gpr_[0] = 0;
 
   const u32 consumed_cycles = instruction_cycles(instruction);
   cycles_ += consumed_cycles;

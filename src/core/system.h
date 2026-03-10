@@ -12,6 +12,7 @@
 #include "timer.h"
 #include "types.h"
 #include <atomic>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -131,7 +132,7 @@ public:
     return cdrom_.swap_disc_image(bin_path, cue_path);
   }
   void notify_disc_inserted() { cdrom_.notify_disc_inserted(); }
-  bool boot_disc();
+  bool boot_disc(bool direct_boot = false);
   void reset();
   void shutdown();
 
@@ -208,6 +209,197 @@ public:
   void disable_sound_reaper();
 
   // Memory bus interface
+  // Fast path used by CPU instruction fetch to avoid full I/O dispatch on the
+  // hot RAM/BIOS paths.
+  u32 read32_instruction(u32 addr) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram) {
+        u32 value = 0;
+        std::memcpy(&value, ram_.data() + off, sizeof(value));
+        return value;
+      }
+      return ram_.read32(off);
+    }
+
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+            (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+      return bios_.read32(phys - psx::BIOS_BASE);
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      return ram_.scratch_read32(phys - 0x1F800000u);
+    }
+
+    return read32(addr);
+  }
+
+  u8 read8_data(u32 addr) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram) {
+        return ram_.data()[off];
+      }
+      return ram_.read8(off);
+    }
+
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+            (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+      return bios_.read8(phys - psx::BIOS_BASE);
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        return ram_.scratch_data()[off];
+      }
+      return ram_.scratch_read8(off);
+    }
+
+    return read8(addr);
+  }
+
+  u16 read16_data(u32 addr) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram) {
+        u16 value = 0;
+        std::memcpy(&value, ram_.data() + off, sizeof(value));
+        return value;
+      }
+      return ram_.read16(off);
+    }
+
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+            (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+      return bios_.read16(phys - psx::BIOS_BASE);
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        u16 value = 0;
+        std::memcpy(&value, ram_.scratch_data() + off, sizeof(value));
+        return value;
+      }
+      return ram_.scratch_read16(off);
+    }
+
+    return read16(addr);
+  }
+
+  u32 read32_data(u32 addr) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram) {
+        u32 value = 0;
+        std::memcpy(&value, ram_.data() + off, sizeof(value));
+        return value;
+      }
+      return ram_.read32(off);
+    }
+
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+            (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+      return bios_.read32(phys - psx::BIOS_BASE);
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        u32 value = 0;
+        std::memcpy(&value, ram_.scratch_data() + off, sizeof(value));
+        return value;
+      }
+      return ram_.scratch_read32(off);
+    }
+
+    return read32(addr);
+  }
+
+  void write8_data(u32 addr, u8 val) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        ram_.data()[off] = val;
+        return;
+      }
+      write8(addr, val);
+      return;
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        ram_.scratch_data()[off] = val;
+        return;
+      }
+      ram_.scratch_write8(off, val);
+      return;
+    }
+
+    write8(addr, val);
+  }
+
+  void write16_data(u32 addr, u16 val) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        std::memcpy(ram_.data() + off, &val, sizeof(val));
+        return;
+      }
+      write16(addr, val);
+      return;
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        std::memcpy(ram_.scratch_data() + off, &val, sizeof(val));
+        return;
+      }
+      ram_.scratch_write16(off, val);
+      return;
+    }
+
+    write16(addr, val);
+  }
+
+  void write32_data(u32 addr, u32 val) {
+    const u32 phys = psx::mask_address(addr);
+    if (phys < 0x00800000u) {
+      const u32 off = phys & 0x1FFFFFu;
+      if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        std::memcpy(ram_.data() + off, &val, sizeof(val));
+        return;
+      }
+      write32(addr, val);
+      return;
+    }
+
+    if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      const u32 off = (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+      if (!g_trace_ram) {
+        std::memcpy(ram_.scratch_data() + off, &val, sizeof(val));
+        return;
+      }
+      ram_.scratch_write32(off, val);
+      return;
+    }
+
+    write32(addr, val);
+  }
+
   u8 read8(u32 addr);
   u16 read16(u32 addr);
   u32 read32(u32 addr);

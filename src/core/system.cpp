@@ -280,7 +280,7 @@ bool System::load_game(const std::string& bin_path,
     return ok;
 }
 
-bool System::boot_disc() {
+bool System::boot_disc(bool direct_boot) {
     if (!bios_loaded()) {
         return false;
     }
@@ -301,6 +301,12 @@ bool System::boot_disc() {
         return false;
     }
 
+    if (direct_boot) {
+        if (!bios_.apply_fast_boot_patch()) {
+            LOG_WARN("System: direct disc boot patch failed; falling back to normal BIOS boot.");
+        }
+    }
+
     set_running(true);
     return true;
 }
@@ -309,6 +315,7 @@ void System::reset() {
     if (!hw_init_) {
         init_hardware();
     }
+    bios_.restore_original_image();
     irq_.reset();
     timers_.reset();
     dma_.reset();

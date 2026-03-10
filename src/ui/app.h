@@ -12,6 +12,7 @@
 struct SDL_Window;
 union SDL_Event;
 struct ImGuiIO;
+struct ImVec2;
 typedef void* SDL_GLContext;
 
 class App {
@@ -62,6 +63,7 @@ private:
 	int pending_bind_index_ = -1;
 
 	// Frame timing
+	static constexpr int kPerfHistorySamples = 240;
 	float fps_ = 0.0f;
 	u32 frame_count_ = 0;
 	u32 last_fps_time_ = 0;
@@ -69,6 +71,11 @@ private:
 	double present_ms_ = 0.0;
 	double render_ms_ = 0.0;
 	double swap_ms_ = 0.0;
+	std::array<float, kPerfHistorySamples> perf_cpu_ms_history_ = {};
+	std::array<float, kPerfHistorySamples> perf_gpu_ms_history_ = {};
+	std::array<float, kPerfHistorySamples> perf_core_ms_history_ = {};
+	int perf_history_write_index_ = 0;
+	int perf_history_count_ = 0;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
 	int latest_frame_width_ = 0;
@@ -78,6 +85,7 @@ private:
 	// Configurable performance options
 	bool config_vsync_ = true;
 	bool config_low_spec_mode_ = false;
+	bool config_direct_disc_boot_ = false;
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
@@ -172,6 +180,8 @@ private:
 		const ImGuiIO& io) const;
 	void update();
 	void render_ui();
+	void push_performance_history_sample();
+	void draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_size);
 
 	// UI panels
 	void menu_bar();

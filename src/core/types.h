@@ -108,12 +108,9 @@ inline bool g_spu_enable_audio_queue = true;
 inline bool g_spu_force_audio_queue = false;
 inline float g_spu_output_buffer_seconds = 5.0f;
 inline float g_spu_xa_buffer_seconds = 0.12f;
-inline bool g_profile_detailed_timing =
-#if defined(NDEBUG)
-    false;
-#else
-    true;
-#endif
+// Keep detailed timing opt-in; enabling it in debug builds can dominate frame
+// time due to high-frequency clock sampling in hot loops.
+inline bool g_profile_detailed_timing = false;
 
 enum class DeinterlaceMode : u8 {
   Weave = 0,

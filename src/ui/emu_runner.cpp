@@ -270,8 +270,10 @@ void EmuRunner::worker_main() {
             FrameSnapshot frame{};
             std::vector<u32> rgba;
             const DisplaySampleInfo sample =
-                system_->gpu().build_display_rgba(rgba, !g_gpu_fast_mode);
-            system_->gpu().build_display_rgba(rgba, false);
+                // UI output should always use the stable present path.
+                // include_stats switches to a slower/alternate conversion path
+                // that can drop BIOS menu cursor pixels on some scenes.
+                system_->gpu().build_display_rgba(rgba, false);
 
             frame.frame_id = snapshot.frame_id;
             frame.width = std::max(1, sample.width);

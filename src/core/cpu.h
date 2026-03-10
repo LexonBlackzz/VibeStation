@@ -84,6 +84,7 @@ private:
   u32 instruction_cycles(u32 instruction) const;
 
   // Memory access (through system bus)
+  u32 fetch32(u32 addr);
   u32 load32(u32 addr);
   u16 load16(u32 addr);
   u8 load8(u32 addr);

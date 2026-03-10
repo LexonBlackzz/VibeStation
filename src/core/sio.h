@@ -66,6 +66,8 @@ private:
   bool transfer_active_ = false;
   bool rx_pending_valid_ = false;
   u8 rx_pending_byte_ = 0xFF;
+  bool tx_queued_valid_ = false;
+  u8 tx_queued_byte_ = 0xFF;
   bool connected_ = true;
   bool saw_pad_cmd42_ = false;
   bool saw_tx_cmd42_ = false;
