@@ -269,6 +269,7 @@ bool System::load_bios(const std::string& path) {
     if (!hw_init_) {
         init_hardware();
     }
+    spu_.clear_replacement_sample();
     return bios_.load(path);
 }
 
@@ -744,6 +745,18 @@ void System::disable_sound_reaper() {
     SoundReaperConfig cfg = sound_reaper_config();
     cfg.enabled = false;
     set_sound_reaper_config(cfg);
+}
+
+bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
+                                           std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.export_voice_sample_to_file(voice, path, error);
+}
+
+bool System::load_spu_replacement_sample_from_file(const std::string& path,
+                                                   std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.load_replacement_sample_from_file(path, error);
 }
 
 void System::apply_ram_reaper_for_frame() {

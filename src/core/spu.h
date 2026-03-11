@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <string>
 #include <vector>
 
 class System;
@@ -175,6 +176,17 @@ public:
   const std::vector<s16> &audio_capture_samples() const {
     return capture_samples_;
   }
+  bool export_voice_sample_to_file(int voice, const std::string &path,
+                                   std::string *error = nullptr) const;
+  bool load_replacement_sample_from_file(const std::string &path,
+                                         std::string *error = nullptr);
+  void clear_replacement_sample();
+  void set_replacement_sample_enabled(bool enabled) {
+    replacement_sample_enabled_ = enabled && !replacement_sample_.empty();
+  }
+  bool replacement_sample_enabled() const { return replacement_sample_enabled_; }
+  bool replacement_sample_loaded() const { return !replacement_sample_.empty(); }
+  size_t replacement_sample_bytes() const { return replacement_sample_.size(); }
 
 private:
   static constexpr int SAMPLE_RATE = 44100;
@@ -234,6 +246,7 @@ private:
 
     bool release_tracking = false;
     u64 release_start_sample = 0;
+    bool use_replacement_sample = false;
   };
 
   struct ReverbRegs {
@@ -341,6 +354,8 @@ private:
   std::vector<s16> host_silence_samples_;
   std::vector<s16> capture_samples_;
   std::vector<s16> cd_input_samples_;
+  std::vector<u8> replacement_sample_;
+  bool replacement_sample_enabled_ = false;
   size_t cd_input_read_pos_ = 0;
   s16 cd_last_sample_l_ = 0;
   s16 cd_last_sample_r_ = 0;
@@ -387,6 +402,10 @@ private:
   static float q15_to_float(s16 value);
   static u32 popcount32(u32 value);
 
+  bool collect_voice_sample_bytes(int voice, std::vector<u8> &out,
+                                  std::string *error) const;
+  bool validate_replacement_sample(const std::vector<u8> &sample,
+                                   std::string *error) const;
   bool decode_adpcm_block(int voice);
   bool fetch_voice_sample(int voice, s16 &sample);
   void seed_gaussian_history(int voice);
