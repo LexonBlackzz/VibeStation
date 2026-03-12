@@ -50,6 +50,18 @@ constexpr std::array<s16, 64> kDefaultScaleTable = {
     static_cast<s16>(0x471C), static_cast<s16>(0xE707),
 };
 
+inline int sign_extend_9(int value) {
+  int signed9 = value & 0x1FF;
+  if ((signed9 & 0x100) != 0) {
+    signed9 -= 0x200;
+  }
+  return signed9;
+}
+
+inline int clamp_signed_sample(int value) {
+  return std::clamp(sign_extend_9(value), -128, 127);
+}
+
 } // namespace
 
 void Mdec::refresh_debug_quant_stats() {
@@ -583,13 +595,6 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
 
   Block spatial{};
   idct(block, spatial);
-  for (int &sample : spatial) {
-    int signed9 = sample & 0x1FF;
-    if ((signed9 & 0x100) != 0) {
-      signed9 -= 0x200;
-    }
-    sample = std::clamp(signed9, -128, 127);
-  }
   block = spatial;
 
   ++debug_stats_.blocks_decoded;
@@ -629,11 +634,7 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
   for (u32 x = 0; x < 8u; ++x) {
     for (u32 y = 0; y < 8u; ++y) {
       const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
-      int signed9 = sum & 0x1FF;
-      if ((signed9 & 0x100) != 0) {
-        signed9 -= 0x200;
-      }
-      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+      pixels[x * 8u + y] = clamp_signed_sample(sum);
     }
   }
 }
@@ -862,11 +863,7 @@ void Mdec::idct_variant(const Block &coeffs, Block &pixels,
   for (u32 x = 0; x < 8u; ++x) {
     for (u32 y = 0; y < 8u; ++y) {
       const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
-      int signed9 = sum & 0x1FF;
-      if ((signed9 & 0x100) != 0) {
-        signed9 -= 0x200;
-      }
-      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+      pixels[x * 8u + y] = clamp_signed_sample(sum);
     }
   }
 }
@@ -983,52 +980,40 @@ u16 Mdec::encode_rgb15(int r, int g, int b) const {
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
                                    const Block &y1, const Block &y2,
                                    const Block &y3, const Block &y4) {
-  auto sign_extend_9 = [](int value) {
-    int signed9 = value & 0x1FF;
-    if ((signed9 & 0x100) != 0) {
-      signed9 -= 0x200;
-    }
-    return signed9;
-  };
-
   const std::array<const Block *, 4> y_blocks = {&y1, &y2, &y3, &y4};
+  const std::array<bool, 4> block_enabled = {
+      (g_mdec_debug_color_block_mask & 0x1u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x2u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x4u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x8u) != 0u,
+  };
+  const bool disable_luma = g_mdec_debug_disable_luma;
+  const bool disable_chroma = g_mdec_debug_disable_chroma;
   output_word_block_id_ = 4;
   current_output_macroblock_seq_ = output_macroblock_seq_++;
-
-  auto pixel_rgb = [&](int px, int py) {
-    const int block = ((py >> 3) << 1) | (px >> 3);
-    const Block &y_block = *y_blocks[static_cast<size_t>(block)];
-    const bool block_enabled =
-        ((g_mdec_debug_color_block_mask >> static_cast<u32>(block)) & 0x1u) != 0u;
-    const int local_x = px & 7;
-    const int local_y = py & 7;
-    const int yy =
-        (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[local_y * 8 + local_x];
-    const int cx = px >> 1;
-    const int cy = py >> 1;
-    const int crv =
-        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
-    const int cbv =
-        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
-
-    const int r =
-        std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)), -128, 127);
-    const int g = std::clamp(
-        sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
-                              ((-183 * crv) & ~0x07) + 0x80) >> 8)),
-        -128, 127);
-    const int b =
-        std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)), -128, 127);
-    return std::array<int, 3>{r, g, b};
-  };
 
   if (out_depth_latched_ == 3) {
     bool have_low = false;
     u16 low_pixel = 0;
     for (int py = 0; py < 16; ++py) {
+      const int block_row = (py >> 3) << 1;
+      const int local_y = py & 7;
+      const int chroma_row = (py >> 1) * 8;
       for (int px = 0; px < 16; ++px) {
-        const auto rgb = pixel_rgb(px, py);
-        const u16 rgb15 = encode_rgb15(rgb[0], rgb[1], rgb[2]);
+        const int block = block_row | (px >> 3);
+        const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+        const bool enabled = block_enabled[static_cast<size_t>(block)];
+        const int local_x = px & 7;
+        const int yy =
+            (!enabled || disable_luma) ? 0 : y_block[local_y * 8 + local_x];
+        const int chroma_index = chroma_row + (px >> 1);
+        const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
+        const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
+        const int r = clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8));
+        const int g = clamp_signed_sample(
+            yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8));
+        const int b = clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8));
+        const u16 rgb15 = encode_rgb15(r, g, b);
         if (!have_low) {
           low_pixel = rgb15;
           have_low = true;
@@ -1043,11 +1028,25 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
   }
 
   for (int py = 0; py < 16; ++py) {
+    const int block_row = (py >> 3) << 1;
+    const int local_y = py & 7;
+    const int chroma_row = (py >> 1) * 8;
     for (int px = 0; px < 16; ++px) {
-      const auto rgb = pixel_rgb(px, py);
-      push_output_byte(encode_component(rgb[0]));
-      push_output_byte(encode_component(rgb[1]));
-      push_output_byte(encode_component(rgb[2]));
+      const int block = block_row | (px >> 3);
+      const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+      const bool enabled = block_enabled[static_cast<size_t>(block)];
+      const int local_x = px & 7;
+      const int yy =
+          (!enabled || disable_luma) ? 0 : y_block[local_y * 8 + local_x];
+      const int chroma_index = chroma_row + (px >> 1);
+      const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
+      const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
+      push_output_byte(
+          encode_component(clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8))));
+      push_output_byte(encode_component(clamp_signed_sample(
+          yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8))));
+      push_output_byte(
+          encode_component(clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8))));
     }
   }
 }
