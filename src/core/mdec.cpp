@@ -407,6 +407,10 @@ void Mdec::execute_decode() {
           in_halfword_fifo_.pop_front();
       }
       if (in_halfword_fifo_.empty()) break;
+      size_t available_halfwords = 0;
+      if (!scan_macroblock(6u, available_halfwords)) {
+        break;
+      }
 
       Block cr{}, cb{}, y1{}, y2{}, y3{}, y4{};
       size_t cursor = 0;
@@ -446,7 +450,7 @@ void Mdec::execute_decode() {
       }
 
       emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
-      while (cursor-- > 0) {
+      while (available_halfwords-- > 0) {
         in_halfword_fifo_.pop_front();
       }
     }
@@ -456,6 +460,10 @@ void Mdec::execute_decode() {
           in_halfword_fifo_.pop_front();
       }
       if (in_halfword_fifo_.empty()) break;
+      size_t available_halfwords = 0;
+      if (!scan_macroblock(1u, available_halfwords)) {
+        break;
+      }
 
       Block y{};
       size_t cursor = 0;
@@ -464,11 +472,47 @@ void Mdec::execute_decode() {
         break;
       }
       emit_monochrome_macroblock(y);
-      while (cursor-- > 0) {
+      while (available_halfwords-- > 0) {
         in_halfword_fifo_.pop_front();
       }
     }
   }
+}
+
+bool Mdec::scan_block(size_t &cursor) const {
+  u16 first = 0;
+  for (;;) {
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false;
+    }
+    first = in_halfword_fifo_[cursor++];
+    if (first != 0xFE00u) {
+      break;
+    }
+  }
+
+  int k = 0;
+  while (true) {
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false;
+    }
+    const u16 word = in_halfword_fifo_[cursor++];
+    k += static_cast<int>((word >> 10) & 0x3Fu) + 1;
+    if (k >= 63) {
+      return true;
+    }
+  }
+}
+
+bool Mdec::scan_macroblock(size_t block_count, size_t &consumed_halfwords) const {
+  size_t cursor = 0;
+  for (size_t block = 0; block < block_count; ++block) {
+    if (!scan_block(cursor)) {
+      return false;
+    }
+  }
+  consumed_halfwords = cursor;
+  return true;
 }
 
 bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
