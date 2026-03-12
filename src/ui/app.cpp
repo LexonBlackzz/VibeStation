@@ -693,6 +693,7 @@ namespace {
 
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
     constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
+    constexpr u64 kDiscordApplicationId = 1481706201375838279ull;
 
     void append_be32(std::vector<u8>& out, u32 value) {
         out.push_back(static_cast<u8>((value >> 24) & 0xFFu));
@@ -1091,6 +1092,10 @@ bool App::init() {
         input_ = std::make_unique<InputManager>();
     }
     load_persistent_config();
+    if (!discord_presence_) {
+        discord_presence_ = std::make_unique<DiscordPresence>();
+    }
+    sync_discord_presence_config();
 
     struct GlContextAttempt {
         int major;
@@ -1277,6 +1282,78 @@ void App::apply_speed_override() {
     emu_runner_.set_speed(current_speed_override());
 }
 
+void App::sync_discord_presence_config() {
+    if (!discord_presence_) {
+        return;
+    }
+    discord_presence_->prepare_runtime_dependency();
+    discord_presence_->configure(
+        config_discord_rich_presence_,
+        kDiscordApplicationId);
+}
+
+std::string App::current_presence_content_name() const {
+    auto prettify_content_name = [](std::string value) {
+        for (char& ch : value) {
+            if (ch == '_' || ch == '-') {
+                ch = ' ';
+            }
+        }
+
+        std::string compact;
+        compact.reserve(value.size());
+        bool previous_space = false;
+        for (char ch : value) {
+            const bool is_space = std::isspace(static_cast<unsigned char>(ch)) != 0;
+            if (is_space) {
+                if (!compact.empty() && !previous_space) {
+                    compact.push_back(' ');
+                }
+            }
+            else {
+                compact.push_back(ch);
+            }
+            previous_space = is_space;
+        }
+        while (!compact.empty() && compact.back() == ' ') {
+            compact.pop_back();
+        }
+        return compact;
+        };
+
+    if (!game_cue_path_.empty()) {
+        return prettify_content_name(std::filesystem::path(game_cue_path_).stem().string());
+    }
+    if (!game_bin_path_.empty()) {
+        return prettify_content_name(std::filesystem::path(game_bin_path_).stem().string());
+    }
+    if (system_ && system_->disc_loaded()) {
+        return "Unknown game";
+    }
+    if (system_ && system_->bios_loaded()) {
+        return "PlayStation BIOS";
+    }
+    return {};
+}
+
+void App::update_discord_presence() {
+    if (!discord_presence_) {
+        return;
+    }
+
+    DiscordPresenceActivity activity{};
+    activity.emulation_started = has_started_emulation_;
+    activity.emulation_running = has_started_emulation_ && emu_runner_.is_running();
+    activity.turbo_active = turbo_hold_active_;
+    activity.slowdown_active = slowdown_hold_active_;
+    activity.bios_loaded = system_ && system_->bios_loaded();
+    activity.disc_selected =
+        !game_bin_path_.empty() || !game_cue_path_.empty() ||
+        (system_ && system_->disc_loaded());
+    activity.content_name = current_presence_content_name();
+    discord_presence_->update_activity(activity);
+}
+
 void App::run() {
     if (!init_runtime()) {
         return;
@@ -1315,6 +1392,10 @@ void App::run() {
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         push_performance_history_sample();
+        update_discord_presence();
+        if (discord_presence_) {
+            discord_presence_->tick();
+        }
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
         u32 now_ms = SDL_GetTicks();
@@ -2398,6 +2479,23 @@ void App::panel_settings() {
                 }
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Reduces audio complexity and internal precision.");
+                ImGui::Separator();
+                ImGui::Text("Discord Rich Presence");
+                if (ImGui::Checkbox("Enable Discord RPC",
+                    &config_discord_rich_presence_)) {
+                    sync_discord_presence_config();
+                    save_persistent_config();
+                }
+                const char* discord_build_status =
+                    (discord_presence_ && discord_presence_->sdk_compiled())
+                    ? "Discord Social SDK linked"
+                    : "Discord Social SDK not linked in this build";
+                ImGui::TextDisabled("%s", discord_build_status);
+                ImGui::TextWrapped("Status: %s",
+                    discord_presence_ ? discord_presence_->status_text().c_str()
+                    : "Unavailable");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Uses the built-in Discord application configuration and the local Discord desktop client.");
 
                 ImGui::EndTabItem();
             }
@@ -5502,6 +5600,10 @@ void App::load_persistent_config() {
         else if (key == "spu_diagnostic_mode") {
             config_spu_diagnostic_mode_ = parse_bool(value, config_spu_diagnostic_mode_);
         }
+        else if (key == "discord_rich_presence") {
+            config_discord_rich_presence_ =
+                parse_bool(value, config_discord_rich_presence_);
+        }
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
         }
@@ -5750,6 +5852,7 @@ void App::save_persistent_config() const {
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
+    out << "discord_rich_presence=" << (config_discord_rich_presence_ ? 1 : 0) << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
     out << "mdec_debug_disable_dma1_reorder="
         << (g_mdec_debug_disable_dma1_reorder ? 1 : 0) << "\n";
@@ -5852,6 +5955,7 @@ void App::shutdown() {
         }
     }
     emu_runner_.stop();
+    discord_presence_.reset();
     if (renderer_) {
         renderer_->shutdown();
     }

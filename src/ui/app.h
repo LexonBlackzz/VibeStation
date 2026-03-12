@@ -1,5 +1,6 @@
 #pragma once
 #include "emu_runner.h"
+#include "../integrations/discord_presence.h"
 #include "../core/renderer.h"
 #include "../core/system.h"
 #include "../core/types.h"
@@ -93,11 +94,13 @@ private:
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
+	bool config_discord_rich_presence_ = false;
 	static constexpr int kMemoryCardSlotCount = 2;
 	std::array<int, kMemoryCardSlotCount> config_memory_card_mode_ = { 0, 0 };
 	std::array<std::string, kMemoryCardSlotCount> memory_card_target_paths_{};
 	bool turbo_hold_active_ = false;
 	bool slowdown_hold_active_ = false;
+	std::unique_ptr<DiscordPresence> discord_presence_;
 
 	// Grim Reaper (experimental BIOS corruption sandbox)
 	int grim_reaper_area_index_ = 0;
@@ -241,4 +244,7 @@ private:
 	void try_autoload_bios_from_config();
 	double current_speed_override() const;
 	void apply_speed_override();
+	void sync_discord_presence_config();
+	void update_discord_presence();
+	std::string current_presence_content_name() const;
 };
