@@ -238,6 +238,7 @@ public:
   void set_spu_reverb_mix_multiplier(double multiplier) {
     spu_.set_reverb_mix_multiplier(multiplier);
   }
+  void set_spu_force_reverb(bool enabled) { spu_.set_force_reverb(enabled); }
 
   // State
   bool is_running() const { return running_; }
@@ -266,6 +267,9 @@ public:
   }
   bool save_spu_voice_sample_to_file(int voice, const std::string &path,
                                      std::string *error = nullptr);
+  bool save_spu_voice_samples_to_file(const std::vector<int> &voices,
+                                      const std::string &path,
+                                      std::string *error = nullptr);
   bool load_spu_replacement_sample_from_file(const std::string &path,
                                              std::string *error = nullptr);
   void clear_spu_replacement_sample() { spu_.clear_replacement_sample(); }

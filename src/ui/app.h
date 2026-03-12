@@ -161,6 +161,8 @@ private:
 	u64 sound_reaper_active_seed_ = 0u;
 	u64 sound_reaper_total_mutations_ = 0;
 	int sound_ram_voice_index_ = 0;
+	bool sound_ram_multi_voice_export_ = false;
+	std::array<bool, 24> sound_ram_voice_selected_ = { true };
 	char grim_preset_name_[64] = "grim_preset";
 	char batch_preset_name_[64] = "grim_batch";
 	char ram_preset_name_[64] = "ram_reaper";

@@ -1672,6 +1672,7 @@ void App::update() {
         const double reverb_mix =
             config_spu_diagnostic_mode_ ? kSpuDiagnosticReverbMixMultiplier : 1.0;
         system_->set_spu_reverb_mix_multiplier(reverb_mix);
+        system_->set_spu_force_reverb(config_spu_diagnostic_mode_);
     }
     g_spu_force_audio_queue = slowdown_hold_active_ && !g_spu_enable_audio_queue;
     sync_ram_reaper_config();
@@ -2375,10 +2376,23 @@ void App::panel_settings() {
                 ImGui::Text("Display Area: %ux%u",
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
-                ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode);
+                if (ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode)) {
+                    if (!g_gpu_fast_mode) {
+                        g_gpu_extreme_fast_mode = false;
+                    }
+                    save_persistent_config();
+                }
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Uses optimized GPU paths for lower CPU usage at the cost of possible artifacting.");
+                ImGui::BeginDisabled(!g_gpu_fast_mode);
+                if (ImGui::Checkbox("Extreme Fast Mode", &g_gpu_extreme_fast_mode)) {
+                    save_persistent_config();
+                }
+                ImGui::EndDisabled();
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.5f, 1.0f),
+                    "More unstable than Fast Mode and may heavily reduce shading, transparency, and presentation quality.");
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };
                 int deinterlace_index = static_cast<int>(g_deinterlace_mode);
@@ -4076,7 +4090,47 @@ void App::panel_grim_reaper() {
             ImGui::Separator();
             std::filesystem::path sound_ram_path = std::filesystem::current_path() / "sound.ram";
             sound_ram_voice_index_ = std::max(0, std::min(23, sound_ram_voice_index_));
+            if (sound_ram_multi_voice_export_) {
+                ImGui::BeginDisabled();
+            }
             ImGui::SliderInt("Sample Voice", &sound_ram_voice_index_, 0, 23);
+            if (sound_ram_multi_voice_export_) {
+                ImGui::EndDisabled();
+            }
+            int selected_voice_count = 0;
+            if (ImGui::Checkbox("Multi-Voice Export", &sound_ram_multi_voice_export_) &&
+                sound_ram_multi_voice_export_) {
+                sound_ram_voice_selected_.fill(false);
+                sound_ram_voice_selected_[static_cast<size_t>(sound_ram_voice_index_)] = true;
+            }
+            if (sound_ram_multi_voice_export_) {
+                if (ImGui::Button("Current Voice Only")) {
+                    sound_ram_voice_selected_.fill(false);
+                    sound_ram_voice_selected_[static_cast<size_t>(sound_ram_voice_index_)] = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Select All Voices")) {
+                    sound_ram_voice_selected_.fill(true);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Voice Selection")) {
+                    sound_ram_voice_selected_.fill(false);
+                }
+                if (ImGui::BeginTable("SoundRamVoiceSelection", 4,
+                        ImGuiTableFlags_SizingStretchSame)) {
+                    for (int voice = 0; voice < 24; ++voice) {
+                        ImGui::TableNextColumn();
+                        ImGui::Checkbox(
+                            ("Voice " + std::to_string(voice)).c_str(),
+                            &sound_ram_voice_selected_[static_cast<size_t>(voice)]);
+                        if (sound_ram_voice_selected_[static_cast<size_t>(voice)]) {
+                            ++selected_voice_count;
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::Text("Selected Voices: %d", selected_voice_count);
+            }
             const bool replacement_loaded = system_->spu_replacement_sample_loaded();
             const bool replacement_enabled = system_->spu_replacement_sample_enabled();
             ImGui::Text("Replacement Sample: %s | %s | %zu bytes",
@@ -4094,11 +4148,34 @@ void App::panel_grim_reaper() {
                     emu_runner_.set_running(true);
                 }
             };
-            if (ImGui::Button("Save Voice To sound.ram")) {
+            if (ImGui::Button(sound_ram_multi_voice_export_
+                    ? "Save Selected Voices"
+                    : "Save Voice To sound.ram")) {
                 run_spu_sample_action([&]() {
                     std::string error;
-                    if (system_->save_spu_voice_sample_to_file(
-                        sound_ram_voice_index_, sound_ram_path.string(), &error)) {
+                    if (sound_ram_multi_voice_export_) {
+                        std::vector<int> voices;
+                        voices.reserve(sound_ram_voice_selected_.size());
+                        for (int voice = 0;
+                             voice < static_cast<int>(sound_ram_voice_selected_.size());
+                             ++voice) {
+                            if (sound_ram_voice_selected_[static_cast<size_t>(voice)]) {
+                                voices.push_back(voice);
+                            }
+                        }
+                        if (system_->save_spu_voice_samples_to_file(
+                                voices, sound_ram_path.string(), &error)) {
+                            status_message_ = "Saved combined sound.ram from " +
+                                std::to_string(voices.size()) + " SPU voices.";
+                        }
+                        else {
+                            status_message_ = error.empty()
+                                ? "Failed to save combined sound.ram."
+                                : error;
+                        }
+                    }
+                    else if (system_->save_spu_voice_sample_to_file(
+                                 sound_ram_voice_index_, sound_ram_path.string(), &error)) {
                         status_message_ = "Saved sound.ram from SPU voice " +
                             std::to_string(sound_ram_voice_index_);
                     }
@@ -4623,7 +4700,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5a-h1");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5a-h1.1");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
@@ -5626,6 +5703,10 @@ void App::load_persistent_config() {
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
         }
+        else if (key == "gpu_extreme_fast_mode") {
+            g_gpu_extreme_fast_mode =
+                parse_bool(value, g_gpu_extreme_fast_mode);
+        }
         else if (key == "mdec_debug_disable_dma1_reorder") {
             g_mdec_debug_disable_dma1_reorder =
                 parse_bool(value, g_mdec_debug_disable_dma1_reorder);
@@ -5854,6 +5935,9 @@ void App::load_persistent_config() {
         std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
     g_spu_xa_buffer_seconds =
         std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
+    if (!g_gpu_fast_mode) {
+        g_gpu_extreme_fast_mode = false;
+    }
     memory_card_target_paths_ = resolve_memory_card_paths();
 
     if (g_unsafe_ps2_bios_mode) {
@@ -5881,6 +5965,8 @@ void App::save_persistent_config() const {
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
     out << "discord_rich_presence=" << (config_discord_rich_presence_ ? 1 : 0) << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
+    out << "gpu_extreme_fast_mode="
+        << ((g_gpu_fast_mode && g_gpu_extreme_fast_mode) ? 1 : 0) << "\n";
     out << "mdec_debug_disable_dma1_reorder="
         << (g_mdec_debug_disable_dma1_reorder ? 1 : 0) << "\n";
     out << "mdec_debug_disable_chroma=" << (g_mdec_debug_disable_chroma ? 1 : 0) << "\n";

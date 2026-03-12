@@ -261,6 +261,13 @@ bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
     return spu_.export_voice_sample_to_file(voice, path, error);
 }
 
+bool System::save_spu_voice_samples_to_file(const std::vector<int>& voices,
+                                            const std::string& path,
+                                            std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.export_voice_samples_to_file(voices, path, error);
+}
+
 bool System::load_spu_replacement_sample_from_file(const std::string& path,
                                                    std::string* error) {
     sync_spu_to_cpu();
@@ -955,12 +962,15 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
     const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
     // Aggressive fast mode intentionally trades timing stability for throughput.
-    const bool aggressive_fast_mode = g_gpu_fast_mode;
-    const u32 cpu_instruction_slice = aggressive_fast_mode ? 128u : 32u;
+    const bool fast_mode = g_gpu_fast_mode;
+    const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
+    const u32 cpu_instruction_slice =
+        aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
     // Keep those devices at near-baseline cadence even in fast mode.
     const u32 dma_tick_stride = 16u;
-    const u32 spu_sync_scanline_stride = aggressive_fast_mode ? 16u : 4u;
+    const u32 spu_sync_scanline_stride =
+        aggressive_fast_mode ? 32u : (fast_mode ? 16u : 4u);
     const u32 cdrom_tick_scanline_stride = 1u;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
@@ -999,7 +1009,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 // scanline. HBlank/VBlank sourced ticks still arrive from the
                 // scanline events below.
                 timers_.tick(consumed);
-                if (aggressive_fast_mode) {
+                if (fast_mode) {
                     sio_slice_cycles += consumed;
                 }
                 else {
@@ -1012,7 +1022,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 cycles_remaining =
                     (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
             }
-            if (aggressive_fast_mode && sio_slice_cycles > 0) {
+            if (fast_mode && sio_slice_cycles > 0) {
                 sio_.tick(sio_slice_cycles);
             }
 

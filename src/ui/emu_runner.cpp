@@ -48,6 +48,7 @@ bool EmuRunner::start(System* system) {
         pending_frame_ = {};
         has_pending_frame_ = false;
     }
+    fast_mode_capture_counter_.store(0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_ = {};
@@ -216,7 +217,15 @@ bool EmuRunner::should_capture_frame() const {
         return true;
     }
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    return !has_pending_frame_;
+    if (has_pending_frame_) {
+        return false;
+    }
+    if (!g_gpu_extreme_fast_mode) {
+        return true;
+    }
+    const u32 capture_index =
+        fast_mode_capture_counter_.fetch_add(1, std::memory_order_acq_rel);
+    return (capture_index % 3u) == 0u;
 }
 
 void EmuRunner::publish_frame(FrameSnapshot&& frame,

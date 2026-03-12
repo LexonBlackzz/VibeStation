@@ -46,6 +46,13 @@ namespace {
             [static_cast<u16>(x) & 0x3u];
     }
 
+    Color average_color(Color a, Color b, Color c) {
+        return Color(
+            static_cast<u8>((static_cast<u32>(a.r) + b.r + c.r) / 3u),
+            static_cast<u8>((static_cast<u32>(a.g) + b.g + c.g) / 3u),
+            static_cast<u8>((static_cast<u32>(a.b) + b.b + c.b) / 3u));
+    }
+
     u16 modulate_texel_15bit(u16 texel, u8 mr, u8 mg, u8 mb) {
         const int tr = texel & 0x1F;
         const int tg = (texel >> 5) & 0x1F;
@@ -2061,6 +2068,11 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
         }
         return;
     }
+    if (g_gpu_extreme_fast_mode) {
+        draw_flat_triangle(v0, v1, v2, average_color(v0.color, v1.color, v2.color));
+        return;
+    }
+
     const bool opaque_fast_path = !semi_transparency_mode_;
     s16 min_x = std::min({ v0.x, v1.x, v2.x });
     s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2196,7 +2208,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     const u8 mr = v0.color.r;
     const u8 mg = v0.color.g;
     const u8 mb = v0.color.b;
-    const bool opaque_fast_path = !semi_transparency_mode_;
+    const bool opaque_fast_path = g_gpu_extreme_fast_mode || !semi_transparency_mode_;
     const float inv_area = 1.0f / static_cast<float>(area);
 
     const s32 step_w0_x = -(v2.y - v1.y);
@@ -2248,7 +2260,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                 if (texel != 0) {
                     u16 out15 = texel;
                     if (!raw_texture) {
-                        if (dither_enabled_) {
+                        if (!g_gpu_extreme_fast_mode && dither_enabled_) {
                             out15 = modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
                         }
                         else {
@@ -2342,6 +2354,15 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         }
         return;
     }
+    if (g_gpu_extreme_fast_mode) {
+        const Color flat_color = average_color(v0.color, v1.color, v2.color);
+        v0.color = flat_color;
+        v1.color = flat_color;
+        v2.color = flat_color;
+        draw_textured_triangle(v0, v1, v2, flat_color);
+        return;
+    }
+
     s16 min_x = std::min({ v0.x, v1.x, v2.x });
     s16 max_x = std::max({ v0.x, v1.x, v2.x });
     s16 min_y = std::min({ v0.y, v1.y, v2.y });
@@ -2490,10 +2511,38 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
 }
 
 void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
-    u16 color15 = c.to_15bit();
-    for (u16 dy = 0; dy < h; dy++) {
-        for (u16 dx = 0; dx < w; dx++) {
-            set_pixel(x + dx, y + dy, color15, semi_transparency_mode_);
+    if (w == 0 || h == 0) {
+        return;
+    }
+    const u16 color15 = c.to_15bit();
+    if (!g_gpu_fast_mode || semi_transparency_mode_) {
+        for (u16 dy = 0; dy < h; dy++) {
+            for (u16 dx = 0; dx < w; dx++) {
+                set_pixel(x + dx, y + dy, color15, semi_transparency_mode_);
+            }
+        }
+        return;
+    }
+
+    const s16 min_x = std::max(x, draw_x_min_);
+    const s16 min_y = std::max(y, draw_y_min_);
+    const s16 max_x = std::min<s16>(static_cast<s16>(x + static_cast<s16>(w) - 1), draw_x_max_);
+    const s16 max_y = std::min<s16>(static_cast<s16>(y + static_cast<s16>(h) - 1), draw_y_max_);
+    if (min_x > max_x || min_y > max_y) {
+        return;
+    }
+
+    const u16 out = force_set_mask_bit_ ? static_cast<u16>(color15 | 0x8000u) : color15;
+    for (s16 py = min_y; py <= max_y; ++py) {
+        u16* row = &vram_[static_cast<size_t>(py) * psx::VRAM_WIDTH];
+        if (!check_mask_before_draw_) {
+            std::fill(row + min_x, row + max_x + 1, out);
+            continue;
+        }
+        for (s16 px = min_x; px <= max_x; ++px) {
+            if ((row[px] & 0x8000u) == 0) {
+                row[px] = out;
+            }
         }
     }
 }

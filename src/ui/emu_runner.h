@@ -89,6 +89,7 @@ private:
   mutable std::mutex frame_mutex_;
   FrameSnapshot pending_frame_{};
   bool has_pending_frame_ = false;
+  mutable std::atomic<u32> fast_mode_capture_counter_{0};
 
   mutable std::mutex snapshot_mutex_;
   RuntimeSnapshot latest_snapshot_{};
