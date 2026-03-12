@@ -4,13 +4,13 @@ This is a fully vibe-coded PS1 emulator for fun. It is written in C++.
 ## Things implemented:
 BIOS loading ✅  
 Game loading 🚩  
-Bindings ✅ 
+Bindings ✅  
 CD-ROM ⚠️  
 Graphics/VRAM ✅⚠️  
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
-MDEC ✅ (for Gran Turismo 2) 🚩 (for everything else)  
+MDEC 🚩  
 Real-time corrupter/BIOS corruption ✅
 
 ✅ - Implemented  
@@ -70,8 +70,8 @@ Corrupts or warps draw offsets, draw areas, textures, and optional display state
 <img width="662" height="216" alt="image" src="https://github.com/user-attachments/assets/0dd2639d-a150-4ff5-a991-0c06350c11ef" />
 
 
-Unlike targetting SPU RAM in RAM reaper, this one targets the reverb, delay, whatever SPU effects is implemented, resulting in hilarious audio corruptions.
-
+Unlike targetting SPU RAM in RAM reaper, this one targets the reverb, delay, whatever SPU effects is implemented, resulting in hilarious audio corruptions.  
+You can also save a certain sound sample from a specific voice channel and apply it to all channels.  
 
 *All reapers include a preset saver/list with their seeds, so you can share your funny results with anyone having this emulator.*
 
