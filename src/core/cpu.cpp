@@ -16,11 +16,19 @@ void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
   last_pc = pc;
   last_instr = instr;
 
+  const auto &mdec_in = sys->dma_last_debug(0);
   const auto &mdec = sys->dma_last_debug(1);
   const auto &cd = sys->dma_last_debug(3);
   LOG_WARN(
       "CPU: ctx sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X v0=0x%08X v1=0x%08X",
       gpr[29], gpr[31], gpr[4], gpr[5], gpr[2], gpr[3]);
+  LOG_WARN(
+      "CPU: last DMA0 madr=0x%08X words=%u first=0x%08X last=0x%08X "
+      "bcr=0x%08X chcr=0x%08X cyc=%llu from_ram=%u",
+      mdec_in.base_addr, mdec_in.transfer_words, mdec_in.first_addr,
+      mdec_in.last_addr, mdec_in.block_ctrl, mdec_in.channel_ctrl,
+      static_cast<unsigned long long>(mdec_in.cpu_cycle),
+      mdec_in.from_ram ? 1u : 0u);
   LOG_WARN(
       "CPU: last DMA1 madr=0x%08X words=%u first=0x%08X last=0x%08X "
       "bcr=0x%08X chcr=0x%08X cyc=%llu from_ram=%u",
@@ -121,6 +129,47 @@ void log_suspicious_jump(System *sys, u32 pc, const u32 *gpr, u32 target,
       pc, rs_index, target, sp, gpr[31], sp0, sp4, sp8);
 }
 
+void log_zero_target_jump(System *sys, u32 pc, const u32 *gpr, u32 rs_index) {
+  static u32 last_pc = 0xFFFFFFFFu;
+  if (sys == nullptr || pc == last_pc) {
+    return;
+  }
+  last_pc = pc;
+
+  const u32 base = pc & 0x1FFFFFFFu;
+  LOG_WARN("CPU: zero-target jump pc=0x%08X rs=r%u sp=0x%08X ra=0x%08X", pc,
+           rs_index, gpr[29], gpr[31]);
+  LOG_WARN(
+      "CPU: zero-target code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+      base - 0x08u, sys->read32(base - 0x08u), base - 0x04u,
+      sys->read32(base - 0x04u), base + 0x00u, sys->read32(base + 0x00u),
+      base + 0x04u, sys->read32(base + 0x04u), base + 0x08u,
+      sys->read32(base + 0x08u));
+  log_stack_window(sys, "CPU: zero-target frame", gpr[29]);
+  sys->debug_log_recent_ram_writes(gpr[29], 0x40u);
+  log_dma_context(sys, pc, sys->read32(base), gpr);
+}
+
+void log_zero_pc_execution(System *sys, u32 instr, const u32 *gpr, u32 sr,
+                           u32 cause, u32 epc) {
+  static bool logged = false;
+  if (sys == nullptr || logged) {
+    return;
+  }
+  logged = true;
+
+  LOG_WARN(
+      "CPU: executing at PC=0x00000000 instr=0x%08X sr=0x%08X cause=0x%08X epc=0x%08X sp=0x%08X ra=0x%08X",
+      instr, sr, cause, epc, gpr[29], gpr[31]);
+  LOG_WARN(
+      "CPU: low RAM %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+      0x00000000u, sys->read32(0x00000000u), 0x00000004u,
+      sys->read32(0x00000004u), 0x00000008u, sys->read32(0x00000008u),
+      0x0000000Cu, sys->read32(0x0000000Cu));
+  log_stack_window(sys, "CPU: pc0 frame", gpr[29]);
+  log_dma_context(sys, 0x00000000u, instr, gpr);
+}
+
 void log_suspicious_ra_load(System *sys, u32 pc, const u32 *gpr, u32 addr,
                             u32 value) {
   static u32 last_pc = 0xFFFFFFFFu;
@@ -137,6 +186,7 @@ void log_suspicious_ra_load(System *sys, u32 pc, const u32 *gpr, u32 addr,
   LOG_WARN(
       "CPU: suspicious ra load pc=0x%08X addr=0x%08X val=0x%08X sp=0x%08X ra=0x%08X",
       pc, addr, value, gpr[29], gpr[31]);
+  sys->debug_log_recent_ram_writes(addr, 0x20u);
 }
 
 void log_suspicious_sp_write(System *sys, u32 pc, u32 old_sp, u32 new_sp,
@@ -211,6 +261,9 @@ void log_suspicious_ra_write(System *sys, u32 pc, u32 old_ra, u32 new_ra,
   LOG_WARN(
       "CPU: suspicious ra write pc=0x%08X old_ra=0x%08X new_ra=0x%08X sp=0x%08X",
       pc, old_ra, new_ra, sp);
+  if (new_ra == 0u) {
+    sys->debug_log_recent_ram_writes(sp, 0x40u);
+  }
 
   if (((old_ra & 0x1FFFFFFFu) == 0x000152ACu) ||
       ((new_ra & 0x1FFFFFFFu) == 0x000152ACu)) {
@@ -607,6 +660,68 @@ u32 Cpu::step() {
   }
 
   if (cpu_diag) {
+    if (current_pc_ >= 0xBFC02B58u && current_pc_ <= 0xBFC02B7Cu) {
+      static bool logged_bios_low_stub_loop = false;
+      if (!logged_bios_low_stub_loop) {
+        logged_bios_low_stub_loop = true;
+        LOG_WARN(
+            "CPU: bios low-stub loop prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+            prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+        LOG_WARN(
+            "CPU: bios low-stub regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X",
+            gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10],
+            gpr_[11], gpr_[12], gpr_[13], gpr_[14], gpr_[15]);
+        LOG_WARN(
+            "CPU: bios low-stub code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            0x1FC02B58u, sys_->read32(0x1FC02B58u), 0x1FC02B5Cu,
+            sys_->read32(0x1FC02B5Cu), 0x1FC02B60u, sys_->read32(0x1FC02B60u),
+            0x1FC02B64u, sys_->read32(0x1FC02B64u), 0x1FC02B68u,
+            sys_->read32(0x1FC02B68u));
+        LOG_WARN(
+            "CPU: bios low-stub code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            0x1FC02B6Cu, sys_->read32(0x1FC02B6Cu), 0x1FC02B70u,
+            sys_->read32(0x1FC02B70u), 0x1FC02B74u, sys_->read32(0x1FC02B74u),
+            0x1FC02B78u, sys_->read32(0x1FC02B78u), 0x1FC02B7Cu,
+            sys_->read32(0x1FC02B7Cu));
+      }
+    }
+    if (current_pc_ != 0u && !is_plausible_exec_addr(current_pc_)) {
+      static bool logged_implausible_pc_entry = false;
+      if (!logged_implausible_pc_entry) {
+        logged_implausible_pc_entry = true;
+        LOG_WARN(
+            "CPU: implausible pc entry prev_pc=0x%08X pc=0x%08X instr=0x%08X branch_pc=0x%08X sp=0x%08X ra=0x%08X",
+            prev_pc_for_diag, current_pc_, instruction, active_branch_pc_,
+            gpr_[29], gpr_[31]);
+        if (prev_pc_for_diag != 0u) {
+          const u32 prev_base = prev_pc_for_diag & 0x1FFFFFFFu;
+          LOG_WARN(
+              "CPU: prev code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+              prev_base - 0x08u, sys_->read32(prev_base - 0x08u),
+              prev_base - 0x04u, sys_->read32(prev_base - 0x04u), prev_base,
+              sys_->read32(prev_base), prev_base + 0x04u,
+              sys_->read32(prev_base + 0x04u), prev_base + 0x08u,
+              sys_->read32(prev_base + 0x08u));
+          sys_->debug_log_recent_ram_writes(prev_base, 0x20u);
+        }
+        if (active_branch_pc_ != 0u) {
+          const u32 branch_base = active_branch_pc_ & 0x1FFFFFFFu;
+          LOG_WARN(
+              "CPU: branch code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+              branch_base - 0x08u, sys_->read32(branch_base - 0x08u),
+              branch_base - 0x04u, sys_->read32(branch_base - 0x04u),
+              branch_base, sys_->read32(branch_base), branch_base + 0x04u,
+              sys_->read32(branch_base + 0x04u), branch_base + 0x08u,
+              sys_->read32(branch_base + 0x08u));
+          sys_->debug_log_recent_ram_writes(branch_base, 0x20u);
+        }
+        log_stack_window(sys_, "CPU: implausible pc frame", gpr_[29]);
+      }
+    }
+    if (current_pc_ == 0x00000000u) {
+      log_zero_pc_execution(sys_, instruction, gpr_, cop0_sr_, cop0_cause_,
+                            cop0_epc_);
+    }
     if (current_pc_ >= 0x80015298u && current_pc_ <= 0x800152B8u) {
     static bool logged_low_helper_caller_entry = false;
     if (!logged_low_helper_caller_entry) {
@@ -687,6 +802,227 @@ u32 Cpu::step() {
       log_stack_window(sys_, "CPU: chain tail frame", gpr_[29]);
     }
     }
+    if (current_pc_ >= 0x8001EE88u && current_pc_ <= 0x8001EF30u) {
+    static bool logged_stack_zero_path = false;
+    if (!logged_stack_zero_path) {
+      logged_stack_zero_path = true;
+      LOG_WARN(
+          "CPU: near stack-zero helper prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: stack-zero regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X v0=0x%08X v1=0x%08X",
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10],
+          gpr_[11], gpr_[2], gpr_[3]);
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EE88u, sys_->read32(0x0001EE88u), 0x0001EE8Cu,
+          sys_->read32(0x0001EE8Cu), 0x0001EE90u, sys_->read32(0x0001EE90u),
+          0x0001EE94u, sys_->read32(0x0001EE94u), 0x0001EE98u,
+          sys_->read32(0x0001EE98u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EE9Cu, sys_->read32(0x0001EE9Cu), 0x0001EEA0u,
+          sys_->read32(0x0001EEA0u), 0x0001EEA4u, sys_->read32(0x0001EEA4u),
+          0x0001EEA8u, sys_->read32(0x0001EEA8u), 0x0001EEACu,
+          sys_->read32(0x0001EEACu));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EEB0u, sys_->read32(0x0001EEB0u), 0x0001EEB4u,
+          sys_->read32(0x0001EEB4u), 0x0001EEB8u, sys_->read32(0x0001EEB8u),
+          0x0001EEBCu, sys_->read32(0x0001EEBCu), 0x0001EEC0u,
+          sys_->read32(0x0001EEC0u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EEC4u, sys_->read32(0x0001EEC4u), 0x0001EEC8u,
+          sys_->read32(0x0001EEC8u), 0x0001EECCu, sys_->read32(0x0001EECCu),
+          0x0001EED0u, sys_->read32(0x0001EED0u), 0x0001EED4u,
+          sys_->read32(0x0001EED4u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EED8u, sys_->read32(0x0001EED8u), 0x0001EEDCu,
+          sys_->read32(0x0001EEDCu), 0x0001EEE0u, sys_->read32(0x0001EEE0u),
+          0x0001EEE4u, sys_->read32(0x0001EEE4u), 0x0001EEE8u,
+          sys_->read32(0x0001EEE8u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EEECu, sys_->read32(0x0001EEECu), 0x0001EEF0u,
+          sys_->read32(0x0001EEF0u), 0x0001EEF4u, sys_->read32(0x0001EEF4u),
+          0x0001EEF8u, sys_->read32(0x0001EEF8u), 0x0001EEFCu,
+          sys_->read32(0x0001EEFCu));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EF00u, sys_->read32(0x0001EF00u), 0x0001EF04u,
+          sys_->read32(0x0001EF04u), 0x0001EF08u, sys_->read32(0x0001EF08u),
+          0x0001EF0Cu, sys_->read32(0x0001EF0Cu), 0x0001EF10u,
+          sys_->read32(0x0001EF10u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EF14u, sys_->read32(0x0001EF14u), 0x0001EF18u,
+          sys_->read32(0x0001EF18u), 0x0001EF1Cu, sys_->read32(0x0001EF1Cu),
+          0x0001EF20u, sys_->read32(0x0001EF20u), 0x0001EF24u,
+          sys_->read32(0x0001EF24u));
+      LOG_WARN(
+          "CPU: stack-zero code %08X=%08X %08X=%08X %08X=%08X",
+          0x0001EF28u, sys_->read32(0x0001EF28u), 0x0001EF2Cu,
+          sys_->read32(0x0001EF2Cu), 0x0001EF30u, sys_->read32(0x0001EF30u));
+      log_stack_window(sys_, "CPU: stack-zero frame", gpr_[29]);
+      sys_->debug_log_recent_ram_writes(gpr_[4], 0x40u);
+      sys_->debug_log_recent_ram_writes(gpr_[5], 0x40u);
+    }
+    }
+    if (current_pc_ >= 0x8001D9F0u && current_pc_ <= 0x8001DA24u) {
+    static bool logged_source_prep_head = false;
+    if (!logged_source_prep_head) {
+      logged_source_prep_head = true;
+      LOG_WARN(
+          "CPU: near source-prep head prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: source-prep regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X s0=0x%08X s1=0x%08X",
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10],
+          gpr_[11], gpr_[16], gpr_[17]);
+      LOG_WARN(
+          "CPU: source-prep code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001D9F0u, sys_->read32(0x0001D9F0u), 0x0001D9F4u,
+          sys_->read32(0x0001D9F4u), 0x0001D9F8u, sys_->read32(0x0001D9F8u),
+          0x0001D9FCu, sys_->read32(0x0001D9FCu), 0x0001DA00u,
+          sys_->read32(0x0001DA00u));
+      LOG_WARN(
+          "CPU: source-prep code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001DA04u, sys_->read32(0x0001DA04u), 0x0001DA08u,
+          sys_->read32(0x0001DA08u), 0x0001DA0Cu, sys_->read32(0x0001DA0Cu),
+          0x0001DA10u, sys_->read32(0x0001DA10u), 0x0001DA14u,
+          sys_->read32(0x0001DA14u));
+      LOG_WARN(
+          "CPU: source-prep ram %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000F11E0u, sys_->read32(0x000F11E0u), 0x000F11E4u,
+          sys_->read32(0x000F11E4u), 0x000F11E8u, sys_->read32(0x000F11E8u),
+          0x000F11ECu, sys_->read32(0x000F11ECu));
+      LOG_WARN(
+          "CPU: source-prep ram %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000F11F0u, sys_->read32(0x000F11F0u), 0x000F11F4u,
+          sys_->read32(0x000F11F4u), 0x000F11F8u, sys_->read32(0x000F11F8u),
+          0x000F11FCu, sys_->read32(0x000F11FCu));
+      sys_->debug_log_recent_ram_writes(0x000F11E0u, 0x60u);
+    }
+    }
+    if (current_pc_ >= 0x8001DAB8u && current_pc_ <= 0x8001DAE0u) {
+    static bool logged_source_prep_tail = false;
+    if (!logged_source_prep_tail) {
+      logged_source_prep_tail = true;
+      LOG_WARN(
+          "CPU: near source-prep tail prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: source-tail regs a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X",
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18],
+          gpr_[19]);
+      LOG_WARN(
+          "CPU: source-tail code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001DAB8u, sys_->read32(0x0001DAB8u), 0x0001DABCu,
+          sys_->read32(0x0001DABCu), 0x0001DAC0u, sys_->read32(0x0001DAC0u),
+          0x0001DAC4u, sys_->read32(0x0001DAC4u), 0x0001DAC8u,
+          sys_->read32(0x0001DAC8u));
+      LOG_WARN(
+          "CPU: source-tail code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0001DACCu, sys_->read32(0x0001DACCu), 0x0001DAD0u,
+          sys_->read32(0x0001DAD0u), 0x0001DAD4u, sys_->read32(0x0001DAD4u),
+          0x0001DAD8u, sys_->read32(0x0001DAD8u), 0x0001DADCu,
+          sys_->read32(0x0001DADCu));
+      LOG_WARN(
+          "CPU: source-tail ram %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000F1200u, sys_->read32(0x000F1200u), 0x000F1204u,
+          sys_->read32(0x000F1204u), 0x000F1240u, sys_->read32(0x000F1240u),
+          0x000F1244u, sys_->read32(0x000F1244u));
+      LOG_WARN(
+          "CPU: source-tail ram %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000F1248u, sys_->read32(0x000F1248u), 0x000F124Cu,
+          sys_->read32(0x000F124Cu), 0x000F0A40u, sys_->read32(0x000F0A40u),
+          0x000F0A44u, sys_->read32(0x000F0A44u));
+      sys_->debug_log_recent_ram_writes(0x000F1240u, 0x80u);
+      sys_->debug_log_recent_ram_writes(0x000F0A40u, 0x40u);
+    }
+    }
+    if (current_pc_ >= 0x8001EF20u && current_pc_ <= 0x8001EF28u &&
+        gpr_[5] >= 0x801FFF00u && gpr_[5] < 0x80200000u) {
+    static bool logged_stack_zero_overrun = false;
+    if (!logged_stack_zero_overrun) {
+      logged_stack_zero_overrun = true;
+      LOG_WARN(
+          "CPU: stack-zero overrun pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X v0=0x%08X v1=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X",
+          current_pc_, instruction, gpr_[29], gpr_[31], gpr_[4], gpr_[5],
+          gpr_[2], gpr_[3], gpr_[8], gpr_[9], gpr_[10], gpr_[11]);
+      LOG_WARN(
+          "CPU: stack-zero src %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          (gpr_[4] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x00u),
+          (gpr_[4] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x04u),
+          (gpr_[4] + 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x08u),
+          (gpr_[4] + 0x0Cu) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x0Cu));
+      LOG_WARN(
+          "CPU: stack-zero dst %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          (gpr_[5] - 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x08u),
+          (gpr_[5] - 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x04u),
+          (gpr_[5] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x00u),
+          (gpr_[5] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x04u));
+    }
+    }
+    if (current_pc_ >= 0x80116CFCu && current_pc_ <= 0x80116D18u) {
+    const bool came_from_outside =
+        !(prev_pc_for_diag >= 0x80116CFCu && prev_pc_for_diag <= 0x80116D18u);
+    const u32 dst_phys = gpr_[5] & 0x1FFFFFFFu;
+    const bool dst_is_low_helper =
+        (dst_phys >= 0x000023D0u && dst_phys <= 0x00002980u);
+    const bool dst_is_stack_top =
+        (gpr_[5] >= 0x801FFF00u && gpr_[5] < 0x80200000u);
+    static bool logged_zero_helper_low = false;
+    static bool logged_zero_helper_stack = false;
+    const bool should_log_low = came_from_outside && dst_is_low_helper &&
+                                !logged_zero_helper_low;
+    const bool should_log_stack = came_from_outside && dst_is_stack_top &&
+                                  !logged_zero_helper_stack;
+    if (should_log_low || should_log_stack) {
+      if (should_log_low) {
+        logged_zero_helper_low = true;
+      }
+      if (should_log_stack) {
+        logged_zero_helper_stack = true;
+      }
+      LOG_WARN(
+          "CPU: zero-helper entry prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31],
+          gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[2], gpr_[3], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11]);
+      LOG_WARN(
+          "CPU: zero-helper code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116CFCu, sys_->read32(0x00116CFCu), 0x00116D00u,
+          sys_->read32(0x00116D00u), 0x00116D04u, sys_->read32(0x00116D04u),
+          0x00116D08u, sys_->read32(0x00116D08u), 0x00116D0Cu,
+          sys_->read32(0x00116D0Cu), 0x00116D10u, sys_->read32(0x00116D10u));
+      LOG_WARN(
+          "CPU: zero-helper code %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116D14u, sys_->read32(0x00116D14u), 0x00116D18u,
+          sys_->read32(0x00116D18u), 0x00116D1Cu, sys_->read32(0x00116D1Cu),
+          0x00116D20u, sys_->read32(0x00116D20u));
+      LOG_WARN(
+          "CPU: zero-helper src %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          (gpr_[4] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x00u),
+          (gpr_[4] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x04u),
+          (gpr_[4] + 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x08u),
+          (gpr_[4] + 0x0Cu) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x0Cu));
+      LOG_WARN(
+          "CPU: zero-helper dst %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          (gpr_[5] - 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x08u),
+          (gpr_[5] - 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x04u),
+          (gpr_[5] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x00u),
+          (gpr_[5] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x04u));
+      sys_->debug_log_recent_ram_writes(gpr_[4], 0x40u);
+      sys_->debug_log_recent_ram_writes(gpr_[5], 0x40u);
+      if (dst_is_low_helper) {
+        sys_->debug_log_recent_ram_writes(0x000023D0u, 0x80u);
+        sys_->debug_log_recent_ram_writes(0x00002930u, 0x80u);
+      }
+    }
+    }
     if (current_pc_ >= 0x000023D0u && current_pc_ <= 0x00002408u) {
     static bool logged_low_helper_leadin = false;
     if (!logged_low_helper_leadin) {
@@ -722,6 +1058,8 @@ u32 Cpu::step() {
             sys_->read32(gpr_[6] + 0x00u), sys_->read32(gpr_[6] + 0x04u),
             sys_->read32(gpr_[6] + 0x08u), sys_->read32(gpr_[6] + 0x0Cu));
       }
+      sys_->debug_log_recent_ram_writes(0x000023D0u, 0x80u);
+      sys_->debug_log_recent_ram_writes(0x00002930u, 0x80u);
       log_stack_window(sys_, "CPU: low lead-in frame", gpr_[29]);
     }
     }
@@ -1124,6 +1462,9 @@ void Cpu::op_srav(u32 i) {
 void Cpu::op_jr(u32 i) {
   const u32 target = gpr_[rs(i)];
   if (cpu_diag_enabled()) {
+    if (target == 0u) {
+      log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
+    }
     if (!is_plausible_exec_addr(target)) {
       log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
     }
@@ -1137,6 +1478,9 @@ void Cpu::op_jr(u32 i) {
 void Cpu::op_jalr(u32 i) {
   const u32 target = gpr_[rs(i)];
   if (cpu_diag_enabled()) {
+    if (target == 0u) {
+      log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
+    }
     if (!is_plausible_exec_addr(target)) {
       log_suspicious_jump(sys_, current_pc_, gpr_, target, rs(i));
     }
@@ -1549,6 +1893,22 @@ void Cpu::op_lwr(u32 i) {
 
 void Cpu::op_sb(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
+  const u32 phys = addr & 0x1FFFFFFFu;
+  if (cpu_diag_enabled() && current_pc_ == 0xBFC02B7Cu &&
+      phys >= 0x00047680u && phys < 0x000476C0u) {
+    static u32 bios_low_stub_sb_log_count = 0;
+    if (bios_low_stub_sb_log_count < 16u) {
+      ++bios_low_stub_sb_log_count;
+      LOG_WARN(
+          "CPU: bios low-stub sb pc=0x%08X virt=0x%08X phys=0x%08X byte=0x%02X rs=r%u base=0x%08X rt=r%u raw=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X",
+          current_pc_,
+          addr, phys, static_cast<unsigned>(gpr_[rt(i)] & 0xFFu),
+          static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], gpr_[4], gpr_[5],
+          gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[12],
+          gpr_[13], gpr_[14], gpr_[15]);
+    }
+  }
   store8(addr, static_cast<u8>(gpr_[rt(i)]));
 }
 

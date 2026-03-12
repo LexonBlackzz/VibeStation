@@ -11,6 +11,8 @@ namespace {
     constexpr u32 kRamWatchEnd = 0x00047A10u;
     constexpr u32 kRamWatchWord0 = 0x000479D0u;
     constexpr u32 kRamWatchLogLimit = 64u;
+    constexpr u32 kRr4SourceWatchStart = 0x001A8E40u;
+    constexpr u32 kRr4SourceWatchEnd = 0x001A8EC0u;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -368,6 +370,9 @@ void System::reset() {
     gpu_gp1_shadow_mask_ = 0;
     post_reg_ = 0;
     mdec_upload_probe_ = {};
+    stack_top_burst_ = {};
+    stack_top_write_log_budget_ = 64;
+    stack_top_write_log_suppressed_ = false;
     gpu_gp0_source_valid_ = false;
     gpu_gp0_source_from_dma_ = false;
     gpu_gp0_source_addr_ = 0;
@@ -427,7 +432,7 @@ void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
 }
 
 void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
-    if (!g_mdec_debug_upload_probe) {
+    if (!g_mdec_debug_upload_probe && !g_cpu_deep_diagnostics) {
         return;
     }
     RamAccessLogEntry &entry =
@@ -441,6 +446,99 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
     ++ram_write_history_pos_;
     ram_write_history_count_ =
         std::min<u32>(ram_write_history_count_ + 1u, static_cast<u32>(kRamWriteHistorySize));
+
+    if (g_cpu_deep_diagnostics) {
+        debug_track_stack_top_write(entry);
+    }
+
+    if (g_cpu_deep_diagnostics && addr >= 0x001FFF00u && addr < 0x00200000u &&
+        !(entry.origin == 0u && entry.size == 2u && entry.value == 0u)) {
+        if (stack_top_write_log_budget_ != 0u) {
+            --stack_top_write_log_budget_;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: stack-top W%u 0x%08X = 0x%08X <- DMA%u",
+                         static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: stack-top W%u 0x%08X = 0x%08X pc=0x%08X",
+                         static_cast<unsigned>(size), addr, value, entry.pc);
+            }
+        } else if (!stack_top_write_log_suppressed_) {
+            stack_top_write_log_suppressed_ = true;
+            LOG_WARN("BUS: stack-top per-write logging suppressed after budget exhaustion; retaining burst and history diagnostics");
+        }
+    }
+
+    if (g_cpu_deep_diagnostics && addr >= 0x00047680u && addr < 0x000476C0u) {
+        static u32 low_stub_write_log_count = 0;
+        static bool low_stub_context_logged = false;
+        if (!low_stub_context_logged) {
+            low_stub_context_logged = true;
+            LOG_WARN(
+                "BUS: low-stub context sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X t6=0x%08X t7=0x%08X",
+                cpu_.reg(29), cpu_.reg(31), cpu_.reg(4), cpu_.reg(5),
+                cpu_.reg(6), cpu_.reg(7), cpu_.reg(8), cpu_.reg(9),
+                cpu_.reg(10), cpu_.reg(11), cpu_.reg(12), cpu_.reg(13),
+                cpu_.reg(14), cpu_.reg(15));
+            LOG_WARN(
+                "BUS: low-stub bios code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+                0x1FC02B58u, read32(0x1FC02B58u), 0x1FC02B5Cu,
+                read32(0x1FC02B5Cu), 0x1FC02B60u, read32(0x1FC02B60u),
+                0x1FC02B64u, read32(0x1FC02B64u), 0x1FC02B68u,
+                read32(0x1FC02B68u));
+            LOG_WARN(
+                "BUS: low-stub bios code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+                0x1FC02B6Cu, read32(0x1FC02B6Cu), 0x1FC02B70u,
+                read32(0x1FC02B70u), 0x1FC02B74u, read32(0x1FC02B74u),
+                0x1FC02B78u, read32(0x1FC02B78u), 0x1FC02B7Cu,
+                read32(0x1FC02B7Cu));
+        }
+        if (low_stub_write_log_count < 64u) {
+            ++low_stub_write_log_count;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: low-stub W%u 0x%08X = 0x%08X <- DMA%u",
+                         static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: low-stub W%u 0x%08X = 0x%08X pc=0x%08X",
+                         static_cast<unsigned>(size), addr, value, entry.pc);
+            }
+        }
+    }
+
+    if (g_cpu_deep_diagnostics && addr >= kRr4SourceWatchStart &&
+        addr < kRr4SourceWatchEnd) {
+        static u32 rr4_source_write_log_count = 0;
+        static bool rr4_source_context_logged = false;
+        if (!rr4_source_context_logged) {
+            rr4_source_context_logged = true;
+            LOG_WARN(
+                "BUS: rr4-source context sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X",
+                cpu_.reg(29), cpu_.reg(31), cpu_.reg(4), cpu_.reg(5),
+                cpu_.reg(6), cpu_.reg(7), cpu_.reg(16), cpu_.reg(17),
+                cpu_.reg(18), cpu_.reg(19), cpu_.reg(8), cpu_.reg(9),
+                cpu_.reg(10), cpu_.reg(11));
+            const u32 pc = cpu_.pc() & 0x1FFFFFFFu;
+            LOG_WARN(
+                "BUS: rr4-source code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+                (pc - 8u) & 0x1FFFFFFFu, read32(pc - 8u),
+                (pc - 4u) & 0x1FFFFFFFu, read32(pc - 4u),
+                pc & 0x1FFFFFFFu, read32(pc),
+                (pc + 4u) & 0x1FFFFFFFu, read32(pc + 4u),
+                (pc + 8u) & 0x1FFFFFFFu, read32(pc + 8u));
+        }
+        if (rr4_source_write_log_count < 64u) {
+            ++rr4_source_write_log_count;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: rr4-source W%u 0x%08X = 0x%08X <- DMA%u",
+                         static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: rr4-source W%u 0x%08X = 0x%08X pc=0x%08X",
+                         static_cast<unsigned>(size), addr, value, entry.pc);
+            }
+        }
+    }
 
     if (!probe_contains_addr(mdec_upload_probe_.gpu_dma_src_base,
                              mdec_upload_probe_.gpu_dma_src_range_bytes, addr)) {
@@ -457,6 +555,120 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
     mdec_upload_probe_.gpu_src_write_origin[index] = entry.origin;
     mdec_upload_probe_.gpu_src_write_sizes[index] = size;
     ++mdec_upload_probe_.gpu_src_write_sample_count;
+}
+
+void System::debug_track_stack_top_write(const RamAccessLogEntry& entry) {
+    if (entry.addr < 0x001FFF00u || entry.addr >= 0x00200000u) {
+        stack_top_burst_ = {};
+        return;
+    }
+
+    const bool is_trackable_zero_halfword =
+        entry.origin == 0u && entry.size == 2u && entry.value == 0u;
+    if (!is_trackable_zero_halfword) {
+        stack_top_burst_ = {};
+        return;
+    }
+
+    const bool continues_burst =
+        stack_top_burst_.active &&
+        stack_top_burst_.pc == entry.pc &&
+        stack_top_burst_.origin == entry.origin &&
+        stack_top_burst_.size == entry.size &&
+        stack_top_burst_.value == entry.value &&
+        stack_top_burst_.next_addr == entry.addr;
+
+    if (!continues_burst) {
+        stack_top_burst_ = {};
+        stack_top_burst_.active = true;
+        stack_top_burst_.pc = entry.pc;
+        stack_top_burst_.origin = entry.origin;
+        stack_top_burst_.size = entry.size;
+        stack_top_burst_.value = entry.value;
+        stack_top_burst_.start_addr = entry.addr;
+        stack_top_burst_.next_addr = entry.addr + entry.size;
+        stack_top_burst_.count = 1;
+        return;
+    }
+
+    ++stack_top_burst_.count;
+    stack_top_burst_.next_addr += entry.size;
+
+    if (!stack_top_burst_.logged_context && stack_top_burst_.count >= 8u) {
+        stack_top_burst_.logged_context = true;
+        debug_log_stack_top_burst_context(entry);
+    }
+}
+
+void System::debug_log_stack_top_burst_context(const RamAccessLogEntry& entry) {
+    const u32 end_addr =
+        stack_top_burst_.next_addr >= entry.size ? (stack_top_burst_.next_addr - entry.size)
+                                                 : stack_top_burst_.next_addr;
+    LOG_WARN(
+        "BUS: stack-top zero sweep pc=0x%08X range=0x%08X..0x%08X count=%u sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X",
+        entry.pc, stack_top_burst_.start_addr, end_addr, stack_top_burst_.count,
+        cpu_.reg(29), cpu_.reg(31), cpu_.reg(4), cpu_.reg(5), cpu_.reg(6),
+        cpu_.reg(7), cpu_.reg(2), cpu_.reg(3));
+
+    const u32 pc = entry.pc;
+    LOG_WARN(
+        "BUS: stack-top zero code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+        (pc - 8u) & 0x1FFFFFFFu, read32_instruction(pc - 8u),
+        (pc - 4u) & 0x1FFFFFFFu, read32_instruction(pc - 4u),
+        pc & 0x1FFFFFFFu, read32_instruction(pc),
+        (pc + 4u) & 0x1FFFFFFFu, read32_instruction(pc + 4u),
+        (pc + 8u) & 0x1FFFFFFFu, read32_instruction(pc + 8u),
+        (pc + 12u) & 0x1FFFFFFFu, read32_instruction(pc + 12u));
+}
+
+void System::debug_log_recent_ram_writes(u32 addr, u32 radius_bytes) const {
+    if (ram_write_history_count_ == 0) {
+        LOG_WARN("BUS: no RAM write history available");
+        return;
+    }
+
+    const u32 center = psx::mask_address(addr) & 0x001FFFFFu;
+    const u32 start = (center > radius_bytes) ? (center - radius_bytes) : 0u;
+    const u32 end = std::min<u32>(center + radius_bytes, psx::RAM_SIZE - 1u);
+    LOG_WARN("BUS: recent RAM writes near 0x%08X (window=0x%08X..0x%08X)",
+             center, start, end);
+
+    bool found = false;
+    u32 printed = 0;
+    u32 suppressed = 0;
+    constexpr u32 kMaxPrintedEntries = 64u;
+    for (u32 i = 0; i < ram_write_history_count_; ++i) {
+        const u32 hist_index =
+            (ram_write_history_pos_ + static_cast<u32>(kRamWriteHistorySize) -
+             ram_write_history_count_ + i) %
+            static_cast<u32>(kRamWriteHistorySize);
+        const RamAccessLogEntry &entry = ram_write_history_[hist_index];
+        if (entry.addr < start || entry.addr > end) {
+            continue;
+        }
+        found = true;
+        if (printed >= kMaxPrintedEntries) {
+            ++suppressed;
+            continue;
+        }
+        ++printed;
+        if ((entry.origin & 0x80u) != 0u) {
+            LOG_WARN("BUS: W%u 0x%08X = 0x%08X <- DMA%u",
+                     static_cast<unsigned>(entry.size), entry.addr, entry.value,
+                     static_cast<unsigned>(entry.origin & 0x7Fu));
+        } else {
+            LOG_WARN("BUS: W%u 0x%08X = 0x%08X pc=0x%08X",
+                     static_cast<unsigned>(entry.size), entry.addr, entry.value,
+                     entry.pc);
+        }
+    }
+
+    if (!found) {
+        LOG_WARN("BUS: no RAM writes captured in requested window");
+    } else if (suppressed != 0u) {
+        LOG_WARN("BUS: suppressed %u additional RAM write entries in requested window",
+                 suppressed);
+    }
 }
 
 void System::populate_gpu_src_write_samples_from_history() {
@@ -1558,11 +1770,24 @@ u16 System::read16(u32 addr) {
             note_sio_io(phys);
             return sio_.read16(io - 0x040);
         }
+        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
+            static u32 io105x_read16_count = 0;
+            if (io105x_read16_count < 8u) {
+                ++io105x_read16_count;
+                LOG_WARN(
+                    "BUS: io105x read16 phys=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+                    phys, cpu_.pc(), cpu_.reg(29), cpu_.reg(31), cpu_.reg(4),
+                    cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
+            }
+        }
         // CDROM
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
-            u16 lo = cdrom_.read8(io - 0x800);
-            u16 hi = cdrom_.read8(std::min<u32>(io - 0x800 + 1, 3));
+            const u32 port = io - 0x800;
+            const u16 lo = cdrom_.read8(port);
+            // RDDATA is a byte FIFO at 1F801802h. Wider reads starting there
+            // must keep consuming FIFO bytes rather than spilling into 803h.
+            const u16 hi = cdrom_.read8(port == 2 ? 2u : std::min<u32>(port + 1, 3));
             return lo | static_cast<u16>(hi << 8);
         }
         // MDEC
@@ -1650,10 +1875,13 @@ u32 System::read32(u32 addr) {
         // CDROM
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
-            u32 b0 = cdrom_.read8(io - 0x800);
-            u32 b1 = cdrom_.read8(std::min<u32>(io - 0x800 + 1, 3));
-            u32 b2 = cdrom_.read8(std::min<u32>(io - 0x800 + 2, 3));
-            u32 b3 = cdrom_.read8(std::min<u32>(io - 0x800 + 3, 3));
+            const u32 port = io - 0x800;
+            const u32 b0 = cdrom_.read8(port);
+            // RDDATA is a byte FIFO at 1F801802h. Wider reads starting there
+            // must keep consuming FIFO bytes rather than spilling into 803h.
+            const u32 b1 = cdrom_.read8(port == 2 ? 2u : std::min<u32>(port + 1, 3));
+            const u32 b2 = cdrom_.read8(port == 2 ? 2u : std::min<u32>(port + 2, 3));
+            const u32 b3 = cdrom_.read8(port == 2 ? 2u : std::min<u32>(port + 3, 3));
             return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
         }
         // MDEC
@@ -1859,6 +2087,16 @@ void System::write16(u32 addr, u16 val) {
             note_sio_io(phys);
             sio_.write16(io - 0x040, val);
             return;
+        }
+        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
+            static u32 io105x_write16_count = 0;
+            if (io105x_write16_count < 8u) {
+                ++io105x_write16_count;
+                LOG_WARN(
+                    "BUS: io105x write16 phys=0x%08X val=0x%04X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+                    phys, val, cpu_.pc(), cpu_.reg(29), cpu_.reg(31),
+                    cpu_.reg(4), cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
+            }
         }
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);

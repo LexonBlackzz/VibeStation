@@ -441,6 +441,9 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         ram_.data()[off] = val;
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+          debug_note_main_ram_write(off, val, 1);
+        }
         return;
       }
       write8(addr, val);
@@ -466,6 +469,9 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         std::memcpy(ram_.data() + off, &val, sizeof(val));
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+          debug_note_main_ram_write(off, val, 2);
+        }
         return;
       }
       write16(addr, val);
@@ -491,6 +497,9 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         std::memcpy(ram_.data() + off, &val, sizeof(val));
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+          debug_note_main_ram_write(off, val, 4);
+        }
         return;
       }
       write32(addr, val);
@@ -567,6 +576,7 @@ public:
   const DmaController::TransferDebug &dma_last_debug(int channel) const {
     return dma_.last_debug(channel);
   }
+  void debug_log_recent_ram_writes(u32 addr, u32 radius_bytes) const;
 
   // Public component access
   Gpu &gpu() { return gpu_; }
@@ -585,10 +595,23 @@ private:
     u8 size = 0;
     u8 origin = 0;
   };
-  static constexpr size_t kRamWriteHistorySize = 128u;
+  struct StackTopBurstDebug {
+    bool active = false;
+    bool logged_context = false;
+    u32 pc = 0xFFFFFFFFu;
+    u32 start_addr = 0;
+    u32 next_addr = 0;
+    u32 value = 0;
+    u8 size = 0;
+    u8 origin = 0;
+    u32 count = 0;
+  };
+  static constexpr size_t kRamWriteHistorySize = 8192u;
 
   void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
   void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
+  void debug_track_stack_top_write(const RamAccessLogEntry &entry);
+  void debug_log_stack_top_burst_context(const RamAccessLogEntry &entry);
   void populate_gpu_src_write_samples_from_history();
 
   // Hardware components
@@ -633,6 +656,9 @@ private:
   std::array<RamAccessLogEntry, kRamWriteHistorySize> ram_write_history_{};
   u32 ram_write_history_pos_ = 0;
   u32 ram_write_history_count_ = 0;
+  StackTopBurstDebug stack_top_burst_ = {};
+  u32 stack_top_write_log_budget_ = 64;
+  bool stack_top_write_log_suppressed_ = false;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;

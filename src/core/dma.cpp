@@ -297,6 +297,7 @@ void DmaController::dma_block(int channel) {
   }
 
   if (!from_ram && ch.sync_mode() == DmaChannel::SyncMode::Block) {
+    const u32 requested_words = transfer_words;
     switch (channel) {
     case 1:
       transfer_words =
@@ -307,6 +308,20 @@ void DmaController::dma_block(int channel) {
       break;
     default:
       break;
+    }
+    if (transfer_words != requested_words) {
+      dbg.transfer_words = transfer_words;
+      if (channel == 3 && g_cpu_deep_diagnostics) {
+        static u32 cdrom_dma_clip_logs = 0;
+        if (cdrom_dma_clip_logs < 32u) {
+          ++cdrom_dma_clip_logs;
+          LOG_WARN(
+              "DMA: CDROM clip madr=0x%08X requested=%u actual=%u avail=%u bcr=0x%08X chcr=0x%08X cyc=%llu",
+              ch.base_addr & 0x00FFFFFFu, requested_words, transfer_words,
+              sys_->cdrom_dma_words_available(), ch.block_ctrl, ch.channel_ctrl,
+              static_cast<unsigned long long>(sys_->cpu().cycle_count()));
+        }
+      }
     }
     if (transfer_words == 0) {
       return;

@@ -54,6 +54,45 @@ static u32 fnv1a_hash_samples(const std::vector<s16> &samples) {
   return hash;
 }
 
+static void log_mdec_summary(const char *prefix, const System &sys) {
+  const auto &stats = sys.mdec_debug_stats();
+  const auto &probe = sys.mdec_upload_probe();
+  const u64 qscale_avg =
+      (stats.blocks_decoded != 0u) ? (stats.qscale_sum / stats.blocks_decoded) : 0u;
+
+  LOG_INFO(
+      "%s_MDEC decode=%llu set_quant=%llu set_scale=%llu blocks=%llu "
+      "dc_only=%llu qscale_zero=%llu qscale_avg=%llu qscale_max=%u "
+      "nonzero_coeff=%llu eob=%llu overflow=%llu dma_in_req=%d dma_out_req=%d "
+      "out_words=%u out_depth=%u out_block=%u out_mb_seq=%u dma1_seen=%d "
+      "gpu_upload_seen=%d gpu_copy_count=%u",
+      prefix, static_cast<unsigned long long>(stats.decode_commands),
+      static_cast<unsigned long long>(stats.set_quant_commands),
+      static_cast<unsigned long long>(stats.set_scale_commands),
+      static_cast<unsigned long long>(stats.blocks_decoded),
+      static_cast<unsigned long long>(stats.dc_only_blocks),
+      static_cast<unsigned long long>(stats.qscale_zero_blocks),
+      static_cast<unsigned long long>(qscale_avg), stats.qscale_max,
+      static_cast<unsigned long long>(stats.nonzero_coeff_count),
+      static_cast<unsigned long long>(stats.eob_markers),
+      static_cast<unsigned long long>(stats.overflow_breaks),
+      sys.mdec_dma_in_request() ? 1 : 0, sys.mdec_dma_out_request() ? 1 : 0,
+      sys.mdec_dma_out_words_available(),
+      static_cast<unsigned>(sys.mdec_dma_out_depth()),
+      static_cast<unsigned>(sys.mdec_dma_out_block()),
+      sys.mdec_dma_out_macroblock_seq(), probe.dma1_seen ? 1 : 0,
+      probe.gpu_upload_seen ? 1 : 0, probe.gpu_copy_count);
+
+  if (stats.command_history_count != 0u) {
+    const u32 latest_index = (stats.command_history_count - 1u) %
+                             static_cast<u32>(Mdec::DebugStats::kCommandHistory);
+    LOG_INFO("%s_MDEC_LASTCMD id=%u word=0x%08X writes=%u controls=%u", prefix,
+             static_cast<unsigned>(stats.command_history_ids[latest_index]),
+             stats.command_history_words[latest_index], stats.write_history_count,
+             stats.control_history_count);
+  }
+}
+
 static void write_u16_le(std::ofstream &out, u16 v) {
   out.put(static_cast<char>(v & 0xFF));
   out.put(static_cast<char>((v >> 8) & 0xFF));
@@ -450,6 +489,15 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     LOG_INFO("Frame test: wrote %s", path);
   };
+  auto should_dump_vram = [frames](int frame_index) {
+    if (frame_index == frames) {
+      return true;
+    }
+    if (frame_index == 60) {
+      return true;
+    }
+    return frame_index >= 300 && (frame_index % 300) == 0;
+  };
   const bool owns_log = (g_log_file == nullptr);
   if (owns_log) {
     g_log_file = std::fopen("bios_test.log", "w");
@@ -482,7 +530,19 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
   }
 
-  sys->reset();
+  if (!cue_path.empty()) {
+    if (!sys->boot_disc()) {
+      LOG_ERROR("Frame test failed to boot disc");
+      if (owns_log && g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
+  } else {
+    sys->reset();
+  }
   bool saw_cd_getid = false;
   bool saw_cd_setloc = false;
   bool saw_cd_seekl = false;
@@ -606,7 +666,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
       LOG_INFO("FRAME_MARKER logo_candidate frame=%d", first_logo_candidate_frame);
     }
 
-    if ((i + 1) % 60 == 0) {
+    if (should_dump_vram(i + 1)) {
       dump_vram_ppm(*sys, i + 1);
     }
     if ((i + 1) <= 10 || ((i + 1) % 30 == 0)) {
@@ -679,6 +739,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
       static_cast<unsigned>(diag.display_y_start),
       static_cast<unsigned>(diag.display_enabled),
       static_cast<unsigned>(diag.display_is_24bit), sys->cpu().pc());
+  log_mdec_summary("FRAME", *sys);
   LOG_INFO("Frame test complete");
   if (owns_log && g_log_file) {
     log_flush_repeats();
@@ -1338,6 +1399,7 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            static_cast<unsigned long long>(irq_timer0),
            static_cast<unsigned long long>(irq_timer1),
            static_cast<unsigned long long>(irq_timer2), sys->cpu().pc());
+  log_mdec_summary("BOOT", *sys);
 
   const bool pass = saw_cd_getid && saw_cd_setloc && saw_cd_seekl &&
                     saw_cd_readn_or_reads && saw_cd_sector_visible;
@@ -1559,5 +1621,3 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
-
-

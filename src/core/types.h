@@ -88,7 +88,7 @@ inline bool g_trace_timer = false;
 inline bool g_trace_sio = false;
 // Expensive CPU sanity diagnostics (helper-range probes, suspicious RA/SP checks).
 // Keep disabled for normal/turbo gameplay performance.
-inline bool g_cpu_deep_diagnostics = false;
+inline bool g_cpu_deep_diagnostics = true;
 // Expensive RAM watchpoint diagnostics around BIOS boot streams.
 inline bool g_ram_watch_diagnostics = false;
 inline u32 g_trace_burst_cpu = 128;
