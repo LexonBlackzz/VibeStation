@@ -87,8 +87,15 @@ Run
 and  
 `cmake --build build-vs --config Release`  
 (or compile inside Visual Studio)    
-  
-    
+
+### ⚠️ As of v0.4.5a, Discord Social SDK for RPC will be implemented, however the source code will NOT include the SDK, you must download it yourself on Discord's Developer Portal.
+To build the Discord RPC:   
+Run   
+`cmake -S . -B build-vs -DVIBESTATION_DISCORD_SDK_ROOT="C:/path/to/discord_social_sdk"`
+
+*C:/path/to/discord_social_sdk should be replaced with where you kept the discord_social_sdk folder*
+
+
 #### ⚠️ The program does ***not*** provide any kind of BIOS files and does not condone piracy. ***All*** BIOS files used must be legally obtained or extracted from your owned console.
 
 ### ⚠️ MANY THINGS ARE EXPERIMENTAL, NOT IMPLEMENTED AND/OR NOT WORKING!
