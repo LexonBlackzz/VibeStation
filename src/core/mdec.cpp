@@ -436,12 +436,14 @@ void Mdec::execute_decode() {
         break;
       }
 
-      std::vector<u16> compare_input;
-      compare_input.reserve(cursor);
-      for (size_t i = 0; i < cursor; ++i) {
-        compare_input.push_back(in_halfword_fifo_[i]);
+      if (g_mdec_debug_compare_macroblocks) {
+        std::vector<u16> compare_input;
+        compare_input.reserve(cursor);
+        for (size_t i = 0; i < cursor; ++i) {
+          compare_input.push_back(in_halfword_fifo_[i]);
+        }
+        compare_colored_macroblock(compare_input);
       }
-      compare_colored_macroblock(compare_input);
 
       emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
       while (cursor-- > 0) {
@@ -571,11 +573,11 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
 
   std::array<int, 64> temp{};
   for (u32 x = 0; x < 8u; ++x) {
+    int row[8]{};
+    for (u32 i = 0; i < 8u; ++i) {
+      row[i] = coeffs[x * 8u + i];
+    }
     for (u32 y = 0; y < 8u; ++y) {
-      int row[8]{};
-      for (u32 i = 0; i < 8u; ++i) {
-        row[i] = coeffs[x * 8u + i];
-      }
       temp[y * 8u + x] = idct_row(row, &scale_table_[y * 8u]);
     }
   }
@@ -804,11 +806,11 @@ void Mdec::idct_variant(const Block &coeffs, Block &pixels,
 
   std::array<int, 64> temp{};
   for (u32 x = 0; x < 8u; ++x) {
+    int row[8]{};
+    for (u32 i = 0; i < 8u; ++i) {
+      row[i] = coeffs[x * 8u + i];
+    }
     for (u32 y = 0; y < 8u; ++y) {
-      int row[8]{};
-      for (u32 i = 0; i < 8u; ++i) {
-        row[i] = coeffs[x * 8u + i];
-      }
       temp[y * 8u + x] = idct_row(row, &scale_table_[y * 8u]);
     }
   }
@@ -945,72 +947,64 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
     return signed9;
   };
 
-  std::array<u32, 256> macroblock_rgb{};
   const std::array<const Block *, 4> y_blocks = {&y1, &y2, &y3, &y4};
   output_word_block_id_ = 4;
   current_output_macroblock_seq_ = output_macroblock_seq_++;
 
-  for (int block = 0; block < 4; ++block) {
-    const int bx = (block & 1) * 8;
-    const int by = (block & 2) * 4;
+  auto pixel_rgb = [&](int px, int py) {
+    const int block = ((py >> 3) << 1) | (px >> 3);
     const Block &y_block = *y_blocks[static_cast<size_t>(block)];
     const bool block_enabled =
         ((g_mdec_debug_color_block_mask >> static_cast<u32>(block)) & 0x1u) != 0u;
+    const int local_x = px & 7;
+    const int local_y = py & 7;
+    const int yy =
+        (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[local_y * 8 + local_x];
+    const int cx = px >> 1;
+    const int cy = py >> 1;
+    const int crv =
+        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
+    const int cbv =
+        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
 
-    for (int y = 0; y < 8; ++y) {
-      for (int x = 0; x < 8; ++x) {
-        const int yy =
-            (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[y * 8 + x];
-        const int cx = (bx + x) >> 1;
-        const int cy = (by + y) >> 1;
-        const int crv =
-            (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
-        const int cbv =
-            (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
-
-        const int r =
-            std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)),
-                       -128, 127);
-        const int g = std::clamp(
-            sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
-                                  ((-183 * crv) & ~0x07) + 0x80) >> 8)),
-            -128, 127);
-        const int b =
-            std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)),
-                       -128, 127);
-
-        macroblock_rgb[static_cast<size_t>((by + y) * 16 + (bx + x))] =
-            static_cast<u32>(encode_component(r)) |
-            (static_cast<u32>(encode_component(g)) << 8) |
-            (static_cast<u32>(encode_component(b)) << 16);
-      }
-    }
-  }
+    const int r =
+        std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)), -128, 127);
+    const int g = std::clamp(
+        sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
+                              ((-183 * crv) & ~0x07) + 0x80) >> 8)),
+        -128, 127);
+    const int b =
+        std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)), -128, 127);
+    return std::array<int, 3>{r, g, b};
+  };
 
   if (out_depth_latched_ == 3) {
-    const auto to5 = [](u32 component) {
-      return std::min<u32>(((component + 4u) >> 3), 0x1Fu);
-    };
-    for (size_t i = 0; i < macroblock_rgb.size(); i += 2u) {
-      const u32 c0 = macroblock_rgb[i];
-      const u32 c1 = macroblock_rgb[i + 1u];
-      const u16 p0 = static_cast<u16>(
-          to5(c0 & 0xFFu) | (to5((c0 >> 8) & 0xFFu) << 5) |
-          (to5((c0 >> 16) & 0xFFu) << 10) |
-          (output_set_bit15_ ? 0x8000u : 0u));
-      const u16 p1 = static_cast<u16>(
-          to5(c1 & 0xFFu) | (to5((c1 >> 8) & 0xFFu) << 5) |
-          (to5((c1 >> 16) & 0xFFu) << 10) |
-          (output_set_bit15_ ? 0x8000u : 0u));
-      push_output_word(static_cast<u32>(p0) | (static_cast<u32>(p1) << 16));
+    bool have_low = false;
+    u16 low_pixel = 0;
+    for (int py = 0; py < 16; ++py) {
+      for (int px = 0; px < 16; ++px) {
+        const auto rgb = pixel_rgb(px, py);
+        const u16 rgb15 = encode_rgb15(rgb[0], rgb[1], rgb[2]);
+        if (!have_low) {
+          low_pixel = rgb15;
+          have_low = true;
+        } else {
+          push_output_word(static_cast<u32>(low_pixel) |
+                           (static_cast<u32>(rgb15) << 16));
+          have_low = false;
+        }
+      }
     }
     return;
   }
 
-  for (u32 rgb : macroblock_rgb) {
-    push_output_byte(static_cast<u8>(rgb & 0xFFu));
-    push_output_byte(static_cast<u8>((rgb >> 8) & 0xFFu));
-    push_output_byte(static_cast<u8>((rgb >> 16) & 0xFFu));
+  for (int py = 0; py < 16; ++py) {
+    for (int px = 0; px < 16; ++px) {
+      const auto rgb = pixel_rgb(px, py);
+      push_output_byte(encode_component(rgb[0]));
+      push_output_byte(encode_component(rgb[1]));
+      push_output_byte(encode_component(rgb[2]));
+    }
   }
 }
 

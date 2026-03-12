@@ -264,6 +264,23 @@ public:
   const std::vector<s16> &spu_audio_capture_samples() const {
     return spu_.audio_capture_samples();
   }
+  bool save_spu_voice_sample_to_file(int voice, const std::string &path,
+                                     std::string *error = nullptr);
+  bool load_spu_replacement_sample_from_file(const std::string &path,
+                                             std::string *error = nullptr);
+  void clear_spu_replacement_sample() { spu_.clear_replacement_sample(); }
+  void set_spu_replacement_sample_enabled(bool enabled) {
+    spu_.set_replacement_sample_enabled(enabled);
+  }
+  bool spu_replacement_sample_enabled() const {
+    return spu_.replacement_sample_enabled();
+  }
+  bool spu_replacement_sample_loaded() const {
+    return spu_.replacement_sample_loaded();
+  }
+  size_t spu_replacement_sample_bytes() const {
+    return spu_.replacement_sample_bytes();
+  }
   void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate) {
     if (spu_skip_sync_for_turbo_) {
       return;

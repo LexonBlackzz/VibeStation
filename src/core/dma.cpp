@@ -313,7 +313,7 @@ void DmaController::dma_block(int channel) {
     }
   }
 
-  if (!from_ram && channel == 1) {
+  if (!from_ram && channel == 1 && g_mdec_debug_upload_probe) {
     sys_->debug_note_mdec_dma_out_begin(addr & 0x001FFFFCu, transfer_words,
                                         sys_->mdec_dma_out_depth(),
                                         sys_->mdec_dma_out_block());
@@ -382,7 +382,9 @@ void DmaController::dma_block(int channel) {
                                             sys_->mdec_dma_out_block(),
                                             sys_->mdec_dma_out_depth());
         data = sys_->mdec_dma_read();
-        sys_->debug_note_mdec_dma_out_word(write_addr, data, macroblock_seq);
+        if (g_mdec_debug_upload_probe) {
+          sys_->debug_note_mdec_dma_out_word(write_addr, data, macroblock_seq);
+        }
         break;
       }
       case 2: // GPU (GPUREAD)

@@ -253,6 +253,18 @@ void System::sync_spu_to_cpu() {
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
+bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
+                                           std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.export_voice_sample_to_file(voice, path, error);
+}
+
+bool System::load_spu_replacement_sample_from_file(const std::string& path,
+                                                   std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.load_replacement_sample_from_file(path, error);
+}
+
 void System::init_hardware() {
     if (hw_init_)
         return; // Already initialized
@@ -276,6 +288,7 @@ bool System::load_bios(const std::string& path) {
     if (!hw_init_) {
         init_hardware();
     }
+    spu_.clear_replacement_sample();
     return bios_.load(path);
 }
 
@@ -392,6 +405,9 @@ void System::debug_end_dma_bus_access() {
 }
 
 void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!probe_contains_addr(mdec_upload_probe_.dma1_base_addr,
                              mdec_upload_probe_.dma1_range_bytes, addr)) {
         return;
@@ -411,6 +427,9 @@ void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
 }
 
 void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     RamAccessLogEntry &entry =
         ram_write_history_[ram_write_history_pos_ % static_cast<u32>(kRamWriteHistorySize)];
     entry.addr = addr;
@@ -441,6 +460,9 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
 }
 
 void System::populate_gpu_src_write_samples_from_history() {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (mdec_upload_probe_.gpu_dma_src_base == 0 ||
         mdec_upload_probe_.gpu_src_write_sample_count != 0 ||
         ram_write_history_count_ == 0) {
@@ -472,6 +494,9 @@ void System::populate_gpu_src_write_samples_from_history() {
 
 void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
                                            u8 first_block) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     mdec_upload_probe_.dma1_seen = true;
     mdec_upload_probe_.dma1_base_addr = base_addr & 0x001FFFFCu;
     mdec_upload_probe_.dma1_words = words;
@@ -495,6 +520,9 @@ void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
 
 void System::debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
                                           u32 macroblock_seq) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!mdec_upload_probe_.dma1_seen) {
         return;
     }
@@ -536,6 +564,9 @@ void System::debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
 }
 
 void System::debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     mdec_upload_probe_.gpu_upload_seen = true;
     mdec_upload_probe_.gpu_upload_data_seen = false;
     ++mdec_upload_probe_.gpu_upload_count;
@@ -588,6 +619,9 @@ void System::debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h) {
 }
 
 void System::debug_note_gpu_image_load_word(u32 value) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     if (!mdec_upload_probe_.gpu_upload_seen) {
         return;
     }
@@ -623,6 +657,9 @@ void System::debug_note_gpu_image_load_word(u32 value) {
 }
 
 void System::debug_note_gpu_vblank() {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     const u32 frame_count = std::min<u32>(
         mdec_upload_probe_.gpu_frame_upload_count,
         static_cast<u32>(MdecUploadProbe::kUploadHistory));
@@ -659,6 +696,9 @@ void System::debug_note_gpu_vblank() {
 
 void System::debug_note_gpu_vram_copy(u16 src_x, u16 src_y, u16 dst_x, u16 dst_y,
                                       u16 w, u16 h) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
     ++mdec_upload_probe_.gpu_copy_count;
     const u32 index = mdec_upload_probe_.gpu_copy_sample_count;
     if (index >= MdecUploadProbe::kSampleWords) {

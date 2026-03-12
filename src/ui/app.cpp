@@ -237,6 +237,37 @@ namespace {
         return fallback;
     }
 
+    int log_level_to_config_value(LogLevel level) {
+        switch (level) {
+        case LogLevel::Debug:
+            return 0;
+        case LogLevel::Info:
+            return 1;
+        case LogLevel::Warn:
+            return 2;
+        case LogLevel::Error:
+            return 3;
+        }
+        return 1;
+    }
+
+    LogLevel parse_log_level_config(const std::string& value, LogLevel fallback) {
+        if (value == "0" || value == "debug" || value == "DEBUG") {
+            return LogLevel::Debug;
+        }
+        if (value == "1" || value == "info" || value == "INFO") {
+            return LogLevel::Info;
+        }
+        if (value == "2" || value == "warn" || value == "warning" ||
+            value == "WARN" || value == "WARNING") {
+            return LogLevel::Warn;
+        }
+        if (value == "3" || value == "error" || value == "ERROR") {
+            return LogLevel::Error;
+        }
+        return fallback;
+    }
+
     int normalize_turbo_speed_percent(int percent) {
         return (percent >= 400) ? 400 : 200;
     }
@@ -254,7 +285,7 @@ namespace {
     }
 
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
-    constexpr double kSpuDiagnosticReverbMixMultiplier = 1.30;
+    constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
 
     void append_be32(std::vector<u8>& out, u32 value) {
         out.push_back(static_cast<u8>((value >> 24) & 0xFFu));
@@ -1900,6 +1931,7 @@ void App::panel_settings() {
                 if (ImGui::InputInt("Desired Samples", &desired_samples, 256, 1024)) {
                     desired_samples = std::max(64, std::min(65535, desired_samples));
                     g_spu_desired_samples = static_cast<u32>(desired_samples);
+                    save_persistent_config();
                 }
                 ImGui::TextDisabled("Applied on next audio device init.");
                 float output_buffer_seconds = g_spu_output_buffer_seconds;
@@ -1908,17 +1940,23 @@ void App::panel_settings() {
                     output_buffer_seconds =
                         std::max(0.05f, std::min(8.0f, output_buffer_seconds));
                     g_spu_output_buffer_seconds = output_buffer_seconds;
+                    save_persistent_config();
                 }
                 float xa_buffer_seconds = g_spu_xa_buffer_seconds;
                 if (ImGui::InputFloat("XA Buffer (seconds)",
                     &xa_buffer_seconds, 0.01f, 0.1f, "%.3f")) {
                     xa_buffer_seconds = std::max(0.0f, std::min(5.0f, xa_buffer_seconds));
                     g_spu_xa_buffer_seconds = xa_buffer_seconds;
+                    save_persistent_config();
                 }
-                ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue);
-                ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status);
+                if (ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue)) {
+                    save_persistent_config();
+                }
+                if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
+                    save_persistent_config();
+                }
                 if (!config_spu_diagnostic_mode_) {
-                    if (ImGui::Button("Slowed + Reverb Mode (0.83x / Reverb +30%)")) {
+                    if (ImGui::Button("Slowed + Reverb Mode (0.83x / Reverb +100%)")) {
                         config_spu_diagnostic_mode_ = true;
                         apply_speed_override();
                         save_persistent_config();
@@ -2070,6 +2108,7 @@ void App::panel_settings() {
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Logging")) {
+                bool logging_config_dirty = false;
                 const char* levels[] = { "Debug", "Info", "Warn", "Error" };
                 int level_index = 1;
                 switch (g_log_level) {
@@ -2088,18 +2127,24 @@ void App::panel_settings() {
                 }
                 if (ImGui::Combo("Level", &level_index, levels, IM_ARRAYSIZE(levels))) {
                     g_log_level = static_cast<LogLevel>(level_index);
+                    logging_config_dirty = true;
                 }
 
-                ImGui::Checkbox("Timestamps", &g_log_timestamp);
-                ImGui::Checkbox("Collapse Repeats", &g_log_dedupe);
+                if (ImGui::Checkbox("Timestamps", &g_log_timestamp)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("Collapse Repeats", &g_log_dedupe)) {
+                    logging_config_dirty = true;
+                }
                 int dedupe_flush = static_cast<int>(g_log_dedupe_flush);
                 if (ImGui::InputInt("Repeat Flush", &dedupe_flush)) {
                     g_log_dedupe_flush = static_cast<u32>(std::max(1, dedupe_flush));
+                    logging_config_dirty = true;
                 }
                 ImGui::Separator();
                 ImGui::Text("Categories");
 
-                auto category_checkbox = [](const char* label, LogCategory cat) {
+                auto category_checkbox = [&](const char* label, LogCategory cat) {
                     bool enabled = log_category_enabled(cat);
                     if (ImGui::Checkbox(label, &enabled)) {
                         if (enabled) {
@@ -2108,6 +2153,7 @@ void App::panel_settings() {
                         else {
                             g_log_category_mask &= ~log_category_bit(cat);
                         }
+                        logging_config_dirty = true;
                     }
                     };
                 category_checkbox("General", LogCategory::General);
@@ -2136,29 +2182,51 @@ void App::panel_settings() {
 
                 if (ImGui::Button("Enable All Categories")) {
                     g_log_category_mask = 0xFFFFFFFFu;
+                    logging_config_dirty = true;
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Disable All Categories")) {
                     g_log_category_mask = 0;
+                    logging_config_dirty = true;
                 }
 
                 ImGui::Separator();
                 ImGui::Text("Trace Channels");
-                ImGui::Checkbox("DMA Trace", &g_trace_dma);
+                if (ImGui::Checkbox("DMA Trace", &g_trace_dma)) {
+                    logging_config_dirty = true;
+                }
                 ImGui::SameLine();
-                ImGui::Checkbox("CDROM Trace", &g_trace_cdrom);
-                ImGui::Checkbox("CPU Trace", &g_trace_cpu);
+                if (ImGui::Checkbox("CDROM Trace", &g_trace_cdrom)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("CPU Trace", &g_trace_cpu)) {
+                    logging_config_dirty = true;
+                }
                 ImGui::SameLine();
-                ImGui::Checkbox("BUS Trace", &g_trace_bus);
+                if (ImGui::Checkbox("BUS Trace", &g_trace_bus)) {
+                    logging_config_dirty = true;
+                }
                 ImGui::SameLine();
-                ImGui::Checkbox("RAM Trace", &g_trace_ram);
-                ImGui::Checkbox("GPU Trace", &g_trace_gpu);
+                if (ImGui::Checkbox("RAM Trace", &g_trace_ram)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("GPU Trace", &g_trace_gpu)) {
+                    logging_config_dirty = true;
+                }
                 ImGui::SameLine();
-                ImGui::Checkbox("SPU Trace", &g_trace_spu);
-                ImGui::Checkbox("IRQ Trace", &g_trace_irq);
+                if (ImGui::Checkbox("SPU Trace", &g_trace_spu)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("IRQ Trace", &g_trace_irq)) {
+                    logging_config_dirty = true;
+                }
                 ImGui::SameLine();
-                ImGui::Checkbox("Timer Trace", &g_trace_timer);
-                ImGui::Checkbox("SIO Trace", &g_trace_sio);
+                if (ImGui::Checkbox("Timer Trace", &g_trace_timer)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("SIO Trace", &g_trace_sio)) {
+                    logging_config_dirty = true;
+                }
 
                 if (ImGui::Button("Enable All Traces")) {
                     g_trace_dma = true;
@@ -2171,6 +2239,7 @@ void App::panel_settings() {
                     g_trace_irq = true;
                     g_trace_timer = true;
                     g_trace_sio = true;
+                    logging_config_dirty = true;
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Disable All Traces")) {
@@ -2184,6 +2253,7 @@ void App::panel_settings() {
                     g_trace_irq = false;
                     g_trace_timer = false;
                     g_trace_sio = false;
+                    logging_config_dirty = true;
                 }
 
                 ImGui::Separator();
@@ -2194,6 +2264,16 @@ void App::panel_settings() {
                 ImGui::Checkbox("Disable Luma (Y=0)", &g_mdec_debug_disable_luma);
                 ImGui::Checkbox("Force Solid MDEC Output", &g_mdec_debug_force_solid_output);
                 ImGui::Checkbox("Swap MDEC Input Halfwords", &g_mdec_debug_swap_input_halfwords);
+                if (ImGui::Checkbox("Enable Macroblock Compare (slow)",
+                        &g_mdec_debug_compare_macroblocks) &&
+                    !g_mdec_debug_compare_macroblocks && system_) {
+                    system_->reset_mdec_debug_compare();
+                }
+                if (ImGui::Checkbox("Enable Upload Probe (slow)",
+                        &g_mdec_debug_upload_probe) &&
+                    !g_mdec_debug_upload_probe && system_) {
+                    system_->reset_mdec_upload_probe();
+                }
 
                 bool y1 = (g_mdec_debug_color_block_mask & 0x1u) != 0u;
                 bool y2 = (g_mdec_debug_color_block_mask & 0x2u) != 0u;
@@ -2221,7 +2301,13 @@ void App::panel_settings() {
                     g_mdec_debug_disable_luma = false;
                     g_mdec_debug_force_solid_output = false;
                     g_mdec_debug_swap_input_halfwords = false;
+                    g_mdec_debug_compare_macroblocks = false;
+                    g_mdec_debug_upload_probe = false;
                     g_mdec_debug_color_block_mask = 0x0Fu;
+                    if (system_) {
+                        system_->reset_mdec_debug_compare();
+                        system_->reset_mdec_upload_probe();
+                    }
                 }
                 ImGui::TextDisabled("Use these toggles to localize FMV artifacts by stage.");
 
@@ -2551,16 +2637,18 @@ void App::panel_settings() {
 
                 ImGui::Separator();
                 ImGui::Text("Trace Sampling (burst/stride)");
-                auto sample_pair = [](const char* label, u32& burst, u32& stride) {
+                auto sample_pair = [&](const char* label, u32& burst, u32& stride) {
                     int b = static_cast<int>(burst);
                     int s = static_cast<int>(stride);
                     std::string burst_label = std::string(label) + " Burst";
                     std::string stride_label = std::string(label) + " Stride";
                     if (ImGui::InputInt(burst_label.c_str(), &b)) {
                         burst = static_cast<u32>(std::max(1, b));
+                        logging_config_dirty = true;
                     }
                     if (ImGui::InputInt(stride_label.c_str(), &s)) {
                         stride = static_cast<u32>(std::max(1, s));
+                        logging_config_dirty = true;
                     }
                     };
                 sample_pair("CPU", g_trace_burst_cpu, g_trace_stride_cpu);
@@ -2594,15 +2682,19 @@ void App::panel_settings() {
                     g_trace_stride_timer = 2048;
                     g_trace_burst_sio = 64;
                     g_trace_stride_sio = 2048;
+                    logging_config_dirty = true;
                 }
 
                 ImGui::Separator();
-                ImGui::InputText("Log File", log_path_, IM_ARRAYSIZE(log_path_));
+                if (ImGui::InputText("Log File", log_path_, IM_ARRAYSIZE(log_path_))) {
+                    logging_config_dirty = true;
+                }
                 if (g_log_file == nullptr) {
                     if (ImGui::Button("Start File Logging")) {
                         g_log_file = std::fopen(log_path_, "w");
                         status_message_ =
                             (g_log_file != nullptr) ? "File logging enabled" : "Failed to open log file";
+                        logging_config_dirty = true;
                     }
                 }
                 else {
@@ -2611,6 +2703,7 @@ void App::panel_settings() {
                         std::fclose(g_log_file);
                         g_log_file = nullptr;
                         status_message_ = "File logging disabled";
+                        logging_config_dirty = true;
                     }
                 }
 
@@ -2797,6 +2890,11 @@ void App::panel_settings() {
                     g_trace_burst_sio = 64;
                     g_trace_stride_sio = 2048;
                     status_message_ = "Logging preset applied";
+                    logging_config_dirty = true;
+                }
+
+                if (logging_config_dirty) {
+                    save_persistent_config();
                 }
 
                 ImGui::EndTabItem();
@@ -3352,6 +3450,67 @@ void App::panel_grim_reaper() {
                 static_cast<unsigned long long>(sound_reaper_active_seed_));
             ImGui::Text("Total Mutations: %llu",
                 static_cast<unsigned long long>(sound_reaper_total_mutations_));
+            ImGui::Separator();
+            std::filesystem::path sound_ram_path = std::filesystem::current_path() / "sound.ram";
+            sound_ram_voice_index_ = std::max(0, std::min(23, sound_ram_voice_index_));
+            ImGui::SliderInt("Sample Voice", &sound_ram_voice_index_, 0, 23);
+            const bool replacement_loaded = system_->spu_replacement_sample_loaded();
+            const bool replacement_enabled = system_->spu_replacement_sample_enabled();
+            ImGui::Text("Replacement Sample: %s | %s | %zu bytes",
+                replacement_loaded ? "Loaded" : "Not loaded",
+                replacement_enabled ? "Enabled" : "Disabled",
+                system_->spu_replacement_sample_bytes());
+            ImGui::TextWrapped("sound.ram path: %s", sound_ram_path.string().c_str());
+            auto run_spu_sample_action = [&](const auto& action) {
+                const bool was_running = emu_runner_.is_running();
+                if (was_running) {
+                    emu_runner_.pause_and_wait_idle();
+                }
+                action();
+                if (was_running) {
+                    emu_runner_.set_running(true);
+                }
+            };
+            if (ImGui::Button("Save Voice To sound.ram")) {
+                run_spu_sample_action([&]() {
+                    std::string error;
+                    if (system_->save_spu_voice_sample_to_file(
+                        sound_ram_voice_index_, sound_ram_path.string(), &error)) {
+                        status_message_ = "Saved sound.ram from SPU voice " +
+                            std::to_string(sound_ram_voice_index_);
+                    }
+                    else {
+                        status_message_ = error.empty() ? "Failed to save sound.ram." : error;
+                    }
+                });
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load sound.ram")) {
+                run_spu_sample_action([&]() {
+                    std::string error;
+                    if (system_->load_spu_replacement_sample_from_file(
+                        sound_ram_path.string(), &error)) {
+                        status_message_ =
+                            "Loaded sound.ram. New SPU key-ons will use the replacement sample.";
+                    }
+                    else {
+                        status_message_ = error.empty() ? "Failed to load sound.ram." : error;
+                    }
+                });
+            }
+            ImGui::SameLine();
+            if (!replacement_loaded) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Clear Replacement")) {
+                run_spu_sample_action([&]() {
+                    system_->clear_spu_replacement_sample();
+                    status_message_ = "Cleared SPU replacement sample.";
+                });
+            }
+            if (!replacement_loaded) {
+                ImGui::EndDisabled();
+            }
             ImGui::InputText("Sound Preset Name", sound_preset_name_,
                 IM_ARRAYSIZE(sound_preset_name_));
             if (ImGui::Button("Save Sound Preset")) {
@@ -4860,6 +5019,14 @@ void App::load_persistent_config() {
             g_mdec_debug_swap_input_halfwords =
                 parse_bool(value, g_mdec_debug_swap_input_halfwords);
         }
+        else if (key == "mdec_debug_compare_macroblocks") {
+            g_mdec_debug_compare_macroblocks =
+                parse_bool(value, g_mdec_debug_compare_macroblocks);
+        }
+        else if (key == "mdec_debug_upload_probe") {
+            g_mdec_debug_upload_probe =
+                parse_bool(value, g_mdec_debug_upload_probe);
+        }
         else if (key == "mdec_debug_color_block_mask") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             g_mdec_debug_color_block_mask =
@@ -4912,6 +5079,116 @@ void App::load_persistent_config() {
         else if (key == "advanced_sound_status_logging") {
             g_spu_advanced_sound_status =
                 parse_bool(value, g_spu_advanced_sound_status);
+        }
+        else if (key == "log_level") {
+            g_log_level = parse_log_level_config(value, g_log_level);
+        }
+        else if (key == "log_timestamps") {
+            g_log_timestamp = parse_bool(value, g_log_timestamp);
+        }
+        else if (key == "log_collapse_repeats") {
+            g_log_dedupe = parse_bool(value, g_log_dedupe);
+        }
+        else if (key == "log_repeat_flush") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            g_log_dedupe_flush = static_cast<u32>(std::max(1ul, parsed));
+        }
+        else if (key == "log_category_mask") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 0);
+            g_log_category_mask = static_cast<u32>(parsed);
+        }
+        else if (key == "log_file_path") {
+            std::snprintf(log_path_, sizeof(log_path_), "%s", value.c_str());
+        }
+        else if (key == "trace_dma") {
+            g_trace_dma = parse_bool(value, g_trace_dma);
+        }
+        else if (key == "trace_cdrom") {
+            g_trace_cdrom = parse_bool(value, g_trace_cdrom);
+        }
+        else if (key == "trace_cpu") {
+            g_trace_cpu = parse_bool(value, g_trace_cpu);
+        }
+        else if (key == "trace_bus") {
+            g_trace_bus = parse_bool(value, g_trace_bus);
+        }
+        else if (key == "trace_ram") {
+            g_trace_ram = parse_bool(value, g_trace_ram);
+        }
+        else if (key == "trace_gpu") {
+            g_trace_gpu = parse_bool(value, g_trace_gpu);
+        }
+        else if (key == "trace_spu") {
+            g_trace_spu = parse_bool(value, g_trace_spu);
+        }
+        else if (key == "trace_irq") {
+            g_trace_irq = parse_bool(value, g_trace_irq);
+        }
+        else if (key == "trace_timer") {
+            g_trace_timer = parse_bool(value, g_trace_timer);
+        }
+        else if (key == "trace_sio") {
+            g_trace_sio = parse_bool(value, g_trace_sio);
+        }
+        else if (key == "trace_burst_cpu") {
+            g_trace_burst_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_cpu") {
+            g_trace_stride_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_bus") {
+            g_trace_burst_bus = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_bus") {
+            g_trace_stride_bus = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_ram") {
+            g_trace_burst_ram = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_ram") {
+            g_trace_stride_ram = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_dma") {
+            g_trace_burst_dma = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_dma") {
+            g_trace_stride_dma = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_cdrom") {
+            g_trace_burst_cdrom = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_cdrom") {
+            g_trace_stride_cdrom = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_gpu") {
+            g_trace_burst_gpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_gpu") {
+            g_trace_stride_gpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_spu") {
+            g_trace_burst_spu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_spu") {
+            g_trace_stride_spu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_irq") {
+            g_trace_burst_irq = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_irq") {
+            g_trace_stride_irq = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_timer") {
+            g_trace_burst_timer = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_timer") {
+            g_trace_stride_timer = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_burst_sio") {
+            g_trace_burst_sio = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
+        }
+        else if (key == "trace_stride_sio") {
+            g_trace_stride_sio = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
         }
         else if (key == "detailed_profiling") {
             g_profile_detailed_timing = parse_bool(value, g_profile_detailed_timing);
@@ -4976,6 +5253,10 @@ void App::save_persistent_config() const {
         << (g_mdec_debug_force_solid_output ? 1 : 0) << "\n";
     out << "mdec_debug_swap_input_halfwords="
         << (g_mdec_debug_swap_input_halfwords ? 1 : 0) << "\n";
+    out << "mdec_debug_compare_macroblocks="
+        << (g_mdec_debug_compare_macroblocks ? 1 : 0) << "\n";
+    out << "mdec_debug_upload_probe="
+        << (g_mdec_debug_upload_probe ? 1 : 0) << "\n";
     out << "mdec_debug_color_block_mask="
         << static_cast<unsigned>(g_mdec_debug_color_block_mask & 0x0Fu) << "\n";
     for (const auto& entry : kKeyboardBindEntries) {
@@ -4989,6 +5270,42 @@ void App::save_persistent_config() const {
     out.unsetf(std::ios::floatfield);
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
+    out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
+    out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";
+    out << "log_collapse_repeats=" << (g_log_dedupe ? 1 : 0) << "\n";
+    out << "log_repeat_flush=" << static_cast<unsigned>(g_log_dedupe_flush) << "\n";
+    out << "log_category_mask=" << g_log_category_mask << "\n";
+    out << "log_file_path=" << log_path_ << "\n";
+    out << "trace_dma=" << (g_trace_dma ? 1 : 0) << "\n";
+    out << "trace_cdrom=" << (g_trace_cdrom ? 1 : 0) << "\n";
+    out << "trace_cpu=" << (g_trace_cpu ? 1 : 0) << "\n";
+    out << "trace_bus=" << (g_trace_bus ? 1 : 0) << "\n";
+    out << "trace_ram=" << (g_trace_ram ? 1 : 0) << "\n";
+    out << "trace_gpu=" << (g_trace_gpu ? 1 : 0) << "\n";
+    out << "trace_spu=" << (g_trace_spu ? 1 : 0) << "\n";
+    out << "trace_irq=" << (g_trace_irq ? 1 : 0) << "\n";
+    out << "trace_timer=" << (g_trace_timer ? 1 : 0) << "\n";
+    out << "trace_sio=" << (g_trace_sio ? 1 : 0) << "\n";
+    out << "trace_burst_cpu=" << g_trace_burst_cpu << "\n";
+    out << "trace_stride_cpu=" << g_trace_stride_cpu << "\n";
+    out << "trace_burst_bus=" << g_trace_burst_bus << "\n";
+    out << "trace_stride_bus=" << g_trace_stride_bus << "\n";
+    out << "trace_burst_ram=" << g_trace_burst_ram << "\n";
+    out << "trace_stride_ram=" << g_trace_stride_ram << "\n";
+    out << "trace_burst_dma=" << g_trace_burst_dma << "\n";
+    out << "trace_stride_dma=" << g_trace_stride_dma << "\n";
+    out << "trace_burst_cdrom=" << g_trace_burst_cdrom << "\n";
+    out << "trace_stride_cdrom=" << g_trace_stride_cdrom << "\n";
+    out << "trace_burst_gpu=" << g_trace_burst_gpu << "\n";
+    out << "trace_stride_gpu=" << g_trace_stride_gpu << "\n";
+    out << "trace_burst_spu=" << g_trace_burst_spu << "\n";
+    out << "trace_stride_spu=" << g_trace_stride_spu << "\n";
+    out << "trace_burst_irq=" << g_trace_burst_irq << "\n";
+    out << "trace_stride_irq=" << g_trace_stride_irq << "\n";
+    out << "trace_burst_timer=" << g_trace_burst_timer << "\n";
+    out << "trace_stride_timer=" << g_trace_stride_timer << "\n";
+    out << "trace_burst_sio=" << g_trace_burst_sio << "\n";
+    out << "trace_stride_sio=" << g_trace_stride_sio << "\n";
     out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
     out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
     out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";

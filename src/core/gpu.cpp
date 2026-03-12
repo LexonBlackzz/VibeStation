@@ -456,7 +456,7 @@ void Gpu::gp0(u32 command) {
 
     // Handle VRAM write mode
     if (gp0_mode_ == Gp0Mode::VramWrite) {
-        if (sys_) {
+        if (sys_ && g_mdec_debug_upload_probe) {
             sys_->debug_note_gpu_image_load_word(command);
         }
         // Write two 16-bit pixels per 32-bit word

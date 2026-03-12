@@ -5,6 +5,8 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <limits>
 
 namespace {
@@ -211,6 +213,136 @@ void Spu::shutdown() {
 
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
 
+bool Spu::collect_voice_sample_bytes(int voice, std::vector<u8> &out,
+                                     std::string *error) const {
+  if (voice < 0 || voice >= NUM_VOICES) {
+    if (error != nullptr) {
+      *error = "Voice index must be between 0 and 23.";
+    }
+    return false;
+  }
+
+  const u32 base = static_cast<u32>(voice) * VOICE_REG_STRIDE;
+  u32 addr = (static_cast<u32>(regs_[(base + 0x6u) / 2u]) * 8u) & SPU_RAM_MASK;
+  out.clear();
+  out.reserve(16u * 128u);
+
+  static constexpr u32 kMaxBlocks = RAM_SIZE_BYTES / 16u;
+  for (u32 block = 0; block < kMaxBlocks; ++block) {
+    const u32 block_addr = addr & SPU_RAM_MASK;
+    for (u32 i = 0; i < 16u; ++i) {
+      out.push_back(spu_ram_[(block_addr + i) & SPU_RAM_MASK]);
+    }
+
+    const u8 flags = spu_ram_[(block_addr + 1u) & SPU_RAM_MASK];
+    if ((flags & 0x01u) != 0u) {
+      return true;
+    }
+    addr = (block_addr + 16u) & SPU_RAM_MASK;
+  }
+
+  out.clear();
+  if (error != nullptr) {
+    *error = "Voice sample never reached an ADPCM end block.";
+  }
+  return false;
+}
+
+bool Spu::validate_replacement_sample(const std::vector<u8> &sample,
+                                      std::string *error) const {
+  if (sample.empty()) {
+    if (error != nullptr) {
+      *error = "sound.ram is empty.";
+    }
+    return false;
+  }
+  if ((sample.size() % 16u) != 0u) {
+    if (error != nullptr) {
+      *error = "sound.ram must be a whole number of 16-byte PS1 ADPCM blocks.";
+    }
+    return false;
+  }
+  if (sample.size() < 16u) {
+    if (error != nullptr) {
+      *error = "sound.ram is too small to contain a valid ADPCM block.";
+    }
+    return false;
+  }
+
+  const u8 last_flags = sample[sample.size() - 15u];
+  if ((last_flags & 0x01u) == 0u) {
+    if (error != nullptr) {
+      *error = "sound.ram must end on an ADPCM block with the end flag set.";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool Spu::export_voice_sample_to_file(int voice, const std::string &path,
+                                      std::string *error) const {
+  std::vector<u8> sample;
+  if (!collect_voice_sample_bytes(voice, sample, error)) {
+    return false;
+  }
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    if (error != nullptr) {
+      *error = "Failed to create sound.ram.";
+    }
+    return false;
+  }
+
+  out.write(reinterpret_cast<const char *>(sample.data()),
+            static_cast<std::streamsize>(sample.size()));
+  if (!out) {
+    if (error != nullptr) {
+      *error = "Failed writing sound.ram.";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool Spu::load_replacement_sample_from_file(const std::string &path,
+                                            std::string *error) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) {
+    if (error != nullptr) {
+      *error = "sound.ram was not found.";
+    }
+    return false;
+  }
+
+  std::vector<u8> sample((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  if (!in.good() && !in.eof()) {
+    if (error != nullptr) {
+      *error = "Failed reading sound.ram.";
+    }
+    return false;
+  }
+  if (!validate_replacement_sample(sample, error)) {
+    return false;
+  }
+
+  replacement_sample_ = std::move(sample);
+  replacement_sample_enabled_ = true;
+  return true;
+}
+
+void Spu::clear_replacement_sample() {
+  replacement_sample_.clear();
+  replacement_sample_enabled_ = false;
+  for (VoiceState &vs : voices_) {
+    if (!vs.use_replacement_sample) {
+      continue;
+    }
+    vs = VoiceState{};
+  }
+}
+
 void Spu::reset() {
   const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
   if (audio_device_ != 0 && requested_samples != opened_audio_samples_) {
@@ -264,6 +396,8 @@ void Spu::reset() {
   host_silence_samples_.clear();
   capture_samples_.clear();
   cd_input_samples_.clear();
+  replacement_sample_.clear();
+  replacement_sample_enabled_ = false;
   cd_input_read_pos_ = 0;
   cd_last_sample_l_ = 0;
   cd_last_sample_r_ = 0;
@@ -929,12 +1063,18 @@ void Spu::key_on_voice(int voice) {
   vs = VoiceState{};
   vs.key_on = true;
   const u32 base = static_cast<u32>(voice) * VOICE_REG_STRIDE;
-  vs.addr =
-      (static_cast<u32>(regs_[(base + 0x6u) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
-  vs.repeat_addr =
-      (static_cast<u32>(regs_[(base + 0xEu) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
-  if (vs.repeat_addr == 0u) {
-    vs.repeat_addr = vs.addr;
+  if (replacement_sample_enabled_ && !replacement_sample_.empty()) {
+    vs.use_replacement_sample = true;
+    vs.addr = 0;
+    vs.repeat_addr = 0;
+  } else {
+    vs.addr =
+        (static_cast<u32>(regs_[(base + 0x6u) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
+    vs.repeat_addr =
+        (static_cast<u32>(regs_[(base + 0xEu) / 2u]) * 8u) & static_cast<u32>(SPU_RAM_MASK);
+    if (vs.repeat_addr == 0u) {
+      vs.repeat_addr = vs.addr;
+    }
   }
 
   const u16 adsr1 = regs_[(base + 0x8u) / 2u];
@@ -1334,11 +1474,30 @@ bool Spu::decode_adpcm_block(int voice) {
   static constexpr int kFilterB[5] = {0, 0, -52, -55, -60};
 
   VoiceState &vs = voices_[voice];
-  const u32 block_addr = vs.addr & SPU_RAM_MASK;
-  maybe_raise_irq9_for_ram_access(block_addr, 16);
+  u32 block_addr = vs.addr;
+  auto read_block_byte = [&](u32 addr) -> u8 {
+    if (vs.use_replacement_sample) {
+      if (replacement_sample_.empty() || addr >= replacement_sample_.size()) {
+        return 0;
+      }
+      return replacement_sample_[static_cast<size_t>(addr)];
+    }
+    const u32 ram_addr = addr & SPU_RAM_MASK;
+    return spu_ram_[ram_addr];
+  };
 
-  const u8 predict_shift = spu_ram_[block_addr & SPU_RAM_MASK];
-  const u8 flags = spu_ram_[(block_addr + 1u) & SPU_RAM_MASK];
+  if (vs.use_replacement_sample) {
+    if (replacement_sample_.empty() ||
+        (block_addr + 16u) > replacement_sample_.size()) {
+      return false;
+    }
+  } else {
+    block_addr &= SPU_RAM_MASK;
+    maybe_raise_irq9_for_ram_access(block_addr, 16);
+  }
+
+  const u8 predict_shift = read_block_byte(block_addr);
+  const u8 flags = read_block_byte(block_addr + 1u);
   vs.last_block_addr = block_addr;
   vs.last_adpcm_flags = flags;
 
@@ -1349,7 +1508,7 @@ bool Spu::decode_adpcm_block(int voice) {
 
   for (int i = 0; i < 28; ++i) {
     const u8 packed =
-        spu_ram_[(block_addr + 2u + static_cast<u32>(i >> 1)) & SPU_RAM_MASK];
+        read_block_byte(block_addr + 2u + static_cast<u32>(i >> 1));
     int nibble = ((i & 1) != 0) ? static_cast<int>(packed >> 4)
                                 : static_cast<int>(packed & 0x0Fu);
     if ((nibble & 0x8) != 0) {
@@ -1369,7 +1528,11 @@ bool Spu::decode_adpcm_block(int voice) {
   }
 
   vs.sample_index = 0;
-  vs.addr = (block_addr + 16u) & SPU_RAM_MASK;
+  if (vs.use_replacement_sample) {
+    vs.addr = block_addr + 16u;
+  } else {
+    vs.addr = (block_addr + 16u) & SPU_RAM_MASK;
+  }
 
   if ((flags & 0x04u) != 0u) {
     vs.repeat_addr = block_addr;

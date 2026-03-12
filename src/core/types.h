@@ -128,6 +128,11 @@ inline bool g_mdec_debug_disable_chroma = false;
 inline bool g_mdec_debug_disable_luma = false;
 inline bool g_mdec_debug_force_solid_output = false;
 inline bool g_mdec_debug_swap_input_halfwords = false;
+// Extra MDEC validation re-decodes and repacks every colored macroblock.
+// Keep it opt-in because it is expensive enough to impact FMV playback.
+inline bool g_mdec_debug_compare_macroblocks = false;
+// Upload probe hooks DMA, RAM, and GPU image-load paths. Keep it opt-in.
+inline bool g_mdec_debug_upload_probe = false;
 // Bitmask for colored 8x8 luma blocks inside a 16x16 macroblock:
 // bit0=Y1 (top-left), bit1=Y2 (top-right), bit2=Y3 (bottom-left), bit3=Y4 (bottom-right).
 inline u8 g_mdec_debug_color_block_mask = 0x0Fu;
