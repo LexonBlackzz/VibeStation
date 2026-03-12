@@ -11,6 +11,8 @@ namespace {
     constexpr u32 kRamWatchEnd = 0x00047A10u;
     constexpr u32 kRamWatchWord0 = 0x000479D0u;
     constexpr u32 kRamWatchLogLimit = 64u;
+    constexpr u32 kRr4SourceWatchStart = 0x001A8E40u;
+    constexpr u32 kRr4SourceWatchEnd = 0x001A8EC0u;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -499,6 +501,40 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
                          static_cast<unsigned>(entry.origin & 0x7Fu));
             } else {
                 LOG_WARN("BUS: low-stub W%u 0x%08X = 0x%08X pc=0x%08X",
+                         static_cast<unsigned>(size), addr, value, entry.pc);
+            }
+        }
+    }
+
+    if (g_cpu_deep_diagnostics && addr >= kRr4SourceWatchStart &&
+        addr < kRr4SourceWatchEnd) {
+        static u32 rr4_source_write_log_count = 0;
+        static bool rr4_source_context_logged = false;
+        if (!rr4_source_context_logged) {
+            rr4_source_context_logged = true;
+            LOG_WARN(
+                "BUS: rr4-source context sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X",
+                cpu_.reg(29), cpu_.reg(31), cpu_.reg(4), cpu_.reg(5),
+                cpu_.reg(6), cpu_.reg(7), cpu_.reg(16), cpu_.reg(17),
+                cpu_.reg(18), cpu_.reg(19), cpu_.reg(8), cpu_.reg(9),
+                cpu_.reg(10), cpu_.reg(11));
+            const u32 pc = cpu_.pc() & 0x1FFFFFFFu;
+            LOG_WARN(
+                "BUS: rr4-source code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+                (pc - 8u) & 0x1FFFFFFFu, read32(pc - 8u),
+                (pc - 4u) & 0x1FFFFFFFu, read32(pc - 4u),
+                pc & 0x1FFFFFFFu, read32(pc),
+                (pc + 4u) & 0x1FFFFFFFu, read32(pc + 4u),
+                (pc + 8u) & 0x1FFFFFFFu, read32(pc + 8u));
+        }
+        if (rr4_source_write_log_count < 64u) {
+            ++rr4_source_write_log_count;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: rr4-source W%u 0x%08X = 0x%08X <- DMA%u",
+                         static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: rr4-source W%u 0x%08X = 0x%08X pc=0x%08X",
                          static_cast<unsigned>(size), addr, value, entry.pc);
             }
         }
@@ -1734,6 +1770,16 @@ u16 System::read16(u32 addr) {
             note_sio_io(phys);
             return sio_.read16(io - 0x040);
         }
+        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
+            static u32 io105x_read16_count = 0;
+            if (io105x_read16_count < 8u) {
+                ++io105x_read16_count;
+                LOG_WARN(
+                    "BUS: io105x read16 phys=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+                    phys, cpu_.pc(), cpu_.reg(29), cpu_.reg(31), cpu_.reg(4),
+                    cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
+            }
+        }
         // CDROM
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
@@ -2041,6 +2087,16 @@ void System::write16(u32 addr, u16 val) {
             note_sio_io(phys);
             sio_.write16(io - 0x040, val);
             return;
+        }
+        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
+            static u32 io105x_write16_count = 0;
+            if (io105x_write16_count < 8u) {
+                ++io105x_write16_count;
+                LOG_WARN(
+                    "BUS: io105x write16 phys=0x%08X val=0x%04X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+                    phys, val, cpu_.pc(), cpu_.reg(29), cpu_.reg(31),
+                    cpu_.reg(4), cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
+            }
         }
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
