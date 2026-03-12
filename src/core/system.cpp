@@ -361,6 +361,7 @@ void System::reset() {
     mdec_command_shadow_ = 0;
     mdec_command_shadow_mask_ = 0;
     mdec_control_shadow_ = 0;
+    mdec_control_shadow_mask_ = 0;
     gpu_gp0_shadow_ = 0;
     gpu_gp0_shadow_mask_ = 0;
     gpu_gp1_shadow_ = 0;
@@ -1765,15 +1766,26 @@ void System::write8(u32 addr, u8 val) {
         if (io >= 0x820 && io < 0x828) {
             const u32 reg = io & ~0x3u;
             const u32 shift = (io & 0x3u) * 8u;
-            const u32 value32 = static_cast<u32>(val) << shift;
-            mdec_command_shadow_ = 0;
-            mdec_command_shadow_mask_ = 0;
-            mdec_control_shadow_ = 0;
+            const u32 mask = 0xFFu << shift;
             if (reg == 0x820) {
-                mdec_.write_command(value32);
+                mdec_command_shadow_ =
+                    (mdec_command_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_command_shadow_mask_ |= mask;
+                if (mdec_command_shadow_mask_ == 0xFFFFFFFFu) {
+                    mdec_.write_command(mdec_command_shadow_);
+                    mdec_command_shadow_ = 0;
+                    mdec_command_shadow_mask_ = 0;
+                }
             }
             if (reg == 0x824) {
-                mdec_.write_control(value32);
+                mdec_control_shadow_ =
+                    (mdec_control_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_control_shadow_mask_ |= mask;
+                if (mdec_control_shadow_mask_ == 0xFFFFFFFFu) {
+                    mdec_.write_control(mdec_control_shadow_);
+                    mdec_control_shadow_ = 0;
+                    mdec_control_shadow_mask_ = 0;
+                }
             }
             return;
         }
@@ -1884,15 +1896,26 @@ void System::write16(u32 addr, u16 val) {
         if (io >= 0x820 && io < 0x828) {
             const u32 reg = io & ~0x3u;
             const u32 shift = (io & 0x2u) * 8u;
-            const u32 value32 = static_cast<u32>(val) << shift;
-            mdec_command_shadow_ = 0;
-            mdec_command_shadow_mask_ = 0;
-            mdec_control_shadow_ = 0;
+            const u32 mask = 0xFFFFu << shift;
             if (reg == 0x820) {
-                mdec_.write_command(value32);
+                mdec_command_shadow_ =
+                    (mdec_command_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_command_shadow_mask_ |= mask;
+                if (mdec_command_shadow_mask_ == 0xFFFFFFFFu) {
+                    mdec_.write_command(mdec_command_shadow_);
+                    mdec_command_shadow_ = 0;
+                    mdec_command_shadow_mask_ = 0;
+                }
             }
             if (reg == 0x824) {
-                mdec_.write_control(value32);
+                mdec_control_shadow_ =
+                    (mdec_control_shadow_ & ~mask) | (static_cast<u32>(val) << shift);
+                mdec_control_shadow_mask_ |= mask;
+                if (mdec_control_shadow_mask_ == 0xFFFFFFFFu) {
+                    mdec_.write_control(mdec_control_shadow_);
+                    mdec_control_shadow_ = 0;
+                    mdec_control_shadow_mask_ = 0;
+                }
             }
             return;
         }
@@ -2007,7 +2030,8 @@ void System::write32(u32 addr, u32 val) {
             return;
         }
         if (io == 0x824) {
-            mdec_control_shadow_ = ((val & 0x80000000u) != 0) ? 0u : val;
+            mdec_control_shadow_ = 0;
+            mdec_control_shadow_mask_ = 0;
             mdec_.write_control(val);
             return;
         }

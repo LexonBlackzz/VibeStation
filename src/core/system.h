@@ -618,6 +618,7 @@ private:
   u32 mdec_command_shadow_ = 0;
   u32 mdec_command_shadow_mask_ = 0;
   u32 mdec_control_shadow_ = 0;
+  u32 mdec_control_shadow_mask_ = 0;
   u32 gpu_gp0_shadow_ = 0;
   u32 gpu_gp0_shadow_mask_ = 0;
   u32 gpu_gp1_shadow_ = 0;
