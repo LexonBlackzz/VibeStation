@@ -245,6 +245,8 @@ private:
 	void save_persistent_config() const;
 	void try_autoload_bios_from_config();
 	double current_speed_override() const;
+	double current_effective_speed_multiplier() const;
+	double current_emulation_slowdown_percent() const;
 	void apply_speed_override();
 	void sync_discord_presence_config();
 	void update_discord_presence();

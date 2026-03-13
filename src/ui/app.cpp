@@ -723,11 +723,18 @@ namespace {
     }
 
     int normalize_turbo_speed_percent(int percent) {
+        if (percent <= 0) {
+            return 0;
+        }
         return (percent >= 400) ? 400 : 200;
     }
 
     double turbo_speed_multiplier_from_percent(int percent) {
-        return static_cast<double>(normalize_turbo_speed_percent(percent)) / 100.0;
+        const int normalized = normalize_turbo_speed_percent(percent);
+        if (normalized == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(normalized) / 100.0;
     }
 
     int normalize_slowdown_speed_percent(int percent) {
@@ -1344,6 +1351,46 @@ double App::current_speed_override() const {
     return 1.0;
 }
 
+double App::current_effective_speed_multiplier() const {
+    if (!has_started_emulation_ || system_ == nullptr) {
+        return 0.0;
+    }
+
+    const double target_fps = system_->target_fps();
+    const double core_frame_ms = std::max(0.0, runtime_snapshot_.core_frame_ms);
+    if (target_fps <= 0.0 || core_frame_ms <= 0.0) {
+        return 0.0;
+    }
+
+    const double baseline_frame_budget_ms = 1000.0 / target_fps;
+    if (baseline_frame_budget_ms <= 0.0) {
+        return 0.0;
+    }
+    return baseline_frame_budget_ms / core_frame_ms;
+}
+
+double App::current_emulation_slowdown_percent() const {
+    if (!has_started_emulation_ || system_ == nullptr) {
+        return 0.0;
+    }
+
+    const double target_fps = system_->target_fps();
+    const double raw_speed = emu_runner_.speed();
+    if (target_fps <= 0.0 || raw_speed <= 0.0) {
+        return 0.0;
+    }
+    const double speed = std::max(0.25, raw_speed);
+
+    const double requested_frame_budget_ms = 1000.0 / (target_fps * speed);
+    const double core_frame_ms = std::max(0.0, runtime_snapshot_.core_frame_ms);
+    if (requested_frame_budget_ms <= 0.0 || core_frame_ms <= requested_frame_budget_ms) {
+        return 0.0;
+    }
+
+    const double sustained_speed_ratio = requested_frame_budget_ms / core_frame_ms;
+    return std::clamp((1.0 - sustained_speed_ratio) * 100.0, 0.0, 100.0);
+}
+
 void App::apply_speed_override() {
     emu_runner_.set_speed(current_speed_override());
 }
@@ -1849,15 +1896,36 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     dl->AddRect(p0, p1, IM_COL32(140, 140, 170, 220), 6.0f);
 
     const auto& stats = runtime_snapshot_.profiling;
+    const double slowdown_percent = current_emulation_slowdown_percent();
+    const bool unlimited_turbo_active =
+        turbo_hold_active_ && config_turbo_speed_percent_ <= 0;
+    const double effective_speed_multiplier = current_effective_speed_multiplier();
     char header[160];
     std::snprintf(header, sizeof(header),
         "CPU %.2f ms   GPU %.2f ms   Core %.2f ms   FPS %.1f",
         stats.cpu_ms, stats.gpu_ms, runtime_snapshot_.core_frame_ms, fps_);
     dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 7.0f), IM_COL32(235, 235, 245, 255), header);
 
+    char status_text[64];
+    ImU32 status_color = IM_COL32(150, 220, 150, 255);
+    if (unlimited_turbo_active) {
+        std::snprintf(status_text, sizeof(status_text), "Turbo x%.2f",
+            effective_speed_multiplier);
+        status_color = IM_COL32(245, 205, 90, 255);
+    }
+    else {
+        std::snprintf(status_text, sizeof(status_text), "Slowdown %.1f%%",
+            slowdown_percent);
+        status_color =
+            (slowdown_percent >= 5.0)
+            ? IM_COL32(240, 110, 110, 255)
+            : IM_COL32(150, 220, 150, 255);
+    }
+    dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 23.0f), status_color, status_text);
+
     const float gx0 = p0.x + 10.0f;
     const float gx1 = p1.x - 10.0f;
-    const float gy0 = p0.y + 28.0f;
+    const float gy0 = p0.y + 42.0f;
     const float gy1 = p1.y - 10.0f;
     const float gw = gx1 - gx0;
     const float gh = gy1 - gy0;
@@ -2528,13 +2596,24 @@ void App::panel_settings() {
                 ImGui::Separator();
                 ImGui::Text("Performance");
                 ImGui::Text("Emulation pacing: fixed 60 Hz");
-                const char* turbo_modes[] = { "200%", "400%" };
-                int turbo_mode_index = (config_turbo_speed_percent_ >= 400) ? 1 : 0;
+                const char* turbo_modes[] = { "200%", "400%", "Unlimited" };
+                int turbo_mode_index = 0;
+                if (config_turbo_speed_percent_ <= 0) {
+                    turbo_mode_index = 2;
+                }
+                else if (config_turbo_speed_percent_ >= 400) {
+                    turbo_mode_index = 1;
+                }
                 if (ImGui::Combo("Turbo Speed (Hold Backspace)", &turbo_mode_index,
                     turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
-                    config_turbo_speed_percent_ = (turbo_mode_index == 1) ? 400 : 200;
+                    config_turbo_speed_percent_ =
+                        (turbo_mode_index == 2) ? 0 : ((turbo_mode_index == 1) ? 400 : 200);
                     apply_speed_override();
                     save_persistent_config();
+                }
+                if (config_turbo_speed_percent_ <= 0) {
+                    ImGui::TextDisabled(
+                        "Unlimited turbo removes frame pacing and skips turbo audio while held.");
                 }
                 int slowdown_speed_percent = config_slowdown_speed_percent_;
                 if (ImGui::SliderInt("Slowdown Speed (Hold Right Shift)",
@@ -4791,7 +4870,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5a-h1.1");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.6a");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();

@@ -128,10 +128,11 @@ void EmuRunner::pause_and_wait_idle() {
 }
 
 void EmuRunner::set_speed(double speed) {
-    const double clamped = std::max(0.25, std::min(speed, 4.0));
+    const bool unlimited = speed <= 0.0;
+    const double clamped = unlimited ? 0.0 : std::max(0.25, std::min(speed, 4.0));
     speed_.store(clamped, std::memory_order_release);
     if (system_ != nullptr) {
-        system_->set_audio_output_speed(clamped);
+        system_->set_audio_output_speed(unlimited ? 1.0 : clamped);
     }
 }
 
@@ -403,7 +404,14 @@ void EmuRunner::worker_main() {
 
         while (running_.load(std::memory_order_acquire) &&
             !stop_requested_.load(std::memory_order_acquire)) {
-            const double speed = std::max(0.25, speed_.load(std::memory_order_acquire));
+            const double raw_speed = speed_.load(std::memory_order_acquire);
+            if (raw_speed <= 0.0) {
+                run_one_frame(true, true, false);
+                next_tick = steady_clock::now();
+                continue;
+            }
+
+            const double speed = std::max(0.25, raw_speed);
             const auto frame_period = std::chrono::duration_cast<steady_clock::duration>(
                 std::chrono::duration<double>((1.0 / system_->target_fps()) / speed));
             const auto now = steady_clock::now();
