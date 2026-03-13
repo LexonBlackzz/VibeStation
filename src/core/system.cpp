@@ -1041,11 +1041,12 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
 
-        // HBlank-sourced timer events still occur at scanline boundaries.
+        // Advance timers by scanline CPU cycles, then apply HBlank edge events.
         std::chrono::high_resolution_clock::time_point start_timers{};
         if (profile_detailed) {
             start_timers = std::chrono::high_resolution_clock::now();
         }
+        timers_.tick(cycles_this_scanline);
         timers_.hblank_pulse();
         if (profile_detailed) {
             const auto end_timers = std::chrono::high_resolution_clock::now();
