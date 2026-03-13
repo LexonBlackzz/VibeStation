@@ -10,7 +10,7 @@ Graphics/VRAM ✅⚠️
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
-MDEC 🚩  
+MDEC ✅(For Gran Turismo 2) 🚩 (For everything else)  
 Real-time corrupter/BIOS corruption ✅   
 Memory Cards ✅
 
