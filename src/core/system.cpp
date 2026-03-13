@@ -994,6 +994,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 const u32 consumed = cpu_.step();
                 spent_in_slice += consumed;
                 frame_cycles_ += consumed;
+                // Root counters are visible to the CPU mid-scanline, so keep
+                // them advancing with CPU execution rather than only once per
+                // scanline. HBlank/VBlank sourced ticks still arrive from the
+                // scanline events below.
+                timers_.tick(consumed);
                 if (aggressive_fast_mode) {
                     sio_slice_cycles += consumed;
                 }
@@ -1031,13 +1036,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
 
-        // Batch devices that already accept cycle counts to reduce per-cycle call
-        // overhead.
+        // HBlank-sourced timer events still occur at scanline boundaries.
         std::chrono::high_resolution_clock::time_point start_timers{};
         if (profile_detailed) {
             start_timers = std::chrono::high_resolution_clock::now();
         }
-        timers_.tick(cycles_this_scanline);
         timers_.hblank_pulse();
         if (profile_detailed) {
             const auto end_timers = std::chrono::high_resolution_clock::now();
