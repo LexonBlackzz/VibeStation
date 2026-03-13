@@ -279,10 +279,49 @@ bool Spu::validate_replacement_sample(const std::vector<u8> &sample,
   return true;
 }
 
+bool Spu::build_combined_voice_sample(const std::vector<int> &voices,
+                                      std::vector<u8> &out,
+                                      std::string *error) const {
+  if (voices.empty()) {
+    if (error != nullptr) {
+      *error = "Select at least one SPU voice.";
+    }
+    return false;
+  }
+
+  out.clear();
+  for (size_t i = 0; i < voices.size(); ++i) {
+    std::vector<u8> sample;
+    if (!collect_voice_sample_bytes(voices[i], sample, error)) {
+      return false;
+    }
+    if (sample.size() < ADPCM_BLOCK_BYTES) {
+      if (error != nullptr) {
+        *error = "Voice sample is too small to export.";
+      }
+      return false;
+    }
+
+    out.insert(out.end(), sample.begin(), sample.end());
+    if (i + 1u < voices.size()) {
+      const size_t terminal_flag_index = out.size() - (ADPCM_BLOCK_BYTES - 1u);
+      out[terminal_flag_index] = static_cast<u8>(out[terminal_flag_index] & ~0x03u);
+    }
+  }
+
+  return validate_replacement_sample(out, error);
+}
+
 bool Spu::export_voice_sample_to_file(int voice, const std::string &path,
                                       std::string *error) const {
+  return export_voice_samples_to_file(std::vector<int>{voice}, path, error);
+}
+
+bool Spu::export_voice_samples_to_file(const std::vector<int> &voices,
+                                       const std::string &path,
+                                       std::string *error) const {
   std::vector<u8> sample;
-  if (!collect_voice_sample_bytes(voice, sample, error)) {
+  if (!build_combined_voice_sample(voices, sample, error)) {
     return false;
   }
 
@@ -343,6 +382,13 @@ void Spu::clear_replacement_sample() {
   }
 }
 
+void Spu::set_force_reverb(bool enabled) {
+  force_reverb_enabled_.store(enabled, std::memory_order_release);
+  if (!enabled) {
+    reset_forced_reverb_state();
+  }
+}
+
 void Spu::reset() {
   const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
   if (audio_device_ != 0 && requested_samples != opened_audio_samples_) {
@@ -398,6 +444,7 @@ void Spu::reset() {
   cd_input_samples_.clear();
   replacement_sample_.clear();
   replacement_sample_enabled_ = false;
+  reset_forced_reverb_state();
   cd_input_read_pos_ = 0;
   cd_last_sample_l_ = 0;
   cd_last_sample_r_ = 0;
@@ -434,6 +481,36 @@ void Spu::reset() {
   has_last_kon_write_sample_ = false;
   last_koff_write_sample_ = 0;
   has_last_koff_write_sample_ = false;
+}
+
+void Spu::reset_forced_reverb_state() {
+  force_reverb_delay_l_.fill(0.0f);
+  force_reverb_delay_r_.fill(0.0f);
+  force_reverb_delay_pos_ = 0;
+}
+
+void Spu::apply_forced_reverb_fallback(float send_l, float send_r, float &wet_l,
+                                       float &wet_r) {
+  const size_t main_index = force_reverb_delay_pos_;
+  const size_t early_index =
+      (main_index + FORCE_REVERB_DELAY_SAMPLES - FORCE_REVERB_EARLY_TAP_SAMPLES) %
+      FORCE_REVERB_DELAY_SAMPLES;
+
+  const float main_l = force_reverb_delay_l_[main_index];
+  const float main_r = force_reverb_delay_r_[main_index];
+  const float early_l = force_reverb_delay_l_[early_index];
+  const float early_r = force_reverb_delay_r_[early_index];
+
+  wet_l += (main_l * 0.42f) + (early_l * 0.24f) + (main_r * 0.14f);
+  wet_r += (main_r * 0.42f) + (early_r * 0.24f) + (main_l * 0.14f);
+
+  force_reverb_delay_l_[main_index] = std::clamp(
+      (send_l * 0.40f) + (main_l * 0.48f) + (early_l * 0.18f) + (main_r * 0.10f),
+      -1.0f, 1.0f);
+  force_reverb_delay_r_[main_index] = std::clamp(
+      (send_r * 0.40f) + (main_r * 0.48f) + (early_r * 0.18f) + (main_l * 0.10f),
+      -1.0f, 1.0f);
+  force_reverb_delay_pos_ = (main_index + 1u) % FORCE_REVERB_DELAY_SAMPLES;
 }
 
 void Spu::corrupt_ram_byte(u32 offset, u8 value) {
@@ -2235,6 +2312,18 @@ void Spu::tick(u32 cycles) {
   const u16 spucnt_eff = spucnt_effective();
   const bool enabled = (spucnt_eff & 0x8000u) != 0u;
   const bool muted = (spucnt_eff & 0x4000u) == 0u;
+  const bool force_reverb = force_reverb_enabled_.load(std::memory_order_acquire);
+  const bool native_reverb_master = (spucnt_eff & 0x0080u) != 0u;
+  const bool native_reverb_configured =
+      audio_diag_.saw_reverb_config_write || reverb_on_mask_ != 0u ||
+      reverb_depth_l_ != 0 || reverb_depth_r_ != 0 || reverb_base_addr_ != 0u;
+  const bool force_reverb_send =
+      force_reverb && (!native_reverb_master || reverb_on_mask_ == 0u);
+  const bool force_reverb_fallback =
+      force_reverb && !native_reverb_configured;
+  const u16 reverb_spucnt_eff = force_reverb_send
+      ? static_cast<u16>(spucnt_eff | 0x0080u | 0x0004u)
+      : spucnt_eff;
 
   const size_t out_samples = static_cast<size_t>(samples_to_generate) * 2u;
   mix_buffer_.resize(out_samples);
@@ -2258,7 +2347,7 @@ void Spu::tick(u32 cycles) {
 
   const bool track_sample_diag = g_spu_advanced_sound_status;
   audio_diag_.gaussian_active = true;
-  audio_diag_.reverb_enabled = (spucnt_eff & 0x0080u) != 0u;
+  audio_diag_.reverb_enabled = native_reverb_master || force_reverb;
   const size_t xa_prefill_frames = static_cast<size_t>(std::ceil(
       static_cast<double>(SAMPLE_RATE) * clamp_xa_buffer_seconds()));
   const size_t xa_low_frames =
@@ -2352,7 +2441,7 @@ void Spu::tick(u32 cycles) {
 
       dry_l += out_l;
       dry_r += out_r;
-      if ((reverb_on_mask_ & (1u << v)) != 0u) {
+      if ((reverb_on_mask_ & (1u << v)) != 0u || force_reverb_send) {
         rev_send_l += out_l;
         rev_send_r += out_r;
       }
@@ -2495,7 +2584,7 @@ void Spu::tick(u32 cycles) {
       dry_l += cd_mix_l;
       dry_r += cd_mix_r;
 
-      if ((spucnt_eff & 0x0004u) != 0u) {
+      if ((spucnt_eff & 0x0004u) != 0u || force_reverb_send) {
         rev_send_l += cd_mix_l;
         rev_send_r += cd_mix_r;
       }
@@ -2512,11 +2601,15 @@ void Spu::tick(u32 cycles) {
     float wet_l = 0.0f;
     float wet_r = 0.0f;
     if (!g_low_spec_mode) {
-      const std::array<float, 2> wet = step_reverb(rev_send_l, rev_send_r, spucnt_eff);
+      const std::array<float, 2> wet =
+          step_reverb(rev_send_l, rev_send_r, reverb_spucnt_eff);
       const float reverb_mix =
           static_cast<float>(reverb_mix_multiplier_.load(std::memory_order_acquire));
       wet_l = wet[0] * reverb_mix;
       wet_r = wet[1] * reverb_mix;
+      if (force_reverb_fallback) {
+        apply_forced_reverb_fallback(dry_l, dry_r, wet_l, wet_r);
+      }
     }
     if (track_sample_diag) {
       audio_diag_.peak_wet_l = std::max(audio_diag_.peak_wet_l, std::abs(wet_l));

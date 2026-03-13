@@ -50,6 +50,22 @@ constexpr std::array<s16, 64> kDefaultScaleTable = {
     static_cast<s16>(0x471C), static_cast<s16>(0xE707),
 };
 
+inline int sign_extend_9(int value) {
+  int signed9 = value & 0x1FF;
+  if ((signed9 & 0x100) != 0) {
+    signed9 -= 0x200;
+  }
+  return signed9;
+}
+
+inline int clamp_signed_sample(int value) {
+  return std::clamp(sign_extend_9(value), -128, 127);
+}
+
+inline bool fmv_diagnostics_enabled() {
+  return g_log_fmv_diagnostics;
+}
+
 } // namespace
 
 void Mdec::refresh_debug_quant_stats() {
@@ -131,11 +147,13 @@ void Mdec::reset() {
 void Mdec::begin_command(u32 value) {
   command_word_ = value;
   command_id_ = static_cast<u8>((value >> 29) & 0x7u);
-  const u32 hist_index =
-      debug_stats_.command_history_count % static_cast<u32>(DebugStats::kCommandHistory);
-  debug_stats_.command_history_words[hist_index] = value;
-  debug_stats_.command_history_ids[hist_index] = command_id_;
-  ++debug_stats_.command_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 hist_index =
+        debug_stats_.command_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+    debug_stats_.command_history_words[hist_index] = value;
+    debug_stats_.command_history_ids[hist_index] = command_id_;
+    ++debug_stats_.command_history_count;
+  }
   status_command_bits_ = static_cast<u8>((value >> 25) & 0x0Fu);
   output_depth_ = static_cast<u8>((value >> 27) & 0x3u);
   output_signed_ = (value & (1u << 26)) != 0;
@@ -158,7 +176,9 @@ void Mdec::begin_command(u32 value) {
     command_busy_ = false;
     break;
   case 1: // Decode macroblocks
-    ++debug_stats_.decode_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.decode_commands;
+    }
     in_words_remaining_ = (value & 0xFFFFu);
     in_unlimited_ = false;
     command_busy_ = true;
@@ -168,14 +188,18 @@ void Mdec::begin_command(u32 value) {
     output_pack_bytes_ = 0;
     break;
   case 2: // Set quant table
-    ++debug_stats_.set_quant_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.set_quant_commands;
+    }
     in_words_remaining_ = (value & 0x1u) ? 32u : 16u;
     in_unlimited_ = false;
     command_busy_ = true;
     expect_command_word_ = false;
     break;
   case 3: // Set scale table
-    ++debug_stats_.set_scale_commands;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.set_scale_commands;
+    }
     in_words_remaining_ = 32u;
     in_unlimited_ = false;
     command_busy_ = true;
@@ -195,13 +219,15 @@ void Mdec::begin_command(u32 value) {
 }
 
 void Mdec::write_command(u32 value) {
-  const u32 write_hist_index =
-      debug_stats_.write_history_count % static_cast<u32>(DebugStats::kWriteHistory);
-  debug_stats_.write_history_words[write_hist_index] = value;
-  debug_stats_.write_history_expect_command[write_hist_index] =
-      expect_command_word_ ? 1u : 0u;
-  debug_stats_.write_history_active_command[write_hist_index] = command_id_;
-  ++debug_stats_.write_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 write_hist_index =
+        debug_stats_.write_history_count % static_cast<u32>(DebugStats::kWriteHistory);
+    debug_stats_.write_history_words[write_hist_index] = value;
+    debug_stats_.write_history_expect_command[write_hist_index] =
+        expect_command_word_ ? 1u : 0u;
+    debug_stats_.write_history_active_command[write_hist_index] = command_id_;
+    ++debug_stats_.write_history_count;
+  }
 
   if (expect_command_word_) {
     begin_command(value);
@@ -236,10 +262,12 @@ void Mdec::write_command(u32 value) {
 }
 
 void Mdec::write_control(u32 value) {
-  const u32 control_hist_index =
-      debug_stats_.control_history_count % static_cast<u32>(DebugStats::kCommandHistory);
-  debug_stats_.control_history_words[control_hist_index] = value;
-  ++debug_stats_.control_history_count;
+  if (fmv_diagnostics_enabled()) {
+    const u32 control_hist_index =
+        debug_stats_.control_history_count % static_cast<u32>(DebugStats::kCommandHistory);
+    debug_stats_.control_history_words[control_hist_index] = value;
+    ++debug_stats_.control_history_count;
+  }
   if (value & 0x80000000u) {
     soft_reset_state();
     // Reset is edge-triggered, but the same write still carries the DMA enable bits.
@@ -407,6 +435,10 @@ void Mdec::execute_decode() {
           in_halfword_fifo_.pop_front();
       }
       if (in_halfword_fifo_.empty()) break;
+      size_t available_halfwords = 0;
+      if (!scan_macroblock(6u, available_halfwords)) {
+        break;
+      }
 
       Block cr{}, cb{}, y1{}, y2{}, y3{}, y4{};
       size_t cursor = 0;
@@ -446,7 +478,7 @@ void Mdec::execute_decode() {
       }
 
       emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
-      while (cursor-- > 0) {
+      while (available_halfwords-- > 0) {
         in_halfword_fifo_.pop_front();
       }
     }
@@ -456,6 +488,10 @@ void Mdec::execute_decode() {
           in_halfword_fifo_.pop_front();
       }
       if (in_halfword_fifo_.empty()) break;
+      size_t available_halfwords = 0;
+      if (!scan_macroblock(1u, available_halfwords)) {
+        break;
+      }
 
       Block y{};
       size_t cursor = 0;
@@ -464,11 +500,47 @@ void Mdec::execute_decode() {
         break;
       }
       emit_monochrome_macroblock(y);
-      while (cursor-- > 0) {
+      while (available_halfwords-- > 0) {
         in_halfword_fifo_.pop_front();
       }
     }
   }
+}
+
+bool Mdec::scan_block(size_t &cursor) const {
+  u16 first = 0;
+  for (;;) {
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false;
+    }
+    first = in_halfword_fifo_[cursor++];
+    if (first != 0xFE00u) {
+      break;
+    }
+  }
+
+  int k = 0;
+  while (true) {
+    if (cursor >= in_halfword_fifo_.size()) {
+      return false;
+    }
+    const u16 word = in_halfword_fifo_[cursor++];
+    k += static_cast<int>((word >> 10) & 0x3Fu) + 1;
+    if (k >= 63) {
+      return true;
+    }
+  }
+}
+
+bool Mdec::scan_macroblock(size_t block_count, size_t &consumed_halfwords) const {
+  size_t cursor = 0;
+  for (size_t block = 0; block < block_count; ++block) {
+    if (!scan_block(cursor)) {
+      return false;
+    }
+  }
+  consumed_halfwords = cursor;
+  return true;
 }
 
 bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
@@ -484,7 +556,9 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
     if (first != 0xFE00u) {
       break;
     }
-    ++debug_stats_.eob_markers;
+    if (fmv_diagnostics_enabled()) {
+      ++debug_stats_.eob_markers;
+    }
   }
 
   const int q_scale = static_cast<int>((first >> 10) & 0x3Fu);
@@ -539,26 +613,21 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
 
   Block spatial{};
   idct(block, spatial);
-  for (int &sample : spatial) {
-    int signed9 = sample & 0x1FF;
-    if ((signed9 & 0x100) != 0) {
-      signed9 -= 0x200;
-    }
-    sample = std::clamp(signed9, -128, 127);
-  }
   block = spatial;
 
-  ++debug_stats_.blocks_decoded;
-  if (!has_nonzero_ac) {
-    ++debug_stats_.dc_only_blocks;
+  if (fmv_diagnostics_enabled()) {
+    ++debug_stats_.blocks_decoded;
+    if (!has_nonzero_ac) {
+      ++debug_stats_.dc_only_blocks;
+    }
+    if (q_scale == 0) {
+      ++debug_stats_.qscale_zero_blocks;
+    }
+    debug_stats_.qscale_sum += static_cast<u64>(q_scale);
+    debug_stats_.qscale_max = std::max<u32>(debug_stats_.qscale_max,
+                                            static_cast<u32>(q_scale));
+    debug_stats_.nonzero_coeff_count += static_cast<u64>(nonzero_coeffs);
   }
-  if (q_scale == 0) {
-    ++debug_stats_.qscale_zero_blocks;
-  }
-  debug_stats_.qscale_sum += static_cast<u64>(q_scale);
-  debug_stats_.qscale_max = std::max<u32>(debug_stats_.qscale_max,
-                                          static_cast<u32>(q_scale));
-  debug_stats_.nonzero_coeff_count += static_cast<u64>(nonzero_coeffs);
   return true;
 }
 
@@ -585,11 +654,7 @@ void Mdec::idct(const Block &coeffs, Block &pixels) const {
   for (u32 x = 0; x < 8u; ++x) {
     for (u32 y = 0; y < 8u; ++y) {
       const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
-      int signed9 = sum & 0x1FF;
-      if ((signed9 & 0x100) != 0) {
-        signed9 -= 0x200;
-      }
-      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+      pixels[x * 8u + y] = clamp_signed_sample(sum);
     }
   }
 }
@@ -818,11 +883,7 @@ void Mdec::idct_variant(const Block &coeffs, Block &pixels,
   for (u32 x = 0; x < 8u; ++x) {
     for (u32 y = 0; y < 8u; ++y) {
       const int sum = idct_row(&temp[x * 8u], &scale_table_[y * 8u]);
-      int signed9 = sum & 0x1FF;
-      if ((signed9 & 0x100) != 0) {
-        signed9 -= 0x200;
-      }
-      pixels[x * 8u + y] = std::clamp(signed9, -128, 127);
+      pixels[x * 8u + y] = clamp_signed_sample(sum);
     }
   }
 }
@@ -939,52 +1000,40 @@ u16 Mdec::encode_rgb15(int r, int g, int b) const {
 void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
                                    const Block &y1, const Block &y2,
                                    const Block &y3, const Block &y4) {
-  auto sign_extend_9 = [](int value) {
-    int signed9 = value & 0x1FF;
-    if ((signed9 & 0x100) != 0) {
-      signed9 -= 0x200;
-    }
-    return signed9;
-  };
-
   const std::array<const Block *, 4> y_blocks = {&y1, &y2, &y3, &y4};
+  const std::array<bool, 4> block_enabled = {
+      (g_mdec_debug_color_block_mask & 0x1u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x2u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x4u) != 0u,
+      (g_mdec_debug_color_block_mask & 0x8u) != 0u,
+  };
+  const bool disable_luma = g_mdec_debug_disable_luma;
+  const bool disable_chroma = g_mdec_debug_disable_chroma;
   output_word_block_id_ = 4;
   current_output_macroblock_seq_ = output_macroblock_seq_++;
-
-  auto pixel_rgb = [&](int px, int py) {
-    const int block = ((py >> 3) << 1) | (px >> 3);
-    const Block &y_block = *y_blocks[static_cast<size_t>(block)];
-    const bool block_enabled =
-        ((g_mdec_debug_color_block_mask >> static_cast<u32>(block)) & 0x1u) != 0u;
-    const int local_x = px & 7;
-    const int local_y = py & 7;
-    const int yy =
-        (!block_enabled || g_mdec_debug_disable_luma) ? 0 : y_block[local_y * 8 + local_x];
-    const int cx = px >> 1;
-    const int cy = py >> 1;
-    const int crv =
-        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cr[cy * 8 + cx];
-    const int cbv =
-        (!block_enabled || g_mdec_debug_disable_chroma) ? 0 : cb[cy * 8 + cx];
-
-    const int r =
-        std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)), -128, 127);
-    const int g = std::clamp(
-        sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
-                              ((-183 * crv) & ~0x07) + 0x80) >> 8)),
-        -128, 127);
-    const int b =
-        std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)), -128, 127);
-    return std::array<int, 3>{r, g, b};
-  };
 
   if (out_depth_latched_ == 3) {
     bool have_low = false;
     u16 low_pixel = 0;
     for (int py = 0; py < 16; ++py) {
+      const int block_row = (py >> 3) << 1;
+      const int local_y = py & 7;
+      const int chroma_row = (py >> 1) * 8;
       for (int px = 0; px < 16; ++px) {
-        const auto rgb = pixel_rgb(px, py);
-        const u16 rgb15 = encode_rgb15(rgb[0], rgb[1], rgb[2]);
+        const int block = block_row | (px >> 3);
+        const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+        const bool enabled = block_enabled[static_cast<size_t>(block)];
+        const int local_x = px & 7;
+        const int yy =
+            (!enabled || disable_luma) ? 0 : y_block[local_y * 8 + local_x];
+        const int chroma_index = chroma_row + (px >> 1);
+        const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
+        const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
+        const int r = clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8));
+        const int g = clamp_signed_sample(
+            yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8));
+        const int b = clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8));
+        const u16 rgb15 = encode_rgb15(r, g, b);
         if (!have_low) {
           low_pixel = rgb15;
           have_low = true;
@@ -999,11 +1048,25 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
   }
 
   for (int py = 0; py < 16; ++py) {
+    const int block_row = (py >> 3) << 1;
+    const int local_y = py & 7;
+    const int chroma_row = (py >> 1) * 8;
     for (int px = 0; px < 16; ++px) {
-      const auto rgb = pixel_rgb(px, py);
-      push_output_byte(encode_component(rgb[0]));
-      push_output_byte(encode_component(rgb[1]));
-      push_output_byte(encode_component(rgb[2]));
+      const int block = block_row | (px >> 3);
+      const Block &y_block = *y_blocks[static_cast<size_t>(block)];
+      const bool enabled = block_enabled[static_cast<size_t>(block)];
+      const int local_x = px & 7;
+      const int yy =
+          (!enabled || disable_luma) ? 0 : y_block[local_y * 8 + local_x];
+      const int chroma_index = chroma_row + (px >> 1);
+      const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
+      const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
+      push_output_byte(
+          encode_component(clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8))));
+      push_output_byte(encode_component(clamp_signed_sample(
+          yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8))));
+      push_output_byte(
+          encode_component(clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8))));
     }
   }
 }

@@ -5,6 +5,30 @@
 #include <cstring>
 #include <SDL.h>
 
+namespace {
+
+void update_snapshot_display_diag_from_sample(System::BootDiagnostics& diag,
+    const DisplaySampleInfo& sample) {
+    diag.display_width = static_cast<u16>(std::max(0, sample.width));
+    diag.display_height = static_cast<u16>(std::max(0, sample.height));
+    diag.display_x_start = static_cast<u16>(std::max(0, sample.x_start));
+    diag.display_y_start = static_cast<u16>(std::max(0, sample.y_start));
+    diag.display_is_24bit = sample.is_24bit ? 1u : 0u;
+    diag.display_enabled = sample.display_enabled ? 1u : 0u;
+}
+
+void update_snapshot_display_diag_from_debug(System::BootDiagnostics& diag,
+    const DisplayDebugInfo& info, const DisplayMode& mode) {
+    diag.display_width = static_cast<u16>(std::max(0, info.width));
+    diag.display_height = static_cast<u16>(std::max(0, info.height));
+    diag.display_x_start = static_cast<u16>(std::max(0, info.x_start));
+    diag.display_y_start = static_cast<u16>(std::max(0, info.y_start));
+    diag.display_is_24bit = mode.is_24bit ? 1u : 0u;
+    diag.display_enabled = mode.display_enabled ? 1u : 0u;
+}
+
+}
+
 EmuRunner::~EmuRunner() { stop(); }
 
 bool EmuRunner::start(System* system) {
@@ -24,6 +48,7 @@ bool EmuRunner::start(System* system) {
         pending_frame_ = {};
         has_pending_frame_ = false;
     }
+    fast_mode_capture_counter_.store(0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_ = {};
@@ -192,7 +217,15 @@ bool EmuRunner::should_capture_frame() const {
         return true;
     }
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    return !has_pending_frame_;
+    if (has_pending_frame_) {
+        return false;
+    }
+    if (!g_gpu_extreme_fast_mode) {
+        return true;
+    }
+    const u32 capture_index =
+        fast_mode_capture_counter_.fetch_add(1, std::memory_order_acq_rel);
+    return (capture_index % 3u) == 0u;
 }
 
 void EmuRunner::publish_frame(FrameSnapshot&& frame,
@@ -285,6 +318,10 @@ void EmuRunner::worker_main() {
         snapshot.profiling = system_->profiling_stats();
         snapshot.core_frame_ms = snapshot.profiling.total_ms;
         snapshot.spu_audio = system_->spu_audio_diag();
+        update_snapshot_display_diag_from_debug(
+            snapshot.boot_diag,
+            system_->gpu_display_debug_info(),
+            system_->gpu().display_mode());
 
         const auto& spu = system_->spu();
         const auto abs16 = [](s16 value) -> int {
@@ -318,6 +355,7 @@ void EmuRunner::worker_main() {
                 // include_stats switches to a slower/alternate conversion path
                 // that can drop BIOS menu cursor pixels on some scenes.
                 system_->gpu().build_display_rgba(rgba, false);
+            update_snapshot_display_diag_from_sample(snapshot.boot_diag, sample);
 
             frame.frame_id = snapshot.frame_id;
             frame.width = std::max(1, sample.width);

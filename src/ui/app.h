@@ -1,5 +1,6 @@
 #pragma once
 #include "emu_runner.h"
+#include "../integrations/discord_presence.h"
 #include "../core/renderer.h"
 #include "../core/system.h"
 #include "../core/types.h"
@@ -81,6 +82,7 @@ private:
 	int perf_history_count_ = 0;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
+	std::vector<u32> turbo_frame_rgba_{};
 	int latest_frame_width_ = 0;
 	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;
@@ -92,11 +94,13 @@ private:
 	int config_turbo_speed_percent_ = 200;
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
+	bool config_discord_rich_presence_ = false;
 	static constexpr int kMemoryCardSlotCount = 2;
 	std::array<int, kMemoryCardSlotCount> config_memory_card_mode_ = { 0, 0 };
 	std::array<std::string, kMemoryCardSlotCount> memory_card_target_paths_{};
 	bool turbo_hold_active_ = false;
 	bool slowdown_hold_active_ = false;
+	std::unique_ptr<DiscordPresence> discord_presence_;
 
 	// Grim Reaper (experimental BIOS corruption sandbox)
 	int grim_reaper_area_index_ = 0;
@@ -157,6 +161,8 @@ private:
 	u64 sound_reaper_active_seed_ = 0u;
 	u64 sound_reaper_total_mutations_ = 0;
 	int sound_ram_voice_index_ = 0;
+	bool sound_ram_multi_voice_export_ = false;
+	std::array<bool, 24> sound_ram_voice_selected_ = { true };
 	char grim_preset_name_[64] = "grim_preset";
 	char batch_preset_name_[64] = "grim_batch";
 	char ram_preset_name_[64] = "ram_reaper";
@@ -202,6 +208,7 @@ private:
 	void panel_grim_reaper();
 	void panel_corruption_presets();
 	void draw_sound_status_content();
+	void draw_spu_diagnostic_mode_controls();
 	void update_vram_debug_texture();
 
 	// File dialog helpers
@@ -239,4 +246,7 @@ private:
 	void try_autoload_bios_from_config();
 	double current_speed_override() const;
 	void apply_speed_override();
+	void sync_discord_presence_config();
+	void update_discord_presence();
+	std::string current_presence_content_name() const;
 };

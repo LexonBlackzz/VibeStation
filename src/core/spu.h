@@ -162,6 +162,7 @@ public:
     const double clamped = std::max(0.0, std::min(multiplier, 4.0));
     reverb_mix_multiplier_.store(clamped, std::memory_order_release);
   }
+  void set_force_reverb(bool enabled);
 
   void tick(u32 cycles);
   void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
@@ -178,6 +179,9 @@ public:
   }
   bool export_voice_sample_to_file(int voice, const std::string &path,
                                    std::string *error = nullptr) const;
+  bool export_voice_samples_to_file(const std::vector<int> &voices,
+                                    const std::string &path,
+                                    std::string *error = nullptr) const;
   bool load_replacement_sample_from_file(const std::string &path,
                                          std::string *error = nullptr);
   void clear_replacement_sample();
@@ -205,6 +209,9 @@ private:
       static_cast<size_t>(SAMPLE_RATE) * 2 * 180;
   static constexpr size_t CD_INPUT_MAX_SAMPLES =
       static_cast<size_t>(SAMPLE_RATE) * 2 * 8;
+  static constexpr size_t ADPCM_BLOCK_BYTES = 16u;
+  static constexpr size_t FORCE_REVERB_DELAY_SAMPLES = 8192u;
+  static constexpr size_t FORCE_REVERB_EARLY_TAP_SAMPLES = 2731u;
 
   struct VoiceState {
     enum class AdsrPhase { Off, Attack, Decay, Sustain, Release };
@@ -343,6 +350,7 @@ private:
   u64 last_synced_cpu_cycle_ = 0;
   std::atomic<double> audio_output_speed_{1.0};
   std::atomic<double> reverb_mix_multiplier_{1.0};
+  std::atomic<bool> force_reverb_enabled_{false};
 
   s16 noise_level_ = 1;
   s32 noise_timer_ = 0;
@@ -362,6 +370,9 @@ private:
   bool cd_stream_started_ = false;
   u32 cd_gap_ramp_samples_ = 0;
   bool cd_gap_active_ = false;
+  std::array<float, FORCE_REVERB_DELAY_SAMPLES> force_reverb_delay_l_ = {};
+  std::array<float, FORCE_REVERB_DELAY_SAMPLES> force_reverb_delay_r_ = {};
+  size_t force_reverb_delay_pos_ = 0;
   u32 cd_rejoin_blend_samples_ = 0;
   s16 cd_rejoin_from_l_ = 0;
   s16 cd_rejoin_from_r_ = 0;
@@ -404,6 +415,9 @@ private:
 
   bool collect_voice_sample_bytes(int voice, std::vector<u8> &out,
                                   std::string *error) const;
+  bool build_combined_voice_sample(const std::vector<int> &voices,
+                                   std::vector<u8> &out,
+                                   std::string *error) const;
   bool validate_replacement_sample(const std::vector<u8> &sample,
                                    std::string *error) const;
   bool decode_adpcm_block(int voice);
@@ -434,6 +448,9 @@ private:
   s16 step_reverb_channel(bool right_channel, s16 lin, s16 rin,
                           bool writes_enabled, bool same_diff_enabled);
   std::array<float, 2> step_reverb(float send_l, float send_r, u16 spucnt_eff);
+  void reset_forced_reverb_state();
+  void apply_forced_reverb_fallback(float send_l, float send_r, float &wet_l,
+                                    float &wet_r);
   void queue_host_audio(const std::vector<s16> &samples);
 
   u16 spucnt_effective() const;

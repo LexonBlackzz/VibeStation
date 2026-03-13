@@ -1082,7 +1082,7 @@ void CdRom::maybe_decode_xa_audio(const std::vector<u8> &raw_sector,
 
   if (!four_bit && !eight_bit) {
     static bool warned_bad_bps = false;
-    if (!warned_bad_bps) {
+    if (!warned_bad_bps && g_log_fmv_diagnostics) {
       LOG_WARN("CDROM: XA unsupported bits-per-sample coding=%u", bits_per_sample);
       warned_bad_bps = true;
     }
@@ -2242,4 +2242,3 @@ u32 CdRom::dma_read() {
   }
   return value;
 }
-

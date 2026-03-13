@@ -261,6 +261,13 @@ bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
     return spu_.export_voice_sample_to_file(voice, path, error);
 }
 
+bool System::save_spu_voice_samples_to_file(const std::vector<int>& voices,
+                                            const std::string& path,
+                                            std::string* error) {
+    sync_spu_to_cpu();
+    return spu_.export_voice_samples_to_file(voices, path, error);
+}
+
 bool System::load_spu_replacement_sample_from_file(const std::string& path,
                                                    std::string* error) {
     sync_spu_to_cpu();
@@ -955,12 +962,15 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     const u32 base_cycles_per_scanline = cycles_per_frame / scanlines_per_frame;
     const u32 extra_cycles_per_frame = cycles_per_frame % scanlines_per_frame;
     // Aggressive fast mode intentionally trades timing stability for throughput.
-    const bool aggressive_fast_mode = g_gpu_fast_mode;
-    const u32 cpu_instruction_slice = aggressive_fast_mode ? 128u : 32u;
+    const bool fast_mode = g_gpu_fast_mode;
+    const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
+    const u32 cpu_instruction_slice =
+        aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
     // Keep those devices at near-baseline cadence even in fast mode.
     const u32 dma_tick_stride = 16u;
-    const u32 spu_sync_scanline_stride = aggressive_fast_mode ? 16u : 4u;
+    const u32 spu_sync_scanline_stride =
+        aggressive_fast_mode ? 32u : (fast_mode ? 16u : 4u);
     const u32 cdrom_tick_scanline_stride = 1u;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
@@ -994,7 +1004,12 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 const u32 consumed = cpu_.step();
                 spent_in_slice += consumed;
                 frame_cycles_ += consumed;
-                if (aggressive_fast_mode) {
+                // Root counters are visible to the CPU mid-scanline, so keep
+                // them advancing with CPU execution rather than only once per
+                // scanline. HBlank/VBlank sourced ticks still arrive from the
+                // scanline events below.
+                timers_.tick(consumed);
+                if (fast_mode) {
                     sio_slice_cycles += consumed;
                 }
                 else {
@@ -1007,7 +1022,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 cycles_remaining =
                     (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
             }
-            if (aggressive_fast_mode && sio_slice_cycles > 0) {
+            if (fast_mode && sio_slice_cycles > 0) {
                 sio_.tick(sio_slice_cycles);
             }
 
@@ -1031,13 +1046,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
 
-        // Batch devices that already accept cycle counts to reduce per-cycle call
-        // overhead.
+        // HBlank-sourced timer events still occur at scanline boundaries.
         std::chrono::high_resolution_clock::time_point start_timers{};
         if (profile_detailed) {
             start_timers = std::chrono::high_resolution_clock::now();
         }
-        timers_.tick(cycles_this_scanline);
         timers_.hblank_pulse();
         if (profile_detailed) {
             const auto end_timers = std::chrono::high_resolution_clock::now();

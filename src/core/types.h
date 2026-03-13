@@ -61,6 +61,7 @@ inline u32 g_log_category_mask = 0xFFFFFFFFu;
 inline bool g_log_timestamp = true;
 inline bool g_log_dedupe = true;
 inline u32 g_log_dedupe_flush = 1000;
+inline bool g_log_fmv_diagnostics = true;
 inline std::string g_log_last_line;
 inline u64 g_log_repeat_count = 0;
 struct LogUiEntry {
@@ -88,7 +89,7 @@ inline bool g_trace_timer = false;
 inline bool g_trace_sio = false;
 // Expensive CPU sanity diagnostics (helper-range probes, suspicious RA/SP checks).
 // Keep disabled for normal/turbo gameplay performance.
-inline bool g_cpu_deep_diagnostics = true;
+inline bool g_cpu_deep_diagnostics = false;
 // Expensive RAM watchpoint diagnostics around BIOS boot streams.
 inline bool g_ram_watch_diagnostics = false;
 inline u32 g_trace_burst_cpu = 128;
@@ -116,6 +117,7 @@ inline bool g_unsafe_ps2_bios_mode = false;
 inline bool g_experimental_unhandled_special_returns_zero = false;
 inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
+inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_spu_enable_audio_queue = true;

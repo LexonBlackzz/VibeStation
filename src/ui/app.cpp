@@ -2,12 +2,14 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_opengl2.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -72,6 +74,458 @@ namespace {
 
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
+
+    struct ThemeColorSlot {
+        ImGuiCol color_id;
+        const char* label;
+        const char* key;
+        ImVec4 default_color;
+    };
+
+    constexpr ThemeColorSlot kThemeColorSlots[] = {
+        {ImGuiCol_WindowBg, "Window Background", "WindowBg", ImVec4(0.08f, 0.06f, 0.12f, 0.95f)},
+        {ImGuiCol_TitleBg, "Title Background", "TitleBg", ImVec4(0.10f, 0.08f, 0.18f, 1.00f)},
+        {ImGuiCol_TitleBgActive, "Title Active", "TitleBgActive", ImVec4(0.16f, 0.10f, 0.30f, 1.00f)},
+        {ImGuiCol_MenuBarBg, "Menu Bar", "MenuBarBg", ImVec4(0.10f, 0.08f, 0.15f, 1.00f)},
+        {ImGuiCol_PopupBg, "List Background", "PopupBg", ImVec4(0.09f, 0.07f, 0.16f, 0.98f)},
+        {ImGuiCol_Tab, "Tab", "Tab", ImVec4(0.14f, 0.10f, 0.25f, 1.00f)},
+        {ImGuiCol_TabHovered, "Tab Hovered", "TabHovered", ImVec4(0.30f, 0.20f, 0.55f, 1.00f)},
+        {ImGuiCol_TabActive, "Tab Active", "TabActive", ImVec4(0.24f, 0.15f, 0.45f, 1.00f)},
+        {ImGuiCol_Header, "Header", "Header", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
+        {ImGuiCol_HeaderHovered, "Header Hovered", "HeaderHovered", ImVec4(0.30f, 0.20f, 0.50f, 1.00f)},
+        {ImGuiCol_HeaderActive, "Header Active", "HeaderActive", ImVec4(0.35f, 0.25f, 0.60f, 1.00f)},
+        {ImGuiCol_Button, "Button", "Button", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
+        {ImGuiCol_ButtonHovered, "Button Hovered", "ButtonHovered", ImVec4(0.34f, 0.22f, 0.58f, 1.00f)},
+        {ImGuiCol_ButtonActive, "Button Active", "ButtonActive", ImVec4(0.40f, 0.28f, 0.65f, 1.00f)},
+        {ImGuiCol_FrameBg, "Frame Background", "FrameBg", ImVec4(0.12f, 0.09f, 0.20f, 1.00f)},
+        {ImGuiCol_FrameBgHovered, "Frame Hovered", "FrameBgHovered", ImVec4(0.18f, 0.12f, 0.30f, 1.00f)},
+        {ImGuiCol_FrameBgActive, "Frame Active", "FrameBgActive", ImVec4(0.24f, 0.16f, 0.40f, 1.00f)},
+        {ImGuiCol_CheckMark, "Check Mark", "CheckMark", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
+        {ImGuiCol_SliderGrab, "Slider Grab", "SliderGrab", ImVec4(0.50f, 0.35f, 0.85f, 1.00f)},
+        {ImGuiCol_SliderGrabActive, "Slider Grab Active", "SliderGrabActive", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
+        {ImGuiCol_Separator, "Separator", "Separator", ImVec4(0.20f, 0.15f, 0.35f, 1.00f)},
+        {ImGuiCol_Text, "Text", "Text", ImVec4(0.90f, 0.88f, 0.95f, 1.00f)},
+    };
+
+    constexpr size_t kThemeColorSlotCount =
+        sizeof(kThemeColorSlots) / sizeof(kThemeColorSlots[0]);
+
+    constexpr ImVec4 kDefaultThemeBackground = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
+    constexpr ImVec4 kDefaultThemeSurface = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
+    constexpr ImVec4 kDefaultThemeOverall = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
+    constexpr ImVec4 kDefaultThemeAccent = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
+    constexpr ImVec4 kDefaultThemeText = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
+    constexpr ImVec4 kDefaultThemeLists = ImVec4(0.09f, 0.07f, 0.16f, 0.98f);
+
+    constexpr ImVec4 theme_color_rgba(int r, int g, int b, int a) {
+        return ImVec4(
+            static_cast<float>(r) / 255.0f,
+            static_cast<float>(g) / 255.0f,
+            static_cast<float>(b) / 255.0f,
+            static_cast<float>(a) / 255.0f);
+    }
+
+    struct ThemeSettings {
+        ImVec4 overall = kDefaultThemeOverall;
+        ImVec4 background = kDefaultThemeBackground;
+        ImVec4 surface = kDefaultThemeSurface;
+        ImVec4 accent = kDefaultThemeAccent;
+        ImVec4 text = kDefaultThemeText;
+        ImVec4 lists = kDefaultThemeLists;
+        bool simple = false;
+        bool advanced = false;
+        std::array<ImVec4, kThemeColorSlotCount> colors{};
+    };
+
+    struct ThemePreset {
+        const char* label;
+        ImVec4 background;
+        ImVec4 surface;
+        ImVec4 accent;
+        ImVec4 text;
+        ImVec4 lists;
+        std::array<ImVec4, kThemeColorSlotCount> colors;
+    };
+
+    constexpr ThemePreset kThemePresets[] = {
+        {
+            "Dark Mode",
+            theme_color_rgba(0, 0, 0, 242),
+            theme_color_rgba(20, 20, 20, 255),
+            theme_color_rgba(41, 40, 40, 255),
+            theme_color_rgba(255, 255, 255, 255),
+            theme_color_rgba(12, 12, 12, 252),
+            {
+                theme_color_rgba(0, 0, 0, 242),
+                theme_color_rgba(7, 7, 7, 247),
+                theme_color_rgba(28, 28, 28, 255),
+                theme_color_rgba(4, 4, 4, 245),
+                theme_color_rgba(12, 12, 12, 252),
+                theme_color_rgba(17, 17, 17, 253),
+                theme_color_rgba(35, 34, 34, 255),
+                theme_color_rgba(30, 30, 30, 255),
+                theme_color_rgba(26, 26, 26, 255),
+                theme_color_rgba(31, 31, 31, 255),
+                theme_color_rgba(35, 34, 34, 255),
+                theme_color_rgba(26, 25, 25, 255),
+                theme_color_rgba(32, 32, 32, 255),
+                theme_color_rgba(36, 36, 36, 255),
+                theme_color_rgba(20, 20, 20, 255),
+                theme_color_rgba(25, 25, 25, 255),
+                theme_color_rgba(28, 28, 28, 255),
+                theme_color_rgba(41, 40, 40, 255),
+                theme_color_rgba(32, 32, 32, 255),
+                theme_color_rgba(41, 40, 40, 255),
+                theme_color_rgba(62, 62, 62, 255),
+                theme_color_rgba(255, 255, 255, 255),
+            },
+        },
+        {
+            "Light Mode",
+            theme_color_rgba(255, 255, 255, 242),
+            theme_color_rgba(221, 221, 221, 255),
+            theme_color_rgba(200, 200, 200, 255),
+            theme_color_rgba(0, 0, 0, 255),
+            theme_color_rgba(235, 235, 235, 252),
+            {
+                theme_color_rgba(255, 255, 255, 242),
+                theme_color_rgba(243, 243, 243, 247),
+                theme_color_rgba(213, 213, 213, 255),
+                theme_color_rgba(248, 248, 248, 245),
+                theme_color_rgba(235, 235, 235, 252),
+                theme_color_rgba(226, 226, 226, 253),
+                theme_color_rgba(206, 206, 206, 255),
+                theme_color_rgba(211, 211, 211, 255),
+                theme_color_rgba(215, 215, 215, 255),
+                theme_color_rgba(210, 210, 210, 255),
+                theme_color_rgba(206, 206, 206, 255),
+                theme_color_rgba(215, 215, 215, 255),
+                theme_color_rgba(209, 209, 209, 255),
+                theme_color_rgba(205, 205, 205, 255),
+                theme_color_rgba(221, 221, 221, 255),
+                theme_color_rgba(216, 216, 216, 255),
+                theme_color_rgba(213, 213, 213, 255),
+                theme_color_rgba(200, 200, 200, 255),
+                theme_color_rgba(209, 209, 209, 255),
+                theme_color_rgba(200, 200, 200, 255),
+                theme_color_rgba(181, 181, 181, 255),
+                theme_color_rgba(0, 0, 0, 255),
+            },
+        },
+    };
+
+    constexpr int kThemePresetCount =
+        static_cast<int>(sizeof(kThemePresets) / sizeof(kThemePresets[0]));
+
+    ThemeSettings g_theme_settings{};
+    bool g_theme_settings_initialized = false;
+    int g_selected_theme_preset_index = 0;
+
+    ImVec4 theme_lerp(const ImVec4& a, const ImVec4& b, float t) {
+        return ImVec4(
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.z + (b.z - a.z) * t,
+            a.w + (b.w - a.w) * t);
+    }
+
+    float theme_luminance(const ImVec4& color) {
+        return (color.x * 0.2126f) + (color.y * 0.7152f) + (color.z * 0.0722f);
+    }
+
+    ImVec4 tint_theme_color(const ImVec4& base, const ImVec4& tint, float mix, float alpha) {
+        ImVec4 out = theme_lerp(base, tint, mix);
+        out.w = alpha;
+        return out;
+    }
+
+    void set_theme_slot(ThemeSettings& settings, ImGuiCol color_id, const ImVec4& color) {
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            if (kThemeColorSlots[i].color_id == color_id) {
+                settings.colors[i] = color;
+                return;
+            }
+        }
+    }
+
+    void rebuild_theme_basics_from_overall(ThemeSettings& settings) {
+        const float luma = theme_luminance(settings.overall);
+        const bool light_theme = luma >= 0.72f;
+
+        const ImVec4 background_base =
+            light_theme ? ImVec4(0.97f, 0.97f, 0.98f, 0.95f)
+            : ImVec4(0.05f, 0.05f, 0.06f, 0.95f);
+        const ImVec4 surface_base =
+            light_theme ? ImVec4(0.88f, 0.88f, 0.90f, 1.00f)
+            : ImVec4(0.12f, 0.11f, 0.14f, 1.00f);
+        const ImVec4 accent_base =
+            light_theme ? ImVec4(0.78f, 0.78f, 0.80f, 1.00f)
+            : ImVec4(0.32f, 0.30f, 0.36f, 1.00f);
+        const ImVec4 lists_base =
+            light_theme ? ImVec4(0.92f, 0.92f, 0.94f, 0.98f)
+            : ImVec4(0.08f, 0.08f, 0.10f, 0.98f);
+        const ImVec4 text_base =
+            light_theme ? ImVec4(0.04f, 0.04f, 0.05f, 1.00f)
+            : ImVec4(0.96f, 0.96f, 0.97f, 1.00f);
+
+        settings.background =
+            tint_theme_color(background_base, settings.overall, light_theme ? 0.18f : 0.16f, 0.95f);
+        settings.surface =
+            tint_theme_color(surface_base, settings.overall, light_theme ? 0.26f : 0.24f, 1.00f);
+        settings.accent =
+            tint_theme_color(accent_base, settings.overall, light_theme ? 0.70f : 0.88f, 1.00f);
+        settings.lists =
+            tint_theme_color(lists_base, settings.overall, light_theme ? 0.20f : 0.18f, 0.98f);
+        settings.text =
+            tint_theme_color(text_base, settings.overall, light_theme ? 0.06f : 0.08f, 1.00f);
+    }
+
+    void sync_theme_overall_from_basics(ThemeSettings& settings) {
+        settings.overall = theme_lerp(settings.surface, settings.accent, 0.75f);
+        settings.overall.w = 1.0f;
+    }
+
+    void rebuild_theme_colors_from_basics(ThemeSettings& settings) {
+        set_theme_slot(settings, ImGuiCol_WindowBg, settings.background);
+        set_theme_slot(settings, ImGuiCol_TitleBg,
+            theme_lerp(settings.background, settings.surface, 0.35f));
+        set_theme_slot(settings, ImGuiCol_TitleBgActive,
+            theme_lerp(settings.surface, settings.accent, 0.40f));
+        set_theme_slot(settings, ImGuiCol_MenuBarBg,
+            theme_lerp(settings.background, settings.surface, 0.20f));
+        set_theme_slot(settings, ImGuiCol_PopupBg, settings.lists);
+        set_theme_slot(settings, ImGuiCol_Tab,
+            theme_lerp(settings.surface, settings.background, 0.15f));
+        set_theme_slot(settings, ImGuiCol_TabHovered,
+            theme_lerp(settings.surface, settings.accent, 0.72f));
+        set_theme_slot(settings, ImGuiCol_TabActive,
+            theme_lerp(settings.surface, settings.accent, 0.50f));
+        set_theme_slot(settings, ImGuiCol_Header,
+            theme_lerp(settings.surface, settings.accent, 0.30f));
+        set_theme_slot(settings, ImGuiCol_HeaderHovered,
+            theme_lerp(settings.surface, settings.accent, 0.55f));
+        set_theme_slot(settings, ImGuiCol_HeaderActive,
+            theme_lerp(settings.surface, settings.accent, 0.72f));
+        set_theme_slot(settings, ImGuiCol_Button,
+            theme_lerp(settings.surface, settings.accent, 0.28f));
+        set_theme_slot(settings, ImGuiCol_ButtonHovered,
+            theme_lerp(settings.surface, settings.accent, 0.60f));
+        set_theme_slot(settings, ImGuiCol_ButtonActive,
+            theme_lerp(settings.surface, settings.accent, 0.78f));
+        set_theme_slot(settings, ImGuiCol_FrameBg, settings.surface);
+        set_theme_slot(settings, ImGuiCol_FrameBgHovered,
+            theme_lerp(settings.surface, settings.accent, 0.25f));
+        set_theme_slot(settings, ImGuiCol_FrameBgActive,
+            theme_lerp(settings.surface, settings.accent, 0.40f));
+        set_theme_slot(settings, ImGuiCol_CheckMark, settings.accent);
+        set_theme_slot(settings, ImGuiCol_SliderGrab,
+            theme_lerp(settings.surface, settings.accent, 0.60f));
+        set_theme_slot(settings, ImGuiCol_SliderGrabActive, settings.accent);
+        set_theme_slot(settings, ImGuiCol_Separator,
+            theme_lerp(settings.surface, settings.text, 0.18f));
+        set_theme_slot(settings, ImGuiCol_Text, settings.text);
+    }
+
+    void reset_theme_settings() {
+        g_theme_settings.overall = kDefaultThemeOverall;
+        g_theme_settings.background = kDefaultThemeBackground;
+        g_theme_settings.surface = kDefaultThemeSurface;
+        g_theme_settings.accent = kDefaultThemeAccent;
+        g_theme_settings.text = kDefaultThemeText;
+        g_theme_settings.lists = kDefaultThemeLists;
+        g_theme_settings.simple = false;
+        g_theme_settings.advanced = false;
+        rebuild_theme_colors_from_basics(g_theme_settings);
+        g_theme_settings_initialized = true;
+    }
+
+    void apply_theme_preset(const ThemePreset& preset) {
+        g_theme_settings.overall = preset.accent;
+        g_theme_settings.background = preset.background;
+        g_theme_settings.surface = preset.surface;
+        g_theme_settings.accent = preset.accent;
+        g_theme_settings.text = preset.text;
+        g_theme_settings.lists = preset.lists;
+        g_theme_settings.simple = false;
+        g_theme_settings.advanced = true;
+        g_theme_settings.colors = preset.colors;
+    }
+
+    void apply_theme_style(ImGuiStyle& style) {
+        style.WindowRounding = 6.0f;
+        style.FrameRounding = 4.0f;
+        style.GrabRounding = 4.0f;
+        style.TabRounding = 4.0f;
+        style.WindowBorderSize = 1.0f;
+        style.FrameBorderSize = 0.0f;
+        style.ScrollbarRounding = 6.0f;
+        style.WindowPadding = ImVec2(10.0f, 10.0f);
+
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            style.Colors[kThemeColorSlots[i].color_id] = g_theme_settings.colors[i];
+        }
+    }
+
+    void ensure_theme_settings_initialized() {
+        if (!g_theme_settings_initialized) {
+            reset_theme_settings();
+        }
+    }
+
+    void mark_theme_settings_dirty() {
+        if (ImGui::GetCurrentContext() != nullptr) {
+            ImGui::MarkIniSettingsDirty();
+        }
+    }
+
+    bool parse_theme_color(const char* text, ImVec4& color) {
+        float r = 0.0f;
+        float g = 0.0f;
+        float b = 0.0f;
+        float a = 0.0f;
+        if (std::sscanf(text, "%f,%f,%f,%f", &r, &g, &b, &a) != 4) {
+            return false;
+        }
+        color = ImVec4(r, g, b, a);
+        return true;
+    }
+
+    bool parse_theme_bool(const char* text, bool fallback) {
+        if (std::strcmp(text, "1") == 0 || std::strcmp(text, "true") == 0 ||
+            std::strcmp(text, "TRUE") == 0) {
+            return true;
+        }
+        if (std::strcmp(text, "0") == 0 || std::strcmp(text, "false") == 0 ||
+            std::strcmp(text, "FALSE") == 0) {
+            return false;
+        }
+        return fallback;
+    }
+
+    void* theme_settings_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+        if (std::strcmp(name, "Colors") != 0) {
+            return nullptr;
+        }
+        ensure_theme_settings_initialized();
+        return &g_theme_settings;
+    }
+
+    void theme_settings_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry,
+        const char* line) {
+        auto* settings = static_cast<ThemeSettings*>(entry);
+        const char* equals = std::strchr(line, '=');
+        if (equals == nullptr) {
+            return;
+        }
+
+        const std::string key(line, static_cast<size_t>(equals - line));
+        if (key == "Overall") {
+            parse_theme_color(equals + 1, settings->overall);
+            return;
+        }
+        if (key == "Background") {
+            parse_theme_color(equals + 1, settings->background);
+            return;
+        }
+        if (key == "Surface") {
+            parse_theme_color(equals + 1, settings->surface);
+            return;
+        }
+        if (key == "Accent") {
+            parse_theme_color(equals + 1, settings->accent);
+            return;
+        }
+        if (key == "TextColor") {
+            parse_theme_color(equals + 1, settings->text);
+            return;
+        }
+        if (key == "Lists") {
+            parse_theme_color(equals + 1, settings->lists);
+            return;
+        }
+        if (key == "Simple") {
+            settings->simple = parse_theme_bool(equals + 1, settings->simple);
+            return;
+        }
+        if (key == "Advanced") {
+            settings->advanced = parse_theme_bool(equals + 1, settings->advanced);
+            return;
+        }
+
+        ImVec4 parsed{};
+        if (!parse_theme_color(equals + 1, parsed)) {
+            return;
+        }
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            if (key == kThemeColorSlots[i].key) {
+                settings->colors[i] = parsed;
+                return;
+            }
+        }
+    }
+
+    void theme_settings_apply_all(ImGuiContext*, ImGuiSettingsHandler*) {
+        ensure_theme_settings_initialized();
+        if (!g_theme_settings.advanced) {
+            rebuild_theme_colors_from_basics(g_theme_settings);
+        }
+        apply_theme_style(ImGui::GetStyle());
+    }
+
+    void theme_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler,
+        ImGuiTextBuffer* out_buf) {
+        ensure_theme_settings_initialized();
+        out_buf->appendf("[%s][Colors]\n", handler->TypeName);
+        out_buf->appendf("Overall=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.overall.x, g_theme_settings.overall.y,
+            g_theme_settings.overall.z, g_theme_settings.overall.w);
+        out_buf->appendf("Background=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.background.x, g_theme_settings.background.y,
+            g_theme_settings.background.z, g_theme_settings.background.w);
+        out_buf->appendf("Surface=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.surface.x, g_theme_settings.surface.y,
+            g_theme_settings.surface.z, g_theme_settings.surface.w);
+        out_buf->appendf("Accent=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.accent.x, g_theme_settings.accent.y,
+            g_theme_settings.accent.z, g_theme_settings.accent.w);
+        out_buf->appendf("TextColor=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.text.x, g_theme_settings.text.y,
+            g_theme_settings.text.z, g_theme_settings.text.w);
+        out_buf->appendf("Lists=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.lists.x, g_theme_settings.lists.y,
+            g_theme_settings.lists.z, g_theme_settings.lists.w);
+        out_buf->appendf("Simple=%d\n", g_theme_settings.simple ? 1 : 0);
+        out_buf->appendf("Advanced=%d\n", g_theme_settings.advanced ? 1 : 0);
+        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+            const ImVec4& color = g_theme_settings.colors[i];
+            out_buf->appendf("%s=%.3f,%.3f,%.3f,%.3f\n",
+                kThemeColorSlots[i].key, color.x, color.y, color.z, color.w);
+        }
+        out_buf->append("\n");
+    }
+
+    void register_theme_settings_handler() {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        if (ctx == nullptr) {
+            return;
+        }
+
+        const ImGuiID type_hash = ImHashStr("VibeStationTheme");
+        for (const ImGuiSettingsHandler& handler : ctx->SettingsHandlers) {
+            if (handler.TypeHash == type_hash) {
+                return;
+            }
+        }
+
+        ImGuiSettingsHandler handler{};
+        handler.TypeName = "VibeStationTheme";
+        handler.TypeHash = type_hash;
+        handler.ReadOpenFn = theme_settings_read_open;
+        handler.ReadLineFn = theme_settings_read_line;
+        handler.ApplyAllFn = theme_settings_apply_all;
+        handler.WriteAllFn = theme_settings_write_all;
+        ImGui::AddSettingsHandler(&handler);
+    }
 
     std::string sanitize_memory_card_stem(const std::string& text) {
         std::string out;
@@ -284,8 +738,28 @@ namespace {
         return static_cast<double>(normalize_slowdown_speed_percent(percent)) / 100.0;
     }
 
+    void resample_rgba_nearest(const std::vector<u32>& src, int src_width, int src_height,
+        std::vector<u32>& dst, int dst_width, int dst_height) {
+        const int safe_src_width = std::max(1, src_width);
+        const int safe_src_height = std::max(1, src_height);
+        const int safe_dst_width = std::max(1, dst_width);
+        const int safe_dst_height = std::max(1, dst_height);
+        dst.resize(static_cast<size_t>(safe_dst_width) * static_cast<size_t>(safe_dst_height));
+        for (int y = 0; y < safe_dst_height; ++y) {
+            const int src_y = (y * safe_src_height) / safe_dst_height;
+            const size_t dst_row = static_cast<size_t>(y) * static_cast<size_t>(safe_dst_width);
+            const size_t src_row = static_cast<size_t>(src_y) * static_cast<size_t>(safe_src_width);
+            for (int x = 0; x < safe_dst_width; ++x) {
+                const int src_x = (x * safe_src_width) / safe_dst_width;
+                dst[dst_row + static_cast<size_t>(x)] =
+                    src[src_row + static_cast<size_t>(src_x)];
+            }
+        }
+    }
+
     constexpr double kSpuDiagnosticSpeedMultiplier = 0.83;
     constexpr double kSpuDiagnosticReverbMixMultiplier = 4.00;
+    constexpr u64 kDiscordApplicationId = 1481706201375838279ull;
 
     void append_be32(std::vector<u8>& out, u32 value) {
         out.push_back(static_cast<u8>((value >> 24) & 0xFFu));
@@ -684,6 +1158,10 @@ bool App::init() {
         input_ = std::make_unique<InputManager>();
     }
     load_persistent_config();
+    if (!discord_presence_) {
+        discord_presence_ = std::make_unique<DiscordPresence>();
+    }
+    sync_discord_presence_config();
 
     struct GlContextAttempt {
         int major;
@@ -763,43 +1241,18 @@ bool App::init() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    (void)io; // Reserved for future config flags
+    io.IniFilename = "imgui.ini";
 
     // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.WindowPadding = ImVec2(10, 10);
+    ensure_theme_settings_initialized();
+    apply_theme_style(ImGui::GetStyle());
+    register_theme_settings_handler();
+    if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+        ImGui::LoadIniSettingsFromDisk(io.IniFilename);
+    }
 
     // Custom color palette â€” deep purple/blue
-    auto& colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.08f, 0.18f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.10f, 0.30f, 1.00f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.08f, 0.15f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.14f, 0.10f, 0.25f, 1.00f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.30f, 0.20f, 0.55f, 1.00f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.24f, 0.15f, 0.45f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.20f, 0.14f, 0.36f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.20f, 0.50f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.35f, 0.25f, 0.60f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.20f, 0.14f, 0.36f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.34f, 0.22f, 0.58f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.40f, 0.28f, 0.65f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.12f, 0.30f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.24f, 0.16f, 0.40f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.50f, 0.35f, 0.85f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.15f, 0.35f, 1.00f);
-    colors[ImGuiCol_Text] = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
     printf("[App::init] ImGui styled\n");
     fflush(stdout);
 
@@ -895,6 +1348,78 @@ void App::apply_speed_override() {
     emu_runner_.set_speed(current_speed_override());
 }
 
+void App::sync_discord_presence_config() {
+    if (!discord_presence_) {
+        return;
+    }
+    discord_presence_->prepare_runtime_dependency();
+    discord_presence_->configure(
+        config_discord_rich_presence_,
+        kDiscordApplicationId);
+}
+
+std::string App::current_presence_content_name() const {
+    auto prettify_content_name = [](std::string value) {
+        for (char& ch : value) {
+            if (ch == '_' || ch == '-') {
+                ch = ' ';
+            }
+        }
+
+        std::string compact;
+        compact.reserve(value.size());
+        bool previous_space = false;
+        for (char ch : value) {
+            const bool is_space = std::isspace(static_cast<unsigned char>(ch)) != 0;
+            if (is_space) {
+                if (!compact.empty() && !previous_space) {
+                    compact.push_back(' ');
+                }
+            }
+            else {
+                compact.push_back(ch);
+            }
+            previous_space = is_space;
+        }
+        while (!compact.empty() && compact.back() == ' ') {
+            compact.pop_back();
+        }
+        return compact;
+        };
+
+    if (!game_cue_path_.empty()) {
+        return prettify_content_name(std::filesystem::path(game_cue_path_).stem().string());
+    }
+    if (!game_bin_path_.empty()) {
+        return prettify_content_name(std::filesystem::path(game_bin_path_).stem().string());
+    }
+    if (system_ && system_->disc_loaded()) {
+        return "Unknown game";
+    }
+    if (system_ && system_->bios_loaded()) {
+        return "PlayStation BIOS";
+    }
+    return {};
+}
+
+void App::update_discord_presence() {
+    if (!discord_presence_) {
+        return;
+    }
+
+    DiscordPresenceActivity activity{};
+    activity.emulation_started = has_started_emulation_;
+    activity.emulation_running = has_started_emulation_ && emu_runner_.is_running();
+    activity.turbo_active = turbo_hold_active_;
+    activity.slowdown_active = slowdown_hold_active_;
+    activity.bios_loaded = system_ && system_->bios_loaded();
+    activity.disc_selected =
+        !game_bin_path_.empty() || !game_cue_path_.empty() ||
+        (system_ && system_->disc_loaded());
+    activity.content_name = current_presence_content_name();
+    discord_presence_->update_activity(activity);
+}
+
 void App::run() {
     if (!init_runtime()) {
         return;
@@ -912,13 +1437,31 @@ void App::run() {
 
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
-            renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-            latest_frame_width_ = frame.width;
-            latest_frame_height_ = frame.height;
-            latest_frame_rgba_ = std::move(frame.rgba);
+            const bool turbo_resolution_clamp =
+                turbo_hold_active_ &&
+                g_output_resolution_mode != OutputResolutionMode::R320x240 &&
+                (frame.width > 320 || frame.height > 240);
+            if (turbo_resolution_clamp) {
+                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
+                    turbo_frame_rgba_, 320, 240);
+                renderer_->upload_frame(turbo_frame_rgba_, 320, 240);
+                latest_frame_width_ = 320;
+                latest_frame_height_ = 240;
+                latest_frame_rgba_ = turbo_frame_rgba_;
+            }
+            else {
+                renderer_->upload_frame(frame.rgba, frame.width, frame.height);
+                latest_frame_width_ = frame.width;
+                latest_frame_height_ = frame.height;
+                latest_frame_rgba_ = std::move(frame.rgba);
+            }
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         push_performance_history_sample();
+        update_discord_presence();
+        if (discord_presence_) {
+            discord_presence_->tick();
+        }
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
         u32 now_ms = SDL_GetTicks();
@@ -947,7 +1490,8 @@ void App::run() {
         int w, h;
         SDL_GetWindowSize(window_, &w, &h);
         glViewport(0, 0, w, h);
-        glClearColor(0.05f, 0.03f, 0.08f, 1.0f);
+        const ImVec4& clear_color = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        glClearColor(clear_color.x, clear_color.y, clear_color.z, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         const auto render_start = std::chrono::high_resolution_clock::now();
@@ -1194,6 +1738,7 @@ void App::update() {
         const double reverb_mix =
             config_spu_diagnostic_mode_ ? kSpuDiagnosticReverbMixMultiplier : 1.0;
         system_->set_spu_reverb_mix_multiplier(reverb_mix);
+        system_->set_spu_force_reverb(config_spu_diagnostic_mode_);
     }
     g_spu_force_audio_queue = slowdown_hold_active_ && !g_spu_enable_audio_queue;
     sync_ram_reaper_config();
@@ -1897,10 +2442,23 @@ void App::panel_settings() {
                 ImGui::Text("Display Area: %ux%u",
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
-                ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode);
+                if (ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode)) {
+                    if (!g_gpu_fast_mode) {
+                        g_gpu_extreme_fast_mode = false;
+                    }
+                    save_persistent_config();
+                }
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Uses optimized GPU paths for lower CPU usage at the cost of possible artifacting.");
+                ImGui::BeginDisabled(!g_gpu_fast_mode);
+                if (ImGui::Checkbox("Extreme Fast Mode", &g_gpu_extreme_fast_mode)) {
+                    save_persistent_config();
+                }
+                ImGui::EndDisabled();
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.5f, 1.0f),
+                    "More unstable than Fast Mode and may heavily reduce shading, transparency, and presentation quality.");
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };
                 int deinterlace_index = static_cast<int>(g_deinterlace_mode);
@@ -1955,24 +2513,6 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
                     save_persistent_config();
                 }
-                if (!config_spu_diagnostic_mode_) {
-                    if (ImGui::Button("Slowed + Reverb Mode (0.83x / Reverb +100%)")) {
-                        config_spu_diagnostic_mode_ = true;
-                        apply_speed_override();
-                        save_persistent_config();
-                    }
-                }
-                else {
-                    if (ImGui::Button("Disable Slowed + Reverb Mode")) {
-                        config_spu_diagnostic_mode_ = false;
-                        apply_speed_override();
-                        save_persistent_config();
-                    }
-                }
-                ImGui::SameLine();
-                ImGui::TextUnformatted(config_spu_diagnostic_mode_ ? "Active" : "Inactive");
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                    "Enables per-sample SPU diagnostics. Voice level meters stay live.");
 
                 ImGui::EndTabItem();
             }
@@ -2019,6 +2559,23 @@ void App::panel_settings() {
                 }
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Reduces audio complexity and internal precision.");
+                ImGui::Separator();
+                ImGui::Text("Discord Rich Presence");
+                if (ImGui::Checkbox("Enable Discord RPC",
+                    &config_discord_rich_presence_)) {
+                    sync_discord_presence_config();
+                    save_persistent_config();
+                }
+                const char* discord_build_status =
+                    (discord_presence_ && discord_presence_->sdk_compiled())
+                    ? "Discord Social SDK linked"
+                    : "Discord Social SDK not linked in this build";
+                ImGui::TextDisabled("%s", discord_build_status);
+                ImGui::TextWrapped("Status: %s",
+                    discord_presence_ ? discord_presence_->status_text().c_str()
+                    : "Unavailable");
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Uses the built-in Discord application configuration and the local Discord desktop client.");
 
                 ImGui::EndTabItem();
             }
@@ -2104,6 +2661,135 @@ void App::panel_settings() {
                 ImGui::TextColored(
                     ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
                     "When enabled, unknown SPECIAL funct values write 0 to rd instead of raising Reserved Instruction.");
+
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Customize")) {
+                ImGui::Text("Theme Colors");
+                ImGui::TextDisabled("Overall changes recolor the full UI. Extra grouped controls and per-element overrides are stored in imgui.ini.");
+                ImGui::Separator();
+
+                const char* theme_preset_labels[kThemePresetCount] = {};
+                for (int i = 0; i < kThemePresetCount; ++i) {
+                    theme_preset_labels[i] = kThemePresets[i].label;
+                }
+                g_selected_theme_preset_index =
+                    std::max(0, std::min(kThemePresetCount - 1, g_selected_theme_preset_index));
+                ImGui::Combo("Preset", &g_selected_theme_preset_index,
+                    theme_preset_labels, kThemePresetCount);
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Preset")) {
+                    apply_theme_preset(kThemePresets[g_selected_theme_preset_index]);
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+                ImGui::TextDisabled(
+                    "Dark Mode and Light Mode use the preset screenshot values plus a dedicated list background color.");
+
+                bool theme_changed = false;
+                bool simple_theme_changed = false;
+
+                ImVec4 overall = g_theme_settings.overall;
+                if (ImGui::ColorEdit4("Overall", &overall.x,
+                    ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                    g_theme_settings.overall = overall;
+                    rebuild_theme_basics_from_overall(g_theme_settings);
+                    theme_changed = true;
+                }
+
+                bool simple = g_theme_settings.simple;
+                if (ImGui::Checkbox("Simple Customization", &simple)) {
+                    g_theme_settings.simple = simple;
+                    theme_changed = true;
+                }
+
+                if (g_theme_settings.simple) {
+                    ImVec4 background = g_theme_settings.background;
+                    if (ImGui::ColorEdit4("Background", &background.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.background = background;
+                        theme_changed = true;
+                        simple_theme_changed = true;
+                    }
+
+                    ImVec4 surface = g_theme_settings.surface;
+                    if (ImGui::ColorEdit4("Surface", &surface.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.surface = surface;
+                        theme_changed = true;
+                        simple_theme_changed = true;
+                    }
+
+                    ImVec4 accent = g_theme_settings.accent;
+                    if (ImGui::ColorEdit4("Accent", &accent.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.accent = accent;
+                        theme_changed = true;
+                        simple_theme_changed = true;
+                    }
+
+                    ImVec4 text = g_theme_settings.text;
+                    if (ImGui::ColorEdit4("Text", &text.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.text = text;
+                        theme_changed = true;
+                        simple_theme_changed = true;
+                    }
+
+                    ImVec4 lists = g_theme_settings.lists;
+                    if (ImGui::ColorEdit4("Lists", &lists.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.lists = lists;
+                        theme_changed = true;
+                        simple_theme_changed = true;
+                    }
+                }
+
+                bool advanced = g_theme_settings.advanced;
+                if (ImGui::Checkbox("Advanced", &advanced)) {
+                    g_theme_settings.advanced = advanced;
+                    theme_changed = true;
+                }
+
+                if (theme_changed) {
+                    if (simple_theme_changed) {
+                        sync_theme_overall_from_basics(g_theme_settings);
+                    }
+                    rebuild_theme_colors_from_basics(g_theme_settings);
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+
+                if (g_theme_settings.advanced) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Advanced per-element overrides.");
+                    bool advanced_theme_changed = false;
+                    for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
+                        ImVec4 color = g_theme_settings.colors[i];
+                        if (ImGui::ColorEdit4(kThemeColorSlots[i].label, &color.x,
+                            ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                            g_theme_settings.colors[i] = color;
+                            advanced_theme_changed = true;
+                        }
+                    }
+                    if (advanced_theme_changed) {
+                        apply_theme_style(ImGui::GetStyle());
+                        mark_theme_settings_dirty();
+                    }
+                }
+
+                if (ImGui::Button("Reset Theme Colors")) {
+                    reset_theme_settings();
+                    apply_theme_style(ImGui::GetStyle());
+                    mark_theme_settings_dirty();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save Theme Now")) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+                        ImGui::SaveIniSettingsToDisk(io.IniFilename);
+                    }
+                }
 
                 ImGui::EndTabItem();
             }
@@ -2227,6 +2913,22 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("SIO Trace", &g_trace_sio)) {
                     logging_config_dirty = true;
                 }
+                if (ImGui::Checkbox("CPU Deep Diagnostics (slow)",
+                        &g_cpu_deep_diagnostics)) {
+                    logging_config_dirty = true;
+                }
+                if (ImGui::Checkbox("Enable FMV Diagnostics",
+                        &g_log_fmv_diagnostics)) {
+                    if (!g_log_fmv_diagnostics) {
+                        g_mdec_debug_compare_macroblocks = false;
+                        g_mdec_debug_upload_probe = false;
+                        if (system_) {
+                            system_->reset_mdec_debug_compare();
+                            system_->reset_mdec_upload_probe();
+                        }
+                    }
+                    logging_config_dirty = true;
+                }
 
                 if (ImGui::Button("Enable All Traces")) {
                     g_trace_dma = true;
@@ -2313,7 +3015,10 @@ void App::panel_settings() {
 
                 if (system_) {
                     ImGui::Separator();
-                    if (ImGui::CollapsingHeader("FMV Diagnostics",
+                    if (!g_log_fmv_diagnostics) {
+                        ImGui::TextDisabled("FMV diagnostics are disabled.");
+                    }
+                    else if (ImGui::CollapsingHeader("FMV Diagnostics",
                         ImGuiTreeNodeFlags_DefaultOpen)) {
                         const float diag_height =
                             420.0f * ImGui::GetIO().FontGlobalScale;
@@ -2905,6 +3610,27 @@ void App::panel_settings() {
     ImGui::End();
 }
 
+void App::draw_spu_diagnostic_mode_controls() {
+    if (!config_spu_diagnostic_mode_) {
+        if (ImGui::Button("Slowed + Reverb Mode")) {
+            config_spu_diagnostic_mode_ = true;
+            apply_speed_override();
+            save_persistent_config();
+        }
+    }
+    else {
+        if (ImGui::Button("Disable Slowed + Reverb Mode")) {
+            config_spu_diagnostic_mode_ = false;
+            apply_speed_override();
+            save_persistent_config();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(config_spu_diagnostic_mode_ ? "Active" : "Inactive");
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+        "Enables per-sample SPU diagnostics. Voice level meters stay live.");
+}
+
 void App::draw_sound_status_content() {
     const auto& diag = runtime_snapshot_.spu_audio;
     const auto avg_count = [](u64 accum, u64 samples) -> float {
@@ -3421,6 +4147,8 @@ void App::panel_grim_reaper() {
             ImGui::TextColored(
                 ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                 "Real-time SPU corruption for pitch, reverb, ADSR release, and mixer routing.");
+            draw_spu_diagnostic_mode_controls();
+            ImGui::Separator();
             ImGui::Checkbox("Enable Sound Reaper", &sound_reaper_enabled_);
             ImGui::SliderFloat("Sound Chaos (%)", &sound_reaper_intensity_percent_, 0.0f,
                 100.0f, "%.1f%%");
@@ -3453,7 +4181,47 @@ void App::panel_grim_reaper() {
             ImGui::Separator();
             std::filesystem::path sound_ram_path = std::filesystem::current_path() / "sound.ram";
             sound_ram_voice_index_ = std::max(0, std::min(23, sound_ram_voice_index_));
+            if (sound_ram_multi_voice_export_) {
+                ImGui::BeginDisabled();
+            }
             ImGui::SliderInt("Sample Voice", &sound_ram_voice_index_, 0, 23);
+            if (sound_ram_multi_voice_export_) {
+                ImGui::EndDisabled();
+            }
+            int selected_voice_count = 0;
+            if (ImGui::Checkbox("Multi-Voice Export", &sound_ram_multi_voice_export_) &&
+                sound_ram_multi_voice_export_) {
+                sound_ram_voice_selected_.fill(false);
+                sound_ram_voice_selected_[static_cast<size_t>(sound_ram_voice_index_)] = true;
+            }
+            if (sound_ram_multi_voice_export_) {
+                if (ImGui::Button("Current Voice Only")) {
+                    sound_ram_voice_selected_.fill(false);
+                    sound_ram_voice_selected_[static_cast<size_t>(sound_ram_voice_index_)] = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Select All Voices")) {
+                    sound_ram_voice_selected_.fill(true);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Voice Selection")) {
+                    sound_ram_voice_selected_.fill(false);
+                }
+                if (ImGui::BeginTable("SoundRamVoiceSelection", 4,
+                        ImGuiTableFlags_SizingStretchSame)) {
+                    for (int voice = 0; voice < 24; ++voice) {
+                        ImGui::TableNextColumn();
+                        ImGui::Checkbox(
+                            ("Voice " + std::to_string(voice)).c_str(),
+                            &sound_ram_voice_selected_[static_cast<size_t>(voice)]);
+                        if (sound_ram_voice_selected_[static_cast<size_t>(voice)]) {
+                            ++selected_voice_count;
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::Text("Selected Voices: %d", selected_voice_count);
+            }
             const bool replacement_loaded = system_->spu_replacement_sample_loaded();
             const bool replacement_enabled = system_->spu_replacement_sample_enabled();
             ImGui::Text("Replacement Sample: %s | %s | %zu bytes",
@@ -3471,11 +4239,34 @@ void App::panel_grim_reaper() {
                     emu_runner_.set_running(true);
                 }
             };
-            if (ImGui::Button("Save Voice To sound.ram")) {
+            if (ImGui::Button(sound_ram_multi_voice_export_
+                    ? "Save Selected Voices"
+                    : "Save Voice To sound.ram")) {
                 run_spu_sample_action([&]() {
                     std::string error;
-                    if (system_->save_spu_voice_sample_to_file(
-                        sound_ram_voice_index_, sound_ram_path.string(), &error)) {
+                    if (sound_ram_multi_voice_export_) {
+                        std::vector<int> voices;
+                        voices.reserve(sound_ram_voice_selected_.size());
+                        for (int voice = 0;
+                             voice < static_cast<int>(sound_ram_voice_selected_.size());
+                             ++voice) {
+                            if (sound_ram_voice_selected_[static_cast<size_t>(voice)]) {
+                                voices.push_back(voice);
+                            }
+                        }
+                        if (system_->save_spu_voice_samples_to_file(
+                                voices, sound_ram_path.string(), &error)) {
+                            status_message_ = "Saved combined sound.ram from " +
+                                std::to_string(voices.size()) + " SPU voices.";
+                        }
+                        else {
+                            status_message_ = error.empty()
+                                ? "Failed to save combined sound.ram."
+                                : error;
+                        }
+                    }
+                    else if (system_->save_spu_voice_sample_to_file(
+                                 sound_ram_voice_index_, sound_ram_path.string(), &error)) {
                         status_message_ = "Saved sound.ram from SPU voice " +
                             std::to_string(sound_ram_voice_index_);
                     }
@@ -4000,7 +4791,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.1.0");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5a-h1.1");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
@@ -4996,8 +5787,16 @@ void App::load_persistent_config() {
         else if (key == "spu_diagnostic_mode") {
             config_spu_diagnostic_mode_ = parse_bool(value, config_spu_diagnostic_mode_);
         }
+        else if (key == "discord_rich_presence") {
+            config_discord_rich_presence_ =
+                parse_bool(value, config_discord_rich_presence_);
+        }
         else if (key == "gpu_fast_mode") {
             g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
+        }
+        else if (key == "gpu_extreme_fast_mode") {
+            g_gpu_extreme_fast_mode =
+                parse_bool(value, g_gpu_extreme_fast_mode);
         }
         else if (key == "mdec_debug_disable_dma1_reorder") {
             g_mdec_debug_disable_dma1_reorder =
@@ -5089,6 +5888,10 @@ void App::load_persistent_config() {
         else if (key == "log_collapse_repeats") {
             g_log_dedupe = parse_bool(value, g_log_dedupe);
         }
+        else if (key == "log_fmv_diagnostics") {
+            g_log_fmv_diagnostics =
+                parse_bool(value, g_log_fmv_diagnostics);
+        }
         else if (key == "log_repeat_flush") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
             g_log_dedupe_flush = static_cast<u32>(std::max(1ul, parsed));
@@ -5129,6 +5932,10 @@ void App::load_persistent_config() {
         }
         else if (key == "trace_sio") {
             g_trace_sio = parse_bool(value, g_trace_sio);
+        }
+        else if (key == "cpu_deep_diagnostics") {
+            g_cpu_deep_diagnostics =
+                parse_bool(value, g_cpu_deep_diagnostics);
         }
         else if (key == "trace_burst_cpu") {
             g_trace_burst_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
@@ -5219,6 +6026,9 @@ void App::load_persistent_config() {
         std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
     g_spu_xa_buffer_seconds =
         std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
+    if (!g_gpu_fast_mode) {
+        g_gpu_extreme_fast_mode = false;
+    }
     memory_card_target_paths_ = resolve_memory_card_paths();
 
     if (g_unsafe_ps2_bios_mode) {
@@ -5244,7 +6054,10 @@ void App::save_persistent_config() const {
     out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
     out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
     out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
+    out << "discord_rich_presence=" << (config_discord_rich_presence_ ? 1 : 0) << "\n";
     out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
+    out << "gpu_extreme_fast_mode="
+        << ((g_gpu_fast_mode && g_gpu_extreme_fast_mode) ? 1 : 0) << "\n";
     out << "mdec_debug_disable_dma1_reorder="
         << (g_mdec_debug_disable_dma1_reorder ? 1 : 0) << "\n";
     out << "mdec_debug_disable_chroma=" << (g_mdec_debug_disable_chroma ? 1 : 0) << "\n";
@@ -5273,6 +6086,7 @@ void App::save_persistent_config() const {
     out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
     out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";
     out << "log_collapse_repeats=" << (g_log_dedupe ? 1 : 0) << "\n";
+    out << "log_fmv_diagnostics=" << (g_log_fmv_diagnostics ? 1 : 0) << "\n";
     out << "log_repeat_flush=" << static_cast<unsigned>(g_log_dedupe_flush) << "\n";
     out << "log_category_mask=" << g_log_category_mask << "\n";
     out << "log_file_path=" << log_path_ << "\n";
@@ -5286,6 +6100,7 @@ void App::save_persistent_config() const {
     out << "trace_irq=" << (g_trace_irq ? 1 : 0) << "\n";
     out << "trace_timer=" << (g_trace_timer ? 1 : 0) << "\n";
     out << "trace_sio=" << (g_trace_sio ? 1 : 0) << "\n";
+    out << "cpu_deep_diagnostics=" << (g_cpu_deep_diagnostics ? 1 : 0) << "\n";
     out << "trace_burst_cpu=" << g_trace_burst_cpu << "\n";
     out << "trace_stride_cpu=" << g_trace_stride_cpu << "\n";
     out << "trace_burst_bus=" << g_trace_burst_bus << "\n";
@@ -5339,7 +6154,14 @@ void App::try_autoload_bios_from_config() {
 }
 void App::shutdown() {
     save_persistent_config();
+    if (ImGui::GetCurrentContext() != nullptr) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
+            ImGui::SaveIniSettingsToDisk(io.IniFilename);
+        }
+    }
     emu_runner_.stop();
+    discord_presence_.reset();
     if (renderer_) {
         renderer_->shutdown();
     }

@@ -7,7 +7,7 @@ inline bool cpu_diag_enabled() { return g_cpu_deep_diagnostics; }
 void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
   static u32 last_pc = 0xFFFFFFFFu;
   static u32 last_instr = 0xFFFFFFFFu;
-  if (sys == nullptr) {
+  if (sys == nullptr || !g_log_fmv_diagnostics) {
     return;
   }
   if (pc == last_pc && instr == last_instr) {

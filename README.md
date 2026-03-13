@@ -4,14 +4,15 @@ This is a fully vibe-coded PS1 emulator for fun. It is written in C++.
 ## Things implemented:
 BIOS loading ✅  
 Game loading 🚩  
-Bindings ✅ 
+Bindings ✅  
 CD-ROM ⚠️  
 Graphics/VRAM ✅⚠️  
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
-MDEC ✅ (for Gran Turismo 2) 🚩 (for everything else)  
-Real-time corrupter/BIOS corruption ✅
+MDEC ✅(For Gran Turismo 2) 🚩 (For everything else)  
+Real-time corrupter/BIOS corruption ✅   
+Memory Cards ✅
 
 ✅ - Implemented  
 ⚠️ - Implemented, buggy  
@@ -70,8 +71,8 @@ Corrupts or warps draw offsets, draw areas, textures, and optional display state
 <img width="662" height="216" alt="image" src="https://github.com/user-attachments/assets/0dd2639d-a150-4ff5-a991-0c06350c11ef" />
 
 
-Unlike targetting SPU RAM in RAM reaper, this one targets the reverb, delay, whatever SPU effects is implemented, resulting in hilarious audio corruptions.
-
+Unlike targetting SPU RAM in RAM reaper, this one targets the reverb, delay, whatever SPU effects is implemented, resulting in hilarious audio corruptions.  
+You can also save a certain sound sample from a specific voice channel and apply it to all channels.  
 
 *All reapers include a preset saver/list with their seeds, so you can share your funny results with anyone having this emulator.*
 
@@ -86,8 +87,16 @@ Run
 and  
 `cmake --build build-vs --config Release`  
 (or compile inside Visual Studio)    
-  
-    
+
+#### ⚠️ As of v0.4.5, Discord RPC support is included, but the source repo does not ship with the Discord Social SDK. If you want working Discord RPC when building from source, download the SDK from Discord's Developer Portal and build with it yourself. This feature is entirely optional to you.
+
+To build the Discord RPC:   
+Run   
+`cmake -S . -B build-vs -DVIBESTATION_DISCORD_SDK_ROOT="C:/path/to/discord_social_sdk"`
+
+*C:/path/to/discord_social_sdk should be replaced with where you kept the discord_social_sdk folder*    
+*⚠️ NOTE: If you choose not to provide the SDK, the project will still build with a stub fallback, but Discord RPC will not function.*
+
 #### ⚠️ The program does ***not*** provide any kind of BIOS files and does not condone piracy. ***All*** BIOS files used must be legally obtained or extracted from your owned console.
 
 ### ⚠️ MANY THINGS ARE EXPERIMENTAL, NOT IMPLEMENTED AND/OR NOT WORKING!

@@ -311,7 +311,7 @@ void DmaController::dma_block(int channel) {
     }
     if (transfer_words != requested_words) {
       dbg.transfer_words = transfer_words;
-      if (channel == 3 && g_cpu_deep_diagnostics) {
+      if (channel == 3 && g_cpu_deep_diagnostics && g_log_fmv_diagnostics) {
         static u32 cdrom_dma_clip_logs = 0;
         if (cdrom_dma_clip_logs < 32u) {
           ++cdrom_dma_clip_logs;
