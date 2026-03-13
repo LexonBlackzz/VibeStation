@@ -10,7 +10,7 @@ Graphics/VRAM ✅⚠️
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
-MDEC 🚩  
+MDEC ✅(For Gran Turismo 2) 🚩 (For everything else)  
 Real-time corrupter/BIOS corruption ✅   
 Memory Cards ✅
 
@@ -88,7 +88,7 @@ and
 `cmake --build build-vs --config Release`  
 (or compile inside Visual Studio)    
 
-#### ⚠️ As of v0.4.5a, Discord RPC support is included, but the source repo does not ship with the Discord Social SDK. If you want working Discord RPC when building from source, download the SDK from Discord's Developer Portal and build with it yourself. This feature is entirely optional to you.
+#### ⚠️ As of v0.4.5, Discord RPC support is included, but the source repo does not ship with the Discord Social SDK. If you want working Discord RPC when building from source, download the SDK from Discord's Developer Portal and build with it yourself. This feature is entirely optional to you.
 
 To build the Discord RPC:   
 Run   

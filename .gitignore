@@ -1,5 +1,6 @@
 .vs/
 build/
 build-vs/
+discord_social_sdk/
 *.pdb
 
