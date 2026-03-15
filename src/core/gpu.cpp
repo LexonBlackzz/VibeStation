@@ -204,6 +204,10 @@ u32 Gpu::gp0_command_length(u8 opcode) {
     case 0x41:
     case 0x42:
     case 0x43:
+    case 0x44:
+    case 0x45:
+    case 0x46:
+    case 0x47:
         return 3; // Mono line
     case 0x48:
     case 0x49:
@@ -218,6 +222,10 @@ u32 Gpu::gp0_command_length(u8 opcode) {
     case 0x51:
     case 0x52:
     case 0x53:
+    case 0x54:
+    case 0x55:
+    case 0x56:
+    case 0x57:
         return 4; // Shaded line
     case 0x58:
     case 0x59:
@@ -243,6 +251,11 @@ u32 Gpu::gp0_command_length(u8 opcode) {
     case 0x6A:
     case 0x6B:
         return 2; // Mono rect 1x1
+    case 0x6C:
+    case 0x6D:
+    case 0x6E:
+    case 0x6F:
+        return 3; // Textured rect 1x1
     case 0x70:
     case 0x71:
     case 0x72:
@@ -264,10 +277,103 @@ u32 Gpu::gp0_command_length(u8 opcode) {
     case 0x7F:
         return 3; // Textured rect 16x16
     case 0x80:
+    case 0x81:
+    case 0x82:
+    case 0x83:
+    case 0x84:
+    case 0x85:
+    case 0x86:
+    case 0x87:
+    case 0x88:
+    case 0x89:
+    case 0x8A:
+    case 0x8B:
+    case 0x8C:
+    case 0x8D:
+    case 0x8E:
+    case 0x8F:
+    case 0x90:
+    case 0x91:
+    case 0x92:
+    case 0x93:
+    case 0x94:
+    case 0x95:
+    case 0x96:
+    case 0x97:
+    case 0x98:
+    case 0x99:
+    case 0x9A:
+    case 0x9B:
+    case 0x9C:
+    case 0x9D:
+    case 0x9E:
+    case 0x9F:
         return 4; // VRAM-to-VRAM copy
     case 0xA0:
+    case 0xA1:
+    case 0xA2:
+    case 0xA3:
+    case 0xA4:
+    case 0xA5:
+    case 0xA6:
+    case 0xA7:
+    case 0xA8:
+    case 0xA9:
+    case 0xAA:
+    case 0xAB:
+    case 0xAC:
+    case 0xAD:
+    case 0xAE:
+    case 0xAF:
+    case 0xB0:
+    case 0xB1:
+    case 0xB2:
+    case 0xB3:
+    case 0xB4:
+    case 0xB5:
+    case 0xB6:
+    case 0xB7:
+    case 0xB8:
+    case 0xB9:
+    case 0xBA:
+    case 0xBB:
+    case 0xBC:
+    case 0xBD:
+    case 0xBE:
+    case 0xBF:
         return 3; // CPU-to-VRAM (header, data follows)
     case 0xC0:
+    case 0xC1:
+    case 0xC2:
+    case 0xC3:
+    case 0xC4:
+    case 0xC5:
+    case 0xC6:
+    case 0xC7:
+    case 0xC8:
+    case 0xC9:
+    case 0xCA:
+    case 0xCB:
+    case 0xCC:
+    case 0xCD:
+    case 0xCE:
+    case 0xCF:
+    case 0xD0:
+    case 0xD1:
+    case 0xD2:
+    case 0xD3:
+    case 0xD4:
+    case 0xD5:
+    case 0xD6:
+    case 0xD7:
+    case 0xD8:
+    case 0xD9:
+    case 0xDA:
+    case 0xDB:
+    case 0xDC:
+    case 0xDD:
+    case 0xDE:
+    case 0xDF:
         return 3; // VRAM-to-CPU
     case 0xE1:
         return 1; // Draw mode
@@ -293,6 +399,7 @@ void Gpu::reset() {
     if (gp0_buffer_.capacity() < 12) {
         gp0_buffer_.reserve(12);
     }
+    gp0_fifo_.clear();
     gp0_buffer_.clear();
     gp0_mode_ = Gp0Mode::Command;
     gp0_words_remaining_ = 0;
@@ -501,11 +608,44 @@ void Gpu::apply_reaper_to_gp0_command() {
     }
 }
 
+void Gpu::consume_vram_write_word(u32 word) {
+    if (sys_ && g_mdec_debug_upload_probe && fmv_diagnostics_enabled()) {
+        sys_->debug_note_gpu_image_load_word(word);
+    }
+
+    const u16 pixel0 = static_cast<u16>(word & 0xFFFFu);
+    const u16 pixel1 = static_cast<u16>(word >> 16);
+
+    if (vram_tx_pos_ < vram_tx_total_) {
+        const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+            (psx::VRAM_WIDTH - 1));
+        const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+            (psx::VRAM_HEIGHT - 1));
+        vram_[y * psx::VRAM_WIDTH + x] = pixel0;
+        vram_tx_pos_++;
+    }
+    if (vram_tx_pos_ < vram_tx_total_) {
+        const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
+            (psx::VRAM_WIDTH - 1));
+        const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
+            (psx::VRAM_HEIGHT - 1));
+        vram_[y * psx::VRAM_WIDTH + x] = pixel1;
+        vram_tx_pos_++;
+    }
+
+    if (vram_tx_pos_ >= vram_tx_total_) {
+        gp0_mode_ = Gp0Mode::Command;
+    }
+}
+
 void Gpu::gp0(u32 command) {
     const bool profile_detailed = g_profile_detailed_timing;
     std::chrono::high_resolution_clock::time_point start{};
     if (profile_detailed) {
         start = std::chrono::high_resolution_clock::now();
+        if (sys_) {
+            sys_->add_gpu_gp0_word();
+        }
     }
     static u64 gp0_count = 0;
     if (g_trace_gpu &&
@@ -515,41 +655,23 @@ void Gpu::gp0(u32 command) {
             static_cast<int>(gp0_mode_));
     }
 
+    gp0_fifo_.push_back(command);
+    while (!gp0_fifo_.empty()) {
+        if (gp0_mode_ == Gp0Mode::VramRead) {
+            break;
+        }
+        command = gp0_fifo_.front();
+        gp0_fifo_.pop_front();
+
     // Handle VRAM write mode
     if (gp0_mode_ == Gp0Mode::VramWrite) {
-        if (sys_ && g_mdec_debug_upload_probe && fmv_diagnostics_enabled()) {
-            sys_->debug_note_gpu_image_load_word(command);
-        }
-        // Write two 16-bit pixels per 32-bit word
-        u16 pixel0 = command & 0xFFFF;
-        u16 pixel1 = command >> 16;
-
-        if (vram_tx_pos_ < vram_tx_total_) {
-            const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                (psx::VRAM_WIDTH - 1));
-            const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                (psx::VRAM_HEIGHT - 1));
-            vram_[y * psx::VRAM_WIDTH + x] = pixel0;
-            vram_tx_pos_++;
-        }
-        if (vram_tx_pos_ < vram_tx_total_) {
-            const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
-                (psx::VRAM_WIDTH - 1));
-            const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
-                (psx::VRAM_HEIGHT - 1));
-            vram_[y * psx::VRAM_WIDTH + x] = pixel1;
-            vram_tx_pos_++;
-        }
-
-        if (vram_tx_pos_ >= vram_tx_total_) {
-            gp0_mode_ = Gp0Mode::Command;
-        }
-        return;
+        consume_vram_write_word(command);
+        continue;
     }
 
     if (polyline_active_) {
         handle_polyline_word(command);
-        return;
+        continue;
     }
 
     // Accumulate command words
@@ -564,12 +686,18 @@ void Gpu::gp0(u32 command) {
     gp0_words_remaining_--;
 
     if (gp0_words_remaining_ > 0)
-        return;
+        continue;
 
     apply_reaper_to_gp0_command();
 
     // Full command received — dispatch
     u8 op = gp0_command_;
+    if (profile_detailed && sys_) {
+        sys_->add_gpu_gp0_command();
+        if (op >= 0x20 && op <= 0x7Fu) {
+            sys_->add_gpu_draw_command();
+        }
+    }
     // GP0 draw command bit1 selects semi-transparency for that command.
     semi_transparency_mode_ = (op >= 0x20 && op <= 0x7F) && ((op & 0x02u) != 0);
     switch (op) {
@@ -634,6 +762,10 @@ void Gpu::gp0(u32 command) {
     case 0x41:
     case 0x42:
     case 0x43:
+    case 0x44:
+    case 0x45:
+    case 0x46:
+    case 0x47:
         gp0_mono_line();
         break;
     case 0x48:
@@ -650,6 +782,10 @@ void Gpu::gp0(u32 command) {
     case 0x51:
     case 0x52:
     case 0x53:
+    case 0x54:
+    case 0x55:
+    case 0x56:
+    case 0x57:
         gp0_shaded_line();
         break;
     case 0x58:
@@ -680,6 +816,12 @@ void Gpu::gp0(u32 command) {
     case 0x6B:
         gp0_mono_rect_1();
         break;
+    case 0x6C:
+    case 0x6D:
+    case 0x6E:
+    case 0x6F:
+        gp0_textured_rect();
+        break;
     case 0x70:
     case 0x71:
     case 0x72:
@@ -705,12 +847,105 @@ void Gpu::gp0(u32 command) {
         gp0_textured_rect();
         break;
     case 0xA0:
+    case 0xA1:
+    case 0xA2:
+    case 0xA3:
+    case 0xA4:
+    case 0xA5:
+    case 0xA6:
+    case 0xA7:
+    case 0xA8:
+    case 0xA9:
+    case 0xAA:
+    case 0xAB:
+    case 0xAC:
+    case 0xAD:
+    case 0xAE:
+    case 0xAF:
+    case 0xB0:
+    case 0xB1:
+    case 0xB2:
+    case 0xB3:
+    case 0xB4:
+    case 0xB5:
+    case 0xB6:
+    case 0xB7:
+    case 0xB8:
+    case 0xB9:
+    case 0xBA:
+    case 0xBB:
+    case 0xBC:
+    case 0xBD:
+    case 0xBE:
+    case 0xBF:
         gp0_image_load();
         break;
     case 0x80:
+    case 0x81:
+    case 0x82:
+    case 0x83:
+    case 0x84:
+    case 0x85:
+    case 0x86:
+    case 0x87:
+    case 0x88:
+    case 0x89:
+    case 0x8A:
+    case 0x8B:
+    case 0x8C:
+    case 0x8D:
+    case 0x8E:
+    case 0x8F:
+    case 0x90:
+    case 0x91:
+    case 0x92:
+    case 0x93:
+    case 0x94:
+    case 0x95:
+    case 0x96:
+    case 0x97:
+    case 0x98:
+    case 0x99:
+    case 0x9A:
+    case 0x9B:
+    case 0x9C:
+    case 0x9D:
+    case 0x9E:
+    case 0x9F:
         gp0_vram_copy();
         break;
     case 0xC0:
+    case 0xC1:
+    case 0xC2:
+    case 0xC3:
+    case 0xC4:
+    case 0xC5:
+    case 0xC6:
+    case 0xC7:
+    case 0xC8:
+    case 0xC9:
+    case 0xCA:
+    case 0xCB:
+    case 0xCC:
+    case 0xCD:
+    case 0xCE:
+    case 0xCF:
+    case 0xD0:
+    case 0xD1:
+    case 0xD2:
+    case 0xD3:
+    case 0xD4:
+    case 0xD5:
+    case 0xD6:
+    case 0xD7:
+    case 0xD8:
+    case 0xD9:
+    case 0xDA:
+    case 0xDB:
+    case 0xDC:
+    case 0xDD:
+    case 0xDE:
+    case 0xDF:
         gp0_image_store();
         break;
     case 0xE1:
@@ -740,6 +975,7 @@ void Gpu::gp0(u32 command) {
     }
 
     gp0_buffer_.clear();
+    }
     if (profile_detailed && sys_) {
         const auto end = std::chrono::high_resolution_clock::now();
         sys_->add_gpu_time(
@@ -945,6 +1181,12 @@ Vertex Gpu::decode_vertex_word(u32 word) const {
 }
 
 void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) {
+    // PS1 hardware rejects lines exceeding 1023x511 span, same as triangles.
+    const int dx_span = std::abs(static_cast<int>(b.x) - static_cast<int>(a.x));
+    const int dy_span = std::abs(static_cast<int>(b.y) - static_cast<int>(a.y));
+    if (dx_span > 1023 || dy_span > 511) {
+        return;
+    }
     s16 x0 = a.x;
     s16 y0 = a.y;
     const s16 x1 = b.x;
@@ -1339,6 +1581,7 @@ void Gpu::gp1_reset() {
 }
 
 void Gpu::gp1_reset_command_buffer() {
+    gp0_fifo_.clear();
     gp0_buffer_.clear();
     gp0_words_remaining_ = 0;
     gp0_mode_ = Gp0Mode::Command;
@@ -1465,6 +1708,13 @@ u32 Gpu::read_data() {
 
         if (vram_tx_pos_ >= vram_tx_total_) {
             gp0_mode_ = Gp0Mode::Command;
+            if (!gp0_fifo_.empty()) {
+                auto queued_words = std::move(gp0_fifo_);
+                gp0_fifo_.clear();
+                for (u32 queued_word : queued_words) {
+                    gp0(queued_word);
+                }
+            }
         }
 
         return static_cast<u32>(p0) | (static_cast<u32>(p1) << 16);
@@ -1473,8 +1723,13 @@ u32 Gpu::read_data() {
 }
 
 u32 Gpu::read_stat() const {
-    const bool cmd_ready = (gp0_mode_ == Gp0Mode::Command);
-    const bool vram_read_ready = (gp0_mode_ != Gp0Mode::VramWrite);
+    // Match the reference core's dynamic GPUSTAT bits more closely:
+    // bit 26 reflects GPU idle, bit 27 only reflects an active VRAM->CPU read,
+    // and bit 28 is the receive side of the GP0/DMA path.
+    const bool gpu_idle = (gp0_mode_ == Gp0Mode::Command) &&
+        gp0_fifo_.empty() && gp0_buffer_.empty() && !polyline_active_;
+    const bool vram_read_ready =
+        (gp0_mode_ == Gp0Mode::VramRead) && (vram_tx_pos_ < vram_tx_total_);
     const bool dma_block_ready = (gp0_mode_ != Gp0Mode::VramRead);
     u32 dma_req = 0;
     switch (dma_direction_ & 0x3u) {
@@ -1508,6 +1763,9 @@ u32 Gpu::read_stat() const {
     stat |= (draw_to_display_ ? 1u : 0u) << 10;
     stat |= (force_set_mask_bit_ ? 1u : 0u) << 11;
     stat |= (check_mask_before_draw_ ? 1u : 0u) << 12;
+    // Bit 13: Interlace Field. Always 1 when interlace is off (GP1(08h).5=0).
+    const bool interlace_field_bit = display_.interlaced ? interlace_field_ : true;
+    stat |= (interlace_field_bit ? 1u : 0u) << 13;
     stat |= (texture_disable_ ? 1 : 0) << 15;
     stat |= (display_.hres == 4 ? 1 : 0) << 16; // HR2
     stat |= (display_.hres & 3) << 17;          // HR1
@@ -1518,7 +1776,7 @@ u32 Gpu::read_stat() const {
     stat |= (display_.display_enabled ? 0 : 1) << 23; // Display disable
     stat |= (irq1_pending_ ? 1u : 0u) << 24;
     stat |= dma_req << 25;
-    stat |= (cmd_ready ? 1u : 0u) << 26;
+    stat |= (gpu_idle ? 1u : 0u) << 26;
     stat |= (vram_read_ready ? 1u : 0u) << 27;
     stat |= (dma_block_ready ? 1u : 0u) << 28;
     stat |= (static_cast<u32>(dma_direction_ & 0x3u) << 29);
@@ -1532,7 +1790,8 @@ u32 Gpu::read_stat() const {
 }
 
 bool Gpu::dma_request() const {
-    const bool vram_read_ready = (gp0_mode_ != Gp0Mode::VramWrite);
+    const bool vram_read_ready =
+        (gp0_mode_ == Gp0Mode::VramRead) && (vram_tx_pos_ < vram_tx_total_);
     const bool dma_block_ready = (gp0_mode_ != Gp0Mode::VramRead);
     switch (dma_direction_ & 0x3u) {
     case 1:

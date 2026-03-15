@@ -46,6 +46,7 @@ private:
 	bool show_grim_reaper_ = false;
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
+	bool show_fmv_diagnostics_ = false;
 	std::string bios_path_;
 	std::string rom_directory_;
 	std::string game_bin_path_;
@@ -82,8 +83,17 @@ private:
 	std::array<float, kPerfHistorySamples> perf_cpu_ms_history_ = {};
 	std::array<float, kPerfHistorySamples> perf_gpu_ms_history_ = {};
 	std::array<float, kPerfHistorySamples> perf_core_ms_history_ = {};
+	std::array<u64, kPerfHistorySamples> perf_frame_id_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_gpu_words_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_gpu_draw_commands_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_cpu_pc_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_dma2_words_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_dma2_base_history_ = {};
+	std::array<u32, kPerfHistorySamples> perf_display_hash_history_ = {};
 	int perf_history_write_index_ = 0;
 	int perf_history_count_ = 0;
+	u64 perf_history_last_frame_id_ = 0;
+	bool perf_history_has_last_frame_id_ = false;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
 	std::vector<u32> turbo_frame_rgba_{};
@@ -213,8 +223,10 @@ private:
 	void panel_grim_reaper();
 	void panel_corruption_presets();
 	void panel_bindings_config();
+	void panel_fmv_diagnostics();
 	void draw_sound_status_content();
 	void draw_bindings_config_content();
+	void draw_fmv_diagnostics_content();
 	void draw_spu_diagnostic_mode_controls();
 	void update_vram_debug_texture();
 

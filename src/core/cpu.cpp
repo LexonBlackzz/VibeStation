@@ -357,6 +357,9 @@ void Cpu::reset() {
   cop0_badvaddr_ = 0;
   cop0_jumpdest_ = 0;
   cycles_ = 0;
+  gte_input_ready_cycle_ = 0;
+  gte_result_ready_cycle_ = 0;
+  cycle_penalty_ = 0;
   std::memset(cop0_regs_, 0, sizeof(cop0_regs_));
 }
 
@@ -481,6 +484,64 @@ void Cpu::schedule_load(u32 index, u32 value) {
     return;
   }
   next_load_ = {index, value};
+}
+
+void Cpu::add_cycle_penalty(u32 cycles) {
+  cycle_penalty_ += cycles;
+}
+
+bool Cpu::gte_data_reg_reads_result(u32 reg) {
+  switch (reg) {
+  case 7:  // OTZ
+  case 8:  // IR0
+  case 9:  // IR1
+  case 10: // IR2
+  case 11: // IR3
+  case 12: // SXY0
+  case 13: // SXY1
+  case 14: // SXY2
+  case 15: // SXYP
+  case 16: // SZ0
+  case 17: // SZ1
+  case 18: // SZ2
+  case 19: // SZ3
+  case 20: // RGB0
+  case 21: // RGB1
+  case 22: // RGB2
+  case 24: // MAC0
+  case 25: // MAC1
+  case 26: // MAC2
+  case 27: // MAC3
+  case 28: // IRGB
+  case 29: // ORGB
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool Cpu::gte_ctrl_reg_reads_result(u32 reg) {
+  return reg == 31; // FLAG
+}
+
+u32 Cpu::gte_input_stall_cycles() const {
+  constexpr u64 kCop2IssueCycles = 2;
+  const u64 ready_cycle =
+      cycles_ + static_cast<u64>(cycle_penalty_) + kCop2IssueCycles;
+  if (gte_input_ready_cycle_ <= ready_cycle) {
+    return 0;
+  }
+  return static_cast<u32>(gte_input_ready_cycle_ - ready_cycle);
+}
+
+u32 Cpu::gte_result_stall_cycles() const {
+  constexpr u64 kCop2IssueCycles = 2;
+  const u64 ready_cycle =
+      cycles_ + static_cast<u64>(cycle_penalty_) + kCop2IssueCycles;
+  if (gte_result_ready_cycle_ <= ready_cycle) {
+    return 0;
+  }
+  return static_cast<u32>(gte_result_ready_cycle_ - ready_cycle);
 }
 
 u32 Cpu::gte_command_cycles(u32 instruction) {
@@ -657,6 +718,7 @@ u32 Cpu::step() {
   const bool cpu_diag = cpu_diag_enabled();
   current_pc_ = pc_;
   exception_raised_ = false;
+  cycle_penalty_ = 0;
   next_load_ = {0, 0};
   in_delay_slot_ = pending_delay_slot_;
   active_branch_pc_ = pending_branch_pc_;
@@ -1200,7 +1262,7 @@ u32 Cpu::step() {
     load_ = {0, 0};
   }
 
-  const u32 consumed_cycles = instruction_cycles(instruction);
+  const u32 consumed_cycles = instruction_cycles(instruction) + cycle_penalty_;
   cycles_ += consumed_cycles;
   prev_pc_for_diag = current_pc_;
   return consumed_cycles;
@@ -1561,7 +1623,7 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
     return 2;
   case 0x12: // COP2 / GTE
     if (rs(instruction) & 0x10u) {
-      return gte_command_cycles(instruction);
+      return 2;
     }
     return 2;
   case 0x20: // LB
@@ -2079,21 +2141,34 @@ void Cpu::op_cop2(u32 i) {
   u32 sub = rs(i);
   switch (sub) {
   case 0x00: // MFC2: Move from COP2 data register
+    if (gte_data_reg_reads_result(rd(i))) {
+      add_cycle_penalty(gte_result_stall_cycles());
+    }
     schedule_load(rt(i), gte.read_data(rd(i)));
     break;
   case 0x02: // CFC2: Move from COP2 control register
+    if (gte_ctrl_reg_reads_result(rd(i))) {
+      add_cycle_penalty(gte_result_stall_cycles());
+    }
     schedule_load(rt(i), gte.read_ctrl(rd(i)));
     break;
   case 0x04: // MTC2: Move to COP2 data register
     gte.write_data(rd(i), gpr_[rt(i)]);
+    gte_input_ready_cycle_ =
+        cycles_ + static_cast<u64>(cycle_penalty_) + 6;
     break;
   case 0x06: // CTC2: Move to COP2 control register
     gte.write_ctrl(rd(i), gpr_[rt(i)]);
+    gte_input_ready_cycle_ =
+        cycles_ + static_cast<u64>(cycle_penalty_) + 6;
     break;
   default:
     if (sub & 0x10) {
-      // GTE command
+      add_cycle_penalty(
+          std::max(gte_result_stall_cycles(), gte_input_stall_cycles()));
       gte.execute(i);
+      gte_result_ready_cycle_ = cycles_ + static_cast<u64>(cycle_penalty_) +
+          static_cast<u64>(gte_command_cycles(i));
     } else {
       LOG_WARN("CPU: Unhandled COP2 sub-op 0x%02X at PC=0x%08X", sub,
                current_pc_);
@@ -2109,10 +2184,15 @@ void Cpu::op_lwc2(u32 i) {
   if (exception_raised_)
     return;
   gte.write_data(rt(i), val);
+  gte_input_ready_cycle_ =
+      cycles_ + static_cast<u64>(cycle_penalty_) + 6;
 }
 
 void Cpu::op_swc2(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
+  if (gte_data_reg_reads_result(rt(i))) {
+    add_cycle_penalty(gte_result_stall_cycles());
+  }
   u32 val = gte.read_data(rt(i));
   store32(addr, val);
 }

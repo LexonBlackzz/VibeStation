@@ -25,6 +25,10 @@ public:
     System::BootDiagnostics boot_diag{};
     System::ProfilingStats profiling{};
     double core_frame_ms = 0.0;
+    u32 cpu_pc = 0;
+    u32 dma2_base_addr = 0;
+    u32 dma2_words = 0;
+    bool dma2_from_ram = false;
     Spu::AudioDiag spu_audio{};
     std::array<s16, 24> spu_voice_level_l{};
     std::array<s16, 24> spu_voice_level_r{};

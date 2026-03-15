@@ -344,6 +344,11 @@ void EmuRunner::worker_main() {
         snapshot.boot_diag = system_->boot_diag();
         snapshot.profiling = system_->profiling_stats();
         snapshot.core_frame_ms = snapshot.profiling.total_ms;
+        snapshot.cpu_pc = system_->cpu().pc();
+        const auto& dma2 = system_->dma_last_debug(2);
+        snapshot.dma2_base_addr = dma2.base_addr;
+        snapshot.dma2_words = dma2.transfer_words;
+        snapshot.dma2_from_ram = dma2.from_ram;
         snapshot.spu_audio = system_->spu_audio_diag();
         update_snapshot_display_diag_from_debug(
             snapshot.boot_diag,
