@@ -32,6 +32,358 @@ namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
     constexpr const char* kMemoryCardDirName = "memcards";
+    constexpr float kEmulatorScreenBottomOverscanPixels = 3.0f;
+    struct GpuDipDiagnostics {
+        bool valid = false;
+        int dip_count = 0;
+        double avg_interval_frames = 0.0;
+        double avg_dip_words = 0.0;
+        double avg_non_dip_words = 0.0;
+        double avg_dip_draws = 0.0;
+        double avg_non_dip_draws = 0.0;
+        u64 latest_dip_frame = 0;
+        u32 latest_dip_pc = 0;
+        u32 latest_dip_dma2_words = 0;
+        u32 latest_dip_dma2_base = 0;
+        bool latest_dip_display_reused = false;
+        std::array<u64, 3> recent_frames{};
+        int recent_frame_count = 0;
+    };
+
+    template <size_t N>
+    GpuDipDiagnostics analyze_gpu_dip_pattern(
+        const std::array<float, N>& gpu_history,
+        const std::array<u64, N>& frame_history,
+        const std::array<u32, N>& gpu_words_history,
+        const std::array<u32, N>& gpu_draw_history,
+        const std::array<u32, N>& cpu_pc_history,
+        const std::array<u32, N>& dma2_words_history,
+        const std::array<u32, N>& dma2_base_history,
+        const std::array<u32, N>& display_hash_history,
+        int count,
+        int write_index) {
+        GpuDipDiagnostics diag{};
+        if (count < 8) {
+            return diag;
+        }
+
+        std::vector<float> samples;
+        std::vector<u64> frames;
+        std::vector<u32> words;
+        std::vector<u32> draws;
+        std::vector<u32> pcs;
+        std::vector<u32> dma2_words;
+        std::vector<u32> dma2_bases;
+        std::vector<u32> display_hashes;
+        samples.reserve(static_cast<size_t>(count));
+        frames.reserve(static_cast<size_t>(count));
+        words.reserve(static_cast<size_t>(count));
+        draws.reserve(static_cast<size_t>(count));
+        pcs.reserve(static_cast<size_t>(count));
+        dma2_words.reserve(static_cast<size_t>(count));
+        dma2_bases.reserve(static_cast<size_t>(count));
+        display_hashes.reserve(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            const int idx = (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            samples.push_back(gpu_history[idx]);
+            frames.push_back(frame_history[idx]);
+            words.push_back(gpu_words_history[idx]);
+            draws.push_back(gpu_draw_history[idx]);
+            pcs.push_back(cpu_pc_history[idx]);
+            dma2_words.push_back(dma2_words_history[idx]);
+            dma2_bases.push_back(dma2_base_history[idx]);
+            display_hashes.push_back(display_hash_history[idx]);
+        }
+
+        std::vector<float> sorted = samples;
+        std::sort(sorted.begin(), sorted.end());
+        const float median = sorted[sorted.size() / 2];
+        const float peak = *std::max_element(samples.begin(), samples.end());
+        if (peak <= 0.0f) {
+            return diag;
+        }
+
+        const float dip_threshold =
+            std::min(median * 0.75f, peak * 0.60f);
+        std::vector<u64> dip_frames;
+        std::vector<size_t> dip_indices;
+        dip_frames.reserve(samples.size() / 8u);
+        for (int i = 1; i + 1 < count; ++i) {
+            const float cur = samples[static_cast<size_t>(i)];
+            if (cur > dip_threshold) {
+                continue;
+            }
+            if (cur >= samples[static_cast<size_t>(i - 1)] ||
+                cur > samples[static_cast<size_t>(i + 1)]) {
+                continue;
+            }
+            const u64 frame_id = frames[static_cast<size_t>(i)];
+            if (!dip_frames.empty() && frame_id <= dip_frames.back() + 1u) {
+                continue;
+            }
+            dip_frames.push_back(frame_id);
+            dip_indices.push_back(static_cast<size_t>(i));
+        }
+
+        diag.dip_count = static_cast<int>(dip_frames.size());
+        if (!dip_frames.empty()) {
+            const size_t recent_count = std::min<size_t>(3, dip_frames.size());
+            diag.recent_frame_count = static_cast<int>(recent_count);
+            for (size_t i = 0; i < recent_count; ++i) {
+                diag.recent_frames[i] =
+                    dip_frames[dip_frames.size() - recent_count + i];
+            }
+            const size_t latest_index = dip_indices.back();
+            diag.latest_dip_frame = frames[latest_index];
+            diag.latest_dip_pc = pcs[latest_index];
+            diag.latest_dip_dma2_words = dma2_words[latest_index];
+            diag.latest_dip_dma2_base = dma2_bases[latest_index];
+            diag.latest_dip_display_reused =
+                (latest_index > 0) &&
+                (display_hashes[latest_index] == display_hashes[latest_index - 1]);
+        }
+
+        if (dip_frames.size() < 2) {
+            if (!dip_indices.empty() && dip_indices.size() < samples.size()) {
+                double dip_word_sum = 0.0;
+                double dip_draw_sum = 0.0;
+                for (size_t dip_index : dip_indices) {
+                    dip_word_sum += static_cast<double>(words[dip_index]);
+                    dip_draw_sum += static_cast<double>(draws[dip_index]);
+                }
+                diag.avg_dip_words =
+                    dip_word_sum / static_cast<double>(dip_indices.size());
+                diag.avg_dip_draws =
+                    dip_draw_sum / static_cast<double>(dip_indices.size());
+
+                double non_dip_word_sum = 0.0;
+                double non_dip_draw_sum = 0.0;
+                size_t non_dip_count = 0;
+                for (size_t i = 0; i < samples.size(); ++i) {
+                    if (std::find(dip_indices.begin(), dip_indices.end(), i) !=
+                        dip_indices.end()) {
+                        continue;
+                    }
+                    non_dip_word_sum += static_cast<double>(words[i]);
+                    non_dip_draw_sum += static_cast<double>(draws[i]);
+                    ++non_dip_count;
+                }
+                if (non_dip_count > 0) {
+                    diag.avg_non_dip_words =
+                        non_dip_word_sum / static_cast<double>(non_dip_count);
+                    diag.avg_non_dip_draws =
+                        non_dip_draw_sum / static_cast<double>(non_dip_count);
+                }
+            }
+            return diag;
+        }
+
+        double interval_sum = 0.0;
+        for (size_t i = 1; i < dip_frames.size(); ++i) {
+            interval_sum += static_cast<double>(dip_frames[i] - dip_frames[i - 1]);
+        }
+        diag.avg_interval_frames =
+            interval_sum / static_cast<double>(dip_frames.size() - 1);
+        double dip_word_sum = 0.0;
+        double dip_draw_sum = 0.0;
+        for (size_t dip_index : dip_indices) {
+            dip_word_sum += static_cast<double>(words[dip_index]);
+            dip_draw_sum += static_cast<double>(draws[dip_index]);
+        }
+        diag.avg_dip_words =
+            dip_word_sum / static_cast<double>(std::max<size_t>(1, dip_indices.size()));
+        diag.avg_dip_draws =
+            dip_draw_sum / static_cast<double>(std::max<size_t>(1, dip_indices.size()));
+        double non_dip_word_sum = 0.0;
+        double non_dip_draw_sum = 0.0;
+        size_t non_dip_count = 0;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (std::find(dip_indices.begin(), dip_indices.end(), i) !=
+                dip_indices.end()) {
+                continue;
+            }
+            non_dip_word_sum += static_cast<double>(words[i]);
+            non_dip_draw_sum += static_cast<double>(draws[i]);
+            ++non_dip_count;
+        }
+        if (non_dip_count > 0) {
+            diag.avg_non_dip_words =
+                non_dip_word_sum / static_cast<double>(non_dip_count);
+            diag.avg_non_dip_draws =
+                non_dip_draw_sum / static_cast<double>(non_dip_count);
+        }
+        diag.valid = true;
+        return diag;
+    }
+
+    struct RectSourceRegion {
+        u16 x = 0;
+        u16 y = 0;
+        u16 w = 0;
+        u16 h = 0;
+        bool valid = false;
+    };
+
+    RectSourceRegion compute_rect_source_region(
+        u16 texpage, u8 depth, u8 u, u8 v, u16 w, u16 h) {
+        RectSourceRegion region{};
+        if (w == 0 || h == 0) {
+            return region;
+        }
+        const u16 tex_base_x = static_cast<u16>((texpage & 0xFu) * 64u);
+        const u16 tex_base_y = static_cast<u16>(((texpage >> 4) & 0x1u) * 256u);
+        u16 src_x = tex_base_x;
+        u16 src_w = 0;
+        switch (depth & 0x3u) {
+        case 0: {
+            src_x = static_cast<u16>(tex_base_x + (u >> 2));
+            const u16 last_u = static_cast<u16>(u + w - 1u);
+            src_w = static_cast<u16>((last_u >> 2) - (u >> 2) + 1u);
+            break;
+        }
+        case 1: {
+            src_x = static_cast<u16>(tex_base_x + (u >> 1));
+            const u16 last_u = static_cast<u16>(u + w - 1u);
+            src_w = static_cast<u16>((last_u >> 1) - (u >> 1) + 1u);
+            break;
+        }
+        case 2:
+            src_x = static_cast<u16>(tex_base_x + u);
+            src_w = w;
+            break;
+        default:
+            return region;
+        }
+        region.x = static_cast<u16>(src_x & (psx::VRAM_WIDTH - 1u));
+        region.y = static_cast<u16>((tex_base_y + v) & (psx::VRAM_HEIGHT - 1u));
+        region.w = src_w;
+        region.h = h;
+        region.valid = true;
+        return region;
+    }
+
+    bool rects_overlap(u16 ax, u16 ay, u16 aw, u16 ah,
+        u16 bx, u16 by, u16 bw, u16 bh) {
+        if (aw == 0 || ah == 0 || bw == 0 || bh == 0) {
+            return false;
+        }
+        const u32 ax2 = static_cast<u32>(ax) + aw;
+        const u32 ay2 = static_cast<u32>(ay) + ah;
+        const u32 bx2 = static_cast<u32>(bx) + bw;
+        const u32 by2 = static_cast<u32>(by) + bh;
+        return ax < bx2 && bx < ax2 && ay < by2 && by < ay2;
+    }
+
+    int find_recent_upload_overlap(const System::MdecUploadProbe& probe,
+        const RectSourceRegion& region) {
+        if (!region.valid) {
+            return -1;
+        }
+        const u32 count = std::min<u32>(probe.gpu_hist_count,
+            static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
+        for (u32 i = 0; i < count; ++i) {
+            const u32 hist_index =
+                (probe.gpu_hist_count - 1u - i) %
+                static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
+            if (rects_overlap(region.x, region.y, region.w, region.h,
+                    probe.gpu_hist_x[hist_index], probe.gpu_hist_y[hist_index],
+                    probe.gpu_hist_w[hist_index], probe.gpu_hist_h[hist_index])) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    int find_recent_copy_overlap(const System::MdecUploadProbe& probe,
+        const RectSourceRegion& region) {
+        if (!region.valid) {
+            return -1;
+        }
+        const u32 count = std::min<u32>(probe.gpu_copy_sample_count,
+            static_cast<u32>(System::MdecUploadProbe::kSampleWords));
+        for (u32 i = 0; i < count; ++i) {
+            const u32 hist_index = count - 1u - i;
+            if (rects_overlap(region.x, region.y, region.w, region.h,
+                    probe.gpu_copy_dst_x[hist_index], probe.gpu_copy_dst_y[hist_index],
+                    probe.gpu_copy_w[hist_index], probe.gpu_copy_h[hist_index])) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    RectSourceRegion compute_poly_source_region(const GpuCommandDebugInfo& gcmd,
+        u32 poly_index) {
+        RectSourceRegion region{};
+        const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+        if (vertex_count == 0 || !gcmd.poly_textured[poly_index]) {
+            return region;
+        }
+        u8 min_u = 255;
+        u8 min_v = 255;
+        u8 max_u = 0;
+        u8 max_v = 0;
+        for (u8 i = 0; i < vertex_count && i < 4; ++i) {
+            min_u = std::min(min_u, gcmd.poly_u[poly_index][i]);
+            min_v = std::min(min_v, gcmd.poly_v[poly_index][i]);
+            max_u = std::max(max_u, gcmd.poly_u[poly_index][i]);
+            max_v = std::max(max_v, gcmd.poly_v[poly_index][i]);
+        }
+        return compute_rect_source_region(
+            gcmd.poly_texpage[poly_index],
+            gcmd.poly_depth[poly_index],
+            min_u,
+            min_v,
+            static_cast<u16>(max_u - min_u + 1u),
+            static_cast<u16>(max_v - min_v + 1u));
+    }
+
+    u32 compute_poly_bbox_area(const GpuCommandDebugInfo& gcmd, u32 poly_index) {
+        const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+        if (vertex_count < 3) {
+            return 0;
+        }
+        s16 min_x = gcmd.poly_x[poly_index][0];
+        s16 max_x = gcmd.poly_x[poly_index][0];
+        s16 min_y = gcmd.poly_y[poly_index][0];
+        s16 max_y = gcmd.poly_y[poly_index][0];
+        for (u8 i = 1; i < vertex_count && i < 4; ++i) {
+            min_x = std::min(min_x, gcmd.poly_x[poly_index][i]);
+            max_x = std::max(max_x, gcmd.poly_x[poly_index][i]);
+            min_y = std::min(min_y, gcmd.poly_y[poly_index][i]);
+            max_y = std::max(max_y, gcmd.poly_y[poly_index][i]);
+        }
+        const int width = std::max(0, static_cast<int>(max_x) - static_cast<int>(min_x));
+        const int height = std::max(0, static_cast<int>(max_y) - static_cast<int>(min_y));
+        return static_cast<u32>(width * height);
+    }
+
+    u32 compute_poly_visible_bbox_area(const GpuCommandDebugInfo& gcmd, u32 poly_index,
+        int view_x, int view_y, int view_w, int view_h) {
+        const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+        if (vertex_count < 3 || view_w <= 0 || view_h <= 0) {
+            return 0;
+        }
+        s16 min_x = gcmd.poly_x[poly_index][0];
+        s16 max_x = gcmd.poly_x[poly_index][0];
+        s16 min_y = gcmd.poly_y[poly_index][0];
+        s16 max_y = gcmd.poly_y[poly_index][0];
+        for (u8 i = 1; i < vertex_count && i < 4; ++i) {
+            min_x = std::min(min_x, gcmd.poly_x[poly_index][i]);
+            max_x = std::max(max_x, gcmd.poly_x[poly_index][i]);
+            min_y = std::min(min_y, gcmd.poly_y[poly_index][i]);
+            max_y = std::max(max_y, gcmd.poly_y[poly_index][i]);
+        }
+        const int clipped_min_x = std::max(static_cast<int>(min_x), view_x);
+        const int clipped_max_x = std::min(static_cast<int>(max_x), view_x + view_w);
+        const int clipped_min_y = std::max(static_cast<int>(min_y), view_y);
+        const int clipped_max_y = std::min(static_cast<int>(max_y), view_y + view_h);
+        const int width = std::max(0, clipped_max_x - clipped_min_x);
+        const int height = std::max(0, clipped_max_y - clipped_min_y);
+        return static_cast<u32>(width * height);
+    }
+
     struct GrimReaperRange {
         const char* label;
         const char* slug;
@@ -132,6 +484,8 @@ namespace {
         ImVec4 accent = kDefaultThemeAccent;
         ImVec4 text = kDefaultThemeText;
         ImVec4 lists = kDefaultThemeLists;
+        ImVec4 startup_title = kDefaultThemeAccent;
+        ImVec4 startup_text = kDefaultThemeText;
         bool simple = false;
         bool advanced = false;
         std::array<ImVec4, kThemeColorSlotCount> colors{};
@@ -285,6 +639,35 @@ namespace {
         settings.overall.w = 1.0f;
     }
 
+    ImVec4 startup_title_theme_color(const ThemeSettings& settings) {
+        const float luma = theme_luminance(settings.overall);
+        return tint_theme_color(
+            settings.accent, settings.overall, luma >= 0.72f ? 0.55f : 0.82f, 1.00f);
+    }
+
+    ImVec4 startup_text_theme_color(const ThemeSettings& settings) {
+        const float luma = theme_luminance(settings.overall);
+        const ImVec4 tinted_text = tint_theme_color(
+            settings.text, settings.overall, luma >= 0.72f ? 0.24f : 0.36f, 1.00f);
+        return theme_lerp(
+            tinted_text, settings.background, luma >= 0.72f ? 0.08f : 0.18f);
+    }
+
+    void reset_theme_startup_colors(ThemeSettings& settings) {
+        settings.startup_title = startup_title_theme_color(settings);
+        settings.startup_text = startup_text_theme_color(settings);
+    }
+
+    ImVec4 current_startup_title_color(const ThemeSettings& settings) {
+        return settings.advanced ? settings.startup_title
+                                 : startup_title_theme_color(settings);
+    }
+
+    ImVec4 current_startup_text_color(const ThemeSettings& settings) {
+        return settings.advanced ? settings.startup_text
+                                 : startup_text_theme_color(settings);
+    }
+
     void rebuild_theme_colors_from_basics(ThemeSettings& settings) {
         set_theme_slot(settings, ImGuiCol_WindowBg, settings.background);
         set_theme_slot(settings, ImGuiCol_TitleBg,
@@ -333,6 +716,7 @@ namespace {
         g_theme_settings.accent = kDefaultThemeAccent;
         g_theme_settings.text = kDefaultThemeText;
         g_theme_settings.lists = kDefaultThemeLists;
+        reset_theme_startup_colors(g_theme_settings);
         g_theme_settings.simple = false;
         g_theme_settings.advanced = false;
         rebuild_theme_colors_from_basics(g_theme_settings);
@@ -346,6 +730,7 @@ namespace {
         g_theme_settings.accent = preset.accent;
         g_theme_settings.text = preset.text;
         g_theme_settings.lists = preset.lists;
+        reset_theme_startup_colors(g_theme_settings);
         g_theme_settings.simple = false;
         g_theme_settings.advanced = true;
         g_theme_settings.colors = preset.colors;
@@ -443,6 +828,14 @@ namespace {
             parse_theme_color(equals + 1, settings->lists);
             return;
         }
+        if (key == "StartupTitle") {
+            parse_theme_color(equals + 1, settings->startup_title);
+            return;
+        }
+        if (key == "StartupText") {
+            parse_theme_color(equals + 1, settings->startup_text);
+            return;
+        }
         if (key == "Simple") {
             settings->simple = parse_theme_bool(equals + 1, settings->simple);
             return;
@@ -494,6 +887,12 @@ namespace {
         out_buf->appendf("Lists=%.3f,%.3f,%.3f,%.3f\n",
             g_theme_settings.lists.x, g_theme_settings.lists.y,
             g_theme_settings.lists.z, g_theme_settings.lists.w);
+        out_buf->appendf("StartupTitle=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.startup_title.x, g_theme_settings.startup_title.y,
+            g_theme_settings.startup_title.z, g_theme_settings.startup_title.w);
+        out_buf->appendf("StartupText=%.3f,%.3f,%.3f,%.3f\n",
+            g_theme_settings.startup_text.x, g_theme_settings.startup_text.y,
+            g_theme_settings.startup_text.z, g_theme_settings.startup_text.w);
         out_buf->appendf("Simple=%d\n", g_theme_settings.simple ? 1 : 0);
         out_buf->appendf("Advanced=%d\n", g_theme_settings.advanced ? 1 : 0);
         for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
@@ -761,6 +1160,25 @@ namespace {
                 dst[dst_row + static_cast<size_t>(x)] =
                     src[src_row + static_cast<size_t>(src_x)];
             }
+        }
+    }
+
+    void output_resolution_dimensions(OutputResolutionMode mode,
+        int& out_width, int& out_height) {
+        switch (mode) {
+        case OutputResolutionMode::R640x480:
+            out_width = 640;
+            out_height = 480;
+            break;
+        case OutputResolutionMode::R1024x768:
+            out_width = 1024;
+            out_height = 768;
+            break;
+        case OutputResolutionMode::R320x240:
+        default:
+            out_width = 320;
+            out_height = 240;
+            break;
         }
     }
 
@@ -1488,6 +1906,9 @@ void App::run() {
                 turbo_hold_active_ &&
                 g_output_resolution_mode != OutputResolutionMode::R320x240 &&
                 (frame.width > 320 || frame.height > 240);
+            int output_width = 320;
+            int output_height = 240;
+            output_resolution_dimensions(g_output_resolution_mode, output_width, output_height);
             if (turbo_resolution_clamp) {
                 resample_rgba_nearest(frame.rgba, frame.width, frame.height,
                     turbo_frame_rgba_, 320, 240);
@@ -1496,14 +1917,57 @@ void App::run() {
                 latest_frame_height_ = 240;
                 latest_frame_rgba_ = turbo_frame_rgba_;
             }
+            else if (frame.width != output_width || frame.height != output_height) {
+                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
+                    scaled_frame_rgba_, output_width, output_height);
+                renderer_->upload_frame(scaled_frame_rgba_, output_width, output_height);
+                latest_frame_width_ = output_width;
+                latest_frame_height_ = output_height;
+                latest_frame_rgba_ = scaled_frame_rgba_;
+            }
             else {
                 renderer_->upload_frame(frame.rgba, frame.width, frame.height);
                 latest_frame_width_ = frame.width;
                 latest_frame_height_ = frame.height;
                 latest_frame_rgba_ = std::move(frame.rgba);
             }
+            emu_runner_.recycle_consumed_frame(std::move(frame));
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
+        u32 now_ms = SDL_GetTicks();
+        if (has_started_emulation_ && system_ != nullptr) {
+            const double target_fps = system_->target_fps();
+            const u64 completed_frames = emu_runner_.completed_frame_count();
+            if (target_fps > 0.0) {
+                if (last_emulation_speed_sample_ms_ == 0 ||
+                    completed_frames < last_emulation_speed_sample_frame_) {
+                    last_emulation_speed_sample_ms_ = now_ms;
+                    last_emulation_speed_sample_frame_ = completed_frames;
+                }
+                else {
+                    const u32 elapsed_ms = now_ms - last_emulation_speed_sample_ms_;
+                    if (elapsed_ms >= 250) {
+                        const u64 frame_delta =
+                            completed_frames - last_emulation_speed_sample_frame_;
+                        measured_emulation_speed_multiplier_ =
+                            ((static_cast<double>(frame_delta) * 1000.0) /
+                                static_cast<double>(elapsed_ms)) / target_fps;
+                        last_emulation_speed_sample_ms_ = now_ms;
+                        last_emulation_speed_sample_frame_ = completed_frames;
+                    }
+                }
+            }
+            else {
+                measured_emulation_speed_multiplier_ = 0.0;
+                last_emulation_speed_sample_ms_ = now_ms;
+                last_emulation_speed_sample_frame_ = completed_frames;
+            }
+        }
+        else {
+            measured_emulation_speed_multiplier_ = 0.0;
+            last_emulation_speed_sample_ms_ = 0;
+            last_emulation_speed_sample_frame_ = 0;
+        }
         push_performance_history_sample();
         update_discord_presence();
         if (discord_presence_) {
@@ -1511,7 +1975,6 @@ void App::run() {
         }
         emu_runner_.set_vram_debug_capture_enabled(show_vram_);
 
-        u32 now_ms = SDL_GetTicks();
         if (show_vram_ ||
             (!emu_runner_.is_running() &&
                 (now_ms - last_vram_update_ms_) >= 1000)) {
@@ -1858,6 +2321,14 @@ void App::push_performance_history_sample() {
     if (!has_started_emulation_) {
         perf_history_write_index_ = 0;
         perf_history_count_ = 0;
+        perf_history_last_frame_id_ = 0;
+        perf_history_has_last_frame_id_ = false;
+        return;
+    }
+
+    const u64 frame_id = runtime_snapshot_.frame_id;
+    if (perf_history_has_last_frame_id_ &&
+        frame_id == perf_history_last_frame_id_) {
         return;
     }
 
@@ -1868,11 +2339,31 @@ void App::push_performance_history_sample() {
         static_cast<float>(std::max(0.0, runtime_snapshot_.profiling.gpu_ms));
     perf_core_ms_history_[idx] =
         static_cast<float>(std::max(0.0, runtime_snapshot_.core_frame_ms));
+    perf_frame_id_history_[idx] = frame_id;
+    if (g_profile_detailed_timing) {
+        perf_gpu_words_history_[idx] = runtime_snapshot_.profiling.gpu_gp0_words;
+        perf_gpu_draw_commands_history_[idx] =
+            runtime_snapshot_.profiling.gpu_draw_commands;
+        perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
+        perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
+        perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
+        perf_display_hash_history_[idx] = runtime_snapshot_.boot_diag.display_hash;
+    }
+    else {
+        perf_gpu_words_history_[idx] = 0;
+        perf_gpu_draw_commands_history_[idx] = 0;
+        perf_cpu_pc_history_[idx] = 0;
+        perf_dma2_words_history_[idx] = 0;
+        perf_dma2_base_history_[idx] = 0;
+        perf_display_hash_history_[idx] = 0;
+    }
 
     perf_history_write_index_ = (perf_history_write_index_ + 1) % kPerfHistorySamples;
     if (perf_history_count_ < kPerfHistorySamples) {
         ++perf_history_count_;
     }
+    perf_history_last_frame_id_ = frame_id;
+    perf_history_has_last_frame_id_ = true;
 }
 
 void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_size) {
@@ -1899,7 +2390,23 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     const double slowdown_percent = current_emulation_slowdown_percent();
     const bool unlimited_turbo_active =
         turbo_hold_active_ && config_turbo_speed_percent_ <= 0;
-    const double effective_speed_multiplier = current_effective_speed_multiplier();
+    const double effective_speed_multiplier =
+        (measured_emulation_speed_multiplier_ > 0.0)
+        ? measured_emulation_speed_multiplier_
+        : current_effective_speed_multiplier();
+    const GpuDipDiagnostics dip_diag = g_profile_detailed_timing
+        ? analyze_gpu_dip_pattern(
+            perf_gpu_ms_history_,
+            perf_frame_id_history_,
+            perf_gpu_words_history_,
+            perf_gpu_draw_commands_history_,
+            perf_cpu_pc_history_,
+            perf_dma2_words_history_,
+            perf_dma2_base_history_,
+            perf_display_hash_history_,
+            perf_history_count_,
+            perf_history_write_index_)
+        : GpuDipDiagnostics{};
     char header[160];
     std::snprintf(header, sizeof(header),
         "CPU %.2f ms   GPU %.2f ms   Core %.2f ms   FPS %.1f",
@@ -1923,9 +2430,50 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     }
     dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 23.0f), status_color, status_text);
 
+    if (g_profile_detailed_timing && dip_diag.valid) {
+        char dip_text[64];
+        std::snprintf(dip_text, sizeof(dip_text), "GPU dips ~%.1f frames",
+            dip_diag.avg_interval_frames);
+        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
+            IM_COL32(180, 180, 200, 255), dip_text);
+    }
+    else if (g_profile_detailed_timing && dip_diag.dip_count > 0) {
+        char dip_text[48];
+        std::snprintf(dip_text, sizeof(dip_text), "GPU dips %d",
+            dip_diag.dip_count);
+        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
+            IM_COL32(180, 180, 200, 255), dip_text);
+    }
+
+    if (g_profile_detailed_timing &&
+        (dip_diag.valid || dip_diag.dip_count > 0) &&
+        dip_diag.avg_non_dip_words > 0.0) {
+        char dip_work_text[80];
+        std::snprintf(dip_work_text, sizeof(dip_work_text),
+            "GP0@dip %.0fw/%.0fd vs %.0fw/%.0fd",
+            dip_diag.avg_dip_words,
+            dip_diag.avg_dip_draws,
+            dip_diag.avg_non_dip_words,
+            dip_diag.avg_non_dip_draws);
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 36.0f),
+            IM_COL32(170, 170, 185, 255), dip_work_text);
+    }
+    if (g_profile_detailed_timing && dip_diag.latest_dip_frame != 0) {
+        char dip_state_text[128];
+        std::snprintf(dip_state_text, sizeof(dip_state_text),
+            "Last dip f%llu pc=%08X dma2=%uw @%08X disp=%s",
+            static_cast<unsigned long long>(dip_diag.latest_dip_frame),
+            dip_diag.latest_dip_pc,
+            dip_diag.latest_dip_dma2_words,
+            dip_diag.latest_dip_dma2_base,
+            dip_diag.latest_dip_display_reused ? "reused" : "changed");
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 48.0f),
+            IM_COL32(170, 170, 185, 255), dip_state_text);
+    }
+
     const float gx0 = p0.x + 10.0f;
     const float gx1 = p1.x - 10.0f;
-    const float gy0 = p0.y + 42.0f;
+    const float gy0 = p0.y + 66.0f;
     const float gy1 = p1.y - 10.0f;
     const float gw = gx1 - gx0;
     const float gh = gy1 - gy0;
@@ -2016,6 +2564,10 @@ void App::render_ui() {
         panel_vram();
     if (show_sound_status_)
         panel_sound_status();
+    if (show_bindings_config_)
+        panel_bindings_config();
+    if (show_fmv_diagnostics_)
+        panel_fmv_diagnostics();
     if (show_corruption_presets_)
         panel_corruption_presets();
 }
@@ -2077,6 +2629,8 @@ void App::menu_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Emulation")) {
+            const char* bios_menu_label =
+                has_started_emulation_ ? "Resume" : "Start BIOS";
             if (ImGui::MenuItem("Boot Disc", "Ctrl+F5", false,
                 bios_loaded && !emu_running &&
                 (disc_loaded || !game_bin_path_.empty()))) {
@@ -2091,7 +2645,7 @@ void App::menu_bar() {
                 config_direct_disc_boot_ = !config_direct_disc_boot_;
                 save_persistent_config();
             }
-            if (ImGui::MenuItem("Start / Resume BIOS", "F5", false,
+            if (ImGui::MenuItem(bios_menu_label, "F5", false,
                 bios_loaded && !emu_running)) {
                 if (has_started_emulation_) {
                     emu_runner_.set_running(true);
@@ -2209,7 +2763,13 @@ void App::panel_emulator_screen() {
         // Show a centered welcome message
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
         const char* logo_text = "VibeStation";
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.4f, 0.8f, 1.0f));
+        const ImVec4 startup_title_color =
+            current_startup_title_color(g_theme_settings);
+        const ImVec4 startup_text_color =
+            current_startup_text_color(g_theme_settings);
+        const ImVec4 startup_text_secondary =
+            theme_lerp(startup_text_color, g_theme_settings.background, 0.18f);
+        ImGui::PushStyleColor(ImGuiCol_Text, startup_title_color);
         ImGui::SetWindowFontScale(2.0f);
         const ImVec2 logo_size = ImGui::CalcTextSize(logo_text);
         ImGui::SetCursorPos(ImVec2(center.x - (logo_size.x * 0.5f), center.y - 80));
@@ -2218,11 +2778,11 @@ void App::panel_emulator_screen() {
         ImGui::PopStyleColor();
 
         ImGui::SetCursorPos(ImVec2(center.x - 180, center.y - 20));
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f),
+        ImGui::TextColored(startup_text_color,
             "Load a BIOS (File > Load BIOS) to get started.");
 
         ImGui::SetCursorPos(ImVec2(center.x - 180, center.y + 5));
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f),
+        ImGui::TextColored(startup_text_secondary,
             "Then load a game and use Emulation > Boot Disc.");
 
         const char* bios_button_label = bios_loaded ? "Change BIOS" : "Load BIOS";
@@ -2416,8 +2976,14 @@ void App::panel_emulator_screen() {
         ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(cursor.x + x_pad, cursor.y + y_pad));
         const ImVec2 image_pos = ImGui::GetCursorScreenPos();
+        const float overscan_v =
+            (latest_frame_height_ > 0)
+            ? std::min(0.02f,
+                kEmulatorScreenBottomOverscanPixels /
+                static_cast<float>(std::max(1, latest_frame_height_)))
+            : 0.0f;
         ImGui::Image((ImTextureID)(intptr_t)renderer_->get_texture_id(), draw_size,
-            ImVec2(0, 0), ImVec2(1, 1));
+            ImVec2(0.0f, 0.0f), ImVec2(1.0f, std::max(0.0f, 1.0f - overscan_v)));
         draw_performance_overlay(image_pos, draw_size);
     }
 }
@@ -2427,16 +2993,6 @@ void App::panel_settings() {
     if (ImGui::Begin("Settings", &show_settings_)) {
         if (ImGui::BeginTabBar("SettingsTabs")) {
             if (ImGui::BeginTabItem("Input")) {
-                ImGui::Text("Keyboard Bindings");
-                ImGui::Separator();
-
-                const char* button_names[] = { "Cross (Z)",     "Circle (X)",
-                                              "Square (A)",    "Triangle (S)",
-                                              "L1 (Q)",        "R1 (W)",
-                                              "L2 (E)",        "R2 (R)",
-                                              "Start (Enter)", "Select (Backspace)",
-                                              "D-Pad Up",      "D-Pad Down",
-                                              "D-Pad Left",    "D-Pad Right" };
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
                     "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
                 ImGui::Spacing();
@@ -2445,6 +3001,11 @@ void App::panel_settings() {
                         "Press a key for %s (Esc to cancel)",
                         kKeyboardBindEntries[pending_bind_index_].label);
                 }
+                if (ImGui::Button("Configure Bindings")) {
+                    show_bindings_config_ = true;
+                }
+                ImGui::TextDisabled("Opens the keyboard binding editor in a separate window.");
+                ImGui::Spacing();
                 ImGui::Text("Input Focus: %s", emu_input_focused_ ? "Active" : "Inactive");
                 ImGui::Text("Buttons (active-low): 0x%04X", last_button_state_);
                 const auto& diag = runtime_snapshot_.boot_diag;
@@ -2454,41 +3015,6 @@ void App::panel_settings() {
                 ImGui::Text("SIO tx42/full-poll: %s / %s",
                     diag.saw_tx_cmd42 ? "Yes" : "No",
                     diag.saw_full_pad_poll ? "Yes" : "No");
-                ImGui::Spacing();
-
-                if (ImGui::Button("Reset to Defaults")) {
-                    input_->set_default_bindings();
-                    pending_bind_index_ = -1;
-                    save_persistent_config();
-                }
-
-                ImGui::Spacing();
-                for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
-                    const SDL_Scancode scancode =
-                        input_->key_for_button(kKeyboardBindEntries[i].button);
-                    const char* key_name =
-                        (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
-                        : "Unbound";
-                    ImGui::Text("%s", kKeyboardBindEntries[i].label);
-                    ImGui::SameLine(140.0f);
-                    std::string assign_label =
-                        std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
-                        "##bind_" + kKeyboardBindEntries[i].config_key;
-                    if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
-                        pending_bind_index_ = i;
-                    }
-                    ImGui::SameLine();
-                    std::string clear_label =
-                        std::string("Clear##") + kKeyboardBindEntries[i].config_key;
-                    if (ImGui::Button(clear_label.c_str())) {
-                        input_->clear_key_binding(kKeyboardBindEntries[i].button);
-                        if (pending_bind_index_ == i) {
-                            pending_bind_index_ = -1;
-                        }
-                        save_persistent_config();
-                    }
-                }
-
                 ImGui::Spacing();
                 ImGui::Text("Gamepad: %s", input_->gamepad_name().c_str());
                 if (input_->has_gamepad()) {
@@ -2544,6 +3070,24 @@ void App::panel_settings() {
                     resolution_index = std::max(0, std::min(2, resolution_index));
                     g_output_resolution_mode =
                         static_cast<OutputResolutionMode>(resolution_index);
+                    if (!latest_frame_rgba_.empty() && latest_frame_width_ > 0 &&
+                        latest_frame_height_ > 0) {
+                        int output_width = 320;
+                        int output_height = 240;
+                        output_resolution_dimensions(g_output_resolution_mode,
+                            output_width, output_height);
+                        if (latest_frame_width_ != output_width ||
+                            latest_frame_height_ != output_height) {
+                            resample_rgba_nearest(latest_frame_rgba_, latest_frame_width_,
+                                latest_frame_height_, scaled_frame_rgba_,
+                                output_width, output_height);
+                            renderer_->upload_frame(scaled_frame_rgba_, output_width,
+                                output_height);
+                            latest_frame_rgba_ = scaled_frame_rgba_;
+                            latest_frame_width_ = output_width;
+                            latest_frame_height_ = output_height;
+                        }
+                    }
                 }
                 ImGui::Text("Internal Upscaling: 1x (native)");
                 ImGui::EndTabItem();
@@ -2553,13 +3097,6 @@ void App::panel_settings() {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                     "XA/CDDA baseline is live; advanced modulation is still in progress.");
 
-                int desired_samples = static_cast<int>(g_spu_desired_samples);
-                if (ImGui::InputInt("Desired Samples", &desired_samples, 256, 1024)) {
-                    desired_samples = std::max(64, std::min(65535, desired_samples));
-                    g_spu_desired_samples = static_cast<u32>(desired_samples);
-                    save_persistent_config();
-                }
-                ImGui::TextDisabled("Applied on next audio device init.");
                 float output_buffer_seconds = g_spu_output_buffer_seconds;
                 if (ImGui::InputFloat("Output Buffer (seconds)",
                     &output_buffer_seconds, 0.1f, 0.5f, "%.2f")) {
@@ -2582,10 +3119,10 @@ void App::panel_settings() {
                     save_persistent_config();
                 }
 
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Sound Status")) {
+                ImGui::Separator();
+                ImGui::Text("Sound Status");
                 draw_sound_status_content();
+
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("System")) {
@@ -2613,7 +3150,7 @@ void App::panel_settings() {
                 }
                 if (config_turbo_speed_percent_ <= 0) {
                     ImGui::TextDisabled(
-                        "Unlimited turbo removes frame pacing and skips turbo audio while held.");
+                        "Unlimited turbo removes frame pacing, skips turbo audio, and drops most display frames while held.");
                 }
                 int slowdown_speed_percent = config_slowdown_speed_percent_;
                 if (ImGui::SliderInt("Slowdown Speed (Hold Right Shift)",
@@ -2826,6 +3363,9 @@ void App::panel_settings() {
 
                 bool advanced = g_theme_settings.advanced;
                 if (ImGui::Checkbox("Advanced", &advanced)) {
+                    if (advanced && !g_theme_settings.advanced) {
+                        reset_theme_startup_colors(g_theme_settings);
+                    }
                     g_theme_settings.advanced = advanced;
                     theme_changed = true;
                 }
@@ -2843,6 +3383,18 @@ void App::panel_settings() {
                     ImGui::Separator();
                     ImGui::TextDisabled("Advanced per-element overrides.");
                     bool advanced_theme_changed = false;
+                    ImVec4 startup_title = g_theme_settings.startup_title;
+                    if (ImGui::ColorEdit4("Startup Title", &startup_title.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.startup_title = startup_title;
+                        advanced_theme_changed = true;
+                    }
+                    ImVec4 startup_text = g_theme_settings.startup_text;
+                    if (ImGui::ColorEdit4("Startup Text", &startup_text.x,
+                        ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                        g_theme_settings.startup_text = startup_text;
+                        advanced_theme_changed = true;
+                    }
                     for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
                         ImVec4 color = g_theme_settings.colors[i];
                         if (ImGui::ColorEdit4(kThemeColorSlots[i].label, &color.x,
@@ -2999,6 +3551,7 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("Enable FMV Diagnostics",
                         &g_log_fmv_diagnostics)) {
                     if (!g_log_fmv_diagnostics) {
+                        show_fmv_diagnostics_ = false;
                         g_mdec_debug_compare_macroblocks = false;
                         g_mdec_debug_upload_probe = false;
                         if (system_) {
@@ -3007,6 +3560,11 @@ void App::panel_settings() {
                         }
                     }
                     logging_config_dirty = true;
+                }
+                if (g_log_fmv_diagnostics) {
+                    if (ImGui::Button("FMV Diagnostics")) {
+                        show_fmv_diagnostics_ = true;
+                    }
                 }
 
                 if (ImGui::Button("Enable All Traces")) {
@@ -3037,386 +3595,8 @@ void App::panel_settings() {
                     logging_config_dirty = true;
                 }
 
-                ImGui::Separator();
-                ImGui::Text("MDEC Debug Isolation");
-                ImGui::Checkbox("Disable DMA1 Reorder (MDEC out)",
-                    &g_mdec_debug_disable_dma1_reorder);
-                ImGui::Checkbox("Disable Chroma (Cb/Cr=0)", &g_mdec_debug_disable_chroma);
-                ImGui::Checkbox("Disable Luma (Y=0)", &g_mdec_debug_disable_luma);
-                ImGui::Checkbox("Force Solid MDEC Output", &g_mdec_debug_force_solid_output);
-                ImGui::Checkbox("Swap MDEC Input Halfwords", &g_mdec_debug_swap_input_halfwords);
-                if (ImGui::Checkbox("Enable Macroblock Compare (slow)",
-                        &g_mdec_debug_compare_macroblocks) &&
-                    !g_mdec_debug_compare_macroblocks && system_) {
-                    system_->reset_mdec_debug_compare();
-                }
-                if (ImGui::Checkbox("Enable Upload Probe (slow)",
-                        &g_mdec_debug_upload_probe) &&
-                    !g_mdec_debug_upload_probe && system_) {
-                    system_->reset_mdec_upload_probe();
-                }
-
-                bool y1 = (g_mdec_debug_color_block_mask & 0x1u) != 0u;
-                bool y2 = (g_mdec_debug_color_block_mask & 0x2u) != 0u;
-                bool y3 = (g_mdec_debug_color_block_mask & 0x4u) != 0u;
-                bool y4 = (g_mdec_debug_color_block_mask & 0x8u) != 0u;
-                if (ImGui::Checkbox("Y1 (top-left 8x8)", &y1)) {
-                    g_mdec_debug_color_block_mask =
-                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x1u) | (y1 ? 0x1u : 0x0u));
-                }
-                if (ImGui::Checkbox("Y2 (top-right 8x8)", &y2)) {
-                    g_mdec_debug_color_block_mask =
-                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x2u) | (y2 ? 0x2u : 0x0u));
-                }
-                if (ImGui::Checkbox("Y3 (bottom-left 8x8)", &y3)) {
-                    g_mdec_debug_color_block_mask =
-                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x4u) | (y3 ? 0x4u : 0x0u));
-                }
-                if (ImGui::Checkbox("Y4 (bottom-right 8x8)", &y4)) {
-                    g_mdec_debug_color_block_mask =
-                        static_cast<u8>((g_mdec_debug_color_block_mask & ~0x8u) | (y4 ? 0x8u : 0x0u));
-                }
-                if (ImGui::Button("Reset MDEC Isolation")) {
-                    g_mdec_debug_disable_dma1_reorder = false;
-                    g_mdec_debug_disable_chroma = false;
-                    g_mdec_debug_disable_luma = false;
-                    g_mdec_debug_force_solid_output = false;
-                    g_mdec_debug_swap_input_halfwords = false;
-                    g_mdec_debug_compare_macroblocks = false;
-                    g_mdec_debug_upload_probe = false;
-                    g_mdec_debug_color_block_mask = 0x0Fu;
-                    if (system_) {
-                        system_->reset_mdec_debug_compare();
-                        system_->reset_mdec_upload_probe();
-                    }
-                }
-                ImGui::TextDisabled("Use these toggles to localize FMV artifacts by stage.");
-
-                if (system_) {
-                    ImGui::Separator();
-                    if (!g_log_fmv_diagnostics) {
-                        ImGui::TextDisabled("FMV diagnostics are disabled.");
-                    }
-                    else if (ImGui::CollapsingHeader("FMV Diagnostics",
-                        ImGuiTreeNodeFlags_DefaultOpen)) {
-                        const float diag_height =
-                            420.0f * ImGui::GetIO().FontGlobalScale;
-                        ImGui::BeginChild("FMVDiagnosticsChild", ImVec2(0.0f, diag_height),
-                            true, ImGuiWindowFlags_HorizontalScrollbar);
-                    const auto &mstats = system_->mdec_debug_stats();
-                    const double blocks = static_cast<double>(mstats.blocks_decoded);
-                    const double dc_only_pct =
-                        (blocks > 0.0)
-                            ? (100.0 * static_cast<double>(mstats.dc_only_blocks) / blocks)
-                            : 0.0;
-                    const double q0_pct =
-                        (blocks > 0.0)
-                            ? (100.0 * static_cast<double>(mstats.qscale_zero_blocks) / blocks)
-                            : 0.0;
-                    const double avg_q =
-                        (blocks > 0.0)
-                            ? (static_cast<double>(mstats.qscale_sum) / blocks)
-                            : 0.0;
-                    const double avg_nonzero_coeff =
-                        (blocks > 0.0)
-                            ? (static_cast<double>(mstats.nonzero_coeff_count) / blocks)
-                            : 0.0;
-
-                    ImGui::Text("MDEC Decode Stats");
-                    ImGui::Text("Cmd: decode=%llu quant=%llu scale=%llu",
-                        static_cast<unsigned long long>(mstats.decode_commands),
-                        static_cast<unsigned long long>(mstats.set_quant_commands),
-                        static_cast<unsigned long long>(mstats.set_scale_commands));
-                    ImGui::Text("Quant: L0=%u C0=%u Lavg=%u Cavg=%u",
-                        mstats.quant_luma0, mstats.quant_chroma0,
-                        mstats.quant_luma_avg, mstats.quant_chroma_avg);
-                    ImGui::Text("Blocks=%llu  DC-only=%llu (%.1f%%)",
-                        static_cast<unsigned long long>(mstats.blocks_decoded),
-                        static_cast<unsigned long long>(mstats.dc_only_blocks), dc_only_pct);
-                    ImGui::Text("q=0=%llu (%.1f%%)  q_avg=%.2f q_max=%u",
-                        static_cast<unsigned long long>(mstats.qscale_zero_blocks), q0_pct,
-                        avg_q, mstats.qscale_max);
-                    ImGui::Text("Nonzero coeff/block=%.2f  EOB=%llu  Overflow=%llu",
-                        avg_nonzero_coeff,
-                        static_cast<unsigned long long>(mstats.eob_markers),
-                        static_cast<unsigned long long>(mstats.overflow_breaks));
-                    if (ImGui::CollapsingHeader("MDEC Command History")) {
-                        ImGui::Text("Recent Cmds");
-                        const u32 cmd_total = mstats.command_history_count;
-                        const u32 cmd_shown = std::min<u32>(
-                            cmd_total, static_cast<u32>(Mdec::DebugStats::kCommandHistory));
-                        for (u32 i = 0; i < cmd_shown; ++i) {
-                            const u32 hist_index =
-                                (cmd_total - cmd_shown + i) %
-                                static_cast<u32>(Mdec::DebugStats::kCommandHistory);
-                            ImGui::Text("  C[%u] id=%u word=0x%08X",
-                                i,
-                                static_cast<unsigned>(mstats.command_history_ids[hist_index]),
-                                mstats.command_history_words[hist_index]);
-                        }
-                        ImGui::Text("Recent Writes");
-                        const u32 write_total = mstats.write_history_count;
-                        const u32 write_shown = std::min<u32>(
-                            write_total, static_cast<u32>(Mdec::DebugStats::kWriteHistory));
-                        for (u32 i = 0; i < write_shown; ++i) {
-                            const u32 hist_index =
-                                (write_total - write_shown + i) %
-                                static_cast<u32>(Mdec::DebugStats::kWriteHistory);
-                            ImGui::Text("  W[%u] cmd=%u active=%u word=0x%08X",
-                                i,
-                                static_cast<unsigned>(mstats.write_history_expect_command[hist_index]),
-                                static_cast<unsigned>(mstats.write_history_active_command[hist_index]),
-                                mstats.write_history_words[hist_index]);
-                        }
-                        ImGui::Text("Recent Ctrl");
-                        const u32 ctrl_total = mstats.control_history_count;
-                        const u32 ctrl_shown = std::min<u32>(
-                            ctrl_total, static_cast<u32>(Mdec::DebugStats::kCommandHistory));
-                        for (u32 i = 0; i < ctrl_shown; ++i) {
-                            const u32 hist_index =
-                                (ctrl_total - ctrl_shown + i) %
-                                static_cast<u32>(Mdec::DebugStats::kCommandHistory);
-                            ImGui::Text("  CT[%u] 0x%08X",
-                                i, mstats.control_history_words[hist_index]);
-                        }
-                    }
-                    if (ImGui::Button("Reset MDEC Decode Stats")) {
-                        system_->reset_mdec_debug_stats();
-                    }
-
-                    ImGui::Separator();
-                    const auto &mcompare = system_->mdec_debug_compare();
-                    static const char *kMdecCompareStages[] = {
-                        "none", "coeff", "idct", "packed-output", "match"};
-                    static const char *kMdecCompareBlocks[] = {
-                        "Cr", "Cb", "Y1", "Y2", "Y3", "Y4"};
-                    ImGui::Text("MDEC Macroblock Compare");
-                    ImGui::Text("Seen=%s  Macroblocks=%llu  Stage=%s",
-                        mcompare.captured ? "yes" : "no",
-                        static_cast<unsigned long long>(mcompare.macroblocks_compared),
-                        kMdecCompareStages[static_cast<unsigned>(mcompare.stage)]);
-                    if (ImGui::CollapsingHeader("MDEC Macroblock Compare Details")) {
-                        if (mcompare.captured && mcompare.stage != Mdec::DebugCompare::Stage::Match &&
-                            mcompare.stage != Mdec::DebugCompare::Stage::None) {
-                            const char *block_name =
-                                (mcompare.mismatch_block < 6u)
-                                    ? kMdecCompareBlocks[mcompare.mismatch_block]
-                                    : "n/a";
-                            ImGui::Text("Mismatch: block=%s idx=%u cur=0x%08X ref=0x%08X",
-                                block_name, static_cast<unsigned>(mcompare.mismatch_index),
-                                static_cast<unsigned>(mcompare.current_value),
-                                static_cast<unsigned>(mcompare.reference_value));
-                        }
-                        if (mcompare.captured) {
-                            ImGui::Text("QScale: Cr=%u Cb=%u Y1=%u Y2=%u Y3=%u Y4=%u",
-                                static_cast<unsigned>(mcompare.qscales[0]),
-                                static_cast<unsigned>(mcompare.qscales[1]),
-                                static_cast<unsigned>(mcompare.qscales[2]),
-                                static_cast<unsigned>(mcompare.qscales[3]),
-                                static_cast<unsigned>(mcompare.qscales[4]),
-                                static_cast<unsigned>(mcompare.qscales[5]));
-                            for (u32 i = 0; i < std::min<u32>(mcompare.input_halfword_count,
-                                                              static_cast<u32>(Mdec::DebugCompare::kInputSampleHalfwords)); ++i) {
-                                ImGui::Text("  In[%u] = 0x%04X",
-                                    i, static_cast<unsigned>(mcompare.input_halfwords[i]));
-                            }
-                        }
-                    }
-                    if (ImGui::Button("Reset MDEC Compare")) {
-                        system_->reset_mdec_debug_compare();
-                    }
-
-                    ImGui::Separator();
-                    const auto &uprobes = system_->mdec_upload_probe();
-                    ImGui::Text("MDEC Upload Probe");
-                    ImGui::Text("DMA1: seen=%s base=0x%08X words=%u depth=%u block=%u",
-                        uprobes.dma1_seen ? "yes" : "no",
-                        uprobes.dma1_base_addr, uprobes.dma1_words,
-                        static_cast<unsigned>(uprobes.dma1_depth),
-                        static_cast<unsigned>(uprobes.dma1_first_block));
-                    ImGui::Text("GPU Upload: seen=%s data=%s xy=(%u,%u) wh=(%u,%u) words=%u/%u",
-                        uprobes.gpu_upload_seen ? "yes" : "no",
-                        uprobes.gpu_upload_data_seen ? "yes" : "no",
-                        static_cast<unsigned>(uprobes.gpu_x),
-                        static_cast<unsigned>(uprobes.gpu_y),
-                        static_cast<unsigned>(uprobes.gpu_w),
-                        static_cast<unsigned>(uprobes.gpu_h),
-                        uprobes.gpu_words_seen, uprobes.gpu_total_words);
-                    if (ImGui::CollapsingHeader("MDEC Upload Probe Details")) {
-                        ImGui::Text("GPU Upload History: count=%u", uprobes.gpu_upload_count);
-                        const u32 hist_count =
-                            std::min<u32>(uprobes.gpu_hist_count,
-                                          static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
-                        for (u32 i = 0; i < hist_count; ++i) {
-                            const u32 hist_index =
-                                (uprobes.gpu_hist_count - hist_count + i) %
-                                static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
-                            ImGui::Text("  UP[%u] (%u,%u) wh=(%u,%u) <- %s",
-                                i,
-                                static_cast<unsigned>(uprobes.gpu_hist_x[hist_index]),
-                                static_cast<unsigned>(uprobes.gpu_hist_y[hist_index]),
-                                static_cast<unsigned>(uprobes.gpu_hist_w[hist_index]),
-                                static_cast<unsigned>(uprobes.gpu_hist_h[hist_index]),
-                                uprobes.gpu_hist_from_dma[hist_index] ? "DMA2" : "CPU");
-                        }
-                        ImGui::Text("GPU Last Frame Uploads: count=%u valid=%s",
-                            uprobes.gpu_last_frame_upload_count,
-                            uprobes.gpu_last_frame_valid ? "yes" : "no");
-                        const u32 last_frame_count =
-                            std::min<u32>(uprobes.gpu_last_frame_upload_count,
-                                          static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
-                        for (u32 i = 0; i < last_frame_count; ++i) {
-                            ImGui::Text("  LF[%u] (%u,%u) wh=(%u,%u) <- %s",
-                                i,
-                                static_cast<unsigned>(uprobes.gpu_last_frame_hist_x[i]),
-                                static_cast<unsigned>(uprobes.gpu_last_frame_hist_y[i]),
-                                static_cast<unsigned>(uprobes.gpu_last_frame_hist_w[i]),
-                                static_cast<unsigned>(uprobes.gpu_last_frame_hist_h[i]),
-                                uprobes.gpu_last_frame_hist_from_dma[i] ? "DMA2" : "CPU");
-                        }
-                        for (u32 i = 0; i < uprobes.dma1_sample_count; ++i) {
-                            ImGui::Text("  DMA1[%u] 0x%08X = 0x%08X",
-                                i, uprobes.dma1_addrs[i], uprobes.dma1_words_sample[i]);
-                        }
-                        ImGui::Text("DMA1 Macroblocks");
-                        const u32 mb_hist_total = uprobes.dma1_mb_hist_count;
-                        const u32 mb_hist_shown = std::min<u32>(
-                            mb_hist_total, static_cast<u32>(System::MdecUploadProbe::kMacroblockHistory));
-                        for (u32 i = 0; i < mb_hist_shown; ++i) {
-                            const u32 hist_index =
-                                (mb_hist_total - mb_hist_shown + i) %
-                                static_cast<u32>(System::MdecUploadProbe::kMacroblockHistory);
-                            ImGui::Text("  MB[%u] seq=%u addr=0x%08X first=0x%08X",
-                                i,
-                                uprobes.dma1_mb_hist_seq[hist_index],
-                                uprobes.dma1_mb_hist_addrs[hist_index],
-                                uprobes.dma1_mb_hist_words_sample[hist_index]);
-                        }
-                        for (u32 i = 0; i < uprobes.gpu_sample_count; ++i) {
-                            if (uprobes.gpu_word_from_dma[i] != 0u) {
-                                ImGui::Text("  GPU[%u] 0x%08X <- DMA2[0x%08X]",
-                                    i, uprobes.gpu_words_sample[i],
-                                    uprobes.gpu_dma_src_addrs[i]);
-                            } else {
-                                ImGui::Text("  GPU[%u] 0x%08X <- CPU",
-                                    i, uprobes.gpu_words_sample[i]);
-                            }
-                        }
-                        ImGui::Text("GPU VRAM Copy: count=%u", uprobes.gpu_copy_count);
-                        for (u32 i = 0; i < uprobes.gpu_copy_sample_count; ++i) {
-                            ImGui::Text("  CPY[%u] (%u,%u) -> (%u,%u) wh=(%u,%u)",
-                                i,
-                                static_cast<unsigned>(uprobes.gpu_copy_src_x[i]),
-                                static_cast<unsigned>(uprobes.gpu_copy_src_y[i]),
-                                static_cast<unsigned>(uprobes.gpu_copy_dst_x[i]),
-                                static_cast<unsigned>(uprobes.gpu_copy_dst_y[i]),
-                                static_cast<unsigned>(uprobes.gpu_copy_w[i]),
-                                static_cast<unsigned>(uprobes.gpu_copy_h[i]));
-                        }
-                        ImGui::Text("MDEC Buffer Reads");
-                        for (u32 i = 0; i < uprobes.mdec_read_sample_count; ++i) {
-                            if ((uprobes.mdec_read_origin[i] & 0x80u) != 0u) {
-                                ImGui::Text("  R%u[%u] 0x%08X = 0x%08X <- DMA%u",
-                                    static_cast<unsigned>(uprobes.mdec_read_sizes[i]), i,
-                                    uprobes.mdec_read_addrs[i], uprobes.mdec_read_values[i],
-                                    static_cast<unsigned>(uprobes.mdec_read_origin[i] & 0x7Fu));
-                            } else {
-                                ImGui::Text("  R%u[%u] 0x%08X = 0x%08X pc=0x%08X",
-                                    static_cast<unsigned>(uprobes.mdec_read_sizes[i]), i,
-                                    uprobes.mdec_read_addrs[i], uprobes.mdec_read_values[i],
-                                    uprobes.mdec_read_pcs[i]);
-                            }
-                        }
-                        ImGui::Text("GPU Source Writes");
-                        for (u32 i = 0; i < uprobes.gpu_src_write_sample_count; ++i) {
-                            if ((uprobes.gpu_src_write_origin[i] & 0x80u) != 0u) {
-                                ImGui::Text("  W%u[%u] 0x%08X = 0x%08X <- DMA%u",
-                                    static_cast<unsigned>(uprobes.gpu_src_write_sizes[i]), i,
-                                    uprobes.gpu_src_write_addrs[i], uprobes.gpu_src_write_values[i],
-                                    static_cast<unsigned>(uprobes.gpu_src_write_origin[i] & 0x7Fu));
-                            } else {
-                                ImGui::Text("  W%u[%u] 0x%08X = 0x%08X pc=0x%08X",
-                                    static_cast<unsigned>(uprobes.gpu_src_write_sizes[i]), i,
-                                    uprobes.gpu_src_write_addrs[i], uprobes.gpu_src_write_values[i],
-                                    uprobes.gpu_src_write_pcs[i]);
-                            }
-                        }
-                    }
-                    if (ImGui::Button("Reset MDEC Upload Probe")) {
-                        system_->reset_mdec_upload_probe();
-                    }
-
-                    ImGui::Separator();
-                    const auto gdisp = system_->gpu_display_debug_info();
-                    const auto gcmd = system_->gpu_command_debug_info();
-                    ImGui::Text("GPU: %dx%d 24bit=%s interlace=%s  GP0 rect=%u",
-                        gdisp.width, gdisp.height,
-                        gdisp.is_24bit ? "yes" : "no",
-                        gdisp.interlaced ? "yes" : "no",
-                        gcmd.gp0_textured_rect_count);
-                    if (ImGui::CollapsingHeader("GPU Display Debug")) {
-                        ImGui::Text("Mode=%dx%d 24bit=%s interlace=%s div=%d",
-                            gdisp.mode_width, gdisp.mode_height,
-                            gdisp.is_24bit ? "yes" : "no",
-                            gdisp.interlaced ? "yes" : "no",
-                            gdisp.divisor);
-                        ImGui::Text("Regs: start=(%d,%d) x=(%d,%d) y=(%d,%d)",
-                            gdisp.x_start, gdisp.y_start,
-                            gdisp.x1, gdisp.x2, gdisp.y1, gdisp.y2);
-                        ImGui::Text("Derived: wh=(%d,%d) src=(%d,%d)",
-                            gdisp.width, gdisp.height,
-                            gdisp.src_width, gdisp.src_height);
-                        ImGui::Text("VRAM: xy=(%d,%d) wh=(%d,%d) skip_x=%d",
-                            gdisp.display_vram_left, gdisp.display_vram_top,
-                            gdisp.display_vram_width, gdisp.display_vram_height,
-                            gdisp.display_skip_x);
-                    }
-                    if (ImGui::CollapsingHeader("GPU Command Debug")) {
-                        ImGui::Text("GP1: area=%u hrange=%u vrange=%u mode=%u",
-                            gcmd.gp1_display_area_count,
-                            gcmd.gp1_horizontal_range_count,
-                            gcmd.gp1_vertical_range_count,
-                            gcmd.gp1_display_mode_count);
-                        ImGui::Text("Last Area: raw=0x%06X xy=(%d,%d)",
-                            gcmd.gp1_display_area_raw & 0xFFFFFFu,
-                            gcmd.gp1_display_area_x, gcmd.gp1_display_area_y);
-                        ImGui::Text("Last Range: x=(%d,%d) y=(%d,%d) mode=0x%02X",
-                            gcmd.gp1_horizontal_range_x1,
-                            gcmd.gp1_horizontal_range_x2,
-                            gcmd.gp1_vertical_range_y1,
-                            gcmd.gp1_vertical_range_y2,
-                            gcmd.gp1_display_mode_raw & 0x7Fu);
-                        ImGui::Text("GP0 Textured: tri=%u quad=%u rect=%u",
-                            gcmd.gp0_textured_tri_count,
-                            gcmd.gp0_textured_quad_count,
-                            gcmd.gp0_textured_rect_count);
-                        const u32 recent_rects = std::min<u32>(
-                            gcmd.gp0_textured_rect_count,
-                            static_cast<u32>(GpuCommandDebugInfo::kRecentRects));
-                        for (u32 i = 0; i < recent_rects; ++i) {
-                            const u32 rect_index =
-                                (gcmd.gp0_textured_rect_count - recent_rects + i) %
-                                static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
-                            ImGui::Text(
-                                "  RECT[%u] xy=(%d,%d) wh=(%u,%u) uv=(%u,%u) rgb=(%u,%u,%u) clut=0x%04X page=0x%03X depth=%u raw=%u",
-                                i,
-                                static_cast<int>(gcmd.rect_x[rect_index]),
-                                static_cast<int>(gcmd.rect_y[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_w[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_h[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_u[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_v[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_r[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_g[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_b[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_clut[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_texpage[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_depth[rect_index]),
-                                static_cast<unsigned>(gcmd.rect_raw[rect_index]));
-                        }
-                    }
-                    ImGui::EndChild();
-                    }
+                if (g_log_fmv_diagnostics) {
+                    ImGui::TextDisabled("Open the FMV Diagnostics window for MDEC/GPU analysis tools.");
                 }
 
                 ImGui::Separator();
@@ -3852,6 +4032,50 @@ void App::draw_sound_status_content() {
     }
 }
 
+void App::draw_bindings_config_content() {
+    if (pending_bind_index_ >= 0) {
+        ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
+            "Press a key for %s (Esc to cancel)",
+            kKeyboardBindEntries[pending_bind_index_].label);
+    }
+    else {
+        ImGui::TextDisabled("Select a binding to assign a new key.");
+    }
+
+    if (ImGui::Button("Reset to Defaults")) {
+        input_->set_default_bindings();
+        pending_bind_index_ = -1;
+        save_persistent_config();
+    }
+
+    ImGui::Spacing();
+    for (int i = 0; i < kKeyboardBindEntryCount; ++i) {
+        const SDL_Scancode scancode =
+            input_->key_for_button(kKeyboardBindEntries[i].button);
+        const char* key_name =
+            (scancode != SDL_SCANCODE_UNKNOWN) ? SDL_GetScancodeName(scancode)
+            : "Unbound";
+        ImGui::Text("%s", kKeyboardBindEntries[i].label);
+        ImGui::SameLine(140.0f);
+        std::string assign_label =
+            std::string((key_name && key_name[0] != '\0') ? key_name : "Unbound") +
+            "##bind_" + kKeyboardBindEntries[i].config_key;
+        if (ImGui::Button(assign_label.c_str(), ImVec2(120.0f, 0.0f))) {
+            pending_bind_index_ = i;
+        }
+        ImGui::SameLine();
+        std::string clear_label =
+            std::string("Clear##") + kKeyboardBindEntries[i].config_key;
+        if (ImGui::Button(clear_label.c_str())) {
+            input_->clear_key_binding(kKeyboardBindEntries[i].button);
+            if (pending_bind_index_ == i) {
+                pending_bind_index_ = -1;
+            }
+            save_persistent_config();
+        }
+    }
+}
+
 void App::panel_sound_status() {
     ImGui::SetNextWindowSize(ImVec2(720, 500), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Voice Levels", &show_sound_status_)) {
@@ -3902,6 +4126,559 @@ void App::panel_sound_status() {
     }
     ImGui::End();
 }
+
+void App::panel_bindings_config() {
+    ImGui::SetNextWindowSize(ImVec2(460, 520), ImGuiCond_FirstUseEver);
+    const bool was_open = show_bindings_config_;
+    if (ImGui::Begin("Configure Bindings", &show_bindings_config_)) {
+        draw_bindings_config_content();
+    }
+    ImGui::End();
+    if (was_open && !show_bindings_config_ && pending_bind_index_ >= 0) {
+        pending_bind_index_ = -1;
+        status_message_ = "Keyboard rebinding canceled";
+    }
+}
+
+void App::draw_fmv_diagnostics_content() {
+    ImGui::Text("MDEC Debug Isolation");
+    ImGui::Checkbox("Disable DMA1 Reorder (MDEC out)",
+        &g_mdec_debug_disable_dma1_reorder);
+    ImGui::Checkbox("Disable Chroma (Cb/Cr=0)", &g_mdec_debug_disable_chroma);
+    ImGui::Checkbox("Disable Luma (Y=0)", &g_mdec_debug_disable_luma);
+    ImGui::Checkbox("Force Solid MDEC Output", &g_mdec_debug_force_solid_output);
+    ImGui::Checkbox("Swap MDEC Input Halfwords", &g_mdec_debug_swap_input_halfwords);
+    if (ImGui::Checkbox("Enable Macroblock Compare (slow)",
+            &g_mdec_debug_compare_macroblocks) &&
+        !g_mdec_debug_compare_macroblocks && system_) {
+        system_->reset_mdec_debug_compare();
+    }
+    if (ImGui::Checkbox("Enable Upload Probe (slow)",
+            &g_mdec_debug_upload_probe) &&
+        !g_mdec_debug_upload_probe && system_) {
+        system_->reset_mdec_upload_probe();
+    }
+
+    bool y1 = (g_mdec_debug_color_block_mask & 0x1u) != 0u;
+    bool y2 = (g_mdec_debug_color_block_mask & 0x2u) != 0u;
+    bool y3 = (g_mdec_debug_color_block_mask & 0x4u) != 0u;
+    bool y4 = (g_mdec_debug_color_block_mask & 0x8u) != 0u;
+    if (ImGui::Checkbox("Y1 (top-left 8x8)", &y1)) {
+        g_mdec_debug_color_block_mask =
+            static_cast<u8>((g_mdec_debug_color_block_mask & ~0x1u) | (y1 ? 0x1u : 0x0u));
+    }
+    if (ImGui::Checkbox("Y2 (top-right 8x8)", &y2)) {
+        g_mdec_debug_color_block_mask =
+            static_cast<u8>((g_mdec_debug_color_block_mask & ~0x2u) | (y2 ? 0x2u : 0x0u));
+    }
+    if (ImGui::Checkbox("Y3 (bottom-left 8x8)", &y3)) {
+        g_mdec_debug_color_block_mask =
+            static_cast<u8>((g_mdec_debug_color_block_mask & ~0x4u) | (y3 ? 0x4u : 0x0u));
+    }
+    if (ImGui::Checkbox("Y4 (bottom-right 8x8)", &y4)) {
+        g_mdec_debug_color_block_mask =
+            static_cast<u8>((g_mdec_debug_color_block_mask & ~0x8u) | (y4 ? 0x8u : 0x0u));
+    }
+    if (ImGui::Button("Reset MDEC Isolation")) {
+        g_mdec_debug_disable_dma1_reorder = false;
+        g_mdec_debug_disable_chroma = false;
+        g_mdec_debug_disable_luma = false;
+        g_mdec_debug_force_solid_output = false;
+        g_mdec_debug_swap_input_halfwords = false;
+        g_mdec_debug_compare_macroblocks = false;
+        g_mdec_debug_upload_probe = false;
+        g_mdec_debug_color_block_mask = 0x0Fu;
+        if (system_) {
+            system_->reset_mdec_debug_compare();
+            system_->reset_mdec_upload_probe();
+        }
+    }
+    ImGui::TextDisabled("Use these toggles to localize FMV artifacts by stage.");
+
+    if (!system_) {
+        return;
+    }
+
+    ImGui::Separator();
+    const auto& mstats = system_->mdec_debug_stats();
+    const double blocks = static_cast<double>(mstats.blocks_decoded);
+    const double dc_only_pct =
+        (blocks > 0.0) ? (100.0 * static_cast<double>(mstats.dc_only_blocks) / blocks) : 0.0;
+    const double q0_pct =
+        (blocks > 0.0) ? (100.0 * static_cast<double>(mstats.qscale_zero_blocks) / blocks) : 0.0;
+    const double avg_q =
+        (blocks > 0.0) ? (static_cast<double>(mstats.qscale_sum) / blocks) : 0.0;
+    const double avg_nonzero_coeff =
+        (blocks > 0.0) ? (static_cast<double>(mstats.nonzero_coeff_count) / blocks) : 0.0;
+
+    ImGui::Text("MDEC Decode Stats");
+    ImGui::Text("Cmd: decode=%llu quant=%llu scale=%llu",
+        static_cast<unsigned long long>(mstats.decode_commands),
+        static_cast<unsigned long long>(mstats.set_quant_commands),
+        static_cast<unsigned long long>(mstats.set_scale_commands));
+    ImGui::Text("Quant: L0=%u C0=%u Lavg=%u Cavg=%u",
+        mstats.quant_luma0, mstats.quant_chroma0,
+        mstats.quant_luma_avg, mstats.quant_chroma_avg);
+    ImGui::Text("Blocks=%llu  DC-only=%llu (%.1f%%)",
+        static_cast<unsigned long long>(mstats.blocks_decoded),
+        static_cast<unsigned long long>(mstats.dc_only_blocks), dc_only_pct);
+    ImGui::Text("q=0=%llu (%.1f%%)  q_avg=%.2f q_max=%u",
+        static_cast<unsigned long long>(mstats.qscale_zero_blocks), q0_pct,
+        avg_q, mstats.qscale_max);
+    ImGui::Text("Nonzero coeff/block=%.2f  EOB=%llu  Overflow=%llu",
+        avg_nonzero_coeff,
+        static_cast<unsigned long long>(mstats.eob_markers),
+        static_cast<unsigned long long>(mstats.overflow_breaks));
+    if (ImGui::CollapsingHeader("MDEC Command History")) {
+        ImGui::Text("Recent Cmds");
+        const u32 cmd_total = mstats.command_history_count;
+        const u32 cmd_shown = std::min<u32>(
+            cmd_total, static_cast<u32>(Mdec::DebugStats::kCommandHistory));
+        for (u32 i = 0; i < cmd_shown; ++i) {
+            const u32 hist_index =
+                (cmd_total - cmd_shown + i) %
+                static_cast<u32>(Mdec::DebugStats::kCommandHistory);
+            ImGui::Text("  C[%u] id=%u word=0x%08X",
+                i,
+                static_cast<unsigned>(mstats.command_history_ids[hist_index]),
+                mstats.command_history_words[hist_index]);
+        }
+        ImGui::Text("Recent Writes");
+        const u32 write_total = mstats.write_history_count;
+        const u32 write_shown = std::min<u32>(
+            write_total, static_cast<u32>(Mdec::DebugStats::kWriteHistory));
+        for (u32 i = 0; i < write_shown; ++i) {
+            const u32 hist_index =
+                (write_total - write_shown + i) %
+                static_cast<u32>(Mdec::DebugStats::kWriteHistory);
+            ImGui::Text("  W[%u] cmd=%u active=%u word=0x%08X",
+                i,
+                static_cast<unsigned>(mstats.write_history_expect_command[hist_index]),
+                static_cast<unsigned>(mstats.write_history_active_command[hist_index]),
+                mstats.write_history_words[hist_index]);
+        }
+        ImGui::Text("Recent Ctrl");
+        const u32 ctrl_total = mstats.control_history_count;
+        const u32 ctrl_shown = std::min<u32>(
+            ctrl_total, static_cast<u32>(Mdec::DebugStats::kCommandHistory));
+        for (u32 i = 0; i < ctrl_shown; ++i) {
+            const u32 hist_index =
+                (ctrl_total - ctrl_shown + i) %
+                static_cast<u32>(Mdec::DebugStats::kCommandHistory);
+            ImGui::Text("  CT[%u] 0x%08X", i, mstats.control_history_words[hist_index]);
+        }
+    }
+    if (ImGui::Button("Reset MDEC Decode Stats")) {
+        system_->reset_mdec_debug_stats();
+    }
+
+    ImGui::Separator();
+    const auto& mcompare = system_->mdec_debug_compare();
+    static const char* kMdecCompareStages[] = {
+        "none", "coeff", "idct", "packed-output", "match" };
+    static const char* kMdecCompareBlocks[] = {
+        "Cr", "Cb", "Y1", "Y2", "Y3", "Y4" };
+    ImGui::Text("MDEC Macroblock Compare");
+    ImGui::Text("Seen=%s  Macroblocks=%llu  Stage=%s",
+        mcompare.captured ? "yes" : "no",
+        static_cast<unsigned long long>(mcompare.macroblocks_compared),
+        kMdecCompareStages[static_cast<unsigned>(mcompare.stage)]);
+    if (ImGui::CollapsingHeader("MDEC Macroblock Compare Details")) {
+        if (mcompare.captured && mcompare.stage != Mdec::DebugCompare::Stage::Match &&
+            mcompare.stage != Mdec::DebugCompare::Stage::None) {
+            const char* block_name =
+                (mcompare.mismatch_block < 6u) ? kMdecCompareBlocks[mcompare.mismatch_block] : "n/a";
+            ImGui::Text("Mismatch: block=%s idx=%u cur=0x%08X ref=0x%08X",
+                block_name, static_cast<unsigned>(mcompare.mismatch_index),
+                static_cast<unsigned>(mcompare.current_value),
+                static_cast<unsigned>(mcompare.reference_value));
+        }
+        if (mcompare.captured) {
+            ImGui::Text("QScale: Cr=%u Cb=%u Y1=%u Y2=%u Y3=%u Y4=%u",
+                static_cast<unsigned>(mcompare.qscales[0]),
+                static_cast<unsigned>(mcompare.qscales[1]),
+                static_cast<unsigned>(mcompare.qscales[2]),
+                static_cast<unsigned>(mcompare.qscales[3]),
+                static_cast<unsigned>(mcompare.qscales[4]),
+                static_cast<unsigned>(mcompare.qscales[5]));
+            for (u32 i = 0; i < std::min<u32>(
+                     mcompare.input_halfword_count,
+                     static_cast<u32>(Mdec::DebugCompare::kInputSampleHalfwords)); ++i) {
+                ImGui::Text("  In[%u] = 0x%04X",
+                    i, static_cast<unsigned>(mcompare.input_halfwords[i]));
+            }
+        }
+    }
+    if (ImGui::Button("Reset MDEC Compare")) {
+        system_->reset_mdec_debug_compare();
+    }
+
+    ImGui::Separator();
+    const auto& uprobes = system_->mdec_upload_probe();
+    ImGui::Text("MDEC Upload Probe");
+    ImGui::Text("DMA1: seen=%s base=0x%08X words=%u depth=%u block=%u",
+        uprobes.dma1_seen ? "yes" : "no",
+        uprobes.dma1_base_addr, uprobes.dma1_words,
+        static_cast<unsigned>(uprobes.dma1_depth),
+        static_cast<unsigned>(uprobes.dma1_first_block));
+    ImGui::Text("GPU Upload: seen=%s data=%s xy=(%u,%u) wh=(%u,%u) words=%u/%u",
+        uprobes.gpu_upload_seen ? "yes" : "no",
+        uprobes.gpu_upload_data_seen ? "yes" : "no",
+        static_cast<unsigned>(uprobes.gpu_x),
+        static_cast<unsigned>(uprobes.gpu_y),
+        static_cast<unsigned>(uprobes.gpu_w),
+        static_cast<unsigned>(uprobes.gpu_h),
+        uprobes.gpu_words_seen, uprobes.gpu_total_words);
+    if (ImGui::CollapsingHeader("MDEC Upload Probe Details")) {
+        ImGui::Text("GPU Upload History: count=%u", uprobes.gpu_upload_count);
+        const u32 hist_count =
+            std::min<u32>(uprobes.gpu_hist_count,
+                          static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
+        for (u32 i = 0; i < hist_count; ++i) {
+            const u32 hist_index =
+                (uprobes.gpu_hist_count - hist_count + i) %
+                static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
+            ImGui::Text("  UP[%u] (%u,%u) wh=(%u,%u) <- %s",
+                i,
+                static_cast<unsigned>(uprobes.gpu_hist_x[hist_index]),
+                static_cast<unsigned>(uprobes.gpu_hist_y[hist_index]),
+                static_cast<unsigned>(uprobes.gpu_hist_w[hist_index]),
+                static_cast<unsigned>(uprobes.gpu_hist_h[hist_index]),
+                uprobes.gpu_hist_from_dma[hist_index] ? "DMA2" : "CPU");
+        }
+        ImGui::Text("GPU Last Frame Uploads: count=%u valid=%s",
+            uprobes.gpu_last_frame_upload_count,
+            uprobes.gpu_last_frame_valid ? "yes" : "no");
+    }
+    if (ImGui::Button("Reset MDEC Upload Probe")) {
+        system_->reset_mdec_upload_probe();
+    }
+
+    ImGui::Separator();
+    const auto gdisp = system_->gpu_display_debug_info();
+    const auto gcmd = system_->gpu_command_debug_info();
+    ImGui::Text("GPU: %dx%d 24bit=%s interlace=%s  GP0 rect=%u",
+        gdisp.width, gdisp.height,
+        gdisp.is_24bit ? "yes" : "no",
+        gdisp.interlaced ? "yes" : "no",
+        gcmd.gp0_textured_rect_count);
+    if (ImGui::CollapsingHeader("GPU Display Debug")) {
+        ImGui::Text("Mode=%dx%d 24bit=%s interlace=%s div=%d",
+            gdisp.mode_width, gdisp.mode_height,
+            gdisp.is_24bit ? "yes" : "no",
+            gdisp.interlaced ? "yes" : "no",
+            gdisp.divisor);
+        ImGui::Text("Regs: start=(%d,%d) x=(%d,%d) y=(%d,%d)",
+            gdisp.x_start, gdisp.y_start,
+            gdisp.x1, gdisp.x2, gdisp.y1, gdisp.y2);
+        ImGui::Text("Derived: wh=(%d,%d) src=(%d,%d)",
+            gdisp.width, gdisp.height,
+            gdisp.src_width, gdisp.src_height);
+        ImGui::Text("VRAM: xy=(%d,%d) wh=(%d,%d) skip_x=%d",
+            gdisp.display_vram_left, gdisp.display_vram_top,
+            gdisp.display_vram_width, gdisp.display_vram_height,
+            gdisp.display_skip_x);
+    }
+    if (ImGui::CollapsingHeader("GPU Command Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("GP1: area=%u hrange=%u vrange=%u mode=%u",
+            gcmd.gp1_display_area_count,
+            gcmd.gp1_horizontal_range_count,
+            gcmd.gp1_vertical_range_count,
+            gcmd.gp1_display_mode_count);
+        ImGui::Text("Last Area: raw=0x%06X xy=(%d,%d)",
+            gcmd.gp1_display_area_raw & 0xFFFFFFu,
+            gcmd.gp1_display_area_x, gcmd.gp1_display_area_y);
+        ImGui::Text("Last Range: x=(%d,%d) y=(%d,%d) mode=0x%02X",
+            gcmd.gp1_horizontal_range_x1,
+            gcmd.gp1_horizontal_range_x2,
+            gcmd.gp1_vertical_range_y1,
+            gcmd.gp1_vertical_range_y2,
+            gcmd.gp1_display_mode_raw & 0x7Fu);
+        ImGui::Text("GP0 Textured: tri=%u quad=%u rect=%u",
+            gcmd.gp0_textured_tri_count,
+            gcmd.gp0_textured_quad_count,
+            gcmd.gp0_textured_rect_count);
+        if (!g_mdec_debug_upload_probe) {
+            ImGui::TextDisabled(
+                "Enable MDEC Upload Probe to capture recent GPU uploads/copies.");
+        }
+        else {
+            const u32 upload_hist_count =
+                std::min<u32>(uprobes.gpu_hist_count,
+                    static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
+            ImGui::Text("Recent GPU Uploads: total=%u frame=%u",
+                uprobes.gpu_upload_count,
+                uprobes.gpu_last_frame_upload_count);
+            for (u32 i = 0; i < std::min<u32>(upload_hist_count, 4u); ++i) {
+                const u32 hist_index =
+                    (uprobes.gpu_hist_count - 1u - i) %
+                    static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
+                ImGui::Text(
+                    "UP[%u]: xy=(%u,%u) wh=(%u,%u) <- %s",
+                    i,
+                    static_cast<unsigned>(uprobes.gpu_hist_x[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_hist_y[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_hist_w[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_hist_h[hist_index]),
+                    uprobes.gpu_hist_from_dma[hist_index] ? "DMA2" : "CPU");
+            }
+            ImGui::Text("Recent VRAM Copies: total=%u",
+                uprobes.gpu_copy_count);
+            for (u32 i = 0; i < std::min<u32>(uprobes.gpu_copy_sample_count, 4u); ++i) {
+                const u32 hist_index = uprobes.gpu_copy_sample_count - 1u - i;
+                ImGui::Text(
+                    "CP[%u]: src=(%u,%u) dst=(%u,%u) wh=(%u,%u)",
+                    i,
+                    static_cast<unsigned>(uprobes.gpu_copy_src_x[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_copy_src_y[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_copy_dst_x[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_copy_dst_y[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_copy_w[hist_index]),
+                    static_cast<unsigned>(uprobes.gpu_copy_h[hist_index]));
+            }
+        }
+        if (gcmd.gp0_textured_rect_count > 0) {
+            const u32 last_rect_index =
+                (gcmd.gp0_textured_rect_count - 1u) %
+                static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
+            const RectSourceRegion last_rect_src = compute_rect_source_region(
+                gcmd.rect_texpage[last_rect_index],
+                gcmd.rect_depth[last_rect_index],
+                gcmd.rect_u[last_rect_index],
+                gcmd.rect_v[last_rect_index],
+                gcmd.rect_w[last_rect_index],
+                gcmd.rect_h[last_rect_index]);
+            const int last_rect_up_hit =
+                find_recent_upload_overlap(uprobes, last_rect_src);
+            const int last_rect_cp_hit =
+                find_recent_copy_overlap(uprobes, last_rect_src);
+            ImGui::Text(
+                "Last RECT: xy=(%d,%d) wh=(%u,%u) uv=(%u,%u) rgb=(%u,%u,%u)",
+                static_cast<int>(gcmd.rect_x[last_rect_index]),
+                static_cast<int>(gcmd.rect_y[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_w[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_h[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_u[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_v[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_r[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_g[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_b[last_rect_index]));
+            ImGui::Text(
+                "Last RECT State: op=0x%02X semi=%u blend=%u clut=0x%04X page=0x%03X depth=%u raw=%u",
+                static_cast<unsigned>(gcmd.rect_opcode[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_semi[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_blend[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_clut[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_texpage[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_depth[last_rect_index]),
+                static_cast<unsigned>(gcmd.rect_raw[last_rect_index]));
+            if (last_rect_src.valid) {
+                ImGui::Text(
+                    "Last RECT Src: vram=(%u,%u) wh=(%u,%u) up=%s cp=%s",
+                    static_cast<unsigned>(last_rect_src.x),
+                    static_cast<unsigned>(last_rect_src.y),
+                    static_cast<unsigned>(last_rect_src.w),
+                    static_cast<unsigned>(last_rect_src.h),
+                    last_rect_up_hit >= 0 ? "hit" : "-",
+                    last_rect_cp_hit >= 0 ? "hit" : "-");
+            }
+            for (u32 i = 0; i < 6 && i < gcmd.gp0_textured_rect_count; ++i) {
+                const u32 rect_index =
+                    (gcmd.gp0_textured_rect_count - 1u - i) %
+                    static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
+                const RectSourceRegion rect_src = compute_rect_source_region(
+                    gcmd.rect_texpage[rect_index],
+                    gcmd.rect_depth[rect_index],
+                    gcmd.rect_u[rect_index],
+                    gcmd.rect_v[rect_index],
+                    gcmd.rect_w[rect_index],
+                    gcmd.rect_h[rect_index]);
+                const int rect_up_hit =
+                    find_recent_upload_overlap(uprobes, rect_src);
+                const int rect_cp_hit =
+                    find_recent_copy_overlap(uprobes, rect_src);
+                ImGui::Text(
+                    "RECT[%u]: op=0x%02X xy=(%d,%d) wh=(%u,%u) uv=(%u,%u) semi=%u blend=%u clut=0x%04X page=0x%03X depth=%u raw=%u src=(%u,%u)+(%u,%u) up=%s cp=%s",
+                    i,
+                    static_cast<unsigned>(gcmd.rect_opcode[rect_index]),
+                    static_cast<int>(gcmd.rect_x[rect_index]),
+                    static_cast<int>(gcmd.rect_y[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_w[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_h[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_u[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_v[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_semi[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_blend[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_clut[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_texpage[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_depth[rect_index]),
+                    static_cast<unsigned>(gcmd.rect_raw[rect_index]),
+                    static_cast<unsigned>(rect_src.x),
+                    static_cast<unsigned>(rect_src.y),
+                    static_cast<unsigned>(rect_src.w),
+                    static_cast<unsigned>(rect_src.h),
+                    rect_up_hit >= 0 ? "hit" : "-",
+                    rect_cp_hit >= 0 ? "hit" : "-");
+            }
+        }
+        const u32 poly_count =
+            std::min<u32>(gcmd.gp0_poly_count,
+                static_cast<u32>(GpuCommandDebugInfo::kRecentPolys));
+        u32 shown_polys = 0;
+        for (u32 i = 0; i < poly_count && shown_polys < 8; ++i) {
+            const u32 poly_index =
+                (gcmd.gp0_poly_count - 1u - i) %
+                static_cast<u32>(GpuCommandDebugInfo::kRecentPolys);
+            const RectSourceRegion poly_src =
+                gcmd.poly_textured[poly_index]
+                ? compute_poly_source_region(gcmd, poly_index)
+                : RectSourceRegion{};
+            const int poly_up_hit =
+                find_recent_upload_overlap(uprobes, poly_src);
+            const int poly_cp_hit =
+                find_recent_copy_overlap(uprobes, poly_src);
+            ImGui::Text(
+                "POLY[%u]: op=0x%02X tex=%u vc=%u sh=%u semi=%u blend=%u clut=0x%04X page=0x%03X depth=%u raw=%u src=(%u,%u)+(%u,%u) up=%s cp=%s xy0=(%d,%d) xy1=(%d,%d) xy2=(%d,%d) xy3=(%d,%d) rgb0=(%u,%u,%u) rgb1=(%u,%u,%u) rgb2=(%u,%u,%u) rgb3=(%u,%u,%u) uv0=(%u,%u) uv1=(%u,%u) uv2=(%u,%u) uv3=(%u,%u)",
+                shown_polys,
+                static_cast<unsigned>(gcmd.poly_opcode[poly_index]),
+                static_cast<unsigned>(gcmd.poly_textured[poly_index]),
+                static_cast<unsigned>(gcmd.poly_vertex_count[poly_index]),
+                static_cast<unsigned>(gcmd.poly_shaded[poly_index]),
+                static_cast<unsigned>(gcmd.poly_semi[poly_index]),
+                static_cast<unsigned>(gcmd.poly_blend[poly_index]),
+                static_cast<unsigned>(gcmd.poly_clut[poly_index]),
+                static_cast<unsigned>(gcmd.poly_texpage[poly_index]),
+                static_cast<unsigned>(gcmd.poly_depth[poly_index]),
+                static_cast<unsigned>(gcmd.poly_raw[poly_index]),
+                static_cast<unsigned>(poly_src.x),
+                static_cast<unsigned>(poly_src.y),
+                static_cast<unsigned>(poly_src.w),
+                static_cast<unsigned>(poly_src.h),
+                poly_up_hit >= 0 ? "hit" : "-",
+                poly_cp_hit >= 0 ? "hit" : "-",
+                static_cast<int>(gcmd.poly_x[poly_index][0]),
+                static_cast<int>(gcmd.poly_y[poly_index][0]),
+                static_cast<int>(gcmd.poly_x[poly_index][1]),
+                static_cast<int>(gcmd.poly_y[poly_index][1]),
+                static_cast<int>(gcmd.poly_x[poly_index][2]),
+                static_cast<int>(gcmd.poly_y[poly_index][2]),
+                static_cast<int>(gcmd.poly_x[poly_index][3]),
+                static_cast<int>(gcmd.poly_y[poly_index][3]),
+                static_cast<unsigned>(gcmd.poly_r[poly_index][0]),
+                static_cast<unsigned>(gcmd.poly_g[poly_index][0]),
+                static_cast<unsigned>(gcmd.poly_b[poly_index][0]),
+                static_cast<unsigned>(gcmd.poly_r[poly_index][1]),
+                static_cast<unsigned>(gcmd.poly_g[poly_index][1]),
+                static_cast<unsigned>(gcmd.poly_b[poly_index][1]),
+                static_cast<unsigned>(gcmd.poly_r[poly_index][2]),
+                static_cast<unsigned>(gcmd.poly_g[poly_index][2]),
+                static_cast<unsigned>(gcmd.poly_b[poly_index][2]),
+                static_cast<unsigned>(gcmd.poly_r[poly_index][3]),
+                static_cast<unsigned>(gcmd.poly_g[poly_index][3]),
+                static_cast<unsigned>(gcmd.poly_b[poly_index][3]),
+                static_cast<unsigned>(gcmd.poly_u[poly_index][0]),
+                static_cast<unsigned>(gcmd.poly_v[poly_index][0]),
+                static_cast<unsigned>(gcmd.poly_u[poly_index][1]),
+                static_cast<unsigned>(gcmd.poly_v[poly_index][1]),
+                static_cast<unsigned>(gcmd.poly_u[poly_index][2]),
+                static_cast<unsigned>(gcmd.poly_v[poly_index][2]),
+                static_cast<unsigned>(gcmd.poly_u[poly_index][3]),
+                static_cast<unsigned>(gcmd.poly_v[poly_index][3]));
+            ++shown_polys;
+        }
+        if (poly_count > 0) {
+            std::array<u32, GpuCommandDebugInfo::kRecentPolys> largest_indices{};
+            for (u32 i = 0; i < poly_count; ++i) {
+                largest_indices[static_cast<size_t>(i)] =
+                    (gcmd.gp0_poly_count - 1u - i) %
+                    static_cast<u32>(GpuCommandDebugInfo::kRecentPolys);
+            }
+            std::sort(largest_indices.begin(),
+                largest_indices.begin() + static_cast<std::ptrdiff_t>(poly_count),
+                [&](u32 a, u32 b) {
+                    return compute_poly_bbox_area(gcmd, a) >
+                        compute_poly_bbox_area(gcmd, b);
+                });
+            ImGui::Separator();
+            ImGui::Text("Largest Recent Polys");
+            for (u32 i = 0; i < std::min<u32>(poly_count, 6u); ++i) {
+                const u32 poly_index = largest_indices[static_cast<size_t>(i)];
+                ImGui::Text(
+                    "BIG[%u]: area=%u op=0x%02X tex=%u sh=%u xy0=(%d,%d) xy1=(%d,%d) xy2=(%d,%d) xy3=(%d,%d) rgb0=(%u,%u,%u)",
+                    i,
+                    compute_poly_bbox_area(gcmd, poly_index),
+                    static_cast<unsigned>(gcmd.poly_opcode[poly_index]),
+                    static_cast<unsigned>(gcmd.poly_textured[poly_index]),
+                    static_cast<unsigned>(gcmd.poly_shaded[poly_index]),
+                    static_cast<int>(gcmd.poly_x[poly_index][0]),
+                    static_cast<int>(gcmd.poly_y[poly_index][0]),
+                    static_cast<int>(gcmd.poly_x[poly_index][1]),
+                    static_cast<int>(gcmd.poly_y[poly_index][1]),
+                    static_cast<int>(gcmd.poly_x[poly_index][2]),
+                    static_cast<int>(gcmd.poly_y[poly_index][2]),
+                    static_cast<int>(gcmd.poly_x[poly_index][3]),
+                    static_cast<int>(gcmd.poly_y[poly_index][3]),
+                    static_cast<unsigned>(gcmd.poly_r[poly_index][0]),
+                    static_cast<unsigned>(gcmd.poly_g[poly_index][0]),
+                    static_cast<unsigned>(gcmd.poly_b[poly_index][0]));
+            }
+            std::sort(largest_indices.begin(),
+                largest_indices.begin() + static_cast<std::ptrdiff_t>(poly_count),
+                [&](u32 a, u32 b) {
+                    return compute_poly_visible_bbox_area(
+                               gcmd, a, gdisp.display_vram_left, gdisp.display_vram_top,
+                               gdisp.display_vram_width, gdisp.display_vram_height) >
+                        compute_poly_visible_bbox_area(
+                               gcmd, b, gdisp.display_vram_left, gdisp.display_vram_top,
+                               gdisp.display_vram_width, gdisp.display_vram_height);
+                });
+            ImGui::Text("Visible Recent Polys");
+            for (u32 i = 0; i < std::min<u32>(poly_count, 6u); ++i) {
+                const u32 poly_index = largest_indices[static_cast<size_t>(i)];
+                const u32 visible_area = compute_poly_visible_bbox_area(
+                    gcmd, poly_index, gdisp.display_vram_left, gdisp.display_vram_top,
+                    gdisp.display_vram_width, gdisp.display_vram_height);
+                if (visible_area == 0) {
+                    continue;
+                }
+                ImGui::Text(
+                    "VIS[%u]: vis=%u op=0x%02X tex=%u sh=%u xy0=(%d,%d) xy1=(%d,%d) xy2=(%d,%d) xy3=(%d,%d) rgb0=(%u,%u,%u)",
+                    i,
+                    visible_area,
+                    static_cast<unsigned>(gcmd.poly_opcode[poly_index]),
+                    static_cast<unsigned>(gcmd.poly_textured[poly_index]),
+                    static_cast<unsigned>(gcmd.poly_shaded[poly_index]),
+                    static_cast<int>(gcmd.poly_x[poly_index][0]),
+                    static_cast<int>(gcmd.poly_y[poly_index][0]),
+                    static_cast<int>(gcmd.poly_x[poly_index][1]),
+                    static_cast<int>(gcmd.poly_y[poly_index][1]),
+                    static_cast<int>(gcmd.poly_x[poly_index][2]),
+                    static_cast<int>(gcmd.poly_y[poly_index][2]),
+                    static_cast<int>(gcmd.poly_x[poly_index][3]),
+                    static_cast<int>(gcmd.poly_y[poly_index][3]),
+                    static_cast<unsigned>(gcmd.poly_r[poly_index][0]),
+                    static_cast<unsigned>(gcmd.poly_g[poly_index][0]),
+                    static_cast<unsigned>(gcmd.poly_b[poly_index][0]));
+            }
+        }
+    }
+}
+
+void App::panel_fmv_diagnostics() {
+    if (!g_log_fmv_diagnostics) {
+        show_fmv_diagnostics_ = false;
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(900, 760), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("FMV Diagnostics", &show_fmv_diagnostics_)) {
+        ImGui::BeginChild("FMVDiagnosticsWindowChild", ImVec2(0.0f, 0.0f),
+            false, ImGuiWindowFlags_HorizontalScrollbar);
+        draw_fmv_diagnostics_content();
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
 void App::panel_performance() {
     ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Performance Profiler", &show_perf_)) {
@@ -3929,6 +4706,50 @@ void App::panel_performance() {
             row("Timers", stats.timers_ms, ImVec4(0.4f, 0.8f, 0.8f, 1.0f));
             row("CDROM", stats.cdrom_ms, ImVec4(0.8f, 0.4f, 0.8f, 1.0f));
             ImGui::TextDisabled("*CPU excludes time already attributed to GPU.");
+            ImGui::TextDisabled(
+                "GPU here is CPU-side emulated GPU command time, not host GPU timestamp/present time.");
+
+            const GpuDipDiagnostics dip_diag = analyze_gpu_dip_pattern(
+                perf_gpu_ms_history_,
+                perf_frame_id_history_,
+                perf_gpu_words_history_,
+                perf_gpu_draw_commands_history_,
+                perf_cpu_pc_history_,
+                perf_dma2_words_history_,
+                perf_dma2_base_history_,
+                perf_display_hash_history_,
+                perf_history_count_,
+                perf_history_write_index_);
+            if (dip_diag.valid) {
+                ImGui::Text("GPU dip interval: ~%.1f frames (%d dips in history)",
+                    dip_diag.avg_interval_frames, dip_diag.dip_count);
+            }
+            else if (dip_diag.dip_count > 0) {
+                ImGui::Text("GPU dips seen in history: %d", dip_diag.dip_count);
+            }
+            if (dip_diag.recent_frame_count > 0) {
+                ImGui::Text("Recent dip frames:");
+                ImGui::SameLine();
+                for (int i = 0; i < dip_diag.recent_frame_count; ++i) {
+                    if (i > 0) {
+                        ImGui::SameLine();
+                        ImGui::TextUnformatted(",");
+                        ImGui::SameLine();
+                    }
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(dip_diag.recent_frames[i]));
+                    if (i + 1 < dip_diag.recent_frame_count) {
+                        ImGui::SameLine();
+                    }
+                }
+            }
+            if ((dip_diag.valid || dip_diag.dip_count > 0) &&
+                dip_diag.avg_non_dip_words > 0.0) {
+                ImGui::Text("GP0 at dips: %.0f words / %.0f draws",
+                    dip_diag.avg_dip_words, dip_diag.avg_dip_draws);
+                ImGui::Text("GP0 normal: %.0f words / %.0f draws",
+                    dip_diag.avg_non_dip_words, dip_diag.avg_non_dip_draws);
+            }
         }
         else {
             ImGui::TextDisabled("Detailed subsystem timings are disabled.");
@@ -4870,7 +5691,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.5-fix");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.6a-h2");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
@@ -5925,11 +6746,6 @@ void App::load_persistent_config() {
                 }
             }
         }
-        else if (key == "spu_desired_samples") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            const u32 clamped = static_cast<u32>(std::max(64ul, std::min(65535ul, parsed)));
-            g_spu_desired_samples = clamped;
-        }
         else if (key == "spu_output_buffer_seconds") {
             const float parsed = std::strtof(value.c_str(), nullptr);
             const float clamped = std::max(0.05f, std::min(8.0f, parsed));
@@ -6155,7 +6971,6 @@ void App::save_persistent_config() const {
         out << entry.config_key << "="
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
-    out << "spu_desired_samples=" << static_cast<unsigned>(g_spu_desired_samples) << "\n";
     out << std::fixed << std::setprecision(3);
     out << "spu_output_buffer_seconds=" << g_spu_output_buffer_seconds << "\n";
     out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";

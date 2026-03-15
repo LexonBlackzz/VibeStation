@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <array>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -135,6 +136,236 @@ static bool write_wav_s16_stereo(const std::string &path,
   out.write(reinterpret_cast<const char *>(samples.data()),
             static_cast<std::streamsize>(data_size));
   return out.good();
+}
+
+struct GpuDebugDumpRegion {
+  u16 x = 0;
+  u16 y = 0;
+  u16 w = 0;
+  u16 h = 0;
+  bool valid = false;
+};
+
+static GpuDebugDumpRegion compute_gpu_poly_source_region(
+    const GpuCommandDebugInfo &gcmd, u32 poly_index) {
+  GpuDebugDumpRegion region{};
+  const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+  if (!gcmd.poly_textured[poly_index] || vertex_count < 3) {
+    return region;
+  }
+
+  u8 min_u = 255;
+  u8 min_v = 255;
+  u8 max_u = 0;
+  u8 max_v = 0;
+  for (u8 i = 0; i < vertex_count && i < 4; ++i) {
+    min_u = std::min(min_u, gcmd.poly_u[poly_index][i]);
+    min_v = std::min(min_v, gcmd.poly_v[poly_index][i]);
+    max_u = std::max(max_u, gcmd.poly_u[poly_index][i]);
+    max_v = std::max(max_v, gcmd.poly_v[poly_index][i]);
+  }
+
+  const u16 texpage = gcmd.poly_texpage[poly_index];
+  const u8 depth = gcmd.poly_depth[poly_index];
+  const u16 tex_base_x = static_cast<u16>((texpage & 0xFu) * 64u);
+  const u16 tex_base_y = static_cast<u16>(((texpage >> 4) & 0x1u) * 256u);
+  u16 src_x = tex_base_x;
+  u16 src_w = 0;
+  switch (depth & 0x3u) {
+  case 0: {
+    src_x = static_cast<u16>(tex_base_x + (min_u >> 2));
+    src_w = static_cast<u16>((max_u >> 2) - (min_u >> 2) + 1u);
+    break;
+  }
+  case 1: {
+    src_x = static_cast<u16>(tex_base_x + (min_u >> 1));
+    src_w = static_cast<u16>((max_u >> 1) - (min_u >> 1) + 1u);
+    break;
+  }
+  case 2:
+    src_x = static_cast<u16>(tex_base_x + min_u);
+    src_w = static_cast<u16>(max_u - min_u + 1u);
+    break;
+  default:
+    return region;
+  }
+
+  region.x = static_cast<u16>(src_x & (psx::VRAM_WIDTH - 1u));
+  region.y = static_cast<u16>((tex_base_y + min_v) & (psx::VRAM_HEIGHT - 1u));
+  region.w = src_w;
+  region.h = static_cast<u16>(max_v - min_v + 1u);
+  region.valid = true;
+  return region;
+}
+
+static u32 compute_gpu_poly_bbox_area(const GpuCommandDebugInfo &gcmd,
+                                      u32 poly_index) {
+  const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+  if (vertex_count < 3) {
+    return 0;
+  }
+  s16 min_x = gcmd.poly_x[poly_index][0];
+  s16 max_x = gcmd.poly_x[poly_index][0];
+  s16 min_y = gcmd.poly_y[poly_index][0];
+  s16 max_y = gcmd.poly_y[poly_index][0];
+  for (u8 i = 1; i < vertex_count && i < 4; ++i) {
+    min_x = std::min(min_x, gcmd.poly_x[poly_index][i]);
+    max_x = std::max(max_x, gcmd.poly_x[poly_index][i]);
+    min_y = std::min(min_y, gcmd.poly_y[poly_index][i]);
+    max_y = std::max(max_y, gcmd.poly_y[poly_index][i]);
+  }
+  const int width = std::max(0, static_cast<int>(max_x) - static_cast<int>(min_x));
+  const int height = std::max(0, static_cast<int>(max_y) - static_cast<int>(min_y));
+  return static_cast<u32>(width * height);
+}
+
+static u32 compute_gpu_poly_visible_area(const GpuCommandDebugInfo &gcmd,
+                                         u32 poly_index,
+                                         const DisplayDebugInfo &gdisp) {
+  const u8 vertex_count = gcmd.poly_vertex_count[poly_index];
+  if (vertex_count < 3 || gdisp.display_vram_width <= 0 ||
+      gdisp.display_vram_height <= 0) {
+    return 0;
+  }
+  s16 min_x = gcmd.poly_x[poly_index][0];
+  s16 max_x = gcmd.poly_x[poly_index][0];
+  s16 min_y = gcmd.poly_y[poly_index][0];
+  s16 max_y = gcmd.poly_y[poly_index][0];
+  for (u8 i = 1; i < vertex_count && i < 4; ++i) {
+    min_x = std::min(min_x, gcmd.poly_x[poly_index][i]);
+    max_x = std::max(max_x, gcmd.poly_x[poly_index][i]);
+    min_y = std::min(min_y, gcmd.poly_y[poly_index][i]);
+    max_y = std::max(max_y, gcmd.poly_y[poly_index][i]);
+  }
+  const int clipped_min_x =
+      std::max(static_cast<int>(min_x), gdisp.display_vram_left);
+  const int clipped_max_x = std::min(static_cast<int>(max_x),
+                                     gdisp.display_vram_left +
+                                         gdisp.display_vram_width);
+  const int clipped_min_y =
+      std::max(static_cast<int>(min_y), gdisp.display_vram_top);
+  const int clipped_max_y = std::min(static_cast<int>(max_y),
+                                     gdisp.display_vram_top +
+                                         gdisp.display_vram_height);
+  const int width = std::max(0, clipped_max_x - clipped_min_x);
+  const int height = std::max(0, clipped_max_y - clipped_min_y);
+  return static_cast<u32>(width * height);
+}
+
+static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
+                                 const System &sys) {
+  const auto gdisp = sys.gpu_display_debug_info();
+  const auto gcmd = sys.gpu_command_debug_info();
+  const auto &probe = sys.mdec_upload_probe();
+
+  out << "FRAME " << frame_index << "\n";
+  out << "DISPLAY mode=" << gdisp.mode_width << "x" << gdisp.mode_height
+      << " width=" << gdisp.width << " height=" << gdisp.height
+      << " src=" << gdisp.src_width << "x" << gdisp.src_height
+      << " vram=(" << gdisp.display_vram_left << "," << gdisp.display_vram_top
+      << ") wh=(" << gdisp.display_vram_width << "," << gdisp.display_vram_height
+      << ") div=" << gdisp.divisor << " 24bit=" << (gdisp.is_24bit ? 1 : 0)
+      << " interlace=" << (gdisp.interlaced ? 1 : 0) << "\n";
+  out << "COUNTS tri=" << gcmd.gp0_textured_tri_count
+      << " quad=" << gcmd.gp0_textured_quad_count
+      << " rect=" << gcmd.gp0_textured_rect_count
+      << " poly=" << gcmd.gp0_poly_count << "\n";
+
+  const u32 upload_hist_count =
+      std::min<u32>(probe.gpu_hist_count,
+                    static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
+  for (u32 i = 0; i < std::min<u32>(upload_hist_count, 4u); ++i) {
+    const u32 hist_index =
+        (probe.gpu_hist_count - 1u - i) %
+        static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
+    out << "UP[" << i << "] xy=(" << probe.gpu_hist_x[hist_index] << ","
+        << probe.gpu_hist_y[hist_index] << ") wh=("
+        << probe.gpu_hist_w[hist_index] << "," << probe.gpu_hist_h[hist_index]
+        << ") src=" << (probe.gpu_hist_from_dma[hist_index] ? "DMA2" : "CPU")
+        << "\n";
+  }
+
+  const u32 poly_count =
+      std::min<u32>(gcmd.gp0_poly_count,
+                    static_cast<u32>(GpuCommandDebugInfo::kRecentPolys));
+  std::array<u32, GpuCommandDebugInfo::kRecentPolys> indices{};
+  for (u32 i = 0; i < poly_count; ++i) {
+    indices[static_cast<size_t>(i)] =
+        (gcmd.gp0_poly_count - 1u - i) %
+        static_cast<u32>(GpuCommandDebugInfo::kRecentPolys);
+  }
+
+  out << "RECENT\n";
+  for (u32 i = 0; i < std::min<u32>(poly_count, 12u); ++i) {
+    const u32 poly_index = indices[static_cast<size_t>(i)];
+    const GpuDebugDumpRegion src =
+        compute_gpu_poly_source_region(gcmd, poly_index);
+    out << "  POLY[" << i << "] op=0x" << std::hex
+        << static_cast<unsigned>(gcmd.poly_opcode[poly_index]) << std::dec
+        << " tex=" << static_cast<unsigned>(gcmd.poly_textured[poly_index])
+        << " vc=" << static_cast<unsigned>(gcmd.poly_vertex_count[poly_index])
+        << " sh=" << static_cast<unsigned>(gcmd.poly_shaded[poly_index])
+        << " semi=" << static_cast<unsigned>(gcmd.poly_semi[poly_index])
+        << " blend=" << static_cast<unsigned>(gcmd.poly_blend[poly_index])
+        << " page=0x" << std::hex << static_cast<unsigned>(gcmd.poly_texpage[poly_index])
+        << " clut=0x" << static_cast<unsigned>(gcmd.poly_clut[poly_index]) << std::dec
+        << " src=(" << src.x << "," << src.y << ")+(" << src.w << "," << src.h << ")"
+        << " xy0=(" << gcmd.poly_x[poly_index][0] << "," << gcmd.poly_y[poly_index][0] << ")"
+        << " xy1=(" << gcmd.poly_x[poly_index][1] << "," << gcmd.poly_y[poly_index][1] << ")"
+        << " xy2=(" << gcmd.poly_x[poly_index][2] << "," << gcmd.poly_y[poly_index][2] << ")"
+        << " xy3=(" << gcmd.poly_x[poly_index][3] << "," << gcmd.poly_y[poly_index][3] << ")"
+        << " rgb0=(" << static_cast<unsigned>(gcmd.poly_r[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_g[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_b[poly_index][0]) << ")\n";
+  }
+
+  std::sort(indices.begin(), indices.begin() + static_cast<std::ptrdiff_t>(poly_count),
+            [&](u32 a, u32 b) {
+              return compute_gpu_poly_visible_area(gcmd, a, gdisp) >
+                     compute_gpu_poly_visible_area(gcmd, b, gdisp);
+            });
+  out << "VISIBLE\n";
+  for (u32 i = 0, shown = 0; i < poly_count && shown < 8; ++i) {
+    const u32 poly_index = indices[static_cast<size_t>(i)];
+    const u32 vis = compute_gpu_poly_visible_area(gcmd, poly_index, gdisp);
+    if (vis == 0) {
+      continue;
+    }
+    out << "  VIS[" << shown << "] area=" << vis << " op=0x" << std::hex
+        << static_cast<unsigned>(gcmd.poly_opcode[poly_index]) << std::dec
+        << " tex=" << static_cast<unsigned>(gcmd.poly_textured[poly_index])
+        << " sh=" << static_cast<unsigned>(gcmd.poly_shaded[poly_index])
+        << " xy0=(" << gcmd.poly_x[poly_index][0] << "," << gcmd.poly_y[poly_index][0] << ")"
+        << " xy1=(" << gcmd.poly_x[poly_index][1] << "," << gcmd.poly_y[poly_index][1] << ")"
+        << " xy2=(" << gcmd.poly_x[poly_index][2] << "," << gcmd.poly_y[poly_index][2] << ")"
+        << " xy3=(" << gcmd.poly_x[poly_index][3] << "," << gcmd.poly_y[poly_index][3] << ")"
+        << " rgb0=(" << static_cast<unsigned>(gcmd.poly_r[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_g[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_b[poly_index][0]) << ")\n";
+    ++shown;
+  }
+
+  std::sort(indices.begin(), indices.begin() + static_cast<std::ptrdiff_t>(poly_count),
+            [&](u32 a, u32 b) {
+              return compute_gpu_poly_bbox_area(gcmd, a) >
+                     compute_gpu_poly_bbox_area(gcmd, b);
+            });
+  out << "BIG\n";
+  for (u32 i = 0; i < std::min<u32>(poly_count, 8u); ++i) {
+    const u32 poly_index = indices[static_cast<size_t>(i)];
+    out << "  BIG[" << i << "] area=" << compute_gpu_poly_bbox_area(gcmd, poly_index)
+        << " op=0x" << std::hex << static_cast<unsigned>(gcmd.poly_opcode[poly_index])
+        << std::dec << " tex=" << static_cast<unsigned>(gcmd.poly_textured[poly_index])
+        << " sh=" << static_cast<unsigned>(gcmd.poly_shaded[poly_index])
+        << " xy0=(" << gcmd.poly_x[poly_index][0] << "," << gcmd.poly_y[poly_index][0] << ")"
+        << " xy1=(" << gcmd.poly_x[poly_index][1] << "," << gcmd.poly_y[poly_index][1] << ")"
+        << " xy2=(" << gcmd.poly_x[poly_index][2] << "," << gcmd.poly_y[poly_index][2] << ")"
+        << " xy3=(" << gcmd.poly_x[poly_index][3] << "," << gcmd.poly_y[poly_index][3] << ")"
+        << " rgb0=(" << static_cast<unsigned>(gcmd.poly_r[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_g[poly_index][0]) << ","
+        << static_cast<unsigned>(gcmd.poly_b[poly_index][0]) << ")\n";
+  }
+  out << "\n";
 }
 
 static bool parse_log_level(const std::string &s, LogLevel &out) {
@@ -467,7 +698,8 @@ static int run_bios_test(const std::string &bios_path, int steps) {
 
 static int run_frame_test(const std::string &bios_path, int frames,
                           const std::string &bin_path = "",
-                          const std::string &cue_path = "") {
+                          const std::string &cue_path = "",
+                          const std::string &gpu_debug_path = "") {
   auto dump_vram_ppm = [](System &sys, int frame_index) {
     char path[128];
     std::snprintf(path, sizeof(path), "frame_%04d_vram.ppm", frame_index);
@@ -505,6 +737,23 @@ static int run_frame_test(const std::string &bios_path, int frames,
   LOG_INFO("=== VibeStation Frame Test ===");
   LOG_INFO("BIOS path: %s", bios_path.c_str());
   LOG_INFO("Frames: %d", frames);
+  if (!gpu_debug_path.empty()) {
+    LOG_INFO("GPU debug file: %s", gpu_debug_path.c_str());
+  }
+
+  std::ofstream gpu_debug_out;
+  if (!gpu_debug_path.empty()) {
+    gpu_debug_out.open(gpu_debug_path, std::ios::trunc);
+    if (!gpu_debug_out.is_open()) {
+      LOG_ERROR("Failed to open GPU debug file");
+      if (owns_log && g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
+  }
 
   auto sys = std::make_unique<System>();
   if (!sys->load_bios(bios_path)) {
@@ -669,6 +918,9 @@ static int run_frame_test(const std::string &bios_path, int frames,
     if (should_dump_vram(i + 1)) {
       dump_vram_ppm(*sys, i + 1);
     }
+    if (gpu_debug_out.is_open()) {
+      dump_gpu_debug_frame(gpu_debug_out, i + 1, *sys);
+    }
     if ((i + 1) <= 10 || ((i + 1) % 30 == 0)) {
       const u32 instr = sys->read32(pc);
       LOG_INFO(
@@ -741,6 +993,9 @@ static int run_frame_test(const std::string &bios_path, int frames,
       static_cast<unsigned>(diag.display_is_24bit), sys->cpu().pc());
   log_mdec_summary("FRAME", *sys);
   LOG_INFO("Frame test complete");
+  if (gpu_debug_out.is_open()) {
+    gpu_debug_out.flush();
+  }
   if (owns_log && g_log_file) {
     log_flush_repeats();
     std::fclose(g_log_file);
@@ -1425,6 +1680,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::string wav_out_path;
+  std::string gpu_debug_out_path;
   std::vector<std::string> passthrough;
   passthrough.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
@@ -1487,6 +1743,12 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--wav-out" && (i + 1) < args.size()) {
       wav_out_path = args[i + 1];
+      ++i;
+      continue;
+    }
+    if (a == "--gpu-debug-file" && (i + 1) < args.size()) {
+      gpu_debug_out_path = args[i + 1];
+      g_mdec_debug_upload_probe = true;
       ++i;
       continue;
     }
@@ -1564,9 +1826,9 @@ int main(int argc, char *argv[]) {
     int rc = 0;
     if (passthrough.size() >= 5) {
       rc = run_frame_test(passthrough[1], frames, passthrough[3],
-                          passthrough[4]);
+                          passthrough[4], gpu_debug_out_path);
     } else {
-      rc = run_frame_test(passthrough[1], frames);
+      rc = run_frame_test(passthrough[1], frames, "", "", gpu_debug_out_path);
     }
     if (g_log_file) {
       log_flush_repeats();
@@ -1595,7 +1857,7 @@ int main(int argc, char *argv[]) {
   SDL_SetMainReady(); // Tell SDL we handled main() ourselves
 
   printf("========================================\n");
-  printf("  VibeStation - PS1 Emulator v0.4.5\n");
+  printf("  VibeStation - PS1 Emulator v0.4.6a-h2\n");
   printf("========================================\n");
   printf("Starting up...\n");
   fflush(stdout);

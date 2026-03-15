@@ -6,6 +6,7 @@
 #include <SDL.h>
 
 namespace {
+constexpr u32 kUnlimitedTurboFrameSkip = 5;
 
 void update_snapshot_display_diag_from_sample(System::BootDiagnostics& diag,
     const DisplaySampleInfo& sample) {
@@ -43,6 +44,7 @@ bool EmuRunner::start(System* system) {
     speed_.store(1.0, std::memory_order_release);
     input_mailbox_.store(pack_input(0xFFFFu, 0x80, 0x80, 0x80, 0x80),
         std::memory_order_release);
+    completed_frame_count_.store(0, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         pending_frame_ = {};
@@ -52,6 +54,10 @@ bool EmuRunner::start(System* system) {
     {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_ = {};
+    }
+    {
+        std::lock_guard<std::mutex> lock(recycled_frame_mutex_);
+        recycled_frame_ = {};
     }
     {
         std::lock_guard<std::mutex> lock(vram_mutex_);
@@ -76,6 +82,7 @@ void EmuRunner::stop() {
 
     running_.store(false, std::memory_order_release);
     stop_requested_.store(true, std::memory_order_release);
+    completed_frame_count_.store(0, std::memory_order_release);
     control_cv_.notify_all();
     idle_cv_.notify_all();
 
@@ -90,6 +97,10 @@ void EmuRunner::stop() {
     {
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         latest_snapshot_.running = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(recycled_frame_mutex_);
+        recycled_frame_ = {};
     }
     {
         std::lock_guard<std::mutex> lock(vram_mutex_);
@@ -167,6 +178,18 @@ bool EmuRunner::consume_latest_frame(FrameSnapshot& out_frame) {
     return true;
 }
 
+void EmuRunner::recycle_consumed_frame(FrameSnapshot&& frame) {
+    frame.frame_id = 0;
+    frame.width = 0;
+    frame.height = 0;
+    frame.rgba.clear();
+
+    std::lock_guard<std::mutex> lock(recycled_frame_mutex_);
+    if (frame.rgba.capacity() >= recycled_frame_.rgba.capacity()) {
+        recycled_frame_ = std::move(frame);
+    }
+}
+
 bool EmuRunner::consume_latest_vram_snapshot(std::vector<u16>& out_vram) {
     std::lock_guard<std::mutex> lock(vram_mutex_);
     if (!has_latest_vram_snapshot_) {
@@ -214,12 +237,12 @@ void EmuRunner::apply_input_state(System& system) {
 }
 
 bool EmuRunner::should_capture_frame() const {
-    if (!g_gpu_fast_mode) {
-        return true;
-    }
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (has_pending_frame_) {
         return false;
+    }
+    if (!g_gpu_fast_mode) {
+        return true;
     }
     if (!g_gpu_extreme_fast_mode) {
         return true;
@@ -305,6 +328,9 @@ void EmuRunner::worker_main() {
         apply_input_state(*system_);
         apply_pending_disc_insert();
         system_->run_frame(false, skip_audio_for_turbo);
+        completed_frame_count_.store(
+            static_cast<u64>(system_->boot_diag().frame_counter),
+            std::memory_order_release);
 
         if (!publish_outputs) {
             frame_active_.store(false, std::memory_order_release);
@@ -318,6 +344,11 @@ void EmuRunner::worker_main() {
         snapshot.boot_diag = system_->boot_diag();
         snapshot.profiling = system_->profiling_stats();
         snapshot.core_frame_ms = snapshot.profiling.total_ms;
+        snapshot.cpu_pc = system_->cpu().pc();
+        const auto& dma2 = system_->dma_last_debug(2);
+        snapshot.dma2_base_addr = dma2.base_addr;
+        snapshot.dma2_words = dma2.transfer_words;
+        snapshot.dma2_from_ram = dma2.from_ram;
         snapshot.spu_audio = system_->spu_audio_diag();
         update_snapshot_display_diag_from_debug(
             snapshot.boot_diag,
@@ -350,18 +381,25 @@ void EmuRunner::worker_main() {
 
         if (force_capture || should_capture_frame()) {
             FrameSnapshot frame{};
-            std::vector<u32> rgba;
+            {
+                std::lock_guard<std::mutex> lock(recycled_frame_mutex_);
+                frame = std::move(recycled_frame_);
+                recycled_frame_ = {};
+            }
+            frame.frame_id = 0;
+            frame.width = 0;
+            frame.height = 0;
+            frame.rgba.clear();
             const DisplaySampleInfo sample =
                 // UI output should always use the stable present path.
                 // include_stats switches to a slower/alternate conversion path
                 // that can drop BIOS menu cursor pixels on some scenes.
-                system_->gpu().build_display_rgba(rgba, false);
+                system_->gpu().build_display_rgba(frame.rgba, false);
             update_snapshot_display_diag_from_sample(snapshot.boot_diag, sample);
 
             frame.frame_id = snapshot.frame_id;
             frame.width = std::max(1, sample.width);
             frame.height = std::max(1, sample.height);
-            frame.rgba = std::move(rgba);
 
             publish_frame(std::move(frame), snapshot);
         }
@@ -401,12 +439,15 @@ void EmuRunner::worker_main() {
             continue;
         }
         next_tick = steady_clock::now();
+        u32 unlimited_frame_skip_counter = 0;
 
         while (running_.load(std::memory_order_acquire) &&
             !stop_requested_.load(std::memory_order_acquire)) {
             const double raw_speed = speed_.load(std::memory_order_acquire);
             if (raw_speed <= 0.0) {
-                run_one_frame(true, true, false);
+                const bool publish_outputs =
+                    (unlimited_frame_skip_counter++ % (kUnlimitedTurboFrameSkip + 1u)) == 0u;
+                run_one_frame(publish_outputs, true, false);
                 next_tick = steady_clock::now();
                 continue;
             }
