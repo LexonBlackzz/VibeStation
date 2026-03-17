@@ -120,6 +120,9 @@ public:
     double timers_ms = 0.0;
     double cdrom_ms = 0.0;
     double total_ms = 0.0;
+    u32 gpu_gp0_words = 0;
+    u32 gpu_gp0_commands = 0;
+    u32 gpu_draw_commands = 0;
   };
 
   struct MdecUploadProbe {
@@ -251,6 +254,9 @@ public:
   void reset_profiling_stats() { profiling_stats_ = {}; }
   void add_cpu_time(double ms) { profiling_stats_.cpu_ms += ms; }
   void add_gpu_time(double ms) { profiling_stats_.gpu_ms += ms; }
+  void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
+  void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
+  void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
   void add_cdrom_time(double ms) { profiling_stats_.cdrom_ms += ms; }
   void add_spu_time(double ms) { profiling_stats_.spu_ms += ms; }
   void add_dma_time(double ms) { profiling_stats_.dma_ms += ms; }

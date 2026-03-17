@@ -464,12 +464,14 @@ void DmaController::dma_linked_list(int channel) {
       sys_->gpu_gp0_dma(command, addr);
     }
 
-    // Follow link to next node
-    if (header & 0x00800000) {
-      break; // End-of-list marker
+    // GPU linked-list DMA terminates on a 24-bit 0xFFFFFF pointer, not just
+    // any header with bit 23 set.
+    const u32 next_addr = header & 0x00FFFFFFu;
+    if ((next_addr & 0x00FFFFFFu) == 0x00FFFFFFu) {
+      break;
     }
 
-    addr = header & 0x001FFFFC;
+    addr = next_addr & 0x001FFFFC;
     safety++;
   }
 

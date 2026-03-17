@@ -87,7 +87,8 @@ private:
   void push_rgb(u32 val);
   u32 divide(u16 h_val, u16 sz3);
   s32 clamp(s32 value, s32 min_val, s32 max_val, u32 flag_bit);
-  int count_leading_zeros(u32 value) const;
+  int count_leading_bits(u32 value) const;
+  int count_leading_zeros16(u16 value) const;
   void normal_color_stage(int v_idx);
   void push_rgb_from_mac();
   void apply_depth_cue_mac();

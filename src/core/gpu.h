@@ -1,6 +1,7 @@
 #pragma once
 #include "types.h"
 #include <array>
+#include <deque>
 #include <vector>
 
 // ── Graphics Processing Unit ───────────────────────────────────────
@@ -84,6 +85,7 @@ struct DisplayDebugInfo {
 
 struct GpuCommandDebugInfo {
   static constexpr size_t kRecentRects = 8;
+  static constexpr size_t kRecentPolys = 64;
   u32 gp1_display_area_count = 0;
   u32 gp1_horizontal_range_count = 0;
   u32 gp1_vertical_range_count = 0;
@@ -109,11 +111,32 @@ struct GpuCommandDebugInfo {
   std::array<u8, kRecentRects> rect_v{};
   std::array<u16, kRecentRects> rect_clut{};
   std::array<u16, kRecentRects> rect_texpage{};
+  std::array<u8, kRecentRects> rect_opcode{};
+  std::array<u8, kRecentRects> rect_semi{};
+  std::array<u8, kRecentRects> rect_blend{};
   std::array<u8, kRecentRects> rect_raw{};
   std::array<u8, kRecentRects> rect_r{};
   std::array<u8, kRecentRects> rect_g{};
   std::array<u8, kRecentRects> rect_b{};
   std::array<u8, kRecentRects> rect_depth{};
+  u32 gp0_poly_count = 0;
+  std::array<u8, kRecentPolys> poly_opcode{};
+  std::array<u8, kRecentPolys> poly_vertex_count{};
+  std::array<u8, kRecentPolys> poly_textured{};
+  std::array<u8, kRecentPolys> poly_shaded{};
+  std::array<u8, kRecentPolys> poly_raw{};
+  std::array<u8, kRecentPolys> poly_semi{};
+  std::array<u8, kRecentPolys> poly_blend{};
+  std::array<u8, kRecentPolys> poly_depth{};
+  std::array<u16, kRecentPolys> poly_clut{};
+  std::array<u16, kRecentPolys> poly_texpage{};
+  std::array<std::array<s16, 4>, kRecentPolys> poly_x{};
+  std::array<std::array<s16, 4>, kRecentPolys> poly_y{};
+  std::array<std::array<u8, 4>, kRecentPolys> poly_u{};
+  std::array<std::array<u8, 4>, kRecentPolys> poly_v{};
+  std::array<std::array<u8, 4>, kRecentPolys> poly_r{};
+  std::array<std::array<u8, 4>, kRecentPolys> poly_g{};
+  std::array<std::array<u8, 4>, kRecentPolys> poly_b{};
 };
 
 class Gpu {
@@ -161,6 +184,7 @@ private:
   std::array<u16, psx::VRAM_WIDTH * psx::VRAM_HEIGHT> vram_{};
 
   // GP0 command buffer (commands can span multiple words)
+  std::deque<u32> gp0_fifo_;
   std::vector<u32> gp0_buffer_;
   std::vector<u16> vram_copy_buffer_;
   u32 gp0_words_remaining_ = 0;
@@ -265,8 +289,11 @@ private:
   static bool is_polyline_terminator(u32 word) {
     return (word & 0xF000F000u) == 0x50005000u;
   }
+  void debug_note_polygon(u8 opcode, const Vertex* vertices, int vertex_count,
+                          bool textured, bool shaded, bool raw_texture = false);
   Vertex decode_vertex_word(u32 word) const;
   void handle_polyline_word(u32 word);
+  void consume_vram_write_word(u32 word);
 
   // Edge function for triangle rasterization
   static s32 edge(const Vertex &a, const Vertex &b, s16 px, s16 py) {
