@@ -127,6 +127,13 @@ public:
     static constexpr size_t kUploadHistory = 8;
     static constexpr size_t kMacroblockHistory = 32;
 
+    bool dma0_seen = false;
+    u32 dma0_base_addr = 0;
+    u32 dma0_words = 0;
+    u32 dma0_sample_count = 0;
+    std::array<u32, kSampleWords> dma0_addrs{};
+    std::array<u32, kSampleWords> dma0_words_sample{};
+
     bool dma1_seen = false;
     u32 dma1_base_addr = 0;
     u32 dma1_words = 0;
@@ -565,6 +572,8 @@ public:
   void reset_mdec_upload_probe() { mdec_upload_probe_ = {}; }
   void debug_begin_dma_bus_access(u8 channel);
   void debug_end_dma_bus_access();
+  void debug_note_mdec_dma_in_begin(u32 base_addr, u32 words);
+  void debug_note_mdec_dma_in_word(u32 read_addr, u32 value);
   void debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
                                      u8 first_block);
   void debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
@@ -614,9 +623,13 @@ private:
 
   void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
   void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
+  void debug_track_active_stack_write(const RamAccessLogEntry &entry);
   void debug_track_stack_top_write(const RamAccessLogEntry &entry);
   void debug_log_stack_top_burst_context(const RamAccessLogEntry &entry);
   void populate_gpu_src_write_samples_from_history();
+  void log_unhandled_bus_write(const char *width, u32 phys, u32 value,
+                               bool io_space, u64 repeat_count,
+                               u64 total_count) const;
 
   // Hardware components
   Bios bios_;
@@ -663,6 +676,8 @@ private:
   StackTopBurstDebug stack_top_burst_ = {};
   u32 stack_top_write_log_budget_ = 64;
   bool stack_top_write_log_suppressed_ = false;
+  u32 active_stack_write_log_budget_ = 96;
+  bool active_stack_write_log_suppressed_ = false;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;

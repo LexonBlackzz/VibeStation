@@ -64,7 +64,7 @@ static void log_mdec_summary(const char *prefix, const System &sys) {
       "%s_MDEC decode=%llu set_quant=%llu set_scale=%llu blocks=%llu "
       "dc_only=%llu qscale_zero=%llu qscale_avg=%llu qscale_max=%u "
       "nonzero_coeff=%llu eob=%llu overflow=%llu dma_in_req=%d dma_out_req=%d "
-      "out_words=%u out_depth=%u out_block=%u out_mb_seq=%u dma1_seen=%d "
+      "out_words=%u out_depth=%u out_block=%u out_mb_seq=%u dma0_seen=%d dma1_seen=%d "
       "gpu_upload_seen=%d gpu_copy_count=%u",
       prefix, static_cast<unsigned long long>(stats.decode_commands),
       static_cast<unsigned long long>(stats.set_quant_commands),
@@ -80,7 +80,8 @@ static void log_mdec_summary(const char *prefix, const System &sys) {
       sys.mdec_dma_out_words_available(),
       static_cast<unsigned>(sys.mdec_dma_out_depth()),
       static_cast<unsigned>(sys.mdec_dma_out_block()),
-      sys.mdec_dma_out_macroblock_seq(), probe.dma1_seen ? 1 : 0,
+      sys.mdec_dma_out_macroblock_seq(), probe.dma0_seen ? 1 : 0,
+      probe.dma1_seen ? 1 : 0,
       probe.gpu_upload_seen ? 1 : 0, probe.gpu_copy_count);
 
   if (stats.command_history_count != 0u) {

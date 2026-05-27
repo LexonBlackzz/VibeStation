@@ -333,6 +333,9 @@ void DmaController::dma_block(int channel) {
                                         sys_->mdec_dma_out_depth(),
                                         sys_->mdec_dma_out_block());
   }
+  if (from_ram && channel == 0 && g_mdec_debug_upload_probe) {
+    sys_->debug_note_mdec_dma_in_begin(addr & 0x001FFFFCu, transfer_words);
+  }
 
   if (channel == 6) {
     // OTC (Ordering Table Clear): always writes to RAM, backwards.
@@ -371,6 +374,9 @@ void DmaController::dma_block(int channel) {
       sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
       u32 data = sys_->read32(current_addr);
       sys_->debug_end_dma_bus_access();
+      if (channel == 0 && g_mdec_debug_upload_probe) {
+        sys_->debug_note_mdec_dma_in_word(current_addr, data);
+      }
       // Send to device
       switch (channel) {
       case 0: // MDEC in

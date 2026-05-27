@@ -118,6 +118,7 @@ inline bool g_experimental_unhandled_special_returns_zero = false;
 inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
+inline bool g_bilinear_filtering = false;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_spu_enable_audio_queue = true;

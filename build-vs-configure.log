@@ -1,0 +1,22 @@
+Running with debug output on.
+-- The C compiler identification is unknown
+   Called from: [3]	D:/Projects/github/VibeStation/CMakeLists.txt
+                [2]	C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeDetermineCCompiler.cmake
+                [1]	C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerId.cmake
+-- The CXX compiler identification is unknown
+   Called from: [3]	D:/Projects/github/VibeStation/CMakeLists.txt
+                [2]	C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeDetermineCXXCompiler.cmake
+                [1]	C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerId.cmake
+CMake Error at CMakeLists.txt:2 (project):
+  No CMAKE_C_COMPILER could be found.
+
+
+
+   Called from: [1]	D:/Projects/github/VibeStation/CMakeLists.txt
+CMake Error at CMakeLists.txt:2 (project):
+  No CMAKE_CXX_COMPILER could be found.
+
+
+
+   Called from: [1]	D:/Projects/github/VibeStation/CMakeLists.txt
+-- Configuring incomplete, errors occurred!

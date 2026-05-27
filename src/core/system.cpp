@@ -173,6 +173,35 @@ void System::note_sio_io(u32 phys_addr) {
     }
 }
 
+void System::log_unhandled_bus_write(const char* width, u32 phys, u32 value,
+                                     bool io_space, u64 repeat_count,
+                                     u64 total_count) const {
+    const u32 pc = cpu_.pc();
+    const u32 sp = cpu_.reg(29);
+    const u32 ra = cpu_.reg(31);
+    const u32 a0 = cpu_.reg(4);
+    const u32 a1 = cpu_.reg(5);
+    const u32 a2 = cpu_.reg(6);
+    const u32 a3 = cpu_.reg(7);
+
+    if (io_space) {
+        LOG_WARN(
+            "BUS: Unhandled %s at I/O 0x%08X = 0x%08X (repeat=%llu total=%llu) "
+            "pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+            width, phys, value, static_cast<unsigned long long>(repeat_count),
+            static_cast<unsigned long long>(total_count), pc, sp, ra, a0, a1, a2,
+            a3);
+        return;
+    }
+
+    LOG_WARN(
+        "BUS: Unhandled %s at 0x%08X = 0x%08X (repeat=%llu total=%llu) "
+        "pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+        width, phys, value, static_cast<unsigned long long>(repeat_count),
+        static_cast<unsigned long long>(total_count), pc, sp, ra, a0, a1, a2,
+        a3);
+}
+
 void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes) {
     if (!g_ram_watch_diagnostics) {
         return;
@@ -380,6 +409,8 @@ void System::reset() {
     stack_top_burst_ = {};
     stack_top_write_log_budget_ = 64;
     stack_top_write_log_suppressed_ = false;
+    active_stack_write_log_budget_ = 96;
+    active_stack_write_log_suppressed_ = false;
     gpu_gp0_source_valid_ = false;
     gpu_gp0_source_from_dma_ = false;
     gpu_gp0_source_addr_ = 0;
@@ -455,6 +486,7 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
         std::min<u32>(ram_write_history_count_ + 1u, static_cast<u32>(kRamWriteHistorySize));
 
     if (g_cpu_deep_diagnostics) {
+        debug_track_active_stack_write(entry);
         debug_track_stack_top_write(entry);
     }
 
@@ -562,6 +594,65 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
     mdec_upload_probe_.gpu_src_write_origin[index] = entry.origin;
     mdec_upload_probe_.gpu_src_write_sizes[index] = size;
     ++mdec_upload_probe_.gpu_src_write_sample_count;
+}
+
+void System::debug_track_active_stack_write(const RamAccessLogEntry& entry) {
+    const u32 sp = cpu_.reg(29) & 0x1FFFFFu;
+    const u32 window_start = (sp > 0x40u) ? (sp - 0x40u) : 0u;
+    const u32 window_end =
+        std::min<u32>(sp + 0x80u, psx::RAM_SIZE - 1u);
+    const u32 entry_end =
+        std::min<u32>(entry.addr + std::max<u32>(entry.size, 1u) - 1u,
+                      psx::RAM_SIZE - 1u);
+    if (entry_end < window_start || entry.addr > window_end) {
+        return;
+    }
+
+    if (active_stack_write_log_budget_ == 0u) {
+        if (!active_stack_write_log_suppressed_) {
+            active_stack_write_log_suppressed_ = true;
+            LOG_WARN("BUS: active-stack per-write logging suppressed after budget exhaustion; recent-write history remains available");
+        }
+        return;
+    }
+    --active_stack_write_log_budget_;
+
+    const bool hits_spill_band =
+        entry_end >= (sp + 0x10u) && entry.addr <= (sp + 0x2Cu);
+    const bool hits_saved_ra_14 =
+        entry_end >= (sp + 0x14u) && entry.addr <= (sp + 0x17u);
+    const bool hits_saved_ra_1c =
+        entry_end >= (sp + 0x1Cu) && entry.addr <= (sp + 0x1Fu);
+    const char* slot_tag = "stack-near";
+    if (hits_saved_ra_14) {
+        slot_tag = "saved-ra@sp+14";
+    } else if (hits_saved_ra_1c) {
+        slot_tag = "saved-ra@sp+1C";
+    } else if (hits_spill_band) {
+        slot_tag = "saved-reg-band";
+    }
+
+    if ((entry.origin & 0x80u) != 0u) {
+        LOG_WARN(
+            "BUS: active-stack %s W%u 0x%08X = 0x%08X <- DMA%u sp=0x%08X ra=0x%08X",
+            slot_tag, static_cast<unsigned>(entry.size), entry.addr, entry.value,
+            static_cast<unsigned>(entry.origin & 0x7Fu), cpu_.reg(29),
+            cpu_.reg(31));
+    } else {
+        LOG_WARN(
+            "BUS: active-stack %s W%u 0x%08X = 0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
+            slot_tag, static_cast<unsigned>(entry.size), entry.addr, entry.value,
+            entry.pc, cpu_.reg(29), cpu_.reg(31));
+    }
+
+    if (hits_saved_ra_14 || hits_saved_ra_1c) {
+        const u32 frame_base = sp;
+        LOG_WARN(
+            "BUS: active-stack frame [sp+10]=0x%08X [sp+14]=0x%08X [sp+18]=0x%08X [sp+1C]=0x%08X [sp+20]=0x%08X [sp+24]=0x%08X",
+            read32(frame_base + 0x10u), read32(frame_base + 0x14u),
+            read32(frame_base + 0x18u), read32(frame_base + 0x1Cu),
+            read32(frame_base + 0x20u), read32(frame_base + 0x24u));
+    }
 }
 
 void System::debug_track_stack_top_write(const RamAccessLogEntry& entry) {
@@ -735,6 +826,31 @@ void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
     mdec_upload_probe_.mdec_read_pcs.fill(0);
     mdec_upload_probe_.mdec_read_origin.fill(0);
     mdec_upload_probe_.mdec_read_sizes.fill(0);
+}
+
+void System::debug_note_mdec_dma_in_begin(u32 base_addr, u32 words) {
+    if (!g_mdec_debug_upload_probe) {
+        return;
+    }
+    mdec_upload_probe_.dma0_seen = true;
+    mdec_upload_probe_.dma0_base_addr = base_addr & 0x001FFFFCu;
+    mdec_upload_probe_.dma0_words = words;
+    mdec_upload_probe_.dma0_sample_count = 0;
+    mdec_upload_probe_.dma0_addrs.fill(0);
+    mdec_upload_probe_.dma0_words_sample.fill(0);
+}
+
+void System::debug_note_mdec_dma_in_word(u32 read_addr, u32 value) {
+    if (!g_mdec_debug_upload_probe || !mdec_upload_probe_.dma0_seen) {
+        return;
+    }
+    const u32 index = mdec_upload_probe_.dma0_sample_count;
+    if (index >= MdecUploadProbe::kSampleWords) {
+        return;
+    }
+    mdec_upload_probe_.dma0_addrs[index] = read_addr & 0x001FFFFCu;
+    mdec_upload_probe_.dma0_words_sample[index] = value;
+    ++mdec_upload_probe_.dma0_sample_count;
 }
 
 void System::debug_note_mdec_dma_out_word(u32 write_addr, u32 value,
@@ -1927,6 +2043,8 @@ u32 System::read32(u32 addr) {
 }
 
 void System::write8(u32 addr, u8 val) {
+    static BusWarnLimiter unhandled_w8_io;
+    static BusWarnLimiter unhandled_w8;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_w8_count = 0;
@@ -2033,7 +2151,25 @@ void System::write8(u32 addr, u8 val) {
         }
         if (phys >= 0x1F802000)
             return;
-        LOG_WARN("BUS: Unhandled write8 at I/O 0x%08X = 0x%02X", phys, val);
+        ++unhandled_w8_io.total;
+        if (phys == unhandled_w8_io.last_addr) {
+            ++unhandled_w8_io.suppressed;
+            if (unhandled_w8_io.suppressed <= 3u ||
+                (unhandled_w8_io.suppressed % 256u) == 0u) {
+                log_unhandled_bus_write("write8", phys, val, true,
+                                        unhandled_w8_io.suppressed,
+                                        unhandled_w8_io.total);
+            }
+            return;
+        }
+        if (unhandled_w8_io.suppressed > 3u) {
+            LOG_WARN("BUS: Previous unhandled write8 at I/O 0x%08X repeated %llu times",
+                     unhandled_w8_io.last_addr,
+                     static_cast<unsigned long long>(unhandled_w8_io.suppressed));
+        }
+        unhandled_w8_io.last_addr = phys;
+        unhandled_w8_io.suppressed = 0;
+        log_unhandled_bus_write("write8", phys, val, true, 0, unhandled_w8_io.total);
         return;
     }
 
@@ -2042,10 +2178,30 @@ void System::write8(u32 addr, u8 val) {
     if (phys >= 0xC0000000u)
         return;
 
-    LOG_WARN("BUS: Unhandled write8 at 0x%08X = 0x%02X", phys, val);
+    ++unhandled_w8.total;
+    if (phys == unhandled_w8.last_addr) {
+        ++unhandled_w8.suppressed;
+        if (unhandled_w8.suppressed <= 3u ||
+            (unhandled_w8.suppressed % 256u) == 0u) {
+            log_unhandled_bus_write("write8", phys, val, false,
+                                    unhandled_w8.suppressed,
+                                    unhandled_w8.total);
+        }
+        return;
+    }
+    if (unhandled_w8.suppressed > 3u) {
+        LOG_WARN("BUS: Previous unhandled write8 at 0x%08X repeated %llu times",
+                 unhandled_w8.last_addr,
+                 static_cast<unsigned long long>(unhandled_w8.suppressed));
+    }
+    unhandled_w8.last_addr = phys;
+    unhandled_w8.suppressed = 0;
+    log_unhandled_bus_write("write8", phys, val, false, 0, unhandled_w8.total);
 }
 
 void System::write16(u32 addr, u16 val) {
+    static BusWarnLimiter unhandled_w16_io;
+    static BusWarnLimiter unhandled_w16;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_w16_count = 0;
@@ -2172,16 +2328,55 @@ void System::write16(u32 addr, u16 val) {
             return;
         }
 
-        LOG_WARN("BUS: Unhandled write16 at I/O 0x%08X = 0x%04X", phys, val);
+        ++unhandled_w16_io.total;
+        if (phys == unhandled_w16_io.last_addr) {
+            ++unhandled_w16_io.suppressed;
+            if (unhandled_w16_io.suppressed <= 3u ||
+                (unhandled_w16_io.suppressed % 256u) == 0u) {
+                log_unhandled_bus_write("write16", phys, val, true,
+                                        unhandled_w16_io.suppressed,
+                                        unhandled_w16_io.total);
+            }
+            return;
+        }
+        if (unhandled_w16_io.suppressed > 3u) {
+            LOG_WARN("BUS: Previous unhandled write16 at I/O 0x%08X repeated %llu times",
+                     unhandled_w16_io.last_addr,
+                     static_cast<unsigned long long>(unhandled_w16_io.suppressed));
+        }
+        unhandled_w16_io.last_addr = phys;
+        unhandled_w16_io.suppressed = 0;
+        log_unhandled_bus_write("write16", phys, val, true, 0,
+                                unhandled_w16_io.total);
         return;
     }
 
     if (phys >= 0xC0000000u)
         return;
-    LOG_WARN("BUS: Unhandled write16 at 0x%08X = 0x%04X", phys, val);
+    ++unhandled_w16.total;
+    if (phys == unhandled_w16.last_addr) {
+        ++unhandled_w16.suppressed;
+        if (unhandled_w16.suppressed <= 3u ||
+            (unhandled_w16.suppressed % 256u) == 0u) {
+            log_unhandled_bus_write("write16", phys, val, false,
+                                    unhandled_w16.suppressed,
+                                    unhandled_w16.total);
+        }
+        return;
+    }
+    if (unhandled_w16.suppressed > 3u) {
+        LOG_WARN("BUS: Previous unhandled write16 at 0x%08X repeated %llu times",
+                 unhandled_w16.last_addr,
+                 static_cast<unsigned long long>(unhandled_w16.suppressed));
+    }
+    unhandled_w16.last_addr = phys;
+    unhandled_w16.suppressed = 0;
+    log_unhandled_bus_write("write16", phys, val, false, 0, unhandled_w16.total);
 }
 
 void System::write32(u32 addr, u32 val) {
+    static BusWarnLimiter unhandled_w32_io;
+    static BusWarnLimiter unhandled_w32;
     u32 phys = psx::mask_address(addr);
     if (g_trace_bus && phys >= 0x1F801000 && phys < 0x1F803000) {
         static u64 bus_w32_count = 0;
@@ -2290,7 +2485,26 @@ void System::write32(u32 addr, u32 val) {
             return;
         }
 
-        LOG_WARN("BUS: Unhandled write32 at I/O 0x%08X = 0x%08X", phys, val);
+        ++unhandled_w32_io.total;
+        if (phys == unhandled_w32_io.last_addr) {
+            ++unhandled_w32_io.suppressed;
+            if (unhandled_w32_io.suppressed <= 3u ||
+                (unhandled_w32_io.suppressed % 256u) == 0u) {
+                log_unhandled_bus_write("write32", phys, val, true,
+                                        unhandled_w32_io.suppressed,
+                                        unhandled_w32_io.total);
+            }
+            return;
+        }
+        if (unhandled_w32_io.suppressed > 3u) {
+            LOG_WARN("BUS: Previous unhandled write32 at I/O 0x%08X repeated %llu times",
+                     unhandled_w32_io.last_addr,
+                     static_cast<unsigned long long>(unhandled_w32_io.suppressed));
+        }
+        unhandled_w32_io.last_addr = phys;
+        unhandled_w32_io.suppressed = 0;
+        log_unhandled_bus_write("write32", phys, val, true, 0,
+                                unhandled_w32_io.total);
         return;
     }
 
@@ -2306,5 +2520,23 @@ void System::write32(u32 addr, u32 val) {
     if (phys >= 0xC0000000u)
         return;
 
-    LOG_WARN("BUS: Unhandled write32 at 0x%08X = 0x%08X", phys, val);
+    ++unhandled_w32.total;
+    if (phys == unhandled_w32.last_addr) {
+        ++unhandled_w32.suppressed;
+        if (unhandled_w32.suppressed <= 3u ||
+            (unhandled_w32.suppressed % 256u) == 0u) {
+            log_unhandled_bus_write("write32", phys, val, false,
+                                    unhandled_w32.suppressed,
+                                    unhandled_w32.total);
+        }
+        return;
+    }
+    if (unhandled_w32.suppressed > 3u) {
+        LOG_WARN("BUS: Previous unhandled write32 at 0x%08X repeated %llu times",
+                 unhandled_w32.last_addr,
+                 static_cast<unsigned long long>(unhandled_w32.suppressed));
+    }
+    unhandled_w32.last_addr = phys;
+    unhandled_w32.suppressed = 0;
+    log_unhandled_bus_write("write32", phys, val, false, 0, unhandled_w32.total);
 }

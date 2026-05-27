@@ -187,6 +187,8 @@ void log_suspicious_ra_load(System *sys, u32 pc, const u32 *gpr, u32 addr,
       "CPU: suspicious ra load pc=0x%08X addr=0x%08X val=0x%08X sp=0x%08X ra=0x%08X",
       pc, addr, value, gpr[29], gpr[31]);
   sys->debug_log_recent_ram_writes(addr, 0x20u);
+  sys->debug_log_recent_ram_writes(gpr[29] + 0x18u, 0x20u);
+  log_stack_window(sys, "CPU: suspicious ra-load frame", gpr[29]);
 }
 
 void log_suspicious_sp_write(System *sys, u32 pc, u32 old_sp, u32 new_sp,
@@ -261,8 +263,23 @@ void log_suspicious_ra_write(System *sys, u32 pc, u32 old_ra, u32 new_ra,
   LOG_WARN(
       "CPU: suspicious ra write pc=0x%08X old_ra=0x%08X new_ra=0x%08X sp=0x%08X",
       pc, old_ra, new_ra, sp);
-  if (new_ra == 0u) {
-    sys->debug_log_recent_ram_writes(sp, 0x40u);
+  sys->debug_log_recent_ram_writes(sp, 0x40u);
+  sys->debug_log_recent_ram_writes(sp + 0x18u, 0x20u);
+  log_stack_window(sys, "CPU: suspicious ra-write frame", sp);
+
+  const u32 prev_pc = (pc - 4u) & 0x1FFFFFFFu;
+  const u32 prev_instr = sys->read32(prev_pc);
+  const u32 prev_op = (prev_instr >> 26) & 0x3Fu;
+  const u32 prev_rs = (prev_instr >> 21) & 0x1Fu;
+  const u32 prev_rt = (prev_instr >> 16) & 0x1Fu;
+  const s32 prev_imm = sign_extend_16(static_cast<u16>(prev_instr & 0xFFFFu));
+  if (prev_op == 0x23u && prev_rs == 29u && prev_rt == 31u) {
+    const u32 load_addr = sp + static_cast<u32>(prev_imm);
+    LOG_WARN(
+        "CPU: suspicious ra source prev_pc=0x%08X instr=0x%08X addr=0x%08X [0]=0x%08X [-4]=0x%08X [+4]=0x%08X",
+        prev_pc, prev_instr, load_addr, sys->read32(load_addr),
+        sys->read32(load_addr - 4u), sys->read32(load_addr + 4u));
+    sys->debug_log_recent_ram_writes(load_addr, 0x20u);
   }
 
   if (((old_ra & 0x1FFFFFFFu) == 0x000152ACu) ||

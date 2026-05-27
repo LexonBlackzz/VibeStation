@@ -3,4 +3,5 @@ build/
 build-vs/
 discord_social_sdk/
 *.pdb
-
+.cache/
+build-ninja/

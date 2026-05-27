@@ -3229,7 +3229,10 @@ void App::panel_settings() {
                     ImGui::Separator();
                     const auto &uprobes = system_->mdec_upload_probe();
                     ImGui::Text("MDEC Upload Probe");
-                    ImGui::Text("DMA1: seen=%s base=0x%08X words=%u depth=%u block=%u",
+                    ImGui::Text("DMA0 In: seen=%s base=0x%08X words=%u",
+                        uprobes.dma0_seen ? "yes" : "no",
+                        uprobes.dma0_base_addr, uprobes.dma0_words);
+                    ImGui::Text("DMA1 Out: seen=%s base=0x%08X words=%u depth=%u block=%u",
                         uprobes.dma1_seen ? "yes" : "no",
                         uprobes.dma1_base_addr, uprobes.dma1_words,
                         static_cast<unsigned>(uprobes.dma1_depth),
@@ -3273,6 +3276,10 @@ void App::panel_settings() {
                                 static_cast<unsigned>(uprobes.gpu_last_frame_hist_w[i]),
                                 static_cast<unsigned>(uprobes.gpu_last_frame_hist_h[i]),
                                 uprobes.gpu_last_frame_hist_from_dma[i] ? "DMA2" : "CPU");
+                        }
+                        for (u32 i = 0; i < uprobes.dma0_sample_count; ++i) {
+                            ImGui::Text("  DMA0[%u] 0x%08X = 0x%08X",
+                                i, uprobes.dma0_addrs[i], uprobes.dma0_words_sample[i]);
                         }
                         for (u32 i = 0; i < uprobes.dma1_sample_count; ++i) {
                             ImGui::Text("  DMA1[%u] 0x%08X = 0x%08X",

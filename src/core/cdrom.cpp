@@ -979,7 +979,64 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     return false;
   }
   stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
-  return stream->gcount() == sector_size;
+  if (stream->gcount() != sector_size) {
+    return false;
+  }
+
+  // Synthesize raw sector structure if sector_size is cooked (< 2352)
+  if (sector_size < 2352) {
+    std::vector<u8> synthesized(2352, 0);
+    // Sync bytes
+    synthesized[0] = 0x00u;
+    for (int i = 1; i < 11; ++i) {
+      synthesized[i] = 0xFFu;
+    }
+    synthesized[11] = 0x00u;
+
+    // Header (MSF + Mode)
+    const int abs_lba = psx_lba + 150;
+    const u8 m = static_cast<u8>(abs_lba / (60 * 75));
+    const u8 s = static_cast<u8>((abs_lba / 75) % 60);
+    const u8 f = static_cast<u8>(abs_lba % 75);
+    synthesized[12] = to_bcd8(m % 100);
+    synthesized[13] = to_bcd8(s);
+    synthesized[14] = to_bcd8(f);
+    synthesized[15] = (track->type == "MODE1/2048") ? 0x01u : 0x02u;
+
+    // Mode 2 Subheader
+    if (synthesized[15] == 0x02u) {
+      u8 file = filter_file_;
+      u8 channel = filter_channel_;
+      u8 submode = 0x08u; // Default to Data
+      if (sector_size == 2048) {
+        if (looks_like_str_header_at(raw_sector, 0)) {
+          submode = 0x02u; // Video
+        }
+      } else if (sector_size == 2336) {
+        file = raw_sector[0];
+        channel = raw_sector[1];
+        submode = raw_sector[2];
+      }
+      synthesized[16] = file;
+      synthesized[17] = channel;
+      synthesized[18] = submode;
+      synthesized[19] = 0x00u;
+      synthesized[20] = file;
+      synthesized[21] = channel;
+      synthesized[22] = submode;
+      synthesized[23] = 0x00u;
+    }
+
+    // Copy user data
+    if (sector_size == 2048) {
+      std::copy(raw_sector.begin(), raw_sector.end(), synthesized.begin() + 24);
+    } else if (sector_size == 2336) {
+      std::copy(raw_sector.begin(), raw_sector.end(), synthesized.begin() + 16);
+    }
+    raw_sector = std::move(synthesized);
+  }
+
+  return true;
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }
@@ -1246,7 +1303,7 @@ bool CdRom::read_sector() {
   if (delivered_to_adpcm) {
     deliver_data = false;
   }
-  if (filter_on && is_audio_sector && !filter_match) {
+  if (filter_on && has_subheader && !filter_match) {
     deliver_data = false;
   }
   if (!deliver_data) {
@@ -1635,10 +1692,6 @@ void CdRom::cmd_stop() {
 // receive INT5 instead of INT3 whenever Standby was called while the drive
 // was already spinning (the normal case), hanging the loader.
 void CdRom::cmd_standby() {
-  if (!motor_on_) {
-    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
-    return;
-  }
   motor_on_ = true;
   cdda_playing_ = false;
   state_ = State::Idle;
