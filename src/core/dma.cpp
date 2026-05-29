@@ -125,9 +125,11 @@ u32 DmaController::read(u32 offset) const {
       return ch.block_ctrl;
     case 0x8:
       return ch.channel_ctrl;
+    case 0xC:
+    return ch.channel_ctrl;
     default:
       LOG_WARN("DMA: Unhandled channel %d reg 0x%X read", channel, reg);
-      return 0;
+      return 0xFFFFFFFFu;
     }
   }
 
@@ -136,9 +138,12 @@ u32 DmaController::read(u32 offset) const {
     return dpcr_;
   case 0x74:
     return dicr_;
+  case 0x78:
+  case 0x7C:
+    return 0xFFFFFFFFu;
   default:
     LOG_WARN("DMA: Unhandled read at offset 0x%X", offset);
-    return 0;
+    return 0xFFFFFFFFu;
   }
 }
 
@@ -155,7 +160,7 @@ void DmaController::write(u32 offset, u32 value) {
     auto &ch = channels_[channel];
     switch (reg) {
     case 0x0:
-      ch.base_addr = value & 0x00FFFFFF; // 24-bit address
+      ch.base_addr = value & 0x00FFFFFF;
       break;
     case 0x4:
       ch.block_ctrl = value;
@@ -174,6 +179,15 @@ void DmaController::write(u32 offset, u32 value) {
                     ch.trigger() ? 1 : 0, static_cast<int>(ch.sync_mode()),
                     channel_enabled(channel) ? 1 : 0);
         }
+      }
+      if (channel == 3) {
+        LOG_WARN("DMA: CH3 CHCR write=0x%08X active=%d enabled=%d dma_req=%d words=%u ready=%d bfrd=%d",
+              value, ch.is_active() ? 1 : 0,
+              channel_enabled(3) ? 1 : 0,
+              sys_->cdrom_dma_request() ? 1 : 0,
+              sys_->cdrom_dma_words_available(),
+              sys_->cdrom_data_ready() ? 1 : 0,
+              sys_->cdrom_data_request_flag() ? 1 : 0);
       }
       if (ch.is_active() && channel_enabled(channel) && request_active(channel)) {
         execute_dma(channel);
@@ -199,11 +213,10 @@ void DmaController::write(u32 offset, u32 value) {
     }
     break;
   case 0x74: {
-    // DICR: bits 24-30 are W1C flags, bit31 is derived master-IRQ flag.
     const u32 old_flags = (dicr_ >> 24) & 0x7Fu;
     const u32 ack_flags = (value >> 24) & 0x7Fu;
     const u32 new_flags = old_flags & ~ack_flags;
-    const u32 writable_control = value & 0x00FF803Fu; // 0-5,15,16-23
+    const u32 writable_control = value & 0x00FF803Fu;
     const u32 old_master = dicr_ & 0x80000000u;
     dicr_ = old_master | writable_control | (new_flags << 24);
     recompute_dicr_master(true);
@@ -248,7 +261,14 @@ void DmaController::execute_dma(int channel) {
 
 void DmaController::dma_block(int channel) {
   auto &ch = channels_[channel];
-
+  if (channel == 3) {
+        LOG_WARN("DMA: CH3 block fired madr=0x%08X bcr=0x%08X chcr=0x%08X "
+                 "data_ready=%d data_request=%d words_avail=%u",
+                 ch.base_addr, ch.block_ctrl, ch.channel_ctrl,
+                 sys_->cdrom_data_ready() ? 1 : 0,
+                 sys_->cdrom_data_request_flag() ? 1 : 0,
+                 sys_->cdrom_dma_words_available());
+    }
   u32 addr = ch.base_addr;
   u32 word_count = 0;
 
@@ -323,9 +343,6 @@ void DmaController::dma_block(int channel) {
         }
       }
     }
-    if (transfer_words == 0) {
-      return;
-    }
   }
 
   if (!from_ram && channel == 1 && g_mdec_debug_upload_probe) {
@@ -347,8 +364,8 @@ void DmaController::dma_block(int channel) {
       } else {
         val = (current - 4) & 0x001FFFFC;
       }
-      sys_->write32(current, val);
-      current -= 4;
+      sys_->write32(current & 0x001FFFFC, val);
+      current = (current - 4) & 0x00FFFFFF;
     }
     if (ch.sync_mode() == DmaChannel::SyncMode::Block) {
       ch.base_addr = current & 0x00FFFFFF;
@@ -426,7 +443,7 @@ void DmaController::dma_block(int channel) {
       sys_->debug_end_dma_bus_access();
     }
 
-    addr = static_cast<u32>(static_cast<s32>(addr) + step);
+    addr = (static_cast<u32>(static_cast<s32>(addr) + step)) & 0x00FFFFFF;
   }
 
   ch.base_addr = addr & 0x00FFFFFF;
@@ -470,12 +487,14 @@ void DmaController::dma_linked_list(int channel) {
       sys_->gpu_gp0_dma(command, addr);
     }
 
-    // Follow link to next node
-    if (header & 0x00800000) {
-      break; // End-of-list marker
+    // GPU linked-list DMA terminates on a 24-bit 0xFFFFFF pointer, not just
+    // any header with bit 23 set.
+    const u32 next_addr = header & 0x00FFFFFFu;
+    if ((next_addr & 0x00FFFFFFu) == 0x00FFFFFFu) {
+      break;
     }
 
-    addr = header & 0x001FFFFC;
+    addr = next_addr & 0x001FFFFC;
     safety++;
   }
 
@@ -503,19 +522,40 @@ void DmaController::transfer_complete(int channel) {
 
 void DmaController::tick() {
   const bool profile_detailed = g_profile_detailed_timing;
-  // Check if any channels need to start
+  
+  // Find the highest priority channel that is ready to transfer.
+  // Priority values are 0-7, where 0 is highest priority.
+  int best_channel = -1;
+  int best_priority = 8;
+  
   for (int i = 0; i < 7; i++) {
     if (channels_[i].is_active() && channel_enabled(i) && request_active(i)) {
-      std::chrono::high_resolution_clock::time_point start{};
-      if (profile_detailed) {
-        start = std::chrono::high_resolution_clock::now();
+      int priority = channel_priority(i);
+      if (priority < best_priority) {
+        best_priority = priority;
+        best_channel = i;
       }
-      execute_dma(i);
-      if (profile_detailed && sys_) {
-        const auto end = std::chrono::high_resolution_clock::now();
-        sys_->add_dma_time(
-            std::chrono::duration<double, std::milli>(end - start).count());
-      }
+    }
+  }
+
+  if (best_channel != -1) {
+        if (best_channel == 3) {
+            LOG_WARN("DMA: CH3 tick-execute madr=0x%08X bcr=0x%08X chcr=0x%08X "
+                     "request=%d words=%u",
+                     channels_[3].base_addr, channels_[3].block_ctrl,
+                     channels_[3].channel_ctrl,
+                     sys_->cdrom_dma_request() ? 1 : 0,
+                     sys_->cdrom_dma_words_available());
+        }
+    std::chrono::high_resolution_clock::time_point start{};
+    if (profile_detailed) {
+      start = std::chrono::high_resolution_clock::now();
+    }
+    execute_dma(best_channel);
+    if (profile_detailed && sys_) {
+      const auto end = std::chrono::high_resolution_clock::now();
+      sys_->add_dma_time(
+          std::chrono::duration<double, std::milli>(end - start).count());
     }
   }
 }

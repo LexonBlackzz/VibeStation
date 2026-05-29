@@ -32,6 +32,8 @@ public:
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path);
+  bool sector_data_ready() const { return data_ready_; }
+  bool sector_data_request() const { return data_request_; }
   void notify_disc_inserted();
   bool is_disc_inserted() const { return disc_loaded_; }
   bool track_map_valid() const { return track_map_valid_; }
@@ -79,13 +81,14 @@ public:
   u32 dma_read();
   bool dma_request() const { return data_ready_ && data_request_; }
   u32 dma_words_available() const {
-    if (!data_ready_ || data_index_ >= static_cast<int>(data_buffer_.size())) {
-      return 0;
+    if (!data_ready_ || !data_request_ ||
+        data_index_ >= static_cast<int>(data_buffer_.size())) {
+        return 0;
     }
     const size_t remaining_bytes =
         data_buffer_.size() - static_cast<size_t>(data_index_);
     return static_cast<u32>(remaining_bytes / 4u);
-  }
+}
 
 private:
   System *sys_ = nullptr;

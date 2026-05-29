@@ -72,6 +72,9 @@ private:
   u32 cop0_regs_[32] = {}; // All 32 COP0 regs (some unused)
 
   u64 cycles_ = 0;
+  u64 gte_input_ready_cycle_ = 0;
+  u64 gte_result_ready_cycle_ = 0;
+  u32 cycle_penalty_ = 0;
 
   // ── Helpers ────────────────────────────────────────────────────
   void set_reg(u32 index, u32 value);
@@ -81,7 +84,13 @@ private:
   u32 read_cop0_reg(u32 index) const;
   void write_cop0_reg(u32 index, u32 value);
   void raise_cop_unusable(u32 cop_index);
+  void add_cycle_penalty(u32 cycles);
+  static bool gte_data_reg_reads_result(u32 reg);
+  static bool gte_ctrl_reg_reads_result(u32 reg);
+  u32 gte_input_stall_cycles() const;
+  u32 gte_result_stall_cycles() const;
   u32 instruction_cycles(u32 instruction) const;
+  static u32 gte_command_cycles(u32 instruction);
 
   // Memory access (through system bus)
   u32 fetch32(u32 addr);

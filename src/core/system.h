@@ -120,6 +120,9 @@ public:
     double timers_ms = 0.0;
     double cdrom_ms = 0.0;
     double total_ms = 0.0;
+    u32 gpu_gp0_words = 0;
+    u32 gpu_gp0_commands = 0;
+    u32 gpu_draw_commands = 0;
   };
 
   struct MdecUploadProbe {
@@ -258,6 +261,9 @@ public:
   void reset_profiling_stats() { profiling_stats_ = {}; }
   void add_cpu_time(double ms) { profiling_stats_.cpu_ms += ms; }
   void add_gpu_time(double ms) { profiling_stats_.gpu_ms += ms; }
+  void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
+  void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
+  void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
   void add_cdrom_time(double ms) { profiling_stats_.cdrom_ms += ms; }
   void add_spu_time(double ms) { profiling_stats_.spu_ms += ms; }
   void add_dma_time(double ms) { profiling_stats_.dma_ms += ms; }
@@ -452,7 +458,8 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         ram_.data()[off] = val;
-        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
+            g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 1);
         }
         return;
@@ -480,7 +487,8 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         std::memcpy(ram_.data() + off, &val, sizeof(val));
-        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
+            g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 2);
         }
         return;
@@ -508,7 +516,8 @@ public:
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
         std::memcpy(ram_.data() + off, &val, sizeof(val));
-        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics) {
+        if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
+            g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 4);
         }
         return;
@@ -545,6 +554,8 @@ public:
   bool gpu_dma_request() const { return gpu_.dma_request(); }
   u32 cdrom_dma_read() { return cdrom_.dma_read(); }
   bool cdrom_dma_request() const { return cdrom_.dma_request(); }
+  bool cdrom_data_ready() const { return cdrom_.sector_data_ready(); }
+  bool cdrom_data_request_flag() const { return cdrom_.sector_data_request(); }
   u32 cdrom_dma_words_available() const { return cdrom_.dma_words_available(); }
   void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
   u32 mdec_dma_read() { return mdec_.dma_read(); }
@@ -589,7 +600,8 @@ public:
   const DmaController::TransferDebug &dma_last_debug(int channel) const {
     return dma_.last_debug(channel);
   }
-  void debug_log_recent_ram_writes(u32 addr, u32 radius_bytes) const;
+  void debug_log_recent_ram_writes(u32 addr, u32 radius_bytes,
+                                   const char *log_prefix = "BUS") const;
 
   // Public component access
   Gpu &gpu() { return gpu_; }

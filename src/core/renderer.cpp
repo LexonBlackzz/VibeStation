@@ -28,11 +28,27 @@ void Renderer::shutdown() {
   }
 }
 
+void Renderer::set_bilinear_filtering(bool enabled) {
+  bilinear_filtering_ = enabled;
+  apply_texture_filtering();
+}
+
+void Renderer::apply_texture_filtering() {
+  if (!texture_id_) {
+    return;
+  }
+
+  glBindTexture(GL_TEXTURE_2D, texture_id_);
+  const GLint filter = bilinear_filtering_ ? GL_LINEAR : GL_NEAREST;
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+}
+
 bool Renderer::create_texture() {
   glGenTextures(1, &texture_id_);
   glBindTexture(GL_TEXTURE_2D, texture_id_);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  bilinear_filtering_ = g_bilinear_filtering;
+  apply_texture_filtering();
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   texture_width_ = 320;

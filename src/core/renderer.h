@@ -12,6 +12,7 @@ class Renderer {
 public:
   bool init(SDL_Window *window);
   void shutdown();
+  void set_bilinear_filtering(bool enabled);
 
   // Upload an RGBA frame into the presentation texture.
   void upload_frame(const std::vector<u32> &rgba, int width, int height);
@@ -28,7 +29,9 @@ private:
   int last_frame_height_ = 240;
   int texture_width_ = 0;
   int texture_height_ = 0;
+  bool bilinear_filtering_ = false;
   std::vector<u32> frame_rgba_;
 
+  void apply_texture_filtering();
   bool create_texture();
 };

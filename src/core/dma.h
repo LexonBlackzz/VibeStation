@@ -91,4 +91,5 @@ private:
   bool request_active(int channel) const;
 
   bool channel_enabled(int ch) const { return (dpcr_ >> (ch * 4 + 3)) & 1; }
+  u8 channel_priority(int ch) const { return (dpcr_ >> (ch * 4)) & 0x7; }
 };

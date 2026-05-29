@@ -7,6 +7,8 @@
 
 namespace {
     constexpr u32 kMainRamMirrorWindow = 0x00800000u;
+    constexpr u32 kExpansion1Base = 0x1F000000u;
+    constexpr u32 kUnmappedHighPhysicalBase = 0x20000000u;
     constexpr u32 kRamWatchStart = 0x000479D0u;
     constexpr u32 kRamWatchEnd = 0x00047A10u;
     constexpr u32 kRamWatchWord0 = 0x000479D0u;
@@ -20,6 +22,13 @@ namespace {
         u64 total = 0;
     };
 
+    bool is_unmapped_physical(u32 phys) {
+        if (phys >= kUnmappedHighPhysicalBase) return true;
+        if (phys >= kMainRamMirrorWindow && phys < kExpansion1Base) return true;
+        if (phys >= 0x1F803000u && phys < 0x1FC00000u) return true;
+        if (phys >= 0x1FC80000u && phys < kUnmappedHighPhysicalBase) return true;
+        return false;
+    }
 void log_unhandled_bus_read(BusWarnLimiter& limiter, const char* width,
         u32 phys, bool io_space) {
         ++limiter.total;
@@ -470,7 +479,8 @@ void System::debug_note_main_ram_read(u32 addr, u32 value, u8 size) {
 }
 
 void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
-    if (!g_mdec_debug_upload_probe && !g_cpu_deep_diagnostics) {
+    if (!g_mdec_debug_upload_probe && !g_cpu_deep_diagnostics &&
+        !g_log_fmv_diagnostics) {
         return;
     }
     RamAccessLogEntry &entry =
@@ -719,16 +729,19 @@ void System::debug_log_stack_top_burst_context(const RamAccessLogEntry& entry) {
         (pc + 12u) & 0x1FFFFFFFu, read32_instruction(pc + 12u));
 }
 
-void System::debug_log_recent_ram_writes(u32 addr, u32 radius_bytes) const {
+void System::debug_log_recent_ram_writes(u32 addr, u32 radius_bytes,
+                                         const char *log_prefix) const {
+    const char *prefix = (log_prefix && log_prefix[0] != '\0') ? log_prefix : "BUS";
     if (ram_write_history_count_ == 0) {
-        LOG_WARN("BUS: no RAM write history available");
+        LOG_WARN("%s: no RAM write history available", prefix);
         return;
     }
 
     const u32 center = psx::mask_address(addr) & 0x001FFFFFu;
     const u32 start = (center > radius_bytes) ? (center - radius_bytes) : 0u;
     const u32 end = std::min<u32>(center + radius_bytes, psx::RAM_SIZE - 1u);
-    LOG_WARN("BUS: recent RAM writes near 0x%08X (window=0x%08X..0x%08X)",
+    LOG_WARN("%s: recent RAM writes near 0x%08X (window=0x%08X..0x%08X)",
+             prefix,
              center, start, end);
 
     bool found = false;
@@ -751,20 +764,23 @@ void System::debug_log_recent_ram_writes(u32 addr, u32 radius_bytes) const {
         }
         ++printed;
         if ((entry.origin & 0x80u) != 0u) {
-            LOG_WARN("BUS: W%u 0x%08X = 0x%08X <- DMA%u",
+            LOG_WARN("%s: W%u 0x%08X = 0x%08X <- DMA%u",
+                     prefix,
                      static_cast<unsigned>(entry.size), entry.addr, entry.value,
                      static_cast<unsigned>(entry.origin & 0x7Fu));
         } else {
-            LOG_WARN("BUS: W%u 0x%08X = 0x%08X pc=0x%08X",
+            LOG_WARN("%s: W%u 0x%08X = 0x%08X pc=0x%08X",
+                     prefix,
                      static_cast<unsigned>(entry.size), entry.addr, entry.value,
                      entry.pc);
         }
     }
 
     if (!found) {
-        LOG_WARN("BUS: no RAM writes captured in requested window");
+        LOG_WARN("%s: no RAM writes captured in requested window", prefix);
     } else if (suppressed != 0u) {
-        LOG_WARN("BUS: suppressed %u additional RAM write entries in requested window",
+        LOG_WARN("%s: suppressed %u additional RAM write entries in requested window",
+                 prefix,
                  suppressed);
     }
 }
@@ -1138,7 +1154,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             dma_tick_budget += spent_in_slice;
-            while (dma_tick_budget >= dma_tick_stride) {
+            if (dma_tick_budget >= dma_tick_stride) {
                 dma_.tick();
                 dma_tick_budget -= dma_tick_stride;
             }
@@ -1802,10 +1818,18 @@ u8 System::read8(u32 addr) {
         if (io >= 0x130 && io < 0x140) {
             return 0xFF;
         }
-        // SIO (controller)
+        // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             return sio_.read8(io - 0x040);
+        }
+        // SIO (serial port) - not used by most games, return open bus
+        if (io >= 0x050 && io < 0x060) {
+            return 0xFF;
+        }
+        // RAM Size (low byte)
+        if (io == 0x060) {
+            return ram_size_ & 0xFF;
         }
         // DMA registers (byte access)
         if (io >= 0x080 && io < 0x100) {
@@ -1838,8 +1862,8 @@ u8 System::read8(u32 addr) {
     // Expansion 1
     if (phys >= 0x1F000000 && phys < 0x1F800000)
         return 0xFF;
-    // KSEG2/unused high virtual space: model as open bus.
-    if (phys >= 0xC0000000u)
+    // Unmapped physical space behaves like open bus.
+    if (is_unmapped_physical(phys))
         return 0xFF;
 
     log_unhandled_bus_read(unhandled_r8, "read8", phys, false);
@@ -1890,20 +1914,15 @@ u16 System::read16(u32 addr) {
         // Timers
         if (io >= 0x100 && io < 0x130)
             return static_cast<u16>(timers_.read(io - 0x100));
-        // SIO
+        // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             return sio_.read16(io - 0x040);
         }
-        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
-            static u32 io105x_read16_count = 0;
-            if (io105x_read16_count < 8u) {
-                ++io105x_read16_count;
-                LOG_WARN(
-                    "BUS: io105x read16 phys=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
-                    phys, cpu_.pc(), cpu_.reg(29), cpu_.reg(31), cpu_.reg(4),
-                    cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
-            }
+        // SIO registers (0x1F801050-0x1F80105F) - not used by most games, return open bus
+        if (io >= 0x050 && io < 0x060) {
+            // Note: serial port not implemented - return open bus value
+            return 0xFFFF;
         }
         // CDROM
         if (io >= 0x800 && io < 0x804) {
@@ -1930,8 +1949,7 @@ u16 System::read16(u32 addr) {
         log_unhandled_bus_read(unhandled_r16_io, "read16", phys, true);
         return 0xFFFF;
     }
-
-    if (phys >= 0xC0000000u)
+    if (is_unmapped_physical(phys))
         return 0xFFFF;
     log_unhandled_bus_read(unhandled_r16, "read16", phys, false);
     return 0xFFFF;
@@ -1987,7 +2005,7 @@ u32 System::read32(u32 addr) {
         // Timers
         if (io >= 0x100 && io < 0x130)
             return timers_.read(io - 0x100);
-        // SIO
+        // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             return sio_.read32(io - 0x040);
@@ -2023,8 +2041,7 @@ u32 System::read32(u32 addr) {
             u16 hi = spu_.read16(io - 0xC00 + 2);
             return lo | (static_cast<u32>(hi) << 16);
         }
-
-        log_unhandled_bus_read(unhandled_r32_io, "read32", phys, true);
+        // Silently ignore other I/O offsets to prevent performance collapse from log floods
         return 0xFFFFFFFFu;
     }
 
@@ -2035,7 +2052,7 @@ u32 System::read32(u32 addr) {
     // KSEG2 (cache control)
     if (addr == 0xFFFE0130)
         return cache_ctrl_;
-    if (phys >= 0xC0000000u)
+    if (is_unmapped_physical(phys))
         return 0xFFFFFFFFu;
 
     log_unhandled_bus_read(unhandled_r32, "read32", phys, false);
@@ -2073,6 +2090,7 @@ void System::write8(u32 addr, u8 val) {
         if (io >= 0x130 && io < 0x140) {
             return;
         }
+        // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sio_.write8(io - 0x040, val);
@@ -2154,6 +2172,7 @@ void System::write8(u32 addr, u8 val) {
         ++unhandled_w8_io.total;
         if (phys == unhandled_w8_io.last_addr) {
             ++unhandled_w8_io.suppressed;
+            // Silently ignore other I/O offsets to prevent performance collapse from log floods
             if (unhandled_w8_io.suppressed <= 3u ||
                 (unhandled_w8_io.suppressed % 256u) == 0u) {
                 log_unhandled_bus_write("write8", phys, val, true,
@@ -2173,9 +2192,14 @@ void System::write8(u32 addr, u8 val) {
         return;
     }
 
+    // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
+    if (phys >= 0x1F803000 && phys < 0x1FC00000)
+        return;
+
+
     if (phys >= 0x1F000000 && phys < 0x1F800000)
         return; // Expansion 1
-    if (phys >= 0xC0000000u)
+    if (is_unmapped_physical(phys))
         return;
 
     ++unhandled_w8.total;
@@ -2248,20 +2272,16 @@ void System::write16(u32 addr, u16 val) {
             timers_.write(io - 0x100, val);
             return;
         }
+        // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sio_.write16(io - 0x040, val);
             return;
         }
-        if (g_cpu_deep_diagnostics && io >= 0x058 && io < 0x060) {
-            static u32 io105x_write16_count = 0;
-            if (io105x_write16_count < 8u) {
-                ++io105x_write16_count;
-                LOG_WARN(
-                    "BUS: io105x write16 phys=0x%08X val=0x%04X pc=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
-                    phys, val, cpu_.pc(), cpu_.reg(29), cpu_.reg(31),
-                    cpu_.reg(4), cpu_.reg(5), cpu_.reg(6), cpu_.reg(7));
-            }
+        // SIO registers (0x1F801050-0x1F80105F) - not used by most games, ignore writes
+        if (io >= 0x050 && io < 0x060) {
+            // Serial port not implemented - ignore write
+            return;
         }
         if (io >= 0x800 && io < 0x804) {
             note_cdrom_io(phys);
@@ -2351,7 +2371,11 @@ void System::write16(u32 addr, u16 val) {
         return;
     }
 
-    if (phys >= 0xC0000000u)
+
+    // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
+    if (phys >= 0x1F803000 && phys < 0x1FC00000)
+        return;
+    if (is_unmapped_physical(phys))
         return;
     ++unhandled_w16.total;
     if (phys == unhandled_w16.last_addr) {
@@ -2433,10 +2457,16 @@ void System::write32(u32 addr, u32 val) {
             timers_.write(io - 0x100, val);
             return;
         }
-        // SIO
+        // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sio_.write32(io - 0x040, val);
+            return;
+        }
+        // SIO registers (0x1F801050-0x1F80105F)
+        if (io >= 0x050 && io < 0x060) {
+            note_sio_io(phys);
+            sio_.write32(io - 0x050, val);
             return;
         }
         // GPU
@@ -2508,8 +2538,8 @@ void System::write32(u32 addr, u32 val) {
         return;
     }
 
-    // Expansion 1
-    if (phys >= 0x1F000000 && phys < 0x1F800000)
+    // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
+    if (phys >= 0x1F803000 && phys < 0x1FC00000)
         return;
 
     // KSEG2 cache control
@@ -2517,7 +2547,7 @@ void System::write32(u32 addr, u32 val) {
         cache_ctrl_ = val;
         return;
     }
-    if (phys >= 0xC0000000u)
+    if (is_unmapped_physical(phys))
         return;
 
     ++unhandled_w32.total;

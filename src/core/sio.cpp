@@ -225,7 +225,7 @@ void Sio::do_transfer() {
         active_device_ = ActiveDevice::MemoryCard;
         active_slot_ = selected_slot;
       }
-    } else if (host_byte != 0x81 && !slot1 && connected_) {
+    } else if (host_byte != 0x81 && connected_) {
       const PadController::TransferResult pad_result = controller_.transfer(host_byte);
       consume_pad_result(pad_result);
       if (host_byte == 0x01 && pad_result.ack) {
