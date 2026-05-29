@@ -81,7 +81,7 @@ public:
   u32 dma_read();
   bool dma_request() const { return data_ready_ && data_request_; }
   u32 dma_words_available() const {
-    if (!data_ready_ || !data_request_ ||
+    if (!data_ready_ ||
         data_index_ >= static_cast<int>(data_buffer_.size())) {
         return 0;
     }

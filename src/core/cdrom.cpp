@@ -292,17 +292,13 @@ bool looks_like_str_header_at(const std::vector<u8> &raw_sector,
   // Validate chunk counters to reduce false positives.
   const u16 chunk_no = read_le16(raw_sector, user_offset + 4u);
   const u16 chunks_per_frame = read_le16(raw_sector, user_offset + 6u);
-  if (chunks_per_frame != 0u && chunks_per_frame <= 1024u &&
-      chunk_no < chunks_per_frame) {
-    return true;
+  if (chunks_per_frame == 0u || chunks_per_frame > 1024u) {
+    return false;
   }
-
-  // Some FMV files have valid STR magic/type but unusual lead-in sectors
-  // before normal per-frame counters begin. Keep those classified as STR so
-  // cooked-sector synthesis still reconstructs Mode 2 Form 2 video flags.
-  const u16 str_type = read_le16(raw_sector, user_offset + 2u);
-  return str_type == 0x8001u || str_type == 0x0001u || str_type == 0x0000u ||
-         str_type == 0x0004u || (str_type & 0x8000u) != 0u;
+  if (chunk_no >= chunks_per_frame) {
+    return false;
+  }
+  return true;
 }
 
 bool is_probable_str_video_sector(const std::vector<u8> &raw_sector) {
@@ -983,75 +979,7 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     return false;
   }
   stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
-  if (stream->gcount() != sector_size) {
-    return false;
-  }
-
-  // Synthesize raw sector structure if sector_size is cooked (< 2352).
-  if (sector_size < 2352) {
-    const std::vector<u8> cooked_sector = raw_sector;
-    const std::string track_type = upper_copy(track->type);
-    const bool mode1_2048 = track_type == "MODE1/2048";
-
-    std::vector<u8> synthesized(2352, 0);
-    // Sync bytes
-    synthesized[0] = 0x00u;
-    for (int i = 1; i < 11; ++i) {
-      synthesized[i] = 0xFFu;
-    }
-    synthesized[11] = 0x00u;
-
-    // Header (MSF + Mode)
-    const int abs_lba = psx_lba + 150;
-    const u8 m = static_cast<u8>(abs_lba / (60 * 75));
-    const u8 s = static_cast<u8>((abs_lba / 75) % 60);
-    const u8 f = static_cast<u8>(abs_lba % 75);
-    synthesized[12] = to_bcd8(m % 100);
-    synthesized[13] = to_bcd8(s);
-    synthesized[14] = to_bcd8(f);
-    synthesized[15] = mode1_2048 ? 0x01u : 0x02u;
-
-    // Mode 2 Subheader
-    if (synthesized[15] == 0x02u) {
-      u8 file = filter_file_;
-      u8 channel = filter_channel_;
-      u8 submode = 0x08u; // Default to Data
-      u8 codinginfo = 0x00u;
-      if (sector_size == 2048) {
-        if (looks_like_str_header_at(cooked_sector, 0)) {
-          // STR video sectors are normally Mode 2 Form 2 realtime video.
-          // Cooked dumps have lost the real subheader, so reconstruct the
-          // bits that FMV demuxers commonly use to classify the sector.
-          submode = 0x62u;
-        }
-      } else if (sector_size == 2336) {
-        file = cooked_sector[0];
-        channel = cooked_sector[1];
-        submode = cooked_sector[2];
-        codinginfo = cooked_sector[3];
-      }
-      synthesized[16] = file;
-      synthesized[17] = channel;
-      synthesized[18] = submode;
-      synthesized[19] = codinginfo;
-      synthesized[20] = file;
-      synthesized[21] = channel;
-      synthesized[22] = submode;
-      synthesized[23] = codinginfo;
-    }
-
-    // Copy user data
-    if (mode1_2048) {
-      std::copy(cooked_sector.begin(), cooked_sector.end(), synthesized.begin() + 16);
-    } else if (sector_size == 2048) {
-      std::copy(cooked_sector.begin(), cooked_sector.end(), synthesized.begin() + 24);
-    } else if (sector_size == 2336) {
-      std::copy(cooked_sector.begin(), cooked_sector.end(), synthesized.begin() + 16);
-    }
-    raw_sector = std::move(synthesized);
-  }
-
-  return true;
+  return stream->gcount() == sector_size;
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }
@@ -1318,7 +1246,7 @@ bool CdRom::read_sector() {
   if (delivered_to_adpcm) {
     deliver_data = false;
   }
-  if (filter_on && has_subheader && !filter_match) {
+  if (filter_on && is_audio_sector && !filter_match) {
     deliver_data = false;
   }
   if (!deliver_data) {
@@ -1707,6 +1635,10 @@ void CdRom::cmd_stop() {
 // receive INT5 instead of INT3 whenever Standby was called while the drive
 // was already spinning (the normal case), hanging the loader.
 void CdRom::cmd_standby() {
+  if (!motor_on_) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x20u));
+    return;
+  }
   motor_on_ = true;
   cdda_playing_ = false;
   state_ = State::Idle;
