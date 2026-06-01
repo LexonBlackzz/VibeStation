@@ -21,6 +21,7 @@ enum class Exception : u32 {
   ReservedInst = 0xA,
   CopUnusable = 0xB,
   Overflow = 0xC,
+  Trap = 0xD,
 };
 
 class Cpu {
@@ -62,6 +63,7 @@ private:
   u32 pending_branch_pc_ = 0;
   u32 active_branch_pc_ = 0;
   bool exception_raised_ = false;
+  u32 irq_inhibit_instructions_ = 0;
 
   // ── COP0 Registers ────────────────────────────────────────────
   u32 cop0_sr_ = 0;        // Status Register (R12)
@@ -177,6 +179,7 @@ private:
   void op_movz(u32 i);
   void op_movn(u32 i);
   void op_sync(u32 i);
+  void op_trap_special(u32 i);
   void op_syscall(u32 i);
   void op_break(u32 i);
   void op_mfhi(u32 i);

@@ -15,6 +15,10 @@ namespace {
     constexpr u32 kRamWatchLogLimit = 64u;
     constexpr u32 kRr4SourceWatchStart = 0x001A8E40u;
     constexpr u32 kRr4SourceWatchEnd = 0x001A8EC0u;
+    constexpr u32 kRr4StrHeaderWatchStart = 0x00141BF4u;
+    constexpr u32 kRr4StrHeaderWatchEnd = 0x00141C14u;
+    constexpr u32 kRr4StateWatchStart = 0x00110400u;
+    constexpr u32 kRr4StateWatchEnd = 0x00110480u;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -79,6 +83,25 @@ void log_unhandled_bus_read(BusWarnLimiter& limiter, const char* width,
         LOG_WARN(
             "BUS: RAM_SIZE %s val=0x%08X pc=0x%08X sp=0x%08X ra=0x%08X",
             op, value, pc, sp, ra);
+    }
+
+    void maybe_log_rr4_str_header_read(u32 addr, u32 value, u8 size, u32 pc,
+        u64 cycle, bool from_dma) {
+        if (!g_log_fmv_diagnostics || from_dma) {
+            return;
+        }
+        if (addr < kRr4StrHeaderWatchStart || addr >= kRr4StrHeaderWatchEnd) {
+            return;
+        }
+        static u32 count = 0;
+        if (count >= 256u) {
+            return;
+        }
+        ++count;
+        LOG_INFO(
+            "BUS: RR4 STR header R%u addr=0x%08X val=0x%08X pc=0x%08X cyc=%llu",
+            static_cast<unsigned>(size), addr, value, pc,
+            static_cast<unsigned long long>(cycle));
     }
 
     // PSX-SPX vertical refresh rates (native region clock):
@@ -420,6 +443,9 @@ void System::reset() {
     stack_top_write_log_suppressed_ = false;
     active_stack_write_log_budget_ = 96;
     active_stack_write_log_suppressed_ = false;
+    fmv_write_hatch_remaining_ = 0;
+    fmv_write_hatch_total_logged_ = 0;
+    fmv_write_hatch_event_count_ = 0;
     gpu_gp0_source_valid_ = false;
     gpu_gp0_source_from_dma_ = false;
     gpu_gp0_source_addr_ = 0;
@@ -518,7 +544,51 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
         }
     }
 
-    if (g_cpu_deep_diagnostics && addr >= 0x00047680u && addr < 0x000476C0u) {
+    // FMV write hatch: opens on trigger events, logs a limited window
+    constexpr u32 kFmvHatchWindow = 32u;
+    constexpr u32 kFmvHatchMaxEvents = 8u;
+    bool is_fmv_ptr = (addr == 0x00117788u || addr == 0x00127788u ||
+        addr == 0x00117789u || addr == 0x0011778Au || addr == 0x0011778Bu ||
+        addr == 0x00127789u || addr == 0x0012778Au || addr == 0x0012778Bu);
+    bool is_mdec_in = (addr >= kRr4SourceWatchStart && addr < kRr4SourceWatchEnd);
+
+    // Trigger: open hatch on non-zero FMV_PTR or non-zero MDEC input writes
+    if (g_cpu_deep_diagnostics && fmv_write_hatch_remaining_ == 0 &&
+        fmv_write_hatch_event_count_ < kFmvHatchMaxEvents) {
+        if ((is_fmv_ptr && value != 0) || (is_mdec_in && value != 0 && (entry.origin & 0x80u) != 0u)) {
+            fmv_write_hatch_remaining_ = kFmvHatchWindow;
+            ++fmv_write_hatch_event_count_;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: FMV_HATCH #%u opened on W%u 0x%08X = 0x%08X <- DMA%u",
+                         fmv_write_hatch_event_count_, static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: FMV_HATCH #%u opened on W%u 0x%08X = 0x%08X pc=0x%08X",
+                         fmv_write_hatch_event_count_, static_cast<unsigned>(size), addr, value,
+                         entry.pc);
+            }
+        }
+    }
+
+    // While hatch is open, log FMV_PTR and MDEC input writes
+    if (g_cpu_deep_diagnostics && fmv_write_hatch_remaining_ > 0 && (is_fmv_ptr || is_mdec_in)) {
+        if ((entry.origin & 0x80u) != 0u) {
+            LOG_WARN("BUS: FMV_HATCH W%u 0x%08X = 0x%08X <- DMA%u",
+                     static_cast<unsigned>(size), addr, value,
+                     static_cast<unsigned>(entry.origin & 0x7Fu));
+        } else {
+            LOG_WARN("BUS: FMV_HATCH W%u 0x%08X = 0x%08X pc=0x%08X",
+                     static_cast<unsigned>(size), addr, value, entry.pc);
+        }
+        fmv_write_hatch_total_logged_++;
+        if (--fmv_write_hatch_remaining_ == 0) {
+            LOG_WARN("BUS: FMV_HATCH #%u closed (%u writes logged, total=%u)",
+                     fmv_write_hatch_event_count_, kFmvHatchWindow,
+                     fmv_write_hatch_total_logged_);
+        }
+    }
+
+        if (g_cpu_deep_diagnostics && addr >= 0x00047680u && addr < 0x000476C0u) {
         static u32 low_stub_write_log_count = 0;
         static bool low_stub_context_logged = false;
         if (!low_stub_context_logged) {
@@ -584,6 +654,23 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
                          static_cast<unsigned>(entry.origin & 0x7Fu));
             } else {
                 LOG_WARN("BUS: rr4-source W%u 0x%08X = 0x%08X pc=0x%08X",
+                         static_cast<unsigned>(size), addr, value, entry.pc);
+            }
+        }
+    }
+
+    if (g_log_fmv_diagnostics &&
+        ((addr >= kRr4StateWatchStart && addr < kRr4StateWatchEnd) ||
+         is_fmv_ptr)) {
+        static u32 rr4_state_write_log_count = 0;
+        if (rr4_state_write_log_count < 256u) {
+            ++rr4_state_write_log_count;
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_WARN("BUS: rr4-state W%u 0x%08X = 0x%08X <- DMA%u",
+                         static_cast<unsigned>(size), addr, value,
+                         static_cast<unsigned>(entry.origin & 0x7Fu));
+            } else {
+                LOG_WARN("BUS: rr4-state W%u 0x%08X = 0x%08X pc=0x%08X",
                          static_cast<unsigned>(size), addr, value, entry.pc);
             }
         }
@@ -1797,6 +1884,8 @@ u8 System::read8(u32 addr) {
     if (phys < kMainRamMirrorWindow) {
         const u32 ram_addr = phys & 0x1FFFFF;
         const u8 value = ram_.read8(ram_addr);
+        maybe_log_rr4_str_header_read(ram_addr, value, 1, cpu_.pc(),
+            cpu_.cycle_count(), bus_access_from_dma_);
         debug_note_main_ram_read(ram_addr, value, 1);
         return value;
     }
@@ -1885,6 +1974,8 @@ u16 System::read16(u32 addr) {
     if (phys < kMainRamMirrorWindow) {
         const u32 ram_addr = phys & 0x1FFFFF;
         const u16 value = ram_.read16(ram_addr);
+        maybe_log_rr4_str_header_read(ram_addr, value, 2, cpu_.pc(),
+            cpu_.cycle_count(), bus_access_from_dma_);
         debug_note_main_ram_read(ram_addr, value, 2);
         return value;
     }
@@ -1971,6 +2062,8 @@ u32 System::read32(u32 addr) {
         const u32 ram_addr = phys & 0x1FFFFF;
         const u32 value = ram_.read32(ram_addr);
 
+        maybe_log_rr4_str_header_read(ram_addr, value, 4, cpu_.pc(),
+            cpu_.cycle_count(), bus_access_from_dma_);
         debug_note_main_ram_read(ram_addr, value, 4);
         return value;
     }
@@ -2075,6 +2168,56 @@ void System::write8(u32 addr, u8 val) {
             maybe_log_ram_watch_write(phys, val, 1);
         }
         const u32 ram_addr = phys & 0x1FFFFF;
+        if (g_log_fmv_diagnostics && ram_addr >= 0x000A6500u &&
+            ram_addr < 0x000A6540u) {
+            static u32 rr4_node2_w8_logs = 0;
+            if (rr4_node2_w8_logs < 128u) {
+                ++rr4_node2_w8_logs;
+                const u8 old_val = ram_.read8(ram_addr);
+                LOG_WARN(
+                    "BUS: rr4-node W8 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00006D00u &&
+            ram_addr < 0x00006E00u) {
+            static u32 low_node_w8_logs = 0;
+            if (low_node_w8_logs < 128u) {
+                ++low_node_w8_logs;
+                const u8 old_val = ram_.read8(ram_addr);
+                LOG_WARN(
+                    "BUS: low-node W8 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00000100u &&
+            ram_addr < 0x00000120u) {
+            static u32 low_100_w8_logs = 0;
+            const u8 old_val = ram_.read8(ram_addr);
+            if (low_100_w8_logs < 128u) {
+                ++low_100_w8_logs;
+                LOG_WARN(
+                    "BUS: low-100 W8 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+            if (cpu_.cycle_count() >= 300000000ull && old_val != val) {
+                static u32 low_100_w8_change_logs = 0;
+                if (low_100_w8_change_logs < 256u) {
+                    ++low_100_w8_change_logs;
+                    LOG_WARN(
+                        "BUS: low-100 W8-change 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                        ram_addr, static_cast<unsigned>(old_val),
+                        static_cast<unsigned>(val), cpu_.pc(),
+                        static_cast<unsigned long long>(cpu_.cycle_count()));
+                }
+            }
+        }
         ram_.write8(ram_addr, val);
         debug_note_main_ram_write(ram_addr, val, 1);
         return;
@@ -2240,6 +2383,60 @@ void System::write16(u32 addr, u16 val) {
             maybe_log_ram_watch_write(phys, val, 2);
         }
         const u32 ram_addr = phys & 0x1FFFFF;
+        if (g_log_fmv_diagnostics && ram_addr >= 0x000A6500u &&
+            ram_addr < 0x000A6540u) {
+            static u32 rr4_node2_w16_logs = 0;
+            if (rr4_node2_w16_logs < 128u) {
+                ++rr4_node2_w16_logs;
+                const u16 old_val = ram_.read16(ram_addr);
+                LOG_WARN(
+                    "BUS: rr4-node W16 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00006D00u &&
+            ram_addr < 0x00006E00u) {
+            static u32 low_node_w16_logs = 0;
+            if (low_node_w16_logs < 128u) {
+                ++low_node_w16_logs;
+                const u16 old_val = ram_.read16(ram_addr);
+                LOG_WARN(
+                    "BUS: low-node W16 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00000100u &&
+            ram_addr < 0x00000120u) {
+            static u32 low_100_w16_logs = 0;
+            const u16 old_val = ram_.read16(ram_addr);
+            if (low_100_w16_logs < 128u) {
+                ++low_100_w16_logs;
+                LOG_WARN(
+                    "BUS: low-100 W16 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+            if (cpu_.cycle_count() >= 300000000ull && old_val != val) {
+                static u32 low_100_w16_change_logs = 0;
+                if (low_100_w16_change_logs < 256u) {
+                    ++low_100_w16_change_logs;
+                    LOG_WARN(
+                        "BUS: low-100 W16-change 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu "
+                        "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X sp=0x%08X ra=0x%08X",
+                        ram_addr, static_cast<unsigned>(old_val),
+                        static_cast<unsigned>(val), cpu_.pc(),
+                        static_cast<unsigned long long>(cpu_.cycle_count()),
+                        cpu_.reg(4), cpu_.reg(5), cpu_.reg(6), cpu_.reg(7),
+                        cpu_.reg(8), cpu_.reg(9), cpu_.reg(10), cpu_.reg(11),
+                        cpu_.reg(29), cpu_.reg(31));
+                }
+            }
+        }
         ram_.write16(ram_addr, val);
         debug_note_main_ram_write(ram_addr, val, 2);
         return;
@@ -2414,6 +2611,105 @@ void System::write32(u32 addr, u32 val) {
         const u32 ram_addr = phys & 0x1FFFFF;
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 4);
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x000A6500u &&
+            ram_addr < 0x000A6540u) {
+            static u32 rr4_node2_w32_logs = 0;
+            if (rr4_node2_w32_logs < 256u) {
+                ++rr4_node2_w32_logs;
+                const u32 old_val = ram_.read32(ram_addr);
+                LOG_WARN(
+                    "BUS: rr4-node W32 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00006D00u &&
+            ram_addr < 0x00006E00u) {
+            static u32 low_node_w32_logs = 0;
+            if (low_node_w32_logs < 128u) {
+                ++low_node_w32_logs;
+                const u32 old_val = ram_.read32(ram_addr);
+                LOG_WARN(
+                    "BUS: low-node W32 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x00000100u &&
+            ram_addr < 0x00000120u) {
+            static u32 low_100_w32_logs = 0;
+            const u32 old_val = ram_.read32(ram_addr);
+            if (low_100_w32_logs < 128u) {
+                ++low_100_w32_logs;
+                LOG_WARN(
+                    "BUS: low-100 W32 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+            if (cpu_.cycle_count() >= 700000000ull && old_val != val) {
+                static u32 low_100_w32_change_logs = 0;
+                if (low_100_w32_change_logs < 256u) {
+                    ++low_100_w32_change_logs;
+                    LOG_WARN(
+                        "BUS: low-100 W32-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                        ram_addr, old_val, val, cpu_.pc(),
+                        static_cast<unsigned long long>(cpu_.cycle_count()));
+                }
+            }
+        }
+        if (g_log_fmv_diagnostics &&
+            (ram_addr == 0x00000010u || ram_addr == 0x00000018u) &&
+            val != 0u) {
+            static bool logged_low_slot10_nonzero = false;
+            static bool logged_low_slot18_nonzero = false;
+            bool& already_logged =
+                (ram_addr == 0x00000010u) ? logged_low_slot10_nonzero
+                                          : logged_low_slot18_nonzero;
+            if (!already_logged) {
+                already_logged = true;
+                const u32 old_val = ram_.read32(ram_addr);
+                LOG_WARN(
+                    "BUS: first low-slot W32 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics &&
+            (ram_addr == 0x00000010u || ram_addr == 0x00000018u) &&
+            cpu_.cycle_count() >= 750000000ull) {
+            static u32 low_slot_w32_change_logs = 0;
+            const u32 old_val = ram_.read32(ram_addr);
+            if (old_val != val && low_slot_w32_change_logs < 128u) {
+                ++low_slot_w32_change_logs;
+                LOG_WARN(
+                    "BUS: low-slot W32-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x000000B0u &&
+            ram_addr <= 0x000000C0u) {
+            static u32 low_vec_w32_change_logs = 0;
+            const u32 old_val = ram_.read32(ram_addr);
+            if (old_val != val && low_vec_w32_change_logs < 128u) {
+                ++low_vec_w32_change_logs;
+                LOG_WARN(
+                    "BUS: low-vec W32-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && val == 0x800A6518u) {
+            static u32 writes_of_bad_ptr = 0;
+            if (writes_of_bad_ptr < 32u) {
+                ++writes_of_bad_ptr;
+                const u32 old_val = ram_.read32(ram_addr);
+                LOG_WARN(
+                    "BUS: wrote 0x800A6518 to 0x%08X old=0x%08X pc=0x%08X cyc=%llu",
+                    ram_addr, old_val, cpu_.pc(),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
         }
         ram_.write32(ram_addr, val);
         debug_note_main_ram_write(ram_addr, val, 4);

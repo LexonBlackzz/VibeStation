@@ -126,8 +126,11 @@ u32 DmaController::read(u32 offset) const {
     case 0x8:
       return ch.channel_ctrl;
     default:
-      LOG_WARN("DMA: Unhandled channel %d reg 0x%X read", channel, reg);
-      return 0;
+      LOG_WARN("DMA: Unhandled channel %d reg 0x%X read pc=0x%08X cyc=%llu",
+               channel, reg, sys_ ? sys_->cpu().pc() : 0,
+               sys_ ? static_cast<unsigned long long>(sys_->cpu().cycle_count())
+                    : 0ull);
+      return 0xFFFFFFFFu;
     }
   }
 
@@ -137,8 +140,11 @@ u32 DmaController::read(u32 offset) const {
   case 0x74:
     return dicr_;
   default:
-    LOG_WARN("DMA: Unhandled read at offset 0x%X", offset);
-    return 0;
+    LOG_WARN("DMA: Unhandled read at offset 0x%X pc=0x%08X cyc=%llu", offset,
+             sys_ ? sys_->cpu().pc() : 0,
+             sys_ ? static_cast<unsigned long long>(sys_->cpu().cycle_count())
+                  : 0ull);
+    return 0xFFFFFFFFu;
   }
 }
 
@@ -183,6 +189,28 @@ void DmaController::write(u32 offset, u32 value) {
       LOG_WARN("DMA: Unhandled channel %d reg 0x%X write = 0x%08X", channel,
                reg, value);
       break;
+    }
+    if (channel == 3 && g_log_fmv_diagnostics) {
+      static u32 cdrom_dma_reg_write_logs = 0;
+      CdRom &cd = sys_->cdrom();
+      const bool fmv_sector = cd.mode() == 0xE0u || cd.dma_data_index() == 44 ||
+                              sys_->cdrom_dma_words_available() == 504u;
+      if (fmv_sector && cdrom_dma_reg_write_logs < 512u) {
+        ++cdrom_dma_reg_write_logs;
+        LOG_INFO(
+            "DMA: CDROM reg write reg=0x%X val=0x%08X pc=0x%08X cyc=%llu "
+            "madr=0x%08X bcr=0x%08X chcr=0x%08X active=%u dpcr_en=%u "
+            "req_active=%u cd_idx=%d cd_avail=%u cd_size=%zu cd_ready=%u "
+            "cd_req=%u cd_mode=0x%02X cd_lba=%d",
+            reg, value, sys_ ? sys_->cpu().pc() : 0u,
+            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u),
+            ch.base_addr, ch.block_ctrl, ch.channel_ctrl, ch.is_active() ? 1u : 0u,
+            channel_enabled(channel) ? 1u : 0u, request_active(channel) ? 1u : 0u,
+            cd.dma_data_index(), sys_->cdrom_dma_words_available(),
+            cd.dma_buffer_size(), cd.sector_data_ready() ? 1u : 0u,
+            cd.sector_data_request() ? 1u : 0u, static_cast<unsigned>(cd.mode()),
+            cd.current_read_lba());
+      }
     }
     return;
   }
@@ -311,16 +339,35 @@ void DmaController::dma_block(int channel) {
     }
     if (transfer_words != requested_words) {
       dbg.transfer_words = transfer_words;
-      if (channel == 3 && g_cpu_deep_diagnostics && g_log_fmv_diagnostics) {
-        static u32 cdrom_dma_clip_logs = 0;
-        if (cdrom_dma_clip_logs < 32u) {
-          ++cdrom_dma_clip_logs;
-          LOG_WARN(
-              "DMA: CDROM clip madr=0x%08X requested=%u actual=%u avail=%u bcr=0x%08X chcr=0x%08X cyc=%llu",
-              ch.base_addr & 0x00FFFFFFu, requested_words, transfer_words,
-              sys_->cdrom_dma_words_available(), ch.block_ctrl, ch.channel_ctrl,
-              static_cast<unsigned long long>(sys_->cpu().cycle_count()));
+    }
+    if (channel == 3 && g_log_fmv_diagnostics) {
+      static u32 cdrom_dma_begin_logs = 0;
+      static u32 cdrom_dma_whole_begin_logs = 0;
+      static u32 cdrom_dma_e0_begin_logs = 0;
+      const CdRom &cd = sys_->cdrom();
+      const bool whole_sector = cd.read_whole_sector();
+      const bool e0_sector = cd.mode() == 0xE0u;
+      if (cdrom_dma_begin_logs < 128u ||
+          (whole_sector && cdrom_dma_whole_begin_logs < 128u) ||
+          (e0_sector && cdrom_dma_e0_begin_logs < 128u)) {
+        ++cdrom_dma_begin_logs;
+        if (whole_sector) {
+          ++cdrom_dma_whole_begin_logs;
         }
+        if (e0_sector) {
+          ++cdrom_dma_e0_begin_logs;
+        }
+        LOG_INFO(
+            "DMA: CDROM begin madr=0x%08X requested=%u actual=%u avail=%u "
+            "idx=%d size=%zu ready=%u req=%u mode=0x%02X whole=%u lba=%d "
+            "bcr=0x%08X chcr=0x%08X cyc=%llu",
+            ch.base_addr & 0x00FFFFFFu, requested_words, transfer_words,
+            sys_->cdrom_dma_words_available(), cd.dma_data_index(),
+            cd.dma_buffer_size(), cd.sector_data_ready() ? 1u : 0u,
+            cd.sector_data_request() ? 1u : 0u, static_cast<unsigned>(cd.mode()),
+            cd.read_whole_sector() ? 1u : 0u, cd.current_read_lba(),
+            ch.block_ctrl, ch.channel_ctrl,
+            static_cast<unsigned long long>(sys_->cpu().cycle_count()));
       }
     }
     if (transfer_words == 0) {
@@ -333,6 +380,12 @@ void DmaController::dma_block(int channel) {
                                         sys_->mdec_dma_out_depth(),
                                         sys_->mdec_dma_out_block());
   }
+
+  u32 cdrom_dma_first_word = 0;
+  u32 cdrom_dma_last_word = 0;
+  u32 cdrom_dma_sample_words[8] = {};
+  u32 cdrom_dma_sample_count = 0;
+  bool cdrom_dma_saw_word = false;
 
   if (channel == 6) {
     // OTC (Ordering Table Clear): always writes to RAM, backwards.
@@ -407,6 +460,16 @@ void DmaController::dma_block(int channel) {
         break;
       case 3: // CDROM
         data = sys_->cdrom_dma_read();
+        if (g_log_fmv_diagnostics) {
+          if (!cdrom_dma_saw_word) {
+            cdrom_dma_first_word = data;
+            cdrom_dma_saw_word = true;
+          }
+          cdrom_dma_last_word = data;
+          if (cdrom_dma_sample_count < 8u) {
+            cdrom_dma_sample_words[cdrom_dma_sample_count++] = data;
+          }
+        }
         break;
       case 4: // SPU
         data = sys_->spu_dma_read();
@@ -435,6 +498,45 @@ void DmaController::dma_block(int channel) {
       const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
       ch.block_ctrl =
           (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
+    }
+  }
+
+  if (!from_ram && channel == 3 && g_log_fmv_diagnostics) {
+    static u32 cdrom_dma_end_logs = 0;
+    static u32 cdrom_dma_whole_end_logs = 0;
+    static u32 cdrom_dma_e0_end_logs = 0;
+    const CdRom &cd = sys_->cdrom();
+    const bool whole_sector = cd.read_whole_sector();
+    const bool e0_sector = cd.mode() == 0xE0u;
+    if (cdrom_dma_end_logs < 128u ||
+        (whole_sector && cdrom_dma_whole_end_logs < 128u) ||
+        (e0_sector && cdrom_dma_e0_end_logs < 128u)) {
+      ++cdrom_dma_end_logs;
+      if (whole_sector) {
+        ++cdrom_dma_whole_end_logs;
+      }
+      if (e0_sector) {
+        ++cdrom_dma_e0_end_logs;
+      }
+      LOG_INFO(
+          "DMA: CDROM end base=0x%08X words=%u remaining_block=%u avail=%u "
+          "idx=%d size=%zu ready=%u req=%u first=0x%08X last=0x%08X cyc=%llu",
+          ch.base_addr & 0x00FFFFFFu, transfer_words, ch.block_words_remaining,
+          sys_->cdrom_dma_words_available(), cd.dma_data_index(),
+          cd.dma_buffer_size(), cd.sector_data_ready() ? 1u : 0u,
+          cd.sector_data_request() ? 1u : 0u, cdrom_dma_first_word,
+          cdrom_dma_last_word,
+          static_cast<unsigned long long>(sys_->cpu().cycle_count()));
+      if (e0_sector && cdrom_dma_sample_count > 0u) {
+        LOG_INFO(
+            "DMA: CDROM E0 sample words=%u w0=0x%08X w1=0x%08X w2=0x%08X "
+            "w3=0x%08X w4=0x%08X w5=0x%08X w6=0x%08X w7=0x%08X",
+            cdrom_dma_sample_count, cdrom_dma_sample_words[0],
+            cdrom_dma_sample_words[1], cdrom_dma_sample_words[2],
+            cdrom_dma_sample_words[3], cdrom_dma_sample_words[4],
+            cdrom_dma_sample_words[5], cdrom_dma_sample_words[6],
+            cdrom_dma_sample_words[7]);
+      }
     }
   }
 }

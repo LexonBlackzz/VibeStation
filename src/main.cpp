@@ -1680,8 +1680,37 @@ int main(int argc, char *argv[]) {
     args.emplace_back(argv[i]);
   }
 
+  auto trim_cli_arg = [](const std::string &input) {
+    const size_t begin = input.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+      return std::string();
+    }
+    const size_t end = input.find_last_not_of(" \t\r\n");
+    std::string out = input.substr(begin, end - begin + 1u);
+    if (out.size() >= 2u && out.front() == '"' && out.back() == '"') {
+      out = out.substr(1u, out.size() - 2u);
+    }
+    return out;
+  };
+  auto looks_like_disc_path = [&](const std::string &value) {
+    std::string lowered = trim_cli_arg(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    return lowered.size() >= 4u &&
+           ((lowered.size() >= 4u &&
+             lowered.compare(lowered.size() - 4u, 4u, ".cue") == 0) ||
+            (lowered.size() >= 4u &&
+             lowered.compare(lowered.size() - 4u, 4u, ".bin") == 0));
+  };
+
   std::string wav_out_path;
   std::string gpu_debug_out_path;
+  std::string windowed_bios_path;
+  std::string windowed_disc_path;
+  bool windowed_direct_boot = false;
+  int fmv_diagnostics_override = -1;
   std::vector<std::string> passthrough;
   passthrough.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
@@ -1751,6 +1780,34 @@ int main(int argc, char *argv[]) {
       gpu_debug_out_path = args[i + 1];
       g_mdec_debug_upload_probe = true;
       ++i;
+      continue;
+    }
+    if (a == "--windowed-disc" && (i + 2) < args.size()) {
+      windowed_bios_path = trim_cli_arg(args[i + 1]);
+      size_t consumed = i + 2;
+      windowed_disc_path = trim_cli_arg(args[consumed]);
+      while (!looks_like_disc_path(windowed_disc_path) &&
+             (consumed + 1) < args.size() &&
+             (args[consumed + 1].rfind("--", 0) != 0)) {
+        ++consumed;
+        if (!windowed_disc_path.empty()) {
+          windowed_disc_path.push_back(' ');
+        }
+        windowed_disc_path += trim_cli_arg(args[consumed]);
+      }
+      i = consumed;
+      continue;
+    }
+    if (a == "--windowed-direct-boot") {
+      windowed_direct_boot = true;
+      continue;
+    }
+    if (a == "--fmv-diagnostics") {
+      fmv_diagnostics_override = 1;
+      continue;
+    }
+    if (a == "--no-fmv-diagnostics") {
+      fmv_diagnostics_override = 0;
       continue;
     }
     if (a == "--experimental-bios-size") {
@@ -1874,6 +1931,27 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     getchar();
     return 1;
+  }
+
+  if (fmv_diagnostics_override >= 0) {
+    g_log_fmv_diagnostics = (fmv_diagnostics_override != 0);
+  }
+
+  if (!windowed_disc_path.empty()) {
+    printf("Launching disc from command line...\n");
+    fflush(stdout);
+    if (!app.launch_disc_from_cli(windowed_bios_path, windowed_disc_path,
+                                  windowed_direct_boot)) {
+      fprintf(stderr, "FATAL: Failed to launch command-line disc.\n");
+      fflush(stderr);
+      app.shutdown();
+      if (g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
   }
 
   printf("Initialization complete! Running...\n");

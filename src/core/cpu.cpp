@@ -87,6 +87,15 @@ bool is_low_helper_addr(u32 addr) {
   return phys >= 0x00002400u && phys <= 0x00002450u;
 }
 
+bool is_known_low_exec_addr(u32 addr) {
+  const u32 phys = addr & 0x1FFFFFFFu;
+  return phys >= 0x000023D0u && phys <= 0x00002450u;
+}
+
+bool is_main_ram_addr(u32 addr) {
+  return (addr & 0x1FFFFFFFu) < 0x00200000u;
+}
+
 void log_stack_window(System *sys, const char *label, u32 sp) {
   if (sys == nullptr || (sp & 3u) != 0u || !is_plausible_exec_addr(sp)) {
     return;
@@ -362,6 +371,8 @@ const char *exception_name(Exception cause) {
     return "CopUnusable";
   case Exception::Overflow:
     return "Overflow";
+  case Exception::Trap:
+    return "Trap";
   default:
     return "Unknown";
   }
@@ -484,6 +495,9 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
     break;
   case 12:
     cop0_sr_ = value;
+    // Real hardware does not recognize a newly restored IE state
+    // immediately on the very next interrupt check.
+    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
     break;
   case 13:
     // Only SW interrupt pending bits are writable.
@@ -639,7 +653,32 @@ u32 Cpu::load32(u32 addr) {
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  return sys_->read32_data(addr);
+  u32 value = sys_->read32_data(addr);
+  if (g_log_fmv_diagnostics && current_pc_ == 0x00000DE8u &&
+      (addr & 0x1FFFFFFFu) == 0x00000018u && value == 0x00000001u) {
+    static u32 rr4_slot18_sentinel_logs = 0;
+    if (rr4_slot18_sentinel_logs < 32u) {
+      ++rr4_slot18_sentinel_logs;
+      LOG_WARN(
+          "CPU: rr4 slot18 sentinel addr=0x%08X val=0x%08X pass-through pc=0x%08X "
+          "ra=0x%08X s3=0x%08X cyc=%llu",
+          addr, value, current_pc_, gpr_[31], gpr_[19],
+          static_cast<unsigned long long>(cycles_));
+    }
+  }
+  if (g_log_fmv_diagnostics && current_pc_ == 0x00000E28u &&
+      (addr & 0x1FFFFFFFu) == 0x000A6518u && value == 0x00000001u) {
+    static u32 rr4_next_sentinel_logs = 0;
+    if (rr4_next_sentinel_logs < 32u) {
+      ++rr4_next_sentinel_logs;
+      LOG_WARN(
+          "CPU: rr4 next sentinel addr=0x%08X val=0x%08X pass-through pc=0x%08X "
+          "ra=0x%08X s1=0x%08X s3=0x%08X cyc=%llu",
+          addr, value, current_pc_, gpr_[31], gpr_[17], gpr_[19],
+          static_cast<unsigned long long>(cycles_));
+    }
+  }
+  return value;
 }
 
 u16 Cpu::load16(u32 addr) {
@@ -667,6 +706,24 @@ void Cpu::store32(u32 addr, u32 value) {
 }
 
 void Cpu::store16(u32 addr, u16 value) {
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x80116CC0u &&
+      current_pc_ <= 0x80116D20u) {
+    const u32 phys = addr & 0x1FFFFFFFu;
+    if (phys >= 0x00000100u && phys < 0x00000120u) {
+      static u32 rr4_lowclr_store16_logs = 0;
+      if (rr4_lowclr_store16_logs < 32u) {
+        ++rr4_lowclr_store16_logs;
+        LOG_WARN(
+            "CPU: rr4-lowclr store16 pc=0x%08X instr=0x%08X addr=0x%08X val=0x%04X cyc=%llu "
+            "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X sp=0x%08X ra=0x%08X",
+            current_pc_, sys_->read32(current_pc_), addr,
+            static_cast<unsigned>(value), static_cast<unsigned long long>(cycles_),
+            gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10],
+            gpr_[11], gpr_[29], gpr_[31]);
+      }
+    }
+  }
+
   if (addr & 1) {
     cop0_badvaddr_ = addr;
     exception(Exception::AddrStoreErr);
@@ -725,6 +782,76 @@ void Cpu::exception(Exception cause) {
         exception_name(cause), current_pc_, handler, cop0_sr_, gpr_[29],
         gpr_[31]);
   }
+  if (g_log_fmv_diagnostics && cause == Exception::Syscall &&
+      cycles_ >= 390000000ull &&
+      (current_pc_ >= 0x800970B0u && current_pc_ <= 0x80097110u)) {
+    static u32 rr4_syscall_logs = 0;
+    if (rr4_syscall_logs < 128u) {
+      ++rr4_syscall_logs;
+      LOG_WARN(
+          "CPU: rr4-syscall pc=0x%08X epc=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X ra=0x%08X sp=0x%08X "
+          "lowB0=0x%08X lowB4=0x%08X lowB8=0x%08X lowBC=0x%08X lowC0=0x%08X",
+          current_pc_, cop0_epc_, static_cast<unsigned long long>(cycles_),
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[31], gpr_[29], sys_->read32(0x000000B0u),
+          sys_->read32(0x000000B4u), sys_->read32(0x000000B8u),
+          sys_->read32(0x000000BCu), sys_->read32(0x000000C0u));
+    }
+  }
+  if (cause == Exception::AddrLoadErr) {
+    static u32 last_adel_pc = 0xFFFFFFFFu;
+    static u32 last_adel_bad_vaddr = 0xFFFFFFFFu;
+    static u32 last_adel_sr = 0xFFFFFFFFu;
+    static u32 repeated_adel_count = 0;
+    const bool same_adel = current_pc_ == last_adel_pc &&
+                           cop0_badvaddr_ == last_adel_bad_vaddr &&
+                           cop0_sr_ == last_adel_sr;
+    if (!same_adel) {
+      if (repeated_adel_count > 0) {
+        LOG_WARN("CPU: repeated previous AdEL exception count=%u",
+                 repeated_adel_count);
+      }
+      last_adel_pc = current_pc_;
+      last_adel_bad_vaddr = cop0_badvaddr_;
+      last_adel_sr = cop0_sr_;
+      repeated_adel_count = 0;
+      LOG_WARN("CPU: AdEL exception pc=0x%08X bad_vaddr=0x%08X sr=0x%08X cyc=%llu",
+               current_pc_, cop0_badvaddr_, cop0_sr_,
+               static_cast<unsigned long long>(cycles_));
+      if (sys_ != nullptr) {
+        const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+        LOG_WARN(
+            "CPU: AdEL ctx epc=0x%08X cause=0x%08X ra=0x%08X sp=0x%08X "
+            "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+            cop0_epc_, cop0_cause_, gpr_[31], gpr_[29], gpr_[2], gpr_[3],
+            gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+        LOG_WARN(
+            "CPU: AdEL saved s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+            "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X",
+            gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21],
+            gpr_[22], gpr_[23]);
+        LOG_WARN(
+            "CPU: AdEL code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+            sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+            sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+            sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+            sys_->read32(phys_pc + 0x08u));
+        log_stack_window(sys_, "CPU: AdEL frame", gpr_[29]);
+      }
+    } else {
+      ++repeated_adel_count;
+      if ((repeated_adel_count & (repeated_adel_count - 1u)) == 0u) {
+        LOG_WARN(
+            "CPU: AdEL exception repeated count=%u pc=0x%08X bad_vaddr=0x%08X "
+            "sr=0x%08X cyc=%llu",
+            repeated_adel_count, current_pc_, cop0_badvaddr_, cop0_sr_,
+            static_cast<unsigned long long>(cycles_));
+      }
+    }
+  }
 
   pc_ = handler;
   next_pc_ = handler + 4;
@@ -757,6 +884,7 @@ u32 Cpu::step() {
   static u32 prev_pc_for_diag = 0;
   const bool cpu_diag = cpu_diag_enabled();
   current_pc_ = pc_;
+  g_diag_current_pc = current_pc_;
   exception_raised_ = false;
   cycle_penalty_ = 0;
   next_load_ = {0, 0};
@@ -765,15 +893,73 @@ u32 Cpu::step() {
   pending_delay_slot_ = false;
   pending_branch_taken_ = false;
   pending_branch_pc_ = 0;
+  if (g_log_fmv_diagnostics && cycles_ >= 390000000ull) {
+    static bool low_vec_seen_nonzero = false;
+    static bool low_vec_zero_transition_logged = false;
+    const u32 low_b0 = sys_->read32(0x000000B0u);
+    const u32 low_b4 = sys_->read32(0x000000B4u);
+    const u32 low_b8 = sys_->read32(0x000000B8u);
+    const u32 low_bc = sys_->read32(0x000000BCu);
+    const u32 low_c0 = sys_->read32(0x000000C0u);
+    const bool low_vec_all_zero =
+        low_b0 == 0u && low_b4 == 0u && low_b8 == 0u && low_bc == 0u &&
+        low_c0 == 0u;
+    if (!low_vec_all_zero) {
+      low_vec_seen_nonzero = true;
+    } else if (low_vec_seen_nonzero && !low_vec_zero_transition_logged) {
+      low_vec_zero_transition_logged = true;
+      LOG_WARN(
+          "CPU: low-vec zero transition pc=0x%08X prev=0x%08X cyc=%llu "
+          "lowB0=0x%08X lowB4=0x%08X lowB8=0x%08X lowBC=0x%08X lowC0=0x%08X "
+          "sr=0x%08X cause=0x%08X ra=0x%08X sp=0x%08X",
+          current_pc_, prev_pc_for_diag, static_cast<unsigned long long>(cycles_),
+          low_b0, low_b4, low_b8, low_bc, low_c0, cop0_sr_, cop0_cause_,
+          gpr_[31], gpr_[29]);
+      sys_->debug_log_recent_ram_writes(0x000000B0u, 0x20u, "CPU");
+    }
+  }
+
+  // COP0 status transitions (RFE/MTC0 SR) take effect with a short hazard
+  // window; do not take a fresh IRQ on the immediate following instruction.
+  const bool irq_inhibited = irq_inhibit_instructions_ != 0;
+  if (irq_inhibit_instructions_ != 0) {
+    --irq_inhibit_instructions_;
+  }
 
   // Check for hardware interrupts
   if (sys_->irq_pending()) {
     cop0_cause_ |= (1u << 10); // Set IP2 (hardware interrupt line)
+    if (g_log_fmv_diagnostics) {
+      static u32 cpu_irq_log = 0;
+      if (cpu_irq_log < 32) {
+        LOG_WARN("CPU: irq_pending -> IP2 set cause=0x%08X sr=0x%08X cyc=%llu",
+            cop0_cause_, cop0_sr_, static_cast<unsigned long long>(cycles_));
+        ++cpu_irq_log;
+      }
+    }
   } else {
     cop0_cause_ &= ~(1u << 10);
   }
 
-  if (check_irq()) {
+  if (!irq_inhibited && check_irq()) {
+    if (g_log_fmv_diagnostics) {
+      static u32 cpu_irq_entry_log = 0;
+      if (cpu_irq_entry_log < 32) {
+        LOG_WARN("CPU: IRQ entry cause=0x%08X sr=0x%08X pc=0x%08X cyc=%llu",
+            cop0_cause_, cop0_sr_, current_pc_, static_cast<unsigned long long>(cycles_));
+        ++cpu_irq_entry_log;
+      }
+      static u32 cpu_irq_entry_late_log = 0;
+      if (cycles_ >= 390000000ull && cpu_irq_entry_late_log < 256u) {
+        LOG_WARN(
+            "CPU: late IRQ entry cause=0x%08X sr=0x%08X pc=0x%08X cyc=%llu "
+            "ra=0x%08X sp=0x%08X v0=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+            cop0_cause_, cop0_sr_, current_pc_,
+            static_cast<unsigned long long>(cycles_), gpr_[31], gpr_[29],
+            gpr_[2], gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+        ++cpu_irq_entry_late_log;
+      }
+    }
     exception(Exception::Interrupt);
     apply_pending_load();
     constexpr u32 irq_cycles = 2;
@@ -788,6 +974,575 @@ u32 Cpu::step() {
     constexpr u32 fault_cycles = 2;
     cycles_ += fault_cycles;
     return fault_cycles;
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x80090540u &&
+      current_pc_ <= 0x80090610u) {
+    static u32 rr4_dma_setup_logs = 0;
+    if (rr4_dma_setup_logs < 512u) {
+      ++rr4_dma_setup_logs;
+      LOG_INFO(
+          "CPU: RR4 DMA setup pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X "
+          "t6=0x%08X t7=0x%08X t8=0x%08X t9=0x%08X sp=0x%08X ra=0x%08X "
+          "h0=0x%08X h1=0x%08X h2=0x%08X h3=0x%08X",
+          current_pc_, instruction, static_cast<unsigned long long>(cycles_),
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[13], gpr_[14],
+          gpr_[15], gpr_[24], gpr_[25], gpr_[29], gpr_[31],
+          sys_->read32(0x00141BF4u), sys_->read32(0x00141BF8u),
+          sys_->read32(0x00141BFCu), sys_->read32(0x00141C00u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x8008FC80u &&
+      current_pc_ <= 0x8008FF40u) {
+    static u32 rr4_sector_parse_logs = 0;
+    if (rr4_sector_parse_logs < 3072u) {
+      ++rr4_sector_parse_logs;
+      LOG_INFO(
+          "CPU: RR4 sector parse pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X t5=0x%08X "
+          "t6=0x%08X t7=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+          "s4=0x%08X sp=0x%08X ra=0x%08X buf0=0x%08X buf1=0x%08X "
+          "buf2=0x%08X buf3=0x%08X cdchcr=0x%08X dicr=0x%08X "
+          "st18=0x%08X st1c=0x%08X st24=0x%08X st28=0x%08X "
+          "st2c=0x%08X st30=0x%08X st34=0x%08X st38=0x%08X "
+          "st3c=0x%08X st40=0x%08X st78=0x%08X rp=0x%08X wp=0x%08X",
+          current_pc_, instruction, static_cast<unsigned long long>(cycles_),
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[13], gpr_[14],
+          gpr_[15], gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20],
+          gpr_[29], gpr_[31], sys_->read32(0x00141BF4u),
+          sys_->read32(0x00141BF8u), sys_->read32(0x00141BFCu),
+          sys_->read32(0x00141C00u), sys_->read32(0x1F8010B8u),
+          sys_->read32(0x1F8010F4u), sys_->read32(0x00110418u),
+          sys_->read32(0x0011041Cu), sys_->read32(0x00110424u),
+          sys_->read32(0x00110428u), sys_->read32(0x0011042Cu),
+          sys_->read32(0x00110430u), sys_->read32(0x00110434u),
+          sys_->read32(0x00110438u), sys_->read32(0x0011043Cu),
+          sys_->read32(0x00110440u), sys_->read32(0x00110478u),
+          sys_->read32(0x00117788u), sys_->read32(0x00127788u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x8008FD68u &&
+      current_pc_ <= 0x8008FE90u) {
+    static u32 rr4_payload_decision_logs = 0;
+    if (rr4_payload_decision_logs < 1024u) {
+      ++rr4_payload_decision_logs;
+      LOG_INFO(
+          "CPU: RR4 payload decision pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X t4=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X "
+          "h0=0x%08X h1=0x%08X h2=0x%08X h3=0x%08X "
+          "st18=0x%08X st24=0x%08X st28=0x%08X st2c=0x%08X "
+          "st30=0x%08X st34=0x%08X st38=0x%08X st3c=0x%08X "
+          "st40=0x%08X st78=0x%08X cdchcr=0x%08X dicr=0x%08X",
+          current_pc_, instruction, static_cast<unsigned long long>(cycles_),
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11], gpr_[12], gpr_[16], gpr_[17],
+          gpr_[18], gpr_[19], gpr_[29], gpr_[31], sys_->read32(0x00141BF4u),
+          sys_->read32(0x00141BF8u), sys_->read32(0x00141BFCu),
+          sys_->read32(0x00141C00u), sys_->read32(0x00110418u),
+          sys_->read32(0x00110424u), sys_->read32(0x00110428u),
+          sys_->read32(0x0011042Cu), sys_->read32(0x00110430u),
+          sys_->read32(0x00110434u), sys_->read32(0x00110438u),
+          sys_->read32(0x0011043Cu), sys_->read32(0x00110440u),
+          sys_->read32(0x00110478u), sys_->read32(0x1F8010B8u),
+          sys_->read32(0x1F8010F4u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x8008F9D0u &&
+      current_pc_ <= 0x8008FA40u) {
+    static u32 rr4_post_parse_logs = 0;
+    if (rr4_post_parse_logs < 768u) {
+      ++rr4_post_parse_logs;
+      LOG_INFO(
+          "CPU: RR4 post-parse pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X s0=0x%08X s1=0x%08X "
+          "s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X "
+          "st0=0x%08X st1=0x%08X st2=0x%08X st3=0x%08X st4=0x%08X "
+          "rp=0x%08X wp=0x%08X",
+          current_pc_, instruction, static_cast<unsigned long long>(cycles_),
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[29], gpr_[31], sys_->read32(0x00110400u),
+          sys_->read32(0x00110404u), sys_->read32(0x00110424u),
+          sys_->read32(0x00110428u), sys_->read32(0x00110438u),
+          sys_->read32(0x00117788u), sys_->read32(0x00127788u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000C80u &&
+      current_pc_ <= 0x00000E40u) {
+    static u32 low_runtime_log_count = 0;
+    static bool low_runtime_active = false;
+    static bool low_runtime_full_dumped = false;
+    const bool came_from_outside =
+        !(prev_pc_for_diag >= 0x00000C80u && prev_pc_for_diag <= 0x00000E40u);
+    if (came_from_outside) {
+      low_runtime_active = false;
+    }
+    if (!low_runtime_full_dumped) {
+      low_runtime_full_dumped = true;
+      for (u32 base = 0x00000C80u; base <= 0x00000E30u; base += 0x10u) {
+        LOG_WARN(
+            "CPU: low-runtime full %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            base + 0x00u, sys_->read32(base + 0x00u), base + 0x04u,
+            sys_->read32(base + 0x04u), base + 0x08u, sys_->read32(base + 0x08u),
+            base + 0x0Cu, sys_->read32(base + 0x0Cu));
+      }
+    }
+    if (!low_runtime_active && low_runtime_log_count < 24u) {
+      low_runtime_active = true;
+      ++low_runtime_log_count;
+      const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: entered low-runtime prev_pc=0x%08X pc=0x%08X instr=0x%08X "
+          "sp=0x%08X ra=0x%08X v0=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31],
+          gpr_[2], gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+      LOG_WARN(
+          "CPU: low-runtime s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+          "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X",
+          gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21],
+          gpr_[22], gpr_[23]);
+      LOG_WARN(
+          "CPU: low-runtime code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+          sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+          sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+          sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+          sys_->read32(phys_pc + 0x08u));
+      log_stack_window(sys_, "CPU: low-runtime frame", gpr_[29]);
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000DE8u &&
+      current_pc_ <= 0x00000E3Cu && cycles_ >= 780000000ull) {
+    static u32 late_low_loop_logs = 0;
+    if (late_low_loop_logs < 160u) {
+      ++late_low_loop_logs;
+      const u32 s6 = gpr_[22];
+      const bool s6_ram = is_main_ram_addr(s6);
+      const u32 next0 = s6_ram ? sys_->read32(s6 + 0x00u) : 0xFFFFFFFFu;
+      const u32 next4 = s6_ram ? sys_->read32(s6 + 0x04u) : 0xFFFFFFFFu;
+      const u32 next8 = s6_ram ? sys_->read32(s6 + 0x08u) : 0xFFFFFFFFu;
+      const u32 low10 = sys_->read32(0x00000010u);
+      const u32 low18 = sys_->read32(0x00000018u);
+      const u32 bridge0 = sys_->read32(0x800A6540u);
+      const u32 bridge4 = sys_->read32(0x800A6544u);
+      const u32 bridge8 = sys_->read32(0x800A6548u);
+      LOG_WARN(
+          "CPU: late low-loop prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "s6=0x%08X [0]=0x%08X [4]=0x%08X [8]=0x%08X "
+          "s0=0x%08X s1=0x%08X s3=0x%08X s4=0x%08X "
+          "v0=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "low[10]=0x%08X low[18]=0x%08X "
+          "bridge=[0x%08X,0x%08X,0x%08X]",
+          prev_pc_for_diag,
+          current_pc_, instruction, static_cast<unsigned long long>(cycles_),
+          s6, next0, next4, next8, gpr_[16], gpr_[17], gpr_[19], gpr_[20],
+          gpr_[2], gpr_[4], gpr_[5], gpr_[6], gpr_[7], low10, low18, bridge0,
+          bridge4, bridge8);
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x80082E80u &&
+      current_pc_ <= 0x80082F10u && cycles_ >= 780000000ull) {
+    static u32 rr4_callback2_logs = 0;
+    if (rr4_callback2_logs < 192u) {
+      ++rr4_callback2_logs;
+      LOG_WARN(
+          "CPU: rr4-cb exec prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X sp=0x%08X ra=0x%08X "
+          "low[10]=0x%08X low[18]=0x%08X node=[0x%08X,0x%08X,0x%08X] bridge=[0x%08X,0x%08X,0x%08X]",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[22], gpr_[29], gpr_[31], sys_->read32(0x00000010u),
+          sys_->read32(0x00000018u), sys_->read32(0x800A6518u),
+          sys_->read32(0x800A651Cu), sys_->read32(0x800A6520u),
+          sys_->read32(0x800A6540u), sys_->read32(0x800A6544u),
+          sys_->read32(0x800A6548u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000EA0u &&
+      current_pc_ <= 0x00000EE0u && cycles_ >= 780000000ull) {
+    static u32 late_low_dispatcher_logs = 0;
+    if (late_low_dispatcher_logs < 128u) {
+      ++late_low_dispatcher_logs;
+      const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: late low-dispatcher prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X sp=0x%08X ra=0x%08X "
+          "low[10]=0x%08X low[18]=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[22], gpr_[29], gpr_[31], sys_->read32(0x10u),
+          sys_->read32(0x18u));
+      LOG_WARN(
+          "CPU: late low-dispatcher code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+          sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+          sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+          sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+          sys_->read32(phys_pc + 0x08u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000E00u &&
+      current_pc_ <= 0x00000E10u && cycles_ >= 780000000ull) {
+    static u32 late_low_callsite_logs = 0;
+    if (late_low_callsite_logs < 128u) {
+      ++late_low_callsite_logs;
+      LOG_WARN(
+          "CPU: late low-callsite prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[22], gpr_[31]);
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000C90u &&
+      current_pc_ <= 0x00000CA4u && cycles_ >= 900000000ull) {
+    static u32 low_k0_chain_logs = 0;
+    if (low_k0_chain_logs < 192u) {
+      ++low_k0_chain_logs;
+      const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: low-k0 chain prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "k0=0x%08X k1=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X "
+          "a2=0x%08X a3=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[26], gpr_[27], gpr_[2],
+          gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[17], gpr_[18],
+          gpr_[19], gpr_[29], gpr_[31]);
+      LOG_WARN(
+          "CPU: low-k0 mem %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00000100u, sys_->read32(0x00000100u), 0x00000108u,
+          sys_->read32(0x00000108u), 0x00000110u, sys_->read32(0x00000110u),
+          0x00000118u, sys_->read32(0x00000118u), 0x00000120u,
+          sys_->read32(0x00000120u));
+      LOG_WARN(
+          "CPU: low-k0 code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+          sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+          sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+          sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+          sys_->read32(phys_pc + 0x08u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x00000CA0u &&
+      current_pc_ <= 0x00000CB8u && cycles_ >= 800000000ull &&
+      sys_->read32(0x10u) == 0x800A6518u) {
+    static u32 low_dispatch_window_logs = 0;
+    if (low_dispatch_window_logs < 96u) {
+      ++low_dispatch_window_logs;
+      const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: low-dispatch prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s6=0x%08X "
+          "sp=0x%08X ra=0x%08X low[10]=0x%08X low[18]=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[20], gpr_[22], gpr_[29], gpr_[31], sys_->read32(0x10u),
+          sys_->read32(0x18u));
+      LOG_WARN(
+          "CPU: low-dispatch code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+          sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+          sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+          sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+          sys_->read32(phys_pc + 0x08u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x8008B8E8u &&
+      current_pc_ <= 0x8008B954u && cycles_ >= 399000000ull) {
+    static u32 rr4_node_window_logs = 0;
+    const u32 node_word0 = sys_->read32(0x800A6518u);
+    if ((node_word0 != 0u || current_pc_ == 0x8008B8FCu ||
+         current_pc_ == 0x8008B94Cu) &&
+        rr4_node_window_logs < 192u) {
+      ++rr4_node_window_logs;
+      LOG_WARN(
+          "CPU: rr4-node window prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X sp=0x%08X ra=0x%08X "
+          "node[0]=0x%08X q0=0x%08X q1=0x%08X low[10]=0x%08X low[18]=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[22], gpr_[29], gpr_[31], node_word0, sys_->read32(0x800A5480u),
+          sys_->read32(0x800A5488u), sys_->read32(0x10u), sys_->read32(0x18u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && cycles_ >= 930000000ull &&
+      ((current_pc_ >= 0x8008B8E8u && current_pc_ <= 0x8008B95Cu) ||
+       (current_pc_ >= 0x800970B0u && current_pc_ <= 0x80097110u))) {
+    static bool rr4_late_code_dumped = false;
+    static u32 rr4_late_path_logs = 0;
+    if (!rr4_late_code_dumped) {
+      rr4_late_code_dumped = true;
+      const u32 low_b0 = sys_->read32(0x000000B0u);
+      const u32 low_b4 = sys_->read32(0x000000B4u);
+      const u32 low_b8 = sys_->read32(0x000000B8u);
+      const u32 low_bc = sys_->read32(0x000000BCu);
+      const u32 low_c0 = sys_->read32(0x000000C0u);
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B8E8u, sys_->read32(0x8008B8E8u), 0x0008B8ECu,
+          sys_->read32(0x8008B8ECu), 0x0008B8F0u, sys_->read32(0x8008B8F0u),
+          0x0008B8F4u, sys_->read32(0x8008B8F4u), 0x0008B8F8u,
+          sys_->read32(0x8008B8F8u));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B8FCu, sys_->read32(0x8008B8FCu), 0x0008B900u,
+          sys_->read32(0x8008B900u), 0x0008B904u, sys_->read32(0x8008B904u),
+          0x0008B908u, sys_->read32(0x8008B908u), 0x0008B90Cu,
+          sys_->read32(0x8008B90Cu));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B910u, sys_->read32(0x8008B910u), 0x0008B914u,
+          sys_->read32(0x8008B914u), 0x0008B918u, sys_->read32(0x8008B918u),
+          0x0008B91Cu, sys_->read32(0x8008B91Cu), 0x0008B920u,
+          sys_->read32(0x8008B920u));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B924u, sys_->read32(0x8008B924u), 0x0008B928u,
+          sys_->read32(0x8008B928u), 0x0008B92Cu, sys_->read32(0x8008B92Cu),
+          0x0008B930u, sys_->read32(0x8008B930u), 0x0008B934u,
+          sys_->read32(0x8008B934u));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B938u, sys_->read32(0x8008B938u), 0x0008B93Cu,
+          sys_->read32(0x8008B93Cu), 0x0008B940u, sys_->read32(0x8008B940u),
+          0x0008B944u, sys_->read32(0x8008B944u), 0x0008B948u,
+          sys_->read32(0x8008B948u));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x0008B94Cu, sys_->read32(0x8008B94Cu), 0x0008B950u,
+          sys_->read32(0x8008B950u), 0x0008B954u, sys_->read32(0x8008B954u),
+          0x0008B958u, sys_->read32(0x8008B958u), 0x0008B95Cu,
+          sys_->read32(0x8008B95Cu));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000970B0u, sys_->read32(0x800970B0u), 0x000970B4u,
+          sys_->read32(0x800970B4u), 0x000970B8u, sys_->read32(0x800970B8u),
+          0x000970BCu, sys_->read32(0x800970BCu), 0x000970C0u,
+          sys_->read32(0x800970C0u));
+      LOG_WARN(
+          "CPU: rr4-late code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000970C4u, sys_->read32(0x800970C4u), 0x000970C8u,
+          sys_->read32(0x800970C8u), 0x000970CCu, sys_->read32(0x800970CCu),
+          0x000970D0u, sys_->read32(0x800970D0u), 0x000970D4u,
+          sys_->read32(0x800970D4u));
+      LOG_WARN(
+          "CPU: rr4-late lowvec %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000000B0u, low_b0, 0x000000B4u, low_b4, 0x000000B8u, low_b8,
+          0x000000BCu, low_bc, 0x000000C0u, low_c0);
+      if (low_b0 == 0u && low_b4 == 0u && low_b8 == 0u && low_bc == 0u &&
+          low_c0 == 0u) {
+        sys_->debug_log_recent_ram_writes(0x000000B0u, 0x20u, "CPU");
+      }
+    }
+    if (rr4_late_path_logs < 192u) {
+      ++rr4_late_path_logs;
+      LOG_WARN(
+          "CPU: rr4-late path prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X sp=0x%08X ra=0x%08X "
+          "node0=0x%08X node4=0x%08X node8=0x%08X low10=0x%08X low18=0x%08X "
+          "lowB0=0x%08X lowB4=0x%08X lowB8=0x%08X lowBC=0x%08X lowC0=0x%08X "
+          "sr=0x%08X cause=0x%08X irq=%d",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10], gpr_[16],
+          gpr_[17], gpr_[18], gpr_[19], gpr_[22], gpr_[29], gpr_[31],
+          sys_->read32(0x800A6518u), sys_->read32(0x800A651Cu),
+          sys_->read32(0x800A6520u), sys_->read32(0x10u), sys_->read32(0x18u),
+          sys_->read32(0x000000B0u), sys_->read32(0x000000B4u),
+          sys_->read32(0x000000B8u), sys_->read32(0x000000BCu),
+          sys_->read32(0x000000C0u), cop0_sr_, cop0_cause_,
+          sys_->irq_pending() ? 1 : 0);
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x80116CC0u &&
+      current_pc_ <= 0x80116D20u) {
+    static bool logged_rr4_lowclr_entry = false;
+    if (!logged_rr4_lowclr_entry) {
+      logged_rr4_lowclr_entry = true;
+      LOG_WARN(
+          "CPU: rr4-lowclr entry prev_pc=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "sp=0x%08X ra=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X s0=0x%08X s1=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[29], gpr_[31],
+          gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8],
+          gpr_[9], gpr_[10], gpr_[11], gpr_[16], gpr_[17]);
+      LOG_WARN(
+          "CPU: rr4-lowclr code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116CC0u, sys_->read32(0x00116CC0u), 0x00116CC4u,
+          sys_->read32(0x00116CC4u), 0x00116CC8u, sys_->read32(0x00116CC8u),
+          0x00116CCCu, sys_->read32(0x00116CCCu), 0x00116CD0u,
+          sys_->read32(0x00116CD0u));
+      LOG_WARN(
+          "CPU: rr4-lowclr code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116CD4u, sys_->read32(0x00116CD4u), 0x00116CD8u,
+          sys_->read32(0x00116CD8u), 0x00116CDCu, sys_->read32(0x00116CDCu),
+          0x00116CE0u, sys_->read32(0x00116CE0u), 0x00116CE4u,
+          sys_->read32(0x00116CE4u));
+      LOG_WARN(
+          "CPU: rr4-lowclr code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116CE8u, sys_->read32(0x00116CE8u), 0x00116CECu,
+          sys_->read32(0x00116CECu), 0x00116CF0u, sys_->read32(0x00116CF0u),
+          0x00116CF4u, sys_->read32(0x00116CF4u), 0x00116CF8u,
+          sys_->read32(0x00116CF8u));
+      LOG_WARN(
+          "CPU: rr4-lowclr code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116CFCu, sys_->read32(0x00116CFCu), 0x00116D00u,
+          sys_->read32(0x00116D00u), 0x00116D04u, sys_->read32(0x00116D04u),
+          0x00116D08u, sys_->read32(0x00116D08u), 0x00116D0Cu,
+          sys_->read32(0x00116D0Cu));
+      LOG_WARN(
+          "CPU: rr4-lowclr code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00116D10u, sys_->read32(0x00116D10u), 0x00116D14u,
+          sys_->read32(0x00116D14u), 0x00116D18u, sys_->read32(0x00116D18u),
+          0x00116D1Cu, sys_->read32(0x00116D1Cu), 0x00116D20u,
+          sys_->read32(0x00116D20u));
+    }
+    static bool logged_rr4_lowclr_lowdest = false;
+    const u32 a1_phys = gpr_[5] & 0x1FFFFFFFu;
+    if (!logged_rr4_lowclr_lowdest && a1_phys < 0x00000200u &&
+        current_pc_ >= 0x80116D0Cu && current_pc_ <= 0x80116D14u) {
+      logged_rr4_lowclr_lowdest = true;
+      LOG_WARN(
+          "CPU: rr4-lowclr lowdest prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X "
+          "t2=0x%08X t3=0x%08X v0=0x%08X v1=0x%08X ra=0x%08X sp=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[4], gpr_[5], gpr_[6],
+          gpr_[7], gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[2], gpr_[3],
+          gpr_[31], gpr_[29]);
+      LOG_WARN(
+          "CPU: rr4-lowclr src %08X=%08X %08X=%08X %08X=%08X %08X=%08X "
+          "%08X=%08X",
+          (gpr_[4] - 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] - 0x08u),
+          (gpr_[4] - 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] - 0x04u),
+          (gpr_[4] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x00u),
+          (gpr_[4] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x04u),
+          (gpr_[4] + 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[4] + 0x08u));
+      LOG_WARN(
+          "CPU: rr4-lowclr dst %08X=%08X %08X=%08X %08X=%08X %08X=%08X "
+          "%08X=%08X",
+          (gpr_[5] - 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x08u),
+          (gpr_[5] - 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x04u),
+          (gpr_[5] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x00u),
+          (gpr_[5] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x04u),
+          (gpr_[5] + 0x08u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x08u));
+      sys_->debug_log_recent_ram_writes(gpr_[5], 0x20u, "CPU");
+    }
+  }
+
+  if (g_log_fmv_diagnostics &&
+      ((gpr_[10] == 0x000000B0u && (gpr_[9] == 0x00000017u || gpr_[9] == 0x00000018u)) ||
+       current_pc_ == 0x000000B0u || current_pc_ == 0x000000C0u) &&
+      cycles_ >= 390000000ull) {
+    static u32 rr4_bios_trampoline_logs = 0;
+    if (rr4_bios_trampoline_logs < 192u) {
+      ++rr4_bios_trampoline_logs;
+      LOG_WARN(
+          "CPU: bios-call pc=0x%08X prev=0x%08X instr=0x%08X cyc=%llu "
+          "t1=0x%08X t2=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X "
+          "a2=0x%08X a3=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+          "sp=0x%08X ra=0x%08X sr=0x%08X cause=0x%08X irq=%d",
+          current_pc_, prev_pc_for_diag, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[9], gpr_[10], gpr_[2],
+          gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17],
+          gpr_[18], gpr_[19], gpr_[29], gpr_[31], cop0_sr_, cop0_cause_,
+          sys_->irq_pending() ? 1 : 0);
+    }
+  }
+
+  if (g_log_fmv_diagnostics && current_pc_ >= 0x800A5480u &&
+      current_pc_ <= 0x800A54C0u && cycles_ >= 780000000ull) {
+    static u32 rr4_callback_logs = 0;
+    static bool rr4_callback_dumped_code = false;
+    if (!rr4_callback_dumped_code) {
+      rr4_callback_dumped_code = true;
+      LOG_WARN(
+          "CPU: rr4-callback code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000A5480u, sys_->read32(0x800A5480u), 0x000A5484u,
+          sys_->read32(0x800A5484u), 0x000A5488u, sys_->read32(0x800A5488u),
+          0x000A548Cu, sys_->read32(0x800A548Cu), 0x000A5490u,
+          sys_->read32(0x800A5490u));
+      LOG_WARN(
+          "CPU: rr4-callback code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x000A5494u, sys_->read32(0x800A5494u), 0x000A5498u,
+          sys_->read32(0x800A5498u), 0x000A549Cu, sys_->read32(0x800A549Cu),
+          0x000A54A0u, sys_->read32(0x800A54A0u), 0x000A54A4u,
+          sys_->read32(0x800A54A4u));
+    }
+    if (rr4_callback_logs < 192u) {
+      ++rr4_callback_logs;
+      LOG_WARN(
+          "CPU: rr4-callback prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X sp=0x%08X ra=0x%08X "
+          "node0=0x%08X node4=0x%08X node8=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[16], gpr_[17], gpr_[18], gpr_[19],
+          gpr_[22], gpr_[29], gpr_[31], sys_->read32(0x800A6518u),
+          sys_->read32(0x800A651Cu), sys_->read32(0x800A6520u));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && cycles_ >= 835000000ull &&
+      ((current_pc_ >= 0x8008B8F0u && current_pc_ <= 0x8008B954u) ||
+       (current_pc_ >= 0x00000DE0u && current_pc_ <= 0x00000E30u))) {
+    static u32 rr4_fault_window_logs = 0;
+    if (rr4_fault_window_logs < 192u) {
+      ++rr4_fault_window_logs;
+      const u32 node_head = sys_->read32(0x800A6518u);
+      const u32 q0 = sys_->read32(0x800A5480u);
+      const u32 q1 = sys_->read32(0x800A5488u);
+      const u32 low0 = sys_->read32(0x00000000u);
+      const u32 low8 = sys_->read32(0x00000008u);
+      const u32 low10 = sys_->read32(0x00000010u);
+      const u32 low18 = sys_->read32(0x00000018u);
+      LOG_WARN(
+          "CPU: rr4 fault-window prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "sr=0x%08X cause=0x%08X irq=%d sp=0x%08X ra=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X "
+          "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "node=0x%08X q0=0x%08X q1=0x%08X low[0]=0x%08X low[8]=0x%08X low[10]=0x%08X low[18]=0x%08X",
+          prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), cop0_sr_, cop0_cause_,
+          sys_->irq_pending() ? 1 : 0, gpr_[29], gpr_[31], gpr_[16], gpr_[17],
+          gpr_[18], gpr_[19], gpr_[22], gpr_[4], gpr_[5], gpr_[6], gpr_[7],
+          node_head, q0, q1, low0, low8, low10, low18);
+    }
   }
 
   if (cpu_diag) {
@@ -849,6 +1604,28 @@ u32 Cpu::step() {
         log_stack_window(sys_, "CPU: implausible pc frame", gpr_[29]);
       }
     }
+    if (current_pc_ < 0x00002000u && !is_known_low_exec_addr(current_pc_)) {
+      static u32 low_exec_log_count = 0;
+      static u32 last_low_exec_pc = 0xFFFFFFFFu;
+      if (current_pc_ != last_low_exec_pc && low_exec_log_count < 32u) {
+        last_low_exec_pc = current_pc_;
+        ++low_exec_log_count;
+        const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+        LOG_WARN(
+            "CPU: entered unexpected low exec prev_pc=0x%08X pc=0x%08X "
+            "instr=0x%08X sp=0x%08X ra=0x%08X epc=0x%08X cause=0x%08X",
+            prev_pc_for_diag, current_pc_, instruction, gpr_[29], gpr_[31],
+            cop0_epc_, cop0_cause_);
+        LOG_WARN(
+            "CPU: low exec code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+            sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+            sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+            sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+            sys_->read32(phys_pc + 0x08u));
+        log_stack_window(sys_, "CPU: low exec frame", gpr_[29]);
+      }
+    }
     if (current_pc_ == 0x00000000u) {
       log_zero_pc_execution(sys_, instruction, gpr_, cop0_sr_, cop0_cause_,
                             cop0_epc_);
@@ -872,6 +1649,39 @@ u32 Cpu::step() {
           sys_->read32(0x000152B4u), 0x000152B8u, sys_->read32(0x000152B8u));
       log_stack_window(sys_, "CPU: caller frame", gpr_[29]);
     }
+    }
+    if (g_log_fmv_diagnostics && current_pc_ >= 0x80115240u &&
+        current_pc_ <= 0x80115270u) {
+      static bool logged_rr4_lowclr_caller = false;
+      if (!logged_rr4_lowclr_caller) {
+        logged_rr4_lowclr_caller = true;
+        LOG_WARN(
+            "CPU: rr4-lowclr caller prev_pc=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+            "sp=0x%08X ra=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+            "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X",
+            prev_pc_for_diag, current_pc_, instruction,
+            static_cast<unsigned long long>(cycles_), gpr_[29], gpr_[31],
+            gpr_[2], gpr_[3], gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[16],
+            gpr_[17], gpr_[18], gpr_[19]);
+        LOG_WARN(
+            "CPU: rr4-lowclr caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            0x00115240u, sys_->read32(0x00115240u), 0x00115244u,
+            sys_->read32(0x00115244u), 0x00115248u, sys_->read32(0x00115248u),
+            0x0011524Cu, sys_->read32(0x0011524Cu), 0x00115250u,
+            sys_->read32(0x00115250u));
+        LOG_WARN(
+            "CPU: rr4-lowclr caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            0x00115254u, sys_->read32(0x00115254u), 0x00115258u,
+            sys_->read32(0x00115258u), 0x0011525Cu, sys_->read32(0x0011525Cu),
+            0x00115260u, sys_->read32(0x00115260u), 0x00115264u,
+            sys_->read32(0x00115264u));
+        LOG_WARN(
+            "CPU: rr4-lowclr caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            0x00115268u, sys_->read32(0x00115268u), 0x0011526Cu,
+            sys_->read32(0x0011526Cu), 0x00115270u, sys_->read32(0x00115270u),
+            0x00115274u, sys_->read32(0x00115274u), 0x00115278u,
+            sys_->read32(0x00115278u));
+      }
     }
     if (current_pc_ >= 0x8001EC98u && current_pc_ <= 0x8001ECC0u) {
     static bool logged_low_helper_chain_entry = false;
@@ -1105,18 +1915,26 @@ u32 Cpu::step() {
         (dst_phys >= 0x000023D0u && dst_phys <= 0x00002980u);
     const bool dst_is_stack_top =
         (gpr_[5] >= 0x801FFF00u && gpr_[5] < 0x80200000u);
+    const bool dst_is_low_table =
+        (dst_phys >= 0x00000100u && dst_phys < 0x00000120u);
     static bool logged_zero_helper_low = false;
     static bool logged_zero_helper_stack = false;
+    static bool logged_zero_helper_low_table = false;
     const bool should_log_low = came_from_outside && dst_is_low_helper &&
                                 !logged_zero_helper_low;
     const bool should_log_stack = came_from_outside && dst_is_stack_top &&
                                   !logged_zero_helper_stack;
-    if (should_log_low || should_log_stack) {
+    const bool should_log_low_table =
+        came_from_outside && dst_is_low_table && !logged_zero_helper_low_table;
+    if (should_log_low || should_log_stack || should_log_low_table) {
       if (should_log_low) {
         logged_zero_helper_low = true;
       }
       if (should_log_stack) {
         logged_zero_helper_stack = true;
+      }
+      if (should_log_low_table) {
+        logged_zero_helper_low_table = true;
       }
       LOG_WARN(
           "CPU: zero-helper entry prev_pc=0x%08X pc=0x%08X instr=0x%08X sp=0x%08X ra=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X v0=0x%08X v1=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X",
@@ -1146,6 +1964,19 @@ u32 Cpu::step() {
           (gpr_[5] - 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] - 0x04u),
           (gpr_[5] + 0x00u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x00u),
           (gpr_[5] + 0x04u) & 0x1FFFFFFFu, sys_->read32(gpr_[5] + 0x04u));
+      if (should_log_low_table) {
+        const u32 caller = gpr_[31] - 8u;
+        LOG_WARN(
+            "CPU: zero-helper low-table dst=0x%08X len=0x%08X caller=0x%08X src=0x%08X",
+            dst_phys, gpr_[6], caller, gpr_[4]);
+        LOG_WARN(
+            "CPU: zero-helper caller code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            caller - 0x08u, sys_->read32(caller - 0x08u), caller - 0x04u,
+            sys_->read32(caller - 0x04u), caller + 0x00u,
+            sys_->read32(caller + 0x00u), caller + 0x04u,
+            sys_->read32(caller + 0x04u), caller + 0x08u,
+            sys_->read32(caller + 0x08u));
+      }
       sys_->debug_log_recent_ram_writes(gpr_[4], 0x40u);
       sys_->debug_log_recent_ram_writes(gpr_[5], 0x40u);
       if (dst_is_low_helper) {
@@ -1276,6 +2107,22 @@ u32 Cpu::step() {
       if (trace_step_counter <= static_cast<u64>(g_trace_burst_cpu) ||
           (g_trace_stride_cpu > 0 &&
            (trace_step_counter % static_cast<u64>(g_trace_stride_cpu)) == 0)) {
+        // ------------------------------------------------------------
+        // Extra diagnostic for a “stuck in NOP loop” situation.
+        // The BIOS often polls a flag by executing a series of NOPs
+        // (instr == 0x00000000) while the PC marches forward.
+        // When we see that pattern we dump the key registers so we
+        // can see what the BIOS is waiting on.
+        // ------------------------------------------------------------
+        if (instruction == 0u && (current_pc_ & 0x80000000u)) {
+            LOG_CAT_DEBUG(LogCategory::Cpu,
+                "NOP LOOP DETECTED: pc=0x%08X instr=0x%08X "
+                "v0=%08X v1=%08X a0=%08X a1=%08X "
+                "sr=%08X cause=%08X",
+                current_pc_, instruction,
+                gpr_[2], gpr_[3], gpr_[4], gpr_[5],
+                cop0_sr_, cop0_cause_);
+        }
         LOG_CAT_DEBUG(LogCategory::Cpu,
             "CPU: step=%llu pc=0x%08X instr=0x%08X sr=0x%08X cause=0x%08X",
             static_cast<unsigned long long>(trace_step_counter), current_pc_,
@@ -1303,7 +2150,10 @@ u32 Cpu::step() {
   }
 
   const u32 consumed_cycles = instruction_cycles(instruction) + cycle_penalty_;
+
+
   cycles_ += consumed_cycles;
+
   prev_pc_for_diag = current_pc_;
   return consumed_cycles;
 }
@@ -1509,6 +2359,7 @@ void Cpu::op_special(u32 i) {
     op_mtlo(i);
     break;
   case 0x14:
+  case 0x1C:
     // Seen in some title startup loops; treat as benign no-op for compatibility.
     break;
   case 0x18:
@@ -1547,11 +2398,45 @@ void Cpu::op_special(u32 i) {
   case 0x27:
     op_nor(i);
     break;
+  case 0x28:
+  case 0x29:
+    // Seen in some post-exception compatibility paths with zeroed operands.
+    // Treat as benign no-ops instead of cascading into a reserved-instruction
+    // loop that prevents the title from recovering.
+    break;
   case 0x2A:
     op_slt(i);
     break;
   case 0x2B:
     op_sltu(i);
+    break;
+  case 0x2C:
+    // Some titles/handlers reach later-MIPS DADD opcodes. We only model
+    // 32-bit GPRs, so treat these as their 32-bit arithmetic equivalents.
+    op_add(i);
+    break;
+  case 0x2D:
+    op_addu(i);
+    break;
+  case 0x2E:
+    op_sub(i);
+    break;
+  case 0x2F:
+    op_subu(i);
+    break;
+  case 0x30:
+  case 0x31:
+  case 0x32:
+  case 0x33:
+  case 0x34:
+  case 0x36:
+    op_trap_special(i);
+    break;
+  case 0x38:
+    // Later-MIPS DSLL32 on a 32-bit core model. For the low 32 bits we keep,
+    // shifting by 32+ always clears the result. This matches the observed
+    // startup/exception probe pattern without raising ReservedInst forever.
+    set_reg(rd(i), 0);
     break;
   default:
     if (g_experimental_unhandled_special_returns_zero) {
@@ -1700,6 +2585,38 @@ void Cpu::op_movn(u32 i) {
 
 void Cpu::op_sync(u32 /*i*/) {
   // In-order single-core emulation: nothing to serialize.
+}
+
+void Cpu::op_trap_special(u32 i) {
+  const u32 lhs = gpr_[rs(i)];
+  const u32 rhs = gpr_[rt(i)];
+  bool trap = false;
+  switch (funct(i)) {
+  case 0x30:
+    trap = static_cast<s32>(lhs) >= static_cast<s32>(rhs);
+    break;
+  case 0x31:
+    trap = lhs >= rhs;
+    break;
+  case 0x32:
+    trap = static_cast<s32>(lhs) < static_cast<s32>(rhs);
+    break;
+  case 0x33:
+    trap = lhs < rhs;
+    break;
+  case 0x34:
+    trap = lhs == rhs;
+    break;
+  case 0x36:
+    trap = lhs != rhs;
+    break;
+  default:
+    exception(Exception::ReservedInst);
+    return;
+  }
+  if (trap) {
+    exception(Exception::Trap);
+  }
 }
 
 void Cpu::op_j(u32 i) {
@@ -1956,6 +2873,22 @@ void Cpu::op_lhu(u32 i) {
 
 void Cpu::op_lw(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
+  const u32 phys = addr & 0x1FFFFFFFu;
+  if (g_log_fmv_diagnostics && phys == 0x000A6518u &&
+      cycles_ >= 835000000ull) {
+    static u32 rr4_node_load32_fault_window_logs = 0;
+    if (rr4_node_load32_fault_window_logs < 160u) {
+      ++rr4_node_load32_fault_window_logs;
+      LOG_WARN(
+          "CPU: rr4-node LW-fault pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+          "s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X ra=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), static_cast<int>(simm(i)), addr,
+          cop0_sr_, cop0_cause_, sys_->irq_pending() ? 1 : 0, gpr_[17],
+          gpr_[18], gpr_[19], gpr_[22], gpr_[31]);
+    }
+  }
   u32 val = load32(addr);
   if (exception_raised_)
     return;
@@ -2029,6 +2962,30 @@ void Cpu::op_lwr(u32 i) {
 void Cpu::op_sb(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
   const u32 phys = addr & 0x1FFFFFFFu;
+  if (g_log_fmv_diagnostics && phys >= 0x000A6500u && phys < 0x000A6540u) {
+    static u32 rr4_node_store8_logs = 0;
+    if (rr4_node_store8_logs < 128u) {
+      ++rr4_node_store8_logs;
+      LOG_WARN(
+          "CPU: rr4-node SB pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr);
+    }
+  }
+  if (g_log_fmv_diagnostics && phys >= 0x000A6540u && phys < 0x000A6550u) {
+    static u32 rr4_bridge_store8_logs = 0;
+    if (rr4_bridge_store8_logs < 64u) {
+      ++rr4_bridge_store8_logs;
+      LOG_WARN(
+          "CPU: rr4-bridge SB pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr);
+    }
+  }
   if (cpu_diag_enabled() && current_pc_ == 0xBFC02B7Cu &&
       phys >= 0x00047680u && phys < 0x000476C0u) {
     static u32 bios_low_stub_sb_log_count = 0;
@@ -2049,12 +3006,162 @@ void Cpu::op_sb(u32 i) {
 
 void Cpu::op_sh(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
+  const u32 phys = addr & 0x1FFFFFFFu;
+  if (g_log_fmv_diagnostics && phys >= 0x000A6500u && phys < 0x000A6540u) {
+    static u32 rr4_node_store16_logs = 0;
+    if (rr4_node_store16_logs < 128u) {
+      ++rr4_node_store16_logs;
+      LOG_WARN(
+          "CPU: rr4-node SH pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr);
+    }
+  }
+  if (g_log_fmv_diagnostics && phys >= 0x000A6540u && phys < 0x000A6550u) {
+    static u32 rr4_bridge_store16_logs = 0;
+    if (rr4_bridge_store16_logs < 64u) {
+      ++rr4_bridge_store16_logs;
+      LOG_WARN(
+          "CPU: rr4-bridge SH pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr);
+    }
+  }
   store16(addr, static_cast<u16>(gpr_[rt(i)]));
 }
 
 void Cpu::op_sw(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
-  store32(addr, gpr_[rt(i)]);
+  const u32 phys = addr & 0x1FFFFFFFu;
+  u32 store_val = gpr_[rt(i)];
+  if (g_log_fmv_diagnostics && phys < 0x00000040u) {
+    static u32 low_slot_store32_logs = 0;
+    if (low_slot_store32_logs < 96u) {
+      ++low_slot_store32_logs;
+      LOG_WARN(
+          "CPU: low-slot SW pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+          "s1=0x%08X s2=0x%08X s3=0x%08X ra=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr, cop0_sr_, cop0_cause_, sys_->irq_pending() ? 1 : 0,
+          gpr_[17], gpr_[18], gpr_[19], gpr_[31]);
+    }
+    if ((phys == 0x00000010u || phys == 0x00000018u) &&
+        cycles_ >= 1000000000ull) {
+      static u32 low_slot_store32_late_logs = 0;
+      if (low_slot_store32_late_logs < 96u) {
+        ++low_slot_store32_late_logs;
+        LOG_WARN(
+            "CPU: low-slot SW-late pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+            "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+            "s1=0x%08X s2=0x%08X s3=0x%08X ra=0x%08X",
+            current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+            static_cast<unsigned>(rt(i)), gpr_[rt(i)],
+            static_cast<int>(simm(i)), addr, cop0_sr_, cop0_cause_,
+            sys_->irq_pending() ? 1 : 0, gpr_[17], gpr_[18], gpr_[19],
+            gpr_[31]);
+    }
+  }
+  if (g_log_fmv_diagnostics && phys >= 0x000000B0u && phys <= 0x000000C0u) {
+    static u32 low_vec_store32_logs = 0;
+    if (low_vec_store32_logs < 128u) {
+      ++low_vec_store32_logs;
+      LOG_WARN(
+          "CPU: low-vec SW pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+          "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr, cop0_sr_, cop0_cause_, sys_->irq_pending() ? 1 : 0, gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[31]);
+    }
+  }
+  const bool low_slot_focus =
+      (phys == 0x00000010u && gpr_[rt(i)] == 0x800A6518u) ||
+        (phys == 0x00000018u &&
+         (gpr_[rt(i)] == 0x00000001u || gpr_[rt(i)] == 0x801A9530u));
+    if (low_slot_focus) {
+      static u32 low_slot_store32_focus_logs = 0;
+      if (low_slot_store32_focus_logs < 64u) {
+        ++low_slot_store32_focus_logs;
+        LOG_WARN(
+            "CPU: low-slot SW-focus pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+            "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+            "v0=0x%08X v1=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X ra=0x%08X",
+            current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+            static_cast<unsigned>(rt(i)), gpr_[rt(i)],
+            static_cast<int>(simm(i)), addr, cop0_sr_, cop0_cause_,
+            sys_->irq_pending() ? 1 : 0, gpr_[2], gpr_[3], gpr_[17], gpr_[18],
+            gpr_[19], gpr_[22], gpr_[31]);
+      }
+    }
+  }
+  if (g_log_fmv_diagnostics && phys >= 0x000A6500u && phys < 0x000A6540u) {
+    static u32 rr4_node_store32_logs = 0;
+    if (rr4_node_store32_logs < 256u) {
+      ++rr4_node_store32_logs;
+      LOG_WARN(
+          "CPU: rr4-node SW pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X "
+          "sr=0x%08X cause=0x%08X irq=%d",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr, gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[29], gpr_[31],
+          cop0_sr_, cop0_cause_, sys_->irq_pending() ? 1 : 0);
+    }
+    if (phys == 0x000A6518u && cycles_ >= 780000000ull) {
+      static u32 rr4_node_store32_late_logs = 0;
+      if (rr4_node_store32_late_logs < 128u) {
+        ++rr4_node_store32_late_logs;
+        LOG_WARN(
+            "CPU: rr4-node SW-late pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+            "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+            "s1=0x%08X s2=0x%08X s3=0x%08X ra=0x%08X",
+            current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+            static_cast<unsigned>(rt(i)), gpr_[rt(i)],
+            static_cast<int>(simm(i)), addr, cop0_sr_, cop0_cause_,
+            sys_->irq_pending() ? 1 : 0, gpr_[17], gpr_[18], gpr_[19],
+            gpr_[31]);
+      }
+    }
+    if (phys == 0x000A6518u && cycles_ >= 835000000ull) {
+      static u32 rr4_node_store32_fault_window_logs = 0;
+      if (rr4_node_store32_fault_window_logs < 160u) {
+        ++rr4_node_store32_fault_window_logs;
+        LOG_WARN(
+            "CPU: rr4-node SW-fault pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+            "rt=r%u val=0x%08X imm=%d addr=0x%08X sr=0x%08X cause=0x%08X irq=%d "
+            "s1=0x%08X s2=0x%08X s3=0x%08X s6=0x%08X ra=0x%08X",
+            current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+            static_cast<unsigned>(rt(i)), gpr_[rt(i)],
+            static_cast<int>(simm(i)), addr, cop0_sr_, cop0_cause_,
+            sys_->irq_pending() ? 1 : 0, gpr_[17], gpr_[18], gpr_[19],
+            gpr_[22], gpr_[31]);
+      }
+    }
+  }
+  if (g_log_fmv_diagnostics && phys >= 0x000A6540u && phys < 0x000A6550u) {
+    static u32 rr4_bridge_store32_logs = 0;
+    if (rr4_bridge_store32_logs < 128u) {
+      ++rr4_bridge_store32_logs;
+      LOG_WARN(
+          "CPU: rr4-bridge SW pc=0x%08X instr=0x%08X rs=r%u base=0x%08X "
+          "rt=r%u val=0x%08X imm=%d addr=0x%08X "
+          "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X "
+          "sr=0x%08X cause=0x%08X irq=%d",
+          current_pc_, i, static_cast<unsigned>(rs(i)), gpr_[rs(i)],
+          static_cast<unsigned>(rt(i)), gpr_[rt(i)], static_cast<int>(simm(i)),
+          addr, gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[29], gpr_[31],
+          cop0_sr_, cop0_cause_, sys_->irq_pending() ? 1 : 0);
+    }
+  }
+  store32(addr, store_val);
 }
 
 void Cpu::op_swl(u32 i) {
@@ -2135,6 +3242,7 @@ void Cpu::op_cop0(u32 i) {
       u32 mode = cop0_sr_ & 0x3F;
       cop0_sr_ &= ~0x3Fu;
       cop0_sr_ |= (mode >> 2);
+      irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
     }
     else {
         LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,

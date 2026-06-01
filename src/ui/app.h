@@ -21,6 +21,8 @@ public:
 	bool init();
 	void run();
 	void shutdown();
+	bool launch_disc_from_cli(const std::string& bios_path,
+		const std::string& disc_path, bool direct_boot);
 
 private:
 	SDL_Window* window_ = nullptr;

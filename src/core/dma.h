@@ -36,11 +36,13 @@ struct DmaChannel {
 
   bool is_active() const {
     bool en = enabled();
+
     if (sync_mode() == SyncMode::Immediate) {
-      return en && trigger();
+        return en && trigger();
     }
+
     return en;
-  }
+}
 };
 
 class DmaController {

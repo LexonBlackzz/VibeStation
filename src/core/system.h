@@ -457,6 +457,78 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        if (g_log_fmv_diagnostics && off < 0x00000040u) {
+          const u32 old_val = ram_.read32(off);
+          static u32 low_slot_w32_fast_logs = 0;
+          if (low_slot_w32_fast_logs < 96u) {
+            ++low_slot_w32_fast_logs;
+            LOG_WARN(
+                "BUS: low-slot W32-fast 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+          if ((off == 0x00000010u || off == 0x00000018u) &&
+              cpu_.cycle_count() >= 1000000000ull) {
+            static u32 low_slot_w32_fast_late_logs = 0;
+            if (low_slot_w32_fast_late_logs < 96u) {
+              ++low_slot_w32_fast_late_logs;
+              LOG_WARN(
+                  "BUS: low-slot W32-fast-late 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                  off, old_val, val, cpu_.pc(),
+                  static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x000A6500u &&
+            off < 0x000A6540u) {
+          static u32 rr4_node2_w8_fast_logs = 0;
+          if (rr4_node2_w8_fast_logs < 128u) {
+            ++rr4_node2_w8_fast_logs;
+            const u8 old_val = ram_.read8(off);
+            LOG_WARN(
+                "BUS: rr4-node W8-fast 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00006D00u &&
+            off < 0x00006E00u) {
+          static u32 low_node_w8_fast_logs = 0;
+          if (low_node_w8_fast_logs < 128u) {
+            ++low_node_w8_fast_logs;
+            const u8 old_val = ram_.read8(off);
+            LOG_WARN(
+                "BUS: low-node W8-fast 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00000100u &&
+            off < 0x00000120u) {
+          static u32 low_100_w8_fast_logs = 0;
+          const u8 old_val = ram_.read8(off);
+          if (low_100_w8_fast_logs < 128u) {
+            ++low_100_w8_fast_logs;
+            LOG_WARN(
+                "BUS: low-100 W8-fast 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+          if (cpu_.cycle_count() >= 300000000ull && old_val != val) {
+            static u32 low_100_w8_fast_change_logs = 0;
+            if (low_100_w8_fast_change_logs < 256u) {
+              ++low_100_w8_fast_change_logs;
+              LOG_WARN(
+                  "BUS: low-100 W8-fast-change 0x%08X old=0x%02X new=0x%02X pc=0x%08X cyc=%llu",
+                  off, static_cast<unsigned>(old_val),
+                  static_cast<unsigned>(val), cpu_.pc(),
+                  static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+          }
+        }
         ram_.data()[off] = val;
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
@@ -486,6 +558,60 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        if (g_log_fmv_diagnostics && off >= 0x000A6500u &&
+            off < 0x000A6540u) {
+          static u32 rr4_node2_w16_fast_logs = 0;
+          if (rr4_node2_w16_fast_logs < 128u) {
+            ++rr4_node2_w16_fast_logs;
+            const u16 old_val = ram_.read16(off);
+            LOG_WARN(
+                "BUS: rr4-node W16-fast 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00006D00u &&
+            off < 0x00006E00u) {
+          static u32 low_node_w16_fast_logs = 0;
+          if (low_node_w16_fast_logs < 128u) {
+            ++low_node_w16_fast_logs;
+            const u16 old_val = ram_.read16(off);
+            LOG_WARN(
+                "BUS: low-node W16-fast 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00000100u &&
+            off < 0x00000120u) {
+          static u32 low_100_w16_fast_logs = 0;
+          const u16 old_val = ram_.read16(off);
+          if (low_100_w16_fast_logs < 128u) {
+            ++low_100_w16_fast_logs;
+            LOG_WARN(
+                "BUS: low-100 W16-fast 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu",
+                off, static_cast<unsigned>(old_val),
+                static_cast<unsigned>(val), cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+          if (cpu_.cycle_count() >= 300000000ull && old_val != val) {
+            static u32 low_100_w16_fast_change_logs = 0;
+            if (low_100_w16_fast_change_logs < 256u) {
+              ++low_100_w16_fast_change_logs;
+              LOG_WARN(
+                  "BUS: low-100 W16-fast-change 0x%08X old=0x%04X new=0x%04X pc=0x%08X cyc=%llu "
+                  "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X sp=0x%08X ra=0x%08X",
+                  off, static_cast<unsigned>(old_val),
+                  static_cast<unsigned>(val), cpu_.pc(),
+                  static_cast<unsigned long long>(cpu_.cycle_count()),
+                  cpu_.reg(4), cpu_.reg(5), cpu_.reg(6), cpu_.reg(7),
+                  cpu_.reg(8), cpu_.reg(9), cpu_.reg(10), cpu_.reg(11),
+                  cpu_.reg(29), cpu_.reg(31));
+            }
+          }
+        }
         std::memcpy(ram_.data() + off, &val, sizeof(val));
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
@@ -515,6 +641,126 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        if (g_log_fmv_diagnostics && off >= 0x000A6500u &&
+            off < 0x000A6540u) {
+          static u32 rr4_node2_w32_fast_logs = 0;
+          if (rr4_node2_w32_fast_logs < 256u) {
+            ++rr4_node2_w32_fast_logs;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: rr4-node W32-fast 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off == 0x000A6518u &&
+            cpu_.cycle_count() >= 780000000ull) {
+          static u32 rr4_node2_w32_fast_late_logs = 0;
+          if (rr4_node2_w32_fast_late_logs < 128u) {
+            ++rr4_node2_w32_fast_late_logs;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: rr4-node W32-fast-late 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off == 0x000A6518u &&
+            cpu_.cycle_count() >= 835000000ull) {
+          static u32 rr4_node2_w32_fast_fault_window_logs = 0;
+          if (rr4_node2_w32_fast_fault_window_logs < 160u) {
+            ++rr4_node2_w32_fast_fault_window_logs;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: rr4-node W32-fast-fault 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00006D00u &&
+            off < 0x00006E00u) {
+          static u32 low_node_w32_fast_logs = 0;
+          if (low_node_w32_fast_logs < 128u) {
+            ++low_node_w32_fast_logs;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: low-node W32-fast 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x00000100u &&
+            off < 0x00000120u) {
+          static u32 low_100_w32_fast_logs = 0;
+          const u32 old_val = ram_.read32(off);
+          if (low_100_w32_fast_logs < 128u) {
+            ++low_100_w32_fast_logs;
+            LOG_WARN(
+                "BUS: low-100 W32-fast 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+          if (cpu_.cycle_count() >= 700000000ull && old_val != val) {
+            static u32 low_100_w32_fast_change_logs = 0;
+            if (low_100_w32_fast_change_logs < 256u) {
+              ++low_100_w32_fast_change_logs;
+              LOG_WARN(
+                  "BUS: low-100 W32-fast-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                  off, old_val, val, cpu_.pc(),
+                  static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+          }
+        }
+        if (g_log_fmv_diagnostics && (off == 0x00000010u || off == 0x00000018u) &&
+            val != 0u) {
+          static bool logged_low_slot10_nonzero = false;
+          static bool logged_low_slot18_nonzero = false;
+          bool& already_logged =
+              (off == 0x00000010u) ? logged_low_slot10_nonzero
+                                   : logged_low_slot18_nonzero;
+          if (!already_logged) {
+            already_logged = true;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: first low-slot W32-fast 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && (off == 0x00000010u || off == 0x00000018u) &&
+            cpu_.cycle_count() >= 750000000ull) {
+          static u32 low_slot_w32_fast_change_logs = 0;
+          const u32 old_val = ram_.read32(off);
+          if (old_val != val && low_slot_w32_fast_change_logs < 128u) {
+            ++low_slot_w32_fast_change_logs;
+            LOG_WARN(
+                "BUS: low-slot W32-fast-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && off >= 0x000000B0u && off <= 0x000000C0u) {
+          static u32 low_vec_w32_fast_logs = 0;
+          const u32 old_val = ram_.read32(off);
+          if (old_val != val && low_vec_w32_fast_logs < 128u) {
+            ++low_vec_w32_fast_logs;
+            LOG_WARN(
+                "BUS: low-vec W32-fast-change 0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
+        if (g_log_fmv_diagnostics && val == 0x800A6518u) {
+          static u32 writes_of_bad_ptr_fast = 0;
+          if (writes_of_bad_ptr_fast < 32u) {
+            ++writes_of_bad_ptr_fast;
+            const u32 old_val = ram_.read32(off);
+            LOG_WARN(
+                "BUS: wrote 0x800A6518-fast to 0x%08X old=0x%08X pc=0x%08X cyc=%llu",
+                off, old_val, cpu_.pc(),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+          }
+        }
         std::memcpy(ram_.data() + off, &val, sizeof(val));
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
@@ -608,6 +854,7 @@ public:
   Cpu &cpu() { return cpu_; }
   Sio &sio() { return sio_; }
   const Spu &spu() const { return spu_; }
+  CdRom &cdrom() { return cdrom_; }
   const CdRom &cdrom() const { return cdrom_; }
   const Bios &bios() const { return bios_; }
   InterruptController &irq() { return irq_; }
@@ -689,6 +936,10 @@ private:
   u32 stack_top_write_log_budget_ = 64;
   bool stack_top_write_log_suppressed_ = false;
   u32 active_stack_write_log_budget_ = 96;
+  // FMV write hatch: opens on trigger events, logs a limited window
+  u32 fmv_write_hatch_remaining_ = 0;
+  u32 fmv_write_hatch_total_logged_ = 0;
+  u32 fmv_write_hatch_event_count_ = 0;
   bool active_stack_write_log_suppressed_ = false;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};

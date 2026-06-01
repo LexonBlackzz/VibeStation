@@ -1757,6 +1757,50 @@ bool App::init_runtime() {
     return true;
 }
 
+bool App::launch_disc_from_cli(const std::string& bios_path,
+    const std::string& disc_path, bool direct_boot) {
+    if (!init_runtime()) {
+        status_message_ = "CLI launch failed: runtime initialization failed.";
+        return false;
+    }
+
+    if (!bios_path.empty()) {
+        if (!system_->load_bios(bios_path)) {
+            status_message_ = "CLI launch failed: BIOS load failed.";
+            LOG_ERROR("CLI launch: failed to load BIOS: %s", bios_path.c_str());
+            return false;
+        }
+        bios_path_ = bios_path;
+    }
+
+    std::string bin_path;
+    std::string cue_path;
+    std::string error;
+    if (!resolve_disc_paths(disc_path, bin_path, cue_path, error)) {
+        status_message_ = "CLI launch failed: " + error;
+        LOG_ERROR("CLI launch: %s", error.c_str());
+        return false;
+    }
+
+    const bool previous_direct_boot = config_direct_disc_boot_;
+    config_direct_disc_boot_ = direct_boot;
+    if (!load_disc_from_ui(bin_path, cue_path)) {
+        config_direct_disc_boot_ = previous_direct_boot;
+        LOG_ERROR("CLI launch: failed to select disc: %s", disc_path.c_str());
+        return false;
+    }
+
+    if (!boot_disc_from_ui()) {
+        config_direct_disc_boot_ = previous_direct_boot;
+        LOG_ERROR("CLI launch: failed to boot disc: %s", disc_path.c_str());
+        return false;
+    }
+
+    status_message_ = "CLI launch: " +
+        std::filesystem::path(disc_path).filename().string();
+    return true;
+}
+
 double App::current_speed_override() const {
     if (turbo_hold_active_) {
         return turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
@@ -5846,7 +5890,16 @@ bool App::resolve_disc_paths(const std::string& selected_path,
     cue_path.clear();
     error.clear();
 
-    const std::filesystem::path selected(selected_path);
+    std::string normalized_path = trim_copy(selected_path);
+    if (normalized_path.size() >= 2u &&
+        normalized_path.front() == '"' &&
+        normalized_path.back() == '"') {
+        normalized_path =
+            normalized_path.substr(1u, normalized_path.size() - 2u);
+        normalized_path = trim_copy(normalized_path);
+    }
+
+    const std::filesystem::path selected(normalized_path);
     std::string ext = selected.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));

@@ -92,6 +92,8 @@ inline bool g_trace_sio = false;
 inline bool g_cpu_deep_diagnostics = false;
 // Expensive RAM watchpoint diagnostics around BIOS boot streams.
 inline bool g_ram_watch_diagnostics = false;
+// Diagnostic: current PC visible to bus reads for FMV demuxer tracing.
+inline u32 g_diag_current_pc = 0;
 inline u32 g_trace_burst_cpu = 128;
 inline u32 g_trace_stride_cpu = 32768;
 inline u32 g_trace_burst_bus = 256;

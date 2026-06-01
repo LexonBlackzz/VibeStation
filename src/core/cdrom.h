@@ -89,6 +89,11 @@ public:
         data_buffer_.size() - static_cast<size_t>(data_index_);
     return static_cast<u32>(remaining_bytes / 4u);
 }
+  int dma_data_index() const { return data_index_; }
+  size_t dma_buffer_size() const { return data_buffer_.size(); }
+  u8 mode() const { return mode_; }
+  bool read_whole_sector() const { return read_whole_sector_; }
+  int current_read_lba() const { return read_lba_; }
 
 private:
   System *sys_ = nullptr;
@@ -140,8 +145,19 @@ private:
     u8 irq = 0;
     bool wait_for_command_idle = true;
     std::vector<u8> response;
+    std::vector<u8> data_payload;
+    bool has_data_payload = false;
+    int data_lba = -1;
+  };
+  struct DeferredDataPayload {
+    std::vector<u8> payload;
+    int data_lba = -1;
   };
   std::deque<PendingIrq> pending_irqs_;
+  std::deque<DeferredDataPayload> deferred_data_payloads_;
+  std::vector<u8> last_sector_payload_;
+  bool last_sector_had_data_ = false;
+  int active_data_lba_ = -1;
 
   // Seek target
   u8 seek_mm_ = 0, seek_ss_ = 0, seek_ff_ = 0;
@@ -198,6 +214,8 @@ private:
   bool insert_probe_active_ = false;
   int insert_probe_delay_cycles_ = 0;
   int insert_probe_stage_ = 0;
+  bool irq_line_request_pending_ = false;
+  int irq_line_delay_cycles_ = 0;
 
   // Status byte
   u8 stat_byte() const;
@@ -248,6 +266,13 @@ private:
   void fire_irq(u8 irq_num);
   void enqueue_irq(u8 irq_num, std::vector<u8> response,
                    bool wait_for_command_idle = true);
+  void enqueue_data_irq(std::vector<u8> payload, int source_lba);
+  void activate_data_payload(std::vector<u8> payload, int source_lba);
+  void defer_data_payload(std::vector<u8> payload, int source_lba);
+  bool can_discard_unread_whole_sector_tail() const;
+  void maybe_promote_deferred_payload_for_header(bool cpu_port_access,
+                                                 bool irq_ack_promotion = false);
+  bool has_unread_data_buffer() const;
   void service_pending_irq();
   void refresh_irq_line();
   const CdTrack *track_for_lba(int lba) const;
