@@ -196,6 +196,9 @@ void Spu::init(System *sys) {
            obtained.freq, static_cast<unsigned>(obtained.samples),
            static_cast<unsigned>(host_target_queue_bytes_),
            static_cast<unsigned>(host_max_queue_bytes_), target_seconds);
+
+  // Initialize the ring buffer with the configured duration.
+  audio_ring_buffer_.init(clamp_output_buffer_seconds(), SAMPLE_RATE, 2);
 }
 
 void Spu::shutdown() {
@@ -209,6 +212,7 @@ void Spu::shutdown() {
   opened_audio_samples_ = 0;
   host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
   host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
+  audio_ring_buffer_.clear();
 }
 
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
@@ -436,10 +440,10 @@ void Spu::reset() {
   noise_timer_ = 0;
 
   audio_diag_ = {};
-  host_staging_samples_.clear();
-  host_staging_read_pos_ = 0;
+  audio_ring_buffer_.clear();
   mix_buffer_.clear();
   host_silence_samples_.clear();
+  turbo_adjusted_samples_.clear();
   capture_samples_.clear();
   cd_input_samples_.clear();
   replacement_sample_.clear();
@@ -1777,10 +1781,46 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
-  const std::vector<s16> *queue_samples = &samples;
-  std::vector<s16> turbo_adjusted_samples;
+  if (capture_enabled_) {
+    if (capture_samples_.size() + samples.size() > CAPTURE_MAX_SAMPLES) {
+      size_t drop =
+          capture_samples_.size() + samples.size() - CAPTURE_MAX_SAMPLES;
+      drop &= ~static_cast<size_t>(1);
+      if (drop >= capture_samples_.size()) {
+        capture_samples_.clear();
+      } else if (drop > 0) {
+        capture_samples_.erase(capture_samples_.begin(),
+                               capture_samples_.begin() +
+                                   static_cast<s64>(drop));
+      }
+    }
+    capture_samples_.insert(capture_samples_.end(), samples.begin(),
+                            samples.end());
+    audio_diag_.capture_frames += samples.size() / 2;
+    return;
+  }
+
+  if (!audio_enabled_ || audio_device_ == 0) {
+    return;
+  }
+
+  // ── Producer: push generated samples into the ring buffer. ───────────
+  // This is the sole producer path. Every tick() batch of mixed audio
+  // lands here. If the emulator lags for seconds, only a trickle of
+  // samples gets pushed — the ring buffer handles it gracefully.
+  audio_ring_buffer_.push_samples(samples.data(), samples.size());
+
+  // ── Consumer: read from the ring buffer into SDL's queue. ────────────
+  // If the ring buffer has enough fresh data, we get clean audio.
+  // If the emulator is lagging, read_samples() automatically loops the
+  // rolling history buffer, producing the "Source Engine" lag stutter.
+  //
+  // We read the same number of samples we just generated (accounting for
+  // turbo resampling) to keep the SDL queue paced correctly.
+  size_t samples_to_read = samples.size();
   const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
   if (output_speed > 1.001 || output_speed < 0.999) {
+    // Turbo/slowdown: resample to maintain correct output rate.
     const double scaled_rate =
         static_cast<double>(SAMPLE_RATE) * std::clamp(output_speed, 0.25, 4.0);
     const u32 in_rate =
@@ -1805,6 +1845,7 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
           static_cast<double>(in_rate) / static_cast<double>(SAMPLE_RATE);
       const bool ratio_is_integer = (in_rate % SAMPLE_RATE) == 0u;
       const u32 ratio_step = ratio_is_integer ? (in_rate / SAMPLE_RATE) : 0u;
+
       auto read_frame = [&](int idx, s16 &l, s16 &r) {
         if (idx < 0) {
           l = turbo_resample_prev_l_;
@@ -1821,18 +1862,23 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
         r = samples[frame * 2 + 1];
       };
 
-      double src_pos = turbo_resample_src_pos_;
-      turbo_adjusted_samples.reserve(samples.size());
+      // First, get the raw samples from the ring buffer (which may stutter).
+      host_silence_samples_.resize(samples.size());
+      audio_ring_buffer_.read_samples(host_silence_samples_.data(), samples.size());
+
+      // Resample the ring-buffer output for turbo/slowdown.
+      turbo_adjusted_samples_.clear();
+      turbo_adjusted_samples_.reserve(samples.size());
       const bool can_use_fast_step =
           ratio_is_integer && (ratio_step >= 2u) && (ratio_step <= 4u) &&
-          (std::fabs(src_pos - std::round(src_pos)) < 1e-9);
+          (std::fabs(turbo_resample_src_pos_ - std::round(turbo_resample_src_pos_)) < 1e-9);
+      double src_pos = turbo_resample_src_pos_;
       if (can_use_fast_step) {
         while (src_pos < static_cast<double>(in_frames)) {
-          s16 l = 0;
-          s16 r = 0;
+          s16 l = 0, r = 0;
           read_frame(static_cast<int>(src_pos), l, r);
-          turbo_adjusted_samples.push_back(l);
-          turbo_adjusted_samples.push_back(r);
+          turbo_adjusted_samples_.push_back(l);
+          turbo_adjusted_samples_.push_back(r);
           src_pos += static_cast<double>(ratio_step);
         }
       } else {
@@ -1841,20 +1887,16 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
           const int idx1 = idx0 + 1;
           const double frac =
               std::clamp(src_pos - static_cast<double>(idx0), 0.0, 1.0);
-          s16 l0 = 0;
-          s16 r0 = 0;
-          s16 l1 = 0;
-          s16 r1 = 0;
+          s16 l0 = 0, r0 = 0, l1 = 0, r1 = 0;
           read_frame(idx0, l0, r0);
           read_frame(idx1, l1, r1);
-
           const s32 l = static_cast<s32>(std::lround(
               static_cast<double>(l0) + (static_cast<double>(l1 - l0) * frac)));
           const s32 r = static_cast<s32>(std::lround(
               static_cast<double>(r0) + (static_cast<double>(r1 - r0) * frac)));
-          turbo_adjusted_samples.push_back(
+          turbo_adjusted_samples_.push_back(
               static_cast<s16>(std::clamp(l, -32768, 32767)));
-          turbo_adjusted_samples.push_back(
+          turbo_adjusted_samples_.push_back(
               static_cast<s16>(std::clamp(r, -32768, 32767)));
           src_pos += ratio;
         }
@@ -1864,9 +1906,10 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
       turbo_resample_prev_l_ = samples[(in_frames - 1) * 2 + 0];
       turbo_resample_prev_r_ = samples[(in_frames - 1) * 2 + 1];
       turbo_resample_prev_valid_ = true;
-    }
-    if (!turbo_adjusted_samples.empty()) {
-      queue_samples = &turbo_adjusted_samples;
+
+      if (!turbo_adjusted_samples_.empty()) {
+        samples_to_read = turbo_adjusted_samples_.size();
+      }
     }
   } else {
     turbo_resample_src_pos_ = 0.0;
@@ -1876,40 +1919,82 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     turbo_resample_prev_r_ = 0;
   }
 
-  if (capture_enabled_) {
-    if (capture_samples_.size() + queue_samples->size() > CAPTURE_MAX_SAMPLES) {
-      size_t drop =
-          capture_samples_.size() + queue_samples->size() - CAPTURE_MAX_SAMPLES;
-      drop &= ~static_cast<size_t>(1);
-      if (drop >= capture_samples_.size()) {
-        capture_samples_.clear();
-      } else if (drop > 0) {
-        capture_samples_.erase(capture_samples_.begin(),
-                               capture_samples_.begin() +
-                                   static_cast<s64>(drop));
-      }
-    }
-    capture_samples_.insert(capture_samples_.end(), queue_samples->begin(),
-                            queue_samples->end());
-    audio_diag_.capture_frames += queue_samples->size() / 2;
-    return;
+  // Read the requested amount from the ring buffer (stutter if needed).
+  // For non-turbo mode, we read exactly what was generated.
+  // For turbo mode, we already read above and resampled.
+  const s16 *queue_ptr = nullptr;
+  if (output_speed > 1.001 || output_speed < 0.999) {
+    queue_ptr = turbo_adjusted_samples_.data();
+  } else {
+    host_silence_samples_.resize(samples.size());
+    audio_ring_buffer_.read_samples(host_silence_samples_.data(), samples.size());
+    queue_ptr = host_silence_samples_.data();
   }
 
-  if (!audio_enabled_ || audio_device_ == 0) {
-    return;
-  }
-
+  // Queue to SDL with the same overrun protection as before.
   const bool audio_queue_enabled =
       g_spu_enable_audio_queue || g_spu_force_audio_queue;
-  if (!audio_queue_enabled) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
 
-    u32 queued_before = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued_before;
-    audio_diag_.queue_peak_bytes =
-        std::max(audio_diag_.queue_peak_bytes, queued_before);
+  u32 queued_before = SDL_GetQueuedAudioSize(audio_device_);
+  audio_diag_.queue_last_bytes = queued_before;
+  audio_diag_.queue_peak_bytes =
+      std::max(audio_diag_.queue_peak_bytes, queued_before);
 
+  if (audio_queue_enabled) {
+    // Seconds-based queue model.
+    const double target_seconds = clamp_output_buffer_seconds();
+    const u32 target_bytes =
+        bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
+    host_target_queue_bytes_ =
+        std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u,
+                  target_bytes});
+    const u32 max_bytes = bytes_from_seconds(
+        std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
+    host_max_queue_bytes_ =
+        std::max(HOST_MAX_QUEUE_BYTES_MIN,
+                 std::max(host_buffer_bytes_ * 8u, max_bytes));
+    if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
+      host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
+    }
+
+    if (queued_before > host_max_queue_bytes_) {
+      SDL_ClearQueuedAudio(audio_device_);
+      audio_diag_.dropped_frames +=
+          queued_before / (static_cast<u32>(sizeof(s16)) * 2u);
+      ++audio_diag_.overrun_events;
+      queued_before = 0;
+    }
+
+    const size_t bytes_available = samples_to_read * sizeof(s16);
+    u32 queued = queued_before;
+    size_t offset = 0;
+    while (offset < bytes_available) {
+      queued = SDL_GetQueuedAudioSize(audio_device_);
+      audio_diag_.queue_last_bytes = queued;
+      audio_diag_.queue_peak_bytes =
+          std::max(audio_diag_.queue_peak_bytes, queued);
+
+      if (queued >= host_target_queue_bytes_) {
+        break;
+      }
+
+      const u32 room = host_target_queue_bytes_ - queued;
+      if (room < sizeof(s16) * 2u) {
+        break;
+      }
+
+      size_t to_queue = std::min<size_t>(room, bytes_available - offset);
+      to_queue &= ~static_cast<size_t>(1); // whole frames only
+      if (to_queue == 0) break;
+
+      SDL_QueueAudio(audio_device_,
+                     reinterpret_cast<const Uint8 *>(queue_ptr) + offset,
+                     static_cast<Uint32>(to_queue));
+      audio_diag_.queued_frames += to_queue / (sizeof(s16) * 2u);
+      offset += to_queue;
+    }
+  } else {
+    // Direct queue mode (no pacing).
     const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
     const u32 slowdown_scale = (queue_speed < 0.999)
                                    ? static_cast<u32>(std::clamp(
@@ -1925,137 +2010,28 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
       queued_before = 0;
     }
 
-    SDL_QueueAudio(audio_device_, queue_samples->data(),
-                   static_cast<Uint32>(queue_samples->size() * sizeof(s16)));
-    audio_diag_.queued_frames += queue_samples->size() / 2;
-
-    const u32 queued_after = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued_after;
-    audio_diag_.queue_peak_bytes =
-        std::max(audio_diag_.queue_peak_bytes, queued_after);
-
-    if (!audio_started_) {
-      SDL_PauseAudioDevice(audio_device_, 0);
-      audio_started_ = true;
-    }
-    return;
-  }
-
-  // Seconds-based queue model: keep buffering toward the configured target.
-  const double target_seconds = clamp_output_buffer_seconds();
-  const u32 bytes_per_second = static_cast<u32>(SAMPLE_RATE * 2u * sizeof(s16));
-  const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
-  host_target_queue_bytes_ =
-      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
-  const u32 max_bytes = bytes_from_seconds(
-      std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
-  host_max_queue_bytes_ =
-      std::max(HOST_MAX_QUEUE_BYTES_MIN, std::max(host_buffer_bytes_ * 8u, max_bytes));
-  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
-    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
-  }
-
-  const double staging_seconds =
-      std::min(20.0, std::max(2.0, target_seconds * 2.0 + 1.0));
-  const size_t staging_max_samples = std::max<size_t>(
-      HOST_STAGING_MAX_SAMPLES,
-      static_cast<size_t>(std::ceil(staging_seconds * static_cast<double>(SAMPLE_RATE) *
-                                    2.0)));
-
-  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
-  } else if (host_staging_read_pos_ > 0 &&
-             (host_staging_read_pos_ >= 16384u ||
-              host_staging_samples_.size() >= staging_max_samples)) {
-    const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-    std::move(host_staging_samples_.begin() +
-                  static_cast<s64>(host_staging_read_pos_),
-              host_staging_samples_.end(), host_staging_samples_.begin());
-    host_staging_samples_.resize(unread);
-    host_staging_read_pos_ = 0;
-  }
-
-  const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-  if (unread + queue_samples->size() > staging_max_samples) {
-    size_t drop = unread + queue_samples->size() - staging_max_samples;
-    drop = std::min(drop, unread);
-    drop &= ~static_cast<size_t>(1);
-    if (drop > 0) {
-      host_staging_read_pos_ += drop;
-      audio_diag_.dropped_frames += drop / 2;
-      ++audio_diag_.overrun_events;
-    }
-    if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-      host_staging_samples_.clear();
-      host_staging_read_pos_ = 0;
-    }
-  }
-
-  host_staging_samples_.insert(host_staging_samples_.end(),
-                               queue_samples->begin(), queue_samples->end());
-
-  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
-  if (queued > host_max_queue_bytes_) {
-    SDL_ClearQueuedAudio(audio_device_);
-    audio_diag_.dropped_frames += queued / (static_cast<u32>(sizeof(s16)) * 2u);
-    ++audio_diag_.overrun_events;
-    queued = 0;
-  }
-
-  while (host_staging_read_pos_ < host_staging_samples_.size()) {
-    queued = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued;
-    audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
-
-    if (queued >= host_target_queue_bytes_) {
-      break;
-    }
-
-    const u32 room = host_target_queue_bytes_ - queued;
-    if (room < sizeof(s16) * 2u) {
-      break;
-    }
-
-    const size_t unread_samples =
-        host_staging_samples_.size() - host_staging_read_pos_;
-    size_t sample_room = room / sizeof(s16);
-    sample_room &= ~static_cast<size_t>(1);
-    size_t to_queue = std::min(sample_room, unread_samples);
-    to_queue &= ~static_cast<size_t>(1);
-    if (to_queue == 0) {
-      break;
-    }
-
     SDL_QueueAudio(audio_device_,
-                   host_staging_samples_.data() + host_staging_read_pos_,
-                   static_cast<Uint32>(to_queue * sizeof(s16)));
-    audio_diag_.queued_frames += to_queue / 2;
-    host_staging_read_pos_ += to_queue;
+                   reinterpret_cast<const Uint8 *>(queue_ptr),
+                   static_cast<Uint32>(samples_to_read * sizeof(s16)));
+    audio_diag_.queued_frames += samples_to_read / 2;
   }
 
-  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
-  }
-
-  queued = SDL_GetQueuedAudioSize(audio_device_);
-  audio_diag_.queue_last_bytes = queued;
-  audio_diag_.queue_peak_bytes = std::max(audio_diag_.queue_peak_bytes, queued);
+  u32 queued_after = SDL_GetQueuedAudioSize(audio_device_);
+  audio_diag_.queue_last_bytes = queued_after;
+  audio_diag_.queue_peak_bytes =
+      std::max(audio_diag_.queue_peak_bytes, queued_after);
 
   if (!audio_started_) {
-      const u32 startup_threshold =
-          std::min(host_target_queue_bytes_,
-              std::max(host_buffer_bytes_ * 2u,
-                  bytes_from_seconds(0.10, SAMPLE_RATE, 2u)));
-    if (queued >= startup_threshold) {
+    const u32 startup_threshold =
+        std::min(host_target_queue_bytes_,
+                 std::max(host_buffer_bytes_ * 2u,
+                          bytes_from_seconds(0.10, SAMPLE_RATE, 2u)));
+    if (queued_after >= startup_threshold) {
       SDL_PauseAudioDevice(audio_device_, 0);
       audio_started_ = true;
     }
   } else {
-    // Continuous streaming mode: keep audio device running and report underruns,
-    // but do not pause/rebuffer in large bursts.
-    if (queued == 0u && host_staging_read_pos_ >= host_staging_samples_.size()) {
+    if (queued_after == 0u) {
       ++audio_diag_.underrun_events;
     }
   }

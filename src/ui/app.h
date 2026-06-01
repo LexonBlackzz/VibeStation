@@ -23,6 +23,7 @@ public:
 	void shutdown();
 	bool launch_disc_from_cli(const std::string& bios_path,
 		const std::string& disc_path, bool direct_boot);
+	bool launch_bios_only_from_cli(const std::string& bios_path);
 
 private:
 	SDL_Window* window_ = nullptr;
@@ -241,6 +242,7 @@ private:
 	bool load_disc_from_ui(const std::string& bin_path, const std::string& cue_path);
 	bool start_bios_from_ui();
 	bool boot_disc_from_ui();
+	bool unload_disc_from_ui();
 	bool save_snapshot_png();
 	bool reap_and_reboot_bios();
 	bool reap_and_reboot_bios_batch();

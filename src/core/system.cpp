@@ -372,6 +372,12 @@ bool System::load_game(const std::string& bin_path,
     return ok;
 }
 
+void System::unload_disc() {
+    cdrom_.unload_disc();
+    last_disc_bin_path_.clear();
+    last_disc_cue_path_.clear();
+}
+
 bool System::boot_disc(bool direct_boot) {
     if (!bios_loaded()) {
         return false;
@@ -1920,6 +1926,10 @@ u8 System::read8(u32 addr) {
         if (io == 0x060) {
             return ram_size_ & 0xFF;
         }
+        // Interrupt controller
+        if (io >= 0x070 && io < 0x078) {
+            return static_cast<u8>(irq_.read(io - 0x070) & 0xFFu);
+        }
         // DMA registers (byte access)
         if (io >= 0x080 && io < 0x100) {
             const u32 dma_off = (io - 0x080) & ~0x3u;
@@ -2237,6 +2247,10 @@ void System::write8(u32 addr, u8 val) {
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
             sio_.write8(io - 0x040, val);
+            return;
+        }
+        if (io >= 0x070 && io < 0x078) {
+            irq_.write(io - 0x070, val);
             return;
         }
         if (io >= 0x080 && io < 0x100) {

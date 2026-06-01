@@ -1709,6 +1709,7 @@ int main(int argc, char *argv[]) {
   std::string gpu_debug_out_path;
   std::string windowed_bios_path;
   std::string windowed_disc_path;
+  std::string windowed_bios_only_path;
   bool windowed_direct_boot = false;
   int fmv_diagnostics_override = -1;
   std::vector<std::string> passthrough;
@@ -1800,6 +1801,11 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--windowed-direct-boot") {
       windowed_direct_boot = true;
+      continue;
+    }
+    if (a == "--windowed-bios" && (i + 1) < args.size()) {
+      windowed_bios_only_path = trim_cli_arg(args[i + 1]);
+      ++i;
       continue;
     }
     if (a == "--fmv-diagnostics") {
@@ -1943,6 +1949,21 @@ int main(int argc, char *argv[]) {
     if (!app.launch_disc_from_cli(windowed_bios_path, windowed_disc_path,
                                   windowed_direct_boot)) {
       fprintf(stderr, "FATAL: Failed to launch command-line disc.\n");
+      fflush(stderr);
+      app.shutdown();
+      if (g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
+  }
+  else if (!windowed_bios_only_path.empty()) {
+    printf("Launching BIOS-only (no disc) from command line...\n");
+    fflush(stdout);
+    if (!app.launch_bios_only_from_cli(windowed_bios_only_path)) {
+      fprintf(stderr, "FATAL: Failed to launch BIOS-only.\n");
       fflush(stderr);
       app.shutdown();
       if (g_log_file) {

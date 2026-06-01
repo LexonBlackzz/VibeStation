@@ -57,6 +57,7 @@ public:
   void set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry);
   void request_live_disc_insert(const std::string &bin_path,
                                 const std::string &cue_path);
+  void request_live_disc_eject();
   void request_memory_card_paths(const std::array<std::string, 2> &slot_paths);
   bool consume_latest_frame(FrameSnapshot &out_frame);
   void recycle_consumed_frame(FrameSnapshot &&frame);
@@ -73,6 +74,7 @@ private:
   void apply_input_state(System &system);
   void apply_pending_memory_card_paths();
   void apply_pending_disc_insert();
+  void apply_pending_disc_eject();
   bool should_capture_frame() const;
   void publish_frame(FrameSnapshot &&frame, const RuntimeSnapshot &snapshot);
   void publish_snapshot(const RuntimeSnapshot &snapshot);
@@ -113,6 +115,7 @@ private:
   bool has_pending_disc_request_ = false;
   std::string pending_disc_bin_path_;
   std::string pending_disc_cue_path_;
+  bool has_pending_disc_eject_ = false;
 
   mutable std::mutex memcard_request_mutex_;
   bool has_pending_memcard_request_ = false;

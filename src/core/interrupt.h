@@ -43,6 +43,9 @@ public:
   }
 
 private:
+  u32 read_reg_word(u32 base_offset) const;
+  void write_reg_word(u32 base_offset, u32 value);
+
   System *sys_ = nullptr;
   u32 i_stat_ = 0;
   u32 i_mask_ = 0;

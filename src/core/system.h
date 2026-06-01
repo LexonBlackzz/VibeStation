@@ -223,6 +223,7 @@ public:
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path) {
     return cdrom_.swap_disc_image(bin_path, cue_path);
   }
+  void unload_disc();
   bool set_memory_card_slot(u32 slot, const std::string &path) {
     return sio_.set_memory_card_slot(slot, path);
   }
@@ -342,8 +343,11 @@ public:
     const u32 phys = psx::mask_address(addr);
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
+      u32 value = 0;
+      if (try_read_kernel_stub_shadow(off, value)) {
+        return value;
+      }
       if (!g_trace_ram) {
-        u32 value = 0;
         std::memcpy(&value, ram_.data() + off, sizeof(value));
         return value;
       }
@@ -367,6 +371,10 @@ public:
     const u32 phys = psx::mask_address(addr);
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
+      u8 value = 0;
+      if (try_read_kernel_stub_shadow(off, value)) {
+        return value;
+      }
       if (!g_trace_ram) {
         return ram_.data()[off];
       }
@@ -394,8 +402,11 @@ public:
     const u32 phys = psx::mask_address(addr);
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
+      u16 value = 0;
+      if (try_read_kernel_stub_shadow(off, value)) {
+        return value;
+      }
       if (!g_trace_ram) {
-        u16 value = 0;
         std::memcpy(&value, ram_.data() + off, sizeof(value));
         return value;
       }
@@ -425,8 +436,11 @@ public:
     const u32 phys = psx::mask_address(addr);
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
+      u32 value = 0;
+      if (try_read_kernel_stub_shadow(off, value)) {
+        return value;
+      }
       if (!g_trace_ram) {
-        u32 value = 0;
         std::memcpy(&value, ram_.data() + off, sizeof(value));
         return value;
       }
@@ -457,6 +471,7 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        maybe_preserve_kernel_stub_shadow_before_write(off, &val, sizeof(val));
         if (g_log_fmv_diagnostics && off < 0x00000040u) {
           const u32 old_val = ram_.read32(off);
           static u32 low_slot_w32_fast_logs = 0;
@@ -530,6 +545,7 @@ public:
           }
         }
         ram_.data()[off] = val;
+        sync_kernel_stub_shadow_after_write(off, sizeof(val));
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 1);
@@ -558,6 +574,7 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        maybe_preserve_kernel_stub_shadow_before_write(off, &val, sizeof(val));
         if (g_log_fmv_diagnostics && off >= 0x000A6500u &&
             off < 0x000A6540u) {
           static u32 rr4_node2_w16_fast_logs = 0;
@@ -613,6 +630,7 @@ public:
           }
         }
         std::memcpy(ram_.data() + off, &val, sizeof(val));
+        sync_kernel_stub_shadow_after_write(off, sizeof(val));
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 2);
@@ -641,6 +659,7 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       if (!g_trace_ram && !g_ram_watch_diagnostics) {
+        maybe_preserve_kernel_stub_shadow_before_write(off, &val, sizeof(val));
         if (g_log_fmv_diagnostics && off >= 0x000A6500u &&
             off < 0x000A6540u) {
           static u32 rr4_node2_w32_fast_logs = 0;
@@ -762,6 +781,7 @@ public:
           }
         }
         std::memcpy(ram_.data() + off, &val, sizeof(val));
+        sync_kernel_stub_shadow_after_write(off, sizeof(val));
         if (g_mdec_debug_upload_probe || g_cpu_deep_diagnostics ||
             g_log_fmv_diagnostics) {
           debug_note_main_ram_write(off, val, 4);
@@ -853,6 +873,7 @@ public:
   Gpu &gpu() { return gpu_; }
   Cpu &cpu() { return cpu_; }
   Sio &sio() { return sio_; }
+  Spu &spu() { return spu_; }
   const Spu &spu() const { return spu_; }
   CdRom &cdrom() { return cdrom_; }
   const CdRom &cdrom() const { return cdrom_; }
@@ -879,6 +900,8 @@ private:
     u32 count = 0;
   };
   static constexpr size_t kRamWriteHistorySize = 8192u;
+  static constexpr u32 kKernelStubShadowStart = 0x00000080u;
+  static constexpr u32 kKernelStubShadowSize = 0x00000098u;
 
   void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
   void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
@@ -886,6 +909,72 @@ private:
   void debug_track_stack_top_write(const RamAccessLogEntry &entry);
   void debug_log_stack_top_burst_context(const RamAccessLogEntry &entry);
   void populate_gpu_src_write_samples_from_history();
+  bool kernel_stub_shadow_touches(u32 off, size_t size) const {
+    const u32 start = kKernelStubShadowStart;
+    const u32 end = kKernelStubShadowStart + kKernelStubShadowSize;
+    const u32 write_end = off + static_cast<u32>(size);
+    return off < end && write_end > start;
+  }
+  template <typename T>
+  bool try_read_kernel_stub_shadow(u32 off, T &value) const {
+    if (!kernel_stub_shadow_frozen_ || !kernel_stub_shadow_live_ ||
+        !kernel_stub_shadow_touches(off, sizeof(T))) {
+      return false;
+    }
+    std::memcpy(&value,
+                kernel_stub_shadow_.data() + (off - kKernelStubShadowStart),
+                sizeof(T));
+    return true;
+  }
+  void sync_kernel_stub_shadow_live() {
+    if (kernel_stub_shadow_frozen_) {
+      return;
+    }
+    std::memcpy(kernel_stub_shadow_.data(), ram_.data() + kKernelStubShadowStart,
+                kernel_stub_shadow_.size());
+    kernel_stub_shadow_live_ = true;
+  }
+  void maybe_preserve_kernel_stub_shadow_before_write(u32 off, const void *src,
+                                                      size_t size) {
+    if (kernel_stub_shadow_frozen_ || !kernel_stub_shadow_touches(off, size)) {
+      return;
+    }
+    sync_kernel_stub_shadow_live();
+    if (cpu_.cycle_count() < 700000000ull) {
+      return;
+    }
+
+    const u32 start = kKernelStubShadowStart;
+    const u32 end = kKernelStubShadowStart + kKernelStubShadowSize;
+    const u8 *new_bytes = static_cast<const u8 *>(src);
+    for (size_t i = 0; i < size; ++i) {
+      const u32 byte_addr = off + static_cast<u32>(i);
+      if (byte_addr < start || byte_addr >= end) {
+        continue;
+      }
+      const u8 old_byte = ram_.data()[byte_addr];
+      const u8 new_byte = new_bytes[i];
+      if (old_byte != 0u && new_byte == 0u) {
+        kernel_stub_shadow_frozen_ = true;
+        if (g_log_fmv_diagnostics) {
+          LOG_WARN(
+              "BUS: froze kernel stub shadow at cyc=%llu pc=0x%08X off=0x%08X "
+              "oldA0=0x%08X oldB0=0x%08X oldB4=0x%08X oldB8=0x%08X oldC0=0x%08X",
+              static_cast<unsigned long long>(cpu_.cycle_count()), cpu_.pc(),
+              byte_addr, ram_.read32(0x000000A0u), ram_.read32(0x000000B0u),
+              ram_.read32(0x000000B4u), ram_.read32(0x000000B8u),
+              ram_.read32(0x000000C0u));
+        }
+        return;
+      }
+    }
+  }
+  void sync_kernel_stub_shadow_after_write(u32 off, size_t size) {
+    if (kernel_stub_shadow_frozen_ || !kernel_stub_shadow_touches(off, size)) {
+      return;
+    }
+    sync_kernel_stub_shadow_live();
+  }
   void log_unhandled_bus_write(const char *width, u32 phys, u32 value,
                                bool io_space, u64 repeat_count,
                                u64 total_count) const;
@@ -941,6 +1030,9 @@ private:
   u32 fmv_write_hatch_total_logged_ = 0;
   u32 fmv_write_hatch_event_count_ = 0;
   bool active_stack_write_log_suppressed_ = false;
+  std::array<u8, kKernelStubShadowSize> kernel_stub_shadow_{};
+  bool kernel_stub_shadow_live_ = false;
+  bool kernel_stub_shadow_frozen_ = false;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;

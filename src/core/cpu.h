@@ -72,6 +72,13 @@ private:
   u32 cop0_badvaddr_ = 0;  // Bad Virtual Address (R8)
   u32 cop0_jumpdest_ = 0;  // Jump destination for debug (R6)
   u32 cop0_regs_[32] = {}; // All 32 COP0 regs (some unused)
+  u32 exception_return_regs_[32] = {};
+  u32 exception_return_hi_ = 0;
+  u32 exception_return_lo_ = 0;
+  u32 exception_return_epc_ = 0;
+  u32 exception_return_sr_ = 0;
+  bool exception_return_bd_ = false;
+  bool exception_return_valid_ = false;
 
   u64 cycles_ = 0;
   u64 gte_input_ready_cycle_ = 0;

@@ -377,6 +377,38 @@ const char *exception_name(Exception cause) {
     return "Unknown";
   }
 }
+
+void log_repeated_decode_warning(const char *kind, u32 code, u32 instr, u32 pc,
+                                 const char *fmt) {
+  static const char *last_kind = nullptr;
+  static u32 last_code = 0xFFFFFFFFu;
+  static u32 last_instr = 0xFFFFFFFFu;
+  static u32 last_pc = 0xFFFFFFFFu;
+  static u32 repeat_count = 0;
+
+  const bool same = last_kind != nullptr && std::strcmp(last_kind, kind) == 0 &&
+                    last_code == code && last_instr == instr && last_pc == pc;
+  if (same) {
+    ++repeat_count;
+    if ((repeat_count & (repeat_count - 1u)) == 0u) {
+      LOG_WARN("%s repeated count=%u instr=0x%08X pc=0x%08X", fmt,
+               repeat_count, instr, pc);
+    }
+    return;
+  }
+
+  if (repeat_count > 0 && last_kind != nullptr) {
+    LOG_WARN("CPU: previous %s repeated %u times instr=0x%08X pc=0x%08X",
+             last_kind, repeat_count, last_instr, last_pc);
+  }
+
+  last_kind = kind;
+  last_code = code;
+  last_instr = instr;
+  last_pc = pc;
+  repeat_count = 0;
+  LOG_WARN(fmt, code, instr, pc);
+}
 } // namespace
 
 // ── Init / Reset ───────────────────────────────────────────────────
@@ -412,6 +444,13 @@ void Cpu::reset() {
   gte_result_ready_cycle_ = 0;
   cycle_penalty_ = 0;
   std::memset(cop0_regs_, 0, sizeof(cop0_regs_));
+  std::memset(exception_return_regs_, 0, sizeof(exception_return_regs_));
+  exception_return_hi_ = 0;
+  exception_return_lo_ = 0;
+  exception_return_epc_ = 0;
+  exception_return_sr_ = 0;
+  exception_return_bd_ = false;
+  exception_return_valid_ = false;
 }
 
 // ── Register Helpers ───────────────────────────────────────────────
@@ -709,6 +748,28 @@ void Cpu::store16(u32 addr, u16 value) {
   if (g_log_fmv_diagnostics && current_pc_ >= 0x80116CC0u &&
       current_pc_ <= 0x80116D20u) {
     const u32 phys = addr & 0x1FFFFFFFu;
+    if (phys < 0x00000200u || (gpr_[5] >= 0x801FFF00u && gpr_[5] < 0x80200200u)) {
+      static u32 rr4_lowclr_wrap_logs = 0;
+      if (rr4_lowclr_wrap_logs < 96u) {
+        ++rr4_lowclr_wrap_logs;
+        const u32 src_ptr = gpr_[8];
+        const u32 src_phys = src_ptr & 0x1FFFFFFFu;
+        const u32 dst_ptr = gpr_[5];
+        LOG_WARN(
+            "CPU: rr4-lowclr wrap pc=0x%08X instr=0x%08X addr=0x%08X phys=0x%08X "
+            "val=0x%04X cyc=%llu a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+            "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X v0=0x%08X v1=0x%08X "
+            "src0=0x%08X src4=0x%08X low100=0x%08X low104=0x%08X low108=0x%08X "
+            "ra=0x%08X sp=0x%08X",
+            current_pc_, sys_->read32(current_pc_), addr, phys,
+            static_cast<unsigned>(value), static_cast<unsigned long long>(cycles_),
+            gpr_[4], gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10],
+            gpr_[11], gpr_[2], gpr_[3], sys_->read32(src_phys),
+            sys_->read32(src_phys + 4u), sys_->read32(0x00000100u),
+            sys_->read32(0x00000104u), sys_->read32(0x00000108u), gpr_[31],
+            gpr_[29]);
+      }
+    }
     if (phys >= 0x00000100u && phys < 0x00000120u) {
       static u32 rr4_lowclr_store16_logs = 0;
       if (rr4_lowclr_store16_logs < 32u) {
@@ -745,6 +806,12 @@ void Cpu::store8(u32 addr, u8 value) {
 void Cpu::exception(Exception cause) {
   static u32 logged_exception_count = 0;
   exception_raised_ = true;
+  std::memcpy(exception_return_regs_, gpr_, sizeof(gpr_));
+  exception_return_hi_ = hi_;
+  exception_return_lo_ = lo_;
+  exception_return_sr_ = cop0_sr_;
+  exception_return_bd_ = in_delay_slot_;
+  exception_return_valid_ = true;
 
   u32 handler;
   if (cop0_sr_ & (1u << 22)) { // BEV bit
@@ -772,6 +839,45 @@ void Cpu::exception(Exception cause) {
   } else {
     cop0_epc_ = current_pc_;
     cop0_cause_ &= ~(1u << 31);
+  }
+  exception_return_epc_ = cop0_epc_;
+
+  // The BIOS exception handler short-circuits syscall 1/2 into
+  // EnterCritical/ExitCritical handling before it walks the broader low-RAM
+  // dispatcher state. Emulate that here so games do not depend on the
+  // trampoline bookkeeping surviving perfectly.
+  if (cause == Exception::Syscall && (gpr_[4] == 1u || gpr_[4] == 2u)) {
+    if (gpr_[4] == 1u) {
+      cop0_sr_ &= ~0x404u;
+      set_reg(2, 1u);
+    } else {
+      cop0_sr_ |= 0x404u;
+    }
+
+    cop0_sr_ = (cop0_sr_ & 0xFFFFFFF0u) | ((cop0_sr_ & 0x3Cu) >> 2);
+    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
+
+    pc_ = cop0_epc_ + 4u;
+    next_pc_ = pc_ + 4u;
+    in_delay_slot_ = false;
+    pending_delay_slot_ = false;
+    pending_branch_taken_ = false;
+    pending_branch_pc_ = 0;
+    active_branch_pc_ = 0;
+
+    if (g_log_fmv_diagnostics && current_pc_ >= 0x800970B0u &&
+        current_pc_ <= 0x80097110u) {
+      static u32 critical_syscall_fastpath_logs = 0;
+      if (critical_syscall_fastpath_logs < 128u) {
+        ++critical_syscall_fastpath_logs;
+        LOG_WARN(
+            "CPU: critical-syscall fastpath pc=0x%08X epc=0x%08X cyc=%llu "
+            "a0=%u sr=0x%08X v0=0x%08X ra=0x%08X sp=0x%08X",
+            current_pc_, cop0_epc_, static_cast<unsigned long long>(cycles_),
+            gpr_[4], cop0_sr_, gpr_[2], gpr_[31], gpr_[29]);
+      }
+    }
+    return;
   }
 
   // Jump to exception handler
@@ -965,6 +1071,49 @@ u32 Cpu::step() {
     constexpr u32 irq_cycles = 2;
     cycles_ += irq_cycles;
     return irq_cycles;
+  }
+
+  const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+  const u32 bios_vector = gpr_[10] & 0x1FFFFFFFu;
+  const u32 bios_call = gpr_[9] & 0xFFu;
+  const bool rr4_late_bios_rfe =
+      cycles_ >= 390000000ull && gpr_[31] >= 0x8008B700u &&
+      gpr_[31] <= 0x8008BA00u;
+  if (phys_pc == 0x000000B0u && bios_vector == 0x000000B0u &&
+      bios_call == 0x17u && exception_return_valid_ && rr4_late_bios_rfe) {
+    if (g_log_fmv_diagnostics) {
+      static u32 bios_rfe_hle_logs = 0;
+      if (bios_rfe_hle_logs < 192u) {
+        ++bios_rfe_hle_logs;
+        LOG_WARN(
+            "CPU: HLE B0:17 pc=0x%08X cyc=%llu epc=0x%08X bd=%u sr=0x%08X "
+            "ra=0x%08X sp=0x%08X",
+            current_pc_, static_cast<unsigned long long>(cycles_),
+            exception_return_epc_, exception_return_bd_ ? 1u : 0u,
+            exception_return_sr_, gpr_[31], gpr_[29]);
+      }
+    }
+
+    std::memcpy(gpr_, exception_return_regs_, sizeof(gpr_));
+    hi_ = exception_return_hi_;
+    lo_ = exception_return_lo_;
+    cop0_sr_ = exception_return_sr_;
+    cop0_epc_ = exception_return_epc_;
+    pc_ = exception_return_epc_ + (exception_return_bd_ ? 4u : 0u);
+    next_pc_ = pc_ + 4u;
+    gpr_[0] = 0u;
+    in_delay_slot_ = false;
+    pending_delay_slot_ = false;
+    pending_branch_taken_ = false;
+    pending_branch_pc_ = 0u;
+    active_branch_pc_ = 0u;
+    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
+    load_ = {0, 0};
+    next_load_ = {0, 0};
+    constexpr u32 bios_rfe_cycles = 1;
+    cycles_ += bios_rfe_cycles;
+    prev_pc_for_diag = current_pc_;
+    return bios_rfe_cycles;
   }
 
   // Fetch instruction
@@ -2295,8 +2444,8 @@ void Cpu::execute(u32 i) {
     op_swc3(i);
     break;
   default:
-    LOG_WARN("CPU: Unhandled opcode 0x%02X instr=0x%08X at PC=0x%08X", op(i),
-             i, current_pc_);
+    log_repeated_decode_warning("opcode", op(i), i, current_pc_,
+                                "CPU: Unhandled opcode 0x%02X instr=0x%08X at PC=0x%08X");
     log_dma_context(sys_, current_pc_, i, gpr_);
     exception(Exception::ReservedInst);
     break;
@@ -2447,8 +2596,9 @@ void Cpu::op_special(u32 i) {
       log_dma_context(sys_, current_pc_, i, gpr_);
       break;
     }
-    LOG_WARN("CPU: Unhandled SPECIAL funct 0x%02X instr=0x%08X at PC=0x%08X",
-             funct(i), i, current_pc_);
+    log_repeated_decode_warning(
+        "special", funct(i), i, current_pc_,
+        "CPU: Unhandled SPECIAL funct 0x%02X instr=0x%08X at PC=0x%08X");
     log_dma_context(sys_, current_pc_, i, gpr_);
     exception(Exception::ReservedInst);
     break;

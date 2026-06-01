@@ -112,6 +112,13 @@ void EmuRunner::stop() {
         has_pending_memcard_request_ = false;
         pending_memcard_paths_ = {};
     }
+    {
+        std::lock_guard<std::mutex> lock(disc_request_mutex_);
+        has_pending_disc_request_ = false;
+        pending_disc_bin_path_.clear();
+        pending_disc_cue_path_.clear();
+        has_pending_disc_eject_ = false;
+    }
     capture_vram_debug_.store(false, std::memory_order_release);
 }
 
@@ -155,9 +162,18 @@ void EmuRunner::set_input_state(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry) {
 void EmuRunner::request_live_disc_insert(const std::string& bin_path,
     const std::string& cue_path) {
     std::lock_guard<std::mutex> lock(disc_request_mutex_);
+    has_pending_disc_eject_ = false;
     pending_disc_bin_path_ = bin_path;
     pending_disc_cue_path_ = cue_path;
     has_pending_disc_request_ = true;
+}
+
+void EmuRunner::request_live_disc_eject() {
+    std::lock_guard<std::mutex> lock(disc_request_mutex_);
+    has_pending_disc_eject_ = true;
+    has_pending_disc_request_ = false;
+    pending_disc_bin_path_.clear();
+    pending_disc_cue_path_.clear();
 }
 
 void EmuRunner::request_memory_card_paths(
@@ -314,6 +330,22 @@ void EmuRunner::apply_pending_disc_insert() {
     }
 }
 
+void EmuRunner::apply_pending_disc_eject() {
+    bool should_eject = false;
+    {
+        std::lock_guard<std::mutex> lock(disc_request_mutex_);
+        if (!has_pending_disc_eject_) {
+            return;
+        }
+        has_pending_disc_eject_ = false;
+        should_eject = true;
+    }
+    if (system_ == nullptr) {
+        return;
+    }
+    system_->unload_disc();
+}
+
 void EmuRunner::worker_main() {
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
 
@@ -327,6 +359,7 @@ void EmuRunner::worker_main() {
         apply_pending_memory_card_paths();
         apply_input_state(*system_);
         apply_pending_disc_insert();
+        apply_pending_disc_eject();
         system_->run_frame(false, skip_audio_for_turbo);
         completed_frame_count_.store(
             static_cast<u64>(system_->boot_diag().frame_counter),

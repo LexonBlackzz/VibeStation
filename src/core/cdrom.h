@@ -32,6 +32,7 @@ public:
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path);
+  void unload_disc();
   bool sector_data_ready() const { return data_ready_; }
   bool sector_data_request() const { return data_request_; }
   void notify_disc_inserted();

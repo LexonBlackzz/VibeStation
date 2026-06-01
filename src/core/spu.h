@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio_ring_buffer.h"
 #include "types.h"
 #include <SDL.h>
 #include <algorithm>
@@ -192,6 +193,10 @@ public:
   bool replacement_sample_loaded() const { return !replacement_sample_.empty(); }
   size_t replacement_sample_bytes() const { return replacement_sample_.size(); }
 
+  // Ring-buffer accessor (used by the host audio callback and UI).
+  AudioRingBuffer &ring_buffer() { return audio_ring_buffer_; }
+  const AudioRingBuffer &ring_buffer() const { return audio_ring_buffer_; }
+
 private:
   static constexpr int SAMPLE_RATE = 44100;
   static constexpr int NUM_VOICES = 24;
@@ -356,10 +361,10 @@ private:
   s32 noise_timer_ = 0;
 
   AudioDiag audio_diag_ = {};
-  std::vector<s16> host_staging_samples_;
-  size_t host_staging_read_pos_ = 0;
+  AudioRingBuffer audio_ring_buffer_;
   std::vector<s16> mix_buffer_;
   std::vector<s16> host_silence_samples_;
+  std::vector<s16> turbo_adjusted_samples_; // scratch for turbo resampling
   std::vector<s16> capture_samples_;
   std::vector<s16> cd_input_samples_;
   std::vector<u8> replacement_sample_;

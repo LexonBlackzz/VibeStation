@@ -2232,6 +2232,12 @@ void App::process_events(bool& quit) {
                     boot_disc_from_ui();
                 }
             }
+            else if (ctrl && key == SDLK_e) {
+                if (system_->bios_loaded() && !emu_runner_.is_running() &&
+                    (system_->disc_loaded() || !game_bin_path_.empty())) {
+                    unload_disc_from_ui();
+                }
+            }
             else if (no_mod && key == SDLK_F5) {
                 if (system_->bios_loaded() && !emu_runner_.is_running()) {
                     if (has_started_emulation_) {
@@ -2685,6 +2691,11 @@ void App::menu_bar() {
                     return;
                 }
             }
+            if (ImGui::MenuItem("Eject Disc", "Ctrl+E", false,
+                bios_loaded && !emu_running &&
+                (disc_loaded || !game_bin_path_.empty()))) {
+                unload_disc_from_ui();
+            }
             if (ImGui::MenuItem("Direct Disc Boot (Skip BIOS Intro)", nullptr,
                 config_direct_disc_boot_)) {
                 config_direct_disc_boot_ = !config_direct_disc_boot_;
@@ -2897,6 +2908,15 @@ void App::panel_emulator_screen() {
         }
         if (!bios_loaded) {
             ImGui::EndDisabled();
+        }
+
+        // Eject Disc button (visible when a game is selected and emulation is idle)
+        if (bios_loaded && has_selected_game && !emu_runner_.is_running()) {
+            ImGui::SameLine();
+            const ImVec2 eject_button_size(100.0f, 0.0f);
+            if (ImGui::Button("Eject Disc", eject_button_size)) {
+                unload_disc_from_ui();
+            }
         }
 
         const bool rom_dir_valid = rom_directory_valid_;
@@ -3172,6 +3192,77 @@ void App::panel_settings() {
                 }
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
                     save_persistent_config();
+                }
+
+                // ── Ring-buffer audio configuration ──────────────────────────
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f),
+                    "Ring Buffer Audio Pipeline");
+
+                // Persist these in a local static so they survive tab switches
+                // without hitting the config file every frame.
+                static float ring_buffer_duration = 0.40f;
+                static float ring_history_seconds = 0.40f;
+
+                const bool spu_ready = system_ != nullptr;
+
+                if (ImGui::SliderFloat("Audio Buffer Duration",
+                    &ring_buffer_duration, 0.05f, 2.0f, "%.2f s")) {
+                    if (spu_ready) {
+                        system_->spu().ring_buffer().set_buffer_duration(
+                            static_cast<double>(ring_buffer_duration));
+                    }
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(dynamic, no pop)");
+
+                if (ImGui::SliderFloat("Stutter History Depth",
+                    &ring_history_seconds, 0.05f, 1.0f, "%.2f s")) {
+                    // History depth is baked at init; re-init to apply.
+                    // The value takes effect on the next reset/boot.
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(re-init on boot)");
+
+                // Live stutter / ring-buffer status read-outs.
+                if (spu_ready) {
+                    auto &rb = system_->spu().ring_buffer();
+
+                    const bool is_stuttering = rb.is_stuttering();
+                    ImGui::Text("Stutter Active: %s",
+                        is_stuttering ? "YES" : "No");
+                    ImGui::SameLine();
+                    if (is_stuttering) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+                            "[LAG]");
+                    }
+
+                    const size_t avail = rb.available_samples();
+                    const size_t cap = rb.capacity_samples();
+                    const float fill_pct = cap > 0
+                        ? (static_cast<float>(avail) / static_cast<float>(cap)) * 100.0f
+                        : 0.0f;
+                    char fill_label[128];
+                    std::snprintf(fill_label, sizeof(fill_label),
+                        "Buffer Fill: %zu / %zu (%.0f%%)", avail, cap, fill_pct);
+                    ImGui::ProgressBar(fill_pct / 100.0f, ImVec2(-1.0f, 0.0f),
+                        fill_label);
+
+                    ImGui::Text("Buffer Capacity: %.1f ms  |  Available: %.1f ms",
+                        static_cast<float>(rb.capacity_seconds() * 1000.0),
+                        static_cast<float>(avail > 0
+                            ? (static_cast<double>(avail) /
+                               (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
+                                static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS)) * 1000.0)
+                            : 0.0));
+
+                    const auto &diag = runtime_snapshot_.spu_audio;
+                    if (diag.underrun_events > 0 || diag.overrun_events > 0) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f),
+                            "Underruns: %llu  |  Overruns: %llu",
+                            static_cast<unsigned long long>(diag.underrun_events),
+                            static_cast<unsigned long long>(diag.overrun_events));
+                    }
                 }
 
                 ImGui::Separator();
@@ -6152,6 +6243,57 @@ bool App::boot_disc_from_ui() {
     status_message_ = config_direct_disc_boot_
         ? "Direct booting disc (BIOS intro skipped)..."
         : "Booting disc from BIOS...";
+    return true;
+}
+
+bool App::unload_disc_from_ui() {
+    if (!system_->bios_loaded()) {
+        status_message_ = "Load a BIOS first.";
+        return false;
+    }
+
+    emu_runner_.pause_and_wait_idle();
+    disable_ram_reaper_mode();
+    disable_gpu_reaper_mode();
+    disable_sound_reaper_mode();
+
+    // If emulation was already running, also send a live eject to the
+    // emulation thread in case it picked up the disc via hot-insert.
+    emu_runner_.request_live_disc_eject();
+
+    system_->unload_disc();
+    game_bin_path_.clear();
+    game_cue_path_.clear();
+    system_->reset();
+    has_started_emulation_ = true;
+    emu_runner_.set_running(true);
+    status_message_ = "Disc ejected — BIOS menu";
+    return true;
+}
+
+bool App::launch_bios_only_from_cli(const std::string& bios_path) {
+    if (!init_runtime()) {
+        status_message_ = "CLI BIOS-only: runtime init failed.";
+        return false;
+    }
+
+    if (!bios_path.empty()) {
+        if (!system_->load_bios(bios_path)) {
+            status_message_ = "CLI BIOS-only: BIOS load failed.";
+            LOG_ERROR("CLI BIOS-only: failed to load BIOS: %s", bios_path.c_str());
+            return false;
+        }
+        bios_path_ = bios_path;
+    }
+
+    emu_runner_.pause_and_wait_idle();
+    disable_ram_reaper_mode();
+    disable_gpu_reaper_mode();
+    disable_sound_reaper_mode();
+    system_->reset();
+    has_started_emulation_ = true;
+    emu_runner_.set_running(true);
+    status_message_ = "BIOS-only mode (no disc)";
     return true;
 }
 

@@ -689,6 +689,17 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   return true;
 }
 
+void CdRom::unload_disc() {
+  if (bin_file_.is_open()) {
+    bin_file_.close();
+  }
+  tracks_.clear();
+  disc_loaded_ = false;
+  track_map_valid_ = false;
+  resolved_disc_path_.clear();
+  bin_size_ = 0;
+}
+
 void CdRom::notify_disc_inserted() {
   if (!disc_loaded_) {
     return;
