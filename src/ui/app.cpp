@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,16 @@ namespace {
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
     constexpr const char* kMemoryCardDirName = "memcards";
     constexpr float kEmulatorScreenBottomOverscanPixels = 3.0f;
+    float smooth_ui_value(float current, float target, float delta_seconds,
+        float response_seconds = 0.18f) {
+        if (current < 0.0f || delta_seconds <= 0.0f) {
+            return target;
+        }
+        const float safe_response = std::max(response_seconds, 0.001f);
+        const float alpha = 1.0f - std::exp(-delta_seconds / safe_response);
+        return current + ((target - current) * alpha);
+    }
+
     struct GpuDipDiagnostics {
         bool valid = false;
         int dip_count = 0;
@@ -2366,6 +2377,54 @@ void App::update() {
         underrun_notice_last_tick_ms_ = 0;
         underrun_notice_last_events_ = 0;
     }
+
+    if (system_ != nullptr) {
+        const u32 now_ms = SDL_GetTicks();
+        const float delta_seconds =
+            (last_audio_metrics_smooth_tick_ms_ > 0 && now_ms >= last_audio_metrics_smooth_tick_ms_)
+            ? static_cast<float>(now_ms - last_audio_metrics_smooth_tick_ms_) / 1000.0f
+            : 0.0f;
+        last_audio_metrics_smooth_tick_ms_ = now_ms;
+
+        const auto& rb = system_->spu().ring_buffer();
+        const size_t avail = rb.available_samples();
+        const size_t cap = rb.capacity_samples();
+        const float fill_pct = cap > 0
+            ? (static_cast<float>(avail) / static_cast<float>(cap)) * 100.0f
+            : 0.0f;
+        const float available_ms = static_cast<float>(
+            (static_cast<double>(avail) /
+                (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
+                    static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS))) * 1000.0);
+        const float queue_kb =
+            static_cast<float>(runtime_snapshot_.spu_audio.queue_last_bytes) / 1024.0f;
+
+        smoothed_audio_buffer_fill_pct_ =
+            smooth_ui_value(smoothed_audio_buffer_fill_pct_, fill_pct, delta_seconds);
+        smoothed_audio_buffer_available_ms_ =
+            smooth_ui_value(smoothed_audio_buffer_available_ms_, available_ms, delta_seconds);
+        smoothed_audio_queue_kb_ =
+            smooth_ui_value(smoothed_audio_queue_kb_, queue_kb, delta_seconds);
+
+        const bool playback_enabled =
+            has_started_emulation_ && emu_runner_.is_running();
+        system_->set_spu_host_playback_enabled(playback_enabled);
+    }
+    else {
+        smoothed_audio_buffer_fill_pct_ = -1.0f;
+        smoothed_audio_buffer_available_ms_ = -1.0f;
+        smoothed_audio_queue_kb_ = -1.0f;
+        last_audio_metrics_smooth_tick_ms_ = 0;
+    }
+
+    // ── Audio heartbeat: pull samples from the SPU ring buffer into SDL. ──
+    // If the emulator is running smoothly, this pulls pristine audio.
+    // If the SPU thread drops frames / the emulator hitches, the ring
+    // buffer's read path automatically engages the Source Engine-style
+    // stutter loop (repeating the last ~400 ms of audio).
+    if (system_) {
+        system_->spu().pump_audio_to_device();
+    }
 }
 
 void App::push_performance_history_sample() {
@@ -3190,6 +3249,9 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue)) {
                     save_persistent_config();
                 }
+                if (ImGui::Checkbox("Lag Stutter Effect", &g_spu_enable_lag_stutter)) {
+                    save_persistent_config();
+                }
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
                     save_persistent_config();
                 }
@@ -3239,22 +3301,31 @@ void App::panel_settings() {
 
                     const size_t avail = rb.available_samples();
                     const size_t cap = rb.capacity_samples();
-                    const float fill_pct = cap > 0
+                    const float fill_pct_raw = cap > 0
                         ? (static_cast<float>(avail) / static_cast<float>(cap)) * 100.0f
                         : 0.0f;
+                    const float fill_pct = (smoothed_audio_buffer_fill_pct_ >= 0.0f)
+                        ? smoothed_audio_buffer_fill_pct_
+                        : fill_pct_raw;
+                    const float available_ms_raw = static_cast<float>(avail > 0
+                        ? (static_cast<double>(avail) /
+                           (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
+                            static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS)) * 1000.0)
+                        : 0.0);
+                    const float available_ms = (smoothed_audio_buffer_available_ms_ >= 0.0f)
+                        ? smoothed_audio_buffer_available_ms_
+                        : available_ms_raw;
+                    const float capacity_ms =
+                        static_cast<float>(rb.capacity_seconds() * 1000.0);
                     char fill_label[128];
                     std::snprintf(fill_label, sizeof(fill_label),
-                        "Buffer Fill: %zu / %zu (%.0f%%)", avail, cap, fill_pct);
-                    ImGui::ProgressBar(fill_pct / 100.0f, ImVec2(-1.0f, 0.0f),
+                        "Buffer Fill: %.1f / %.1f ms (%.0f%%)",
+                        available_ms, capacity_ms, fill_pct);
+                    ImGui::ProgressBar(std::clamp(fill_pct / 100.0f, 0.0f, 1.0f), ImVec2(-1.0f, 0.0f),
                         fill_label);
 
                     ImGui::Text("Buffer Capacity: %.1f ms  |  Available: %.1f ms",
-                        static_cast<float>(rb.capacity_seconds() * 1000.0),
-                        static_cast<float>(avail > 0
-                            ? (static_cast<double>(avail) /
-                               (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
-                                static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS)) * 1000.0)
-                            : 0.0));
+                        capacity_ms, available_ms);
 
                     const auto &diag = runtime_snapshot_.spu_audio;
                     if (diag.underrun_events > 0 || diag.overrun_events > 0) {
@@ -4047,8 +4118,10 @@ void App::draw_sound_status_content() {
     const float avg_env = avg_count(diag.env_voice_accum, diag.env_voice_samples);
     const float avg_audible =
         avg_count(diag.audible_voice_accum, diag.audible_voice_samples);
-    const float queue_kb =
+    const float queue_kb_raw =
         static_cast<float>(diag.queue_last_bytes) / 1024.0f;
+    const float queue_kb =
+        (smoothed_audio_queue_kb_ >= 0.0f) ? smoothed_audio_queue_kb_ : queue_kb_raw;
     const float queue_peak_kb =
         static_cast<float>(diag.queue_peak_bytes) / 1024.0f;
 
@@ -6976,6 +7049,10 @@ void App::load_persistent_config() {
         else if (key == "spu_enable_audio_queue") {
             g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
         }
+        else if (key == "spu_enable_lag_stutter") {
+            g_spu_enable_lag_stutter =
+                parse_bool(value, g_spu_enable_lag_stutter);
+        }
         else if (key == "advanced_sound_status_logging") {
             g_spu_advanced_sound_status =
                 parse_bool(value, g_spu_advanced_sound_status);
@@ -7185,6 +7262,7 @@ void App::save_persistent_config() const {
     out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";
     out.unsetf(std::ios::floatfield);
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
+    out << "spu_enable_lag_stutter=" << (g_spu_enable_lag_stutter ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
     out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
     out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";

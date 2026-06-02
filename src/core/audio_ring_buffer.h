@@ -2,6 +2,7 @@
 
 #include "types.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <mutex>
@@ -18,9 +19,8 @@
 //   - Configurable buffer duration and sample rate via constructor / init().
 //   - Hardcoded to stereo 16-bit (s16) matching the PS1 SPU output format.
 //   - "Source Engine" lag-stutter: when the emulator drops frames and the
-//     buffer is starved, a rolling history buffer of the last ~400 ms of
-//     audio is looped/repeated to produce a glitchy retro stutter instead
-//     of dead silence.
+//     buffer is starved, a fixed snapshot of the last ~400 ms of audio is
+//     looped until enough fresh audio has accumulated to resume cleanly.
 //   - Push never blocks: the SPU thread can push even 1 sample at a time
 //     during a massive frame freeze without overflowing.
 //   - set_buffer_duration() changes the capacity threshold at runtime
@@ -83,9 +83,8 @@ public:
   // the read pointer while recording them in the rolling history buffer.
   //
   // Stutter path: if fewer than `requested_count` samples are available,
-  // drain what exists, then fill the remaining slots by looping the rolling
-  // history buffer — a continuously-updated copy of the last ~400 ms of
-  // audio. This produces the glitchy "Source Engine" lag stutter.
+  // latch a fixed loop from the rolling history buffer and keep outputting
+  // that loop until enough fresh audio has accumulated to resume cleanly.
   //
   // @param out_buffer       Destination buffer (must hold at least
   //                         `requested_count` s16 values).
@@ -127,6 +126,31 @@ private:
   // into `dst`. Handles wrap-around. Must be called under mutex_.
   void copy_from_ring(size_t ring_pos, s16 *dst, size_t count) const;
 
+  // Copy `count` samples from the rolling history buffer starting at
+  // `history_pos`. Handles wrap-around. Must be called under mutex_.
+  void copy_from_history(size_t history_pos, s16 *dst, size_t count) const;
+
+  // Copy `count` samples from the latched stutter loop and advance the
+  // current loop position. Must be called under mutex_.
+  void copy_from_stutter_loop(s16 *dst, size_t count);
+
+  // Choose a rotation point in the rolling history that minimizes the jump
+  // from the last played frame into the latched stutter loop.
+  size_t choose_stutter_start_pos() const;
+
+  // Rebuild the stutter loop from rolling history, optionally previewing
+  // unread ring-buffer samples into the newest tail so heavy spiking can
+  // keep evolving instead of freezing on a single snapshot.
+  void refresh_stutter_loop(size_t preview_samples, bool prefer_clean_entry);
+
+  // Track the last complete stereo frame written to the output so stutter
+  // recovery can crossfade back into live audio without a hard edge.
+  void update_last_output_frame(const s16 *samples, size_t count);
+
+  // Blend the start of freshly resumed audio with the tail of the latched
+  // stutter loop. Must be called under mutex_.
+  void crossfade_from_stutter(s16 *samples, size_t count);
+
   // Advance `ring_pos` by `count` positions, wrapping at buffer_.size().
   static size_t advance_pos(size_t ring_pos, size_t count, size_t buf_size) {
     ring_pos += count;
@@ -153,12 +177,16 @@ private:
 
   // Rolling history buffer — always contains the most recent ~400 ms of
   // audio consumed from the ring buffer, used as the source for stutter
-  // looping.
+  // loop snapshots.
   std::vector<s16> history_buffer_;
   size_t history_write_ = 0;
   size_t history_valid_ = 0; // How many samples are actually filled.
 
   // Stutter state.
   std::atomic<bool> stutter_active_{false};
-  size_t stutter_index_ = 0; // Current position in the history loop.
+  std::vector<s16> stutter_loop_buffer_;
+  size_t stutter_loop_pos_ = 0;
+  size_t stutter_resume_threshold_ = 0;
+  std::array<s16, DEFAULT_CHANNELS> last_output_frame_ = {};
+  bool has_last_output_frame_ = false;
 };

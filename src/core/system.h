@@ -250,6 +250,9 @@ public:
     spu_.set_reverb_mix_multiplier(multiplier);
   }
   void set_spu_force_reverb(bool enabled) { spu_.set_force_reverb(enabled); }
+  void set_spu_host_playback_enabled(bool enabled) {
+    spu_.set_host_playback_enabled(enabled);
+  }
 
   // State
   bool is_running() const { return running_; }

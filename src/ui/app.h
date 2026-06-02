@@ -69,6 +69,10 @@ private:
 	u32 underrun_notice_bucket_sum_ = 0;
 	u32 underrun_notice_last_tick_ms_ = 0;
 	u64 underrun_notice_last_events_ = 0;
+	float smoothed_audio_buffer_fill_pct_ = -1.0f;
+	float smoothed_audio_buffer_available_ms_ = -1.0f;
+	float smoothed_audio_queue_kb_ = -1.0f;
+	u32 last_audio_metrics_smooth_tick_ms_ = 0;
 	int pending_bind_index_ = -1;
 
 	// Frame timing

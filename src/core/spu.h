@@ -163,6 +163,7 @@ public:
     const double clamped = std::max(0.0, std::min(multiplier, 4.0));
     reverb_mix_multiplier_.store(clamped, std::memory_order_release);
   }
+  void set_host_playback_enabled(bool enabled);
   void set_force_reverb(bool enabled);
 
   void tick(u32 cycles);
@@ -193,7 +194,13 @@ public:
   bool replacement_sample_loaded() const { return !replacement_sample_.empty(); }
   size_t replacement_sample_bytes() const { return replacement_sample_.size(); }
 
-  // Ring-buffer accessor (used by the host audio callback and UI).
+  // ── Ring-buffer audio pipeline ─────────────────────────────────────
+  // Called once per frame from the app/main thread to pump accumulated
+  // samples from the ring buffer into SDL's hardware queue.  The ring
+  // buffer's read path handles stutter logic automatically when lagging.
+  void pump_audio_to_device();
+
+  // Direct access for UI / diagnostics.
   AudioRingBuffer &ring_buffer() { return audio_ring_buffer_; }
   const AudioRingBuffer &ring_buffer() const { return audio_ring_buffer_; }
 
@@ -312,11 +319,11 @@ private:
   SDL_AudioDeviceID audio_device_ = 0;
   bool audio_enabled_ = false;
   bool audio_started_ = false;
+  bool host_playback_enabled_ = true;
+  bool ring_stutter_active_last_pump_ = false;
   bool capture_enabled_ = false;
   u32 host_buffer_bytes_ = 0;
   u32 opened_audio_samples_ = 0;
-  u32 host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
-  u32 host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
 
   std::array<u16, 0x200> regs_ = {};
   std::array<u8, 512 * 1024> spu_ram_ = {};
@@ -363,8 +370,6 @@ private:
   AudioDiag audio_diag_ = {};
   AudioRingBuffer audio_ring_buffer_;
   std::vector<s16> mix_buffer_;
-  std::vector<s16> host_silence_samples_;
-  std::vector<s16> turbo_adjusted_samples_; // scratch for turbo resampling
   std::vector<s16> capture_samples_;
   std::vector<s16> cd_input_samples_;
   std::vector<u8> replacement_sample_;
@@ -456,7 +461,10 @@ private:
   void reset_forced_reverb_state();
   void apply_forced_reverb_fallback(float send_l, float send_r, float &wet_l,
                                     float &wet_r);
-  void queue_host_audio(const std::vector<s16> &samples);
+
+  // Called internally by tick() — pushes generated samples into the ring
+  // buffer and handles audio capture.  Does NOT touch SDL.
+  void enqueue_ring_buffer(const std::vector<s16> &samples);
 
   u16 spucnt_effective() const;
   void tick_spucnt_mode_delay(u32 cycles);

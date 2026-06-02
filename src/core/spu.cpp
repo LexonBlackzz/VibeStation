@@ -177,28 +177,26 @@ void Spu::init(System *sys) {
                        static_cast<u32>(obtained.channels) * sizeof(s16);
   const double target_seconds = clamp_output_buffer_seconds();
   const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
-  host_target_queue_bytes_ =
+  const u32 init_target =
       std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
   const u32 max_bytes = bytes_from_seconds(
       std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
-  host_max_queue_bytes_ =
+  const u32 init_max =
       std::max(HOST_MAX_QUEUE_BYTES_MIN,
                std::max(host_buffer_bytes_ * 8u, max_bytes));
-  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
-    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
-  }
 
   audio_enabled_ = true;
   audio_started_ = false;
+  ring_stutter_active_last_pump_ = false;
   opened_audio_samples_ = requested_samples;
   SDL_PauseAudioDevice(audio_device_, 1);
   LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes, target=%.2fs)",
            obtained.freq, static_cast<unsigned>(obtained.samples),
-           static_cast<unsigned>(host_target_queue_bytes_),
-           static_cast<unsigned>(host_max_queue_bytes_), target_seconds);
+           static_cast<unsigned>(init_target),
+           static_cast<unsigned>(init_max), target_seconds);
 
   // Initialize the ring buffer with the configured duration.
-  audio_ring_buffer_.init(clamp_output_buffer_seconds(), SAMPLE_RATE, 2);
+  audio_ring_buffer_.init(target_seconds, SAMPLE_RATE, 2);
 }
 
 void Spu::shutdown() {
@@ -208,11 +206,25 @@ void Spu::shutdown() {
   }
   audio_enabled_ = false;
   audio_started_ = false;
+  ring_stutter_active_last_pump_ = false;
   host_buffer_bytes_ = 0;
   opened_audio_samples_ = 0;
-  host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
-  host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
   audio_ring_buffer_.clear();
+}
+
+void Spu::set_host_playback_enabled(bool enabled) {
+  host_playback_enabled_ = enabled;
+  if (!audio_enabled_ || audio_device_ == 0) {
+    return;
+  }
+
+  if (!enabled) {
+    SDL_PauseAudioDevice(audio_device_, 1);
+    SDL_ClearQueuedAudio(audio_device_);
+    audio_started_ = false;
+    ring_stutter_active_last_pump_ = false;
+    audio_ring_buffer_.clear();
+  }
 }
 
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
@@ -403,6 +415,7 @@ void Spu::reset() {
     SDL_PauseAudioDevice(audio_device_, 1);
     SDL_ClearQueuedAudio(audio_device_);
     audio_started_ = false;
+    ring_stutter_active_last_pump_ = false;
   }
 
   regs_.fill(0);
@@ -442,8 +455,6 @@ void Spu::reset() {
   audio_diag_ = {};
   audio_ring_buffer_.clear();
   mix_buffer_.clear();
-  host_silence_samples_.clear();
-  turbo_adjusted_samples_.clear();
   capture_samples_.clear();
   cd_input_samples_.clear();
   replacement_sample_.clear();
@@ -1776,11 +1787,24 @@ s16 Spu::next_noise_sample() {
   return noise_level_;
 }
 
-void Spu::queue_host_audio(const std::vector<s16> &samples) {
+// ============================================================================
+// enqueue_ring_buffer() — Producer (SPU thread only)
+// ============================================================================
+//
+// Push the freshly mixed samples into the ring buffer.  This is the sole
+// producer path.  If the emulator freezes for seconds, only a trickle of
+// samples lands here — the ring buffer's overflow protection discards the
+// oldest unread data so the push never blocks.
+//
+// Also handles audio-capture mode (bypasses the ring buffer entirely).
+// Does NOT touch SDL — the app thread pumps via pump_audio_to_device().
+// ============================================================================
+void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
   if (samples.empty()) {
     return;
   }
 
+  // Audio-capture mode: skip the ring buffer, dump directly.
   if (capture_enabled_) {
     if (capture_samples_.size() + samples.size() > CAPTURE_MAX_SAMPLES) {
       size_t drop =
@@ -1800,239 +1824,94 @@ void Spu::queue_host_audio(const std::vector<s16> &samples) {
     return;
   }
 
-  if (!audio_enabled_ || audio_device_ == 0) {
+  // Push into the ring buffer.  Never blocks.
+  audio_ring_buffer_.push_samples(samples.data(), samples.size());
+}
+
+// ============================================================================
+// pump_audio_to_device() — Consumer (App / main thread, once per frame)
+// ============================================================================
+//
+// Drain samples from the ring buffer and queue them to SDL — but ONLY when
+// SDL's internal queue drops below a small "cushion" threshold (~40 ms).
+//
+// Why a cushion instead of flooding:
+//   The old approach filled SDL's queue to the full target level (~500 ms)
+//   every single frame.  Since the SPU only generates ~1-2 ms of samples
+//   per tick(), the ring buffer was drained to near-zero every frame,
+//   causing the stutter logic to flip on and off hundreds of times per
+//   second — audible as rapid crackling.
+//
+//   The cushion approach lets the ring buffer accumulate a healthy
+//   reservoir of samples during normal playback.  SDL's device consumes
+//   from its own internal queue; we only top it up when it gets low.
+//   When the emulator genuinely hitches (SPU thread stops producing
+//   samples), the ring buffer depletes and the stutter loop kicks in
+//   cleanly — one sustained glitchy loop, not micro-crackle.
+// ============================================================================
+void Spu::pump_audio_to_device() {
+  if (!audio_enabled_ || audio_device_ == 0 || !host_playback_enabled_) {
     return;
   }
 
-  // ── Producer: push generated samples into the ring buffer. ───────────
-  // This is the sole producer path. Every tick() batch of mixed audio
-  // lands here. If the emulator lags for seconds, only a trickle of
-  // samples gets pushed — the ring buffer handles it gracefully.
-  audio_ring_buffer_.push_samples(samples.data(), samples.size());
+  // At 44100 Hz stereo 16-bit: 1 ms ≈ 176.4 bytes.
+  // CUSHION: keep SDL's queue topped up to ~40 ms of audio.
+  // CRITICAL: below ~10 ms we're about to run dry (stutter territory).
+  static constexpr u32 CUSHION_BYTES  = 7056;  // ~40 ms safety margin
+  static constexpr u32 CRITICAL_BYTES = 1764;  // ~10 ms — stutter imminent
 
-  // ── Consumer: read from the ring buffer into SDL's queue. ────────────
-  // If the ring buffer has enough fresh data, we get clean audio.
-  // If the emulator is lagging, read_samples() automatically loops the
-  // rolling history buffer, producing the "Source Engine" lag stutter.
-  //
-  // We read the same number of samples we just generated (accounting for
-  // turbo resampling) to keep the SDL queue paced correctly.
-  size_t samples_to_read = samples.size();
-  const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
-  if (output_speed > 1.001 || output_speed < 0.999) {
-    // Turbo/slowdown: resample to maintain correct output rate.
-    const double scaled_rate =
-        static_cast<double>(SAMPLE_RATE) * std::clamp(output_speed, 0.25, 4.0);
-    const u32 in_rate =
-        static_cast<u32>(std::clamp<int>(static_cast<int>(std::lround(scaled_rate)),
-                                         SAMPLE_RATE / 4, SAMPLE_RATE * 4));
-    const size_t in_frames = samples.size() / 2;
-    if (in_frames > 0) {
-      if (turbo_resample_in_rate_ != in_rate) {
-        turbo_resample_in_rate_ = in_rate;
-        turbo_resample_src_pos_ = 0.0;
-        turbo_resample_prev_valid_ = false;
-      }
-
-      if (!turbo_resample_prev_valid_) {
-        turbo_resample_prev_l_ = samples[0];
-        turbo_resample_prev_r_ = samples[1];
-        turbo_resample_prev_valid_ = true;
-        turbo_resample_src_pos_ = std::max(0.0, turbo_resample_src_pos_);
-      }
-
-      const double ratio =
-          static_cast<double>(in_rate) / static_cast<double>(SAMPLE_RATE);
-      const bool ratio_is_integer = (in_rate % SAMPLE_RATE) == 0u;
-      const u32 ratio_step = ratio_is_integer ? (in_rate / SAMPLE_RATE) : 0u;
-
-      auto read_frame = [&](int idx, s16 &l, s16 &r) {
-        if (idx < 0) {
-          l = turbo_resample_prev_l_;
-          r = turbo_resample_prev_r_;
-          return;
-        }
-        const size_t frame = static_cast<size_t>(idx);
-        if (frame >= in_frames) {
-          l = samples[(in_frames - 1) * 2 + 0];
-          r = samples[(in_frames - 1) * 2 + 1];
-          return;
-        }
-        l = samples[frame * 2 + 0];
-        r = samples[frame * 2 + 1];
-      };
-
-      // First, get the raw samples from the ring buffer (which may stutter).
-      host_silence_samples_.resize(samples.size());
-      audio_ring_buffer_.read_samples(host_silence_samples_.data(), samples.size());
-
-      // Resample the ring-buffer output for turbo/slowdown.
-      turbo_adjusted_samples_.clear();
-      turbo_adjusted_samples_.reserve(samples.size());
-      const bool can_use_fast_step =
-          ratio_is_integer && (ratio_step >= 2u) && (ratio_step <= 4u) &&
-          (std::fabs(turbo_resample_src_pos_ - std::round(turbo_resample_src_pos_)) < 1e-9);
-      double src_pos = turbo_resample_src_pos_;
-      if (can_use_fast_step) {
-        while (src_pos < static_cast<double>(in_frames)) {
-          s16 l = 0, r = 0;
-          read_frame(static_cast<int>(src_pos), l, r);
-          turbo_adjusted_samples_.push_back(l);
-          turbo_adjusted_samples_.push_back(r);
-          src_pos += static_cast<double>(ratio_step);
-        }
-      } else {
-        while (src_pos < static_cast<double>(in_frames)) {
-          const int idx0 = static_cast<int>(std::floor(src_pos));
-          const int idx1 = idx0 + 1;
-          const double frac =
-              std::clamp(src_pos - static_cast<double>(idx0), 0.0, 1.0);
-          s16 l0 = 0, r0 = 0, l1 = 0, r1 = 0;
-          read_frame(idx0, l0, r0);
-          read_frame(idx1, l1, r1);
-          const s32 l = static_cast<s32>(std::lround(
-              static_cast<double>(l0) + (static_cast<double>(l1 - l0) * frac)));
-          const s32 r = static_cast<s32>(std::lround(
-              static_cast<double>(r0) + (static_cast<double>(r1 - r0) * frac)));
-          turbo_adjusted_samples_.push_back(
-              static_cast<s16>(std::clamp(l, -32768, 32767)));
-          turbo_adjusted_samples_.push_back(
-              static_cast<s16>(std::clamp(r, -32768, 32767)));
-          src_pos += ratio;
-        }
-      }
-
-      turbo_resample_src_pos_ = src_pos - static_cast<double>(in_frames);
-      turbo_resample_prev_l_ = samples[(in_frames - 1) * 2 + 0];
-      turbo_resample_prev_r_ = samples[(in_frames - 1) * 2 + 1];
-      turbo_resample_prev_valid_ = true;
-
-      if (!turbo_adjusted_samples_.empty()) {
-        samples_to_read = turbo_adjusted_samples_.size();
-      }
-    }
-  } else {
-    turbo_resample_src_pos_ = 0.0;
-    turbo_resample_in_rate_ = SAMPLE_RATE;
-    turbo_resample_prev_valid_ = false;
-    turbo_resample_prev_l_ = 0;
-    turbo_resample_prev_r_ = 0;
-  }
-
-  // Read the requested amount from the ring buffer (stutter if needed).
-  // For non-turbo mode, we read exactly what was generated.
-  // For turbo mode, we already read above and resampled.
-  const s16 *queue_ptr = nullptr;
-  if (output_speed > 1.001 || output_speed < 0.999) {
-    queue_ptr = turbo_adjusted_samples_.data();
-  } else {
-    host_silence_samples_.resize(samples.size());
-    audio_ring_buffer_.read_samples(host_silence_samples_.data(), samples.size());
-    queue_ptr = host_silence_samples_.data();
-  }
-
-  // Queue to SDL with the same overrun protection as before.
-  const bool audio_queue_enabled =
-      g_spu_enable_audio_queue || g_spu_force_audio_queue;
-
-  u32 queued_before = SDL_GetQueuedAudioSize(audio_device_);
-  audio_diag_.queue_last_bytes = queued_before;
+  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+  audio_diag_.queue_last_bytes = queued;
   audio_diag_.queue_peak_bytes =
-      std::max(audio_diag_.queue_peak_bytes, queued_before);
+      std::max(audio_diag_.queue_peak_bytes, queued);
 
-  if (audio_queue_enabled) {
-    // Seconds-based queue model.
-    const double target_seconds = clamp_output_buffer_seconds();
-    const u32 target_bytes =
-        bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
-    host_target_queue_bytes_ =
-        std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u,
-                  target_bytes});
-    const u32 max_bytes = bytes_from_seconds(
-        std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
-    host_max_queue_bytes_ =
-        std::max(HOST_MAX_QUEUE_BYTES_MIN,
-                 std::max(host_buffer_bytes_ * 8u, max_bytes));
-    if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
-      host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
-    }
+  // Overrun protection: if SDL's queue exploded (e.g. after a long pause),
+  // flush it so we don't play seconds-old audio.
+  const u32 max_q = HOST_MAX_QUEUE_BYTES_MIN;
+  if (queued > max_q) {
+    SDL_ClearQueuedAudio(audio_device_);
+    audio_diag_.dropped_frames +=
+        queued / (static_cast<u32>(sizeof(s16)) * 2u);
+    ++audio_diag_.overrun_events;
+    queued = 0;
+  }
 
-    if (queued_before > host_max_queue_bytes_) {
-      SDL_ClearQueuedAudio(audio_device_);
-      audio_diag_.dropped_frames +=
-          queued_before / (static_cast<u32>(sizeof(s16)) * 2u);
-      ++audio_diag_.overrun_events;
-      queued_before = 0;
-    }
+  // Only pull from the ring buffer if SDL's queue is below the cushion.
+  // This prevents the aggressive drain that caused micro-crackle.
+  if (queued < CUSHION_BYTES) {
+    const u32 bytes_needed = CUSHION_BYTES - queued;
+    size_t count = bytes_needed / sizeof(s16);
+    // Align to full stereo frames (2 s16 samples per frame).
+    count = (count + 1u) & ~static_cast<size_t>(1u);
 
-    const size_t bytes_available = samples_to_read * sizeof(s16);
-    u32 queued = queued_before;
-    size_t offset = 0;
-    while (offset < bytes_available) {
+    if (count > 0) {
+      // Consumer call: stutter kicks in if the ring buffer is starved.
+      std::vector<s16> chunk(count);
+      audio_ring_buffer_.read_samples(chunk.data(), count);
+      const bool stuttering_now = audio_ring_buffer_.is_stuttering();
+      if (stuttering_now && !ring_stutter_active_last_pump_) {
+        ++audio_diag_.underrun_events;
+      }
+      ring_stutter_active_last_pump_ = stuttering_now;
+
+      SDL_QueueAudio(audio_device_, chunk.data(),
+                     static_cast<Uint32>(count * sizeof(s16)));
+      audio_diag_.queued_frames += count / 2;
+
       queued = SDL_GetQueuedAudioSize(audio_device_);
       audio_diag_.queue_last_bytes = queued;
       audio_diag_.queue_peak_bytes =
           std::max(audio_diag_.queue_peak_bytes, queued);
-
-      if (queued >= host_target_queue_bytes_) {
-        break;
-      }
-
-      const u32 room = host_target_queue_bytes_ - queued;
-      if (room < sizeof(s16) * 2u) {
-        break;
-      }
-
-      size_t to_queue = std::min<size_t>(room, bytes_available - offset);
-      to_queue &= ~static_cast<size_t>(1); // whole frames only
-      if (to_queue == 0) break;
-
-      SDL_QueueAudio(audio_device_,
-                     reinterpret_cast<const Uint8 *>(queue_ptr) + offset,
-                     static_cast<Uint32>(to_queue));
-      audio_diag_.queued_frames += to_queue / (sizeof(s16) * 2u);
-      offset += to_queue;
     }
   } else {
-    // Direct queue mode (no pacing).
-    const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
-    const u32 slowdown_scale = (queue_speed < 0.999)
-                                   ? static_cast<u32>(std::clamp(
-                                         static_cast<int>(std::lround(1.0 / queue_speed)), 1, 8))
-                                   : 1u;
-    const u32 direct_queue_cap =
-        std::max(host_buffer_bytes_ * (2u * slowdown_scale), 4096u);
-    if (queued_before > direct_queue_cap) {
-      SDL_ClearQueuedAudio(audio_device_);
-      audio_diag_.dropped_frames +=
-          queued_before / (static_cast<u32>(sizeof(s16)) * 2u);
-      ++audio_diag_.overrun_events;
-      queued_before = 0;
-    }
-
-    SDL_QueueAudio(audio_device_,
-                   reinterpret_cast<const Uint8 *>(queue_ptr),
-                   static_cast<Uint32>(samples_to_read * sizeof(s16)));
-    audio_diag_.queued_frames += samples_to_read / 2;
+    ring_stutter_active_last_pump_ = audio_ring_buffer_.is_stuttering();
   }
 
-  u32 queued_after = SDL_GetQueuedAudioSize(audio_device_);
-  audio_diag_.queue_last_bytes = queued_after;
-  audio_diag_.queue_peak_bytes =
-      std::max(audio_diag_.queue_peak_bytes, queued_after);
-
+  // Startup: unpause the device once the cushion is filled.
   if (!audio_started_) {
-    const u32 startup_threshold =
-        std::min(host_target_queue_bytes_,
-                 std::max(host_buffer_bytes_ * 2u,
-                          bytes_from_seconds(0.10, SAMPLE_RATE, 2u)));
-    if (queued_after >= startup_threshold) {
+    if (queued >= CUSHION_BYTES) {
       SDL_PauseAudioDevice(audio_device_, 0);
       audio_started_ = true;
-    }
-  } else {
-    if (queued_after == 0u) {
-      ++audio_diag_.underrun_events;
     }
   }
 }
@@ -2312,7 +2191,7 @@ void Spu::tick(u32 cycles) {
       capture_half_ ^= 1u;
       ++audio_diag_.muted_output_frames;
     }
-    queue_host_audio(out);
+    enqueue_ring_buffer(out);
     if (profile_detailed && sys_ != nullptr) {
       const auto end = std::chrono::high_resolution_clock::now();
       sys_->add_spu_time(
@@ -2635,7 +2514,7 @@ void Spu::tick(u32 cycles) {
     cd_input_read_pos_ = 0;
   }
 
-  queue_host_audio(out);
+  enqueue_ring_buffer(out);
 
   if (profile_detailed && sys_ != nullptr) {
     const auto end = std::chrono::high_resolution_clock::now();
