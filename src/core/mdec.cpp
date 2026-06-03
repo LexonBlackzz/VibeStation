@@ -890,14 +890,6 @@ void Mdec::idct_variant(const Block &coeffs, Block &pixels,
 
 void Mdec::build_macroblock_rgb(const MacroblockBlocks &pixel_blocks,
                                 MacroblockRgb &rgb_out) const {
-  auto sign_extend_9 = [](int value) {
-    int signed9 = value & 0x1FF;
-    if ((signed9 & 0x100) != 0) {
-      signed9 -= 0x200;
-    }
-    return signed9;
-  };
-
   const Block &cr = pixel_blocks[0];
   const Block &cb = pixel_blocks[1];
   const std::array<const Block *, 4> y_blocks = {
@@ -915,22 +907,12 @@ void Mdec::build_macroblock_rgb(const MacroblockBlocks &pixel_blocks,
         const int cy = (by + y) >> 1;
         const int crv = cr[cy * 8 + cx];
         const int cbv = cb[cy * 8 + cx];
-
-        const int r =
-            std::clamp(sign_extend_9(yy + (((359 * crv) + 0x80) >> 8)),
-                       -128, 127);
-        const int g = std::clamp(
-            sign_extend_9(yy + ((((-88 * cbv) & ~0x1F) +
-                                  ((-183 * crv) & ~0x07) + 0x80) >> 8)),
-            -128, 127);
-        const int b =
-            std::clamp(sign_extend_9(yy + (((454 * cbv) + 0x80) >> 8)),
-                       -128, 127);
+        const auto rgb = ycbcr_to_rgb_components(yy, cbv, crv);
 
         rgb_out[static_cast<size_t>((by + y) * 16 + (bx + x))] =
-            static_cast<u32>(encode_component(r)) |
-            (static_cast<u32>(encode_component(g)) << 8) |
-            (static_cast<u32>(encode_component(b)) << 16);
+            static_cast<u32>(encode_component(rgb[0])) |
+            (static_cast<u32>(encode_component(rgb[1])) << 8) |
+            (static_cast<u32>(encode_component(rgb[2])) << 16);
       }
     }
   }
@@ -1029,11 +1011,8 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
         const int chroma_index = chroma_row + (px >> 1);
         const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
         const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
-        const int r = clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8));
-        const int g = clamp_signed_sample(
-            yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8));
-        const int b = clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8));
-        const u16 rgb15 = encode_rgb15(r, g, b);
+        const auto rgb = ycbcr_to_rgb_components(yy, cbv, crv);
+        const u16 rgb15 = encode_rgb15(rgb[0], rgb[1], rgb[2]);
         if (!have_low) {
           low_pixel = rgb15;
           have_low = true;
@@ -1061,14 +1040,20 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
       const int chroma_index = chroma_row + (px >> 1);
       const int crv = (!enabled || disable_chroma) ? 0 : cr[chroma_index];
       const int cbv = (!enabled || disable_chroma) ? 0 : cb[chroma_index];
-      push_output_byte(
-          encode_component(clamp_signed_sample(yy + (((359 * crv) + 0x80) >> 8))));
-      push_output_byte(encode_component(clamp_signed_sample(
-          yy + ((((-88 * cbv) & ~0x1F) + ((-183 * crv) & ~0x07) + 0x80) >> 8))));
-      push_output_byte(
-          encode_component(clamp_signed_sample(yy + (((454 * cbv) + 0x80) >> 8))));
+      const auto rgb = ycbcr_to_rgb_components(yy, cbv, crv);
+      push_output_byte(encode_component(rgb[0]));
+      push_output_byte(encode_component(rgb[1]));
+      push_output_byte(encode_component(rgb[2]));
     }
   }
+}
+
+std::array<int, 3> Mdec::ycbcr_to_rgb_components(int y, int cb, int cr) {
+  const int r = std::clamp(y + (((359 * cr) + 0x80) >> 8), -128, 127);
+  const int g =
+      std::clamp(y - (((88 * cb) + (183 * cr) + 0x80) >> 8), -128, 127);
+  const int b = std::clamp(y + (((454 * cb) + 0x80) >> 8), -128, 127);
+  return {r, g, b};
 }
 
 void Mdec::emit_monochrome_macroblock(const Block &y) {

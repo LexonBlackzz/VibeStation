@@ -129,6 +129,7 @@ private:
   void push_output_byte(u8 value);
   static int sign_extend_10(u16 value);
   static int clamp_s11(int value);
+  static std::array<int, 3> ycbcr_to_rgb_components(int y, int cb, int cr);
   u8 encode_component(int value) const;
   u16 encode_rgb15(int r, int g, int b) const;
 
