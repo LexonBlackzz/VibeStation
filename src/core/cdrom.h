@@ -270,6 +270,7 @@ private:
   void enqueue_data_irq(std::vector<u8> payload, int source_lba);
   void activate_data_payload(std::vector<u8> payload, int source_lba);
   void defer_data_payload(std::vector<u8> payload, int source_lba);
+  void flush_data_pipeline();
   bool can_discard_unread_whole_sector_tail() const;
   void maybe_promote_deferred_payload_for_header(bool cpu_port_access,
                                                  bool irq_ack_promotion = false);

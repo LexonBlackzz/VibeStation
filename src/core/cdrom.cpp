@@ -841,7 +841,7 @@ int CdRom::msf_to_lba(u8 mm, u8 ss, u8 ff) const {
 
 int CdRom::read_period_for_mode() const {
   bool double_speed = (mode_ & 0x80u) != 0;
-  if (pending_reads_mode_ && read_whole_sector_) {
+  if (pending_reads_mode_ && read_whole_sector_ && (mode_ & 0x40u) != 0) {
     // FMV whole-sector ReadS streams are noticeably less tolerant of a
     // perfectly idealized 2x cadence than plain data reads. Real drives spend
     // more time in the host/decoder handoff here; pacing them at 1x avoids the
@@ -1314,7 +1314,7 @@ bool CdRom::read_sector() {
     if (raw.size() >= 2352u) {
       whole_offset = 12u;
       whole_size = 0x924u;
-      if (layout.mode2 && has_subheader) {
+      if (layout.mode2 && has_subheader && (mode_ & 0x40u) != 0) {
         // RR4 and similar interleaved FMV streams expect the whole-sector host
         // FIFO to expose a stable 12-byte header/subheader prefix plus 2048
         // bytes of payload for both Form1 and Form2 sectors. Presenting the
@@ -1410,8 +1410,33 @@ void CdRom::defer_data_payload(std::vector<u8> payload, int source_lba) {
   }
 }
 
+void CdRom::flush_data_pipeline() {
+  data_buffer_.clear();
+  deferred_data_payloads_.clear();
+  active_data_lba_ = -1;
+  data_index_ = 0;
+  data_ready_ = false;
+
+  for (auto it = pending_irqs_.begin(); it != pending_irqs_.end();) {
+    if (it->has_data_payload) {
+      it = pending_irqs_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 bool CdRom::can_discard_unread_whole_sector_tail() const {
-  if (!read_whole_sector_ || !data_ready_ || data_index_ != 44) {
+  if (!read_whole_sector_ || !data_ready_) {
+    return false;
+  }
+  if (data_buffer_.size() >= 0x924u && data_index_ >= 2060) {
+    // Some whole-sector readers consume the 12-byte header/subheader prefix
+    // plus 2048 bytes of payload, then intentionally skip the trailing raw
+    // sector ECC/EDC tail. Allow the next sector to replace that tail.
+    return true;
+  }
+  if (data_index_ != 44) {
     return false;
   }
   if (data_buffer_.size() < 16u) {
@@ -1667,9 +1692,27 @@ void CdRom::cmd_setloc() {
   seek_mm_ = param_fifo_[0];
   seek_ss_ = param_fifo_[1];
   seek_ff_ = param_fifo_[2];
+  const int previous_seek_target = seek_target_valid_ ? seek_target_lba_ : -1;
   seek_target_lba_ = target;
   seek_target_valid_ = true;
   seek_error_ = false;
+  const bool stale_active_payload =
+      active_data_lba_ >= 0 && active_data_lba_ != seek_target_lba_;
+  const bool stale_deferred_payloads = !deferred_data_payloads_.empty();
+  if ((stale_active_payload || stale_deferred_payloads) &&
+      (previous_seek_target != seek_target_lba_ || stale_active_payload)) {
+    if (g_log_fmv_diagnostics) {
+      static u32 flush_setloc_log_count = 0;
+      if (flush_setloc_log_count < 128u) {
+        ++flush_setloc_log_count;
+        LOG_WARN(
+            "CDROM: flushing stale data pipeline on Setloc old_target=%d new_target=%d active_lba=%d idx=%d size=%zu deferred=%zu",
+            previous_seek_target, seek_target_lba_, active_data_lba_, data_index_,
+            data_buffer_.size(), deferred_data_payloads_.size());
+      }
+    }
+    flush_data_pipeline();
+  }
   if (g_log_fmv_diagnostics) {
     static u32 setloc_log_count = 0;
     if (setloc_log_count < 128u) {
@@ -2352,13 +2395,14 @@ void CdRom::write8(u32 offset, u8 value) {
         }
       }
       data_request_ = (value & 0x80u) != 0;
-      // Some games expect BFRD=0 to rewind a plain 2048-byte sector before
-      // re-arming DMA, while FMV whole-sector streams keep consuming the same
-      // 2060-byte payload across multiple BFRD windows. Rewinding E0/whole
-      // sectors traps RR4 in repeated header-only reads, so only rewind the
-      // simple user-data path here.
+      // Some games expect BFRD=0 to rewind before re-arming DMA. The
+      // "preserve whole-sector position" behavior is only needed for XA/FMVs;
+      // applying it to plain Mode2 whole-sector reads makes the guest keep
+      // seeing the same unread sector forever and stalls RR4's movie handoff.
       if (!data_request_) {
-        if (!read_whole_sector_) {
+        const bool preserve_whole_sector_position =
+            read_whole_sector_ && (mode_ & 0x40u) != 0;
+        if (!preserve_whole_sector_position) {
           data_index_ = 0;
         } else if (g_log_fmv_diagnostics) {
           static u32 whole_sector_bfrd_hold_logs = 0;
