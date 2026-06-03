@@ -475,7 +475,7 @@ void Spu::reset() {
   cd_resample_prev_l_ = 0;
   cd_resample_prev_r_ = 0;
   turbo_resample_src_pos_ = 0.0;
-  turbo_resample_in_rate_ = SAMPLE_RATE;
+  turbo_resample_speed_ = 1.0;
   turbo_resample_prev_valid_ = false;
   turbo_resample_prev_l_ = 0;
   turbo_resample_prev_r_ = 0;
@@ -1799,6 +1799,87 @@ s16 Spu::next_noise_sample() {
 // Also handles audio-capture mode (bypasses the ring buffer entirely).
 // Does NOT touch SDL — the app thread pumps via pump_audio_to_device().
 // ============================================================================
+std::vector<s16> Spu::resample_output_for_speed(const std::vector<s16> &samples,
+                                                double speed) {
+  if (samples.empty() || (samples.size() & 1u) != 0u) {
+    return {};
+  }
+
+  const double clamped_speed = std::clamp(speed, 0.25, 4.0);
+  if (std::abs(clamped_speed - 1.0) < 0.001) {
+    turbo_resample_speed_ = 1.0;
+    turbo_resample_src_pos_ = 0.0;
+    turbo_resample_prev_valid_ = false;
+    return samples;
+  }
+
+  if (std::abs(turbo_resample_speed_ - clamped_speed) >= 0.001) {
+    turbo_resample_speed_ = clamped_speed;
+    turbo_resample_src_pos_ = 1.0;
+    turbo_resample_prev_valid_ = false;
+  }
+
+  const size_t in_frames = samples.size() / 2u;
+  if (in_frames == 0u) {
+    return {};
+  }
+
+  if (!turbo_resample_prev_valid_) {
+    turbo_resample_prev_l_ = samples[0];
+    turbo_resample_prev_r_ = samples[1];
+    turbo_resample_prev_valid_ = true;
+    turbo_resample_src_pos_ = std::max(1.0, turbo_resample_src_pos_);
+  }
+
+  auto read_frame = [&](int idx, s16 &l, s16 &r) {
+    if (idx <= 0) {
+      l = turbo_resample_prev_l_;
+      r = turbo_resample_prev_r_;
+      return;
+    }
+    const size_t frame = static_cast<size_t>(idx - 1);
+    if (frame >= in_frames) {
+      l = samples[(in_frames - 1u) * 2u + 0u];
+      r = samples[(in_frames - 1u) * 2u + 1u];
+      return;
+    }
+    l = samples[frame * 2u + 0u];
+    r = samples[frame * 2u + 1u];
+  };
+
+  std::vector<s16> resampled;
+  resampled.reserve(static_cast<size_t>(
+      std::ceil((static_cast<double>(in_frames) / clamped_speed) * 2.0)));
+
+  double src_pos = turbo_resample_src_pos_;
+  while (src_pos < static_cast<double>(in_frames)) {
+    const int i0 = static_cast<int>(std::floor(src_pos));
+    const int i1 = i0 + 1;
+    const double frac = std::clamp(src_pos - static_cast<double>(i0), 0.0, 1.0);
+
+    s16 l0 = 0;
+    s16 r0 = 0;
+    s16 l1 = 0;
+    s16 r1 = 0;
+    read_frame(i0, l0, r0);
+    read_frame(i1, l1, r1);
+
+    const s32 l = static_cast<s32>(std::lround(
+        static_cast<double>(l0) + (static_cast<double>(l1 - l0) * frac)));
+    const s32 r = static_cast<s32>(std::lround(
+        static_cast<double>(r0) + (static_cast<double>(r1 - r0) * frac)));
+    resampled.push_back(static_cast<s16>(std::clamp(l, -32768, 32767)));
+    resampled.push_back(static_cast<s16>(std::clamp(r, -32768, 32767)));
+
+    src_pos += clamped_speed;
+  }
+
+  turbo_resample_src_pos_ = src_pos - static_cast<double>(in_frames);
+  turbo_resample_prev_l_ = samples[(in_frames - 1u) * 2u + 0u];
+  turbo_resample_prev_r_ = samples[(in_frames - 1u) * 2u + 1u];
+  return resampled;
+}
+
 void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
   if (samples.empty()) {
     return;
@@ -1824,8 +1905,14 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
     return;
   }
 
+  const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
+  const std::vector<s16> resampled = resample_output_for_speed(samples, output_speed);
+  if (resampled.empty()) {
+    return;
+  }
+
   // Push into the ring buffer.  Never blocks.
-  audio_ring_buffer_.push_samples(samples.data(), samples.size());
+  audio_ring_buffer_.push_samples(resampled.data(), resampled.size());
 }
 
 // ============================================================================
