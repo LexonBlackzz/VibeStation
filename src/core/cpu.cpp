@@ -704,6 +704,10 @@ u32 Cpu::load32(u32 addr) {
           addr, value, current_pc_, gpr_[31], gpr_[19],
           static_cast<unsigned long long>(cycles_));
     }
+    // RR4 uses a transient 1 sentinel in the helper slot while the producer
+    // side is unwinding. Letting the low helper treat that as real state keeps
+    // re-seeding the bad walk, so collapse it to 0 here.
+    return 0;
   }
   if (g_log_fmv_diagnostics && current_pc_ == 0x00000E28u &&
       (addr & 0x1FFFFFFFu) == 0x000A6518u && value == 0x00000001u) {
@@ -716,6 +720,27 @@ u32 Cpu::load32(u32 addr) {
           addr, value, current_pc_, gpr_[31], gpr_[17], gpr_[19],
           static_cast<unsigned long long>(cycles_));
     }
+    // RR4's low helper chain can surface a transient/sentinel value of 1 in the
+    // node head while the producer path is still unwinding. Treat it as a null
+    // next-pointer so the BIOS helper terminates the walk instead of dereferencing
+    // 0x00000001 on the next iteration.
+    return 0;
+  }
+  if (g_log_fmv_diagnostics && current_pc_ == 0x8008B8FCu &&
+      (addr & 0x1FFFFFFFu) == 0x000A6518u && value == 0x00000001u) {
+    static u32 rr4_node_head_reader_logs = 0;
+    if (rr4_node_head_reader_logs < 32u) {
+      ++rr4_node_head_reader_logs;
+      LOG_WARN(
+          "CPU: rr4 head sentinel addr=0x%08X val=0x%08X pass-through pc=0x%08X "
+          "ra=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X cyc=%llu",
+          addr, value, current_pc_, gpr_[31], gpr_[17], gpr_[18], gpr_[19],
+          static_cast<unsigned long long>(cycles_));
+    }
+    // This is the earlier producer-side read that feeds v1=1 into the low
+    // dispatch scratch slots. Normalizing it here keeps the helper from
+    // repeatedly rebuilding the bad walk.
+    return 0;
   }
   return value;
 }
@@ -841,44 +866,6 @@ void Cpu::exception(Exception cause) {
     cop0_cause_ &= ~(1u << 31);
   }
   exception_return_epc_ = cop0_epc_;
-
-  // The BIOS exception handler short-circuits syscall 1/2 into
-  // EnterCritical/ExitCritical handling before it walks the broader low-RAM
-  // dispatcher state. Emulate that here so games do not depend on the
-  // trampoline bookkeeping surviving perfectly.
-  if (cause == Exception::Syscall && (gpr_[4] == 1u || gpr_[4] == 2u)) {
-    if (gpr_[4] == 1u) {
-      cop0_sr_ &= ~0x404u;
-      set_reg(2, 1u);
-    } else {
-      cop0_sr_ |= 0x404u;
-    }
-
-    cop0_sr_ = (cop0_sr_ & 0xFFFFFFF0u) | ((cop0_sr_ & 0x3Cu) >> 2);
-    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
-
-    pc_ = cop0_epc_ + 4u;
-    next_pc_ = pc_ + 4u;
-    in_delay_slot_ = false;
-    pending_delay_slot_ = false;
-    pending_branch_taken_ = false;
-    pending_branch_pc_ = 0;
-    active_branch_pc_ = 0;
-
-    if (g_log_fmv_diagnostics && current_pc_ >= 0x800970B0u &&
-        current_pc_ <= 0x80097110u) {
-      static u32 critical_syscall_fastpath_logs = 0;
-      if (critical_syscall_fastpath_logs < 128u) {
-        ++critical_syscall_fastpath_logs;
-        LOG_WARN(
-            "CPU: critical-syscall fastpath pc=0x%08X epc=0x%08X cyc=%llu "
-            "a0=%u sr=0x%08X v0=0x%08X ra=0x%08X sp=0x%08X",
-            current_pc_, cop0_epc_, static_cast<unsigned long long>(cycles_),
-            gpr_[4], cop0_sr_, gpr_[2], gpr_[31], gpr_[29]);
-      }
-    }
-    return;
-  }
 
   // Jump to exception handler
   if (cause != Exception::Interrupt && logged_exception_count < 32) {
@@ -1076,44 +1063,19 @@ u32 Cpu::step() {
   const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
   const u32 bios_vector = gpr_[10] & 0x1FFFFFFFu;
   const u32 bios_call = gpr_[9] & 0xFFu;
-  const bool rr4_late_bios_rfe =
-      cycles_ >= 390000000ull && gpr_[31] >= 0x8008B700u &&
-      gpr_[31] <= 0x8008BA00u;
-  if (phys_pc == 0x000000B0u && bios_vector == 0x000000B0u &&
-      bios_call == 0x17u && exception_return_valid_ && rr4_late_bios_rfe) {
-    if (g_log_fmv_diagnostics) {
-      static u32 bios_rfe_hle_logs = 0;
-      if (bios_rfe_hle_logs < 192u) {
-        ++bios_rfe_hle_logs;
-        LOG_WARN(
-            "CPU: HLE B0:17 pc=0x%08X cyc=%llu epc=0x%08X bd=%u sr=0x%08X "
-            "ra=0x%08X sp=0x%08X",
-            current_pc_, static_cast<unsigned long long>(cycles_),
-            exception_return_epc_, exception_return_bd_ ? 1u : 0u,
-            exception_return_sr_, gpr_[31], gpr_[29]);
-      }
+  if (g_log_fmv_diagnostics && phys_pc == 0x000000B0u &&
+      bios_vector == 0x000000B0u && bios_call == 0x17u &&
+      exception_return_valid_ && cycles_ >= 390000000ull) {
+    static u32 bios_rfe_visit_logs = 0;
+    if (bios_rfe_visit_logs < 192u) {
+      ++bios_rfe_visit_logs;
+      LOG_WARN(
+          "CPU: BIOS B0:17 visit pc=0x%08X cyc=%llu epc=0x%08X bd=%u sr=0x%08X "
+          "ra=0x%08X sp=0x%08X irq=%u",
+          current_pc_, static_cast<unsigned long long>(cycles_),
+          exception_return_epc_, exception_return_bd_ ? 1u : 0u,
+          exception_return_sr_, gpr_[31], gpr_[29], sys_->irq_pending() ? 1u : 0u);
     }
-
-    std::memcpy(gpr_, exception_return_regs_, sizeof(gpr_));
-    hi_ = exception_return_hi_;
-    lo_ = exception_return_lo_;
-    cop0_sr_ = exception_return_sr_;
-    cop0_epc_ = exception_return_epc_;
-    pc_ = exception_return_epc_ + (exception_return_bd_ ? 4u : 0u);
-    next_pc_ = pc_ + 4u;
-    gpr_[0] = 0u;
-    in_delay_slot_ = false;
-    pending_delay_slot_ = false;
-    pending_branch_taken_ = false;
-    pending_branch_pc_ = 0u;
-    active_branch_pc_ = 0u;
-    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
-    load_ = {0, 0};
-    next_load_ = {0, 0};
-    constexpr u32 bios_rfe_cycles = 1;
-    cycles_ += bios_rfe_cycles;
-    prev_pc_for_diag = current_pc_;
-    return bios_rfe_cycles;
   }
 
   // Fetch instruction
