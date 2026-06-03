@@ -1948,7 +1948,9 @@ u8 System::read8(u32 addr) {
             const u32 shift = (io & 0x3u) * 8u;
             return static_cast<u8>((reg >> shift) & 0xFFu);
         }
-        // Expansion 2
+        // Expansion 2 / peripheral gap / open bus
+        if (phys >= 0x1F801FD0 && phys < 0x1F802000)
+            return 0xFF;
         if (phys == 0x1F802041)
             return post_reg_;
         if (phys >= 0x1F802000)
@@ -2041,6 +2043,9 @@ u16 System::read16(u32 addr) {
             const u32 shift = (io & 0x2u) ? 16u : 0u;
             return static_cast<u16>((reg >> shift) & 0xFFFFu);
         }
+        // Peripheral gap before Expansion 2 / open bus
+        if (phys >= 0x1F801FD0 && phys < 0x1F802000)
+            return 0xFFFF;
         // SPU
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();
@@ -2137,6 +2142,9 @@ u32 System::read32(u32 addr) {
         if (io == 0x824) {
             return mdec_.read_status();
         }
+        // Peripheral gap before Expansion 2 / open bus
+        if (phys >= 0x1F801FD0 && phys < 0x1F802000)
+            return 0xFFFFFFFFu;
         // SPU
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();

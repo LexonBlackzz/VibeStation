@@ -920,63 +920,22 @@ private:
   }
   template <typename T>
   bool try_read_kernel_stub_shadow(u32 off, T &value) const {
-    if (!kernel_stub_shadow_frozen_ || !kernel_stub_shadow_live_ ||
-        !kernel_stub_shadow_touches(off, sizeof(T))) {
-      return false;
-    }
-    std::memcpy(&value,
-                kernel_stub_shadow_.data() + (off - kKernelStubShadowStart),
-                sizeof(T));
-    return true;
+    (void)off;
+    (void)value;
+    return false;
   }
   void sync_kernel_stub_shadow_live() {
-    if (kernel_stub_shadow_frozen_) {
-      return;
-    }
-    std::memcpy(kernel_stub_shadow_.data(), ram_.data() + kKernelStubShadowStart,
-                kernel_stub_shadow_.size());
-    kernel_stub_shadow_live_ = true;
+    kernel_stub_shadow_live_ = false;
   }
   void maybe_preserve_kernel_stub_shadow_before_write(u32 off, const void *src,
                                                       size_t size) {
-    if (kernel_stub_shadow_frozen_ || !kernel_stub_shadow_touches(off, size)) {
-      return;
-    }
-    sync_kernel_stub_shadow_live();
-    if (cpu_.cycle_count() < 700000000ull) {
-      return;
-    }
-
-    const u32 start = kKernelStubShadowStart;
-    const u32 end = kKernelStubShadowStart + kKernelStubShadowSize;
-    const u8 *new_bytes = static_cast<const u8 *>(src);
-    for (size_t i = 0; i < size; ++i) {
-      const u32 byte_addr = off + static_cast<u32>(i);
-      if (byte_addr < start || byte_addr >= end) {
-        continue;
-      }
-      const u8 old_byte = ram_.data()[byte_addr];
-      const u8 new_byte = new_bytes[i];
-      if (old_byte != 0u && new_byte == 0u) {
-        kernel_stub_shadow_frozen_ = true;
-        if (g_log_fmv_diagnostics) {
-          LOG_WARN(
-              "BUS: froze kernel stub shadow at cyc=%llu pc=0x%08X off=0x%08X "
-              "oldA0=0x%08X oldB0=0x%08X oldB4=0x%08X oldB8=0x%08X oldC0=0x%08X",
-              static_cast<unsigned long long>(cpu_.cycle_count()), cpu_.pc(),
-              byte_addr, ram_.read32(0x000000A0u), ram_.read32(0x000000B0u),
-              ram_.read32(0x000000B4u), ram_.read32(0x000000B8u),
-              ram_.read32(0x000000C0u));
-        }
-        return;
-      }
-    }
+    (void)off;
+    (void)src;
+    (void)size;
   }
   void sync_kernel_stub_shadow_after_write(u32 off, size_t size) {
-    if (kernel_stub_shadow_frozen_ || !kernel_stub_shadow_touches(off, size)) {
-      return;
-    }
-    sync_kernel_stub_shadow_live();
+    (void)off;
+    (void)size;
   }
   void log_unhandled_bus_write(const char *width, u32 phys, u32 value,
                                bool io_space, u64 repeat_count,
