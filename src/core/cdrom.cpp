@@ -13,7 +13,13 @@ namespace {
 constexpr u8 kHintTypeMask = 0x07u;
 constexpr u8 kHintMaskAll = 0x1Fu;
 constexpr int kCdIrqAssertDelayCycles = 1536;
+constexpr int kCdSectorRedeliveryDelayCycles = 5000;
+constexpr int kCdAsyncMinInterruptGapCycles = 1000;
+constexpr int kCdAsyncRetryDelayCycles = 500;
 constexpr size_t kFifoCapacity = 16u;
+constexpr size_t kSectorBufferBacklog = 8u;
+constexpr size_t kRawSectorBytesAfterSync = 2340u;
+constexpr int kRawSectorHeaderAndDataBytes = 12 + 2048;
 
 std::string trim_copy(const std::string &text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -381,7 +387,7 @@ void CdRom::reset() {
   response_index_ = 0;
 
   data_buffer_.clear();
-  deferred_data_payloads_.clear();
+  queued_sector_buffers_.clear();
   last_sector_payload_.clear();
   last_sector_had_data_ = false;
   active_data_lba_ = -1;
@@ -391,6 +397,7 @@ void CdRom::reset() {
 
   state_ = State::Idle;
   pending_second_ = {};
+  pending_async_irq_ = {};
   pending_irqs_.clear();
 
   seek_mm_ = 0;
@@ -435,6 +442,7 @@ void CdRom::reset() {
   seek_complete_ = false;
   read_whole_sector_ = true;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   pending_reads_mode_ = false;
   cdda_playing_ = false;
   cdda_cmd_muted_ = false;
@@ -442,6 +450,9 @@ void CdRom::reset() {
   adpcm_busy_cycles_ = 0;
   irq_line_request_pending_ = false;
   irq_line_delay_cycles_ = 0;
+  sector_redelivery_pending_ = false;
+  sector_redelivery_delay_cycles_ = 0;
+  last_irq_clear_cycle_ = 0;
 
   atv_pending_ = {0x80u, 0x00u, 0x80u, 0x00u};
   atv_active_ = atv_pending_;
@@ -644,12 +655,13 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   // but clear in-flight transfer/decoder state from the previous disc.
   state_ = State::Idle;
   pending_second_ = {};
+  pending_async_irq_ = {};
   pending_irqs_.clear();
   param_fifo_.clear();
   response_fifo_.clear();
   response_index_ = 0;
   data_buffer_.clear();
-  deferred_data_payloads_.clear();
+  queued_sector_buffers_.clear();
   last_sector_payload_.clear();
   last_sector_had_data_ = false;
   data_index_ = 0;
@@ -666,6 +678,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   seek_target_valid_ = false;
   seek_complete_ = false;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   pending_reads_mode_ = false;
   cdda_playing_ = false;
   seek_error_ = false;
@@ -680,6 +693,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   xa_stream_channel_ = 0;
   interrupt_flag_ = 0;
   refresh_irq_line();
+  last_irq_clear_cycle_ = 0;
 
   LOG_INFO("CDROM: Live inserted disc - %zu track(s) from %s", tracks_.size(),
            resolved_disc_path_.c_str());
@@ -841,12 +855,11 @@ int CdRom::msf_to_lba(u8 mm, u8 ss, u8 ff) const {
 
 int CdRom::read_period_for_mode() const {
   bool double_speed = (mode_ & 0x80u) != 0;
-  if (pending_reads_mode_ && read_whole_sector_ && (mode_ & 0x40u) != 0) {
-    // FMV whole-sector ReadS streams are noticeably less tolerant of a
-    // perfectly idealized 2x cadence than plain data reads. Real drives spend
-    // more time in the host/decoder handoff here; pacing them at 1x avoids the
-    // ring-buffer outrun pattern seen in RR4 while leaving normal ReadN timing
-    // unchanged.
+  if (double_speed && pending_reads_mode_ && read_whole_sector_ &&
+      sys_ != nullptr && sys_->mdec_active()) {
+    // DuckStation only backs off read speed heuristics when MDEC is active.
+    // Using MDEC activity as the gate is less blunt than slowing every
+    // whole-sector ReadS path, and better matches FMV-specific fragility.
     double_speed = false;
   }
   return static_cast<int>(psx::CPU_CLOCK_HZ / (double_speed ? 150u : 75u));
@@ -894,7 +907,9 @@ void CdRom::schedule_second_response(int delay_cycles, u8 irq,
 }
 
 void CdRom::start_read_stream(bool reads_mode) {
+  clear_read_buffers_for_new_stream();
   pending_reads_mode_ = reads_mode;
+  read_startup_pending_ = true;
   if (g_log_fmv_diagnostics) {
     static u32 read_start_log_count = 0;
     if (read_start_log_count < 128u) {
@@ -1276,20 +1291,20 @@ bool CdRom::read_sector() {
       looks_like_str_video || (has_subheader && ((submode & 0x02u) != 0));
   const bool is_audio_sector =
       has_subheader && ((submode & 0x04u) != 0) && !is_video_sector;
+  const bool is_realtime_audio_sector =
+      layout.mode2 && has_subheader && ((submode & 0x44u) == 0x44u);
   const bool filter_on = (mode_ & 0x08u) != 0;
   const bool filter_match =
       !filter_on || (file == filter_file_ && channel == filter_channel_);
 
-  bool delivered_to_adpcm = false;
-  if ((mode_ & 0x40u) != 0 && is_audio_sector && filter_match) {
+  if ((mode_ & 0x40u) != 0 && is_realtime_audio_sector) {
     maybe_decode_xa_audio(raw, track);
-    delivered_to_adpcm = true;
+    last_sector_payload_.clear();
+    last_sector_had_data_ = false;
+    return true;
   }
 
   bool deliver_data = true;
-  if (delivered_to_adpcm && !read_whole_sector_) {
-    deliver_data = false;
-  }
   if (filter_on && is_audio_sector && !filter_match) {
     deliver_data = false;
   }
@@ -1314,14 +1329,6 @@ bool CdRom::read_sector() {
     if (raw.size() >= 2352u) {
       whole_offset = 12u;
       whole_size = 0x924u;
-      if (layout.mode2 && has_subheader && (mode_ & 0x40u) != 0) {
-        // RR4 and similar interleaved FMV streams expect the whole-sector host
-        // FIFO to expose a stable 12-byte header/subheader prefix plus 2048
-        // bytes of payload for both Form1 and Form2 sectors. Presenting the
-        // longer Form2 tail here makes the game stall on the first XA-heavy
-        // sector after a run of normal STR chunks.
-        whole_size = 12u + 0x800u;
-      }
     }
     if (whole_offset + whole_size <= raw.size()) {
       payload.assign(raw.begin() + static_cast<ptrdiff_t>(whole_offset),
@@ -1357,13 +1364,19 @@ bool CdRom::read_sector() {
                (static_cast<u32>(last_sector_payload_[offset + 2u]) << 16u) |
                (static_cast<u32>(last_sector_payload_[offset + 3u]) << 24u);
       };
+      const u32 body0 = last_sector_payload_.size() >= 48u ? word_at(44) : 0u;
+      const u32 body1 = last_sector_payload_.size() >= 52u ? word_at(48) : 0u;
+      const u32 body2 = last_sector_payload_.size() >= 56u ? word_at(52) : 0u;
+      const u32 body3 = last_sector_payload_.size() >= 60u ? word_at(56) : 0u;
+      const u32 tail0 = last_sector_payload_.size() >= 2064u ? word_at(2060) : 0u;
       LOG_WARN(
           "CDROM: sector payload lba=%d tag=%c%c w0=0x%08X w3=0x%08X w4=0x%08X "
-          "w5=0x%08X w6=0x%08X size=%zu mode=0x%02X queued=%zu",
+          "w5=0x%08X w6=0x%08X body0=0x%08X body1=0x%08X body2=0x%08X "
+          "body3=0x%08X tail0=0x%08X size=%zu mode=0x%02X queued=%zu",
           read_lba_, static_cast<char>(last_sector_payload_[0]),
           static_cast<char>(last_sector_payload_[1]), word_at(0), word_at(12),
-          word_at(16), word_at(20), word_at(24), last_sector_payload_.size(),
-          mode_, pending_irqs_.size());
+          word_at(16), word_at(20), word_at(24), body0, body1, body2, body3,
+          tail0, last_sector_payload_.size(), mode_, pending_irqs_.size());
     }
   }
   return true;
@@ -1395,16 +1408,19 @@ void CdRom::activate_data_payload(std::vector<u8> payload, int source_lba) {
   }
 }
 
-void CdRom::defer_data_payload(std::vector<u8> payload, int source_lba) {
-  deferred_data_payloads_.push_back(
-      DeferredDataPayload{std::move(payload), source_lba});
+void CdRom::queue_sector_buffer(std::vector<u8> payload, int source_lba) {
+  queued_sector_buffers_.push_back(
+      QueuedSectorBuffer{std::move(payload), source_lba});
+  while (queued_sector_buffers_.size() > kSectorBufferBacklog) {
+    queued_sector_buffers_.pop_front();
+  }
   if (g_log_fmv_diagnostics) {
     static u32 deferred_payload_log_count = 0;
     if (deferred_payload_log_count < 128u) {
       ++deferred_payload_log_count;
       LOG_WARN(
-          "CDROM: deferred payload lba=%d q=%zu active_lba=%d idx=%d size=%zu",
-          source_lba, deferred_data_payloads_.size(), active_data_lba_,
+          "CDROM: queued sector buffer lba=%d q=%zu active_lba=%d idx=%d size=%zu",
+          source_lba, queued_sector_buffers_.size(), active_data_lba_,
           data_index_, data_buffer_.size());
     }
   }
@@ -1412,86 +1428,193 @@ void CdRom::defer_data_payload(std::vector<u8> payload, int source_lba) {
 
 void CdRom::flush_data_pipeline() {
   data_buffer_.clear();
-  deferred_data_payloads_.clear();
+  queued_sector_buffers_.clear();
   active_data_lba_ = -1;
   data_index_ = 0;
   data_ready_ = false;
+}
 
-  for (auto it = pending_irqs_.begin(); it != pending_irqs_.end();) {
-    if (it->has_data_payload) {
-      it = pending_irqs_.erase(it);
-    } else {
-      ++it;
+void CdRom::clear_read_buffers_for_new_stream() {
+  const bool had_data_state = data_ready_ || data_request_ ||
+                              !data_buffer_.empty() ||
+                              !queued_sector_buffers_.empty() ||
+                              (active_data_lba_ >= 0) ||
+                              (pending_async_irq_.active &&
+                               pending_async_irq_.irq == 1u) ||
+                              std::any_of(pending_irqs_.begin(),
+                                          pending_irqs_.end(),
+                                          [](const PendingIrq &irq) {
+                                            return irq.irq == 1u;
+                                          });
+  if (g_log_fmv_diagnostics && had_data_state) {
+    static u32 clear_read_buffers_log_count = 0;
+    if (clear_read_buffers_log_count < 128u) {
+      ++clear_read_buffers_log_count;
+      LOG_WARN(
+          "CDROM: clearing read buffers for new stream active_lba=%d idx=%d size=%zu q=%zu request=%u ready=%u pending_async=%u",
+          active_data_lba_, data_index_, data_buffer_.size(),
+          queued_sector_buffers_.size(), data_request_ ? 1u : 0u,
+          data_ready_ ? 1u : 0u,
+          (pending_async_irq_.active && pending_async_irq_.irq == 1u) ? 1u
+                                                                      : 0u);
     }
   }
+
+  data_buffer_.clear();
+  queued_sector_buffers_.clear();
+  active_data_lba_ = -1;
+  data_index_ = 0;
+  data_ready_ = false;
+  data_request_ = false;
+  host_audio_regs_[0] = static_cast<u8>(host_audio_regs_[0] & ~0x80u);
+  sector_redelivery_pending_ = false;
+  sector_redelivery_delay_cycles_ = 0;
+
+  if (pending_async_irq_.active && pending_async_irq_.irq == 1u) {
+    pending_async_irq_ = {};
+  }
+  pending_irqs_.erase(
+      std::remove_if(pending_irqs_.begin(), pending_irqs_.end(),
+                     [](const PendingIrq &irq) { return irq.irq == 1u; }),
+      pending_irqs_.end());
 }
 
 bool CdRom::can_discard_unread_whole_sector_tail() const {
-  if (!read_whole_sector_ || !data_ready_) {
-    return false;
-  }
-  if (data_buffer_.size() >= 0x924u && data_index_ >= 2060) {
-    // Some whole-sector readers consume the 12-byte header/subheader prefix
-    // plus 2048 bytes of payload, then intentionally skip the trailing raw
-    // sector ECC/EDC tail. Allow the next sector to replace that tail.
-    return true;
-  }
-  if (data_index_ != 44) {
-    return false;
-  }
-  if (data_buffer_.size() < 16u) {
-    return false;
-  }
-  const u32 header_word =
-      static_cast<u32>(data_buffer_[12]) |
-      (static_cast<u32>(data_buffer_[13]) << 8u) |
-      (static_cast<u32>(data_buffer_[14]) << 16u) |
-      (static_cast<u32>(data_buffer_[15]) << 24u);
-  return header_word != 0x80010160u;
+  return read_whole_sector_ && data_ready_ &&
+         data_buffer_.size() == kRawSectorBytesAfterSync &&
+         data_index_ >= kRawSectorHeaderAndDataBytes;
 }
 
-void CdRom::maybe_promote_deferred_payload_for_header(bool cpu_port_access,
-                                                      bool irq_ack_promotion) {
-  if (deferred_data_payloads_.empty()) {
+void CdRom::complete_discardable_whole_sector_tail() {
+  if (!can_discard_unread_whole_sector_tail()) {
     return;
   }
-  if (!has_unread_data_buffer()) {
-    DeferredDataPayload front = std::move(deferred_data_payloads_.front());
-    deferred_data_payloads_.pop_front();
+  if (g_log_fmv_diagnostics) {
+    static u32 discard_tail_log_count = 0;
+    if (discard_tail_log_count < 128u) {
+      ++discard_tail_log_count;
+      LOG_WARN(
+          "CDROM: discarding unread whole-sector tail lba=%d idx=%d size=%zu remaining=%zu mode=0x%02X",
+          active_data_lba_, data_index_, data_buffer_.size(),
+          data_buffer_.size() - static_cast<size_t>(data_index_), mode_);
+    }
+  }
+  complete_active_data_buffer();
+}
+
+void CdRom::maybe_promote_queued_sector(bool cpu_port_access,
+                                        bool irq_ack_promotion) {
+  if (queued_sector_buffers_.empty()) {
+    return;
+  }
+  complete_discardable_whole_sector_tail();
+  if (!should_defer_sector_irq_for_unread_buffer()) {
+    QueuedSectorBuffer front = std::move(queued_sector_buffers_.front());
+    queued_sector_buffers_.pop_front();
     activate_data_payload(std::move(front.payload), front.data_lba);
     return;
   }
-  if (!read_whole_sector_ || data_index_ != 44) {
-    return;
-  }
-
-  bool should_promote = cpu_port_access || irq_ack_promotion;
-  if (!cpu_port_access && !irq_ack_promotion) {
-    const u32 avail_words = dma_words_available();
-    should_promote = (avail_words > 0u && avail_words <= 8u);
-  }
-  if (!should_promote) {
-    return;
-  }
-
-  DeferredDataPayload front = std::move(deferred_data_payloads_.front());
-  deferred_data_payloads_.pop_front();
   if (g_log_fmv_diagnostics) {
-    static u32 deferred_promote_log_count = 0;
-    if (deferred_promote_log_count < 128u) {
-      ++deferred_promote_log_count;
+    static u32 blocked_promote_log_count = 0;
+    if (blocked_promote_log_count < 128u) {
+      ++blocked_promote_log_count;
       LOG_WARN(
-          "CDROM: promote deferred payload lba=%d cpu=%u ack=%u old_lba=%d old_idx=%d old_size=%zu",
-          front.data_lba, cpu_port_access ? 1u : 0u,
+          "CDROM: delaying queued sector promotion cpu=%u ack=%u active_lba=%d old_idx=%d old_size=%zu q=%zu",
+          cpu_port_access ? 1u : 0u,
           irq_ack_promotion ? 1u : 0u, active_data_lba_, data_index_,
-          data_buffer_.size());
+          data_buffer_.size(), queued_sector_buffers_.size());
+    }
+  }
+}
+
+void CdRom::complete_active_data_buffer() {
+  data_request_ = false;
+  host_audio_regs_[0] = static_cast<u8>(host_audio_regs_[0] & ~0x80u);
+  data_ready_ = false;
+  active_data_lba_ = -1;
+  data_index_ = 0;
+  data_buffer_.clear();
+  if (!queued_sector_buffers_.empty()) {
+    sector_redelivery_pending_ = true;
+    sector_redelivery_delay_cycles_ = kCdSectorRedeliveryDelayCycles;
+  } else {
+    sector_redelivery_pending_ = false;
+    sector_redelivery_delay_cycles_ = 0;
+    service_pending_irq();
+  }
+}
+
+void CdRom::promote_queued_sector_after_drain(bool immediate) {
+  if (has_unread_data_buffer() || queued_sector_buffers_.empty()) {
+    return;
+  }
+
+  sector_redelivery_pending_ = false;
+  sector_redelivery_delay_cycles_ = 0;
+  QueuedSectorBuffer front = std::move(queued_sector_buffers_.front());
+  queued_sector_buffers_.pop_front();
+  if (g_log_fmv_diagnostics) {
+    static u32 queued_drain_promote_log_count = 0;
+    if (queued_drain_promote_log_count < 128u) {
+      ++queued_drain_promote_log_count;
+      LOG_WARN(
+          "CDROM: promoting queued sector after drain lba=%d q_remaining=%zu immediate=%u",
+          front.data_lba, queued_sector_buffers_.size(), immediate ? 1u : 0u);
     }
   }
   activate_data_payload(std::move(front.payload), front.data_lba);
+  service_pending_irq();
 }
 
 bool CdRom::has_unread_data_buffer() const {
+  if (can_discard_unread_whole_sector_tail()) {
+    return false;
+  }
   return data_ready_ && data_index_ < static_cast<int>(data_buffer_.size());
+}
+
+bool CdRom::should_defer_sector_irq_for_unread_buffer() const {
+  if (!has_unread_data_buffer()) {
+    return false;
+  }
+
+  // DuckStation lets a later INT1 move the readable sector buffer even if the
+  // previous raw sector was only partially consumed. DMA itself stalls the CPU
+  // long enough for header+body split reads to finish on the same sector; if a
+  // game leaves the body behind, it is treating that sector as skipped.
+  return false;
+}
+
+bool CdRom::has_pending_data_ready_irq() const {
+  if ((interrupt_flag_ & kHintTypeMask) == 1u) {
+    return true;
+  }
+  if (pending_async_irq_.active && pending_async_irq_.irq == 1u) {
+    return true;
+  }
+  return std::any_of(pending_irqs_.begin(), pending_irqs_.end(),
+                     [](const PendingIrq &irq) { return irq.irq == 1u; });
+}
+
+void CdRom::select_latest_sector_for_data_ready_irq() {
+  if (queued_sector_buffers_.empty()) {
+    return;
+  }
+
+  QueuedSectorBuffer latest = std::move(queued_sector_buffers_.back());
+  const size_t dropped = queued_sector_buffers_.size() - 1u;
+  queued_sector_buffers_.clear();
+  if (g_log_fmv_diagnostics) {
+    static u32 latest_sector_select_log_count = 0;
+    if (latest_sector_select_log_count < 128u) {
+      ++latest_sector_select_log_count;
+      LOG_WARN(
+          "CDROM: selecting latest sector for INT1 lba=%d dropped=%zu old_lba=%d old_idx=%d old_size=%zu",
+          latest.data_lba, dropped, active_data_lba_, data_index_,
+          data_buffer_.size());
+    }
+  }
+  activate_data_payload(std::move(latest.payload), latest.data_lba);
 }
 
 void CdRom::fire_irq(u8 irq_num) {
@@ -1511,6 +1634,98 @@ void CdRom::fire_irq(u8 irq_num) {
   refresh_irq_line();
 }
 
+void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response) {
+  if ((interrupt_flag_ & kHintTypeMask) == irq_num) {
+    if (pending_async_irq_.active && pending_async_irq_.irq == irq_num) {
+      pending_async_irq_ = {};
+    }
+    if (g_log_fmv_diagnostics && irq_num == 1u) {
+      static u32 suppressed_async_data_ready_logs = 0;
+      if (suppressed_async_data_ready_logs < 128u) {
+        ++suppressed_async_data_ready_logs;
+        LOG_WARN(
+            "CDROM: suppressing async INT1 because INT1 is already unacknowledged active_lba=%d idx=%d size=%zu sector_q=%zu",
+            active_data_lba_, data_index_, data_buffer_.size(),
+            queued_sector_buffers_.size());
+      }
+    }
+    return;
+  }
+
+  if (pending_async_irq_.active && pending_async_irq_.irq == irq_num) {
+    return;
+  }
+
+  const u64 now =
+      sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+  const u64 diff = now - last_irq_clear_cycle_;
+  const bool gap_satisfied = diff >= static_cast<u64>(kCdAsyncMinInterruptGapCycles);
+  const bool can_deliver_now =
+      ((interrupt_flag_ & kHintTypeMask) == 0u) &&
+      response_index_ >= static_cast<int>(response_fifo_.size()) && !command_busy_ &&
+      gap_satisfied &&
+      !(irq_num == 1u && should_defer_sector_irq_for_unread_buffer());
+
+  if (can_deliver_now) {
+    if (irq_num == 1u) {
+      select_latest_sector_for_data_ready_irq();
+    }
+    response_fifo_ = std::move(response);
+    if (response_fifo_.size() > kFifoCapacity) {
+      response_fifo_.resize(kFifoCapacity);
+    }
+    response_index_ = 0;
+    fire_irq(irq_num);
+    return;
+  }
+
+  pending_async_irq_.active = true;
+  pending_async_irq_.irq = irq_num;
+  pending_async_irq_.response = std::move(response);
+  pending_async_irq_.delay =
+      gap_satisfied ? kCdAsyncRetryDelayCycles : kCdAsyncRetryDelayCycles;
+}
+
+void CdRom::deliver_pending_async_irq() {
+  if (!pending_async_irq_.active) {
+    return;
+  }
+  if ((interrupt_flag_ & kHintTypeMask) != 0u) {
+    return;
+  }
+  if (response_index_ < static_cast<int>(response_fifo_.size())) {
+    return;
+  }
+  if (command_busy_) {
+    return;
+  }
+  if (pending_async_irq_.irq == 1u &&
+      should_defer_sector_irq_for_unread_buffer()) {
+    pending_async_irq_.delay = kCdAsyncRetryDelayCycles;
+    return;
+  }
+
+  const u64 now =
+      sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+  const u64 diff = now - last_irq_clear_cycle_;
+  if (diff < static_cast<u64>(kCdAsyncMinInterruptGapCycles)) {
+    pending_async_irq_.delay = kCdAsyncRetryDelayCycles;
+    return;
+  }
+
+  response_fifo_ = std::move(pending_async_irq_.response);
+  if (response_fifo_.size() > kFifoCapacity) {
+    response_fifo_.resize(kFifoCapacity);
+  }
+  response_index_ = 0;
+  const u8 irq = pending_async_irq_.irq;
+  pending_async_irq_ = {};
+  if (irq == 1u) {
+    select_latest_sector_for_data_ready_irq();
+  }
+  fire_irq(irq);
+}
+
 void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
                         bool wait_for_command_idle) {
   const bool pending = (interrupt_flag_ & kHintTypeMask) != 0;
@@ -1522,8 +1737,6 @@ void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
         irq_num,
         wait_for_command_idle,
         std::move(response),
-        {},
-        false,
     });
     return;
   }
@@ -1537,20 +1750,22 @@ void CdRom::enqueue_irq(u8 irq_num, std::vector<u8> response,
 }
 
 void CdRom::enqueue_data_irq(std::vector<u8> payload, int source_lba) {
+  complete_discardable_whole_sector_tail();
+
   const bool pending = (interrupt_flag_ & kHintTypeMask) != 0;
   const bool response_pending =
       response_index_ < static_cast<int>(response_fifo_.size());
   std::vector<u8> response = {stat_byte()};
 
   if (pending || response_pending || command_busy_) {
-    pending_irqs_.push_back(PendingIrq{
-        1u,
-        false,
-        std::move(response),
-        std::move(payload),
-        true,
-        source_lba,
-    });
+    queue_sector_buffer(std::move(payload), source_lba);
+    if (!has_pending_data_ready_irq()) {
+      pending_irqs_.push_back(PendingIrq{
+          1u,
+          false,
+          std::move(response),
+      });
+    }
     if (g_log_fmv_diagnostics) {
       static u32 queue_growth_logs = 0;
       if (queue_growth_logs < 128u) {
@@ -1561,9 +1776,10 @@ void CdRom::enqueue_data_irq(std::vector<u8> payload, int source_lba) {
                    static_cast<size_t>(std::max(0, data_index_)))
                 : 0u;
         LOG_WARN(
-            "CDROM: queued data irq src_lba=%d q=%zu active_lba=%d idx=%d "
+            "CDROM: queued data irq src_lba=%d irq_q=%zu sector_q=%zu active_lba=%d idx=%d "
             "size=%zu remaining=%zu pending=%u resp=%u busy=%u if=0x%02X",
-            source_lba, pending_irqs_.size(), active_data_lba_, data_index_,
+            source_lba, pending_irqs_.size(), queued_sector_buffers_.size(),
+            active_data_lba_, data_index_,
             data_buffer_.size(), remaining, pending ? 1u : 0u,
             response_pending ? 1u : 0u, command_busy_ ? 1u : 0u,
             static_cast<unsigned>(interrupt_flag_));
@@ -1572,34 +1788,14 @@ void CdRom::enqueue_data_irq(std::vector<u8> payload, int source_lba) {
     return;
   }
 
-  if (has_unread_data_buffer()) {
-    if (can_discard_unread_whole_sector_tail()) {
-      if (g_log_fmv_diagnostics) {
-        static u32 discard_tail_log_count = 0;
-        if (discard_tail_log_count < 64u) {
-          ++discard_tail_log_count;
-          LOG_WARN(
-              "CDROM: dropping skipped whole-sector tail active_lba=%d idx=%d size=%zu for next lba=%d",
-              active_data_lba_, data_index_, data_buffer_.size(), source_lba);
-        }
-      }
-      response_fifo_ = std::move(response);
-      response_index_ = 0;
-      activate_data_payload(std::move(payload), source_lba);
-      fire_irq(1);
-      return;
-    }
-    response_fifo_ = std::move(response);
-    response_index_ = 0;
-    defer_data_payload(std::move(payload), source_lba);
-    fire_irq(1);
+  if (should_defer_sector_irq_for_unread_buffer()) {
+    queue_sector_buffer(std::move(payload), source_lba);
+    queue_or_deliver_async_irq(1u, std::move(response));
     return;
   }
 
-  response_fifo_ = std::move(response);
-  response_index_ = 0;
   activate_data_payload(std::move(payload), source_lba);
-  fire_irq(1);
+  queue_or_deliver_async_irq(1u, std::move(response));
 }
 
 void CdRom::service_pending_irq() {
@@ -1618,41 +1814,20 @@ void CdRom::service_pending_irq() {
     return;
   }
 
-  response_fifo_ = std::move(front.response);
-  if (response_fifo_.size() > kFifoCapacity) {
-    response_fifo_.resize(kFifoCapacity);
-  }
-  response_index_ = 0;
-  if (front.has_data_payload) {
-    if (g_log_fmv_diagnostics) {
-      static u32 service_promote_logs = 0;
-      if (service_promote_logs < 128u) {
-        ++service_promote_logs;
-        const bool replacing_unread =
-            data_ready_ && data_index_ < static_cast<int>(data_buffer_.size());
-        const size_t remaining =
-            replacing_unread
-                ? (data_buffer_.size() -
-                   static_cast<size_t>(std::max(0, data_index_)))
-                : 0u;
-        LOG_WARN(
-            "CDROM: promoting queued payload lba=%d q_before=%zu replace=%u "
-            "active_lba=%d idx=%d remaining=%zu if=0x%02X",
-            front.data_lba, pending_irqs_.size(),
-            replacing_unread ? 1u : 0u, active_data_lba_, data_index_,
-            remaining, static_cast<unsigned>(interrupt_flag_));
-      }
-    }
-    if (has_unread_data_buffer() && !can_discard_unread_whole_sector_tail()) {
-      defer_data_payload(std::move(front.data_payload), front.data_lba);
-    } else {
-      activate_data_payload(std::move(front.data_payload), front.data_lba);
-    }
-  }
   const u8 irq = front.irq;
+  std::vector<u8> response = std::move(front.response);
   pending_irqs_.pop_front();
   ++response_promotion_count_;
-  fire_irq(irq);
+  if (irq == 1u) {
+    queue_or_deliver_async_irq(irq, std::move(response));
+  } else {
+    response_fifo_ = std::move(response);
+    if (response_fifo_.size() > kFifoCapacity) {
+      response_fifo_.resize(kFifoCapacity);
+    }
+    response_index_ = 0;
+    fire_irq(irq);
+  }
 }
 
 void CdRom::refresh_irq_line() {
@@ -1698,8 +1873,8 @@ void CdRom::cmd_setloc() {
   seek_error_ = false;
   const bool stale_active_payload =
       active_data_lba_ >= 0 && active_data_lba_ != seek_target_lba_;
-  const bool stale_deferred_payloads = !deferred_data_payloads_.empty();
-  if ((stale_active_payload || stale_deferred_payloads) &&
+  const bool stale_queued_payloads = !queued_sector_buffers_.empty();
+  if ((stale_active_payload || stale_queued_payloads) &&
       (previous_seek_target != seek_target_lba_ || stale_active_payload)) {
     if (g_log_fmv_diagnostics) {
       static u32 flush_setloc_log_count = 0;
@@ -1708,7 +1883,7 @@ void CdRom::cmd_setloc() {
         LOG_WARN(
             "CDROM: flushing stale data pipeline on Setloc old_target=%d new_target=%d active_lba=%d idx=%d size=%zu deferred=%zu",
             previous_seek_target, seek_target_lba_, active_data_lba_, data_index_,
-            data_buffer_.size(), deferred_data_payloads_.size());
+            data_buffer_.size(), queued_sector_buffers_.size());
       }
     }
     flush_data_pipeline();
@@ -1771,18 +1946,32 @@ void CdRom::cmd_readn() {
 
   ++read_command_count_;
   motor_on_ = true;
+  const u8 ack_stat = stat_byte();
+  enqueue_irq(3, {ack_stat});
   start_read_stream(false);
-  enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_pause() {
   const u8 first = stat_byte();
+  const bool pause_rejected_for_seek =
+      (state_ == State::Seeking) ||
+      (state_ == State::Reading && read_startup_pending_);
+
+  // Real hardware rejects Pause while a read/seek has only just begun and
+  // the first sector has not been processed yet. Games like Silent Hill
+  // depend on this retry-until-it-works behavior.
+  enqueue_irq(3, {first});
+  if (pause_rejected_for_seek) {
+    enqueue_irq(5, make_error_response(stat_byte(), 0x80u), false);
+    return;
+  }
+
   cdda_playing_ = false;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   pending_reads_mode_ = false;
   state_ = State::Idle;
   seek_complete_ = true;
-  enqueue_irq(3, {first});
   schedule_second_response(25000, 2, {stat_byte()});
 }
 
@@ -1798,6 +1987,7 @@ void CdRom::cmd_init() {
   seek_error_ = false;
   id_error_ = false;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   pending_reads_mode_ = false;
   state_ = State::Idle;
   refresh_read_period();
@@ -1840,10 +2030,11 @@ void CdRom::cmd_seekl() {
   motor_on_ = true;
   cdda_playing_ = false;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   state_ = State::Seeking;
   pending_cycles_ = std::max(1, read_period_cycles_ / 2);
   seek_error_ = false;
-  enqueue_irq(3, {stat_byte()});
+  enqueue_irq(3, {static_cast<u8>(stat_byte() & ~0x40u)});
   schedule_second_response(33868, 2, {stat_byte()});
 }
 
@@ -1879,8 +2070,9 @@ void CdRom::cmd_reads() {
   }
   ++read_command_count_;
   motor_on_ = true;
+  const u8 ack_stat = stat_byte();
+  enqueue_irq(3, {ack_stat});
   start_read_stream(true);
-  enqueue_irq(3, {stat_byte()});
 }
 
 void CdRom::cmd_test() {
@@ -1957,6 +2149,7 @@ void CdRom::cmd_stop() {
   cdda_playing_ = false;
   state_ = State::Idle;
   pending_read_start_ = false;
+  read_startup_pending_ = false;
   pending_reads_mode_ = false;
   motor_on_ = false;
   data_ready_ = false;
@@ -2222,7 +2415,7 @@ u8 CdRom::read8(u32 offset) {
     if (response_index_ < static_cast<int>(response_fifo_.size())) {
       status |= 0x20u;
     }
-    if (data_ready_ && data_request_) {
+    if (data_request_) {
       status |= 0x40u;
     }
     if (command_busy_) {
@@ -2266,7 +2459,8 @@ u8 CdRom::read8(u32 offset) {
     return 0;
 
   case 2: {
-    if (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size())) {
+    if (data_ready_ && data_request_ &&
+        data_index_ < static_cast<int>(data_buffer_.size())) {
       const u8 value = data_buffer_[static_cast<size_t>(data_index_)];
       if (g_log_fmv_diagnostics && mode_ == 0xE0u) {
         static u32 e0_fifo_read_logs = 0;
@@ -2285,12 +2479,25 @@ u8 CdRom::read8(u32 offset) {
         }
       }
       ++data_index_;
-      if (data_index_ >= static_cast<int>(data_buffer_.size())) {
-        data_ready_ = false;
-        active_data_lba_ = -1;
-        service_pending_irq();
+      if (data_index_ >= static_cast<int>(data_buffer_.size()) ||
+          can_discard_unread_whole_sector_tail()) {
+        complete_active_data_buffer();
       }
       return value;
+    }
+    if (g_log_fmv_diagnostics && mode_ == 0xE0u) {
+      static u32 e0_fifo_overread_logs = 0;
+      if (e0_fifo_overread_logs < 96u) {
+        ++e0_fifo_overread_logs;
+        LOG_WARN(
+            "CDROM: E0 fifo overread pc=0x%08X idx=%d size=%zu ready=%u req=%u "
+            "lba=%d if=0x%02X ie=0x%02X cyc=%llu",
+            sys_ ? sys_->cpu().pc() : 0u, data_index_, data_buffer_.size(),
+            data_ready_ ? 1u : 0u, data_request_ ? 1u : 0u, read_lba_,
+            static_cast<unsigned>(interrupt_flag_),
+            static_cast<unsigned>(interrupt_enable_),
+            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u));
+      }
     }
     return 0;
   }
@@ -2395,29 +2602,10 @@ void CdRom::write8(u32 offset, u8 value) {
         }
       }
       data_request_ = (value & 0x80u) != 0;
-      // Some games expect BFRD=0 to rewind before re-arming DMA. The
-      // "preserve whole-sector position" behavior is only needed for XA/FMVs;
-      // applying it to plain Mode2 whole-sector reads makes the guest keep
-      // seeing the same unread sector forever and stalls RR4's movie handoff.
       if (!data_request_) {
-        const bool preserve_whole_sector_position =
-            read_whole_sector_ && (mode_ & 0x40u) != 0;
-        if (!preserve_whole_sector_position) {
-          data_index_ = 0;
-        } else if (g_log_fmv_diagnostics) {
-          static u32 whole_sector_bfrd_hold_logs = 0;
-          if (whole_sector_bfrd_hold_logs < 64u) {
-            ++whole_sector_bfrd_hold_logs;
-            const size_t remaining =
-                (data_ready_ && data_index_ < static_cast<int>(data_buffer_.size()))
-                    ? (data_buffer_.size() -
-                       static_cast<size_t>(std::max(0, data_index_)))
-                    : 0u;
-            LOG_WARN(
-                "CDROM: preserving whole-sector index=%d size=%zu remaining=%zu on BFRD=0",
-                data_index_, data_buffer_.size(), remaining);
-          }
-        }
+        // DuckStation resets the current sector position whenever BFRD is
+        // cleared, and RR4's demux path expects that same behavior.
+        data_index_ = 0;
       }
       if ((value & 0x20u) != 0) {
         host_audio_regs_[7] = 1;
@@ -2454,6 +2642,10 @@ void CdRom::write8(u32 offset, u8 value) {
         if ((old_mask & ack_mask) != 0u) {
           interrupt_flag_ =
               static_cast<u8>(interrupt_flag_ & static_cast<u8>(~kHintTypeMask));
+          if (old_type != 0u) {
+            last_irq_clear_cycle_ =
+                sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+          }
           response_fifo_.clear();
           response_index_ = 0;
           acked_irq = true;
@@ -2464,10 +2656,11 @@ void CdRom::write8(u32 offset, u8 value) {
         response_index_ = 0;
       }
       if (acked_irq) {
-        maybe_promote_deferred_payload_for_header(false, true);
+        maybe_promote_queued_sector(false, true);
       }
       refresh_irq_line();
       service_pending_irq();
+      deliver_pending_async_irq();
       return;
     }
 
@@ -2511,12 +2704,20 @@ void CdRom::tick(u32 cycles) {
     }
   }
 
+  if (sector_redelivery_pending_) {
+    sector_redelivery_delay_cycles_ -= step;
+    if (sector_redelivery_delay_cycles_ <= 0) {
+      promote_queued_sector_after_drain(false);
+    }
+  }
+
   if (command_busy_) {
     command_busy_cycles_ -= step;
     if (command_busy_cycles_ <= 0) {
       command_busy_cycles_ = 0;
       command_busy_ = false;
       service_pending_irq();
+      deliver_pending_async_irq();
     }
   }
 
@@ -2533,6 +2734,14 @@ void CdRom::tick(u32 cycles) {
       pending_second_.active = false;
       enqueue_irq(pending_second_.irq, std::move(pending_second_.response), false);
       pending_second_.response.clear();
+    }
+  }
+
+  if (pending_async_irq_.active) {
+    pending_async_irq_.delay -= step;
+    if (pending_async_irq_.delay <= 0) {
+      pending_async_irq_.delay = kCdAsyncRetryDelayCycles;
+      deliver_pending_async_irq();
     }
   }
 
@@ -2594,10 +2803,12 @@ void CdRom::tick(u32 cycles) {
         seek_error_ = true;
         state_ = State::Idle;
         cdda_playing_ = false;
+        read_startup_pending_ = false;
         enqueue_irq(5, make_error_response(stat_byte(), 0x04u), false);
         break;
       }
 
+      read_startup_pending_ = false;
       ++sector_counter_;
       if (!cdda_playing_) {
         // Only fire INT1 when a real host-data sector landed in the buffer.
@@ -2696,10 +2907,9 @@ u32 CdRom::dma_read() {
     value |= static_cast<u32>(byte) << (i * 8u);
   }
 
-  if (data_index_ >= static_cast<int>(data_buffer_.size())) {
-    data_ready_ = false;
-    active_data_lba_ = -1;
-    service_pending_irq();
+  if (data_index_ >= static_cast<int>(data_buffer_.size()) ||
+      can_discard_unread_whole_sector_tail()) {
+    complete_active_data_buffer();
     if (g_log_fmv_diagnostics) {
       static u32 dma_drain_log_count = 0;
       if (dma_drain_log_count < 64u) {

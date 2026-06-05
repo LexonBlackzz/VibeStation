@@ -142,20 +142,24 @@ private:
     std::vector<u8> response; // Response FIFO payload
   };
   PendingSecondResponse pending_second_;
+  struct PendingAsyncIrq {
+    bool active = false;
+    int delay = 0;
+    u8 irq = 0;
+    std::vector<u8> response;
+  };
+  PendingAsyncIrq pending_async_irq_;
   struct PendingIrq {
     u8 irq = 0;
     bool wait_for_command_idle = true;
     std::vector<u8> response;
-    std::vector<u8> data_payload;
-    bool has_data_payload = false;
-    int data_lba = -1;
   };
-  struct DeferredDataPayload {
+  struct QueuedSectorBuffer {
     std::vector<u8> payload;
     int data_lba = -1;
   };
   std::deque<PendingIrq> pending_irqs_;
-  std::deque<DeferredDataPayload> deferred_data_payloads_;
+  std::deque<QueuedSectorBuffer> queued_sector_buffers_;
   std::vector<u8> last_sector_payload_;
   bool last_sector_had_data_ = false;
   int active_data_lba_ = -1;
@@ -200,6 +204,7 @@ private:
   bool seek_complete_ = false;
   bool read_whole_sector_ = false;
   bool pending_read_start_ = false;
+  bool read_startup_pending_ = false;
   bool pending_reads_mode_ = false;
   bool cdda_playing_ = false;
   bool cdda_cmd_muted_ = false;
@@ -217,6 +222,9 @@ private:
   int insert_probe_stage_ = 0;
   bool irq_line_request_pending_ = false;
   int irq_line_delay_cycles_ = 0;
+  bool sector_redelivery_pending_ = false;
+  int sector_redelivery_delay_cycles_ = 0;
+  u64 last_irq_clear_cycle_ = 0;
 
   // Status byte
   u8 stat_byte() const;
@@ -269,14 +277,23 @@ private:
                    bool wait_for_command_idle = true);
   void enqueue_data_irq(std::vector<u8> payload, int source_lba);
   void activate_data_payload(std::vector<u8> payload, int source_lba);
-  void defer_data_payload(std::vector<u8> payload, int source_lba);
+  void queue_sector_buffer(std::vector<u8> payload, int source_lba);
   void flush_data_pipeline();
+  void clear_read_buffers_for_new_stream();
   bool can_discard_unread_whole_sector_tail() const;
-  void maybe_promote_deferred_payload_for_header(bool cpu_port_access,
-                                                 bool irq_ack_promotion = false);
+  void complete_discardable_whole_sector_tail();
+  void maybe_promote_queued_sector(bool cpu_port_access,
+                                   bool irq_ack_promotion = false);
+  void complete_active_data_buffer();
+  void promote_queued_sector_after_drain(bool immediate);
   bool has_unread_data_buffer() const;
+  bool should_defer_sector_irq_for_unread_buffer() const;
   void service_pending_irq();
   void refresh_irq_line();
+  void queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response);
+  void deliver_pending_async_irq();
+  bool has_pending_data_ready_irq() const;
+  void select_latest_sector_for_data_ready_irq();
   const CdTrack *track_for_lba(int lba) const;
   bool parse_cue(const std::string &cue_path, const std::string &bin_dir);
 
