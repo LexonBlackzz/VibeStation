@@ -5,6 +5,7 @@
 #include "core/system.h"
 #include "ui/app.h"
 #include <SDL.h>
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstdio>
@@ -53,6 +54,68 @@ static u32 fnv1a_hash_samples(const std::vector<s16> &samples) {
     hash *= 16777619u;
   }
   return hash;
+}
+
+static std::string cue_trim_copy(std::string text) {
+  const size_t begin = text.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return {};
+  }
+  const size_t end = text.find_last_not_of(" \t\r\n");
+  return text.substr(begin, end - begin + 1u);
+}
+
+static std::string parse_cue_file_target(const std::string &line) {
+  const size_t q0 = line.find('"');
+  if (q0 != std::string::npos) {
+    const size_t q1 = line.find('"', q0 + 1u);
+    if (q1 != std::string::npos && q1 > q0 + 1u) {
+      return line.substr(q0 + 1u, q1 - q0 - 1u);
+    }
+  }
+
+  std::istringstream iss(line);
+  std::string token;
+  std::string file_name;
+  iss >> token >> file_name;
+  return file_name;
+}
+
+static std::string resolve_first_bin_from_cue_cli(
+    const std::filesystem::path &cue_path) {
+  std::ifstream cue(cue_path);
+  if (!cue.is_open()) {
+    return {};
+  }
+
+  std::string line;
+  while (std::getline(cue, line)) {
+    line = cue_trim_copy(line);
+    if (line.empty() || line[0] == ';' || line.size() < 4u) {
+      continue;
+    }
+
+    std::string head = line.substr(0u, 4u);
+    std::transform(head.begin(), head.end(), head.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::toupper(c));
+                   });
+    if (head != "FILE") {
+      continue;
+    }
+
+    const std::string file_name = parse_cue_file_target(line);
+    if (file_name.empty()) {
+      continue;
+    }
+
+    std::filesystem::path resolved(file_name);
+    if (!resolved.is_absolute()) {
+      resolved = cue_path.parent_path() / resolved;
+    }
+    return std::filesystem::exists(resolved) ? resolved.string() : std::string();
+  }
+  return {};
 }
 
 static void log_mdec_summary(const char *prefix, const System &sys) {
@@ -722,6 +785,27 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     LOG_INFO("Frame test: wrote %s", path);
   };
+  auto dump_display_ppm = [](System &sys, int frame_index) {
+    std::vector<u32> rgba;
+    const DisplaySampleInfo sample = sys.gpu().build_display_rgba(rgba, false);
+    if (sample.width <= 0 || sample.height <= 0 || rgba.empty()) {
+      return;
+    }
+
+    char path[128];
+    std::snprintf(path, sizeof(path), "frame_%04d_display.ppm", frame_index);
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+      return;
+    }
+    out << "P6\n" << sample.width << " " << sample.height << "\n255\n";
+    for (u32 p : rgba) {
+      out.put(static_cast<char>(p & 0xFFu));
+      out.put(static_cast<char>((p >> 8) & 0xFFu));
+      out.put(static_cast<char>((p >> 16) & 0xFFu));
+    }
+    LOG_INFO("Frame test: wrote %s", path);
+  };
   auto should_dump_vram = [frames](int frame_index) {
     if (frame_index == frames) {
       return true;
@@ -918,6 +1002,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
 
     if (should_dump_vram(i + 1)) {
       dump_vram_ppm(*sys, i + 1);
+      dump_display_ppm(*sys, i + 1);
     }
     if (gpu_debug_out.is_open()) {
       dump_gpu_debug_frame(gpu_debug_out, i + 1, *sys);
@@ -1769,6 +1854,9 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--log-file" && (i + 1) < args.size()) {
       g_log_file = std::fopen(args[i + 1].c_str(), "w");
+      if (g_log_file) {
+        std::setvbuf(g_log_file, nullptr, _IONBF, 0);
+      }
       ++i;
       continue;
     }
@@ -1874,10 +1962,27 @@ int main(int argc, char *argv[]) {
     }
     return rc;
   }
-  if (passthrough.size() >= 5 && passthrough[0] == "--boot-disc-test") {
+  if (passthrough.size() >= 4 && passthrough[0] == "--boot-disc-test") {
     const int frames = std::max(1, std::atoi(passthrough[2].c_str()));
-    const int rc =
-        run_boot_disc_test(passthrough[1], frames, passthrough[3], passthrough[4]);
+    std::string bin_path;
+    std::string cue_path;
+    if (passthrough.size() >= 5) {
+      bin_path = passthrough[3];
+      cue_path = passthrough[4];
+    } else {
+      cue_path = passthrough[3];
+      bin_path = resolve_first_bin_from_cue_cli(cue_path);
+      if (bin_path.empty()) {
+        LOG_ERROR("BOOT_TEST_FAIL reason=cue_bin_resolve cue=%s", cue_path.c_str());
+        if (g_log_file) {
+          log_flush_repeats();
+          std::fclose(g_log_file);
+          g_log_file = nullptr;
+        }
+        return 1;
+      }
+    }
+    const int rc = run_boot_disc_test(passthrough[1], frames, bin_path, cue_path);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
