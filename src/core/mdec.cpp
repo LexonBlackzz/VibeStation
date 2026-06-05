@@ -112,10 +112,10 @@ void Mdec::soft_reset_state() {
   command_id_ = 0;
   command_word_ = 0;
   in_words_remaining_ = 0;
+  decode_halfwords_remaining_ = 0;
   in_unlimited_ = false;
   in_halfword_fifo_.clear();
   status_command_bits_ = 0;
-  current_block_ = 4;
   output_depth_ = 2;
   output_signed_ = false;
   output_set_bit15_ = false;
@@ -125,6 +125,7 @@ void Mdec::soft_reset_state() {
   output_macroblock_seq_ = 0;
   current_output_macroblock_seq_ = 0;
   out_depth_latched_ = 2;
+  reset_decode_state();
   out_fifo_.clear();
   out_block_fifo_.clear();
   out_macroblock_fifo_.clear();
@@ -159,6 +160,8 @@ void Mdec::begin_command(u32 value) {
   output_signed_ = (value & (1u << 26)) != 0;
   output_set_bit15_ = (value & (1u << 25)) != 0;
   in_halfword_fifo_.clear();
+  decode_halfwords_remaining_ = 0;
+  reset_decode_state();
   // A fresh command resets pending output words from the previous command.
   out_fifo_.clear();
   out_block_fifo_.clear();
@@ -180,6 +183,7 @@ void Mdec::begin_command(u32 value) {
       ++debug_stats_.decode_commands;
     }
     in_words_remaining_ = (value & 0xFFFFu);
+    decode_halfwords_remaining_ = in_words_remaining_ * 2u;
     in_unlimited_ = false;
     command_busy_ = true;
     expect_command_word_ = false;
@@ -255,9 +259,13 @@ void Mdec::write_command(u32 value) {
   if (!in_unlimited_ && in_words_remaining_ == 0) {
     if (command_id_ != 1) {
       execute_command();
+      expect_command_word_ = true;
+      command_busy_ = false;
+    } else if (out_fifo_.empty() && in_halfword_fifo_.empty() &&
+               decode_halfwords_remaining_ == 0) {
+      expect_command_word_ = true;
+      command_busy_ = false;
     }
-    expect_command_word_ = true;
-    command_busy_ = false;
   }
 }
 
@@ -288,6 +296,14 @@ u32 Mdec::read_data() {
   }
   if (!out_macroblock_fifo_.empty()) {
     out_macroblock_fifo_.pop_front();
+  }
+  if (out_fifo_.empty() && command_id_ == 1) {
+    execute_decode();
+    if (out_fifo_.empty() && in_halfword_fifo_.empty() &&
+        in_words_remaining_ == 0 && decode_halfwords_remaining_ == 0) {
+      expect_command_word_ = true;
+      command_busy_ = false;
+    }
   }
   return value;
 }
@@ -333,10 +349,13 @@ u32 Mdec::read_status() const {
   status |= (static_cast<u32>(block & 0x7u) << 16);
 
   if (!expect_command_word_) {
-    if (in_words_remaining_ == 0) {
+    const u32 remaining_words =
+        (command_id_ == 1) ? ((decode_halfwords_remaining_ + 1u) / 2u)
+                           : in_words_remaining_;
+    if (remaining_words == 0) {
       status |= 0xFFFFu;
     } else {
-      status |= ((in_words_remaining_ - 1u) & 0xFFFFu);
+      status |= ((remaining_words - 1u) & 0xFFFFu);
     }
   } else {
     status |= 0xFFFFu;
@@ -363,6 +382,11 @@ bool Mdec::dma_in_request() const {
 bool Mdec::dma_out_request() const {
   const bool dma_out_enabled = (control_ & 0x20000000u) != 0;
   return dma_out_enabled && !out_fifo_.empty();
+}
+
+bool Mdec::is_active() const {
+  return command_busy_ || !expect_command_word_ || !in_halfword_fifo_.empty() ||
+         !out_fifo_.empty();
 }
 
 void Mdec::execute_command() {
@@ -428,83 +452,135 @@ void Mdec::execute_set_scale_table() {
 }
 
 void Mdec::execute_decode() {
-  if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
-    while (true) {
-      // Peek for padding
-      while (!in_halfword_fifo_.empty() && in_halfword_fifo_.front() == 0xFE00u) {
-          in_halfword_fifo_.pop_front();
-      }
-      if (in_halfword_fifo_.empty()) break;
-      size_t available_halfwords = 0;
-      if (!scan_macroblock(6u, available_halfwords)) {
-        break;
-      }
+  if (!out_fifo_.empty()) {
+    return;
+  }
 
-      Block cr{}, cb{}, y1{}, y2{}, y3{}, y4{};
-      size_t cursor = 0;
-
-      current_block_ = 4;
-      if (!decode_block(cr, quant_chroma_, cursor)) {
-        break;
-      }
-      current_block_ = 5;
-      if (!decode_block(cb, quant_chroma_, cursor)) {
-        break;
-      }
-      current_block_ = 0;
-      if (!decode_block(y1, quant_luma_, cursor)) {
-        break;
-      }
-      current_block_ = 1;
-      if (!decode_block(y2, quant_luma_, cursor)) {
-        break;
-      }
-      current_block_ = 2;
-      if (!decode_block(y3, quant_luma_, cursor)) {
-        break;
-      }
-      current_block_ = 3;
-      if (!decode_block(y4, quant_luma_, cursor)) {
-        break;
-      }
-
-      if (g_mdec_debug_compare_macroblocks) {
-        std::vector<u16> compare_input;
-        compare_input.reserve(cursor);
-        for (size_t i = 0; i < cursor; ++i) {
-          compare_input.push_back(in_halfword_fifo_[i]);
+  while (out_fifo_.empty() && command_id_ == 1) {
+    const u8 needed_blocks = (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 6u : 1u;
+    if (decode_block_index_ >= needed_blocks) {
+      if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
+        if (g_mdec_debug_compare_macroblocks) {
+          debug_compare_.macroblocks_compared++;
         }
-        compare_colored_macroblock(compare_input);
+        emit_colored_macroblock(decode_blocks_[0], decode_blocks_[1],
+                                decode_blocks_[2], decode_blocks_[3],
+                                decode_blocks_[4], decode_blocks_[5]);
+      } else {
+        emit_monochrome_macroblock(decode_blocks_[0]);
       }
-
-      emit_colored_macroblock(cr, cb, y1, y2, y3, y4);
-      while (available_halfwords-- > 0) {
-        in_halfword_fifo_.pop_front();
-      }
+      reset_decode_state();
+      return;
     }
-  } else {
-    while (true) {
-      while (!in_halfword_fifo_.empty() && in_halfword_fifo_.front() == 0xFE00u) {
-          in_halfword_fifo_.pop_front();
-      }
-      if (in_halfword_fifo_.empty()) break;
-      size_t available_halfwords = 0;
-      if (!scan_macroblock(1u, available_halfwords)) {
-        break;
-      }
 
-      Block y{};
-      size_t cursor = 0;
-      current_block_ = 0;
-      if (!decode_block(y, quant_luma_, cursor)) {
-        break;
+    if (!decode_next_block()) {
+      if (decode_halfwords_remaining_ == 0 && in_halfword_fifo_.empty()) {
+        reset_decode_state();
       }
-      emit_monochrome_macroblock(y);
-      while (available_halfwords-- > 0) {
-        in_halfword_fifo_.pop_front();
-      }
+      return;
     }
   }
+}
+
+void Mdec::reset_decode_state() {
+  decode_block_index_ = 0;
+  current_coefficient_ = 64;
+  current_q_scale_ = 0;
+  current_block_ = (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 4 : 0;
+  for (Block &block : decode_blocks_) {
+    block.fill(0);
+  }
+}
+
+bool Mdec::decode_next_block() {
+  const bool colored = (out_depth_latched_ == 2 || out_depth_latched_ == 3);
+  if (colored) {
+    static constexpr std::array<u8, 6> kStatusBlockOrder = {4, 5, 0, 1, 2, 3};
+    current_block_ = kStatusBlockOrder[decode_block_index_];
+  } else {
+    current_block_ = 0;
+  }
+
+  const bool chroma_block = colored && decode_block_index_ < 2u;
+  Block &block = decode_blocks_[decode_block_index_];
+  if (!decode_rle_block(block, chroma_block ? quant_chroma_ : quant_luma_)) {
+    return false;
+  }
+
+  Block spatial{};
+  idct(block, spatial);
+  block = spatial;
+
+  ++decode_block_index_;
+  current_coefficient_ = 64;
+
+  if (fmv_diagnostics_enabled()) {
+    ++debug_stats_.blocks_decoded;
+  }
+  return true;
+}
+
+u16 Mdec::pop_decode_halfword() {
+  const u16 value = in_halfword_fifo_.front();
+  in_halfword_fifo_.pop_front();
+  if (decode_halfwords_remaining_ > 0) {
+    --decode_halfwords_remaining_;
+  }
+  return value;
+}
+
+bool Mdec::decode_rle_block(Block &block,
+                            const std::array<u8, kBlockSize> &quant_table) {
+  if (current_coefficient_ == 64) {
+    block.fill(0);
+
+    u16 first = 0;
+    for (;;) {
+      if (in_halfword_fifo_.empty() || decode_halfwords_remaining_ == 0) {
+        return false;
+      }
+      first = pop_decode_halfword();
+      if (first != 0xFE00u) {
+        break;
+      }
+      if (fmv_diagnostics_enabled()) {
+        ++debug_stats_.eob_markers;
+      }
+    }
+
+    current_coefficient_ = 0;
+    current_q_scale_ = first >> 10;
+
+    const int level = sign_extend_10(first);
+    const int bias = level ? ((level < 0) ? 8 : -8) : 0;
+    const int coeff = (current_q_scale_ == 0)
+                          ? (level << 5)
+                          : ((level * static_cast<int>(quant_table[0]) << 4) + bias);
+    block[kZigZag[0]] = std::clamp(coeff, -0x4000, 0x3FFF);
+  }
+
+  while (!in_halfword_fifo_.empty() && decode_halfwords_remaining_ > 0) {
+    const u16 word = pop_decode_halfword();
+    current_coefficient_ += ((word >> 10) + 1u);
+    if (current_coefficient_ < 64u) {
+      const int level = sign_extend_10(word);
+      const int scale =
+          static_cast<int>(current_q_scale_) *
+          static_cast<int>(quant_table[current_coefficient_]);
+      const int bias = level ? ((level < 0) ? 8 : -8) : 0;
+      const int coeff =
+          (scale == 0) ? (level << 5) : ((((level * scale) >> 3) << 4) + bias);
+      block[kZigZag[current_coefficient_]] =
+          std::clamp(coeff, -0x4000, 0x3FFF);
+    }
+
+    if (current_coefficient_ >= 63u) {
+      current_coefficient_ = 64;
+      return true;
+    }
+  }
+
+  return false;
 }
 
 bool Mdec::scan_block(size_t &cursor) const {
@@ -1049,10 +1125,14 @@ void Mdec::emit_colored_macroblock(const Block &cr, const Block &cb,
 }
 
 std::array<int, 3> Mdec::ycbcr_to_rgb_components(int y, int cb, int cr) {
-  const int r = std::clamp(y + (((359 * cr) + 0x80) >> 8), -128, 127);
-  const int g =
-      std::clamp(y - (((88 * cb) + (183 * cr) + 0x80) >> 8), -128, 127);
-  const int b = std::clamp(y + (((454 * cb) + 0x80) >> 8), -128, 127);
+  const int r =
+      std::clamp(sign_extend_9(y + (((359 * cr) + 0x80) >> 8)), -128, 127);
+  const int g = std::clamp(
+      sign_extend_9(y + ((((-88 * cb) & ~0x1F) + ((-183 * cr) & ~0x07) + 0x80) >>
+                         8)),
+      -128, 127);
+  const int b =
+      std::clamp(sign_extend_9(y + (((454 * cb) + 0x80) >> 8)), -128, 127);
   return {r, g, b};
 }
 

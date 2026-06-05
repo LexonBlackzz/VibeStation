@@ -74,6 +74,7 @@ public:
   u32 dma_read() { return read_data(); }
   bool dma_in_request() const;
   bool dma_out_request() const;
+  bool is_active() const;
   u32 dma_out_words_available() const {
     return static_cast<u32>(out_fifo_.size());
   }
@@ -99,6 +100,10 @@ private:
   void execute_decode();
   void execute_set_quant_table();
   void execute_set_scale_table();
+  void reset_decode_state();
+  bool decode_next_block();
+  bool decode_rle_block(Block &block, const std::array<u8, kBlockSize> &quant_table);
+  u16 pop_decode_halfword();
   bool scan_block(size_t &cursor) const;
   bool scan_macroblock(size_t block_count, size_t &consumed_halfwords) const;
   bool decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
@@ -139,6 +144,7 @@ private:
   u8 command_id_ = 0;
   u32 command_word_ = 0;
   u32 in_words_remaining_ = 0;
+  u32 decode_halfwords_remaining_ = 0;
   bool in_unlimited_ = false;
   
   std::deque<u16> in_halfword_fifo_{};
@@ -148,6 +154,10 @@ private:
   std::array<s16, kBlockSize> scale_table_{};
   u8 status_command_bits_ = 0;
   u8 current_block_ = 4;
+  u8 decode_block_index_ = 0;
+  u32 current_coefficient_ = 64;
+  u32 current_q_scale_ = 0;
+  MacroblockBlocks decode_blocks_{};
   u8 output_depth_ = 2;
   bool output_signed_ = false;
   bool output_set_bit15_ = false;
