@@ -442,6 +442,7 @@ void Cpu::reset() {
   cycles_ = 0;
   gte_input_ready_cycle_ = 0;
   gte_result_ready_cycle_ = 0;
+  muldiv_result_ready_cycle_ = 0;
   cycle_penalty_ = 0;
   std::memset(cop0_regs_, 0, sizeof(cop0_regs_));
   std::memset(exception_return_regs_, 0, sizeof(exception_return_regs_));
@@ -451,6 +452,9 @@ void Cpu::reset() {
   exception_return_sr_ = 0;
   exception_return_bd_ = false;
   exception_return_valid_ = false;
+  for (auto &line : icache_) {
+    line = {};
+  }
 }
 
 // ── Register Helpers ───────────────────────────────────────────────
@@ -492,9 +496,6 @@ void Cpu::set_reg(u32 index, u32 value) {
   if (load_.reg == index) {
     load_.reg = 0;
   }
-  if (next_load_.reg == index) {
-    next_load_.reg = 0;
-  }
   gpr_[index] = value;
 }
 
@@ -527,23 +528,21 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
     cop0_regs_[index] = value;
     break;
   case 6:
-    cop0_jumpdest_ = value;
+    // Match DuckStation/hardware-facing behavior: this debug-oriented
+    // register is not software-writable in normal guest execution.
     break;
   case 8:
-    cop0_badvaddr_ = value;
+    // BadVaddr is exception-written, not guest-written.
     break;
   case 12:
     cop0_sr_ = value;
-    // Real hardware does not recognize a newly restored IE state
-    // immediately on the very next interrupt check.
-    irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
     break;
   case 13:
     // Only SW interrupt pending bits are writable.
     cop0_cause_ = (cop0_cause_ & ~0x300u) | (value & 0x300u);
     break;
   case 14:
-    cop0_epc_ = value;
+    // EPC is exception-written, not guest-written.
     break;
   default:
     cop0_regs_[index & 31] = value;
@@ -556,7 +555,24 @@ void Cpu::raise_cop_unusable(u32 cop_index) {
   exception(Exception::CopUnusable);
 }
 
-void Cpu::apply_pending_load() {
+void Cpu::advance_load_delay() {
+  if (cpu_diag_enabled() && load_.reg == 31) {
+    const bool suspicious_ra =
+        (load_.value == 0u) || !is_plausible_exec_addr(load_.value);
+    if (suspicious_ra) {
+      log_suspicious_ra_write(sys_, current_pc_, gpr_[31], load_.value,
+                              gpr_[29]);
+    }
+  }
+  if (load_.reg != 0) {
+    gpr_[load_.reg] = load_.value;
+  }
+  load_ = next_load_;
+  next_load_ = {0, 0};
+}
+
+void Cpu::flush_load_delay() {
+  next_load_ = {0, 0};
   if (cpu_diag_enabled() && load_.reg == 31) {
     const bool suspicious_ra =
         (load_.value == 0u) || !is_plausible_exec_addr(load_.value);
@@ -576,11 +592,22 @@ void Cpu::schedule_load(u32 index, u32 value) {
     next_load_ = {0, 0};
     return;
   }
+  if (load_.reg == index) {
+    load_.reg = 0;
+  }
   next_load_ = {index, value};
 }
 
 void Cpu::add_cycle_penalty(u32 cycles) {
   cycle_penalty_ += cycles;
+}
+
+u32 Cpu::cpu_data_read_penalty(u32 addr) const {
+  // DuckStation models a 6-tick RAM read. Our load/store op timing already
+  // carries a 2-cycle baseline, so add the remaining 4 cycles here for
+  // main-RAM data reads. We intentionally do not charge instruction fetches
+  // yet because this core still lacks a comparable icache model.
+  return is_main_ram_addr(addr) ? 4u : 0u;
 }
 
 bool Cpu::gte_data_reg_reads_result(u32 reg) {
@@ -637,6 +664,48 @@ u32 Cpu::gte_result_stall_cycles() const {
   return static_cast<u32>(gte_result_ready_cycle_ - ready_cycle);
 }
 
+u32 Cpu::muldiv_stall_cycles() const {
+  const u64 issue_cycle = cycles_ + static_cast<u64>(cycle_penalty_) + 1u;
+  if (muldiv_result_ready_cycle_ <= issue_cycle) {
+    return 0;
+  }
+  return static_cast<u32>(muldiv_result_ready_cycle_ - issue_cycle);
+}
+
+void Cpu::stall_until_muldiv_complete() {
+  add_cycle_penalty(muldiv_stall_cycles());
+}
+
+void Cpu::mark_muldiv_result_pending(u32 ticks) {
+  muldiv_result_ready_cycle_ =
+      cycles_ + static_cast<u64>(cycle_penalty_) + static_cast<u64>(ticks);
+}
+
+u32 Cpu::mult_result_ticks(s32 value) {
+  if (value < 0) {
+    return (value >= -2048) ? 6u : ((value >= -1048576) ? 9u : 13u);
+  }
+  return (value < 0x800) ? 6u : ((value < 0x100000) ? 9u : 13u);
+}
+
+u32 Cpu::multu_result_ticks(u32 value) {
+  return (value < 0x800) ? 6u : ((value < 0x100000) ? 9u : 13u);
+}
+
+u32 Cpu::div_result_ticks() { return 36u; }
+
+bool Cpu::instruction_cacheable(u32 addr) const {
+  if (addr >= 0xA0000000u && addr < 0xC0000000u) {
+    return false;
+  }
+  const u32 phys = psx::mask_address(addr);
+  return phys < 0x00800000u || (phys >= 0x1F800000u && phys < 0x1F801000u);
+}
+
+void Cpu::invalidate_icache_line(u32 addr) {
+  icache_[(addr >> 4) & 0xFFu].valid = false;
+}
+
 u32 Cpu::gte_command_cycles(u32 instruction) {
   switch (instruction & 0x3Fu) {
   case 0x01: return 15; // RTPS
@@ -683,7 +752,24 @@ u32 Cpu::fetch32(u32 addr) {
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  return sys_->read32_instruction(addr);
+  if (!instruction_cacheable(addr)) {
+    return sys_->read32_instruction(addr);
+  }
+
+  const u32 index = (addr >> 4) & 0xFFu;
+  const u32 word_index = (addr >> 2) & 0x03u;
+  const u32 tag = psx::mask_address(addr) & ~0x0Fu;
+  auto &line = icache_[index];
+  if (!line.valid || line.tag != tag) {
+    const u32 base = addr & ~0x0Fu;
+    line.tag = tag;
+    for (u32 word = 0; word < 4u; ++word) {
+      line.words[word] = sys_->read32_instruction(base + word * 4u);
+    }
+    line.valid = true;
+    add_cycle_penalty(4u);
+  }
+  return line.words[word_index];
 }
 
 u32 Cpu::load32(u32 addr) {
@@ -692,7 +778,8 @@ u32 Cpu::load32(u32 addr) {
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  u32 value = sys_->read32_data(addr);
+  add_cycle_penalty(cpu_data_read_penalty(addr));
+  u32 value = sys_->read32(addr);
   if (g_log_fmv_diagnostics && current_pc_ == 0x00000DE8u &&
       (addr & 0x1FFFFFFFu) == 0x00000018u && value == 0x00000001u) {
     static u32 rr4_slot18_sentinel_logs = 0;
@@ -704,10 +791,6 @@ u32 Cpu::load32(u32 addr) {
           addr, value, current_pc_, gpr_[31], gpr_[19],
           static_cast<unsigned long long>(cycles_));
     }
-    // RR4 uses a transient 1 sentinel in the helper slot while the producer
-    // side is unwinding. Letting the low helper treat that as real state keeps
-    // re-seeding the bad walk, so collapse it to 0 here.
-    return 0;
   }
   if (g_log_fmv_diagnostics && current_pc_ == 0x00000E28u &&
       (addr & 0x1FFFFFFFu) == 0x000A6518u && value == 0x00000001u) {
@@ -720,11 +803,6 @@ u32 Cpu::load32(u32 addr) {
           addr, value, current_pc_, gpr_[31], gpr_[17], gpr_[19],
           static_cast<unsigned long long>(cycles_));
     }
-    // RR4's low helper chain can surface a transient/sentinel value of 1 in the
-    // node head while the producer path is still unwinding. Treat it as a null
-    // next-pointer so the BIOS helper terminates the walk instead of dereferencing
-    // 0x00000001 on the next iteration.
-    return 0;
   }
   if (g_log_fmv_diagnostics && current_pc_ == 0x8008B8FCu &&
       (addr & 0x1FFFFFFFu) == 0x000A6518u && value == 0x00000001u) {
@@ -737,10 +815,6 @@ u32 Cpu::load32(u32 addr) {
           addr, value, current_pc_, gpr_[31], gpr_[17], gpr_[18], gpr_[19],
           static_cast<unsigned long long>(cycles_));
     }
-    // This is the earlier producer-side read that feeds v1=1 into the low
-    // dispatch scratch slots. Normalizing it here keeps the helper from
-    // repeatedly rebuilding the bad walk.
-    return 0;
   }
   return value;
 }
@@ -751,10 +825,14 @@ u16 Cpu::load16(u32 addr) {
     exception(Exception::AddrLoadErr);
     return 0;
   }
-  return sys_->read16_data(addr);
+  add_cycle_penalty(cpu_data_read_penalty(addr));
+  return sys_->read16(addr);
 }
 
-u8 Cpu::load8(u32 addr) { return sys_->read8_data(addr); }
+u8 Cpu::load8(u32 addr) {
+  add_cycle_penalty(cpu_data_read_penalty(addr));
+  return sys_->read8(addr);
+}
 
 void Cpu::store32(u32 addr, u32 value) {
   if (addr & 3) {
@@ -764,9 +842,10 @@ void Cpu::store32(u32 addr, u32 value) {
   }
   // Check if cache is isolated (COP0 SR bit 16)
   if (cop0_sr_ & (1u << 16)) {
-    return; // Cache isolated, writes go nowhere
+    invalidate_icache_line(addr);
+    return;
   }
-  sys_->write32_data(addr, value);
+  sys_->write32(addr, value);
 }
 
 void Cpu::store16(u32 addr, u16 value) {
@@ -815,15 +894,19 @@ void Cpu::store16(u32 addr, u16 value) {
     exception(Exception::AddrStoreErr);
     return;
   }
-  if (cop0_sr_ & (1u << 16))
+  if (cop0_sr_ & (1u << 16)) {
+    invalidate_icache_line(addr);
     return;
-  sys_->write16_data(addr, value);
+  }
+  sys_->write16(addr, value);
 }
 
 void Cpu::store8(u32 addr, u8 value) {
-  if (cop0_sr_ & (1u << 16))
+  if (cop0_sr_ & (1u << 16)) {
+    invalidate_icache_line(addr);
     return;
-  sys_->write8_data(addr, value);
+  }
+  sys_->write8(addr, value);
 }
 
 // ── Exception Handling ─────────────────────────────────────────────
@@ -831,6 +914,7 @@ void Cpu::store8(u32 addr, u8 value) {
 void Cpu::exception(Exception cause) {
   static u32 logged_exception_count = 0;
   exception_raised_ = true;
+  flush_load_delay();
   std::memcpy(exception_return_regs_, gpr_, sizeof(gpr_));
   exception_return_hi_ = hi_;
   exception_return_lo_ = lo_;
@@ -944,6 +1028,59 @@ void Cpu::exception(Exception cause) {
             static_cast<unsigned long long>(cycles_));
       }
     }
+  } else if (cause == Exception::ReservedInst) {
+    static u32 last_ri_pc = 0xFFFFFFFFu;
+    static u32 last_ri_instr = 0xFFFFFFFFu;
+    static u32 repeated_ri_count = 0;
+    const u32 instr = sys_ != nullptr ? sys_->read32(current_pc_) : 0u;
+    const bool same_ri = current_pc_ == last_ri_pc && instr == last_ri_instr;
+    if (!same_ri) {
+      if (repeated_ri_count > 0) {
+        LOG_WARN("CPU: repeated previous ReservedInst count=%u",
+                 repeated_ri_count);
+      }
+      last_ri_pc = current_pc_;
+      last_ri_instr = instr;
+      repeated_ri_count = 0;
+      LOG_WARN(
+          "CPU: ReservedInst pc=0x%08X instr=0x%08X sr=0x%08X cyc=%llu "
+          "ra=0x%08X sp=0x%08X",
+          current_pc_, instr, cop0_sr_, static_cast<unsigned long long>(cycles_),
+          gpr_[31], gpr_[29]);
+      if (sys_ != nullptr) {
+        const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+        LOG_WARN(
+            "CPU: ReservedInst ctx epc=0x%08X cause=0x%08X v0=0x%08X v1=0x%08X "
+            "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
+            cop0_epc_, cop0_cause_, gpr_[2], gpr_[3], gpr_[4], gpr_[5],
+            gpr_[6], gpr_[7]);
+        LOG_WARN(
+            "CPU: ReservedInst saved s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+            "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X",
+            gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21],
+            gpr_[22], gpr_[23]);
+        LOG_WARN(
+            "CPU: ReservedInst code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+            phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+            sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+            sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+            sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+            sys_->read32(phys_pc + 0x08u));
+        log_stack_window(sys_, "CPU: ReservedInst frame", gpr_[29]);
+        sys_->debug_log_recent_ram_writes(gpr_[29], 0x40u, "CPU");
+        if (is_main_ram_addr(current_pc_)) {
+          sys_->debug_log_recent_ram_writes(current_pc_, 0x40u, "CPU");
+        }
+        log_dma_context(sys_, current_pc_, instr, gpr_);
+      }
+    } else {
+      ++repeated_ri_count;
+      if ((repeated_ri_count & (repeated_ri_count - 1u)) == 0u) {
+        LOG_WARN(
+            "CPU: ReservedInst repeated count=%u pc=0x%08X instr=0x%08X",
+            repeated_ri_count, current_pc_, instr);
+      }
+    }
   }
 
   pc_ = handler;
@@ -980,7 +1117,6 @@ u32 Cpu::step() {
   g_diag_current_pc = current_pc_;
   exception_raised_ = false;
   cycle_penalty_ = 0;
-  next_load_ = {0, 0};
   in_delay_slot_ = pending_delay_slot_;
   active_branch_pc_ = pending_branch_pc_;
   pending_delay_slot_ = false;
@@ -1012,13 +1148,6 @@ u32 Cpu::step() {
     }
   }
 
-  // COP0 status transitions (RFE/MTC0 SR) take effect with a short hazard
-  // window; do not take a fresh IRQ on the immediate following instruction.
-  const bool irq_inhibited = irq_inhibit_instructions_ != 0;
-  if (irq_inhibit_instructions_ != 0) {
-    --irq_inhibit_instructions_;
-  }
-
   // Check for hardware interrupts
   if (sys_->irq_pending()) {
     cop0_cause_ |= (1u << 10); // Set IP2 (hardware interrupt line)
@@ -1034,7 +1163,7 @@ u32 Cpu::step() {
     cop0_cause_ &= ~(1u << 10);
   }
 
-  if (!irq_inhibited && check_irq()) {
+  if (check_irq()) {
     if (g_log_fmv_diagnostics) {
       static u32 cpu_irq_entry_log = 0;
       if (cpu_irq_entry_log < 32) {
@@ -1054,7 +1183,6 @@ u32 Cpu::step() {
       }
     }
     exception(Exception::Interrupt);
-    apply_pending_load();
     constexpr u32 irq_cycles = 2;
     cycles_ += irq_cycles;
     return irq_cycles;
@@ -1081,7 +1209,6 @@ u32 Cpu::step() {
   // Fetch instruction
   u32 instruction = fetch32(pc_);
   if (exception_raised_) {
-    apply_pending_load();
     constexpr u32 fault_cycles = 2;
     cycles_ += fault_cycles;
     return fault_cycles;
@@ -1500,6 +1627,24 @@ u32 Cpu::step() {
 
   if (g_log_fmv_diagnostics && current_pc_ >= 0x80116CC0u &&
       current_pc_ <= 0x80116D20u) {
+    static u32 rr4_decomp_step_logs = 0;
+    if (rr4_decomp_step_logs < 768u) {
+      ++rr4_decomp_step_logs;
+      const u32 src0 = gpr_[4];
+      const u32 dst0 = gpr_[5];
+      const u32 bitp = gpr_[8];
+      LOG_WARN(
+          "CPU: rr4-decomp step n=%u prev=0x%08X pc=0x%08X instr=0x%08X cyc=%llu "
+          "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X t1=0x%08X "
+          "t2=0x%08X t3=0x%08X v0=0x%08X v1=0x%08X s0=0x%08X s1=0x%08X "
+          "src0=0x%08X src4=0x%08X bit0=0x%08X bit4=0x%08X dst0=0x%08X dst4=0x%08X",
+          rr4_decomp_step_logs, prev_pc_for_diag, current_pc_, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[4], gpr_[5],
+          gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10], gpr_[11], gpr_[2],
+          gpr_[3], gpr_[16], gpr_[17], sys_->read32(src0),
+          sys_->read32(src0 + 4u), sys_->read32(bitp), sys_->read32(bitp + 4u),
+          sys_->read32(dst0), sys_->read32(dst0 + 4u));
+    }
     static bool logged_rr4_lowclr_entry = false;
     if (!logged_rr4_lowclr_entry) {
       logged_rr4_lowclr_entry = true;
@@ -2250,14 +2395,8 @@ u32 Cpu::step() {
   // Decode and execute
   execute(instruction);
 
-  // Commit previous cycle's delayed load after one full instruction delay.
-  apply_pending_load();
-
-  // Only arm the next delayed load when the instruction completed normally.
   if (!exception_raised_) {
-    load_ = next_load_;
-  } else {
-    load_ = {0, 0};
+    advance_load_delay();
   }
 
   const u32 consumed_cycles = instruction_cycles(instruction) + cycle_penalty_;
@@ -2639,10 +2778,9 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
       return 2;
     case 0x18: // MULT
     case 0x19: // MULTU
-      return 8;
     case 0x1A: // DIV
     case 0x1B: // DIVU
-      return 35;
+      return 1;
     default:
       return 1;
     }
@@ -2907,16 +3045,24 @@ void Cpu::op_sltu(u32 i) { set_reg(rd(i), gpr_[rs(i)] < gpr_[rt(i)] ? 1 : 0); }
 // ── Multiply / Divide ──────────────────────────────────────────────
 
 void Cpu::op_mult(u32 i) {
-  s64 result = static_cast<s64>(static_cast<s32>(gpr_[rs(i)])) *
-               static_cast<s64>(static_cast<s32>(gpr_[rt(i)]));
+  const u32 lhs = gpr_[rs(i)];
+  const u32 rhs = gpr_[rt(i)];
+  s64 result = static_cast<s64>(static_cast<s32>(lhs)) *
+               static_cast<s64>(static_cast<s32>(rhs));
   lo_ = static_cast<u32>(result);
   hi_ = static_cast<u32>(result >> 32);
+  stall_until_muldiv_complete();
+  mark_muldiv_result_pending(mult_result_ticks(static_cast<s32>(lhs)));
 }
 
 void Cpu::op_multu(u32 i) {
-  u64 result = static_cast<u64>(gpr_[rs(i)]) * static_cast<u64>(gpr_[rt(i)]);
+  const u32 lhs = gpr_[rs(i)];
+  const u32 rhs = gpr_[rt(i)];
+  u64 result = static_cast<u64>(lhs) * static_cast<u64>(rhs);
   lo_ = static_cast<u32>(result);
   hi_ = static_cast<u32>(result >> 32);
+  stall_until_muldiv_complete();
+  mark_muldiv_result_pending(multu_result_ticks(lhs));
 }
 
 void Cpu::op_div(u32 i) {
@@ -2934,6 +3080,8 @@ void Cpu::op_div(u32 i) {
     lo_ = static_cast<u32>(n / d);
     hi_ = static_cast<u32>(n % d);
   }
+  stall_until_muldiv_complete();
+  mark_muldiv_result_pending(div_result_ticks());
 }
 
 void Cpu::op_divu(u32 i) {
@@ -2946,12 +3094,31 @@ void Cpu::op_divu(u32 i) {
     lo_ = n / d;
     hi_ = n % d;
   }
+  stall_until_muldiv_complete();
+  mark_muldiv_result_pending(div_result_ticks());
 }
 
-void Cpu::op_mfhi(u32 i) { set_reg(rd(i), hi_); }
-void Cpu::op_mthi(u32 i) { hi_ = gpr_[rs(i)]; }
-void Cpu::op_mflo(u32 i) { set_reg(rd(i), lo_); }
-void Cpu::op_mtlo(u32 i) { lo_ = gpr_[rs(i)]; }
+void Cpu::op_mfhi(u32 i) {
+  set_reg(rd(i), hi_);
+  stall_until_muldiv_complete();
+}
+
+void Cpu::op_mthi(u32 i) {
+  hi_ = gpr_[rs(i)];
+  stall_until_muldiv_complete();
+  muldiv_result_ready_cycle_ = cycles_ + static_cast<u64>(cycle_penalty_) + 1u;
+}
+
+void Cpu::op_mflo(u32 i) {
+  set_reg(rd(i), lo_);
+  stall_until_muldiv_complete();
+}
+
+void Cpu::op_mtlo(u32 i) {
+  lo_ = gpr_[rs(i)];
+  stall_until_muldiv_complete();
+  muldiv_result_ready_cycle_ = cycles_ + static_cast<u64>(cycle_penalty_) + 1u;
+}
 
 // ── Load Instructions ──────────────────────────────────────────────
 
@@ -3354,7 +3521,6 @@ void Cpu::op_cop0(u32 i) {
       u32 mode = cop0_sr_ & 0x3F;
       cop0_sr_ &= ~0x3Fu;
       cop0_sr_ |= (mode >> 2);
-      irq_inhibit_instructions_ = std::max(irq_inhibit_instructions_, 1u);
     }
     else {
         LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,

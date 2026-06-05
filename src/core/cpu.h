@@ -39,6 +39,7 @@ public:
   u32 pc() const { return pc_; }
   u32 reg(int i) const { return gpr_[i]; }
   u64 cycle_count() const { return cycles_; }
+  void add_cycle_penalty(u32 cycles);
 
 private:
   System *sys_ = nullptr;
@@ -63,7 +64,6 @@ private:
   u32 pending_branch_pc_ = 0;
   u32 active_branch_pc_ = 0;
   bool exception_raised_ = false;
-  u32 irq_inhibit_instructions_ = 0;
 
   // ── COP0 Registers ────────────────────────────────────────────
   u32 cop0_sr_ = 0;        // Status Register (R12)
@@ -80,26 +80,43 @@ private:
   bool exception_return_bd_ = false;
   bool exception_return_valid_ = false;
 
+  struct ICacheLine {
+    u32 tag = 0;
+    std::array<u32, 4> words = {};
+    bool valid = false;
+  };
+  std::array<ICacheLine, 256> icache_ = {};
+
   u64 cycles_ = 0;
   u64 gte_input_ready_cycle_ = 0;
   u64 gte_result_ready_cycle_ = 0;
+  u64 muldiv_result_ready_cycle_ = 0;
   u32 cycle_penalty_ = 0;
 
   // ── Helpers ────────────────────────────────────────────────────
   void set_reg(u32 index, u32 value);
-  void apply_pending_load();
+  void advance_load_delay();
+  void flush_load_delay();
   void schedule_load(u32 index, u32 value);
   void begin_branch(bool taken, u32 target);
   u32 read_cop0_reg(u32 index) const;
   void write_cop0_reg(u32 index, u32 value);
   void raise_cop_unusable(u32 cop_index);
-  void add_cycle_penalty(u32 cycles);
+  u32 cpu_data_read_penalty(u32 addr) const;
   static bool gte_data_reg_reads_result(u32 reg);
   static bool gte_ctrl_reg_reads_result(u32 reg);
   u32 gte_input_stall_cycles() const;
   u32 gte_result_stall_cycles() const;
+  u32 muldiv_stall_cycles() const;
+  void stall_until_muldiv_complete();
+  void mark_muldiv_result_pending(u32 ticks);
+  static u32 mult_result_ticks(s32 value);
+  static u32 multu_result_ticks(u32 value);
+  static u32 div_result_ticks();
   u32 instruction_cycles(u32 instruction) const;
   static u32 gte_command_cycles(u32 instruction);
+  bool instruction_cacheable(u32 addr) const;
+  void invalidate_icache_line(u32 addr);
 
   // Memory access (through system bus)
   u32 fetch32(u32 addr);
