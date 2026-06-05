@@ -347,9 +347,6 @@ public:
     if (phys < 0x00800000u) {
       const u32 off = phys & 0x1FFFFFu;
       u32 value = 0;
-      if (try_read_kernel_stub_shadow(off, value)) {
-        return value;
-      }
       if (!g_trace_ram) {
         std::memcpy(&value, ram_.data() + off, sizeof(value));
         return value;
@@ -370,30 +367,6 @@ public:
     return read32(addr);
   }
 
-  u8 read8_data(u32 addr) {
-    return read8(addr);
-  }
-
-  u16 read16_data(u32 addr) {
-    return read16(addr);
-  }
-
-  u32 read32_data(u32 addr) {
-    return read32(addr);
-  }
-
-  void write8_data(u32 addr, u8 val) {
-    write8(addr, val);
-  }
-
-  void write16_data(u32 addr, u16 val) {
-    write16(addr, val);
-  }
-
-  void write32_data(u32 addr, u32 val) {
-    write32(addr, val);
-  }
-
   u8 read8(u32 addr);
   u16 read16(u32 addr);
   u32 read32(u32 addr);
@@ -412,6 +385,7 @@ public:
   bool cdrom_data_ready() const { return cdrom_.sector_data_ready(); }
   bool cdrom_data_request_flag() const { return cdrom_.sector_data_request(); }
   u32 cdrom_dma_words_available() const { return cdrom_.dma_words_available(); }
+  void add_cpu_cycle_penalty(u32 cycles) { cpu_.add_cycle_penalty(cycles); }
   void mdec_dma_write(u32 val) { mdec_.dma_write(val); }
   u32 mdec_dma_read() { return mdec_.dma_read(); }
   u8 mdec_dma_out_block() const { return mdec_.dma_out_block(); }
@@ -419,6 +393,7 @@ public:
   u32 mdec_dma_out_macroblock_seq() const { return mdec_.dma_out_macroblock_seq(); }
   bool mdec_dma_in_request() const { return mdec_.dma_in_request(); }
   bool mdec_dma_out_request() const { return mdec_.dma_out_request(); }
+  bool mdec_active() const { return mdec_.is_active(); }
   u32 mdec_dma_out_words_available() const {
     return mdec_.dma_out_words_available();
   }
@@ -489,40 +464,12 @@ private:
     u32 count = 0;
   };
   static constexpr size_t kRamWriteHistorySize = 8192u;
-  static constexpr u32 kKernelStubShadowStart = 0x00000080u;
-  static constexpr u32 kKernelStubShadowSize = 0x00000098u;
-
   void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
   void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
   void debug_track_active_stack_write(const RamAccessLogEntry &entry);
   void debug_track_stack_top_write(const RamAccessLogEntry &entry);
   void debug_log_stack_top_burst_context(const RamAccessLogEntry &entry);
   void populate_gpu_src_write_samples_from_history();
-  bool kernel_stub_shadow_touches(u32 off, size_t size) const {
-    const u32 start = kKernelStubShadowStart;
-    const u32 end = kKernelStubShadowStart + kKernelStubShadowSize;
-    const u32 write_end = off + static_cast<u32>(size);
-    return off < end && write_end > start;
-  }
-  template <typename T>
-  bool try_read_kernel_stub_shadow(u32 off, T &value) const {
-    (void)off;
-    (void)value;
-    return false;
-  }
-  void sync_kernel_stub_shadow_live() {
-    kernel_stub_shadow_live_ = false;
-  }
-  void maybe_preserve_kernel_stub_shadow_before_write(u32 off, const void *src,
-                                                      size_t size) {
-    (void)off;
-    (void)src;
-    (void)size;
-  }
-  void sync_kernel_stub_shadow_after_write(u32 off, size_t size) {
-    (void)off;
-    (void)size;
-  }
   void log_unhandled_bus_write(const char *width, u32 phys, u32 value,
                                bool io_space, u64 repeat_count,
                                u64 total_count) const;
@@ -578,9 +525,6 @@ private:
   u32 fmv_write_hatch_total_logged_ = 0;
   u32 fmv_write_hatch_event_count_ = 0;
   bool active_stack_write_log_suppressed_ = false;
-  std::array<u8, kKernelStubShadowSize> kernel_stub_shadow_{};
-  bool kernel_stub_shadow_live_ = false;
-  bool kernel_stub_shadow_frozen_ = false;
   BootDiagnostics boot_diag_ = {};
   ProfilingStats profiling_stats_ = {};
   bool saw_non_bios_exec_ = false;

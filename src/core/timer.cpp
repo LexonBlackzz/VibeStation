@@ -26,7 +26,7 @@ u32 Timers::read(u32 offset) const {
 
   switch (reg) {
   case 0x0:
-    return t.counter;
+    return t.counter & 0xFFFFu;
   case 0x4: {
     u32 val = t.mode;
     const_cast<Timer &>(t).mode &= ~(3u << 11); // bits 11-12 clear on read
@@ -52,13 +52,17 @@ void Timers::write(u32 offset, u32 value) {
 
   switch (reg) {
   case 0x0:
-    t.counter = static_cast<u16>(value);
+  {
+    const u32 old_counter = t.counter;
+    t.counter = value & 0xFFFFu;
+    check_timer_events(timer, old_counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
       LOG_DEBUG("Timers: T%d COUNTER <= 0x%04X", timer, t.counter);
     }
     break;
+  }
   case 0x4:
     t.mode = static_cast<u16>(value & 0x3FF);
     t.mode |= (1u << 10);
@@ -66,6 +70,7 @@ void Timers::write(u32 offset, u32 value) {
     t.one_shot_done = false;
     t.sync_released = false;
     t.irq_pulse_restore_pending = false;
+    check_timer_events(timer, t.counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -74,6 +79,7 @@ void Timers::write(u32 offset, u32 value) {
     break;
   case 0x8:
     t.target = static_cast<u16>(value);
+    check_timer_events(timer, t.counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -131,16 +137,24 @@ void Timers::tick_timer(int index, u32 cycles) {
 
   const u32 old_counter = t.counter;
   const u32 new_counter = old_counter + cycles;
-  t.counter = static_cast<u16>(new_counter & 0xFFFFu);
+  t.counter = new_counter;
+  check_timer_events(index, old_counter);
+  t.counter = static_cast<u16>(t.counter);
+}
 
+void Timers::check_timer_events(int index, u32 old_counter) {
+  auto &t = timers_[index];
+  const u32 new_counter = t.counter;
   const bool target_hit =
-      (t.target != 0) && (old_counter < t.target) && (new_counter >= t.target);
-  const bool overflow_hit = new_counter >= 0x10000u;
+      (new_counter >= t.target) && (old_counter < t.target || t.target == 0);
+  const bool overflow_hit = new_counter >= 0xFFFFu;
 
   handle_timer_event(t, index, target_hit, overflow_hit);
 
-  if (target_hit && t.reset_on_target()) {
-    t.counter = 0;
+  if (target_hit && t.reset_on_target() && t.target > 0) {
+    t.counter = static_cast<u16>(new_counter % t.target);
+  } else if (overflow_hit) {
+    t.counter = static_cast<u16>(new_counter % 0xFFFFu);
   }
 }
 

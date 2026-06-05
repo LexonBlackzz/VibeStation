@@ -9,7 +9,7 @@
 class System;
 
 struct Timer {
-  u16 counter = 0; // Current counter value
+  u32 counter = 0; // Current counter value
   u16 target = 0;  // Target value
   u16 mode = 0;    // Mode register
   bool one_shot_done = false;
@@ -64,6 +64,7 @@ private:
   bool vblank_active_ = false;
 
   void tick_timer(int index, u32 ticks);
+  void check_timer_events(int index, u32 old_counter);
   bool is_paused_by_sync(int index) const;
   void process_sync_event(int index);
   void handle_timer_event(Timer &t, int index, bool target_hit, bool overflow_hit);

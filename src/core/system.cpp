@@ -28,9 +28,19 @@ namespace {
 
     bool is_unmapped_physical(u32 phys) {
         if (phys >= kUnmappedHighPhysicalBase) return true;
+        if (phys >= psx::RAM_SIZE && phys < kMainRamMirrorWindow) return true;
         if (phys >= kMainRamMirrorWindow && phys < kExpansion1Base) return true;
         if (phys >= 0x1F803000u && phys < 0x1FC00000u) return true;
         if (phys >= 0x1FC80000u && phys < kUnmappedHighPhysicalBase) return true;
+        return false;
+    }
+
+    bool map_main_ram_address(u32 addr, u32 phys, u32& ram_addr) {
+        if (phys < psx::RAM_SIZE) {
+            ram_addr = phys;
+            return true;
+        }
+
         return false;
     }
 void log_unhandled_bus_read(BusWarnLimiter& limiter, const char* width,
@@ -1196,10 +1206,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     const u32 dma_tick_stride = 16u;
     const u32 spu_sync_scanline_stride =
         aggressive_fast_mode ? 32u : (fast_mode ? 16u : 4u);
-    const u32 cdrom_tick_scanline_stride = 1u;
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
-    u32 cdrom_tick_budget = 0;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -1246,6 +1254,10 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 sio_.tick(sio_slice_cycles);
             }
 
+            if (spent_in_slice > 0) {
+                cdrom_.tick(spent_in_slice);
+            }
+
             dma_tick_budget += spent_in_slice;
             if (dma_tick_budget >= dma_tick_stride) {
                 dma_.tick();
@@ -1280,12 +1292,6 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 .count());
         }
 
-        cdrom_tick_budget += cycles_this_scanline;
-        if (((scanline + 1u) % cdrom_tick_scanline_stride) == 0u ||
-            ((scanline + 1u) == scanlines_per_frame)) {
-            cdrom_.tick(cdrom_tick_budget);
-            cdrom_tick_budget = 0;
-        }
         const bool sync_spu_now =
             (((scanline + 1u) % spu_sync_scanline_stride) == 0u) ||
             ((scanline + 1u) == scanlines_per_frame);
@@ -1886,9 +1892,8 @@ u8 System::read8(u32 addr) {
         }
     }
 
-    // Main RAM (2MB) mirrored across the low 8MB physical window.
-    if (phys < kMainRamMirrorWindow) {
-        const u32 ram_addr = phys & 0x1FFFFF;
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         const u8 value = ram_.read8(ram_addr);
         maybe_log_rr4_str_header_read(ram_addr, value, 1, cpu_.pc(),
             cpu_.cycle_count(), bus_access_from_dma_);
@@ -1909,8 +1914,8 @@ u8 System::read8(u32 addr) {
     // I/O Ports
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return 0xFF;
         }
         // SIO (controller/memory card)
@@ -1983,8 +1988,8 @@ u16 System::read16(u32 addr) {
         }
     }
 
-    if (phys < kMainRamMirrorWindow) {
-        const u32 ram_addr = phys & 0x1FFFFF;
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         const u16 value = ram_.read16(ram_addr);
         maybe_log_rr4_str_header_read(ram_addr, value, 2, cpu_.pc(),
             cpu_.cycle_count(), bus_access_from_dma_);
@@ -2000,8 +2005,8 @@ u16 System::read16(u32 addr) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return 0xFFFF;
         }
         // Interrupt controller
@@ -2073,8 +2078,8 @@ u32 System::read32(u32 addr) {
         }
     }
 
-    if (phys < kMainRamMirrorWindow) {
-        const u32 ram_addr = phys & 0x1FFFFF;
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         const u32 value = ram_.read32(ram_addr);
 
         maybe_log_rr4_str_header_read(ram_addr, value, 4, cpu_.pc(),
@@ -2091,8 +2096,8 @@ u32 System::read32(u32 addr) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): open bus.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return 0xFFFFFFFFu;
         }
         // Memory control
@@ -2181,11 +2186,11 @@ void System::write8(u32 addr, u8 val) {
         }
     }
 
-    if (phys < kMainRamMirrorWindow) {
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 1);
         }
-        const u32 ram_addr = phys & 0x1FFFFF;
         if (g_log_fmv_diagnostics && ram_addr >= 0x000A6500u &&
             ram_addr < 0x000A6540u) {
             static u32 rr4_node2_w8_logs = 0;
@@ -2247,8 +2252,8 @@ void System::write8(u32 addr, u8 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return;
         }
         // SIO (controller/memory card)
@@ -2400,11 +2405,11 @@ void System::write16(u32 addr, u16 val) {
         }
     }
 
-    if (phys < kMainRamMirrorWindow) {
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 2);
         }
-        const u32 ram_addr = phys & 0x1FFFFF;
         if (g_log_fmv_diagnostics && ram_addr >= 0x000A6500u &&
             ram_addr < 0x000A6540u) {
             static u32 rr4_node2_w16_logs = 0;
@@ -2470,8 +2475,8 @@ void System::write16(u32 addr, u16 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return;
         }
         if (io >= 0x070 && io < 0x078) {
@@ -2629,8 +2634,8 @@ void System::write32(u32 addr, u32 val) {
         }
     }
 
-    if (phys < kMainRamMirrorWindow) {
-        const u32 ram_addr = phys & 0x1FFFFF;
+    u32 ram_addr = 0;
+    if (map_main_ram_address(addr, phys, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 4);
         }
@@ -2744,8 +2749,8 @@ void System::write32(u32 addr, u32 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
-        // Unused timer slot / peripheral gap (e.g. 1F801130h..13Fh): ignore writes.
-        if (io >= 0x130 && io < 0x140) {
+        // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
+        if (io >= 0x130 && io < 0x800) {
             return;
         }
         // Memory control
