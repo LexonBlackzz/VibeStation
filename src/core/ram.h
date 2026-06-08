@@ -39,6 +39,6 @@ public:
   const u8 *scratch_data() const { return scratchpad_.data(); }
 
 private:
-  std::array<u8, psx::RAM_SIZE> data_;
+  std::array<u8, psx::RAM_MAX_SIZE> data_;
   std::array<u8, psx::SCRATCHPAD_SIZE> scratchpad_;
 };

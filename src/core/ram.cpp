@@ -17,13 +17,13 @@ inline void ram_trace_event(const char *op, u32 offset, u32 value) {
 } // namespace
 
 u8 Ram::read8(u32 offset) const {
-  const u8 value = data_[offset & (psx::RAM_SIZE - 1)];
+  const u8 value = data_[offset & (psx::RAM_MAX_SIZE - 1)];
   ram_trace_event("R8", offset, value);
   return value;
 }
 
 u16 Ram::read16(u32 offset) const {
-  u32 off = offset & (psx::RAM_SIZE - 1);
+  u32 off = offset & (psx::RAM_MAX_SIZE - 1);
   u16 val;
   std::memcpy(&val, &data_[off], sizeof(u16));
   ram_trace_event("R16", offset, val);
@@ -31,7 +31,7 @@ u16 Ram::read16(u32 offset) const {
 }
 
 u32 Ram::read32(u32 offset) const {
-  u32 off = offset & (psx::RAM_SIZE - 1);
+  u32 off = offset & (psx::RAM_MAX_SIZE - 1);
   u32 val;
   std::memcpy(&val, &data_[off], sizeof(u32));
   ram_trace_event("R32", offset, val);
@@ -39,18 +39,18 @@ u32 Ram::read32(u32 offset) const {
 }
 
 void Ram::write8(u32 offset, u8 val) {
-  data_[offset & (psx::RAM_SIZE - 1)] = val;
+  data_[offset & (psx::RAM_MAX_SIZE - 1)] = val;
   ram_trace_event("W8", offset, val);
 }
 
 void Ram::write16(u32 offset, u16 val) {
-  u32 off = offset & (psx::RAM_SIZE - 1);
+  u32 off = offset & (psx::RAM_MAX_SIZE - 1);
   std::memcpy(&data_[off], &val, sizeof(u16));
   ram_trace_event("W16", offset, val);
 }
 
 void Ram::write32(u32 offset, u32 val) {
-  u32 off = offset & (psx::RAM_SIZE - 1);
+  u32 off = offset & (psx::RAM_MAX_SIZE - 1);
   std::memcpy(&data_[off], &val, sizeof(u32));
   ram_trace_event("W32", offset, val);
 }
