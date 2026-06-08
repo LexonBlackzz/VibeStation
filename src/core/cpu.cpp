@@ -1163,7 +1163,10 @@ u32 Cpu::step() {
     cop0_cause_ &= ~(1u << 10);
   }
 
-  if (check_irq()) {
+  // Hardware interrupts are sampled between instructions. If a branch delay slot
+  // is about to execute, let it retire first so EPC/BD describe the branch path
+  // correctly instead of vectoring out from the delay slot pre-fetch.
+  if (!in_delay_slot_ && check_irq()) {
     if (g_log_fmv_diagnostics) {
       static u32 cpu_irq_entry_log = 0;
       if (cpu_irq_entry_log < 32) {
