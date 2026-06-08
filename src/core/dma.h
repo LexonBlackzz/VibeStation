@@ -85,6 +85,7 @@ private:
   void transfer_complete(int channel);
   bool request_active(int channel) const;
   u32 dma_ram_tick_cost(u32 word_count) const;
+  u32 slice_words_for_channel(int channel) const;
 
   bool channel_enabled(int ch) const { return (dpcr_ >> (ch * 4 + 3)) & 1; }
   u8 channel_priority(int ch) const { return (dpcr_ >> (ch * 4)) & 0x7; }

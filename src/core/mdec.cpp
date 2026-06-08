@@ -66,6 +66,12 @@ inline bool fmv_diagnostics_enabled() {
   return g_log_fmv_diagnostics;
 }
 
+constexpr u32 kTicksPerBlock = 448u;
+// DuckStation schedules macroblock copy-out after TICKS_PER_BLOCK * 6 via the
+// global event queue. Until this core has a comparable scheduler/CPU stall path,
+// delaying MDEC output here starves DMA1 and regresses FMV playback.
+constexpr u32 kMacroblockOutputDelayCycles = 0u;
+
 } // namespace
 
 void Mdec::refresh_debug_quant_stats() {
@@ -124,11 +130,15 @@ void Mdec::soft_reset_state() {
   output_word_block_id_ = 4;
   output_macroblock_seq_ = 0;
   current_output_macroblock_seq_ = 0;
+  output_ready_delay_cycles_ = 0;
   out_depth_latched_ = 2;
   reset_decode_state();
   out_fifo_.clear();
   out_block_fifo_.clear();
   out_macroblock_fifo_.clear();
+  pending_out_fifo_.clear();
+  pending_out_block_fifo_.clear();
+  pending_out_macroblock_fifo_.clear();
 }
 
 void Mdec::reset() {
@@ -166,6 +176,10 @@ void Mdec::begin_command(u32 value) {
   out_fifo_.clear();
   out_block_fifo_.clear();
   out_macroblock_fifo_.clear();
+  pending_out_fifo_.clear();
+  pending_out_block_fifo_.clear();
+  pending_out_macroblock_fifo_.clear();
+  output_ready_delay_cycles_ = 0;
   output_pack_word_ = 0;
   output_pack_bytes_ = 0;
 
@@ -285,7 +299,16 @@ void Mdec::write_control(u32 value) {
   control_ = value;
 }
 
+void Mdec::tick(u32 cycles) {
+  output_ready_delay_cycles_ =
+      (cycles >= output_ready_delay_cycles_) ? 0 : (output_ready_delay_cycles_ - cycles);
+  if (output_ready_delay_cycles_ == 0) {
+    publish_pending_output();
+  }
+}
+
 u32 Mdec::read_data() {
+  publish_pending_output();
   if (out_fifo_.empty()) {
     return 0;
   }
@@ -312,6 +335,9 @@ u32 Mdec::dma_out_macroblock_seq() const {
   if (!out_macroblock_fifo_.empty()) {
     return out_macroblock_fifo_.front();
   }
+  if (delayed_output_ready() && !pending_out_macroblock_fifo_.empty()) {
+    return pending_out_macroblock_fifo_.front();
+  }
   return current_output_macroblock_seq_;
 }
 
@@ -319,12 +345,16 @@ u8 Mdec::dma_out_block() const {
   if (!out_block_fifo_.empty()) {
     return out_block_fifo_.front();
   }
+  if (delayed_output_ready() && !pending_out_block_fifo_.empty()) {
+    return pending_out_block_fifo_.front();
+  }
   return current_block_;
 }
 
 u32 Mdec::read_status() const {
   u32 status = 0;
-  if (out_fifo_.empty()) {
+  const bool data_out_ready = !out_fifo_.empty() || delayed_output_ready();
+  if (!data_out_ready) {
     status |= 1u << 31;
   }
   // bit 30: Data In Full - we use dynamic buffer, so report full if huge
@@ -345,7 +375,11 @@ u32 Mdec::read_status() const {
   status |= (static_cast<u32>(status_command_bits_ & 0x0Fu) << 23);
   
   const u8 block =
-      out_block_fifo_.empty() ? current_block_ : out_block_fifo_.front();
+      !out_block_fifo_.empty()
+          ? out_block_fifo_.front()
+          : ((delayed_output_ready() && !pending_out_block_fifo_.empty())
+                 ? pending_out_block_fifo_.front()
+                 : current_block_);
   status |= (static_cast<u32>(block & 0x7u) << 16);
 
   if (!expect_command_word_) {
@@ -381,12 +415,12 @@ bool Mdec::dma_in_request() const {
 
 bool Mdec::dma_out_request() const {
   const bool dma_out_enabled = (control_ & 0x20000000u) != 0;
-  return dma_out_enabled && !out_fifo_.empty();
+  return dma_out_enabled && (!out_fifo_.empty() || delayed_output_ready());
 }
 
 bool Mdec::is_active() const {
   return command_busy_ || !expect_command_word_ || !in_halfword_fifo_.empty() ||
-         !out_fifo_.empty();
+         !out_fifo_.empty() || !pending_out_fifo_.empty();
 }
 
 void Mdec::execute_command() {
@@ -452,7 +486,8 @@ void Mdec::execute_set_scale_table() {
 }
 
 void Mdec::execute_decode() {
-  if (!out_fifo_.empty()) {
+  if (!out_fifo_.empty() || !pending_out_fifo_.empty() ||
+      output_ready_delay_cycles_ != 0) {
     return;
   }
 
@@ -461,7 +496,7 @@ void Mdec::execute_decode() {
     if (decode_block_index_ >= needed_blocks) {
       if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
         if (g_mdec_debug_compare_macroblocks) {
-          debug_compare_.macroblocks_compared++;
+          compare_colored_macroblock(debug_current_macroblock_input_);
         }
         emit_colored_macroblock(decode_blocks_[0], decode_blocks_[1],
                                 decode_blocks_[2], decode_blocks_[3],
@@ -469,6 +504,10 @@ void Mdec::execute_decode() {
       } else {
         emit_monochrome_macroblock(decode_blocks_[0]);
       }
+      pending_out_fifo_.swap(out_fifo_);
+      pending_out_block_fifo_.swap(out_block_fifo_);
+      pending_out_macroblock_fifo_.swap(out_macroblock_fifo_);
+      output_ready_delay_cycles_ = kMacroblockOutputDelayCycles;
       reset_decode_state();
       return;
     }
@@ -487,6 +526,7 @@ void Mdec::reset_decode_state() {
   current_coefficient_ = 64;
   current_q_scale_ = 0;
   current_block_ = (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 4 : 0;
+  debug_current_macroblock_input_.clear();
   for (Block &block : decode_blocks_) {
     block.fill(0);
   }
@@ -523,6 +563,9 @@ bool Mdec::decode_next_block() {
 u16 Mdec::pop_decode_halfword() {
   const u16 value = in_halfword_fifo_.front();
   in_halfword_fifo_.pop_front();
+  if (g_mdec_debug_compare_macroblocks) {
+    debug_current_macroblock_input_.push_back(value);
+  }
   if (decode_halfwords_remaining_ > 0) {
     --decode_halfwords_remaining_;
   }
@@ -549,14 +592,63 @@ bool Mdec::decode_rle_block(Block &block,
     }
 
     current_coefficient_ = 0;
-    current_q_scale_ = first >> 10;
+    current_q_scale_ = (first >> 10) & 0x3Fu;
+    u32 nonzero_coeffs = 0;
+    bool has_nonzero_ac = false;
 
     const int level = sign_extend_10(first);
     const int bias = level ? ((level < 0) ? 8 : -8) : 0;
     const int coeff = (current_q_scale_ == 0)
                           ? (level << 5)
                           : ((level * static_cast<int>(quant_table[0]) << 4) + bias);
-    block[kZigZag[0]] = std::clamp(coeff, -0x4000, 0x3FFF);
+    block[(current_q_scale_ == 0) ? 0 : kZigZag[0]] =
+        std::clamp(coeff, -0x4000, 0x3FFF);
+    if (block[(current_q_scale_ == 0) ? 0 : kZigZag[0]] != 0) {
+      ++nonzero_coeffs;
+    }
+    if (fmv_diagnostics_enabled()) {
+      debug_stats_.qscale_sum += static_cast<u64>(current_q_scale_);
+      debug_stats_.qscale_max =
+          std::max<u32>(debug_stats_.qscale_max, current_q_scale_);
+      if (current_q_scale_ == 0) {
+        ++debug_stats_.qscale_zero_blocks;
+      }
+    }
+
+    while (!in_halfword_fifo_.empty() && decode_halfwords_remaining_ > 0) {
+      const u16 word = pop_decode_halfword();
+      current_coefficient_ += ((word >> 10) + 1u);
+      if (current_coefficient_ < 64u) {
+        const int level = sign_extend_10(word);
+        const int scale =
+            static_cast<int>(current_q_scale_) *
+            static_cast<int>(quant_table[current_coefficient_]);
+        const int bias = level ? ((level < 0) ? 8 : -8) : 0;
+        const int coeff =
+            (scale == 0) ? (level << 5) : ((((level * scale) >> 3) << 4) + bias);
+        const u32 out_index =
+            (current_q_scale_ == 0) ? current_coefficient_
+                                    : kZigZag[current_coefficient_];
+        block[out_index] = std::clamp(coeff, -0x4000, 0x3FFF);
+        if (block[out_index] != 0) {
+          has_nonzero_ac = true;
+          ++nonzero_coeffs;
+        }
+      }
+
+      if (current_coefficient_ >= 63u) {
+        current_coefficient_ = 64;
+        if (fmv_diagnostics_enabled()) {
+          if (!has_nonzero_ac) {
+            ++debug_stats_.dc_only_blocks;
+          }
+          debug_stats_.nonzero_coeff_count += static_cast<u64>(nonzero_coeffs);
+        }
+        return true;
+      }
+    }
+
+    return false;
   }
 
   while (!in_halfword_fifo_.empty() && decode_halfwords_remaining_ > 0) {
@@ -570,7 +662,8 @@ bool Mdec::decode_rle_block(Block &block,
       const int bias = level ? ((level < 0) ? 8 : -8) : 0;
       const int coeff =
           (scale == 0) ? (level << 5) : ((((level * scale) >> 3) << 4) + bias);
-      block[kZigZag[current_coefficient_]] =
+      block[(current_q_scale_ == 0) ? current_coefficient_
+                                    : kZigZag[current_coefficient_]] =
           std::clamp(coeff, -0x4000, 0x3FFF);
     }
 
@@ -1179,6 +1272,19 @@ void Mdec::push_output_byte(u8 value) {
     output_pack_word_ = 0;
     output_pack_bytes_ = 0;
   }
+}
+
+bool Mdec::delayed_output_ready() const {
+  return output_ready_delay_cycles_ == 0 && !pending_out_fifo_.empty();
+}
+
+void Mdec::publish_pending_output() {
+  if (!delayed_output_ready() || !out_fifo_.empty()) {
+    return;
+  }
+  out_fifo_.swap(pending_out_fifo_);
+  out_block_fifo_.swap(pending_out_block_fifo_);
+  out_macroblock_fifo_.swap(pending_out_macroblock_fifo_);
 }
 
 int Mdec::sign_extend_10(u16 value) {

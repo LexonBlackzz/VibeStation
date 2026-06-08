@@ -13,6 +13,32 @@ bool is_streaming_dma_channel(int channel) {
 }
 } // namespace
 
+u32 DmaController::slice_words_for_channel(int channel) const {
+  if (!is_streaming_dma_channel(channel)) {
+    return 0xFFFFFFFFu;
+  }
+
+  if (channel != 1 || sys_ == nullptr) {
+    return kStreamingDmaSliceWords;
+  }
+
+  // MDEC output is generated in macroblock-sized chunks. Let a DMA1 slice move
+  // one complete ready macroblock so GPU uploads do not see a half-populated
+  // staging area while still allowing the request line to drop between blocks.
+  switch (sys_->mdec_dma_out_depth()) {
+  case 2: // 24-bit color, 16x16x3 bytes
+    return 192u;
+  case 3: // 15-bit color, 16x16x2 bytes
+    return 128u;
+  case 1: // 8-bit mono, 16x16 bytes
+    return 64u;
+  case 0: // 4-bit mono, 16x16 / 2 bytes
+    return 32u;
+  default:
+    return kStreamingDmaSliceWords;
+  }
+}
+
 void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
   const bool old_master = (dicr_ & 0x80000000u) != 0;
   const bool force_irq = ((dicr_ >> 15) & 1u) != 0;
@@ -192,17 +218,13 @@ void DmaController::execute_dma(int channel) {
 
   switch (ch.sync_mode()) {
   case DmaChannel::SyncMode::Immediate:
-    dma_block(channel, is_streaming_dma_channel(channel)
-                           ? kStreamingDmaSliceWords
-                           : 0xFFFFFFFFu);
+    dma_block(channel, slice_words_for_channel(channel));
     if (ch.block_words_remaining == 0) {
       transfer_complete(channel);
     }
     break;
   case DmaChannel::SyncMode::Block:
-    dma_block(channel, is_streaming_dma_channel(channel)
-                           ? kStreamingDmaSliceWords
-                           : 0xFFFFFFFFu);
+    dma_block(channel, slice_words_for_channel(channel));
     if (ch.block_count() == 0 && ch.block_words_remaining == 0) {
       transfer_complete(channel);
     }
@@ -235,6 +257,7 @@ void DmaController::drain_cpu_blocking_channel(int channel) {
         ch.block_words_remaining == old_remaining) {
       break;
     }
+
   }
 
   if (safety >= 0x10000u) {
