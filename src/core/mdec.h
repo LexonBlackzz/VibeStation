@@ -64,6 +64,7 @@ public:
 
   void write_command(u32 value);
   void write_control(u32 value);
+  void tick(u32 cycles);
   u32 read_data();
   u32 read_status() const;
   u8 dma_out_block() const;
@@ -76,7 +77,13 @@ public:
   bool dma_out_request() const;
   bool is_active() const;
   u32 dma_out_words_available() const {
-    return static_cast<u32>(out_fifo_.size());
+    if (!out_fifo_.empty()) {
+      return static_cast<u32>(out_fifo_.size());
+    }
+    if (delayed_output_ready()) {
+      return static_cast<u32>(pending_out_fifo_.size());
+    }
+    return 0;
   }
   const DebugStats &debug_stats() const { return debug_stats_; }
   void reset_debug_stats();
@@ -132,6 +139,8 @@ private:
   void emit_monochrome_macroblock(const Block &y);
   void push_output_word(u32 value);
   void push_output_byte(u8 value);
+  bool delayed_output_ready() const;
+  void publish_pending_output();
   static int sign_extend_10(u16 value);
   static int clamp_s11(int value);
   static std::array<int, 3> ycbcr_to_rgb_components(int y, int cb, int cr);
@@ -158,6 +167,7 @@ private:
   u32 current_coefficient_ = 64;
   u32 current_q_scale_ = 0;
   MacroblockBlocks decode_blocks_{};
+  std::vector<u16> debug_current_macroblock_input_{};
   u8 output_depth_ = 2;
   bool output_signed_ = false;
   bool output_set_bit15_ = false;
@@ -166,10 +176,14 @@ private:
   u8 output_word_block_id_ = 4;
   u32 output_macroblock_seq_ = 0;
   u32 current_output_macroblock_seq_ = 0;
+  u32 output_ready_delay_cycles_ = 0;
   u8 out_depth_latched_ = 2;
   std::deque<u32> out_fifo_{};
   std::deque<u8> out_block_fifo_{};
   std::deque<u32> out_macroblock_fifo_{};
+  std::deque<u32> pending_out_fifo_{};
+  std::deque<u8> pending_out_block_fifo_{};
+  std::deque<u32> pending_out_macroblock_fifo_{};
   DebugStats debug_stats_{};
   DebugCompare debug_compare_{};
   void refresh_debug_quant_stats();
