@@ -66,6 +66,124 @@ namespace {
         return 10;
     }
 
+    constexpr int kNtscTicksPerLine = 3413;
+    constexpr int kNtscTotalLines = 263;
+    constexpr int kPalTicksPerLine = 3406;
+    constexpr int kPalTotalLines = 314;
+    constexpr int kNtscHorizontalActiveStart = 488;
+    constexpr int kNtscHorizontalActiveEnd = 3288;
+    constexpr int kNtscVerticalActiveStart = 16;
+    constexpr int kNtscVerticalActiveEnd = 256;
+    constexpr int kPalHorizontalActiveStart = 488;
+    constexpr int kPalHorizontalActiveEnd = 3300;
+    constexpr int kPalVerticalActiveStart = 20;
+    constexpr int kPalVerticalActiveEnd = 308;
+
+    struct CrtcRect {
+        int mode_width = 0;
+        int mode_height = 0;
+        int width = 0;
+        int height = 0;
+        int vram_left = 0;
+        int vram_top = 0;
+        int vram_width = 0;
+        int vram_height = 0;
+        int skip_x = 0;
+        int divisor = 1;
+    };
+
+    CrtcRect calculate_crtc_rect(const DisplayMode& display) {
+        CrtcRect rect{};
+        rect.mode_width = display.width();
+        rect.mode_height = display.height();
+        rect.divisor = std::max(1, horizontal_divisor(display.hres));
+
+        const int horizontal_total =
+            display.is_pal ? kPalTicksPerLine : kNtscTicksPerLine;
+        const int vertical_total =
+            display.is_pal ? kPalTotalLines : kNtscTotalLines;
+        const int active_h_start =
+            display.is_pal ? kPalHorizontalActiveStart : kNtscHorizontalActiveStart;
+        const int active_h_end =
+            display.is_pal ? kPalHorizontalActiveEnd : kNtscHorizontalActiveEnd;
+        const int active_v_start =
+            display.is_pal ? kPalVerticalActiveStart : kNtscVerticalActiveStart;
+        const int active_v_end =
+            display.is_pal ? kPalVerticalActiveEnd : kNtscVerticalActiveEnd;
+
+        const int horizontal_start =
+            (std::min<int>(display.x1, horizontal_total) / rect.divisor) *
+            rect.divisor;
+        const int horizontal_end =
+            (std::min<int>(display.x2, horizontal_total) / rect.divisor) *
+            rect.divisor;
+        const int visible_h_start =
+            std::clamp(horizontal_start, active_h_start, active_h_end);
+        const int visible_h_end =
+            std::clamp(horizontal_end, visible_h_start, active_h_end);
+        const int horizontal_ticks =
+            std::max(0, horizontal_end - horizontal_start);
+        const int horizontal_pixels = horizontal_ticks / rect.divisor;
+        const int visible_pixels =
+            std::max(0, (visible_h_end - visible_h_start) / rect.divisor);
+
+        rect.width = (visible_pixels > 0)
+            ? clamp_display_dimension(visible_pixels, rect.mode_width, psx::VRAM_WIDTH)
+            : clamp_display_dimension(rect.mode_width, 320, psx::VRAM_WIDTH);
+        if (horizontal_pixels == 1) {
+            rect.vram_width = 4;
+        } else if (horizontal_pixels > 1) {
+            rect.vram_width = ((horizontal_pixels + 2) & ~3);
+        } else {
+            rect.vram_width = rect.width;
+        }
+
+        const int vertical_start = std::min<int>(display.y1, vertical_total);
+        const int vertical_end = std::min<int>(display.y2, vertical_total);
+        const int visible_v_start =
+            std::clamp(vertical_start, active_v_start, active_v_end);
+        const int visible_v_end =
+            std::clamp(vertical_end, visible_v_start, active_v_end);
+        const int vertical_lines =
+            std::max(0, vertical_end - vertical_start);
+        const int visible_lines =
+            std::max(0, visible_v_end - visible_v_start);
+        const int height_shift =
+            (display.interlaced && display.vres != 0) ? 1 : 0;
+
+        rect.height = (visible_lines > 0)
+            ? clamp_display_dimension(visible_lines << height_shift,
+                                      rect.mode_height, psx::VRAM_HEIGHT)
+            : clamp_display_dimension(rect.mode_height, 240, psx::VRAM_HEIGHT);
+
+        rect.vram_left = static_cast<int>(display.x_start);
+        rect.vram_top = static_cast<int>(display.y_start);
+        rect.skip_x = 0;
+        if (horizontal_start < visible_h_start) {
+            rect.skip_x = (visible_h_start - horizontal_start) / rect.divisor;
+            rect.vram_left =
+                (rect.vram_left + rect.skip_x) % static_cast<int>(psx::VRAM_WIDTH);
+            rect.vram_width -= std::min(rect.vram_width, rect.skip_x);
+        }
+        rect.vram_width = std::min(rect.vram_width, rect.width);
+
+        if (vertical_start < visible_v_start) {
+            const int vertical_skip = (visible_v_start - vertical_start) << height_shift;
+            rect.vram_top =
+                (rect.vram_top + vertical_skip) % static_cast<int>(psx::VRAM_HEIGHT);
+        }
+        rect.vram_height = std::min(rect.height, std::max(0, vertical_lines << height_shift));
+        if (rect.vram_height <= 0) {
+            rect.vram_height = rect.height;
+        }
+
+        rect.vram_left = std::clamp(rect.vram_left, 0, static_cast<int>(psx::VRAM_WIDTH) - 1);
+        rect.vram_top = std::clamp(rect.vram_top, 0, static_cast<int>(psx::VRAM_HEIGHT) - 1);
+        rect.vram_width = clamp_display_dimension(rect.vram_width, rect.width, psx::VRAM_WIDTH);
+        rect.vram_height = clamp_display_dimension(rect.vram_height, rect.height, psx::VRAM_HEIGHT);
+        return rect;
+    }
+
     constexpr int kDitherTable[4][4] = {
         {-4, 0, -3, 1},
         {2, -2, 3, -1},
@@ -615,13 +733,23 @@ void Gpu::consume_vram_write_word(u32 word) {
 
     const u16 pixel0 = static_cast<u16>(word & 0xFFFFu);
     const u16 pixel1 = static_cast<u16>(word >> 16);
+    const auto write_pixel = [&](u16 x, u16 y, u16 pixel) {
+        const size_t index = static_cast<size_t>(y) * psx::VRAM_WIDTH + x;
+        if (check_mask_before_draw_ && (vram_[index] & 0x8000u)) {
+            return;
+        }
+        if (force_set_mask_bit_) {
+            pixel |= 0x8000u;
+        }
+        vram_[index] = pixel;
+    };
 
     if (vram_tx_pos_ < vram_tx_total_) {
         const u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
             (psx::VRAM_WIDTH - 1));
         const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
             (psx::VRAM_HEIGHT - 1));
-        vram_[y * psx::VRAM_WIDTH + x] = pixel0;
+        write_pixel(x, y, pixel0);
         vram_tx_pos_++;
     }
     if (vram_tx_pos_ < vram_tx_total_) {
@@ -629,7 +757,7 @@ void Gpu::consume_vram_write_word(u32 word) {
             (psx::VRAM_WIDTH - 1));
         const u16 y = static_cast<u16>((vram_tx_y_ + (vram_tx_pos_ / vram_tx_w_)) &
             (psx::VRAM_HEIGHT - 1));
-        vram_[y * psx::VRAM_WIDTH + x] = pixel1;
+        write_pixel(x, y, pixel1);
         vram_tx_pos_++;
     }
 
@@ -1498,8 +1626,15 @@ void Gpu::gp0_vram_copy() {
         for (u16 x = 0; x < w; ++x) {
             u16 dx = static_cast<u16>((dst_x + x) & (psx::VRAM_WIDTH - 1));
             u16 dy = static_cast<u16>((dst_y + y) & (psx::VRAM_HEIGHT - 1));
-            vram_[dy * psx::VRAM_WIDTH + dx] =
-                vram_copy_buffer_[static_cast<size_t>(y) * w + x];
+            const size_t dst_index = static_cast<size_t>(dy) * psx::VRAM_WIDTH + dx;
+            if (check_mask_before_draw_ && (vram_[dst_index] & 0x8000u)) {
+                continue;
+            }
+            u16 pixel = vram_copy_buffer_[static_cast<size_t>(y) * w + x];
+            if (force_set_mask_bit_) {
+                pixel |= 0x8000u;
+            }
+            vram_[dst_index] = pixel;
         }
     }
 }
@@ -1813,95 +1948,15 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
     info.x_start = static_cast<int>(display_.x_start);
     info.y_start = static_cast<int>(display_.y_start);
 
-    const int mode_w = display_.width();
-    const int mode_h = display_.height();
-    const int divisor = std::max(1, horizontal_divisor(display_.hres));
-
-    // Safe baseline: mode-derived size is authoritative unless range values are
-    // close enough to be trustworthy for the active mode.
-    int width = clamp_display_dimension(mode_w, 320, psx::VRAM_WIDTH);
-    int height = clamp_display_dimension(mode_h, 240, psx::VRAM_HEIGHT);
-
-    if (display_.x2 > display_.x1) {
-        const int dots = static_cast<int>(display_.x2 - display_.x1);
-        const int divisor = horizontal_divisor(display_.hres);
-        if (divisor > 0) {
-            const int candidate = dots / divisor;
-            const int min_ok = std::max(1, (mode_w * 3) / 4);
-            const int max_ok = std::max(min_ok, (mode_w * 5) / 4);
-            if (candidate >= min_ok && candidate <= max_ok) {
-                width = clamp_display_dimension(candidate, width, psx::VRAM_WIDTH);
-            }
-        }
-    }
-    if (display_.y2 > display_.y1) {
-        const int candidate = static_cast<int>(display_.y2 - display_.y1);
-        const int min_ok = std::max(1, (mode_h * 3) / 4);
-        const int max_ok = std::max(min_ok, (mode_h * 5) / 4);
-        if (candidate >= min_ok && candidate <= max_ok) {
-            const int chosen_height =
-                (!display_.interlaced && candidate > mode_h && (candidate - mode_h) <= 2)
-                ? mode_h
-                : candidate;
-            height = clamp_display_dimension(chosen_height, height, psx::VRAM_HEIGHT);
-        }
-    }
-
-    // DuckStation-style distinction between display resolution and the VRAM
-    // rectangle feeding scanout. 24-bit scanout in particular depends on the
-    // VRAM width being rounded to a 4-pixel multiple before reinterpretation.
-    int display_vram_width = width;
-    int display_vram_height = height;
-    int display_vram_left = info.x_start;
-    int display_vram_top = info.y_start;
-    int display_skip_x = 0;
-
-    if (display_.x2 > display_.x1) {
-        const int horizontal_ticks =
-            std::max(0, static_cast<int>(display_.x2 - display_.x1));
-        const int horizontal_pixels = horizontal_ticks / divisor;
-        if (horizontal_pixels == 1) {
-            display_vram_width = 4;
-        } else if (horizontal_pixels > 1) {
-            display_vram_width =
-                clamp_display_dimension((horizontal_pixels + 2) & ~3, width,
-                                        psx::VRAM_WIDTH);
-        }
-    }
-
-    // If the configured display range starts before the active area, crop after
-    // 24-bit reinterpretation rather than by shifting the source byte address.
-    if (display_.x2 > display_.x1) {
-        const int horizontal_start =
-            (static_cast<int>(display_.x1) / divisor) * divisor;
-        const int horizontal_end =
-            (static_cast<int>(display_.x2) / divisor) * divisor;
-        const int display_pixels =
-            std::max(0, (horizontal_end - horizontal_start) / divisor);
-        if (display_pixels > 0) {
-            display_skip_x = std::max(0, display_pixels - width);
-            display_vram_width =
-                std::min<int>(display_vram_width + display_skip_x,
-                              static_cast<int>(psx::VRAM_WIDTH));
-            display_vram_left =
-                (info.x_start + display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
-        }
-    }
-    const int src_width = std::max(1, display_.is_24bit ? display_vram_width : width);
+    const CrtcRect crtc = calculate_crtc_rect(display_);
+    const int width = crtc.width;
+    const int height = crtc.height;
+    const int display_vram_width = crtc.vram_width;
+    const int display_vram_left = crtc.vram_left;
+    const int display_vram_top = crtc.vram_top;
+    const int display_skip_x = crtc.skip_x;
+    const int src_width = std::max(1, width);
     const int src_height = std::max(1, height);
-    if (display_.y2 > display_.y1) {
-        const int vertical_lines = static_cast<int>(display_.y2 - display_.y1);
-        const int vertical_skip =
-            (!display_.interlaced && vertical_lines > height &&
-                (vertical_lines - height) <= 2)
-            ? (vertical_lines - height)
-            : 0;
-        if (vertical_skip > 0) {
-            display_vram_top =
-                std::min(display_vram_top + vertical_skip,
-                    static_cast<int>(psx::VRAM_HEIGHT) - src_height);
-        }
-    }
     // Present the actual CRTC-sized frame. The UI layer already scales this
     // texture for display, so forcing a fixed software output resolution here
     // only adds an extra resample and can hide the true GPU output.
@@ -1988,7 +2043,7 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         const u16 s1 = vram_[row_base + ((vram_word_x + 1u) % psx::VRAM_WIDTH)];
         const u32 packed =
             ((static_cast<u32>(s1) << 16) | static_cast<u32>(s0)) >>
-            ((sample_x & 1u) * 8u);
+            ((static_cast<u32>(x) & 1u) * 8u);
         r = static_cast<u8>(packed & 0xFFu);
         g = static_cast<u8>((packed >> 8) & 0xFFu);
         b = static_cast<u8>((packed >> 16) & 0xFFu);
@@ -2086,83 +2141,17 @@ DisplayDebugInfo Gpu::debug_display_info() const {
     info.y2 = static_cast<int>(display_.y2);
     info.is_24bit = display_.is_24bit;
     info.interlaced = display_.interlaced;
-    info.divisor = std::max(1, horizontal_divisor(display_.hres));
-
-    info.width = clamp_display_dimension(info.mode_width, 320, psx::VRAM_WIDTH);
-    info.height = clamp_display_dimension(info.mode_height, 240, psx::VRAM_HEIGHT);
-
-    if (display_.x2 > display_.x1) {
-        const int dots = static_cast<int>(display_.x2 - display_.x1);
-        const int candidate = dots / info.divisor;
-        const int min_ok = std::max(1, (info.mode_width * 3) / 4);
-        const int max_ok = std::max(min_ok, (info.mode_width * 5) / 4);
-        if (candidate >= min_ok && candidate <= max_ok) {
-            info.width = clamp_display_dimension(candidate, info.width, psx::VRAM_WIDTH);
-        }
-    }
-    if (display_.y2 > display_.y1) {
-        const int candidate = static_cast<int>(display_.y2 - display_.y1);
-        const int min_ok = std::max(1, (info.mode_height * 3) / 4);
-        const int max_ok = std::max(min_ok, (info.mode_height * 5) / 4);
-        if (candidate >= min_ok && candidate <= max_ok) {
-            const int chosen_height =
-                (!display_.interlaced && candidate > info.mode_height &&
-                    (candidate - info.mode_height) <= 2)
-                ? info.mode_height
-                : candidate;
-            info.height =
-                clamp_display_dimension(chosen_height, info.height, psx::VRAM_HEIGHT);
-        }
-    }
-
-    info.display_vram_width = info.width;
-    info.display_vram_height = info.height;
-    info.display_vram_left = info.x_start;
-    info.display_vram_top = info.y_start;
-    info.display_skip_x = 0;
-
-    if (display_.x2 > display_.x1) {
-        const int horizontal_ticks =
-            std::max(0, static_cast<int>(display_.x2 - display_.x1));
-        const int horizontal_pixels = horizontal_ticks / info.divisor;
-        if (horizontal_pixels == 1) {
-            info.display_vram_width = 4;
-        } else if (horizontal_pixels > 1) {
-            info.display_vram_width =
-                clamp_display_dimension((horizontal_pixels + 2) & ~3, info.width,
-                                        psx::VRAM_WIDTH);
-        }
-
-        const int horizontal_start =
-            (static_cast<int>(display_.x1) / info.divisor) * info.divisor;
-        const int horizontal_end =
-            (static_cast<int>(display_.x2) / info.divisor) * info.divisor;
-        const int display_pixels =
-            std::max(0, (horizontal_end - horizontal_start) / info.divisor);
-        if (display_pixels > 0) {
-            info.display_skip_x = std::max(0, display_pixels - info.width);
-            info.display_vram_width =
-                std::min<int>(info.display_vram_width + info.display_skip_x,
-                              static_cast<int>(psx::VRAM_WIDTH));
-            info.display_vram_left =
-                (info.x_start + info.display_skip_x) % static_cast<int>(psx::VRAM_WIDTH);
-        }
-    }
-    info.src_width = std::max(1, display_.is_24bit ? info.display_vram_width : info.width);
+    const CrtcRect crtc = calculate_crtc_rect(display_);
+    info.divisor = crtc.divisor;
+    info.width = crtc.width;
+    info.height = crtc.height;
+    info.display_vram_width = crtc.vram_width;
+    info.display_vram_height = crtc.vram_height;
+    info.display_vram_left = crtc.vram_left;
+    info.display_vram_top = crtc.vram_top;
+    info.display_skip_x = crtc.skip_x;
+    info.src_width = std::max(1, info.width);
     info.src_height = std::max(1, info.height);
-    if (display_.y2 > display_.y1) {
-        const int vertical_lines = static_cast<int>(display_.y2 - display_.y1);
-        const int vertical_skip =
-            (!display_.interlaced && vertical_lines > info.height &&
-                (vertical_lines - info.height) <= 2)
-            ? (vertical_lines - info.height)
-            : 0;
-        if (vertical_skip > 0) {
-            info.display_vram_top =
-                std::min(info.display_vram_top + vertical_skip,
-                    static_cast<int>(psx::VRAM_HEIGHT) - info.src_height);
-        }
-    }
     return info;
 }
 
