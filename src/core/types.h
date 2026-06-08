@@ -409,6 +409,7 @@ namespace psx {
 constexpr u32 CPU_CLOCK_HZ = 33'868'800;     // 33.8688 MHz
 constexpr u32 CYCLES_PER_FRAME = CPU_CLOCK_HZ / 60;
 constexpr u32 RAM_SIZE = 2 * 1024 * 1024;    // 2 MB
+constexpr u32 RAM_MAX_SIZE = 8 * 1024 * 1024; // RAM_SIZE register can expose 8 MB
 constexpr u32 SCRATCHPAD_SIZE = 1024;        // 1 KB
 constexpr u32 BIOS_SIZE = 512 * 1024;        // 512 KB
 constexpr u32 VRAM_WIDTH = 1024;

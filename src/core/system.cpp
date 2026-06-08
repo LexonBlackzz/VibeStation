@@ -26,17 +26,29 @@ namespace {
         u64 total = 0;
     };
 
-    bool is_unmapped_physical(u32 phys) {
+    u32 mapped_main_ram_size_from_reg(u32 ram_size_reg) {
+        const u32 memory_window = (ram_size_reg >> 9) & 0x7u;
+        switch (memory_window) {
+        case 5: // 8MB memory
+        case 7:
+            return psx::RAM_MAX_SIZE;
+        case 4: // 2MB memory + 6MB unmapped
+        default:
+            return psx::RAM_SIZE;
+        }
+    }
+
+    bool is_unmapped_physical(u32 phys, u32 mapped_main_ram_size) {
         if (phys >= kUnmappedHighPhysicalBase) return true;
-        if (phys >= psx::RAM_SIZE && phys < kMainRamMirrorWindow) return true;
+        if (phys >= mapped_main_ram_size && phys < kMainRamMirrorWindow) return true;
         if (phys >= kMainRamMirrorWindow && phys < kExpansion1Base) return true;
         if (phys >= 0x1F803000u && phys < 0x1FC00000u) return true;
         if (phys >= 0x1FC80000u && phys < kUnmappedHighPhysicalBase) return true;
         return false;
     }
 
-    bool map_main_ram_address(u32 addr, u32 phys, u32& ram_addr) {
-        if (phys < psx::RAM_SIZE) {
+    bool map_main_ram_address(u32 addr, u32 phys, u32 mapped_main_ram_size, u32& ram_addr) {
+        if (phys < mapped_main_ram_size) {
             ram_addr = phys;
             return true;
         }
@@ -442,7 +454,7 @@ void System::reset() {
     saw_non_bios_exec_ = false;
     bios_menu_streak_after_non_bios_ = 0;
     std::memset(mem_ctrl_, 0, sizeof(mem_ctrl_));
-    ram_size_ = 0;
+    ram_size_ = 0x00000B88u;
     cache_ctrl_ = 0;
     mdec_command_shadow_ = 0;
     mdec_command_shadow_mask_ = 0;
@@ -1255,6 +1267,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             if (spent_in_slice > 0) {
+                mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);
             }
 
@@ -1893,7 +1906,8 @@ u8 System::read8(u32 addr) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u8 value = ram_.read8(ram_addr);
         maybe_log_rr4_str_header_read(ram_addr, value, 1, cpu_.pc(),
             cpu_.cycle_count(), bus_access_from_dma_);
@@ -1969,7 +1983,7 @@ u8 System::read8(u32 addr) {
     if (phys >= 0x1F000000 && phys < 0x1F800000)
         return 0xFF;
     // Unmapped physical space behaves like open bus.
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return 0xFF;
 
     log_unhandled_bus_read(unhandled_r8, "read8", phys, false);
@@ -1989,7 +2003,8 @@ u16 System::read16(u32 addr) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u16 value = ram_.read16(ram_addr);
         maybe_log_rr4_str_header_read(ram_addr, value, 2, cpu_.pc(),
             cpu_.cycle_count(), bus_access_from_dma_);
@@ -2060,7 +2075,7 @@ u16 System::read16(u32 addr) {
         log_unhandled_bus_read(unhandled_r16_io, "read16", phys, true);
         return 0xFFFF;
     }
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return 0xFFFF;
     log_unhandled_bus_read(unhandled_r16, "read16", phys, false);
     return 0xFFFF;
@@ -2079,7 +2094,8 @@ u32 System::read32(u32 addr) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u32 value = ram_.read32(ram_addr);
 
         maybe_log_rr4_str_header_read(ram_addr, value, 4, cpu_.pc(),
@@ -2168,7 +2184,7 @@ u32 System::read32(u32 addr) {
     // KSEG2 (cache control)
     if (addr == 0xFFFE0130)
         return cache_ctrl_;
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return 0xFFFFFFFFu;
 
     log_unhandled_bus_read(unhandled_r32, "read32", phys, false);
@@ -2187,7 +2203,8 @@ void System::write8(u32 addr, u8 val) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 1);
         }
@@ -2369,7 +2386,7 @@ void System::write8(u32 addr, u8 val) {
 
     if (phys >= 0x1F000000 && phys < 0x1F800000)
         return; // Expansion 1
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return;
 
     ++unhandled_w8.total;
@@ -2406,7 +2423,8 @@ void System::write16(u32 addr, u16 val) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 2);
         }
@@ -2599,7 +2617,7 @@ void System::write16(u32 addr, u16 val) {
     // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
     if (phys >= 0x1F803000 && phys < 0x1FC00000)
         return;
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return;
     ++unhandled_w16.total;
     if (phys == unhandled_w16.last_addr) {
@@ -2635,7 +2653,8 @@ void System::write32(u32 addr, u32 val) {
     }
 
     u32 ram_addr = 0;
-    if (map_main_ram_address(addr, phys, ram_addr)) {
+    const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
+    if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         if (g_ram_watch_diagnostics) {
             maybe_log_ram_watch_write(phys, val, 4);
         }
@@ -2870,7 +2889,7 @@ void System::write32(u32 addr, u32 val) {
         cache_ctrl_ = val;
         return;
     }
-    if (is_unmapped_physical(phys))
+    if (is_unmapped_physical(phys, mapped_ram_size))
         return;
 
     ++unhandled_w32.total;
