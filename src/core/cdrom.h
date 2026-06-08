@@ -290,7 +290,8 @@ private:
   bool should_defer_sector_irq_for_unread_buffer() const;
   void service_pending_irq();
   void refresh_irq_line();
-  void queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response);
+  void queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response,
+                                  bool allow_current_data_ready = false);
   void deliver_pending_async_irq();
   bool has_pending_data_ready_irq() const;
   void select_latest_sector_for_data_ready_irq();

@@ -20,6 +20,7 @@ constexpr size_t kFifoCapacity = 16u;
 constexpr size_t kSectorBufferBacklog = 8u;
 constexpr size_t kRawSectorBytesAfterSync = 2340u;
 constexpr int kRawSectorHeaderAndDataBytes = 12 + 2048;
+constexpr int kRawSectorStreamHeaderBytes = 44;
 
 std::string trim_copy(const std::string &text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
@@ -1563,7 +1564,13 @@ void CdRom::promote_queued_sector_after_drain(bool immediate) {
     }
   }
   activate_data_payload(std::move(front.payload), front.data_lba);
-  service_pending_irq();
+  if (pending_async_irq_.active && pending_async_irq_.irq == 1u) {
+    std::vector<u8> response = std::move(pending_async_irq_.response);
+    pending_async_irq_ = {};
+    queue_or_deliver_async_irq(1u, std::move(response), true);
+  } else {
+    service_pending_irq();
+  }
 }
 
 bool CdRom::has_unread_data_buffer() const {
@@ -1578,11 +1585,19 @@ bool CdRom::should_defer_sector_irq_for_unread_buffer() const {
     return false;
   }
 
-  // DuckStation lets a later INT1 move the readable sector buffer even if the
-  // previous raw sector was only partially consumed. DMA itself stalls the CPU
-  // long enough for header+body split reads to finish on the same sector; if a
-  // game leaves the body behind, it is treating that sector as skipped.
-  return false;
+  const bool stream_header_consumed =
+      read_whole_sector_ && (mode_ & 0x40u) != 0u &&
+      data_index_ >= kRawSectorStreamHeaderBytes;
+
+  if (stream_header_consumed && !has_pending_data_ready_irq()) {
+    return false;
+  }
+
+  // Keep the currently visible sector stable while the interrupt is still
+  // pending, or while the host has BFRD asserted and may be draining it.
+  // Once both are false, the game has effectively skipped the sector; allow
+  // later INT1s to move the read buffer forward instead of parking streams.
+  return data_request_ || has_pending_data_ready_irq();
 }
 
 bool CdRom::has_pending_data_ready_irq() const {
@@ -1601,20 +1616,24 @@ void CdRom::select_latest_sector_for_data_ready_irq() {
     return;
   }
 
-  QueuedSectorBuffer latest = std::move(queued_sector_buffers_.back());
-  const size_t dropped = queued_sector_buffers_.size() - 1u;
-  queued_sector_buffers_.clear();
+  complete_discardable_whole_sector_tail();
+  if (should_defer_sector_irq_for_unread_buffer()) {
+    return;
+  }
+
+  QueuedSectorBuffer next = std::move(queued_sector_buffers_.front());
+  queued_sector_buffers_.pop_front();
   if (g_log_fmv_diagnostics) {
-    static u32 latest_sector_select_log_count = 0;
-    if (latest_sector_select_log_count < 128u) {
-      ++latest_sector_select_log_count;
+    static u32 sector_select_log_count = 0;
+    if (sector_select_log_count < 128u) {
+      ++sector_select_log_count;
       LOG_WARN(
-          "CDROM: selecting latest sector for INT1 lba=%d dropped=%zu old_lba=%d old_idx=%d old_size=%zu",
-          latest.data_lba, dropped, active_data_lba_, data_index_,
-          data_buffer_.size());
+          "CDROM: selecting queued sector for INT1 lba=%d q_remaining=%zu old_lba=%d old_idx=%d old_size=%zu",
+          next.data_lba, queued_sector_buffers_.size(), active_data_lba_,
+          data_index_, data_buffer_.size());
     }
   }
-  activate_data_payload(std::move(latest.payload), latest.data_lba);
+  activate_data_payload(std::move(next.payload), next.data_lba);
 }
 
 void CdRom::fire_irq(u8 irq_num) {
@@ -1634,7 +1653,8 @@ void CdRom::fire_irq(u8 irq_num) {
   refresh_irq_line();
 }
 
-void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response) {
+void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response,
+                                       bool allow_current_data_ready) {
   if ((interrupt_flag_ & kHintTypeMask) == irq_num) {
     if (pending_async_irq_.active && pending_async_irq_.irq == irq_num) {
       pending_async_irq_ = {};
@@ -1664,7 +1684,8 @@ void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response) {
       ((interrupt_flag_ & kHintTypeMask) == 0u) &&
       response_index_ >= static_cast<int>(response_fifo_.size()) && !command_busy_ &&
       gap_satisfied &&
-      !(irq_num == 1u && should_defer_sector_irq_for_unread_buffer());
+      !(irq_num == 1u && !allow_current_data_ready &&
+        should_defer_sector_irq_for_unread_buffer());
 
   if (can_deliver_now) {
     if (irq_num == 1u) {
@@ -1795,7 +1816,7 @@ void CdRom::enqueue_data_irq(std::vector<u8> payload, int source_lba) {
   }
 
   activate_data_payload(std::move(payload), source_lba);
-  queue_or_deliver_async_irq(1u, std::move(response));
+  queue_or_deliver_async_irq(1u, std::move(response), true);
 }
 
 void CdRom::service_pending_irq() {
