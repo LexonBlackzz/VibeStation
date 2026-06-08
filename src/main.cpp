@@ -121,6 +121,7 @@ static std::string resolve_first_bin_from_cue_cli(
 static void log_mdec_summary(const char *prefix, const System &sys) {
   const auto &stats = sys.mdec_debug_stats();
   const auto &probe = sys.mdec_upload_probe();
+  const auto &compare = sys.mdec_debug_compare();
   const u64 qscale_avg =
       (stats.blocks_decoded != 0u) ? (stats.qscale_sum / stats.blocks_decoded) : 0u;
 
@@ -155,6 +156,96 @@ static void log_mdec_summary(const char *prefix, const System &sys) {
              static_cast<unsigned>(stats.command_history_ids[latest_index]),
              stats.command_history_words[latest_index], stats.write_history_count,
              stats.control_history_count);
+  }
+
+  if (probe.dma1_seen) {
+    LOG_INFO(
+        "%s_MDEC_DMA1 base=0x%06X words=%u depth=%u first_block=%u "
+        "sample_count=%u a0=0x%06X w0=0x%08X a1=0x%06X w1=0x%08X "
+        "mb_hist=%u mb0=%u@0x%06X mbw0=0x%08X",
+        prefix, probe.dma1_base_addr, probe.dma1_words,
+        static_cast<unsigned>(probe.dma1_depth),
+        static_cast<unsigned>(probe.dma1_first_block),
+        probe.dma1_sample_count, probe.dma1_addrs[0],
+        probe.dma1_words_sample[0], probe.dma1_addrs[1],
+        probe.dma1_words_sample[1], probe.dma1_mb_hist_count,
+        probe.dma1_mb_hist_seq[0], probe.dma1_mb_hist_addrs[0],
+        probe.dma1_mb_hist_words_sample[0]);
+  }
+
+  if (probe.gpu_upload_seen) {
+    LOG_INFO(
+        "%s_GPU_UPLOAD count=%u xy=%u,%u wh=%u,%u words=%u/%u "
+        "src_base=0x%06X range=%u sample_count=%u "
+        "g0=0x%08X from_dma=%u ga0=0x%06X g1=0x%08X from_dma1=%u ga1=0x%06X "
+        "src_writes=%u sw0=0x%08X@0x%06X origin0=0x%02X",
+        prefix, probe.gpu_upload_count, static_cast<unsigned>(probe.gpu_x),
+        static_cast<unsigned>(probe.gpu_y), static_cast<unsigned>(probe.gpu_w),
+        static_cast<unsigned>(probe.gpu_h), probe.gpu_words_seen,
+        probe.gpu_total_words, probe.gpu_dma_src_base,
+        probe.gpu_dma_src_range_bytes, probe.gpu_sample_count,
+        probe.gpu_words_sample[0], static_cast<unsigned>(probe.gpu_word_from_dma[0]),
+        probe.gpu_dma_src_addrs[0], probe.gpu_words_sample[1],
+        static_cast<unsigned>(probe.gpu_word_from_dma[1]),
+        probe.gpu_dma_src_addrs[1], probe.gpu_src_write_sample_count,
+        probe.gpu_src_write_values[0], probe.gpu_src_write_addrs[0],
+        static_cast<unsigned>(probe.gpu_src_write_origin[0]));
+  }
+
+  if (probe.gpu_copy_sample_count != 0u) {
+    LOG_INFO(
+        "%s_GPU_COPY count=%u sample_count=%u "
+        "copy0=%u,%u->%u,%u %ux%u copy1=%u,%u->%u,%u %ux%u",
+        prefix, probe.gpu_copy_count, probe.gpu_copy_sample_count,
+        static_cast<unsigned>(probe.gpu_copy_src_x[0]),
+        static_cast<unsigned>(probe.gpu_copy_src_y[0]),
+        static_cast<unsigned>(probe.gpu_copy_dst_x[0]),
+        static_cast<unsigned>(probe.gpu_copy_dst_y[0]),
+        static_cast<unsigned>(probe.gpu_copy_w[0]),
+        static_cast<unsigned>(probe.gpu_copy_h[0]),
+        static_cast<unsigned>(probe.gpu_copy_src_x[1]),
+        static_cast<unsigned>(probe.gpu_copy_src_y[1]),
+        static_cast<unsigned>(probe.gpu_copy_dst_x[1]),
+        static_cast<unsigned>(probe.gpu_copy_dst_y[1]),
+        static_cast<unsigned>(probe.gpu_copy_w[1]),
+        static_cast<unsigned>(probe.gpu_copy_h[1]));
+  }
+
+  if (compare.captured || compare.macroblocks_compared != 0u) {
+    const char *stage = "none";
+    switch (compare.stage) {
+    case Mdec::DebugCompare::Stage::Coeff:
+      stage = "coeff";
+      break;
+    case Mdec::DebugCompare::Stage::Idct:
+      stage = "idct";
+      break;
+    case Mdec::DebugCompare::Stage::Rgb:
+      stage = "rgb";
+      break;
+    case Mdec::DebugCompare::Stage::Match:
+      stage = "match";
+      break;
+    case Mdec::DebugCompare::Stage::None:
+    default:
+      break;
+    }
+    LOG_INFO(
+        "%s_MDEC_COMPARE captured=%d color=%d compared=%llu stage=%s "
+        "block=%u index=%u current=0x%08X reference=0x%08X input_halfwords=%u "
+        "qscale=%u,%u,%u,%u,%u,%u",
+        prefix, compare.captured ? 1 : 0, compare.color_macroblock ? 1 : 0,
+        static_cast<unsigned long long>(compare.macroblocks_compared), stage,
+        static_cast<unsigned>(compare.mismatch_block),
+        static_cast<unsigned>(compare.mismatch_index),
+        static_cast<u32>(compare.current_value),
+        static_cast<u32>(compare.reference_value), compare.input_halfword_count,
+        static_cast<unsigned>(compare.qscales[0]),
+        static_cast<unsigned>(compare.qscales[1]),
+        static_cast<unsigned>(compare.qscales[2]),
+        static_cast<unsigned>(compare.qscales[3]),
+        static_cast<unsigned>(compare.qscales[4]),
+        static_cast<unsigned>(compare.qscales[5]));
   }
 }
 
@@ -328,8 +419,20 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
       << " src=" << gdisp.src_width << "x" << gdisp.src_height
       << " vram=(" << gdisp.display_vram_left << "," << gdisp.display_vram_top
       << ") wh=(" << gdisp.display_vram_width << "," << gdisp.display_vram_height
-      << ") div=" << gdisp.divisor << " 24bit=" << (gdisp.is_24bit ? 1 : 0)
+      << ") skip=(" << gdisp.display_skip_x << ",0)"
+      << " div=" << gdisp.divisor << " 24bit=" << (gdisp.is_24bit ? 1 : 0)
       << " interlace=" << (gdisp.interlaced ? 1 : 0) << "\n";
+  out << "GP1 area=(" << gdisp.x_start << "," << gdisp.y_start << ")"
+      << " hrange=(" << gdisp.x1 << "," << gdisp.x2 << ")"
+      << " vrange=(" << gdisp.y1 << "," << gdisp.y2 << ")"
+      << " raw_area=0x" << std::hex << gcmd.gp1_display_area_raw
+      << " raw_h=0x" << gcmd.gp1_horizontal_range_raw
+      << " raw_v=0x" << gcmd.gp1_vertical_range_raw
+      << " raw_mode=0x" << gcmd.gp1_display_mode_raw << std::dec
+      << " counts=(" << gcmd.gp1_display_area_count << ","
+      << gcmd.gp1_horizontal_range_count << ","
+      << gcmd.gp1_vertical_range_count << ","
+      << gcmd.gp1_display_mode_count << ")\n";
   out << "COUNTS tri=" << gcmd.gp0_textured_tri_count
       << " quad=" << gcmd.gp0_textured_quad_count
       << " rect=" << gcmd.gp0_textured_rect_count
@@ -1898,6 +2001,14 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--fmv-diagnostics") {
       fmv_diagnostics_override = 1;
+      continue;
+    }
+    if (a == "--mdec-compare") {
+      g_mdec_debug_compare_macroblocks = true;
+      continue;
+    }
+    if (a == "--mdec-upload-probe") {
+      g_mdec_debug_upload_probe = true;
       continue;
     }
     if (a == "--no-fmv-diagnostics") {
