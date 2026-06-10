@@ -2137,7 +2137,7 @@ int main(int argc, char *argv[]) {
   SDL_SetMainReady(); // Tell SDL we handled main() ourselves
 
   printf("========================================\n");
-  printf("  VibeStation - PS1 Emulator v0.4.6a-h2\n");
+  printf("  VibeStation - PS1 Emulator v0.5.0\n");
   printf("========================================\n");
   printf("Starting up...\n");
   fflush(stdout);

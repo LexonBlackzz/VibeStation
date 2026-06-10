@@ -5910,7 +5910,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.4.6a-h2");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.5.0");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
