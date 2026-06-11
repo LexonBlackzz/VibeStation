@@ -77,8 +77,10 @@ private:
 
 	// Frame timing
 	static constexpr int kPerfHistorySamples = 240;
-	float fps_ = 0.0f;
-	u32 frame_count_ = 0;
+	float game_fps_ = 0.0f;
+		float video_fps_ = 0.0f;
+	u32 game_frame_count_ = 0;
+		u32 video_frame_count_ = 0;
 	u32 last_fps_time_ = 0;
 	u32 last_vram_update_ms_ = 0;
 	u32 last_emulation_speed_sample_ms_ = 0;

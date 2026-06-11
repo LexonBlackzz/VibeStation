@@ -1958,6 +1958,7 @@ void App::run() {
 
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
+            game_frame_count_++;
             const bool turbo_resolution_clamp =
                 turbo_hold_active_ &&
                 g_output_resolution_mode != OutputResolutionMode::R320x240 &&
@@ -2079,17 +2080,20 @@ void App::run() {
         present_ms_ = render_ms_ + swap_ms_;
 
         // FPS counter
-        frame_count_++;
+        video_frame_count_++;
         u32 now = SDL_GetTicks();
         if (now - last_fps_time_ >= 1000) {
-            fps_ =
-                static_cast<float>(frame_count_) * 1000.0f / (now - last_fps_time_);
-            frame_count_ = 0;
+            video_fps_ =
+                static_cast<float>(video_frame_count_) * 1000.0f / (now - last_fps_time_);
+            game_fps_ =
+                static_cast<float>(game_frame_count_) * 1000.0f / (now - last_fps_time_);
+            video_frame_count_ = 0;
+            game_frame_count_ = 0;
             last_fps_time_ = now;
 
             char title[128];
-            snprintf(title, sizeof(title), "VibeStation - PS1 Emulator | %.1f FPS",
-                fps_);
+            snprintf(title, sizeof(title), "VibeStation - PS1 Emulator | %.1f Game FPS | %.1f Video FPS",
+                game_fps_, video_fps_);
             SDL_SetWindowTitle(window_, title);
         }
 
@@ -2484,7 +2488,7 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
         return;
     }
 
-    const float overlay_w = std::min(420.0f, image_size.x - 20.0f);
+    const float overlay_w = std::min(455.0f, image_size.x - 20.0f);
     const float overlay_h = std::min(150.0f, image_size.y - 20.0f);
     if (overlay_w < 220.0f || overlay_h < 100.0f) {
         return;
@@ -2493,8 +2497,8 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     const ImVec2 p0(image_pos.x + 10.0f, image_pos.y + 10.0f);
     const ImVec2 p1(p0.x + overlay_w, p0.y + overlay_h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p0, p1, IM_COL32(8, 8, 12, 190), 6.0f);
-    dl->AddRect(p0, p1, IM_COL32(140, 140, 170, 220), 6.0f);
+    dl->AddRectFilled(p0, p1, IM_COL32(8, 8, 12, 220), 6.0f);
+    dl->AddRect(p0, p1, IM_COL32(140, 140, 170, 250), 6.0f);
 
     const auto& stats = runtime_snapshot_.profiling;
     const double slowdown_percent = current_emulation_slowdown_percent();
@@ -2519,8 +2523,9 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
         : GpuDipDiagnostics{};
     char header[160];
     std::snprintf(header, sizeof(header),
-        "CPU %.2f ms   GPU %.2f ms   Core %.2f ms   FPS %.1f",
-        stats.cpu_ms, stats.gpu_ms, runtime_snapshot_.core_frame_ms, fps_);
+        "CPU %.2f ms  GPU %.2f ms  Core %.2f ms  Game %.1f  Video %.1f",
+        stats.cpu_ms, stats.gpu_ms, runtime_snapshot_.core_frame_ms,
+        game_fps_, video_fps_);
     dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 7.0f), IM_COL32(235, 235, 245, 255), header);
 
     char status_text[64];
@@ -2828,9 +2833,9 @@ void App::menu_bar() {
         // Status bar on the right
         const char* disc_text = disc_loaded ? "Disc: Loaded" : "Disc: None";
         const float status_width = ImGui::CalcTextSize(status_message_.c_str()).x + 16.0f;
-        const float disc_width = ImGui::CalcTextSize(disc_text).x + 16.0f;
+        const float disc_width = ImGui::CalcTextSize(disc_text).x + 32.0f;
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - status_width - disc_width - 84.0f);
+        ImGui::SameLine(ImGui::GetWindowWidth() - status_width - disc_width - 64.0f);
         ImGui::TextColored(ImVec4(0.5f, 0.4f, 0.8f, 1.0f), "%s",
             status_message_.c_str());
 
@@ -2839,8 +2844,9 @@ void App::menu_bar() {
             : ImVec4(0.85f, 0.45f, 0.45f, 1.0f),
             "%s", disc_text);
 
-        ImGui::SameLine(ImGui::GetWindowWidth() - 72.0f);
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "%.0f FPS", fps_);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 96.0f);
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "%.0f/%.0f FPS",
+            game_fps_, video_fps_);
 
         ImGui::EndMainMenuBar();
     }
@@ -5910,7 +5916,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.5.0");
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "VibeStation v0.5.1");
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
