@@ -328,6 +328,8 @@ private:
   bool capture_enabled_ = false;
   u32 host_buffer_bytes_ = 0;
   u32 opened_audio_samples_ = 0;
+  u32 host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
+  u32 host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
 
   std::array<u16, 0x200> regs_ = {};
   std::array<u8, 512 * 1024> spu_ram_ = {};
@@ -374,6 +376,8 @@ private:
 
   AudioDiag audio_diag_ = {};
   AudioRingBuffer audio_ring_buffer_;
+  std::vector<s16> host_staging_samples_;
+  size_t host_staging_read_pos_ = 0;
   std::vector<s16> mix_buffer_;
   std::vector<s16> capture_samples_;
   std::ofstream host_wav_capture_;
