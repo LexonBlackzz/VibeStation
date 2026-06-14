@@ -127,7 +127,7 @@ public:
 
   struct MdecUploadProbe {
     static constexpr size_t kSampleWords = 8;
-    static constexpr size_t kUploadHistory = 8;
+    static constexpr size_t kUploadHistory = 64;
     static constexpr size_t kMacroblockHistory = 32;
 
     bool dma0_seen = false;
@@ -203,6 +203,13 @@ public:
     std::array<u32, kSampleWords> gpu_src_write_pcs{};
     std::array<u8, kSampleWords> gpu_src_write_origin{};
     std::array<u8, kSampleWords> gpu_src_write_sizes{};
+    u32 gpu_src_words_expected = 0;
+    u32 gpu_src_words_seen = 0;
+    u32 gpu_src_words_dma1 = 0;
+    u32 gpu_src_words_dma_other = 0;
+    u32 gpu_src_words_cpu = 0;
+    u32 gpu_src_words_missing = 0;
+    u32 gpu_src_write_entries = 0;
 
     u32 gpu_copy_count = 0;
     u32 gpu_copy_sample_count = 0;

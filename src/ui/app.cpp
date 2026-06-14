@@ -2412,12 +2412,29 @@ void App::update() {
 
         const bool playback_enabled =
             has_started_emulation_ && emu_runner_.is_running();
+        bool slowdown_stutter_hint = false;
+        if (playback_enabled && g_spu_enable_slowdown_stutter) {
+            const double target_fps = system_->target_fps();
+            const double frame_budget_ms =
+                (target_fps > 0.0) ? (1000.0 / target_fps) : 0.0;
+            const double core_ms = runtime_snapshot_.core_frame_ms;
+            if (frame_budget_ms > 0.0 && core_ms > 0.0) {
+                const double activate_ms = frame_budget_ms * 1.25;
+                const double release_ms = frame_budget_ms * 1.10;
+                slowdown_stutter_hint = slowdown_stutter_hint_active_
+                    ? (core_ms >= release_ms)
+                    : (core_ms >= activate_ms);
+            }
+        }
+        slowdown_stutter_hint_active_ = slowdown_stutter_hint;
+        system_->spu().set_lag_stutter_hint(slowdown_stutter_hint);
         system_->set_spu_host_playback_enabled(playback_enabled);
     }
     else {
         smoothed_audio_buffer_fill_pct_ = -1.0f;
         smoothed_audio_buffer_available_ms_ = -1.0f;
         smoothed_audio_queue_kb_ = -1.0f;
+        slowdown_stutter_hint_active_ = false;
         last_audio_metrics_smooth_tick_ms_ = 0;
     }
 
@@ -3258,6 +3275,9 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("Lag Stutter Effect", &g_spu_enable_lag_stutter)) {
                     save_persistent_config();
                 }
+                if (ImGui::Checkbox("Slowdown Stutter Loop", &g_spu_enable_slowdown_stutter)) {
+                    save_persistent_config();
+                }
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
                     save_persistent_config();
                 }
@@ -3297,12 +3317,12 @@ void App::panel_settings() {
                     auto &rb = system_->spu().ring_buffer();
 
                     const bool is_stuttering = rb.is_stuttering();
-                    ImGui::Text("Stutter Active: %s",
-                        is_stuttering ? "YES" : "No");
-                    ImGui::SameLine();
                     if (is_stuttering) {
                         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                            "[LAG]");
+                            "Stutter Active: YES [LAG]");
+                    }
+                    else {
+                        ImGui::TextUnformatted("Stutter Active: No");
                     }
 
                     const size_t avail = rb.available_samples();
@@ -7059,6 +7079,10 @@ void App::load_persistent_config() {
             g_spu_enable_lag_stutter =
                 parse_bool(value, g_spu_enable_lag_stutter);
         }
+        else if (key == "spu_enable_slowdown_stutter") {
+            g_spu_enable_slowdown_stutter =
+                parse_bool(value, g_spu_enable_slowdown_stutter);
+        }
         else if (key == "advanced_sound_status_logging") {
             g_spu_advanced_sound_status =
                 parse_bool(value, g_spu_advanced_sound_status);
@@ -7269,6 +7293,8 @@ void App::save_persistent_config() const {
     out.unsetf(std::ios::floatfield);
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
     out << "spu_enable_lag_stutter=" << (g_spu_enable_lag_stutter ? 1 : 0) << "\n";
+    out << "spu_enable_slowdown_stutter="
+        << (g_spu_enable_slowdown_stutter ? 1 : 0) << "\n";
     out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
     out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
     out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";

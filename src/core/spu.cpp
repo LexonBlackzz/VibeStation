@@ -113,6 +113,40 @@ u32 bytes_from_seconds(double seconds, u32 sample_rate, u32 channels) {
   return static_cast<u32>(std::max(0.0, std::ceil(bytes)));
 }
 
+void write_wav_u16_le(std::ofstream &out, u16 v) {
+  out.put(static_cast<char>(v & 0xFFu));
+  out.put(static_cast<char>((v >> 8) & 0xFFu));
+}
+
+void write_wav_u32_le(std::ofstream &out, u32 v) {
+  out.put(static_cast<char>(v & 0xFFu));
+  out.put(static_cast<char>((v >> 8) & 0xFFu));
+  out.put(static_cast<char>((v >> 16) & 0xFFu));
+  out.put(static_cast<char>((v >> 24) & 0xFFu));
+}
+
+void write_wav_header(std::ofstream &out, u32 sample_rate, u32 data_bytes) {
+  static constexpr u16 channels = 2;
+  static constexpr u16 bits_per_sample = 16;
+  static constexpr u16 block_align = channels * (bits_per_sample / 8u);
+  const u32 riff_size = 36u + data_bytes;
+  const u32 byte_rate = sample_rate * static_cast<u32>(block_align);
+
+  out.write("RIFF", 4);
+  write_wav_u32_le(out, riff_size);
+  out.write("WAVE", 4);
+  out.write("fmt ", 4);
+  write_wav_u32_le(out, 16);
+  write_wav_u16_le(out, 1);
+  write_wav_u16_le(out, channels);
+  write_wav_u32_le(out, sample_rate);
+  write_wav_u32_le(out, byte_rate);
+  write_wav_u16_le(out, block_align);
+  write_wav_u16_le(out, bits_per_sample);
+  out.write("data", 4);
+  write_wav_u32_le(out, data_bytes);
+}
+
 void push_history(std::array<s16, 39> &history, s16 sample) {
   for (size_t i = 0; i + 1 < history.size(); ++i) {
     history[i] = history[i + 1];
@@ -156,7 +190,8 @@ void Spu::init(System *sys) {
   desired.channels = 2;
   const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
   desired.samples = static_cast<Uint16>(requested_samples);
-  desired.callback = nullptr;
+  desired.callback = &Spu::sdl_audio_callback_thunk;
+  desired.userdata = this;
 
   SDL_AudioSpec obtained{};
   audio_device_ = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
@@ -186,8 +221,8 @@ void Spu::init(System *sys) {
                std::max(host_buffer_bytes_ * 8u, max_bytes));
 
   audio_enabled_ = true;
-  audio_started_ = false;
-  ring_stutter_active_last_pump_ = false;
+  audio_started_.store(false, std::memory_order_release);
+  ring_stutter_active_last_pump_.store(false, std::memory_order_release);
   opened_audio_samples_ = requested_samples;
   SDL_PauseAudioDevice(audio_device_, 1);
   LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes, target=%.2fs)",
@@ -197,23 +232,30 @@ void Spu::init(System *sys) {
 
   // Initialize the ring buffer with the configured duration.
   audio_ring_buffer_.init(target_seconds, SAMPLE_RATE, 2);
+
+  if (!g_spu_host_wav_out_path.empty()) {
+    start_host_wav_capture(g_spu_host_wav_out_path);
+  }
 }
 
 void Spu::shutdown() {
+  stop_host_wav_capture();
   if (audio_device_ != 0) {
+    SDL_PauseAudioDevice(audio_device_, 1);
     SDL_CloseAudioDevice(audio_device_);
     audio_device_ = 0;
   }
   audio_enabled_ = false;
-  audio_started_ = false;
-  ring_stutter_active_last_pump_ = false;
+  audio_started_.store(false, std::memory_order_release);
+  ring_stutter_active_last_pump_.store(false, std::memory_order_release);
   host_buffer_bytes_ = 0;
   opened_audio_samples_ = 0;
   audio_ring_buffer_.clear();
 }
 
 void Spu::set_host_playback_enabled(bool enabled) {
-  host_playback_enabled_ = enabled;
+  const bool was_enabled =
+      host_playback_enabled_.exchange(enabled, std::memory_order_acq_rel);
   if (!audio_enabled_ || audio_device_ == 0) {
     return;
   }
@@ -221,13 +263,66 @@ void Spu::set_host_playback_enabled(bool enabled) {
   if (!enabled) {
     SDL_PauseAudioDevice(audio_device_, 1);
     SDL_ClearQueuedAudio(audio_device_);
-    audio_started_ = false;
-    ring_stutter_active_last_pump_ = false;
+    audio_started_.store(false, std::memory_order_release);
+    ring_stutter_active_last_pump_.store(false, std::memory_order_release);
     audio_ring_buffer_.clear();
+  } else if (!was_enabled) {
+    SDL_PauseAudioDevice(audio_device_, 0);
   }
 }
 
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
+
+bool Spu::start_host_wav_capture(const std::string &path) {
+  stop_host_wav_capture();
+  host_wav_capture_.open(path, std::ios::binary | std::ios::trunc);
+  if (!host_wav_capture_.is_open()) {
+    LOG_WARN("SPU: Failed to open host WAV capture: %s", path.c_str());
+    return false;
+  }
+
+  host_wav_capture_bytes_ = 0;
+  write_wav_header(host_wav_capture_, SAMPLE_RATE, 0);
+  if (!host_wav_capture_.good()) {
+    LOG_WARN("SPU: Failed to write host WAV header: %s", path.c_str());
+    stop_host_wav_capture();
+    return false;
+  }
+
+  LOG_INFO("SPU: Host output WAV capture enabled: %s", path.c_str());
+  return true;
+}
+
+void Spu::stop_host_wav_capture() {
+  if (!host_wav_capture_.is_open()) {
+    host_wav_capture_bytes_ = 0;
+    return;
+  }
+
+  host_wav_capture_.seekp(0, std::ios::beg);
+  write_wav_header(host_wav_capture_, SAMPLE_RATE, host_wav_capture_bytes_);
+  host_wav_capture_.close();
+  LOG_INFO("SPU: Host output WAV capture closed (%u bytes)",
+           static_cast<unsigned>(host_wav_capture_bytes_));
+  host_wav_capture_bytes_ = 0;
+}
+
+void Spu::append_host_wav_capture(const s16 *samples, size_t count) {
+  if (!host_wav_capture_.is_open() || samples == nullptr || count == 0) {
+    return;
+  }
+
+  const size_t byte_count = count * sizeof(s16);
+  const size_t writable = std::min<size_t>(
+      byte_count, std::numeric_limits<u32>::max() - host_wav_capture_bytes_);
+  if (writable == 0) {
+    return;
+  }
+
+  host_wav_capture_.write(reinterpret_cast<const char *>(samples),
+                          static_cast<std::streamsize>(writable));
+  host_wav_capture_bytes_ += static_cast<u32>(writable);
+}
 
 bool Spu::collect_voice_sample_bytes(int voice, std::vector<u8> &out,
                                      std::string *error) const {
@@ -414,8 +509,8 @@ void Spu::reset() {
   if (audio_device_ != 0) {
     SDL_PauseAudioDevice(audio_device_, 1);
     SDL_ClearQueuedAudio(audio_device_);
-    audio_started_ = false;
-    ring_stutter_active_last_pump_ = false;
+    audio_started_.store(false, std::memory_order_release);
+    ring_stutter_active_last_pump_.store(false, std::memory_order_release);
   }
 
   regs_.fill(0);
@@ -1906,9 +2001,29 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
   }
 
   const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
-  const std::vector<s16> resampled = resample_output_for_speed(samples, output_speed);
+  const std::vector<s16> resampled =
+      resample_output_for_speed(samples, output_speed);
   if (resampled.empty()) {
     return;
+  }
+
+  const size_t capacity = audio_ring_buffer_.capacity_samples();
+  if (capacity > 0u) {
+    static constexpr size_t kMaxLiveBacklogSamples =
+        static_cast<size_t>(SAMPLE_RATE) * 2u * 50u / 1000u;
+    size_t target_backlog =
+        std::min(kMaxLiveBacklogSamples, (capacity * 3u) / 4u);
+    target_backlog &= ~static_cast<size_t>(1u);
+    target_backlog = std::max<size_t>(target_backlog, 2u);
+
+    const size_t available = audio_ring_buffer_.available_samples();
+    if (available + resampled.size() > target_backlog) {
+      const size_t discard =
+          ((available + resampled.size()) - target_backlog) &
+          ~static_cast<size_t>(1u);
+      const size_t dropped = audio_ring_buffer_.discard_oldest_samples(discard);
+      audio_diag_.dropped_frames += dropped / 2u;
+    }
   }
 
   // Push into the ring buffer.  Never blocks.
@@ -1936,71 +2051,80 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
 //   samples), the ring buffer depletes and the stutter loop kicks in
 //   cleanly — one sustained glitchy loop, not micro-crackle.
 // ============================================================================
-void Spu::pump_audio_to_device() {
-  if (!audio_enabled_ || audio_device_ == 0 || !host_playback_enabled_) {
+void Spu::sdl_audio_callback_thunk(void *userdata, Uint8 *stream, int len) {
+  static_cast<Spu *>(userdata)->sdl_audio_callback(stream, len);
+}
+
+void Spu::sdl_audio_callback(Uint8 *stream, int len) {
+  if (stream == nullptr || len <= 0) {
     return;
   }
 
-  // At 44100 Hz stereo 16-bit: 1 ms ≈ 176.4 bytes.
-  // CUSHION: keep SDL's queue topped up to ~40 ms of audio.
-  // CRITICAL: below ~10 ms we're about to run dry (stutter territory).
-  static constexpr u32 CUSHION_BYTES  = 7056;  // ~40 ms safety margin
-  static constexpr u32 CRITICAL_BYTES = 1764;  // ~10 ms — stutter imminent
+  const size_t requested_bytes = static_cast<size_t>(len);
+  size_t requested_count = requested_bytes / sizeof(s16);
+  requested_count &= ~static_cast<size_t>(1u);
+  if (requested_count == 0) {
+    SDL_memset(stream, 0, requested_bytes);
+    return;
+  }
 
-  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
+  s16 *out = reinterpret_cast<s16 *>(stream);
+  if (!host_playback_enabled_.load(std::memory_order_acquire)) {
+    SDL_memset(stream, 0, requested_bytes);
+    return;
+  }
+
+  static constexpr size_t kStartupSamples =
+      static_cast<size_t>(SAMPLE_RATE) * 2u * 5u / 1000u;
+  const size_t available = audio_ring_buffer_.available_samples();
+  if (!audio_started_.load(std::memory_order_acquire) &&
+      available < std::min(kStartupSamples, requested_count)) {
+    SDL_memset(stream, 0, requested_bytes);
+    return;
+  }
+  audio_started_.store(true, std::memory_order_release);
+
+  const bool force_lag_stutter =
+      g_spu_enable_lag_stutter && g_spu_enable_slowdown_stutter &&
+      lag_stutter_hint_.load(std::memory_order_acquire);
+  if (force_lag_stutter) {
+    audio_ring_buffer_.read_stutter_samples(out, requested_count);
+  } else {
+    audio_ring_buffer_.read_live_samples(out, requested_count);
+  }
+
+  const bool stuttering_now = audio_ring_buffer_.is_stuttering();
+  const bool was_stuttering =
+      ring_stutter_active_last_pump_.exchange(stuttering_now,
+                                              std::memory_order_acq_rel);
+  if (stuttering_now && !was_stuttering) {
+    ++audio_diag_.underrun_events;
+  }
+
+  append_host_wav_capture(out, requested_count);
+  audio_diag_.queued_frames += requested_count / 2u;
+  audio_diag_.queue_last_bytes = static_cast<u32>(requested_count * sizeof(s16));
+  audio_diag_.queue_peak_bytes =
+      std::max(audio_diag_.queue_peak_bytes, audio_diag_.queue_last_bytes);
+
+  if (requested_count * sizeof(s16) < requested_bytes) {
+    SDL_memset(stream + requested_count * sizeof(s16), 0,
+               requested_bytes - requested_count * sizeof(s16));
+  }
+}
+
+void Spu::pump_audio_to_device() {
+  if (!audio_enabled_ || audio_device_ == 0 ||
+      !host_playback_enabled_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  const u32 queued = SDL_GetQueuedAudioSize(audio_device_);
   audio_diag_.queue_last_bytes = queued;
   audio_diag_.queue_peak_bytes =
       std::max(audio_diag_.queue_peak_bytes, queued);
+  return;
 
-  // Overrun protection: if SDL's queue exploded (e.g. after a long pause),
-  // flush it so we don't play seconds-old audio.
-  const u32 max_q = HOST_MAX_QUEUE_BYTES_MIN;
-  if (queued > max_q) {
-    SDL_ClearQueuedAudio(audio_device_);
-    audio_diag_.dropped_frames +=
-        queued / (static_cast<u32>(sizeof(s16)) * 2u);
-    ++audio_diag_.overrun_events;
-    queued = 0;
-  }
-
-  // Only pull from the ring buffer if SDL's queue is below the cushion.
-  // This prevents the aggressive drain that caused micro-crackle.
-  if (queued < CUSHION_BYTES) {
-    const u32 bytes_needed = CUSHION_BYTES - queued;
-    size_t count = bytes_needed / sizeof(s16);
-    // Align to full stereo frames (2 s16 samples per frame).
-    count = (count + 1u) & ~static_cast<size_t>(1u);
-
-    if (count > 0) {
-      // Consumer call: stutter kicks in if the ring buffer is starved.
-      std::vector<s16> chunk(count);
-      audio_ring_buffer_.read_samples(chunk.data(), count);
-      const bool stuttering_now = audio_ring_buffer_.is_stuttering();
-      if (stuttering_now && !ring_stutter_active_last_pump_) {
-        ++audio_diag_.underrun_events;
-      }
-      ring_stutter_active_last_pump_ = stuttering_now;
-
-      SDL_QueueAudio(audio_device_, chunk.data(),
-                     static_cast<Uint32>(count * sizeof(s16)));
-      audio_diag_.queued_frames += count / 2;
-
-      queued = SDL_GetQueuedAudioSize(audio_device_);
-      audio_diag_.queue_last_bytes = queued;
-      audio_diag_.queue_peak_bytes =
-          std::max(audio_diag_.queue_peak_bytes, queued);
-    }
-  } else {
-    ring_stutter_active_last_pump_ = audio_ring_buffer_.is_stuttering();
-  }
-
-  // Startup: unpause the device once the cushion is filled.
-  if (!audio_started_) {
-    if (queued >= CUSHION_BYTES) {
-      SDL_PauseAudioDevice(audio_device_, 0);
-      audio_started_ = true;
-    }
-  }
 }
 
 void Spu::push_cd_audio_samples(const std::vector<s16> &samples,

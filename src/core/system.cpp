@@ -910,6 +910,21 @@ void System::populate_gpu_src_write_samples_from_history() {
         return;
     }
 
+    constexpr u32 kMaxTrackedWords = 4096u;
+    std::array<u8, kMaxTrackedWords> latest_origin{};
+    latest_origin.fill(0xFFu);
+
+    const u32 range_words =
+        std::min<u32>((mdec_upload_probe_.gpu_dma_src_range_bytes + 3u) / 4u,
+                      kMaxTrackedWords);
+    mdec_upload_probe_.gpu_src_words_expected = range_words;
+    mdec_upload_probe_.gpu_src_words_seen = 0;
+    mdec_upload_probe_.gpu_src_words_dma1 = 0;
+    mdec_upload_probe_.gpu_src_words_dma_other = 0;
+    mdec_upload_probe_.gpu_src_words_cpu = 0;
+    mdec_upload_probe_.gpu_src_words_missing = range_words;
+    mdec_upload_probe_.gpu_src_write_entries = 0;
+
     for (u32 i = 0; i < ram_write_history_count_; ++i) {
         const u32 hist_index =
             (ram_write_history_pos_ + static_cast<u32>(kRamWriteHistorySize) - ram_write_history_count_ + i) %
@@ -920,9 +935,22 @@ void System::populate_gpu_src_write_samples_from_history() {
             continue;
         }
 
+        ++mdec_upload_probe_.gpu_src_write_entries;
+        if (range_words != 0) {
+            const u32 range_offset = entry.addr - mdec_upload_probe_.gpu_dma_src_base;
+            const u32 first_word = range_offset / 4u;
+            const u32 last_byte_offset =
+                std::min<u32>(range_offset + std::max<u8>(entry.size, 1u) - 1u,
+                              mdec_upload_probe_.gpu_dma_src_range_bytes - 1u);
+            const u32 last_word = std::min<u32>(last_byte_offset / 4u, range_words - 1u);
+            for (u32 word = first_word; word <= last_word; ++word) {
+                latest_origin[word] = entry.origin;
+            }
+        }
+
         const u32 sample_index = mdec_upload_probe_.gpu_src_write_sample_count;
         if (sample_index >= MdecUploadProbe::kSampleWords) {
-            break;
+            continue;
         }
         mdec_upload_probe_.gpu_src_write_addrs[sample_index] = entry.addr;
         mdec_upload_probe_.gpu_src_write_values[sample_index] = entry.value;
@@ -931,6 +959,31 @@ void System::populate_gpu_src_write_samples_from_history() {
         mdec_upload_probe_.gpu_src_write_sizes[sample_index] = entry.size;
         ++mdec_upload_probe_.gpu_src_write_sample_count;
     }
+
+    u32 seen = 0;
+    u32 dma1 = 0;
+    u32 dma_other = 0;
+    u32 cpu = 0;
+    for (u32 word = 0; word < range_words; ++word) {
+        const u8 origin = latest_origin[word];
+        if (origin == 0xFFu) {
+            continue;
+        }
+        ++seen;
+        if ((origin & 0x80u) == 0u) {
+            ++cpu;
+        } else if ((origin & 0x7Fu) == 1u) {
+            ++dma1;
+        } else {
+            ++dma_other;
+        }
+    }
+    mdec_upload_probe_.gpu_src_words_seen = seen;
+    mdec_upload_probe_.gpu_src_words_dma1 = dma1;
+    mdec_upload_probe_.gpu_src_words_dma_other = dma_other;
+    mdec_upload_probe_.gpu_src_words_cpu = cpu;
+    mdec_upload_probe_.gpu_src_words_missing =
+        (range_words > seen) ? (range_words - seen) : 0u;
 }
 
 void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
@@ -1055,6 +1108,13 @@ void System::debug_note_gpu_image_load_begin(u16 x, u16 y, u16 w, u16 h) {
     mdec_upload_probe_.gpu_src_write_pcs.fill(0);
     mdec_upload_probe_.gpu_src_write_origin.fill(0);
     mdec_upload_probe_.gpu_src_write_sizes.fill(0);
+    mdec_upload_probe_.gpu_src_words_expected = 0;
+    mdec_upload_probe_.gpu_src_words_seen = 0;
+    mdec_upload_probe_.gpu_src_words_dma1 = 0;
+    mdec_upload_probe_.gpu_src_words_dma_other = 0;
+    mdec_upload_probe_.gpu_src_words_cpu = 0;
+    mdec_upload_probe_.gpu_src_words_missing = 0;
+    mdec_upload_probe_.gpu_src_write_entries = 0;
     mdec_upload_probe_.gpu_copy_count = 0;
     mdec_upload_probe_.gpu_copy_sample_count = 0;
     mdec_upload_probe_.gpu_copy_src_x.fill(0);
@@ -1238,6 +1298,24 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             start_loop = std::chrono::high_resolution_clock::now();
         }
         u32 cycles_remaining = cycles_this_scanline;
+        auto service_dma = [&]() {
+            const u64 before_dma_cycles = cpu_.cycle_count();
+            dma_.tick();
+            const u64 after_dma_cycles = cpu_.cycle_count();
+            const u32 dma_cycles =
+                static_cast<u32>(std::min<u64>(after_dma_cycles - before_dma_cycles,
+                                               0xFFFFFFFFull));
+            if (dma_cycles == 0) {
+                return;
+            }
+
+            frame_cycles_ += dma_cycles;
+            sio_.tick(dma_cycles);
+            mdec_.tick(dma_cycles);
+            cdrom_.tick(dma_cycles);
+            cycles_remaining =
+                (dma_cycles >= cycles_remaining) ? 0 : (cycles_remaining - dma_cycles);
+        };
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
                 std::min(cycles_remaining, cpu_instruction_slice * 4u);
@@ -1273,13 +1351,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
 
             dma_tick_budget += spent_in_slice;
             if (dma_tick_budget >= dma_tick_stride) {
-                dma_.tick();
+                service_dma();
                 dma_tick_budget -= dma_tick_stride;
             }
-        }
-        if (dma_tick_budget > 0) {
-            dma_.tick();
-            dma_tick_budget = 0;
         }
         if (profile_detailed) {
             const auto end_loop = std::chrono::high_resolution_clock::now();

@@ -491,34 +491,52 @@ void Mdec::execute_decode() {
     return;
   }
 
-  while (out_fifo_.empty() && command_id_ == 1) {
-    const u8 needed_blocks = (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 6u : 1u;
-    if (decode_block_index_ >= needed_blocks) {
-      if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
-        if (g_mdec_debug_compare_macroblocks) {
-          compare_colored_macroblock(debug_current_macroblock_input_);
-        }
-        emit_colored_macroblock(decode_blocks_[0], decode_blocks_[1],
-                                decode_blocks_[2], decode_blocks_[3],
-                                decode_blocks_[4], decode_blocks_[5]);
-      } else {
-        emit_monochrome_macroblock(decode_blocks_[0]);
-      }
-      pending_out_fifo_.swap(out_fifo_);
-      pending_out_block_fifo_.swap(out_block_fifo_);
-      pending_out_macroblock_fifo_.swap(out_macroblock_fifo_);
-      output_ready_delay_cycles_ = kMacroblockOutputDelayCycles;
-      reset_decode_state();
-      return;
-    }
+  if (command_id_ != 1) {
+    return;
+  }
 
-    if (!decode_next_block()) {
-      if (decode_halfwords_remaining_ == 0 && in_halfword_fifo_.empty()) {
-        reset_decode_state();
-      }
+  const size_t needed_blocks =
+      (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 6u : 1u;
+  size_t consumed_halfwords = 0;
+  if (!scan_macroblock(needed_blocks, consumed_halfwords)) {
+    if (decode_halfwords_remaining_ == 0 && in_halfword_fifo_.empty()) {
+      reset_decode_state();
+    }
+    return;
+  }
+
+  MacroblockBlocks decoded_blocks{};
+  size_t cursor = 0;
+  for (size_t block = 0; block < needed_blocks; ++block) {
+    const bool chroma_block =
+        (out_depth_latched_ == 2 || out_depth_latched_ == 3) && block < 2u;
+    if (!decode_block(decoded_blocks[block],
+                      chroma_block ? quant_chroma_ : quant_luma_, cursor)) {
       return;
     }
   }
+
+  debug_current_macroblock_input_.clear();
+  for (size_t i = 0; i < consumed_halfwords; ++i) {
+    pop_decode_halfword();
+  }
+
+  if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
+    if (g_mdec_debug_compare_macroblocks) {
+      compare_colored_macroblock(debug_current_macroblock_input_);
+    }
+    emit_colored_macroblock(decoded_blocks[0], decoded_blocks[1],
+                            decoded_blocks[2], decoded_blocks[3],
+                            decoded_blocks[4], decoded_blocks[5]);
+  } else {
+    emit_monochrome_macroblock(decoded_blocks[0]);
+  }
+
+  pending_out_fifo_.swap(out_fifo_);
+  pending_out_block_fifo_.swap(out_block_fifo_);
+  pending_out_macroblock_fifo_.swap(out_macroblock_fifo_);
+  output_ready_delay_cycles_ = kMacroblockOutputDelayCycles;
+  reset_decode_state();
 }
 
 void Mdec::reset_decode_state() {

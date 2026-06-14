@@ -92,6 +92,7 @@ private:
   u64 gte_result_ready_cycle_ = 0;
   u64 muldiv_result_ready_cycle_ = 0;
   u32 cycle_penalty_ = 0;
+  bool executing_step_ = false;
 
   // ── Helpers ────────────────────────────────────────────────────
   void set_reg(u32 index, u32 value);

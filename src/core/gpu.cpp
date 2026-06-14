@@ -548,6 +548,9 @@ void Gpu::reset() {
     interlace_field_ = false;
     gpuread_latch_ = 0;
     frame_complete_ = false;
+    presented_display_valid_ = false;
+    presented_display_info_ = {};
+    presented_display_rgba_.clear();
     command_debug_ = {};
     polyline_active_ = false;
     polyline_gouraud_ = false;
@@ -1434,6 +1437,9 @@ void Gpu::gp0_textured_rect() {
         command_debug_.rect_v[rect_index] = v;
         command_debug_.rect_clut[rect_index] = clut_;
         command_debug_.rect_texpage[rect_index] = texpage_;
+        command_debug_.rect_opcode[rect_index] = opcode;
+        command_debug_.rect_semi[rect_index] = semi_transparency_mode_ ? 1u : 0u;
+        command_debug_.rect_blend[rect_index] = semi_transparency_;
         command_debug_.rect_raw[rect_index] = raw_texture ? 1u : 0u;
         command_debug_.rect_r[rect_index] = c.r;
         command_debug_.rect_g[rect_index] = c.g;
@@ -2129,6 +2135,42 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
     return info;
 }
 
+DisplaySampleInfo Gpu::build_presented_display_rgba(std::vector<u32>* rgba,
+    bool include_stats) const {
+    if (!presented_display_valid_) {
+        return build_display_rgba(rgba, include_stats);
+    }
+
+    if (rgba != nullptr) {
+        *rgba = presented_display_rgba_;
+    }
+
+    if (!include_stats) {
+        return presented_display_info_;
+    }
+
+    DisplaySampleInfo info = presented_display_info_;
+    u32 hash = 2166136261u;
+    u64 non_black = 0;
+    for (u32 pixel : presented_display_rgba_) {
+        const u8 r = static_cast<u8>(pixel & 0xFFu);
+        const u8 g = static_cast<u8>((pixel >> 8) & 0xFFu);
+        const u8 b = static_cast<u8>((pixel >> 16) & 0xFFu);
+        hash ^= r;
+        hash *= 16777619u;
+        hash ^= g;
+        hash *= 16777619u;
+        hash ^= b;
+        hash *= 16777619u;
+        if ((r | g | b) != 0) {
+            ++non_black;
+        }
+    }
+    info.hash = hash;
+    info.non_black_pixels = non_black;
+    return info;
+}
+
 DisplayDebugInfo Gpu::debug_display_info() const {
     DisplayDebugInfo info{};
     info.mode_width = display_.width();
@@ -2157,6 +2199,8 @@ DisplayDebugInfo Gpu::debug_display_info() const {
 
 void Gpu::vblank() {
     static u64 vblank_count = 0;
+    presented_display_info_ = build_display_rgba(presented_display_rgba_, true);
+    presented_display_valid_ = true;
     frame_complete_ = true;
     if (sys_ && fmv_diagnostics_enabled()) {
         sys_->debug_note_gpu_vblank();

@@ -3,6 +3,28 @@
 
 namespace {
 u64 g_timer_trace_counter = 0;
+
+bool counter_reaches_value(u32 old_counter, u32 ticks, u16 value) {
+  if (ticks == 0) {
+    return false;
+  }
+
+  old_counter &= 0xFFFFu;
+  if (ticks >= 0x10000u) {
+    return true;
+  }
+
+  const u32 target = value;
+  if (old_counter < target) {
+    return old_counter + ticks >= target;
+  }
+  if (old_counter > target) {
+    return old_counter + ticks >= (0x10000u + target);
+  }
+
+  // Already sitting on the compare value; the next hit is after a full wrap.
+  return false;
+}
 }
 
 void Timers::reset() {
@@ -52,17 +74,13 @@ void Timers::write(u32 offset, u32 value) {
 
   switch (reg) {
   case 0x0:
-  {
-    const u32 old_counter = t.counter;
     t.counter = value & 0xFFFFu;
-    check_timer_events(timer, old_counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
       LOG_DEBUG("Timers: T%d COUNTER <= 0x%04X", timer, t.counter);
     }
     break;
-  }
   case 0x4:
     t.mode = static_cast<u16>(value & 0x3FF);
     t.mode |= (1u << 10);
@@ -70,7 +88,6 @@ void Timers::write(u32 offset, u32 value) {
     t.one_shot_done = false;
     t.sync_released = false;
     t.irq_pulse_restore_pending = false;
-    check_timer_events(timer, t.counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -79,7 +96,6 @@ void Timers::write(u32 offset, u32 value) {
     break;
   case 0x8:
     t.target = static_cast<u16>(value);
-    check_timer_events(timer, t.counter);
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -136,31 +152,21 @@ void Timers::tick_timer(int index, u32 cycles) {
   }
 
   const u32 old_counter = t.counter;
-  const u32 new_counter = old_counter + cycles;
-  t.counter = new_counter;
-  check_timer_events(index, old_counter);
-  t.counter = static_cast<u16>(t.counter);
-}
-
-void Timers::check_timer_events(int index, u32 old_counter) {
-  auto &t = timers_[index];
-  const u32 new_counter = t.counter;
-  const bool target_hit =
-      (new_counter >= t.target) && (old_counter < t.target || t.target == 0);
-  const bool overflow_hit = new_counter >= 0xFFFFu;
+  const bool target_hit = counter_reaches_value(old_counter, cycles, t.target);
+  const bool overflow_hit = (old_counter & 0xFFFFu) + cycles >= 0x10000u;
 
   handle_timer_event(t, index, target_hit, overflow_hit);
 
   if (target_hit && t.reset_on_target() && t.target > 0) {
-    t.counter = static_cast<u16>(new_counter % t.target);
-  } else if (overflow_hit) {
-    t.counter = static_cast<u16>(new_counter % 0xFFFFu);
+    t.counter = (old_counter + cycles) % t.target;
+  } else {
+    t.counter = (old_counter + cycles) & 0xFFFFu;
   }
 }
 
 void Timers::hblank_pulse() {
   hblank_active_ = true;
-  process_sync_event(0);
+  process_sync_event(0, true);
 
   // Timer 0 source 1/3 is not fully dot-clock accurate yet; use one tick
   // per HBlank pulse to keep BIOS timing from stalling.
@@ -182,6 +188,7 @@ void Timers::hblank_pulse() {
     }
   }
   hblank_active_ = false;
+  process_sync_event(0, false);
 }
 
 void Timers::set_vblank(bool active) {
@@ -189,9 +196,7 @@ void Timers::set_vblank(bool active) {
     return;
   }
   vblank_active_ = active;
-  if (active) {
-    process_sync_event(1);
-  }
+  process_sync_event(1, active);
 }
 
 bool Timers::is_paused_by_sync(int index) const {
@@ -227,7 +232,7 @@ bool Timers::is_paused_by_sync(int index) const {
   }
 }
 
-void Timers::process_sync_event(int index) {
+void Timers::process_sync_event(int index, bool active) {
   if (index < 0 || index > 1) {
     return;
   }
@@ -239,11 +244,19 @@ void Timers::process_sync_event(int index) {
 
   switch (t.sync_mode()) {
   case 1:
+    if (!active) {
+      t.counter = 0;
+    }
+    break;
   case 2:
-    t.counter = 0;
+    if (active) {
+      t.counter = 0;
+    }
     break;
   case 3:
-    t.sync_released = true;
+    if (!active) {
+      t.sync_released = true;
+    }
     break;
   default:
     break;

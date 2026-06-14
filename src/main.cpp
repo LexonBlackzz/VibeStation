@@ -3,6 +3,7 @@
 
 #define SDL_MAIN_HANDLED // Prevent SDL from redefining main()
 #include "core/system.h"
+#include "input/controller.h"
 #include "ui/app.h"
 #include <SDL.h>
 #include <algorithm>
@@ -15,6 +16,86 @@
 #include <memory>
 #include <sstream>
 #include <vector>
+
+struct AutoInputConfig {
+  u16 mask = 0;
+  int start_frame = 1;
+  int end_frame = 0;
+  int period_frames = 1;
+  int hold_frames = 1;
+
+  bool enabled() const { return mask != 0; }
+};
+
+static AutoInputConfig g_auto_input;
+
+static bool parse_psx_button_name(const std::string &name, PsxButton &button) {
+  std::string v = name;
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  v.erase(std::remove(v.begin(), v.end(), '-'), v.end());
+  v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+
+  if (v == "select") button = PsxButton::Select;
+  else if (v == "start") button = PsxButton::Start;
+  else if (v == "up") button = PsxButton::Up;
+  else if (v == "right") button = PsxButton::Right;
+  else if (v == "down") button = PsxButton::Down;
+  else if (v == "left") button = PsxButton::Left;
+  else if (v == "l1") button = PsxButton::L1;
+  else if (v == "r1") button = PsxButton::R1;
+  else if (v == "l2") button = PsxButton::L2;
+  else if (v == "r2") button = PsxButton::R2;
+  else if (v == "triangle") button = PsxButton::Triangle;
+  else if (v == "circle") button = PsxButton::Circle;
+  else if (v == "cross" || v == "x") button = PsxButton::Cross;
+  else if (v == "square") button = PsxButton::Square;
+  else return false;
+  return true;
+}
+
+static bool add_auto_input_buttons(const std::string &spec) {
+  std::istringstream input(spec);
+  std::string token;
+  bool parsed_any = false;
+  while (std::getline(input, token, ',')) {
+    const size_t begin = token.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+      token.clear();
+    } else {
+      const size_t end = token.find_last_not_of(" \t\r\n");
+      token = token.substr(begin, end - begin + 1u);
+    }
+    if (token.empty()) {
+      continue;
+    }
+    PsxButton button{};
+    if (!parse_psx_button_name(token, button)) {
+      return false;
+    }
+    g_auto_input.mask |= static_cast<u16>(button);
+    parsed_any = true;
+  }
+  return parsed_any;
+}
+
+static u16 auto_input_buttons_for_frame(int frame_index) {
+  if (!g_auto_input.enabled() || frame_index < g_auto_input.start_frame) {
+    return 0xFFFFu;
+  }
+  if (g_auto_input.end_frame > 0 && frame_index > g_auto_input.end_frame) {
+    return 0xFFFFu;
+  }
+
+  const int period = std::max(1, g_auto_input.period_frames);
+  const int hold = std::max(1, std::min(g_auto_input.hold_frames, period));
+  const int phase = (frame_index - g_auto_input.start_frame) % period;
+  if (phase >= hold) {
+    return 0xFFFFu;
+  }
+  return static_cast<u16>(0xFFFFu & ~g_auto_input.mask);
+}
 
 #ifdef _WIN32
 extern "C" {
@@ -441,7 +522,7 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
   const u32 upload_hist_count =
       std::min<u32>(probe.gpu_hist_count,
                     static_cast<u32>(System::MdecUploadProbe::kUploadHistory));
-  for (u32 i = 0; i < std::min<u32>(upload_hist_count, 4u); ++i) {
+  for (u32 i = 0; i < upload_hist_count; ++i) {
     const u32 hist_index =
         (probe.gpu_hist_count - 1u - i) %
         static_cast<u32>(System::MdecUploadProbe::kUploadHistory);
@@ -450,6 +531,17 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
         << probe.gpu_hist_w[hist_index] << "," << probe.gpu_hist_h[hist_index]
         << ") src=" << (probe.gpu_hist_from_dma[hist_index] ? "DMA2" : "CPU")
         << "\n";
+  }
+  if (probe.gpu_dma_src_range_bytes != 0) {
+    out << "GPU_SRC_COVERAGE base=0x" << std::hex << probe.gpu_dma_src_base
+        << std::dec << " bytes=" << probe.gpu_dma_src_range_bytes
+        << " expected_words=" << probe.gpu_src_words_expected
+        << " seen=" << probe.gpu_src_words_seen
+        << " dma1=" << probe.gpu_src_words_dma1
+        << " dma_other=" << probe.gpu_src_words_dma_other
+        << " cpu=" << probe.gpu_src_words_cpu
+        << " missing=" << probe.gpu_src_words_missing
+        << " entries=" << probe.gpu_src_write_entries << "\n";
   }
 
   const u32 poly_count =
@@ -463,6 +555,30 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
   }
 
   out << "RECENT\n";
+  const u32 rect_count =
+      std::min<u32>(gcmd.gp0_textured_rect_count,
+                    static_cast<u32>(GpuCommandDebugInfo::kRecentRects));
+  for (u32 i = 0; i < std::min<u32>(rect_count, 40u); ++i) {
+    const u32 rect_index =
+        (gcmd.gp0_textured_rect_count - 1u - i) %
+        static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
+    out << "  RECT[" << i << "] op=0x" << std::hex
+        << static_cast<unsigned>(gcmd.rect_opcode[rect_index]) << std::dec
+        << " xy=(" << gcmd.rect_x[rect_index] << ","
+        << gcmd.rect_y[rect_index] << ") wh=("
+        << gcmd.rect_w[rect_index] << "," << gcmd.rect_h[rect_index]
+        << ") uv=(" << static_cast<unsigned>(gcmd.rect_u[rect_index]) << ","
+        << static_cast<unsigned>(gcmd.rect_v[rect_index]) << ")"
+        << " page=0x" << std::hex
+        << static_cast<unsigned>(gcmd.rect_texpage[rect_index])
+        << " clut=0x" << static_cast<unsigned>(gcmd.rect_clut[rect_index])
+        << std::dec << " depth="
+        << static_cast<unsigned>(gcmd.rect_depth[rect_index])
+        << " raw=" << static_cast<unsigned>(gcmd.rect_raw[rect_index])
+        << " rgb=(" << static_cast<unsigned>(gcmd.rect_r[rect_index]) << ","
+        << static_cast<unsigned>(gcmd.rect_g[rect_index]) << ","
+        << static_cast<unsigned>(gcmd.rect_b[rect_index]) << ")\n";
+  }
   for (u32 i = 0; i < std::min<u32>(poly_count, 12u); ++i) {
     const u32 poly_index = indices[static_cast<size_t>(i)];
     const GpuDebugDumpRegion src =
@@ -890,7 +1006,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
   };
   auto dump_display_ppm = [](System &sys, int frame_index) {
     std::vector<u32> rgba;
-    const DisplaySampleInfo sample = sys.gpu().build_display_rgba(rgba, false);
+    const DisplaySampleInfo sample =
+        sys.gpu().build_presented_display_rgba(rgba, false);
     if (sample.width <= 0 || sample.height <= 0 || rgba.empty()) {
       return;
     }
@@ -925,6 +1042,12 @@ static int run_frame_test(const std::string &bios_path, int frames,
   LOG_INFO("=== VibeStation Frame Test ===");
   LOG_INFO("BIOS path: %s", bios_path.c_str());
   LOG_INFO("Frames: %d", frames);
+  if (g_auto_input.enabled()) {
+    LOG_INFO("Auto input: mask=0x%04X start=%d end=%d period=%d hold=%d",
+             static_cast<unsigned>(g_auto_input.mask), g_auto_input.start_frame,
+             g_auto_input.end_frame, g_auto_input.period_frames,
+             g_auto_input.hold_frames);
+  }
   if (!gpu_debug_path.empty()) {
     LOG_INFO("GPU debug file: %s", gpu_debug_path.c_str());
   }
@@ -1010,8 +1133,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
   int first_logo_candidate_frame = -1;
 
   for (int i = 0; i < frames; ++i) {
-    // Diagnostic probe: hold Start pressed (active-low bit3) for boot-test runs.
-    sys->sio().set_button_state(static_cast<u16>(0xFFFFu & ~0x0008u));
+    sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
     const System::BootDiagnostics &diag = sys->boot_diag();
     const u32 pc = sys->cpu().pc();
@@ -1440,6 +1562,12 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   LOG_INFO("Frames: %d", frames);
   LOG_INFO("Disc BIN: %s", bin_path.c_str());
   LOG_INFO("Disc CUE: %s", cue_path.c_str());
+  if (g_auto_input.enabled()) {
+    LOG_INFO("Auto input: mask=0x%04X start=%d end=%d period=%d hold=%d",
+             static_cast<unsigned>(g_auto_input.mask), g_auto_input.start_frame,
+             g_auto_input.end_frame, g_auto_input.period_frames,
+             g_auto_input.hold_frames);
+  }
 
   auto sys = std::make_unique<System>();
   if (!sys->load_bios(bios_path)) {
@@ -1524,6 +1652,7 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
            pc_band_name(last_band));
 
   for (int i = 0; i < frames; ++i) {
+    sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
 
     const u32 pc = sys->cpu().pc();
@@ -1968,10 +2097,78 @@ int main(int argc, char *argv[]) {
       ++i;
       continue;
     }
+    if (a == "--host-wav-out" && (i + 1) < args.size()) {
+      g_spu_host_wav_out_path = args[i + 1];
+      ++i;
+      continue;
+    }
+    if (a == "--lag-stutter") {
+      g_spu_enable_lag_stutter = true;
+      continue;
+    }
+    if (a == "--no-lag-stutter") {
+      g_spu_enable_lag_stutter = false;
+      g_spu_enable_slowdown_stutter = false;
+      continue;
+    }
+    if (a == "--slowdown-stutter") {
+      g_spu_enable_lag_stutter = true;
+      g_spu_enable_slowdown_stutter = true;
+      continue;
+    }
+    if (a == "--no-slowdown-stutter") {
+      g_spu_enable_slowdown_stutter = false;
+      continue;
+    }
     if (a == "--gpu-debug-file" && (i + 1) < args.size()) {
       gpu_debug_out_path = args[i + 1];
       g_mdec_debug_upload_probe = true;
       ++i;
+      continue;
+    }
+    if ((a == "--auto-input" || a == "--auto-key") && (i + 1) < args.size()) {
+      if (!add_auto_input_buttons(args[i + 1])) {
+        fprintf(stderr, "WARN: Ignoring invalid auto input spec: %s\n",
+                args[i + 1].c_str());
+      }
+      ++i;
+      continue;
+    }
+    if ((a == "--auto-mash" || a == "--auto-mash-key") &&
+        (i + 1) < args.size()) {
+      if (!add_auto_input_buttons(args[i + 1])) {
+        fprintf(stderr, "WARN: Ignoring invalid auto mash spec: %s\n",
+                args[i + 1].c_str());
+      } else {
+        g_auto_input.period_frames = 6;
+        g_auto_input.hold_frames = 2;
+      }
+      ++i;
+      continue;
+    }
+    if (a == "--auto-input-start" && (i + 1) < args.size()) {
+      g_auto_input.start_frame = std::max(1, std::atoi(args[i + 1].c_str()));
+      ++i;
+      continue;
+    }
+    if (a == "--auto-input-end" && (i + 1) < args.size()) {
+      g_auto_input.end_frame = std::max(0, std::atoi(args[i + 1].c_str()));
+      ++i;
+      continue;
+    }
+    if (a == "--auto-input-period" && (i + 1) < args.size()) {
+      g_auto_input.period_frames = std::max(1, std::atoi(args[i + 1].c_str()));
+      ++i;
+      continue;
+    }
+    if (a == "--auto-input-hold" && (i + 1) < args.size()) {
+      g_auto_input.hold_frames = std::max(1, std::atoi(args[i + 1].c_str()));
+      ++i;
+      continue;
+    }
+    if (a == "--auto-input-hold-key") {
+      g_auto_input.period_frames = 1;
+      g_auto_input.hold_frames = 1;
       continue;
     }
     if (a == "--windowed-disc" && (i + 2) < args.size()) {
@@ -2107,6 +2304,21 @@ int main(int argc, char *argv[]) {
     if (passthrough.size() >= 5) {
       rc = run_frame_test(passthrough[1], frames, passthrough[3],
                           passthrough[4], gpu_debug_out_path);
+    } else if (passthrough.size() >= 4) {
+      const std::string cue_path = passthrough[3];
+      const std::string bin_path = resolve_first_bin_from_cue_cli(cue_path);
+      if (bin_path.empty()) {
+        LOG_ERROR("FRAME_TEST_FAIL reason=cue_bin_resolve cue=%s",
+                  cue_path.c_str());
+        if (g_log_file) {
+          log_flush_repeats();
+          std::fclose(g_log_file);
+          g_log_file = nullptr;
+        }
+        return 1;
+      }
+      rc = run_frame_test(passthrough[1], frames, bin_path, cue_path,
+                          gpu_debug_out_path);
     } else {
       rc = run_frame_test(passthrough[1], frames, "", "", gpu_debug_out_path);
     }

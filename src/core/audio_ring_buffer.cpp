@@ -130,10 +130,19 @@ void AudioRingBuffer::push_samples(const s16 *samples, size_t count) {
 
   std::lock_guard<std::mutex> lock(mutex_);
 
+  if (count > capacity_) {
+    const size_t drop = count - capacity_;
+    samples += drop;
+    count = capacity_;
+  }
+
   // If pushing would overflow, discard oldest to make room.
   const size_t used = used_samples();
   if (used + count > capacity_) {
     const size_t discard = (used + count) - capacity_;
+    std::vector<s16> stale(discard);
+    copy_from_ring(read_pos_, stale.data(), discard);
+    history_push(stale.data(), stale.size());
     read_pos_ = advance_pos(read_pos_, discard, buffer_.size());
   }
 
@@ -153,6 +162,21 @@ void AudioRingBuffer::push_samples(const s16 *samples, size_t count) {
                 second_chunk * sizeof(s16));
     write_pos_ = second_chunk;
   }
+}
+
+size_t AudioRingBuffer::discard_oldest_samples(size_t count) {
+  if (count == 0 || capacity_ == 0) return 0;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  const size_t used = used_samples();
+  const size_t discard = std::min(count, used);
+  if (discard == 0) return 0;
+
+  std::vector<s16> stale(discard);
+  copy_from_ring(read_pos_, stale.data(), discard);
+  history_push(stale.data(), stale.size());
+  read_pos_ = advance_pos(read_pos_, discard, buffer_.size());
+  return discard;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,31 +250,163 @@ void AudioRingBuffer::read_samples(s16 *out_buffer, size_t requested_count) {
     refresh_stutter_loop(available, false);
   }
 
+  size_t drained = 0;
+  if (!was_stuttering && available > 0) {
+    drained = std::min(available, requested_count);
+    copy_from_ring(read_pos_, out_buffer, drained);
+    read_pos_ = advance_pos(read_pos_, drained, buffer_.size());
+    history_push(out_buffer, drained);
+    update_last_output_frame(out_buffer, drained);
+  }
+
+  const size_t remaining = requested_count - drained;
+  if (remaining == 0) {
+    update_last_output_frame(out_buffer, requested_count);
+    return;
+  }
+
+  if (stutter_loop_buffer_.empty() && !was_stuttering && history_valid_ > 0 &&
+      g_spu_enable_lag_stutter) {
+    refresh_stutter_loop(0, true);
+    stutter_resume_threshold_ =
+        std::min(capacity_, std::max(requested_count * 2u, requested_count));
+    stutter_active_ = true;
+  }
+
   if (!stutter_loop_buffer_.empty()) {
-    copy_from_stutter_loop(out_buffer, requested_count);
+    copy_from_stutter_loop(out_buffer + drained, remaining);
     if (!was_stuttering) {
-      crossfade_from_stutter(out_buffer, requested_count);
+      crossfade_from_stutter(out_buffer + drained, remaining);
     }
     update_last_output_frame(out_buffer, requested_count);
-  } else {
-    size_t drained = 0;
-    if (available > 0) {
-      copy_from_ring(read_pos_, out_buffer, available);
-      read_pos_ = advance_pos(read_pos_, available, buffer_.size());
-      history_push(out_buffer, available);
-      drained = available;
-    }
+    return;
+  }
 
-    for (size_t i = drained; i < requested_count; ++i) {
+  for (size_t i = drained; i < requested_count; ++i) {
+    out_buffer[i] = has_last_output_frame_
+        ? last_output_frame_[i % std::max<u32>(channels_, 1u)]
+        : 0;
+  }
+  stutter_active_ = false;
+  stutter_resume_threshold_ = 0;
+  stutter_loop_pos_ = 0;
+  update_last_output_frame(out_buffer, requested_count);
+}
+
+void AudioRingBuffer::read_live_samples(s16 *out_buffer,
+                                        size_t requested_count) {
+  if (requested_count == 0 || out_buffer == nullptr) return;
+  if (capacity_ == 0) {
+    std::memset(out_buffer, 0, requested_count * sizeof(s16));
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  stutter_active_ = false;
+  stutter_resume_threshold_ = 0;
+  stutter_loop_buffer_.clear();
+  stutter_loop_pos_ = 0;
+
+  const size_t frame_samples = std::max<u32>(channels_, 1u);
+  const size_t requested_aligned =
+      requested_count - (requested_count % frame_samples);
+  const size_t available = used_samples();
+  const size_t available_aligned =
+      available - (available % frame_samples);
+
+  if (requested_aligned == 0) {
+    std::memset(out_buffer, 0, requested_count * sizeof(s16));
+    return;
+  }
+
+  if (available_aligned >= requested_aligned) {
+    copy_from_ring(read_pos_, out_buffer, requested_aligned);
+    read_pos_ = advance_pos(read_pos_, requested_aligned, buffer_.size());
+    history_push(out_buffer, requested_aligned);
+    update_last_output_frame(out_buffer, requested_aligned);
+    if (requested_aligned < requested_count) {
+      std::memset(out_buffer + requested_aligned, 0,
+                  (requested_count - requested_aligned) * sizeof(s16));
+    }
+    return;
+  }
+
+  if (available_aligned == 0) {
+    std::memset(out_buffer, 0, requested_count * sizeof(s16));
+    has_last_output_frame_ = false;
+    last_output_frame_.fill(0);
+    return;
+  }
+
+  std::vector<s16> live(available_aligned);
+  copy_from_ring(read_pos_, live.data(), available_aligned);
+  read_pos_ = advance_pos(read_pos_, available_aligned, buffer_.size());
+  history_push(live.data(), live.size());
+
+  const size_t live_frames = available_aligned / frame_samples;
+  const size_t requested_frames = requested_aligned / frame_samples;
+  for (size_t frame = 0; frame < requested_frames; ++frame) {
+    const size_t src_frame =
+        std::min((frame * live_frames) / requested_frames, live_frames - 1u);
+    for (size_t ch = 0; ch < frame_samples; ++ch) {
+      out_buffer[(frame * frame_samples) + ch] =
+          live[(src_frame * frame_samples) + ch];
+    }
+  }
+
+  if (requested_aligned < requested_count) {
+    std::memset(out_buffer + requested_aligned, 0,
+                (requested_count - requested_aligned) * sizeof(s16));
+  }
+  update_last_output_frame(out_buffer, requested_aligned);
+}
+
+void AudioRingBuffer::read_stutter_samples(s16 *out_buffer,
+                                           size_t requested_count) {
+  if (requested_count == 0 || out_buffer == nullptr) return;
+  if (capacity_ == 0) {
+    std::memset(out_buffer, 0, requested_count * sizeof(s16));
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  const size_t available = used_samples();
+  if (available > 0) {
+    std::vector<s16> fresh(available);
+    copy_from_ring(read_pos_, fresh.data(), available);
+    read_pos_ = advance_pos(read_pos_, available, buffer_.size());
+    history_push(fresh.data(), fresh.size());
+  }
+
+  if (!g_spu_enable_lag_stutter) {
+    for (size_t i = 0; i < requested_count; ++i) {
       out_buffer[i] = has_last_output_frame_
           ? last_output_frame_[i % std::max<u32>(channels_, 1u)]
           : 0;
     }
     stutter_active_ = false;
-    stutter_resume_threshold_ = 0;
-    stutter_loop_pos_ = 0;
     update_last_output_frame(out_buffer, requested_count);
+    return;
   }
+
+  if (history_valid_ > 0) {
+    refresh_stutter_loop(0, !stutter_active_.load(std::memory_order_acquire));
+    stutter_resume_threshold_ = std::min(capacity_, history_buffer_.size());
+    stutter_active_ = true;
+  }
+
+  if (!stutter_loop_buffer_.empty()) {
+    copy_from_stutter_loop(out_buffer, requested_count);
+  } else {
+    for (size_t i = 0; i < requested_count; ++i) {
+      out_buffer[i] = has_last_output_frame_
+          ? last_output_frame_[i % std::max<u32>(channels_, 1u)]
+          : 0;
+    }
+  }
+  update_last_output_frame(out_buffer, requested_count);
 }
 
 // ---------------------------------------------------------------------------

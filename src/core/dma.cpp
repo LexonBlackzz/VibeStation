@@ -4,7 +4,7 @@
 #include <chrono>
 
 namespace {
-constexpr u32 kStreamingDmaSliceWords = 32u;
+constexpr u32 kStreamingDmaSliceWords = 96u;
 constexpr u32 kDicrWriteMask = 0x00FF807Fu;
 constexpr u32 kDicrResetMask = 0x7F000000u;
 
@@ -146,7 +146,6 @@ void DmaController::write(u32 offset, u32 value) {
       }
       if (ch.is_active() && channel_enabled(channel) && request_active(channel)) {
         execute_dma(channel);
-        drain_cpu_blocking_channel(channel);
       }
       break;
     default:
@@ -224,44 +223,45 @@ void DmaController::execute_dma(int channel) {
     }
     break;
   case DmaChannel::SyncMode::Block:
-    dma_block(channel, slice_words_for_channel(channel));
+  {
+    u32 words_budget = slice_words_for_channel(channel);
+    u32 safety = 0;
+    while (ch.is_active() && channel_enabled(channel) && request_active(channel) &&
+           (ch.block_count() != 0 || ch.block_words_remaining != 0) &&
+           safety++ < 0x10000u) {
+      const u32 before_count = ch.block_count();
+      const u32 before_remaining = ch.block_words_remaining;
+      const u32 before_addr = ch.base_addr;
+      const u32 max_words = (words_budget == 0xFFFFFFFFu) ? 0xFFFFFFFFu : words_budget;
+
+      dma_block(channel, max_words);
+      const u32 moved_words = last_debug_[channel].transfer_words;
+      if (moved_words == 0) {
+        break;
+      }
+
+      if (words_budget != 0xFFFFFFFFu) {
+        if (moved_words >= words_budget) {
+          break;
+        }
+        words_budget -= moved_words;
+      }
+
+      if (before_count == ch.block_count() &&
+          before_remaining == ch.block_words_remaining &&
+          before_addr == ch.base_addr) {
+        break;
+      }
+    }
     if (ch.block_count() == 0 && ch.block_words_remaining == 0) {
       transfer_complete(channel);
     }
     break;
+  }
   case DmaChannel::SyncMode::LinkedList:
     dma_linked_list(channel);
     transfer_complete(channel);
     break;
-  }
-}
-
-void DmaController::drain_cpu_blocking_channel(int channel) {
-  if (!is_streaming_dma_channel(channel)) {
-    return;
-  }
-
-  auto &ch = channels_[channel];
-  u32 safety = 0;
-  while (ch.is_active() && channel_enabled(channel) && request_active(channel) &&
-         safety++ < 0x10000u) {
-    const u32 old_addr = ch.base_addr;
-    const u32 old_block_ctrl = ch.block_ctrl;
-    const u32 old_channel_ctrl = ch.channel_ctrl;
-    const u32 old_remaining = ch.block_words_remaining;
-
-    execute_dma(channel);
-
-    if (ch.base_addr == old_addr && ch.block_ctrl == old_block_ctrl &&
-        ch.channel_ctrl == old_channel_ctrl &&
-        ch.block_words_remaining == old_remaining) {
-      break;
-    }
-
-  }
-
-  if (safety >= 0x10000u) {
-    LOG_WARN("DMA: channel %d CPU-blocking drain hit safety limit", channel);
   }
 }
 

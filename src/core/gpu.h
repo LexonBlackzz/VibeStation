@@ -84,7 +84,7 @@ struct DisplayDebugInfo {
 };
 
 struct GpuCommandDebugInfo {
-  static constexpr size_t kRecentRects = 8;
+  static constexpr size_t kRecentRects = 128;
   static constexpr size_t kRecentPolys = 64;
   u32 gp1_display_area_count = 0;
   u32 gp1_horizontal_range_count = 0;
@@ -165,6 +165,12 @@ public:
                                        bool include_stats = true) const {
     return build_display_rgba(&rgba, include_stats);
   }
+  DisplaySampleInfo build_presented_display_rgba(std::vector<u32> *rgba,
+                                                 bool include_stats = true) const;
+  DisplaySampleInfo build_presented_display_rgba(std::vector<u32> &rgba,
+                                                 bool include_stats = true) const {
+    return build_presented_display_rgba(&rgba, include_stats);
+  }
   DisplayDebugInfo debug_display_info() const;
   GpuCommandDebugInfo debug_command_info() const { return command_debug_; }
 
@@ -226,6 +232,9 @@ private:
   u32 gpuread_latch_ = 0;
 
   bool frame_complete_ = false;
+  bool presented_display_valid_ = false;
+  DisplaySampleInfo presented_display_info_{};
+  std::vector<u32> presented_display_rgba_{};
   GpuCommandDebugInfo command_debug_{};
 
   // ── GP0 Command Handlers ───────────────────────────────────────

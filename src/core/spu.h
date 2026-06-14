@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -165,6 +166,9 @@ public:
   }
   void set_host_playback_enabled(bool enabled);
   void set_force_reverb(bool enabled);
+  void set_lag_stutter_hint(bool enabled) {
+    lag_stutter_hint_.store(enabled, std::memory_order_release);
+  }
 
   void tick(u32 cycles);
   void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
@@ -195,9 +199,9 @@ public:
   size_t replacement_sample_bytes() const { return replacement_sample_.size(); }
 
   // ── Ring-buffer audio pipeline ─────────────────────────────────────
-  // Called once per frame from the app/main thread to pump accumulated
-  // samples from the ring buffer into SDL's hardware queue.  The ring
-  // buffer's read path handles stutter logic automatically when lagging.
+  // Called once per frame from the app/main thread for audio diagnostics.
+  // Playback itself is pulled by SDL's audio callback so tiny buffers do not
+  // depend on GUI frame pacing.
   void pump_audio_to_device();
 
   // Direct access for UI / diagnostics.
@@ -318,9 +322,9 @@ private:
   System *sys_ = nullptr;
   SDL_AudioDeviceID audio_device_ = 0;
   bool audio_enabled_ = false;
-  bool audio_started_ = false;
-  bool host_playback_enabled_ = true;
-  bool ring_stutter_active_last_pump_ = false;
+  std::atomic<bool> audio_started_{false};
+  std::atomic<bool> host_playback_enabled_{false};
+  std::atomic<bool> ring_stutter_active_last_pump_{false};
   bool capture_enabled_ = false;
   u32 host_buffer_bytes_ = 0;
   u32 opened_audio_samples_ = 0;
@@ -363,6 +367,7 @@ private:
   std::atomic<double> audio_output_speed_{1.0};
   std::atomic<double> reverb_mix_multiplier_{1.0};
   std::atomic<bool> force_reverb_enabled_{false};
+  std::atomic<bool> lag_stutter_hint_{false};
 
   s16 noise_level_ = 1;
   s32 noise_timer_ = 0;
@@ -371,6 +376,8 @@ private:
   AudioRingBuffer audio_ring_buffer_;
   std::vector<s16> mix_buffer_;
   std::vector<s16> capture_samples_;
+  std::ofstream host_wav_capture_;
+  u32 host_wav_capture_bytes_ = 0;
   std::vector<s16> cd_input_samples_;
   std::vector<u8> replacement_sample_;
   bool replacement_sample_enabled_ = false;
@@ -459,6 +466,11 @@ private:
                           bool writes_enabled, bool same_diff_enabled);
   std::array<float, 2> step_reverb(float send_l, float send_r, u16 spucnt_eff);
   void reset_forced_reverb_state();
+  bool start_host_wav_capture(const std::string &path);
+  void stop_host_wav_capture();
+  void append_host_wav_capture(const s16 *samples, size_t count);
+  static void sdl_audio_callback_thunk(void *userdata, Uint8 *stream, int len);
+  void sdl_audio_callback(Uint8 *stream, int len);
   void apply_forced_reverb_fallback(float send_l, float send_r, float &wet_l,
                                     float &wet_r);
 

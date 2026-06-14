@@ -427,7 +427,7 @@ void EmuRunner::worker_main() {
                 // UI output should always use the stable present path.
                 // include_stats switches to a slower/alternate conversion path
                 // that can drop BIOS menu cursor pixels on some scenes.
-                system_->gpu().build_display_rgba(frame.rgba, false);
+                system_->gpu().build_presented_display_rgba(frame.rgba, false);
             update_snapshot_display_diag_from_sample(snapshot.boot_diag, sample);
 
             frame.frame_id = snapshot.frame_id;

@@ -79,7 +79,6 @@ private:
 
   void recompute_dicr_master(bool request_irq_on_rise);
   void execute_dma(int channel);
-  void drain_cpu_blocking_channel(int channel);
   void dma_block(int channel, u32 max_words = 0xFFFFFFFFu);
   void dma_linked_list(int channel);
   void transfer_complete(int channel);

@@ -72,6 +72,7 @@ private:
 	float smoothed_audio_buffer_fill_pct_ = -1.0f;
 	float smoothed_audio_buffer_available_ms_ = -1.0f;
 	float smoothed_audio_queue_kb_ = -1.0f;
+	bool slowdown_stutter_hint_active_ = false;
 	u32 last_audio_metrics_smooth_tick_ms_ = 0;
 	int pending_bind_index_ = -1;
 

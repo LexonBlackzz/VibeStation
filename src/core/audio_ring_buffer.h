@@ -73,6 +73,11 @@ public:
   // @param count    Number of samples to push (even 1 is valid).
   void push_samples(const s16 *samples, size_t count);
 
+  // Drop the oldest unread live samples without invoking stutter synthesis.
+  // Dropped audio is still recorded into the rolling history so the optional
+  // stutter loop can keep evolving without adding playback latency.
+  size_t discard_oldest_samples(size_t count);
+
   // --------------------------------------------------------------------------
   // Consumer (Host Audio thread) — read_samples
   // --------------------------------------------------------------------------
@@ -90,6 +95,17 @@ public:
   //                         `requested_count` s16 values).
   // @param requested_count  Number of samples to produce.
   void read_samples(s16 *out_buffer, size_t requested_count);
+
+  // DuckStation-style normal playback read. This never enters the stutter
+  // loop: it consumes fresh frames when available, stretches a short partial
+  // read over the requested output to avoid a hard silence splice, and emits
+  // silence only when completely empty.
+  void read_live_samples(s16 *out_buffer, size_t requested_count);
+
+  // Force Source-style stutter output while consuming any newly generated
+  // live audio into the rolling history. This keeps the loop evolving during
+  // sustained emulation slowdown without playing delayed live audio.
+  void read_stutter_samples(s16 *out_buffer, size_t requested_count);
 
   // --------------------------------------------------------------------------
   // Query helpers

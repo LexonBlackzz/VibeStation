@@ -2801,6 +2801,7 @@ void CdRom::tick(u32 cycles) {
       seek_complete_ = true;
       if (pending_read_start_) {
         pending_read_start_ = false;
+        read_startup_pending_ = false;
         state_ = State::Reading;
         pending_cycles_ = std::max(1, read_period_cycles_);
       } else {

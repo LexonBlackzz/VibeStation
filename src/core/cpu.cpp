@@ -444,6 +444,7 @@ void Cpu::reset() {
   gte_result_ready_cycle_ = 0;
   muldiv_result_ready_cycle_ = 0;
   cycle_penalty_ = 0;
+  executing_step_ = false;
   std::memset(cop0_regs_, 0, sizeof(cop0_regs_));
   std::memset(exception_return_regs_, 0, sizeof(exception_return_regs_));
   exception_return_hi_ = 0;
@@ -599,7 +600,11 @@ void Cpu::schedule_load(u32 index, u32 value) {
 }
 
 void Cpu::add_cycle_penalty(u32 cycles) {
-  cycle_penalty_ += cycles;
+  if (executing_step_) {
+    cycle_penalty_ += cycles;
+  } else {
+    cycles_ += cycles;
+  }
 }
 
 u32 Cpu::cpu_data_read_penalty(u32 addr) const {
@@ -1113,6 +1118,7 @@ u32 Cpu::step() {
   static u64 trace_repeat = 0;
   static u32 prev_pc_for_diag = 0;
   const bool cpu_diag = cpu_diag_enabled();
+  executing_step_ = true;
   current_pc_ = pc_;
   g_diag_current_pc = current_pc_;
   exception_raised_ = false;
@@ -1188,6 +1194,7 @@ u32 Cpu::step() {
     exception(Exception::Interrupt);
     constexpr u32 irq_cycles = 2;
     cycles_ += irq_cycles;
+    executing_step_ = false;
     return irq_cycles;
   }
 
@@ -1214,6 +1221,7 @@ u32 Cpu::step() {
   if (exception_raised_) {
     constexpr u32 fault_cycles = 2;
     cycles_ += fault_cycles;
+    executing_step_ = false;
     return fault_cycles;
   }
 
@@ -2406,6 +2414,7 @@ u32 Cpu::step() {
 
 
   cycles_ += consumed_cycles;
+  executing_step_ = false;
 
   prev_pc_for_diag = current_pc_;
   return consumed_cycles;
