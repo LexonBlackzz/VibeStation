@@ -2560,6 +2560,9 @@ void Cpu::execute(u32 i) {
     log_repeated_decode_warning("opcode", op(i), i, current_pc_,
                                 "CPU: Unhandled opcode 0x%02X instr=0x%08X at PC=0x%08X");
     log_dma_context(sys_, current_pc_, i, gpr_);
+    if (g_experimental_unhandled_special_returns_zero) {
+      break;
+    }
     exception(Exception::ReservedInst);
     break;
   }
@@ -3535,6 +3538,12 @@ void Cpu::op_cop0(u32 i) {
       cop0_sr_ |= (mode >> 2);
     }
     else {
+        if (g_experimental_unhandled_special_returns_zero) {
+            log_repeated_decode_warning(
+                "cop0-co", i & 0x3Fu, i, current_pc_,
+                "CPU: Unhandled COP0 CO funct 0x%02X instr=0x%08X at PC=0x%08X");
+            break;
+        }
         LOG_WARN("CPU: Unhandled COP0 CO funct 0x%02X at PC=0x%08X", i & 0x3F,
             current_pc_);
         exception(Exception::ReservedInst);
@@ -3546,6 +3555,12 @@ void Cpu::op_cop0(u32 i) {
     break;
 
   default:
+    if (g_experimental_unhandled_special_returns_zero) {
+      log_repeated_decode_warning(
+          "cop0", sub, i, current_pc_,
+          "CPU: Unhandled COP0 sub-op 0x%02X instr=0x%08X at PC=0x%08X");
+      break;
+    }
     LOG_WARN("CPU: Unhandled COP0 sub-op 0x%02X at PC=0x%08X", sub,
              current_pc_);
     exception(Exception::ReservedInst);
@@ -3608,6 +3623,12 @@ void Cpu::op_cop2(u32 i) {
       gte_result_ready_cycle_ = cycles_ + static_cast<u64>(cycle_penalty_) +
           static_cast<u64>(gte_command_cycles(i));
     } else {
+      if (g_experimental_unhandled_special_returns_zero) {
+        log_repeated_decode_warning(
+            "cop2", sub, i, current_pc_,
+            "CPU: Unhandled COP2 sub-op 0x%02X instr=0x%08X at PC=0x%08X");
+        break;
+      }
       LOG_WARN("CPU: Unhandled COP2 sub-op 0x%02X at PC=0x%08X", sub,
                current_pc_);
       exception(Exception::ReservedInst);

@@ -2254,6 +2254,25 @@ int main(int argc, char *argv[]) {
       g_experimental_bios_size_mode = true;
       continue;
     }
+    if (a == "--experimental-dma-command-sanitizer") {
+      if ((i + 1) < args.size()) {
+        std::string v = args[i + 1];
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
+        const bool looks_bool =
+            (v == "1" || v == "0" || v == "on" || v == "off" ||
+             v == "true" || v == "false");
+        if (looks_bool) {
+          g_experimental_dma_command_sanitizer =
+              !(v == "0" || v == "off" || v == "false");
+          ++i;
+          continue;
+        }
+      }
+      g_experimental_dma_command_sanitizer = true;
+      continue;
+    }
     passthrough.push_back(a);
   }
 

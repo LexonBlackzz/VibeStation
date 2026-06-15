@@ -3515,11 +3515,16 @@ void App::panel_settings() {
                     "Unsafe PS2 mode maps full BIOS size and is expected to be unstable.");
 
                 ImGui::Separator();
-                ImGui::Checkbox("Unhandled SPECIAL fallback (rd <- 0)",
+                ImGui::Checkbox("Unhandled opcode fallback",
                     &g_experimental_unhandled_special_returns_zero);
                 ImGui::TextColored(
                     ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
-                    "When enabled, unknown SPECIAL funct values write 0 to rd instead of raising Reserved Instruction.");
+                    "When enabled, unknown opcodes act as NOPs; unknown SPECIAL funct values still write 0 to rd.");
+                ImGui::Checkbox("DMA command sanitizer",
+                    &g_experimental_dma_command_sanitizer);
+                ImGui::TextColored(
+                    ImVec4(0.8f, 0.5f, 0.3f, 1.0f),
+                    "When enabled, malformed DMA channel commands are coerced into legal transfer commands.");
 
                 ImGui::EndTabItem();
             }
@@ -7218,6 +7223,10 @@ void App::load_persistent_config() {
             g_experimental_unhandled_special_returns_zero =
                 parse_bool(value, g_experimental_unhandled_special_returns_zero);
         }
+        else if (key == "experimental_dma_command_sanitizer") {
+            g_experimental_dma_command_sanitizer =
+                parse_bool(value, g_experimental_dma_command_sanitizer);
+        }
         else if (key == "deinterlace_mode") {
             const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
             const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
@@ -7339,6 +7348,8 @@ void App::save_persistent_config() const {
     out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";
     out << "experimental_unhandled_special_returns_zero=" <<
         (g_experimental_unhandled_special_returns_zero ? 1 : 0) << "\n";
+    out << "experimental_dma_command_sanitizer=" <<
+        (g_experimental_dma_command_sanitizer ? 1 : 0) << "\n";
     out << "deinterlace_mode=" << static_cast<int>(g_deinterlace_mode) << "\n";
     out << "bilinear_filtering=" << (g_bilinear_filtering ? 1 : 0) << "\n";
     out << "output_resolution_mode=" << static_cast<int>(g_output_resolution_mode) << "\n";

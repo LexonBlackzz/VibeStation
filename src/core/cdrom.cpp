@@ -993,18 +993,27 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     return false;
   }
 
+  const int sector_size = std::max(1, track->sector_size);
+  auto synthesize_sector = [&raw_sector, sector_size]() {
+    raw_sector.assign(static_cast<size_t>(sector_size), 0xFFu);
+    return true;
+  };
+
   const int rel = psx_lba - (track->index01_abs_lba - 150);
   if (rel < 0) {
-    return false;
+    return synthesize_sector();
   }
 
   const int file_lba = track->index01_file_lba + rel;
-  const int sector_size = std::max(1, track->sector_size);
+  if (file_lba < 0) {
+    return synthesize_sector();
+  }
+
   const u64 offset = static_cast<u64>(file_lba) * static_cast<u64>(sector_size);
   const std::string target_path =
       !track->filename.empty() ? track->filename : resolved_disc_path_;
   if (target_path.empty()) {
-    return false;
+    return synthesize_sector();
   }
 
   std::ifstream alt_file;
@@ -1021,7 +1030,7 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   } else {
     alt_file.open(std::filesystem::path(target_path), std::ios::binary);
     if (!alt_file.is_open()) {
-      return false;
+      return synthesize_sector();
     }
     stream = &alt_file;
     target_size = file_size_bytes(target_path);
@@ -1029,17 +1038,26 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
 
   if (target_size > 0 &&
       offset + static_cast<u64>(sector_size) > target_size) {
-    return false;
+    return synthesize_sector();
   }
 
   raw_sector.resize(static_cast<size_t>(sector_size));
   stream->clear();
   stream->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
   if (!stream->good()) {
-    return false;
+    return synthesize_sector();
   }
   stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
-  return stream->gcount() == sector_size;
+  if (stream->gcount() == sector_size) {
+    return true;
+  }
+
+  const std::streamsize got = std::max<std::streamsize>(stream->gcount(), 0);
+  raw_sector.resize(static_cast<size_t>(sector_size), 0xFFu);
+  if (static_cast<size_t>(got) < raw_sector.size()) {
+    std::fill(raw_sector.begin() + got, raw_sector.end(), 0xFFu);
+  }
+  return true;
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }

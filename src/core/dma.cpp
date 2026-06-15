@@ -11,6 +11,60 @@ constexpr u32 kDicrResetMask = 0x7F000000u;
 bool is_streaming_dma_channel(int channel) {
   return channel == 0 || channel == 1 || channel == 3;
 }
+
+u32 sanitize_corrupt_chcr(int channel, u32 value) {
+  constexpr u32 kChcrLegalMask =
+      (1u << 0) | (1u << 1) | (1u << 8) | (0x3u << 9) |
+      (0x7u << 16) | (0x7u << 20) | (1u << 24) | (1u << 28);
+  u32 sanitized = value;
+
+  const bool has_command_byte = (sanitized & 0xFF000000u) != 0;
+  if (has_command_byte) {
+    sanitized |= (1u << 24) | (1u << 28);
+  }
+
+  bool trigger = (sanitized & (1u << 28)) != 0;
+  bool enabled = (sanitized & (1u << 24)) != 0;
+  if (trigger && !enabled) {
+    sanitized |= (1u << 24);
+    enabled = true;
+  }
+  if (enabled && !trigger && (((sanitized >> 9) & 0x3u) == 0u)) {
+    sanitized |= (1u << 28);
+  }
+
+  const u32 sync = (sanitized >> 9) & 0x3u;
+  if (sync == 3u) {
+    sanitized &= ~(0x3u << 9);
+    sanitized |= ((channel == 2) ? 2u : 1u) << 9;
+  }
+
+  if (((sanitized >> 9) & 0x3u) == 2u && channel != 2) {
+    sanitized &= ~(0x3u << 9);
+    sanitized |= 1u << 9;
+  }
+
+  switch (channel) {
+  case 0: // MDEC in: RAM -> device
+  case 2: // GPU: linked-list and GP0 DMA are RAM -> device
+    sanitized |= 1u;
+    break;
+  case 1: // MDEC out: device -> RAM
+  case 3: // CDROM: device -> RAM
+  case 6: // OTC: writes ordering table entries to RAM
+    sanitized &= ~1u;
+    break;
+  default:
+    break;
+  }
+
+  if (channel == 6) {
+    sanitized |= 1u << 1;
+    sanitized &= ~(0x3u << 9);
+  }
+
+  return sanitized & kChcrLegalMask;
+}
 } // namespace
 
 u32 DmaController::slice_words_for_channel(int channel) const {
@@ -132,6 +186,14 @@ void DmaController::write(u32 offset, u32 value) {
       break;
     case 0x8:
       ch.block_words_remaining = 0;
+      if (g_experimental_dma_command_sanitizer) {
+        const u32 sanitized = sanitize_corrupt_chcr(channel, value);
+        if (sanitized != value) {
+          LOG_WARN("DMA: Sanitized CH%d CHCR 0x%08X -> 0x%08X",
+                   channel, value, sanitized);
+        }
+        value = sanitized;
+      }
       ch.channel_ctrl = value;
       if (g_trace_dma) {
         static u64 chcr_log_count = 0;

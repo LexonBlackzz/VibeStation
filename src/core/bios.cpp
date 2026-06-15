@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 bool Bios::load(const std::string &path) {
@@ -19,43 +20,45 @@ bool Bios::load(const std::string &path) {
   }
 
   auto size = file.tellg();
+  if (size <= 0) {
+    LOG_ERROR("BIOS: Invalid empty image: %s", path.c_str());
+    return false;
+  }
+
   const bool size_is_standard =
       (size == static_cast<std::streamoff>(psx::BIOS_SIZE));
-  if (!size_is_standard) {
-    const bool size_is_kb_aligned =
-        (size > 0) && ((static_cast<u64>(size) % 1024u) == 0u);
-    const bool size_covers_window =
-        size >= static_cast<std::streamoff>(psx::BIOS_SIZE);
-    if (!g_experimental_bios_size_mode || !size_is_kb_aligned ||
-        !size_covers_window) {
-      LOG_ERROR("BIOS: Invalid size %lld (expected %u)", (long long)size,
-                psx::BIOS_SIZE);
-      return false;
-    }
-  }
 
   file.seekg(0);
   const size_t file_size = static_cast<size_t>(size);
-  data_.resize(file_size);
-  file.read(reinterpret_cast<char *>(data_.data()), size);
+  std::vector<u8> file_data(file_size);
+  file.read(reinterpret_cast<char *>(file_data.data()), size);
   if (!file || file.gcount() != size) {
     LOG_ERROR("BIOS: Failed to read image (%lld/%lld bytes)",
               (long long)file.gcount(), (long long)size);
     return false;
   }
 
-  if (size_is_standard) {
-    mapped_size_ = psx::BIOS_SIZE;
+  if (g_unsafe_ps2_bios_mode && file_size > psx::BIOS_SIZE) {
+    data_ = std::move(file_data);
+    mapped_size_ = static_cast<u32>(
+        std::min<size_t>(data_.size(), std::numeric_limits<u32>::max()));
+    LOG_WARN("BIOS: UNSAFE PS2 BIOS mode active (%lld bytes mapped).",
+             (long long)size);
   } else {
-    if (g_unsafe_ps2_bios_mode) {
-      mapped_size_ = static_cast<u32>(file_size);
-      LOG_WARN("BIOS: UNSAFE PS2 BIOS mode active (%lld bytes mapped).",
-               (long long)size);
-    } else {
-      mapped_size_ = psx::BIOS_SIZE;
-      LOG_WARN(
-          "BIOS: Experimental size mode active (%lld bytes). Using first %u bytes.",
-          (long long)size, psx::BIOS_SIZE);
+    data_.assign(psx::BIOS_SIZE, 0xFFu);
+    const size_t copy_size =
+        std::min(file_data.size(), static_cast<size_t>(psx::BIOS_SIZE));
+    std::copy_n(file_data.data(), copy_size, data_.data());
+    mapped_size_ = psx::BIOS_SIZE;
+
+    if (!size_is_standard) {
+      if (file_size < psx::BIOS_SIZE) {
+        LOG_WARN("BIOS: Short image (%lld bytes). Padded to %u bytes.",
+                 (long long)size, psx::BIOS_SIZE);
+      } else {
+        LOG_WARN("BIOS: Oversized image (%lld bytes). Using first %u bytes.",
+                 (long long)size, psx::BIOS_SIZE);
+      }
     }
   }
 
@@ -63,7 +66,7 @@ bool Bios::load(const std::string &path) {
   original_data_ = data_;
 
   identify();
-  LOG_INFO("BIOS: Loaded successfully — %s", info_.c_str());
+  LOG_INFO("BIOS: Loaded successfully - %s", info_.c_str());
   return true;
 }
 
@@ -238,22 +241,55 @@ void Bios::identify() {
 }
 
 u8 Bios::read8(u32 offset) const {
-  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  const size_t size = std::min<size_t>(
+      data_.size(), mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_);
+  if (size == 0) {
+    return 0xFFu;
+  }
   return data_[static_cast<size_t>(offset % size)];
 }
 
 u16 Bios::read16(u32 offset) const {
-  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  const size_t size = std::min<size_t>(
+      data_.size(), mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_);
+  if (size == 0) {
+    return 0xFFFFu;
+  }
   const u16 lo = data_[static_cast<size_t>(offset % size)];
   const u16 hi = data_[static_cast<size_t>((offset + 1) % size)];
   return static_cast<u16>(lo | (hi << 8));
 }
 
 u32 Bios::read32(u32 offset) const {
-  const u32 size = mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_;
+  const size_t size = std::min<size_t>(
+      data_.size(), mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_);
+  if (size == 0) {
+    return 0xFFFFFFFFu;
+  }
   const u32 b0 = data_[static_cast<size_t>(offset % size)];
   const u32 b1 = data_[static_cast<size_t>((offset + 1) % size)];
   const u32 b2 = data_[static_cast<size_t>((offset + 2) % size)];
   const u32 b3 = data_[static_cast<size_t>((offset + 3) % size)];
   return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+void Bios::write8(u32 offset, u8 value) {
+  const size_t size = std::min<size_t>(
+      data_.size(), mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_);
+  if (size == 0) {
+    return;
+  }
+  data_[static_cast<size_t>(offset % size)] = value;
+}
+
+void Bios::write16(u32 offset, u16 value) {
+  write8(offset + 0u, static_cast<u8>(value & 0xFFu));
+  write8(offset + 1u, static_cast<u8>((value >> 8) & 0xFFu));
+}
+
+void Bios::write32(u32 offset, u32 value) {
+  write8(offset + 0u, static_cast<u8>(value & 0xFFu));
+  write8(offset + 1u, static_cast<u8>((value >> 8) & 0xFFu));
+  write8(offset + 2u, static_cast<u8>((value >> 16) & 0xFFu));
+  write8(offset + 3u, static_cast<u8>((value >> 24) & 0xFFu));
 }

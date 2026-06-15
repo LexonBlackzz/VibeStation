@@ -2340,6 +2340,12 @@ void System::write8(u32 addr, u8 val) {
         ram_.scratch_write8(phys - 0x1F800000, val);
         return;
     }
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+        (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+        bios_.write8(phys - psx::BIOS_BASE, val);
+        return;
+    }
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
@@ -2562,6 +2568,12 @@ void System::write16(u32 addr, u16 val) {
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write16(phys - 0x1F800000, val);
+        return;
+    }
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+        (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+        bios_.write16(phys - psx::BIOS_BASE, val);
         return;
     }
 
@@ -2837,6 +2849,12 @@ void System::write32(u32 addr, u32 val) {
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write32(phys - 0x1F800000, val);
+        return;
+    }
+    if (phys >= psx::BIOS_BASE &&
+        static_cast<u64>(phys) <
+        (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
+        bios_.write32(phys - psx::BIOS_BASE, val);
         return;
     }
 

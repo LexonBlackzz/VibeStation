@@ -117,6 +117,7 @@ inline u32 g_trace_stride_sio = 2048;
 inline bool g_experimental_bios_size_mode = false;
 inline bool g_unsafe_ps2_bios_mode = false;
 inline bool g_experimental_unhandled_special_returns_zero = false;
+inline bool g_experimental_dma_command_sanitizer = false;
 inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
