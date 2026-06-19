@@ -32,6 +32,7 @@ public:
 
   // Fire an interrupt from a hardware source
   void request(Interrupt irq);
+  void set_line_state(Interrupt irq, bool active);
 
   // Check if any unmasked interrupt is pending
   bool pending() const { return (i_stat_ & i_mask_) != 0; }
@@ -49,5 +50,6 @@ private:
   System *sys_ = nullptr;
   u32 i_stat_ = 0;
   u32 i_mask_ = 0;
+  u32 line_state_ = 0;
   u64 request_count_[11] = {};
 };

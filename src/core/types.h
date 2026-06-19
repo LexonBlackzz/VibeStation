@@ -61,7 +61,7 @@ inline u32 g_log_category_mask = 0xFFFFFFFFu;
 inline bool g_log_timestamp = true;
 inline bool g_log_dedupe = true;
 inline u32 g_log_dedupe_flush = 1000;
-inline bool g_log_fmv_diagnostics = true;
+inline bool g_log_fmv_diagnostics = false;
 inline std::string g_log_last_line;
 inline u64 g_log_repeat_count = 0;
 struct LogUiEntry {

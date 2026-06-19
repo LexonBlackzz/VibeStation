@@ -79,6 +79,10 @@ struct DisplayDebugInfo {
   int display_skip_x = 0;
   int src_width = 0;
   int src_height = 0;
+  int tex_window_mask_x = 0;
+  int tex_window_mask_y = 0;
+  int tex_window_off_x = 0;
+  int tex_window_off_y = 0;
   bool is_24bit = false;
   bool interlaced = false;
 };

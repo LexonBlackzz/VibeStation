@@ -9,6 +9,10 @@ namespace {
         return g_log_fmv_diagnostics;
     }
 
+    inline bool gpu_command_diagnostics_enabled() {
+        return g_log_fmv_diagnostics || g_mdec_debug_upload_probe;
+    }
+
     int clamp_display_dimension(int value, int fallback, int max_value) {
         const int candidate = (value > 0) ? value : fallback;
         return std::max(1, std::min(candidate, max_value));
@@ -730,7 +734,7 @@ void Gpu::apply_reaper_to_gp0_command() {
 }
 
 void Gpu::consume_vram_write_word(u32 word) {
-    if (sys_ && g_mdec_debug_upload_probe && fmv_diagnostics_enabled()) {
+    if (sys_ && g_mdec_debug_upload_probe) {
         sys_->debug_note_gpu_image_load_word(word);
     }
 
@@ -1119,6 +1123,49 @@ void Gpu::gp0(u32 command) {
 void Gpu::gp0_nop() {}
 void Gpu::gp0_clear_cache() {}
 
+void Gpu::debug_note_polygon(u8 opcode, const Vertex* vertices, int vertex_count,
+                             bool textured, bool shaded, bool raw_texture) {
+    if (!gpu_command_diagnostics_enabled() || vertices == nullptr ||
+        vertex_count <= 0) {
+        return;
+    }
+
+    const u32 index = command_debug_.gp0_poly_count %
+        static_cast<u32>(GpuCommandDebugInfo::kRecentPolys);
+    ++command_debug_.gp0_poly_count;
+    command_debug_.poly_opcode[index] = opcode;
+    command_debug_.poly_vertex_count[index] =
+        static_cast<u8>(std::min(vertex_count, 4));
+    command_debug_.poly_textured[index] = textured ? 1u : 0u;
+    command_debug_.poly_shaded[index] = shaded ? 1u : 0u;
+    command_debug_.poly_raw[index] = raw_texture ? 1u : 0u;
+    command_debug_.poly_semi[index] = semi_transparency_mode_ ? 1u : 0u;
+    command_debug_.poly_blend[index] = semi_transparency_;
+    command_debug_.poly_depth[index] =
+        textured ? static_cast<u8>((texpage_ >> 7) & 0x3u) : 0u;
+    command_debug_.poly_clut[index] = textured ? clut_ : 0u;
+    command_debug_.poly_texpage[index] = textured ? texpage_ : 0u;
+    for (int i = 0; i < 4; ++i) {
+        if (i < vertex_count) {
+            command_debug_.poly_x[index][i] = vertices[i].x;
+            command_debug_.poly_y[index][i] = vertices[i].y;
+            command_debug_.poly_u[index][i] = vertices[i].u;
+            command_debug_.poly_v[index][i] = vertices[i].v;
+            command_debug_.poly_r[index][i] = vertices[i].color.r;
+            command_debug_.poly_g[index][i] = vertices[i].color.g;
+            command_debug_.poly_b[index][i] = vertices[i].color.b;
+        } else {
+            command_debug_.poly_x[index][i] = 0;
+            command_debug_.poly_y[index][i] = 0;
+            command_debug_.poly_u[index][i] = 0;
+            command_debug_.poly_v[index][i] = 0;
+            command_debug_.poly_r[index][i] = 0;
+            command_debug_.poly_g[index][i] = 0;
+            command_debug_.poly_b[index][i] = 0;
+        }
+    }
+}
+
 void Gpu::gp0_fill_rect() {
     Color c(gp0_buffer_[0]);
     u16 x = gp0_buffer_[1] & 0x3F0; // Rounded down to 16-pixel boundary
@@ -1138,10 +1185,15 @@ void Gpu::gp0_fill_rect() {
 
 void Gpu::gp0_mono_tri() {
     Color c(gp0_buffer_[0]);
-    const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
-    const Vertex v1 = decode_vertex_word(gp0_buffer_[2]);
-    const Vertex v2 = decode_vertex_word(gp0_buffer_[3]);
-    draw_flat_triangle(v0, v1, v2, c);
+    Vertex v[3];
+    v[0] = decode_vertex_word(gp0_buffer_[1]);
+    v[1] = decode_vertex_word(gp0_buffer_[2]);
+    v[2] = decode_vertex_word(gp0_buffer_[3]);
+    v[0].color = c;
+    v[1].color = c;
+    v[2].color = c;
+    debug_note_polygon(gp0_command_, v, 3, false, false);
+    draw_flat_triangle(v[0], v[1], v[2], c);
 }
 
 void Gpu::gp0_mono_quad() {
@@ -1149,13 +1201,15 @@ void Gpu::gp0_mono_quad() {
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
         v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
+        v[i].color = c;
     }
+    debug_note_polygon(gp0_command_, v, 4, false, false);
     draw_flat_triangle(v[0], v[1], v[2], c);
     draw_flat_triangle(v[1], v[2], v[3], c);
 }
 
 void Gpu::gp0_textured_tri() {
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp0_textured_tri_count;
     }
     Color c(gp0_buffer_[0]);
@@ -1175,11 +1229,13 @@ void Gpu::gp0_textured_tri() {
     v[0].color = c;
     v[1].color = c;
     v[2].color = c;
+    debug_note_polygon(gp0_command_, v, 3, true, false,
+                       (gp0_command_ & 0x1u) != 0);
     draw_textured_triangle(v[0], v[1], v[2], c);
 }
 
 void Gpu::gp0_textured_quad() {
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp0_textured_quad_count;
     }
     Color c(gp0_buffer_[0]);
@@ -1194,6 +1250,8 @@ void Gpu::gp0_textured_quad() {
         v[i].v = (gp0_buffer_[base + 1] >> 8) & 0xFF;
         v[i].color = c;
     }
+    debug_note_polygon(gp0_command_, v, 4, true, false,
+                       (gp0_command_ & 0x1u) != 0);
     draw_textured_triangle(v[0], v[1], v[2], c);
     draw_textured_triangle(v[1], v[2], v[3], c);
 }
@@ -1206,6 +1264,7 @@ void Gpu::gp0_shaded_tri() {
         v[i].x = pos.x;
         v[i].y = pos.y;
     }
+    debug_note_polygon(gp0_command_, v, 3, false, true);
     draw_shaded_triangle(v[0], v[1], v[2]);
 }
 
@@ -1217,6 +1276,7 @@ void Gpu::gp0_shaded_quad() {
         v[i].x = pos.x;
         v[i].y = pos.y;
     }
+    debug_note_polygon(gp0_command_, v, 4, false, true);
     draw_shaded_triangle(v[0], v[1], v[2]);
     draw_shaded_triangle(v[1], v[2], v[3]);
 }
@@ -1235,6 +1295,8 @@ void Gpu::gp0_shaded_textured_tri() {
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
+    debug_note_polygon(gp0_command_, v, 3, true, true,
+                       (gp0_command_ & 0x1u) != 0);
     draw_shaded_textured_triangle(v[0], v[1], v[2]);
 }
 
@@ -1252,6 +1314,8 @@ void Gpu::gp0_shaded_textured_quad() {
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
+    debug_note_polygon(gp0_command_, v, 4, true, true,
+                       (gp0_command_ & 0x1u) != 0);
     draw_shaded_textured_triangle(v[0], v[1], v[2]);
     draw_shaded_textured_triangle(v[1], v[2], v[3]);
 }
@@ -1394,7 +1458,7 @@ void Gpu::gp0_mono_rect() {
 }
 
 void Gpu::gp0_textured_rect() {
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp0_textured_rect_count;
     }
     Color c(gp0_buffer_[0]);
@@ -1425,7 +1489,7 @@ void Gpu::gp0_textured_rect() {
     }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         const u32 rect_index =
             (command_debug_.gp0_textured_rect_count - 1u) %
             static_cast<u32>(GpuCommandDebugInfo::kRecentRects);
@@ -1572,7 +1636,7 @@ void Gpu::gp0_image_load() {
     vram_tx_total_ = static_cast<u32>(vram_tx_w_) * vram_tx_h_;
 
     if (sys_) {
-        if (fmv_diagnostics_enabled()) {
+        if (gpu_command_diagnostics_enabled()) {
             sys_->debug_note_gpu_image_load_begin(vram_tx_x_, vram_tx_y_,
                                                   vram_tx_w_, vram_tx_h_);
         }
@@ -1612,7 +1676,7 @@ void Gpu::gp0_vram_copy() {
         h = 512;
 
     if (sys_) {
-        if (fmv_diagnostics_enabled()) {
+        if (gpu_command_diagnostics_enabled()) {
             sys_->debug_note_gpu_vram_copy(src_x, src_y, dst_x, dst_y, w, h);
         }
     }
@@ -1745,7 +1809,7 @@ void Gpu::gp1_display_area(u32 val) {
     const u32 value = val & 0x00FFFFFFu;
     display_.x_start = value & 0x3FE; // 10 bits, aligned to 2
     display_.y_start = (value >> 10) & 0x1FF;
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp1_display_area_count;
         command_debug_.gp1_display_area_raw = value;
         command_debug_.gp1_display_area_x = display_.x_start;
@@ -1756,7 +1820,7 @@ void Gpu::gp1_display_area(u32 val) {
 void Gpu::gp1_horizontal_range(u32 val) {
     display_.x1 = val & 0xFFF;
     display_.x2 = (val >> 12) & 0xFFF;
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp1_horizontal_range_count;
         command_debug_.gp1_horizontal_range_raw = val & 0x00FFFFFFu;
         command_debug_.gp1_horizontal_range_x1 = display_.x1;
@@ -1767,7 +1831,7 @@ void Gpu::gp1_horizontal_range(u32 val) {
 void Gpu::gp1_vertical_range(u32 val) {
     display_.y1 = val & 0x3FF;
     display_.y2 = (val >> 10) & 0x3FF;
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp1_vertical_range_count;
         command_debug_.gp1_vertical_range_raw = val & 0x001FFFFFu;
         command_debug_.gp1_vertical_range_y1 = display_.y1;
@@ -1783,7 +1847,7 @@ void Gpu::gp1_display_mode(u32 val) {
     display_.is_pal = (val >> 3) & 1;
     display_.is_24bit = (val >> 4) & 1;
     display_.interlaced = (val >> 5) & 1;
-    if (fmv_diagnostics_enabled()) {
+    if (gpu_command_diagnostics_enabled()) {
         ++command_debug_.gp1_display_mode_count;
         command_debug_.gp1_display_mode_raw = val & 0x7Fu;
     }
@@ -2194,6 +2258,10 @@ DisplayDebugInfo Gpu::debug_display_info() const {
     info.display_skip_x = crtc.skip_x;
     info.src_width = std::max(1, info.width);
     info.src_height = std::max(1, info.height);
+    info.tex_window_mask_x = static_cast<int>(tex_window_mask_x_);
+    info.tex_window_mask_y = static_cast<int>(tex_window_mask_y_);
+    info.tex_window_off_x = static_cast<int>(tex_window_off_x_);
+    info.tex_window_off_y = static_cast<int>(tex_window_off_y_);
     return info;
 }
 
@@ -2237,7 +2305,7 @@ void Gpu::set_pixel_clipped(s16 x, s16 y, u16 color, bool semi_transparent) {
     }
 
     const u16 color15 = static_cast<u16>(color & 0x7FFFu);
-    u16 out = color15;
+    u16 out = static_cast<u16>(color & 0x8000u);
     if (semi_transparent) {
         const int fr = color15 & 0x1F;
         const int fg = (color15 >> 5) & 0x1F;
@@ -2268,8 +2336,10 @@ void Gpu::set_pixel_clipped(s16 x, s16 y, u16 color, bool semi_transparent) {
             rb = std::min(31, bb + (fb >> 2));
             break;
         }
-        out = static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
+        out = static_cast<u16>(out | (rr & 0x1F) | ((rg & 0x1F) << 5) |
             ((rb & 0x1F) << 10));
+    } else {
+        out = static_cast<u16>(out | color15);
     }
 
     if (force_set_mask_bit_) {
@@ -2284,7 +2354,7 @@ void Gpu::write_pixel_opaque_clipped(s16 x, s16 y, u16 color) {
         return;
     }
 
-    u16 out = static_cast<u16>(color & 0x7FFFu);
+    u16 out = color;
     if (force_set_mask_bit_) {
         out |= 0x8000u;
     }
@@ -2305,7 +2375,6 @@ u16 Gpu::read_texel(u8 u, u8 v) const {
     const u16 clut_x = static_cast<u16>((clut_ & 0x3F) * 16);
     const u16 clut_y = static_cast<u16>((clut_ >> 6) & 0x1FF);
     const u8 depth = static_cast<u8>((texpage_ >> 7) & 0x3);
-
     const u16 tx = static_cast<u16>((tex_base_x + uw) & (psx::VRAM_WIDTH - 1));
     const u16 ty = static_cast<u16>((tex_base_y + vw) & (psx::VRAM_HEIGHT - 1));
 

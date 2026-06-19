@@ -94,6 +94,7 @@ public:
   size_t dma_buffer_size() const { return data_buffer_.size(); }
   u8 mode() const { return mode_; }
   bool read_whole_sector() const { return read_whole_sector_; }
+  int active_data_lba() const { return active_data_lba_; }
   int current_read_lba() const { return read_lba_; }
 
 private:
@@ -157,12 +158,19 @@ private:
   struct QueuedSectorBuffer {
     std::vector<u8> payload;
     int data_lba = -1;
+    bool realtime_stream = false;
   };
   std::deque<PendingIrq> pending_irqs_;
   std::deque<QueuedSectorBuffer> queued_sector_buffers_;
   std::vector<u8> last_sector_payload_;
   bool last_sector_had_data_ = false;
+  bool last_sector_realtime_stream_ = false;
+  std::array<u8, 8> last_sector_location_ = {};
+  bool last_sector_location_valid_ = false;
+  int last_sector_lba_ = -1;
   int active_data_lba_ = -1;
+  bool active_data_realtime_stream_ = false;
+  bool active_data_stream_header_consumed_ = false;
 
   // Seek target
   u8 seek_mm_ = 0, seek_ss_ = 0, seek_ff_ = 0;
@@ -275,13 +283,18 @@ private:
   void fire_irq(u8 irq_num);
   void enqueue_irq(u8 irq_num, std::vector<u8> response,
                    bool wait_for_command_idle = true);
-  void enqueue_data_irq(std::vector<u8> payload, int source_lba);
-  void activate_data_payload(std::vector<u8> payload, int source_lba);
-  void queue_sector_buffer(std::vector<u8> payload, int source_lba);
+  void enqueue_data_irq(std::vector<u8> payload, int source_lba,
+                        bool realtime_stream);
+  void activate_data_payload(std::vector<u8> payload, int source_lba,
+                             bool realtime_stream);
+  void queue_sector_buffer(std::vector<u8> payload, int source_lba,
+                           bool realtime_stream);
+  QueuedSectorBuffer pop_queued_sector_for_data_ready();
   void flush_data_pipeline();
   void clear_read_buffers_for_new_stream();
-  bool can_discard_unread_whole_sector_tail() const;
-  void complete_discardable_whole_sector_tail();
+  bool can_discard_unread_sector_tail() const;
+  bool can_replace_unread_logical_xa_sector() const;
+  void complete_discardable_sector_tail();
   void maybe_promote_queued_sector(bool cpu_port_access,
                                    bool irq_ack_promotion = false);
   void complete_active_data_buffer();

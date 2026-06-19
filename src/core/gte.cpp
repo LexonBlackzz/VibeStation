@@ -753,6 +753,7 @@ void Gte::cmd_mvmva() {
   const u32 vx = (cmd >> 15) & 0x3;
   const u32 cv = (cmd >> 13) & 0x3;
 
+  s16 buggy_matrix[3][3] = {};
   const s16(*mat)[3] = rotation;
   switch (mx) {
   case 0:
@@ -765,7 +766,18 @@ void Gte::cmd_mvmva() {
     mat = color_matrix;
     break;
   default:
-    mat = rotation;
+    // Hardware's matrix selector 3 is not a real matrix. It exposes a
+    // quirky mix of RGBC/IR0 and rotation entries, which some games rely on.
+    buggy_matrix[0][0] = -static_cast<s16>((rgbc[0] & 0xFFu) << 4);
+    buggy_matrix[0][1] = static_cast<s16>((rgbc[0] & 0xFFu) << 4);
+    buggy_matrix[0][2] = ir[0];
+    buggy_matrix[1][0] = rotation[0][2];
+    buggy_matrix[1][1] = rotation[0][2];
+    buggy_matrix[1][2] = rotation[0][2];
+    buggy_matrix[2][0] = rotation[1][1];
+    buggy_matrix[2][1] = rotation[1][1];
+    buggy_matrix[2][2] = rotation[1][1];
+    mat = buggy_matrix;
     break;
   }
 
@@ -818,12 +830,27 @@ void Gte::cmd_mvmva() {
   }
 
   for (int i = 0; i < 3; i++) {
-    s64 result = static_cast<s64>(add[i]) << 12;
-    result += static_cast<s64>(mat[i][0]) * vec[0];
-    result += static_cast<s64>(mat[i][1]) * vec[1];
-    result += static_cast<s64>(mat[i][2]) * vec[2];
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    if (cv == 2) {
+      // The FC translation-vector selector has a hardware bug: the first
+      // multiply plus translation affects the temporary IR value, then the
+      // final MAC/IR is produced only from the remaining two products.
+      const s64 first =
+          (static_cast<s64>(add[i]) << 12) +
+          static_cast<s64>(mat[i][0]) * vec[0];
+      set_ir(i + 1, static_cast<s32>(first >> sf), false);
+      const s64 result =
+          static_cast<s64>(mat[i][1]) * vec[1] +
+          static_cast<s64>(mat[i][2]) * vec[2];
+      set_mac(i + 1, result);
+      set_ir(i + 1, mac[i + 1], lm);
+    } else {
+      s64 result = static_cast<s64>(add[i]) << 12;
+      result += static_cast<s64>(mat[i][0]) * vec[0];
+      result += static_cast<s64>(mat[i][1]) * vec[1];
+      result += static_cast<s64>(mat[i][2]) * vec[2];
+      set_mac(i + 1, result);
+      set_ir(i + 1, mac[i + 1], lm);
+    }
   }
 }
 

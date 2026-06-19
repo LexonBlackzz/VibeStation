@@ -19,6 +19,8 @@ namespace {
     constexpr u32 kRr4StrHeaderWatchEnd = 0x00141C14u;
     constexpr u32 kRr4StateWatchStart = 0x00110400u;
     constexpr u32 kRr4StateWatchEnd = 0x00110480u;
+    constexpr u32 kRr4WaitObjectWatchStart = 0x001281C0u;
+    constexpr u32 kRr4WaitObjectWatchEnd = 0x00128210u;
 
     struct BusWarnLimiter {
         u32 last_addr = 0xFFFFFFFFu;
@@ -49,7 +51,11 @@ namespace {
 
     bool map_main_ram_address(u32 addr, u32 phys, u32 mapped_main_ram_size, u32& ram_addr) {
         if (phys < mapped_main_ram_size) {
-            ram_addr = phys;
+            // The RAM_SIZE register controls which parts of the 8MB RAM window
+            // respond, but the stock PS1 still has 2MB of physical RAM. Upper
+            // mirrors must alias that 2MB so CPU-side stack/data writes match
+            // what DMA sees through its 24-bit address register.
+            ram_addr = phys & (psx::RAM_SIZE - 1u);
             return true;
         }
 
@@ -579,6 +585,62 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
         addr == 0x00117789u || addr == 0x0011778Au || addr == 0x0011778Bu ||
         addr == 0x00127789u || addr == 0x0012778Au || addr == 0x0012778Bu);
     bool is_mdec_in = (addr >= kRr4SourceWatchStart && addr < kRr4SourceWatchEnd);
+    const bool is_rr4_str_header =
+        (addr >= kRr4StrHeaderWatchStart && addr < kRr4StrHeaderWatchEnd);
+    const bool is_rr4_state =
+        (addr >= kRr4StateWatchStart && addr < kRr4StateWatchEnd);
+    const bool is_rr4_wait_object =
+        (addr >= kRr4WaitObjectWatchStart && addr < kRr4WaitObjectWatchEnd);
+
+    if (g_log_fmv_diagnostics &&
+        (is_rr4_str_header || is_rr4_state || is_rr4_wait_object)) {
+        static u32 rr4_header_write_count = 0;
+        static u32 rr4_state_write_count = 0;
+        static u32 rr4_wait_object_write_count = 0;
+        u32& log_count = is_rr4_str_header ? rr4_header_write_count :
+            (is_rr4_state ? rr4_state_write_count : rr4_wait_object_write_count);
+        const u32 log_limit = is_rr4_str_header ? 768u :
+            (is_rr4_state ? 1024u : 512u);
+        if (log_count < log_limit) {
+            ++log_count;
+            const char* label = is_rr4_str_header ? "STR" :
+                (is_rr4_state ? "STATE" : "WAITOBJ");
+            if ((entry.origin & 0x80u) != 0u) {
+                LOG_INFO(
+                    "BUS: RR4 %s W%u addr=0x%08X val=0x%08X <- DMA%u cyc=%llu",
+                    label,
+                    static_cast<unsigned>(size), addr, value,
+                    static_cast<unsigned>(entry.origin & 0x7Fu),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            } else {
+                LOG_INFO(
+                    "BUS: RR4 %s W%u addr=0x%08X val=0x%08X pc=0x%08X "
+                    "ra=0x%08X sp=0x%08X a0=0x%08X a1=0x%08X s0=0x%08X "
+                    "s1=0x%08X s2=0x%08X s3=0x%08X cyc=%llu",
+                    label,
+                    static_cast<unsigned>(size), addr, value, entry.pc,
+                    cpu_.reg(31), cpu_.reg(29), cpu_.reg(4), cpu_.reg(5),
+                    cpu_.reg(16), cpu_.reg(17), cpu_.reg(18), cpu_.reg(19),
+                    static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+            if (is_rr4_wait_object && (addr == 0x001281D8u ||
+                                       addr == 0x001281ECu ||
+                                       addr == 0x001281CCu)) {
+                const u32 pc = entry.pc & 0x1FFFFFFFu;
+                const u32 ra = cpu_.reg(31) & 0x1FFFFFFFu;
+                LOG_INFO(
+                    "BUS: RR4 WAITOBJ ctx pc_code %08X=%08X %08X=%08X "
+                    "%08X=%08X %08X=%08X ra_code %08X=%08X %08X=%08X "
+                    "%08X=%08X %08X=%08X",
+                    pc - 0x08u, read32(pc - 0x08u),
+                    pc - 0x04u, read32(pc - 0x04u), pc, read32(pc),
+                    pc + 0x04u, read32(pc + 0x04u),
+                    ra - 0x08u, read32(ra - 0x08u),
+                    ra - 0x04u, read32(ra - 0x04u), ra, read32(ra),
+                    ra + 0x04u, read32(ra + 0x04u));
+            }
+        }
+    }
 
     // Trigger: open hatch on non-zero FMV_PTR or non-zero MDEC input writes
     if (g_cpu_deep_diagnostics && fmv_write_hatch_remaining_ == 0 &&
@@ -2332,6 +2394,20 @@ void System::write8(u32 addr, u8 val) {
                 }
             }
         }
+        if (g_log_fmv_diagnostics && ram_addr >= 0x001F0680u &&
+            ram_addr < 0x001F06C0u) {
+            static u32 gt2_wait_w8_logs = 0;
+            if (gt2_wait_w8_logs < 256u) {
+                ++gt2_wait_w8_logs;
+                const u8 old_val = ram_.read8(ram_addr);
+                LOG_WARN(
+                    "BUS: GT2 wait W8 0x%08X old=0x%02X new=0x%02X pc=0x%08X ra=0x%08X cyc=%llu flag=0x%02X",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(), cpu_.reg(31),
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    static_cast<unsigned>(ram_.read8(0x001F06A6u)));
+            }
+        }
         ram_.write8(ram_addr, val);
         debug_note_main_ram_write(ram_addr, val, 1);
         return;
@@ -2367,8 +2443,14 @@ void System::write8(u32 addr, u8 val) {
             const u32 dma_off = (io - 0x080) & ~0x3u;
             const u32 shift = (io & 0x3u) * 8u;
             const u32 mask = 0xFFu << shift;
-            const u32 merged =
+            u32 merged =
                 (dma_.read(dma_off) & ~mask) | (static_cast<u32>(val) << shift);
+            if (dma_off == 0x74u) {
+                // DICR bits 24-30 are write-one-to-clear. For sub-word writes,
+                // do not let the read/merge path re-write flag bits that the CPU
+                // did not actually touch.
+                merged &= ~(0x7F000000u & ~mask);
+            }
             dma_.write(dma_off, merged);
             return;
         }
@@ -2562,6 +2644,20 @@ void System::write16(u32 addr, u16 val) {
                 }
             }
         }
+        if (g_log_fmv_diagnostics && ram_addr < 0x001F06C0u &&
+            (ram_addr + 1u) >= 0x001F0680u) {
+            static u32 gt2_wait_w16_logs = 0;
+            if (gt2_wait_w16_logs < 256u) {
+                ++gt2_wait_w16_logs;
+                const u16 old_val = ram_.read16(ram_addr);
+                LOG_WARN(
+                    "BUS: GT2 wait W16 0x%08X old=0x%04X new=0x%04X pc=0x%08X ra=0x%08X cyc=%llu flag=0x%02X",
+                    ram_addr, static_cast<unsigned>(old_val),
+                    static_cast<unsigned>(val), cpu_.pc(), cpu_.reg(31),
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    static_cast<unsigned>(ram_.read8(0x001F06A6u)));
+            }
+        }
         ram_.write16(ram_addr, val);
         debug_note_main_ram_write(ram_addr, val, 2);
         return;
@@ -2591,8 +2687,14 @@ void System::write16(u32 addr, u16 val) {
             const u32 dma_off = (io - 0x080) & ~0x3u;
             const u32 shift = (io & 0x2u) * 8u;
             const u32 mask = 0xFFFFu << shift;
-            const u32 merged =
+            u32 merged =
                 (dma_.read(dma_off) & ~mask) | (static_cast<u32>(val) << shift);
+            if (dma_off == 0x74u) {
+                // DICR bits 24-30 are write-one-to-clear. For sub-word writes,
+                // do not let the read/merge path re-write flag bits that the CPU
+                // did not actually touch.
+                merged &= ~(0x7F000000u & ~mask);
+            }
             dma_.write(dma_off, merged);
             return;
         }
@@ -2841,6 +2943,19 @@ void System::write32(u32 addr, u32 val) {
                     "BUS: wrote 0x800A6518 to 0x%08X old=0x%08X pc=0x%08X cyc=%llu",
                     ram_addr, old_val, cpu_.pc(),
                     static_cast<unsigned long long>(cpu_.cycle_count()));
+            }
+        }
+        if (g_log_fmv_diagnostics && ram_addr < 0x001F06C0u &&
+            (ram_addr + 3u) >= 0x001F0680u) {
+            static u32 gt2_wait_w32_logs = 0;
+            if (gt2_wait_w32_logs < 256u) {
+                ++gt2_wait_w32_logs;
+                const u32 old_val = ram_.read32(ram_addr);
+                LOG_WARN(
+                    "BUS: GT2 wait W32 0x%08X old=0x%08X new=0x%08X pc=0x%08X ra=0x%08X cyc=%llu flag=0x%02X",
+                    ram_addr, old_val, val, cpu_.pc(), cpu_.reg(31),
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
         }
         ram_.write32(ram_addr, val);

@@ -8,6 +8,7 @@ u64 g_irq_trace_counter = 0;
 void InterruptController::reset() {
   i_stat_ = 0;
   i_mask_ = 0;
+  line_state_ = 0;
   std::memset(request_count_, 0, sizeof(request_count_));
 }
 
@@ -86,5 +87,28 @@ void InterruptController::request(Interrupt irq) {
                                       g_trace_stride_irq)) {
     LOG_DEBUG("IRQ: request src=%u I_STAT=0x%08X I_MASK=0x%08X",
               static_cast<unsigned>(irq), i_stat_, i_mask_);
+  }
+}
+
+void InterruptController::set_line_state(Interrupt irq, bool active) {
+  const u32 index = static_cast<u32>(irq);
+  if (index >= 11) {
+    return;
+  }
+
+  const u32 bit = 1u << index;
+  const u32 previous = line_state_;
+  if (active) {
+    line_state_ |= bit;
+  } else {
+    line_state_ &= ~bit;
+  }
+
+  if (line_state_ == previous) {
+    return;
+  }
+
+  if (active) {
+    request(irq);
   }
 }

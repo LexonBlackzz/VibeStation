@@ -413,6 +413,11 @@ public:
   DisplayDebugInfo gpu_display_debug_info() const {
     return gpu_.debug_display_info();
   }
+  u32 gpu_dot_clock_divider() const {
+    static constexpr u32 kDividers[] = {10u, 8u, 5u, 4u, 7u};
+    const u8 hres = gpu_.display_mode().hres;
+    return hres < 5u ? kDividers[hres] : 8u;
+  }
   GpuCommandDebugInfo gpu_command_debug_info() const {
     return gpu_.debug_command_info();
   }

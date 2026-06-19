@@ -1731,6 +1731,86 @@ u32 Cpu::step() {
     }
   }
 
+  if (g_log_fmv_diagnostics && cycles_ >= 900000000ull &&
+      current_pc_ >= 0x80115480u && current_pc_ <= 0x80115530u) {
+    static u32 rr4_wait_code_logs = 0;
+    if (rr4_wait_code_logs < 256u) {
+      ++rr4_wait_code_logs;
+      const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: RR4 wait pc=0x%08X prev=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X s0=0x%08X s1=0x%08X "
+          "s2=0x%08X s3=0x%08X sp=0x%08X ra=0x%08X sr=0x%08X cause=0x%08X",
+          current_pc_, prev_pc_for_diag, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[10], gpr_[11],
+          gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[29], gpr_[31],
+          cop0_sr_, cop0_cause_);
+      LOG_WARN(
+          "CPU: RR4 wait code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          phys_pc - 0x10u, sys_->read32(phys_pc - 0x10u), phys_pc - 0x0Cu,
+          sys_->read32(phys_pc - 0x0Cu), phys_pc - 0x08u,
+          sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
+          sys_->read32(phys_pc - 0x04u), phys_pc + 0x00u,
+          sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
+          sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
+          sys_->read32(phys_pc + 0x08u), phys_pc + 0x0Cu,
+          sys_->read32(phys_pc + 0x0Cu), phys_pc + 0x10u,
+          sys_->read32(phys_pc + 0x10u));
+      LOG_WARN(
+          "CPU: RR4 wait mem str=%08X %08X %08X %08X node=%08X %08X %08X "
+          "obj=%08X %08X %08X %08X %08X %08X %08X %08X "
+          "mdec_status=0x%08X dma0=%08X/%08X/%08X dma1=%08X/%08X/%08X dpcr=0x%08X dicr=0x%08X",
+          sys_->read32(0x00141BF4u), sys_->read32(0x00141BF8u),
+          sys_->read32(0x00141BFCu), sys_->read32(0x00141C00u),
+          sys_->read32(0x00110400u), sys_->read32(0x00110404u),
+          sys_->read32(0x00110408u), sys_->read32(0x001281CCu),
+          sys_->read32(0x001281D0u), sys_->read32(0x001281D4u),
+          sys_->read32(0x001281D8u), sys_->read32(0x001281DCu),
+          sys_->read32(0x001281E0u), sys_->read32(0x001281E4u),
+          sys_->read32(0x001281E8u), sys_->read32(0x1F801824u),
+          sys_->read32(0x1F801080u), sys_->read32(0x1F801084u),
+          sys_->read32(0x1F801088u), sys_->read32(0x1F801090u),
+          sys_->read32(0x1F801094u), sys_->read32(0x1F801098u),
+          sys_->read32(0x1F8010F0u), sys_->read32(0x1F8010F4u));
+      LOG_WARN(
+          "CPU: RR4 wait caller %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
+          0x00114E90u, sys_->read32(0x00114E90u), 0x00114E94u,
+          sys_->read32(0x00114E94u), 0x00114E98u,
+          sys_->read32(0x00114E98u), 0x00114E9Cu,
+          sys_->read32(0x00114E9Cu), 0x00114EA0u,
+          sys_->read32(0x00114EA0u), 0x00114EA4u,
+          sys_->read32(0x00114EA4u), 0x00114EA8u,
+          sys_->read32(0x00114EA8u), 0x00114EACu,
+          sys_->read32(0x00114EACu));
+    }
+  }
+
+  if (g_log_fmv_diagnostics && cycles_ >= 880000000ull &&
+      ((current_pc_ >= 0x8008BDE0u && current_pc_ <= 0x8008BE40u) ||
+       (current_pc_ >= 0x801150D0u && current_pc_ <= 0x801151C0u))) {
+    static u32 rr4_dma_callback_logs = 0;
+    if (rr4_dma_callback_logs < 512u) {
+      ++rr4_dma_callback_logs;
+      LOG_WARN(
+          "CPU: RR4 dma-callback pc=0x%08X prev=0x%08X instr=0x%08X cyc=%llu "
+          "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+          "t0=0x%08X t1=0x%08X s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+          "sp=0x%08X ra=0x%08X sr=0x%08X cause=0x%08X "
+          "istat=0x%08X imask=0x%08X dicr=0x%08X obj=%08X/%08X/%08X/%08X/%08X/%08X",
+          current_pc_, prev_pc_for_diag, instruction,
+          static_cast<unsigned long long>(cycles_), gpr_[2], gpr_[3], gpr_[4],
+          gpr_[5], gpr_[6], gpr_[7], gpr_[8], gpr_[9], gpr_[16], gpr_[17],
+          gpr_[18], gpr_[19], gpr_[29], gpr_[31], cop0_sr_, cop0_cause_,
+          sys_->read32(0x1F801070u), sys_->read32(0x1F801074u),
+          sys_->read32(0x1F8010F4u), sys_->read32(0x001281CCu),
+          sys_->read32(0x001281D0u), sys_->read32(0x001281D4u),
+          sys_->read32(0x001281D8u), sys_->read32(0x001281ECu),
+          sys_->read32(0x001281EEu));
+    }
+  }
+
   if (g_log_fmv_diagnostics &&
       ((gpr_[10] == 0x000000B0u && (gpr_[9] == 0x00000017u || gpr_[9] == 0x00000018u)) ||
        current_pc_ == 0x000000B0u || current_pc_ == 0x000000C0u) &&
@@ -2785,12 +2865,13 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
     return 2;
   }
 
+  // The R3000A retires most integer instructions in one CPU tick in
+  // DuckStation's timing model; memory/device waits and coprocessor stalls are
+  // charged separately by the access helpers above. Keeping branch/store/COP
+  // opcodes at two ticks starves tight CD/MDEC streaming loops.
   switch (op(instruction)) {
   case 0x00:
     switch (funct(instruction)) {
-    case 0x08: // JR
-    case 0x09: // JALR
-      return 2;
     case 0x18: // MULT
     case 0x19: // MULTU
     case 0x1A: // DIV
@@ -2806,16 +2887,12 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x05: // BNE
   case 0x06: // BLEZ
   case 0x07: // BGTZ
-    return pending_branch_taken_ ? 2 : 1;
   case 0x10: // COP0
   case 0x11: // COP1
   case 0x13: // COP3
-    return 2;
+    return 1;
   case 0x12: // COP2 / GTE
-    if (rs(instruction) & 0x10u) {
-      return 2;
-    }
-    return 2;
+    return 1;
   case 0x20: // LB
   case 0x21: // LH
   case 0x22: // LWL
@@ -2836,7 +2913,7 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x39: // SWC1
   case 0x3A: // SWC2
   case 0x3B: // SWC3
-    return 2;
+    return 1;
   default:
     return 1;
   }

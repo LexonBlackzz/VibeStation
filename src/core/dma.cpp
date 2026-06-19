@@ -9,7 +9,7 @@ constexpr u32 kDicrWriteMask = 0x00FF807Fu;
 constexpr u32 kDicrResetMask = 0x7F000000u;
 
 bool is_streaming_dma_channel(int channel) {
-  return channel == 0 || channel == 1 || channel == 3;
+  return channel == 0 || channel == 1;
 }
 
 u32 sanitize_corrupt_chcr(int channel, u32 value) {
@@ -72,7 +72,7 @@ u32 DmaController::slice_words_for_channel(int channel) const {
     return 0xFFFFFFFFu;
   }
 
-  if (channel != 1 || sys_ == nullptr) {
+  if (sys_ == nullptr) {
     return kStreamingDmaSliceWords;
   }
 
@@ -179,12 +179,26 @@ void DmaController::write(u32 offset, u32 value) {
     switch (reg) {
     case 0x0:
       ch.base_addr = value & 0x00FFFFFF; // 24-bit address
+      if (g_log_fmv_diagnostics && channel == 1) {
+        LOG_WARN(
+            "DMA: ch1 MADR write value=0x%08X bcr=0x%08X chcr=0x%08X cyc=%llu",
+            ch.base_addr, ch.block_ctrl, ch.channel_ctrl,
+            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count()
+                                                 : 0ull));
+      }
       break;
     case 0x4:
       ch.block_ctrl = value;
       ch.block_words_remaining = 0;
+      if (g_log_fmv_diagnostics && channel == 1) {
+        LOG_WARN(
+            "DMA: ch1 BCR write value=0x%08X madr=0x%08X chcr=0x%08X cyc=%llu",
+            value, ch.base_addr, ch.channel_ctrl,
+            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count()
+                                                 : 0ull));
+      }
       break;
-    case 0x8:
+    case 0x8: {
       ch.block_words_remaining = 0;
       if (g_experimental_dma_command_sanitizer) {
         const u32 sanitized = sanitize_corrupt_chcr(channel, value);
@@ -195,6 +209,14 @@ void DmaController::write(u32 offset, u32 value) {
         value = sanitized;
       }
       ch.channel_ctrl = value;
+      if (g_log_fmv_diagnostics && channel == 1) {
+        LOG_WARN(
+            "DMA: ch1 CHCR write value=0x%08X madr=0x%08X bcr=0x%08X req=%u active=%u cyc=%llu",
+            value, ch.base_addr, ch.block_ctrl, request_active(channel) ? 1u : 0u,
+            ch.is_active() ? 1u : 0u,
+            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count()
+                                                 : 0ull));
+      }
       if (g_trace_dma) {
         static u64 chcr_log_count = 0;
         if (trace_should_log(chcr_log_count, g_trace_burst_dma,
@@ -210,6 +232,7 @@ void DmaController::write(u32 offset, u32 value) {
         execute_dma(channel);
       }
       break;
+    }
     default:
       LOG_WARN("DMA: Unhandled channel %d reg 0x%X write = 0x%08X", channel,
                reg, value);
@@ -253,9 +276,21 @@ void DmaController::write(u32 offset, u32 value) {
     break;
   case 0x74: {
     // DICR: bits 24-30 are W1C flags, bit31 is derived.
+    const u32 old_dicr = dicr_;
     dicr_ = (dicr_ & ~kDicrWriteMask) | (value & kDicrWriteMask);
     dicr_ &= ~(value & kDicrResetMask);
     recompute_dicr_master(true);
+    if (g_log_fmv_diagnostics) {
+      static u32 dicr_write_log_count = 0;
+      const u64 cycle = sys_ ? sys_->cpu().cycle_count() : 0ull;
+      if (dicr_write_log_count < 256u || cycle >= 880000000ull) {
+        ++dicr_write_log_count;
+        LOG_WARN(
+            "DMA: DICR write val=0x%08X old=0x%08X new=0x%08X pc=0x%08X cyc=%llu",
+            value, old_dicr, dicr_, sys_ ? sys_->cpu().pc() : 0u,
+            static_cast<unsigned long long>(cycle));
+      }
+    }
     break;
   }
   default:
@@ -288,17 +323,22 @@ void DmaController::execute_dma(int channel) {
   {
     u32 words_budget = slice_words_for_channel(channel);
     u32 safety = 0;
+    bool completed_request_transfer = false;
     while (ch.is_active() && channel_enabled(channel) && request_active(channel) &&
            (ch.block_count() != 0 || ch.block_words_remaining != 0) &&
            safety++ < 0x10000u) {
-      const u32 before_count = ch.block_count();
+      const u16 before_count = ch.raw_block_count();
       const u32 before_remaining = ch.block_words_remaining;
       const u32 before_addr = ch.base_addr;
       const u32 max_words = (words_budget == 0xFFFFFFFFu) ? 0xFFFFFFFFu : words_budget;
-
       dma_block(channel, max_words);
       const u32 moved_words = last_debug_[channel].transfer_words;
       if (moved_words == 0) {
+        break;
+      }
+
+      if (ch.raw_block_count() == 0u && ch.block_words_remaining == 0u) {
+        completed_request_transfer = true;
         break;
       }
 
@@ -315,7 +355,7 @@ void DmaController::execute_dma(int channel) {
         break;
       }
     }
-    if (ch.block_count() == 0 && ch.block_words_remaining == 0) {
+    if (completed_request_transfer) {
       transfer_complete(channel);
     }
     break;
@@ -375,6 +415,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
   }
 
   bool from_ram = ch.from_ram();
+  int cdrom_dma_active_lba = -1;
   auto &dbg = last_debug_[channel];
   dbg.base_addr = addr & 0x00FFFFFFu;
   dbg.block_ctrl = ch.block_ctrl;
@@ -411,18 +452,25 @@ void DmaController::dma_block(int channel, u32 max_words) {
       static u32 cdrom_dma_begin_logs = 0;
       static u32 cdrom_dma_whole_begin_logs = 0;
       static u32 cdrom_dma_e0_begin_logs = 0;
+      static u32 cdrom_dma_c0_begin_logs = 0;
       const CdRom &cd = sys_->cdrom();
       const bool whole_sector = cd.read_whole_sector();
       const bool e0_sector = cd.mode() == 0xE0u;
-      if (cdrom_dma_begin_logs < 128u ||
-          (whole_sector && cdrom_dma_whole_begin_logs < 128u) ||
-          (e0_sector && cdrom_dma_e0_begin_logs < 128u)) {
+      const bool c0_sector = cd.mode() == 0xC0u;
+      cdrom_dma_active_lba = cd.active_data_lba();
+      if (cdrom_dma_begin_logs < 256u ||
+          (whole_sector && cdrom_dma_whole_begin_logs < 512u) ||
+          (e0_sector && cdrom_dma_e0_begin_logs < 512u) ||
+          (c0_sector && cdrom_dma_c0_begin_logs < 512u)) {
         ++cdrom_dma_begin_logs;
         if (whole_sector) {
           ++cdrom_dma_whole_begin_logs;
         }
         if (e0_sector) {
           ++cdrom_dma_e0_begin_logs;
+        }
+        if (c0_sector) {
+          ++cdrom_dma_c0_begin_logs;
         }
         LOG_INFO(
             "DMA: CDROM begin madr=0x%08X requested=%u actual=%u slice=%u avail=%u "
@@ -432,7 +480,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
             max_words, sys_->cdrom_dma_words_available(), cd.dma_data_index(),
             cd.dma_buffer_size(), cd.sector_data_ready() ? 1u : 0u,
             cd.sector_data_request() ? 1u : 0u, static_cast<unsigned>(cd.mode()),
-            cd.read_whole_sector() ? 1u : 0u, cd.current_read_lba(),
+            cd.read_whole_sector() ? 1u : 0u, cdrom_dma_active_lba,
             ch.block_ctrl, ch.channel_ctrl,
             static_cast<unsigned long long>(sys_->cpu().cycle_count()));
       }
@@ -479,7 +527,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
         ch.block_words_remaining = 0;
       }
       if (block_mode && ch.block_words_remaining == 0) {
-        const u16 remaining = ch.block_count();
+        const u32 remaining = ch.block_count();
         const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
         ch.block_ctrl =
             (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
@@ -568,7 +616,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
       ch.block_words_remaining = 0;
     }
     if (block_mode && ch.block_words_remaining == 0) {
-      const u16 remaining = ch.block_count();
+      const u32 remaining = ch.block_count();
       const u16 next = (remaining > 0) ? static_cast<u16>(remaining - 1) : 0;
       ch.block_ctrl =
           (ch.block_ctrl & 0x0000FFFFu) | (static_cast<u32>(next) << 16);
@@ -583,18 +631,24 @@ void DmaController::dma_block(int channel, u32 max_words) {
     static u32 cdrom_dma_end_logs = 0;
     static u32 cdrom_dma_whole_end_logs = 0;
     static u32 cdrom_dma_e0_end_logs = 0;
+    static u32 cdrom_dma_c0_end_logs = 0;
     const CdRom &cd = sys_->cdrom();
     const bool whole_sector = cd.read_whole_sector();
     const bool e0_sector = cd.mode() == 0xE0u;
-    if (cdrom_dma_end_logs < 128u ||
-        (whole_sector && cdrom_dma_whole_end_logs < 128u) ||
-        (e0_sector && cdrom_dma_e0_end_logs < 128u)) {
+    const bool c0_sector = cd.mode() == 0xC0u;
+    if (cdrom_dma_end_logs < 256u ||
+        (whole_sector && cdrom_dma_whole_end_logs < 512u) ||
+        (e0_sector && cdrom_dma_e0_end_logs < 512u) ||
+        (c0_sector && cdrom_dma_c0_end_logs < 512u)) {
       ++cdrom_dma_end_logs;
       if (whole_sector) {
         ++cdrom_dma_whole_end_logs;
       }
       if (e0_sector) {
         ++cdrom_dma_e0_end_logs;
+      }
+      if (c0_sector) {
+        ++cdrom_dma_c0_end_logs;
       }
       LOG_INFO(
           "DMA: CDROM end base=0x%08X words=%u remaining_block=%u avail=%u "
@@ -616,6 +670,45 @@ void DmaController::dma_block(int channel, u32 max_words) {
             cdrom_dma_sample_words[7]);
       }
     }
+    if (c0_sector && cdrom_dma_sample_count > 0u) {
+      static u32 str_dma_log_count = 0;
+      static int str_header_lba = -1;
+      static u32 str_header_frame = 0;
+      static u32 str_header_chunk = 0;
+      static u32 str_header_chunks = 0;
+      static bool str_header_pending = false;
+
+      if (cdrom_dma_sample_words[0] == 0x80010160u &&
+          cdrom_dma_sample_count >= 3u) {
+        str_header_lba = cdrom_dma_active_lba;
+        str_header_chunk = cdrom_dma_sample_words[1] & 0xFFFFu;
+        str_header_chunks = cdrom_dma_sample_words[1] >> 16;
+        str_header_frame = cdrom_dma_sample_words[2];
+        str_header_pending = true;
+        if (str_dma_log_count < 4096u) {
+          ++str_dma_log_count;
+          LOG_INFO(
+              "DMA: STRDMA head lba=%d words=%u frame=%u chunk=%u/%u "
+              "madr=0x%08X w3=0x%08X cyc=%llu",
+              str_header_lba, transfer_words, str_header_frame,
+              str_header_chunk, str_header_chunks, dbg.base_addr,
+              cdrom_dma_sample_words[3],
+              static_cast<unsigned long long>(sys_->cpu().cycle_count()));
+        }
+      } else if (str_header_pending && transfer_words >= 128u) {
+        if (str_dma_log_count < 4096u) {
+          ++str_dma_log_count;
+          LOG_INFO(
+              "DMA: STRDMA body lba=%d words=%u frame=%u chunk=%u/%u "
+              "madr=0x%08X first=0x%08X last=0x%08X cyc=%llu",
+              str_header_lba, transfer_words, str_header_frame,
+              str_header_chunk, str_header_chunks, dbg.base_addr,
+              cdrom_dma_first_word, cdrom_dma_last_word,
+              static_cast<unsigned long long>(sys_->cpu().cycle_count()));
+        }
+        str_header_pending = false;
+      }
+    }
   }
 }
 
@@ -635,6 +728,8 @@ void DmaController::dma_linked_list(int channel) {
     u32 header = sys_->read32(addr);
     sys_->debug_end_dma_bus_access();
     u32 word_count = header >> 24;
+    const u32 packet_addr = addr;
+    const u32 next_addr = header & 0x00FFFFFFu;
     transferred_words += 1;
 
     // Send words to GP0
@@ -667,6 +762,14 @@ void DmaController::dma_linked_list(int channel) {
 
 void DmaController::transfer_complete(int channel) {
   auto &ch = channels_[channel];
+  const u64 cycle = sys_ ? sys_->cpu().cycle_count() : 0ull;
+  if (g_log_fmv_diagnostics &&
+      (channel == 1 || cycle >= 880000000ull)) {
+    LOG_WARN(
+        "DMA: ch%d complete pre madr=0x%08X bcr=0x%08X chcr=0x%08X dicr=0x%08X cyc=%llu",
+        channel, ch.base_addr, ch.block_ctrl, ch.channel_ctrl, dicr_,
+        static_cast<unsigned long long>(cycle));
+  }
 
   // Clear enable + trigger bits
   ch.channel_ctrl &= ~(1u << 24); // Disable
@@ -682,6 +785,13 @@ void DmaController::transfer_complete(int channel) {
   if (master_enable && channel_irq_enable) {
     dicr_ |= (1u << (24 + channel));
     recompute_dicr_master(true);
+  }
+  if (g_log_fmv_diagnostics &&
+      (channel == 1 || cycle >= 880000000ull)) {
+    LOG_WARN(
+        "DMA: ch%d complete post madr=0x%08X bcr=0x%08X chcr=0x%08X dicr=0x%08X cyc=%llu",
+        channel, ch.base_addr, ch.block_ctrl, ch.channel_ctrl, dicr_,
+        static_cast<unsigned long long>(cycle));
   }
 }
 

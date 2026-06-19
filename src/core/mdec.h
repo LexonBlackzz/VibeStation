@@ -102,6 +102,8 @@ private:
   };
 
   void begin_command(u32 value);
+  bool start_queued_command();
+  void complete_decode_if_ready();
   void soft_reset_state();
   void execute_command();
   void execute_decode();
@@ -111,10 +113,11 @@ private:
   bool decode_next_block();
   bool decode_rle_block(Block &block, const std::array<u8, kBlockSize> &quant_table);
   u16 pop_decode_halfword();
-  bool scan_block(size_t &cursor) const;
-  bool scan_macroblock(size_t block_count, size_t &consumed_halfwords) const;
+  bool scan_block(size_t &cursor, size_t limit) const;
+  bool scan_macroblock(size_t block_count, size_t limit,
+                       size_t &consumed_halfwords) const;
   bool decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
-                    size_t &cursor);
+                    size_t &cursor, size_t limit);
   void idct(const Block &coeffs, Block &pixels) const;
   void compare_colored_macroblock(const std::vector<u16> &input) ;
   bool decode_colored_macroblock_variant(const std::vector<u16> &input,

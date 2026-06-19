@@ -502,7 +502,10 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
       << ") wh=(" << gdisp.display_vram_width << "," << gdisp.display_vram_height
       << ") skip=(" << gdisp.display_skip_x << ",0)"
       << " div=" << gdisp.divisor << " 24bit=" << (gdisp.is_24bit ? 1 : 0)
-      << " interlace=" << (gdisp.interlaced ? 1 : 0) << "\n";
+      << " interlace=" << (gdisp.interlaced ? 1 : 0)
+      << " texwin_mask=(" << gdisp.tex_window_mask_x << ","
+      << gdisp.tex_window_mask_y << ") texwin_off=("
+      << gdisp.tex_window_off_x << "," << gdisp.tex_window_off_y << ")\n";
   out << "GP1 area=(" << gdisp.x_start << "," << gdisp.y_start << ")"
       << " hrange=(" << gdisp.x1 << "," << gdisp.x2 << ")"
       << " vrange=(" << gdisp.y1 << "," << gdisp.y2 << ")"
@@ -543,6 +546,18 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
         << " missing=" << probe.gpu_src_words_missing
         << " entries=" << probe.gpu_src_write_entries << "\n";
   }
+  if (probe.gpu_upload_seen) {
+    out << "GPU_UPLOAD_CUR count=" << probe.gpu_upload_count << " xy=("
+        << probe.gpu_x << "," << probe.gpu_y << ") wh=(" << probe.gpu_w
+        << "," << probe.gpu_h << ") words=" << probe.gpu_words_seen << "/"
+        << probe.gpu_total_words << " sample=" << probe.gpu_sample_count;
+    for (u32 i = 0; i < probe.gpu_sample_count; ++i) {
+      out << " w" << i << "=0x" << std::hex << probe.gpu_words_sample[i]
+          << "@0x" << probe.gpu_dma_src_addrs[i] << std::dec
+          << (probe.gpu_word_from_dma[i] ? ":dma" : ":cpu");
+    }
+    out << "\n";
+  }
 
   const u32 poly_count =
       std::min<u32>(gcmd.gp0_poly_count,
@@ -579,7 +594,7 @@ static void dump_gpu_debug_frame(std::ofstream &out, int frame_index,
         << static_cast<unsigned>(gcmd.rect_g[rect_index]) << ","
         << static_cast<unsigned>(gcmd.rect_b[rect_index]) << ")\n";
   }
-  for (u32 i = 0; i < std::min<u32>(poly_count, 12u); ++i) {
+  for (u32 i = 0; i < std::min<u32>(poly_count, 64u); ++i) {
     const u32 poly_index = indices[static_cast<size_t>(i)];
     const GpuDebugDumpRegion src =
         compute_gpu_poly_source_region(gcmd, poly_index);
@@ -1004,6 +1019,22 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     LOG_INFO("Frame test: wrote %s", path);
   };
+  auto dump_vram_raw = [](System &sys, int frame_index) {
+    char path[128];
+    std::snprintf(path, sizeof(path), "frame_%04d_vram.bin", frame_index);
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+      return;
+    }
+    const u16 *vram = sys.gpu().vram();
+    for (int i = 0; i < static_cast<int>(psx::VRAM_WIDTH * psx::VRAM_HEIGHT);
+         ++i) {
+      const u16 p = vram[i];
+      out.put(static_cast<char>(p & 0xFFu));
+      out.put(static_cast<char>((p >> 8) & 0xFFu));
+    }
+    LOG_INFO("Frame test: wrote %s", path);
+  };
   auto dump_display_ppm = [](System &sys, int frame_index) {
     std::vector<u32> rgba;
     const DisplaySampleInfo sample =
@@ -1227,6 +1258,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
 
     if (should_dump_vram(i + 1)) {
       dump_vram_ppm(*sys, i + 1);
+      dump_vram_raw(*sys, i + 1);
       dump_display_ppm(*sys, i + 1);
     }
     if (gpu_debug_out.is_open()) {
@@ -1258,7 +1290,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
       "last_pad_buttons=0x%04X last_sio_tx=0x%02X last_sio_rx=0x%02X "
       "joy_stat=0x%04X joy_ctrl=0x%04X "
       "sio_irq_assert=%llu sio_irq_ack=%llu "
-      "cdread_count=%llu cd_irq1=%llu cd_irq3=%llu "
+      "cdread_count=%llu cd_sector_count=%llu cd_lba=%d cd_irq1=%llu cd_irq3=%llu "
       "cd_resp_promotions=%llu cd_read_stalls=%llu cd_status_e0=%llu cd_status_e0_streak=%llu "
       "display_hash=0x%08X display_non_black=%llu display_wh=%ux%u "
       "display_start=%u,%u display_enabled=%u display_24=%u final_pc=0x%08X",
@@ -1288,6 +1320,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
       static_cast<unsigned long long>(diag.sio_irq_assert_count),
       static_cast<unsigned long long>(diag.sio_irq_ack_count),
       static_cast<unsigned long long>(diag.cd_read_command_count),
+      static_cast<unsigned long long>(sys->cdrom().sector_count()),
+      sys->cdrom().current_read_lba(),
       static_cast<unsigned long long>(diag.cd_irq_int1_count),
       static_cast<unsigned long long>(diag.cd_irq_int3_count),
       static_cast<unsigned long long>(sys->cdrom().response_promotion_count()),
@@ -2276,6 +2310,10 @@ int main(int argc, char *argv[]) {
     passthrough.push_back(a);
   }
 
+  if (fmv_diagnostics_override >= 0) {
+    g_log_fmv_diagnostics = (fmv_diagnostics_override != 0);
+  }
+
   if (passthrough.size() >= 2 && passthrough[0] == "--bios-test") {
     int steps = 20000;
     if (passthrough.size() >= 3) {
@@ -2384,10 +2422,6 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     getchar();
     return 1;
-  }
-
-  if (fmv_diagnostics_override >= 0) {
-    g_log_fmv_diagnostics = (fmv_diagnostics_override != 0);
   }
 
   if (!windowed_disc_path.empty()) {

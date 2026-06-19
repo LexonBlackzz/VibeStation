@@ -67,10 +67,13 @@ inline bool fmv_diagnostics_enabled() {
 }
 
 constexpr u32 kTicksPerBlock = 448u;
-// DuckStation schedules macroblock copy-out after TICKS_PER_BLOCK * 6 via the
-// global event queue. Until this core has a comparable scheduler/CPU stall path,
-// delaying MDEC output here starves DMA1 and regresses FMV playback.
-constexpr u32 kMacroblockOutputDelayCycles = 0u;
+constexpr size_t kDataInFifoHalfwords = 1024u / sizeof(u16);
+constexpr size_t kDmaInRequestHalfwords = 32u * 2u;
+// DuckStation schedules macroblock copy-out after TICKS_PER_BLOCK * 6. With
+// incremental RLE consumption, DMA0 can keep feeding the input FIFO while DMA1
+// waits on realistic output latency instead of making every macroblock
+// available in the same instant it is parsed.
+constexpr u32 kMacroblockOutputDelayCycles = kTicksPerBlock * 6u;
 
 } // namespace
 
@@ -169,7 +172,6 @@ void Mdec::begin_command(u32 value) {
   output_depth_ = static_cast<u8>((value >> 27) & 0x3u);
   output_signed_ = (value & (1u << 26)) != 0;
   output_set_bit15_ = (value & (1u << 25)) != 0;
-  in_halfword_fifo_.clear();
   decode_halfwords_remaining_ = 0;
   reset_decode_state();
   // A fresh command resets pending output words from the previous command.
@@ -236,6 +238,33 @@ void Mdec::begin_command(u32 value) {
   }
 }
 
+bool Mdec::start_queued_command() {
+  if (!expect_command_word_ || in_halfword_fifo_.size() < 2u) {
+    return false;
+  }
+
+  const u16 lo = in_halfword_fifo_.front();
+  in_halfword_fifo_.pop_front();
+  const u16 hi = in_halfword_fifo_.front();
+  in_halfword_fifo_.pop_front();
+  begin_command(static_cast<u32>(lo) | (static_cast<u32>(hi) << 16));
+  return true;
+}
+
+void Mdec::complete_decode_if_ready() {
+  if (command_id_ != 1 || in_unlimited_ || decode_halfwords_remaining_ != 0 ||
+      !out_fifo_.empty() || !pending_out_fifo_.empty() ||
+      output_ready_delay_cycles_ != 0) {
+    return;
+  }
+
+  expect_command_word_ = true;
+  command_busy_ = false;
+  if (start_queued_command() && command_id_ == 1) {
+    execute_decode();
+  }
+}
+
 void Mdec::write_command(u32 value) {
   if (fmv_diagnostics_enabled()) {
     const u32 write_hist_index =
@@ -247,7 +276,7 @@ void Mdec::write_command(u32 value) {
     ++debug_stats_.write_history_count;
   }
 
-  if (expect_command_word_) {
+  if (expect_command_word_ && in_halfword_fifo_.empty()) {
     begin_command(value);
     return;
   }
@@ -260,6 +289,14 @@ void Mdec::write_command(u32 value) {
   } else {
     in_halfword_fifo_.push_back(lo);
     in_halfword_fifo_.push_back(hi);
+  }
+
+  if (expect_command_word_) {
+    start_queued_command();
+    if (command_id_ == 1) {
+      execute_decode();
+    }
+    return;
   }
 
   if (!in_unlimited_ && in_words_remaining_ > 0) {
@@ -275,10 +312,12 @@ void Mdec::write_command(u32 value) {
       execute_command();
       expect_command_word_ = true;
       command_busy_ = false;
-    } else if (out_fifo_.empty() && in_halfword_fifo_.empty() &&
-               decode_halfwords_remaining_ == 0) {
-      expect_command_word_ = true;
-      command_busy_ = false;
+      start_queued_command();
+      if (command_id_ == 1) {
+        execute_decode();
+      }
+    } else {
+      complete_decode_if_ready();
     }
   }
 }
@@ -321,11 +360,11 @@ u32 Mdec::read_data() {
     out_macroblock_fifo_.pop_front();
   }
   if (out_fifo_.empty() && command_id_ == 1) {
-    execute_decode();
-    if (out_fifo_.empty() && in_halfword_fifo_.empty() &&
-        in_words_remaining_ == 0 && decode_halfwords_remaining_ == 0) {
-      expect_command_word_ = true;
-      command_busy_ = false;
+    if (decode_halfwords_remaining_ == 0) {
+      complete_decode_if_ready();
+    } else {
+      execute_decode();
+      complete_decode_if_ready();
     }
   }
   return value;
@@ -357,8 +396,9 @@ u32 Mdec::read_status() const {
   if (!data_out_ready) {
     status |= 1u << 31;
   }
-  // bit 30: Data In Full - we use dynamic buffer, so report full if huge
-  if (in_halfword_fifo_.size() > 4096) {
+  // DuckStation models the data-in FIFO as 1024 bytes. Preserve that
+  // backpressure so DMA0 cannot run an entire compressed frame ahead of MDEC.
+  if (in_halfword_fifo_.size() >= kDataInFifoHalfwords) {
       status |= 1u << 30;
   }
   if (command_busy_) {
@@ -380,7 +420,7 @@ u32 Mdec::read_status() const {
           : ((delayed_output_ready() && !pending_out_block_fifo_.empty())
                  ? pending_out_block_fifo_.front()
                  : current_block_);
-  status |= (static_cast<u32>(block & 0x7u) << 16);
+  status |= (static_cast<u32>((block + 4u) % 6u) << 16);
 
   if (!expect_command_word_) {
     const u32 remaining_words =
@@ -403,14 +443,9 @@ bool Mdec::dma_in_request() const {
   if (!dma_in_enabled) {
     return false;
   }
-  if (expect_command_word_) {
-    // Channel 0 request mode must be able to deliver command words.
-    return true;
-  }
-  if (in_unlimited_) {
-    return true;
-  }
-  return in_words_remaining_ > 0;
+  return (kDataInFifoHalfwords - std::min(in_halfword_fifo_.size(),
+                                          kDataInFifoHalfwords)) >=
+         kDmaInRequestHalfwords;
 }
 
 bool Mdec::dma_out_request() const {
@@ -494,42 +529,32 @@ void Mdec::execute_decode() {
   if (command_id_ != 1) {
     return;
   }
-
-  const size_t needed_blocks =
-      (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 6u : 1u;
-  size_t consumed_halfwords = 0;
-  if (!scan_macroblock(needed_blocks, consumed_halfwords)) {
-    if (decode_halfwords_remaining_ == 0 && in_halfword_fifo_.empty()) {
-      reset_decode_state();
-    }
+  if (decode_halfwords_remaining_ == 0) {
+    complete_decode_if_ready();
     return;
   }
 
-  MacroblockBlocks decoded_blocks{};
-  size_t cursor = 0;
-  for (size_t block = 0; block < needed_blocks; ++block) {
-    const bool chroma_block =
-        (out_depth_latched_ == 2 || out_depth_latched_ == 3) && block < 2u;
-    if (!decode_block(decoded_blocks[block],
-                      chroma_block ? quant_chroma_ : quant_luma_, cursor)) {
+  const size_t needed_blocks =
+      (out_depth_latched_ == 2 || out_depth_latched_ == 3) ? 6u : 1u;
+
+  while (decode_block_index_ < needed_blocks) {
+    if (!decode_next_block()) {
+      if (decode_halfwords_remaining_ == 0 && in_halfword_fifo_.empty()) {
+        reset_decode_state();
+      }
       return;
     }
-  }
-
-  debug_current_macroblock_input_.clear();
-  for (size_t i = 0; i < consumed_halfwords; ++i) {
-    pop_decode_halfword();
   }
 
   if (out_depth_latched_ == 2 || out_depth_latched_ == 3) {
     if (g_mdec_debug_compare_macroblocks) {
       compare_colored_macroblock(debug_current_macroblock_input_);
     }
-    emit_colored_macroblock(decoded_blocks[0], decoded_blocks[1],
-                            decoded_blocks[2], decoded_blocks[3],
-                            decoded_blocks[4], decoded_blocks[5]);
+    emit_colored_macroblock(decode_blocks_[0], decode_blocks_[1],
+                            decode_blocks_[2], decode_blocks_[3],
+                            decode_blocks_[4], decode_blocks_[5]);
   } else {
-    emit_monochrome_macroblock(decoded_blocks[0]);
+    emit_monochrome_macroblock(decode_blocks_[0]);
   }
 
   pending_out_fifo_.swap(out_fifo_);
@@ -694,10 +719,10 @@ bool Mdec::decode_rle_block(Block &block,
   return false;
 }
 
-bool Mdec::scan_block(size_t &cursor) const {
+bool Mdec::scan_block(size_t &cursor, size_t limit) const {
   u16 first = 0;
   for (;;) {
-    if (cursor >= in_halfword_fifo_.size()) {
+    if (cursor >= limit) {
       return false;
     }
     first = in_halfword_fifo_[cursor++];
@@ -708,7 +733,7 @@ bool Mdec::scan_block(size_t &cursor) const {
 
   int k = 0;
   while (true) {
-    if (cursor >= in_halfword_fifo_.size()) {
+    if (cursor >= limit) {
       return false;
     }
     const u16 word = in_halfword_fifo_[cursor++];
@@ -719,10 +744,11 @@ bool Mdec::scan_block(size_t &cursor) const {
   }
 }
 
-bool Mdec::scan_macroblock(size_t block_count, size_t &consumed_halfwords) const {
+bool Mdec::scan_macroblock(size_t block_count, size_t limit,
+                           size_t &consumed_halfwords) const {
   size_t cursor = 0;
   for (size_t block = 0; block < block_count; ++block) {
-    if (!scan_block(cursor)) {
+    if (!scan_block(cursor, limit)) {
       return false;
     }
   }
@@ -731,12 +757,12 @@ bool Mdec::scan_macroblock(size_t block_count, size_t &consumed_halfwords) const
 }
 
 bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_table,
-                        size_t &cursor) {
+                        size_t &cursor, size_t limit) {
   block.fill(0);
 
   u16 first = 0;
   for (;;) {
-    if (cursor >= in_halfword_fifo_.size()) {
+    if (cursor >= limit) {
       return false;
     }
     first = in_halfword_fifo_[cursor++];
@@ -778,7 +804,7 @@ bool Mdec::decode_block(Block &block, const std::array<u8, kBlockSize> &quant_ta
   }
 
   while (true) {
-    if (cursor >= in_halfword_fifo_.size()) {
+    if (cursor >= limit) {
       return false; // Need more data for EOB
     }
     const u16 word = in_halfword_fifo_[cursor++];

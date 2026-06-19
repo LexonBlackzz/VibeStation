@@ -32,7 +32,11 @@ struct DmaChannel {
   }
 
   u16 block_size() const { return static_cast<u16>(block_ctrl & 0xFFFF); }
-  u16 block_count() const { return static_cast<u16>(block_ctrl >> 16); }
+  u16 raw_block_count() const { return static_cast<u16>(block_ctrl >> 16); }
+  u32 block_count() const {
+    const u16 count = raw_block_count();
+    return count == 0 ? 0x10000u : count;
+  }
 
   bool is_active() const {
     bool en = enabled();

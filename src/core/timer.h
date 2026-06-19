@@ -62,6 +62,8 @@ private:
   Timer timers_[3];
   bool hblank_active_ = false;
   bool vblank_active_ = false;
+  u32 timer0_dot_cycle_remainder_ = 0;
+  u32 timer2_sysclk8_cycle_remainder_ = 0;
 
   void tick_timer(int index, u32 ticks);
   bool is_paused_by_sync(int index) const;

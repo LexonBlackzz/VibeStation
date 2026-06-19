@@ -34,6 +34,8 @@ void Timers::reset() {
   }
   hblank_active_ = false;
   vblank_active_ = false;
+  timer0_dot_cycle_remainder_ = 0;
+  timer2_sysclk8_cycle_remainder_ = 0;
 }
 
 u32 Timers::read(u32 offset) const {
@@ -75,6 +77,11 @@ void Timers::write(u32 offset, u32 value) {
   switch (reg) {
   case 0x0:
     t.counter = value & 0xFFFFu;
+    if (timer == 0) {
+      timer0_dot_cycle_remainder_ = 0;
+    } else if (timer == 2) {
+      timer2_sysclk8_cycle_remainder_ = 0;
+    }
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -88,6 +95,25 @@ void Timers::write(u32 offset, u32 value) {
     t.one_shot_done = false;
     t.sync_released = false;
     t.irq_pulse_restore_pending = false;
+    if (timer == 0) {
+      timer0_dot_cycle_remainder_ = 0;
+    } else if (timer == 2) {
+      timer2_sysclk8_cycle_remainder_ = 0;
+    }
+    if (g_log_fmv_diagnostics) {
+      static u32 timer_mode_write_log_count = 0;
+      if (timer_mode_write_log_count < 64u) {
+        ++timer_mode_write_log_count;
+        LOG_INFO(
+            "Timers: diag T%d MODE raw=0x%04X mode=0x%04X sync=%u smode=%u irq_target=%u irq_overflow=%u repeat=%u toggle=%u source=%u target=0x%04X",
+            timer, static_cast<unsigned>(value & 0xFFFFu),
+            static_cast<unsigned>(t.mode), t.sync_enable() ? 1u : 0u,
+            static_cast<unsigned>(t.sync_mode()), t.irq_on_target() ? 1u : 0u,
+            t.irq_on_overflow() ? 1u : 0u, t.irq_repeat() ? 1u : 0u,
+            t.irq_toggle() ? 1u : 0u, static_cast<unsigned>(t.clock_source()),
+            static_cast<unsigned>(t.target));
+      }
+    }
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -96,6 +122,16 @@ void Timers::write(u32 offset, u32 value) {
     break;
   case 0x8:
     t.target = static_cast<u16>(value);
+    if (g_log_fmv_diagnostics) {
+      static u32 timer_target_write_log_count = 0;
+      if (timer_target_write_log_count < 64u) {
+        ++timer_target_write_log_count;
+        LOG_INFO("Timers: diag T%d TARGET raw=0x%04X mode=0x%04X source=%u",
+                 timer, static_cast<unsigned>(t.target),
+                 static_cast<unsigned>(t.mode),
+                 static_cast<unsigned>(t.clock_source()));
+      }
+    }
     if (g_trace_timer &&
         trace_should_log(g_timer_trace_counter, g_trace_burst_timer,
                          g_trace_stride_timer)) {
@@ -114,13 +150,22 @@ void Timers::tick(u32 cycles) {
     const u8 source = timers_[i].clock_source();
     u32 ticks = 0;
 
-    if (i == 2) {
+    if (i == 0 && (source == 1 || source == 3)) {
+      const u32 divider = (sys_ != nullptr) ? sys_->gpu_dot_clock_divider() : 8u;
+      const u64 total = static_cast<u64>(timer0_dot_cycle_remainder_) + cycles;
+      ticks = static_cast<u32>(total / divider);
+      timer0_dot_cycle_remainder_ = static_cast<u32>(total % divider);
+    } else if (i == 2) {
       // PSX-SPX timer2 clock source:
       //   0/1 = System Clock, 2/3 = System Clock / 8
       if (source == 2 || source == 3) {
-        ticks = cycles / 8;
+        const u64 total =
+            static_cast<u64>(timer2_sysclk8_cycle_remainder_) + cycles;
+        ticks = static_cast<u32>(total / 8u);
+        timer2_sysclk8_cycle_remainder_ = static_cast<u32>(total % 8u);
       } else {
         ticks = cycles;
+        timer2_sysclk8_cycle_remainder_ = 0;
       }
     } else {
       // Timers 0/1 use the system clock on sources 0/2.
@@ -168,10 +213,11 @@ void Timers::hblank_pulse() {
   hblank_active_ = true;
   process_sync_event(0, true);
 
-  // Timer 0 source 1/3 is not fully dot-clock accurate yet; use one tick
-  // per HBlank pulse to keep BIOS timing from stalling.
+  // Keep a narrow HBlank tick for gated Timer 0 modes which only run during
+  // HBlank. Free-running dot-clock mode is advanced from CPU cycles in tick().
   const u8 t0_source = timers_[0].clock_source();
-  if (t0_source == 1 || t0_source == 3) {
+  if ((t0_source == 1 || t0_source == 3) && timers_[0].sync_enable() &&
+      timers_[0].sync_mode() == 2) {
     tick_timer(0, 1);
   }
 
