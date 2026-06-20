@@ -1,6 +1,7 @@
 #pragma once
 #include "gte.h"
 #include "types.h"
+#include <array>
 
 
 // ── MIPS R3000A CPU ────────────────────────────────────────────────
@@ -8,6 +9,70 @@
 // Features: 32 GPRs, HI/LO for multiply/divide, load and branch delay slots.
 
 class System;
+class CpuOptimizedBackend;
+
+struct CpuRunSliceResult {
+  u32 cycles = 0;
+  u32 instructions = 0;
+};
+
+struct CpuBackendStats {
+  bool available = false;
+  bool active = false;
+  u32 block_count = 0;
+  u32 interpreter_only_blocks = 0;
+  u64 decoded_blocks = 0;
+  u64 native_blocks = 0;
+  u64 cache_hits = 0;
+  u64 cache_misses = 0;
+  u64 invalidations = 0;
+  u64 invalidation_queries = 0;
+  u64 invalidation_fast_no_code_page_exits = 0;
+  u64 invalidation_blocks_examined = 0;
+  u64 invalidation_blocks_invalidated = 0;
+  u64 flushes = 0;
+  u64 decoded_block_entries = 0;
+  u64 native_block_entries = 0;
+  u64 optimized_instructions = 0;
+  u64 decoded_instructions = 0;
+  u64 native_instructions = 0;
+  u64 fallback_instructions = 0;
+  u64 interpreter_fallback_steps = 0;
+  u64 memory_helper_calls = 0;
+  u64 mmio_accesses = 0;
+  u64 exceptions = 0;
+  u64 interrupt_exits = 0;
+  u64 budget_exits = 0;
+  u64 fallback_exits = 0;
+  u64 pc_mismatch_exits = 0;
+  u64 invalidated_exits = 0;
+  u64 executed_cycles = 0;
+  size_t code_bytes = 0;
+};
+
+struct CpuDebugState {
+  std::array<u32, 32> gpr{};
+  u32 pc = 0;
+  u32 next_pc = 0;
+  u32 current_pc = 0;
+  u32 hi = 0;
+  u32 lo = 0;
+  u32 load_reg = 0;
+  u32 load_value = 0;
+  u32 next_load_reg = 0;
+  u32 next_load_value = 0;
+  bool in_delay_slot = false;
+  bool pending_delay_slot = false;
+  bool pending_branch_taken = false;
+  u32 pending_branch_pc = 0;
+  u32 active_branch_pc = 0;
+  bool exception_raised = false;
+  u32 cop0_sr = 0;
+  u32 cop0_cause = 0;
+  u32 cop0_epc = 0;
+  u32 cop0_badvaddr = 0;
+  u64 cycles = 0;
+};
 
 // COP0 exception causes
 enum class Exception : u32 {
@@ -26,11 +91,20 @@ enum class Exception : u32 {
 
 class Cpu {
 public:
+  Cpu();
+  ~Cpu();
+
   void init(System *sys);
   void reset();
 
   // Execute one instruction and return the number of CPU cycles it consumed.
   u32 step();
+  CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
+  u32 read_instruction_for_backend(u32 addr) const;
+  void notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes);
+  void notify_cpu_backend_frame(u32 frame_index);
+  void flush_cpu_backend();
+  CpuBackendStats cpu_backend_stats() const;
 
   // COP2 (GTE) — publicly accessible for DMA
   Gte gte;
@@ -40,9 +114,13 @@ public:
   u32 reg(int i) const { return gpr_[i]; }
   u64 cycle_count() const { return cycles_; }
   void add_cycle_penalty(u32 cycles);
+  CpuDebugState debug_state() const;
+  void debug_set_state(const CpuDebugState &state);
 
 private:
   System *sys_ = nullptr;
+  std::unique_ptr<CpuOptimizedBackend> optimized_backend_;
+  friend class CpuOptimizedBackend;
 
   // ── Registers ──────────────────────────────────────────────────
   u32 gpr_[32] = {};    // General purpose registers (r0 ≡ 0)

@@ -1315,6 +1315,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     reset_profiling_stats();
     spu_skip_sync_for_turbo_ = skip_spu_for_turbo;
     const bool profile_detailed = g_profile_detailed_timing;
+    cpu_.notify_cpu_backend_frame(boot_diag_.frame_counter);
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
     apply_sound_reaper_for_frame();
@@ -1333,6 +1334,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // Aggressive fast mode intentionally trades timing stability for throughput.
     const bool fast_mode = g_gpu_fast_mode;
     const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
+    const bool optimized_cpu_mode =
+        effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
     const u32 cpu_instruction_slice =
         aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
@@ -1384,23 +1387,48 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
             u32 sio_slice_cycles = 0;
-            while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
-                   instructions_executed < cpu_instruction_slice) {
-                const u32 consumed = cpu_.step();
-                spent_in_slice += consumed;
-                frame_cycles_ += consumed;
+            if (optimized_cpu_mode) {
+                CpuRunSliceResult run =
+                    cpu_.run_slice(target_slice_cycles, cpu_instruction_slice);
+                if (run.cycles == 0 || run.instructions == 0) {
+                    run.cycles = cpu_.step();
+                    run.instructions = 1;
+                }
+
+                spent_in_slice = run.cycles;
+                instructions_executed = run.instructions;
+                frame_cycles_ += run.cycles;
                 if (fast_mode) {
-                    sio_slice_cycles += consumed;
+                    sio_slice_cycles += run.cycles;
+                } else {
+                    sio_.tick(run.cycles);
                 }
-                else {
-                    // Advance SIO at instruction granularity so JOYPAD serial
-                    // handshakes don't stall for an entire scanline worth of CPU
-                    // polling loops.
-                    sio_.tick(consumed);
-                }
-                ++instructions_executed;
                 cycles_remaining =
-                    (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
+                    (run.cycles >= cycles_remaining) ? 0 : (cycles_remaining - run.cycles);
+            } else {
+                while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
+                       instructions_executed < cpu_instruction_slice) {
+                    const CpuRunSliceResult run =
+                        cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
+                    const u32 consumed = run.cycles;
+                    if (consumed == 0) {
+                        break;
+                    }
+                    spent_in_slice += consumed;
+                    frame_cycles_ += consumed;
+                    if (fast_mode) {
+                        sio_slice_cycles += consumed;
+                    }
+                    else {
+                        // Advance SIO at instruction granularity so JOYPAD serial
+                        // handshakes don't stall for an entire scanline worth of CPU
+                        // polling loops.
+                        sio_.tick(consumed);
+                    }
+                    instructions_executed += std::max(1u, run.instructions);
+                    cycles_remaining =
+                        (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
+                }
             }
             if (fast_mode && sio_slice_cycles > 0) {
                 sio_.tick(sio_slice_cycles);
@@ -1788,6 +1816,7 @@ void System::apply_ram_reaper_for_frame() {
             if (cursor == target_index) {
                 const u32 offset = addr_dist(ram_reaper_rng_);
                 ram_.write8(offset, static_cast<u8>(byte_dist(ram_reaper_rng_)));
+                cpu_.notify_code_write(offset, 1);
                 ++mutations;
                 continue;
             }
@@ -2409,17 +2438,20 @@ void System::write8(u32 addr, u8 val) {
             }
         }
         ram_.write8(ram_addr, val);
+        cpu_.notify_code_write(ram_addr, 1);
         debug_note_main_ram_write(ram_addr, val, 1);
         return;
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write8(phys - 0x1F800000, val);
+        cpu_.notify_code_write(phys, 1);
         return;
     }
     if (phys >= psx::BIOS_BASE &&
         static_cast<u64>(phys) <
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
         bios_.write8(phys - psx::BIOS_BASE, val);
+        cpu_.notify_code_write(phys, 1);
         return;
     }
 
@@ -2659,17 +2691,20 @@ void System::write16(u32 addr, u16 val) {
             }
         }
         ram_.write16(ram_addr, val);
+        cpu_.notify_code_write(ram_addr, 2);
         debug_note_main_ram_write(ram_addr, val, 2);
         return;
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write16(phys - 0x1F800000, val);
+        cpu_.notify_code_write(phys, 2);
         return;
     }
     if (phys >= psx::BIOS_BASE &&
         static_cast<u64>(phys) <
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
         bios_.write16(phys - psx::BIOS_BASE, val);
+        cpu_.notify_code_write(phys, 2);
         return;
     }
 
@@ -2959,17 +2994,20 @@ void System::write32(u32 addr, u32 val) {
             }
         }
         ram_.write32(ram_addr, val);
+        cpu_.notify_code_write(ram_addr, 4);
         debug_note_main_ram_write(ram_addr, val, 4);
         return;
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write32(phys - 0x1F800000, val);
+        cpu_.notify_code_write(phys, 4);
         return;
     }
     if (phys >= psx::BIOS_BASE &&
         static_cast<u64>(phys) <
         (static_cast<u64>(psx::BIOS_BASE) + bios_.mapped_size())) {
         bios_.write32(phys - psx::BIOS_BASE, val);
+        cpu_.notify_code_write(phys, 4);
         return;
     }
 

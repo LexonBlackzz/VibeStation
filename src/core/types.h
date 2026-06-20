@@ -122,6 +122,15 @@ inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_bilinear_filtering = false;
+enum class CpuExecutionMode : u8 {
+  Interpreter = 0,
+  DecodedBlockInterpreter = 1,
+  X64Jit = 2,
+};
+inline CpuExecutionMode g_cpu_execution_mode = CpuExecutionMode::Interpreter;
+inline bool g_cpu_execution_mode_cli_override = false;
+inline CpuExecutionMode g_cpu_execution_mode_cli_value =
+    CpuExecutionMode::Interpreter;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_spu_enable_audio_queue = true;
@@ -164,6 +173,45 @@ enum class OutputResolutionMode : u8 {
 inline DeinterlaceMode g_deinterlace_mode = DeinterlaceMode::Weave;
 inline OutputResolutionMode g_output_resolution_mode =
     OutputResolutionMode::R320x240;
+
+inline CpuExecutionMode effective_cpu_execution_mode() {
+  return g_cpu_execution_mode_cli_override ? g_cpu_execution_mode_cli_value
+                                           : g_cpu_execution_mode;
+}
+
+inline const char *cpu_execution_mode_name(CpuExecutionMode mode) {
+  switch (mode) {
+  case CpuExecutionMode::DecodedBlockInterpreter:
+    return "Decoded Block";
+  case CpuExecutionMode::X64Jit:
+    return "x64 JIT";
+  case CpuExecutionMode::Interpreter:
+  default:
+    return "Interpreter";
+  }
+}
+
+inline int cpu_execution_mode_to_config_value(CpuExecutionMode mode) {
+  switch (mode) {
+  case CpuExecutionMode::DecodedBlockInterpreter:
+    return 1;
+  case CpuExecutionMode::X64Jit:
+    return 2;
+  case CpuExecutionMode::Interpreter:
+  default:
+    return 0;
+  }
+}
+
+inline CpuExecutionMode cpu_execution_mode_from_config_value(int value) {
+  if (value == 1) {
+    return CpuExecutionMode::DecodedBlockInterpreter;
+  }
+  if (value == 2) {
+    return CpuExecutionMode::X64Jit;
+  }
+  return CpuExecutionMode::Interpreter;
+}
 
 inline constexpr u32 log_category_bit(LogCategory cat) {
   return static_cast<u32>(cat);

@@ -377,6 +377,8 @@ void EmuRunner::worker_main() {
         snapshot.boot_diag = system_->boot_diag();
         snapshot.profiling = system_->profiling_stats();
         snapshot.core_frame_ms = snapshot.profiling.total_ms;
+        snapshot.cpu_backend = effective_cpu_execution_mode();
+        snapshot.cpu_backend_stats = system_->cpu().cpu_backend_stats();
         snapshot.cpu_pc = system_->cpu().pc();
         const auto& dma2 = system_->dma_last_debug(2);
         snapshot.dma2_base_addr = dma2.base_addr;

@@ -1,0 +1,199 @@
+#pragma once
+
+#include "cpu.h"
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+enum class DecodedOp : u16 {
+  Unsupported,
+  Nop,
+
+  Sll,
+  Srl,
+  Sra,
+  Sllv,
+  Srlv,
+  Srav,
+  Jr,
+  Jalr,
+  Syscall,
+  Break,
+  Addu,
+  Subu,
+  And,
+  Or,
+  Xor,
+  Nor,
+  Slt,
+  Sltu,
+
+  Bltz,
+  Bgez,
+  Bltzal,
+  Bgezal,
+  J,
+  Jal,
+  Beq,
+  Bne,
+  Blez,
+  Bgtz,
+  Addiu,
+  Slti,
+  Sltiu,
+  Andi,
+  Ori,
+  Xori,
+  Lui,
+
+  Lb,
+  Lh,
+  Lw,
+  Lbu,
+  Lhu,
+  Sb,
+  Sh,
+  Sw,
+
+  Cop0,
+  Cop2,
+};
+
+enum class CpuBlockExitReason : u8 {
+  None,
+  Branch,
+  Exception,
+  Interrupt,
+  Budget,
+  Fallback,
+  Invalidated,
+  PcMismatch,
+};
+
+struct CpuBlockRunResult {
+  u32 cycles = 0;
+  u32 instructions = 0;
+  CpuBlockExitReason exit_reason = CpuBlockExitReason::None;
+};
+
+struct DecodedInstruction {
+  DecodedOp op = DecodedOp::Unsupported;
+  u32 pc = 0;
+  u32 bits = 0;
+  u32 normalized_addr = 0;
+  u32 target = 0;
+  s32 simm = 0;
+  u16 imm = 0;
+  u8 rs = 0;
+  u8 rt = 0;
+  u8 rd = 0;
+  u8 shamt = 0;
+  u8 cycles = 1;
+  bool is_branch = false;
+  bool is_unconditional_branch = false;
+  bool may_raise_exception = false;
+  bool may_access_memory = false;
+  bool must_fallback = false;
+};
+
+struct DecodedBlock {
+  static constexpr u32 kMaxInstructions = 17;
+
+  DecodedBlock() = default;
+  ~DecodedBlock();
+
+  DecodedBlock(const DecodedBlock &) = delete;
+  DecodedBlock &operator=(const DecodedBlock &) = delete;
+
+  u32 start_pc = 0;
+  u32 start_key = 0;
+  std::array<DecodedInstruction, kMaxInstructions> instructions{};
+  u32 instruction_count = 0;
+  std::array<std::pair<u32, u32>, kMaxInstructions> tracked_ranges{};
+  u32 tracked_range_count = 0;
+  std::array<u32, kMaxInstructions> registered_pages{};
+  u32 registered_page_count = 0;
+  u32 last_invalidation_query = 0;
+  u32 compile_frame = 0;
+  u32 last_invalidate_frame = 0;
+  u32 invalidations_in_window = 0;
+  u32 recompiles_in_window = 0;
+  u32 interpreter_only_until_frame = 0;
+  bool invalidated = false;
+  bool has_control_flow = false;
+  bool has_fallback = false;
+};
+
+class CpuOptimizedBackend {
+public:
+  explicit CpuOptimizedBackend(Cpu &cpu);
+  ~CpuOptimizedBackend();
+
+  bool decoded_available() const { return true; }
+  bool x64_jit_available() const;
+  CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions,
+                              CpuExecutionMode requested_mode);
+  void invalidate_range(u32 phys_or_normalized_addr, u32 size_bytes);
+  void begin_frame(u32 frame_index);
+  void flush();
+  CpuBackendStats stats() const;
+
+private:
+  static constexpr u32 kMaxBlockInstructions = 16;
+  static constexpr u32 kInterpreterFallbackRecompiles = 3;
+  static constexpr u32 kInterpreterFallbackFrames = 15;
+  static constexpr u32 kInterpreterOnlyFrames = 60;
+  static constexpr size_t kMaxDecodedBlocks = 16384u;
+  static constexpr u32 kCodePageShift = 12;
+  static constexpr u32 kCodePageSize = 1u << kCodePageShift;
+  static constexpr u32 kCodePageCount = 1u << (32u - kCodePageShift);
+  static constexpr u32 kCodePageBitmapWordCount = kCodePageCount / 64u;
+
+  struct BlockHistory {
+    u32 window_start_frame = 0;
+    u32 compile_count_in_window = 0;
+    u32 invalidation_count_in_window = 0;
+    u32 interpreter_only_until_frame = 0;
+  };
+
+  DecodedBlock *lookup_or_decode(u32 pc);
+  DecodedBlock *decode_block(u32 pc);
+  DecodedInstruction decode_instruction(u32 pc, u32 bits) const;
+  bool append_decoded_instruction(DecodedBlock &block,
+                                  const DecodedInstruction &inst);
+  CpuBlockRunResult execute_block(DecodedBlock &block, u32 max_cycles,
+                                  u32 max_instructions);
+  bool execute_decoded_instruction(const DecodedInstruction &inst);
+  bool prepare_instruction(const DecodedInstruction &inst,
+                           CpuBlockRunResult &result);
+  void finish_instruction(const DecodedInstruction &inst,
+                          CpuBlockRunResult &result, bool count_decoded);
+  bool diagnostics_force_interpreter() const;
+  bool is_block_terminator(const DecodedInstruction &inst) const;
+  bool is_mmio_address(u32 addr) const;
+  u32 normalized_code_addr(u32 addr) const;
+  u32 code_page_for_normalized_addr(u32 addr) const;
+  bool code_page_maybe_compiled(u32 page) const;
+  void set_code_page_compiled(u32 page);
+  void clear_code_page_compiled(u32 page);
+  bool register_block_page(DecodedBlock &block, u32 page);
+  void register_block_pages(DecodedBlock &block);
+  void unregister_block_pages(DecodedBlock &block);
+  bool ranges_overlap(u32 a0, u32 a1, u32 b0, u32 b1) const;
+  void mark_block_invalidated(DecodedBlock &block);
+  void record_exit(CpuBlockExitReason reason);
+  void warn_x64_unavailable_once();
+
+  Cpu &cpu_;
+  std::unordered_map<u32, std::unique_ptr<DecodedBlock>> blocks_;
+  std::unordered_map<u32, BlockHistory> block_history_;
+  std::unordered_map<u32, std::vector<DecodedBlock *>> blocks_by_page_;
+  std::array<u64, kCodePageBitmapWordCount> compiled_code_page_bitmap_{};
+  u32 invalidation_query_stamp_ = 0;
+  u32 current_frame_ = 0;
+  bool x64_unavailable_warned_ = false;
+  CpuBackendStats stats_{};
+};

@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "cpu_recompiler.h"
 #include "system.h"
 
 namespace {
@@ -413,8 +414,14 @@ void log_repeated_decode_warning(const char *kind, u32 code, u32 instr, u32 pc,
 
 // ── Init / Reset ───────────────────────────────────────────────────
 
+Cpu::Cpu() = default;
+Cpu::~Cpu() = default;
+
 void Cpu::init(System *sys) {
   sys_ = sys;
+  if (!optimized_backend_) {
+    optimized_backend_ = std::make_unique<CpuOptimizedBackend>(*this);
+  }
   reset();
 }
 
@@ -456,9 +463,67 @@ void Cpu::reset() {
   for (auto &line : icache_) {
     line = {};
   }
+  if (optimized_backend_) {
+    optimized_backend_->flush();
+  }
 }
 
 // ── Register Helpers ───────────────────────────────────────────────
+
+CpuDebugState Cpu::debug_state() const {
+  CpuDebugState state{};
+  for (u32 i = 0; i < 32u; ++i) {
+    state.gpr[i] = gpr_[i];
+  }
+  state.pc = pc_;
+  state.next_pc = next_pc_;
+  state.current_pc = current_pc_;
+  state.hi = hi_;
+  state.lo = lo_;
+  state.load_reg = load_.reg;
+  state.load_value = load_.value;
+  state.next_load_reg = next_load_.reg;
+  state.next_load_value = next_load_.value;
+  state.in_delay_slot = in_delay_slot_;
+  state.pending_delay_slot = pending_delay_slot_;
+  state.pending_branch_taken = pending_branch_taken_;
+  state.pending_branch_pc = pending_branch_pc_;
+  state.active_branch_pc = active_branch_pc_;
+  state.exception_raised = exception_raised_;
+  state.cop0_sr = cop0_sr_;
+  state.cop0_cause = cop0_cause_;
+  state.cop0_epc = cop0_epc_;
+  state.cop0_badvaddr = cop0_badvaddr_;
+  state.cycles = cycles_;
+  return state;
+}
+
+void Cpu::debug_set_state(const CpuDebugState &state) {
+  for (u32 i = 0; i < 32u; ++i) {
+    gpr_[i] = state.gpr[i];
+  }
+  gpr_[0] = 0;
+  pc_ = state.pc;
+  next_pc_ = state.next_pc;
+  current_pc_ = state.current_pc;
+  hi_ = state.hi;
+  lo_ = state.lo;
+  load_ = {state.load_reg, state.load_value};
+  next_load_ = {state.next_load_reg, state.next_load_value};
+  in_delay_slot_ = state.in_delay_slot;
+  pending_delay_slot_ = state.pending_delay_slot;
+  pending_branch_taken_ = state.pending_branch_taken;
+  pending_branch_pc_ = state.pending_branch_pc;
+  active_branch_pc_ = state.active_branch_pc;
+  exception_raised_ = state.exception_raised;
+  cop0_sr_ = state.cop0_sr;
+  cop0_cause_ = state.cop0_cause;
+  cop0_epc_ = state.cop0_epc;
+  cop0_badvaddr_ = state.cop0_badvaddr;
+  cycles_ = state.cycles;
+  cycle_penalty_ = 0;
+  executing_step_ = false;
+}
 
 void Cpu::set_reg(u32 index, u32 value) {
   if (index == 0) {
@@ -709,6 +774,9 @@ bool Cpu::instruction_cacheable(u32 addr) const {
 
 void Cpu::invalidate_icache_line(u32 addr) {
   icache_[(addr >> 4) & 0xFFu].valid = false;
+  if (optimized_backend_) {
+    optimized_backend_->invalidate_range(addr & ~0x0Fu, 16u);
+  }
 }
 
 u32 Cpu::gte_command_cycles(u32 instruction) {
@@ -2501,6 +2569,52 @@ u32 Cpu::step() {
 }
 
 // ── Instruction Dispatch ───────────────────────────────────────────
+
+CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
+  CpuRunSliceResult result{};
+  if (max_cycles == 0 || max_instructions == 0) {
+    return result;
+  }
+
+  const CpuExecutionMode mode = effective_cpu_execution_mode();
+  if (mode != CpuExecutionMode::Interpreter && optimized_backend_) {
+    return optimized_backend_->run_slice(max_cycles, max_instructions, mode);
+  }
+
+  while (result.cycles < max_cycles &&
+         result.instructions < max_instructions) {
+    const u32 consumed = step();
+    result.cycles += consumed;
+    ++result.instructions;
+  }
+  return result;
+}
+
+u32 Cpu::read_instruction_for_backend(u32 addr) const {
+  return sys_->read32_instruction(addr);
+}
+
+void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
+  if (optimized_backend_) {
+    optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
+  }
+}
+
+void Cpu::notify_cpu_backend_frame(u32 frame_index) {
+  if (optimized_backend_) {
+    optimized_backend_->begin_frame(frame_index);
+  }
+}
+
+void Cpu::flush_cpu_backend() {
+  if (optimized_backend_) {
+    optimized_backend_->flush();
+  }
+}
+
+CpuBackendStats Cpu::cpu_backend_stats() const {
+  return optimized_backend_ ? optimized_backend_->stats() : CpuBackendStats{};
+}
 
 void Cpu::execute(u32 i) {
   switch (op(i)) {

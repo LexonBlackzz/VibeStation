@@ -689,6 +689,29 @@ static bool parse_log_level(const std::string &s, LogLevel &out) {
   return false;
 }
 
+static bool parse_cpu_execution_mode(const std::string &s,
+                                     CpuExecutionMode &out) {
+  std::string v = s;
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  v.erase(std::remove(v.begin(), v.end(), '-'), v.end());
+  v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+  if (v == "interpreter" || v == "interp") {
+    out = CpuExecutionMode::Interpreter;
+    return true;
+  }
+  if (v == "decoded" || v == "decodedblock" || v == "blockinterpreter" ||
+      v == "blockinterp" || v == "block") {
+    out = CpuExecutionMode::DecodedBlockInterpreter;
+    return true;
+  }
+  if (v == "x64jit" || v == "jit" || v == "dynarec" || v == "recompiler") {
+    out = CpuExecutionMode::X64Jit;
+    return true;
+  }
+  return false;
+}
+
 static u32 category_from_name(const std::string &name) {
   std::string v = name;
   std::transform(v.begin(), v.end(), v.begin(),
@@ -919,6 +942,319 @@ static const char *pc_band_name(PcBand band) {
     return "non_bios";
   }
 }
+
+namespace {
+constexpr u32 kCpuComparePc = 0x80010000u;
+
+struct CpuCompareMemoryWord {
+  u32 addr = 0;
+  u32 value = 0;
+};
+
+struct CpuCompareCase {
+  const char *name = "";
+  std::vector<u32> program;
+  std::vector<CpuCompareMemoryWord> memory;
+  std::array<u32, 32> initial_gpr{};
+  u32 instructions = 0;
+  bool experimental_unknown_fallback = false;
+};
+
+struct CpuCompareRunResult {
+  CpuDebugState state{};
+  CpuBackendStats stats{};
+  CpuRunSliceResult run{};
+};
+
+static u32 enc_r(u32 rs, u32 rt, u32 rd, u32 shamt, u32 funct) {
+  return ((rs & 31u) << 21) | ((rt & 31u) << 16) | ((rd & 31u) << 11) |
+         ((shamt & 31u) << 6) | (funct & 63u);
+}
+
+static u32 enc_i(u32 op, u32 rs, u32 rt, u16 imm) {
+  return ((op & 63u) << 26) | ((rs & 31u) << 21) | ((rt & 31u) << 16) |
+         imm;
+}
+
+static u32 enc_j(u32 op, u32 target) {
+  return ((op & 63u) << 26) | ((target >> 2) & 0x03FFFFFFu);
+}
+
+static bool cpu_debug_states_equal(const CpuDebugState &a,
+                                   const CpuDebugState &b) {
+  for (u32 i = 0; i < 32u; ++i) {
+    if (a.gpr[i] != b.gpr[i]) {
+      return false;
+    }
+  }
+
+  return a.pc == b.pc && a.next_pc == b.next_pc &&
+         a.current_pc == b.current_pc && a.hi == b.hi && a.lo == b.lo &&
+         a.load_reg == b.load_reg && a.load_value == b.load_value &&
+         a.next_load_reg == b.next_load_reg &&
+         a.next_load_value == b.next_load_value &&
+         a.in_delay_slot == b.in_delay_slot &&
+         a.pending_delay_slot == b.pending_delay_slot &&
+         a.pending_branch_taken == b.pending_branch_taken &&
+         a.pending_branch_pc == b.pending_branch_pc &&
+         a.active_branch_pc == b.active_branch_pc &&
+         a.exception_raised == b.exception_raised &&
+         a.cop0_sr == b.cop0_sr && a.cop0_cause == b.cop0_cause &&
+         a.cop0_epc == b.cop0_epc &&
+         a.cop0_badvaddr == b.cop0_badvaddr && a.cycles == b.cycles;
+}
+
+static void log_cpu_debug_state_diff(const char *name,
+                                     const CpuDebugState &interpreter,
+                                     const CpuDebugState &decoded) {
+  auto field = [&](const char *field_name, auto a, auto b) {
+    if (a != b) {
+      LOG_ERROR("CPU_COMPARE_DIFF name=%s field=%s interpreter=0x%llX decoded=0x%llX",
+                name, field_name, static_cast<unsigned long long>(a),
+                static_cast<unsigned long long>(b));
+    }
+  };
+
+  field("pc", interpreter.pc, decoded.pc);
+  field("next_pc", interpreter.next_pc, decoded.next_pc);
+  field("current_pc", interpreter.current_pc, decoded.current_pc);
+  field("hi", interpreter.hi, decoded.hi);
+  field("lo", interpreter.lo, decoded.lo);
+  field("load_reg", interpreter.load_reg, decoded.load_reg);
+  field("load_value", interpreter.load_value, decoded.load_value);
+  field("next_load_reg", interpreter.next_load_reg, decoded.next_load_reg);
+  field("next_load_value", interpreter.next_load_value,
+        decoded.next_load_value);
+  field("in_delay_slot", interpreter.in_delay_slot ? 1u : 0u,
+        decoded.in_delay_slot ? 1u : 0u);
+  field("pending_delay_slot", interpreter.pending_delay_slot ? 1u : 0u,
+        decoded.pending_delay_slot ? 1u : 0u);
+  field("pending_branch_taken", interpreter.pending_branch_taken ? 1u : 0u,
+        decoded.pending_branch_taken ? 1u : 0u);
+  field("pending_branch_pc", interpreter.pending_branch_pc,
+        decoded.pending_branch_pc);
+  field("active_branch_pc", interpreter.active_branch_pc,
+        decoded.active_branch_pc);
+  field("exception_raised", interpreter.exception_raised ? 1u : 0u,
+        decoded.exception_raised ? 1u : 0u);
+  field("cop0_sr", interpreter.cop0_sr, decoded.cop0_sr);
+  field("cop0_cause", interpreter.cop0_cause, decoded.cop0_cause);
+  field("cop0_epc", interpreter.cop0_epc, decoded.cop0_epc);
+  field("cop0_badvaddr", interpreter.cop0_badvaddr, decoded.cop0_badvaddr);
+  field("cycles", interpreter.cycles, decoded.cycles);
+
+  for (u32 i = 0; i < 32u; ++i) {
+    if (interpreter.gpr[i] != decoded.gpr[i]) {
+      LOG_ERROR("CPU_COMPARE_DIFF name=%s reg=r%u interpreter=0x%08X decoded=0x%08X",
+                name, static_cast<unsigned>(i), interpreter.gpr[i],
+                decoded.gpr[i]);
+    }
+  }
+}
+
+static CpuCompareRunResult run_cpu_compare_case_once(
+    const CpuCompareCase &test_case, CpuExecutionMode mode) {
+  auto sys = std::make_unique<System>();
+  sys->init_hardware();
+  sys->reset();
+
+  for (size_t i = 0; i < test_case.program.size(); ++i) {
+    sys->write32((kCpuComparePc & 0x1FFFFFFFu) + static_cast<u32>(i * 4u),
+                 test_case.program[i]);
+  }
+  for (const CpuCompareMemoryWord &word : test_case.memory) {
+    sys->write32(word.addr, word.value);
+  }
+
+  CpuDebugState initial = sys->cpu().debug_state();
+  initial.pc = kCpuComparePc;
+  initial.next_pc = kCpuComparePc + 4u;
+  initial.current_pc = 0;
+  initial.cycles = 0;
+  initial.load_reg = 0;
+  initial.load_value = 0;
+  initial.next_load_reg = 0;
+  initial.next_load_value = 0;
+  initial.in_delay_slot = false;
+  initial.pending_delay_slot = false;
+  initial.pending_branch_taken = false;
+  initial.pending_branch_pc = 0;
+  initial.active_branch_pc = 0;
+  initial.exception_raised = false;
+  for (u32 i = 0; i < 32u; ++i) {
+    initial.gpr[i] = test_case.initial_gpr[i];
+  }
+  initial.gpr[0] = 0;
+  sys->cpu().debug_set_state(initial);
+  sys->cpu().flush_cpu_backend();
+  sys->cpu().notify_cpu_backend_frame(1);
+
+  g_cpu_execution_mode_cli_override = true;
+  g_cpu_execution_mode_cli_value = mode;
+  CpuCompareRunResult out{};
+  out.run = sys->cpu().run_slice(100000u, test_case.instructions);
+  out.state = sys->cpu().debug_state();
+  out.stats = sys->cpu().cpu_backend_stats();
+  return out;
+}
+
+static std::vector<CpuCompareCase> make_cpu_compare_cases() {
+  std::vector<CpuCompareCase> cases;
+
+  CpuCompareCase branch_taken{};
+  branch_taken.name = "branch_delay_taken";
+  branch_taken.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x04, 1, 1, 2),
+      enc_i(0x09, 0, 2, 0x0011),
+      enc_i(0x09, 0, 3, 0x0022),
+      enc_i(0x09, 0, 4, 0x0033),
+      enc_i(0x09, 0, 5, 0x0044),
+  };
+  branch_taken.instructions = 5;
+  cases.push_back(branch_taken);
+
+  CpuCompareCase branch_not_taken{};
+  branch_not_taken.name = "branch_delay_not_taken";
+  branch_not_taken.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x04, 1, 0, 2),
+      enc_i(0x09, 0, 2, 0x0011),
+      enc_i(0x09, 0, 3, 0x0022),
+      enc_i(0x09, 0, 4, 0x0033),
+  };
+  branch_not_taken.instructions = 5;
+  cases.push_back(branch_not_taken);
+
+  CpuCompareCase jal{};
+  jal.name = "jal_link_delay";
+  jal.program = {
+      enc_j(0x03, kCpuComparePc + 0x10u),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      0,
+      enc_r(31, 0, 7, 0, 0x21),
+      enc_i(0x09, 0, 8, 0x0088),
+  };
+  jal.instructions = 4;
+  cases.push_back(jal);
+
+  CpuCompareCase jalr{};
+  jalr.name = "jalr_link_delay";
+  jalr.initial_gpr[8] = kCpuComparePc + 0x10u;
+  jalr.program = {
+      enc_r(8, 0, 9, 0, 0x09),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      0,
+      enc_r(9, 0, 10, 0, 0x21),
+      enc_i(0x09, 0, 11, 0x0077),
+  };
+  jalr.instructions = 4;
+  cases.push_back(jalr);
+
+  CpuCompareCase load_delay{};
+  load_delay.name = "load_delay_lw";
+  load_delay.initial_gpr[2] = 0x11111111u;
+  load_delay.program = {
+      enc_i(0x0F, 0, 1, 0x8001),
+      enc_i(0x23, 1, 2, 0x1000),
+      enc_r(2, 0, 3, 0, 0x21),
+      enc_r(2, 0, 4, 0, 0x21),
+  };
+  load_delay.memory.push_back({0x00011000u, 0x12345678u});
+  load_delay.instructions = 4;
+  cases.push_back(load_delay);
+
+  CpuCompareCase syscall_exception{};
+  syscall_exception.name = "exception_syscall";
+  syscall_exception.program = {
+      enc_i(0x09, 0, 1, 5),
+      0x0000000Cu,
+      enc_i(0x09, 0, 2, 6),
+  };
+  syscall_exception.instructions = 2;
+  cases.push_back(syscall_exception);
+
+  CpuCompareCase unaligned_lw{};
+  unaligned_lw.name = "exception_unaligned_lw";
+  unaligned_lw.initial_gpr[1] = 0x80011002u;
+  unaligned_lw.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x09, 0, 3, 3),
+  };
+  unaligned_lw.instructions = 1;
+  cases.push_back(unaligned_lw);
+
+  CpuCompareCase unknown_primary{};
+  unknown_primary.name = "unknown_primary_fallback_nop";
+  unknown_primary.program = {
+      0xFC000000u,
+      enc_i(0x09, 0, 2, 2),
+  };
+  unknown_primary.instructions = 2;
+  unknown_primary.experimental_unknown_fallback = true;
+  cases.push_back(unknown_primary);
+
+  CpuCompareCase unknown_special{};
+  unknown_special.name = "unknown_special_fallback_rd_zero";
+  unknown_special.initial_gpr[5] = 0x12345678u;
+  unknown_special.program = {
+      enc_r(0, 0, 5, 0, 0x3F),
+      enc_i(0x09, 0, 6, 6),
+  };
+  unknown_special.instructions = 2;
+  unknown_special.experimental_unknown_fallback = true;
+  cases.push_back(unknown_special);
+
+  return cases;
+}
+
+static int run_cpu_backend_compare_test() {
+  LOG_INFO("=== CPU Backend Compare Test ===");
+  const bool saved_override = g_cpu_execution_mode_cli_override;
+  const CpuExecutionMode saved_override_value = g_cpu_execution_mode_cli_value;
+  const bool saved_unknown_fallback =
+      g_experimental_unhandled_special_returns_zero;
+
+  int failures = 0;
+  for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
+    g_experimental_unhandled_special_returns_zero =
+        test_case.experimental_unknown_fallback;
+    CpuCompareRunResult interpreter = run_cpu_compare_case_once(
+        test_case, CpuExecutionMode::Interpreter);
+    CpuCompareRunResult decoded = run_cpu_compare_case_once(
+        test_case, CpuExecutionMode::DecodedBlockInterpreter);
+
+    const bool pass = cpu_debug_states_equal(interpreter.state, decoded.state);
+    LOG_INFO(
+        "CPU_COMPARE name=%s result=%s int_pc=0x%08X dec_pc=0x%08X int_cycles=%llu dec_cycles=%llu int_instr=%u dec_instr=%u dec_blocks=%u dec_fallback=%llu",
+        test_case.name, pass ? "PASS" : "FAIL", interpreter.state.pc,
+        decoded.state.pc,
+        static_cast<unsigned long long>(interpreter.state.cycles),
+        static_cast<unsigned long long>(decoded.state.cycles),
+        interpreter.run.instructions, decoded.run.instructions,
+        decoded.stats.block_count,
+        static_cast<unsigned long long>(decoded.stats.fallback_instructions));
+    if (!pass) {
+      ++failures;
+      log_cpu_debug_state_diff(test_case.name, interpreter.state,
+                               decoded.state);
+    }
+  }
+
+  g_experimental_unhandled_special_returns_zero = saved_unknown_fallback;
+  g_cpu_execution_mode_cli_override = saved_override;
+  g_cpu_execution_mode_cli_value = saved_override_value;
+
+  if (failures != 0) {
+    LOG_ERROR("CPU backend compare test failed: %d case(s)", failures);
+    return 1;
+  }
+  LOG_INFO("CPU backend compare test passed");
+  return 0;
+}
+} // namespace
 
 static int run_bios_test(const std::string &bios_path, int steps) {
   const bool owns_log = (g_log_file == nullptr);
@@ -2075,6 +2411,38 @@ int main(int argc, char *argv[]) {
       ++i;
       continue;
     }
+    if (a == "--cpu") {
+      if ((i + 1) >= args.size()) {
+        fprintf(stderr,
+                "WARN: --cpu requires interpreter, decoded, or x64jit\n");
+        continue;
+      }
+      CpuExecutionMode parsed = CpuExecutionMode::Interpreter;
+      if (parse_cpu_execution_mode(args[i + 1], parsed)) {
+        g_cpu_execution_mode_cli_override = true;
+        g_cpu_execution_mode_cli_value = parsed;
+      } else {
+        fprintf(stderr, "WARN: Ignoring invalid CPU backend: %s\n",
+                args[i + 1].c_str());
+      }
+      ++i;
+      continue;
+    }
+    if (a == "--interpreter") {
+      g_cpu_execution_mode_cli_override = true;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::Interpreter;
+      continue;
+    }
+    if (a == "--jit" || a == "--recompiler") {
+      g_cpu_execution_mode_cli_override = true;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::X64Jit;
+      continue;
+    }
+    if (a == "--decoded" || a == "--block-interpreter") {
+      g_cpu_execution_mode_cli_override = true;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::DecodedBlockInterpreter;
+      continue;
+    }
     if (a == "--trace" && (i + 1) < args.size()) {
       apply_trace_list(args[i + 1]);
       ++i;
@@ -2312,6 +2680,18 @@ int main(int argc, char *argv[]) {
 
   if (fmv_diagnostics_override >= 0) {
     g_log_fmv_diagnostics = (fmv_diagnostics_override != 0);
+  }
+
+  if (!passthrough.empty() &&
+      (passthrough[0] == "--cpu-backend-compare-test" ||
+       passthrough[0] == "--cpu-compare-test")) {
+    const int rc = run_cpu_backend_compare_test();
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
   }
 
   if (passthrough.size() >= 2 && passthrough[0] == "--bios-test") {

@@ -25,6 +25,8 @@ public:
     System::BootDiagnostics boot_diag{};
     System::ProfilingStats profiling{};
     double core_frame_ms = 0.0;
+    CpuExecutionMode cpu_backend = CpuExecutionMode::Interpreter;
+    CpuBackendStats cpu_backend_stats{};
     u32 cpu_pc = 0;
     u32 dma2_base_addr = 0;
     u32 dma2_words = 0;

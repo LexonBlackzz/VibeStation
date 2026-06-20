@@ -3373,6 +3373,41 @@ void App::panel_settings() {
                     ? "Not loaded"
                     : system_->bios().get_info().c_str());
                 ImGui::Text("CPU Clock: 33.8688 MHz");
+                const char* cpu_backend_labels[] = {
+                    "Interpreter",
+                    "Decoded Block",
+                    "x64 JIT"
+                };
+                int cpu_backend_index =
+                    cpu_execution_mode_to_config_value(g_cpu_execution_mode);
+                if (ImGui::Combo("CPU Backend", &cpu_backend_index,
+                    cpu_backend_labels, IM_ARRAYSIZE(cpu_backend_labels))) {
+                    const bool was_running = emu_runner_.is_running();
+                    if (was_running) {
+                        emu_runner_.pause_and_wait_idle();
+                    }
+                    g_cpu_execution_mode =
+                        cpu_execution_mode_from_config_value(cpu_backend_index);
+                    if (system_) {
+                        system_->cpu().flush_cpu_backend();
+                    }
+                    save_persistent_config();
+                    if (was_running) {
+                        emu_runner_.set_running(true);
+                    }
+                }
+                if (g_cpu_execution_mode_cli_override) {
+                    ImGui::TextDisabled("CLI override active: %s",
+                        cpu_execution_mode_name(g_cpu_execution_mode_cli_value));
+                }
+                const CpuBackendStats backend_stats =
+                    system_ ? system_->cpu().cpu_backend_stats()
+                            : runtime_snapshot_.cpu_backend_stats;
+                if (g_cpu_execution_mode == CpuExecutionMode::X64Jit &&
+                    backend_stats.native_blocks == 0) {
+                    ImGui::TextDisabled(
+                        "x64 JIT is a staged mode; current build uses decoded blocks until real native emission is added.");
+                }
                 ImGui::Separator();
                 ImGui::Text("Performance");
                 ImGui::Text("Emulation pacing: fixed 60 Hz");
@@ -5009,6 +5044,38 @@ void App::panel_performance() {
         row("Render", render_ms_, ImVec4(0.9f, 0.9f, 0.7f, 1.0f));
         row("Swap", swap_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
         row("Present", present_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
+        const CpuBackendStats& backend = runtime_snapshot_.cpu_backend_stats;
+        ImGui::Separator();
+        ImGui::Text("CPU Backend: %s",
+            cpu_execution_mode_name(runtime_snapshot_.cpu_backend));
+        ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu",
+            backend.block_count,
+            static_cast<unsigned long long>(backend.cache_hits),
+            static_cast<unsigned long long>(backend.cache_misses),
+            static_cast<unsigned long long>(backend.invalidations));
+        ImGui::Text("Invalidation queries: %llu  no-code exits: %llu",
+            static_cast<unsigned long long>(backend.invalidation_queries),
+            static_cast<unsigned long long>(
+                backend.invalidation_fast_no_code_page_exits));
+        ImGui::Text("Invalidation blocks: examined %llu  invalidated %llu",
+            static_cast<unsigned long long>(backend.invalidation_blocks_examined),
+            static_cast<unsigned long long>(
+                backend.invalidation_blocks_invalidated));
+        ImGui::Text("Decoded/native/fallback instructions: %llu / %llu / %llu",
+            static_cast<unsigned long long>(backend.decoded_instructions),
+            static_cast<unsigned long long>(backend.native_instructions),
+            static_cast<unsigned long long>(backend.fallback_instructions));
+        ImGui::Text("Block entries: decoded %llu  native %llu  avg %.2f instr",
+            static_cast<unsigned long long>(backend.decoded_block_entries),
+            static_cast<unsigned long long>(backend.native_block_entries),
+            backend.decoded_block_entries == 0
+                ? 0.0
+                : static_cast<double>(backend.decoded_instructions) /
+                      static_cast<double>(backend.decoded_block_entries));
+        ImGui::Text("Memory helpers: %llu  MMIO: %llu  Exceptions: %llu",
+            static_cast<unsigned long long>(backend.memory_helper_calls),
+            static_cast<unsigned long long>(backend.mmio_accesses),
+            static_cast<unsigned long long>(backend.exceptions));
         if (config_vsync_ && swap_ms_ > 8.0) {
             ImGui::TextDisabled(
                 "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");
@@ -5945,7 +6012,8 @@ void App::panel_about() {
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
-        ImGui::Text("CPU: MIPS R3000A interpreter");
+        ImGui::Text("CPU: MIPS R3000A %s",
+            cpu_execution_mode_name(effective_cpu_execution_mode()));
         ImGui::Text("GPU: Software rasterizer");
         ImGui::Text("GTE: Fixed-point geometry engine");
         ImGui::Text("SPU: Gaussian + reverb core (stage 2)");
@@ -5960,6 +6028,28 @@ void App::panel_debug_cpu() {
     ImGui::SetNextWindowSize(ImVec2(450, 500), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("CPU Debug", &show_debug_cpu_)) {
         const bool running = emu_runner_.is_running();
+        const CpuBackendStats backend_stats =
+            running ? runtime_snapshot_.cpu_backend_stats
+                    : system_->cpu().cpu_backend_stats();
+        ImGui::Text("Backend: %s",
+            cpu_execution_mode_name(effective_cpu_execution_mode()));
+        ImGui::Text("Blocks: %u  Decoded entries: %llu  Native entries: %llu",
+            backend_stats.block_count,
+            static_cast<unsigned long long>(backend_stats.decoded_block_entries),
+            static_cast<unsigned long long>(backend_stats.native_block_entries));
+        ImGui::Text("Decoded/native/fallback instr: %llu / %llu / %llu",
+            static_cast<unsigned long long>(backend_stats.decoded_instructions),
+            static_cast<unsigned long long>(backend_stats.native_instructions),
+            static_cast<unsigned long long>(backend_stats.fallback_instructions));
+        ImGui::Text("Invalidation: queries %llu  no-code %llu  examined %llu  hit %llu",
+            static_cast<unsigned long long>(backend_stats.invalidation_queries),
+            static_cast<unsigned long long>(
+                backend_stats.invalidation_fast_no_code_page_exits),
+            static_cast<unsigned long long>(
+                backend_stats.invalidation_blocks_examined),
+            static_cast<unsigned long long>(
+                backend_stats.invalidation_blocks_invalidated));
+        ImGui::Separator();
         if (running) {
             ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f),
                 "Pause emulation to inspect registers.");
@@ -6944,6 +7034,24 @@ void App::load_persistent_config() {
         }
         return fallback;
         };
+    auto parse_cpu_mode = [](std::string v, CpuExecutionMode fallback) {
+        std::transform(v.begin(), v.end(), v.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        v.erase(std::remove(v.begin(), v.end(), '-'), v.end());
+        v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
+        if (v == "1" || v == "decoded" || v == "decodedblock" ||
+            v == "blockinterpreter" || v == "blockinterp" || v == "block") {
+            return CpuExecutionMode::DecodedBlockInterpreter;
+        }
+        if (v == "2" || v == "x64jit" || v == "recompiler" ||
+            v == "jit" || v == "dynarec") {
+            return CpuExecutionMode::X64Jit;
+        }
+        if (v == "0" || v == "interpreter" || v == "interp") {
+            return CpuExecutionMode::Interpreter;
+        }
+        return fallback;
+        };
 
     std::string line;
     while (std::getline(in, line)) {
@@ -6977,6 +7085,9 @@ void App::load_persistent_config() {
         else if (key == "direct_disc_boot") {
             config_direct_disc_boot_ =
                 parse_bool(value, config_direct_disc_boot_);
+        }
+        else if (key == "cpu_execution_mode") {
+            g_cpu_execution_mode = parse_cpu_mode(value, g_cpu_execution_mode);
         }
         else if (key == "memory_card_slot1_mode") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
@@ -7267,6 +7378,8 @@ void App::save_persistent_config() const {
     out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
     out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
     out << "direct_disc_boot=" << (config_direct_disc_boot_ ? 1 : 0) << "\n";
+    out << "cpu_execution_mode="
+        << cpu_execution_mode_to_config_value(g_cpu_execution_mode) << "\n";
     out << "memory_card_slot1_mode="
         << std::max(0, std::min(2, config_memory_card_mode_[0])) << "\n";
     out << "memory_card_slot2_mode="
