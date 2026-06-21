@@ -7,6 +7,7 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -42,6 +43,196 @@ namespace {
         const float safe_response = std::max(response_seconds, 0.001f);
         const float alpha = 1.0f - std::exp(-delta_seconds / safe_response);
         return current + ((target - current) * alpha);
+    }
+
+    double percent_of(u64 value, u64 total) {
+        if (total == 0) {
+            return 0.0;
+        }
+        return (static_cast<double>(value) * 100.0) /
+            static_cast<double>(total);
+    }
+
+    void draw_cpu_backend_instruction_mix(const CpuBackendStats& stats) {
+        const u64 total = stats.decoded_instructions +
+            stats.native_instructions + stats.fallback_instructions;
+        ImGui::Text("Instruction mix: native %.1f%%  decoded %.1f%%  fallback %.1f%%",
+            percent_of(stats.native_instructions, total),
+            percent_of(stats.decoded_instructions, total),
+            percent_of(stats.fallback_instructions, total));
+        ImGui::Text("Instructions: native %llu  decoded %llu  fallback %llu",
+            static_cast<unsigned long long>(stats.native_instructions),
+            static_cast<unsigned long long>(stats.decoded_instructions),
+            static_cast<unsigned long long>(stats.fallback_instructions));
+    }
+
+    void draw_cpu_backend_mode_summary(
+        const CpuBackendStats& stats, CpuExecutionMode requested_mode) {
+        const CpuForcedInterpreterReason forced_reason =
+            stats.forced_interpreter_last_reason;
+        const bool forced =
+            forced_reason != CpuForcedInterpreterReason::None;
+        ImGui::Text("Requested backend: %s",
+            cpu_execution_mode_name(requested_mode));
+        if (forced) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
+                "Effective backend: Interpreter (forced by %s)",
+                cpu_forced_interpreter_reason_name(forced_reason));
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
+                "Forced reason: %s",
+                cpu_forced_interpreter_reason_name(forced_reason));
+        }
+        else {
+            ImGui::Text("Effective backend: %s",
+                cpu_execution_mode_name(requested_mode));
+        }
+        ImGui::TextDisabled("active %u  native %u",
+            stats.active ? 1u : 0u, stats.native_available ? 1u : 0u);
+    }
+
+    bool draw_cpu_backend_logging_section(
+        const CpuBackendStats& stats, CpuExecutionMode mode) {
+        bool dirty = false;
+        draw_cpu_backend_mode_summary(stats, mode);
+
+        int hot_threshold =
+            static_cast<int>(g_cpu_x64_jit_hot_block_threshold);
+        if (ImGui::InputInt("x64 Hot Threshold", &hot_threshold)) {
+            g_cpu_x64_jit_hot_block_threshold =
+                static_cast<u32>(std::max(0, hot_threshold));
+            dirty = true;
+        }
+        int min_block = static_cast<int>(g_cpu_x64_jit_min_block_instructions);
+        if (ImGui::InputInt("x64 Min Block Instructions", &min_block)) {
+            g_cpu_x64_jit_min_block_instructions =
+                static_cast<u32>(std::max(1, min_block));
+            dirty = true;
+        }
+        ImGui::Checkbox("Force x64 Compile", &g_cpu_x64_jit_force_compile);
+
+        ImGui::Separator();
+        draw_cpu_backend_instruction_mix(stats);
+        const bool forced_before_lookup =
+            stats.forced_interpreter_instructions != 0 &&
+            stats.decoded_block_entries == 0 && stats.native_block_entries == 0 &&
+            stats.cache_hits == 0 && stats.cache_misses == 0;
+        if (stats.forced_interpreter_last_reason !=
+                CpuForcedInterpreterReason::None ||
+            forced_before_lookup) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
+                "Forced interpreter reason: %s",
+                cpu_forced_interpreter_reason_name(
+                    stats.forced_interpreter_last_reason));
+        }
+        ImGui::Text("Forced interpreter: slices %llu  instructions %llu",
+            static_cast<unsigned long long>(stats.forced_interpreter_slices),
+            static_cast<unsigned long long>(
+                stats.forced_interpreter_instructions));
+        ImGui::Text("Forced reasons: trace %llu  deep %llu  fmv %llu",
+            static_cast<unsigned long long>(stats.forced_interpreter_trace),
+            static_cast<unsigned long long>(
+                stats.forced_interpreter_deep_diagnostics),
+            static_cast<unsigned long long>(stats.forced_interpreter_fmv));
+        if (stats.forced_interpreter_backend_compare != 0 ||
+            stats.forced_interpreter_other != 0) {
+            ImGui::Text("Forced reasons: backend/test %llu  other %llu",
+                static_cast<unsigned long long>(
+                    stats.forced_interpreter_backend_compare),
+                static_cast<unsigned long long>(
+                    stats.forced_interpreter_other));
+        }
+        const double avg_decoded =
+            stats.decoded_block_entries == 0
+                ? 0.0
+                : static_cast<double>(stats.decoded_instructions) /
+                      static_cast<double>(stats.decoded_block_entries);
+        const double avg_native =
+            stats.native_block_entries == 0
+                ? 0.0
+                : static_cast<double>(stats.native_instructions) /
+                      static_cast<double>(stats.native_block_entries);
+        ImGui::Text("Block entries: decoded %llu  native %llu",
+            static_cast<unsigned long long>(stats.decoded_block_entries),
+            static_cast<unsigned long long>(stats.native_block_entries));
+        ImGui::Text("Average block length: decoded %.2f  native %.2f",
+            avg_decoded, avg_native);
+        ImGui::Text("Blocks: cached %u  decoded %llu  native %llu  interpreter-only %u",
+            stats.block_count,
+            static_cast<unsigned long long>(stats.decoded_blocks),
+            static_cast<unsigned long long>(stats.native_blocks),
+            stats.interpreter_only_blocks);
+
+        ImGui::Separator();
+        ImGui::Text("Native compile: attempts %llu  successes %llu  failures %llu",
+            static_cast<unsigned long long>(stats.native_compile_attempts),
+            static_cast<unsigned long long>(stats.native_compile_successes),
+            static_cast<unsigned long long>(stats.native_compile_failures));
+        ImGui::Text("Native runtime: entries %llu  cycles %llu  code %zu bytes",
+            static_cast<unsigned long long>(stats.native_block_entries),
+            static_cast<unsigned long long>(stats.native_cycles),
+            stats.native_code_bytes);
+        ImGui::Text("Native fallback: decoded %llu  unsafe rejects %llu",
+            static_cast<unsigned long long>(stats.native_to_decoded_fallbacks),
+            static_cast<unsigned long long>(stats.native_rejected_unsafe_blocks));
+        ImGui::Text("Native gating: cold %llu  short %llu",
+            static_cast<unsigned long long>(stats.native_hot_threshold_skips),
+            static_cast<unsigned long long>(stats.native_short_block_skips));
+
+        struct RejectRow {
+            const char* label;
+            u64 count;
+        };
+        std::array<RejectRow, 8> rejects = { {
+            { "branch", stats.native_reject_branch },
+            { "memory", stats.native_reject_memory },
+            { "cop0", stats.native_reject_cop0 },
+            { "cop2/gte", stats.native_reject_cop2 },
+            { "exception/unknown", stats.native_reject_exception_unknown },
+            { "unsafe state", stats.native_reject_unsafe_state },
+            { "budget", stats.native_reject_budget },
+            { "icache", stats.native_reject_icache },
+        } };
+        std::sort(rejects.begin(), rejects.end(),
+            [](const RejectRow& a, const RejectRow& b) {
+                return a.count > b.count;
+            });
+        if (rejects[0].count == 0) {
+            ImGui::Text("Top rejections: none");
+        }
+        else {
+            ImGui::Text("Top rejections: %s %llu  %s %llu  %s %llu",
+                rejects[0].label,
+                static_cast<unsigned long long>(rejects[0].count),
+                rejects[1].label,
+                static_cast<unsigned long long>(rejects[1].count),
+                rejects[2].label,
+                static_cast<unsigned long long>(rejects[2].count));
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Invalidation: queries %llu  no-code exits %llu",
+            static_cast<unsigned long long>(stats.invalidation_queries),
+            static_cast<unsigned long long>(
+                stats.invalidation_fast_no_code_page_exits));
+        ImGui::Text("Invalidation blocks: examined %llu  invalidated %llu",
+            static_cast<unsigned long long>(stats.invalidation_blocks_examined),
+            static_cast<unsigned long long>(
+                stats.invalidation_blocks_invalidated));
+        ImGui::Text("Cache: hits %llu  misses %llu  flushes %llu  bytes %zu",
+            static_cast<unsigned long long>(stats.cache_hits),
+            static_cast<unsigned long long>(stats.cache_misses),
+            static_cast<unsigned long long>(stats.flushes),
+            stats.code_bytes);
+        ImGui::Text("Slow paths: memory helpers %llu  MMIO %llu  exceptions %llu",
+            static_cast<unsigned long long>(stats.memory_helper_calls),
+            static_cast<unsigned long long>(stats.mmio_accesses),
+            static_cast<unsigned long long>(stats.exceptions));
+        ImGui::Text("Exits: interrupts %llu  budget %llu  fallback %llu  pc mismatch %llu",
+            static_cast<unsigned long long>(stats.interrupt_exits),
+            static_cast<unsigned long long>(stats.budget_exits),
+            static_cast<unsigned long long>(stats.fallback_exits),
+            static_cast<unsigned long long>(stats.pc_mismatch_exits));
+        return dirty;
     }
 
     struct GpuDipDiagnostics {
@@ -3406,7 +3597,7 @@ void App::panel_settings() {
                 if (g_cpu_execution_mode == CpuExecutionMode::X64Jit &&
                     backend_stats.native_blocks == 0) {
                     ImGui::TextDisabled(
-                        "x64 JIT is a staged mode; current build uses decoded blocks until real native emission is added.");
+                        "x64 JIT currently native-compiles hot ALU/immediate blocks; other blocks use decoded fallback.");
                 }
                 ImGui::Separator();
                 ImGui::Text("Performance");
@@ -3810,6 +4001,13 @@ void App::panel_settings() {
                 if (ImGui::Checkbox("RAM Trace", &g_trace_ram)) {
                     logging_config_dirty = true;
                 }
+                const ImVec4 trace_warning_color =
+                    g_trace_cpu ? ImVec4(1.0f, 0.72f, 0.28f, 1.0f)
+                                : ImVec4(0.62f, 0.62f, 0.62f, 1.0f);
+                ImGui::TextColored(trace_warning_color,
+                    "CPU trace disables decoded/JIT execution and forces interpreter.");
+                ImGui::TextDisabled(
+                    "For benchmarking decoded/JIT, CPU trace must be off.");
                 if (ImGui::Checkbox("GPU Trace", &g_trace_gpu)) {
                     logging_config_dirty = true;
                 }
@@ -3950,6 +4148,24 @@ void App::panel_settings() {
                         std::fclose(g_log_file);
                         g_log_file = nullptr;
                         status_message_ = "File logging disabled";
+                        logging_config_dirty = true;
+                    }
+                }
+
+                ImGui::Separator();
+                if (ImGui::CollapsingHeader("CPU Backend Stats",
+                    ImGuiTreeNodeFlags_DefaultOpen)) {
+                    CpuBackendStats backend_stats{};
+                    CpuExecutionMode backend_mode = effective_cpu_execution_mode();
+                    if (emu_runner_.is_running()) {
+                        backend_stats = runtime_snapshot_.cpu_backend_stats;
+                        backend_mode = runtime_snapshot_.cpu_backend;
+                    }
+                    else if (system_) {
+                        backend_stats = system_->cpu().cpu_backend_stats();
+                    }
+                    if (draw_cpu_backend_logging_section(
+                        backend_stats, backend_mode)) {
                         logging_config_dirty = true;
                     }
                 }
@@ -5046,8 +5262,7 @@ void App::panel_performance() {
         row("Present", present_ms_, ImVec4(0.7f, 0.9f, 0.9f, 1.0f));
         const CpuBackendStats& backend = runtime_snapshot_.cpu_backend_stats;
         ImGui::Separator();
-        ImGui::Text("CPU Backend: %s",
-            cpu_execution_mode_name(runtime_snapshot_.cpu_backend));
+        draw_cpu_backend_mode_summary(backend, runtime_snapshot_.cpu_backend);
         ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu",
             backend.block_count,
             static_cast<unsigned long long>(backend.cache_hits),
@@ -5065,13 +5280,57 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.decoded_instructions),
             static_cast<unsigned long long>(backend.native_instructions),
             static_cast<unsigned long long>(backend.fallback_instructions));
-        ImGui::Text("Block entries: decoded %llu  native %llu  avg %.2f instr",
+        if (backend.forced_interpreter_instructions != 0 ||
+            backend.forced_interpreter_last_reason !=
+                CpuForcedInterpreterReason::None) {
+            ImGui::Text("Forced interpreter: %s  slices %llu  instr %llu",
+                cpu_forced_interpreter_reason_name(
+                    backend.forced_interpreter_last_reason),
+                static_cast<unsigned long long>(
+                    backend.forced_interpreter_slices),
+                static_cast<unsigned long long>(
+                    backend.forced_interpreter_instructions));
+        }
+        ImGui::Text("Native: available %u  attempts %llu  successes %llu  compiled %llu",
+            backend.native_available ? 1u : 0u,
+            static_cast<unsigned long long>(backend.native_compile_attempts),
+            static_cast<unsigned long long>(backend.native_compile_successes),
+            static_cast<unsigned long long>(backend.native_blocks_compiled));
+        ImGui::Text("Native entries: %llu  cycles %llu  code %zu bytes",
+            static_cast<unsigned long long>(backend.native_block_entries),
+            static_cast<unsigned long long>(backend.native_cycles),
+            backend.native_code_bytes);
+        ImGui::Text("Native fallback: rejected %llu  compile fail %llu  decoded %llu",
+            static_cast<unsigned long long>(
+                backend.native_rejected_unsafe_blocks),
+            static_cast<unsigned long long>(backend.native_compile_failures),
+            static_cast<unsigned long long>(
+                backend.native_to_decoded_fallbacks));
+        ImGui::Text("Native gating: cold %llu  short %llu",
+            static_cast<unsigned long long>(backend.native_hot_threshold_skips),
+            static_cast<unsigned long long>(backend.native_short_block_skips));
+        ImGui::Text("Native rejects: branch %llu  mem %llu  cop0 %llu  cop2 %llu",
+            static_cast<unsigned long long>(backend.native_reject_branch),
+            static_cast<unsigned long long>(backend.native_reject_memory),
+            static_cast<unsigned long long>(backend.native_reject_cop0),
+            static_cast<unsigned long long>(backend.native_reject_cop2));
+        ImGui::Text("Native rejects: exc/unk %llu  state %llu  budget %llu  icache %llu",
+            static_cast<unsigned long long>(
+                backend.native_reject_exception_unknown),
+            static_cast<unsigned long long>(backend.native_reject_unsafe_state),
+            static_cast<unsigned long long>(backend.native_reject_budget),
+            static_cast<unsigned long long>(backend.native_reject_icache));
+        ImGui::Text("Block entries: decoded %llu  native %llu  avg %.2f / %.2f instr",
             static_cast<unsigned long long>(backend.decoded_block_entries),
             static_cast<unsigned long long>(backend.native_block_entries),
             backend.decoded_block_entries == 0
                 ? 0.0
                 : static_cast<double>(backend.decoded_instructions) /
-                      static_cast<double>(backend.decoded_block_entries));
+                      static_cast<double>(backend.decoded_block_entries),
+            backend.native_block_entries == 0
+                ? 0.0
+                : static_cast<double>(backend.native_instructions) /
+                      static_cast<double>(backend.native_block_entries));
         ImGui::Text("Memory helpers: %llu  MMIO: %llu  Exceptions: %llu",
             static_cast<unsigned long long>(backend.memory_helper_calls),
             static_cast<unsigned long long>(backend.mmio_accesses),
@@ -6031,8 +6290,10 @@ void App::panel_debug_cpu() {
         const CpuBackendStats backend_stats =
             running ? runtime_snapshot_.cpu_backend_stats
                     : system_->cpu().cpu_backend_stats();
-        ImGui::Text("Backend: %s",
-            cpu_execution_mode_name(effective_cpu_execution_mode()));
+        const CpuExecutionMode requested_backend =
+            running ? runtime_snapshot_.cpu_backend
+                    : effective_cpu_execution_mode();
+        draw_cpu_backend_mode_summary(backend_stats, requested_backend);
         ImGui::Text("Blocks: %u  Decoded entries: %llu  Native entries: %llu",
             backend_stats.block_count,
             static_cast<unsigned long long>(backend_stats.decoded_block_entries),
@@ -6041,6 +6302,54 @@ void App::panel_debug_cpu() {
             static_cast<unsigned long long>(backend_stats.decoded_instructions),
             static_cast<unsigned long long>(backend_stats.native_instructions),
             static_cast<unsigned long long>(backend_stats.fallback_instructions));
+        if (backend_stats.forced_interpreter_instructions != 0 ||
+            backend_stats.forced_interpreter_last_reason !=
+                CpuForcedInterpreterReason::None) {
+            ImGui::Text("Forced interpreter: %s  slices %llu  instr %llu",
+                cpu_forced_interpreter_reason_name(
+                    backend_stats.forced_interpreter_last_reason),
+                static_cast<unsigned long long>(
+                    backend_stats.forced_interpreter_slices),
+                static_cast<unsigned long long>(
+                    backend_stats.forced_interpreter_instructions));
+        }
+        ImGui::Text("Native: available %u  attempts %llu  successes %llu  compiled %llu",
+            backend_stats.native_available ? 1u : 0u,
+            static_cast<unsigned long long>(
+                backend_stats.native_compile_attempts),
+            static_cast<unsigned long long>(
+                backend_stats.native_compile_successes),
+            static_cast<unsigned long long>(
+                backend_stats.native_blocks_compiled));
+        ImGui::Text("Native entries: %llu  cycles %llu  code %zu bytes",
+            static_cast<unsigned long long>(
+                backend_stats.native_block_entries),
+            static_cast<unsigned long long>(backend_stats.native_cycles),
+            backend_stats.native_code_bytes);
+        ImGui::Text("Native fallback: rejected %llu  compile fail %llu  decoded %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_rejected_unsafe_blocks),
+            static_cast<unsigned long long>(
+                backend_stats.native_compile_failures),
+            static_cast<unsigned long long>(
+                backend_stats.native_to_decoded_fallbacks));
+        ImGui::Text("Native gating: cold %llu  short %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_hot_threshold_skips),
+            static_cast<unsigned long long>(
+                backend_stats.native_short_block_skips));
+        ImGui::Text("Native rejects: branch %llu  mem %llu  cop0 %llu  cop2 %llu",
+            static_cast<unsigned long long>(backend_stats.native_reject_branch),
+            static_cast<unsigned long long>(backend_stats.native_reject_memory),
+            static_cast<unsigned long long>(backend_stats.native_reject_cop0),
+            static_cast<unsigned long long>(backend_stats.native_reject_cop2));
+        ImGui::Text("Native rejects: exc/unk %llu  state %llu  budget %llu  icache %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_exception_unknown),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_unsafe_state),
+            static_cast<unsigned long long>(backend_stats.native_reject_budget),
+            static_cast<unsigned long long>(backend_stats.native_reject_icache));
         ImGui::Text("Invalidation: queries %llu  no-code %llu  examined %llu  hit %llu",
             static_cast<unsigned long long>(backend_stats.invalidation_queries),
             static_cast<unsigned long long>(
@@ -7089,6 +7398,18 @@ void App::load_persistent_config() {
         else if (key == "cpu_execution_mode") {
             g_cpu_execution_mode = parse_cpu_mode(value, g_cpu_execution_mode);
         }
+        else if (key == "cpu_x64_jit_hot_block_threshold") {
+            const unsigned long parsed =
+                std::strtoul(value.c_str(), nullptr, 10);
+            g_cpu_x64_jit_hot_block_threshold =
+                static_cast<u32>(std::min(1000000ul, parsed));
+        }
+        else if (key == "cpu_x64_jit_min_block_instructions") {
+            const unsigned long parsed =
+                std::strtoul(value.c_str(), nullptr, 10);
+            g_cpu_x64_jit_min_block_instructions =
+                static_cast<u32>(std::max(1ul, std::min(64ul, parsed)));
+        }
         else if (key == "memory_card_slot1_mode") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
             config_memory_card_mode_[0] = std::max(0, std::min(2, parsed));
@@ -7380,6 +7701,10 @@ void App::save_persistent_config() const {
     out << "direct_disc_boot=" << (config_direct_disc_boot_ ? 1 : 0) << "\n";
     out << "cpu_execution_mode="
         << cpu_execution_mode_to_config_value(g_cpu_execution_mode) << "\n";
+    out << "cpu_x64_jit_hot_block_threshold="
+        << g_cpu_x64_jit_hot_block_threshold << "\n";
+    out << "cpu_x64_jit_min_block_instructions="
+        << g_cpu_x64_jit_min_block_instructions << "\n";
     out << "memory_card_slot1_mode="
         << std::max(0, std::min(2, config_memory_card_mode_[0])) << "\n";
     out << "memory_card_slot2_mode="

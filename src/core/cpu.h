@@ -2,6 +2,7 @@
 #include "gte.h"
 #include "types.h"
 #include <array>
+#include <cstddef>
 
 
 // ── MIPS R3000A CPU ────────────────────────────────────────────────
@@ -19,10 +20,27 @@ struct CpuRunSliceResult {
 struct CpuBackendStats {
   bool available = false;
   bool active = false;
+  bool native_available = false;
   u32 block_count = 0;
   u32 interpreter_only_blocks = 0;
   u64 decoded_blocks = 0;
   u64 native_blocks = 0;
+  u64 native_compile_attempts = 0;
+  u64 native_compile_successes = 0;
+  u64 native_blocks_compiled = 0;
+  u64 native_compile_failures = 0;
+  u64 native_rejected_unsafe_blocks = 0;
+  u64 native_to_decoded_fallbacks = 0;
+  u64 native_hot_threshold_skips = 0;
+  u64 native_short_block_skips = 0;
+  u64 native_reject_branch = 0;
+  u64 native_reject_memory = 0;
+  u64 native_reject_cop0 = 0;
+  u64 native_reject_cop2 = 0;
+  u64 native_reject_exception_unknown = 0;
+  u64 native_reject_unsafe_state = 0;
+  u64 native_reject_budget = 0;
+  u64 native_reject_icache = 0;
   u64 cache_hits = 0;
   u64 cache_misses = 0;
   u64 invalidations = 0;
@@ -36,8 +54,18 @@ struct CpuBackendStats {
   u64 optimized_instructions = 0;
   u64 decoded_instructions = 0;
   u64 native_instructions = 0;
+  u64 native_cycles = 0;
   u64 fallback_instructions = 0;
   u64 interpreter_fallback_steps = 0;
+  u64 forced_interpreter_slices = 0;
+  u64 forced_interpreter_instructions = 0;
+  u64 forced_interpreter_trace = 0;
+  u64 forced_interpreter_deep_diagnostics = 0;
+  u64 forced_interpreter_fmv = 0;
+  u64 forced_interpreter_backend_compare = 0;
+  u64 forced_interpreter_other = 0;
+  CpuForcedInterpreterReason forced_interpreter_last_reason =
+      CpuForcedInterpreterReason::None;
   u64 memory_helper_calls = 0;
   u64 mmio_accesses = 0;
   u64 exceptions = 0;
@@ -48,6 +76,7 @@ struct CpuBackendStats {
   u64 invalidated_exits = 0;
   u64 executed_cycles = 0;
   size_t code_bytes = 0;
+  size_t native_code_bytes = 0;
 };
 
 struct CpuDebugState {
@@ -116,6 +145,7 @@ public:
   void add_cycle_penalty(u32 cycles);
   CpuDebugState debug_state() const;
   void debug_set_state(const CpuDebugState &state);
+  void debug_invalidate_icache_line(u32 addr);
 
 private:
   System *sys_ = nullptr;

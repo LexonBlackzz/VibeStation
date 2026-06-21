@@ -127,10 +127,24 @@ enum class CpuExecutionMode : u8 {
   DecodedBlockInterpreter = 1,
   X64Jit = 2,
 };
+enum class CpuForcedInterpreterReason : u8 {
+  None = 0,
+  TraceCpu = 1,
+  DeepDiagnostics = 2,
+  FmvDiagnostics = 3,
+  BackendCompareTest = 4,
+  Other = 5,
+};
 inline CpuExecutionMode g_cpu_execution_mode = CpuExecutionMode::Interpreter;
 inline bool g_cpu_execution_mode_cli_override = false;
 inline CpuExecutionMode g_cpu_execution_mode_cli_value =
     CpuExecutionMode::Interpreter;
+inline bool g_cpu_backend_compare_test_force_interpreter = false;
+inline bool g_cpu_x64_jit_force_compile = false;
+inline u32 g_cpu_x64_jit_hot_block_threshold = 8;
+inline u32 g_cpu_x64_jit_min_block_instructions = 2;
+inline bool g_cpu_backend_stats_logging = false;
+inline u32 g_cpu_backend_stats_log_frames = 60;
 inline bool g_spu_advanced_sound_status = false;
 inline u32 g_spu_desired_samples = 64u;
 inline bool g_spu_enable_audio_queue = true;
@@ -188,6 +202,25 @@ inline const char *cpu_execution_mode_name(CpuExecutionMode mode) {
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
+  }
+}
+
+inline const char *
+cpu_forced_interpreter_reason_name(CpuForcedInterpreterReason reason) {
+  switch (reason) {
+  case CpuForcedInterpreterReason::TraceCpu:
+    return "CPU trace";
+  case CpuForcedInterpreterReason::DeepDiagnostics:
+    return "CPU deep diagnostics";
+  case CpuForcedInterpreterReason::FmvDiagnostics:
+    return "FMV diagnostics";
+  case CpuForcedInterpreterReason::BackendCompareTest:
+    return "backend compare/test mode";
+  case CpuForcedInterpreterReason::Other:
+    return "other";
+  case CpuForcedInterpreterReason::None:
+  default:
+    return "none";
   }
 }
 

@@ -525,6 +525,10 @@ void Cpu::debug_set_state(const CpuDebugState &state) {
   executing_step_ = false;
 }
 
+void Cpu::debug_invalidate_icache_line(u32 addr) {
+  invalidate_icache_line(addr);
+}
+
 void Cpu::set_reg(u32 index, u32 value) {
   if (index == 0) {
     gpr_[0] = 0;

@@ -951,13 +951,28 @@ struct CpuCompareMemoryWord {
   u32 value = 0;
 };
 
+struct CpuCompareCodeMutation {
+  u32 after_instructions = 0;
+  u32 addr = 0;
+  u32 value = 0;
+  bool invalidate_icache_line = true;
+};
+
 struct CpuCompareCase {
   const char *name = "";
   std::vector<u32> program;
   std::vector<CpuCompareMemoryWord> memory;
+  std::vector<CpuCompareCodeMutation> mutations;
   std::array<u32, 32> initial_gpr{};
   u32 instructions = 0;
+  bool expect_final_control_state = false;
+  u32 expected_pc = 0;
+  u32 expected_next_pc = 0;
+  u32 expected_current_pc = 0;
+  u64 expected_cycles = 0;
   bool experimental_unknown_fallback = false;
+  bool require_full_native_when_available = false;
+  bool expect_x64_fallback = false;
 };
 
 struct CpuCompareRunResult {
@@ -978,6 +993,71 @@ static u32 enc_i(u32 op, u32 rs, u32 rt, u16 imm) {
 
 static u32 enc_j(u32 op, u32 target) {
   return ((op & 63u) << 26) | ((target >> 2) & 0x03FFFFFFu);
+}
+
+static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
+  switch (mode) {
+  case CpuExecutionMode::DecodedBlockInterpreter:
+    return "DecodedBlockInterpreter";
+  case CpuExecutionMode::X64Jit:
+    return "X64Jit";
+  case CpuExecutionMode::Interpreter:
+  default:
+    return "Interpreter";
+  }
+}
+
+static const char *cpu_compare_outcome(CpuExecutionMode mode,
+                                       const CpuBackendStats &stats) {
+  if (mode == CpuExecutionMode::Interpreter) {
+    return "interpreter";
+  }
+
+  if (stats.native_block_entries != 0 || stats.native_instructions != 0) {
+    if (stats.decoded_instructions != 0 || stats.fallback_instructions != 0 ||
+        stats.interpreter_fallback_steps != 0) {
+      return "native_with_fallback";
+    }
+    return "native";
+  }
+
+  if (mode == CpuExecutionMode::X64Jit && !stats.native_available) {
+    if (stats.decoded_instructions != 0 || stats.decoded_block_entries != 0) {
+      return "x64_unavailable_decoded_fallback";
+    }
+    if (stats.interpreter_fallback_steps != 0 ||
+        stats.fallback_instructions != 0) {
+      return "x64_unavailable_interpreter_fallback";
+    }
+    return "x64_unavailable_no_optimized_work";
+  }
+
+  if (stats.decoded_instructions != 0 || stats.decoded_block_entries != 0) {
+    if (stats.interpreter_fallback_steps != 0 ||
+        stats.fallback_instructions != 0) {
+      return mode == CpuExecutionMode::X64Jit
+                 ? "decoded_with_interpreter_fallback"
+                 : "decoded_interpreter_fallback";
+    }
+    return mode == CpuExecutionMode::X64Jit ? "decoded_fallback"
+                                            : "decoded";
+  }
+
+  if (stats.interpreter_fallback_steps != 0 || stats.fallback_instructions != 0) {
+    return mode == CpuExecutionMode::X64Jit ? "interpreter_fallback"
+                                            : "fallback";
+  }
+
+  return "no_optimized_work";
+}
+
+static void log_cpu_compare_program(const CpuCompareCase &test_case) {
+  for (size_t i = 0; i < test_case.program.size(); ++i) {
+    LOG_ERROR("CPU_COMPARE_PROGRAM name=%s index=%u pc=0x%08X opcode=0x%08X",
+              test_case.name, static_cast<unsigned>(i),
+              kCpuComparePc + static_cast<u32>(i * 4u),
+              test_case.program[i]);
+  }
 }
 
 static bool cpu_debug_states_equal(const CpuDebugState &a,
@@ -1005,51 +1085,79 @@ static bool cpu_debug_states_equal(const CpuDebugState &a,
 }
 
 static void log_cpu_debug_state_diff(const char *name,
-                                     const CpuDebugState &interpreter,
-                                     const CpuDebugState &decoded) {
+                                     const char *actual_mode,
+                                     const CpuDebugState &reference,
+                                     const CpuDebugState &actual) {
   auto field = [&](const char *field_name, auto a, auto b) {
     if (a != b) {
-      LOG_ERROR("CPU_COMPARE_DIFF name=%s field=%s interpreter=0x%llX decoded=0x%llX",
-                name, field_name, static_cast<unsigned long long>(a),
+      LOG_ERROR("CPU_COMPARE_DIFF name=%s mode=%s field=%s reference=0x%llX actual=0x%llX",
+                name, actual_mode, field_name,
+                static_cast<unsigned long long>(a),
                 static_cast<unsigned long long>(b));
     }
   };
 
-  field("pc", interpreter.pc, decoded.pc);
-  field("next_pc", interpreter.next_pc, decoded.next_pc);
-  field("current_pc", interpreter.current_pc, decoded.current_pc);
-  field("hi", interpreter.hi, decoded.hi);
-  field("lo", interpreter.lo, decoded.lo);
-  field("load_reg", interpreter.load_reg, decoded.load_reg);
-  field("load_value", interpreter.load_value, decoded.load_value);
-  field("next_load_reg", interpreter.next_load_reg, decoded.next_load_reg);
-  field("next_load_value", interpreter.next_load_value,
-        decoded.next_load_value);
-  field("in_delay_slot", interpreter.in_delay_slot ? 1u : 0u,
-        decoded.in_delay_slot ? 1u : 0u);
-  field("pending_delay_slot", interpreter.pending_delay_slot ? 1u : 0u,
-        decoded.pending_delay_slot ? 1u : 0u);
-  field("pending_branch_taken", interpreter.pending_branch_taken ? 1u : 0u,
-        decoded.pending_branch_taken ? 1u : 0u);
-  field("pending_branch_pc", interpreter.pending_branch_pc,
-        decoded.pending_branch_pc);
-  field("active_branch_pc", interpreter.active_branch_pc,
-        decoded.active_branch_pc);
-  field("exception_raised", interpreter.exception_raised ? 1u : 0u,
-        decoded.exception_raised ? 1u : 0u);
-  field("cop0_sr", interpreter.cop0_sr, decoded.cop0_sr);
-  field("cop0_cause", interpreter.cop0_cause, decoded.cop0_cause);
-  field("cop0_epc", interpreter.cop0_epc, decoded.cop0_epc);
-  field("cop0_badvaddr", interpreter.cop0_badvaddr, decoded.cop0_badvaddr);
-  field("cycles", interpreter.cycles, decoded.cycles);
+  field("pc", reference.pc, actual.pc);
+  field("next_pc", reference.next_pc, actual.next_pc);
+  field("current_pc", reference.current_pc, actual.current_pc);
+  field("hi", reference.hi, actual.hi);
+  field("lo", reference.lo, actual.lo);
+  field("load_reg", reference.load_reg, actual.load_reg);
+  field("load_value", reference.load_value, actual.load_value);
+  field("next_load_reg", reference.next_load_reg, actual.next_load_reg);
+  field("next_load_value", reference.next_load_value,
+        actual.next_load_value);
+  field("in_delay_slot", reference.in_delay_slot ? 1u : 0u,
+        actual.in_delay_slot ? 1u : 0u);
+  field("pending_delay_slot", reference.pending_delay_slot ? 1u : 0u,
+        actual.pending_delay_slot ? 1u : 0u);
+  field("pending_branch_taken", reference.pending_branch_taken ? 1u : 0u,
+        actual.pending_branch_taken ? 1u : 0u);
+  field("pending_branch_pc", reference.pending_branch_pc,
+        actual.pending_branch_pc);
+  field("active_branch_pc", reference.active_branch_pc,
+        actual.active_branch_pc);
+  field("exception_raised", reference.exception_raised ? 1u : 0u,
+        actual.exception_raised ? 1u : 0u);
+  field("cop0_sr", reference.cop0_sr, actual.cop0_sr);
+  field("cop0_cause", reference.cop0_cause, actual.cop0_cause);
+  field("cop0_epc", reference.cop0_epc, actual.cop0_epc);
+  field("cop0_badvaddr", reference.cop0_badvaddr, actual.cop0_badvaddr);
+  field("cycles", reference.cycles, actual.cycles);
 
   for (u32 i = 0; i < 32u; ++i) {
-    if (interpreter.gpr[i] != decoded.gpr[i]) {
-      LOG_ERROR("CPU_COMPARE_DIFF name=%s reg=r%u interpreter=0x%08X decoded=0x%08X",
-                name, static_cast<unsigned>(i), interpreter.gpr[i],
-                decoded.gpr[i]);
+    if (reference.gpr[i] != actual.gpr[i]) {
+      LOG_ERROR("CPU_COMPARE_DIFF name=%s mode=%s reg=r%u reference=0x%08X actual=0x%08X",
+                name, actual_mode, static_cast<unsigned>(i), reference.gpr[i],
+                actual.gpr[i]);
     }
   }
+}
+
+static bool cpu_compare_expected_state_pass(const CpuCompareCase &test_case,
+                                            CpuExecutionMode mode,
+                                            const CpuDebugState &state) {
+  if (!test_case.expect_final_control_state) {
+    return true;
+  }
+
+  bool pass = true;
+  auto field = [&](const char *field_name, auto expected, auto actual) {
+    if (expected == actual) {
+      return;
+    }
+    pass = false;
+    LOG_ERROR("CPU_COMPARE_EXPECTED_DIFF name=%s mode=%s field=%s expected=0x%llX actual=0x%llX",
+              test_case.name, cpu_compare_mode_name(mode), field_name,
+              static_cast<unsigned long long>(expected),
+              static_cast<unsigned long long>(actual));
+  };
+
+  field("pc", test_case.expected_pc, state.pc);
+  field("next_pc", test_case.expected_next_pc, state.next_pc);
+  field("current_pc", test_case.expected_current_pc, state.current_pc);
+  field("cycles", test_case.expected_cycles, state.cycles);
+  return pass;
 }
 
 static CpuCompareRunResult run_cpu_compare_case_once(
@@ -1092,14 +1200,168 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_execution_mode_cli_override = true;
   g_cpu_execution_mode_cli_value = mode;
   CpuCompareRunResult out{};
-  out.run = sys->cpu().run_slice(100000u, test_case.instructions);
+  u32 executed = 0;
+  for (const CpuCompareCodeMutation &mutation : test_case.mutations) {
+    const u32 target = std::min(mutation.after_instructions,
+                                test_case.instructions);
+    if (target > executed) {
+      CpuRunSliceResult segment =
+          sys->cpu().run_slice(100000u, target - executed);
+      out.run.cycles += segment.cycles;
+      out.run.instructions += segment.instructions;
+      executed += segment.instructions;
+    }
+    sys->write32(mutation.addr, mutation.value);
+    if (mutation.invalidate_icache_line) {
+      sys->cpu().debug_invalidate_icache_line(mutation.addr);
+    }
+  }
+  if (executed < test_case.instructions) {
+    CpuRunSliceResult segment =
+        sys->cpu().run_slice(100000u, test_case.instructions - executed);
+    out.run.cycles += segment.cycles;
+    out.run.instructions += segment.instructions;
+  }
   out.state = sys->cpu().debug_state();
   out.stats = sys->cpu().cpu_backend_stats();
   return out;
 }
 
+static void pad_cpu_compare_program(CpuCompareCase &test_case,
+                                    u32 instruction_count = 16u) {
+  while (test_case.program.size() < instruction_count) {
+    test_case.program.push_back(0);
+  }
+  test_case.instructions = instruction_count;
+}
+
 static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   std::vector<CpuCompareCase> cases;
+
+  CpuCompareCase native_control{};
+  native_control.name = "native_control_state_icache_cycles";
+  native_control.program.assign(16u, 0u);
+  native_control.instructions = 16;
+  native_control.expect_final_control_state = true;
+  native_control.expected_pc = kCpuComparePc + 16u * 4u;
+  native_control.expected_next_pc = native_control.expected_pc + 4u;
+  native_control.expected_current_pc = kCpuComparePc + 15u * 4u;
+  native_control.expected_cycles = 32u;
+  native_control.require_full_native_when_available = true;
+  cases.push_back(native_control);
+
+  CpuCompareCase native_mixed{};
+  native_mixed.name = "native_mixed_alu_immediate";
+  native_mixed.program = {
+      0,
+      enc_i(0x09, 0, 1, 0x0001),
+      enc_i(0x09, 1, 1, 0x0001),
+      enc_i(0x0F, 0, 2, 0x1234),
+      enc_i(0x0D, 2, 2, 0x5678),
+      enc_i(0x0C, 2, 3, 0x00FF),
+      enc_i(0x0E, 3, 4, 0x00AA),
+      enc_r(1, 1, 5, 0, 0x21),
+      enc_r(5, 1, 6, 0, 0x23),
+      enc_r(2, 4, 7, 0, 0x24),
+      enc_r(2, 4, 8, 0, 0x25),
+      enc_r(2, 4, 9, 0, 0x26),
+      enc_r(2, 4, 10, 0, 0x27),
+      enc_i(0x0A, 10, 11, 0x0000),
+      enc_i(0x0B, 10, 12, 0xFFFF),
+      enc_r(12, 11, 13, 0, 0x21),
+  };
+  native_mixed.require_full_native_when_available = true;
+  native_mixed.instructions = 16;
+  cases.push_back(native_mixed);
+
+  CpuCompareCase r0_writes{};
+  r0_writes.name = "native_r0_writes_ignored";
+  r0_writes.program = {
+      enc_i(0x09, 0, 0, 0x1234),
+      enc_i(0x0F, 0, 0, 0xFFFF),
+      enc_i(0x0D, 0, 0, 0xFFFF),
+      enc_r(0, 0, 0, 4, 0x00),
+      enc_i(0x09, 0, 1, 0x0007),
+  };
+  r0_writes.require_full_native_when_available = true;
+  pad_cpu_compare_program(r0_writes);
+  cases.push_back(r0_writes);
+
+  CpuCompareCase addiu_overlap{};
+  addiu_overlap.name = "native_addiu_positive_negative_overlap";
+  addiu_overlap.initial_gpr[1] = 0x7FFFFFFFu;
+  addiu_overlap.initial_gpr[2] = 0x00000010u;
+  addiu_overlap.program = {
+      enc_i(0x09, 0, 3, 0x7FFF),
+      enc_i(0x09, 3, 4, 0x8000),
+      enc_i(0x09, 1, 1, 0x0001),
+      enc_i(0x0D, 2, 2, 0x0001),
+      enc_r(1, 1, 1, 0, 0x21),
+  };
+  addiu_overlap.require_full_native_when_available = true;
+  pad_cpu_compare_program(addiu_overlap);
+  cases.push_back(addiu_overlap);
+
+  CpuCompareCase wrapping_logic{};
+  wrapping_logic.name = "native_wrapping_logic_lui_zero_extend";
+  wrapping_logic.program = {
+      enc_i(0x0F, 0, 1, 0xFFFF),
+      enc_i(0x0D, 1, 1, 0xFFFF),
+      enc_i(0x09, 0, 2, 0x0001),
+      enc_r(1, 2, 3, 0, 0x21),
+      enc_r(2, 1, 4, 0, 0x23),
+      enc_i(0x0F, 0, 5, 0x00FF),
+      enc_i(0x0C, 5, 6, 0xF0F0),
+      enc_i(0x0D, 6, 7, 0x0F0F),
+      enc_i(0x0E, 7, 8, 0xFFFF),
+      enc_r(7, 8, 9, 0, 0x24),
+      enc_r(7, 8, 10, 0, 0x25),
+      enc_r(7, 8, 11, 0, 0x26),
+      enc_r(7, 8, 12, 0, 0x27),
+  };
+  wrapping_logic.require_full_native_when_available = true;
+  pad_cpu_compare_program(wrapping_logic);
+  cases.push_back(wrapping_logic);
+
+  CpuCompareCase comparisons{};
+  comparisons.name = "native_signed_unsigned_comparisons";
+  comparisons.program = {
+      enc_i(0x09, 0, 1, 0xFFFF),
+      enc_i(0x09, 0, 2, 0x0001),
+      enc_i(0x0F, 0, 3, 0x8000),
+      enc_r(1, 2, 4, 0, 0x2A),
+      enc_r(1, 2, 5, 0, 0x2B),
+      enc_r(3, 2, 6, 0, 0x2A),
+      enc_r(3, 2, 7, 0, 0x2B),
+      enc_i(0x0A, 2, 8, 0xFFFF),
+      enc_i(0x0A, 1, 9, 0x0001),
+      enc_i(0x0B, 2, 10, 0xFFFF),
+      enc_i(0x0B, 1, 11, 0x0001),
+  };
+  comparisons.require_full_native_when_available = true;
+  pad_cpu_compare_program(comparisons);
+  cases.push_back(comparisons);
+
+  CpuCompareCase shifts{};
+  shifts.name = "native_shift_immediate_and_variable";
+  shifts.program = {
+      enc_i(0x0F, 0, 1, 0x8000),
+      enc_i(0x0D, 1, 1, 0x0001),
+      enc_r(0, 1, 2, 0, 0x00),
+      enc_r(0, 1, 3, 4, 0x00),
+      enc_r(0, 1, 4, 0, 0x02),
+      enc_r(0, 1, 5, 4, 0x02),
+      enc_r(0, 1, 6, 0, 0x03),
+      enc_r(0, 1, 7, 4, 0x03),
+      enc_i(0x09, 0, 8, 0x0028),
+      enc_r(8, 1, 9, 0, 0x04),
+      enc_r(8, 1, 10, 0, 0x06),
+      enc_r(8, 1, 11, 0, 0x07),
+      enc_r(8, 1, 1, 0, 0x04),
+  };
+  shifts.require_full_native_when_available = true;
+  pad_cpu_compare_program(shifts);
+  cases.push_back(shifts);
 
   CpuCompareCase branch_taken{};
   branch_taken.name = "branch_delay_taken";
@@ -1112,6 +1374,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 5, 0x0044),
   };
   branch_taken.instructions = 5;
+  branch_taken.expect_x64_fallback = true;
   cases.push_back(branch_taken);
 
   CpuCompareCase branch_not_taken{};
@@ -1124,6 +1387,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 4, 0x0033),
   };
   branch_not_taken.instructions = 5;
+  branch_not_taken.expect_x64_fallback = true;
   cases.push_back(branch_not_taken);
 
   CpuCompareCase jal{};
@@ -1137,6 +1401,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 8, 0x0088),
   };
   jal.instructions = 4;
+  jal.expect_x64_fallback = true;
   cases.push_back(jal);
 
   CpuCompareCase jalr{};
@@ -1151,6 +1416,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 11, 0x0077),
   };
   jalr.instructions = 4;
+  jalr.expect_x64_fallback = true;
   cases.push_back(jalr);
 
   CpuCompareCase load_delay{};
@@ -1164,7 +1430,21 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   load_delay.memory.push_back({0x00011000u, 0x12345678u});
   load_delay.instructions = 4;
+  load_delay.expect_x64_fallback = true;
   cases.push_back(load_delay);
+
+  CpuCompareCase memory_load_store{};
+  memory_load_store.name = "unsafe_memory_load_store_fallback";
+  memory_load_store.initial_gpr[1] = 0x80011020u;
+  memory_load_store.initial_gpr[2] = 0xCAFEBABEu;
+  memory_load_store.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x23, 1, 3, 0),
+      0,
+  };
+  memory_load_store.instructions = 3;
+  memory_load_store.expect_x64_fallback = true;
+  cases.push_back(memory_load_store);
 
   CpuCompareCase syscall_exception{};
   syscall_exception.name = "exception_syscall";
@@ -1174,7 +1454,19 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 2, 6),
   };
   syscall_exception.instructions = 2;
+  syscall_exception.expect_x64_fallback = true;
   cases.push_back(syscall_exception);
+
+  CpuCompareCase break_exception{};
+  break_exception.name = "exception_break";
+  break_exception.program = {
+      enc_i(0x09, 0, 1, 5),
+      0x0000000Du,
+      enc_i(0x09, 0, 2, 6),
+  };
+  break_exception.instructions = 2;
+  break_exception.expect_x64_fallback = true;
+  cases.push_back(break_exception);
 
   CpuCompareCase unaligned_lw{};
   unaligned_lw.name = "exception_unaligned_lw";
@@ -1184,7 +1476,38 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 3, 3),
   };
   unaligned_lw.instructions = 1;
+  unaligned_lw.expect_x64_fallback = true;
   cases.push_back(unaligned_lw);
+
+  CpuCompareCase cop0{};
+  cop0.name = "unsafe_cop0_fallback";
+  cop0.program = {
+      (0x10u << 26) | (0u << 21) | (2u << 16) | (12u << 11),
+      0,
+  };
+  cop0.instructions = 2;
+  cop0.expect_x64_fallback = true;
+  cases.push_back(cop0);
+
+  CpuCompareCase cop2{};
+  cop2.name = "unsafe_cop2_gte_fallback";
+  cop2.program = {
+      (0x12u << 26) | (0u << 21) | (2u << 16) | (0u << 11),
+      0,
+  };
+  cop2.instructions = 2;
+  cop2.expect_x64_fallback = true;
+  cases.push_back(cop2);
+
+  CpuCompareCase unsupported_strict{};
+  unsupported_strict.name = "unsafe_unsupported_opcode_exception";
+  unsupported_strict.program = {
+      0xFC000000u,
+      enc_i(0x09, 0, 2, 2),
+  };
+  unsupported_strict.instructions = 1;
+  unsupported_strict.expect_x64_fallback = true;
+  cases.push_back(unsupported_strict);
 
   CpuCompareCase unknown_primary{};
   unknown_primary.name = "unknown_primary_fallback_nop";
@@ -1194,6 +1517,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   unknown_primary.instructions = 2;
   unknown_primary.experimental_unknown_fallback = true;
+  unknown_primary.expect_x64_fallback = true;
   cases.push_back(unknown_primary);
 
   CpuCompareCase unknown_special{};
@@ -1205,7 +1529,20 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   unknown_special.instructions = 2;
   unknown_special.experimental_unknown_fallback = true;
+  unknown_special.expect_x64_fallback = true;
   cases.push_back(unknown_special);
+
+  CpuCompareCase ram_invalidation{};
+  ram_invalidation.name = "ram_code_invalidation";
+  ram_invalidation.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x09, 0, 2, 2),
+      enc_i(0x09, 0, 3, 3),
+  };
+  ram_invalidation.mutations.push_back(
+      {1u, kCpuComparePc + 4u, enc_i(0x09, 0, 2, 0x0022)});
+  ram_invalidation.instructions = 3;
+  cases.push_back(ram_invalidation);
 
   return cases;
 }
@@ -1216,34 +1553,139 @@ static int run_cpu_backend_compare_test() {
   const CpuExecutionMode saved_override_value = g_cpu_execution_mode_cli_value;
   const bool saved_unknown_fallback =
       g_experimental_unhandled_special_returns_zero;
+  const bool saved_force_native = g_cpu_x64_jit_force_compile;
+  g_cpu_x64_jit_force_compile = true;
 
   int failures = 0;
+  const std::array<CpuExecutionMode, 3> modes = {
+      CpuExecutionMode::Interpreter,
+      CpuExecutionMode::DecodedBlockInterpreter,
+      CpuExecutionMode::X64Jit,
+  };
+
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
     g_experimental_unhandled_special_returns_zero =
         test_case.experimental_unknown_fallback;
-    CpuCompareRunResult interpreter = run_cpu_compare_case_once(
-        test_case, CpuExecutionMode::Interpreter);
-    CpuCompareRunResult decoded = run_cpu_compare_case_once(
-        test_case, CpuExecutionMode::DecodedBlockInterpreter);
 
-    const bool pass = cpu_debug_states_equal(interpreter.state, decoded.state);
-    LOG_INFO(
-        "CPU_COMPARE name=%s result=%s int_pc=0x%08X dec_pc=0x%08X int_cycles=%llu dec_cycles=%llu int_instr=%u dec_instr=%u dec_blocks=%u dec_fallback=%llu",
-        test_case.name, pass ? "PASS" : "FAIL", interpreter.state.pc,
-        decoded.state.pc,
-        static_cast<unsigned long long>(interpreter.state.cycles),
-        static_cast<unsigned long long>(decoded.state.cycles),
-        interpreter.run.instructions, decoded.run.instructions,
-        decoded.stats.block_count,
-        static_cast<unsigned long long>(decoded.stats.fallback_instructions));
-    if (!pass) {
-      ++failures;
-      log_cpu_debug_state_diff(test_case.name, interpreter.state,
-                               decoded.state);
+    CpuCompareRunResult reference =
+        run_cpu_compare_case_once(test_case, CpuExecutionMode::Interpreter);
+
+    for (CpuExecutionMode mode : modes) {
+      CpuCompareRunResult result =
+          (mode == CpuExecutionMode::Interpreter)
+              ? reference
+              : run_cpu_compare_case_once(test_case, mode);
+
+      bool pass = cpu_debug_states_equal(reference.state, result.state);
+      const bool state_pass = pass;
+      const bool expected_state_pass =
+          cpu_compare_expected_state_pass(test_case, mode, result.state);
+      bool native_check_pass = true;
+      const char *native_check = "not_required";
+
+      if (mode == CpuExecutionMode::X64Jit) {
+        if (test_case.require_full_native_when_available) {
+          if (!result.stats.native_available) {
+            native_check = "skip_native_unavailable";
+          } else {
+            const bool fully_native =
+                result.stats.native_blocks_compiled != 0 &&
+                result.stats.native_block_entries != 0 &&
+                result.stats.native_instructions >= test_case.instructions &&
+                result.stats.native_code_bytes != 0 &&
+                result.stats.decoded_instructions == 0 &&
+                result.stats.fallback_instructions == 0 &&
+                result.stats.interpreter_fallback_steps == 0;
+            native_check = fully_native ? "native_full" : "native_missing";
+            native_check_pass = fully_native;
+          }
+        } else if (test_case.expect_x64_fallback) {
+          if (!result.stats.native_available) {
+            native_check = "skip_native_unavailable";
+          } else {
+            const bool clean_fallback =
+                result.stats.native_block_entries == 0 &&
+                result.stats.native_instructions == 0;
+            native_check = clean_fallback ? "clean_fallback"
+                                          : "unexpected_native";
+            native_check_pass = clean_fallback;
+          }
+        }
+      }
+
+      pass = pass && expected_state_pass && native_check_pass;
+      const char *outcome = cpu_compare_outcome(mode, result.stats);
+      LOG_INFO(
+          "CPU_COMPARE name=%s mode=%s result=%s outcome=%s native_check=%s pc=0x%08X next_pc=0x%08X current_pc=0x%08X instr=%u cycles=%llu decoded_instr=%llu native_instr=%llu fallback_instr=%llu forced_reason=%s forced_slices=%llu forced_instr=%llu native_blocks=%llu native_attempts=%llu native_successes=%llu native_compiled=%llu native_entries=%llu native_code_bytes=%llu native_available=%u",
+          test_case.name, cpu_compare_mode_name(mode),
+          pass ? "PASS" : "FAIL", outcome, native_check, result.state.pc,
+          result.state.next_pc, result.state.current_pc, result.run.instructions,
+          static_cast<unsigned long long>(result.state.cycles),
+          static_cast<unsigned long long>(result.stats.decoded_instructions),
+          static_cast<unsigned long long>(result.stats.native_instructions),
+          static_cast<unsigned long long>(result.stats.fallback_instructions),
+          cpu_forced_interpreter_reason_name(
+              result.stats.forced_interpreter_last_reason),
+          static_cast<unsigned long long>(
+              result.stats.forced_interpreter_slices),
+          static_cast<unsigned long long>(
+              result.stats.forced_interpreter_instructions),
+          static_cast<unsigned long long>(result.stats.native_blocks),
+          static_cast<unsigned long long>(result.stats.native_compile_attempts),
+          static_cast<unsigned long long>(result.stats.native_compile_successes),
+          static_cast<unsigned long long>(result.stats.native_blocks_compiled),
+          static_cast<unsigned long long>(result.stats.native_block_entries),
+          static_cast<unsigned long long>(result.stats.native_code_bytes),
+          result.stats.native_available ? 1u : 0u);
+
+      if (mode == CpuExecutionMode::X64Jit &&
+          test_case.require_full_native_when_available) {
+        LOG_INFO(
+            "CPU_COMPARE_NATIVE name=%s required=1 available=%u compiled=%u entered=%u native_instr=%llu decoded_instr=%llu fallback_instr=%llu code_bytes=%llu attempts=%llu successes=%llu force=%u hot_threshold=%u min_block=%u",
+            test_case.name, result.stats.native_available ? 1u : 0u,
+            result.stats.native_blocks_compiled != 0 ? 1u : 0u,
+            result.stats.native_block_entries != 0 ? 1u : 0u,
+            static_cast<unsigned long long>(result.stats.native_instructions),
+            static_cast<unsigned long long>(result.stats.decoded_instructions),
+            static_cast<unsigned long long>(result.stats.fallback_instructions),
+            static_cast<unsigned long long>(result.stats.native_code_bytes),
+            static_cast<unsigned long long>(result.stats.native_compile_attempts),
+            static_cast<unsigned long long>(
+                result.stats.native_compile_successes),
+            g_cpu_x64_jit_force_compile ? 1u : 0u,
+            g_cpu_x64_jit_hot_block_threshold,
+            g_cpu_x64_jit_min_block_instructions);
+      }
+
+      if (!pass) {
+        ++failures;
+        if (!state_pass) {
+          log_cpu_debug_state_diff(test_case.name, cpu_compare_mode_name(mode),
+                                   reference.state, result.state);
+        }
+        if (!native_check_pass) {
+          LOG_ERROR(
+              "CPU_COMPARE_BACKEND_DIFF name=%s mode=%s expected=%s outcome=%s native_available=%u native_blocks_compiled=%llu native_entries=%llu native_instr=%llu native_code_bytes=%llu decoded_instr=%llu fallback_instr=%llu interpreter_fallback_steps=%llu",
+              test_case.name, cpu_compare_mode_name(mode), native_check,
+              outcome, result.stats.native_available ? 1u : 0u,
+              static_cast<unsigned long long>(
+                  result.stats.native_blocks_compiled),
+              static_cast<unsigned long long>(
+                  result.stats.native_block_entries),
+              static_cast<unsigned long long>(result.stats.native_instructions),
+              static_cast<unsigned long long>(result.stats.native_code_bytes),
+              static_cast<unsigned long long>(result.stats.decoded_instructions),
+              static_cast<unsigned long long>(result.stats.fallback_instructions),
+              static_cast<unsigned long long>(
+                  result.stats.interpreter_fallback_steps));
+        }
+        log_cpu_compare_program(test_case);
+      }
     }
   }
 
   g_experimental_unhandled_special_returns_zero = saved_unknown_fallback;
+  g_cpu_x64_jit_force_compile = saved_force_native;
   g_cpu_execution_mode_cli_override = saved_override;
   g_cpu_execution_mode_cli_value = saved_override_value;
 
@@ -2441,6 +2883,36 @@ int main(int argc, char *argv[]) {
     if (a == "--decoded" || a == "--block-interpreter") {
       g_cpu_execution_mode_cli_override = true;
       g_cpu_execution_mode_cli_value = CpuExecutionMode::DecodedBlockInterpreter;
+      continue;
+    }
+    if (a == "--jit-hot-threshold" && (i + 1) < args.size()) {
+      g_cpu_x64_jit_hot_block_threshold =
+          static_cast<u32>(std::max(0, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--jit-min-block-instructions" && (i + 1) < args.size()) {
+      g_cpu_x64_jit_min_block_instructions =
+          static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--jit-force-compile") {
+      g_cpu_x64_jit_force_compile = true;
+      continue;
+    }
+    if (a == "--cpu-backend-stats-log-frames" && (i + 1) < args.size()) {
+      g_cpu_backend_stats_log_frames =
+          static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--cpu-backend-stats-log") {
+      g_cpu_backend_stats_logging = true;
+      continue;
+    }
+    if (a == "--no-cpu-backend-stats-log") {
+      g_cpu_backend_stats_logging = false;
       continue;
     }
     if (a == "--trace" && (i + 1) < args.size()) {

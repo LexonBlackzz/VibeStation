@@ -73,6 +73,15 @@ enum class CpuBlockExitReason : u8 {
   PcMismatch,
 };
 
+enum class NativeBlockRejectReason : u8 {
+  None,
+  Branch,
+  Memory,
+  Cop0,
+  Cop2,
+  ExceptionOrUnknown,
+};
+
 struct CpuBlockRunResult {
   u32 cycles = 0;
   u32 instructions = 0;
@@ -101,6 +110,7 @@ struct DecodedInstruction {
 
 struct DecodedBlock {
   static constexpr u32 kMaxInstructions = 17;
+  using NativeFn = void (*)(void *, CpuBlockRunResult *);
 
   DecodedBlock() = default;
   ~DecodedBlock();
@@ -117,6 +127,11 @@ struct DecodedBlock {
   std::array<u32, kMaxInstructions> registered_pages{};
   u32 registered_page_count = 0;
   u32 last_invalidation_query = 0;
+  u64 entry_count = 0;
+  NativeFn native_fn = nullptr;
+  void *native_context = nullptr;
+  void (*destroy_native_context)(void *) = nullptr;
+  size_t native_code_bytes = 0;
   u32 compile_frame = 0;
   u32 last_invalidate_frame = 0;
   u32 invalidations_in_window = 0;
@@ -125,6 +140,12 @@ struct DecodedBlock {
   bool invalidated = false;
   bool has_control_flow = false;
   bool has_fallback = false;
+  bool native_compile_attempted = false;
+  bool native_safety_checked = false;
+  bool native_stage1_safe = false;
+  bool native_rejected_unsafe = false;
+  NativeBlockRejectReason native_reject_reason =
+      NativeBlockRejectReason::None;
 };
 
 class CpuOptimizedBackend {
@@ -166,13 +187,20 @@ private:
                                   const DecodedInstruction &inst);
   CpuBlockRunResult execute_block(DecodedBlock &block, u32 max_cycles,
                                   u32 max_instructions);
+  CpuBlockRunResult execute_native_block(DecodedBlock &block, u32 max_cycles,
+                                         u32 max_instructions);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
   bool prepare_instruction(const DecodedInstruction &inst,
                            CpuBlockRunResult &result);
   void finish_instruction(const DecodedInstruction &inst,
                           CpuBlockRunResult &result, bool count_decoded);
-  bool diagnostics_force_interpreter() const;
+  CpuForcedInterpreterReason diagnostics_force_interpreter_reason() const;
   bool is_block_terminator(const DecodedInstruction &inst) const;
+  NativeBlockRejectReason classify_x64_reject_reason(
+      const DecodedBlock &block) const;
+  bool ensure_x64_safety_checked(DecodedBlock &block);
+  bool should_attempt_x64_compile(const DecodedBlock &block);
+  bool compile_x64_block(DecodedBlock &block);
   bool is_mmio_address(u32 addr) const;
   u32 normalized_code_addr(u32 addr) const;
   u32 code_page_for_normalized_addr(u32 addr) const;
@@ -184,7 +212,15 @@ private:
   void unregister_block_pages(DecodedBlock &block);
   bool ranges_overlap(u32 a0, u32 a1, u32 b0, u32 b1) const;
   void mark_block_invalidated(DecodedBlock &block);
+  void record_forced_interpreter(CpuForcedInterpreterReason reason,
+                                 u32 instructions);
   void record_exit(CpuBlockExitReason reason);
+  void record_native_reject(NativeBlockRejectReason reason);
+  void warn_forced_interpreter_once(CpuForcedInterpreterReason reason);
+  void log_periodic_stats();
+  void log_stats_section(const CpuBackendStats &current,
+                         const CpuBackendStats &delta,
+                         u32 frame_delta) const;
   void warn_x64_unavailable_once();
 
   Cpu &cpu_;
@@ -194,6 +230,11 @@ private:
   std::array<u64, kCodePageBitmapWordCount> compiled_code_page_bitmap_{};
   u32 invalidation_query_stamp_ = 0;
   u32 current_frame_ = 0;
+  u32 last_stats_log_frame_ = 0;
   bool x64_unavailable_warned_ = false;
+  bool have_stats_log_snapshot_ = false;
+  CpuBackendStats last_stats_log_{};
   CpuBackendStats stats_{};
+  CpuForcedInterpreterReason last_forced_interpreter_warning_ =
+      CpuForcedInterpreterReason::None;
 };
