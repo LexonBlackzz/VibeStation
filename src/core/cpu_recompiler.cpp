@@ -2,6 +2,7 @@
 #include "system.h"
 #include <algorithm>
 #include <array>
+#include <string>
 
 namespace {
 u64 delta_u64(u64 current, u64 previous) {
@@ -10,6 +11,110 @@ u64 delta_u64(u64 current, u64 previous) {
 
 size_t delta_size(size_t current, size_t previous) {
   return current >= previous ? current - previous : 0;
+}
+
+const char *decoded_op_name(DecodedOp op) {
+  switch (op) {
+  case DecodedOp::Unsupported: return "Unsupported";
+  case DecodedOp::Nop: return "Nop";
+  case DecodedOp::Sll: return "Sll";
+  case DecodedOp::Srl: return "Srl";
+  case DecodedOp::Sra: return "Sra";
+  case DecodedOp::Sllv: return "Sllv";
+  case DecodedOp::Srlv: return "Srlv";
+  case DecodedOp::Srav: return "Srav";
+  case DecodedOp::Jr: return "Jr";
+  case DecodedOp::Jalr: return "Jalr";
+  case DecodedOp::Syscall: return "Syscall";
+  case DecodedOp::Break: return "Break";
+  case DecodedOp::Addu: return "Addu";
+  case DecodedOp::Subu: return "Subu";
+  case DecodedOp::And: return "And";
+  case DecodedOp::Or: return "Or";
+  case DecodedOp::Xor: return "Xor";
+  case DecodedOp::Nor: return "Nor";
+  case DecodedOp::Slt: return "Slt";
+  case DecodedOp::Sltu: return "Sltu";
+  case DecodedOp::Bltz: return "Bltz";
+  case DecodedOp::Bgez: return "Bgez";
+  case DecodedOp::Bltzal: return "Bltzal";
+  case DecodedOp::Bgezal: return "Bgezal";
+  case DecodedOp::J: return "J";
+  case DecodedOp::Jal: return "Jal";
+  case DecodedOp::Beq: return "Beq";
+  case DecodedOp::Bne: return "Bne";
+  case DecodedOp::Blez: return "Blez";
+  case DecodedOp::Bgtz: return "Bgtz";
+  case DecodedOp::Addiu: return "Addiu";
+  case DecodedOp::Slti: return "Slti";
+  case DecodedOp::Sltiu: return "Sltiu";
+  case DecodedOp::Andi: return "Andi";
+  case DecodedOp::Ori: return "Ori";
+  case DecodedOp::Xori: return "Xori";
+  case DecodedOp::Lui: return "Lui";
+  case DecodedOp::Lb: return "Lb";
+  case DecodedOp::Lh: return "Lh";
+  case DecodedOp::Lw: return "Lw";
+  case DecodedOp::Lbu: return "Lbu";
+  case DecodedOp::Lhu: return "Lhu";
+  case DecodedOp::Sb: return "Sb";
+  case DecodedOp::Sh: return "Sh";
+  case DecodedOp::Sw: return "Sw";
+  case DecodedOp::Cop0: return "Cop0";
+  case DecodedOp::Cop2: return "Cop2";
+  default: return "Unknown";
+  }
+}
+
+const char *native_reject_detail_name(NativeBlockRejectDetail detail) {
+  switch (detail) {
+  case NativeBlockRejectDetail::Branch: return "branch";
+  case NativeBlockRejectDetail::Memory: return "memory";
+  case NativeBlockRejectDetail::Cop0: return "cop0";
+  case NativeBlockRejectDetail::Cop2: return "cop2_gte";
+  case NativeBlockRejectDetail::ExceptionOrUnknown:
+    return "exception_unknown";
+  case NativeBlockRejectDetail::PcMismatch: return "pc_mismatch";
+  case NativeBlockRejectDetail::NextPcMismatch: return "next_pc_mismatch";
+  case NativeBlockRejectDetail::BlockStartAfterBranchDelay:
+    return "block_start_after_branch_delay";
+  case NativeBlockRejectDetail::StaleInvalidBlockState:
+    return "stale_invalid_block_state";
+  case NativeBlockRejectDetail::InDelaySlot: return "in_delay_slot";
+  case NativeBlockRejectDetail::PendingDelaySlot:
+    return "pending_delay_slot";
+  case NativeBlockRejectDetail::PendingBranchTaken:
+    return "pending_branch_taken";
+  case NativeBlockRejectDetail::PendingBranchPc:
+    return "pending_branch_pc";
+  case NativeBlockRejectDetail::LoadDelayState: return "load_delay_state";
+  case NativeBlockRejectDetail::IrqState: return "irq_state";
+  case NativeBlockRejectDetail::InvalidatedState: return "invalidated_state";
+  case NativeBlockRejectDetail::OtherState: return "other_state";
+  case NativeBlockRejectDetail::Budget: return "budget";
+  case NativeBlockRejectDetail::ICache: return "icache";
+  case NativeBlockRejectDetail::Mmio: return "mmio";
+  case NativeBlockRejectDetail::Unaligned: return "unaligned";
+  case NativeBlockRejectDetail::Cold: return "cold";
+  case NativeBlockRejectDetail::TooShort: return "too_short";
+  case NativeBlockRejectDetail::CompileFailure: return "compile_failure";
+  case NativeBlockRejectDetail::None:
+  default:
+    return "none";
+  }
+}
+
+std::string decoded_ops_string(
+    const std::array<DecodedOp, DecodedBlock::kMaxInstructions> &ops,
+    u32 count) {
+  std::string out;
+  for (u32 i = 0; i < count && i < ops.size(); ++i) {
+    if (!out.empty()) {
+      out += ",";
+    }
+    out += decoded_op_name(ops[i]);
+  }
+  return out;
 }
 
 CpuBackendStats delta_stats(const CpuBackendStats &current,
@@ -56,10 +161,63 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_reject_unsafe_state =
       delta_u64(current.native_reject_unsafe_state,
                 previous.native_reject_unsafe_state);
+  out.native_reject_pc_state =
+      delta_u64(current.native_reject_pc_state,
+                previous.native_reject_pc_state);
+  out.native_reject_branch_delay_state =
+      delta_u64(current.native_reject_branch_delay_state,
+                previous.native_reject_branch_delay_state);
+  out.native_reject_load_delay_state =
+      delta_u64(current.native_reject_load_delay_state,
+                previous.native_reject_load_delay_state);
+  out.native_reject_irq_state =
+      delta_u64(current.native_reject_irq_state,
+                previous.native_reject_irq_state);
+  out.native_reject_invalidated_state =
+      delta_u64(current.native_reject_invalidated_state,
+                previous.native_reject_invalidated_state);
+  out.native_reject_other_state =
+      delta_u64(current.native_reject_other_state,
+                previous.native_reject_other_state);
+  out.native_reject_pc_mismatch =
+      delta_u64(current.native_reject_pc_mismatch,
+                previous.native_reject_pc_mismatch);
+  out.native_reject_next_pc_mismatch =
+      delta_u64(current.native_reject_next_pc_mismatch,
+                previous.native_reject_next_pc_mismatch);
+  out.native_reject_block_start_after_branch_delay =
+      delta_u64(current.native_reject_block_start_after_branch_delay,
+                previous.native_reject_block_start_after_branch_delay);
+  out.native_reject_stale_invalid_block_state =
+      delta_u64(current.native_reject_stale_invalid_block_state,
+                previous.native_reject_stale_invalid_block_state);
+  out.native_reject_branch_delay_in_delay_slot =
+      delta_u64(current.native_reject_branch_delay_in_delay_slot,
+                previous.native_reject_branch_delay_in_delay_slot);
+  out.native_reject_branch_delay_pending_delay_slot =
+      delta_u64(current.native_reject_branch_delay_pending_delay_slot,
+                previous.native_reject_branch_delay_pending_delay_slot);
+  out.native_reject_branch_delay_pending_branch_taken =
+      delta_u64(current.native_reject_branch_delay_pending_branch_taken,
+                previous.native_reject_branch_delay_pending_branch_taken);
+  out.native_reject_branch_delay_pending_branch_pc =
+      delta_u64(current.native_reject_branch_delay_pending_branch_pc,
+                previous.native_reject_branch_delay_pending_branch_pc);
   out.native_reject_budget =
       delta_u64(current.native_reject_budget, previous.native_reject_budget);
   out.native_reject_icache =
       delta_u64(current.native_reject_icache, previous.native_reject_icache);
+  out.native_reject_mmio =
+      delta_u64(current.native_reject_mmio, previous.native_reject_mmio);
+  out.native_reject_unaligned =
+      delta_u64(current.native_reject_unaligned,
+                previous.native_reject_unaligned);
+  out.native_rejected_block_count =
+      delta_u64(current.native_rejected_block_count,
+                previous.native_rejected_block_count);
+  out.native_rejected_block_instructions =
+      delta_u64(current.native_rejected_block_instructions,
+                previous.native_rejected_block_instructions);
   out.cache_hits = delta_u64(current.cache_hits, previous.cache_hits);
   out.cache_misses = delta_u64(current.cache_misses, previous.cache_misses);
   out.invalidations =
@@ -121,6 +279,27 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
       current.forced_interpreter_last_reason;
   out.memory_helper_calls =
       delta_u64(current.memory_helper_calls, previous.memory_helper_calls);
+  out.native_memory_helper_calls =
+      delta_u64(current.native_memory_helper_calls,
+                previous.native_memory_helper_calls);
+  out.native_memory_fastpath_loads =
+      delta_u64(current.native_memory_fastpath_loads,
+                previous.native_memory_fastpath_loads);
+  out.native_memory_fastpath_stores =
+      delta_u64(current.native_memory_fastpath_stores,
+                previous.native_memory_fastpath_stores);
+  out.native_memory_exception_exits =
+      delta_u64(current.native_memory_exception_exits,
+                previous.native_memory_exception_exits);
+  out.native_helper_load_delay_entries =
+      delta_u64(current.native_helper_load_delay_entries,
+                previous.native_helper_load_delay_entries);
+  out.native_helper_load_delay_passes =
+      delta_u64(current.native_helper_load_delay_passes,
+                previous.native_helper_load_delay_passes);
+  out.native_helper_load_delay_fallbacks =
+      delta_u64(current.native_helper_load_delay_fallbacks,
+                previous.native_helper_load_delay_fallbacks);
   out.mmio_accesses =
       delta_u64(current.mmio_accesses, previous.mmio_accesses);
   out.exceptions = delta_u64(current.exceptions, previous.exceptions);
@@ -213,10 +392,16 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
     if (try_native) {
       if (!ensure_x64_safety_checked(*block)) {
         ++stats_.native_to_decoded_fallbacks;
+        record_native_block_rejection(
+            *block, native_reject_detail_for_reason(
+                        block->native_reject_reason));
         result = execute_block(*block, cycle_budget, instruction_budget);
       } else if (block->instruction_count > instruction_budget) {
         ++stats_.native_to_decoded_fallbacks;
         ++stats_.native_reject_budget;
+        ++stats_.native_rejected_block_count;
+        stats_.native_rejected_block_instructions += block->instruction_count;
+        record_native_block_rejection(*block, NativeBlockRejectDetail::Budget);
         result = execute_block(*block, cycle_budget, instruction_budget);
       } else if (!should_attempt_x64_compile(*block)) {
         ++stats_.native_to_decoded_fallbacks;
@@ -230,6 +415,8 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
               execute_native_block(*block, cycle_budget, instruction_budget);
         } else {
           ++stats_.native_to_decoded_fallbacks;
+          record_native_block_rejection(
+              *block, NativeBlockRejectDetail::CompileFailure);
           result = execute_block(*block, cycle_budget, instruction_budget);
         }
       }
@@ -338,6 +525,7 @@ void CpuOptimizedBackend::begin_frame(u32 frame_index) {
 void CpuOptimizedBackend::flush() {
   blocks_.clear();
   blocks_by_page_.clear();
+  rejected_block_profiles_.clear();
   compiled_code_page_bitmap_.fill(0);
   stats_.block_count = 0;
   stats_.interpreter_only_blocks = 0;
@@ -379,10 +567,16 @@ bool CpuOptimizedBackend::should_attempt_x64_compile(
   }
   if (block.instruction_count < g_cpu_x64_jit_min_block_instructions) {
     ++stats_.native_short_block_skips;
+    ++stats_.native_rejected_block_count;
+    stats_.native_rejected_block_instructions += block.instruction_count;
+    record_native_block_rejection(block, NativeBlockRejectDetail::TooShort);
     return false;
   }
   if (block.entry_count < g_cpu_x64_jit_hot_block_threshold) {
     ++stats_.native_hot_threshold_skips;
+    ++stats_.native_rejected_block_count;
+    stats_.native_rejected_block_instructions += block.instruction_count;
+    record_native_block_rejection(block, NativeBlockRejectDetail::Cold);
     return false;
   }
   return true;
@@ -1188,9 +1382,191 @@ void CpuOptimizedBackend::record_native_reject(
   case NativeBlockRejectReason::ExceptionOrUnknown:
     ++stats_.native_reject_exception_unknown;
     break;
+  case NativeBlockRejectReason::Mmio:
+    ++stats_.native_reject_mmio;
+    break;
+  case NativeBlockRejectReason::Unaligned:
+    ++stats_.native_reject_unaligned;
+    break;
   case NativeBlockRejectReason::None:
   default:
     break;
+  }
+}
+
+NativeBlockRejectDetail CpuOptimizedBackend::native_reject_detail_for_reason(
+    NativeBlockRejectReason reason) const {
+  switch (reason) {
+  case NativeBlockRejectReason::Branch:
+    return NativeBlockRejectDetail::Branch;
+  case NativeBlockRejectReason::Memory:
+    return NativeBlockRejectDetail::Memory;
+  case NativeBlockRejectReason::Cop0:
+    return NativeBlockRejectDetail::Cop0;
+  case NativeBlockRejectReason::Cop2:
+    return NativeBlockRejectDetail::Cop2;
+  case NativeBlockRejectReason::ExceptionOrUnknown:
+    return NativeBlockRejectDetail::ExceptionOrUnknown;
+  case NativeBlockRejectReason::Mmio:
+    return NativeBlockRejectDetail::Mmio;
+  case NativeBlockRejectReason::Unaligned:
+    return NativeBlockRejectDetail::Unaligned;
+  case NativeBlockRejectReason::None:
+  default:
+    return NativeBlockRejectDetail::None;
+  }
+}
+
+NativeBlockRejectDetail CpuOptimizedBackend::classify_native_pc_state_reject(
+    const DecodedBlock &block) const {
+  if (block.invalidated || block.native_fn == nullptr ||
+      block.native_context == nullptr) {
+    return NativeBlockRejectDetail::StaleInvalidBlockState;
+  }
+
+  const bool branch_delay_shape =
+      cpu_.in_delay_slot_ || cpu_.pending_delay_slot_ ||
+      cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u;
+  if (branch_delay_shape) {
+    return NativeBlockRejectDetail::BlockStartAfterBranchDelay;
+  }
+
+  if (cpu_.pc_ != block.start_pc) {
+    return NativeBlockRejectDetail::PcMismatch;
+  }
+  if (cpu_.next_pc_ != block.start_pc + 4u) {
+    return NativeBlockRejectDetail::NextPcMismatch;
+  }
+  return NativeBlockRejectDetail::PcMismatch;
+}
+
+NativeBlockRejectDetail
+CpuOptimizedBackend::record_native_branch_delay_subreasons() {
+  NativeBlockRejectDetail first = NativeBlockRejectDetail::None;
+  auto note = [&](bool active, u64 &counter,
+                  NativeBlockRejectDetail detail) {
+    if (!active) {
+      return;
+    }
+    ++counter;
+    if (first == NativeBlockRejectDetail::None) {
+      first = detail;
+    }
+  };
+
+  note(cpu_.in_delay_slot_, stats_.native_reject_branch_delay_in_delay_slot,
+       NativeBlockRejectDetail::InDelaySlot);
+  note(cpu_.pending_delay_slot_,
+       stats_.native_reject_branch_delay_pending_delay_slot,
+       NativeBlockRejectDetail::PendingDelaySlot);
+  note(cpu_.pending_branch_taken_,
+       stats_.native_reject_branch_delay_pending_branch_taken,
+       NativeBlockRejectDetail::PendingBranchTaken);
+  note(cpu_.pending_branch_pc_ != 0u,
+       stats_.native_reject_branch_delay_pending_branch_pc,
+       NativeBlockRejectDetail::PendingBranchPc);
+
+  return first == NativeBlockRejectDetail::None
+             ? NativeBlockRejectDetail::PendingDelaySlot
+             : first;
+}
+
+void CpuOptimizedBackend::record_native_pc_state_subreason(
+    NativeBlockRejectDetail detail) {
+  switch (detail) {
+  case NativeBlockRejectDetail::PcMismatch:
+    ++stats_.native_reject_pc_mismatch;
+    break;
+  case NativeBlockRejectDetail::NextPcMismatch:
+    ++stats_.native_reject_next_pc_mismatch;
+    break;
+  case NativeBlockRejectDetail::BlockStartAfterBranchDelay:
+    ++stats_.native_reject_block_start_after_branch_delay;
+    break;
+  case NativeBlockRejectDetail::StaleInvalidBlockState:
+    ++stats_.native_reject_stale_invalid_block_state;
+    break;
+  default:
+    ++stats_.native_reject_pc_mismatch;
+    break;
+  }
+}
+
+void CpuOptimizedBackend::record_native_block_rejection(
+    const DecodedBlock &block, NativeBlockRejectDetail detail) {
+  if (!g_cpu_backend_rejected_block_logging) {
+    return;
+  }
+
+  NativeRejectedBlockProfile &profile =
+      rejected_block_profiles_[block.start_key];
+  if (profile.rejections == 0) {
+    profile.start_pc = block.start_pc;
+    profile.instruction_count = block.instruction_count;
+    profile.contains_fallback = block.has_fallback;
+    for (u32 i = 0; i < block.instruction_count && i < profile.ops.size();
+         ++i) {
+      const DecodedInstruction &inst = block.instructions[i];
+      profile.ops[i] = inst.op;
+      profile.contains_branch = profile.contains_branch || inst.is_branch;
+      profile.contains_memory =
+          profile.contains_memory || inst.may_access_memory;
+      profile.contains_cop = profile.contains_cop ||
+                             inst.op == DecodedOp::Cop0 ||
+                             inst.op == DecodedOp::Cop2;
+      profile.contains_syscall_break =
+          profile.contains_syscall_break || inst.op == DecodedOp::Syscall ||
+          inst.op == DecodedOp::Break;
+      profile.contains_fallback =
+          profile.contains_fallback || inst.must_fallback;
+    }
+  }
+
+  ++profile.rejections;
+  profile.rejected_instructions += block.instruction_count;
+  profile.last_reason = detail;
+}
+
+void CpuOptimizedBackend::log_rejected_block_profiles() const {
+  if (!g_cpu_backend_rejected_block_logging ||
+      rejected_block_profiles_.empty()) {
+    return;
+  }
+
+  std::vector<const NativeRejectedBlockProfile *> profiles;
+  profiles.reserve(rejected_block_profiles_.size());
+  for (const auto &entry : rejected_block_profiles_) {
+    profiles.push_back(&entry.second);
+  }
+  std::sort(profiles.begin(), profiles.end(),
+            [](const NativeRejectedBlockProfile *a,
+               const NativeRejectedBlockProfile *b) {
+              if (a->rejections != b->rejections) {
+                return a->rejections > b->rejections;
+              }
+              return a->rejected_instructions > b->rejected_instructions;
+            });
+
+  const u32 limit = std::min<u32>(
+      std::max<u32>(1u, g_cpu_backend_rejected_block_log_count),
+      static_cast<u32>(profiles.size()));
+  LOG_INFO("CPU_BACKEND_REJECTED_BLOCKS top=%u tracked=%zu", limit,
+           profiles.size());
+  for (u32 i = 0; i < limit; ++i) {
+    const NativeRejectedBlockProfile &profile = *profiles[i];
+    const std::string ops =
+        decoded_ops_string(profile.ops, profile.instruction_count);
+    LOG_INFO("CPU_BACKEND_REJECTED_BLOCK rank=%u pc=0x%08X count=%llu instructions=%u rejected_instr=%llu reason=%s flags=branch:%u memory:%u cop:%u syscall_break:%u fallback:%u ops=%s",
+             i + 1u, profile.start_pc,
+             static_cast<unsigned long long>(profile.rejections),
+             profile.instruction_count,
+             static_cast<unsigned long long>(profile.rejected_instructions),
+             native_reject_detail_name(profile.last_reason),
+             profile.contains_branch ? 1u : 0u,
+             profile.contains_memory ? 1u : 0u,
+             profile.contains_cop ? 1u : 0u,
+             profile.contains_syscall_break ? 1u : 0u,
+             profile.contains_fallback ? 1u : 0u, ops.c_str());
   }
 }
 
@@ -1254,6 +1630,11 @@ void CpuOptimizedBackend::log_stats_section(
           ? 0.0
           : static_cast<double>(delta.native_instructions) /
                 static_cast<double>(delta.native_block_entries);
+  const double rejected_avg =
+      delta.native_rejected_block_count == 0
+          ? 0.0
+          : static_cast<double>(delta.native_rejected_block_instructions) /
+                static_cast<double>(delta.native_rejected_block_count);
   const u64 instr_total = delta.decoded_instructions +
                           delta.native_instructions +
                           delta.fallback_instructions;
@@ -1277,19 +1658,46 @@ void CpuOptimizedBackend::log_stats_section(
     const char *name = "";
     u64 count = 0;
   };
-  std::array<Reason, 10> reasons = {{
+  std::array<Reason, 17> reasons = {{
       {"branch", delta.native_reject_branch},
       {"memory", delta.native_reject_memory},
       {"cop0", delta.native_reject_cop0},
       {"cop2_gte", delta.native_reject_cop2},
       {"exception_unknown", delta.native_reject_exception_unknown},
-      {"load_delay_unsafe_state", delta.native_reject_unsafe_state},
+      {"pc_state", delta.native_reject_pc_state},
+      {"branch_delay_state", delta.native_reject_branch_delay_state},
+      {"load_delay_state", delta.native_reject_load_delay_state},
+      {"irq_state", delta.native_reject_irq_state},
+      {"invalidated_state", delta.native_reject_invalidated_state},
+      {"other_state", delta.native_reject_other_state},
       {"budget", delta.native_reject_budget},
       {"icache", delta.native_reject_icache},
+      {"mmio", delta.native_reject_mmio},
+      {"unaligned", delta.native_reject_unaligned},
       {"cold", delta.native_hot_threshold_skips},
       {"too_short", delta.native_short_block_skips},
   }};
   std::sort(reasons.begin(), reasons.end(),
+            [](const Reason &a, const Reason &b) {
+              return a.count > b.count;
+            });
+
+  std::array<Reason, 8> exact_reasons = {{
+      {"pc_mismatch", delta.native_reject_pc_mismatch},
+      {"next_pc_mismatch", delta.native_reject_next_pc_mismatch},
+      {"block_start_after_branch_delay",
+       delta.native_reject_block_start_after_branch_delay},
+      {"stale_invalid_block_state",
+       delta.native_reject_stale_invalid_block_state},
+      {"in_delay_slot", delta.native_reject_branch_delay_in_delay_slot},
+      {"pending_delay_slot",
+       delta.native_reject_branch_delay_pending_delay_slot},
+      {"pending_branch_taken",
+       delta.native_reject_branch_delay_pending_branch_taken},
+      {"pending_branch_pc",
+       delta.native_reject_branch_delay_pending_branch_pc},
+  }};
+  std::sort(exact_reasons.begin(), exact_reasons.end(),
             [](const Reason &a, const Reason &b) {
               return a.count > b.count;
             });
@@ -1305,6 +1713,11 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(delta.decoded_block_entries),
            static_cast<unsigned long long>(delta.native_block_entries),
            decoded_avg, native_avg);
+  LOG_INFO("CPU_BACKEND_STATS rejected_blocks count=%llu instructions=%llu avg_rejected=%.2f",
+           static_cast<unsigned long long>(delta.native_rejected_block_count),
+           static_cast<unsigned long long>(
+               delta.native_rejected_block_instructions),
+           rejected_avg);
   LOG_INFO("CPU_BACKEND_STATS instructions decoded=%llu native=%llu fallback=%llu native_pct=%.2f decoded_pct=%.2f fallback_pct=%.2f",
            static_cast<unsigned long long>(delta.decoded_instructions),
            static_cast<unsigned long long>(delta.native_instructions),
@@ -1336,11 +1749,26 @@ void CpuOptimizedBackend::log_stats_section(
            g_cpu_x64_jit_force_compile ? 1u : 0u,
            static_cast<unsigned long long>(delta.native_hot_threshold_skips),
            static_cast<unsigned long long>(delta.native_short_block_skips));
+  LOG_INFO("CPU_BACKEND_STATS diagnostic_forces trace=%u deep=%u fmv=%u forced_active=%u",
+           g_trace_cpu ? 1u : 0u, g_cpu_deep_diagnostics ? 1u : 0u,
+           g_log_fmv_diagnostics ? 1u : 0u,
+           (delta.forced_interpreter_slices != 0 ||
+            current.forced_interpreter_last_reason !=
+                CpuForcedInterpreterReason::None)
+               ? 1u
+               : 0u);
   LOG_INFO("CPU_BACKEND_STATS top_rejections %s=%llu %s=%llu %s=%llu",
            reasons[0].name, static_cast<unsigned long long>(reasons[0].count),
            reasons[1].name, static_cast<unsigned long long>(reasons[1].count),
            reasons[2].name, static_cast<unsigned long long>(reasons[2].count));
-  LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu load_delay_unsafe_state=%llu budget=%llu icache=%llu",
+  LOG_INFO("CPU_BACKEND_STATS top_exact_rejections %s=%llu %s=%llu %s=%llu",
+           exact_reasons[0].name,
+           static_cast<unsigned long long>(exact_reasons[0].count),
+           exact_reasons[1].name,
+           static_cast<unsigned long long>(exact_reasons[1].count),
+           exact_reasons[2].name,
+           static_cast<unsigned long long>(exact_reasons[2].count));
+  LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),
            static_cast<unsigned long long>(delta.native_reject_cop0),
@@ -1348,8 +1776,51 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(
                delta.native_reject_exception_unknown),
            static_cast<unsigned long long>(delta.native_reject_unsafe_state),
+           static_cast<unsigned long long>(delta.native_reject_pc_state),
+           static_cast<unsigned long long>(
+               delta.native_reject_branch_delay_state),
+           static_cast<unsigned long long>(
+               delta.native_reject_load_delay_state),
+           static_cast<unsigned long long>(delta.native_reject_irq_state),
+           static_cast<unsigned long long>(
+               delta.native_reject_invalidated_state),
+           static_cast<unsigned long long>(delta.native_reject_other_state),
            static_cast<unsigned long long>(delta.native_reject_budget),
-           static_cast<unsigned long long>(delta.native_reject_icache));
+           static_cast<unsigned long long>(delta.native_reject_icache),
+           static_cast<unsigned long long>(delta.native_reject_mmio),
+           static_cast<unsigned long long>(delta.native_reject_unaligned));
+  LOG_INFO("CPU_BACKEND_STATS rejection_exact pc_mismatch=%llu next_pc_mismatch=%llu block_start_after_branch_delay=%llu stale_invalid_block_state=%llu branch_delay_in_delay_slot=%llu branch_delay_pending_delay_slot=%llu branch_delay_pending_branch_taken=%llu branch_delay_pending_branch_pc=%llu",
+           static_cast<unsigned long long>(delta.native_reject_pc_mismatch),
+           static_cast<unsigned long long>(
+               delta.native_reject_next_pc_mismatch),
+           static_cast<unsigned long long>(
+               delta.native_reject_block_start_after_branch_delay),
+           static_cast<unsigned long long>(
+               delta.native_reject_stale_invalid_block_state),
+           static_cast<unsigned long long>(
+               delta.native_reject_branch_delay_in_delay_slot),
+           static_cast<unsigned long long>(
+               delta.native_reject_branch_delay_pending_delay_slot),
+           static_cast<unsigned long long>(
+               delta.native_reject_branch_delay_pending_branch_taken),
+           static_cast<unsigned long long>(
+               delta.native_reject_branch_delay_pending_branch_pc));
+  LOG_INFO("CPU_BACKEND_STATS memory_helpers total=%llu native=%llu native_fast_loads=%llu native_fast_stores=%llu native_exception_exits=%llu mmio=%llu exceptions=%llu",
+           static_cast<unsigned long long>(delta.memory_helper_calls),
+           static_cast<unsigned long long>(delta.native_memory_helper_calls),
+           static_cast<unsigned long long>(delta.native_memory_fastpath_loads),
+           static_cast<unsigned long long>(delta.native_memory_fastpath_stores),
+           static_cast<unsigned long long>(
+               delta.native_memory_exception_exits),
+           static_cast<unsigned long long>(delta.mmio_accesses),
+           static_cast<unsigned long long>(delta.exceptions));
+  LOG_INFO("CPU_BACKEND_STATS helper_load_delay entries=%llu passes=%llu fallbacks=%llu",
+           static_cast<unsigned long long>(
+               delta.native_helper_load_delay_entries),
+           static_cast<unsigned long long>(
+               delta.native_helper_load_delay_passes),
+           static_cast<unsigned long long>(
+               delta.native_helper_load_delay_fallbacks));
   LOG_INFO("CPU_BACKEND_STATS cache hits=%llu misses=%llu invalidations=%llu invalidation_queries=%llu no_code_page=%llu examined=%llu invalidated=%llu flushes=%llu",
            static_cast<unsigned long long>(delta.cache_hits),
            static_cast<unsigned long long>(delta.cache_misses),
@@ -1361,6 +1832,7 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(
                delta.invalidation_blocks_invalidated),
            static_cast<unsigned long long>(delta.flushes));
+  log_rejected_block_profiles();
   LOG_INFO("=== End CPU Backend Stats ===");
 }
 

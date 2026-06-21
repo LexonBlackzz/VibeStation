@@ -80,6 +80,36 @@ enum class NativeBlockRejectReason : u8 {
   Cop0,
   Cop2,
   ExceptionOrUnknown,
+  Mmio,
+  Unaligned,
+};
+
+enum class NativeBlockRejectDetail : u8 {
+  None,
+  Branch,
+  Memory,
+  Cop0,
+  Cop2,
+  ExceptionOrUnknown,
+  PcMismatch,
+  NextPcMismatch,
+  BlockStartAfterBranchDelay,
+  StaleInvalidBlockState,
+  InDelaySlot,
+  PendingDelaySlot,
+  PendingBranchTaken,
+  PendingBranchPc,
+  LoadDelayState,
+  IrqState,
+  InvalidatedState,
+  OtherState,
+  Budget,
+  ICache,
+  Mmio,
+  Unaligned,
+  Cold,
+  TooShort,
+  CompileFailure,
 };
 
 struct CpuBlockRunResult {
@@ -180,6 +210,20 @@ private:
     u32 interpreter_only_until_frame = 0;
   };
 
+  struct NativeRejectedBlockProfile {
+    u32 start_pc = 0;
+    u32 instruction_count = 0;
+    u64 rejections = 0;
+    u64 rejected_instructions = 0;
+    NativeBlockRejectDetail last_reason = NativeBlockRejectDetail::None;
+    bool contains_branch = false;
+    bool contains_memory = false;
+    bool contains_cop = false;
+    bool contains_syscall_break = false;
+    bool contains_fallback = false;
+    std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
+  };
+
   DecodedBlock *lookup_or_decode(u32 pc);
   DecodedBlock *decode_block(u32 pc);
   DecodedInstruction decode_instruction(u32 pc, u32 bits) const;
@@ -201,6 +245,13 @@ private:
   bool ensure_x64_safety_checked(DecodedBlock &block);
   bool should_attempt_x64_compile(const DecodedBlock &block);
   bool compile_x64_block(DecodedBlock &block);
+  static bool x64_native_prepare_instruction(void *context, u32 index,
+                                             CpuBlockRunResult *result);
+  static bool x64_native_memory_instruction(void *context, u32 op,
+                                            u32 rt_or_value, u32 addr);
+  static bool x64_native_finish_instruction(void *context, u32 index,
+                                            CpuBlockRunResult *result,
+                                            u32 memory_instruction);
   bool is_mmio_address(u32 addr) const;
   u32 normalized_code_addr(u32 addr) const;
   u32 code_page_for_normalized_addr(u32 addr) const;
@@ -216,6 +267,15 @@ private:
                                  u32 instructions);
   void record_exit(CpuBlockExitReason reason);
   void record_native_reject(NativeBlockRejectReason reason);
+  NativeBlockRejectDetail native_reject_detail_for_reason(
+      NativeBlockRejectReason reason) const;
+  NativeBlockRejectDetail classify_native_pc_state_reject(
+      const DecodedBlock &block) const;
+  NativeBlockRejectDetail record_native_branch_delay_subreasons();
+  void record_native_pc_state_subreason(NativeBlockRejectDetail detail);
+  void record_native_block_rejection(
+      const DecodedBlock &block, NativeBlockRejectDetail detail);
+  void log_rejected_block_profiles() const;
   void warn_forced_interpreter_once(CpuForcedInterpreterReason reason);
   void log_periodic_stats();
   void log_stats_section(const CpuBackendStats &current,
@@ -226,6 +286,7 @@ private:
   Cpu &cpu_;
   std::unordered_map<u32, std::unique_ptr<DecodedBlock>> blocks_;
   std::unordered_map<u32, BlockHistory> block_history_;
+  std::unordered_map<u32, NativeRejectedBlockProfile> rejected_block_profiles_;
   std::unordered_map<u32, std::vector<DecodedBlock *>> blocks_by_page_;
   std::array<u64, kCodePageBitmapWordCount> compiled_code_page_bitmap_{};
   u32 invalidation_query_stamp_ = 0;

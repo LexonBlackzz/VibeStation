@@ -20,6 +20,9 @@ struct X64NativeContext {
   explicit X64NativeContext(size_t code_size) : code(code_size) {}
   Xbyak::CodeGenerator code;
 #endif
+  CpuOptimizedBackend *backend = nullptr;
+  Cpu *cpu = nullptr;
+  DecodedBlock *block = nullptr;
   u32 *gpr = nullptr;
   u32 *pc = nullptr;
   u32 *next_pc = nullptr;
@@ -31,6 +34,9 @@ struct X64NativeContext {
   u32 instruction_count = 0;
   u32 base_cycles = 0;
   u32 cycles_to_add = 0;
+  u32 max_cycles = 0;
+  u32 max_instructions = 0;
+  bool uses_instruction_helpers = false;
 };
 
 void destroy_x64_native_context(void *context) {
@@ -65,6 +71,35 @@ bool is_x64_stage1_op(DecodedOp op) {
   default:
     return false;
   }
+}
+
+bool is_x64_memory_op(DecodedOp op) {
+  switch (op) {
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Sb:
+  case DecodedOp::Sh:
+  case DecodedOp::Sw:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_x64_stage2_op(DecodedOp op) {
+  return is_x64_stage1_op(op) || is_x64_memory_op(op);
+}
+
+bool block_uses_instruction_helpers(const DecodedBlock &block) {
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    if (is_x64_memory_op(block.instructions[i].op)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 #if VIBESTATION_X64_JIT_SUPPORTED
@@ -256,7 +291,82 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
   }
 }
 
-void emit_x64_block(X64NativeContext &context, const DecodedBlock &block) {
+void emit_absolute_call(Xbyak::CodeGenerator &code, uintptr_t fn) {
+  code.mov(code.rax, fn);
+  code.call(code.rax);
+}
+
+void emit_prepare_helper_call(Xbyak::CodeGenerator &code,
+                              const Xbyak::Reg64 &ctx,
+                              const Xbyak::Reg64 &result, u32 index,
+                              uintptr_t prepare_fn) {
+#if defined(_WIN32)
+  code.mov(code.rcx, ctx);
+  code.mov(code.edx, index);
+  code.mov(code.r8, result);
+#else
+  code.mov(code.rdi, ctx);
+  code.mov(code.esi, index);
+  code.mov(code.rdx, result);
+#endif
+  emit_absolute_call(code, prepare_fn);
+}
+
+void emit_finish_helper_call(Xbyak::CodeGenerator &code,
+                             const Xbyak::Reg64 &ctx,
+                             const Xbyak::Reg64 &result, u32 index,
+                             bool memory_instruction, uintptr_t finish_fn) {
+#if defined(_WIN32)
+  code.mov(code.rcx, ctx);
+  code.mov(code.edx, index);
+  code.mov(code.r8, result);
+  code.mov(code.r9d, memory_instruction ? 1u : 0u);
+#else
+  code.mov(code.rdi, ctx);
+  code.mov(code.esi, index);
+  code.mov(code.rdx, result);
+  code.mov(code.ecx, memory_instruction ? 1u : 0u);
+#endif
+  emit_absolute_call(code, finish_fn);
+}
+
+void emit_memory_helper_call(Xbyak::CodeGenerator &code,
+                             const Xbyak::Reg64 &ctx,
+                             const Xbyak::Reg64 &gpr,
+                             const DecodedInstruction &inst,
+                             uintptr_t memory_fn) {
+  emit_read_gpr(code, code.r10d, gpr, inst.rs);
+  if (inst.simm != 0) {
+    code.add(code.r10d, static_cast<u32>(inst.simm));
+  }
+
+  switch (inst.op) {
+  case DecodedOp::Sb:
+  case DecodedOp::Sh:
+  case DecodedOp::Sw:
+    emit_read_gpr(code, code.r11d, gpr, inst.rt);
+    break;
+  default:
+    code.mov(code.r11d, static_cast<u32>(inst.rt));
+    break;
+  }
+
+#if defined(_WIN32)
+  code.mov(code.rcx, ctx);
+  code.mov(code.edx, static_cast<u32>(inst.op));
+  code.mov(code.r8d, code.r11d);
+  code.mov(code.r9d, code.r10d);
+#else
+  code.mov(code.rdi, ctx);
+  code.mov(code.esi, static_cast<u32>(inst.op));
+  code.mov(code.edx, code.r11d);
+  code.mov(code.ecx, code.r10d);
+#endif
+  emit_absolute_call(code, memory_fn);
+}
+
+void emit_x64_direct_block(X64NativeContext &context,
+                           const DecodedBlock &block) {
   using namespace Xbyak;
   CodeGenerator &code = context.code;
 #if defined(_WIN32)
@@ -310,11 +420,226 @@ void emit_x64_block(X64NativeContext &context, const DecodedBlock &block) {
   code.ret();
   code.ready();
 }
+
+void emit_x64_helper_block(X64NativeContext &context,
+                           const DecodedBlock &block, uintptr_t prepare_fn,
+                           uintptr_t memory_fn, uintptr_t finish_fn) {
+  using namespace Xbyak;
+  CodeGenerator &code = context.code;
+  Label done;
+
+  code.push(code.r12);
+  code.push(code.r13);
+  code.push(code.r14);
+  code.sub(code.rsp, 32);
+
+  const Reg64 ctx = code.r12;
+  const Reg64 result = code.r13;
+  const Reg64 gpr = code.r14;
+#if defined(_WIN32)
+  code.mov(ctx, code.rcx);
+  code.mov(result, code.rdx);
+#else
+  code.mov(ctx, code.rdi);
+  code.mov(result, code.rsi);
+#endif
+  code.mov(gpr, code.ptr[ctx + offsetof(X64NativeContext, gpr)]);
+
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    const bool memory_instruction = is_x64_memory_op(inst.op);
+
+    emit_prepare_helper_call(code, ctx, result, i, prepare_fn);
+    code.test(code.al, code.al);
+    code.jz(done, CodeGenerator::T_NEAR);
+
+    if (memory_instruction) {
+      emit_memory_helper_call(code, ctx, gpr, inst, memory_fn);
+      code.test(code.al, code.al);
+      code.jz(done, CodeGenerator::T_NEAR);
+    } else {
+      emit_x64_instruction(code, inst, gpr);
+    }
+
+    code.mov(code.dword[gpr], 0);
+    emit_finish_helper_call(code, ctx, result, i, memory_instruction,
+                            finish_fn);
+    code.test(code.al, code.al);
+    code.jz(done, CodeGenerator::T_NEAR);
+  }
+
+  code.L(done);
+  code.add(code.rsp, 32);
+  code.pop(code.r14);
+  code.pop(code.r13);
+  code.pop(code.r12);
+  code.ret();
+  code.ready();
+}
+
+void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
+                    uintptr_t prepare_fn, uintptr_t memory_fn,
+                    uintptr_t finish_fn) {
+  if (context.uses_instruction_helpers) {
+    emit_x64_helper_block(context, block, prepare_fn, memory_fn, finish_fn);
+  } else {
+    emit_x64_direct_block(context, block);
+  }
+}
 #endif
 } // namespace
 
 bool CpuOptimizedBackend::x64_jit_available() const {
   return VIBESTATION_X64_JIT_SUPPORTED != 0;
+}
+
+bool CpuOptimizedBackend::x64_native_prepare_instruction(
+    void *context_ptr, u32 index, CpuBlockRunResult *result) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->backend == nullptr ||
+      context->block == nullptr || result == nullptr ||
+      index >= context->block->instruction_count) {
+    if (result != nullptr) {
+      result->exit_reason = CpuBlockExitReason::Fallback;
+    }
+    return false;
+  }
+
+  if (result->cycles >= context->max_cycles ||
+      result->instructions >= context->max_instructions ||
+      context->block->invalidated) {
+    result->exit_reason = context->block->invalidated
+                              ? CpuBlockExitReason::Invalidated
+                              : CpuBlockExitReason::Budget;
+    return false;
+  }
+
+  return context->backend->prepare_instruction(context->block->instructions[index],
+                                               *result);
+}
+
+bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
+                                                        u32 op_value,
+                                                        u32 rt_or_value,
+                                                        u32 addr) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->backend == nullptr ||
+      context->cpu == nullptr) {
+    return false;
+  }
+
+  CpuOptimizedBackend &backend = *context->backend;
+  Cpu &cpu = *context->cpu;
+  const DecodedOp op = static_cast<DecodedOp>(op_value);
+
+  ++backend.stats_.memory_helper_calls;
+  ++backend.stats_.native_memory_helper_calls;
+  if (backend.is_mmio_address(addr)) {
+    ++backend.stats_.mmio_accesses;
+  }
+
+  switch (op) {
+  case DecodedOp::Lh:
+  case DecodedOp::Lhu:
+  case DecodedOp::Sh:
+    if ((addr & 1u) != 0) {
+      ++backend.stats_.native_reject_unaligned;
+    }
+    break;
+  case DecodedOp::Lw:
+  case DecodedOp::Sw:
+    if ((addr & 3u) != 0) {
+      ++backend.stats_.native_reject_unaligned;
+    }
+    break;
+  default:
+    break;
+  }
+
+  switch (op) {
+  case DecodedOp::Lb: {
+    const u8 value = cpu.load8(addr);
+    cpu.schedule_load(rt_or_value, static_cast<u32>(sign_extend_8(value)));
+    break;
+  }
+  case DecodedOp::Lbu:
+    cpu.schedule_load(rt_or_value, cpu.load8(addr));
+    break;
+  case DecodedOp::Lh: {
+    const u16 value = cpu.load16(addr);
+    if (!cpu.exception_raised_) {
+      cpu.schedule_load(rt_or_value, static_cast<u32>(sign_extend_16(value)));
+    }
+    break;
+  }
+  case DecodedOp::Lhu: {
+    const u16 value = cpu.load16(addr);
+    if (!cpu.exception_raised_) {
+      cpu.schedule_load(rt_or_value, value);
+    }
+    break;
+  }
+  case DecodedOp::Lw: {
+    const u32 value = cpu.load32(addr);
+    if (!cpu.exception_raised_) {
+      cpu.schedule_load(rt_or_value, value);
+    }
+    break;
+  }
+  case DecodedOp::Sb:
+    cpu.store8(addr, static_cast<u8>(rt_or_value));
+    break;
+  case DecodedOp::Sh:
+    cpu.store16(addr, static_cast<u16>(rt_or_value));
+    break;
+  case DecodedOp::Sw:
+    cpu.store32(addr, rt_or_value);
+    break;
+  default:
+    return false;
+  }
+
+  return true;
+}
+
+bool CpuOptimizedBackend::x64_native_finish_instruction(
+    void *context_ptr, u32 index, CpuBlockRunResult *result,
+    u32 memory_instruction) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->backend == nullptr ||
+      context->cpu == nullptr || context->block == nullptr ||
+      result == nullptr || index >= context->block->instruction_count) {
+    if (result != nullptr) {
+      result->exit_reason = CpuBlockExitReason::Fallback;
+    }
+    return false;
+  }
+
+  Cpu &cpu = *context->cpu;
+  context->backend->finish_instruction(context->block->instructions[index],
+                                       *result, false);
+
+  if (cpu.exception_raised_) {
+    result->exit_reason = CpuBlockExitReason::Exception;
+    if (memory_instruction != 0) {
+      ++context->backend->stats_.native_memory_exception_exits;
+    }
+    return false;
+  }
+
+  if (context->block->invalidated) {
+    result->exit_reason = CpuBlockExitReason::Invalidated;
+    return false;
+  }
+
+  if (index + 1u < context->block->instruction_count &&
+      (result->cycles >= context->max_cycles ||
+       result->instructions >= context->max_instructions)) {
+    result->exit_reason = CpuBlockExitReason::Budget;
+    return false;
+  }
+
+  return true;
 }
 
 NativeBlockRejectReason CpuOptimizedBackend::classify_x64_reject_reason(
@@ -328,7 +653,10 @@ NativeBlockRejectReason CpuOptimizedBackend::classify_x64_reject_reason(
       return NativeBlockRejectReason::Branch;
     }
     if (inst.may_access_memory) {
-      return NativeBlockRejectReason::Memory;
+      if (!is_x64_memory_op(inst.op)) {
+        return NativeBlockRejectReason::Memory;
+      }
+      continue;
     }
     if (inst.op == DecodedOp::Cop0) {
       return NativeBlockRejectReason::Cop0;
@@ -337,7 +665,7 @@ NativeBlockRejectReason CpuOptimizedBackend::classify_x64_reject_reason(
       return NativeBlockRejectReason::Cop2;
     }
     if (inst.must_fallback || inst.may_raise_exception ||
-        !is_x64_stage1_op(inst.op)) {
+        !is_x64_stage2_op(inst.op)) {
       return NativeBlockRejectReason::ExceptionOrUnknown;
     }
   }
@@ -362,6 +690,8 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   if (!block.native_stage1_safe) {
     block.native_rejected_unsafe = true;
     ++stats_.native_rejected_unsafe_blocks;
+    ++stats_.native_rejected_block_count;
+    stats_.native_rejected_block_instructions += block.instruction_count;
     record_native_reject(block.native_reject_reason);
     return false;
   }
@@ -386,13 +716,17 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
 
 #if VIBESTATION_X64_JIT_SUPPORTED
   try {
-    auto context = std::make_unique<X64NativeContext>(4096);
+    auto context = std::make_unique<X64NativeContext>(8192);
+    context->backend = this;
+    context->cpu = &cpu_;
+    context->block = &block;
     context->gpr = cpu_.gpr_;
     context->pc = &cpu_.pc_;
     context->next_pc = &cpu_.next_pc_;
     context->current_pc = &cpu_.current_pc_;
     context->cycles = &cpu_.cycles_;
     context->instruction_count = block.instruction_count;
+    context->uses_instruction_helpers = block_uses_instruction_helpers(block);
     context->end_pc = block.start_pc + block.instruction_count * 4u;
     context->end_next_pc = context->end_pc + 4u;
     context->last_pc = context->end_pc - 4u;
@@ -400,7 +734,14 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
       context->base_cycles += block.instructions[i].cycles;
     }
 
-    emit_x64_block(*context, block);
+    emit_x64_block(
+        *context, block,
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_prepare_instruction),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_memory_instruction),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_finish_instruction));
     block.native_fn = context->code.getCode<DecodedBlock::NativeFn>();
     block.native_code_bytes = context->code.getSize();
     block.native_context = context.release();
@@ -409,8 +750,10 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     ++stats_.native_blocks_compiled;
     stats_.native_code_bytes += block.native_code_bytes;
     return true;
-  } catch (const std::exception &) {
+  } catch (const std::exception &e) {
     ++stats_.native_compile_failures;
+    LOG_WARN("CPU x64 JIT compile failed at pc=0x%08X: %s", block.start_pc,
+             e.what());
     return false;
   }
 #else
@@ -422,29 +765,60 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
 CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     DecodedBlock &block, u32 max_cycles, u32 max_instructions) {
   CpuBlockRunResult result{};
+  auto record_rejected_block = [&](NativeBlockRejectDetail detail) {
+    ++stats_.native_rejected_block_count;
+    stats_.native_rejected_block_instructions += block.instruction_count;
+    record_native_block_rejection(block, detail);
+  };
+  auto reject_to_decoded = [&](u64 &specific_counter,
+                               NativeBlockRejectDetail detail) {
+    ++stats_.native_to_decoded_fallbacks;
+    ++stats_.native_reject_unsafe_state;
+    ++specific_counter;
+    record_rejected_block(detail);
+    return execute_block(block, max_cycles, max_instructions);
+  };
+
   if (block.invalidated) {
+    ++stats_.native_reject_invalidated_state;
+    ++stats_.native_reject_stale_invalid_block_state;
+    record_rejected_block(NativeBlockRejectDetail::InvalidatedState);
     result.exit_reason = CpuBlockExitReason::Invalidated;
     return result;
   }
 
   if (block.native_fn == nullptr || block.native_context == nullptr) {
-    ++stats_.native_to_decoded_fallbacks;
-    ++stats_.native_reject_unsafe_state;
-    return execute_block(block, max_cycles, max_instructions);
+    ++stats_.native_reject_stale_invalid_block_state;
+    return reject_to_decoded(stats_.native_reject_other_state,
+                             NativeBlockRejectDetail::StaleInvalidBlockState);
   }
 
   auto *context = static_cast<X64NativeContext *>(block.native_context);
   if (block.instruction_count > max_instructions) {
     ++stats_.native_to_decoded_fallbacks;
     ++stats_.native_reject_budget;
+    record_rejected_block(NativeBlockRejectDetail::Budget);
     return execute_block(block, max_cycles, max_instructions);
   }
-  if (cpu_.pc_ != block.start_pc || cpu_.next_pc_ != block.start_pc + 4u ||
-      cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
-      cpu_.load_.reg != 0 || cpu_.next_load_.reg != 0) {
-    ++stats_.native_to_decoded_fallbacks;
-    ++stats_.native_reject_unsafe_state;
-    return execute_block(block, max_cycles, max_instructions);
+  if (cpu_.pc_ != block.start_pc || cpu_.next_pc_ != block.start_pc + 4u) {
+    const NativeBlockRejectDetail detail =
+        classify_native_pc_state_reject(block);
+    record_native_pc_state_subreason(detail);
+    return reject_to_decoded(stats_.native_reject_pc_state, detail);
+  }
+  if (cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
+      cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
+    const NativeBlockRejectDetail detail =
+        record_native_branch_delay_subreasons();
+    return reject_to_decoded(stats_.native_reject_branch_delay_state, detail);
+  }
+
+  const bool active_load_delay =
+      cpu_.load_.reg != 0 || cpu_.next_load_.reg != 0;
+  if (active_load_delay && !context->uses_instruction_helpers) {
+    ++stats_.native_helper_load_delay_fallbacks;
+    return reject_to_decoded(stats_.native_reject_load_delay_state,
+                             NativeBlockRejectDetail::LoadDelayState);
   }
 
   if (cpu_.sys_->irq_pending()) {
@@ -453,11 +827,18 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     cpu_.cop0_cause_ &= ~(1u << 10);
   }
   if (cpu_.check_irq()) {
-    ++stats_.native_to_decoded_fallbacks;
-    ++stats_.native_reject_unsafe_state;
-    return execute_block(block, max_cycles, max_instructions);
+    return reject_to_decoded(stats_.native_reject_irq_state,
+                             NativeBlockRejectDetail::IrqState);
   }
 
+  if (active_load_delay && context->uses_instruction_helpers) {
+    ++stats_.native_helper_load_delay_entries;
+  }
+
+  context->max_cycles = max_cycles;
+  context->max_instructions = max_instructions;
+
+  if (!context->uses_instruction_helpers) {
   struct FetchFill {
     u32 index = 0;
     u32 tag = 0;
@@ -472,6 +853,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     if ((pc & 3u) != 0) {
       ++stats_.native_to_decoded_fallbacks;
       ++stats_.native_reject_icache;
+      record_rejected_block(NativeBlockRejectDetail::ICache);
       return execute_block(block, max_cycles, max_instructions);
     }
 
@@ -493,6 +875,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       if (fill_count >= fills.size()) {
         ++stats_.native_to_decoded_fallbacks;
         ++stats_.native_reject_icache;
+        record_rejected_block(NativeBlockRejectDetail::ICache);
         return execute_block(block, max_cycles, max_instructions);
       }
       fills[fill_count++] = {index, tag, pc & ~0x0Fu};
@@ -503,6 +886,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   if (total_cycles > max_cycles) {
     ++stats_.native_to_decoded_fallbacks;
     ++stats_.native_reject_budget;
+    record_rejected_block(NativeBlockRejectDetail::Budget);
     return execute_block(block, max_cycles, max_instructions);
   }
 
@@ -517,11 +901,25 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   }
 
   context->cycles_to_add = total_cycles;
+  } else {
+    context->cycles_to_add = 0;
+  }
+
   block.native_fn(block.native_context, &result);
+
+  if (active_load_delay && context->uses_instruction_helpers) {
+    if (result.instructions != 0) {
+      ++stats_.native_helper_load_delay_passes;
+    } else {
+      ++stats_.native_helper_load_delay_fallbacks;
+    }
+  }
 
   cpu_.cycle_penalty_ = 0;
   cpu_.executing_step_ = false;
-  cpu_.exception_raised_ = false;
+  if (result.exit_reason != CpuBlockExitReason::Exception) {
+    cpu_.exception_raised_ = false;
+  }
   cpu_.in_delay_slot_ = false;
   cpu_.pending_delay_slot_ = false;
   cpu_.pending_branch_taken_ = false;

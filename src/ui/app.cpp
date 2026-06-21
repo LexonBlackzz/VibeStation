@@ -109,6 +109,18 @@ namespace {
             dirty = true;
         }
         ImGui::Checkbox("Force x64 Compile", &g_cpu_x64_jit_force_compile);
+        if (ImGui::Checkbox("Log Hot Native Rejects",
+                &g_cpu_backend_rejected_block_logging)) {
+            dirty = true;
+        }
+        int rejected_block_log_count =
+            static_cast<int>(g_cpu_backend_rejected_block_log_count);
+        if (ImGui::InputInt("Hot Reject Log Count",
+                &rejected_block_log_count)) {
+            g_cpu_backend_rejected_block_log_count =
+                static_cast<u32>(std::max(1, rejected_block_log_count));
+            dirty = true;
+        }
 
         ImGui::Separator();
         draw_cpu_backend_instruction_mix(stats);
@@ -182,15 +194,22 @@ namespace {
             const char* label;
             u64 count;
         };
-        std::array<RejectRow, 8> rejects = { {
+        std::array<RejectRow, 15> rejects = { {
             { "branch", stats.native_reject_branch },
             { "memory", stats.native_reject_memory },
             { "cop0", stats.native_reject_cop0 },
             { "cop2/gte", stats.native_reject_cop2 },
             { "exception/unknown", stats.native_reject_exception_unknown },
-            { "unsafe state", stats.native_reject_unsafe_state },
+            { "pc state", stats.native_reject_pc_state },
+            { "branch delay", stats.native_reject_branch_delay_state },
+            { "load delay", stats.native_reject_load_delay_state },
+            { "irq state", stats.native_reject_irq_state },
+            { "invalidated", stats.native_reject_invalidated_state },
+            { "other state", stats.native_reject_other_state },
             { "budget", stats.native_reject_budget },
             { "icache", stats.native_reject_icache },
+            { "mmio", stats.native_reject_mmio },
+            { "unaligned", stats.native_reject_unaligned },
         } };
         std::sort(rejects.begin(), rejects.end(),
             [](const RejectRow& a, const RejectRow& b) {
@@ -208,6 +227,23 @@ namespace {
                 rejects[2].label,
                 static_cast<unsigned long long>(rejects[2].count));
         }
+        ImGui::Text("PC reject detail: pc %llu  next_pc %llu  delay-start %llu  stale %llu",
+            static_cast<unsigned long long>(stats.native_reject_pc_mismatch),
+            static_cast<unsigned long long>(
+                stats.native_reject_next_pc_mismatch),
+            static_cast<unsigned long long>(
+                stats.native_reject_block_start_after_branch_delay),
+            static_cast<unsigned long long>(
+                stats.native_reject_stale_invalid_block_state));
+        ImGui::Text("Delay reject detail: in %llu  pending %llu  taken %llu  pc %llu",
+            static_cast<unsigned long long>(
+                stats.native_reject_branch_delay_in_delay_slot),
+            static_cast<unsigned long long>(
+                stats.native_reject_branch_delay_pending_delay_slot),
+            static_cast<unsigned long long>(
+                stats.native_reject_branch_delay_pending_branch_taken),
+            static_cast<unsigned long long>(
+                stats.native_reject_branch_delay_pending_branch_pc));
 
         ImGui::Separator();
         ImGui::Text("Invalidation: queries %llu  no-code exits %llu",
@@ -227,6 +263,30 @@ namespace {
             static_cast<unsigned long long>(stats.memory_helper_calls),
             static_cast<unsigned long long>(stats.mmio_accesses),
             static_cast<unsigned long long>(stats.exceptions));
+        ImGui::Text("Native memory: helpers %llu  fast L/S %llu / %llu  exception exits %llu",
+            static_cast<unsigned long long>(stats.native_memory_helper_calls),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_loads),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_stores),
+            static_cast<unsigned long long>(
+                stats.native_memory_exception_exits));
+        ImGui::Text("Helper load-delay: entries %llu  passes %llu  fallbacks %llu",
+            static_cast<unsigned long long>(
+                stats.native_helper_load_delay_entries),
+            static_cast<unsigned long long>(
+                stats.native_helper_load_delay_passes),
+            static_cast<unsigned long long>(
+                stats.native_helper_load_delay_fallbacks));
+        const double avg_rejected =
+            stats.native_rejected_block_count == 0
+                ? 0.0
+                : static_cast<double>(stats.native_rejected_block_instructions) /
+                      static_cast<double>(stats.native_rejected_block_count);
+        ImGui::Text("Rejected blocks: %llu  avg %.2f instr",
+            static_cast<unsigned long long>(
+                stats.native_rejected_block_count),
+            avg_rejected);
         ImGui::Text("Exits: interrupts %llu  budget %llu  fallback %llu  pc mismatch %llu",
             static_cast<unsigned long long>(stats.interrupt_exits),
             static_cast<unsigned long long>(stats.budget_exits),
@@ -5320,6 +5380,20 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_reject_unsafe_state),
             static_cast<unsigned long long>(backend.native_reject_budget),
             static_cast<unsigned long long>(backend.native_reject_icache));
+        ImGui::Text("Native state rejects: pc %llu  branch-delay %llu  load-delay %llu",
+            static_cast<unsigned long long>(backend.native_reject_pc_state),
+            static_cast<unsigned long long>(
+                backend.native_reject_branch_delay_state),
+            static_cast<unsigned long long>(
+                backend.native_reject_load_delay_state));
+        ImGui::Text("Native state rejects: irq %llu  invalidated %llu  other %llu",
+            static_cast<unsigned long long>(backend.native_reject_irq_state),
+            static_cast<unsigned long long>(
+                backend.native_reject_invalidated_state),
+            static_cast<unsigned long long>(backend.native_reject_other_state));
+        ImGui::Text("Native rejects: mmio %llu  unaligned %llu",
+            static_cast<unsigned long long>(backend.native_reject_mmio),
+            static_cast<unsigned long long>(backend.native_reject_unaligned));
         ImGui::Text("Block entries: decoded %llu  native %llu  avg %.2f / %.2f instr",
             static_cast<unsigned long long>(backend.decoded_block_entries),
             static_cast<unsigned long long>(backend.native_block_entries),
@@ -5335,6 +5409,22 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.memory_helper_calls),
             static_cast<unsigned long long>(backend.mmio_accesses),
             static_cast<unsigned long long>(backend.exceptions));
+        ImGui::Text("Native memory helpers: %llu  fast L/S: %llu / %llu  exception exits: %llu",
+            static_cast<unsigned long long>(
+                backend.native_memory_helper_calls),
+            static_cast<unsigned long long>(
+                backend.native_memory_fastpath_loads),
+            static_cast<unsigned long long>(
+                backend.native_memory_fastpath_stores),
+            static_cast<unsigned long long>(
+                backend.native_memory_exception_exits));
+        ImGui::Text("Helper load-delay: entries %llu  passes %llu  fallbacks %llu",
+            static_cast<unsigned long long>(
+                backend.native_helper_load_delay_entries),
+            static_cast<unsigned long long>(
+                backend.native_helper_load_delay_passes),
+            static_cast<unsigned long long>(
+                backend.native_helper_load_delay_fallbacks));
         if (config_vsync_ && swap_ms_ > 8.0) {
             ImGui::TextDisabled(
                 "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");
@@ -6350,6 +6440,40 @@ void App::panel_debug_cpu() {
                 backend_stats.native_reject_unsafe_state),
             static_cast<unsigned long long>(backend_stats.native_reject_budget),
             static_cast<unsigned long long>(backend_stats.native_reject_icache));
+        ImGui::Text("Native state rejects: pc %llu  branch-delay %llu  load-delay %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_pc_state),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_branch_delay_state),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_load_delay_state));
+        ImGui::Text("Native state rejects: irq %llu  invalidated %llu  other %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_irq_state),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_invalidated_state),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_other_state));
+        ImGui::Text("Native rejects: mmio %llu  unaligned %llu",
+            static_cast<unsigned long long>(backend_stats.native_reject_mmio),
+            static_cast<unsigned long long>(
+                backend_stats.native_reject_unaligned));
+        ImGui::Text("Native memory: helpers %llu  fast L/S %llu / %llu  exception exits %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_memory_helper_calls),
+            static_cast<unsigned long long>(
+                backend_stats.native_memory_fastpath_loads),
+            static_cast<unsigned long long>(
+                backend_stats.native_memory_fastpath_stores),
+            static_cast<unsigned long long>(
+                backend_stats.native_memory_exception_exits));
+        ImGui::Text("Helper load-delay: entries %llu  passes %llu  fallbacks %llu",
+            static_cast<unsigned long long>(
+                backend_stats.native_helper_load_delay_entries),
+            static_cast<unsigned long long>(
+                backend_stats.native_helper_load_delay_passes),
+            static_cast<unsigned long long>(
+                backend_stats.native_helper_load_delay_fallbacks));
         ImGui::Text("Invalidation: queries %llu  no-code %llu  examined %llu  hit %llu",
             static_cast<unsigned long long>(backend_stats.invalidation_queries),
             static_cast<unsigned long long>(
