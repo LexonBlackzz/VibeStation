@@ -70,6 +70,7 @@ set(VIBESTATION_SOURCES
     src/core/cpu.cpp
     src/core/cpu_recompiler.cpp
     src/core/cpu_recompiler_x64.cpp
+    src/core/input_recorder.cpp
     src/core/system.cpp
     src/core/renderer.cpp
     src/input/controller.cpp
