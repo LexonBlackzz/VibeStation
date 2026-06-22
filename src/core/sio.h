@@ -24,7 +24,12 @@ public:
   void write32(u32 offset, u32 val);
 
   void set_button_state(u16 buttons);
+  u16 button_state() const { return controller_.button_state(); }
   void set_analog_state(u8 lx, u8 ly, u8 rx, u8 ry);
+  u8 analog_lx() const { return controller_.analog_lx(); }
+  u8 analog_ly() const { return controller_.analog_ly(); }
+  u8 analog_rx() const { return controller_.analog_rx(); }
+  u8 analog_ry() const { return controller_.analog_ry(); }
   bool set_memory_card_slot(u32 slot, const std::string &path);
   void flush_memory_cards();
   bool memory_card_inserted(u32 slot) const;

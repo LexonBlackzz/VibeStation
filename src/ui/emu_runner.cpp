@@ -365,6 +365,14 @@ void EmuRunner::worker_main() {
         apply_pending_disc_eject();
         const u64 cpu_cycles_before = system_->cpu().cycle_count();
         system_->run_frame(false, skip_audio_for_turbo);
+        if (system_->consume_input_playback_stop_request()) {
+            running_.store(false, std::memory_order_release);
+            system_->set_running(false);
+            system_->set_spu_host_playback_enabled(false);
+            frame_active_.store(false, std::memory_order_release);
+            idle_cv_.notify_all();
+            return 0u;
+        }
         const u64 cpu_cycles_after = system_->cpu().cycle_count();
         const u64 cpu_cycles_advanced = cpu_cycles_after >= cpu_cycles_before
             ? cpu_cycles_after - cpu_cycles_before

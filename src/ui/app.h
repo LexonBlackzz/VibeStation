@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/input_recorder.h"
 #include "emu_runner.h"
 #include "../integrations/discord_presence.h"
 #include "../core/renderer.h"
@@ -18,6 +19,7 @@ typedef void* SDL_GLContext;
 
 class App {
 public:
+	void set_input_recorder_config(const InputRecorder::Config& config);
 	bool init();
 	void run();
 	void shutdown();
@@ -34,8 +36,15 @@ private:
 	std::unique_ptr<System> system_;
 	std::unique_ptr<Renderer> renderer_;
 	std::unique_ptr<InputManager> input_;
+	InputRecorder input_recorder_;
+	InputRecorder::Config input_recorder_config_{};
 	EmuRunner emu_runner_;
 	bool runtime_ready_ = false;
+	bool input_movie_cli_pending_ = false;
+	char input_movie_record_path_[260] = "manual_replay";
+	char input_movie_playback_path_[260] = "manual_replay";
+	bool input_movie_stop_at_eof_ = false;
+	bool input_movie_loop_ = false;
 
 	// UI State
 	bool show_demo_window_ = false;
@@ -249,6 +258,10 @@ private:
 	bool load_disc_from_ui(const std::string& bin_path, const std::string& cue_path);
 	bool start_bios_from_ui();
 	bool boot_disc_from_ui();
+	bool start_configured_input_movie();
+	bool start_input_recording_from_ui();
+	bool start_input_playback_from_ui();
+	InputRecorder::PlaybackEndBehavior input_movie_end_behavior() const;
 	bool unload_disc_from_ui();
 	bool save_snapshot_png();
 	bool reap_and_reboot_bios();

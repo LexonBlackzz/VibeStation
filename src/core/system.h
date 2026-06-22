@@ -19,6 +19,9 @@
 
 // System container for all PS1 core devices and memory bus dispatch.
 
+// Forward declarations
+class InputRecorder;
+
 class System {
 public:
   struct RamReaperConfig {
@@ -220,6 +223,14 @@ public:
     std::array<u16, kSampleWords> gpu_copy_w{};
     std::array<u16, kSampleWords> gpu_copy_h{};
   };
+
+  // Input recording/playback
+  void set_input_recorder(InputRecorder* recorder) { input_recorder_ = recorder; }
+  bool consume_input_playback_stop_request() {
+    const bool requested = input_playback_stop_requested_;
+    input_playback_stop_requested_ = false;
+    return requested;
+  }
 
   System() = default;
 
@@ -609,7 +620,8 @@ private:
   bool sound_reaper_prev_enabled_ = false;
   bool sound_reaper_prev_use_custom_seed_ = false;
   u64 sound_reaper_prev_seed_ = 0;
-
+  InputRecorder* input_recorder_ = nullptr;
+  bool input_playback_stop_requested_ = false;
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
   void maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes);

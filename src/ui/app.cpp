@@ -1867,6 +1867,25 @@ namespace {
     }
 }
 
+void App::set_input_recorder_config(const InputRecorder::Config& config) {
+    input_recorder_config_ = config;
+    input_movie_cli_pending_ =
+        config.recording_enabled() || config.playback_enabled();
+    if (!config.record_path.empty()) {
+        std::snprintf(input_movie_record_path_, sizeof(input_movie_record_path_),
+            "%s", config.record_path.c_str());
+    }
+    if (!config.playback_path.empty()) {
+        std::snprintf(input_movie_playback_path_, sizeof(input_movie_playback_path_),
+            "%s", config.playback_path.c_str());
+    }
+    input_movie_stop_at_eof_ =
+        config.end_behavior == InputRecorder::PlaybackEndBehavior::Stop;
+    input_movie_loop_ =
+        config.end_behavior == InputRecorder::PlaybackEndBehavior::Loop;
+    input_recorder_.set_config(config);
+}
+
 bool App::init() {
     printf("[App::init] Initializing SDL...\n");
     fflush(stdout);
@@ -2021,6 +2040,7 @@ bool App::init_runtime() {
     fflush(stdout);
 
     system_ = std::make_unique<System>();
+    system_->set_input_recorder(&input_recorder_);
     renderer_ = std::make_unique<Renderer>();
     if (!input_) {
         input_ = std::make_unique<InputManager>();
@@ -3467,6 +3487,99 @@ void App::panel_settings() {
                         ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
                         "No gamepad detected. Connect one and it will auto-bind.");
                 }
+
+                ImGui::Separator();
+                ImGui::Text("Input Movie");
+                InputRecorder::Status movie_status = input_recorder_.status();
+                const ImVec4 state_color =
+                    movie_status.state == InputRecorder::State::Error
+                    ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+                    : movie_status.state == InputRecorder::State::Recording
+                    ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+                    : movie_status.state == InputRecorder::State::Playing
+                    ? ImVec4(0.35f, 0.9f, 0.5f, 1.0f)
+                    : ImVec4(0.75f, 0.75f, 0.8f, 1.0f);
+                ImGui::TextColored(state_color, "State: %s",
+                    InputRecorder::state_name(movie_status.state));
+                ImGui::TextWrapped("Replay folder: %s",
+                    movie_status.replay_folder_path.c_str());
+
+                ImGui::InputText("Record filename/path", input_movie_record_path_,
+                    sizeof(input_movie_record_path_));
+                if (ImGui::Button("Start Recording")) {
+                    start_input_recording_from_ui();
+                    movie_status = input_recorder_.status();
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(
+                    movie_status.mode != InputRecorder::Mode::Recording);
+                if (ImGui::Button("Stop Recording")) {
+                    input_recorder_.shutdown();
+                    status_message_ = "Input recording stopped.";
+                    movie_status = input_recorder_.status();
+                }
+                ImGui::EndDisabled();
+
+                ImGui::InputText("Playback filename/path", input_movie_playback_path_,
+                    sizeof(input_movie_playback_path_));
+                if (ImGui::Button("Start Playback")) {
+                    start_input_playback_from_ui();
+                    movie_status = input_recorder_.status();
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(
+                    movie_status.mode != InputRecorder::Mode::Playing);
+                if (ImGui::Button("Stop Playback")) {
+                    input_recorder_.shutdown();
+                    status_message_ = "Input playback stopped.";
+                    movie_status = input_recorder_.status();
+                }
+                ImGui::EndDisabled();
+
+                if (ImGui::Checkbox("Stop playback at EOF",
+                    &input_movie_stop_at_eof_)) {
+                    if (input_movie_stop_at_eof_) {
+                        input_movie_loop_ = false;
+                    }
+                    input_recorder_.set_end_behavior(input_movie_end_behavior());
+                    movie_status = input_recorder_.status();
+                }
+                if (ImGui::Checkbox("Loop playback", &input_movie_loop_)) {
+                    if (input_movie_loop_) {
+                        input_movie_stop_at_eof_ = false;
+                    }
+                    input_recorder_.set_end_behavior(input_movie_end_behavior());
+                    movie_status = input_recorder_.status();
+                }
+
+                ImGui::Text("Current emulated frame: %llu",
+                    static_cast<unsigned long long>(
+                        movie_status.current_emulated_frame));
+                ImGui::Text("Frames recorded: %llu",
+                    static_cast<unsigned long long>(
+                        movie_status.recorded_frame_count));
+                ImGui::Text("Frames replayed: %llu",
+                    static_cast<unsigned long long>(
+                        movie_status.playback_frame_count));
+                ImGui::Text("Playback index: %llu / %llu",
+                    static_cast<unsigned long long>(
+                        movie_status.playback_current_index),
+                    static_cast<unsigned long long>(
+                        movie_status.playback_total_frames));
+                ImGui::Text("EOF behavior: %s",
+                    InputRecorder::end_behavior_name(movie_status.end_behavior));
+                ImGui::TextWrapped("Resolved record path: %s",
+                    movie_status.record_path.empty()
+                    ? "(none)" : movie_status.record_path.c_str());
+                ImGui::TextWrapped("Resolved playback path: %s",
+                    movie_status.playback_path.empty()
+                    ? "(none)" : movie_status.playback_path.c_str());
+                if (!movie_status.last_error.empty()) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.4f, 1.0f),
+                        "Last error: %s", movie_status.last_error.c_str());
+                }
+                ImGui::TextWrapped("Status: %s",
+                    movie_status.status_message.c_str());
 
                 ImGui::EndTabItem();
             }
@@ -6951,6 +7064,9 @@ bool App::start_bios_from_ui() {
     disable_sound_reaper_mode();
     system_->reset();
     apply_memory_card_settings(false);
+    if (!start_configured_input_movie()) {
+        return false;
+    }
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = "Emulation started (BIOS)";
@@ -6988,6 +7104,9 @@ bool App::boot_disc_from_ui() {
     }
 
     apply_memory_card_settings(false);
+    if (!start_configured_input_movie()) {
+        return false;
+    }
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = config_direct_disc_boot_
@@ -7041,9 +7160,95 @@ bool App::launch_bios_only_from_cli(const std::string& bios_path) {
     disable_gpu_reaper_mode();
     disable_sound_reaper_mode();
     system_->reset();
+    if (!start_configured_input_movie()) {
+        return false;
+    }
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = "BIOS-only mode (no disc)";
+    return true;
+}
+
+bool App::start_configured_input_movie() {
+    if (!input_movie_cli_pending_) {
+        return true;
+    }
+
+    const std::string disc_path =
+        !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
+    input_movie_cli_pending_ = false;
+    if (!input_recorder_.init(disc_path, "VibeStation v0.5.2")) {
+        const InputRecorder::Status movie_status = input_recorder_.status();
+        status_message_ = "Input movie failed: " + movie_status.status_message;
+        LOG_ERROR("%s", status_message_.c_str());
+        return false;
+    }
+
+    const InputRecorder::Status movie_status = input_recorder_.status();
+    if (movie_status.mode == InputRecorder::Mode::Recording) {
+        status_message_ = "Input recording started: " + movie_status.record_path;
+    }
+    else if (movie_status.mode == InputRecorder::Mode::Playing) {
+        status_message_ = "Input playback started: " + movie_status.playback_path;
+    }
+    return true;
+}
+
+InputRecorder::PlaybackEndBehavior App::input_movie_end_behavior() const {
+    if (input_movie_loop_) {
+        return InputRecorder::PlaybackEndBehavior::Loop;
+    }
+    if (input_movie_stop_at_eof_) {
+        return InputRecorder::PlaybackEndBehavior::Stop;
+    }
+    return InputRecorder::PlaybackEndBehavior::HoldNeutral;
+}
+
+bool App::start_input_recording_from_ui() {
+    if (input_movie_record_path_[0] == '\0') {
+        status_message_ = "Input movie: enter a recording filename or path.";
+        return false;
+    }
+
+    InputRecorder::Config config{};
+    config.record_path = input_movie_record_path_;
+    config.end_behavior = input_movie_end_behavior();
+    input_recorder_.set_config(config);
+    const std::string disc_path =
+        !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
+    if (!input_recorder_.init(disc_path, "VibeStation v0.5.2")) {
+        status_message_ = "Input movie: " + input_recorder_.status().status_message;
+        return false;
+    }
+
+    input_recorder_config_ = input_recorder_.config();
+    input_movie_cli_pending_ = false;
+    status_message_ = "Input recording started: " +
+        input_recorder_.status().record_path;
+    return true;
+}
+
+bool App::start_input_playback_from_ui() {
+    if (input_movie_playback_path_[0] == '\0') {
+        status_message_ = "Input movie: enter a playback filename or path.";
+        return false;
+    }
+
+    InputRecorder::Config config{};
+    config.playback_path = input_movie_playback_path_;
+    config.end_behavior = input_movie_end_behavior();
+    input_recorder_.set_config(config);
+    const std::string disc_path =
+        !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
+    if (!input_recorder_.init(disc_path, "VibeStation v0.5.2")) {
+        status_message_ = "Input movie: " + input_recorder_.status().status_message;
+        return false;
+    }
+
+    input_recorder_config_ = input_recorder_.config();
+    input_movie_cli_pending_ = false;
+    status_message_ = "Input playback started: " +
+        input_recorder_.status().playback_path;
     return true;
 }
 
@@ -8131,6 +8336,7 @@ void App::shutdown() {
         }
     }
     emu_runner_.stop();
+    input_recorder_.shutdown();
     discord_presence_.reset();
     if (renderer_) {
         renderer_->shutdown();

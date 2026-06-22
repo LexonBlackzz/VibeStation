@@ -3,6 +3,7 @@
 
 #define SDL_MAIN_HANDLED // Prevent SDL from redefining main()
 #include "core/system.h"
+#include "core/input_recorder.h"
 #include "input/controller.h"
 #include "ui/app.h"
 #include <SDL.h>
@@ -29,6 +30,9 @@ struct AutoInputConfig {
 };
 
 static AutoInputConfig g_auto_input;
+
+// Input recording/playback
+static InputRecorder::Config g_input_recorder_config;
 
 static bool parse_psx_button_name(const std::string &name, PsxButton &button) {
   std::string v = name;
@@ -4769,6 +4773,25 @@ int main(int argc, char *argv[]) {
       g_auto_input.hold_frames = 1;
       continue;
     }
+    // Input recorder/playback flags
+    if (a == "--record-input" && (i + 1) < args.size()) {
+      g_input_recorder_config.record_path = trim_cli_arg(args[i + 1]);
+      ++i;
+      continue;
+    }
+    if (a == "--play-input" && (i + 1) < args.size()) {
+      g_input_recorder_config.playback_path = trim_cli_arg(args[i + 1]);
+      ++i;
+      continue;
+    }
+    if (a == "--input-playback-stop-at-end") {
+      g_input_recorder_config.end_behavior = InputRecorder::PlaybackEndBehavior::Stop;
+      continue;
+    }
+    if (a == "--input-playback-loop") {
+      g_input_recorder_config.end_behavior = InputRecorder::PlaybackEndBehavior::Loop;
+      continue;
+    }
     if (a == "--windowed-disc" && (i + 2) < args.size()) {
       windowed_bios_path = trim_cli_arg(args[i + 1]);
       size_t consumed = i + 2;
@@ -5002,6 +5025,7 @@ int main(int argc, char *argv[]) {
   fflush(stdout);
 
   App app;
+  app.set_input_recorder_config(g_input_recorder_config);
   printf("App object created.\n");
   fflush(stdout);
 

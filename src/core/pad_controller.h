@@ -21,7 +21,12 @@ public:
   void reset_transfer_state();
 
   void set_button_state(u16 buttons) { button_state_ = buttons; }
+  u16 button_state() const { return button_state_; }
   void set_analog_state(u8 lx, u8 ly, u8 rx, u8 ry);
+  u8 analog_lx() const { return analog_lx_; }
+  u8 analog_ly() const { return analog_ly_; }
+  u8 analog_rx() const { return analog_rx_; }
+  u8 analog_ry() const { return analog_ry_; }
 
   TransferResult transfer(u8 data_in);
 

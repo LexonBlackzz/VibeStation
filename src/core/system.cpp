@@ -1,4 +1,5 @@
 #include "system.h"
+#include "input_recorder.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1401,6 +1402,32 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     auto start_total = std::chrono::high_resolution_clock::now();
     reset_profiling_stats();
     spu_skip_sync_for_turbo_ = skip_spu_for_turbo;
+    input_playback_stop_requested_ = false;
+    if (input_recorder_ != nullptr) {
+        InputRecorder::ControllerState current_input{};
+        current_input.buttons = sio_.button_state();
+        current_input.lx = sio_.analog_lx();
+        current_input.ly = sio_.analog_ly();
+        current_input.rx = sio_.analog_rx();
+        current_input.ry = sio_.analog_ry();
+        const InputRecorder::FrameResult movie_input =
+            input_recorder_->process_frame(boot_diag_.frame_counter,
+                                           current_input);
+        if (movie_input.override_input) {
+            // The movie stores the same raw pad values consumed by controller
+            // 1. Neutral buttons (0xFFFF) are still an explicit override.
+            sio_.set_button_state(movie_input.controller.buttons);
+            sio_.set_analog_state(movie_input.controller.lx,
+                                  movie_input.controller.ly,
+                                  movie_input.controller.rx,
+                                  movie_input.controller.ry);
+        }
+        if (movie_input.stop_requested) {
+            input_playback_stop_requested_ = true;
+            spu_skip_sync_for_turbo_ = false;
+            return;
+        }
+    }
     const bool profile_detailed = g_profile_detailed_timing;
     cpu_.notify_cpu_backend_frame(boot_diag_.frame_counter);
     apply_ram_reaper_for_frame();
