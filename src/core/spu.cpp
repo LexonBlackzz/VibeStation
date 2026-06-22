@@ -91,26 +91,48 @@ constexpr std::array<s16, 39> kReverbFirTable = {
 
 constexpr u32 kCdGapRampSamples = 96u;
 constexpr u32 kCdRejoinBlendSamples = 32u;
-constexpr double kOutputBufferSecondsMin = 0.05;
-constexpr double kOutputBufferSecondsMax = 8.0;
 constexpr double kXaBufferSecondsMin = 0.0;
 constexpr double kXaBufferSecondsMax = 5.0;
-
-double clamp_output_buffer_seconds() {
-  return std::clamp(static_cast<double>(g_spu_output_buffer_seconds),
-                    kOutputBufferSecondsMin, kOutputBufferSecondsMax);
-}
 
 double clamp_xa_buffer_seconds() {
   return std::clamp(static_cast<double>(g_spu_xa_buffer_seconds),
                     kXaBufferSecondsMin, kXaBufferSecondsMax);
 }
 
-u32 bytes_from_seconds(double seconds, u32 sample_rate, u32 channels) {
-  const double samples =
-      seconds * static_cast<double>(sample_rate) * static_cast<double>(channels);
-  const double bytes = samples * static_cast<double>(sizeof(s16));
-  return static_cast<u32>(std::max(0.0, std::ceil(bytes)));
+u32 stereo_frames_from_ms(u32 milliseconds, u32 sample_rate) {
+  const u64 numerator = static_cast<u64>(milliseconds) * sample_rate;
+  return std::max<u32>(static_cast<u32>((numerator + 999u) / 1000u), 1u);
+}
+
+const char *audio_format_name(SDL_AudioFormat format) {
+  switch (format) {
+  case AUDIO_U8: return "U8";
+  case AUDIO_S8: return "S8";
+  case AUDIO_U16LSB: return "U16LE";
+  case AUDIO_S16LSB: return "S16LE";
+  case AUDIO_U16MSB: return "U16BE";
+  case AUDIO_S16MSB: return "S16BE";
+  case AUDIO_S32LSB: return "S32LE";
+  case AUDIO_S32MSB: return "S32BE";
+  case AUDIO_F32LSB: return "F32LE";
+  case AUDIO_F32MSB: return "F32BE";
+  default: return "UNKNOWN";
+  }
+}
+
+const char *nearest_standard_audio_rate(double stereo_frames_per_second) {
+  const double distance_44100 = std::abs(stereo_frames_per_second - 44100.0);
+  const double distance_48000 = std::abs(stereo_frames_per_second - 48000.0);
+  return distance_44100 <= distance_48000 ? "44100" : "48000";
+}
+
+void update_atomic_max(std::atomic<u32> &value, u32 candidate) {
+  u32 current = value.load(std::memory_order_relaxed);
+  while (current < candidate &&
+         !value.compare_exchange_weak(current, candidate,
+                                      std::memory_order_release,
+                                      std::memory_order_relaxed)) {
+  }
 }
 
 void write_wav_u16_le(std::ofstream &out, u16 v) {
@@ -190,12 +212,21 @@ void Spu::init(System *sys) {
   desired.channels = 2;
   const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
   desired.samples = static_cast<Uint16>(requested_samples);
-  desired.callback = nullptr;
+  desired.callback = &Spu::sdl_audio_callback_thunk;
+  desired.userdata = this;
+
+  SDL_AudioSpec preferred_device{};
+  char *preferred_device_name = nullptr;
+  const bool have_preferred_device =
+      SDL_GetDefaultAudioInfo(&preferred_device_name, &preferred_device, 0) == 0;
 
   SDL_AudioSpec obtained{};
-  audio_device_ = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
+  constexpr int allowed_format_changes = 0;
+  audio_device_ = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained,
+                                      allowed_format_changes);
   if (audio_device_ == 0) {
     LOG_WARN("SPU: Failed to open audio device: %s", SDL_GetError());
+    SDL_free(preferred_device_name);
     audio_enabled_ = false;
     return;
   }
@@ -203,37 +234,140 @@ void Spu::init(System *sys) {
     LOG_WARN("SPU: Unsupported host audio format, disabling output.");
     SDL_CloseAudioDevice(audio_device_);
     audio_device_ = 0;
+    SDL_free(preferred_device_name);
     audio_enabled_ = false;
     return;
   }
 
   host_buffer_bytes_ = static_cast<u32>(obtained.samples) *
                        static_cast<u32>(obtained.channels) * sizeof(s16);
-  const double target_seconds = clamp_output_buffer_seconds();
-  const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
-  host_target_queue_bytes_ =
-      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
-  const u32 max_bytes = bytes_from_seconds(
-      std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
-  host_max_queue_bytes_ =
-      std::max(HOST_MAX_QUEUE_BYTES_MIN,
-               std::max(host_buffer_bytes_ * 8u, max_bytes));
-  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
-    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
-  }
+  const bool queue_enabled =
+      g_spu_enable_audio_queue || g_spu_force_audio_queue;
+  const bool raw_drift_mode = g_spu_audio_raw_drift;
+  const u32 callback_stereo_frames = static_cast<u32>(obtained.samples);
+  const u32 configured_target_ms =
+      std::clamp(g_spu_audio_target_latency_ms, 10u, 500u);
+  const u32 configured_soft_ms = std::clamp(g_spu_audio_soft_latency_ms,
+      configured_target_ms, 750u);
+  const u32 normal_max_ms =
+      std::clamp(g_spu_audio_max_latency_ms, configured_soft_ms, 1000u);
+  // Raw-drift runs need enough headroom for 60 seconds of a 2% error. This is
+  // diagnostic capacity only; normal playback retains its configured cap.
+  const u32 configured_max_ms = raw_drift_mode
+      ? std::max(normal_max_ms, 2500u)
+      : normal_max_ms;
+  const u32 configured_target_stereo_frames =
+      stereo_frames_from_ms(configured_target_ms, SAMPLE_RATE);
+  const u32 configured_max_stereo_frames =
+      stereo_frames_from_ms(configured_max_ms, SAMPLE_RATE);
+  const u32 configured_soft_stereo_frames =
+      stereo_frames_from_ms(configured_soft_ms, SAMPLE_RATE);
+  const u32 target_stereo_frames = queue_enabled
+      ? configured_target_stereo_frames
+      : callback_stereo_frames;
+  const u32 max_stereo_frames = queue_enabled
+      ? std::max(configured_max_stereo_frames, callback_stereo_frames)
+      : std::max(callback_stereo_frames * 2u, callback_stereo_frames);
 
   audio_enabled_ = true;
+  audio_queue_enabled_.store(queue_enabled, std::memory_order_release);
+  raw_drift_mode_.store(raw_drift_mode, std::memory_order_release);
+  smooth_trim_enabled_.store(g_spu_enable_smooth_trim && !raw_drift_mode,
+                             std::memory_order_release);
+  lag_stutter_enabled_.store(g_spu_enable_lag_stutter && !raw_drift_mode,
+                             std::memory_order_release);
+  slowdown_stutter_enabled_.store(g_spu_enable_slowdown_stutter,
+                                  std::memory_order_release);
+  requested_callback_sample_rate_ = static_cast<u32>(desired.freq);
+  requested_callback_buffer_frames_ = static_cast<u32>(desired.samples);
+  requested_sample_format_ = desired.format;
+  requested_channels_ = desired.channels;
+  obtained_callback_sample_rate_.store(static_cast<u32>(obtained.freq),
+                                       std::memory_order_release);
+  obtained_callback_buffer_frames_.store(static_cast<u32>(obtained.samples),
+                                         std::memory_order_release);
+  obtained_sample_format_ = obtained.format;
+  obtained_channels_ = obtained.channels;
+  preferred_device_format_available_ = have_preferred_device;
+  preferred_device_sample_rate_ = have_preferred_device
+      ? static_cast<u32>(preferred_device.freq) : 0u;
+  preferred_device_sample_format_ = have_preferred_device
+      ? preferred_device.format : 0u;
+  preferred_device_channels_ = have_preferred_device
+      ? preferred_device.channels : 0u;
+  sdl_internal_conversion_expected_ = have_preferred_device &&
+      (preferred_device.freq != obtained.freq ||
+       preferred_device.format != obtained.format ||
+       preferred_device.channels != obtained.channels ||
+       (preferred_device.samples != 0u &&
+        preferred_device.samples != obtained.samples));
+  target_queue_stereo_frames_.store(target_stereo_frames,
+                                    std::memory_order_release);
+  soft_queue_stereo_frames_.store(
+      queue_enabled ? configured_soft_stereo_frames : max_stereo_frames,
+      std::memory_order_release);
+  max_queue_stereo_frames_.store(max_stereo_frames,
+                                 std::memory_order_release);
+  stutter_enter_stereo_frames_.store(
+      stereo_frames_from_ms(15u, SAMPLE_RATE),
+      std::memory_order_release);
+  stutter_exit_stereo_frames_.store(
+      stereo_frames_from_ms(60u, SAMPLE_RATE),
+      std::memory_order_release);
   audio_started_.store(false, std::memory_order_release);
-  ring_stutter_active_last_pump_.store(false, std::memory_order_release);
   opened_audio_samples_ = requested_samples;
   SDL_PauseAudioDevice(audio_device_, 1);
-  LOG_INFO("SPU: Audio initialized (%d Hz, device samples=%u, queue target/max=%u/%u bytes, target=%.2fs)",
-           obtained.freq, static_cast<unsigned>(obtained.samples),
-           static_cast<unsigned>(host_target_queue_bytes_),
-           static_cast<unsigned>(host_max_queue_bytes_), target_seconds);
+  audio_device_reinit_count_.fetch_add(1, std::memory_order_relaxed);
+  const char *const driver = SDL_GetCurrentAudioDriver();
+  LOG_INFO("AUDIO_DEVICE requested_callback: rate=%d Hz format=%s(0x%04X) channels=%u buffer=%u stereo_frames (%u interleaved_s16_values, %u bytes)",
+           desired.freq, audio_format_name(desired.format), desired.format,
+           static_cast<unsigned>(desired.channels),
+           static_cast<unsigned>(desired.samples),
+           static_cast<unsigned>(desired.samples) * desired.channels,
+           static_cast<unsigned>(desired.samples) * desired.channels *
+               static_cast<unsigned>(sizeof(s16)));
+  LOG_INFO("AUDIO_DEVICE obtained_callback: rate=%d Hz format=%s(0x%04X) channels=%u buffer=%u stereo_frames (%u interleaved_s16_values, %u bytes)",
+           obtained.freq, audio_format_name(obtained.format), obtained.format,
+           static_cast<unsigned>(obtained.channels),
+           static_cast<unsigned>(obtained.samples),
+           static_cast<unsigned>(obtained.samples) * obtained.channels,
+           obtained.size);
+  if (have_preferred_device) {
+    LOG_INFO("AUDIO_DEVICE default_preferred: driver=%s name=%s rate=%d Hz format=%s(0x%04X) channels=%u buffer=%u frames (0=unavailable)",
+             driver != nullptr ? driver : "unknown",
+             preferred_device_name != nullptr ? preferred_device_name : "unknown",
+             preferred_device.freq, audio_format_name(preferred_device.format),
+             preferred_device.format,
+             static_cast<unsigned>(preferred_device.channels),
+             static_cast<unsigned>(preferred_device.samples));
+  } else {
+    LOG_INFO("AUDIO_DEVICE default_preferred: unavailable (%s)", SDL_GetError());
+  }
+  LOG_INFO("AUDIO_DEVICE negotiation: allowed_changes=0 SDL_frequency_resampling_expected=%s SDL_format_conversion_expected=%s SDL_channel_conversion_expected=%s SDL_callback_buffer_conversion_expected=%s physical_opened_format_exposed=no obtained_is_callback_format=yes raw_drift=%s",
+           have_preferred_device && preferred_device.freq != obtained.freq
+               ? "yes" : "no",
+           have_preferred_device && preferred_device.format != obtained.format
+               ? "yes" : "no",
+           have_preferred_device &&
+                   preferred_device.channels != obtained.channels
+               ? "yes" : "no",
+           !have_preferred_device || preferred_device.samples == 0u
+               ? "unknown"
+               : (preferred_device.samples != obtained.samples
+                      ? "yes" : "no"),
+           raw_drift_mode ? "on" : "off");
+  LOG_INFO("SPU: Audio initialized (obtained_callback=%d Hz, emulated=%d Hz, callback=%u stereo_frames, queue=%s, target/soft/emergency=%u/%u/%u ms, smooth_trim=%s, preemptive_stutter=%s)",
+           obtained.freq, SAMPLE_RATE, static_cast<unsigned>(obtained.samples),
+           queue_enabled ? "on" : "off", configured_target_ms,
+           configured_soft_ms, configured_max_ms,
+           (g_spu_enable_smooth_trim && !raw_drift_mode) ? "on" : "off",
+           (g_spu_enable_lag_stutter && !raw_drift_mode) ? "on" : "off");
+  SDL_free(preferred_device_name);
 
-  // Initialize the ring buffer with the configured duration.
-  audio_ring_buffer_.init(target_seconds, SAMPLE_RATE, 2);
+  const double max_seconds = static_cast<double>(max_stereo_frames) /
+      static_cast<double>(SAMPLE_RATE);
+  audio_ring_buffer_.init(max_seconds, SAMPLE_RATE, obtained.channels);
+  reset_audio_output("audio device initialization");
 
   if (!g_spu_host_wav_out_path.empty()) {
     start_host_wav_capture(g_spu_host_wav_out_path);
@@ -241,21 +375,25 @@ void Spu::init(System *sys) {
 }
 
 void Spu::shutdown() {
-  stop_host_wav_capture();
   if (audio_device_ != 0) {
     SDL_PauseAudioDevice(audio_device_, 1);
+  }
+  stop_host_wav_capture();
+  if (audio_device_ != 0) {
     SDL_CloseAudioDevice(audio_device_);
     audio_device_ = 0;
   }
   audio_enabled_ = false;
   audio_started_.store(false, std::memory_order_release);
-  ring_stutter_active_last_pump_.store(false, std::memory_order_release);
   host_buffer_bytes_ = 0;
   opened_audio_samples_ = 0;
-  host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
-  host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
-  host_staging_samples_.clear();
-  host_staging_read_pos_ = 0;
+  obtained_callback_sample_rate_.store(0, std::memory_order_release);
+  obtained_callback_buffer_frames_.store(0, std::memory_order_release);
+  target_queue_stereo_frames_.store(0, std::memory_order_release);
+  soft_queue_stereo_frames_.store(0, std::memory_order_release);
+  max_queue_stereo_frames_.store(0, std::memory_order_release);
+  stutter_enter_stereo_frames_.store(0, std::memory_order_release);
+  stutter_exit_stereo_frames_.store(0, std::memory_order_release);
   audio_ring_buffer_.clear();
 }
 
@@ -266,20 +404,229 @@ void Spu::set_host_playback_enabled(bool enabled) {
     return;
   }
 
-  if (!enabled) {
-    SDL_PauseAudioDevice(audio_device_, 1);
-    SDL_ClearQueuedAudio(audio_device_);
-    audio_started_.store(false, std::memory_order_release);
-    ring_stutter_active_last_pump_.store(false, std::memory_order_release);
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
-    audio_ring_buffer_.clear();
-  } else if (!was_enabled) {
-    SDL_PauseAudioDevice(audio_device_, 1);
+  if (enabled != was_enabled) {
+    reset_audio_output(enabled ? "playback resume" : "playback pause");
   }
 }
 
+void Spu::reset_audio_output(const char *reason) {
+  if (audio_device_ != 0) {
+    SDL_PauseAudioDevice(audio_device_, 1);
+  }
+  audio_started_.store(false, std::memory_order_release);
+  starvation_stutter_active_.store(false, std::memory_order_release);
+  soft_correction_active_ = false;
+  soft_correction_callback_counter_ = 0;
+  audio_ring_buffer_.clear();
+  audio_queue_reset_count_.fetch_add(1, std::memory_order_relaxed);
+  if (reason != nullptr) {
+    LOG_INFO("SPU: Audio queue reset (%s)", reason);
+  }
+}
+
+void Spu::reinitialize_audio_device() {
+  System *const system = sys_;
+  shutdown();
+  init(system);
+}
+
 void Spu::clear_audio_capture() { capture_samples_.clear(); }
+
+void Spu::reset_audio_diag() {
+  audio_diag_ = AudioDiag{};
+  reset_audio_queue_stats();
+}
+
+Spu::AudioQueueStats Spu::audio_queue_stats(bool reset_window) const {
+  AudioQueueStats stats{};
+  stats.emulated_cpu_cycles =
+      emulated_cpu_cycles_total_.load(std::memory_order_acquire);
+  stats.expected_spu_stereo_frames =
+      (stats.emulated_cpu_cycles / psx::CPU_CLOCK_HZ) * SAMPLE_RATE +
+      ((stats.emulated_cpu_cycles % psx::CPU_CLOCK_HZ) * SAMPLE_RATE) /
+          psx::CPU_CLOCK_HZ;
+  stats.produced_stereo_frames =
+      produced_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.pushed_stereo_frames =
+      pushed_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.callback_consumed_stereo_frames =
+      callback_consumed_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.callback_output_stereo_frames =
+      callback_output_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.callback_silence_stereo_frames =
+      callback_silence_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.callback_stutter_stereo_frames =
+      callback_stutter_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.callback_invocations =
+      callback_invocations_total_.load(std::memory_order_acquire);
+  stats.dropped_stereo_frames =
+      dropped_stereo_frames_total_.load(std::memory_order_acquire);
+  stats.underrun_count =
+      audio_underrun_count_.load(std::memory_order_acquire);
+  stats.overrun_count =
+      audio_overrun_count_.load(std::memory_order_acquire);
+  stats.callback_lock_misses =
+      callback_lock_misses_.load(std::memory_order_acquire);
+  stats.smooth_trim_count =
+      smooth_trim_count_.load(std::memory_order_acquire);
+  stats.smooth_trim_stereo_frames =
+      smooth_trim_stereo_frames_.load(std::memory_order_acquire);
+  stats.hard_trim_count = hard_trim_count_.load(std::memory_order_acquire);
+  stats.hard_trim_stereo_frames =
+      hard_trim_stereo_frames_.load(std::memory_order_acquire);
+  stats.stutter_enter_count =
+      stutter_enter_count_.load(std::memory_order_acquire);
+  stats.stutter_exit_count =
+      stutter_exit_count_.load(std::memory_order_acquire);
+  stats.output_clipped_samples =
+      output_clipped_samples_.load(std::memory_order_acquire);
+  stats.read_pointer_discontinuity_count =
+      read_pointer_discontinuity_count_.load(std::memory_order_acquire);
+  stats.queue_reset_count =
+      audio_queue_reset_count_.load(std::memory_order_acquire);
+  stats.device_reinit_count =
+      audio_device_reinit_count_.load(std::memory_order_acquire);
+  if (reset_window) {
+    stats.produced_stereo_frames_window =
+        produced_stereo_frames_window_.exchange(0, std::memory_order_acq_rel);
+    stats.pushed_stereo_frames_window =
+        pushed_stereo_frames_window_.exchange(0, std::memory_order_acq_rel);
+    stats.callback_consumed_stereo_frames_window =
+        callback_consumed_stereo_frames_window_.exchange(
+            0, std::memory_order_acq_rel);
+    stats.callback_output_stereo_frames_window =
+        callback_output_stereo_frames_window_.exchange(
+            0, std::memory_order_acq_rel);
+  } else {
+    stats.produced_stereo_frames_window =
+        produced_stereo_frames_window_.load(std::memory_order_acquire);
+    stats.pushed_stereo_frames_window =
+        pushed_stereo_frames_window_.load(std::memory_order_acquire);
+    stats.callback_consumed_stereo_frames_window =
+        callback_consumed_stereo_frames_window_.load(std::memory_order_acquire);
+    stats.callback_output_stereo_frames_window =
+        callback_output_stereo_frames_window_.load(std::memory_order_acquire);
+  }
+  stats.producer_consumer_drift_stereo_frames_window =
+      static_cast<s64>(stats.pushed_stereo_frames_window) -
+      static_cast<s64>(stats.callback_output_stereo_frames_window);
+  stats.producer_consumer_drift_percent =
+      stats.callback_output_stereo_frames_window == 0u ? 0.0
+      : (static_cast<double>(
+             stats.producer_consumer_drift_stereo_frames_window) *
+         100.0) /
+          static_cast<double>(stats.callback_output_stereo_frames_window);
+  stats.queue_stereo_frames = static_cast<u32>(std::min<size_t>(
+      audio_ring_buffer_.available_samples() / 2u,
+      std::numeric_limits<u32>::max()));
+  stats.max_observed_queue_stereo_frames =
+      max_observed_queue_stereo_frames_.load(std::memory_order_acquire);
+  stats.target_stereo_frames =
+      target_queue_stereo_frames_.load(std::memory_order_acquire);
+  stats.soft_latency_stereo_frames =
+      soft_queue_stereo_frames_.load(std::memory_order_acquire);
+  stats.max_stereo_frames =
+      max_queue_stereo_frames_.load(std::memory_order_acquire);
+  stats.smooth_trim_last_stereo_frames =
+      smooth_trim_last_stereo_frames_.load(std::memory_order_acquire);
+  stats.smooth_trim_queue_before_stereo_frames =
+      smooth_trim_queue_before_stereo_frames_.load(std::memory_order_acquire);
+  stats.smooth_trim_queue_after_stereo_frames =
+      smooth_trim_queue_after_stereo_frames_.load(std::memory_order_acquire);
+  stats.hard_trim_last_stereo_frames =
+      hard_trim_last_stereo_frames_.load(std::memory_order_acquire);
+  stats.stutter_enter_stereo_frames =
+      stutter_enter_stereo_frames_.load(std::memory_order_acquire);
+  stats.stutter_exit_stereo_frames =
+      stutter_exit_stereo_frames_.load(std::memory_order_acquire);
+  stats.output_peak_sample_before_clamp =
+      output_peak_sample_before_clamp_.load(std::memory_order_acquire);
+  stats.requested_callback_sample_rate = requested_callback_sample_rate_;
+  stats.obtained_callback_sample_rate =
+      obtained_callback_sample_rate_.load(std::memory_order_acquire);
+  stats.preferred_device_sample_rate = preferred_device_sample_rate_;
+  stats.emulated_sample_rate = SAMPLE_RATE;
+  stats.requested_callback_buffer_frames = requested_callback_buffer_frames_;
+  stats.obtained_callback_buffer_frames =
+      obtained_callback_buffer_frames_.load(std::memory_order_acquire);
+  stats.requested_sample_format = requested_sample_format_;
+  stats.obtained_sample_format = obtained_sample_format_;
+  stats.preferred_device_sample_format = preferred_device_sample_format_;
+  stats.requested_channels = requested_channels_;
+  stats.obtained_channels = obtained_channels_;
+  stats.preferred_device_channels = preferred_device_channels_;
+  stats.queue_enabled = audio_queue_enabled_.load(std::memory_order_acquire);
+  stats.device_open = audio_enabled_ && audio_device_ != 0;
+  stats.playback_enabled =
+      host_playback_enabled_.load(std::memory_order_acquire);
+  stats.stutter_active =
+      starvation_stutter_active_.load(std::memory_order_acquire);
+  stats.smooth_trim_enabled =
+      smooth_trim_enabled_.load(std::memory_order_acquire);
+  stats.raw_drift_mode = raw_drift_mode_.load(std::memory_order_acquire);
+  stats.preferred_device_format_available =
+      preferred_device_format_available_;
+  stats.sdl_internal_conversion_expected =
+      sdl_internal_conversion_expected_;
+  return stats;
+}
+
+void Spu::reset_audio_queue_stats() {
+  emulated_cpu_cycles_total_.store(0, std::memory_order_release);
+  produced_stereo_frames_total_.store(0, std::memory_order_release);
+  pushed_stereo_frames_total_.store(0, std::memory_order_release);
+  callback_consumed_stereo_frames_total_.store(0, std::memory_order_release);
+  callback_output_stereo_frames_total_.store(0, std::memory_order_release);
+  callback_silence_stereo_frames_total_.store(0, std::memory_order_release);
+  callback_stutter_stereo_frames_total_.store(0, std::memory_order_release);
+  callback_invocations_total_.store(0, std::memory_order_release);
+  dropped_stereo_frames_total_.store(0, std::memory_order_release);
+  audio_underrun_count_.store(0, std::memory_order_release);
+  audio_overrun_count_.store(0, std::memory_order_release);
+  callback_lock_misses_.store(0, std::memory_order_release);
+  smooth_trim_count_.store(0, std::memory_order_release);
+  smooth_trim_stereo_frames_.store(0, std::memory_order_release);
+  hard_trim_count_.store(0, std::memory_order_release);
+  hard_trim_stereo_frames_.store(0, std::memory_order_release);
+  stutter_enter_count_.store(0, std::memory_order_release);
+  stutter_exit_count_.store(0, std::memory_order_release);
+  output_clipped_samples_.store(0, std::memory_order_release);
+  read_pointer_discontinuity_count_.store(0, std::memory_order_release);
+  produced_stereo_frames_window_.store(0, std::memory_order_release);
+  pushed_stereo_frames_window_.store(0, std::memory_order_release);
+  callback_consumed_stereo_frames_window_.store(0,
+                                                std::memory_order_release);
+  callback_output_stereo_frames_window_.store(0,
+                                              std::memory_order_release);
+  max_observed_queue_stereo_frames_.store(0, std::memory_order_release);
+  smooth_trim_last_stereo_frames_.store(0, std::memory_order_release);
+  smooth_trim_queue_before_stereo_frames_.store(0,
+                                                std::memory_order_release);
+  smooth_trim_queue_after_stereo_frames_.store(0,
+                                               std::memory_order_release);
+  hard_trim_last_stereo_frames_.store(0, std::memory_order_release);
+  output_peak_sample_before_clamp_.store(0, std::memory_order_release);
+  audio_measurement_start_counter_.store(0, std::memory_order_release);
+  measurement_start_cpu_cycles_.store(0, std::memory_order_release);
+  measurement_start_produced_stereo_frames_.store(0,
+                                                  std::memory_order_release);
+  measurement_start_pushed_stereo_frames_.store(0,
+                                                std::memory_order_release);
+  measurement_start_consumed_stereo_frames_.store(0,
+                                                  std::memory_order_release);
+  measurement_start_output_stereo_frames_.store(0,
+                                                std::memory_order_release);
+  measurement_start_callback_invocations_.store(0,
+                                                std::memory_order_release);
+  last_audio_stats_log_counter_ = 0;
+  last_audio_stats_log_cpu_cycles_ = 0;
+  last_audio_stats_log_produced_stereo_frames_ = 0;
+  last_audio_stats_log_pushed_stereo_frames_ = 0;
+  last_audio_stats_log_consumed_stereo_frames_ = 0;
+  last_audio_stats_log_output_stereo_frames_ = 0;
+  last_audio_stats_log_callback_invocations_ = 0;
+  next_audio_stats_milestone_ = 0;
+}
 
 bool Spu::start_host_wav_capture(const std::string &path) {
   stop_host_wav_capture();
@@ -511,16 +858,9 @@ void Spu::set_force_reverb(bool enabled) {
 void Spu::reset() {
   const u32 requested_samples = std::clamp<u32>(g_spu_desired_samples, 64u, 65535u);
   if (audio_device_ != 0 && requested_samples != opened_audio_samples_) {
-    shutdown();
-    init(sys_);
-  }
-  if (audio_device_ != 0) {
-    SDL_PauseAudioDevice(audio_device_, 1);
-    SDL_ClearQueuedAudio(audio_device_);
-    audio_started_.store(false, std::memory_order_release);
-    ring_stutter_active_last_pump_.store(false, std::memory_order_release);
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
+    reinitialize_audio_device();
+  } else {
+    reset_audio_output("emulator reset");
   }
 
   regs_.fill(0);
@@ -558,9 +898,8 @@ void Spu::reset() {
   noise_timer_ = 0;
 
   audio_diag_ = {};
+  reset_audio_queue_stats();
   audio_ring_buffer_.clear();
-  host_staging_samples_.clear();
-  host_staging_read_pos_ = 0;
   mix_buffer_.clear();
   capture_samples_.clear();
   cd_input_samples_.clear();
@@ -1903,8 +2242,8 @@ s16 Spu::next_noise_sample() {
 // samples lands here — the ring buffer's overflow protection discards the
 // oldest unread data so the push never blocks.
 //
-// Also handles audio-capture mode (bypasses the ring buffer entirely).
-// Does NOT touch SDL — the app thread pumps via pump_audio_to_device().
+// Also handles audio-capture mode (bypasses the ring buffer entirely). SDL's
+// real-time callback consumes the ring independently of GUI frame pacing.
 // ============================================================================
 std::vector<s16> Spu::resample_output_for_speed(const std::vector<s16> &samples,
                                                 double speed) {
@@ -1992,6 +2331,12 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
     return;
   }
 
+  const u64 produced_stereo_frames = samples.size() / 2u;
+  produced_stereo_frames_total_.fetch_add(produced_stereo_frames,
+                                          std::memory_order_relaxed);
+  produced_stereo_frames_window_.fetch_add(produced_stereo_frames,
+                                           std::memory_order_relaxed);
+
   const double output_speed = audio_output_speed_.load(std::memory_order_acquire);
   const std::vector<s16> resampled =
       resample_output_for_speed(samples, output_speed);
@@ -2024,193 +2369,61 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
     return;
   }
 
-  const bool audio_queue_enabled =
-      g_spu_enable_audio_queue || g_spu_force_audio_queue;
-  if (!audio_queue_enabled) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
+  const u32 target_stereo_frames =
+      target_queue_stereo_frames_.load(std::memory_order_acquire);
+  const u32 max_stereo_frames =
+      max_queue_stereo_frames_.load(std::memory_order_acquire);
+  const AudioRingBuffer::PushResult push =
+      audio_ring_buffer_.push_samples_bounded(
+          queue_samples->data(), queue_samples->size(),
+          static_cast<size_t>(target_stereo_frames) * 2u,
+          static_cast<size_t>(max_stereo_frames) * 2u);
 
-    u32 queued_before = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued_before;
-    audio_diag_.queue_peak_bytes =
-        std::max(audio_diag_.queue_peak_bytes, queued_before);
+  const u64 pushed_stereo_frames = push.pushed_samples / 2u;
+  pushed_stereo_frames_total_.fetch_add(pushed_stereo_frames,
+                                        std::memory_order_relaxed);
+  pushed_stereo_frames_window_.fetch_add(pushed_stereo_frames,
+                                         std::memory_order_relaxed);
+  audio_diag_.queued_frames += push.pushed_samples / 2u;
+  audio_diag_.queue_last_bytes = static_cast<u32>(
+      std::min<size_t>(push.queued_samples * sizeof(s16),
+                       std::numeric_limits<u32>::max()));
+  audio_diag_.queue_peak_bytes = std::max(
+      audio_diag_.queue_peak_bytes,
+      static_cast<u32>(std::min<size_t>(push.peak_samples * sizeof(s16),
+                                        std::numeric_limits<u32>::max())));
 
-    const double queue_speed = std::clamp(output_speed, 0.1, 4.0);
-    const u32 slowdown_scale =
-        (queue_speed < 0.999)
-            ? static_cast<u32>(std::clamp(
-                  static_cast<int>(std::lround(1.0 / queue_speed)), 1, 8))
-            : 1u;
-    const u32 direct_queue_cap =
-        std::max(host_buffer_bytes_ * (2u * slowdown_scale), 4096u);
-    if (queued_before > direct_queue_cap) {
-      SDL_ClearQueuedAudio(audio_device_);
-      audio_diag_.dropped_frames +=
-          queued_before / (static_cast<u32>(sizeof(s16)) * 2u);
-      ++audio_diag_.overrun_events;
-      queued_before = 0;
-    }
-
-    SDL_QueueAudio(audio_device_, queue_samples->data(),
-                   static_cast<Uint32>(queue_samples->size() * sizeof(s16)));
-    append_host_wav_capture(queue_samples->data(), queue_samples->size());
-    audio_diag_.queued_frames += queue_samples->size() / 2;
-
-    const u32 queued_after = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued_after;
-    audio_diag_.queue_peak_bytes =
-        std::max(audio_diag_.queue_peak_bytes, queued_after);
-
-    if (!audio_started_.load(std::memory_order_acquire)) {
-      SDL_PauseAudioDevice(audio_device_, 0);
-      audio_started_.store(true, std::memory_order_release);
-    }
-    return;
-  }
-
-  const double target_seconds = clamp_output_buffer_seconds();
-  const u32 target_bytes = bytes_from_seconds(target_seconds, SAMPLE_RATE, 2u);
-  host_target_queue_bytes_ =
-      std::max({HOST_TARGET_QUEUE_BYTES_MIN, host_buffer_bytes_ * 3u, target_bytes});
-  const u32 max_bytes = bytes_from_seconds(
-      std::min(kOutputBufferSecondsMax, target_seconds + 2.0), SAMPLE_RATE, 2u);
-  host_max_queue_bytes_ =
-      std::max(HOST_MAX_QUEUE_BYTES_MIN,
-               std::max(host_buffer_bytes_ * 8u, max_bytes));
-  if (host_max_queue_bytes_ <= host_target_queue_bytes_) {
-    host_max_queue_bytes_ = host_target_queue_bytes_ + host_buffer_bytes_;
-  }
-
-  const double staging_seconds =
-      std::min(20.0, std::max(2.0, target_seconds * 2.0 + 1.0));
-  const size_t staging_max_samples = std::max<size_t>(
-      HOST_STAGING_MAX_SAMPLES,
-      static_cast<size_t>(std::ceil(
-          staging_seconds * static_cast<double>(SAMPLE_RATE) * 2.0)));
-
-  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
-  } else if (host_staging_read_pos_ > 0 &&
-             (host_staging_read_pos_ >= 16384u ||
-              host_staging_samples_.size() >= staging_max_samples)) {
-    const size_t unread =
-        host_staging_samples_.size() - host_staging_read_pos_;
-    std::move(host_staging_samples_.begin() +
-                  static_cast<s64>(host_staging_read_pos_),
-              host_staging_samples_.end(), host_staging_samples_.begin());
-    host_staging_samples_.resize(unread);
-    host_staging_read_pos_ = 0;
-  }
-
-  const size_t unread = host_staging_samples_.size() - host_staging_read_pos_;
-  if (unread + queue_samples->size() > staging_max_samples) {
-    size_t drop = unread + queue_samples->size() - staging_max_samples;
-    drop = std::min(drop, unread);
-    drop &= ~static_cast<size_t>(1);
-    if (drop > 0) {
-      host_staging_read_pos_ += drop;
-      audio_diag_.dropped_frames += drop / 2;
-      ++audio_diag_.overrun_events;
-    }
-    if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-      host_staging_samples_.clear();
-      host_staging_read_pos_ = 0;
-    }
-  }
-
-  host_staging_samples_.insert(host_staging_samples_.end(),
-                               queue_samples->begin(), queue_samples->end());
-
-  u32 queued = SDL_GetQueuedAudioSize(audio_device_);
-  if (queued > host_max_queue_bytes_) {
-    SDL_ClearQueuedAudio(audio_device_);
-    audio_diag_.dropped_frames +=
-        queued / (static_cast<u32>(sizeof(s16)) * 2u);
+  update_atomic_max(max_observed_queue_stereo_frames_, static_cast<u32>(
+      std::min<size_t>(push.peak_samples / 2u,
+                       std::numeric_limits<u32>::max())));
+  if (push.dropped_samples > 0) {
+    const u64 dropped_stereo_frames = push.dropped_samples / 2u;
+    dropped_stereo_frames_total_.fetch_add(dropped_stereo_frames,
+                                           std::memory_order_relaxed);
+    audio_overrun_count_.fetch_add(1, std::memory_order_relaxed);
+    hard_trim_count_.fetch_add(1, std::memory_order_relaxed);
+    hard_trim_stereo_frames_.fetch_add(dropped_stereo_frames,
+                                       std::memory_order_relaxed);
+    hard_trim_last_stereo_frames_.store(static_cast<u32>(std::min<u64>(
+        dropped_stereo_frames, std::numeric_limits<u32>::max())),
+        std::memory_order_release);
+    read_pointer_discontinuity_count_.fetch_add(1,
+                                                std::memory_order_relaxed);
+    audio_diag_.dropped_frames += push.dropped_samples / 2u;
     ++audio_diag_.overrun_events;
-    queued = 0;
   }
 
-  while (host_staging_read_pos_ < host_staging_samples_.size()) {
-    queued = SDL_GetQueuedAudioSize(audio_device_);
-    audio_diag_.queue_last_bytes = queued;
-    audio_diag_.queue_peak_bytes =
-        std::max(audio_diag_.queue_peak_bytes, queued);
+  append_host_wav_capture(queue_samples->data(), queue_samples->size());
 
-    if (queued >= host_target_queue_bytes_) {
-      break;
-    }
-
-    const u32 room = host_target_queue_bytes_ - queued;
-    if (room < sizeof(s16) * 2u) {
-      break;
-    }
-
-    const size_t unread_samples =
-        host_staging_samples_.size() - host_staging_read_pos_;
-    size_t sample_room = room / sizeof(s16);
-    sample_room &= ~static_cast<size_t>(1);
-    size_t to_queue = std::min(sample_room, unread_samples);
-    to_queue &= ~static_cast<size_t>(1);
-    if (to_queue == 0) {
-      break;
-    }
-
-    SDL_QueueAudio(audio_device_,
-                   host_staging_samples_.data() + host_staging_read_pos_,
-                   static_cast<Uint32>(to_queue * sizeof(s16)));
-    append_host_wav_capture(host_staging_samples_.data() +
-                                host_staging_read_pos_,
-                            to_queue);
-    audio_diag_.queued_frames += to_queue / 2;
-    host_staging_read_pos_ += to_queue;
-  }
-
-  if (host_staging_read_pos_ >= host_staging_samples_.size()) {
-    host_staging_samples_.clear();
-    host_staging_read_pos_ = 0;
-  }
-
-  queued = SDL_GetQueuedAudioSize(audio_device_);
-  audio_diag_.queue_last_bytes = queued;
-  audio_diag_.queue_peak_bytes =
-      std::max(audio_diag_.queue_peak_bytes, queued);
-
-  if (!audio_started_.load(std::memory_order_acquire)) {
-    const u32 startup_threshold =
-        std::min(host_target_queue_bytes_,
-                 std::max(host_buffer_bytes_ * 2u,
-                          bytes_from_seconds(0.10, SAMPLE_RATE, 2u)));
-    if (queued >= startup_threshold) {
-      SDL_PauseAudioDevice(audio_device_, 0);
-      audio_started_.store(true, std::memory_order_release);
-    }
-  } else if (queued == 0u &&
-             host_staging_read_pos_ >= host_staging_samples_.size()) {
-    ++audio_diag_.underrun_events;
+  if (!audio_started_.load(std::memory_order_acquire) &&
+      (push.queued_samples / 2u) >= target_stereo_frames) {
+    audio_started_.store(true, std::memory_order_release);
+    SDL_PauseAudioDevice(audio_device_, 0);
   }
 }
 
 // ============================================================================
-// pump_audio_to_device() — Consumer (App / main thread, once per frame)
-// ============================================================================
-//
-// Drain samples from the ring buffer and queue them to SDL — but ONLY when
-// SDL's internal queue drops below a small "cushion" threshold (~40 ms).
-//
-// Why a cushion instead of flooding:
-//   The old approach filled SDL's queue to the full target level (~500 ms)
-//   every single frame.  Since the SPU only generates ~1-2 ms of samples
-//   per tick(), the ring buffer was drained to near-zero every frame,
-//   causing the stutter logic to flip on and off hundreds of times per
-//   second — audible as rapid crackling.
-//
-//   The cushion approach lets the ring buffer accumulate a healthy
-//   reservoir of samples during normal playback.  SDL's device consumes
-//   from its own internal queue; we only top it up when it gets low.
-//   When the emulator genuinely hitches (SPU thread stops producing
-//   samples), the ring buffer depletes and the stutter loop kicks in
-//   cleanly — one sustained glitchy loop, not micro-crackle.
+// SDL callback consumer and app-thread diagnostics heartbeat.
 // ============================================================================
 void Spu::sdl_audio_callback_thunk(void *userdata, Uint8 *stream, int len) {
   static_cast<Spu *>(userdata)->sdl_audio_callback(stream, len);
@@ -2229,49 +2442,195 @@ void Spu::sdl_audio_callback(Uint8 *stream, int len) {
     return;
   }
 
-  s16 *out = reinterpret_cast<s16 *>(stream);
+  SDL_memset(stream, 0, requested_bytes);
   if (!host_playback_enabled_.load(std::memory_order_acquire)) {
-    SDL_memset(stream, 0, requested_bytes);
     return;
   }
 
-  static constexpr size_t kStartupSamples =
-      static_cast<size_t>(SAMPLE_RATE) * 2u * 5u / 1000u;
-  const size_t available = audio_ring_buffer_.available_samples();
-  if (!audio_started_.load(std::memory_order_acquire) &&
-      available < std::min(kStartupSamples, requested_count)) {
-    SDL_memset(stream, 0, requested_bytes);
+  const u64 requested_stereo_frames = requested_count / 2u;
+  const bool start_measurement_after_callback =
+      audio_measurement_start_counter_.load(std::memory_order_acquire) == 0u;
+  const auto finish_measurement_start = [&]() {
+    if (!start_measurement_after_callback) {
+      return;
+    }
+    measurement_start_cpu_cycles_.store(
+        emulated_cpu_cycles_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    measurement_start_produced_stereo_frames_.store(
+        produced_stereo_frames_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    measurement_start_pushed_stereo_frames_.store(
+        pushed_stereo_frames_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    measurement_start_consumed_stereo_frames_.store(
+        callback_consumed_stereo_frames_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    measurement_start_output_stereo_frames_.store(
+        callback_output_stereo_frames_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    measurement_start_callback_invocations_.store(
+        callback_invocations_total_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    audio_measurement_start_counter_.store(SDL_GetPerformanceCounter(),
+                                           std::memory_order_release);
+  };
+  callback_invocations_total_.fetch_add(1, std::memory_order_relaxed);
+  callback_output_stereo_frames_total_.fetch_add(
+      requested_stereo_frames, std::memory_order_relaxed);
+  callback_output_stereo_frames_window_.fetch_add(
+      requested_stereo_frames, std::memory_order_relaxed);
+
+  const size_t available_sample_values =
+      audio_ring_buffer_.available_samples();
+  const size_t available_stereo_frames = available_sample_values / 2u;
+  bool stutter_active =
+      starvation_stutter_active_.load(std::memory_order_acquire);
+  if (lag_stutter_enabled_.load(std::memory_order_acquire)) {
+    const size_t enter_stereo_frames =
+        stutter_enter_stereo_frames_.load(std::memory_order_relaxed);
+    const size_t exit_stereo_frames =
+        stutter_exit_stereo_frames_.load(std::memory_order_relaxed);
+    if (!stutter_active && available_stereo_frames < enter_stereo_frames) {
+      stutter_active = true;
+      starvation_stutter_active_.store(true, std::memory_order_release);
+      stutter_enter_count_.fetch_add(1, std::memory_order_relaxed);
+    } else if (stutter_active &&
+               available_stereo_frames >= exit_stereo_frames) {
+      stutter_active = false;
+      starvation_stutter_active_.store(false, std::memory_order_release);
+      stutter_exit_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+  } else if (stutter_active) {
+    stutter_active = false;
+    starvation_stutter_active_.store(false, std::memory_order_release);
+    stutter_exit_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  if (stutter_active) {
+    const bool drain_live_to_history =
+        slowdown_stutter_enabled_.load(std::memory_order_relaxed) &&
+        lag_stutter_hint_.load(std::memory_order_acquire);
+    const AudioRingBuffer::ReadResult history =
+        audio_ring_buffer_.try_read_history_samples(
+            reinterpret_cast<s16 *>(stream), requested_count,
+            drain_live_to_history ? requested_count : 0u);
+    const u64 drained_stereo_frames = history.history_drained_samples / 2u;
+    const u64 stutter_output_stereo_frames = history.consumed_samples / 2u;
+    const u64 missing_stereo_frames =
+        requested_stereo_frames - stutter_output_stereo_frames;
+    callback_consumed_stereo_frames_total_.fetch_add(
+        drained_stereo_frames, std::memory_order_relaxed);
+    callback_consumed_stereo_frames_window_.fetch_add(
+        drained_stereo_frames, std::memory_order_relaxed);
+    callback_stutter_stereo_frames_total_.fetch_add(
+        stutter_output_stereo_frames, std::memory_order_relaxed);
+    if (missing_stereo_frames > 0) {
+      callback_silence_stereo_frames_total_.fetch_add(
+          missing_stereo_frames, std::memory_order_relaxed);
+      if (!history.lock_contended) {
+        audio_underrun_count_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    if (history.lock_contended) {
+      callback_lock_misses_.fetch_add(1, std::memory_order_relaxed);
+    }
+    update_atomic_max(output_peak_sample_before_clamp_,
+                      history.peak_sample_before_clamp);
+    output_clipped_samples_.fetch_add(history.clipped_samples,
+                                      std::memory_order_relaxed);
+    finish_measurement_start();
     return;
   }
-  audio_started_.store(true, std::memory_order_release);
 
-  const bool force_lag_stutter =
-      g_spu_enable_lag_stutter && g_spu_enable_slowdown_stutter &&
-      lag_stutter_hint_.load(std::memory_order_acquire);
-  if (force_lag_stutter) {
-    audio_ring_buffer_.read_stutter_samples(out, requested_count);
+  const size_t soft_stereo_frames =
+      soft_queue_stereo_frames_.load(std::memory_order_relaxed);
+  const size_t target_stereo_frames =
+      target_queue_stereo_frames_.load(std::memory_order_relaxed);
+  const size_t soft_exit_stereo_frames =
+      target_stereo_frames +
+      ((soft_stereo_frames -
+        std::min(soft_stereo_frames, target_stereo_frames)) / 2u);
+  if (!soft_correction_active_ &&
+      available_stereo_frames > soft_stereo_frames) {
+    soft_correction_active_ = true;
+  } else if (soft_correction_active_ &&
+             available_stereo_frames <= soft_exit_stereo_frames) {
+    soft_correction_active_ = false;
+    soft_correction_callback_counter_ = 0;
+  }
+
+  size_t smooth_discard_stereo_frames = 0;
+  if (smooth_trim_enabled_.load(std::memory_order_relaxed) &&
+      soft_correction_active_ &&
+      audio_queue_enabled_.load(std::memory_order_relaxed)) {
+    const u32 host_rate =
+        obtained_callback_sample_rate_.load(std::memory_order_relaxed);
+    const u32 callback_frames =
+        std::max(obtained_callback_buffer_frames_.load(
+                     std::memory_order_relaxed), 1u);
+    const u32 correction_interval_callbacks =
+        std::max(host_rate / (callback_frames * 4u), 1u);
+    if (++soft_correction_callback_counter_ >= correction_interval_callbacks) {
+      soft_correction_callback_counter_ = 0;
+      const size_t correction_floor = soft_exit_stereo_frames;
+      const size_t excess = available_stereo_frames > correction_floor
+          ? available_stereo_frames - correction_floor
+          : 0u;
+      const size_t max_step_stereo_frames = stereo_frames_from_ms(
+          4u, host_rate == 0u ? SAMPLE_RATE : host_rate);
+      smooth_discard_stereo_frames =
+          std::min(excess, max_step_stereo_frames);
+    }
   } else {
-    audio_ring_buffer_.read_live_samples(out, requested_count);
+    soft_correction_callback_counter_ = 0;
   }
 
-  const bool stuttering_now = audio_ring_buffer_.is_stuttering();
-  const bool was_stuttering =
-      ring_stutter_active_last_pump_.exchange(stuttering_now,
-                                              std::memory_order_acq_rel);
-  if (stuttering_now && !was_stuttering) {
-    ++audio_diag_.underrun_events;
+  AudioRingBuffer::ReadResult read = audio_ring_buffer_.try_read_samples(
+      reinterpret_cast<s16 *>(stream), requested_count,
+      smooth_discard_stereo_frames * 2u);
+  const u64 consumed_stereo_frames = read.consumed_samples / 2u;
+  callback_consumed_stereo_frames_total_.fetch_add(
+      consumed_stereo_frames, std::memory_order_relaxed);
+  callback_consumed_stereo_frames_window_.fetch_add(
+      consumed_stereo_frames, std::memory_order_relaxed);
+
+  if (read.discarded_samples > 0) {
+    const u64 discarded_stereo_frames = read.discarded_samples / 2u;
+    smooth_trim_count_.fetch_add(1, std::memory_order_relaxed);
+    smooth_trim_stereo_frames_.fetch_add(discarded_stereo_frames,
+                                         std::memory_order_relaxed);
+    smooth_trim_last_stereo_frames_.store(
+        static_cast<u32>(discarded_stereo_frames),
+        std::memory_order_release);
+    smooth_trim_queue_before_stereo_frames_.store(
+        static_cast<u32>(read.queue_samples_before / 2u),
+        std::memory_order_release);
+    smooth_trim_queue_after_stereo_frames_.store(
+        static_cast<u32>(read.queue_samples_after / 2u),
+        std::memory_order_release);
+    read_pointer_discontinuity_count_.fetch_add(
+        read.read_pointer_discontinuities, std::memory_order_relaxed);
   }
 
-  append_host_wav_capture(out, requested_count);
-  audio_diag_.queued_frames += requested_count / 2u;
-  audio_diag_.queue_last_bytes = static_cast<u32>(requested_count * sizeof(s16));
-  audio_diag_.queue_peak_bytes =
-      std::max(audio_diag_.queue_peak_bytes, audio_diag_.queue_last_bytes);
+  update_atomic_max(output_peak_sample_before_clamp_,
+                    read.peak_sample_before_clamp);
+  output_clipped_samples_.fetch_add(read.clipped_samples,
+                                    std::memory_order_relaxed);
 
-  if (requested_count * sizeof(s16) < requested_bytes) {
-    SDL_memset(stream + requested_count * sizeof(s16), 0,
-               requested_bytes - requested_count * sizeof(s16));
+  const u64 missing_stereo_frames =
+      requested_stereo_frames - consumed_stereo_frames;
+  if (missing_stereo_frames > 0) {
+    callback_silence_stereo_frames_total_.fetch_add(
+        missing_stereo_frames, std::memory_order_relaxed);
+    if (!read.lock_contended || available_sample_values < requested_count) {
+      audio_underrun_count_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
+  if (read.lock_contended) {
+    callback_lock_misses_.fetch_add(1, std::memory_order_relaxed);
+  }
+  finish_measurement_start();
 }
 
 void Spu::pump_audio_to_device() {
@@ -2280,12 +2639,203 @@ void Spu::pump_audio_to_device() {
     return;
   }
 
-  const u32 queued = SDL_GetQueuedAudioSize(audio_device_);
-  audio_diag_.queue_last_bytes = queued;
-  audio_diag_.queue_peak_bytes =
-      std::max(audio_diag_.queue_peak_bytes, queued);
-  return;
+  if (!g_spu_audio_stats_log) {
+    return;
+  }
+  const u64 performance_frequency = SDL_GetPerformanceFrequency();
+  const u64 measurement_start =
+      audio_measurement_start_counter_.load(std::memory_order_acquire);
+  if (performance_frequency == 0u || measurement_start == 0u) {
+    return;
+  }
+  const u64 now = SDL_GetPerformanceCounter();
+  if (now <= measurement_start) {
+    return;
+  }
 
+  if (last_audio_stats_log_counter_ == 0u) {
+    last_audio_stats_log_counter_ = measurement_start;
+    last_audio_stats_log_cpu_cycles_ =
+        measurement_start_cpu_cycles_.load(std::memory_order_acquire);
+    last_audio_stats_log_produced_stereo_frames_ =
+        measurement_start_produced_stereo_frames_.load(
+            std::memory_order_acquire);
+    last_audio_stats_log_pushed_stereo_frames_ =
+        measurement_start_pushed_stereo_frames_.load(
+            std::memory_order_acquire);
+    last_audio_stats_log_consumed_stereo_frames_ =
+        measurement_start_consumed_stereo_frames_.load(
+            std::memory_order_acquire);
+    last_audio_stats_log_output_stereo_frames_ =
+        measurement_start_output_stereo_frames_.load(
+            std::memory_order_acquire);
+    last_audio_stats_log_callback_invocations_ =
+        measurement_start_callback_invocations_.load(
+            std::memory_order_acquire);
+  }
+
+  const u64 window_counter_delta = now - last_audio_stats_log_counter_;
+  if (window_counter_delta < performance_frequency) {
+    return;
+  }
+
+  const AudioQueueStats stats = audio_queue_stats(false);
+  const auto delta_u64 = [](u64 value, u64 baseline) {
+    return value >= baseline ? value - baseline : value;
+  };
+  const auto expected_frames_for_cycles = [](u64 cycles) {
+    return (cycles / psx::CPU_CLOCK_HZ) * static_cast<u64>(SAMPLE_RATE) +
+        ((cycles % psx::CPU_CLOCK_HZ) * static_cast<u64>(SAMPLE_RATE)) /
+            psx::CPU_CLOCK_HZ;
+  };
+  const double window_seconds =
+      static_cast<double>(window_counter_delta) /
+      static_cast<double>(performance_frequency);
+  const double elapsed_seconds =
+      static_cast<double>(now - measurement_start) /
+      static_cast<double>(performance_frequency);
+
+  const u64 window_cpu_cycles = delta_u64(
+      stats.emulated_cpu_cycles, last_audio_stats_log_cpu_cycles_);
+  const u64 window_produced = delta_u64(
+      stats.produced_stereo_frames,
+      last_audio_stats_log_produced_stereo_frames_);
+  const u64 window_pushed = delta_u64(
+      stats.pushed_stereo_frames,
+      last_audio_stats_log_pushed_stereo_frames_);
+  const u64 window_consumed = delta_u64(
+      stats.callback_consumed_stereo_frames,
+      last_audio_stats_log_consumed_stereo_frames_);
+  const u64 window_output = delta_u64(
+      stats.callback_output_stereo_frames,
+      last_audio_stats_log_output_stereo_frames_);
+  const u64 window_callbacks = delta_u64(
+      stats.callback_invocations,
+      last_audio_stats_log_callback_invocations_);
+
+  const u64 start_cpu_cycles =
+      measurement_start_cpu_cycles_.load(std::memory_order_acquire);
+  const u64 cumulative_cpu_cycles =
+      delta_u64(stats.emulated_cpu_cycles, start_cpu_cycles);
+  const u64 cumulative_expected_spu_frames =
+      delta_u64(expected_frames_for_cycles(stats.emulated_cpu_cycles),
+                expected_frames_for_cycles(start_cpu_cycles));
+  const u64 cumulative_produced = delta_u64(
+      stats.produced_stereo_frames,
+      measurement_start_produced_stereo_frames_.load(
+          std::memory_order_acquire));
+  const u64 cumulative_pushed = delta_u64(
+      stats.pushed_stereo_frames,
+      measurement_start_pushed_stereo_frames_.load(
+          std::memory_order_acquire));
+  const u64 cumulative_consumed = delta_u64(
+      stats.callback_consumed_stereo_frames,
+      measurement_start_consumed_stereo_frames_.load(
+          std::memory_order_acquire));
+  const u64 cumulative_output = delta_u64(
+      stats.callback_output_stereo_frames,
+      measurement_start_output_stereo_frames_.load(
+          std::memory_order_acquire));
+  const u64 cumulative_callbacks = delta_u64(
+      stats.callback_invocations,
+      measurement_start_callback_invocations_.load(
+          std::memory_order_acquire));
+
+  const double produced_rate = window_produced / window_seconds;
+  const double pushed_rate = window_pushed / window_seconds;
+  const double consumed_rate = window_consumed / window_seconds;
+  const double callback_output_rate = window_output / window_seconds;
+  const double emulated_clock_ratio =
+      (static_cast<double>(window_cpu_cycles) / window_seconds) /
+      static_cast<double>(psx::CPU_CLOCK_HZ);
+  const double obtained_rate =
+      static_cast<double>(stats.obtained_callback_sample_rate);
+  const double drift_frames_per_second = pushed_rate - callback_output_rate;
+  const double drift_ms_per_second = obtained_rate > 0.0
+      ? (drift_frames_per_second * 1000.0) / obtained_rate
+      : 0.0;
+  const double drift_percent = callback_output_rate > 0.0
+      ? (drift_frames_per_second * 100.0) / callback_output_rate
+      : 0.0;
+  const double callback_rate_error_percent = obtained_rate > 0.0
+      ? ((callback_output_rate - obtained_rate) * 100.0) / obtained_rate
+      : 0.0;
+  const double queue_ms = obtained_rate > 0.0
+      ? (static_cast<double>(stats.queue_stereo_frames) * 1000.0) /
+            obtained_rate
+      : 0.0;
+
+  LOG_INFO("AUDIO_CLOCK window=%.3fs callbacks=%llu emu_cycles=%llu emu_clock=%.6fx produced=%.3f stereo_frames/s pushed=%.3f stereo_frames/s callback_output=%.3f stereo_frames/s queue_consumed=%.3f stereo_frames/s callback_vs_obtained=%+.4f%% nearest=%s drift=%+.3f stereo_frames/s drift=%+.3f ms/s (%+.4f%%)",
+           window_seconds, static_cast<unsigned long long>(window_callbacks),
+           static_cast<unsigned long long>(window_cpu_cycles),
+           emulated_clock_ratio, produced_rate, pushed_rate,
+           callback_output_rate, consumed_rate, callback_rate_error_percent,
+           nearest_standard_audio_rate(callback_output_rate),
+           drift_frames_per_second, drift_ms_per_second, drift_percent);
+  LOG_INFO("AUDIO_TOTAL elapsed=%.3fs callbacks=%llu emulated_time=%.6fs cpu_cycles=%llu expected_spu=%llu stereo_frames actual_spu=%llu pushed=%llu callback_output=%llu callback_queue_consumed=%llu produced_minus_output=%+lld queue=%u stereo_frames (%.3f ms) silence=%llu stutter=%llu smooth_trim=%llu events/%llu stereo_frames hard_trim=%llu events/%llu stereo_frames underruns=%llu lock_misses=%llu raw_drift=%s",
+           elapsed_seconds, static_cast<unsigned long long>(cumulative_callbacks),
+           static_cast<double>(cumulative_cpu_cycles) /
+               static_cast<double>(psx::CPU_CLOCK_HZ),
+           static_cast<unsigned long long>(cumulative_cpu_cycles),
+           static_cast<unsigned long long>(cumulative_expected_spu_frames),
+           static_cast<unsigned long long>(cumulative_produced),
+           static_cast<unsigned long long>(cumulative_pushed),
+           static_cast<unsigned long long>(cumulative_output),
+           static_cast<unsigned long long>(cumulative_consumed),
+           static_cast<long long>(static_cast<s64>(cumulative_pushed) -
+                                  static_cast<s64>(cumulative_output)),
+           stats.queue_stereo_frames, queue_ms,
+           static_cast<unsigned long long>(
+               stats.callback_silence_stereo_frames),
+           static_cast<unsigned long long>(
+               stats.callback_stutter_stereo_frames),
+           static_cast<unsigned long long>(stats.smooth_trim_count),
+           static_cast<unsigned long long>(
+               stats.smooth_trim_stereo_frames),
+           static_cast<unsigned long long>(stats.hard_trim_count),
+           static_cast<unsigned long long>(stats.hard_trim_stereo_frames),
+           static_cast<unsigned long long>(stats.underrun_count),
+           static_cast<unsigned long long>(stats.callback_lock_misses),
+           stats.raw_drift_mode ? "on" : "off");
+
+  static constexpr std::array<double, 3> kMilestones = {10.0, 30.0, 60.0};
+  while (next_audio_stats_milestone_ < kMilestones.size() &&
+         elapsed_seconds >= kMilestones[next_audio_stats_milestone_]) {
+    const double cumulative_produced_rate =
+        cumulative_produced / elapsed_seconds;
+    const double cumulative_pushed_rate = cumulative_pushed / elapsed_seconds;
+    const double cumulative_output_rate = cumulative_output / elapsed_seconds;
+    const double cumulative_consumed_rate = cumulative_consumed / elapsed_seconds;
+    const double cumulative_drift_rate =
+        cumulative_pushed_rate - cumulative_output_rate;
+    const double cumulative_drift_ms_per_second = obtained_rate > 0.0
+        ? (cumulative_drift_rate * 1000.0) / obtained_rate
+        : 0.0;
+    const double cumulative_drift_percent = cumulative_output_rate > 0.0
+        ? (cumulative_drift_rate * 100.0) / cumulative_output_rate
+        : 0.0;
+    LOG_INFO("AUDIO_MILESTONE target=%.0fs elapsed=%.3fs obtained_callback_rate=%u Hz preferred_device_rate=%u Hz callback_output=%.3f stereo_frames/s produced=%.3f stereo_frames/s pushed=%.3f stereo_frames/s queue_consumed=%.3f stereo_frames/s drift=%+.3f ms/s (%+.4f%%) nearest_callback_rate=%s SDL_conversion_expected=%s",
+             kMilestones[next_audio_stats_milestone_], elapsed_seconds,
+             stats.obtained_callback_sample_rate,
+             stats.preferred_device_sample_rate, cumulative_output_rate,
+             cumulative_produced_rate, cumulative_pushed_rate,
+             cumulative_consumed_rate, cumulative_drift_ms_per_second,
+             cumulative_drift_percent,
+             nearest_standard_audio_rate(cumulative_output_rate),
+             stats.sdl_internal_conversion_expected ? "yes" : "no");
+    ++next_audio_stats_milestone_;
+  }
+
+  last_audio_stats_log_counter_ = now;
+  last_audio_stats_log_cpu_cycles_ = stats.emulated_cpu_cycles;
+  last_audio_stats_log_produced_stereo_frames_ =
+      stats.produced_stereo_frames;
+  last_audio_stats_log_pushed_stereo_frames_ = stats.pushed_stereo_frames;
+  last_audio_stats_log_consumed_stereo_frames_ =
+      stats.callback_consumed_stereo_frames;
+  last_audio_stats_log_output_stereo_frames_ =
+      stats.callback_output_stereo_frames;
+  last_audio_stats_log_callback_invocations_ = stats.callback_invocations;
 }
 
 void Spu::push_cd_audio_samples(const std::vector<s16> &samples,
@@ -2509,6 +3059,7 @@ void Spu::tick_adsr(int voice, VoiceState &vs) {
 }
 
 void Spu::tick(u32 cycles) {
+  emulated_cpu_cycles_total_.fetch_add(cycles, std::memory_order_relaxed);
   const bool profile_detailed = g_profile_detailed_timing;
   std::chrono::high_resolution_clock::time_point start{};
   if (profile_detailed) {

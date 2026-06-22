@@ -32,6 +32,7 @@ public:
     u32 dma2_words = 0;
     bool dma2_from_ram = false;
     Spu::AudioDiag spu_audio{};
+    Spu::AudioQueueStats audio_queue{};
     std::array<s16, 24> spu_voice_level_l{};
     std::array<s16, 24> spu_voice_level_r{};
     std::array<bool, 24> spu_voice_active{};

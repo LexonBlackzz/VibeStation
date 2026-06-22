@@ -1048,6 +1048,93 @@ void System::populate_gpu_src_write_samples_from_history() {
         (range_words > seen) ? (range_words - seen) : 0u;
 }
 
+void System::debug_log_frame_state() const {
+    const CpuDebugState cpu = cpu_.debug_state();
+    const CpuBackendStats stats = cpu_.cpu_backend_stats();
+    const Timer &t0 = timers_.debug_timer(0);
+    const Timer &t1 = timers_.debug_timer(1);
+    const Timer &t2 = timers_.debug_timer(2);
+    LOG_INFO(
+        "FRAME_STATE frame=%u display_hash=0x%08X display_non_black=%llu "
+        "display_wh=%ux%u display_start=%u,%u display_enabled=%u display_24=%u "
+        "pc=0x%08X next_pc=0x%08X current_pc=0x%08X cycles=%llu "
+        "load=%u:0x%08X next_load=%u:0x%08X in_delay=%u pending_delay=%u "
+        "pending_taken=%u pending_pc=0x%08X active_branch_pc=0x%08X exception=%u "
+        "irq_stat=0x%08X irq_mask=0x%08X dma_dpcr=0x%08X dma_dicr=0x%08X "
+        "cd_sectors=%llu cd_read_lba=%d cd_active_lba=%d cd_data_index=%d "
+        "cd_busy=%d cd_pending_irq=%zu cd_last_irq=%u cd_response=%zu "
+        "cd_data_ready=%u cd_data_request=%u "
+        "timer0=%u:0x%04X:0x%04X timer1=%u:0x%04X:0x%04X "
+        "timer2=%u:0x%04X:0x%04X timer_hblank=%u timer_vblank=%u "
+        "timer0_rem=%u timer2_rem=%u cpu_ms=%.3f core_ms=%.3f "
+        "native_instr=%llu decoded_instr=%llu fallback_instr=%llu "
+        "branch_entries=%llu branch_taken=%llu branch_not_taken=%llu "
+        "branch_bgtz=%llu branch_blez=%llu memory_helpers=%llu "
+        "prepare_helpers=%llu finish_helpers=%llu branch_helpers=%llu "
+        "ram_helpers=%llu scratch_helpers=%llu bios_helpers=%llu "
+        "mmio_helpers=%llu unknown_helpers=%llu unaligned_helpers=%llu "
+        "ram_fast_loads=%llu mmio_fast_loads=%llu "
+        "forced_slices=%llu forced_instr=%llu",
+        boot_diag_.frame_counter, boot_diag_.display_hash,
+        static_cast<unsigned long long>(boot_diag_.display_non_black_pixels),
+        static_cast<unsigned>(boot_diag_.display_width),
+        static_cast<unsigned>(boot_diag_.display_height),
+        static_cast<unsigned>(boot_diag_.display_x_start),
+        static_cast<unsigned>(boot_diag_.display_y_start),
+        static_cast<unsigned>(boot_diag_.display_enabled),
+        static_cast<unsigned>(boot_diag_.display_is_24bit), cpu.pc, cpu.next_pc,
+        cpu.current_pc, static_cast<unsigned long long>(cpu.cycles),
+        cpu.load_reg, cpu.load_value, cpu.next_load_reg, cpu.next_load_value,
+        cpu.in_delay_slot ? 1u : 0u, cpu.pending_delay_slot ? 1u : 0u,
+        cpu.pending_branch_taken ? 1u : 0u, cpu.pending_branch_pc,
+        cpu.active_branch_pc, cpu.exception_raised ? 1u : 0u, irq_.stat(),
+        irq_.mask(), dma_.read(0x70u), dma_.read(0x74u),
+        static_cast<unsigned long long>(cdrom_.sector_count()),
+        cdrom_.current_read_lba(), cdrom_.active_data_lba(),
+        cdrom_.dma_data_index(), cdrom_.busy_cycles_remaining(),
+        cdrom_.pending_irq_count(), static_cast<unsigned>(cdrom_.last_irq_code()),
+        cdrom_.response_fifo_size(), cdrom_.sector_data_ready() ? 1u : 0u,
+        cdrom_.sector_data_request() ? 1u : 0u, t0.counter,
+        static_cast<unsigned>(t0.mode), static_cast<unsigned>(t0.target),
+        t1.counter, static_cast<unsigned>(t1.mode),
+        static_cast<unsigned>(t1.target), t2.counter,
+        static_cast<unsigned>(t2.mode), static_cast<unsigned>(t2.target),
+        timers_.debug_hblank_active() ? 1u : 0u,
+        timers_.debug_vblank_active() ? 1u : 0u,
+        timers_.debug_timer0_dot_remainder(),
+        timers_.debug_timer2_sysclk8_remainder(), profiling_stats_.cpu_ms,
+        profiling_stats_.total_ms,
+        static_cast<unsigned long long>(stats.native_instructions),
+        static_cast<unsigned long long>(stats.decoded_instructions),
+        static_cast<unsigned long long>(stats.fallback_instructions),
+        static_cast<unsigned long long>(stats.native_branch_tail_entries),
+        static_cast<unsigned long long>(stats.native_branch_taken),
+        static_cast<unsigned long long>(stats.native_branch_not_taken),
+        static_cast<unsigned long long>(stats.native_branch_tail_bgtz_entries),
+        static_cast<unsigned long long>(stats.native_branch_tail_blez_entries),
+        static_cast<unsigned long long>(stats.native_memory_helper_calls),
+        static_cast<unsigned long long>(stats.native_prepare_helper_calls),
+        static_cast<unsigned long long>(stats.native_finish_helper_calls),
+        static_cast<unsigned long long>(stats.native_branch_helper_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_ram_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_scratchpad_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_bios_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_mmio_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_unknown_calls),
+        static_cast<unsigned long long>(
+            stats.native_memory_helper_unaligned_calls),
+        static_cast<unsigned long long>(stats.native_memory_fastpath_loads),
+        static_cast<unsigned long long>(
+            stats.native_memory_fastpath_mmio_loads),
+        static_cast<unsigned long long>(stats.forced_interpreter_slices),
+        static_cast<unsigned long long>(stats.forced_interpreter_instructions));
+}
+
 void System::debug_note_mdec_dma_out_begin(u32 base_addr, u32 words, u8 depth,
                                            u8 first_block) {
     if (!g_mdec_debug_upload_probe) {

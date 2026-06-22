@@ -140,21 +140,93 @@ inline bool g_cpu_execution_mode_cli_override = false;
 inline CpuExecutionMode g_cpu_execution_mode_cli_value =
     CpuExecutionMode::Interpreter;
 inline bool g_cpu_backend_compare_test_force_interpreter = false;
+inline bool g_cpu_backend_compare_test_active = false;
 inline bool g_cpu_x64_jit_force_compile = false;
 inline u32 g_cpu_x64_jit_hot_block_threshold = 8;
 inline u32 g_cpu_x64_jit_min_block_instructions = 2;
+// Native branch tails are opt-in while real-game correctness is being
+// validated. CLI overrides take precedence over the persisted UI setting.
+inline bool g_cpu_x64_jit_branch_tail_enabled = false;
+inline bool g_cpu_x64_jit_branch_tail_cli_override = false;
+inline bool g_cpu_x64_jit_branch_tail_cli_value = false;
+inline bool g_cpu_x64_jit_branch_tail_logging = false;
+inline u32 g_cpu_x64_jit_branch_tail_log_count = 32;
+inline std::vector<u32> g_cpu_x64_jit_branch_tail_blacklist;
+inline bool g_cpu_x64_jit_all_native_enabled = true;
+inline bool g_cpu_x64_jit_all_native_cli_override = false;
+inline bool g_cpu_x64_jit_all_native_cli_value = true;
+// Native helper-memory blocks share decoded load/store semantics. Native ALU
+// writes inside helper blocks must still cancel matching pending loads.
+inline bool g_cpu_x64_jit_native_memory_enabled = true;
+inline bool g_cpu_x64_jit_native_memory_cli_override = false;
+inline bool g_cpu_x64_jit_native_memory_cli_value = true;
+inline bool g_cpu_x64_jit_disable_native_loads = false;
+inline bool g_cpu_x64_jit_disable_native_stores = false;
+inline bool g_cpu_x64_jit_disable_native_mmio = false;
+inline bool g_cpu_x64_jit_disable_native_ram = false;
+inline bool g_cpu_x64_jit_disable_native_load_delay = false;
+inline bool g_cpu_x64_jit_disable_native_mixed_load_store = false;
+inline bool g_cpu_x64_jit_memory_trace = false;
+inline bool g_cpu_x64_jit_memory_trace_pc_set = false;
+inline u32 g_cpu_x64_jit_memory_trace_pc = 0;
+inline u32 g_cpu_x64_jit_memory_trace_count = 128;
+// Opt-in groundwork only: aligned loads from the canonical 2 MiB main-RAM
+// aliases may bypass the shared memory helper. All other regions stay slow.
+inline bool g_cpu_x64_jit_ram_load_fastpath_enabled = false;
+inline bool g_cpu_x64_jit_native_alu_enabled = true;
+inline bool g_cpu_x64_jit_native_alu_cli_override = false;
+inline bool g_cpu_x64_jit_native_alu_cli_value = true;
+// Compare-suite-only hooks for instruction-boundary IRQ/state coverage.
+inline bool g_cpu_backend_compare_irq_on_branch = false;
+inline bool g_cpu_backend_compare_allow_partial_branch_tail = false;
+inline bool g_cpu_backend_compare_allow_partial_memory_helper = false;
 inline bool g_cpu_backend_stats_logging = false;
 inline u32 g_cpu_backend_stats_log_frames = 60;
+inline u32 g_frame_state_log_frames = 0;
 inline bool g_cpu_backend_rejected_block_logging = false;
 inline u32 g_cpu_backend_rejected_block_log_count = 8;
+
+inline bool cpu_x64_jit_branch_tail_enabled() {
+  return g_cpu_x64_jit_branch_tail_cli_override
+             ? g_cpu_x64_jit_branch_tail_cli_value
+             : g_cpu_x64_jit_branch_tail_enabled;
+}
+inline bool cpu_x64_jit_all_native_enabled() {
+  return g_cpu_x64_jit_all_native_cli_override
+             ? g_cpu_x64_jit_all_native_cli_value
+             : g_cpu_x64_jit_all_native_enabled;
+}
+inline bool cpu_x64_jit_native_memory_enabled() {
+  return g_cpu_x64_jit_native_memory_cli_override
+             ? g_cpu_x64_jit_native_memory_cli_value
+             : g_cpu_x64_jit_native_memory_enabled;
+}
+inline bool cpu_x64_jit_native_alu_enabled() {
+  return g_cpu_x64_jit_native_alu_cli_override
+             ? g_cpu_x64_jit_native_alu_cli_value
+             : g_cpu_x64_jit_native_alu_enabled;
+}
 inline bool g_spu_advanced_sound_status = false;
-inline u32 g_spu_desired_samples = 64u;
+inline u32 g_spu_desired_samples = 256u;
 inline bool g_spu_enable_audio_queue = true;
-inline bool g_spu_enable_lag_stutter = false;
+inline bool g_spu_enable_lag_stutter = true;
 inline bool g_spu_enable_slowdown_stutter = false;
 inline bool g_spu_force_audio_queue = false;
+// Diagnostic mode for measuring the uncorrected producer/consumer clocks.
+// Smooth trims and pre-emptive history stutter are disabled; only the
+// emergency queue cap and true-underrun silence remain active.
+inline bool g_spu_audio_raw_drift = false;
 inline std::string g_spu_host_wav_out_path;
-inline float g_spu_output_buffer_seconds = 5.0f;
+// Host playback pacing. Values are milliseconds of stereo sample frames;
+// target is the normal cushion and max is the hard latency watermark.
+inline u32 g_spu_audio_target_latency_ms = 80u;
+inline u32 g_spu_audio_soft_latency_ms = 100u;
+inline u32 g_spu_audio_max_latency_ms = 300u;
+inline bool g_spu_enable_smooth_trim = true;
+inline bool g_spu_show_audio_stats = true;
+inline bool g_spu_audio_stats_log = false;
+// Legacy persisted setting, retained only for config migration.
+inline float g_spu_output_buffer_seconds = 0.06f;
 inline float g_spu_xa_buffer_seconds = 0.12f;
 // Runtime MDEC isolation toggles for FMV debugging.
 inline bool g_mdec_debug_disable_dma1_reorder = false;

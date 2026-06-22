@@ -57,6 +57,18 @@ public:
   void hblank_pulse();
   void set_vblank(bool active);
 
+  // Side-effect-free diagnostic access. Unlike read(), this does not clear
+  // the timer reached-target/reached-overflow flags in the mode register.
+  const Timer &debug_timer(int index) const { return timers_[index]; }
+  bool debug_hblank_active() const { return hblank_active_; }
+  bool debug_vblank_active() const { return vblank_active_; }
+  u32 debug_timer0_dot_remainder() const {
+    return timer0_dot_cycle_remainder_;
+  }
+  u32 debug_timer2_sysclk8_remainder() const {
+    return timer2_sysclk8_cycle_remainder_;
+  }
+
 private:
   System *sys_ = nullptr;
   Timer timers_[3];

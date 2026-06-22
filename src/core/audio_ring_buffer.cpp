@@ -33,6 +33,7 @@ void AudioRingBuffer::init(double buffer_seconds, u32 sample_rate,
   buffer_.resize(capacity_ + 1);
   write_pos_ = 0;
   read_pos_ = 0;
+  available_samples_snapshot_.store(0, std::memory_order_release);
 
   // Allocate the rolling history buffer.
   history_buffer_.resize(
@@ -47,6 +48,10 @@ void AudioRingBuffer::init(double buffer_seconds, u32 sample_rate,
   stutter_resume_threshold_ = 0;
   last_output_frame_.fill(0);
   has_last_output_frame_ = false;
+  history_loop_active_ = false;
+  history_loop_start_ = 0;
+  history_loop_length_ = 0;
+  history_loop_offset_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +117,7 @@ void AudioRingBuffer::resize_buffer(size_t new_capacity) {
   }
   read_pos_ = 0;
   write_pos_ = keep;
+  publish_available_locked();
 }
 
 // ---------------------------------------------------------------------------
@@ -130,20 +136,64 @@ void AudioRingBuffer::push_samples(const s16 *samples, size_t count) {
 
   std::lock_guard<std::mutex> lock(mutex_);
 
+  size_t dropped_samples = 0;
+  append_samples_locked(samples, count, dropped_samples);
+  publish_available_locked();
+}
+
+AudioRingBuffer::PushResult AudioRingBuffer::push_samples_bounded(
+    const s16 *samples, size_t count, size_t target_samples,
+    size_t max_samples) {
+  PushResult result{};
+  if (count == 0 || samples == nullptr || capacity_ == 0) {
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  result.pushed_samples = count;
+
+  target_samples = std::min(target_samples, capacity_);
+  max_samples = std::min(std::max(max_samples, target_samples), capacity_);
+  const size_t used_before_push = used_samples();
+  const size_t logical_peak = used_before_push >
+          (std::numeric_limits<size_t>::max() - count)
+      ? std::numeric_limits<size_t>::max()
+      : used_before_push + count;
+  append_samples_locked(samples, count, result.dropped_samples, false);
+
+  result.peak_samples = logical_peak;
+  if (result.peak_samples > max_samples) {
+    result.dropped_samples += discard_oldest_locked(
+        used_samples() > target_samples ? used_samples() - target_samples : 0u,
+        false);
+  }
+  result.queued_samples = used_samples();
+  publish_available_locked();
+  return result;
+}
+
+void AudioRingBuffer::append_samples_locked(const s16 *samples, size_t count,
+                                            size_t &dropped_samples,
+                                            bool preserve_stutter_history) {
+
   if (count > capacity_) {
     const size_t drop = count - capacity_;
     samples += drop;
     count = capacity_;
+    dropped_samples += drop;
   }
 
   // If pushing would overflow, discard oldest to make room.
   const size_t used = used_samples();
   if (used + count > capacity_) {
     const size_t discard = (used + count) - capacity_;
-    std::vector<s16> stale(discard);
-    copy_from_ring(read_pos_, stale.data(), discard);
-    history_push(stale.data(), stale.size());
+    if (preserve_stutter_history) {
+      std::vector<s16> stale(discard);
+      copy_from_ring(read_pos_, stale.data(), discard);
+      history_push(stale.data(), stale.size());
+    }
     read_pos_ = advance_pos(read_pos_, discard, buffer_.size());
+    dropped_samples += discard;
   }
 
   // Fast path: no wrap.
@@ -168,13 +218,21 @@ size_t AudioRingBuffer::discard_oldest_samples(size_t count) {
   if (count == 0 || capacity_ == 0) return 0;
 
   std::lock_guard<std::mutex> lock(mutex_);
-  const size_t used = used_samples();
-  const size_t discard = std::min(count, used);
+  const size_t discard = discard_oldest_locked(count);
+  publish_available_locked();
+  return discard;
+}
+
+size_t AudioRingBuffer::discard_oldest_locked(size_t count,
+                                              bool preserve_stutter_history) {
+  const size_t discard = std::min(count, used_samples());
   if (discard == 0) return 0;
 
-  std::vector<s16> stale(discard);
-  copy_from_ring(read_pos_, stale.data(), discard);
-  history_push(stale.data(), stale.size());
+  if (preserve_stutter_history) {
+    std::vector<s16> stale(discard);
+    copy_from_ring(read_pos_, stale.data(), discard);
+    history_push(stale.data(), stale.size());
+  }
   read_pos_ = advance_pos(read_pos_, discard, buffer_.size());
   return discard;
 }
@@ -231,6 +289,7 @@ void AudioRingBuffer::read_samples(s16 *out_buffer, size_t requested_count) {
 
     copy_from_ring(read_pos_, out_buffer, requested_count);
     read_pos_ = advance_pos(read_pos_, requested_count, buffer_.size());
+    publish_available_locked();
     history_push(out_buffer, requested_count);
     if (was_stuttering) {
       crossfade_from_stutter(out_buffer, requested_count);
@@ -255,6 +314,7 @@ void AudioRingBuffer::read_samples(s16 *out_buffer, size_t requested_count) {
     drained = std::min(available, requested_count);
     copy_from_ring(read_pos_, out_buffer, drained);
     read_pos_ = advance_pos(read_pos_, drained, buffer_.size());
+    publish_available_locked();
     history_push(out_buffer, drained);
     update_last_output_frame(out_buffer, drained);
   }
@@ -323,6 +383,7 @@ void AudioRingBuffer::read_live_samples(s16 *out_buffer,
   if (available_aligned >= requested_aligned) {
     copy_from_ring(read_pos_, out_buffer, requested_aligned);
     read_pos_ = advance_pos(read_pos_, requested_aligned, buffer_.size());
+    publish_available_locked();
     history_push(out_buffer, requested_aligned);
     update_last_output_frame(out_buffer, requested_aligned);
     if (requested_aligned < requested_count) {
@@ -342,6 +403,7 @@ void AudioRingBuffer::read_live_samples(s16 *out_buffer,
   std::vector<s16> live(available_aligned);
   copy_from_ring(read_pos_, live.data(), available_aligned);
   read_pos_ = advance_pos(read_pos_, available_aligned, buffer_.size());
+  publish_available_locked();
   history_push(live.data(), live.size());
 
   const size_t live_frames = available_aligned / frame_samples;
@@ -377,6 +439,7 @@ void AudioRingBuffer::read_stutter_samples(s16 *out_buffer,
     std::vector<s16> fresh(available);
     copy_from_ring(read_pos_, fresh.data(), available);
     read_pos_ = advance_pos(read_pos_, available, buffer_.size());
+    publish_available_locked();
     history_push(fresh.data(), fresh.size());
   }
 
@@ -409,6 +472,181 @@ void AudioRingBuffer::read_stutter_samples(s16 *out_buffer,
   update_last_output_frame(out_buffer, requested_count);
 }
 
+AudioRingBuffer::ReadResult AudioRingBuffer::try_read_samples(
+    s16 *out_buffer, size_t requested_count, size_t discard_before_read) {
+  ReadResult result{};
+  if (requested_count == 0 || out_buffer == nullptr) {
+    return result;
+  }
+
+  std::memset(out_buffer, 0, requested_count * sizeof(s16));
+  if (capacity_ == 0) {
+    return result;
+  }
+
+  std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    result.lock_contended = true;
+    return result;
+  }
+
+  const size_t frame_samples = std::max<u32>(channels_, 1u);
+  const bool resuming_from_history = history_loop_active_;
+  const size_t requested_aligned =
+      requested_count - (requested_count % frame_samples);
+  const size_t available = used_samples();
+  const size_t available_aligned = available - (available % frame_samples);
+  result.queue_samples_before = available_aligned;
+  discard_before_read -= discard_before_read % frame_samples;
+  const size_t max_discard = available_aligned > requested_aligned
+      ? available_aligned - requested_aligned
+      : 0u;
+  result.discarded_samples = std::min(discard_before_read, max_discard);
+  const size_t available_after_discard =
+      available_aligned - result.discarded_samples;
+  result.consumed_samples =
+      std::min(requested_aligned, available_after_discard);
+  if (result.consumed_samples == 0) {
+    result.queue_samples_after = available_after_discard;
+    publish_available_locked();
+    return result;
+  }
+
+  if (result.discarded_samples > 0) {
+    static constexpr size_t kSmoothTrimCrossfadeFrames = 64u;
+    const size_t fade_samples = std::min(
+        result.consumed_samples, kSmoothTrimCrossfadeFrames * frame_samples);
+    for (size_t i = 0; i < fade_samples; ++i) {
+      const size_t old_pos =
+          (read_pos_ + i) % buffer_.size();
+      const size_t new_pos =
+          (read_pos_ + result.discarded_samples + i) % buffer_.size();
+      const size_t fade_frame = i / frame_samples;
+      const size_t fade_frames = fade_samples / frame_samples;
+      const s64 old_weight = static_cast<s64>(fade_frames - fade_frame);
+      const s64 new_weight = static_cast<s64>(fade_frame + 1u);
+      const s64 denominator = static_cast<s64>(fade_frames + 1u);
+      const s64 mixed =
+          (static_cast<s64>(buffer_[old_pos]) * old_weight +
+           static_cast<s64>(buffer_[new_pos]) * new_weight) /
+          denominator;
+      const s64 magnitude = mixed < 0 ? -mixed : mixed;
+      result.peak_sample_before_clamp = std::max<u32>(
+          result.peak_sample_before_clamp,
+          static_cast<u32>(std::min<s64>(magnitude,
+                                         std::numeric_limits<u32>::max())));
+      if (mixed < -32768 || mixed > 32767) {
+        ++result.clipped_samples;
+      }
+      out_buffer[i] = static_cast<s16>(std::clamp<s64>(mixed, -32768, 32767));
+    }
+    if (fade_samples < result.consumed_samples) {
+      const size_t remainder_pos = advance_pos(
+          read_pos_, result.discarded_samples + fade_samples, buffer_.size());
+      copy_from_ring(remainder_pos, out_buffer + fade_samples,
+                     result.consumed_samples - fade_samples);
+    }
+    read_pos_ = advance_pos(
+        read_pos_, result.discarded_samples + result.consumed_samples,
+        buffer_.size());
+    result.read_pointer_discontinuities = 1;
+  } else {
+    copy_from_ring(read_pos_, out_buffer, result.consumed_samples);
+    read_pos_ = advance_pos(read_pos_, result.consumed_samples, buffer_.size());
+  }
+  for (size_t i = 0; i < result.consumed_samples; ++i) {
+    const s32 sample = static_cast<s32>(out_buffer[i]);
+    result.peak_sample_before_clamp = std::max<u32>(
+        result.peak_sample_before_clamp,
+        static_cast<u32>(sample < 0 ? -sample : sample));
+  }
+  if (resuming_from_history) {
+    crossfade_from_stutter(out_buffer, result.consumed_samples);
+  }
+  history_push(out_buffer, result.consumed_samples);
+  update_last_output_frame(out_buffer, result.consumed_samples);
+  history_loop_active_ = false;
+  result.queue_samples_after = used_samples();
+  publish_available_locked();
+  return result;
+}
+
+AudioRingBuffer::ReadResult AudioRingBuffer::try_read_history_samples(
+    s16 *out_buffer, size_t requested_count, size_t drain_live_samples) {
+  ReadResult result{};
+  if (requested_count == 0 || out_buffer == nullptr) {
+    return result;
+  }
+
+  std::memset(out_buffer, 0, requested_count * sizeof(s16));
+  std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    result.lock_contended = true;
+    return result;
+  }
+
+  const size_t frame_samples = std::max<u32>(channels_, 1u);
+  const size_t requested_aligned =
+      requested_count - (requested_count % frame_samples);
+  result.queue_samples_before = used_samples();
+  drain_live_samples -= drain_live_samples % frame_samples;
+  result.history_drained_samples =
+      std::min(drain_live_samples,
+               result.queue_samples_before -
+                   (result.queue_samples_before % frame_samples));
+  size_t drain_remaining = result.history_drained_samples;
+  while (drain_remaining > 0) {
+    const size_t chunk = std::min(drain_remaining,
+                                  buffer_.size() - read_pos_);
+    history_push(buffer_.data() + read_pos_, chunk);
+    read_pos_ = advance_pos(read_pos_, chunk, buffer_.size());
+    drain_remaining -= chunk;
+  }
+  result.queue_samples_after = used_samples();
+  publish_available_locked();
+  if (requested_aligned == 0 || history_valid_ < frame_samples ||
+      history_buffer_.empty()) {
+    return result;
+  }
+
+  if (!history_loop_active_) {
+    history_loop_length_ = history_valid_ - (history_valid_ % frame_samples);
+    history_loop_start_ = history_valid_ == history_buffer_.size()
+        ? choose_stutter_start_pos()
+        : 0u;
+    history_loop_offset_ = 0;
+    history_loop_active_ = true;
+  }
+
+  size_t written = 0;
+  while (written < requested_aligned && history_loop_length_ > 0) {
+    const size_t physical =
+        (history_loop_start_ + history_loop_offset_) % history_buffer_.size();
+    const size_t until_loop_end =
+        history_loop_length_ - history_loop_offset_;
+    const size_t until_buffer_end = history_buffer_.size() - physical;
+    const size_t chunk = std::min(
+        requested_aligned - written,
+        std::min(until_loop_end, until_buffer_end));
+    std::memcpy(out_buffer + written, history_buffer_.data() + physical,
+                chunk * sizeof(s16));
+    written += chunk;
+    history_loop_offset_ += chunk;
+    if (history_loop_offset_ >= history_loop_length_) {
+      history_loop_offset_ = 0;
+    }
+  }
+  result.consumed_samples = written;
+  for (size_t i = 0; i < written; ++i) {
+    const s32 sample = static_cast<s32>(out_buffer[i]);
+    result.peak_sample_before_clamp = std::max<u32>(
+        result.peak_sample_before_clamp,
+        static_cast<u32>(sample < 0 ? -sample : sample));
+  }
+  update_last_output_frame(out_buffer, written);
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // samples_from_seconds()
 // ---------------------------------------------------------------------------
@@ -427,8 +665,7 @@ size_t AudioRingBuffer::samples_from_seconds(double seconds) const {
 // available_samples()
 // ---------------------------------------------------------------------------
 size_t AudioRingBuffer::available_samples() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return used_samples();
+  return available_samples_snapshot_.load(std::memory_order_acquire);
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +684,7 @@ void AudioRingBuffer::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   write_pos_ = 0;
   read_pos_ = 0;
+  available_samples_snapshot_.store(0, std::memory_order_release);
   stutter_active_ = false;
   stutter_loop_buffer_.clear();
   stutter_loop_pos_ = 0;
@@ -455,6 +693,10 @@ void AudioRingBuffer::clear() {
   history_valid_ = 0;
   last_output_frame_.fill(0);
   has_last_output_frame_ = false;
+  history_loop_active_ = false;
+  history_loop_start_ = 0;
+  history_loop_length_ = 0;
+  history_loop_offset_ = 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -819,6 +819,9 @@ void Cpu::begin_branch(bool taken, u32 target) {
   if (taken) {
     next_pc_ = target;
   }
+  if (g_cpu_backend_compare_irq_on_branch && sys_ != nullptr) {
+    sys_->irq().request(Interrupt::VBlank);
+  }
 }
 
 // ── Memory Access ──────────────────────────────────────────────────

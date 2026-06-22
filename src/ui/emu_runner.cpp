@@ -126,6 +126,7 @@ void EmuRunner::set_running(bool running) {
     running_.store(running, std::memory_order_release);
     if (system_ != nullptr) {
         system_->set_running(running);
+        system_->set_spu_host_playback_enabled(running);
     }
     control_cv_.notify_all();
     if (!running) {
@@ -326,6 +327,7 @@ void EmuRunner::apply_pending_disc_insert() {
     }
 
     if (system_->swap_disc_image(bin_path, cue_path)) {
+        system_->spu().reset_audio_output("disc change");
         system_->notify_disc_inserted();
     }
 }
@@ -344,6 +346,7 @@ void EmuRunner::apply_pending_disc_eject() {
         return;
     }
     system_->unload_disc();
+    system_->spu().reset_audio_output("disc eject");
 }
 
 void EmuRunner::worker_main() {
@@ -353,22 +356,32 @@ void EmuRunner::worker_main() {
     auto next_tick = steady_clock::now();
 
     auto run_one_frame = [&](bool publish_outputs, bool skip_audio_for_turbo,
-                             bool force_capture) {
+                             bool force_capture) -> u64 {
         frame_active_.store(true, std::memory_order_release);
 
         apply_pending_memory_card_paths();
         apply_input_state(*system_);
         apply_pending_disc_insert();
         apply_pending_disc_eject();
+        const u64 cpu_cycles_before = system_->cpu().cycle_count();
         system_->run_frame(false, skip_audio_for_turbo);
+        const u64 cpu_cycles_after = system_->cpu().cycle_count();
+        const u64 cpu_cycles_advanced = cpu_cycles_after >= cpu_cycles_before
+            ? cpu_cycles_after - cpu_cycles_before
+            : 0u;
         completed_frame_count_.store(
             static_cast<u64>(system_->boot_diag().frame_counter),
             std::memory_order_release);
+        if (g_frame_state_log_frames != 0u &&
+            (system_->boot_diag().frame_counter %
+             g_frame_state_log_frames) == 0u) {
+            system_->debug_log_frame_state();
+        }
 
         if (!publish_outputs) {
             frame_active_.store(false, std::memory_order_release);
             idle_cv_.notify_all();
-            return;
+            return cpu_cycles_advanced;
         }
 
         RuntimeSnapshot snapshot{};
@@ -385,6 +398,7 @@ void EmuRunner::worker_main() {
         snapshot.dma2_words = dma2.transfer_words;
         snapshot.dma2_from_ram = dma2.from_ram;
         snapshot.spu_audio = system_->spu_audio_diag();
+        snapshot.audio_queue = system_->spu().audio_queue_stats(true);
         update_snapshot_display_diag_from_debug(
             snapshot.boot_diag,
             system_->gpu_display_debug_info(),
@@ -457,6 +471,7 @@ void EmuRunner::worker_main() {
 
         frame_active_.store(false, std::memory_order_release);
         idle_cv_.notify_all();
+        return cpu_cycles_advanced;
         };
 
     while (!stop_requested_.load(std::memory_order_acquire)) {
@@ -482,7 +497,7 @@ void EmuRunner::worker_main() {
             if (raw_speed <= 0.0) {
                 const bool publish_outputs =
                     (unlimited_frame_skip_counter++ % (kUnlimitedTurboFrameSkip + 1u)) == 0u;
-                run_one_frame(publish_outputs, true, false);
+                (void)run_one_frame(publish_outputs, true, false);
                 next_tick = steady_clock::now();
                 continue;
             }
@@ -519,8 +534,20 @@ void EmuRunner::worker_main() {
                 i < frames_to_run && running_.load(std::memory_order_acquire) &&
                 !stop_requested_.load(std::memory_order_acquire);
                 ++i) {
-                run_one_frame(true, false, false);
-                next_tick += frame_period;
+                const u64 cpu_cycles_advanced =
+                    run_one_frame(true, false, false);
+                // Pace the emulator's actual master clock, not an assumed
+                // number of cycles per video frame. CPU instructions and DMA
+                // can legally finish past a scanline's nominal cycle budget;
+                // ignoring that overshoot makes SPU production run fast.
+                const auto actual_emulated_period =
+                    cpu_cycles_advanced == 0u
+                    ? frame_period
+                    : std::chrono::duration_cast<steady_clock::duration>(
+                        std::chrono::duration<double>(
+                            (static_cast<double>(cpu_cycles_advanced) /
+                             static_cast<double>(psx::CPU_CLOCK_HZ)) / speed));
+                next_tick += actual_emulated_period;
             }
 
             const auto after = steady_clock::now();

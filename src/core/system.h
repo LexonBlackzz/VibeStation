@@ -380,6 +380,7 @@ public:
   void write8(u32 addr, u8 val);
   void write16(u32 addr, u16 val);
   void write32(u32 addr, u32 val);
+  const u8 *jit_main_ram_data() const { return ram_.data(); }
 
   // Component access (for DMA)
   bool irq_pending() { return irq_.pending(); }
@@ -442,6 +443,23 @@ public:
   const DmaController::TransferDebug &dma_last_debug(int channel) const {
     return dma_.last_debug(channel);
   }
+  u32 debug_dma_read(u32 offset) const { return dma_.read(offset); }
+  const Timer &debug_timer(int index) const {
+    return timers_.debug_timer(index);
+  }
+  bool debug_timer_hblank_active() const {
+    return timers_.debug_hblank_active();
+  }
+  bool debug_timer_vblank_active() const {
+    return timers_.debug_vblank_active();
+  }
+  u32 debug_timer0_dot_remainder() const {
+    return timers_.debug_timer0_dot_remainder();
+  }
+  u32 debug_timer2_sysclk8_remainder() const {
+    return timers_.debug_timer2_sysclk8_remainder();
+  }
+  void debug_log_frame_state() const;
   void debug_log_recent_ram_writes(u32 addr, u32 radius_bytes,
                                    const char *log_prefix = "BUS") const;
 

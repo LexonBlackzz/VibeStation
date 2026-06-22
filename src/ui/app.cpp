@@ -109,6 +109,45 @@ namespace {
             dirty = true;
         }
         ImGui::Checkbox("Force x64 Compile", &g_cpu_x64_jit_force_compile);
+        if (ImGui::Checkbox("Enable All Native x64",
+                &g_cpu_x64_jit_all_native_enabled)) {
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Enable Native Memory Blocks (Experimental)",
+                            &g_cpu_x64_jit_native_memory_enabled)) {
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Enable Native ALU Blocks",
+                &g_cpu_x64_jit_native_alu_enabled)) {
+            dirty = true;
+        }
+        if (g_cpu_x64_jit_all_native_cli_override ||
+            g_cpu_x64_jit_native_memory_cli_override ||
+            g_cpu_x64_jit_native_alu_cli_override) {
+            ImGui::TextDisabled("CLI native tiers: all %s  memory %s  ALU %s",
+                cpu_x64_jit_all_native_enabled() ? "on" : "off",
+                cpu_x64_jit_native_memory_enabled() ? "on" : "off",
+                cpu_x64_jit_native_alu_enabled() ? "on" : "off");
+        }
+        if (ImGui::Checkbox("Enable Native Branch Tails (experimental)",
+                &g_cpu_x64_jit_branch_tail_enabled)) {
+            dirty = true;
+        }
+        if (g_cpu_x64_jit_branch_tail_cli_override) {
+            ImGui::TextDisabled("CLI override: branch tails %s",
+                cpu_x64_jit_branch_tail_enabled() ? "enabled" : "disabled");
+        }
+        if (ImGui::Checkbox("Log Recent Native Branch Tails",
+                &g_cpu_x64_jit_branch_tail_logging)) {
+            dirty = true;
+        }
+        int branch_tail_log_count =
+            static_cast<int>(g_cpu_x64_jit_branch_tail_log_count);
+        if (ImGui::InputInt("Branch Tail Log Count", &branch_tail_log_count)) {
+            g_cpu_x64_jit_branch_tail_log_count =
+                static_cast<u32>(std::max(1, branch_tail_log_count));
+            dirty = true;
+        }
         if (ImGui::Checkbox("Log Hot Native Rejects",
                 &g_cpu_backend_rejected_block_logging)) {
             dirty = true;
@@ -2593,7 +2632,7 @@ void App::update() {
     if (has_started_emulation_) {
         static constexpr u32 kUnderrunNoticeSamplePeriodMs = 1000;
         static constexpr u64 kUnderrunNoticeThreshold = 3;
-        const u64 underruns = runtime_snapshot_.spu_audio.underrun_events;
+        const u64 underruns = runtime_snapshot_.audio_queue.underrun_count;
         const u32 now_ms = SDL_GetTicks();
         if (underrun_notice_last_tick_ms_ == 0) {
             underrun_notice_last_tick_ms_ = now_ms;
@@ -2601,9 +2640,11 @@ void App::update() {
         }
         else if ((now_ms - underrun_notice_last_tick_ms_) >=
             kUnderrunNoticeSamplePeriodMs) {
-            const u32 bucket_value =
-                static_cast<u32>(std::min<u64>(underruns - underrun_notice_last_events_,
-                    std::numeric_limits<u32>::max()));
+            const u64 underrun_delta = underruns >= underrun_notice_last_events_
+                ? underruns - underrun_notice_last_events_
+                : underruns;
+            const u32 bucket_value = static_cast<u32>(std::min<u64>(
+                underrun_delta, std::numeric_limits<u32>::max()));
             if (underrun_notice_bucket_count_ < underrun_notice_buckets_.size()) {
                 ++underrun_notice_bucket_count_;
             }
@@ -2652,7 +2693,9 @@ void App::update() {
                 (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
                     static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS))) * 1000.0);
         const float queue_kb =
-            static_cast<float>(runtime_snapshot_.spu_audio.queue_last_bytes) / 1024.0f;
+            static_cast<float>(
+                runtime_snapshot_.audio_queue.queue_stereo_frames * 2u *
+                sizeof(s16)) / 1024.0f;
 
         smoothed_audio_buffer_fill_pct_ =
             smooth_ui_value(smoothed_audio_buffer_fill_pct_, fill_pct, delta_seconds);
@@ -3505,13 +3548,54 @@ void App::panel_settings() {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.3f, 1.0f),
                     "XA/CDDA baseline is live; advanced modulation is still in progress.");
 
-                float output_buffer_seconds = g_spu_output_buffer_seconds;
-                if (ImGui::InputFloat("Output Buffer (seconds)",
-                    &output_buffer_seconds, 0.1f, 0.5f, "%.2f")) {
-                    output_buffer_seconds =
-                        std::max(0.05f, std::min(8.0f, output_buffer_seconds));
-                    g_spu_output_buffer_seconds = output_buffer_seconds;
+                const auto apply_audio_settings = [&]() {
                     save_persistent_config();
+                    if (system_ == nullptr) {
+                        return;
+                    }
+                    const bool was_running = emu_runner_.is_running();
+                    if (was_running) {
+                        emu_runner_.pause_and_wait_idle();
+                    }
+                    system_->spu().reinitialize_audio_device();
+                    if (was_running) {
+                        emu_runner_.set_running(true);
+                    }
+                };
+
+                int target_latency_ms =
+                    static_cast<int>(g_spu_audio_target_latency_ms);
+                if (ImGui::InputInt("Target Latency (ms)",
+                    &target_latency_ms, 5, 20)) {
+                    g_spu_audio_target_latency_ms = static_cast<u32>(
+                        std::clamp(target_latency_ms, 10, 500));
+                    g_spu_audio_soft_latency_ms = std::max(
+                        g_spu_audio_soft_latency_ms,
+                        g_spu_audio_target_latency_ms);
+                    g_spu_audio_max_latency_ms = std::max(
+                        g_spu_audio_max_latency_ms,
+                        g_spu_audio_soft_latency_ms);
+                    apply_audio_settings();
+                }
+                int soft_latency_ms =
+                    static_cast<int>(g_spu_audio_soft_latency_ms);
+                if (ImGui::InputInt("Soft Correction Starts (ms)",
+                    &soft_latency_ms, 5, 20)) {
+                    g_spu_audio_soft_latency_ms = static_cast<u32>(std::clamp(
+                        soft_latency_ms,
+                        static_cast<int>(g_spu_audio_target_latency_ms), 750));
+                    g_spu_audio_max_latency_ms = std::max(
+                        g_spu_audio_max_latency_ms,
+                        g_spu_audio_soft_latency_ms);
+                    apply_audio_settings();
+                }
+                int max_latency_ms = static_cast<int>(g_spu_audio_max_latency_ms);
+                if (ImGui::InputInt("Maximum Latency (ms)",
+                    &max_latency_ms, 5, 20)) {
+                    g_spu_audio_max_latency_ms = static_cast<u32>(std::clamp(
+                        max_latency_ms,
+                        static_cast<int>(g_spu_audio_soft_latency_ms), 1000));
+                    apply_audio_settings();
                 }
                 float xa_buffer_seconds = g_spu_xa_buffer_seconds;
                 if (ImGui::InputFloat("XA Buffer (seconds)",
@@ -3521,96 +3605,118 @@ void App::panel_settings() {
                     save_persistent_config();
                 }
                 if (ImGui::Checkbox("Enable Audio Queue", &g_spu_enable_audio_queue)) {
-                    save_persistent_config();
+                    apply_audio_settings();
                 }
+                if (ImGui::Checkbox("Enable Crossfaded Smooth Trim",
+                    &g_spu_enable_smooth_trim)) {
+                    apply_audio_settings();
+                }
+                ImGui::TextDisabled(
+                    "Bounded to four crossfaded correction steps per second.");
                 if (ImGui::Checkbox("Lag Stutter Effect", &g_spu_enable_lag_stutter)) {
-                    save_persistent_config();
+                    apply_audio_settings();
                 }
                 if (ImGui::Checkbox("Slowdown Stutter Loop", &g_spu_enable_slowdown_stutter)) {
-                    save_persistent_config();
+                    apply_audio_settings();
                 }
                 if (ImGui::Checkbox("Advanced Sound Status Logging", &g_spu_advanced_sound_status)) {
+                    save_persistent_config();
+                }
+                if (ImGui::Checkbox("Show Audio Queue Stats", &g_spu_show_audio_stats)) {
+                    save_persistent_config();
+                }
+                if (ImGui::Checkbox("Log Audio Queue Stats", &g_spu_audio_stats_log)) {
                     save_persistent_config();
                 }
 
                 // ── Ring-buffer audio configuration ──────────────────────────
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f),
-                    "Ring Buffer Audio Pipeline");
+                    "Bounded Host Audio Queue");
 
-                // Persist these in a local static so they survive tab switches
-                // without hitting the config file every frame.
-                static float ring_buffer_duration = 0.40f;
-                static float ring_history_seconds = 0.40f;
-
-                const bool spu_ready = system_ != nullptr;
-
-                if (ImGui::SliderFloat("Audio Buffer Duration",
-                    &ring_buffer_duration, 0.05f, 2.0f, "%.2f s")) {
-                    if (spu_ready) {
-                        system_->spu().ring_buffer().set_buffer_duration(
-                            static_cast<double>(ring_buffer_duration));
-                    }
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("(dynamic, no pop)");
-
-                if (ImGui::SliderFloat("Stutter History Depth",
-                    &ring_history_seconds, 0.05f, 1.0f, "%.2f s")) {
-                    // History depth is baked at init; re-init to apply.
-                    // The value takes effect on the next reset/boot.
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("(re-init on boot)");
-
-                // Live stutter / ring-buffer status read-outs.
-                if (spu_ready) {
-                    auto &rb = system_->spu().ring_buffer();
-
-                    const bool is_stuttering = rb.is_stuttering();
-                    if (is_stuttering) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                            "Stutter Active: YES [LAG]");
-                    }
-                    else {
-                        ImGui::TextUnformatted("Stutter Active: No");
-                    }
-
-                    const size_t avail = rb.available_samples();
-                    const size_t cap = rb.capacity_samples();
-                    const float fill_pct_raw = cap > 0
-                        ? (static_cast<float>(avail) / static_cast<float>(cap)) * 100.0f
-                        : 0.0f;
-                    const float fill_pct = (smoothed_audio_buffer_fill_pct_ >= 0.0f)
-                        ? smoothed_audio_buffer_fill_pct_
-                        : fill_pct_raw;
-                    const float available_ms_raw = static_cast<float>(avail > 0
-                        ? (static_cast<double>(avail) /
-                           (static_cast<double>(AudioRingBuffer::DEFAULT_SAMPLE_RATE) *
-                            static_cast<double>(AudioRingBuffer::DEFAULT_CHANNELS)) * 1000.0)
-                        : 0.0);
-                    const float available_ms = (smoothed_audio_buffer_available_ms_ >= 0.0f)
-                        ? smoothed_audio_buffer_available_ms_
-                        : available_ms_raw;
-                    const float capacity_ms =
-                        static_cast<float>(rb.capacity_seconds() * 1000.0);
+                if (g_spu_show_audio_stats) {
+                    const auto &stats = runtime_snapshot_.audio_queue;
+                    const auto frames_to_ms = [&](u64 frame_count) -> double {
+                        const u32 rate = stats.obtained_callback_sample_rate != 0u
+                            ? stats.obtained_callback_sample_rate
+                            : stats.emulated_sample_rate;
+                        return rate == 0u ? 0.0
+                            : (static_cast<double>(frame_count) * 1000.0) /
+                                static_cast<double>(rate);
+                    };
+                    const float fill = stats.max_stereo_frames == 0u ? 0.0f
+                        : static_cast<float>(stats.queue_stereo_frames) /
+                            static_cast<float>(stats.max_stereo_frames);
                     char fill_label[128];
                     std::snprintf(fill_label, sizeof(fill_label),
-                        "Buffer Fill: %.1f / %.1f ms (%.0f%%)",
-                        available_ms, capacity_ms, fill_pct);
-                    ImGui::ProgressBar(std::clamp(fill_pct / 100.0f, 0.0f, 1.0f), ImVec2(-1.0f, 0.0f),
-                        fill_label);
-
-                    ImGui::Text("Buffer Capacity: %.1f ms  |  Available: %.1f ms",
-                        capacity_ms, available_ms);
-
-                    const auto &diag = runtime_snapshot_.spu_audio;
-                    if (diag.underrun_events > 0 || diag.overrun_events > 0) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f),
-                            "Underruns: %llu  |  Overruns: %llu",
-                            static_cast<unsigned long long>(diag.underrun_events),
-                            static_cast<unsigned long long>(diag.overrun_events));
-                    }
+                        "Queue: %u stereo frames / %.1f ms",
+                        stats.queue_stereo_frames,
+                        frames_to_ms(stats.queue_stereo_frames));
+                    ImGui::ProgressBar(std::clamp(fill, 0.0f, 1.0f),
+                        ImVec2(-1.0f, 0.0f), fill_label);
+                    ImGui::Text("Target / Soft / Hard: %.1f / %.1f / %.1f ms",
+                        frames_to_ms(stats.target_stereo_frames),
+                        frames_to_ms(stats.soft_latency_stereo_frames),
+                        frames_to_ms(stats.max_stereo_frames));
+                    ImGui::Text("Max Observed: %u stereo frames / %.1f ms",
+                        stats.max_observed_queue_stereo_frames,
+                        frames_to_ms(stats.max_observed_queue_stereo_frames));
+                    ImGui::Text("Last frame - produced / pushed / consumed: %llu / %llu / %llu stereo frames",
+                        static_cast<unsigned long long>(stats.produced_stereo_frames_window),
+                        static_cast<unsigned long long>(stats.pushed_stereo_frames_window),
+                        static_cast<unsigned long long>(stats.callback_consumed_stereo_frames_window));
+                    ImGui::Text("Totals - produced / pushed / consumed: %llu / %llu / %llu stereo frames",
+                        static_cast<unsigned long long>(stats.produced_stereo_frames),
+                        static_cast<unsigned long long>(stats.pushed_stereo_frames),
+                        static_cast<unsigned long long>(stats.callback_consumed_stereo_frames));
+                    ImGui::Text("Underruns: %llu  |  Overruns: %llu  |  Dropped: %llu stereo frames",
+                        static_cast<unsigned long long>(stats.underrun_count),
+                        static_cast<unsigned long long>(stats.overrun_count),
+                        static_cast<unsigned long long>(stats.dropped_stereo_frames));
+                    ImGui::Text("Smooth Trim [%s]: %llu events / %llu stereo frames (last %u, %.1f -> %.1f ms)",
+                        stats.smooth_trim_enabled ? "Enabled" : "Disabled",
+                        static_cast<unsigned long long>(stats.smooth_trim_count),
+                        static_cast<unsigned long long>(stats.smooth_trim_stereo_frames),
+                        stats.smooth_trim_last_stereo_frames,
+                        frames_to_ms(stats.smooth_trim_queue_before_stereo_frames),
+                        frames_to_ms(stats.smooth_trim_queue_after_stereo_frames));
+                    ImGui::Text("Hard Trim: %llu events / %llu stereo frames (last %u)",
+                        static_cast<unsigned long long>(stats.hard_trim_count),
+                        static_cast<unsigned long long>(stats.hard_trim_stereo_frames),
+                        stats.hard_trim_last_stereo_frames);
+                    ImGui::Text("Stutter: %s  |  Enter / Exit: %llu / %llu (%.1f / %.1f ms)",
+                        stats.stutter_active ? "Active" : "Inactive",
+                        static_cast<unsigned long long>(stats.stutter_enter_count),
+                        static_cast<unsigned long long>(stats.stutter_exit_count),
+                        frames_to_ms(stats.stutter_enter_stereo_frames),
+                        frames_to_ms(stats.stutter_exit_stereo_frames));
+                    ImGui::Text("Producer / Host Drift (last frame window): %+.3f%% (%+lld stereo frames)",
+                        stats.producer_consumer_drift_percent,
+                        static_cast<long long>(stats.producer_consumer_drift_stereo_frames_window));
+                    ImGui::Text("Silence / Stutter: %llu / %llu stereo frames  |  Callback lock misses: %llu",
+                        static_cast<unsigned long long>(stats.callback_silence_stereo_frames),
+                        static_cast<unsigned long long>(stats.callback_stutter_stereo_frames),
+                        static_cast<unsigned long long>(stats.callback_lock_misses));
+                    ImGui::Text("Host Output Peak (pre-clamp): %u  |  Clipped: %llu samples",
+                        stats.output_peak_sample_before_clamp,
+                        static_cast<unsigned long long>(stats.output_clipped_samples));
+                    ImGui::Text("Read Pointer Discontinuities: %llu",
+                        static_cast<unsigned long long>(
+                            stats.read_pointer_discontinuity_count));
+                    ImGui::Text("Requested / Obtained / Preferred Rate: %u / %u / %u Hz",
+                        stats.requested_callback_sample_rate,
+                        stats.obtained_callback_sample_rate,
+                        stats.preferred_device_sample_rate);
+                    ImGui::Text("Requested / Obtained Callback: %u / %u stereo frames  |  SDL conversion: %s",
+                        stats.requested_callback_buffer_frames,
+                        stats.obtained_callback_buffer_frames,
+                        stats.sdl_internal_conversion_expected ? "Expected" : "Not expected");
+                    ImGui::Text("Queue Resets: %llu  |  Device Reinits: %llu",
+                        static_cast<unsigned long long>(stats.queue_reset_count),
+                        static_cast<unsigned long long>(stats.device_reinit_count));
+                }
+                else {
+                    ImGui::TextDisabled("Audio queue statistics are hidden.");
                 }
 
                 ImGui::Separator();
@@ -4451,6 +4557,7 @@ void App::draw_spu_diagnostic_mode_controls() {
 
 void App::draw_sound_status_content() {
     const auto& diag = runtime_snapshot_.spu_audio;
+    const auto& queue_stats = runtime_snapshot_.audio_queue;
     const auto avg_count = [](u64 accum, u64 samples) -> float {
         const u64 denom = std::max<u64>(samples, 1);
         return static_cast<float>(accum) / static_cast<float>(denom);
@@ -4461,11 +4568,14 @@ void App::draw_sound_status_content() {
     const float avg_audible =
         avg_count(diag.audible_voice_accum, diag.audible_voice_samples);
     const float queue_kb_raw =
-        static_cast<float>(diag.queue_last_bytes) / 1024.0f;
+        static_cast<float>(queue_stats.queue_stereo_frames * 2u * sizeof(s16)) /
+        1024.0f;
     const float queue_kb =
         (smoothed_audio_queue_kb_ >= 0.0f) ? smoothed_audio_queue_kb_ : queue_kb_raw;
     const float queue_peak_kb =
-        static_cast<float>(diag.queue_peak_bytes) / 1024.0f;
+        static_cast<float>(queue_stats.max_observed_queue_stereo_frames * 2u *
+            sizeof(s16)) /
+        1024.0f;
 
     ImGui::Text("Realtime SPU voice monitor (updates every emulated frame).");
     if (ImGui::Button("Reset Sound Stats")) {
@@ -4475,6 +4585,7 @@ void App::draw_sound_status_content() {
         }
         system_->reset_spu_audio_diag();
         runtime_snapshot_.spu_audio = system_->spu_audio_diag();
+        runtime_snapshot_.audio_queue = system_->spu().audio_queue_stats(false);
         status_message_ = "SPU sound stats reset";
         if (was_running) {
             emu_runner_.set_running(true);
@@ -4488,11 +4599,23 @@ void App::draw_sound_status_content() {
     ImGui::Text("Generated/Queued Frames: %llu / %llu",
         static_cast<unsigned long long>(diag.generated_frames),
         static_cast<unsigned long long>(diag.queued_frames));
-    ImGui::Text("Dropped Frames: %llu (Overruns: %llu, Underruns: %llu)",
-        static_cast<unsigned long long>(diag.dropped_frames),
-        static_cast<unsigned long long>(diag.overrun_events),
-        static_cast<unsigned long long>(diag.underrun_events));
-    ImGui::Text("Audio Queue: %.1f KB (peak %.1f KB)", queue_kb, queue_peak_kb);
+    ImGui::Text("Dropped Stereo Frames: %llu (Overruns: %llu, Underruns: %llu)",
+        static_cast<unsigned long long>(queue_stats.dropped_stereo_frames),
+        static_cast<unsigned long long>(queue_stats.overrun_count),
+        static_cast<unsigned long long>(queue_stats.underrun_count));
+    if (g_spu_show_audio_stats) {
+        const double queue_latency_ms =
+            queue_stats.obtained_callback_sample_rate == 0u
+            ? 0.0
+            : (static_cast<double>(queue_stats.queue_stereo_frames) * 1000.0) /
+                static_cast<double>(queue_stats.obtained_callback_sample_rate);
+        ImGui::Text("Audio Queue: %.1f KB (peak %.1f KB), %.1f ms",
+            queue_kb, queue_peak_kb, queue_latency_ms);
+        ImGui::Text("Produced / Pushed / Callback Consumed: %llu / %llu / %llu stereo frames",
+            static_cast<unsigned long long>(queue_stats.produced_stereo_frames),
+            static_cast<unsigned long long>(queue_stats.pushed_stereo_frames),
+            static_cast<unsigned long long>(queue_stats.callback_consumed_stereo_frames));
+    }
     if (!g_spu_advanced_sound_status) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.35f, 1.0f),
@@ -7534,6 +7657,22 @@ void App::load_persistent_config() {
             g_cpu_x64_jit_min_block_instructions =
                 static_cast<u32>(std::max(1ul, std::min(64ul, parsed)));
         }
+        else if (key == "cpu_x64_jit_branch_tail_enabled") {
+            g_cpu_x64_jit_branch_tail_enabled =
+                parse_bool(value, g_cpu_x64_jit_branch_tail_enabled);
+        }
+        else if (key == "cpu_x64_jit_all_native_enabled") {
+            g_cpu_x64_jit_all_native_enabled =
+                parse_bool(value, g_cpu_x64_jit_all_native_enabled);
+        }
+        else if (key == "cpu_x64_jit_native_memory_enabled") {
+            g_cpu_x64_jit_native_memory_enabled =
+                parse_bool(value, g_cpu_x64_jit_native_memory_enabled);
+        }
+        else if (key == "cpu_x64_jit_native_alu_enabled") {
+            g_cpu_x64_jit_native_alu_enabled =
+                parse_bool(value, g_cpu_x64_jit_native_alu_enabled);
+        }
         else if (key == "memory_card_slot1_mode") {
             const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
             config_memory_card_mode_[0] = std::max(0, std::min(2, parsed));
@@ -7617,6 +7756,21 @@ void App::load_persistent_config() {
             const float clamped = std::max(0.05f, std::min(8.0f, parsed));
             g_spu_output_buffer_seconds = clamped;
         }
+        else if (key == "spu_audio_target_latency_ms") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            g_spu_audio_target_latency_ms = static_cast<u32>(
+                std::clamp(parsed, 10ul, 500ul));
+        }
+        else if (key == "spu_audio_max_latency_ms") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            g_spu_audio_max_latency_ms = static_cast<u32>(
+                std::clamp(parsed, 10ul, 1000ul));
+        }
+        else if (key == "spu_audio_soft_latency_ms") {
+            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+            g_spu_audio_soft_latency_ms = static_cast<u32>(
+                std::clamp(parsed, 10ul, 750ul));
+        }
         else if (key == "spu_xa_buffer_seconds") {
             const float parsed = std::strtof(value.c_str(), nullptr);
             const float clamped = std::max(0.0f, std::min(5.0f, parsed));
@@ -7625,8 +7779,8 @@ void App::load_persistent_config() {
         // Backward compatibility with older config keys in milliseconds.
         else if (key == "spu_output_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            const u32 clamped = static_cast<u32>(std::max(16ul, std::min(1000ul, parsed)));
-            g_spu_output_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
+            g_spu_audio_target_latency_ms = static_cast<u32>(
+                std::clamp(parsed, 10ul, 500ul));
         }
         else if (key == "spu_xa_latency_ms") {
             const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
@@ -7635,6 +7789,16 @@ void App::load_persistent_config() {
         }
         else if (key == "spu_enable_audio_queue") {
             g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
+        }
+        else if (key == "spu_enable_smooth_trim") {
+            g_spu_enable_smooth_trim =
+                parse_bool(value, g_spu_enable_smooth_trim);
+        }
+        else if (key == "spu_show_audio_stats") {
+            g_spu_show_audio_stats = parse_bool(value, g_spu_show_audio_stats);
+        }
+        else if (key == "spu_audio_stats_log") {
+            g_spu_audio_stats_log = parse_bool(value, g_spu_audio_stats_log);
         }
         else if (key == "spu_enable_lag_stutter") {
             g_spu_enable_lag_stutter =
@@ -7800,6 +7964,12 @@ void App::load_persistent_config() {
 
     g_spu_output_buffer_seconds =
         std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
+    g_spu_audio_target_latency_ms =
+        std::clamp(g_spu_audio_target_latency_ms, 10u, 500u);
+    g_spu_audio_soft_latency_ms = std::clamp(g_spu_audio_soft_latency_ms,
+        g_spu_audio_target_latency_ms, 750u);
+    g_spu_audio_max_latency_ms = std::clamp(g_spu_audio_max_latency_ms,
+        g_spu_audio_soft_latency_ms, 1000u);
     g_spu_xa_buffer_seconds =
         std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
     if (!g_gpu_fast_mode) {
@@ -7829,6 +7999,14 @@ void App::save_persistent_config() const {
         << g_cpu_x64_jit_hot_block_threshold << "\n";
     out << "cpu_x64_jit_min_block_instructions="
         << g_cpu_x64_jit_min_block_instructions << "\n";
+    out << "cpu_x64_jit_branch_tail_enabled="
+        << (g_cpu_x64_jit_branch_tail_enabled ? 1 : 0) << "\n";
+    out << "cpu_x64_jit_all_native_enabled="
+        << (g_cpu_x64_jit_all_native_enabled ? 1 : 0) << "\n";
+    out << "cpu_x64_jit_native_memory_enabled="
+        << (g_cpu_x64_jit_native_memory_enabled ? 1 : 0) << "\n";
+    out << "cpu_x64_jit_native_alu_enabled="
+        << (g_cpu_x64_jit_native_alu_enabled ? 1 : 0) << "\n";
     out << "memory_card_slot1_mode="
         << std::max(0, std::min(2, config_memory_card_mode_[0])) << "\n";
     out << "memory_card_slot2_mode="
@@ -7859,10 +8037,15 @@ void App::save_persistent_config() const {
             << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
     }
     out << std::fixed << std::setprecision(3);
-    out << "spu_output_buffer_seconds=" << g_spu_output_buffer_seconds << "\n";
     out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";
     out.unsetf(std::ios::floatfield);
+    out << "spu_audio_target_latency_ms=" << g_spu_audio_target_latency_ms << "\n";
+    out << "spu_audio_soft_latency_ms=" << g_spu_audio_soft_latency_ms << "\n";
+    out << "spu_audio_max_latency_ms=" << g_spu_audio_max_latency_ms << "\n";
     out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
+    out << "spu_enable_smooth_trim=" << (g_spu_enable_smooth_trim ? 1 : 0) << "\n";
+    out << "spu_show_audio_stats=" << (g_spu_show_audio_stats ? 1 : 0) << "\n";
+    out << "spu_audio_stats_log=" << (g_spu_audio_stats_log ? 1 : 0) << "\n";
     out << "spu_enable_lag_stutter=" << (g_spu_enable_lag_stutter ? 1 : 0) << "\n";
     out << "spu_enable_slowdown_stutter="
         << (g_spu_enable_slowdown_stutter ? 1 : 0) << "\n";

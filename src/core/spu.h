@@ -144,6 +144,74 @@ public:
     u32 queue_last_bytes = 0;
   };
 
+  struct AudioQueueStats {
+    // All time-domain audio counts in this structure are stereo frames.
+    // A stereo frame contains one left and one right s16 sample value.
+    u64 emulated_cpu_cycles = 0;
+    u64 expected_spu_stereo_frames = 0;
+    u64 produced_stereo_frames = 0;
+    u64 pushed_stereo_frames = 0;
+    u64 callback_consumed_stereo_frames = 0;
+    u64 callback_output_stereo_frames = 0;
+    u64 callback_silence_stereo_frames = 0;
+    u64 callback_stutter_stereo_frames = 0;
+    u64 callback_invocations = 0;
+    u64 dropped_stereo_frames = 0;
+    u64 underrun_count = 0;
+    u64 overrun_count = 0;
+    u64 callback_lock_misses = 0;
+    u64 smooth_trim_count = 0;
+    u64 smooth_trim_stereo_frames = 0;
+    u64 hard_trim_count = 0;
+    u64 hard_trim_stereo_frames = 0;
+    u64 stutter_enter_count = 0;
+    u64 stutter_exit_count = 0;
+    // These two counters intentionally count individual interleaved s16
+    // sample values because they describe amplitude processing, not time.
+    u64 output_clipped_samples = 0;
+    u64 read_pointer_discontinuity_count = 0;
+    u64 queue_reset_count = 0;
+    u64 device_reinit_count = 0;
+    u64 produced_stereo_frames_window = 0;
+    u64 pushed_stereo_frames_window = 0;
+    u64 callback_consumed_stereo_frames_window = 0;
+    u64 callback_output_stereo_frames_window = 0;
+    s64 producer_consumer_drift_stereo_frames_window = 0;
+    double producer_consumer_drift_percent = 0.0;
+    u32 queue_stereo_frames = 0;
+    u32 max_observed_queue_stereo_frames = 0;
+    u32 target_stereo_frames = 0;
+    u32 soft_latency_stereo_frames = 0;
+    u32 max_stereo_frames = 0;
+    u32 smooth_trim_last_stereo_frames = 0;
+    u32 smooth_trim_queue_before_stereo_frames = 0;
+    u32 smooth_trim_queue_after_stereo_frames = 0;
+    u32 hard_trim_last_stereo_frames = 0;
+    u32 stutter_enter_stereo_frames = 0;
+    u32 stutter_exit_stereo_frames = 0;
+    u32 output_peak_sample_before_clamp = 0;
+    u32 requested_callback_sample_rate = 0;
+    u32 obtained_callback_sample_rate = 0;
+    u32 preferred_device_sample_rate = 0;
+    u32 emulated_sample_rate = 0;
+    u32 requested_callback_buffer_frames = 0;
+    u32 obtained_callback_buffer_frames = 0;
+    u16 requested_sample_format = 0;
+    u16 obtained_sample_format = 0;
+    u16 preferred_device_sample_format = 0;
+    u8 requested_channels = 0;
+    u8 obtained_channels = 0;
+    u8 preferred_device_channels = 0;
+    bool queue_enabled = false;
+    bool device_open = false;
+    bool playback_enabled = false;
+    bool stutter_active = false;
+    bool smooth_trim_enabled = false;
+    bool raw_drift_mode = false;
+    bool preferred_device_format_available = false;
+    bool sdl_internal_conversion_expected = false;
+  };
+
   void init(System *sys);
   void shutdown();
   void reset();
@@ -165,6 +233,8 @@ public:
     reverb_mix_multiplier_.store(clamped, std::memory_order_release);
   }
   void set_host_playback_enabled(bool enabled);
+  void reset_audio_output(const char *reason);
+  void reinitialize_audio_device();
   void set_force_reverb(bool enabled);
   void set_lag_stutter_hint(bool enabled) {
     lag_stutter_hint_.store(enabled, std::memory_order_release);
@@ -175,7 +245,9 @@ public:
 
   u16 status() const { return spustat_; }
   const AudioDiag &audio_diag() const { return audio_diag_; }
-  void reset_audio_diag() { audio_diag_ = AudioDiag{}; }
+  void reset_audio_diag();
+  AudioQueueStats audio_queue_stats(bool reset_window = false) const;
+  void reset_audio_queue_stats();
 
   void set_audio_capture(bool enabled) { capture_enabled_ = enabled; }
   bool audio_capture_enabled() const { return capture_enabled_; }
@@ -217,10 +289,6 @@ private:
   static constexpr u32 SPU_RAM_MASK = 0x7FFFFu;
   static constexpr u32 SPU_RAM_WORD_MASK = 0x7FFFEu;
   static constexpr u32 SPUCNT_MODE_APPLY_DELAY_CYCLES = 0x100u;
-  static constexpr u32 HOST_TARGET_QUEUE_BYTES_MIN = 16384u;
-  static constexpr u32 HOST_MAX_QUEUE_BYTES_MIN = 65536u;
-  static constexpr size_t HOST_STAGING_MAX_SAMPLES =
-      static_cast<size_t>(SAMPLE_RATE) * 2 * 4;
   static constexpr size_t CAPTURE_MAX_SAMPLES =
       static_cast<size_t>(SAMPLE_RATE) * 2 * 180;
   static constexpr size_t CD_INPUT_MAX_SAMPLES =
@@ -324,12 +392,43 @@ private:
   bool audio_enabled_ = false;
   std::atomic<bool> audio_started_{false};
   std::atomic<bool> host_playback_enabled_{false};
-  std::atomic<bool> ring_stutter_active_last_pump_{false};
+  std::atomic<bool> audio_queue_enabled_{true};
+  std::atomic<bool> smooth_trim_enabled_{false};
+  std::atomic<bool> lag_stutter_enabled_{true};
+  std::atomic<bool> slowdown_stutter_enabled_{false};
+  std::atomic<bool> starvation_stutter_active_{false};
+  std::atomic<bool> raw_drift_mode_{false};
   bool capture_enabled_ = false;
   u32 host_buffer_bytes_ = 0;
   u32 opened_audio_samples_ = 0;
-  u32 host_target_queue_bytes_ = HOST_TARGET_QUEUE_BYTES_MIN;
-  u32 host_max_queue_bytes_ = HOST_MAX_QUEUE_BYTES_MIN;
+  std::atomic<u32> obtained_callback_sample_rate_{0};
+  std::atomic<u32> obtained_callback_buffer_frames_{0};
+  std::atomic<u32> target_queue_stereo_frames_{0};
+  std::atomic<u32> soft_queue_stereo_frames_{0};
+  std::atomic<u32> max_queue_stereo_frames_{0};
+  std::atomic<u32> stutter_enter_stereo_frames_{0};
+  std::atomic<u32> stutter_exit_stereo_frames_{0};
+  u32 requested_callback_sample_rate_ = 0;
+  u32 requested_callback_buffer_frames_ = 0;
+  u16 requested_sample_format_ = 0;
+  u16 obtained_sample_format_ = 0;
+  u8 requested_channels_ = 0;
+  u8 obtained_channels_ = 0;
+  u32 preferred_device_sample_rate_ = 0;
+  u16 preferred_device_sample_format_ = 0;
+  u8 preferred_device_channels_ = 0;
+  bool preferred_device_format_available_ = false;
+  bool sdl_internal_conversion_expected_ = false;
+  u64 last_audio_stats_log_counter_ = 0;
+  u64 last_audio_stats_log_cpu_cycles_ = 0;
+  u64 last_audio_stats_log_produced_stereo_frames_ = 0;
+  u64 last_audio_stats_log_pushed_stereo_frames_ = 0;
+  u64 last_audio_stats_log_consumed_stereo_frames_ = 0;
+  u64 last_audio_stats_log_output_stereo_frames_ = 0;
+  u64 last_audio_stats_log_callback_invocations_ = 0;
+  size_t next_audio_stats_milestone_ = 0;
+  bool soft_correction_active_ = false;
+  u32 soft_correction_callback_counter_ = 0;
 
   std::array<u16, 0x200> regs_ = {};
   std::array<u8, 512 * 1024> spu_ram_ = {};
@@ -376,8 +475,45 @@ private:
 
   AudioDiag audio_diag_ = {};
   AudioRingBuffer audio_ring_buffer_;
-  std::vector<s16> host_staging_samples_;
-  size_t host_staging_read_pos_ = 0;
+  mutable std::atomic<u64> emulated_cpu_cycles_total_{0};
+  mutable std::atomic<u64> produced_stereo_frames_total_{0};
+  mutable std::atomic<u64> pushed_stereo_frames_total_{0};
+  mutable std::atomic<u64> callback_consumed_stereo_frames_total_{0};
+  mutable std::atomic<u64> callback_output_stereo_frames_total_{0};
+  mutable std::atomic<u64> callback_silence_stereo_frames_total_{0};
+  mutable std::atomic<u64> callback_stutter_stereo_frames_total_{0};
+  mutable std::atomic<u64> callback_invocations_total_{0};
+  mutable std::atomic<u64> dropped_stereo_frames_total_{0};
+  mutable std::atomic<u64> audio_underrun_count_{0};
+  mutable std::atomic<u64> audio_overrun_count_{0};
+  mutable std::atomic<u64> callback_lock_misses_{0};
+  mutable std::atomic<u64> smooth_trim_count_{0};
+  mutable std::atomic<u64> smooth_trim_stereo_frames_{0};
+  mutable std::atomic<u64> hard_trim_count_{0};
+  mutable std::atomic<u64> hard_trim_stereo_frames_{0};
+  mutable std::atomic<u64> stutter_enter_count_{0};
+  mutable std::atomic<u64> stutter_exit_count_{0};
+  mutable std::atomic<u64> output_clipped_samples_{0};
+  mutable std::atomic<u64> read_pointer_discontinuity_count_{0};
+  mutable std::atomic<u64> audio_queue_reset_count_{0};
+  mutable std::atomic<u64> audio_device_reinit_count_{0};
+  mutable std::atomic<u64> produced_stereo_frames_window_{0};
+  mutable std::atomic<u64> pushed_stereo_frames_window_{0};
+  mutable std::atomic<u64> callback_consumed_stereo_frames_window_{0};
+  mutable std::atomic<u64> callback_output_stereo_frames_window_{0};
+  mutable std::atomic<u32> max_observed_queue_stereo_frames_{0};
+  mutable std::atomic<u32> smooth_trim_last_stereo_frames_{0};
+  mutable std::atomic<u32> smooth_trim_queue_before_stereo_frames_{0};
+  mutable std::atomic<u32> smooth_trim_queue_after_stereo_frames_{0};
+  mutable std::atomic<u32> hard_trim_last_stereo_frames_{0};
+  mutable std::atomic<u32> output_peak_sample_before_clamp_{0};
+  mutable std::atomic<u64> audio_measurement_start_counter_{0};
+  mutable std::atomic<u64> measurement_start_cpu_cycles_{0};
+  mutable std::atomic<u64> measurement_start_produced_stereo_frames_{0};
+  mutable std::atomic<u64> measurement_start_pushed_stereo_frames_{0};
+  mutable std::atomic<u64> measurement_start_consumed_stereo_frames_{0};
+  mutable std::atomic<u64> measurement_start_output_stereo_frames_{0};
+  mutable std::atomic<u64> measurement_start_callback_invocations_{0};
   std::vector<s16> mix_buffer_;
   std::vector<s16> capture_samples_;
   std::ofstream host_wav_capture_;

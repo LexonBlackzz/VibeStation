@@ -110,7 +110,26 @@ enum class NativeBlockRejectDetail : u8 {
   Cold,
   TooShort,
   CompileFailure,
+  BranchTailMissingBranch,
+  BranchTailUnsupportedBranch,
+  BranchTailMissingDelaySlot,
+  BranchTailUnsupportedBody,
+  BranchTailUnsupportedDelaySlot,
+  BranchTailNestedDelayBranch,
+  BranchTailDisabled,
+  BranchTailBlacklisted,
 };
+
+enum class NativeMemoryRegion : u8 {
+  Ram,
+  Scratchpad,
+  BiosReadOnly,
+  Mmio,
+  UnknownSlow,
+};
+
+NativeMemoryRegion classify_native_memory_region(u32 addr);
+const char *native_memory_region_name(NativeMemoryRegion region);
 
 struct CpuBlockRunResult {
   u32 cycles = 0;
@@ -158,6 +177,12 @@ struct DecodedBlock {
   u32 registered_page_count = 0;
   u32 last_invalidation_query = 0;
   u64 entry_count = 0;
+  u64 native_branch_tail_entry_count = 0;
+  u64 native_prepare_helper_call_count = 0;
+  u64 native_finish_helper_call_count = 0;
+  u64 native_memory_helper_call_count = 0;
+  u64 native_branch_helper_call_count = 0;
+  mutable u64 native_helper_calls_logged = 0;
   NativeFn native_fn = nullptr;
   void *native_context = nullptr;
   void (*destroy_native_context)(void *) = nullptr;
@@ -170,12 +195,19 @@ struct DecodedBlock {
   bool invalidated = false;
   bool has_control_flow = false;
   bool has_fallback = false;
+  bool has_memory = false;
+  bool has_load = false;
+  bool has_store = false;
+  u8 native_memory_runtime_filter_reason = 0;
   bool native_compile_attempted = false;
   bool native_safety_checked = false;
   bool native_stage1_safe = false;
+  bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =
       NativeBlockRejectReason::None;
+  NativeBlockRejectDetail native_reject_detail =
+      NativeBlockRejectDetail::None;
 };
 
 class CpuOptimizedBackend {
@@ -224,6 +256,20 @@ private:
     std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
   };
 
+  struct NativeBranchTailTrace {
+    u64 sequence = 0;
+    u32 start_pc = 0;
+    u32 branch_pc = 0;
+    u32 target = 0;
+    u32 final_pc = 0;
+    u32 final_next_pc = 0;
+    DecodedOp delay_op = DecodedOp::Unsupported;
+    bool taken = false;
+    bool delay_memory = false;
+    bool delay_mmio = false;
+    bool exception = false;
+  };
+
   DecodedBlock *lookup_or_decode(u32 pc);
   DecodedBlock *decode_block(u32 pc);
   DecodedInstruction decode_instruction(u32 pc, u32 bits) const;
@@ -249,6 +295,7 @@ private:
                                              CpuBlockRunResult *result);
   static bool x64_native_memory_instruction(void *context, u32 op,
                                             u32 rt_or_value, u32 addr);
+  static void x64_native_branch_instruction(void *context, u32 taken);
   static bool x64_native_finish_instruction(void *context, u32 index,
                                             CpuBlockRunResult *result,
                                             u32 memory_instruction);
@@ -276,6 +323,12 @@ private:
   void record_native_block_rejection(
       const DecodedBlock &block, NativeBlockRejectDetail detail);
   void log_rejected_block_profiles() const;
+  bool native_branch_tail_pc_blacklisted(const DecodedBlock &block) const;
+  void record_native_branch_tail_trace(const DecodedBlock &block, bool taken,
+                                       bool delay_memory, bool delay_mmio,
+                                       bool exception);
+  void log_native_branch_tail_diagnostics() const;
+  void log_native_helper_pc_diagnostics() const;
   void warn_forced_interpreter_once(CpuForcedInterpreterReason reason);
   void log_periodic_stats();
   void log_stats_section(const CpuBackendStats &current,
@@ -287,9 +340,12 @@ private:
   std::unordered_map<u32, std::unique_ptr<DecodedBlock>> blocks_;
   std::unordered_map<u32, BlockHistory> block_history_;
   std::unordered_map<u32, NativeRejectedBlockProfile> rejected_block_profiles_;
+  std::deque<NativeBranchTailTrace> recent_native_branch_tails_;
   std::unordered_map<u32, std::vector<DecodedBlock *>> blocks_by_page_;
   std::array<u64, kCodePageBitmapWordCount> compiled_code_page_bitmap_{};
   u32 invalidation_query_stamp_ = 0;
+  u64 native_branch_tail_trace_sequence_ = 0;
+  u64 native_memory_trace_emitted_ = 0;
   u32 current_frame_ = 0;
   u32 last_stats_log_frame_ = 0;
   bool x64_unavailable_warned_ = false;

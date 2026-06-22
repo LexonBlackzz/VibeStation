@@ -15,6 +15,7 @@
 #include <array>
 #include <memory>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 struct AutoInputConfig {
@@ -958,13 +959,25 @@ struct CpuCompareCodeMutation {
   bool invalidate_icache_line = true;
 };
 
+struct CpuCompareNativeTierMode {
+  bool all_native = true;
+  bool memory_native = true;
+  bool alu_native = true;
+};
+
 struct CpuCompareCase {
   const char *name = "";
   std::vector<u32> program;
   std::vector<CpuCompareMemoryWord> memory;
+  std::vector<u32> compare_memory_addresses;
   std::vector<CpuCompareCodeMutation> mutations;
   std::vector<u32> segment_instructions;
+  std::vector<CpuCompareNativeTierMode> segment_native_tiers;
   std::array<u32, 32> initial_gpr{};
+  u32 initial_cop0_sr_bits = 0;
+  u32 initial_irq_mask = 0;
+  bool initial_irq_pending = false;
+  bool request_irq_on_branch = false;
   u32 instructions = 0;
   bool expect_final_control_state = false;
   u32 expected_pc = 0;
@@ -977,14 +990,98 @@ struct CpuCompareCase {
   bool require_native_memory_helper_when_available = false;
   bool require_native_memory_exception_when_available = false;
   bool require_native_helper_load_delay_entry_when_available = false;
+  bool require_native_branch_tail_when_available = false;
+  bool native_branch_should_be_taken = false;
+  u8 native_branch_primary_op = 0xFFu;
+  bool require_native_branch_delay_memory_helper_when_available = false;
+  bool require_native_mmio_when_available = false;
+  bool disable_branch_tail_for_x64 = false;
+  bool blacklist_branch_tail_for_x64 = false;
+  bool require_branch_tail_disabled_fallback_when_available = false;
+  bool require_branch_tail_blacklisted_fallback_when_available = false;
+  bool allow_partial_native_branch_tail = false;
+  bool allow_partial_native_memory_helper = false;
+  bool compare_segment_states = false;
+  bool disable_all_native_for_x64 = false;
+  bool disable_memory_native_for_x64 = false;
+  bool disable_alu_native_for_x64 = false;
+  bool require_all_native_disabled_fallback_when_available = false;
+  bool require_memory_native_disabled_fallback_when_available = false;
+  bool require_alu_native_disabled_fallback_when_available = false;
+  bool require_native_memory_tier_entry_when_available = false;
+  bool require_native_alu_tier_entry_when_available = false;
+  bool enable_ram_load_fastpath_for_x64 = false;
+  bool require_native_ram_load_fastpath_when_available = false;
+  bool require_no_native_ram_load_fastpath = false;
   bool expect_x64_fallback = false;
 };
+
+struct CpuComparePeripheralState {
+  u32 irq_stat = 0;
+  u32 irq_mask = 0;
+  u32 dma_dpcr = 0;
+  u32 dma_dicr = 0;
+  u64 cd_sector_count = 0;
+  int cd_read_lba = 0;
+  int cd_active_lba = 0;
+  int cd_data_index = 0;
+  int cd_busy_cycles = 0;
+  size_t cd_pending_irqs = 0;
+  size_t cd_response_size = 0;
+  u8 cd_last_irq = 0;
+  bool cd_data_ready = false;
+  bool cd_data_request = false;
+};
+
+static bool cpu_compare_peripherals_equal(
+    const CpuComparePeripheralState &a,
+    const CpuComparePeripheralState &b) {
+  return a.irq_stat == b.irq_stat && a.irq_mask == b.irq_mask &&
+         a.dma_dpcr == b.dma_dpcr && a.dma_dicr == b.dma_dicr &&
+         a.cd_sector_count == b.cd_sector_count &&
+         a.cd_read_lba == b.cd_read_lba &&
+         a.cd_active_lba == b.cd_active_lba &&
+         a.cd_data_index == b.cd_data_index &&
+         a.cd_busy_cycles == b.cd_busy_cycles &&
+         a.cd_pending_irqs == b.cd_pending_irqs &&
+         a.cd_response_size == b.cd_response_size &&
+         a.cd_last_irq == b.cd_last_irq &&
+         a.cd_data_ready == b.cd_data_ready &&
+         a.cd_data_request == b.cd_data_request;
+}
 
 struct CpuCompareRunResult {
   CpuDebugState state{};
   CpuBackendStats stats{};
   CpuRunSliceResult run{};
+  std::vector<CpuDebugState> segment_states;
+  std::vector<CpuComparePeripheralState> segment_peripherals;
+  CpuComparePeripheralState peripherals{};
+  u32 irq_stat = 0;
+  u32 irq_mask = 0;
+  std::vector<u32> memory_values;
 };
+
+static CpuComparePeripheralState capture_cpu_compare_peripherals(
+    System &sys) {
+  const CdRom &cd = sys.cdrom();
+  CpuComparePeripheralState out{};
+  out.irq_stat = sys.irq().stat();
+  out.irq_mask = sys.irq().mask();
+  out.dma_dpcr = sys.debug_dma_read(0x70u);
+  out.dma_dicr = sys.debug_dma_read(0x74u);
+  out.cd_sector_count = cd.sector_count();
+  out.cd_read_lba = cd.current_read_lba();
+  out.cd_active_lba = cd.active_data_lba();
+  out.cd_data_index = cd.dma_data_index();
+  out.cd_busy_cycles = cd.busy_cycles_remaining();
+  out.cd_pending_irqs = cd.pending_irq_count();
+  out.cd_response_size = cd.response_fifo_size();
+  out.cd_last_irq = cd.last_irq_code();
+  out.cd_data_ready = cd.sector_data_ready();
+  out.cd_data_request = cd.sector_data_request();
+  return out;
+}
 
 static u32 enc_r(u32 rs, u32 rt, u32 rd, u32 shamt, u32 funct) {
   return ((rs & 31u) << 21) | ((rt & 31u) << 16) | ((rd & 31u) << 11) |
@@ -1178,6 +1275,13 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   for (const CpuCompareMemoryWord &word : test_case.memory) {
     sys->write32(word.addr, word.value);
   }
+  if (test_case.initial_irq_mask != 0u ||
+      test_case.request_irq_on_branch || test_case.initial_irq_pending) {
+    sys->irq().write(4u, test_case.initial_irq_mask);
+  }
+  if (test_case.initial_irq_pending) {
+    sys->irq().request(Interrupt::VBlank);
+  }
 
   CpuDebugState initial = sys->cpu().debug_state();
   initial.pc = kCpuComparePc;
@@ -1194,6 +1298,7 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   initial.pending_branch_pc = 0;
   initial.active_branch_pc = 0;
   initial.exception_raised = false;
+  initial.cop0_sr |= test_case.initial_cop0_sr_bits;
   for (u32 i = 0; i < 32u; ++i) {
     initial.gpr[i] = test_case.initial_gpr[i];
   }
@@ -1204,16 +1309,60 @@ static CpuCompareRunResult run_cpu_compare_case_once(
 
   g_cpu_execution_mode_cli_override = true;
   g_cpu_execution_mode_cli_value = mode;
+  g_cpu_backend_compare_irq_on_branch = test_case.request_irq_on_branch;
+  g_cpu_backend_compare_allow_partial_branch_tail =
+      mode == CpuExecutionMode::X64Jit &&
+      test_case.allow_partial_native_branch_tail;
+  g_cpu_backend_compare_allow_partial_memory_helper =
+      mode == CpuExecutionMode::X64Jit &&
+      test_case.allow_partial_native_memory_helper;
+  g_cpu_x64_jit_branch_tail_cli_override = true;
+  g_cpu_x64_jit_branch_tail_cli_value =
+      !(mode == CpuExecutionMode::X64Jit &&
+        test_case.disable_branch_tail_for_x64);
+  g_cpu_x64_jit_branch_tail_blacklist.clear();
+  if (mode == CpuExecutionMode::X64Jit &&
+      test_case.blacklist_branch_tail_for_x64) {
+    g_cpu_x64_jit_branch_tail_blacklist.push_back(kCpuComparePc);
+  }
+  g_cpu_x64_jit_all_native_cli_override = true;
+  g_cpu_x64_jit_all_native_cli_value =
+      !(mode == CpuExecutionMode::X64Jit &&
+        test_case.disable_all_native_for_x64);
+  g_cpu_x64_jit_native_memory_cli_override = true;
+  g_cpu_x64_jit_native_memory_cli_value =
+      !(mode == CpuExecutionMode::X64Jit &&
+        test_case.disable_memory_native_for_x64);
+  g_cpu_x64_jit_native_alu_cli_override = true;
+  g_cpu_x64_jit_native_alu_cli_value =
+      !(mode == CpuExecutionMode::X64Jit &&
+        test_case.disable_alu_native_for_x64);
+  g_cpu_x64_jit_ram_load_fastpath_enabled =
+      mode == CpuExecutionMode::X64Jit &&
+      test_case.enable_ram_load_fastpath_for_x64;
   CpuCompareRunResult out{};
   u32 executed = 0;
+  size_t segment_index = 0;
   auto run_segment = [&](u32 instruction_count) {
     if (instruction_count == 0) {
       return;
+    }
+    if (mode == CpuExecutionMode::X64Jit &&
+        segment_index < test_case.segment_native_tiers.size()) {
+      const CpuCompareNativeTierMode &tiers =
+          test_case.segment_native_tiers[segment_index];
+      g_cpu_x64_jit_all_native_cli_value = tiers.all_native;
+      g_cpu_x64_jit_native_memory_cli_value = tiers.memory_native;
+      g_cpu_x64_jit_native_alu_cli_value = tiers.alu_native;
     }
     CpuRunSliceResult segment = sys->cpu().run_slice(100000u, instruction_count);
     out.run.cycles += segment.cycles;
     out.run.instructions += segment.instructions;
     executed += segment.instructions;
+    out.segment_states.push_back(sys->cpu().debug_state());
+    out.segment_peripherals.push_back(
+        capture_cpu_compare_peripherals(*sys));
+    ++segment_index;
   };
 
   if (!test_case.segment_instructions.empty()) {
@@ -1242,6 +1391,12 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   }
   out.state = sys->cpu().debug_state();
   out.stats = sys->cpu().cpu_backend_stats();
+  out.peripherals = capture_cpu_compare_peripherals(*sys);
+  out.irq_stat = sys->irq().stat();
+  out.irq_mask = sys->irq().mask();
+  for (u32 addr : test_case.compare_memory_addresses) {
+    out.memory_values.push_back(sys->read32(addr));
+  }
   return out;
 }
 
@@ -1267,6 +1422,38 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_control.expected_cycles = 32u;
   native_control.require_full_native_when_available = true;
   cases.push_back(native_control);
+
+  CpuCompareCase all_native_disabled{};
+  all_native_disabled.name = "x64_all_native_disabled_gate";
+  all_native_disabled.program.assign(16u, 0u);
+  all_native_disabled.instructions = 16;
+  all_native_disabled.disable_all_native_for_x64 = true;
+  all_native_disabled.expect_x64_fallback = true;
+  all_native_disabled.require_all_native_disabled_fallback_when_available =
+      true;
+  cases.push_back(all_native_disabled);
+
+  CpuCompareCase native_memory_disabled{};
+  native_memory_disabled.name = "x64_native_memory_disabled_gate";
+  native_memory_disabled.initial_gpr[1] = 0x80011180u;
+  native_memory_disabled.memory.push_back({0x00011180u, 0x12345678u});
+  native_memory_disabled.program = {enc_i(0x23, 1, 2, 0), 0};
+  pad_cpu_compare_program(native_memory_disabled);
+  native_memory_disabled.disable_memory_native_for_x64 = true;
+  native_memory_disabled.expect_x64_fallback = true;
+  native_memory_disabled
+      .require_memory_native_disabled_fallback_when_available = true;
+  cases.push_back(native_memory_disabled);
+
+  CpuCompareCase native_alu_disabled{};
+  native_alu_disabled.name = "x64_native_alu_disabled_gate";
+  native_alu_disabled.program.assign(16u, 0u);
+  native_alu_disabled.instructions = 16;
+  native_alu_disabled.disable_alu_native_for_x64 = true;
+  native_alu_disabled.expect_x64_fallback = true;
+  native_alu_disabled.require_alu_native_disabled_fallback_when_available =
+      true;
+  cases.push_back(native_alu_disabled);
 
   CpuCompareCase native_mixed{};
   native_mixed.name = "native_mixed_alu_immediate";
@@ -1381,32 +1568,688 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(shifts);
   cases.push_back(shifts);
 
-  CpuCompareCase branch_taken{};
-  branch_taken.name = "branch_delay_taken";
-  branch_taken.program = {
-      enc_i(0x09, 0, 1, 1),
-      enc_i(0x04, 1, 1, 2),
-      enc_i(0x09, 0, 2, 0x0011),
-      enc_i(0x09, 0, 3, 0x0022),
-      enc_i(0x09, 0, 4, 0x0033),
-      enc_i(0x09, 0, 5, 0x0044),
+  CpuCompareCase bne_taken{};
+  bne_taken.name = "native_branch_tail_bne_taken_alu_delay";
+  bne_taken.initial_gpr[1] = 1u;
+  bne_taken.initial_gpr[2] = 2u;
+  bne_taken.program = {
+      enc_i(0x05, 1, 2, 2),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
   };
-  branch_taken.instructions = 5;
-  branch_taken.expect_x64_fallback = true;
-  cases.push_back(branch_taken);
+  bne_taken.instructions = 2;
+  bne_taken.require_full_native_when_available = true;
+  bne_taken.require_native_branch_tail_when_available = true;
+  bne_taken.native_branch_should_be_taken = true;
+  cases.push_back(bne_taken);
 
-  CpuCompareCase branch_not_taken{};
-  branch_not_taken.name = "branch_delay_not_taken";
-  branch_not_taken.program = {
-      enc_i(0x09, 0, 1, 1),
-      enc_i(0x04, 1, 0, 2),
-      enc_i(0x09, 0, 2, 0x0011),
-      enc_i(0x09, 0, 3, 0x0022),
-      enc_i(0x09, 0, 4, 0x0033),
+  CpuCompareCase bne_not_taken{};
+  bne_not_taken.name = "native_branch_tail_bne_not_taken_alu_delay";
+  bne_not_taken.initial_gpr[1] = 1u;
+  bne_not_taken.initial_gpr[2] = 1u;
+  bne_not_taken.program = bne_taken.program;
+  bne_not_taken.instructions = 2;
+  bne_not_taken.require_full_native_when_available = true;
+  bne_not_taken.require_native_branch_tail_when_available = true;
+  cases.push_back(bne_not_taken);
+
+  CpuCompareCase beq_taken{};
+  beq_taken.name = "native_branch_tail_beq_taken_alu_delay";
+  beq_taken.initial_gpr[1] = 7u;
+  beq_taken.initial_gpr[2] = 7u;
+  beq_taken.program = {
+      enc_i(0x04, 1, 2, 2),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
   };
-  branch_not_taken.instructions = 5;
-  branch_not_taken.expect_x64_fallback = true;
-  cases.push_back(branch_not_taken);
+  beq_taken.instructions = 2;
+  beq_taken.require_full_native_when_available = true;
+  beq_taken.require_native_branch_tail_when_available = true;
+  beq_taken.native_branch_should_be_taken = true;
+  cases.push_back(beq_taken);
+
+  CpuCompareCase beq_not_taken{};
+  beq_not_taken.name = "native_branch_tail_beq_not_taken_alu_delay";
+  beq_not_taken.initial_gpr[1] = 7u;
+  beq_not_taken.initial_gpr[2] = 8u;
+  beq_not_taken.program = beq_taken.program;
+  beq_not_taken.instructions = 2;
+  beq_not_taken.require_full_native_when_available = true;
+  beq_not_taken.require_native_branch_tail_when_available = true;
+  cases.push_back(beq_not_taken);
+
+  CpuCompareCase bgtz_taken{};
+  bgtz_taken.name = "native_branch_tail_bgtz_taken_alu_delay";
+  bgtz_taken.initial_gpr[1] = 1u;
+  bgtz_taken.program = {
+      enc_i(0x07, 1, 0, 1),
+      enc_i(0x09, 0, 2, 0x0031),
+      0,
+  };
+  bgtz_taken.instructions = 2;
+  bgtz_taken.require_full_native_when_available = true;
+  bgtz_taken.require_native_branch_tail_when_available = true;
+  bgtz_taken.native_branch_should_be_taken = true;
+  bgtz_taken.native_branch_primary_op = 0x07u;
+  cases.push_back(bgtz_taken);
+
+  CpuCompareCase bgtz_not_taken{};
+  bgtz_not_taken.name = "native_branch_tail_bgtz_not_taken_alu_delay";
+  bgtz_not_taken.initial_gpr[1] = 0xFFFFFFFFu;
+  bgtz_not_taken.program = bgtz_taken.program;
+  bgtz_not_taken.instructions = 2;
+  bgtz_not_taken.require_full_native_when_available = true;
+  bgtz_not_taken.require_native_branch_tail_when_available = true;
+  bgtz_not_taken.native_branch_primary_op = 0x07u;
+  cases.push_back(bgtz_not_taken);
+
+  CpuCompareCase blez_taken{};
+  blez_taken.name = "native_branch_tail_blez_taken_alu_delay";
+  blez_taken.initial_gpr[1] = 0u;
+  blez_taken.program = {
+      enc_i(0x06, 1, 0, 1),
+      enc_i(0x09, 0, 2, 0x0032),
+      0,
+  };
+  blez_taken.instructions = 2;
+  blez_taken.require_full_native_when_available = true;
+  blez_taken.require_native_branch_tail_when_available = true;
+  blez_taken.native_branch_should_be_taken = true;
+  blez_taken.native_branch_primary_op = 0x06u;
+  cases.push_back(blez_taken);
+
+  CpuCompareCase blez_not_taken{};
+  blez_not_taken.name = "native_branch_tail_blez_not_taken_alu_delay";
+  blez_not_taken.initial_gpr[1] = 1u;
+  blez_not_taken.program = blez_taken.program;
+  blez_not_taken.instructions = 2;
+  blez_not_taken.require_full_native_when_available = true;
+  blez_not_taken.require_native_branch_tail_when_available = true;
+  blez_not_taken.native_branch_primary_op = 0x06u;
+  cases.push_back(blez_not_taken);
+
+  CpuCompareCase bgtz_memory_loop{};
+  bgtz_memory_loop.name = "native_branch_tail_bgtz_memory_store_delay";
+  bgtz_memory_loop.initial_gpr[1] = 0x80011240u;
+  bgtz_memory_loop.memory.push_back({0x00011240u, 2u});
+  bgtz_memory_loop.program = {
+      enc_i(0x24, 1, 2, 0),
+      0,
+      enc_i(0x09, 2, 2, 0xFFFF),
+      enc_i(0x07, 2, 0, 0xFFFD),
+      enc_i(0x28, 1, 2, 1),
+  };
+  bgtz_memory_loop.instructions = 5;
+  bgtz_memory_loop.require_full_native_when_available = true;
+  bgtz_memory_loop.require_native_memory_helper_when_available = true;
+  bgtz_memory_loop.require_native_branch_tail_when_available = true;
+  bgtz_memory_loop.native_branch_should_be_taken = true;
+  bgtz_memory_loop.native_branch_primary_op = 0x07u;
+  bgtz_memory_loop
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(bgtz_memory_loop);
+
+  CpuCompareCase blez_memory_delay{};
+  blez_memory_delay.name = "native_branch_tail_blez_memory_load_delay";
+  blez_memory_delay.initial_gpr[1] = 0u;
+  blez_memory_delay.initial_gpr[6] = 0x80011250u;
+  blez_memory_delay.memory.push_back({0x00011250u, 0x55667788u});
+  blez_memory_delay.program = {
+      enc_i(0x06, 1, 0, 1),
+      enc_i(0x23, 6, 5, 0),
+      0,
+  };
+  blez_memory_delay.instructions = 2;
+  blez_memory_delay.require_full_native_when_available = true;
+  blez_memory_delay.require_native_memory_helper_when_available = true;
+  blez_memory_delay.require_native_branch_tail_when_available = true;
+  blez_memory_delay.native_branch_should_be_taken = true;
+  blez_memory_delay.native_branch_primary_op = 0x06u;
+  blez_memory_delay
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(blez_memory_delay);
+
+  CpuCompareCase beq_memory_body_delay{};
+  beq_memory_body_delay.name = "native_branch_tail_beq_memory_body_delay";
+  beq_memory_body_delay.initial_gpr[1] = 0x80011260u;
+  beq_memory_body_delay.initial_gpr[2] = 5u;
+  beq_memory_body_delay.memory.push_back({0x00011264u, 0x11223344u});
+  beq_memory_body_delay.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x23, 1, 4, 0),
+      0,
+      enc_i(0x04, 4, 2, 1),
+      enc_i(0x23, 1, 5, 4),
+      0,
+  };
+  beq_memory_body_delay.instructions = 5;
+  beq_memory_body_delay.require_full_native_when_available = true;
+  beq_memory_body_delay.require_native_memory_helper_when_available = true;
+  beq_memory_body_delay.require_native_branch_tail_when_available = true;
+  beq_memory_body_delay.native_branch_should_be_taken = true;
+  beq_memory_body_delay
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(beq_memory_body_delay);
+
+  CpuCompareCase bne_memory_body{};
+  bne_memory_body.name = "native_branch_tail_bne_memory_body";
+  bne_memory_body.initial_gpr[1] = 0x80011100u;
+  bne_memory_body.initial_gpr[2] = 0x12345678u;
+  bne_memory_body.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x23, 1, 3, 0),
+      0,
+      enc_i(0x05, 3, 0, 1),
+      enc_i(0x09, 3, 4, 1),
+      0,
+  };
+  bne_memory_body.instructions = 5;
+  bne_memory_body.require_full_native_when_available = true;
+  bne_memory_body.require_native_memory_helper_when_available = true;
+  bne_memory_body.require_native_branch_tail_when_available = true;
+  bne_memory_body.native_branch_should_be_taken = true;
+  cases.push_back(bne_memory_body);
+
+  CpuCompareCase bne_lw_delay{};
+  bne_lw_delay.name = "native_branch_tail_bne_lw_delay";
+  bne_lw_delay.initial_gpr[1] = 1u;
+  bne_lw_delay.initial_gpr[2] = 0u;
+  bne_lw_delay.initial_gpr[6] = 0x80011120u;
+  bne_lw_delay.memory.push_back({0x00011120u, 0xCAFEBABEu});
+  bne_lw_delay.program = {
+      enc_i(0x05, 1, 2, 1),
+      enc_i(0x23, 6, 5, 0),
+      0,
+      0,
+  };
+  bne_lw_delay.instructions = 2;
+  bne_lw_delay.require_full_native_when_available = true;
+  bne_lw_delay.require_native_memory_helper_when_available = true;
+  bne_lw_delay.require_native_branch_tail_when_available = true;
+  bne_lw_delay.native_branch_should_be_taken = true;
+  bne_lw_delay.require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(bne_lw_delay);
+
+  CpuCompareCase branch_tail_then_decoded_consumer{};
+  branch_tail_then_decoded_consumer.name =
+      "native_branch_tail_then_decoded_load_consumer";
+  branch_tail_then_decoded_consumer.initial_gpr[1] = 1u;
+  branch_tail_then_decoded_consumer.initial_gpr[6] = 0x80011270u;
+  branch_tail_then_decoded_consumer.memory.push_back(
+      {0x00011270u, 0xABCDEF01u});
+  branch_tail_then_decoded_consumer.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x23, 6, 5, 0),
+      enc_r(5, 0, 7, 0, 0x21),
+  };
+  branch_tail_then_decoded_consumer.instructions = 3;
+  branch_tail_then_decoded_consumer.segment_instructions = {2u, 1u};
+  branch_tail_then_decoded_consumer.segment_native_tiers = {
+      {true, true, true}, {false, true, true}};
+  branch_tail_then_decoded_consumer.compare_segment_states = true;
+  branch_tail_then_decoded_consumer
+      .require_native_memory_helper_when_available = true;
+  branch_tail_then_decoded_consumer
+      .require_native_branch_tail_when_available = true;
+  branch_tail_then_decoded_consumer.native_branch_should_be_taken = true;
+  branch_tail_then_decoded_consumer
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(branch_tail_then_decoded_consumer);
+
+  CpuCompareCase decoded_load_then_branch_tail{};
+  decoded_load_then_branch_tail.name =
+      "decoded_load_then_native_branch_tail_cancel";
+  decoded_load_then_branch_tail.initial_gpr[1] = 0x80011280u;
+  decoded_load_then_branch_tail.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_branch_tail.initial_gpr[4] = 1u;
+  decoded_load_then_branch_tail.memory.push_back(
+      {0x00011280u, 0xDEADBEEFu});
+  decoded_load_then_branch_tail.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x05, 4, 0, 1),
+      enc_i(0x09, 0, 2, 7),
+      0,
+  };
+  decoded_load_then_branch_tail.instructions = 3;
+  decoded_load_then_branch_tail.segment_instructions = {1u, 2u};
+  decoded_load_then_branch_tail.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_branch_tail.compare_segment_states = true;
+  decoded_load_then_branch_tail
+      .require_native_helper_load_delay_entry_when_available = true;
+  decoded_load_then_branch_tail
+      .require_native_branch_tail_when_available = true;
+  decoded_load_then_branch_tail.native_branch_should_be_taken = true;
+  cases.push_back(decoded_load_then_branch_tail);
+
+  CpuCompareCase bne_delay_exception{};
+  bne_delay_exception.name = "native_branch_tail_delay_memory_exception";
+  bne_delay_exception.initial_gpr[1] = 1u;
+  bne_delay_exception.initial_gpr[2] = 0u;
+  bne_delay_exception.initial_gpr[6] = 0x80011122u;
+  bne_delay_exception.program = {
+      enc_i(0x05, 1, 2, 1),
+      enc_i(0x23, 6, 5, 0),
+      0,
+  };
+  bne_delay_exception.instructions = 2;
+  bne_delay_exception.require_full_native_when_available = true;
+  bne_delay_exception.require_native_memory_helper_when_available = true;
+  bne_delay_exception.require_native_memory_exception_when_available = true;
+  bne_delay_exception.require_native_branch_tail_when_available = true;
+  bne_delay_exception.native_branch_should_be_taken = true;
+  bne_delay_exception.require_native_branch_delay_memory_helper_when_available =
+      true;
+  cases.push_back(bne_delay_exception);
+
+  CpuCompareCase bne_load_delay_crossing{};
+  bne_load_delay_crossing.name = "native_branch_tail_load_delay_crossing";
+  bne_load_delay_crossing.initial_gpr[1] = 0x80011130u;
+  bne_load_delay_crossing.initial_gpr[2] = 0u;
+  bne_load_delay_crossing.memory.push_back({0x00011130u, 0x01020304u});
+  bne_load_delay_crossing.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x05, 2, 0, 1),
+      enc_r(2, 0, 3, 0, 0x21),
+      0,
+  };
+  bne_load_delay_crossing.instructions = 3;
+  bne_load_delay_crossing.require_full_native_when_available = true;
+  bne_load_delay_crossing.require_native_memory_helper_when_available = true;
+  bne_load_delay_crossing.require_native_branch_tail_when_available = true;
+  cases.push_back(bne_load_delay_crossing);
+
+  CpuCompareCase bne_loop_shape{};
+  bne_loop_shape.name = "native_branch_tail_atrain_loop_shape";
+  bne_loop_shape.initial_gpr[1] = 0x80011140u;
+  bne_loop_shape.initial_gpr[2] = 1u;
+  bne_loop_shape.initial_gpr[4] = 10u;
+  bne_loop_shape.program = {
+      0,
+      enc_r(0, 2, 2, 1, 0x00),
+      enc_r(4, 2, 3, 0, 0x23),
+      enc_i(0x2B, 1, 3, 0),
+      enc_i(0x23, 1, 5, 0),
+      0,
+      enc_i(0x09, 6, 6, 1),
+      enc_i(0x2B, 1, 6, 4),
+      enc_i(0x23, 1, 7, 4),
+      0,
+      enc_i(0x0A, 6, 8, 2),
+      enc_i(0x05, 8, 0, 0xFFF4),
+      enc_i(0x23, 1, 9, 8),
+  };
+  bne_loop_shape.memory.push_back({0x00011148u, 0x0BADF00Du});
+  bne_loop_shape.instructions = 26;
+  bne_loop_shape.require_full_native_when_available = true;
+  bne_loop_shape.require_native_memory_helper_when_available = true;
+  bne_loop_shape.require_native_branch_tail_when_available = true;
+  bne_loop_shape.native_branch_should_be_taken = true;
+  bne_loop_shape.require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(bne_loop_shape);
+
+  CpuCompareCase atrain_splash_poll_pair{};
+  atrain_splash_poll_pair.name =
+      "native_branch_tail_atrain_splash_poll_pair_segments";
+  atrain_splash_poll_pair.initial_gpr[1] = 0x80011300u;
+  atrain_splash_poll_pair.memory.push_back({0x00011300u, 3u});
+  atrain_splash_poll_pair.program = {
+      enc_i(0x09, 1, 1, 0),
+      enc_i(0x23, 1, 3, 0),
+      0,
+      enc_i(0x09, 3, 4, 1),
+      enc_i(0x2B, 1, 4, 4),
+      enc_i(0x23, 1, 5, 4),
+      0,
+      enc_i(0x05, 5, 0, 1),
+      0,
+      enc_i(0x0F, 0, 6, 0x8001),
+      enc_i(0x23, 6, 7, 0x1304),
+      0,
+      enc_r(0, 7, 8, 0, 0x2A),
+      enc_i(0x05, 8, 0, 0xFFFB),
+      0,
+  };
+  atrain_splash_poll_pair.instructions = 15;
+  atrain_splash_poll_pair.segment_instructions = {9u, 6u};
+  atrain_splash_poll_pair.compare_segment_states = true;
+  atrain_splash_poll_pair.require_full_native_when_available = true;
+  atrain_splash_poll_pair.require_native_memory_helper_when_available = true;
+  atrain_splash_poll_pair.require_native_branch_tail_when_available = true;
+  atrain_splash_poll_pair.native_branch_should_be_taken = true;
+  atrain_splash_poll_pair.compare_memory_addresses.push_back(0x00011304u);
+  cases.push_back(atrain_splash_poll_pair);
+
+  CpuCompareCase branch_tail_disabled{};
+  branch_tail_disabled.name = "native_branch_tail_disabled_gate";
+  branch_tail_disabled.initial_gpr[1] = 1u;
+  branch_tail_disabled.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 2, 1),
+      0,
+  };
+  branch_tail_disabled.instructions = 2;
+  branch_tail_disabled.disable_branch_tail_for_x64 = true;
+  branch_tail_disabled.expect_x64_fallback = true;
+  branch_tail_disabled.require_branch_tail_disabled_fallback_when_available =
+      true;
+  cases.push_back(branch_tail_disabled);
+
+  CpuCompareCase branch_tail_blacklisted{};
+  branch_tail_blacklisted.name = "native_branch_tail_pc_blacklist";
+  branch_tail_blacklisted.initial_gpr[1] = 1u;
+  branch_tail_blacklisted.program = branch_tail_disabled.program;
+  branch_tail_blacklisted.instructions = 2;
+  branch_tail_blacklisted.blacklist_branch_tail_for_x64 = true;
+  branch_tail_blacklisted.expect_x64_fallback = true;
+  branch_tail_blacklisted
+      .require_branch_tail_blacklisted_fallback_when_available = true;
+  cases.push_back(branch_tail_blacklisted);
+
+  CpuCompareCase branch_irq_before{};
+  branch_irq_before.name = "native_branch_tail_irq_pending_before_branch";
+  branch_irq_before.initial_gpr[1] = 1u;
+  branch_irq_before.initial_cop0_sr_bits = 1u | (1u << 10);
+  branch_irq_before.initial_irq_mask = 1u;
+  branch_irq_before.initial_irq_pending = true;
+  branch_irq_before.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 2, 1),
+      0,
+  };
+  branch_irq_before.instructions = 1;
+  branch_irq_before.expect_x64_fallback = true;
+  cases.push_back(branch_irq_before);
+
+  CpuCompareCase branch_irq_delay{};
+  branch_irq_delay.name = "native_branch_tail_irq_pending_before_delay";
+  branch_irq_delay.initial_gpr[1] = 1u;
+  branch_irq_delay.initial_cop0_sr_bits = 1u | (1u << 10);
+  branch_irq_delay.initial_irq_mask = 1u;
+  branch_irq_delay.request_irq_on_branch = true;
+  branch_irq_delay.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 2, 1),
+      0,
+  };
+  branch_irq_delay.instructions = 2;
+  branch_irq_delay.segment_instructions = {1u, 1u};
+  branch_irq_delay.allow_partial_native_branch_tail = true;
+  branch_irq_delay.compare_segment_states = true;
+  branch_irq_delay.require_native_branch_tail_when_available = true;
+  branch_irq_delay.native_branch_should_be_taken = true;
+  cases.push_back(branch_irq_delay);
+
+  CpuCompareCase branch_mmio_body{};
+  branch_mmio_body.name = "native_branch_tail_mmio_body_read_write";
+  branch_mmio_body.initial_gpr[1] = 0x1F801070u;
+  branch_mmio_body.initial_gpr[2] = 1u;
+  branch_mmio_body.program = {
+      enc_i(0x2B, 1, 2, 4),
+      enc_i(0x23, 1, 3, 4),
+      0,
+      enc_i(0x05, 3, 0, 1),
+      enc_i(0x09, 0, 4, 1),
+      0,
+  };
+  branch_mmio_body.instructions = 5;
+  branch_mmio_body.require_full_native_when_available = true;
+  branch_mmio_body.require_native_memory_helper_when_available = true;
+  branch_mmio_body.require_native_mmio_when_available = true;
+  branch_mmio_body.require_native_branch_tail_when_available = true;
+  branch_mmio_body.native_branch_should_be_taken = true;
+  cases.push_back(branch_mmio_body);
+
+  CpuCompareCase branch_mmio_load_delay{};
+  branch_mmio_load_delay.name = "native_branch_tail_taken_mmio_load_delay";
+  branch_mmio_load_delay.initial_gpr[1] = 1u;
+  branch_mmio_load_delay.initial_gpr[6] = 0x1F801070u;
+  branch_mmio_load_delay.initial_irq_mask = 1u;
+  branch_mmio_load_delay.initial_irq_pending = true;
+  branch_mmio_load_delay.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x23, 6, 5, 0),
+      0,
+  };
+  branch_mmio_load_delay.instructions = 2;
+  branch_mmio_load_delay.require_full_native_when_available = true;
+  branch_mmio_load_delay.require_native_memory_helper_when_available = true;
+  branch_mmio_load_delay.require_native_mmio_when_available = true;
+  branch_mmio_load_delay.require_native_branch_tail_when_available = true;
+  branch_mmio_load_delay.native_branch_should_be_taken = true;
+  branch_mmio_load_delay
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(branch_mmio_load_delay);
+
+  CpuCompareCase branch_mmio_store_delay{};
+  branch_mmio_store_delay.name = "native_branch_tail_taken_mmio_store_delay";
+  branch_mmio_store_delay.initial_gpr[1] = 1u;
+  branch_mmio_store_delay.initial_gpr[2] = 1u;
+  branch_mmio_store_delay.initial_gpr[6] = 0x1F801070u;
+  branch_mmio_store_delay.program = {
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x2B, 6, 2, 4),
+      0,
+  };
+  branch_mmio_store_delay.instructions = 2;
+  branch_mmio_store_delay.require_full_native_when_available = true;
+  branch_mmio_store_delay.require_native_memory_helper_when_available = true;
+  branch_mmio_store_delay.require_native_mmio_when_available = true;
+  branch_mmio_store_delay.require_native_branch_tail_when_available = true;
+  branch_mmio_store_delay.native_branch_should_be_taken = true;
+  branch_mmio_store_delay
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(branch_mmio_store_delay);
+
+  CpuCompareCase branch_not_taken_lw_delay{};
+  branch_not_taken_lw_delay.name =
+      "native_branch_tail_not_taken_memory_delay";
+  branch_not_taken_lw_delay.initial_gpr[1] = 1u;
+  branch_not_taken_lw_delay.initial_gpr[2] = 1u;
+  branch_not_taken_lw_delay.initial_gpr[6] = 0x80011160u;
+  branch_not_taken_lw_delay.memory.push_back(
+      {0x00011160u, 0x11223344u});
+  branch_not_taken_lw_delay.program = {
+      enc_i(0x05, 1, 2, 1),
+      enc_i(0x23, 6, 5, 0),
+      0,
+  };
+  branch_not_taken_lw_delay.instructions = 2;
+  branch_not_taken_lw_delay.require_full_native_when_available = true;
+  branch_not_taken_lw_delay.require_native_memory_helper_when_available = true;
+  branch_not_taken_lw_delay.require_native_branch_tail_when_available = true;
+  branch_not_taken_lw_delay
+      .require_native_branch_delay_memory_helper_when_available = true;
+  cases.push_back(branch_not_taken_lw_delay);
+
+  CpuCompareCase repeated_mmio_branch{};
+  repeated_mmio_branch.name = "native_repeated_mmio_status_reads_branch";
+  repeated_mmio_branch.initial_gpr[1] = 0x1F801070u;
+  repeated_mmio_branch.initial_irq_mask = 1u;
+  repeated_mmio_branch.initial_irq_pending = true;
+  repeated_mmio_branch.program = {
+      enc_i(0x23, 1, 2, 0),
+      0,
+      enc_i(0x23, 1, 3, 0),
+      0,
+      enc_i(0x05, 2, 3, 1),
+      0,
+      0,
+  };
+  repeated_mmio_branch.instructions = 6;
+  repeated_mmio_branch.require_full_native_when_available = true;
+  repeated_mmio_branch.require_native_memory_helper_when_available = true;
+  repeated_mmio_branch.require_native_mmio_when_available = true;
+  repeated_mmio_branch.require_native_branch_tail_when_available = true;
+  cases.push_back(repeated_mmio_branch);
+
+  CpuCompareCase mmio_load_delay_branch{};
+  mmio_load_delay_branch.name = "native_mmio_load_delay_then_branch";
+  mmio_load_delay_branch.initial_gpr[1] = 0x1F801070u;
+  mmio_load_delay_branch.initial_gpr[2] = 0u;
+  mmio_load_delay_branch.initial_irq_mask = 1u;
+  mmio_load_delay_branch.initial_irq_pending = true;
+  mmio_load_delay_branch.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x05, 2, 0, 1),
+      0,
+      0,
+  };
+  mmio_load_delay_branch.instructions = 3;
+  mmio_load_delay_branch.require_full_native_when_available = true;
+  mmio_load_delay_branch.require_native_memory_helper_when_available = true;
+  mmio_load_delay_branch.require_native_mmio_when_available = true;
+  mmio_load_delay_branch.require_native_branch_tail_when_available = true;
+  cases.push_back(mmio_load_delay_branch);
+
+  CpuCompareCase mmio_write_branch{};
+  mmio_write_branch.name = "native_mmio_write_then_branch";
+  mmio_write_branch.initial_gpr[1] = 0x1F801070u;
+  mmio_write_branch.initial_gpr[2] = 1u;
+  mmio_write_branch.program = {
+      enc_i(0x2B, 1, 2, 4),
+      enc_i(0x05, 2, 0, 1),
+      0,
+      0,
+  };
+  mmio_write_branch.instructions = 3;
+  mmio_write_branch.require_full_native_when_available = true;
+  mmio_write_branch.require_native_memory_helper_when_available = true;
+  mmio_write_branch.require_native_mmio_when_available = true;
+  mmio_write_branch.require_native_branch_tail_when_available = true;
+  mmio_write_branch.native_branch_should_be_taken = true;
+  cases.push_back(mmio_write_branch);
+
+  CpuCompareCase native_memory_mid_block_irq{};
+  native_memory_mid_block_irq.name = "native_memory_mid_block_irq_state";
+  native_memory_mid_block_irq.initial_gpr[1] = 0x1F801070u;
+  native_memory_mid_block_irq.initial_gpr[2] = 1u;
+  native_memory_mid_block_irq.initial_cop0_sr_bits = 0x401u;
+  native_memory_mid_block_irq.initial_irq_pending = true;
+  native_memory_mid_block_irq.program = {
+      enc_i(0x2B, 1, 2, 4),
+      enc_i(0x05, 0, 0, 1),
+      0,
+  };
+  native_memory_mid_block_irq.instructions = 2;
+  native_memory_mid_block_irq.allow_partial_native_branch_tail = true;
+  native_memory_mid_block_irq.require_native_entry_when_available = true;
+  native_memory_mid_block_irq.require_native_memory_helper_when_available =
+      true;
+  native_memory_mid_block_irq.require_native_mmio_when_available = true;
+  cases.push_back(native_memory_mid_block_irq);
+
+  CpuCompareCase native_memory_then_decoded_load{};
+  native_memory_then_decoded_load.name =
+      "native_memory_then_decoded_consumes_load";
+  native_memory_then_decoded_load.initial_gpr[1] = 0x800111A0u;
+  native_memory_then_decoded_load.initial_gpr[2] = 0x11111111u;
+  native_memory_then_decoded_load.memory.push_back(
+      {0x000111A0u, 0x22222222u});
+  native_memory_then_decoded_load.program.assign(17u, 0u);
+  native_memory_then_decoded_load.program[15] = enc_i(0x23, 1, 2, 0);
+  native_memory_then_decoded_load.program[16] =
+      enc_r(2, 0, 3, 0, 0x21);
+  native_memory_then_decoded_load.instructions = 17;
+  native_memory_then_decoded_load.segment_instructions = {16u, 1u};
+  native_memory_then_decoded_load.segment_native_tiers = {
+      {true, true, true}, {false, true, true}};
+  native_memory_then_decoded_load.compare_segment_states = true;
+  native_memory_then_decoded_load.enable_ram_load_fastpath_for_x64 = true;
+  native_memory_then_decoded_load
+      .require_native_ram_load_fastpath_when_available = true;
+  native_memory_then_decoded_load
+      .require_native_memory_tier_entry_when_available = true;
+  cases.push_back(native_memory_then_decoded_load);
+
+  CpuCompareCase decoded_then_native_fast_load{};
+  decoded_then_native_fast_load.name =
+      "decoded_load_then_native_ram_fast_load";
+  decoded_then_native_fast_load.initial_gpr[1] = 0x80011420u;
+  decoded_then_native_fast_load.initial_gpr[2] = 0x11111111u;
+  decoded_then_native_fast_load.initial_gpr[3] = 0x33333333u;
+  decoded_then_native_fast_load.memory.push_back(
+      {0x00011420u, 0x22222222u});
+  decoded_then_native_fast_load.memory.push_back(
+      {0x00011424u, 0x44444444u});
+  decoded_then_native_fast_load.program.assign(17u, 0u);
+  decoded_then_native_fast_load.program[0] = enc_i(0x23, 1, 2, 0);
+  decoded_then_native_fast_load.program[1] = enc_i(0x23, 1, 3, 4);
+  decoded_then_native_fast_load.program[2] =
+      enc_r(2, 0, 4, 0, 0x21);
+  decoded_then_native_fast_load.instructions = 17;
+  decoded_then_native_fast_load.segment_instructions = {1u, 16u};
+  decoded_then_native_fast_load.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_then_native_fast_load.compare_segment_states = true;
+  decoded_then_native_fast_load.enable_ram_load_fastpath_for_x64 = true;
+  decoded_then_native_fast_load
+      .require_native_ram_load_fastpath_when_available = true;
+  decoded_then_native_fast_load
+      .require_native_helper_load_delay_entry_when_available = true;
+  decoded_then_native_fast_load
+      .require_native_memory_tier_entry_when_available = true;
+  cases.push_back(decoded_then_native_fast_load);
+
+  CpuCompareCase decoded_then_native_memory_load{};
+  decoded_then_native_memory_load.name =
+      "decoded_load_then_native_memory_helper";
+  decoded_then_native_memory_load.initial_gpr[1] = 0x800111B0u;
+  decoded_then_native_memory_load.initial_gpr[2] = 0x11111111u;
+  decoded_then_native_memory_load.memory.push_back(
+      {0x000111B0u, 0x22222222u});
+  decoded_then_native_memory_load.compare_memory_addresses.push_back(
+      0x000111B4u);
+  decoded_then_native_memory_load.program.assign(17u, 0u);
+  decoded_then_native_memory_load.program[0] = enc_i(0x23, 1, 2, 0);
+  decoded_then_native_memory_load.program[1] = enc_i(0x2B, 1, 2, 4);
+  decoded_then_native_memory_load.program[3] =
+      enc_r(2, 0, 3, 0, 0x21);
+  decoded_then_native_memory_load.instructions = 17;
+  decoded_then_native_memory_load.segment_instructions = {1u, 16u};
+  decoded_then_native_memory_load.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_then_native_memory_load.compare_segment_states = true;
+  decoded_then_native_memory_load.require_native_memory_helper_when_available =
+      true;
+  decoded_then_native_memory_load
+      .require_native_memory_tier_entry_when_available = true;
+  cases.push_back(decoded_then_native_memory_load);
+
+  CpuCompareCase native_alu_then_memory{};
+  native_alu_then_memory.name = "native_alu_then_native_memory_block";
+  native_alu_then_memory.initial_gpr[1] = 0x800111C0u;
+  native_alu_then_memory.program.assign(32u, 0u);
+  native_alu_then_memory.program[0] = enc_i(0x09, 0, 2, 5);
+  native_alu_then_memory.program[16] = enc_i(0x2B, 1, 2, 0);
+  native_alu_then_memory.compare_memory_addresses.push_back(0x000111C0u);
+  native_alu_then_memory.instructions = 32;
+  native_alu_then_memory.segment_instructions = {16u, 16u};
+  native_alu_then_memory.compare_segment_states = true;
+  native_alu_then_memory.require_native_memory_helper_when_available = true;
+  native_alu_then_memory.require_native_memory_tier_entry_when_available =
+      true;
+  native_alu_then_memory.require_native_alu_tier_entry_when_available = true;
+  cases.push_back(native_alu_then_memory);
+
+  CpuCompareCase native_memory_then_alu{};
+  native_memory_then_alu.name = "native_memory_then_native_alu_block";
+  native_memory_then_alu.initial_gpr[1] = 0x800111D0u;
+  native_memory_then_alu.initial_gpr[2] = 0xA5A5A5A5u;
+  native_memory_then_alu.program.assign(32u, 0u);
+  native_memory_then_alu.program[0] = enc_i(0x2B, 1, 2, 0);
+  native_memory_then_alu.program[16] = enc_i(0x09, 0, 3, 7);
+  native_memory_then_alu.compare_memory_addresses.push_back(0x000111D0u);
+  native_memory_then_alu.instructions = 32;
+  native_memory_then_alu.segment_instructions = {16u, 16u};
+  native_memory_then_alu.compare_segment_states = true;
+  native_memory_then_alu.require_native_memory_helper_when_available = true;
+  native_memory_then_alu.require_native_memory_tier_entry_when_available =
+      true;
+  native_memory_then_alu.require_native_alu_tier_entry_when_available = true;
+  cases.push_back(native_memory_then_alu);
 
   CpuCompareCase jal{};
   jal.name = "jal_link_delay";
@@ -1451,6 +2294,13 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   load_delay.require_native_memory_helper_when_available = true;
   pad_cpu_compare_program(load_delay);
   cases.push_back(load_delay);
+
+  CpuCompareCase ram_fast_load_delay = load_delay;
+  ram_fast_load_delay.name = "native_ram_fast_load_delay";
+  ram_fast_load_delay.enable_ram_load_fastpath_for_x64 = true;
+  ram_fast_load_delay.require_native_memory_helper_when_available = false;
+  ram_fast_load_delay.require_native_ram_load_fastpath_when_available = true;
+  cases.push_back(ram_fast_load_delay);
 
   CpuCompareCase load_entry_alu{};
   load_entry_alu.name = "native_load_delay_entry_alu_then_memory";
@@ -1518,6 +2368,28 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(sign_loads);
   cases.push_back(sign_loads);
 
+  CpuCompareCase ram_fast_load_widths{};
+  ram_fast_load_widths.name = "native_ram_fast_load_widths_sign_zero";
+  ram_fast_load_widths.initial_gpr[1] = 0x80011400u;
+  ram_fast_load_widths.memory.push_back({0x00011400u, 0x8001FF80u});
+  ram_fast_load_widths.program = {
+      enc_i(0x20, 1, 2, 0),
+      0,
+      enc_i(0x24, 1, 3, 1),
+      0,
+      enc_i(0x21, 1, 4, 0),
+      0,
+      enc_i(0x25, 1, 5, 2),
+      0,
+      enc_i(0x23, 1, 6, 0),
+      0,
+  };
+  ram_fast_load_widths.enable_ram_load_fastpath_for_x64 = true;
+  ram_fast_load_widths.require_native_ram_load_fastpath_when_available = true;
+  ram_fast_load_widths.require_full_native_when_available = true;
+  pad_cpu_compare_program(ram_fast_load_widths);
+  cases.push_back(ram_fast_load_widths);
+
   CpuCompareCase stores{};
   stores.name = "native_memory_byte_half_word_stores";
   stores.initial_gpr[1] = 0x80011040u;
@@ -1555,6 +2427,35 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(mixed_memory_alu);
   cases.push_back(mixed_memory_alu);
 
+  CpuCompareCase memory_load_alu_same_reg_store{};
+  memory_load_alu_same_reg_store.name =
+      "native_memory_load_alu_same_reg_cancels_delay";
+  memory_load_alu_same_reg_store.initial_gpr[1] = 0x80011220u;
+  memory_load_alu_same_reg_store.initial_gpr[2] = 0x11111111u;
+  memory_load_alu_same_reg_store.memory.push_back(
+      {0x00011220u, 0xA5A5A5A5u});
+  memory_load_alu_same_reg_store.compare_memory_addresses.push_back(
+      0x00011224u);
+  memory_load_alu_same_reg_store.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x09, 0, 2, 7),
+      enc_i(0x2B, 1, 2, 4),
+  };
+  pad_cpu_compare_program(memory_load_alu_same_reg_store);
+  memory_load_alu_same_reg_store.instructions = 3u;
+  memory_load_alu_same_reg_store.require_native_entry_when_available = true;
+  memory_load_alu_same_reg_store
+      .require_native_memory_helper_when_available = true;
+  memory_load_alu_same_reg_store
+      .require_native_memory_tier_entry_when_available = true;
+  memory_load_alu_same_reg_store.enable_ram_load_fastpath_for_x64 = true;
+  memory_load_alu_same_reg_store
+      .require_native_ram_load_fastpath_when_available = true;
+  memory_load_alu_same_reg_store.segment_instructions.assign(3u, 1u);
+  memory_load_alu_same_reg_store.compare_segment_states = true;
+  memory_load_alu_same_reg_store.allow_partial_native_memory_helper = true;
+  cases.push_back(memory_load_alu_same_reg_store);
+
   CpuCompareCase mmio_helper{};
   mmio_helper.name = "native_mmio_safe_helper_store";
   mmio_helper.initial_gpr[1] = 0x1F801080u;
@@ -1567,6 +2468,51 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   mmio_helper.require_native_memory_helper_when_available = true;
   pad_cpu_compare_program(mmio_helper);
   cases.push_back(mmio_helper);
+
+  CpuCompareCase cdrom_status_helper{};
+  cdrom_status_helper.name = "native_memory_cdrom_status_read";
+  cdrom_status_helper.initial_gpr[1] = 0x1F801800u;
+  cdrom_status_helper.program = {
+      enc_i(0x24, 1, 2, 0),
+      0,
+      enc_r(2, 0, 3, 0, 0x21),
+  };
+  cdrom_status_helper.require_full_native_when_available = true;
+  cdrom_status_helper.require_native_memory_helper_when_available = true;
+  cdrom_status_helper.require_native_mmio_when_available = true;
+  cdrom_status_helper.enable_ram_load_fastpath_for_x64 = true;
+  cdrom_status_helper.require_no_native_ram_load_fastpath = true;
+  pad_cpu_compare_program(cdrom_status_helper);
+  cases.push_back(cdrom_status_helper);
+
+  CpuCompareCase scratchpad_slow_load{};
+  scratchpad_slow_load.name = "native_scratchpad_load_stays_helper";
+  scratchpad_slow_load.initial_gpr[1] = 0x1F800000u;
+  scratchpad_slow_load.memory.push_back({0x1F800000u, 0x55667788u});
+  scratchpad_slow_load.program = {
+      enc_i(0x23, 1, 2, 0),
+      0,
+  };
+  scratchpad_slow_load.enable_ram_load_fastpath_for_x64 = true;
+  scratchpad_slow_load.require_no_native_ram_load_fastpath = true;
+  scratchpad_slow_load.require_native_memory_helper_when_available = true;
+  scratchpad_slow_load.require_full_native_when_available = true;
+  pad_cpu_compare_program(scratchpad_slow_load);
+  cases.push_back(scratchpad_slow_load);
+
+  CpuCompareCase dma_status_helper{};
+  dma_status_helper.name = "native_memory_dma_status_read_write";
+  dma_status_helper.initial_gpr[1] = 0x1F801080u;
+  dma_status_helper.program = {
+      enc_i(0x23, 1, 2, 0x70),
+      0,
+      enc_i(0x2B, 1, 2, 0x70),
+  };
+  dma_status_helper.require_full_native_when_available = true;
+  dma_status_helper.require_native_memory_helper_when_available = true;
+  dma_status_helper.require_native_mmio_when_available = true;
+  pad_cpu_compare_program(dma_status_helper);
+  cases.push_back(dma_status_helper);
 
   CpuCompareCase syscall_exception{};
   syscall_exception.name = "exception_syscall";
@@ -1600,6 +2546,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   unaligned_lw.require_native_entry_when_available = true;
   unaligned_lw.require_native_memory_helper_when_available = true;
   unaligned_lw.require_native_memory_exception_when_available = true;
+  unaligned_lw.enable_ram_load_fastpath_for_x64 = true;
+  unaligned_lw.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(unaligned_lw);
   cases.push_back(unaligned_lw);
 
@@ -1613,6 +2561,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   unaligned_lh.require_native_entry_when_available = true;
   unaligned_lh.require_native_memory_helper_when_available = true;
   unaligned_lh.require_native_memory_exception_when_available = true;
+  unaligned_lh.enable_ram_load_fastpath_for_x64 = true;
+  unaligned_lh.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(unaligned_lh);
   cases.push_back(unaligned_lh);
 
@@ -1712,13 +2662,42 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   return cases;
 }
 
-static int run_cpu_backend_compare_test() {
+static int run_cpu_backend_compare_test(bool memory_only = false) {
   LOG_INFO("=== CPU Backend Compare Test ===");
   const bool saved_override = g_cpu_execution_mode_cli_override;
   const CpuExecutionMode saved_override_value = g_cpu_execution_mode_cli_value;
   const bool saved_unknown_fallback =
       g_experimental_unhandled_special_returns_zero;
   const bool saved_force_native = g_cpu_x64_jit_force_compile;
+  const bool saved_branch_tail_enabled = g_cpu_x64_jit_branch_tail_enabled;
+  const bool saved_branch_tail_cli_override =
+      g_cpu_x64_jit_branch_tail_cli_override;
+  const bool saved_branch_tail_cli_value =
+      g_cpu_x64_jit_branch_tail_cli_value;
+  const std::vector<u32> saved_branch_tail_blacklist =
+      g_cpu_x64_jit_branch_tail_blacklist;
+  const bool saved_compare_irq_on_branch =
+      g_cpu_backend_compare_irq_on_branch;
+  const bool saved_compare_partial_branch_tail =
+      g_cpu_backend_compare_allow_partial_branch_tail;
+  const bool saved_compare_partial_memory =
+      g_cpu_backend_compare_allow_partial_memory_helper;
+  const bool saved_compare_test_active = g_cpu_backend_compare_test_active;
+  const bool saved_all_native_cli_override =
+      g_cpu_x64_jit_all_native_cli_override;
+  const bool saved_all_native_cli_value =
+      g_cpu_x64_jit_all_native_cli_value;
+  const bool saved_memory_native_cli_override =
+      g_cpu_x64_jit_native_memory_cli_override;
+  const bool saved_memory_native_cli_value =
+      g_cpu_x64_jit_native_memory_cli_value;
+  const bool saved_alu_native_cli_override =
+      g_cpu_x64_jit_native_alu_cli_override;
+  const bool saved_alu_native_cli_value =
+      g_cpu_x64_jit_native_alu_cli_value;
+  const bool saved_ram_load_fastpath =
+      g_cpu_x64_jit_ram_load_fastpath_enabled;
+  g_cpu_backend_compare_test_active = true;
   g_cpu_x64_jit_force_compile = true;
 
   int failures = 0;
@@ -1729,6 +2708,19 @@ static int run_cpu_backend_compare_test() {
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
+    if (memory_only) {
+      const std::string_view name(test_case.name);
+      const bool memory_case =
+          test_case.require_native_memory_helper_when_available ||
+          test_case.require_native_memory_exception_when_available ||
+          test_case.require_native_memory_tier_entry_when_available ||
+          test_case.disable_memory_native_for_x64 ||
+          name.find("memory") != std::string_view::npos ||
+          name.find("mmio") != std::string_view::npos;
+      if (!memory_case) {
+        continue;
+      }
+    }
     g_experimental_unhandled_special_returns_zero =
         test_case.experimental_unknown_fallback;
 
@@ -1743,6 +2735,45 @@ static int run_cpu_backend_compare_test() {
 
       bool pass = cpu_debug_states_equal(reference.state, result.state);
       const bool state_pass = pass;
+      bool segment_state_pass = true;
+      bool segment_peripheral_pass = true;
+      if (test_case.compare_segment_states) {
+        segment_state_pass =
+            reference.segment_states.size() == result.segment_states.size();
+        const size_t segment_count = std::min(reference.segment_states.size(),
+                                              result.segment_states.size());
+        for (size_t segment = 0; segment < segment_count; ++segment) {
+          if (!cpu_debug_states_equal(reference.segment_states[segment],
+                                      result.segment_states[segment])) {
+            segment_state_pass = false;
+            log_cpu_debug_state_diff(
+                test_case.name, cpu_compare_mode_name(mode),
+                reference.segment_states[segment],
+                result.segment_states[segment]);
+          }
+        }
+        segment_peripheral_pass =
+            reference.segment_peripherals.size() ==
+            result.segment_peripherals.size();
+        const size_t peripheral_segment_count =
+            std::min(reference.segment_peripherals.size(),
+                     result.segment_peripherals.size());
+        for (size_t segment = 0; segment < peripheral_segment_count;
+             ++segment) {
+          if (!cpu_compare_peripherals_equal(
+                  reference.segment_peripherals[segment],
+                  result.segment_peripherals[segment])) {
+            segment_peripheral_pass = false;
+          }
+        }
+      }
+      const bool irq_state_pass =
+          reference.irq_stat == result.irq_stat &&
+          reference.irq_mask == result.irq_mask;
+      const bool memory_state_pass =
+          reference.memory_values == result.memory_values;
+      const bool peripheral_state_pass = cpu_compare_peripherals_equal(
+          reference.peripherals, result.peripherals);
       const bool expected_state_pass =
           cpu_compare_expected_state_pass(test_case, mode, result.state);
       bool native_check_pass = true;
@@ -1823,9 +2854,115 @@ static int run_cpu_backend_compare_test() {
                                            : "native_load_delay_entry_missing";
           native_check_pass = load_delay_native;
         }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_branch_tail_when_available) {
+          const u64 expected_branch_count =
+              test_case.native_branch_should_be_taken
+                  ? result.stats.native_branch_taken
+                  : result.stats.native_branch_not_taken;
+          u64 expected_opcode_entries = 1u;
+          u64 expected_opcode_outcomes = 1u;
+          if (test_case.native_branch_primary_op == 0x07u) {
+            expected_opcode_entries =
+                result.stats.native_branch_tail_bgtz_entries;
+            expected_opcode_outcomes =
+                test_case.native_branch_should_be_taken
+                    ? result.stats.native_branch_tail_bgtz_taken
+                    : result.stats.native_branch_tail_bgtz_not_taken;
+          } else if (test_case.native_branch_primary_op == 0x06u) {
+            expected_opcode_entries =
+                result.stats.native_branch_tail_blez_entries;
+            expected_opcode_outcomes =
+                test_case.native_branch_should_be_taken
+                    ? result.stats.native_branch_tail_blez_taken
+                    : result.stats.native_branch_tail_blez_not_taken;
+          }
+          const bool branch_tail_native =
+              result.stats.native_branch_tail_blocks_compiled != 0 &&
+              result.stats.native_branch_tail_entries != 0 &&
+              expected_branch_count != 0 && expected_opcode_entries != 0 &&
+              expected_opcode_outcomes != 0;
+          native_check = branch_tail_native ? "native_branch_tail"
+                                             : "native_branch_tail_missing";
+          native_check_pass = branch_tail_native;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_branch_delay_memory_helper_when_available &&
+            result.stats.native_branch_delay_slot_memory_helpers == 0) {
+          native_check = "native_branch_delay_memory_helper_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_mmio_when_available &&
+            result.stats.mmio_accesses == 0) {
+          native_check = "native_mmio_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_branch_tail_disabled_fallback_when_available &&
+            result.stats.native_branch_tail_disabled_fallbacks == 0) {
+          native_check = "branch_tail_disabled_fallback_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_branch_tail_blacklisted_fallback_when_available &&
+            result.stats.native_branch_tail_blacklisted_fallbacks == 0) {
+          native_check = "branch_tail_blacklist_fallback_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_all_native_disabled_fallback_when_available &&
+            result.stats.native_all_disabled_fallbacks == 0) {
+          native_check = "all_native_disabled_fallback_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_memory_native_disabled_fallback_when_available &&
+            result.stats.native_memory_disabled_fallbacks == 0) {
+          native_check = "memory_native_disabled_fallback_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_alu_native_disabled_fallback_when_available &&
+            result.stats.native_alu_disabled_fallbacks == 0) {
+          native_check = "alu_native_disabled_fallback_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_memory_tier_entry_when_available &&
+            result.stats.native_memory_block_entries == 0) {
+          native_check = "native_memory_tier_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_alu_tier_entry_when_available &&
+            result.stats.native_alu_block_entries == 0) {
+          native_check = "native_alu_tier_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_ram_load_fastpath_when_available &&
+            result.stats.native_memory_fastpath_loads == 0) {
+          native_check = "native_ram_load_fastpath_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_no_native_ram_load_fastpath &&
+            result.stats.native_memory_fastpath_loads != 0) {
+          native_check = "unexpected_native_ram_load_fastpath";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            result.stats.native_memory_fastpath_mmio_loads != 0) {
+          native_check = "native_mmio_fastpath_forbidden";
+          native_check_pass = false;
+        }
       }
 
-      pass = pass && expected_state_pass && native_check_pass;
+      pass = pass && segment_state_pass && segment_peripheral_pass &&
+             irq_state_pass && peripheral_state_pass && memory_state_pass &&
+             expected_state_pass && native_check_pass;
       const char *outcome = cpu_compare_outcome(mode, result.stats);
       LOG_INFO(
           "CPU_COMPARE name=%s mode=%s result=%s outcome=%s native_check=%s pc=0x%08X next_pc=0x%08X current_pc=0x%08X instr=%u cycles=%llu decoded_instr=%llu native_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu forced_reason=%s forced_slices=%llu forced_instr=%llu native_blocks=%llu native_attempts=%llu native_successes=%llu native_compiled=%llu native_entries=%llu native_code_bytes=%llu native_available=%u",
@@ -1865,7 +3002,10 @@ static int run_cpu_backend_compare_test() {
            test_case.require_native_entry_when_available ||
            test_case.require_native_memory_helper_when_available ||
            test_case.require_native_memory_exception_when_available ||
-           test_case.require_native_helper_load_delay_entry_when_available)) {
+           test_case.require_native_helper_load_delay_entry_when_available ||
+           test_case.require_native_branch_tail_when_available ||
+           test_case
+               .require_native_branch_delay_memory_helper_when_available)) {
         LOG_INFO(
             "CPU_COMPARE_NATIVE name=%s required=1 available=%u compiled=%u entered=%u native_instr=%llu decoded_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu code_bytes=%llu attempts=%llu successes=%llu force=%u hot_threshold=%u min_block=%u",
             test_case.name, result.stats.native_available ? 1u : 0u,
@@ -1893,11 +3033,86 @@ static int run_cpu_backend_compare_test() {
             g_cpu_x64_jit_min_block_instructions);
       }
 
+      if (mode == CpuExecutionMode::X64Jit &&
+          test_case.require_native_branch_tail_when_available) {
+        LOG_INFO(
+            "CPU_COMPARE_BRANCH_TAIL name=%s blocks_compiled=%llu entries=%llu taken=%llu not_taken=%llu rejects=%llu delay_memory_helpers=%llu",
+            test_case.name,
+            static_cast<unsigned long long>(
+                result.stats.native_branch_tail_blocks_compiled),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_tail_entries),
+            static_cast<unsigned long long>(result.stats.native_branch_taken),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_not_taken),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_tail_rejects),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_delay_slot_memory_helpers));
+      }
+
+      if (mode == CpuExecutionMode::X64Jit &&
+          (test_case.enable_ram_load_fastpath_for_x64 ||
+           test_case.require_native_ram_load_fastpath_when_available ||
+           test_case.require_no_native_ram_load_fastpath)) {
+        LOG_INFO("CPU_COMPARE_RAM_FASTPATH name=%s enabled=%u fast_loads=%llu memory_helpers=%llu ram_helpers=%llu scratch_helpers=%llu bios_helpers=%llu mmio_helpers=%llu unknown_helpers=%llu unaligned_helpers=%llu mmio_fast_loads=%llu",
+                 test_case.name,
+                 test_case.enable_ram_load_fastpath_for_x64 ? 1u : 0u,
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_loads),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_ram_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_scratchpad_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_bios_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_mmio_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_unknown_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_unaligned_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_mmio_loads));
+      }
+
       if (!pass) {
         ++failures;
         if (!state_pass) {
           log_cpu_debug_state_diff(test_case.name, cpu_compare_mode_name(mode),
                                    reference.state, result.state);
+        }
+        if (!irq_state_pass) {
+          LOG_ERROR("CPU_COMPARE_IRQ_DIFF name=%s mode=%s reference_stat=0x%08X actual_stat=0x%08X reference_mask=0x%08X actual_mask=0x%08X",
+                    test_case.name, cpu_compare_mode_name(mode),
+                    reference.irq_stat, result.irq_stat,
+                    reference.irq_mask, result.irq_mask);
+        }
+        if (!memory_state_pass) {
+          LOG_ERROR("CPU_COMPARE_MEMORY_DIFF name=%s mode=%s reference_count=%zu actual_count=%zu",
+                    test_case.name, cpu_compare_mode_name(mode),
+                    reference.memory_values.size(),
+                    result.memory_values.size());
+        }
+        if (!peripheral_state_pass || !segment_peripheral_pass) {
+          LOG_ERROR("CPU_COMPARE_PERIPHERAL_DIFF name=%s mode=%s final=%u segment=%u reference_dma=0x%08X/0x%08X actual_dma=0x%08X/0x%08X reference_cd=%llu/%d/%d actual_cd=%llu/%d/%d",
+                    test_case.name, cpu_compare_mode_name(mode),
+                    peripheral_state_pass ? 1u : 0u,
+                    segment_peripheral_pass ? 1u : 0u,
+                    reference.peripherals.dma_dpcr,
+                    reference.peripherals.dma_dicr,
+                    result.peripherals.dma_dpcr,
+                    result.peripherals.dma_dicr,
+                    static_cast<unsigned long long>(
+                        reference.peripherals.cd_sector_count),
+                    reference.peripherals.cd_read_lba,
+                    reference.peripherals.cd_active_lba,
+                    static_cast<unsigned long long>(
+                        result.peripherals.cd_sector_count),
+                    result.peripherals.cd_read_lba,
+                    result.peripherals.cd_active_lba);
         }
         if (!native_check_pass) {
           LOG_ERROR(
@@ -1932,6 +3147,25 @@ static int run_cpu_backend_compare_test() {
 
   g_experimental_unhandled_special_returns_zero = saved_unknown_fallback;
   g_cpu_x64_jit_force_compile = saved_force_native;
+  g_cpu_x64_jit_branch_tail_enabled = saved_branch_tail_enabled;
+  g_cpu_x64_jit_branch_tail_cli_override =
+      saved_branch_tail_cli_override;
+  g_cpu_x64_jit_branch_tail_cli_value = saved_branch_tail_cli_value;
+  g_cpu_x64_jit_branch_tail_blacklist = saved_branch_tail_blacklist;
+  g_cpu_backend_compare_irq_on_branch = saved_compare_irq_on_branch;
+  g_cpu_backend_compare_allow_partial_branch_tail =
+      saved_compare_partial_branch_tail;
+  g_cpu_backend_compare_allow_partial_memory_helper =
+      saved_compare_partial_memory;
+  g_cpu_x64_jit_all_native_cli_override = saved_all_native_cli_override;
+  g_cpu_x64_jit_all_native_cli_value = saved_all_native_cli_value;
+  g_cpu_x64_jit_native_memory_cli_override =
+      saved_memory_native_cli_override;
+  g_cpu_x64_jit_native_memory_cli_value = saved_memory_native_cli_value;
+  g_cpu_x64_jit_native_alu_cli_override = saved_alu_native_cli_override;
+  g_cpu_x64_jit_native_alu_cli_value = saved_alu_native_cli_value;
+  g_cpu_x64_jit_ram_load_fastpath_enabled = saved_ram_load_fastpath;
+  g_cpu_backend_compare_test_active = saved_compare_test_active;
   g_cpu_execution_mode_cli_override = saved_override;
   g_cpu_execution_mode_cli_value = saved_override_value;
 
@@ -2186,10 +3420,16 @@ static int run_frame_test(const std::string &bios_path, int frames,
   int first_black_after_logo_frame = -1;
   int first_fell_back_frame = -1;
   int first_logo_candidate_frame = -1;
+  double frame_test_cpu_ms_total = 0.0;
+  double frame_test_core_ms_total = 0.0;
+  sys->cpu().notify_cpu_backend_frame(0u);
 
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+    sys->cpu().notify_cpu_backend_frame(static_cast<u32>(i + 1));
+    frame_test_cpu_ms_total += sys->profiling_stats().cpu_ms;
+    frame_test_core_ms_total += sys->profiling_stats().total_ms;
     const System::BootDiagnostics &diag = sys->boot_diag();
     const u32 pc = sys->cpu().pc();
 
@@ -2296,11 +3536,26 @@ static int run_frame_test(const std::string &bios_path, int frames,
           static_cast<unsigned long long>(sys->cpu().cycle_count()),
           sys->irq().stat(), sys->irq().mask());
     }
-  }
-  if (g_cpu_backend_stats_logging) {
-    sys->cpu().notify_cpu_backend_frame(static_cast<u32>(frames));
+    if (g_frame_state_log_frames != 0u &&
+        (static_cast<u32>(i + 1) % g_frame_state_log_frames) == 0u) {
+      sys->debug_log_frame_state();
+    }
   }
   const System::BootDiagnostics &diag = sys->boot_diag();
+  const double cpu_core_ms_avg =
+      frame_test_cpu_ms_total / static_cast<double>(frames);
+  const double core_ms_avg =
+      frame_test_core_ms_total / static_cast<double>(frames);
+  const double target_fps = sys->target_fps();
+  const double frame_budget_ms = target_fps > 0.0 ? 1000.0 / target_fps : 0.0;
+  const double slowdown_percent =
+      frame_budget_ms > 0.0 && core_ms_avg > frame_budget_ms
+          ? std::clamp((1.0 - frame_budget_ms / core_ms_avg) * 100.0,
+                       0.0, 100.0)
+          : 0.0;
+  LOG_INFO("FRAME_PERF cpu_core_ms=%.3f core_ms=%.3f slowdown_percent=%.2f target_fps=%.3f detailed=%u",
+           cpu_core_ms_avg, core_ms_avg, slowdown_percent, target_fps,
+           g_profile_detailed_timing ? 1u : 0u);
   LOG_INFO(
       "FRAME_SUMMARY saw_cd_read_cmd=%d saw_cd_sector_visible=%d "
       "saw_tx_cmd42=%d saw_full_pad_poll=%d saw_cd_getid=%d "
@@ -3090,6 +4345,14 @@ int main(int argc, char *argv[]) {
   std::string windowed_bios_only_path;
   bool windowed_direct_boot = false;
   int fmv_diagnostics_override = -1;
+  int audio_target_latency_override_ms = -1;
+  int audio_soft_latency_override_ms = -1;
+  int audio_max_latency_override_ms = -1;
+  int audio_queue_override = -1;
+  int audio_smooth_trim_override = -1;
+  int audio_raw_drift_override = -1;
+  int show_audio_stats_override = -1;
+  int audio_stats_log_override = -1;
   std::vector<std::string> passthrough;
   passthrough.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
@@ -3150,8 +4413,143 @@ int main(int argc, char *argv[]) {
       g_cpu_x64_jit_force_compile = true;
       continue;
     }
+    if (a == "--jit-disable-all-native") {
+      g_cpu_x64_jit_all_native_cli_override = true;
+      g_cpu_x64_jit_all_native_cli_value = false;
+      continue;
+    }
+    if (a == "--jit-enable-all-native") {
+      g_cpu_x64_jit_all_native_cli_override = true;
+      g_cpu_x64_jit_all_native_cli_value = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-memory") {
+      g_cpu_x64_jit_native_memory_cli_override = true;
+      g_cpu_x64_jit_native_memory_cli_value = false;
+      continue;
+    }
+    if (a == "--jit-enable-native-memory") {
+      g_cpu_x64_jit_native_memory_cli_override = true;
+      g_cpu_x64_jit_native_memory_cli_value = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-loads") {
+      g_cpu_x64_jit_disable_native_loads = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-stores") {
+      g_cpu_x64_jit_disable_native_stores = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-mmio") {
+      g_cpu_x64_jit_disable_native_mmio = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-ram") {
+      g_cpu_x64_jit_disable_native_ram = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-load-delay") {
+      g_cpu_x64_jit_disable_native_load_delay = true;
+      continue;
+    }
+    if (a == "--jit-disable-native-mixed-load-store") {
+      g_cpu_x64_jit_disable_native_mixed_load_store = true;
+      continue;
+    }
+    if (a == "--jit-memory-trace") {
+      g_cpu_x64_jit_memory_trace = true;
+      continue;
+    }
+    if (a == "--jit-memory-trace-pc" && (i + 1) < args.size()) {
+      char *end = nullptr;
+      const unsigned long parsed = std::strtoul(args[i + 1].c_str(), &end, 0);
+      if (end != args[i + 1].c_str() && end != nullptr && *end == '\0') {
+        g_cpu_x64_jit_memory_trace_pc_set = true;
+        g_cpu_x64_jit_memory_trace_pc = static_cast<u32>(parsed);
+        g_cpu_x64_jit_memory_trace = true;
+      } else {
+        fprintf(stderr, "WARN: Ignoring invalid native-memory trace PC: %s\n",
+                args[i + 1].c_str());
+      }
+      ++i;
+      continue;
+    }
+    if (a == "--jit-memory-trace-count" && (i + 1) < args.size()) {
+      g_cpu_x64_jit_memory_trace_count =
+          static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--jit-enable-ram-load-fastpath") {
+      g_cpu_x64_jit_ram_load_fastpath_enabled = true;
+      continue;
+    }
+    if (a == "--jit-disable-ram-load-fastpath") {
+      g_cpu_x64_jit_ram_load_fastpath_enabled = false;
+      continue;
+    }
+    if (a == "--jit-disable-native-alu") {
+      g_cpu_x64_jit_native_alu_cli_override = true;
+      g_cpu_x64_jit_native_alu_cli_value = false;
+      continue;
+    }
+    if (a == "--jit-enable-native-alu") {
+      g_cpu_x64_jit_native_alu_cli_override = true;
+      g_cpu_x64_jit_native_alu_cli_value = true;
+      continue;
+    }
+    if (a == "--jit-disable-branch-tail") {
+      g_cpu_x64_jit_branch_tail_cli_override = true;
+      g_cpu_x64_jit_branch_tail_cli_value = false;
+      continue;
+    }
+    if (a == "--jit-enable-branch-tail") {
+      g_cpu_x64_jit_branch_tail_cli_override = true;
+      g_cpu_x64_jit_branch_tail_cli_value = true;
+      continue;
+    }
+    if (a == "--jit-branch-tail-log") {
+      g_cpu_x64_jit_branch_tail_logging = true;
+      g_cpu_backend_stats_logging = true;
+      continue;
+    }
+    if (a == "--jit-branch-tail-log-count" && (i + 1) < args.size()) {
+      g_cpu_x64_jit_branch_tail_log_count =
+          static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--jit-branch-tail-blacklist-pc" && (i + 1) < args.size()) {
+      char *end = nullptr;
+      const unsigned long parsed =
+          std::strtoul(args[i + 1].c_str(), &end, 0);
+      if (end != args[i + 1].c_str() && end != nullptr && *end == '\0') {
+        const u32 pc = static_cast<u32>(parsed);
+        if (std::find(g_cpu_x64_jit_branch_tail_blacklist.begin(),
+                      g_cpu_x64_jit_branch_tail_blacklist.end(),
+                      pc) == g_cpu_x64_jit_branch_tail_blacklist.end()) {
+          g_cpu_x64_jit_branch_tail_blacklist.push_back(pc);
+        }
+      } else {
+        fprintf(stderr, "WARN: Ignoring invalid branch-tail PC: %s\n",
+                args[i + 1].c_str());
+      }
+      ++i;
+      continue;
+    }
+    if (a == "--jit-clear-branch-tail-blacklist") {
+      g_cpu_x64_jit_branch_tail_blacklist.clear();
+      continue;
+    }
     if (a == "--cpu-backend-stats-log-frames" && (i + 1) < args.size()) {
       g_cpu_backend_stats_log_frames =
+          static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--frame-state-log-frames" && (i + 1) < args.size()) {
+      g_frame_state_log_frames =
           static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
       ++i;
       continue;
@@ -3241,6 +4639,65 @@ int main(int argc, char *argv[]) {
     if (a == "--host-wav-out" && (i + 1) < args.size()) {
       g_spu_host_wav_out_path = args[i + 1];
       ++i;
+      continue;
+    }
+    if (a == "--audio-target-latency-ms" && (i + 1) < args.size()) {
+      audio_target_latency_override_ms =
+          std::clamp(std::atoi(args[i + 1].c_str()), 10, 500);
+      ++i;
+      continue;
+    }
+    if (a == "--audio-max-latency-ms" && (i + 1) < args.size()) {
+      audio_max_latency_override_ms =
+          std::clamp(std::atoi(args[i + 1].c_str()), 10, 1000);
+      ++i;
+      continue;
+    }
+    if (a == "--audio-soft-latency-ms" && (i + 1) < args.size()) {
+      audio_soft_latency_override_ms =
+          std::clamp(std::atoi(args[i + 1].c_str()), 10, 750);
+      ++i;
+      continue;
+    }
+    if (a == "--audio-queue") {
+      audio_queue_override = 1;
+      continue;
+    }
+    if (a == "--no-audio-queue") {
+      audio_queue_override = 0;
+      continue;
+    }
+    if (a == "--audio-smooth-trim") {
+      audio_smooth_trim_override = 1;
+      continue;
+    }
+    if (a == "--no-audio-smooth-trim") {
+      audio_smooth_trim_override = 0;
+      continue;
+    }
+    if (a == "--audio-raw-drift") {
+      audio_raw_drift_override = 1;
+      audio_stats_log_override = 1;
+      continue;
+    }
+    if (a == "--no-audio-raw-drift") {
+      audio_raw_drift_override = 0;
+      continue;
+    }
+    if (a == "--show-audio-stats") {
+      show_audio_stats_override = 1;
+      continue;
+    }
+    if (a == "--hide-audio-stats") {
+      show_audio_stats_override = 0;
+      continue;
+    }
+    if (a == "--audio-stats-log") {
+      audio_stats_log_override = 1;
+      continue;
+    }
+    if (a == "--no-audio-stats-log") {
+      audio_stats_log_override = 0;
       continue;
     }
     if (a == "--lag-stutter") {
@@ -3395,6 +4852,14 @@ int main(int argc, char *argv[]) {
       g_experimental_bios_size_mode = true;
       continue;
     }
+    if (a == "--detailed-profiling") {
+      g_profile_detailed_timing = true;
+      continue;
+    }
+    if (a == "--no-detailed-profiling") {
+      g_profile_detailed_timing = false;
+      continue;
+    }
     if (a == "--experimental-dma-command-sanitizer") {
       if ((i + 1) < args.size()) {
         std::string v = args[i + 1];
@@ -3423,8 +4888,14 @@ int main(int argc, char *argv[]) {
 
   if (!passthrough.empty() &&
       (passthrough[0] == "--cpu-backend-compare-test" ||
-       passthrough[0] == "--cpu-compare-test")) {
-    const int rc = run_cpu_backend_compare_test();
+       passthrough[0] == "--cpu-compare-test" ||
+       passthrough[0] == "--jit-memory-compare-test")) {
+    const bool memory_only =
+        passthrough[0] == "--jit-memory-compare-test";
+    if (memory_only) {
+      g_cpu_x64_jit_memory_trace = true;
+    }
+    const int rc = run_cpu_backend_compare_test(memory_only);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
@@ -3541,6 +5012,38 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
     getchar();
     return 1;
+  }
+
+  if (audio_target_latency_override_ms >= 0) {
+    g_spu_audio_target_latency_ms =
+        static_cast<u32>(audio_target_latency_override_ms);
+  }
+  if (audio_max_latency_override_ms >= 0) {
+    g_spu_audio_max_latency_ms =
+        static_cast<u32>(audio_max_latency_override_ms);
+  }
+  if (audio_soft_latency_override_ms >= 0) {
+    g_spu_audio_soft_latency_ms =
+        static_cast<u32>(audio_soft_latency_override_ms);
+  }
+  g_spu_audio_soft_latency_ms = std::clamp(g_spu_audio_soft_latency_ms,
+      g_spu_audio_target_latency_ms, 750u);
+  g_spu_audio_max_latency_ms = std::clamp(g_spu_audio_max_latency_ms,
+      g_spu_audio_soft_latency_ms, 1000u);
+  if (audio_queue_override >= 0) {
+    g_spu_enable_audio_queue = audio_queue_override != 0;
+  }
+  if (audio_smooth_trim_override >= 0) {
+    g_spu_enable_smooth_trim = audio_smooth_trim_override != 0;
+  }
+  if (audio_raw_drift_override >= 0) {
+    g_spu_audio_raw_drift = audio_raw_drift_override != 0;
+  }
+  if (show_audio_stats_override >= 0) {
+    g_spu_show_audio_stats = show_audio_stats_override != 0;
+  }
+  if (audio_stats_log_override >= 0) {
+    g_spu_audio_stats_log = audio_stats_log_override != 0;
   }
 
   if (!windowed_disc_path.empty()) {

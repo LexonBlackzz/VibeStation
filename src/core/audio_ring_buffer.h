@@ -21,14 +21,33 @@
 //   - "Source Engine" lag-stutter: when the emulator drops frames and the
 //     buffer is starved, a fixed snapshot of the last ~400 ms of audio is
 //     looped until enough fresh audio has accumulated to resume cleanly.
-//   - Push never blocks: the SPU thread can push even 1 sample at a time
-//     during a massive frame freeze without overflowing.
+//   - Callback reads use try-lock and never wait; a contested callback emits
+//     silence while the producer retains normal mutex-protected writes.
 //   - set_buffer_duration() changes the capacity threshold at runtime
 //     WITHOUT dropping pending audio data.
 // ============================================================================
 
 class AudioRingBuffer {
 public:
+  struct PushResult {
+    size_t pushed_samples = 0;
+    size_t dropped_samples = 0;
+    size_t peak_samples = 0;
+    size_t queued_samples = 0;
+  };
+
+  struct ReadResult {
+    size_t consumed_samples = 0;
+    size_t discarded_samples = 0;
+    size_t queue_samples_before = 0;
+    size_t queue_samples_after = 0;
+    size_t history_drained_samples = 0;
+    u32 peak_sample_before_clamp = 0;
+    size_t clipped_samples = 0;
+    size_t read_pointer_discontinuities = 0;
+    bool lock_contended = false;
+  };
+
   // Defaults tuned for PS1: 44.1 kHz, stereo, 400 ms buffer.
   static constexpr u32 DEFAULT_SAMPLE_RATE = 44100;
   static constexpr u32 DEFAULT_CHANNELS = 2;
@@ -65,13 +84,19 @@ public:
   // --------------------------------------------------------------------------
   //
   // Append `count` interleaved stereo samples (L, R, L, R, …) to the ring
-  // buffer. This function NEVER blocks: if the buffer is full it discards
-  // the oldest samples to make room, ensuring the SPU thread can push at
-  // any rate — even a single sample per second during a 7-second frame drop.
+  // buffer. If full, it discards oldest samples to make room. Producer writes
+  // may take the mutex; the SDL callback always uses a non-waiting try-lock.
   //
   // @param samples  Pointer to interleaved s16 sample data.
   // @param count    Number of samples to push (even 1 is valid).
   void push_samples(const s16 *samples, size_t count);
+
+  // Append samples and enforce a latency watermark in one producer-side
+  // critical section. If the queue crosses max_samples, oldest audio is
+  // discarded until target_samples remains.
+  PushResult push_samples_bounded(const s16 *samples, size_t count,
+                                  size_t target_samples,
+                                  size_t max_samples);
 
   // Drop the oldest unread live samples without invoking stutter synthesis.
   // Dropped audio is still recorded into the rolling history so the optional
@@ -107,6 +132,18 @@ public:
   // sustained emulation slowdown without playing delayed live audio.
   void read_stutter_samples(s16 *out_buffer, size_t requested_count);
 
+  // Real-time callback read. This never waits for the producer: if the ring
+  // lock is busy, or fewer samples are available, the missing output remains
+  // silence and the result reports how many fresh samples were consumed.
+  ReadResult try_read_samples(s16 *out_buffer, size_t requested_count,
+                              size_t discard_before_read = 0);
+
+  // Play the recent-output history without consuming live queued samples.
+  // Used only during real starvation; like try_read_samples(), it never waits.
+  ReadResult try_read_history_samples(s16 *out_buffer,
+                                      size_t requested_count,
+                                      size_t drain_live_samples = 0);
+
   // --------------------------------------------------------------------------
   // Query helpers
   // --------------------------------------------------------------------------
@@ -125,6 +162,16 @@ public:
 
 private:
   size_t samples_from_seconds(double seconds) const;
+
+  void append_samples_locked(const s16 *samples, size_t count,
+                             size_t &dropped_samples,
+                             bool preserve_stutter_history = true);
+  size_t discard_oldest_locked(size_t count,
+                               bool preserve_stutter_history = true);
+  void publish_available_locked() {
+    available_samples_snapshot_.store(used_samples(),
+                                      std::memory_order_release);
+  }
 
   // Resize the backing storage to `new_capacity + 1` slots, preserving
   // the currently valid samples. Must be called under mutex_.
@@ -186,6 +233,7 @@ private:
   size_t capacity_ = 0; // Max usable samples (buffer_.size() - 1).
   size_t write_pos_ = 0;
   size_t read_pos_ = 0;
+  std::atomic<size_t> available_samples_snapshot_{0};
 
   // Format.
   u32 sample_rate_ = DEFAULT_SAMPLE_RATE;
@@ -205,4 +253,8 @@ private:
   size_t stutter_resume_threshold_ = 0;
   std::array<s16, DEFAULT_CHANNELS> last_output_frame_ = {};
   bool has_last_output_frame_ = false;
+  bool history_loop_active_ = false;
+  size_t history_loop_start_ = 0;
+  size_t history_loop_length_ = 0;
+  size_t history_loop_offset_ = 0;
 };
