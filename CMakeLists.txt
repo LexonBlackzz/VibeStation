@@ -4,6 +4,14 @@ project(VibeStation LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(VIBESTATION_X64_JIT_DEFAULT OFF)
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND
+        (MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
+    set(VIBESTATION_X64_JIT_DEFAULT ON)
+endif()
+option(VIBESTATION_ENABLE_X64_JIT
+    "Enable the native x64 CPU JIT/recompiler when supported" ${VIBESTATION_X64_JIT_DEFAULT})
+
 # ── Fetch Dependencies ──────────────────────────────────────────────
 include(FetchContent)
 
@@ -50,6 +58,7 @@ set(VIBESTATION_SOURCES
     src/core/interrupt.cpp
     src/core/timer.cpp
     src/core/spu.cpp
+    src/core/audio_ring_buffer.cpp
     src/core/sio.cpp
     src/core/memory_card.cpp
     src/core/pad_controller.cpp
@@ -59,6 +68,8 @@ set(VIBESTATION_SOURCES
     src/core/gpu.cpp
     src/core/gte.cpp
     src/core/cpu.cpp
+    src/core/cpu_recompiler.cpp
+    src/core/cpu_recompiler_x64.cpp
     src/core/system.cpp
     src/core/renderer.cpp
     src/input/controller.cpp
@@ -73,10 +84,32 @@ add_executable(VibeStation ${VIBESTATION_SOURCES})
 target_include_directories(VibeStation PRIVATE src)
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static)
 
+if(VIBESTATION_ENABLE_X64_JIT)
+    FetchContent_Declare(xbyak
+        GIT_REPOSITORY https://github.com/herumi/xbyak.git
+        GIT_TAG v7.37.4
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(xbyak)
+    target_include_directories(VibeStation PRIVATE ${xbyak_SOURCE_DIR})
+    target_compile_definitions(VibeStation PRIVATE VIBESTATION_ENABLE_X64_JIT=1)
+    message(STATUS "Xbyak available for native x64 CPU JIT work at ${xbyak_SOURCE_DIR}")
+else()
+    message(STATUS "Native x64 CPU JIT support disabled; optimized CPU modes use non-native fallbacks")
+endif()
+
 option(VIBESTATION_ENABLE_DISCORD_RPC
     "Enable Discord Rich Presence via the Discord Social SDK when available" ON)
+set(VIBESTATION_DISCORD_DEFAULT_SDK_ROOT "D:/Projects/github/discord_social_sdk")
+if(NOT EXISTS "${VIBESTATION_DISCORD_DEFAULT_SDK_ROOT}/include/discordpp.h")
+    set(VIBESTATION_DISCORD_DEFAULT_SDK_ROOT "")
+endif()
 set(VIBESTATION_DISCORD_SDK_ROOT "" CACHE PATH
     "Path to the extracted Discord Social SDK directory")
+if(NOT VIBESTATION_DISCORD_SDK_ROOT AND VIBESTATION_DISCORD_DEFAULT_SDK_ROOT)
+    set(VIBESTATION_DISCORD_SDK_ROOT "${VIBESTATION_DISCORD_DEFAULT_SDK_ROOT}"
+        CACHE PATH "Path to the extracted Discord Social SDK directory" FORCE)
+endif()
 
 if(VIBESTATION_ENABLE_DISCORD_RPC)
     # The SDK root can move outside the repo. Clear cached lookup results so
@@ -97,12 +130,12 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
     find_library(VIBESTATION_DISCORD_LIBRARY
         NAMES discord_partner_sdk
         PATHS
-            ${VIBESTATION_DISCORD_SDK_ROOT}
-            ${VIBESTATION_DISCORD_SDK_ROOT}/lib
             ${VIBESTATION_DISCORD_SDK_ROOT}/lib/release
             ${VIBESTATION_DISCORD_SDK_ROOT}/lib/debug
             ${VIBESTATION_DISCORD_SDK_ROOT}/lib/x64
             ${VIBESTATION_DISCORD_SDK_ROOT}/lib/x86_64
+            ${VIBESTATION_DISCORD_SDK_ROOT}/lib
+            ${VIBESTATION_DISCORD_SDK_ROOT}
         NO_DEFAULT_PATH
     )
 
@@ -114,8 +147,6 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
         find_file(VIBESTATION_DISCORD_DLL
             NAMES discord_partner_sdk.dll
             PATHS
-                ${VIBESTATION_DISCORD_SDK_ROOT}
-                ${VIBESTATION_DISCORD_SDK_ROOT}/bin
                 ${VIBESTATION_DISCORD_SDK_ROOT}/bin/release
                 ${VIBESTATION_DISCORD_SDK_ROOT}/bin/debug
                 ${VIBESTATION_DISCORD_SDK_ROOT}/bin/x64
@@ -124,6 +155,8 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
                 ${VIBESTATION_DISCORD_SDK_ROOT}/lib/debug
                 ${VIBESTATION_DISCORD_SDK_ROOT}/lib/x64
                 ${VIBESTATION_DISCORD_SDK_ROOT}/lib/x86_64
+                ${VIBESTATION_DISCORD_SDK_ROOT}/bin
+                ${VIBESTATION_DISCORD_SDK_ROOT}
             NO_DEFAULT_PATH
         )
         if(WIN32 AND VIBESTATION_DISCORD_DLL)
