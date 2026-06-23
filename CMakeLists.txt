@@ -54,6 +54,7 @@ target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
 set(VIBESTATION_SOURCES
     src/main.cpp
     src/platform/cpu_backend_compare_runner.cpp
+    src/platform/disc_path_utils.cpp
     src/core/bios.cpp
     src/core/ram.cpp
     src/core/interrupt.cpp
