@@ -79,6 +79,7 @@ set(VIBESTATION_SOURCES
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
     src/ui/app.cpp
+    src/ui/panels/cpu_backend_panel.cpp
 )
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
