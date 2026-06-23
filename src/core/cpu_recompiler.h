@@ -118,6 +118,10 @@ enum class NativeBlockRejectDetail : u8 {
   BranchTailNestedDelayBranch,
   BranchTailDisabled,
   BranchTailBlacklisted,
+  ReducedHelperStore,
+  ReducedHelperLoadBaseWritten,
+  ReducedHelperUnsupportedMemory,
+  ReducedHelperPreflightDisabled,
 };
 
 enum class NativeMemoryRegion : u8 {
@@ -126,6 +130,19 @@ enum class NativeMemoryRegion : u8 {
   BiosReadOnly,
   Mmio,
   UnknownSlow,
+};
+
+enum class NativeBlockShape : u8 {
+  StraightAlu,
+  StraightAluRamLoadCandidate,
+  StraightAluRamStoreCandidate,
+  HelperSafeMemory,
+  BranchTail,
+  FallbackControl,
+  Cop0,
+  Cop2,
+  Mmio,
+  ExceptionUnsafe,
 };
 
 NativeMemoryRegion classify_native_memory_region(u32 addr);
@@ -177,6 +194,7 @@ struct DecodedBlock {
   u32 registered_page_count = 0;
   u32 last_invalidation_query = 0;
   u64 entry_count = 0;
+  u64 native_entry_count = 0;
   u64 native_branch_tail_entry_count = 0;
   u64 native_prepare_helper_call_count = 0;
   u64 native_finish_helper_call_count = 0;
@@ -202,12 +220,17 @@ struct DecodedBlock {
   bool native_compile_attempted = false;
   bool native_safety_checked = false;
   bool native_stage1_safe = false;
+  bool native_reduced_helper = false;
+  bool native_reduced_helper_ram_load = false;
   bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =
       NativeBlockRejectReason::None;
   NativeBlockRejectDetail native_reject_detail =
       NativeBlockRejectDetail::None;
+  NativeBlockRejectDetail native_reduced_helper_reject_detail =
+      NativeBlockRejectDetail::None;
+  NativeBlockShape native_shape = NativeBlockShape::ExceptionUnsafe;
 };
 
 class CpuOptimizedBackend {
@@ -328,6 +351,7 @@ private:
                                        bool delay_memory, bool delay_mmio,
                                        bool exception);
   void log_native_branch_tail_diagnostics() const;
+  void log_native_entry_pc_diagnostics() const;
   void log_native_helper_pc_diagnostics() const;
   void warn_forced_interpreter_once(CpuForcedInterpreterReason reason);
   void log_periodic_stats();

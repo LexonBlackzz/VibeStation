@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <array>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -1014,6 +1015,12 @@ struct CpuCompareCase {
   bool require_alu_native_disabled_fallback_when_available = false;
   bool require_native_memory_tier_entry_when_available = false;
   bool require_native_alu_tier_entry_when_available = false;
+  bool require_native_reduced_helper_ram_load_entry_when_available = false;
+  bool require_no_native_reduced_helper_ram_load_entry = false;
+  bool require_no_native_instruction_helpers_when_available = false;
+  bool require_reduced_helper_preflight_mmio_when_available = false;
+  bool require_reduced_helper_preflight_unaligned_when_available = false;
+  bool require_reduced_helper_preflight_non_ram_when_available = false;
   bool enable_ram_load_fastpath_for_x64 = false;
   bool require_native_ram_load_fastpath_when_available = false;
   bool require_no_native_ram_load_fastpath = false;
@@ -1571,6 +1578,71 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   shifts.require_full_native_when_available = true;
   pad_cpu_compare_program(shifts);
   cases.push_back(shifts);
+
+  CpuCompareCase decoded_load_then_reduced_alu_cancel{};
+  decoded_load_then_reduced_alu_cancel.name =
+      "decoded_load_then_reduced_alu_cancel";
+  decoded_load_then_reduced_alu_cancel.initial_gpr[1] = 0x80011480u;
+  decoded_load_then_reduced_alu_cancel.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_reduced_alu_cancel.memory.push_back(
+      {0x00011480u, 0xDEADBEEFu});
+  decoded_load_then_reduced_alu_cancel.program = {
+      enc_i(0x23, 1, 2, 0), enc_i(0x09, 0, 2, 7),
+      enc_r(2, 0, 3, 0, 0x21),
+  };
+  pad_cpu_compare_program(decoded_load_then_reduced_alu_cancel, 17u);
+  decoded_load_then_reduced_alu_cancel.segment_instructions = {1u, 16u};
+  decoded_load_then_reduced_alu_cancel.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_reduced_alu_cancel.compare_segment_states = true;
+  decoded_load_then_reduced_alu_cancel
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(decoded_load_then_reduced_alu_cancel);
+
+  CpuCompareCase decoded_load_then_reduced_alu_retire{};
+  decoded_load_then_reduced_alu_retire.name =
+      "decoded_load_then_reduced_alu_retire";
+  decoded_load_then_reduced_alu_retire.initial_gpr[1] = 0x80011490u;
+  decoded_load_then_reduced_alu_retire.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_reduced_alu_retire.memory.push_back(
+      {0x00011490u, 0xCAFEBABEu});
+  decoded_load_then_reduced_alu_retire.program = {
+      enc_i(0x23, 1, 2, 0), enc_i(0x09, 0, 3, 7),
+      enc_r(2, 0, 4, 0, 0x21),
+  };
+  pad_cpu_compare_program(decoded_load_then_reduced_alu_retire, 17u);
+  decoded_load_then_reduced_alu_retire.segment_instructions = {1u, 16u};
+  decoded_load_then_reduced_alu_retire.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_reduced_alu_retire.compare_segment_states = true;
+  decoded_load_then_reduced_alu_retire
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(decoded_load_then_reduced_alu_retire);
+
+  CpuCompareCase reduced_alu_then_decoded_boundary{};
+  reduced_alu_then_decoded_boundary.name =
+      "reduced_alu_then_decoded_boundary";
+  reduced_alu_then_decoded_boundary.program.assign(17u, 0u);
+  reduced_alu_then_decoded_boundary.program[0] =
+      enc_i(0x09, 0, 2, 0x1234);
+  reduced_alu_then_decoded_boundary.program[15] =
+      enc_i(0x0E, 2, 2, 0x00FF);
+  reduced_alu_then_decoded_boundary.program[16] =
+      enc_r(2, 0, 3, 0, 0x21);
+  reduced_alu_then_decoded_boundary.instructions = 17u;
+  reduced_alu_then_decoded_boundary.segment_instructions = {16u, 1u};
+  reduced_alu_then_decoded_boundary.segment_native_tiers = {
+      {true, true, true}, {false, true, true}};
+  reduced_alu_then_decoded_boundary.compare_segment_states = true;
+  reduced_alu_then_decoded_boundary.expect_final_control_state = true;
+  reduced_alu_then_decoded_boundary.expected_pc = kCpuComparePc + 68u;
+  reduced_alu_then_decoded_boundary.expected_next_pc = kCpuComparePc + 72u;
+  reduced_alu_then_decoded_boundary.expected_current_pc =
+      kCpuComparePc + 64u;
+  reduced_alu_then_decoded_boundary.expected_cycles = 37u;
+  reduced_alu_then_decoded_boundary
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(reduced_alu_then_decoded_boundary);
 
   CpuCompareCase bne_taken{};
   bne_taken.name = "native_branch_tail_bne_taken_alu_delay";
@@ -2166,6 +2238,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_ram_load_fastpath_when_available = true;
   native_memory_then_decoded_load
       .require_native_memory_tier_entry_when_available = true;
+  native_memory_then_decoded_load
+      .require_native_reduced_helper_ram_load_entry_when_available = true;
+  native_memory_then_decoded_load
+      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_memory_then_decoded_load);
 
   CpuCompareCase decoded_then_native_fast_load{};
@@ -2192,9 +2268,11 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   decoded_then_native_fast_load
       .require_native_ram_load_fastpath_when_available = true;
   decoded_then_native_fast_load
-      .require_native_helper_load_delay_entry_when_available = true;
-  decoded_then_native_fast_load
       .require_native_memory_tier_entry_when_available = true;
+  decoded_then_native_fast_load
+      .require_native_reduced_helper_ram_load_entry_when_available = true;
+  decoded_then_native_fast_load
+      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(decoded_then_native_fast_load);
 
   CpuCompareCase decoded_then_native_memory_load{};
@@ -2394,6 +2472,134 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(ram_fast_load_widths);
   cases.push_back(ram_fast_load_widths);
 
+  CpuCompareCase reduced_ram_load_widths{};
+  reduced_ram_load_widths.name =
+      "reduced_helper_ram_load_widths_sign_zero";
+  reduced_ram_load_widths.initial_gpr[1] = 0x80011500u;
+  reduced_ram_load_widths.memory.push_back({0x00011500u, 0x8001FF80u});
+  reduced_ram_load_widths.program = {
+      enc_i(0x20, 1, 2, 0), 0,
+      enc_i(0x24, 1, 3, 1), 0,
+      enc_i(0x21, 1, 4, 0), 0,
+      enc_i(0x25, 1, 5, 2), 0,
+      enc_i(0x23, 1, 6, 0), 0,
+  };
+  reduced_ram_load_widths.enable_ram_load_fastpath_for_x64 = true;
+  reduced_ram_load_widths.require_full_native_when_available = true;
+  reduced_ram_load_widths
+      .require_native_reduced_helper_ram_load_entry_when_available = true;
+  reduced_ram_load_widths
+      .require_no_native_instruction_helpers_when_available = true;
+  pad_cpu_compare_program(reduced_ram_load_widths);
+  cases.push_back(reduced_ram_load_widths);
+
+  CpuCompareCase reduced_ram_load_boundary{};
+  reduced_ram_load_boundary.name =
+      "decoded_load_then_reduced_helper_ram_load";
+  reduced_ram_load_boundary.initial_gpr[1] = 0x80011520u;
+  reduced_ram_load_boundary.initial_gpr[2] = 0x11111111u;
+  reduced_ram_load_boundary.initial_gpr[3] = 0x22222222u;
+  reduced_ram_load_boundary.memory.push_back(
+      {0x00011520u, 0xA1B2C3D4u});
+  reduced_ram_load_boundary.memory.push_back(
+      {0x00011524u, 0x55667788u});
+  reduced_ram_load_boundary.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x23, 1, 3, 4),
+      enc_r(2, 0, 4, 0, 0x21),
+      enc_r(3, 0, 5, 0, 0x21),
+  };
+  pad_cpu_compare_program(reduced_ram_load_boundary, 17u);
+  reduced_ram_load_boundary.segment_instructions = {1u, 16u};
+  reduced_ram_load_boundary.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  reduced_ram_load_boundary.compare_segment_states = true;
+  reduced_ram_load_boundary.enable_ram_load_fastpath_for_x64 = true;
+  reduced_ram_load_boundary
+      .require_native_reduced_helper_ram_load_entry_when_available = true;
+  reduced_ram_load_boundary
+      .require_no_native_instruction_helpers_when_available = true;
+  cases.push_back(reduced_ram_load_boundary);
+
+  CpuCompareCase reduced_ram_load_cancel{};
+  reduced_ram_load_cancel.name =
+      "reduced_helper_ram_load_same_register_cancel";
+  reduced_ram_load_cancel.initial_gpr[1] = 0x80011540u;
+  reduced_ram_load_cancel.initial_gpr[2] = 0x11111111u;
+  reduced_ram_load_cancel.memory.push_back(
+      {0x00011540u, 0xDEADBEEFu});
+  reduced_ram_load_cancel.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x09, 0, 2, 7),
+      enc_r(2, 0, 3, 0, 0x21),
+  };
+  reduced_ram_load_cancel.enable_ram_load_fastpath_for_x64 = true;
+  reduced_ram_load_cancel.require_full_native_when_available = true;
+  reduced_ram_load_cancel
+      .require_native_reduced_helper_ram_load_entry_when_available = true;
+  reduced_ram_load_cancel
+      .require_no_native_instruction_helpers_when_available = true;
+  pad_cpu_compare_program(reduced_ram_load_cancel);
+  cases.push_back(reduced_ram_load_cancel);
+
+  CpuCompareCase reduced_ram_load_mmio_reject{};
+  reduced_ram_load_mmio_reject.name =
+      "reduced_helper_ram_load_mmio_rejected";
+  reduced_ram_load_mmio_reject.initial_gpr[1] = 0x1F801800u;
+  reduced_ram_load_mmio_reject.program = {
+      enc_i(0x24, 1, 2, 0), 0,
+  };
+  reduced_ram_load_mmio_reject.enable_ram_load_fastpath_for_x64 = true;
+  reduced_ram_load_mmio_reject.expect_x64_fallback = true;
+  reduced_ram_load_mmio_reject.require_native_mmio_when_available = true;
+  reduced_ram_load_mmio_reject
+      .require_no_native_reduced_helper_ram_load_entry = true;
+  reduced_ram_load_mmio_reject
+      .require_reduced_helper_preflight_mmio_when_available = true;
+  reduced_ram_load_mmio_reject.require_no_native_ram_load_fastpath = true;
+  pad_cpu_compare_program(reduced_ram_load_mmio_reject);
+  cases.push_back(reduced_ram_load_mmio_reject);
+
+  CpuCompareCase reduced_ram_load_scratchpad_reject{};
+  reduced_ram_load_scratchpad_reject.name =
+      "reduced_helper_ram_load_scratchpad_rejected";
+  reduced_ram_load_scratchpad_reject.initial_gpr[1] = 0x1F800000u;
+  reduced_ram_load_scratchpad_reject.memory.push_back(
+      {0x1F800000u, 0x55667788u});
+  reduced_ram_load_scratchpad_reject.program = {
+      enc_i(0x23, 1, 2, 0), 0,
+  };
+  reduced_ram_load_scratchpad_reject.enable_ram_load_fastpath_for_x64 =
+      true;
+  reduced_ram_load_scratchpad_reject.expect_x64_fallback = true;
+  reduced_ram_load_scratchpad_reject
+      .require_no_native_reduced_helper_ram_load_entry = true;
+  reduced_ram_load_scratchpad_reject
+      .require_reduced_helper_preflight_non_ram_when_available = true;
+  reduced_ram_load_scratchpad_reject.require_no_native_ram_load_fastpath =
+      true;
+  pad_cpu_compare_program(reduced_ram_load_scratchpad_reject);
+  cases.push_back(reduced_ram_load_scratchpad_reject);
+
+  CpuCompareCase reduced_ram_load_unaligned_reject{};
+  reduced_ram_load_unaligned_reject.name =
+      "reduced_helper_ram_load_unaligned_rejected";
+  reduced_ram_load_unaligned_reject.initial_gpr[1] = 0x80011562u;
+  reduced_ram_load_unaligned_reject.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x09, 0, 3, 3),
+  };
+  reduced_ram_load_unaligned_reject.enable_ram_load_fastpath_for_x64 = true;
+  reduced_ram_load_unaligned_reject.expect_x64_fallback = true;
+  reduced_ram_load_unaligned_reject
+      .require_no_native_reduced_helper_ram_load_entry = true;
+  reduced_ram_load_unaligned_reject
+      .require_reduced_helper_preflight_unaligned_when_available = true;
+  reduced_ram_load_unaligned_reject.require_no_native_ram_load_fastpath =
+      true;
+  pad_cpu_compare_program(reduced_ram_load_unaligned_reject);
+  cases.push_back(reduced_ram_load_unaligned_reject);
+
   CpuCompareCase stores{};
   stores.name = "native_memory_byte_half_word_stores";
   stores.initial_gpr[1] = 0x80011040u;
@@ -2484,7 +2690,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   cdrom_status_helper.require_full_native_when_available = true;
   cdrom_status_helper.require_native_memory_helper_when_available = true;
   cdrom_status_helper.require_native_mmio_when_available = true;
-  cdrom_status_helper.enable_ram_load_fastpath_for_x64 = true;
   cdrom_status_helper.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(cdrom_status_helper);
   cases.push_back(cdrom_status_helper);
@@ -2497,7 +2702,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x23, 1, 2, 0),
       0,
   };
-  scratchpad_slow_load.enable_ram_load_fastpath_for_x64 = true;
   scratchpad_slow_load.require_no_native_ram_load_fastpath = true;
   scratchpad_slow_load.require_native_memory_helper_when_available = true;
   scratchpad_slow_load.require_full_native_when_available = true;
@@ -2550,7 +2754,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   unaligned_lw.require_native_entry_when_available = true;
   unaligned_lw.require_native_memory_helper_when_available = true;
   unaligned_lw.require_native_memory_exception_when_available = true;
-  unaligned_lw.enable_ram_load_fastpath_for_x64 = true;
   unaligned_lw.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(unaligned_lw);
   cases.push_back(unaligned_lw);
@@ -2565,7 +2768,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   unaligned_lh.require_native_entry_when_available = true;
   unaligned_lh.require_native_memory_helper_when_available = true;
   unaligned_lh.require_native_memory_exception_when_available = true;
-  unaligned_lh.enable_ram_load_fastpath_for_x64 = true;
   unaligned_lh.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(unaligned_lh);
   cases.push_back(unaligned_lh);
@@ -2718,6 +2920,11 @@ static int run_cpu_backend_compare_test(bool memory_only = false) {
           test_case.require_native_memory_helper_when_available ||
           test_case.require_native_memory_exception_when_available ||
           test_case.require_native_memory_tier_entry_when_available ||
+          test_case
+              .require_native_reduced_helper_ram_load_entry_when_available ||
+          test_case.require_reduced_helper_preflight_mmio_when_available ||
+          test_case.require_reduced_helper_preflight_unaligned_when_available ||
+          test_case.require_reduced_helper_preflight_non_ram_when_available ||
           test_case.disable_memory_native_for_x64 ||
           name.find("memory") != std::string_view::npos ||
           name.find("mmio") != std::string_view::npos;
@@ -2946,6 +3153,49 @@ static int run_cpu_backend_compare_test(bool memory_only = false) {
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_reduced_helper_ram_load_entry_when_available &&
+            result.stats.native_reduced_helper_ram_load_entries == 0) {
+          native_check = "native_reduced_helper_ram_load_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_no_native_reduced_helper_ram_load_entry &&
+            result.stats.native_reduced_helper_ram_load_entries != 0) {
+          native_check = "unexpected_native_reduced_helper_ram_load_entry";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_no_native_instruction_helpers_when_available &&
+            (result.stats.native_prepare_helper_calls != 0 ||
+             result.stats.native_finish_helper_calls != 0 ||
+             result.stats.native_memory_helper_calls != 0)) {
+          native_check = "native_instruction_helpers_forbidden";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_reduced_helper_preflight_mmio_when_available &&
+            result.stats.native_reduced_helper_ram_load_preflight_mmio == 0) {
+          native_check = "native_reduced_helper_mmio_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_preflight_unaligned_when_available &&
+            result.stats.native_reduced_helper_ram_load_preflight_unaligned ==
+                0) {
+          native_check = "native_reduced_helper_unaligned_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_preflight_non_ram_when_available &&
+            result.stats.native_reduced_helper_ram_load_preflight_non_ram ==
+                0) {
+          native_check = "native_reduced_helper_non_ram_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
             test_case.require_native_ram_load_fastpath_when_available &&
             result.stats.native_memory_fastpath_loads == 0) {
           native_check = "native_ram_load_fastpath_missing";
@@ -3008,6 +3258,8 @@ static int run_cpu_backend_compare_test(bool memory_only = false) {
            test_case.require_native_memory_exception_when_available ||
            test_case.require_native_helper_load_delay_entry_when_available ||
            test_case.require_native_branch_tail_when_available ||
+           test_case
+               .require_native_reduced_helper_ram_load_entry_when_available ||
            test_case
                .require_native_branch_delay_memory_helper_when_available)) {
         LOG_INFO(
@@ -3080,6 +3332,42 @@ static int run_cpu_backend_compare_test(bool memory_only = false) {
                      result.stats.native_memory_helper_unaligned_calls),
                  static_cast<unsigned long long>(
                      result.stats.native_memory_fastpath_mmio_loads));
+      }
+
+      if (mode == CpuExecutionMode::X64Jit &&
+          (test_case
+               .require_native_reduced_helper_ram_load_entry_when_available ||
+           test_case.require_no_native_reduced_helper_ram_load_entry ||
+           test_case.require_reduced_helper_preflight_mmio_when_available ||
+           test_case
+               .require_reduced_helper_preflight_unaligned_when_available ||
+           test_case
+               .require_reduced_helper_preflight_non_ram_when_available)) {
+        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu native_helpers=%llu",
+                 test_case.name,
+                 static_cast<unsigned long long>(
+                     result.stats.native_reduced_helper_entries),
+                 static_cast<unsigned long long>(
+                     result.stats.native_reduced_helper_ram_load_entries),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_loads),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_reduced_helper_ram_load_preflight_fallbacks),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_reduced_helper_ram_load_preflight_mmio),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_reduced_helper_ram_load_preflight_unaligned),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_reduced_helper_ram_load_preflight_non_ram),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_reduced_helper_ram_load_preflight_disabled),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_calls));
       }
 
       if (!pass) {
@@ -3426,14 +3714,24 @@ static int run_frame_test(const std::string &bios_path, int frames,
   int first_logo_candidate_frame = -1;
   double frame_test_cpu_ms_total = 0.0;
   double frame_test_core_ms_total = 0.0;
+  double frame_test_cpu_ms_min = std::numeric_limits<double>::max();
+  double frame_test_cpu_ms_max = 0.0;
+  double frame_test_core_ms_min = std::numeric_limits<double>::max();
+  double frame_test_core_ms_max = 0.0;
   sys->cpu().notify_cpu_backend_frame(0u);
 
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
     sys->cpu().notify_cpu_backend_frame(static_cast<u32>(i + 1));
-    frame_test_cpu_ms_total += sys->profiling_stats().cpu_ms;
-    frame_test_core_ms_total += sys->profiling_stats().total_ms;
+    const double frame_cpu_ms = sys->profiling_stats().cpu_ms;
+    const double frame_core_ms = sys->profiling_stats().total_ms;
+    frame_test_cpu_ms_total += frame_cpu_ms;
+    frame_test_core_ms_total += frame_core_ms;
+    frame_test_cpu_ms_min = std::min(frame_test_cpu_ms_min, frame_cpu_ms);
+    frame_test_cpu_ms_max = std::max(frame_test_cpu_ms_max, frame_cpu_ms);
+    frame_test_core_ms_min = std::min(frame_test_core_ms_min, frame_core_ms);
+    frame_test_core_ms_max = std::max(frame_test_core_ms_max, frame_core_ms);
     const System::BootDiagnostics &diag = sys->boot_diag();
     const u32 pc = sys->cpu().pc();
 
@@ -3557,8 +3855,10 @@ static int run_frame_test(const std::string &bios_path, int frames,
           ? std::clamp((1.0 - frame_budget_ms / core_ms_avg) * 100.0,
                        0.0, 100.0)
           : 0.0;
-  LOG_INFO("FRAME_PERF cpu_core_ms=%.3f core_ms=%.3f slowdown_percent=%.2f target_fps=%.3f detailed=%u",
-           cpu_core_ms_avg, core_ms_avg, slowdown_percent, target_fps,
+  LOG_INFO("FRAME_PERF cpu_core_ms=%.3f core_ms=%.3f cpu_core_min_ms=%.3f cpu_core_max_ms=%.3f core_min_ms=%.3f core_max_ms=%.3f slowdown_percent=%.2f target_fps=%.3f detailed=%u",
+           cpu_core_ms_avg, core_ms_avg, frame_test_cpu_ms_min,
+           frame_test_cpu_ms_max, frame_test_core_ms_min,
+           frame_test_core_ms_max, slowdown_percent, target_fps,
            g_profile_detailed_timing ? 1u : 0u);
   LOG_INFO(
       "FRAME_SUMMARY saw_cd_read_cmd=%d saw_cd_sector_visible=%d "

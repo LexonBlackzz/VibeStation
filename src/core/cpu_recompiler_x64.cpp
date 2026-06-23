@@ -170,6 +170,56 @@ u8 x64_native_gpr_write_reg(const DecodedInstruction &inst) {
   }
 }
 
+bool is_x64_reduced_helper_ram_load_block(
+    const DecodedBlock &block, NativeBlockRejectDetail &reject_detail) {
+  reject_detail = NativeBlockRejectDetail::None;
+  if (!block.has_load) {
+    return false;
+  }
+  if (block.has_store) {
+    reject_detail = NativeBlockRejectDetail::ReducedHelperStore;
+    return false;
+  }
+  if (block.has_control_flow || block.has_fallback) {
+    reject_detail = NativeBlockRejectDetail::ReducedHelperUnsupportedMemory;
+    return false;
+  }
+
+  std::array<bool, 32> written{};
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (is_x64_load_op(inst.op)) {
+      if (inst.rs != 0u && written[inst.rs]) {
+        reject_detail = NativeBlockRejectDetail::ReducedHelperLoadBaseWritten;
+        return false;
+      }
+      if (inst.rt != 0u) {
+        written[inst.rt] = true;
+      }
+      continue;
+    }
+    if (inst.may_access_memory || !is_x64_stage1_op(inst.op) ||
+        inst.must_fallback || inst.may_raise_exception) {
+      reject_detail = NativeBlockRejectDetail::ReducedHelperUnsupportedMemory;
+      return false;
+    }
+    const u8 write_reg = x64_native_gpr_write_reg(inst);
+    if (write_reg != 0u) {
+      written[write_reg] = true;
+    }
+  }
+  return true;
+}
+
+bool is_canonical_ram_alias(u32 addr) {
+  const u32 segment = addr & 0xE0000000u;
+  if (segment != 0u && segment != 0x80000000u &&
+      segment != 0xA0000000u) {
+    return false;
+  }
+  return (addr & 0x1FFFFFFFu) < psx::RAM_SIZE;
+}
+
 bool is_x64_branch_tail_block(const DecodedBlock &block,
                               NativeBlockRejectDetail &reject_detail) {
   reject_detail = NativeBlockRejectDetail::None;
@@ -237,6 +287,42 @@ bool block_uses_instruction_helpers(const DecodedBlock &block) {
   return false;
 }
 
+NativeBlockShape classify_x64_block_shape(const DecodedBlock &block) {
+  bool contains_cop0 = false;
+  bool contains_cop2 = false;
+  bool contains_unsafe = block.has_fallback;
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    contains_cop0 = contains_cop0 || inst.op == DecodedOp::Cop0;
+    contains_cop2 = contains_cop2 || inst.op == DecodedOp::Cop2;
+    contains_unsafe = contains_unsafe || inst.must_fallback ||
+                      (inst.may_raise_exception && !inst.may_access_memory);
+  }
+  if (contains_cop0) {
+    return NativeBlockShape::Cop0;
+  }
+  if (contains_cop2) {
+    return NativeBlockShape::Cop2;
+  }
+  if (block.has_control_flow) {
+    return block.native_branch_tail ? NativeBlockShape::BranchTail
+                                    : NativeBlockShape::FallbackControl;
+  }
+  if (contains_unsafe) {
+    return NativeBlockShape::ExceptionUnsafe;
+  }
+  if (block.has_store) {
+    return NativeBlockShape::StraightAluRamStoreCandidate;
+  }
+  if (block.has_load) {
+    return NativeBlockShape::StraightAluRamLoadCandidate;
+  }
+  if (block.has_memory) {
+    return NativeBlockShape::HelperSafeMemory;
+  }
+  return NativeBlockShape::StraightAlu;
+}
+
 #if VIBESTATION_X64_JIT_SUPPORTED
 void emit_read_gpr(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
                    const Xbyak::Reg64 &gpr, u8 index) {
@@ -247,9 +333,17 @@ void emit_read_gpr(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
   }
 }
 
-void emit_write_gpr(Xbyak::CodeGenerator &code, const Xbyak::Reg64 &gpr,
-                    u8 index, const Xbyak::Reg32 &src) {
+void emit_write_gpr(Xbyak::CodeGenerator &code, const Xbyak::Reg64 &ctx,
+                    const Xbyak::Reg64 &gpr, u8 index,
+                    const Xbyak::Reg32 &src) {
   if (index != 0) {
+    Xbyak::Label no_cancel;
+    code.mov(code.r9,
+             code.ptr[ctx + offsetof(X64NativeContext, load_reg)]);
+    code.cmp(code.dword[code.r9], static_cast<u32>(index));
+    code.jne(no_cancel, Xbyak::CodeGenerator::T_NEAR);
+    code.mov(code.dword[code.r9], 0u);
+    code.L(no_cancel);
     code.mov(code.dword[gpr + static_cast<int>(index) * 4], src);
   }
 }
@@ -261,6 +355,7 @@ void emit_mov_imm32(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
 
 void emit_x64_instruction(Xbyak::CodeGenerator &code,
                           const DecodedInstruction &inst,
+                          const Xbyak::Reg64 &ctx,
                           const Xbyak::Reg64 &gpr) {
   using namespace Xbyak;
   switch (inst.op) {
@@ -271,56 +366,56 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     if (inst.shamt != 0) {
       code.shl(code.eax, inst.shamt);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Srl:
     emit_read_gpr(code, code.eax, gpr, inst.rt);
     if (inst.shamt != 0) {
       code.shr(code.eax, inst.shamt);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Sra:
     emit_read_gpr(code, code.eax, gpr, inst.rt);
     if (inst.shamt != 0) {
       code.sar(code.eax, inst.shamt);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Sllv:
     emit_read_gpr(code, code.eax, gpr, inst.rt);
     emit_read_gpr(code, code.ecx, gpr, inst.rs);
     code.and_(code.ecx, 0x1F);
     code.shl(code.eax, code.cl);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Srlv:
     emit_read_gpr(code, code.eax, gpr, inst.rt);
     emit_read_gpr(code, code.ecx, gpr, inst.rs);
     code.and_(code.ecx, 0x1F);
     code.shr(code.eax, code.cl);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Srav:
     emit_read_gpr(code, code.eax, gpr, inst.rt);
     emit_read_gpr(code, code.ecx, gpr, inst.rs);
     code.and_(code.ecx, 0x1F);
     code.sar(code.eax, code.cl);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Addu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
       code.add(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Subu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
       code.sub(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::And:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -329,21 +424,21 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     } else {
       code.and_(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Or:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
       code.or_(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Xor:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
       code.xor_(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Nor:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -351,7 +446,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
       code.or_(code.eax, code.dword[gpr + static_cast<int>(inst.rt) * 4]);
     }
     code.not_(code.eax);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Slt:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -362,7 +457,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     }
     code.setl(code.al);
     code.movzx(code.eax, code.al);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Sltu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -373,14 +468,14 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     }
     code.setb(code.al);
     code.movzx(code.eax, code.al);
-    emit_write_gpr(code, gpr, inst.rd, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Addiu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.simm != 0) {
       code.add(code.eax, static_cast<u32>(inst.simm));
     }
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Slti:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -388,7 +483,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     code.cmp(code.eax, code.r10d);
     code.setl(code.al);
     code.movzx(code.eax, code.al);
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Sltiu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
@@ -396,34 +491,71 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     code.cmp(code.eax, code.r10d);
     code.setb(code.al);
     code.movzx(code.eax, code.al);
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Andi:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     code.and_(code.eax, static_cast<u32>(inst.imm));
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Ori:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.imm != 0) {
       code.or_(code.eax, static_cast<u32>(inst.imm));
     }
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Xori:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.imm != 0) {
       code.xor_(code.eax, static_cast<u32>(inst.imm));
     }
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   case DecodedOp::Lui:
     emit_mov_imm32(code, code.eax, static_cast<u32>(inst.imm) << 16);
-    emit_write_gpr(code, gpr, inst.rt, code.eax);
+    emit_write_gpr(code, ctx, gpr, inst.rt, code.eax);
     break;
   default:
     break;
   }
+}
+
+void emit_advance_load_delay(Xbyak::CodeGenerator &code,
+                             const Xbyak::Reg64 &ctx,
+                             const Xbyak::Reg64 &gpr) {
+  using namespace Xbyak;
+  Label no_commit;
+
+  code.mov(code.r9,
+           code.ptr[ctx + offsetof(X64NativeContext, load_reg)]);
+  code.mov(code.r10d, code.dword[code.r9]);
+  code.test(code.r10d, code.r10d);
+  code.jz(no_commit, CodeGenerator::T_NEAR);
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, load_value)]);
+  code.mov(code.eax, code.dword[code.rax]);
+  code.mov(code.dword[gpr + code.r10 * 4], code.eax);
+  code.L(no_commit);
+
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+  code.mov(code.r10d, code.dword[code.rax]);
+  code.mov(code.dword[code.r9], code.r10d);
+
+  code.mov(code.r9,
+           code.ptr[ctx + offsetof(X64NativeContext, load_value)]);
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+  code.mov(code.r10d, code.dword[code.rax]);
+  code.mov(code.dword[code.r9], code.r10d);
+
+  code.mov(code.r9,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+  code.mov(code.dword[code.r9], 0u);
+  code.mov(code.r9,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+  code.mov(code.dword[code.r9], 0u);
 }
 
 void emit_absolute_call(Xbyak::CodeGenerator &code, uintptr_t fn) {
@@ -600,6 +732,67 @@ void emit_ram_load_fastpath_or_memory_helper(
   code.L(completed);
 }
 
+void emit_reduced_helper_ram_load(Xbyak::CodeGenerator &code,
+                                  const Xbyak::Reg64 &ctx,
+                                  const Xbyak::Reg64 &gpr,
+                                  const DecodedInstruction &inst) {
+  emit_read_gpr(code, code.r10d, gpr, inst.rs);
+  if (inst.simm != 0) {
+    code.add(code.r10d, static_cast<u32>(inst.simm));
+  }
+  code.mov(code.eax, code.r10d);
+  code.and_(code.eax, 0x1FFFFFFFu);
+  code.mov(code.r9, code.ptr[ctx + offsetof(X64NativeContext, ram_data)]);
+  switch (inst.op) {
+  case DecodedOp::Lb:
+    code.movsx(code.r10d, code.byte[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lbu:
+    code.movzx(code.r10d, code.byte[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lh:
+    code.movsx(code.r10d, code.word[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lhu:
+    code.movzx(code.r10d, code.word[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lw:
+    code.mov(code.r10d, code.dword[code.r9 + code.rax]);
+    break;
+  default:
+    code.xor_(code.r10d, code.r10d);
+    break;
+  }
+
+  code.mov(code.rax,
+           code.ptr[ctx +
+                    offsetof(X64NativeContext, ram_load_fastpath_counter)]);
+  code.inc(code.qword[code.rax]);
+
+  if (inst.rt == 0u) {
+    code.mov(code.rax,
+             code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+    code.mov(code.dword[code.rax], 0u);
+    code.mov(code.rax,
+             code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+    code.mov(code.dword[code.rax], 0u);
+    return;
+  }
+
+  code.mov(code.rax, code.ptr[ctx + offsetof(X64NativeContext, load_reg)]);
+  code.cmp(code.dword[code.rax], static_cast<u32>(inst.rt));
+  Xbyak::Label no_cancel;
+  code.jne(no_cancel, Xbyak::CodeGenerator::T_NEAR);
+  code.mov(code.dword[code.rax], 0u);
+  code.L(no_cancel);
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+  code.mov(code.dword[code.rax], static_cast<u32>(inst.rt));
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+  code.mov(code.dword[code.rax], code.r10d);
+}
+
 void emit_branch_helper_call(Xbyak::CodeGenerator &code,
                              const Xbyak::Reg64 &ctx,
                              const Xbyak::Reg64 &gpr,
@@ -650,10 +843,15 @@ void emit_x64_direct_block(X64NativeContext &context,
   code.mov(gpr, code.ptr[ctx + offsetof(X64NativeContext, gpr)]);
 
   for (u32 i = 0; i < block.instruction_count; ++i) {
-    emit_x64_instruction(code, block.instructions[i], gpr);
+    const DecodedInstruction &inst = block.instructions[i];
+    if (block.native_reduced_helper_ram_load && is_x64_load_op(inst.op)) {
+      emit_reduced_helper_ram_load(code, ctx, gpr, inst);
+    } else {
+      emit_x64_instruction(code, inst, ctx, gpr);
+    }
+    emit_advance_load_delay(code, ctx, gpr);
+    code.mov(code.dword[gpr], 0);
   }
-
-  code.mov(code.dword[gpr], 0);
 
   code.mov(code.r9, code.ptr[ctx + offsetof(X64NativeContext, pc)]);
   code.mov(code.r10d, code.dword[ctx + offsetof(X64NativeContext, end_pc)]);
@@ -734,7 +932,7 @@ void emit_x64_helper_block(X64NativeContext &context,
         code.jz(done, CodeGenerator::T_NEAR);
       }
     } else {
-      emit_x64_instruction(code, inst, gpr);
+      emit_x64_instruction(code, inst, ctx, gpr);
     }
 
     code.mov(code.dword[gpr], 0);
@@ -1149,13 +1347,86 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   NativeBlockRejectDetail branch_tail_detail = NativeBlockRejectDetail::None;
   block.native_branch_tail =
       is_x64_branch_tail_block(block, branch_tail_detail);
+  block.native_shape = classify_x64_block_shape(block);
   block.native_reject_reason = classify_x64_reject_reason(block);
   block.native_stage1_safe =
       block.native_reject_reason == NativeBlockRejectReason::None;
+  NativeBlockRejectDetail reduced_helper_detail =
+      NativeBlockRejectDetail::None;
+  const bool reduced_helper_ram_load_candidate =
+      is_x64_reduced_helper_ram_load_block(block, reduced_helper_detail);
+  block.native_reduced_helper_ram_load =
+      block.native_stage1_safe && !block.native_branch_tail &&
+      reduced_helper_ram_load_candidate &&
+      g_cpu_x64_jit_ram_load_fastpath_enabled;
+  if (reduced_helper_ram_load_candidate &&
+      !g_cpu_x64_jit_ram_load_fastpath_enabled) {
+    reduced_helper_detail =
+        NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
+  }
+  block.native_reduced_helper =
+      block.native_stage1_safe && !block.native_branch_tail &&
+      (!block.has_memory || block.native_reduced_helper_ram_load);
+  block.native_reduced_helper_reject_detail = reduced_helper_detail;
   block.native_reject_detail =
       branch_tail_detail != NativeBlockRejectDetail::None
           ? branch_tail_detail
           : native_reject_detail_for_reason(block.native_reject_reason);
+
+  switch (block.native_shape) {
+  case NativeBlockShape::StraightAlu:
+    ++stats_.native_shape_straight_alu;
+    break;
+  case NativeBlockShape::StraightAluRamLoadCandidate:
+    ++stats_.native_shape_straight_alu_ram_load;
+    break;
+  case NativeBlockShape::StraightAluRamStoreCandidate:
+    ++stats_.native_shape_straight_alu_ram_store;
+    break;
+  case NativeBlockShape::HelperSafeMemory:
+    ++stats_.native_shape_helper_safe_memory;
+    break;
+  case NativeBlockShape::BranchTail:
+    ++stats_.native_shape_branch_tail;
+    break;
+  case NativeBlockShape::FallbackControl:
+    ++stats_.native_shape_fallback_control;
+    break;
+  case NativeBlockShape::Cop0:
+    ++stats_.native_shape_cop0;
+    break;
+  case NativeBlockShape::Cop2:
+    ++stats_.native_shape_cop2;
+    break;
+  case NativeBlockShape::Mmio:
+    break;
+  case NativeBlockShape::ExceptionUnsafe:
+    ++stats_.native_shape_exception_unsafe;
+    break;
+  }
+  if (block.native_reduced_helper) {
+    ++stats_.native_reduced_helper_candidate_blocks;
+  } else {
+    ++stats_.native_reduced_helper_rejected_blocks;
+    stats_.native_reduced_helper_rejected_instructions +=
+        block.instruction_count;
+    if (block.native_stage1_safe) {
+      ++stats_.native_direct_helper_candidate_blocks;
+    }
+    switch (block.native_reduced_helper_reject_detail) {
+    case NativeBlockRejectDetail::ReducedHelperStore:
+      ++stats_.native_reduced_helper_reject_stores;
+      break;
+    case NativeBlockRejectDetail::ReducedHelperLoadBaseWritten:
+      ++stats_.native_reduced_helper_reject_load_base_written;
+      break;
+    case NativeBlockRejectDetail::ReducedHelperUnsupportedMemory:
+      ++stats_.native_reduced_helper_reject_unsupported_memory;
+      break;
+    default:
+      break;
+    }
+  }
   if (!block.native_stage1_safe) {
     if (block.has_control_flow) {
       ++stats_.native_branch_tail_rejects;
@@ -1200,6 +1471,10 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     return false;
   }
 
+  if (block.native_reduced_helper) {
+    ++stats_.native_reduced_helper_compile_attempts;
+  }
+
 #if VIBESTATION_X64_JIT_SUPPORTED
   try {
     auto context = std::make_unique<X64NativeContext>(8192);
@@ -1222,7 +1497,9 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->instruction_count = block.instruction_count;
     context->is_branch_tail = block.native_branch_tail;
     context->uses_instruction_helpers =
-        context->is_branch_tail || block_uses_instruction_helpers(block);
+        context->is_branch_tail ||
+        (block_uses_instruction_helpers(block) &&
+         !block.native_reduced_helper);
     if (context->is_branch_tail) {
       context->branch_instruction_index = block.instruction_count - 2u;
     }
@@ -1231,6 +1508,10 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->last_pc = context->end_pc - 4u;
     for (u32 i = 0; i < block.instruction_count; ++i) {
       context->base_cycles += block.instructions[i].cycles;
+      if (block.native_reduced_helper_ram_load &&
+          is_x64_load_op(block.instructions[i].op)) {
+        context->base_cycles += 4u;
+      }
     }
 
     emit_x64_block(
@@ -1249,6 +1530,13 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     block.destroy_native_context = destroy_x64_native_context;
     ++stats_.native_compile_successes;
     ++stats_.native_blocks_compiled;
+    if (block.native_reduced_helper) {
+      ++stats_.native_reduced_helper_compile_successes;
+      ++stats_.native_reduced_helper_blocks_compiled;
+      if (block.native_reduced_helper_ram_load) {
+        ++stats_.native_reduced_helper_ram_load_blocks_compiled;
+      }
+    }
     if (block.native_branch_tail) {
       ++stats_.native_branch_tail_blocks_compiled;
     } else if (block.has_memory) {
@@ -1283,6 +1571,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     ++stats_.native_to_decoded_fallbacks;
     ++stats_.native_reject_unsafe_state;
     ++specific_counter;
+    if (block.native_reduced_helper) {
+      ++stats_.native_reduced_helper_fallbacks;
+    }
     record_rejected_block(detail);
     return execute_block(block, max_cycles, max_instructions);
   };
@@ -1334,9 +1625,64 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     cpu_.active_branch_pc_ = 0u;
   }
 
+  if (block.native_reduced_helper_ram_load) {
+    NativeBlockRejectDetail preflight_detail =
+        NativeBlockRejectDetail::None;
+    if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
+        g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
+        g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr) {
+      preflight_detail =
+          NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
+    } else {
+      for (u32 i = 0; i < block.instruction_count; ++i) {
+        const DecodedInstruction &inst = block.instructions[i];
+        if (!is_x64_load_op(inst.op)) {
+          continue;
+        }
+        const u32 addr =
+            cpu_.gpr_[inst.rs] + static_cast<u32>(inst.simm);
+        if (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu) &&
+             (addr & 1u) != 0u) ||
+            (inst.op == DecodedOp::Lw && (addr & 3u) != 0u)) {
+          preflight_detail = NativeBlockRejectDetail::Unaligned;
+          break;
+        }
+        if (!is_canonical_ram_alias(addr)) {
+          preflight_detail =
+              classify_native_memory_region(addr) == NativeMemoryRegion::Mmio
+                  ? NativeBlockRejectDetail::Mmio
+                  : NativeBlockRejectDetail::Memory;
+          break;
+        }
+      }
+    }
+
+    if (preflight_detail != NativeBlockRejectDetail::None) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_reduced_helper_fallbacks;
+      ++stats_.native_reduced_helper_ram_load_preflight_fallbacks;
+      if (preflight_detail == NativeBlockRejectDetail::Mmio) {
+        ++stats_.native_reduced_helper_ram_load_preflight_mmio;
+        ++stats_.native_reject_mmio;
+      } else if (preflight_detail == NativeBlockRejectDetail::Unaligned) {
+        ++stats_.native_reduced_helper_ram_load_preflight_unaligned;
+        ++stats_.native_reject_unaligned;
+      } else if (preflight_detail == NativeBlockRejectDetail::Memory) {
+        ++stats_.native_reduced_helper_ram_load_preflight_non_ram;
+        ++stats_.native_reject_memory;
+      } else {
+        ++stats_.native_reduced_helper_ram_load_preflight_disabled;
+        ++stats_.native_ram_disabled_fallbacks;
+      }
+      record_rejected_block(preflight_detail);
+      return execute_block(block, max_cycles, max_instructions);
+    }
+  }
+
   const bool active_load_delay =
       cpu_.load_.reg != 0 || cpu_.next_load_.reg != 0;
-  if (active_load_delay && !context->uses_instruction_helpers) {
+  if (active_load_delay && !context->uses_instruction_helpers &&
+      !block.native_reduced_helper) {
     ++stats_.native_helper_load_delay_fallbacks;
     return reject_to_decoded(stats_.native_reject_load_delay_state,
                              NativeBlockRejectDetail::LoadDelayState);
@@ -1354,6 +1700,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   if (active_load_delay && context->uses_instruction_helpers) {
     ++stats_.native_helper_load_delay_entries;
+  } else if (active_load_delay && block.native_reduced_helper) {
+    ++stats_.native_reduced_helper_load_delay_entries;
   }
 
   context->max_cycles = max_cycles;
@@ -1452,6 +1800,13 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   } else {
     ++stats_.native_alu_block_entries;
   }
+  ++block.native_entry_count;
+  if (block.native_reduced_helper) {
+    ++stats_.native_reduced_helper_entries;
+    if (block.native_reduced_helper_ram_load) {
+      ++stats_.native_reduced_helper_ram_load_entries;
+    }
+  }
   block.native_fn(block.native_context, &result);
 
   if (active_load_delay && context->uses_instruction_helpers) {
@@ -1466,6 +1821,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   ++stats_.native_block_entries;
   stats_.native_instructions += result.instructions;
+  if (block.native_reduced_helper) {
+    stats_.native_reduced_helper_instructions += result.instructions;
+  }
   stats_.native_cycles += result.cycles;
   stats_.optimized_instructions += result.instructions;
   return result;
