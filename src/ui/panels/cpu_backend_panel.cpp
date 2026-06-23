@@ -114,6 +114,14 @@ namespace {
                 &g_cpu_backend_rejected_block_logging)) {
             dirty = true;
         }
+        if (ImGui::Checkbox("Enable RAM load fastpath (experimental)",
+                &g_cpu_x64_jit_ram_load_fastpath_enabled)) {
+            dirty = true;
+        }
+        if (g_cpu_x64_jit_ram_load_fastpath_cli_override) {
+            ImGui::TextDisabled("CLI override: RAM load fastpath %s",
+                g_cpu_x64_jit_ram_load_fastpath_enabled ? "enabled" : "disabled");
+        }
         int rejected_block_log_count =
             static_cast<int>(g_cpu_backend_rejected_block_log_count);
         if (ImGui::InputInt("Hot Reject Log Count",

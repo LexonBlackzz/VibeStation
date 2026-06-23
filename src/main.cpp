@@ -2267,10 +2267,12 @@ int main(int argc, char *argv[]) {
       continue;
     }
     if (a == "--jit-enable-ram-load-fastpath") {
+      g_cpu_x64_jit_ram_load_fastpath_cli_override = true;
       g_cpu_x64_jit_ram_load_fastpath_enabled = true;
       continue;
     }
     if (a == "--jit-disable-ram-load-fastpath") {
+      g_cpu_x64_jit_ram_load_fastpath_cli_override = true;
       g_cpu_x64_jit_ram_load_fastpath_enabled = false;
       continue;
     }
