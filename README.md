@@ -3,14 +3,14 @@ This is a fully vibe-coded PS1 emulator for fun. It is written in C++.
 
 ## Things implemented:
 BIOS loading ✅  
-Game loading ⚠️  
+Game loading ✅  
 Bindings ✅  
-CD-ROM ⚠️  
+CD-ROM ✅  
 Graphics/VRAM ✅⚠️  
 Audio ✅  
 CPU/RAM/DMA ✅   
 Main UI ✅  
-MDEC ✅(For Gran Turismo 2), ⚠️ (Silent Hill), 🚩 (For everything else)  
+MDEC ⚠️ (For GT2 and RR4 - ✅)
 Real-time corrupter/BIOS corruption ✅   
 Memory Cards ✅
 
