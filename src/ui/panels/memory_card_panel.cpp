@@ -1,4 +1,3 @@
-#include "ui/panels/memory_card_panel.h"
 #include "ui/app.h"
 #include "platform/memory_card_utils.h"
 
