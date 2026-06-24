@@ -83,6 +83,7 @@ set(VIBESTATION_SOURCES
     src/ui/app.cpp
     src/ui/theme_settings.cpp
     src/ui/panels/cpu_backend_panel.cpp
+    src/ui/panels/grim_reaper_panel.cpp
 )
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
