@@ -50,6 +50,9 @@ public:
   void set_running(bool running);
   void pause_and_wait_idle();
   bool is_running() const { return running_.load(std::memory_order_acquire); }
+  bool playback_stopped_at_eof() const {
+    return playback_stopped_at_eof_.load(std::memory_order_acquire);
+  }
   void set_vram_debug_capture_enabled(bool enabled) {
     capture_vram_debug_.store(enabled, std::memory_order_release);
   }
@@ -90,6 +93,7 @@ private:
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> running_{false};
   std::atomic<bool> frame_active_{false};
+  std::atomic<bool> playback_stopped_at_eof_{false};
   std::atomic<double> speed_{1.0};
   std::atomic<u64> input_mailbox_{0};
   std::atomic<u64> completed_frame_count_{0};

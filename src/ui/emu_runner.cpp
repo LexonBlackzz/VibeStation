@@ -41,6 +41,7 @@ bool EmuRunner::start(System* system) {
     stop_requested_.store(false, std::memory_order_release);
     running_.store(false, std::memory_order_release);
     frame_active_.store(false, std::memory_order_release);
+    playback_stopped_at_eof_.store(false, std::memory_order_release);
     speed_.store(1.0, std::memory_order_release);
     input_mailbox_.store(pack_input(0xFFFFu, 0x80, 0x80, 0x80, 0x80),
         std::memory_order_release);
@@ -367,6 +368,7 @@ void EmuRunner::worker_main() {
         system_->run_frame(false, skip_audio_for_turbo);
         if (system_->consume_input_playback_stop_request()) {
             running_.store(false, std::memory_order_release);
+            playback_stopped_at_eof_.store(true, std::memory_order_release);
             system_->set_running(false);
             system_->set_spu_host_playback_enabled(false);
             frame_active_.store(false, std::memory_order_release);

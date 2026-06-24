@@ -1,4 +1,4 @@
-﻿#include "app.h"
+#include "app.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
 #include "ui/theme_settings.h"
@@ -1140,6 +1140,14 @@ void App::run() {
                 (now_ms - last_vram_update_ms_) >= 1000)) {
             update_vram_debug_texture();
             last_vram_update_ms_ = now_ms;
+        }
+
+        if (!emu_runner_.is_running() && emu_runner_.playback_stopped_at_eof()) {
+            fprintf(stdout, "[App] Playback finished, requesting exit.\n");
+            fflush(stdout);
+            SDL_Event quit_event;
+            quit_event.type = SDL_QUIT;
+            SDL_PushEvent(&quit_event);
         }
 
         // Start ImGui frame
