@@ -1,6 +1,7 @@
 #include "app.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
+#include "ui/theme_settings.h"
 #include "ui/panels/cpu_backend_panel.h"
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -441,505 +442,6 @@ namespace {
 
     constexpr int kKeyboardBindEntryCount =
         static_cast<int>(sizeof(kKeyboardBindEntries) / sizeof(kKeyboardBindEntries[0]));
-
-    struct ThemeColorSlot {
-        ImGuiCol color_id;
-        const char* label;
-        const char* key;
-        ImVec4 default_color;
-    };
-
-    constexpr ThemeColorSlot kThemeColorSlots[] = {
-        {ImGuiCol_WindowBg, "Window Background", "WindowBg", ImVec4(0.08f, 0.06f, 0.12f, 0.95f)},
-        {ImGuiCol_TitleBg, "Title Background", "TitleBg", ImVec4(0.10f, 0.08f, 0.18f, 1.00f)},
-        {ImGuiCol_TitleBgActive, "Title Active", "TitleBgActive", ImVec4(0.16f, 0.10f, 0.30f, 1.00f)},
-        {ImGuiCol_MenuBarBg, "Menu Bar", "MenuBarBg", ImVec4(0.10f, 0.08f, 0.15f, 1.00f)},
-        {ImGuiCol_PopupBg, "List Background", "PopupBg", ImVec4(0.09f, 0.07f, 0.16f, 0.98f)},
-        {ImGuiCol_Tab, "Tab", "Tab", ImVec4(0.14f, 0.10f, 0.25f, 1.00f)},
-        {ImGuiCol_TabHovered, "Tab Hovered", "TabHovered", ImVec4(0.30f, 0.20f, 0.55f, 1.00f)},
-        {ImGuiCol_TabActive, "Tab Active", "TabActive", ImVec4(0.24f, 0.15f, 0.45f, 1.00f)},
-        {ImGuiCol_Header, "Header", "Header", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
-        {ImGuiCol_HeaderHovered, "Header Hovered", "HeaderHovered", ImVec4(0.30f, 0.20f, 0.50f, 1.00f)},
-        {ImGuiCol_HeaderActive, "Header Active", "HeaderActive", ImVec4(0.35f, 0.25f, 0.60f, 1.00f)},
-        {ImGuiCol_Button, "Button", "Button", ImVec4(0.20f, 0.14f, 0.36f, 1.00f)},
-        {ImGuiCol_ButtonHovered, "Button Hovered", "ButtonHovered", ImVec4(0.34f, 0.22f, 0.58f, 1.00f)},
-        {ImGuiCol_ButtonActive, "Button Active", "ButtonActive", ImVec4(0.40f, 0.28f, 0.65f, 1.00f)},
-        {ImGuiCol_FrameBg, "Frame Background", "FrameBg", ImVec4(0.12f, 0.09f, 0.20f, 1.00f)},
-        {ImGuiCol_FrameBgHovered, "Frame Hovered", "FrameBgHovered", ImVec4(0.18f, 0.12f, 0.30f, 1.00f)},
-        {ImGuiCol_FrameBgActive, "Frame Active", "FrameBgActive", ImVec4(0.24f, 0.16f, 0.40f, 1.00f)},
-        {ImGuiCol_CheckMark, "Check Mark", "CheckMark", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
-        {ImGuiCol_SliderGrab, "Slider Grab", "SliderGrab", ImVec4(0.50f, 0.35f, 0.85f, 1.00f)},
-        {ImGuiCol_SliderGrabActive, "Slider Grab Active", "SliderGrabActive", ImVec4(0.60f, 0.40f, 1.00f, 1.00f)},
-        {ImGuiCol_Separator, "Separator", "Separator", ImVec4(0.20f, 0.15f, 0.35f, 1.00f)},
-        {ImGuiCol_Text, "Text", "Text", ImVec4(0.90f, 0.88f, 0.95f, 1.00f)},
-    };
-
-    constexpr size_t kThemeColorSlotCount =
-        sizeof(kThemeColorSlots) / sizeof(kThemeColorSlots[0]);
-
-    constexpr ImVec4 kDefaultThemeBackground = ImVec4(0.08f, 0.06f, 0.12f, 0.95f);
-    constexpr ImVec4 kDefaultThemeSurface = ImVec4(0.12f, 0.09f, 0.20f, 1.00f);
-    constexpr ImVec4 kDefaultThemeOverall = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    constexpr ImVec4 kDefaultThemeAccent = ImVec4(0.60f, 0.40f, 1.00f, 1.00f);
-    constexpr ImVec4 kDefaultThemeText = ImVec4(0.90f, 0.88f, 0.95f, 1.00f);
-    constexpr ImVec4 kDefaultThemeLists = ImVec4(0.09f, 0.07f, 0.16f, 0.98f);
-
-    constexpr ImVec4 theme_color_rgba(int r, int g, int b, int a) {
-        return ImVec4(
-            static_cast<float>(r) / 255.0f,
-            static_cast<float>(g) / 255.0f,
-            static_cast<float>(b) / 255.0f,
-            static_cast<float>(a) / 255.0f);
-    }
-
-    struct ThemeSettings {
-        ImVec4 overall = kDefaultThemeOverall;
-        ImVec4 background = kDefaultThemeBackground;
-        ImVec4 surface = kDefaultThemeSurface;
-        ImVec4 accent = kDefaultThemeAccent;
-        ImVec4 text = kDefaultThemeText;
-        ImVec4 lists = kDefaultThemeLists;
-        ImVec4 startup_title = kDefaultThemeAccent;
-        ImVec4 startup_text = kDefaultThemeText;
-        bool simple = false;
-        bool advanced = false;
-        std::array<ImVec4, kThemeColorSlotCount> colors{};
-    };
-
-    struct ThemePreset {
-        const char* label;
-        ImVec4 background;
-        ImVec4 surface;
-        ImVec4 accent;
-        ImVec4 text;
-        ImVec4 lists;
-        std::array<ImVec4, kThemeColorSlotCount> colors;
-    };
-
-    constexpr ThemePreset kThemePresets[] = {
-        {
-            "Dark Mode",
-            theme_color_rgba(0, 0, 0, 242),
-            theme_color_rgba(20, 20, 20, 255),
-            theme_color_rgba(41, 40, 40, 255),
-            theme_color_rgba(255, 255, 255, 255),
-            theme_color_rgba(12, 12, 12, 252),
-            {
-                theme_color_rgba(0, 0, 0, 242),
-                theme_color_rgba(7, 7, 7, 247),
-                theme_color_rgba(28, 28, 28, 255),
-                theme_color_rgba(4, 4, 4, 245),
-                theme_color_rgba(12, 12, 12, 252),
-                theme_color_rgba(17, 17, 17, 253),
-                theme_color_rgba(35, 34, 34, 255),
-                theme_color_rgba(30, 30, 30, 255),
-                theme_color_rgba(26, 26, 26, 255),
-                theme_color_rgba(31, 31, 31, 255),
-                theme_color_rgba(35, 34, 34, 255),
-                theme_color_rgba(26, 25, 25, 255),
-                theme_color_rgba(32, 32, 32, 255),
-                theme_color_rgba(36, 36, 36, 255),
-                theme_color_rgba(20, 20, 20, 255),
-                theme_color_rgba(25, 25, 25, 255),
-                theme_color_rgba(28, 28, 28, 255),
-                theme_color_rgba(41, 40, 40, 255),
-                theme_color_rgba(32, 32, 32, 255),
-                theme_color_rgba(41, 40, 40, 255),
-                theme_color_rgba(62, 62, 62, 255),
-                theme_color_rgba(255, 255, 255, 255),
-            },
-        },
-        {
-            "Light Mode",
-            theme_color_rgba(255, 255, 255, 242),
-            theme_color_rgba(221, 221, 221, 255),
-            theme_color_rgba(200, 200, 200, 255),
-            theme_color_rgba(0, 0, 0, 255),
-            theme_color_rgba(235, 235, 235, 252),
-            {
-                theme_color_rgba(255, 255, 255, 242),
-                theme_color_rgba(243, 243, 243, 247),
-                theme_color_rgba(213, 213, 213, 255),
-                theme_color_rgba(248, 248, 248, 245),
-                theme_color_rgba(235, 235, 235, 252),
-                theme_color_rgba(226, 226, 226, 253),
-                theme_color_rgba(206, 206, 206, 255),
-                theme_color_rgba(211, 211, 211, 255),
-                theme_color_rgba(215, 215, 215, 255),
-                theme_color_rgba(210, 210, 210, 255),
-                theme_color_rgba(206, 206, 206, 255),
-                theme_color_rgba(215, 215, 215, 255),
-                theme_color_rgba(209, 209, 209, 255),
-                theme_color_rgba(205, 205, 205, 255),
-                theme_color_rgba(221, 221, 221, 255),
-                theme_color_rgba(216, 216, 216, 255),
-                theme_color_rgba(213, 213, 213, 255),
-                theme_color_rgba(200, 200, 200, 255),
-                theme_color_rgba(209, 209, 209, 255),
-                theme_color_rgba(200, 200, 200, 255),
-                theme_color_rgba(181, 181, 181, 255),
-                theme_color_rgba(0, 0, 0, 255),
-            },
-        },
-    };
-
-    constexpr int kThemePresetCount =
-        static_cast<int>(sizeof(kThemePresets) / sizeof(kThemePresets[0]));
-
-    ThemeSettings g_theme_settings{};
-    bool g_theme_settings_initialized = false;
-    int g_selected_theme_preset_index = 0;
-
-    ImVec4 theme_lerp(const ImVec4& a, const ImVec4& b, float t) {
-        return ImVec4(
-            a.x + (b.x - a.x) * t,
-            a.y + (b.y - a.y) * t,
-            a.z + (b.z - a.z) * t,
-            a.w + (b.w - a.w) * t);
-    }
-
-    float theme_luminance(const ImVec4& color) {
-        return (color.x * 0.2126f) + (color.y * 0.7152f) + (color.z * 0.0722f);
-    }
-
-    ImVec4 tint_theme_color(const ImVec4& base, const ImVec4& tint, float mix, float alpha) {
-        ImVec4 out = theme_lerp(base, tint, mix);
-        out.w = alpha;
-        return out;
-    }
-
-    void set_theme_slot(ThemeSettings& settings, ImGuiCol color_id, const ImVec4& color) {
-        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
-            if (kThemeColorSlots[i].color_id == color_id) {
-                settings.colors[i] = color;
-                return;
-            }
-        }
-    }
-
-    void rebuild_theme_basics_from_overall(ThemeSettings& settings) {
-        const float luma = theme_luminance(settings.overall);
-        const bool light_theme = luma >= 0.72f;
-
-        const ImVec4 background_base =
-            light_theme ? ImVec4(0.97f, 0.97f, 0.98f, 0.95f)
-            : ImVec4(0.05f, 0.05f, 0.06f, 0.95f);
-        const ImVec4 surface_base =
-            light_theme ? ImVec4(0.88f, 0.88f, 0.90f, 1.00f)
-            : ImVec4(0.12f, 0.11f, 0.14f, 1.00f);
-        const ImVec4 accent_base =
-            light_theme ? ImVec4(0.78f, 0.78f, 0.80f, 1.00f)
-            : ImVec4(0.32f, 0.30f, 0.36f, 1.00f);
-        const ImVec4 lists_base =
-            light_theme ? ImVec4(0.92f, 0.92f, 0.94f, 0.98f)
-            : ImVec4(0.08f, 0.08f, 0.10f, 0.98f);
-        const ImVec4 text_base =
-            light_theme ? ImVec4(0.04f, 0.04f, 0.05f, 1.00f)
-            : ImVec4(0.96f, 0.96f, 0.97f, 1.00f);
-
-        settings.background =
-            tint_theme_color(background_base, settings.overall, light_theme ? 0.18f : 0.16f, 0.95f);
-        settings.surface =
-            tint_theme_color(surface_base, settings.overall, light_theme ? 0.26f : 0.24f, 1.00f);
-        settings.accent =
-            tint_theme_color(accent_base, settings.overall, light_theme ? 0.70f : 0.88f, 1.00f);
-        settings.lists =
-            tint_theme_color(lists_base, settings.overall, light_theme ? 0.20f : 0.18f, 0.98f);
-        settings.text =
-            tint_theme_color(text_base, settings.overall, light_theme ? 0.06f : 0.08f, 1.00f);
-    }
-
-    void sync_theme_overall_from_basics(ThemeSettings& settings) {
-        settings.overall = theme_lerp(settings.surface, settings.accent, 0.75f);
-        settings.overall.w = 1.0f;
-    }
-
-    ImVec4 startup_title_theme_color(const ThemeSettings& settings) {
-        const float luma = theme_luminance(settings.overall);
-        return tint_theme_color(
-            settings.accent, settings.overall, luma >= 0.72f ? 0.55f : 0.82f, 1.00f);
-    }
-
-    ImVec4 startup_text_theme_color(const ThemeSettings& settings) {
-        const float luma = theme_luminance(settings.overall);
-        const ImVec4 tinted_text = tint_theme_color(
-            settings.text, settings.overall, luma >= 0.72f ? 0.24f : 0.36f, 1.00f);
-        return theme_lerp(
-            tinted_text, settings.background, luma >= 0.72f ? 0.08f : 0.18f);
-    }
-
-    void reset_theme_startup_colors(ThemeSettings& settings) {
-        settings.startup_title = startup_title_theme_color(settings);
-        settings.startup_text = startup_text_theme_color(settings);
-    }
-
-    ImVec4 current_startup_title_color(const ThemeSettings& settings) {
-        return settings.advanced ? settings.startup_title
-                                 : startup_title_theme_color(settings);
-    }
-
-    ImVec4 current_startup_text_color(const ThemeSettings& settings) {
-        return settings.advanced ? settings.startup_text
-                                 : startup_text_theme_color(settings);
-    }
-
-    void rebuild_theme_colors_from_basics(ThemeSettings& settings) {
-        set_theme_slot(settings, ImGuiCol_WindowBg, settings.background);
-        set_theme_slot(settings, ImGuiCol_TitleBg,
-            theme_lerp(settings.background, settings.surface, 0.35f));
-        set_theme_slot(settings, ImGuiCol_TitleBgActive,
-            theme_lerp(settings.surface, settings.accent, 0.40f));
-        set_theme_slot(settings, ImGuiCol_MenuBarBg,
-            theme_lerp(settings.background, settings.surface, 0.20f));
-        set_theme_slot(settings, ImGuiCol_PopupBg, settings.lists);
-        set_theme_slot(settings, ImGuiCol_Tab,
-            theme_lerp(settings.surface, settings.background, 0.15f));
-        set_theme_slot(settings, ImGuiCol_TabHovered,
-            theme_lerp(settings.surface, settings.accent, 0.72f));
-        set_theme_slot(settings, ImGuiCol_TabActive,
-            theme_lerp(settings.surface, settings.accent, 0.50f));
-        set_theme_slot(settings, ImGuiCol_Header,
-            theme_lerp(settings.surface, settings.accent, 0.30f));
-        set_theme_slot(settings, ImGuiCol_HeaderHovered,
-            theme_lerp(settings.surface, settings.accent, 0.55f));
-        set_theme_slot(settings, ImGuiCol_HeaderActive,
-            theme_lerp(settings.surface, settings.accent, 0.72f));
-        set_theme_slot(settings, ImGuiCol_Button,
-            theme_lerp(settings.surface, settings.accent, 0.28f));
-        set_theme_slot(settings, ImGuiCol_ButtonHovered,
-            theme_lerp(settings.surface, settings.accent, 0.60f));
-        set_theme_slot(settings, ImGuiCol_ButtonActive,
-            theme_lerp(settings.surface, settings.accent, 0.78f));
-        set_theme_slot(settings, ImGuiCol_FrameBg, settings.surface);
-        set_theme_slot(settings, ImGuiCol_FrameBgHovered,
-            theme_lerp(settings.surface, settings.accent, 0.25f));
-        set_theme_slot(settings, ImGuiCol_FrameBgActive,
-            theme_lerp(settings.surface, settings.accent, 0.40f));
-        set_theme_slot(settings, ImGuiCol_CheckMark, settings.accent);
-        set_theme_slot(settings, ImGuiCol_SliderGrab,
-            theme_lerp(settings.surface, settings.accent, 0.60f));
-        set_theme_slot(settings, ImGuiCol_SliderGrabActive, settings.accent);
-        set_theme_slot(settings, ImGuiCol_Separator,
-            theme_lerp(settings.surface, settings.text, 0.18f));
-        set_theme_slot(settings, ImGuiCol_Text, settings.text);
-    }
-
-    void reset_theme_settings() {
-        g_theme_settings.overall = kDefaultThemeOverall;
-        g_theme_settings.background = kDefaultThemeBackground;
-        g_theme_settings.surface = kDefaultThemeSurface;
-        g_theme_settings.accent = kDefaultThemeAccent;
-        g_theme_settings.text = kDefaultThemeText;
-        g_theme_settings.lists = kDefaultThemeLists;
-        reset_theme_startup_colors(g_theme_settings);
-        g_theme_settings.simple = false;
-        g_theme_settings.advanced = false;
-        rebuild_theme_colors_from_basics(g_theme_settings);
-        g_theme_settings_initialized = true;
-    }
-
-    void apply_theme_preset(const ThemePreset& preset) {
-        g_theme_settings.overall = preset.accent;
-        g_theme_settings.background = preset.background;
-        g_theme_settings.surface = preset.surface;
-        g_theme_settings.accent = preset.accent;
-        g_theme_settings.text = preset.text;
-        g_theme_settings.lists = preset.lists;
-        reset_theme_startup_colors(g_theme_settings);
-        g_theme_settings.simple = false;
-        g_theme_settings.advanced = true;
-        g_theme_settings.colors = preset.colors;
-    }
-
-    void apply_theme_style(ImGuiStyle& style) {
-        style.WindowRounding = 6.0f;
-        style.FrameRounding = 4.0f;
-        style.GrabRounding = 4.0f;
-        style.TabRounding = 4.0f;
-        style.WindowBorderSize = 1.0f;
-        style.FrameBorderSize = 0.0f;
-        style.ScrollbarRounding = 6.0f;
-        style.WindowPadding = ImVec2(10.0f, 10.0f);
-
-        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
-            style.Colors[kThemeColorSlots[i].color_id] = g_theme_settings.colors[i];
-        }
-    }
-
-    void ensure_theme_settings_initialized() {
-        if (!g_theme_settings_initialized) {
-            reset_theme_settings();
-        }
-    }
-
-    void mark_theme_settings_dirty() {
-        if (ImGui::GetCurrentContext() != nullptr) {
-            ImGui::MarkIniSettingsDirty();
-        }
-    }
-
-    bool parse_theme_color(const char* text, ImVec4& color) {
-        float r = 0.0f;
-        float g = 0.0f;
-        float b = 0.0f;
-        float a = 0.0f;
-        if (std::sscanf(text, "%f,%f,%f,%f", &r, &g, &b, &a) != 4) {
-            return false;
-        }
-        color = ImVec4(r, g, b, a);
-        return true;
-    }
-
-    bool parse_theme_bool(const char* text, bool fallback) {
-        if (std::strcmp(text, "1") == 0 || std::strcmp(text, "true") == 0 ||
-            std::strcmp(text, "TRUE") == 0) {
-            return true;
-        }
-        if (std::strcmp(text, "0") == 0 || std::strcmp(text, "false") == 0 ||
-            std::strcmp(text, "FALSE") == 0) {
-            return false;
-        }
-        return fallback;
-    }
-
-    void* theme_settings_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
-        if (std::strcmp(name, "Colors") != 0) {
-            return nullptr;
-        }
-        ensure_theme_settings_initialized();
-        return &g_theme_settings;
-    }
-
-    void theme_settings_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry,
-        const char* line) {
-        auto* settings = static_cast<ThemeSettings*>(entry);
-        const char* equals = std::strchr(line, '=');
-        if (equals == nullptr) {
-            return;
-        }
-
-        const std::string key(line, static_cast<size_t>(equals - line));
-        if (key == "Overall") {
-            parse_theme_color(equals + 1, settings->overall);
-            return;
-        }
-        if (key == "Background") {
-            parse_theme_color(equals + 1, settings->background);
-            return;
-        }
-        if (key == "Surface") {
-            parse_theme_color(equals + 1, settings->surface);
-            return;
-        }
-        if (key == "Accent") {
-            parse_theme_color(equals + 1, settings->accent);
-            return;
-        }
-        if (key == "TextColor") {
-            parse_theme_color(equals + 1, settings->text);
-            return;
-        }
-        if (key == "Lists") {
-            parse_theme_color(equals + 1, settings->lists);
-            return;
-        }
-        if (key == "StartupTitle") {
-            parse_theme_color(equals + 1, settings->startup_title);
-            return;
-        }
-        if (key == "StartupText") {
-            parse_theme_color(equals + 1, settings->startup_text);
-            return;
-        }
-        if (key == "Simple") {
-            settings->simple = parse_theme_bool(equals + 1, settings->simple);
-            return;
-        }
-        if (key == "Advanced") {
-            settings->advanced = parse_theme_bool(equals + 1, settings->advanced);
-            return;
-        }
-
-        ImVec4 parsed{};
-        if (!parse_theme_color(equals + 1, parsed)) {
-            return;
-        }
-        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
-            if (key == kThemeColorSlots[i].key) {
-                settings->colors[i] = parsed;
-                return;
-            }
-        }
-    }
-
-    void theme_settings_apply_all(ImGuiContext*, ImGuiSettingsHandler*) {
-        ensure_theme_settings_initialized();
-        if (!g_theme_settings.advanced) {
-            rebuild_theme_colors_from_basics(g_theme_settings);
-        }
-        apply_theme_style(ImGui::GetStyle());
-    }
-
-    void theme_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler,
-        ImGuiTextBuffer* out_buf) {
-        ensure_theme_settings_initialized();
-        out_buf->appendf("[%s][Colors]\n", handler->TypeName);
-        out_buf->appendf("Overall=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.overall.x, g_theme_settings.overall.y,
-            g_theme_settings.overall.z, g_theme_settings.overall.w);
-        out_buf->appendf("Background=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.background.x, g_theme_settings.background.y,
-            g_theme_settings.background.z, g_theme_settings.background.w);
-        out_buf->appendf("Surface=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.surface.x, g_theme_settings.surface.y,
-            g_theme_settings.surface.z, g_theme_settings.surface.w);
-        out_buf->appendf("Accent=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.accent.x, g_theme_settings.accent.y,
-            g_theme_settings.accent.z, g_theme_settings.accent.w);
-        out_buf->appendf("TextColor=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.text.x, g_theme_settings.text.y,
-            g_theme_settings.text.z, g_theme_settings.text.w);
-        out_buf->appendf("Lists=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.lists.x, g_theme_settings.lists.y,
-            g_theme_settings.lists.z, g_theme_settings.lists.w);
-        out_buf->appendf("StartupTitle=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.startup_title.x, g_theme_settings.startup_title.y,
-            g_theme_settings.startup_title.z, g_theme_settings.startup_title.w);
-        out_buf->appendf("StartupText=%.3f,%.3f,%.3f,%.3f\n",
-            g_theme_settings.startup_text.x, g_theme_settings.startup_text.y,
-            g_theme_settings.startup_text.z, g_theme_settings.startup_text.w);
-        out_buf->appendf("Simple=%d\n", g_theme_settings.simple ? 1 : 0);
-        out_buf->appendf("Advanced=%d\n", g_theme_settings.advanced ? 1 : 0);
-        for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
-            const ImVec4& color = g_theme_settings.colors[i];
-            out_buf->appendf("%s=%.3f,%.3f,%.3f,%.3f\n",
-                kThemeColorSlots[i].key, color.x, color.y, color.z, color.w);
-        }
-        out_buf->append("\n");
-    }
-
-    void register_theme_settings_handler() {
-        ImGuiContext* ctx = ImGui::GetCurrentContext();
-        if (ctx == nullptr) {
-            return;
-        }
-
-        const ImGuiID type_hash = ImHashStr("VibeStationTheme");
-        for (const ImGuiSettingsHandler& handler : ctx->SettingsHandlers) {
-            if (handler.TypeHash == type_hash) {
-                return;
-            }
-        }
-
-        ImGuiSettingsHandler handler{};
-        handler.TypeName = "VibeStationTheme";
-        handler.TypeHash = type_hash;
-        handler.ReadOpenFn = theme_settings_read_open;
-        handler.ReadLineFn = theme_settings_read_line;
-        handler.ApplyAllFn = theme_settings_apply_all;
-        handler.WriteAllFn = theme_settings_write_all;
-        ImGui::AddSettingsHandler(&handler);
-    }
 
 
     struct ParsedCorruptionPreset {
@@ -1618,9 +1120,9 @@ bool App::init() {
 
     // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
-    ensure_theme_settings_initialized();
-    apply_theme_style(ImGui::GetStyle());
-    register_theme_settings_handler();
+    ui_theme::ensure_theme_settings_initialized();
+    ui_theme::apply_theme_style(ImGui::GetStyle());
+    ui_theme::register_theme_settings_handler();
     if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
         ImGui::LoadIniSettingsFromDisk(io.IniFilename);
     }
@@ -2844,11 +2346,11 @@ void App::panel_emulator_screen() {
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
         const char* logo_text = "VibeStation";
         const ImVec4 startup_title_color =
-            current_startup_title_color(g_theme_settings);
+            ui_theme::current_startup_title_color(ui_theme::g_theme_settings);
         const ImVec4 startup_text_color =
-            current_startup_text_color(g_theme_settings);
+            ui_theme::current_startup_text_color(ui_theme::g_theme_settings);
         const ImVec4 startup_text_secondary =
-            theme_lerp(startup_text_color, g_theme_settings.background, 0.18f);
+            ui_theme::theme_lerp(startup_text_color, ui_theme::g_theme_settings.background, 0.18f);
         ImGui::PushStyleColor(ImGuiCol_Text, startup_title_color);
         ImGui::SetWindowFontScale(2.0f);
         const ImVec2 logo_size = ImGui::CalcTextSize(logo_text);
@@ -3666,19 +3168,20 @@ void App::panel_settings() {
                 ImGui::TextDisabled("Overall changes recolor the full UI. Extra grouped controls and per-element overrides are stored in imgui.ini.");
                 ImGui::Separator();
 
-                const char* theme_preset_labels[kThemePresetCount] = {};
-                for (int i = 0; i < kThemePresetCount; ++i) {
-                    theme_preset_labels[i] = kThemePresets[i].label;
+                const int preset_count = ui_theme::theme_preset_count();
+                const char* theme_preset_labels[64] = {};
+                for (int i = 0; i < preset_count; ++i) {
+                    theme_preset_labels[i] = ui_theme::theme_preset_by_index(i).label;
                 }
-                g_selected_theme_preset_index =
-                    std::max(0, std::min(kThemePresetCount - 1, g_selected_theme_preset_index));
-                ImGui::Combo("Preset", &g_selected_theme_preset_index,
-                    theme_preset_labels, kThemePresetCount);
+                ui_theme::g_selected_theme_preset_index =
+                    std::max(0, std::min(preset_count - 1, ui_theme::g_selected_theme_preset_index));
+                ImGui::Combo("Preset", &ui_theme::g_selected_theme_preset_index,
+                    theme_preset_labels, preset_count);
                 ImGui::SameLine();
                 if (ImGui::Button("Apply Preset")) {
-                    apply_theme_preset(kThemePresets[g_selected_theme_preset_index]);
-                    apply_theme_style(ImGui::GetStyle());
-                    mark_theme_settings_dirty();
+                    ui_theme::apply_theme_preset_by_index(ui_theme::g_selected_theme_preset_index);
+                    ui_theme::apply_theme_style(ImGui::GetStyle());
+                    ui_theme::mark_theme_settings_dirty();
                 }
                 ImGui::TextDisabled(
                     "Dark Mode and Light Mode use the preset screenshot values plus a dedicated list background color.");
@@ -3686,114 +3189,114 @@ void App::panel_settings() {
                 bool theme_changed = false;
                 bool simple_theme_changed = false;
 
-                ImVec4 overall = g_theme_settings.overall;
+                ImVec4 overall = ui_theme::g_theme_settings.overall;
                 if (ImGui::ColorEdit4("Overall", &overall.x,
                     ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                    g_theme_settings.overall = overall;
-                    rebuild_theme_basics_from_overall(g_theme_settings);
+                    ui_theme::g_theme_settings.overall = overall;
+                    ui_theme::rebuild_theme_basics_from_overall(ui_theme::g_theme_settings);
                     theme_changed = true;
                 }
 
-                bool simple = g_theme_settings.simple;
+                bool simple = ui_theme::g_theme_settings.simple;
                 if (ImGui::Checkbox("Simple Customization", &simple)) {
-                    g_theme_settings.simple = simple;
+                    ui_theme::g_theme_settings.simple = simple;
                     theme_changed = true;
                 }
 
-                if (g_theme_settings.simple) {
-                    ImVec4 background = g_theme_settings.background;
+                if (ui_theme::g_theme_settings.simple) {
+                    ImVec4 background = ui_theme::g_theme_settings.background;
                     if (ImGui::ColorEdit4("Background", &background.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.background = background;
+                        ui_theme::g_theme_settings.background = background;
                         theme_changed = true;
                         simple_theme_changed = true;
                     }
 
-                    ImVec4 surface = g_theme_settings.surface;
+                    ImVec4 surface = ui_theme::g_theme_settings.surface;
                     if (ImGui::ColorEdit4("Surface", &surface.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.surface = surface;
+                        ui_theme::g_theme_settings.surface = surface;
                         theme_changed = true;
                         simple_theme_changed = true;
                     }
 
-                    ImVec4 accent = g_theme_settings.accent;
+                    ImVec4 accent = ui_theme::g_theme_settings.accent;
                     if (ImGui::ColorEdit4("Accent", &accent.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.accent = accent;
+                        ui_theme::g_theme_settings.accent = accent;
                         theme_changed = true;
                         simple_theme_changed = true;
                     }
 
-                    ImVec4 text = g_theme_settings.text;
+                    ImVec4 text = ui_theme::g_theme_settings.text;
                     if (ImGui::ColorEdit4("Text", &text.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.text = text;
+                        ui_theme::g_theme_settings.text = text;
                         theme_changed = true;
                         simple_theme_changed = true;
                     }
 
-                    ImVec4 lists = g_theme_settings.lists;
+                    ImVec4 lists = ui_theme::g_theme_settings.lists;
                     if (ImGui::ColorEdit4("Lists", &lists.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.lists = lists;
+                        ui_theme::g_theme_settings.lists = lists;
                         theme_changed = true;
                         simple_theme_changed = true;
                     }
                 }
 
-                bool advanced = g_theme_settings.advanced;
+                bool advanced = ui_theme::g_theme_settings.advanced;
                 if (ImGui::Checkbox("Advanced", &advanced)) {
-                    if (advanced && !g_theme_settings.advanced) {
-                        reset_theme_startup_colors(g_theme_settings);
+                    if (advanced && !ui_theme::g_theme_settings.advanced) {
+                        ui_theme::reset_theme_startup_colors(ui_theme::g_theme_settings);
                     }
-                    g_theme_settings.advanced = advanced;
+                    ui_theme::g_theme_settings.advanced = advanced;
                     theme_changed = true;
                 }
 
                 if (theme_changed) {
                     if (simple_theme_changed) {
-                        sync_theme_overall_from_basics(g_theme_settings);
+                        ui_theme::sync_theme_overall_from_basics(ui_theme::g_theme_settings);
                     }
-                    rebuild_theme_colors_from_basics(g_theme_settings);
-                    apply_theme_style(ImGui::GetStyle());
-                    mark_theme_settings_dirty();
+                    ui_theme::rebuild_theme_colors_from_basics(ui_theme::g_theme_settings);
+                    ui_theme::apply_theme_style(ImGui::GetStyle());
+                    ui_theme::mark_theme_settings_dirty();
                 }
 
-                if (g_theme_settings.advanced) {
+                if (ui_theme::g_theme_settings.advanced) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Advanced per-element overrides.");
                     bool advanced_theme_changed = false;
-                    ImVec4 startup_title = g_theme_settings.startup_title;
+                    ImVec4 startup_title = ui_theme::g_theme_settings.startup_title;
                     if (ImGui::ColorEdit4("Startup Title", &startup_title.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.startup_title = startup_title;
+                        ui_theme::g_theme_settings.startup_title = startup_title;
                         advanced_theme_changed = true;
                     }
-                    ImVec4 startup_text = g_theme_settings.startup_text;
+                    ImVec4 startup_text = ui_theme::g_theme_settings.startup_text;
                     if (ImGui::ColorEdit4("Startup Text", &startup_text.x,
                         ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                        g_theme_settings.startup_text = startup_text;
+                        ui_theme::g_theme_settings.startup_text = startup_text;
                         advanced_theme_changed = true;
                     }
-                    for (size_t i = 0; i < kThemeColorSlotCount; ++i) {
-                        ImVec4 color = g_theme_settings.colors[i];
-                        if (ImGui::ColorEdit4(kThemeColorSlots[i].label, &color.x,
+                    for (size_t i = 0; i < ui_theme::kThemeColorSlotCount; ++i) {
+                        ImVec4 color = ui_theme::g_theme_settings.colors[i];
+                        if (ImGui::ColorEdit4(ui_theme::kThemeColorSlots[i].label, &color.x,
                             ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
-                            g_theme_settings.colors[i] = color;
+                            ui_theme::g_theme_settings.colors[i] = color;
                             advanced_theme_changed = true;
                         }
                     }
                     if (advanced_theme_changed) {
-                        apply_theme_style(ImGui::GetStyle());
-                        mark_theme_settings_dirty();
+                        ui_theme::apply_theme_style(ImGui::GetStyle());
+                        ui_theme::mark_theme_settings_dirty();
                     }
                 }
 
                 if (ImGui::Button("Reset Theme Colors")) {
-                    reset_theme_settings();
-                    apply_theme_style(ImGui::GetStyle());
-                    mark_theme_settings_dirty();
+                    ui_theme::reset_theme_settings();
+                    ui_theme::apply_theme_style(ImGui::GetStyle());
+                    ui_theme::mark_theme_settings_dirty();
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Save Theme Now")) {
