@@ -55,6 +55,7 @@ set(VIBESTATION_SOURCES
     src/main.cpp
     src/platform/cpu_backend_compare_runner.cpp
     src/platform/disc_path_utils.cpp
+    src/platform/memory_card_utils.cpp
     src/core/bios.cpp
     src/core/ram.cpp
     src/core/interrupt.cpp

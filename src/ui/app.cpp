@@ -1,5 +1,6 @@
 #include "app.h"
 #include "platform/disc_path_utils.h"
+#include "platform/memory_card_utils.h"
 #include "ui/panels/cpu_backend_panel.h"
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -35,7 +36,6 @@
 namespace {
     constexpr const char* kAppConfigFileName = "vibestation_config.ini";
     constexpr const char* kCorruptionPresetDirName = "corruption_presets";
-    constexpr const char* kMemoryCardDirName = "memcards";
     constexpr float kEmulatorScreenBottomOverscanPixels = 3.0f;
     float smooth_ui_value(float current, float target, float delta_seconds,
         float response_seconds = 0.18f) {
@@ -939,27 +939,6 @@ namespace {
         handler.ApplyAllFn = theme_settings_apply_all;
         handler.WriteAllFn = theme_settings_write_all;
         ImGui::AddSettingsHandler(&handler);
-    }
-
-    std::string sanitize_memory_card_stem(const std::string& text) {
-        std::string out;
-        out.reserve(text.size());
-        for (char ch : text) {
-            const unsigned char uch = static_cast<unsigned char>(ch);
-            if (std::isalnum(uch)) {
-                out.push_back(static_cast<char>(std::tolower(uch)));
-            }
-            else if (ch == '-' || ch == '_') {
-                out.push_back(ch);
-            }
-            else if (std::isspace(uch)) {
-                out.push_back('_');
-            }
-        }
-        if (out.empty()) {
-            out = "game";
-        }
-        return out;
     }
 
 
