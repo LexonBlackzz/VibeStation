@@ -1,4 +1,5 @@
-# VibeStation
+<img width="1500" height="500" alt="VibeStation banner" src="https://github.com/user-attachments/assets/a1dd0bf5-1405-4267-895d-f624cf647bce" />
+
 VibeStation is an experimental PS1 emulator with a built-in game corruptor, written in C++.
 
 The emulator is built for fun, experimentation, debugging, and breaking games in interesting ways. Its main unique feature is Grim Reaper, a set of built-in corruption tools for BIOS, RAM, GPU, and SPU/audio corruption.
@@ -31,6 +32,7 @@ Grim Reaper uses a "Random Strike" system to do all of its corruptions (essentia
 **BIOS corruptor**
 
 Essentially, it almost works the same way as "Vinesauce ROM Corruptor". It corrupts your selected BIOS and boots it up.
+
 
 <img width="524" height="67" alt="Intro Bootmenu Slider" src="https://github.com/user-attachments/assets/a5748dcc-c799-4130-a226-37bd07bebc16" />  
 
