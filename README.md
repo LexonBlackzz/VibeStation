@@ -1,5 +1,7 @@
-<img width="1500" height="500" alt="VibeStation banner" src="https://github.com/user-attachments/assets/a1dd0bf5-1405-4267-895d-f624cf647bce" />
+# <img width="1500" height="500" alt="VibeStation banner" src="https://github.com/user-attachments/assets/a1dd0bf5-1405-4267-895d-f624cf647bce" />
 
+
+# **About**
 VibeStation is an experimental PS1 emulator with a built-in game corruptor, written in C++.
 
 The emulator is built for fun, experimentation, debugging, and breaking games in interesting ways. Its main unique feature is Grim Reaper, a set of built-in corruption tools for BIOS, RAM, GPU, and SPU/audio corruption.
