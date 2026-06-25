@@ -236,9 +236,11 @@ private:
 	void panel_settings();
 	void panel_about();
 	void panel_debug_cpu();
+	void draw_input_panel();
     void draw_memory_card_panel();
 	void draw_experimental_settings_panel();
 	void draw_audio_panel();
+	void draw_system_panel();
 	void panel_vram();
 	void panel_performance();
 	void panel_sound_status();
