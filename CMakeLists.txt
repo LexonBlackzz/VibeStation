@@ -88,6 +88,7 @@ set(VIBESTATION_SOURCES
     src/ui/panels/experimental_settings_panel.cpp
     src/ui/panels/audio_panel.cpp
     src/ui/panels/system_panel.cpp
+    src/ui/panels/logging_panel.cpp
 )
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
