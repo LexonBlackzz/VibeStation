@@ -184,6 +184,8 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
                 ${CMAKE_CURRENT_BINARY_DIR}/discord_partner_sdk_embed.rc)
             target_compile_definitions(VibeStation PRIVATE
                 VIBESTATION_HAS_EMBEDDED_DISCORD_DLL=1)
+            target_sources(VibeStation PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
             if(MSVC)
                 target_link_libraries(VibeStation PRIVATE delayimp)
                 target_link_options(VibeStation PRIVATE /DELAYLOAD:discord_partner_sdk.dll)
