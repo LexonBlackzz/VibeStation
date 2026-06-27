@@ -112,7 +112,7 @@ Provide its path when configuring the project:
 Replace C:/path/to/discord_social_sdk with the location of your Discord Social SDK folder.
 If the SDK is not provided, the project will still build with a stub fallback, but Discord RPC will not function.
 
-#BIOS Disclaimer  
+# BIOS Disclaimer  
 VibeStation does ***not*** provide any kind of BIOS files. You must legally obtain or extract BIOS files from hardware you own. This project does not condone piracy.
 
 ⚠️ VibeStation is still experimental. Many features are incomplete, inaccurate, buggy, or unstable. Compatibility is not guaranteed.
