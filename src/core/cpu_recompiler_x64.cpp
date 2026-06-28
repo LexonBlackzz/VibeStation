@@ -70,6 +70,10 @@ bool is_x64_stage1_op(DecodedOp op) {
   case DecodedOp::Sllv:
   case DecodedOp::Srlv:
   case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Sync:
+  case DecodedOp::Clear:
   case DecodedOp::Addu:
   case DecodedOp::Subu:
   case DecodedOp::And:
@@ -137,7 +141,8 @@ bool is_x64_stage2_op(DecodedOp op) {
 
 bool is_x64_branch_tail_op(DecodedOp op) {
   return op == DecodedOp::Bne || op == DecodedOp::Beq ||
-         op == DecodedOp::Bgtz || op == DecodedOp::Blez;
+         op == DecodedOp::Bgtz || op == DecodedOp::Blez ||
+         op == DecodedOp::Bltz || op == DecodedOp::Bgez;
 }
 
 u8 x64_native_gpr_write_reg(const DecodedInstruction &inst) {
@@ -148,6 +153,9 @@ u8 x64_native_gpr_write_reg(const DecodedInstruction &inst) {
   case DecodedOp::Sllv:
   case DecodedOp::Srlv:
   case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Clear:
   case DecodedOp::Addu:
   case DecodedOp::Subu:
   case DecodedOp::And:
@@ -168,6 +176,10 @@ u8 x64_native_gpr_write_reg(const DecodedInstruction &inst) {
   default:
     return 0;
   }
+}
+
+bool x64_native_conditional_gpr_write(const DecodedInstruction &inst) {
+  return inst.op == DecodedOp::Movz || inst.op == DecodedOp::Movn;
 }
 
 bool is_x64_reduced_helper_ram_load_block(
@@ -401,6 +413,32 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     emit_read_gpr(code, code.ecx, gpr, inst.rs);
     code.and_(code.ecx, 0x1F);
     code.sar(code.eax, code.cl);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
+    break;
+  case DecodedOp::Movz: {
+    Label skip_write;
+    emit_read_gpr(code, code.eax, gpr, inst.rt);
+    code.test(code.eax, code.eax);
+    code.jnz(skip_write, CodeGenerator::T_NEAR);
+    emit_read_gpr(code, code.eax, gpr, inst.rs);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
+    code.L(skip_write);
+    break;
+  }
+  case DecodedOp::Movn: {
+    Label skip_write;
+    emit_read_gpr(code, code.eax, gpr, inst.rt);
+    code.test(code.eax, code.eax);
+    code.jz(skip_write, CodeGenerator::T_NEAR);
+    emit_read_gpr(code, code.eax, gpr, inst.rs);
+    emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
+    code.L(skip_write);
+    break;
+  }
+  case DecodedOp::Sync:
+    break;
+  case DecodedOp::Clear:
+    code.xor_(code.eax, code.eax);
     emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
   case DecodedOp::Addu:
@@ -799,7 +837,8 @@ void emit_branch_helper_call(Xbyak::CodeGenerator &code,
                              const DecodedInstruction &inst,
                              uintptr_t branch_fn) {
   emit_read_gpr(code, code.eax, gpr, inst.rs);
-  if (inst.op == DecodedOp::Bgtz || inst.op == DecodedOp::Blez) {
+  if (inst.op == DecodedOp::Bgtz || inst.op == DecodedOp::Blez ||
+      inst.op == DecodedOp::Bltz || inst.op == DecodedOp::Bgez) {
     code.cmp(code.eax, 0);
   } else if (inst.rt == 0) {
     code.cmp(code.eax, 0);
@@ -812,6 +851,10 @@ void emit_branch_helper_call(Xbyak::CodeGenerator &code,
     code.sete(code.al);
   } else if (inst.op == DecodedOp::Bgtz) {
     code.setg(code.al);
+  } else if (inst.op == DecodedOp::Bltz) {
+    code.setl(code.al);
+  } else if (inst.op == DecodedOp::Bgez) {
+    code.setge(code.al);
   } else {
     code.setle(code.al);
   }
@@ -1225,7 +1268,7 @@ bool CpuOptimizedBackend::x64_native_finish_instruction(
   Cpu &cpu = *context->cpu;
   const DecodedInstruction &inst = context->block->instructions[index];
   const u8 write_reg = x64_native_gpr_write_reg(inst);
-  if (write_reg != 0u) {
+  if (write_reg != 0u && !x64_native_conditional_gpr_write(inst)) {
     // The native ALU instruction has already written its result. Reuse the
     // CPU register-write semantic helper so a write to the destination of a
     // pending load cancels that load exactly as decoded execution does.

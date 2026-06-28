@@ -25,6 +25,10 @@ const char *decoded_op_name(DecodedOp op) {
   case DecodedOp::Srav: return "Srav";
   case DecodedOp::Jr: return "Jr";
   case DecodedOp::Jalr: return "Jalr";
+  case DecodedOp::Movz: return "Movz";
+  case DecodedOp::Movn: return "Movn";
+  case DecodedOp::Sync: return "Sync";
+  case DecodedOp::Clear: return "Clear";
   case DecodedOp::Syscall: return "Syscall";
   case DecodedOp::Break: return "Break";
   case DecodedOp::Addu: return "Addu";
@@ -1087,6 +1091,8 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
       out.is_branch = true;
       out.is_unconditional_branch = true;
       break;
+    case 0x0A: out.op = DecodedOp::Movz; break;
+    case 0x0B: out.op = DecodedOp::Movn; break;
     case 0x0C:
       out.op = DecodedOp::Syscall;
       out.may_raise_exception = true;
@@ -1095,14 +1101,28 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
       out.op = DecodedOp::Break;
       out.may_raise_exception = true;
       break;
+    case 0x0F: out.op = DecodedOp::Sync; break;
+    case 0x14:
+    case 0x1C:
+    case 0x28:
+    case 0x29:
+      out.op = DecodedOp::Nop;
+      break;
     case 0x21: out.op = DecodedOp::Addu; break;
+    case 0x2D:
+      out.op = DecodedOp::Addu;
+      break;
     case 0x23: out.op = DecodedOp::Subu; break;
+    case 0x2F:
+      out.op = DecodedOp::Subu;
+      break;
     case 0x24: out.op = DecodedOp::And; break;
     case 0x25: out.op = DecodedOp::Or; break;
     case 0x26: out.op = DecodedOp::Xor; break;
     case 0x27: out.op = DecodedOp::Nor; break;
     case 0x2A: out.op = DecodedOp::Slt; break;
     case 0x2B: out.op = DecodedOp::Sltu; break;
+    case 0x38: out.op = DecodedOp::Clear; break;
     default:
       out.must_fallback = true;
       break;
@@ -1367,6 +1387,21 @@ bool CpuOptimizedBackend::execute_decoded_instruction(
   case DecodedOp::Srav:
     set_reg(inst.rd, static_cast<u32>(static_cast<s32>(reg(inst.rt)) >>
                                       (reg(inst.rs) & 0x1Fu)));
+    break;
+  case DecodedOp::Movz:
+    if (reg(inst.rt) == 0u) {
+      set_reg(inst.rd, reg(inst.rs));
+    }
+    break;
+  case DecodedOp::Movn:
+    if (reg(inst.rt) != 0u) {
+      set_reg(inst.rd, reg(inst.rs));
+    }
+    break;
+  case DecodedOp::Sync:
+    break;
+  case DecodedOp::Clear:
+    set_reg(inst.rd, 0);
     break;
   case DecodedOp::Jr:
     cpu_.begin_branch(true, reg(inst.rs));
