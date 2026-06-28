@@ -253,6 +253,13 @@ namespace {
                 stats.native_reject_branch_delay_pending_branch_taken),
             static_cast<unsigned long long>(
                 stats.native_reject_branch_delay_pending_branch_pc));
+        ImGui::Text("Unsupported detail: exception %llu  fallback %llu  unsupported %llu",
+            static_cast<unsigned long long>(
+                stats.native_reject_exception_risk),
+            static_cast<unsigned long long>(
+                stats.native_reject_fallback_instruction),
+            static_cast<unsigned long long>(
+                stats.native_reject_unsupported_instruction));
 
         ImGui::Separator();
         ImGui::Text("Invalidation: queries %llu  no-code exits %llu",
@@ -280,6 +287,22 @@ namespace {
                 stats.native_memory_fastpath_stores),
             static_cast<unsigned long long>(
                 stats.native_memory_exception_exits));
+        ImGui::Text("Native memory helper mix: loads %llu  stores %llu",
+            static_cast<unsigned long long>(
+                stats.native_memory_helper_load_calls),
+            static_cast<unsigned long long>(
+                stats.native_memory_helper_store_calls));
+        ImGui::Text("RAM load fastpath misses: total %llu  disabled %llu  trace %llu  unaligned %llu  non-RAM %llu",
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_load_misses),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_load_miss_disabled),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_load_miss_trace),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_load_miss_unaligned),
+            static_cast<unsigned long long>(
+                stats.native_memory_fastpath_load_miss_non_ram));
         ImGui::Text("Helper load-delay: entries %llu  passes %llu  fallbacks %llu",
             static_cast<unsigned long long>(
                 stats.native_helper_load_delay_entries),
