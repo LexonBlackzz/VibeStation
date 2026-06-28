@@ -82,6 +82,8 @@ set(VIBESTATION_SOURCES
     src/ui/emu_runner.cpp
     src/ui/app.cpp
     src/ui/app_discord_presence.cpp
+    src/ui/input_bindings.cpp
+    src/ui/output_resolution_utils.cpp
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
     src/ui/panels/cpu_backend_panel.cpp
@@ -89,10 +91,13 @@ set(VIBESTATION_SOURCES
     src/ui/panels/memory_card_panel.cpp
     src/ui/panels/experimental_settings_panel.cpp
     src/ui/panels/audio_panel.cpp
+    src/ui/panels/sound_status_panel.cpp
     src/ui/panels/system_panel.cpp
     src/ui/panels/logging_panel.cpp
     src/ui/panels/fmv_diagnostics_panel.cpp
     src/ui/panels/performance_overlay.cpp
+    src/ui/panels/bindings_config_panel.cpp
+    src/ui/panels/settings_panel.cpp
     src/ui/panels/vram_panel.cpp
 )
 
