@@ -635,6 +635,114 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(shifts);
   cases.push_back(shifts);
 
+  CpuCompareCase conditional_moves{};
+  conditional_moves.name = "native_movz_movn_sync";
+  conditional_moves.initial_gpr[1] = 0x11111111u;
+  conditional_moves.initial_gpr[2] = 0u;
+  conditional_moves.initial_gpr[3] = 0x22222222u;
+  conditional_moves.initial_gpr[4] = 5u;
+  conditional_moves.program = {
+      enc_r(1, 2, 7, 0, 0x0A),
+      enc_r(3, 4, 8, 0, 0x0A),
+      enc_r(3, 4, 9, 0, 0x0B),
+      enc_r(1, 2, 10, 0, 0x0B),
+      enc_r(0, 0, 0, 0, 0x0F),
+      enc_r(7, 9, 11, 0, 0x21),
+  };
+  conditional_moves.require_full_native_when_available = true;
+  pad_cpu_compare_program(conditional_moves);
+  cases.push_back(conditional_moves);
+
+  CpuCompareCase compat_specials{};
+  compat_specials.name = "native_compat_special_noops_and_aliases";
+  compat_specials.initial_gpr[1] = 0xFFFFFFFFu;
+  compat_specials.initial_gpr[2] = 2u;
+  compat_specials.initial_gpr[5] = 0x55555555u;
+  compat_specials.initial_gpr[6] = 0x66666666u;
+  compat_specials.initial_gpr[7] = 0x77777777u;
+  compat_specials.initial_gpr[8] = 0x88888888u;
+  compat_specials.initial_gpr[10] = 0x99999999u;
+  compat_specials.program = {
+      enc_r(1, 2, 3, 0, 0x2D),
+      enc_r(2, 1, 4, 0, 0x2F),
+      enc_r(1, 2, 5, 0, 0x14),
+      enc_r(1, 2, 6, 0, 0x1C),
+      enc_r(1, 2, 7, 0, 0x28),
+      enc_r(1, 2, 8, 0, 0x29),
+      enc_r(0, 10, 10, 0, 0x38),
+      enc_r(3, 4, 9, 0, 0x21),
+  };
+  compat_specials.require_full_native_when_available = true;
+  pad_cpu_compare_program(compat_specials);
+  cases.push_back(compat_specials);
+
+  CpuCompareCase decoded_load_then_movz_cancel{};
+  decoded_load_then_movz_cancel.name =
+      "decoded_load_then_native_movz_cancel";
+  decoded_load_then_movz_cancel.initial_gpr[1] = 0x800114A0u;
+  decoded_load_then_movz_cancel.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_movz_cancel.initial_gpr[3] = 7u;
+  decoded_load_then_movz_cancel.initial_gpr[4] = 0u;
+  decoded_load_then_movz_cancel.memory.push_back(
+      {0x000114A0u, 0xDEADBEEFu});
+  decoded_load_then_movz_cancel.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_r(3, 4, 2, 0, 0x0A),
+      enc_r(2, 0, 5, 0, 0x21),
+  };
+  pad_cpu_compare_program(decoded_load_then_movz_cancel, 17u);
+  decoded_load_then_movz_cancel.segment_instructions = {1u, 16u};
+  decoded_load_then_movz_cancel.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_movz_cancel.compare_segment_states = true;
+  decoded_load_then_movz_cancel
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(decoded_load_then_movz_cancel);
+
+  CpuCompareCase decoded_load_then_movn_no_cancel{};
+  decoded_load_then_movn_no_cancel.name =
+      "decoded_load_then_native_movn_no_cancel";
+  decoded_load_then_movn_no_cancel.initial_gpr[1] = 0x800114B0u;
+  decoded_load_then_movn_no_cancel.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_movn_no_cancel.initial_gpr[3] = 7u;
+  decoded_load_then_movn_no_cancel.initial_gpr[4] = 0u;
+  decoded_load_then_movn_no_cancel.memory.push_back(
+      {0x000114B0u, 0xCAFEBABEu});
+  decoded_load_then_movn_no_cancel.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_r(3, 4, 2, 0, 0x0B),
+      enc_r(2, 0, 5, 0, 0x21),
+  };
+  pad_cpu_compare_program(decoded_load_then_movn_no_cancel, 17u);
+  decoded_load_then_movn_no_cancel.segment_instructions = {1u, 16u};
+  decoded_load_then_movn_no_cancel.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_movn_no_cancel.compare_segment_states = true;
+  decoded_load_then_movn_no_cancel
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(decoded_load_then_movn_no_cancel);
+
+  CpuCompareCase decoded_load_then_clear_cancel{};
+  decoded_load_then_clear_cancel.name =
+      "decoded_load_then_native_clear_cancel";
+  decoded_load_then_clear_cancel.initial_gpr[1] = 0x800114C0u;
+  decoded_load_then_clear_cancel.initial_gpr[2] = 0x11111111u;
+  decoded_load_then_clear_cancel.memory.push_back(
+      {0x000114C0u, 0x1234ABCDu});
+  decoded_load_then_clear_cancel.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_r(0, 2, 2, 0, 0x38),
+      enc_r(2, 0, 5, 0, 0x21),
+  };
+  pad_cpu_compare_program(decoded_load_then_clear_cancel, 17u);
+  decoded_load_then_clear_cancel.segment_instructions = {1u, 16u};
+  decoded_load_then_clear_cancel.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  decoded_load_then_clear_cancel.compare_segment_states = true;
+  decoded_load_then_clear_cancel
+      .require_native_alu_tier_entry_when_available = true;
+  cases.push_back(decoded_load_then_clear_cancel);
+
   CpuCompareCase decoded_load_then_reduced_alu_cancel{};
   decoded_load_then_reduced_alu_cancel.name =
       "decoded_load_then_reduced_alu_cancel";
@@ -801,6 +909,52 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   blez_not_taken.require_native_branch_tail_when_available = true;
   blez_not_taken.native_branch_primary_op = 0x06u;
   cases.push_back(blez_not_taken);
+
+  CpuCompareCase bltz_taken{};
+  bltz_taken.name = "native_branch_tail_bltz_taken_alu_delay";
+  bltz_taken.initial_gpr[1] = 0xFFFFFFFFu;
+  bltz_taken.program = {
+      enc_i(0x01, 1, 0x00, 1),
+      enc_i(0x09, 0, 2, 0x0034),
+      0,
+  };
+  bltz_taken.instructions = 2;
+  bltz_taken.require_full_native_when_available = true;
+  bltz_taken.require_native_branch_tail_when_available = true;
+  bltz_taken.native_branch_should_be_taken = true;
+  cases.push_back(bltz_taken);
+
+  CpuCompareCase bltz_not_taken{};
+  bltz_not_taken.name = "native_branch_tail_bltz_not_taken_alu_delay";
+  bltz_not_taken.initial_gpr[1] = 1u;
+  bltz_not_taken.program = bltz_taken.program;
+  bltz_not_taken.instructions = 2;
+  bltz_not_taken.require_full_native_when_available = true;
+  bltz_not_taken.require_native_branch_tail_when_available = true;
+  cases.push_back(bltz_not_taken);
+
+  CpuCompareCase bgez_taken{};
+  bgez_taken.name = "native_branch_tail_bgez_taken_alu_delay";
+  bgez_taken.initial_gpr[1] = 0u;
+  bgez_taken.program = {
+      enc_i(0x01, 1, 0x01, 1),
+      enc_i(0x09, 0, 2, 0x0035),
+      0,
+  };
+  bgez_taken.instructions = 2;
+  bgez_taken.require_full_native_when_available = true;
+  bgez_taken.require_native_branch_tail_when_available = true;
+  bgez_taken.native_branch_should_be_taken = true;
+  cases.push_back(bgez_taken);
+
+  CpuCompareCase bgez_not_taken{};
+  bgez_not_taken.name = "native_branch_tail_bgez_not_taken_alu_delay";
+  bgez_not_taken.initial_gpr[1] = 0xFFFFFFFFu;
+  bgez_not_taken.program = bgez_taken.program;
+  bgez_not_taken.instructions = 2;
+  bgez_not_taken.require_full_native_when_available = true;
+  bgez_not_taken.require_native_branch_tail_when_available = true;
+  cases.push_back(bgez_not_taken);
 
   CpuCompareCase bgtz_memory_loop{};
   bgtz_memory_loop.name = "native_branch_tail_bgtz_memory_store_delay";
