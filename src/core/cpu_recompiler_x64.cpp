@@ -36,6 +36,7 @@ struct X64NativeContext {
   u32 *cycle_penalty = nullptr;
   const u8 *ram_data = nullptr;
   u64 *ram_load_fastpath_counter = nullptr;
+  u64 *branch_tail_ram_load_fastpath_counter = nullptr;
   u32 end_pc = 0;
   u32 end_next_pc = 0;
   u32 last_pc = 0;
@@ -673,7 +674,8 @@ void emit_memory_helper_call(Xbyak::CodeGenerator &code,
 void emit_ram_load_fastpath_or_memory_helper(
     Xbyak::CodeGenerator &code, const Xbyak::Reg64 &ctx,
     const Xbyak::Reg64 &gpr, const DecodedInstruction &inst,
-    uintptr_t memory_fn, Xbyak::Label &block_done) {
+    uintptr_t memory_fn, Xbyak::Label &block_done,
+    bool count_branch_tail_fastpath_hits) {
   using namespace Xbyak;
   Label slow, mapped, completed;
 
@@ -737,8 +739,15 @@ void emit_ram_load_fastpath_or_memory_helper(
   code.add(code.dword[code.rax], 4u);
   code.mov(code.rax,
            code.ptr[ctx +
-                    offsetof(X64NativeContext, ram_load_fastpath_counter)]);
+                     offsetof(X64NativeContext, ram_load_fastpath_counter)]);
   code.inc(code.qword[code.rax]);
+  if (count_branch_tail_fastpath_hits) {
+    code.mov(
+        code.rax,
+        code.ptr[ctx + offsetof(X64NativeContext,
+                                branch_tail_ram_load_fastpath_counter)]);
+    code.inc(code.qword[code.rax]);
+  }
 
   if (inst.rt == 0u) {
     code.mov(code.rax,
@@ -968,7 +977,8 @@ void emit_x64_helper_block(X64NativeContext &context,
     } else if (memory_instruction) {
       if (is_x64_load_op(inst.op)) {
         emit_ram_load_fastpath_or_memory_helper(code, ctx, gpr, inst,
-                                                memory_fn, done);
+                                                memory_fn, done,
+                                                context.is_branch_tail);
       } else {
         emit_memory_helper_call(code, ctx, gpr, inst, memory_fn);
         code.test(code.al, code.al);
@@ -1025,6 +1035,9 @@ bool CpuOptimizedBackend::x64_native_prepare_instruction(
 
   ++context->backend->stats_.native_prepare_helper_calls;
   ++context->block->native_prepare_helper_call_count;
+  if (context->is_branch_tail) {
+    ++context->backend->stats_.native_branch_tail_prepare_helper_calls;
+  }
 
   context->current_instruction_index = index;
   if (result->cycles >= context->max_cycles ||
@@ -1061,16 +1074,26 @@ bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
       context->block->instructions[context->current_instruction_index];
   ++backend.stats_.native_memory_helper_calls;
   ++context->block->native_memory_helper_call_count;
+  if (context->is_branch_tail) {
+    ++backend.stats_.native_branch_tail_memory_helper_calls;
+  }
   const u32 expected_addr =
       cpu.gpr_[inst.rs] + static_cast<u32>(inst.simm);
   const u32 expected_arg =
       is_x64_load_op(inst.op) ? static_cast<u32>(inst.rt)
                               : cpu.gpr_[inst.rt];
   const bool load_op = is_x64_load_op(inst.op);
+  CpuBackendStats &stats = backend.stats_;
   if (load_op) {
-    ++backend.stats_.native_memory_helper_load_calls;
+    ++stats.native_memory_helper_load_calls;
+    if (context->is_branch_tail) {
+      ++stats.native_branch_tail_memory_helper_load_calls;
+    }
   } else {
-    ++backend.stats_.native_memory_helper_store_calls;
+    ++stats.native_memory_helper_store_calls;
+    if (context->is_branch_tail) {
+      ++stats.native_branch_tail_memory_helper_store_calls;
+    }
   }
   const bool operands_match =
       op == inst.op && addr == expected_addr && rt_or_value == expected_arg;
@@ -1135,18 +1158,35 @@ bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
     const bool trace_blocks_fastpath =
         g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus;
     if (!context->ram_load_fastpath_enabled) {
-      ++backend.stats_.native_memory_fastpath_load_misses;
+      ++stats.native_memory_fastpath_load_misses;
+      if (context->is_branch_tail) {
+        ++stats.native_branch_tail_ram_load_fastpath_load_misses;
+      }
       if (trace_blocks_fastpath) {
-        ++backend.stats_.native_memory_fastpath_load_miss_trace;
+        ++stats.native_memory_fastpath_load_miss_trace;
+        if (context->is_branch_tail) {
+          ++stats.native_branch_tail_ram_load_fastpath_load_miss_trace;
+        }
       } else {
-        ++backend.stats_.native_memory_fastpath_load_miss_disabled;
+        ++stats.native_memory_fastpath_load_miss_disabled;
+        if (context->is_branch_tail) {
+          ++stats.native_branch_tail_ram_load_fastpath_load_miss_disabled;
+        }
       }
     } else if (unaligned_load) {
-      ++backend.stats_.native_memory_fastpath_load_misses;
-      ++backend.stats_.native_memory_fastpath_load_miss_unaligned;
+      ++stats.native_memory_fastpath_load_misses;
+      ++stats.native_memory_fastpath_load_miss_unaligned;
+      if (context->is_branch_tail) {
+        ++stats.native_branch_tail_ram_load_fastpath_load_misses;
+        ++stats.native_branch_tail_ram_load_fastpath_load_miss_unaligned;
+      }
     } else if (!is_canonical_ram_alias(expected_addr)) {
-      ++backend.stats_.native_memory_fastpath_load_misses;
-      ++backend.stats_.native_memory_fastpath_load_miss_non_ram;
+      ++stats.native_memory_fastpath_load_misses;
+      ++stats.native_memory_fastpath_load_miss_non_ram;
+      if (context->is_branch_tail) {
+        ++stats.native_branch_tail_ram_load_fastpath_load_misses;
+        ++stats.native_branch_tail_ram_load_fastpath_load_miss_non_ram;
+      }
     }
   }
 
@@ -1253,6 +1293,7 @@ void CpuOptimizedBackend::x64_native_branch_instruction(void *context_ptr,
 
   ++context->backend->stats_.native_branch_helper_calls;
   ++context->block->native_branch_helper_call_count;
+  ++context->backend->stats_.native_branch_tail_branch_helper_calls;
 
   Cpu &cpu = *context->cpu;
   context->branch_taken = taken != 0u;
@@ -1294,6 +1335,9 @@ bool CpuOptimizedBackend::x64_native_finish_instruction(
 
   ++context->backend->stats_.native_finish_helper_calls;
   ++context->block->native_finish_helper_call_count;
+  if (context->is_branch_tail) {
+    ++context->backend->stats_.native_branch_tail_finish_helper_calls;
+  }
 
   Cpu &cpu = *context->cpu;
   const DecodedInstruction &inst = context->block->instructions[index];
@@ -1333,6 +1377,7 @@ bool CpuOptimizedBackend::x64_native_finish_instruction(
       context->is_branch_tail &&
       index == context->branch_instruction_index + 1u;
   if (completed_delay_slot) {
+    ++context->backend->stats_.native_branch_tail_delay_slot_finish_helper_calls;
     context->backend->record_native_branch_tail_trace(
         *context->block, context->branch_taken,
         context->delay_slot_used_memory, context->delay_slot_used_mmio,
@@ -1621,6 +1666,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->ram_data = cpu_.sys_->jit_main_ram_data();
     context->ram_load_fastpath_counter =
         &stats_.native_memory_fastpath_loads;
+    context->branch_tail_ram_load_fastpath_counter =
+        &stats_.native_branch_tail_ram_load_fastpath_loads;
     context->instruction_count = block.instruction_count;
     context->is_branch_tail = block.native_branch_tail;
     context->uses_instruction_helpers =
@@ -1696,6 +1743,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   auto reject_to_decoded = [&](u64 &specific_counter,
                                NativeBlockRejectDetail detail) {
     ++stats_.native_to_decoded_fallbacks;
+    if (block.native_branch_tail) {
+      ++stats_.native_branch_tail_to_decoded_fallbacks;
+    }
     ++stats_.native_reject_unsafe_state;
     ++specific_counter;
     if (block.native_reduced_helper) {
@@ -1726,6 +1776,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       !(block.has_memory &&
         g_cpu_backend_compare_allow_partial_memory_helper)) {
     ++stats_.native_to_decoded_fallbacks;
+    if (block.native_branch_tail) {
+      ++stats_.native_branch_tail_to_decoded_fallbacks;
+    }
     ++stats_.native_reject_budget;
     record_rejected_block(NativeBlockRejectDetail::Budget);
     return execute_block(block, max_cycles, max_instructions);
@@ -1935,6 +1988,24 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     }
   }
   block.native_fn(block.native_context, &result);
+  if (context->is_branch_tail) {
+    switch (result.exit_reason) {
+    case CpuBlockExitReason::Branch:
+      ++stats_.native_branch_tail_completed_exits;
+      break;
+    case CpuBlockExitReason::Budget:
+      ++stats_.native_branch_tail_budget_exits;
+      break;
+    case CpuBlockExitReason::Fallback:
+      ++stats_.native_branch_tail_fallback_exits;
+      break;
+    case CpuBlockExitReason::Exception:
+      ++stats_.native_branch_tail_exception_exits;
+      break;
+    default:
+      break;
+    }
+  }
 
   if (active_load_delay && context->uses_instruction_helpers) {
     if (result.instructions != 0) {

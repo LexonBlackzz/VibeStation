@@ -379,6 +379,21 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_branch_not_taken =
       delta_u64(current.native_branch_not_taken,
                 previous.native_branch_not_taken);
+  out.native_branch_tail_to_decoded_fallbacks = delta_u64(
+      current.native_branch_tail_to_decoded_fallbacks,
+      previous.native_branch_tail_to_decoded_fallbacks);
+  out.native_branch_tail_completed_exits = delta_u64(
+      current.native_branch_tail_completed_exits,
+      previous.native_branch_tail_completed_exits);
+  out.native_branch_tail_budget_exits = delta_u64(
+      current.native_branch_tail_budget_exits,
+      previous.native_branch_tail_budget_exits);
+  out.native_branch_tail_fallback_exits = delta_u64(
+      current.native_branch_tail_fallback_exits,
+      previous.native_branch_tail_fallback_exits);
+  out.native_branch_tail_exception_exits = delta_u64(
+      current.native_branch_tail_exception_exits,
+      previous.native_branch_tail_exception_exits);
   out.native_branch_tail_bgtz_entries =
       delta_u64(current.native_branch_tail_bgtz_entries,
                 previous.native_branch_tail_bgtz_entries);
@@ -558,6 +573,27 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_memory_helper_unaligned_calls =
       delta_u64(current.native_memory_helper_unaligned_calls,
                 previous.native_memory_helper_unaligned_calls);
+  out.native_branch_tail_prepare_helper_calls = delta_u64(
+      current.native_branch_tail_prepare_helper_calls,
+      previous.native_branch_tail_prepare_helper_calls);
+  out.native_branch_tail_finish_helper_calls = delta_u64(
+      current.native_branch_tail_finish_helper_calls,
+      previous.native_branch_tail_finish_helper_calls);
+  out.native_branch_tail_delay_slot_finish_helper_calls = delta_u64(
+      current.native_branch_tail_delay_slot_finish_helper_calls,
+      previous.native_branch_tail_delay_slot_finish_helper_calls);
+  out.native_branch_tail_branch_helper_calls = delta_u64(
+      current.native_branch_tail_branch_helper_calls,
+      previous.native_branch_tail_branch_helper_calls);
+  out.native_branch_tail_memory_helper_calls = delta_u64(
+      current.native_branch_tail_memory_helper_calls,
+      previous.native_branch_tail_memory_helper_calls);
+  out.native_branch_tail_memory_helper_load_calls = delta_u64(
+      current.native_branch_tail_memory_helper_load_calls,
+      previous.native_branch_tail_memory_helper_load_calls);
+  out.native_branch_tail_memory_helper_store_calls = delta_u64(
+      current.native_branch_tail_memory_helper_store_calls,
+      previous.native_branch_tail_memory_helper_store_calls);
   out.native_memory_fastpath_loads =
       delta_u64(current.native_memory_fastpath_loads,
                 previous.native_memory_fastpath_loads);
@@ -582,6 +618,24 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_memory_fastpath_load_miss_non_ram =
       delta_u64(current.native_memory_fastpath_load_miss_non_ram,
                 previous.native_memory_fastpath_load_miss_non_ram);
+  out.native_branch_tail_ram_load_fastpath_loads = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_loads,
+      previous.native_branch_tail_ram_load_fastpath_loads);
+  out.native_branch_tail_ram_load_fastpath_load_misses = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_load_misses,
+      previous.native_branch_tail_ram_load_fastpath_load_misses);
+  out.native_branch_tail_ram_load_fastpath_load_miss_disabled = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_load_miss_disabled,
+      previous.native_branch_tail_ram_load_fastpath_load_miss_disabled);
+  out.native_branch_tail_ram_load_fastpath_load_miss_trace = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_load_miss_trace,
+      previous.native_branch_tail_ram_load_fastpath_load_miss_trace);
+  out.native_branch_tail_ram_load_fastpath_load_miss_unaligned = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_load_miss_unaligned,
+      previous.native_branch_tail_ram_load_fastpath_load_miss_unaligned);
+  out.native_branch_tail_ram_load_fastpath_load_miss_non_ram = delta_u64(
+      current.native_branch_tail_ram_load_fastpath_load_miss_non_ram,
+      previous.native_branch_tail_ram_load_fastpath_load_miss_non_ram);
   out.native_memory_exception_exits =
       delta_u64(current.native_memory_exception_exits,
                 previous.native_memory_exception_exits);
@@ -2761,12 +2815,27 @@ void CpuOptimizedBackend::log_stats_section(
   const u64 ram_fastpath_load_attempts =
       delta.native_memory_fastpath_loads +
       delta.native_memory_fastpath_load_misses;
+  const u64 branch_tail_helper_calls =
+      delta.native_branch_tail_prepare_helper_calls +
+      delta.native_branch_tail_finish_helper_calls +
+      delta.native_branch_tail_memory_helper_calls +
+      delta.native_branch_tail_branch_helper_calls;
+  const u64 branch_tail_ram_fastpath_attempts =
+      delta.native_branch_tail_ram_load_fastpath_loads +
+      delta.native_branch_tail_ram_load_fastpath_load_misses;
   const double ram_fastpath_hit_pct =
       ram_fastpath_load_attempts == 0
           ? 0.0
           : (100.0 *
              static_cast<double>(delta.native_memory_fastpath_loads)) /
                 static_cast<double>(ram_fastpath_load_attempts);
+  const double branch_tail_ram_fastpath_hit_pct =
+      branch_tail_ram_fastpath_attempts == 0
+          ? 0.0
+          : (100.0 *
+             static_cast<double>(
+                 delta.native_branch_tail_ram_load_fastpath_loads)) /
+                static_cast<double>(branch_tail_ram_fastpath_attempts);
   LOG_INFO("CPU_BACKEND_STATS native_helpers total=%llu prepare=%llu finish=%llu memory=%llu branch=%llu per_native_block=%.3f per_native_instruction=%.3f",
            static_cast<unsigned long long>(native_helper_calls),
            static_cast<unsigned long long>(delta.native_prepare_helper_calls),
@@ -2778,6 +2847,32 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(direct_helper_entries),
            static_cast<unsigned long long>(direct_helper_instructions),
            direct_helpers_per_block, direct_helpers_per_instruction);
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_helpers total=%llu prepare=%llu finish=%llu delay_slot_finish=%llu branch=%llu memory=%llu memory_loads=%llu memory_stores=%llu runtime_to_decoded=%llu exits_branch=%llu exits_budget=%llu exits_fallback=%llu exits_exception=%llu",
+           static_cast<unsigned long long>(branch_tail_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_prepare_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_finish_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_delay_slot_finish_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_branch_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_memory_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_memory_helper_load_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_memory_helper_store_calls),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_to_decoded_fallbacks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_completed_exits),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_budget_exits),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_fallback_exits),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_exception_exits));
   LOG_INFO("CPU_BACKEND_STATS memory_helper_regions ram=%llu scratchpad=%llu bios_read_only=%llu mmio=%llu unknown_slow=%llu unaligned=%llu",
            static_cast<unsigned long long>(
                delta.native_memory_helper_ram_calls),
@@ -2835,6 +2930,20 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(
                delta.native_memory_fastpath_load_miss_non_ram),
            ram_fastpath_hit_pct);
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_ram_load_fastpath hits=%llu misses=%llu miss_disabled=%llu miss_trace=%llu miss_unaligned=%llu miss_non_ram=%llu hit_pct=%.2f",
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_loads),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_load_misses),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_load_miss_disabled),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_load_miss_trace),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_load_miss_unaligned),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_ram_load_fastpath_load_miss_non_ram),
+           branch_tail_ram_fastpath_hit_pct);
   LOG_INFO("CPU_BACKEND_STATS helper_load_delay entries=%llu passes=%llu fallbacks=%llu",
            static_cast<unsigned long long>(
                delta.native_helper_load_delay_entries),
