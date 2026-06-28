@@ -2429,7 +2429,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
              expected_state_pass && native_check_pass;
       const char *outcome = cpu_compare_outcome(mode, result.stats);
       LOG_INFO(
-          "CPU_COMPARE name=%s mode=%s result=%s outcome=%s native_check=%s pc=0x%08X next_pc=0x%08X current_pc=0x%08X instr=%u cycles=%llu decoded_instr=%llu native_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu forced_reason=%s forced_slices=%llu forced_instr=%llu native_blocks=%llu native_attempts=%llu native_successes=%llu native_compiled=%llu native_entries=%llu native_code_bytes=%llu native_available=%u",
+          "CPU_COMPARE name=%s mode=%s result=%s outcome=%s native_check=%s pc=0x%08X next_pc=0x%08X current_pc=0x%08X instr=%u cycles=%llu decoded_instr=%llu native_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_load_helpers=%llu native_mem_store_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu forced_reason=%s forced_slices=%llu forced_instr=%llu native_blocks=%llu native_attempts=%llu native_successes=%llu native_compiled=%llu native_entries=%llu native_code_bytes=%llu native_available=%u",
           test_case.name, cpu_compare_mode_name(mode),
           pass ? "PASS" : "FAIL", outcome, native_check, result.state.pc,
           result.state.next_pc, result.state.current_pc, result.run.instructions,
@@ -2439,6 +2439,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           static_cast<unsigned long long>(result.stats.fallback_instructions),
           static_cast<unsigned long long>(
               result.stats.native_memory_helper_calls),
+          static_cast<unsigned long long>(
+              result.stats.native_memory_helper_load_calls),
+          static_cast<unsigned long long>(
+              result.stats.native_memory_helper_store_calls),
           static_cast<unsigned long long>(
               result.stats.native_memory_exception_exits),
           static_cast<unsigned long long>(
@@ -2521,13 +2525,27 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           (test_case.enable_ram_load_fastpath_for_x64 ||
            test_case.require_native_ram_load_fastpath_when_available ||
            test_case.require_no_native_ram_load_fastpath)) {
-        LOG_INFO("CPU_COMPARE_RAM_FASTPATH name=%s enabled=%u fast_loads=%llu memory_helpers=%llu ram_helpers=%llu scratch_helpers=%llu bios_helpers=%llu mmio_helpers=%llu unknown_helpers=%llu unaligned_helpers=%llu mmio_fast_loads=%llu",
+        LOG_INFO("CPU_COMPARE_RAM_FASTPATH name=%s enabled=%u fast_loads=%llu misses=%llu miss_disabled=%llu miss_trace=%llu miss_unaligned=%llu miss_non_ram=%llu memory_helpers=%llu load_helpers=%llu store_helpers=%llu ram_helpers=%llu scratch_helpers=%llu bios_helpers=%llu mmio_helpers=%llu unknown_helpers=%llu unaligned_helpers=%llu mmio_fast_loads=%llu",
                  test_case.name,
                  test_case.enable_ram_load_fastpath_for_x64 ? 1u : 0u,
                  static_cast<unsigned long long>(
                      result.stats.native_memory_fastpath_loads),
                  static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_load_misses),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_load_miss_disabled),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_load_miss_trace),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_load_miss_unaligned),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_fastpath_load_miss_non_ram),
+                 static_cast<unsigned long long>(
                      result.stats.native_memory_helper_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_load_calls),
+                 static_cast<unsigned long long>(
+                     result.stats.native_memory_helper_store_calls),
                  static_cast<unsigned long long>(
                      result.stats.native_memory_helper_ram_calls),
                  static_cast<unsigned long long>(

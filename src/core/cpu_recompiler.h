@@ -111,6 +111,9 @@ enum class NativeBlockRejectDetail : u8 {
   ICache,
   Mmio,
   Unaligned,
+  ExceptionRisk,
+  FallbackInstruction,
+  UnsupportedInstruction,
   Cold,
   TooShort,
   CompileFailure,
@@ -314,6 +317,8 @@ private:
   CpuForcedInterpreterReason diagnostics_force_interpreter_reason() const;
   bool is_block_terminator(const DecodedInstruction &inst) const;
   NativeBlockRejectReason classify_x64_reject_reason(
+      const DecodedBlock &block) const;
+  NativeBlockRejectDetail classify_x64_reject_detail(
       const DecodedBlock &block) const;
   bool ensure_x64_safety_checked(DecodedBlock &block);
   bool should_attempt_x64_compile(const DecodedBlock &block);

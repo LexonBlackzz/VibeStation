@@ -50,6 +50,9 @@ struct CpuBackendStats {
   u64 native_reject_cop0 = 0;
   u64 native_reject_cop2 = 0;
   u64 native_reject_exception_unknown = 0;
+  u64 native_reject_exception_risk = 0;
+  u64 native_reject_fallback_instruction = 0;
+  u64 native_reject_unsupported_instruction = 0;
   u64 native_reject_unsafe_state = 0;
   u64 native_reject_pc_state = 0;
   u64 native_reject_branch_delay_state = 0;
@@ -151,6 +154,8 @@ struct CpuBackendStats {
   u64 native_finish_helper_calls = 0;
   u64 native_branch_helper_calls = 0;
   u64 native_memory_helper_calls = 0;
+  u64 native_memory_helper_load_calls = 0;
+  u64 native_memory_helper_store_calls = 0;
   u64 native_memory_helper_ram_calls = 0;
   u64 native_memory_helper_scratchpad_calls = 0;
   u64 native_memory_helper_bios_calls = 0;
@@ -160,6 +165,11 @@ struct CpuBackendStats {
   u64 native_memory_fastpath_loads = 0;
   u64 native_memory_fastpath_stores = 0;
   u64 native_memory_fastpath_mmio_loads = 0;
+  u64 native_memory_fastpath_load_misses = 0;
+  u64 native_memory_fastpath_load_miss_disabled = 0;
+  u64 native_memory_fastpath_load_miss_trace = 0;
+  u64 native_memory_fastpath_load_miss_unaligned = 0;
+  u64 native_memory_fastpath_load_miss_non_ram = 0;
   u64 native_memory_exception_exits = 0;
   u64 native_memory_operand_mismatches = 0;
   u64 native_memory_shared_decoded_calls = 0;

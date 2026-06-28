@@ -1066,6 +1066,12 @@ bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
   const u32 expected_arg =
       is_x64_load_op(inst.op) ? static_cast<u32>(inst.rt)
                               : cpu.gpr_[inst.rt];
+  const bool load_op = is_x64_load_op(inst.op);
+  if (load_op) {
+    ++backend.stats_.native_memory_helper_load_calls;
+  } else {
+    ++backend.stats_.native_memory_helper_store_calls;
+  }
   const bool operands_match =
       op == inst.op && addr == expected_addr && rt_or_value == expected_arg;
 
@@ -1118,6 +1124,30 @@ bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
       (ram && g_cpu_x64_jit_disable_native_ram)) {
     context->block->native_memory_runtime_filter_reason = mmio ? 1u : 2u;
     context->memory_filter_exit = true;
+  }
+
+  const bool unaligned_load =
+      load_op &&
+      (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu) &&
+        (expected_addr & 1u) != 0u) ||
+       (inst.op == DecodedOp::Lw && (expected_addr & 3u) != 0u));
+  if (load_op) {
+    const bool trace_blocks_fastpath =
+        g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus;
+    if (!context->ram_load_fastpath_enabled) {
+      ++backend.stats_.native_memory_fastpath_load_misses;
+      if (trace_blocks_fastpath) {
+        ++backend.stats_.native_memory_fastpath_load_miss_trace;
+      } else {
+        ++backend.stats_.native_memory_fastpath_load_miss_disabled;
+      }
+    } else if (unaligned_load) {
+      ++backend.stats_.native_memory_fastpath_load_misses;
+      ++backend.stats_.native_memory_fastpath_load_miss_unaligned;
+    } else if (!is_canonical_ram_alias(expected_addr)) {
+      ++backend.stats_.native_memory_fastpath_load_misses;
+      ++backend.stats_.native_memory_fastpath_load_miss_non_ram;
+    }
   }
 
   const bool trace =
@@ -1381,6 +1411,47 @@ NativeBlockRejectReason CpuOptimizedBackend::classify_x64_reject_reason(
   return NativeBlockRejectReason::None;
 }
 
+NativeBlockRejectDetail CpuOptimizedBackend::classify_x64_reject_detail(
+    const DecodedBlock &block) const {
+  if (block.instruction_count == 0) {
+    return NativeBlockRejectDetail::UnsupportedInstruction;
+  }
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (inst.is_branch) {
+      return NativeBlockRejectDetail::Branch;
+    }
+    if (inst.may_access_memory) {
+      if (!is_x64_memory_op(inst.op)) {
+        return NativeBlockRejectDetail::Memory;
+      }
+      continue;
+    }
+    if (inst.op == DecodedOp::Cop0) {
+      return NativeBlockRejectDetail::Cop0;
+    }
+    if (inst.op == DecodedOp::Cop2) {
+      return NativeBlockRejectDetail::Cop2;
+    }
+    if (inst.must_fallback) {
+      return NativeBlockRejectDetail::FallbackInstruction;
+    }
+    if (inst.may_raise_exception) {
+      return NativeBlockRejectDetail::ExceptionRisk;
+    }
+    if (!is_x64_stage2_op(inst.op)) {
+      return NativeBlockRejectDetail::UnsupportedInstruction;
+    }
+  }
+  if (block.has_control_flow) {
+    return NativeBlockRejectDetail::Branch;
+  }
+  if (block.has_fallback) {
+    return NativeBlockRejectDetail::FallbackInstruction;
+  }
+  return native_reject_detail_for_reason(block.native_reject_reason);
+}
+
 bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   if (block.native_safety_checked) {
     return block.native_stage1_safe;
@@ -1414,7 +1485,7 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   block.native_reject_detail =
       branch_tail_detail != NativeBlockRejectDetail::None
           ? branch_tail_detail
-          : native_reject_detail_for_reason(block.native_reject_reason);
+          : classify_x64_reject_detail(block);
 
   switch (block.native_shape) {
   case NativeBlockShape::StraightAlu:
@@ -1493,6 +1564,19 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
     ++stats_.native_rejected_block_count;
     stats_.native_rejected_block_instructions += block.instruction_count;
     record_native_reject(block.native_reject_reason);
+    switch (block.native_reject_detail) {
+    case NativeBlockRejectDetail::ExceptionRisk:
+      ++stats_.native_reject_exception_risk;
+      break;
+    case NativeBlockRejectDetail::FallbackInstruction:
+      ++stats_.native_reject_fallback_instruction;
+      break;
+    case NativeBlockRejectDetail::UnsupportedInstruction:
+      ++stats_.native_reject_unsupported_instruction;
+      break;
+    default:
+      break;
+    }
     return false;
   }
   return true;

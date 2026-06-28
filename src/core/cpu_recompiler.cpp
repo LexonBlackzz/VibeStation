@@ -99,6 +99,11 @@ const char *native_reject_detail_name(NativeBlockRejectDetail detail) {
   case NativeBlockRejectDetail::ICache: return "icache";
   case NativeBlockRejectDetail::Mmio: return "mmio";
   case NativeBlockRejectDetail::Unaligned: return "unaligned";
+  case NativeBlockRejectDetail::ExceptionRisk: return "exception_risk";
+  case NativeBlockRejectDetail::FallbackInstruction:
+    return "fallback_instruction";
+  case NativeBlockRejectDetail::UnsupportedInstruction:
+    return "unsupported_instruction";
   case NativeBlockRejectDetail::Cold: return "cold";
   case NativeBlockRejectDetail::TooShort: return "too_short";
   case NativeBlockRejectDetail::CompileFailure: return "compile_failure";
@@ -240,6 +245,15 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_reject_exception_unknown =
       delta_u64(current.native_reject_exception_unknown,
                 previous.native_reject_exception_unknown);
+  out.native_reject_exception_risk =
+      delta_u64(current.native_reject_exception_risk,
+                previous.native_reject_exception_risk);
+  out.native_reject_fallback_instruction =
+      delta_u64(current.native_reject_fallback_instruction,
+                previous.native_reject_fallback_instruction);
+  out.native_reject_unsupported_instruction =
+      delta_u64(current.native_reject_unsupported_instruction,
+                previous.native_reject_unsupported_instruction);
   out.native_reject_unsafe_state =
       delta_u64(current.native_reject_unsafe_state,
                 previous.native_reject_unsafe_state);
@@ -520,6 +534,12 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_memory_helper_calls =
       delta_u64(current.native_memory_helper_calls,
                 previous.native_memory_helper_calls);
+  out.native_memory_helper_load_calls =
+      delta_u64(current.native_memory_helper_load_calls,
+                previous.native_memory_helper_load_calls);
+  out.native_memory_helper_store_calls =
+      delta_u64(current.native_memory_helper_store_calls,
+                previous.native_memory_helper_store_calls);
   out.native_memory_helper_ram_calls =
       delta_u64(current.native_memory_helper_ram_calls,
                 previous.native_memory_helper_ram_calls);
@@ -547,6 +567,21 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_memory_fastpath_mmio_loads =
       delta_u64(current.native_memory_fastpath_mmio_loads,
                 previous.native_memory_fastpath_mmio_loads);
+  out.native_memory_fastpath_load_misses =
+      delta_u64(current.native_memory_fastpath_load_misses,
+                previous.native_memory_fastpath_load_misses);
+  out.native_memory_fastpath_load_miss_disabled =
+      delta_u64(current.native_memory_fastpath_load_miss_disabled,
+                previous.native_memory_fastpath_load_miss_disabled);
+  out.native_memory_fastpath_load_miss_trace =
+      delta_u64(current.native_memory_fastpath_load_miss_trace,
+                previous.native_memory_fastpath_load_miss_trace);
+  out.native_memory_fastpath_load_miss_unaligned =
+      delta_u64(current.native_memory_fastpath_load_miss_unaligned,
+                previous.native_memory_fastpath_load_miss_unaligned);
+  out.native_memory_fastpath_load_miss_non_ram =
+      delta_u64(current.native_memory_fastpath_load_miss_non_ram,
+                previous.native_memory_fastpath_load_miss_non_ram);
   out.native_memory_exception_exits =
       delta_u64(current.native_memory_exception_exits,
                 previous.native_memory_exception_exits);
@@ -2369,6 +2404,23 @@ void CpuOptimizedBackend::log_stats_section(
           ? 0.0
           : (100.0 * static_cast<double>(delta.fallback_instructions)) /
                 static_cast<double>(instr_total);
+  const u64 entry_total =
+      delta.decoded_block_entries + delta.native_block_entries;
+  const double native_entry_pct =
+      entry_total == 0
+          ? 0.0
+          : (100.0 * static_cast<double>(delta.native_block_entries)) /
+                static_cast<double>(entry_total);
+  const double decoded_entry_pct =
+      entry_total == 0
+          ? 0.0
+          : (100.0 * static_cast<double>(delta.decoded_block_entries)) /
+                static_cast<double>(entry_total);
+  const double native_decode_fallbacks_per_entry =
+      delta.native_block_entries == 0
+          ? 0.0
+          : static_cast<double>(delta.native_to_decoded_fallbacks) /
+                static_cast<double>(delta.native_block_entries);
 
   struct Reason {
     const char *name = "";
@@ -2398,7 +2450,7 @@ void CpuOptimizedBackend::log_stats_section(
               return a.count > b.count;
             });
 
-  std::array<Reason, 8> exact_reasons = {{
+  std::array<Reason, 11> exact_reasons = {{
       {"pc_mismatch", delta.native_reject_pc_mismatch},
       {"next_pc_mismatch", delta.native_reject_next_pc_mismatch},
       {"block_start_after_branch_delay",
@@ -2412,6 +2464,10 @@ void CpuOptimizedBackend::log_stats_section(
        delta.native_reject_branch_delay_pending_branch_taken},
       {"pending_branch_pc",
        delta.native_reject_branch_delay_pending_branch_pc},
+      {"exception_risk", delta.native_reject_exception_risk},
+      {"fallback_instruction", delta.native_reject_fallback_instruction},
+      {"unsupported_instruction",
+       delta.native_reject_unsupported_instruction},
   }};
   std::sort(exact_reasons.begin(), exact_reasons.end(),
             [](const Reason &a, const Reason &b) {
@@ -2429,6 +2485,9 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(delta.decoded_block_entries),
            static_cast<unsigned long long>(delta.native_block_entries),
            decoded_avg, native_avg);
+  LOG_INFO("CPU_BACKEND_STATS entry_mix native_pct=%.2f decoded_pct=%.2f native_to_decoded_fallbacks_per_native_entry=%.3f",
+           native_entry_pct, decoded_entry_pct,
+           native_decode_fallbacks_per_entry);
   LOG_INFO("CPU_BACKEND_STATS rejected_blocks count=%llu instructions=%llu avg_rejected=%.2f",
            static_cast<unsigned long long>(delta.native_rejected_block_count),
            static_cast<unsigned long long>(
@@ -2623,13 +2682,19 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(exact_reasons[1].count),
            exact_reasons[2].name,
            static_cast<unsigned long long>(exact_reasons[2].count));
-  LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
+  LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu exception_risk=%llu fallback_instruction=%llu unsupported_instruction=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),
            static_cast<unsigned long long>(delta.native_reject_cop0),
            static_cast<unsigned long long>(delta.native_reject_cop2),
            static_cast<unsigned long long>(
                delta.native_reject_exception_unknown),
+           static_cast<unsigned long long>(
+               delta.native_reject_exception_risk),
+           static_cast<unsigned long long>(
+               delta.native_reject_fallback_instruction),
+           static_cast<unsigned long long>(
+               delta.native_reject_unsupported_instruction),
            static_cast<unsigned long long>(delta.native_reject_unsafe_state),
            static_cast<unsigned long long>(delta.native_reject_pc_state),
            static_cast<unsigned long long>(
@@ -2693,6 +2758,15 @@ void CpuOptimizedBackend::log_stats_section(
           ? 0.0
           : static_cast<double>(native_helper_calls) /
                 static_cast<double>(direct_helper_instructions);
+  const u64 ram_fastpath_load_attempts =
+      delta.native_memory_fastpath_loads +
+      delta.native_memory_fastpath_load_misses;
+  const double ram_fastpath_hit_pct =
+      ram_fastpath_load_attempts == 0
+          ? 0.0
+          : (100.0 *
+             static_cast<double>(delta.native_memory_fastpath_loads)) /
+                static_cast<double>(ram_fastpath_load_attempts);
   LOG_INFO("CPU_BACKEND_STATS native_helpers total=%llu prepare=%llu finish=%llu memory=%llu branch=%llu per_native_block=%.3f per_native_instruction=%.3f",
            static_cast<unsigned long long>(native_helper_calls),
            static_cast<unsigned long long>(delta.native_prepare_helper_calls),
@@ -2717,9 +2791,13 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_memory_helper_unknown_calls),
            static_cast<unsigned long long>(
                delta.native_memory_helper_unaligned_calls));
-  LOG_INFO("CPU_BACKEND_STATS memory_helpers total=%llu native=%llu shared_decoded=%llu operand_mismatches=%llu ram_load_fastpath_enabled=%u native_fast_loads=%llu native_fast_stores=%llu mmio_fast_loads=%llu native_exception_exits=%llu mmio=%llu exceptions=%llu",
+  LOG_INFO("CPU_BACKEND_STATS memory_helpers total=%llu native=%llu native_loads=%llu native_stores=%llu shared_decoded=%llu operand_mismatches=%llu ram_load_fastpath_enabled=%u native_fast_loads=%llu native_fast_stores=%llu mmio_fast_loads=%llu native_exception_exits=%llu mmio=%llu exceptions=%llu",
            static_cast<unsigned long long>(delta.memory_helper_calls),
            static_cast<unsigned long long>(delta.native_memory_helper_calls),
+           static_cast<unsigned long long>(
+               delta.native_memory_helper_load_calls),
+           static_cast<unsigned long long>(
+               delta.native_memory_helper_store_calls),
            static_cast<unsigned long long>(
                delta.native_memory_shared_decoded_calls),
            static_cast<unsigned long long>(
@@ -2733,6 +2811,30 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_memory_exception_exits),
            static_cast<unsigned long long>(delta.mmio_accesses),
            static_cast<unsigned long long>(delta.exceptions));
+  LOG_INFO("CPU_BACKEND_STATS ram_load_fastpath requested=%u active_without_trace=%u memory_trace=%u trace_ram=%u trace_bus=%u native_ram_disabled=%u hits=%llu misses=%llu miss_disabled=%llu miss_trace=%llu miss_unaligned=%llu miss_non_ram=%llu hit_pct=%.2f",
+           g_cpu_x64_jit_ram_load_fastpath_enabled ? 1u : 0u,
+           (g_cpu_x64_jit_ram_load_fastpath_enabled &&
+            !g_cpu_x64_jit_memory_trace && !g_trace_ram && !g_trace_bus &&
+            !g_cpu_x64_jit_disable_native_ram)
+               ? 1u
+               : 0u,
+           g_cpu_x64_jit_memory_trace ? 1u : 0u,
+           g_trace_ram ? 1u : 0u,
+           g_trace_bus ? 1u : 0u,
+           g_cpu_x64_jit_disable_native_ram ? 1u : 0u,
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_loads),
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_load_misses),
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_load_miss_disabled),
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_load_miss_trace),
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_load_miss_unaligned),
+           static_cast<unsigned long long>(
+               delta.native_memory_fastpath_load_miss_non_ram),
+           ram_fastpath_hit_pct);
   LOG_INFO("CPU_BACKEND_STATS helper_load_delay entries=%llu passes=%llu fallbacks=%llu",
            static_cast<unsigned long long>(
                delta.native_helper_load_delay_entries),
