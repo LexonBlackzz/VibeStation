@@ -81,6 +81,8 @@ set(VIBESTATION_SOURCES
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
     src/ui/app.cpp
+    src/ui/app_discord_presence.cpp
+    src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
     src/ui/panels/cpu_backend_panel.cpp
     src/ui/panels/grim_reaper_panel.cpp
@@ -90,6 +92,8 @@ set(VIBESTATION_SOURCES
     src/ui/panels/system_panel.cpp
     src/ui/panels/logging_panel.cpp
     src/ui/panels/fmv_diagnostics_panel.cpp
+    src/ui/panels/performance_overlay.cpp
+    src/ui/panels/vram_panel.cpp
 )
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
