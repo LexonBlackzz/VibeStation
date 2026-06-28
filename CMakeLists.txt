@@ -87,8 +87,11 @@ set(VIBESTATION_SOURCES
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
     src/ui/panels/grim_reaper_actions.cpp
+    src/ui/panels/grim_reaper_runtime.cpp
     src/ui/panels/cpu_backend_panel.cpp
     src/ui/panels/cpu_debug_panel.cpp
+    src/ui/panels/about_panel.cpp
+    src/ui/panels/emulator_screen_panel.cpp
     src/ui/panels/grim_reaper_panel.cpp
     src/ui/panels/memory_card_panel.cpp
     src/ui/panels/experimental_settings_panel.cpp
