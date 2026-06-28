@@ -7,6 +7,7 @@
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
 #include "ui/app.h"
+#include "vibestation_version.h"
 #include <SDL.h>
 #include <algorithm>
 #include <cctype>
@@ -2698,9 +2699,6 @@ int main(int argc, char *argv[]) {
        passthrough[0] == "--jit-memory-compare-test")) {
     const bool memory_only =
         passthrough[0] == "--jit-memory-compare-test";
-    if (memory_only) {
-      g_cpu_x64_jit_memory_trace = true;
-    }
     const int rc = run_cpu_backend_compare_test(memory_only);
     if (g_log_file) {
       log_flush_repeats();
@@ -2802,7 +2800,7 @@ int main(int argc, char *argv[]) {
   SDL_SetMainReady(); // Tell SDL we handled main() ourselves
 
   printf("========================================\n");
-  printf("  VibeStation - PS1 Emulator v0.5.2\n");
+  printf("  %s\n", VIBESTATION_FULL_VERSION_STRING);
   printf("========================================\n");
   printf("Starting up...\n");
   fflush(stdout);

@@ -106,9 +106,38 @@ set(VIBESTATION_SOURCES
     src/ui/panels/vram_panel.cpp
 )
 
+set(VIBESTATION_VERSION_STRING "v0.5.3-dev")
+set(VIBESTATION_BUILD_NUMBER_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
+set(VIBESTATION_VERSION_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.h")
+
+add_custom_command(
+    OUTPUT "${VIBESTATION_VERSION_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DVIBESTATION_VERSION_STRING=${VIBESTATION_VERSION_STRING}
+        -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
+        -DVIBESTATION_VERSION_HEADER=${VIBESTATION_VERSION_HEADER}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
+        "${VIBESTATION_BUILD_NUMBER_FILE}"
+    VERBATIM
+    COMMENT "Updating VibeStation build metadata")
+
+add_custom_target(vibestation_version_header
+    DEPENDS "${VIBESTATION_VERSION_HEADER}")
+
+set_source_files_properties(src/ui/panels/about_panel.cpp PROPERTIES
+    OBJECT_DEPENDS "${VIBESTATION_VERSION_HEADER}")
+
 add_executable(VibeStation ${VIBESTATION_SOURCES})
 
-target_include_directories(VibeStation PRIVATE src)
+add_dependencies(VibeStation vibestation_version_header)
+
+target_include_directories(VibeStation PRIVATE
+    src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static)
 
 if(VIBESTATION_ENABLE_X64_JIT)
