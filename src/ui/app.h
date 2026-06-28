@@ -228,6 +228,7 @@ private:
 	void update();
 	void render_ui();
 	void push_performance_history_sample();
+	void draw_performance_gpu_dip_diagnostics();
 	void draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_size);
 
 	// UI panels
