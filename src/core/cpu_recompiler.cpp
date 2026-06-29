@@ -711,6 +711,81 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_prefix_reject_unsupported_prefix_instruction = delta_u64(
       current.native_prefix_reject_unsupported_prefix_instruction,
       previous.native_prefix_reject_unsupported_prefix_instruction);
+  out.native_prefix_ram_load_candidate_blocks = delta_u64(
+      current.native_prefix_ram_load_candidate_blocks,
+      previous.native_prefix_ram_load_candidate_blocks);
+  out.native_prefix_ram_load_entries = delta_u64(
+      current.native_prefix_ram_load_entries,
+      previous.native_prefix_ram_load_entries);
+  out.native_prefix_ram_load_instructions = delta_u64(
+      current.native_prefix_ram_load_instructions,
+      previous.native_prefix_ram_load_instructions);
+  out.native_prefix_ram_load_preflight_passes = delta_u64(
+      current.native_prefix_ram_load_preflight_passes,
+      previous.native_prefix_ram_load_preflight_passes);
+  out.native_prefix_ram_load_preflight_fallbacks = delta_u64(
+      current.native_prefix_ram_load_preflight_fallbacks,
+      previous.native_prefix_ram_load_preflight_fallbacks);
+  out.native_prefix_ram_load_preflight_mmio = delta_u64(
+      current.native_prefix_ram_load_preflight_mmio,
+      previous.native_prefix_ram_load_preflight_mmio);
+  out.native_prefix_ram_load_preflight_unaligned = delta_u64(
+      current.native_prefix_ram_load_preflight_unaligned,
+      previous.native_prefix_ram_load_preflight_unaligned);
+  out.native_prefix_ram_load_preflight_non_ram = delta_u64(
+      current.native_prefix_ram_load_preflight_non_ram,
+      previous.native_prefix_ram_load_preflight_non_ram);
+  out.native_prefix_ram_load_preflight_disabled = delta_u64(
+      current.native_prefix_ram_load_preflight_disabled,
+      previous.native_prefix_ram_load_preflight_disabled);
+  out.native_prefix_reject_load_fastpath_disabled = delta_u64(
+      current.native_prefix_reject_load_fastpath_disabled,
+      previous.native_prefix_reject_load_fastpath_disabled);
+  out.native_prefix_reject_load_base_written = delta_u64(
+      current.native_prefix_reject_load_base_written,
+      previous.native_prefix_reject_load_base_written);
+  out.native_prefix_reject_store =
+      delta_u64(current.native_prefix_reject_store,
+                previous.native_prefix_reject_store);
+  out.native_prefix_memory_reject_lw =
+      delta_u64(current.native_prefix_memory_reject_lw,
+                previous.native_prefix_memory_reject_lw);
+  out.native_prefix_memory_reject_lb =
+      delta_u64(current.native_prefix_memory_reject_lb,
+                previous.native_prefix_memory_reject_lb);
+  out.native_prefix_memory_reject_lbu =
+      delta_u64(current.native_prefix_memory_reject_lbu,
+                previous.native_prefix_memory_reject_lbu);
+  out.native_prefix_memory_reject_lh =
+      delta_u64(current.native_prefix_memory_reject_lh,
+                previous.native_prefix_memory_reject_lh);
+  out.native_prefix_memory_reject_lhu =
+      delta_u64(current.native_prefix_memory_reject_lhu,
+                previous.native_prefix_memory_reject_lhu);
+  out.native_prefix_memory_reject_sb =
+      delta_u64(current.native_prefix_memory_reject_sb,
+                previous.native_prefix_memory_reject_sb);
+  out.native_prefix_memory_reject_sh =
+      delta_u64(current.native_prefix_memory_reject_sh,
+                previous.native_prefix_memory_reject_sh);
+  out.native_prefix_memory_reject_sw =
+      delta_u64(current.native_prefix_memory_reject_sw,
+                previous.native_prefix_memory_reject_sw);
+  out.native_prefix_ram_load_blocker_bne = delta_u64(
+      current.native_prefix_ram_load_blocker_bne,
+      previous.native_prefix_ram_load_blocker_bne);
+  out.native_prefix_ram_load_blocker_beq = delta_u64(
+      current.native_prefix_ram_load_blocker_beq,
+      previous.native_prefix_ram_load_blocker_beq);
+  out.native_prefix_ram_load_blocker_jr = delta_u64(
+      current.native_prefix_ram_load_blocker_jr,
+      previous.native_prefix_ram_load_blocker_jr);
+  out.native_prefix_ram_load_blocker_cop2 = delta_u64(
+      current.native_prefix_ram_load_blocker_cop2,
+      previous.native_prefix_ram_load_blocker_cop2);
+  out.native_prefix_ram_load_blocker_other = delta_u64(
+      current.native_prefix_ram_load_blocker_other,
+      previous.native_prefix_ram_load_blocker_other);
   out.cache_hits = delta_u64(current.cache_hits, previous.cache_hits);
   out.cache_misses = delta_u64(current.cache_misses, previous.cache_misses);
   out.invalidations =
@@ -3443,6 +3518,11 @@ void CpuOptimizedBackend::log_stats_section(
           ? 0.0
           : static_cast<double>(delta.native_prefix_instructions) /
                 static_cast<double>(delta.native_prefix_entries);
+  const double native_prefix_ram_load_avg =
+      delta.native_prefix_ram_load_entries == 0
+          ? 0.0
+          : static_cast<double>(delta.native_prefix_ram_load_instructions) /
+                static_cast<double>(delta.native_prefix_ram_load_entries);
 
   LOG_INFO("=== CPU Backend Stats ===");
   LOG_INFO("CPU_BACKEND_STATS frame=%u frames=%u mode=%s blocks=%u native_blocks=%llu code_bytes=%zu native_code_bytes=%zu",
@@ -3993,6 +4073,57 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_prefix_reject_memory_risk),
            static_cast<unsigned long long>(
                delta.native_prefix_reject_unsupported_prefix_instruction));
+  LOG_INFO("CPU_BACKEND_STATS native_prefix_ram_load candidates=%llu entries=%llu instructions=%llu avg=%.2f preflight_passes=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu rejects=fastpath_disabled:%llu,load_base_written:%llu,store:%llu memory_op=lw:%llu,lb:%llu,lbu:%llu,lh:%llu,lhu:%llu,sb:%llu,sh:%llu,sw:%llu blockers=bne:%llu,beq:%llu,jr:%llu,cop2:%llu,other:%llu",
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_entries),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_instructions),
+           native_prefix_ram_load_avg,
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_passes),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_fallbacks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_mmio),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_unaligned),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_non_ram),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_disabled),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_load_fastpath_disabled),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_load_base_written),
+           static_cast<unsigned long long>(delta.native_prefix_reject_store),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_lw),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_lb),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_lbu),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_lh),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_lhu),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_sb),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_sh),
+           static_cast<unsigned long long>(
+               delta.native_prefix_memory_reject_sw),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_blocker_bne),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_blocker_beq),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_blocker_jr),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_blocker_cop2),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_blocker_other));
   LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu exception_risk=%llu fallback_instruction=%llu unsupported_instruction=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),

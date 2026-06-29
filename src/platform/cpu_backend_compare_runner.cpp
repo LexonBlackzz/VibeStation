@@ -90,6 +90,9 @@ struct CpuCompareCase {
   bool require_native_prefix_jr_blocker_when_available = false;
   bool require_native_prefix_cop2_blocker_when_available = false;
   bool require_native_prefix_other_blocker_when_available = false;
+  bool require_native_prefix_ram_load_entry_when_available = false;
+  bool require_native_prefix_ram_load_preflight_non_ram_when_available = false;
+  bool require_native_prefix_reject_store_when_available = false;
   bool require_no_native_reduced_helper_ram_load_entry = false;
   bool require_no_native_reduced_helper_branch_tail_ram_load_entry = false;
   bool require_no_native_instruction_helpers_when_available = false;
@@ -1910,6 +1913,207 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(native_prefix_unsupported);
 
+  CpuCompareCase native_prefix_ram_lw_bne{};
+  native_prefix_ram_lw_bne.name = "native_prefix_ram_load_lw_bne";
+  native_prefix_ram_lw_bne.initial_gpr[8] = 0x80011700u;
+  native_prefix_ram_lw_bne.memory.push_back({0x00011700u, 0x12345678u});
+  native_prefix_ram_lw_bne.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
+  };
+  native_prefix_ram_lw_bne.instructions = 5;
+  native_prefix_ram_lw_bne.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_bne.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_bne.enable_ram_load_fastpath_for_x64 = true;
+  native_prefix_ram_lw_bne.require_native_prefix_entry_when_available =
+      true;
+  native_prefix_ram_lw_bne.require_native_prefix_ram_load_entry_when_available =
+      true;
+  native_prefix_ram_lw_bne.require_native_prefix_bne_blocker_when_available =
+      true;
+  native_prefix_ram_lw_bne.require_native_ram_load_fastpath_when_available =
+      true;
+  native_prefix_ram_lw_bne.require_no_native_instruction_helpers_when_available =
+      true;
+  cases.push_back(native_prefix_ram_lw_bne);
+
+  CpuCompareCase native_prefix_ram_lw_beq_independent{};
+  native_prefix_ram_lw_beq_independent.name =
+      "native_prefix_ram_load_lw_independent_beq";
+  native_prefix_ram_lw_beq_independent.initial_gpr[8] = 0x80011710u;
+  native_prefix_ram_lw_beq_independent.memory.push_back(
+      {0x00011710u, 0x87654321u});
+  native_prefix_ram_lw_beq_independent.program = {
+      enc_i(0x09, 0, 1, 3),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x09, 1, 3, 1),
+      enc_i(0x04, 1, 0, 1),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
+  };
+  native_prefix_ram_lw_beq_independent.instructions = 5;
+  native_prefix_ram_lw_beq_independent.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_beq_independent.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_beq_independent.enable_ram_load_fastpath_for_x64 =
+      true;
+  native_prefix_ram_lw_beq_independent
+      .require_native_prefix_entry_when_available = true;
+  native_prefix_ram_lw_beq_independent
+      .require_native_prefix_ram_load_entry_when_available = true;
+  native_prefix_ram_lw_beq_independent
+      .require_native_prefix_beq_blocker_when_available = true;
+  native_prefix_ram_lw_beq_independent
+      .require_native_ram_load_fastpath_when_available = true;
+  native_prefix_ram_lw_beq_independent
+      .require_no_native_instruction_helpers_when_available = true;
+  cases.push_back(native_prefix_ram_lw_beq_independent);
+
+  CpuCompareCase native_prefix_ram_lw_r0{};
+  native_prefix_ram_lw_r0.name = "native_prefix_ram_load_lw_r0";
+  native_prefix_ram_lw_r0.initial_gpr[1] = 1u;
+  native_prefix_ram_lw_r0.initial_gpr[8] = 0x80011720u;
+  native_prefix_ram_lw_r0.memory.push_back({0x00011720u, 0xFFFFFFFFu});
+  native_prefix_ram_lw_r0.program = {
+      enc_i(0x09, 0, 3, 7),
+      enc_i(0x23, 8, 0, 0),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 4, 0x0011),
+      enc_i(0x09, 0, 5, 0x0022),
+      enc_i(0x09, 0, 6, 0x0033),
+  };
+  native_prefix_ram_lw_r0.instructions = 5;
+  native_prefix_ram_lw_r0.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_r0.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_r0.enable_ram_load_fastpath_for_x64 = true;
+  native_prefix_ram_lw_r0.require_native_prefix_entry_when_available =
+      true;
+  native_prefix_ram_lw_r0.require_native_prefix_ram_load_entry_when_available =
+      true;
+  native_prefix_ram_lw_r0.require_native_prefix_bne_blocker_when_available =
+      true;
+  native_prefix_ram_lw_r0.require_native_ram_load_fastpath_when_available =
+      true;
+  native_prefix_ram_lw_r0.require_no_native_instruction_helpers_when_available =
+      true;
+  cases.push_back(native_prefix_ram_lw_r0);
+
+  CpuCompareCase native_prefix_ram_lw_consumed{};
+  native_prefix_ram_lw_consumed.name =
+      "native_prefix_ram_load_delay_consumed";
+  native_prefix_ram_lw_consumed.initial_gpr[2] = 0x10u;
+  native_prefix_ram_lw_consumed.initial_gpr[8] = 0x80011730u;
+  native_prefix_ram_lw_consumed.memory.push_back(
+      {0x00011730u, 0x22222222u});
+  native_prefix_ram_lw_consumed.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x09, 2, 3, 1),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 4, 0x0011),
+      enc_i(0x09, 0, 5, 0x0022),
+  };
+  native_prefix_ram_lw_consumed.instructions = 5;
+  native_prefix_ram_lw_consumed.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_consumed.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_consumed.enable_ram_load_fastpath_for_x64 = true;
+  native_prefix_ram_lw_consumed.require_native_prefix_entry_when_available =
+      true;
+  native_prefix_ram_lw_consumed
+      .require_native_prefix_ram_load_entry_when_available = true;
+  native_prefix_ram_lw_consumed
+      .require_native_prefix_bne_blocker_when_available = true;
+  native_prefix_ram_lw_consumed
+      .require_native_ram_load_fastpath_when_available = true;
+  native_prefix_ram_lw_consumed
+      .require_no_native_instruction_helpers_when_available = true;
+  cases.push_back(native_prefix_ram_lw_consumed);
+
+  CpuCompareCase native_prefix_ram_lw_pending_bne{};
+  native_prefix_ram_lw_pending_bne.name =
+      "native_prefix_ram_load_pending_at_bne";
+  native_prefix_ram_lw_pending_bne.initial_gpr[2] = 0u;
+  native_prefix_ram_lw_pending_bne.initial_gpr[8] = 0x80011740u;
+  native_prefix_ram_lw_pending_bne.memory.push_back(
+      {0x00011740u, 1u});
+  native_prefix_ram_lw_pending_bne.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x05, 2, 0, 1),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
+  };
+  native_prefix_ram_lw_pending_bne.instructions = 5;
+  native_prefix_ram_lw_pending_bne.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_pending_bne.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_pending_bne.enable_ram_load_fastpath_for_x64 =
+      true;
+  native_prefix_ram_lw_pending_bne
+      .require_native_prefix_entry_when_available = true;
+  native_prefix_ram_lw_pending_bne
+      .require_native_prefix_ram_load_entry_when_available = true;
+  native_prefix_ram_lw_pending_bne
+      .require_native_prefix_bne_blocker_when_available = true;
+  native_prefix_ram_lw_pending_bne
+      .require_native_ram_load_fastpath_when_available = true;
+  native_prefix_ram_lw_pending_bne
+      .require_no_native_instruction_helpers_when_available = true;
+  cases.push_back(native_prefix_ram_lw_pending_bne);
+
+  CpuCompareCase native_prefix_ram_lw_scratchpad{};
+  native_prefix_ram_lw_scratchpad.name =
+      "native_prefix_ram_load_scratchpad_fallback";
+  native_prefix_ram_lw_scratchpad.initial_gpr[1] = 1u;
+  native_prefix_ram_lw_scratchpad.initial_gpr[8] = 0x1F800000u;
+  native_prefix_ram_lw_scratchpad.memory.push_back(
+      {0x1F800000u, 0x44556677u});
+  native_prefix_ram_lw_scratchpad.program = {
+      enc_i(0x09, 0, 3, 7),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 4, 0x0011),
+      enc_i(0x09, 0, 5, 0x0022),
+  };
+  native_prefix_ram_lw_scratchpad.instructions = 5;
+  native_prefix_ram_lw_scratchpad.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_scratchpad.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_scratchpad.enable_ram_load_fastpath_for_x64 =
+      true;
+  native_prefix_ram_lw_scratchpad.expect_x64_fallback = true;
+  native_prefix_ram_lw_scratchpad
+      .require_native_prefix_ram_load_preflight_non_ram_when_available =
+      true;
+  native_prefix_ram_lw_scratchpad.require_no_native_ram_load_fastpath =
+      true;
+  cases.push_back(native_prefix_ram_lw_scratchpad);
+
+  CpuCompareCase native_prefix_store_reject{};
+  native_prefix_store_reject.name = "native_prefix_store_still_rejected";
+  native_prefix_store_reject.initial_gpr[1] = 1u;
+  native_prefix_store_reject.initial_gpr[2] = 0xAABBCCDDu;
+  native_prefix_store_reject.initial_gpr[8] = 0x80011750u;
+  native_prefix_store_reject.memory.push_back({0x00011750u, 0u});
+  native_prefix_store_reject.compare_memory_addresses.push_back(0x00011750u);
+  native_prefix_store_reject.program = {
+      enc_i(0x09, 0, 3, 7),
+      enc_i(0x2B, 8, 2, 0),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 4, 0x0011),
+      enc_i(0x09, 0, 5, 0x0022),
+  };
+  native_prefix_store_reject.instructions = 5;
+  native_prefix_store_reject.disable_branch_tail_for_x64 = true;
+  native_prefix_store_reject.enable_native_prefix_for_x64 = true;
+  native_prefix_store_reject.enable_ram_load_fastpath_for_x64 = true;
+  native_prefix_store_reject.expect_x64_fallback = true;
+  native_prefix_store_reject.require_native_prefix_reject_store_when_available =
+      true;
+  cases.push_back(native_prefix_store_reject);
+
   CpuCompareCase branch_tail_disabled{};
   branch_tail_disabled.name = "native_branch_tail_disabled_gate";
   branch_tail_disabled.initial_gpr[1] = 1u;
@@ -2847,6 +3051,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               .require_native_aggressive_reduced_helper_branch_tail_store_entry_when_available ||
           test_case
               .require_native_aggressive_reduced_helper_branch_tail_mixed_entry_when_available ||
+          test_case.require_native_prefix_ram_load_entry_when_available ||
+          test_case
+              .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+          test_case.require_native_prefix_reject_store_when_available ||
           test_case.require_reduced_helper_preflight_mmio_when_available ||
           test_case.require_reduced_helper_preflight_unaligned_when_available ||
           test_case.require_reduced_helper_preflight_non_ram_when_available ||
@@ -3187,6 +3395,25 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_prefix_ram_load_entry_when_available &&
+            result.stats.native_prefix_ram_load_entries == 0) {
+          native_check = "native_prefix_ram_load_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_prefix_ram_load_preflight_non_ram_when_available &&
+            result.stats.native_prefix_ram_load_preflight_non_ram == 0) {
+          native_check = "native_prefix_ram_load_non_ram_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_native_prefix_reject_store_when_available &&
+            result.stats.native_prefix_reject_store == 0) {
+          native_check = "native_prefix_store_reject_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
             test_case.require_no_native_reduced_helper_ram_load_entry &&
             result.stats.native_reduced_helper_ram_load_entries != 0) {
           native_check = "unexpected_native_reduced_helper_ram_load_entry";
@@ -3421,6 +3648,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case
                .require_native_aggressive_reduced_helper_branch_tail_mixed_entry_when_available ||
            test_case.require_native_prefix_entry_when_available ||
+           test_case.require_native_prefix_ram_load_entry_when_available ||
+           test_case
+               .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+           test_case.require_native_prefix_reject_store_when_available ||
            test_case
                .require_native_branch_delay_memory_helper_when_available)) {
         LOG_INFO(
@@ -3451,9 +3682,13 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       }
 
       if (mode == CpuExecutionMode::X64Jit &&
-          test_case.require_native_prefix_entry_when_available) {
+          (test_case.require_native_prefix_entry_when_available ||
+           test_case.require_native_prefix_ram_load_entry_when_available ||
+           test_case
+               .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+           test_case.require_native_prefix_reject_store_when_available)) {
         LOG_INFO(
-            "CPU_COMPARE_NATIVE_PREFIX name=%s candidates=%llu compiled=%llu entries=%llu instructions=%llu exits=%llu blockers_bne=%llu blockers_beq=%llu blockers_jr=%llu blockers_cop2=%llu blockers_other=%llu rejects_too_short=%llu rejects_unsafe=%llu rejects_load_delay=%llu rejects_memory=%llu rejects_unsupported=%llu",
+            "CPU_COMPARE_NATIVE_PREFIX name=%s candidates=%llu compiled=%llu entries=%llu instructions=%llu exits=%llu blockers_bne=%llu blockers_beq=%llu blockers_jr=%llu blockers_cop2=%llu blockers_other=%llu rejects_too_short=%llu rejects_unsafe=%llu rejects_load_delay=%llu rejects_memory=%llu rejects_unsupported=%llu ram_load_candidates=%llu ram_load_entries=%llu ram_load_instr=%llu ram_preflight_passes=%llu ram_preflight_fallbacks=%llu ram_preflight_non_ram=%llu reject_store=%llu reject_load_base_written=%llu",
             test_case.name,
             static_cast<unsigned long long>(
                 result.stats.native_prefix_candidate_blocks),
@@ -3484,7 +3719,23 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                 result.stats.native_prefix_reject_memory_risk),
             static_cast<unsigned long long>(
                 result.stats
-                    .native_prefix_reject_unsupported_prefix_instruction));
+                    .native_prefix_reject_unsupported_prefix_instruction),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_candidate_blocks),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_entries),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_instructions),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_preflight_passes),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_preflight_fallbacks),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_preflight_non_ram),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_reject_store),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_reject_load_base_written));
       }
 
       if (mode == CpuExecutionMode::X64Jit &&

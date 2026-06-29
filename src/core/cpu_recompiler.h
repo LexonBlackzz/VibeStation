@@ -245,6 +245,7 @@ struct DecodedBlock {
   bool native_stage1_safe = false;
   bool native_reduced_helper = false;
   bool native_prefix = false;
+  bool native_prefix_ram_load = false;
   u32 native_prefix_instruction_count = 0;
   DecodedOp native_prefix_blocker_op = DecodedOp::Unsupported;
   bool native_reduced_helper_ram_load = false;
