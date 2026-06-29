@@ -18,6 +18,8 @@ struct CpuRunSliceResult {
 };
 
 struct CpuBackendStats {
+  static constexpr size_t kDecodedOpStatsCount = 64;
+
   bool available = false;
   bool active = false;
   bool native_available = false;
@@ -125,6 +127,26 @@ struct CpuBackendStats {
   u64 native_alu_disabled_fallbacks = 0;
   u64 native_rejected_block_count = 0;
   u64 native_rejected_block_instructions = 0;
+  u64 native_rejection_profiled_blocks = 0;
+  u64 native_rejection_profiled_instructions = 0;
+  u64 native_rejected_memory_only_blocks = 0;
+  u64 native_rejected_prefix_blocks = 0;
+  u64 native_rejected_prefix_instructions = 0;
+  u64 native_rejected_prefix_total_instructions = 0;
+  u64 native_rejected_single_blocker_blocks = 0;
+  u64 native_rejected_single_unsupported_blocker_blocks = 0;
+  u64 native_rejected_shape_straight_alu = 0;
+  u64 native_rejected_shape_straight_alu_ram_load = 0;
+  u64 native_rejected_shape_straight_alu_ram_store = 0;
+  u64 native_rejected_shape_helper_safe_memory = 0;
+  u64 native_rejected_shape_branch_tail = 0;
+  u64 native_rejected_shape_fallback_control = 0;
+  u64 native_rejected_shape_cop0 = 0;
+  u64 native_rejected_shape_cop2 = 0;
+  u64 native_rejected_shape_exception_unsafe = 0;
+  std::array<u64, kDecodedOpStatsCount> native_rejected_opcode_counts{};
+  std::array<u64, kDecodedOpStatsCount>
+      native_rejected_first_blocker_opcode_counts{};
   u64 cache_hits = 0;
   u64 cache_misses = 0;
   u64 invalidations = 0;

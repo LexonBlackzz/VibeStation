@@ -384,6 +384,8 @@ private:
   void record_native_pc_state_subreason(NativeBlockRejectDetail detail);
   void record_native_block_rejection(
       const DecodedBlock &block, NativeBlockRejectDetail detail);
+  void record_native_rejection_profile_stats(
+      const DecodedBlock &block, NativeBlockRejectDetail detail);
   void log_rejected_block_profiles() const;
   bool native_branch_tail_pc_blacklisted(const DecodedBlock &block) const;
   void record_native_branch_tail_trace(const DecodedBlock &block, bool taken,

@@ -200,6 +200,72 @@ std::string decoded_ops_string(
   return out;
 }
 
+size_t decoded_op_stats_index(DecodedOp op) {
+  const size_t index = static_cast<size_t>(op);
+  return index < CpuBackendStats::kDecodedOpStatsCount ? index : 0u;
+}
+
+bool diagnostic_native_body_op(DecodedOp op) {
+  switch (op) {
+  case DecodedOp::Nop:
+  case DecodedOp::Sll:
+  case DecodedOp::Srl:
+  case DecodedOp::Sra:
+  case DecodedOp::Sllv:
+  case DecodedOp::Srlv:
+  case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Sync:
+  case DecodedOp::Clear:
+  case DecodedOp::Addu:
+  case DecodedOp::Subu:
+  case DecodedOp::And:
+  case DecodedOp::Or:
+  case DecodedOp::Xor:
+  case DecodedOp::Nor:
+  case DecodedOp::Slt:
+  case DecodedOp::Sltu:
+  case DecodedOp::Addiu:
+  case DecodedOp::Slti:
+  case DecodedOp::Sltiu:
+  case DecodedOp::Andi:
+  case DecodedOp::Ori:
+  case DecodedOp::Xori:
+  case DecodedOp::Lui:
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Sb:
+  case DecodedOp::Sh:
+  case DecodedOp::Sw:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool native_reject_detail_is_memory_only(NativeBlockRejectDetail detail) {
+  switch (detail) {
+  case NativeBlockRejectDetail::Memory:
+  case NativeBlockRejectDetail::Mmio:
+  case NativeBlockRejectDetail::Unaligned:
+  case NativeBlockRejectDetail::ReducedHelperUnsupportedMemory:
+  case NativeBlockRejectDetail::ReducedHelperPreflightDisabled:
+  case NativeBlockRejectDetail::ReducedHelperBranchTailMemory:
+  case NativeBlockRejectDetail::ReducedHelperBranchTailStore:
+  case NativeBlockRejectDetail::ReducedHelperBranchTailMixedLoadStore:
+  case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedLoad:
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailMemory:
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailStore:
+    return true;
+  default:
+    return false;
+  }
+}
+
 CpuBackendStats delta_stats(const CpuBackendStats &current,
                             const CpuBackendStats &previous) {
   CpuBackendStats out{};
@@ -541,6 +607,65 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_rejected_block_instructions =
       delta_u64(current.native_rejected_block_instructions,
                 previous.native_rejected_block_instructions);
+  out.native_rejection_profiled_blocks = delta_u64(
+      current.native_rejection_profiled_blocks,
+      previous.native_rejection_profiled_blocks);
+  out.native_rejection_profiled_instructions = delta_u64(
+      current.native_rejection_profiled_instructions,
+      previous.native_rejection_profiled_instructions);
+  out.native_rejected_memory_only_blocks = delta_u64(
+      current.native_rejected_memory_only_blocks,
+      previous.native_rejected_memory_only_blocks);
+  out.native_rejected_prefix_blocks = delta_u64(
+      current.native_rejected_prefix_blocks,
+      previous.native_rejected_prefix_blocks);
+  out.native_rejected_prefix_instructions = delta_u64(
+      current.native_rejected_prefix_instructions,
+      previous.native_rejected_prefix_instructions);
+  out.native_rejected_prefix_total_instructions = delta_u64(
+      current.native_rejected_prefix_total_instructions,
+      previous.native_rejected_prefix_total_instructions);
+  out.native_rejected_single_blocker_blocks = delta_u64(
+      current.native_rejected_single_blocker_blocks,
+      previous.native_rejected_single_blocker_blocks);
+  out.native_rejected_single_unsupported_blocker_blocks = delta_u64(
+      current.native_rejected_single_unsupported_blocker_blocks,
+      previous.native_rejected_single_unsupported_blocker_blocks);
+  out.native_rejected_shape_straight_alu = delta_u64(
+      current.native_rejected_shape_straight_alu,
+      previous.native_rejected_shape_straight_alu);
+  out.native_rejected_shape_straight_alu_ram_load = delta_u64(
+      current.native_rejected_shape_straight_alu_ram_load,
+      previous.native_rejected_shape_straight_alu_ram_load);
+  out.native_rejected_shape_straight_alu_ram_store = delta_u64(
+      current.native_rejected_shape_straight_alu_ram_store,
+      previous.native_rejected_shape_straight_alu_ram_store);
+  out.native_rejected_shape_helper_safe_memory = delta_u64(
+      current.native_rejected_shape_helper_safe_memory,
+      previous.native_rejected_shape_helper_safe_memory);
+  out.native_rejected_shape_branch_tail = delta_u64(
+      current.native_rejected_shape_branch_tail,
+      previous.native_rejected_shape_branch_tail);
+  out.native_rejected_shape_fallback_control = delta_u64(
+      current.native_rejected_shape_fallback_control,
+      previous.native_rejected_shape_fallback_control);
+  out.native_rejected_shape_cop0 = delta_u64(
+      current.native_rejected_shape_cop0,
+      previous.native_rejected_shape_cop0);
+  out.native_rejected_shape_cop2 = delta_u64(
+      current.native_rejected_shape_cop2,
+      previous.native_rejected_shape_cop2);
+  out.native_rejected_shape_exception_unsafe = delta_u64(
+      current.native_rejected_shape_exception_unsafe,
+      previous.native_rejected_shape_exception_unsafe);
+  for (size_t i = 0; i < CpuBackendStats::kDecodedOpStatsCount; ++i) {
+    out.native_rejected_opcode_counts[i] =
+        delta_u64(current.native_rejected_opcode_counts[i],
+                  previous.native_rejected_opcode_counts[i]);
+    out.native_rejected_first_blocker_opcode_counts[i] =
+        delta_u64(current.native_rejected_first_blocker_opcode_counts[i],
+                  previous.native_rejected_first_blocker_opcode_counts[i]);
+  }
   out.cache_hits = delta_u64(current.cache_hits, previous.cache_hits);
   out.cache_misses = delta_u64(current.cache_misses, previous.cache_misses);
   out.invalidations =
@@ -2497,8 +2622,160 @@ void CpuOptimizedBackend::record_native_pc_state_subreason(
   }
 }
 
+void CpuOptimizedBackend::record_native_rejection_profile_stats(
+    const DecodedBlock &block, NativeBlockRejectDetail detail) {
+  if (!g_cpu_backend_stats_logging && !g_cpu_backend_rejected_block_logging) {
+    return;
+  }
+
+  ++stats_.native_rejection_profiled_blocks;
+  stats_.native_rejection_profiled_instructions += block.instruction_count;
+
+  switch (block.native_shape) {
+  case NativeBlockShape::StraightAlu:
+    ++stats_.native_rejected_shape_straight_alu;
+    break;
+  case NativeBlockShape::StraightAluRamLoadCandidate:
+    ++stats_.native_rejected_shape_straight_alu_ram_load;
+    break;
+  case NativeBlockShape::StraightAluRamStoreCandidate:
+    ++stats_.native_rejected_shape_straight_alu_ram_store;
+    break;
+  case NativeBlockShape::HelperSafeMemory:
+    ++stats_.native_rejected_shape_helper_safe_memory;
+    break;
+  case NativeBlockShape::BranchTail:
+    ++stats_.native_rejected_shape_branch_tail;
+    break;
+  case NativeBlockShape::FallbackControl:
+    ++stats_.native_rejected_shape_fallback_control;
+    break;
+  case NativeBlockShape::Cop0:
+    ++stats_.native_rejected_shape_cop0;
+    break;
+  case NativeBlockShape::Cop2:
+    ++stats_.native_rejected_shape_cop2;
+    break;
+  case NativeBlockShape::Mmio:
+    break;
+  case NativeBlockShape::ExceptionUnsafe:
+    ++stats_.native_rejected_shape_exception_unsafe;
+    break;
+  }
+
+  bool contains_branch = false;
+  bool contains_memory = false;
+  bool contains_cop = false;
+  bool contains_fallback = false;
+  bool contains_exception_risk = false;
+  bool contains_unsupported = false;
+  u32 first_blocker_index = block.instruction_count;
+  u32 blocker_count = 0;
+  auto is_blocker = [&](u32 index) {
+    const DecodedInstruction &inst = block.instructions[index];
+    switch (detail) {
+    case NativeBlockRejectDetail::Branch:
+    case NativeBlockRejectDetail::BranchTailDisabled:
+    case NativeBlockRejectDetail::BranchTailBlacklisted:
+    case NativeBlockRejectDetail::BranchTailUnsupportedBranch:
+      return inst.is_branch;
+    case NativeBlockRejectDetail::Memory:
+    case NativeBlockRejectDetail::Mmio:
+    case NativeBlockRejectDetail::Unaligned:
+    case NativeBlockRejectDetail::ReducedHelperUnsupportedMemory:
+    case NativeBlockRejectDetail::ReducedHelperPreflightDisabled:
+    case NativeBlockRejectDetail::ReducedHelperBranchTailMemory:
+    case NativeBlockRejectDetail::ReducedHelperBranchTailStore:
+    case NativeBlockRejectDetail::ReducedHelperBranchTailMixedLoadStore:
+    case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedLoad:
+    case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailMemory:
+    case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailStore:
+      return inst.may_access_memory;
+    case NativeBlockRejectDetail::ReducedHelperBranchTailDelaySlotLoad:
+    case NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailDelaySlotMemory:
+      return index + 1u == block.instruction_count &&
+             inst.may_access_memory;
+    case NativeBlockRejectDetail::Cop0:
+      return inst.op == DecodedOp::Cop0;
+    case NativeBlockRejectDetail::Cop2:
+      return inst.op == DecodedOp::Cop2;
+    case NativeBlockRejectDetail::FallbackInstruction:
+      return inst.must_fallback;
+    case NativeBlockRejectDetail::ExceptionRisk:
+    case NativeBlockRejectDetail::ExceptionOrUnknown:
+      return inst.may_raise_exception && !inst.may_access_memory;
+    case NativeBlockRejectDetail::UnsupportedInstruction:
+    case NativeBlockRejectDetail::BranchTailUnsupportedBody:
+    case NativeBlockRejectDetail::BranchTailUnsupportedDelaySlot:
+    case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedBody:
+    case NativeBlockRejectDetail::
+        ReducedHelperBranchTailUnsupportedDelaySlot:
+    case NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailUnsupportedBody:
+    case NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailUnsupportedDelaySlot:
+      return inst.is_branch || inst.must_fallback ||
+             (inst.may_raise_exception && !inst.may_access_memory) ||
+             (!inst.may_access_memory &&
+              !diagnostic_native_body_op(inst.op));
+    default:
+      return false;
+    }
+  };
+
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    ++stats_.native_rejected_opcode_counts[decoded_op_stats_index(inst.op)];
+    contains_branch = contains_branch || inst.is_branch;
+    contains_memory = contains_memory || inst.may_access_memory;
+    contains_cop =
+        contains_cop || inst.op == DecodedOp::Cop0 ||
+        inst.op == DecodedOp::Cop2;
+    contains_fallback = contains_fallback || inst.must_fallback;
+    contains_exception_risk =
+        contains_exception_risk ||
+        (inst.may_raise_exception && !inst.may_access_memory);
+    contains_unsupported =
+        contains_unsupported ||
+        (!inst.may_access_memory && !inst.is_branch &&
+         !diagnostic_native_body_op(inst.op));
+    if (is_blocker(i)) {
+      if (first_blocker_index == block.instruction_count) {
+        first_blocker_index = i;
+      }
+      ++blocker_count;
+    }
+  }
+
+  if (native_reject_detail_is_memory_only(detail) && contains_memory &&
+      !contains_branch && !contains_cop && !contains_fallback &&
+      !contains_exception_risk && !contains_unsupported) {
+    ++stats_.native_rejected_memory_only_blocks;
+  }
+
+  if (first_blocker_index < block.instruction_count) {
+    const DecodedOp first_op = block.instructions[first_blocker_index].op;
+    const size_t first_op_index = decoded_op_stats_index(first_op);
+    ++stats_.native_rejected_first_blocker_opcode_counts[first_op_index];
+    ++stats_.native_rejected_prefix_blocks;
+    stats_.native_rejected_prefix_instructions += first_blocker_index;
+    stats_.native_rejected_prefix_total_instructions +=
+        block.instruction_count;
+    if (blocker_count == 1u) {
+      ++stats_.native_rejected_single_blocker_blocks;
+      if (detail == NativeBlockRejectDetail::UnsupportedInstruction &&
+          first_blocker_index != 0u) {
+        ++stats_.native_rejected_single_unsupported_blocker_blocks;
+      }
+    }
+  }
+}
+
 void CpuOptimizedBackend::record_native_block_rejection(
     const DecodedBlock &block, NativeBlockRejectDetail detail) {
+  record_native_rejection_profile_stats(block, detail);
+
   if (!g_cpu_backend_rejected_block_logging) {
     return;
   }
@@ -3012,6 +3289,81 @@ void CpuOptimizedBackend::log_stats_section(
               return a.count > b.count;
             });
 
+  auto top_opcode_counts =
+      [](const std::array<u64, CpuBackendStats::kDecodedOpStatsCount>
+             &counts) {
+        std::array<Reason, CpuBackendStats::kDecodedOpStatsCount> out{};
+        for (size_t i = 0; i < out.size(); ++i) {
+          out[i] = {decoded_op_name(static_cast<DecodedOp>(i)), counts[i]};
+        }
+        std::sort(out.begin(), out.end(),
+                  [](const Reason &a, const Reason &b) {
+                    return a.count > b.count;
+                  });
+        return out;
+      };
+  const auto rejected_opcodes =
+      top_opcode_counts(delta.native_rejected_opcode_counts);
+  const auto first_blocker_opcodes =
+      top_opcode_counts(delta.native_rejected_first_blocker_opcode_counts);
+  std::array<Reason, 9> rejected_shapes = {{
+      {"straight_alu", delta.native_rejected_shape_straight_alu},
+      {"straight_alu_ram_load",
+       delta.native_rejected_shape_straight_alu_ram_load},
+      {"straight_alu_ram_store",
+       delta.native_rejected_shape_straight_alu_ram_store},
+      {"helper_safe_memory", delta.native_rejected_shape_helper_safe_memory},
+      {"branch_tail", delta.native_rejected_shape_branch_tail},
+      {"fallback_control", delta.native_rejected_shape_fallback_control},
+      {"cop0", delta.native_rejected_shape_cop0},
+      {"cop2_gte", delta.native_rejected_shape_cop2},
+      {"exception_unsafe", delta.native_rejected_shape_exception_unsafe},
+  }};
+  std::sort(rejected_shapes.begin(), rejected_shapes.end(),
+            [](const Reason &a, const Reason &b) {
+              return a.count > b.count;
+            });
+  const u64 profiled_rejection_count = delta.native_rejection_profiled_blocks;
+  const double profiled_rejected_avg =
+      profiled_rejection_count == 0
+          ? 0.0
+          : static_cast<double>(
+                delta.native_rejection_profiled_instructions) /
+                static_cast<double>(profiled_rejection_count);
+  const double memory_only_reject_pct =
+      profiled_rejection_count == 0
+          ? 0.0
+          : (100.0 *
+             static_cast<double>(delta.native_rejected_memory_only_blocks)) /
+                static_cast<double>(profiled_rejection_count);
+  const double branch_tail_disabled_reject_pct =
+      profiled_rejection_count == 0
+          ? 0.0
+          : (100.0 *
+             static_cast<double>(
+                 delta.native_branch_tail_disabled_fallbacks)) /
+                static_cast<double>(profiled_rejection_count);
+  const u64 cop_rejections =
+      delta.native_rejected_shape_cop0 + delta.native_rejected_shape_cop2;
+  const double cop_reject_pct =
+      profiled_rejection_count == 0
+          ? 0.0
+          : (100.0 * static_cast<double>(cop_rejections)) /
+                static_cast<double>(profiled_rejection_count);
+  const double avg_native_prefix =
+      delta.native_rejected_prefix_blocks == 0
+          ? 0.0
+          : static_cast<double>(delta.native_rejected_prefix_instructions) /
+                static_cast<double>(delta.native_rejected_prefix_blocks);
+  const double native_prefix_pct =
+      delta.native_rejected_prefix_total_instructions == 0
+          ? 0.0
+          : (100.0 *
+             static_cast<double>(
+                 delta.native_rejected_prefix_instructions)) /
+                static_cast<double>(
+                    delta.native_rejected_prefix_total_instructions);
+
   LOG_INFO("=== CPU Backend Stats ===");
   LOG_INFO("CPU_BACKEND_STATS frame=%u frames=%u mode=%s blocks=%u native_blocks=%llu code_bytes=%zu native_code_bytes=%zu",
            current_frame_, frame_delta,
@@ -3495,6 +3847,40 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(exact_reasons[1].count),
            exact_reasons[2].name,
            static_cast<unsigned long long>(exact_reasons[2].count));
+  LOG_INFO("CPU_BACKEND_STATS rejection_opcodes top=%s:%llu,%s:%llu,%s:%llu first_blockers=%s:%llu,%s:%llu,%s:%llu",
+           rejected_opcodes[0].name,
+           static_cast<unsigned long long>(rejected_opcodes[0].count),
+           rejected_opcodes[1].name,
+           static_cast<unsigned long long>(rejected_opcodes[1].count),
+           rejected_opcodes[2].name,
+           static_cast<unsigned long long>(rejected_opcodes[2].count),
+           first_blocker_opcodes[0].name,
+           static_cast<unsigned long long>(first_blocker_opcodes[0].count),
+           first_blocker_opcodes[1].name,
+           static_cast<unsigned long long>(first_blocker_opcodes[1].count),
+           first_blocker_opcodes[2].name,
+           static_cast<unsigned long long>(first_blocker_opcodes[2].count));
+  LOG_INFO("CPU_BACKEND_STATS rejection_shapes profiled=%llu avg_profiled=%.2f top=%s:%llu,%s:%llu,%s:%llu memory_only=%llu memory_only_pct=%.2f branch_tail_disabled_pct=%.2f cop_gte_pct=%.2f",
+           static_cast<unsigned long long>(profiled_rejection_count),
+           profiled_rejected_avg,
+           rejected_shapes[0].name,
+           static_cast<unsigned long long>(rejected_shapes[0].count),
+           rejected_shapes[1].name,
+           static_cast<unsigned long long>(rejected_shapes[1].count),
+           rejected_shapes[2].name,
+           static_cast<unsigned long long>(rejected_shapes[2].count),
+           static_cast<unsigned long long>(
+               delta.native_rejected_memory_only_blocks),
+           memory_only_reject_pct, branch_tail_disabled_reject_pct,
+           cop_reject_pct);
+  LOG_INFO("CPU_BACKEND_STATS rejection_prefix blocker_blocks=%llu avg_native_prefix=%.2f native_prefix_pct=%.2f single_blocker=%llu single_unsupported_after_prefix=%llu",
+           static_cast<unsigned long long>(
+               delta.native_rejected_prefix_blocks),
+           avg_native_prefix, native_prefix_pct,
+           static_cast<unsigned long long>(
+               delta.native_rejected_single_blocker_blocks),
+           static_cast<unsigned long long>(
+               delta.native_rejected_single_unsupported_blocker_blocks));
   LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu exception_risk=%llu fallback_instruction=%llu unsupported_instruction=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),
