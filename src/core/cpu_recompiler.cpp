@@ -131,6 +131,26 @@ const char *native_reject_detail_name(NativeBlockRejectDetail detail) {
     return "reduced_helper_unsupported_memory";
   case NativeBlockRejectDetail::ReducedHelperPreflightDisabled:
     return "reduced_helper_preflight_disabled";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailDisabled:
+    return "reduced_helper_branch_tail_disabled";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailMemory:
+    return "reduced_helper_branch_tail_memory";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailStore:
+    return "reduced_helper_branch_tail_store";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailMixedLoadStore:
+    return "reduced_helper_branch_tail_mixed_load_store";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailLoadBaseWritten:
+    return "reduced_helper_branch_tail_load_base_written";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedLoad:
+    return "reduced_helper_branch_tail_unsupported_load";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailDelaySlotLoad:
+    return "reduced_helper_branch_tail_delay_slot_load";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedBody:
+    return "reduced_helper_branch_tail_unsupported_body";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedDelaySlot:
+    return "reduced_helper_branch_tail_unsupported_delay_slot";
+  case NativeBlockRejectDetail::ReducedHelperBranchTailCompareIrq:
+    return "reduced_helper_branch_tail_compare_irq";
   case NativeBlockRejectDetail::None:
   default:
     return "none";
@@ -219,6 +239,69 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_reduced_helper_reject_unsupported_memory = delta_u64(
       current.native_reduced_helper_reject_unsupported_memory,
       previous.native_reduced_helper_reject_unsupported_memory);
+  out.native_branch_tail_reduced_helper_candidate_blocks = delta_u64(
+      current.native_branch_tail_reduced_helper_candidate_blocks,
+      previous.native_branch_tail_reduced_helper_candidate_blocks);
+  out.native_branch_tail_reduced_helper_rejected_blocks = delta_u64(
+      current.native_branch_tail_reduced_helper_rejected_blocks,
+      previous.native_branch_tail_reduced_helper_rejected_blocks);
+  out.native_branch_tail_reduced_helper_reject_disabled = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_disabled,
+      previous.native_branch_tail_reduced_helper_reject_disabled);
+  out.native_branch_tail_reduced_helper_reject_memory = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_memory,
+      previous.native_branch_tail_reduced_helper_reject_memory);
+  out.native_branch_tail_reduced_helper_load_candidate_blocks = delta_u64(
+      current.native_branch_tail_reduced_helper_load_candidate_blocks,
+      previous.native_branch_tail_reduced_helper_load_candidate_blocks);
+  out.native_branch_tail_reduced_helper_store_candidate_blocks = delta_u64(
+      current.native_branch_tail_reduced_helper_store_candidate_blocks,
+      previous.native_branch_tail_reduced_helper_store_candidate_blocks);
+  out.native_branch_tail_reduced_helper_mixed_load_store_candidate_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_reduced_helper_mixed_load_store_candidate_blocks,
+          previous
+              .native_branch_tail_reduced_helper_mixed_load_store_candidate_blocks);
+  out.native_branch_tail_reduced_helper_reject_load = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_load,
+      previous.native_branch_tail_reduced_helper_reject_load);
+  out.native_branch_tail_reduced_helper_reject_store = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_store,
+      previous.native_branch_tail_reduced_helper_reject_store);
+  out.native_branch_tail_reduced_helper_reject_mixed_load_store = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_mixed_load_store,
+      previous.native_branch_tail_reduced_helper_reject_mixed_load_store);
+  out.native_branch_tail_reduced_helper_reject_load_base_written = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_load_base_written,
+      previous.native_branch_tail_reduced_helper_reject_load_base_written);
+  out.native_branch_tail_reduced_helper_reject_unsupported_load = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_unsupported_load,
+      previous.native_branch_tail_reduced_helper_reject_unsupported_load);
+  out.native_branch_tail_reduced_helper_reject_body = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_body,
+      previous.native_branch_tail_reduced_helper_reject_body);
+  out.native_branch_tail_reduced_helper_reject_delay_slot = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_delay_slot,
+      previous.native_branch_tail_reduced_helper_reject_delay_slot);
+  out.native_branch_tail_reduced_helper_reject_delay_slot_load = delta_u64(
+      current.native_branch_tail_reduced_helper_reject_delay_slot_load,
+      previous.native_branch_tail_reduced_helper_reject_delay_slot_load);
+  out.native_branch_tail_reduced_helper_load_lw = delta_u64(
+      current.native_branch_tail_reduced_helper_load_lw,
+      previous.native_branch_tail_reduced_helper_load_lw);
+  out.native_branch_tail_reduced_helper_load_lb = delta_u64(
+      current.native_branch_tail_reduced_helper_load_lb,
+      previous.native_branch_tail_reduced_helper_load_lb);
+  out.native_branch_tail_reduced_helper_load_lbu = delta_u64(
+      current.native_branch_tail_reduced_helper_load_lbu,
+      previous.native_branch_tail_reduced_helper_load_lbu);
+  out.native_branch_tail_reduced_helper_load_lh = delta_u64(
+      current.native_branch_tail_reduced_helper_load_lh,
+      previous.native_branch_tail_reduced_helper_load_lh);
+  out.native_branch_tail_reduced_helper_load_lhu = delta_u64(
+      current.native_branch_tail_reduced_helper_load_lhu,
+      previous.native_branch_tail_reduced_helper_load_lhu);
   out.native_compile_failures =
       delta_u64(current.native_compile_failures,
                 previous.native_compile_failures);
@@ -439,9 +522,72 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_reduced_helper_ram_load_entries = delta_u64(
       current.native_reduced_helper_ram_load_entries,
       previous.native_reduced_helper_ram_load_entries);
+  out.native_branch_tail_reduced_helper_entries = delta_u64(
+      current.native_branch_tail_reduced_helper_entries,
+      previous.native_branch_tail_reduced_helper_entries);
+  out.native_branch_tail_reduced_helper_ram_load_entries = delta_u64(
+      current.native_branch_tail_reduced_helper_ram_load_entries,
+      previous.native_branch_tail_reduced_helper_ram_load_entries);
   out.native_reduced_helper_instructions = delta_u64(
       current.native_reduced_helper_instructions,
       previous.native_reduced_helper_instructions);
+  out.native_branch_tail_reduced_helper_instructions = delta_u64(
+      current.native_branch_tail_reduced_helper_instructions,
+      previous.native_branch_tail_reduced_helper_instructions);
+  out.native_branch_tail_reduced_helper_ram_load_instructions = delta_u64(
+      current.native_branch_tail_reduced_helper_ram_load_instructions,
+      previous.native_branch_tail_reduced_helper_ram_load_instructions);
+  out.native_branch_tail_reduced_helper_prepare_helpers_avoided = delta_u64(
+      current.native_branch_tail_reduced_helper_prepare_helpers_avoided,
+      previous.native_branch_tail_reduced_helper_prepare_helpers_avoided);
+  out.native_branch_tail_reduced_helper_finish_helpers_avoided = delta_u64(
+      current.native_branch_tail_reduced_helper_finish_helpers_avoided,
+      previous.native_branch_tail_reduced_helper_finish_helpers_avoided);
+  out.native_branch_tail_reduced_helper_branch_helpers_avoided = delta_u64(
+      current.native_branch_tail_reduced_helper_branch_helpers_avoided,
+      previous.native_branch_tail_reduced_helper_branch_helpers_avoided);
+  out.native_branch_tail_reduced_helper_memory_helpers_avoided = delta_u64(
+      current.native_branch_tail_reduced_helper_memory_helpers_avoided,
+      previous.native_branch_tail_reduced_helper_memory_helpers_avoided);
+  out.native_branch_tail_reduced_helper_normal_fallbacks = delta_u64(
+      current.native_branch_tail_reduced_helper_normal_fallbacks,
+      previous.native_branch_tail_reduced_helper_normal_fallbacks);
+  out.native_branch_tail_reduced_helper_runtime_fallbacks = delta_u64(
+      current.native_branch_tail_reduced_helper_runtime_fallbacks,
+      previous.native_branch_tail_reduced_helper_runtime_fallbacks);
+  out.native_branch_tail_reduced_helper_load_delay_fallbacks = delta_u64(
+      current.native_branch_tail_reduced_helper_load_delay_fallbacks,
+      previous.native_branch_tail_reduced_helper_load_delay_fallbacks);
+  out.native_branch_tail_reduced_helper_irq_hook_fallbacks = delta_u64(
+      current.native_branch_tail_reduced_helper_irq_hook_fallbacks,
+      previous.native_branch_tail_reduced_helper_irq_hook_fallbacks);
+  out.native_branch_tail_reduced_helper_ram_load_preflight_fallbacks =
+      delta_u64(
+          current
+              .native_branch_tail_reduced_helper_ram_load_preflight_fallbacks,
+          previous
+              .native_branch_tail_reduced_helper_ram_load_preflight_fallbacks);
+  out.native_branch_tail_reduced_helper_ram_load_preflight_mmio = delta_u64(
+      current.native_branch_tail_reduced_helper_ram_load_preflight_mmio,
+      previous.native_branch_tail_reduced_helper_ram_load_preflight_mmio);
+  out.native_branch_tail_reduced_helper_ram_load_preflight_unaligned =
+      delta_u64(
+          current
+              .native_branch_tail_reduced_helper_ram_load_preflight_unaligned,
+          previous
+              .native_branch_tail_reduced_helper_ram_load_preflight_unaligned);
+  out.native_branch_tail_reduced_helper_ram_load_preflight_non_ram =
+      delta_u64(
+          current
+              .native_branch_tail_reduced_helper_ram_load_preflight_non_ram,
+          previous
+              .native_branch_tail_reduced_helper_ram_load_preflight_non_ram);
+  out.native_branch_tail_reduced_helper_ram_load_preflight_disabled =
+      delta_u64(
+          current
+              .native_branch_tail_reduced_helper_ram_load_preflight_disabled,
+          previous
+              .native_branch_tail_reduced_helper_ram_load_preflight_disabled);
   out.native_reduced_helper_fallbacks = delta_u64(
       current.native_reduced_helper_fallbacks,
       previous.native_reduced_helper_fallbacks);
@@ -2677,6 +2823,93 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_branch_tail_reject_blez),
            static_cast<unsigned long long>(
                delta.native_branch_tail_reject_other_opcode));
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_reduced_helper enabled=%u candidates=%llu rejected=%llu reject_disabled=%llu reject_memory=%llu reject_body=%llu reject_delay=%llu entries=%llu ram_load_entries=%llu instructions=%llu ram_load_instructions=%llu avoided_prepare=%llu avoided_finish=%llu avoided_branch=%llu avoided_memory=%llu normal_fallbacks=%llu runtime_fallbacks=%llu load_delay_fallbacks=%llu irq_hook_fallbacks=%llu",
+           g_cpu_x64_jit_reduced_helper_branch_tail_enabled ? 1u : 0u,
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_rejected_blocks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_disabled),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_memory),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_body),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_delay_slot),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_entries),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_ram_load_entries),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_instructions),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_ram_load_instructions),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_prepare_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_finish_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_branch_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_memory_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_normal_fallbacks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_runtime_fallbacks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_delay_fallbacks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_irq_hook_fallbacks));
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_reduced_helper_loads load_candidates=%llu store_candidates=%llu mixed_load_store_candidates=%llu reject_load=%llu reject_store=%llu reject_mixed=%llu reject_load_base_written=%llu reject_unsupported_load=%llu reject_delay_slot_load=%llu lw=%llu lb=%llu lbu=%llu lh=%llu lhu=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu",
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_store_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_mixed_load_store_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_load),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_store),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_reject_mixed_load_store),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_reject_load_base_written),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_reject_unsupported_load),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_reject_delay_slot_load),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_lw),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_lb),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_lbu),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_lh),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_reduced_helper_load_lhu),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_ram_load_preflight_fallbacks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_ram_load_preflight_mmio),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_ram_load_preflight_unaligned),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_ram_load_preflight_non_ram),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_reduced_helper_ram_load_preflight_disabled));
   LOG_INFO("CPU_BACKEND_STATS native_tiers all_enabled=%u memory_enabled=%u alu_enabled=%u branch_tail_enabled=%u memory_compiled=%llu memory_entries=%llu alu_compiled=%llu alu_entries=%llu all_disabled_fallbacks=%llu memory_disabled_fallbacks=%llu alu_disabled_fallbacks=%llu compare_flag_leak_warnings=%llu",
            cpu_x64_jit_all_native_enabled() ? 1u : 0u,
            cpu_x64_jit_native_memory_enabled() ? 1u : 0u,

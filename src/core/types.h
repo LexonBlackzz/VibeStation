@@ -152,6 +152,7 @@ inline bool g_cpu_x64_jit_branch_tail_cli_value = false;
 inline bool g_cpu_x64_jit_branch_tail_logging = false;
 inline u32 g_cpu_x64_jit_branch_tail_log_count = 32;
 inline std::vector<u32> g_cpu_x64_jit_branch_tail_blacklist;
+inline bool g_cpu_x64_jit_reduced_helper_branch_tail_enabled = false;
 inline bool g_cpu_x64_jit_all_native_enabled = true;
 inline bool g_cpu_x64_jit_all_native_cli_override = false;
 inline bool g_cpu_x64_jit_all_native_cli_value = true;
@@ -598,4 +599,3 @@ inline u32 mask_address(u32 addr) {
   return addr & REGION_MASK[addr >> 29];
 }
 } // namespace psx
-

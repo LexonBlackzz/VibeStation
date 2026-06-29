@@ -61,6 +61,7 @@ struct CpuCompareCase {
   bool require_branch_tail_disabled_fallback_when_available = false;
   bool require_branch_tail_blacklisted_fallback_when_available = false;
   bool allow_partial_native_branch_tail = false;
+  bool enable_reduced_helper_branch_tail_for_x64 = false;
   bool allow_partial_native_memory_helper = false;
   bool compare_segment_states = false;
   bool disable_all_native_for_x64 = false;
@@ -72,11 +73,24 @@ struct CpuCompareCase {
   bool require_native_memory_tier_entry_when_available = false;
   bool require_native_alu_tier_entry_when_available = false;
   bool require_native_reduced_helper_ram_load_entry_when_available = false;
+  bool require_native_reduced_helper_branch_tail_entry_when_available = false;
+  bool require_native_reduced_helper_branch_tail_ram_load_entry_when_available =
+      false;
   bool require_no_native_reduced_helper_ram_load_entry = false;
+  bool require_no_native_reduced_helper_branch_tail_ram_load_entry = false;
   bool require_no_native_instruction_helpers_when_available = false;
+  bool require_no_native_branch_tail_helpers_when_available = false;
   bool require_reduced_helper_preflight_mmio_when_available = false;
   bool require_reduced_helper_preflight_unaligned_when_available = false;
   bool require_reduced_helper_preflight_non_ram_when_available = false;
+  bool require_reduced_helper_branch_tail_preflight_mmio_when_available =
+      false;
+  bool require_reduced_helper_branch_tail_preflight_unaligned_when_available =
+      false;
+  bool require_reduced_helper_branch_tail_preflight_non_ram_when_available =
+      false;
+  bool require_reduced_helper_branch_tail_reject_load_base_written_when_available =
+      false;
   bool enable_ram_load_fastpath_for_x64 = false;
   bool require_native_ram_load_fastpath_when_available = false;
   bool require_no_native_ram_load_fastpath = false;
@@ -407,6 +421,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_x64_jit_ram_load_fastpath_enabled =
       mode == CpuExecutionMode::X64Jit &&
       test_case.enable_ram_load_fastpath_for_x64;
+  g_cpu_x64_jit_reduced_helper_branch_tail_enabled =
+      mode == CpuExecutionMode::X64Jit &&
+      test_case.enable_reduced_helper_branch_tail_for_x64;
   CpuCompareRunResult out{};
   u32 executed = 0;
   size_t segment_index = 0;
@@ -833,6 +850,187 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   bne_not_taken.require_full_native_when_available = true;
   bne_not_taken.require_native_branch_tail_when_available = true;
   cases.push_back(bne_not_taken);
+
+  CpuCompareCase reduced_bne_taken{};
+  reduced_bne_taken.name =
+      "native_reduced_helper_branch_tail_bne_taken_alu_body_delay";
+  reduced_bne_taken.initial_gpr[1] = 1u;
+  reduced_bne_taken.initial_gpr[2] = 2u;
+  reduced_bne_taken.program = {
+      enc_i(0x09, 0, 6, 0x0001),
+      enc_i(0x05, 1, 2, 2),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
+  };
+  reduced_bne_taken.instructions = 3;
+  reduced_bne_taken.enable_reduced_helper_branch_tail_for_x64 = true;
+  reduced_bne_taken.require_full_native_when_available = true;
+  reduced_bne_taken.require_native_branch_tail_when_available = true;
+  reduced_bne_taken
+      .require_native_reduced_helper_branch_tail_entry_when_available = true;
+  reduced_bne_taken.require_no_native_instruction_helpers_when_available =
+      true;
+  reduced_bne_taken.require_no_native_branch_tail_helpers_when_available =
+      true;
+  reduced_bne_taken.native_branch_should_be_taken = true;
+  cases.push_back(reduced_bne_taken);
+
+  CpuCompareCase reduced_bne_lw_not_taken{};
+  reduced_bne_lw_not_taken.name =
+      "native_reduced_helper_branch_tail_lw_not_taken";
+  reduced_bne_lw_not_taken.initial_gpr[1] = 0x80011600u;
+  reduced_bne_lw_not_taken.initial_gpr[2] = 0x11111111u;
+  reduced_bne_lw_not_taken.initial_gpr[3] = 0x11111111u;
+  reduced_bne_lw_not_taken.memory.push_back(
+      {0x00011600u, 0x22222222u});
+  reduced_bne_lw_not_taken.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x05, 2, 3, 2),
+      enc_r(2, 0, 4, 0, 0x21),
+      enc_i(0x09, 0, 5, 0x0011),
+      enc_i(0x09, 0, 6, 0x0022),
+  };
+  reduced_bne_lw_not_taken.instructions = 3;
+  reduced_bne_lw_not_taken.enable_ram_load_fastpath_for_x64 = true;
+  reduced_bne_lw_not_taken.enable_reduced_helper_branch_tail_for_x64 = true;
+  reduced_bne_lw_not_taken.require_full_native_when_available = true;
+  reduced_bne_lw_not_taken.require_native_branch_tail_when_available = true;
+  reduced_bne_lw_not_taken
+      .require_native_reduced_helper_branch_tail_entry_when_available = true;
+  reduced_bne_lw_not_taken
+      .require_native_reduced_helper_branch_tail_ram_load_entry_when_available =
+      true;
+  reduced_bne_lw_not_taken.require_native_ram_load_fastpath_when_available =
+      true;
+  reduced_bne_lw_not_taken.require_no_native_instruction_helpers_when_available =
+      true;
+  reduced_bne_lw_not_taken.require_no_native_branch_tail_helpers_when_available =
+      true;
+  cases.push_back(reduced_bne_lw_not_taken);
+
+  CpuCompareCase reduced_bne_lw_taken_after_alu{};
+  reduced_bne_lw_taken_after_alu.name =
+      "native_reduced_helper_branch_tail_lw_taken_after_alu";
+  reduced_bne_lw_taken_after_alu.initial_gpr[1] = 0x80011610u;
+  reduced_bne_lw_taken_after_alu.initial_gpr[2] = 0x11111111u;
+  reduced_bne_lw_taken_after_alu.initial_gpr[3] = 0x11111111u;
+  reduced_bne_lw_taken_after_alu.memory.push_back(
+      {0x00011610u, 0x22222222u});
+  reduced_bne_lw_taken_after_alu.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_r(2, 0, 4, 0, 0x21),
+      enc_i(0x05, 2, 3, 1),
+      enc_r(2, 0, 5, 0, 0x21),
+      enc_i(0x09, 0, 6, 0x0022),
+  };
+  reduced_bne_lw_taken_after_alu.instructions = 4;
+  reduced_bne_lw_taken_after_alu.enable_ram_load_fastpath_for_x64 = true;
+  reduced_bne_lw_taken_after_alu.enable_reduced_helper_branch_tail_for_x64 =
+      true;
+  reduced_bne_lw_taken_after_alu.require_full_native_when_available = true;
+  reduced_bne_lw_taken_after_alu.require_native_branch_tail_when_available =
+      true;
+  reduced_bne_lw_taken_after_alu
+      .require_native_reduced_helper_branch_tail_entry_when_available = true;
+  reduced_bne_lw_taken_after_alu
+      .require_native_reduced_helper_branch_tail_ram_load_entry_when_available =
+      true;
+  reduced_bne_lw_taken_after_alu
+      .require_native_ram_load_fastpath_when_available = true;
+  reduced_bne_lw_taken_after_alu
+      .require_no_native_instruction_helpers_when_available = true;
+  reduced_bne_lw_taken_after_alu
+      .require_no_native_branch_tail_helpers_when_available = true;
+  reduced_bne_lw_taken_after_alu.native_branch_should_be_taken = true;
+  cases.push_back(reduced_bne_lw_taken_after_alu);
+
+  CpuCompareCase reduced_bne_lw_r0{};
+  reduced_bne_lw_r0.name = "native_reduced_helper_branch_tail_lw_r0";
+  reduced_bne_lw_r0.initial_gpr[1] = 0x80011620u;
+  reduced_bne_lw_r0.initial_gpr[2] = 7u;
+  reduced_bne_lw_r0.initial_gpr[3] = 7u;
+  reduced_bne_lw_r0.memory.push_back({0x00011620u, 0xFFFFFFFFu});
+  reduced_bne_lw_r0.program = {
+      enc_i(0x23, 1, 0, 0),
+      enc_i(0x05, 2, 3, 1),
+      enc_r(0, 0, 4, 0, 0x21),
+      enc_i(0x09, 0, 5, 0x0011),
+  };
+  reduced_bne_lw_r0.instructions = 3;
+  reduced_bne_lw_r0.enable_ram_load_fastpath_for_x64 = true;
+  reduced_bne_lw_r0.enable_reduced_helper_branch_tail_for_x64 = true;
+  reduced_bne_lw_r0.require_full_native_when_available = true;
+  reduced_bne_lw_r0.require_native_branch_tail_when_available = true;
+  reduced_bne_lw_r0
+      .require_native_reduced_helper_branch_tail_entry_when_available = true;
+  reduced_bne_lw_r0
+      .require_native_reduced_helper_branch_tail_ram_load_entry_when_available =
+      true;
+  reduced_bne_lw_r0.require_native_ram_load_fastpath_when_available = true;
+  reduced_bne_lw_r0.require_no_native_instruction_helpers_when_available =
+      true;
+  reduced_bne_lw_r0.require_no_native_branch_tail_helpers_when_available =
+      true;
+  cases.push_back(reduced_bne_lw_r0);
+
+  CpuCompareCase reduced_bne_lw_base_write_reject{};
+  reduced_bne_lw_base_write_reject.name =
+      "native_reduced_helper_branch_tail_lw_base_write_rejected";
+  reduced_bne_lw_base_write_reject.initial_gpr[1] = 0x80011630u;
+  reduced_bne_lw_base_write_reject.initial_gpr[2] = 0x11111111u;
+  reduced_bne_lw_base_write_reject.initial_gpr[3] = 0x11111111u;
+  reduced_bne_lw_base_write_reject.memory.push_back(
+      {0x00011634u, 0x22222222u});
+  reduced_bne_lw_base_write_reject.program = {
+      enc_i(0x09, 1, 1, 4),
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x05, 2, 3, 1),
+      enc_r(2, 0, 4, 0, 0x21),
+      enc_i(0x09, 0, 5, 0x0022),
+  };
+  reduced_bne_lw_base_write_reject.instructions = 4;
+  reduced_bne_lw_base_write_reject.enable_ram_load_fastpath_for_x64 = true;
+  reduced_bne_lw_base_write_reject
+      .enable_reduced_helper_branch_tail_for_x64 = true;
+  reduced_bne_lw_base_write_reject.require_full_native_when_available = true;
+  reduced_bne_lw_base_write_reject.require_native_branch_tail_when_available =
+      true;
+  reduced_bne_lw_base_write_reject
+      .require_no_native_reduced_helper_branch_tail_ram_load_entry = true;
+  reduced_bne_lw_base_write_reject
+      .require_reduced_helper_branch_tail_reject_load_base_written_when_available =
+      true;
+  reduced_bne_lw_base_write_reject
+      .require_native_ram_load_fastpath_when_available = true;
+  cases.push_back(reduced_bne_lw_base_write_reject);
+
+  CpuCompareCase reduced_bne_lw_scratchpad_reject{};
+  reduced_bne_lw_scratchpad_reject.name =
+      "native_reduced_helper_branch_tail_lw_scratchpad_rejected";
+  reduced_bne_lw_scratchpad_reject.initial_gpr[1] = 0x1F800000u;
+  reduced_bne_lw_scratchpad_reject.initial_gpr[2] = 1u;
+  reduced_bne_lw_scratchpad_reject.initial_gpr[3] = 1u;
+  reduced_bne_lw_scratchpad_reject.memory.push_back(
+      {0x1F800000u, 0x55667788u});
+  reduced_bne_lw_scratchpad_reject.program = {
+      enc_i(0x23, 1, 4, 0),
+      enc_i(0x05, 2, 3, 1),
+      enc_i(0x09, 0, 5, 0x0011),
+      enc_i(0x09, 0, 6, 0x0022),
+  };
+  reduced_bne_lw_scratchpad_reject.instructions = 3;
+  reduced_bne_lw_scratchpad_reject.enable_ram_load_fastpath_for_x64 = true;
+  reduced_bne_lw_scratchpad_reject.enable_reduced_helper_branch_tail_for_x64 =
+      true;
+  reduced_bne_lw_scratchpad_reject.expect_x64_fallback = true;
+  reduced_bne_lw_scratchpad_reject
+      .require_no_native_reduced_helper_branch_tail_ram_load_entry = true;
+  reduced_bne_lw_scratchpad_reject
+      .require_reduced_helper_branch_tail_preflight_non_ram_when_available =
+      true;
+  reduced_bne_lw_scratchpad_reject.require_no_native_ram_load_fastpath = true;
+  cases.push_back(reduced_bne_lw_scratchpad_reject);
 
   CpuCompareCase beq_taken{};
   beq_taken.name = "native_branch_tail_beq_taken_alu_delay";
@@ -2113,6 +2311,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       g_cpu_x64_jit_native_alu_cli_value;
   const bool saved_ram_load_fastpath =
       g_cpu_x64_jit_ram_load_fastpath_enabled;
+  const bool saved_reduced_helper_branch_tail =
+      g_cpu_x64_jit_reduced_helper_branch_tail_enabled;
   g_cpu_backend_compare_test_active = true;
   g_cpu_x64_jit_force_compile = true;
 
@@ -2132,9 +2332,19 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           test_case.require_native_memory_tier_entry_when_available ||
           test_case
               .require_native_reduced_helper_ram_load_entry_when_available ||
+          test_case
+              .require_native_reduced_helper_branch_tail_ram_load_entry_when_available ||
           test_case.require_reduced_helper_preflight_mmio_when_available ||
           test_case.require_reduced_helper_preflight_unaligned_when_available ||
           test_case.require_reduced_helper_preflight_non_ram_when_available ||
+          test_case
+              .require_reduced_helper_branch_tail_preflight_mmio_when_available ||
+          test_case
+              .require_reduced_helper_branch_tail_preflight_unaligned_when_available ||
+          test_case
+              .require_reduced_helper_branch_tail_preflight_non_ram_when_available ||
+          test_case
+              .require_reduced_helper_branch_tail_reject_load_base_written_when_available ||
           test_case.disable_memory_native_for_x64 ||
           name.find("memory") != std::string_view::npos ||
           name.find("mmio") != std::string_view::npos;
@@ -2370,17 +2580,52 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_reduced_helper_branch_tail_entry_when_available &&
+            result.stats.native_branch_tail_reduced_helper_entries == 0) {
+          native_check = "native_reduced_helper_branch_tail_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_reduced_helper_branch_tail_ram_load_entry_when_available &&
+            result.stats.native_branch_tail_reduced_helper_ram_load_entries ==
+                0) {
+          native_check =
+              "native_reduced_helper_branch_tail_ram_load_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
             test_case.require_no_native_reduced_helper_ram_load_entry &&
             result.stats.native_reduced_helper_ram_load_entries != 0) {
           native_check = "unexpected_native_reduced_helper_ram_load_entry";
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_no_native_reduced_helper_branch_tail_ram_load_entry &&
+            result.stats.native_branch_tail_reduced_helper_ram_load_entries !=
+                0) {
+          native_check =
+              "unexpected_native_reduced_helper_branch_tail_ram_load_entry";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
             test_case.require_no_native_instruction_helpers_when_available &&
             (result.stats.native_prepare_helper_calls != 0 ||
              result.stats.native_finish_helper_calls != 0 ||
-             result.stats.native_memory_helper_calls != 0)) {
+             result.stats.native_memory_helper_calls != 0 ||
+             result.stats.native_branch_helper_calls != 0)) {
           native_check = "native_instruction_helpers_forbidden";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case.require_no_native_branch_tail_helpers_when_available &&
+            (result.stats.native_branch_tail_prepare_helper_calls != 0 ||
+             result.stats.native_branch_tail_finish_helper_calls != 0 ||
+             result.stats.native_branch_tail_memory_helper_calls != 0 ||
+             result.stats.native_branch_tail_branch_helper_calls != 0)) {
+          native_check = "native_branch_tail_helpers_forbidden";
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
@@ -2403,6 +2648,46 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             result.stats.native_reduced_helper_ram_load_preflight_non_ram ==
                 0) {
           native_check = "native_reduced_helper_non_ram_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_branch_tail_preflight_mmio_when_available &&
+            result.stats
+                    .native_branch_tail_reduced_helper_ram_load_preflight_mmio ==
+                0) {
+          native_check =
+              "native_reduced_helper_branch_tail_mmio_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_branch_tail_preflight_unaligned_when_available &&
+            result.stats
+                    .native_branch_tail_reduced_helper_ram_load_preflight_unaligned ==
+                0) {
+          native_check =
+              "native_reduced_helper_branch_tail_unaligned_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_branch_tail_preflight_non_ram_when_available &&
+            result.stats
+                    .native_branch_tail_reduced_helper_ram_load_preflight_non_ram ==
+                0) {
+          native_check =
+              "native_reduced_helper_branch_tail_non_ram_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_reduced_helper_branch_tail_reject_load_base_written_when_available &&
+            result.stats
+                    .native_branch_tail_reduced_helper_reject_load_base_written ==
+                0) {
+          native_check =
+              "native_reduced_helper_branch_tail_load_base_write_reject_missing";
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
@@ -2475,6 +2760,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case
                .require_native_reduced_helper_ram_load_entry_when_available ||
            test_case
+               .require_native_reduced_helper_branch_tail_entry_when_available ||
+           test_case
+               .require_native_reduced_helper_branch_tail_ram_load_entry_when_available ||
+           test_case
                .require_native_branch_delay_memory_helper_when_available)) {
         LOG_INFO(
             "CPU_COMPARE_NATIVE name=%s required=1 available=%u compiled=%u entered=%u native_instr=%llu decoded_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu code_bytes=%llu attempts=%llu successes=%llu force=%u hot_threshold=%u min_block=%u",
@@ -2506,7 +2795,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       if (mode == CpuExecutionMode::X64Jit &&
           test_case.require_native_branch_tail_when_available) {
         LOG_INFO(
-            "CPU_COMPARE_BRANCH_TAIL name=%s blocks_compiled=%llu entries=%llu taken=%llu not_taken=%llu rejects=%llu delay_memory_helpers=%llu",
+            "CPU_COMPARE_BRANCH_TAIL name=%s blocks_compiled=%llu entries=%llu taken=%llu not_taken=%llu rejects=%llu delay_memory_helpers=%llu reduced_entries=%llu reduced_ram_load_entries=%llu reduced_instr=%llu reduced_ram_load_instr=%llu reduced_avoided_prepare=%llu reduced_avoided_finish=%llu reduced_avoided_branch=%llu reduced_avoided_memory=%llu",
             test_case.name,
             static_cast<unsigned long long>(
                 result.stats.native_branch_tail_blocks_compiled),
@@ -2518,7 +2807,29 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             static_cast<unsigned long long>(
                 result.stats.native_branch_tail_rejects),
             static_cast<unsigned long long>(
-                result.stats.native_branch_delay_slot_memory_helpers));
+                result.stats.native_branch_delay_slot_memory_helpers),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_tail_reduced_helper_entries),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_ram_load_entries),
+            static_cast<unsigned long long>(
+                result.stats.native_branch_tail_reduced_helper_instructions),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_ram_load_instructions),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_prepare_helpers_avoided),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_finish_helpers_avoided),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_branch_helpers_avoided),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_branch_tail_reduced_helper_memory_helpers_avoided));
       }
 
       if (mode == CpuExecutionMode::X64Jit &&
@@ -2565,20 +2876,37 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       if (mode == CpuExecutionMode::X64Jit &&
           (test_case
                .require_native_reduced_helper_ram_load_entry_when_available ||
+           test_case
+               .require_native_reduced_helper_branch_tail_ram_load_entry_when_available ||
            test_case.require_no_native_reduced_helper_ram_load_entry ||
+           test_case
+               .require_no_native_reduced_helper_branch_tail_ram_load_entry ||
            test_case.require_reduced_helper_preflight_mmio_when_available ||
            test_case
                .require_reduced_helper_preflight_unaligned_when_available ||
            test_case
-               .require_reduced_helper_preflight_non_ram_when_available)) {
-        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu native_helpers=%llu",
+               .require_reduced_helper_preflight_non_ram_when_available ||
+           test_case
+               .require_reduced_helper_branch_tail_preflight_mmio_when_available ||
+           test_case
+               .require_reduced_helper_branch_tail_preflight_unaligned_when_available ||
+           test_case
+               .require_reduced_helper_branch_tail_preflight_non_ram_when_available ||
+           test_case
+               .require_reduced_helper_branch_tail_reject_load_base_written_when_available)) {
+        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu branch_tail_ram_load_entries=%llu fast_loads=%llu branch_tail_fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu branch_tail_preflight_fallbacks=%llu branch_tail_preflight_mmio=%llu branch_tail_preflight_unaligned=%llu branch_tail_preflight_non_ram=%llu branch_tail_preflight_disabled=%llu branch_tail_reject_load_base_written=%llu native_helpers=%llu",
                  test_case.name,
                  static_cast<unsigned long long>(
                      result.stats.native_reduced_helper_entries),
                  static_cast<unsigned long long>(
                      result.stats.native_reduced_helper_ram_load_entries),
                  static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_entries),
+                 static_cast<unsigned long long>(
                      result.stats.native_memory_fastpath_loads),
+                 static_cast<unsigned long long>(
+                     result.stats.native_branch_tail_ram_load_fastpath_loads),
                  static_cast<unsigned long long>(
                      result.stats
                          .native_reduced_helper_ram_load_preflight_fallbacks),
@@ -2594,6 +2922,24 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                  static_cast<unsigned long long>(
                      result.stats
                          .native_reduced_helper_ram_load_preflight_disabled),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_preflight_fallbacks),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_preflight_mmio),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_preflight_unaligned),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_preflight_non_ram),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_ram_load_preflight_disabled),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_reduced_helper_reject_load_base_written),
                  static_cast<unsigned long long>(
                      result.stats.native_memory_helper_calls));
       }
@@ -2685,6 +3031,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_native_alu_cli_override = saved_alu_native_cli_override;
   g_cpu_x64_jit_native_alu_cli_value = saved_alu_native_cli_value;
   g_cpu_x64_jit_ram_load_fastpath_enabled = saved_ram_load_fastpath;
+  g_cpu_x64_jit_reduced_helper_branch_tail_enabled =
+      saved_reduced_helper_branch_tail;
   g_cpu_backend_compare_test_active = saved_compare_test_active;
   g_cpu_execution_mode_cli_override = saved_override;
   g_cpu_execution_mode_cli_value = saved_override_value;
