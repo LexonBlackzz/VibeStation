@@ -151,6 +151,18 @@ const char *native_reject_detail_name(NativeBlockRejectDetail detail) {
     return "reduced_helper_branch_tail_unsupported_delay_slot";
   case NativeBlockRejectDetail::ReducedHelperBranchTailCompareIrq:
     return "reduced_helper_branch_tail_compare_irq";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailDisabled:
+    return "aggressive_reduced_helper_branch_tail_disabled";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailMemory:
+    return "aggressive_reduced_helper_branch_tail_memory";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailStore:
+    return "aggressive_reduced_helper_branch_tail_store";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailDelaySlotMemory:
+    return "aggressive_reduced_helper_branch_tail_delay_slot_memory";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailUnsupportedBody:
+    return "aggressive_reduced_helper_branch_tail_unsupported_body";
+  case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailUnsupportedDelaySlot:
+    return "aggressive_reduced_helper_branch_tail_unsupported_delay_slot";
   case NativeBlockRejectDetail::None:
   default:
     return "none";
@@ -302,6 +314,102 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_branch_tail_reduced_helper_load_lhu = delta_u64(
       current.native_branch_tail_reduced_helper_load_lhu,
       previous.native_branch_tail_reduced_helper_load_lhu);
+  out.native_branch_tail_aggressive_reduced_helper_candidate_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_candidate_blocks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_candidate_blocks);
+  out.native_branch_tail_aggressive_reduced_helper_rejected_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_rejected_blocks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_rejected_blocks);
+  out.native_branch_tail_aggressive_reduced_helper_reject_disabled =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_disabled,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_disabled);
+  out.native_branch_tail_aggressive_reduced_helper_reject_memory = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_reject_memory,
+      previous.native_branch_tail_aggressive_reduced_helper_reject_memory);
+  out.native_branch_tail_aggressive_reduced_helper_reject_store = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_reject_store,
+      previous.native_branch_tail_aggressive_reduced_helper_reject_store);
+  out.native_branch_tail_aggressive_reduced_helper_reject_store_sb =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_store_sb,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_store_sb);
+  out.native_branch_tail_aggressive_reduced_helper_reject_store_sh =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_store_sh,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_store_sh);
+  out.native_branch_tail_aggressive_reduced_helper_reject_store_other =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_store_other,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_store_other);
+  out.native_branch_tail_aggressive_reduced_helper_reject_delay_slot_memory =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_memory,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_memory);
+  out.native_branch_tail_aggressive_reduced_helper_reject_delay_slot_load =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_load,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_load);
+  out.native_branch_tail_aggressive_reduced_helper_reject_delay_slot_store =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_store,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_store);
+  out.native_branch_tail_aggressive_reduced_helper_reject_body = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_reject_body,
+      previous.native_branch_tail_aggressive_reduced_helper_reject_body);
+  out.native_branch_tail_aggressive_reduced_helper_reject_delay_slot =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot);
+  out.native_branch_tail_aggressive_reduced_helper_load_candidate_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_load_candidate_blocks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_load_candidate_blocks);
+  out.native_branch_tail_aggressive_reduced_helper_store_candidate_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_store_candidate_blocks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_store_candidate_blocks);
+  out.native_branch_tail_aggressive_reduced_helper_mixed_load_store_candidate_blocks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_mixed_load_store_candidate_blocks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_mixed_load_store_candidate_blocks);
+  out.native_branch_tail_aggressive_reduced_helper_store_sb =
+      delta_u64(current.native_branch_tail_aggressive_reduced_helper_store_sb,
+                previous.native_branch_tail_aggressive_reduced_helper_store_sb);
+  out.native_branch_tail_aggressive_reduced_helper_store_sh =
+      delta_u64(current.native_branch_tail_aggressive_reduced_helper_store_sh,
+                previous.native_branch_tail_aggressive_reduced_helper_store_sh);
+  out.native_branch_tail_aggressive_reduced_helper_store_sw =
+      delta_u64(current.native_branch_tail_aggressive_reduced_helper_store_sw,
+                previous.native_branch_tail_aggressive_reduced_helper_store_sw);
   out.native_compile_failures =
       delta_u64(current.native_compile_failures,
                 previous.native_compile_failures);
@@ -528,6 +636,24 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_branch_tail_reduced_helper_ram_load_entries = delta_u64(
       current.native_branch_tail_reduced_helper_ram_load_entries,
       previous.native_branch_tail_reduced_helper_ram_load_entries);
+  out.native_branch_tail_aggressive_reduced_helper_entries = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_entries,
+      previous.native_branch_tail_aggressive_reduced_helper_entries);
+  out.native_branch_tail_aggressive_reduced_helper_ram_load_entries =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_ram_load_entries,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_ram_load_entries);
+  out.native_branch_tail_aggressive_reduced_helper_store_entries = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_store_entries,
+      previous.native_branch_tail_aggressive_reduced_helper_store_entries);
+  out.native_branch_tail_aggressive_reduced_helper_mixed_memory_entries =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries);
   out.native_reduced_helper_instructions = delta_u64(
       current.native_reduced_helper_instructions,
       previous.native_reduced_helper_instructions);
@@ -537,6 +663,21 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_branch_tail_reduced_helper_ram_load_instructions = delta_u64(
       current.native_branch_tail_reduced_helper_ram_load_instructions,
       previous.native_branch_tail_reduced_helper_ram_load_instructions);
+  out.native_branch_tail_aggressive_reduced_helper_instructions = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_instructions,
+      previous.native_branch_tail_aggressive_reduced_helper_instructions);
+  out.native_branch_tail_aggressive_reduced_helper_ram_load_instructions =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_ram_load_instructions,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_ram_load_instructions);
+  out.native_branch_tail_aggressive_reduced_helper_store_instructions =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_store_instructions,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_store_instructions);
   out.native_branch_tail_reduced_helper_prepare_helpers_avoided = delta_u64(
       current.native_branch_tail_reduced_helper_prepare_helpers_avoided,
       previous.native_branch_tail_reduced_helper_prepare_helpers_avoided);
@@ -549,6 +690,113 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_branch_tail_reduced_helper_memory_helpers_avoided = delta_u64(
       current.native_branch_tail_reduced_helper_memory_helpers_avoided,
       previous.native_branch_tail_reduced_helper_memory_helpers_avoided);
+  out.native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided);
+  out.native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided);
+  out.native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided);
+  out.native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided);
+  out.native_branch_tail_aggressive_reduced_helper_runtime_fallbacks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks);
+  out.native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks);
+  out.native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_fallbacks =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_fallbacks,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_fallbacks);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_mmio = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_preflight_mmio,
+      previous.native_branch_tail_aggressive_reduced_helper_preflight_mmio);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_unaligned =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_unaligned,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_unaligned);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_non_ram =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_non_ram,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_non_ram);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_scratchpad =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_scratchpad,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_scratchpad);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_disabled =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_disabled,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_disabled);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_code_page =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_code_page,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_code_page);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_passes =
+      delta_u64(
+          current.native_branch_tail_aggressive_reduced_helper_preflight_passes,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_passes);
+  out.native_branch_tail_aggressive_reduced_helper_preflight_instructions =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_preflight_instructions,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_preflight_instructions);
+  out.native_branch_tail_aggressive_reduced_helper_helper_fallback_entries =
+      delta_u64(
+          current
+              .native_branch_tail_aggressive_reduced_helper_helper_fallback_entries,
+          previous
+              .native_branch_tail_aggressive_reduced_helper_helper_fallback_entries);
+  out.native_branch_tail_aggressive_reduced_helper_fast_store8 = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_fast_store8,
+      previous.native_branch_tail_aggressive_reduced_helper_fast_store8);
+  out.native_branch_tail_aggressive_reduced_helper_fast_store16 = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_fast_store16,
+      previous.native_branch_tail_aggressive_reduced_helper_fast_store16);
+  out.native_branch_tail_aggressive_reduced_helper_fast_store32 = delta_u64(
+      current.native_branch_tail_aggressive_reduced_helper_fast_store32,
+      previous.native_branch_tail_aggressive_reduced_helper_fast_store32);
   out.native_branch_tail_reduced_helper_normal_fallbacks = delta_u64(
       current.native_branch_tail_reduced_helper_normal_fallbacks,
       previous.native_branch_tail_reduced_helper_normal_fallbacks);
@@ -2910,6 +3158,144 @@ void CpuOptimizedBackend::log_stats_section(
            static_cast<unsigned long long>(
                delta
                    .native_branch_tail_reduced_helper_ram_load_preflight_disabled));
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_aggressive_reduced_helper enabled=%u candidates=%llu rejected=%llu reject_disabled=%llu reject_memory=%llu reject_store=%llu reject_delay_slot_memory=%llu reject_body=%llu reject_delay=%llu entries=%llu ram_load_entries=%llu store_entries=%llu mixed_memory_entries=%llu instructions=%llu ram_load_instructions=%llu store_instructions=%llu avoided_prepare=%llu avoided_finish=%llu avoided_branch=%llu avoided_memory=%llu fast_store8=%llu fast_store16=%llu fast_store32=%llu runtime_fallbacks=%llu load_delay_fallbacks=%llu irq_hook_fallbacks=%llu helper_fallback_entries=%llu",
+           cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled() ? 1u
+                                                                        : 0u,
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_rejected_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_disabled),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_memory),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_store),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_memory),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_body),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_delay_slot),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_aggressive_reduced_helper_entries),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_ram_load_entries),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_aggressive_reduced_helper_store_entries),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_instructions),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_ram_load_instructions),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_store_instructions),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_fast_store8),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_fast_store16),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_fast_store32),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_helper_fallback_entries));
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_aggressive_reduced_helper_detail reject_store_sb=%llu reject_store_sh=%llu reject_store_other=%llu reject_delay_slot_load=%llu reject_delay_slot_store=%llu store_sb=%llu store_sh=%llu store_sw=%llu",
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_store_sb),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_store_sh),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_store_other),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_load),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_store),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_aggressive_reduced_helper_store_sb),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_aggressive_reduced_helper_store_sh),
+           static_cast<unsigned long long>(
+               delta.native_branch_tail_aggressive_reduced_helper_store_sw));
+  LOG_INFO("CPU_BACKEND_STATS branch_tail_aggressive_reduced_helper_memory load_candidates=%llu store_candidates=%llu mixed_load_store_candidates=%llu preflight_passes=%llu preflight_work=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_scratchpad=%llu preflight_disabled=%llu preflight_code_page=%llu",
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_load_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_store_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_mixed_load_store_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_passes),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_instructions),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_fallbacks),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_mmio),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_unaligned),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_non_ram),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_scratchpad),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_disabled),
+           static_cast<unsigned long long>(
+               delta
+                   .native_branch_tail_aggressive_reduced_helper_preflight_code_page));
   LOG_INFO("CPU_BACKEND_STATS native_tiers all_enabled=%u memory_enabled=%u alu_enabled=%u branch_tail_enabled=%u memory_compiled=%llu memory_entries=%llu alu_compiled=%llu alu_entries=%llu all_disabled_fallbacks=%llu memory_disabled_fallbacks=%llu alu_disabled_fallbacks=%llu compare_flag_leak_warnings=%llu",
            cpu_x64_jit_all_native_enabled() ? 1u : 0u,
            cpu_x64_jit_native_memory_enabled() ? 1u : 0u,

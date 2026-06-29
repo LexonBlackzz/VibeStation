@@ -2305,6 +2305,18 @@ int main(int argc, char *argv[]) {
       g_cpu_x64_jit_reduced_helper_branch_tail_enabled = false;
       continue;
     }
+    if (a == "--jit-enable-aggressive-reduced-helper-branch-tail") {
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override = true;
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_value = true;
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled = true;
+      continue;
+    }
+    if (a == "--jit-disable-aggressive-reduced-helper-branch-tail") {
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override = true;
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_value = false;
+      g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled = false;
+      continue;
+    }
     if (a == "--jit-branch-tail-log") {
       g_cpu_x64_jit_branch_tail_logging = true;
       g_cpu_backend_stats_logging = true;

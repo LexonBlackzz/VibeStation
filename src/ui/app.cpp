@@ -1811,6 +1811,12 @@ void App::load_persistent_config() {
             g_cpu_x64_jit_branch_tail_enabled =
                 parse_bool(value, g_cpu_x64_jit_branch_tail_enabled);
         }
+        else if (key ==
+                 "cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled") {
+            g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled =
+                parse_bool(value,
+                    g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled);
+        }
         else if (key == "cpu_x64_jit_all_native_enabled") {
             g_cpu_x64_jit_all_native_enabled =
                 parse_bool(value, g_cpu_x64_jit_all_native_enabled);
@@ -2151,6 +2157,9 @@ void App::save_persistent_config() const {
         << g_cpu_x64_jit_min_block_instructions << "\n";
     out << "cpu_x64_jit_branch_tail_enabled="
         << (g_cpu_x64_jit_branch_tail_enabled ? 1 : 0) << "\n";
+    out << "cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled="
+        << (g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled ? 1 : 0)
+        << "\n";
     out << "cpu_x64_jit_all_native_enabled="
         << (g_cpu_x64_jit_all_native_enabled ? 1 : 0) << "\n";
     out << "cpu_x64_jit_native_memory_enabled="

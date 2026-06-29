@@ -123,10 +123,50 @@ bool is_x64_load_op(DecodedOp op) {
          op == DecodedOp::Lhu;
 }
 
+bool is_x64_store_op(DecodedOp op) {
+  return op == DecodedOp::Sb || op == DecodedOp::Sh ||
+         op == DecodedOp::Sw;
+}
+
+bool is_x64_aggressive_store_op(DecodedOp op) {
+  return op == DecodedOp::Sb || op == DecodedOp::Sh ||
+         op == DecodedOp::Sw;
+}
+
 u32 count_x64_load_ops(const DecodedBlock &block) {
   u32 count = 0;
   for (u32 i = 0; i < block.instruction_count; ++i) {
     if (is_x64_load_op(block.instructions[i].op)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+u32 count_x64_store_ops(const DecodedBlock &block) {
+  u32 count = 0;
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    if (is_x64_store_op(block.instructions[i].op)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+u32 count_x64_store_ops(const DecodedBlock &block, DecodedOp op) {
+  u32 count = 0;
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    if (block.instructions[i].op == op) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+u32 count_x64_memory_ops(const DecodedBlock &block) {
+  u32 count = 0;
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    if (is_x64_memory_op(block.instructions[i].op)) {
       ++count;
     }
   }
@@ -381,6 +421,66 @@ bool is_x64_reduced_helper_branch_tail_block(
       !is_x64_stage1_op(delay.op)) {
     reject_detail =
         NativeBlockRejectDetail::ReducedHelperBranchTailUnsupportedDelaySlot;
+    return false;
+  }
+  return true;
+}
+
+bool is_x64_aggressive_reduced_helper_branch_tail_block(
+    const DecodedBlock &block, NativeBlockRejectDetail &reject_detail) {
+  reject_detail = NativeBlockRejectDetail::None;
+  if (!cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled()) {
+    reject_detail =
+        NativeBlockRejectDetail::AggressiveReducedHelperBranchTailDisabled;
+    return false;
+  }
+  if (!block.native_branch_tail || block.instruction_count < 2u) {
+    reject_detail = NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailUnsupportedBody;
+    return false;
+  }
+  if (block.has_memory && !g_cpu_x64_jit_ram_load_fastpath_enabled) {
+    reject_detail = NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
+    return false;
+  }
+
+  const u32 branch_index = block.instruction_count - 2u;
+  for (u32 i = 0; i < branch_index; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (inst.is_branch || inst.must_fallback) {
+      reject_detail = NativeBlockRejectDetail::
+          AggressiveReducedHelperBranchTailUnsupportedBody;
+      return false;
+    }
+    if (inst.may_access_memory) {
+      if (is_x64_load_op(inst.op) || is_x64_aggressive_store_op(inst.op)) {
+        continue;
+      }
+      reject_detail =
+          is_x64_store_op(inst.op)
+              ? NativeBlockRejectDetail::
+                    AggressiveReducedHelperBranchTailStore
+              : NativeBlockRejectDetail::
+                    AggressiveReducedHelperBranchTailMemory;
+      return false;
+    }
+    if (inst.may_raise_exception || !is_x64_stage1_op(inst.op)) {
+      reject_detail = NativeBlockRejectDetail::
+          AggressiveReducedHelperBranchTailUnsupportedBody;
+      return false;
+    }
+  }
+
+  const DecodedInstruction &delay = block.instructions[branch_index + 1u];
+  if (delay.may_access_memory) {
+    reject_detail = NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailDelaySlotMemory;
+    return false;
+  }
+  if (delay.is_branch || delay.must_fallback || delay.may_raise_exception ||
+      !is_x64_stage1_op(delay.op)) {
+    reject_detail = NativeBlockRejectDetail::
+        AggressiveReducedHelperBranchTailUnsupportedDelaySlot;
     return false;
   }
   return true;
@@ -943,6 +1043,26 @@ void emit_reduced_helper_ram_load(Xbyak::CodeGenerator &code,
   code.mov(code.dword[code.rax], code.r10d);
 }
 
+void emit_aggressive_reduced_helper_ram_store(
+    Xbyak::CodeGenerator &code, const Xbyak::Reg64 &ctx,
+    const Xbyak::Reg64 &gpr, const DecodedInstruction &inst) {
+  emit_read_gpr(code, code.r10d, gpr, inst.rs);
+  if (inst.simm != 0) {
+    code.add(code.r10d, static_cast<u32>(inst.simm));
+  }
+  emit_read_gpr(code, code.ecx, gpr, inst.rt);
+  code.mov(code.eax, code.r10d);
+  code.and_(code.eax, 0x1FFFFFFFu);
+  code.mov(code.r9, code.ptr[ctx + offsetof(X64NativeContext, ram_data)]);
+  if (inst.op == DecodedOp::Sb) {
+    code.mov(code.byte[code.r9 + code.rax], code.cl);
+  } else if (inst.op == DecodedOp::Sh) {
+    code.mov(code.word[code.r9 + code.rax], code.cx);
+  } else {
+    code.mov(code.dword[code.r9 + code.rax], code.ecx);
+  }
+}
+
 void emit_branch_helper_call(Xbyak::CodeGenerator &code,
                              const Xbyak::Reg64 &ctx,
                              const Xbyak::Reg64 &gpr,
@@ -1091,6 +1211,9 @@ void emit_x64_reduced_helper_branch_tail_block(X64NativeContext &context,
     const DecodedInstruction &inst = block.instructions[i];
     if (is_x64_load_op(inst.op)) {
       emit_reduced_helper_ram_load(code, ctx, gpr, inst, true);
+    } else if (block.native_aggressive_reduced_helper_branch_tail &&
+               is_x64_aggressive_store_op(inst.op)) {
+      emit_aggressive_reduced_helper_ram_store(code, ctx, gpr, inst);
     } else {
       emit_x64_instruction(code, inst, ctx, gpr);
     }
@@ -1233,7 +1356,8 @@ void emit_x64_helper_block(X64NativeContext &context,
 void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
                     uintptr_t prepare_fn, uintptr_t memory_fn,
                     uintptr_t branch_fn, uintptr_t finish_fn) {
-  if (block.native_reduced_helper_branch_tail) {
+  if (block.native_reduced_helper_branch_tail ||
+      block.native_aggressive_reduced_helper_branch_tail) {
     emit_x64_reduced_helper_branch_tail_block(context, block);
   } else if (context.uses_instruction_helpers) {
     emit_x64_helper_block(context, block, prepare_fn, memory_fn, branch_fn,
@@ -1748,12 +1872,22 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
       block.native_branch_tail &&
       is_x64_reduced_helper_branch_tail_block(
           block, reduced_helper_branch_tail_detail);
+  NativeBlockRejectDetail aggressive_reduced_helper_branch_tail_detail =
+      NativeBlockRejectDetail::None;
+  const bool aggressive_reduced_helper_branch_tail_candidate =
+      block.native_branch_tail &&
+      is_x64_aggressive_reduced_helper_branch_tail_block(
+          block, aggressive_reduced_helper_branch_tail_detail);
   block.native_reduced_helper_ram_load =
       block.native_stage1_safe && !block.native_branch_tail &&
       reduced_helper_ram_load_candidate &&
       g_cpu_x64_jit_ram_load_fastpath_enabled;
+  block.native_aggressive_reduced_helper_branch_tail =
+      block.native_stage1_safe &&
+      aggressive_reduced_helper_branch_tail_candidate;
   block.native_reduced_helper_branch_tail =
-      block.native_stage1_safe && reduced_helper_branch_tail_candidate;
+      block.native_stage1_safe && reduced_helper_branch_tail_candidate &&
+      !block.native_aggressive_reduced_helper_branch_tail;
   if (reduced_helper_ram_load_candidate &&
       !g_cpu_x64_jit_ram_load_fastpath_enabled) {
     reduced_helper_detail =
@@ -1763,10 +1897,14 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
       block.native_stage1_safe && !block.native_branch_tail &&
       (!block.has_memory || block.native_reduced_helper_ram_load);
   block.native_reduced_helper =
-      direct_reduced_helper || block.native_reduced_helper_branch_tail;
+      direct_reduced_helper || block.native_reduced_helper_branch_tail ||
+      block.native_aggressive_reduced_helper_branch_tail;
   block.native_reduced_helper_reject_detail =
-      block.native_branch_tail ? reduced_helper_branch_tail_detail
-                               : reduced_helper_detail;
+      block.native_branch_tail
+          ? (cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled()
+                 ? aggressive_reduced_helper_branch_tail_detail
+                 : reduced_helper_branch_tail_detail)
+          : reduced_helper_detail;
   block.native_reject_detail =
       branch_tail_detail != NativeBlockRejectDetail::None
           ? branch_tail_detail
@@ -1805,6 +1943,18 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   }
   if (block.native_branch_tail) {
     if (block.has_load) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_load_candidate_blocks;
+    }
+    if (block.has_store) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_store_candidate_blocks;
+    }
+    if (block.has_load && block.has_store) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_mixed_load_store_candidate_blocks;
+    }
+    if (block.has_load) {
       ++stats_.native_branch_tail_reduced_helper_load_candidate_blocks;
     }
     if (block.has_store) {
@@ -1829,6 +1979,91 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
         break;
       case DecodedOp::Lhu:
         ++stats_.native_branch_tail_reduced_helper_load_lhu;
+        break;
+      case DecodedOp::Sb:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_store_sb;
+        break;
+      case DecodedOp::Sh:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_store_sh;
+        break;
+      case DecodedOp::Sw:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_store_sw;
+        break;
+      default:
+        break;
+      }
+    }
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_candidate_blocks;
+    } else {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_rejected_blocks;
+      switch (aggressive_reduced_helper_branch_tail_detail) {
+      case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailDisabled:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_disabled;
+        break;
+      case NativeBlockRejectDetail::ReducedHelperPreflightDisabled:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_memory;
+        break;
+      case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailMemory:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_memory;
+        break;
+      case NativeBlockRejectDetail::AggressiveReducedHelperBranchTailStore:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_store;
+        for (u32 i = 0; i + 2u < block.instruction_count; ++i) {
+          switch (block.instructions[i].op) {
+          case DecodedOp::Sb:
+            ++stats_
+                  .native_branch_tail_aggressive_reduced_helper_reject_store_sb;
+            break;
+          case DecodedOp::Sh:
+            ++stats_
+                  .native_branch_tail_aggressive_reduced_helper_reject_store_sh;
+            break;
+          case DecodedOp::Sw:
+            break;
+          default:
+            if (is_x64_store_op(block.instructions[i].op)) {
+              ++stats_
+                    .native_branch_tail_aggressive_reduced_helper_reject_store_other;
+            }
+            break;
+          }
+        }
+        break;
+      case NativeBlockRejectDetail::
+          AggressiveReducedHelperBranchTailDelaySlotMemory:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_memory;
+        if (block.instruction_count >= 2u) {
+          const DecodedInstruction &delay =
+              block.instructions[block.instruction_count - 1u];
+          if (is_x64_load_op(delay.op)) {
+            ++stats_
+                  .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_load;
+          } else if (is_x64_store_op(delay.op)) {
+            ++stats_
+                  .native_branch_tail_aggressive_reduced_helper_reject_delay_slot_store;
+          }
+        }
+        break;
+      case NativeBlockRejectDetail::
+          AggressiveReducedHelperBranchTailUnsupportedBody:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_body;
+        break;
+      case NativeBlockRejectDetail::
+          AggressiveReducedHelperBranchTailUnsupportedDelaySlot:
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_reject_delay_slot;
         break;
       default:
         break;
@@ -1994,7 +2229,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->is_branch_tail = block.native_branch_tail;
     context->uses_instruction_helpers =
         (context->is_branch_tail &&
-         !block.native_reduced_helper_branch_tail) ||
+         !block.native_reduced_helper_branch_tail &&
+         !block.native_aggressive_reduced_helper_branch_tail) ||
         (block_uses_instruction_helpers(block) &&
          !block.native_reduced_helper);
     if (context->is_branch_tail) {
@@ -2006,7 +2242,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     for (u32 i = 0; i < block.instruction_count; ++i) {
       context->base_cycles += block.instructions[i].cycles;
       if ((block.native_reduced_helper_ram_load ||
-           block.native_reduced_helper_branch_tail) &&
+           block.native_reduced_helper_branch_tail ||
+           block.native_aggressive_reduced_helper_branch_tail) &&
           is_x64_load_op(block.instructions[i].op)) {
         context->base_cycles += 4u;
       }
@@ -2129,10 +2366,17 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     cpu_.active_branch_pc_ = 0u;
   }
 
-  if (block.native_reduced_helper_branch_tail &&
+  if ((block.native_reduced_helper_branch_tail ||
+       block.native_aggressive_reduced_helper_branch_tail) &&
       g_cpu_backend_compare_irq_on_branch) {
-    ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
-    ++stats_.native_branch_tail_reduced_helper_irq_hook_fallbacks;
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
+      ++stats_.native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks;
+    } else {
+      ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
+      ++stats_.native_branch_tail_reduced_helper_irq_hook_fallbacks;
+    }
     return reject_to_decoded(stats_.native_reject_irq_state,
                              NativeBlockRejectDetail::
                                  ReducedHelperBranchTailCompareIrq);
@@ -2140,11 +2384,350 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   const bool active_load_delay =
       cpu_.load_.reg != 0 || cpu_.next_load_.reg != 0;
-  if (active_load_delay && block.native_reduced_helper_branch_tail) {
-    ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
-    ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
+  if (active_load_delay &&
+      (block.native_reduced_helper_branch_tail ||
+       block.native_aggressive_reduced_helper_branch_tail)) {
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks;
+    } else {
+      ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
+      ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
+    }
     return reject_to_decoded(stats_.native_reject_load_delay_state,
                              NativeBlockRejectDetail::LoadDelayState);
+  }
+
+  if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory) {
+    u32 aggressive_preflight_simulated_instructions = 0;
+    bool aggressive_preflight_saw_scratchpad = false;
+    auto reject_aggressive_preflight =
+        [&](NativeBlockRejectDetail detail) -> CpuBlockRunResult {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_branch_tail_to_decoded_fallbacks;
+      ++stats_.native_reduced_helper_fallbacks;
+      ++stats_.native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
+      ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_fallbacks;
+      stats_
+          .native_branch_tail_aggressive_reduced_helper_preflight_instructions +=
+          aggressive_preflight_simulated_instructions;
+      if (detail == NativeBlockRejectDetail::Mmio) {
+        ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_mmio;
+        ++stats_.native_reject_mmio;
+      } else if (detail == NativeBlockRejectDetail::Unaligned) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_unaligned;
+        ++stats_.native_reject_unaligned;
+      } else if (detail == NativeBlockRejectDetail::Memory) {
+        ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_non_ram;
+        if (aggressive_preflight_saw_scratchpad) {
+          ++stats_
+                .native_branch_tail_aggressive_reduced_helper_preflight_scratchpad;
+        }
+        ++stats_.native_reject_memory;
+      } else if (detail == NativeBlockRejectDetail::ICache) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_code_page;
+        ++stats_.native_reject_icache;
+      } else {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_disabled;
+        ++stats_.native_ram_disabled_fallbacks;
+      }
+      record_rejected_block(detail);
+      return execute_block(block, max_cycles, max_instructions);
+    };
+
+    auto store_touches_compiled_code_page = [&](u32 addr,
+                                                u32 size) -> bool {
+      if (size == 0u) {
+        return false;
+      }
+      const u32 start = normalized_code_addr(addr);
+      const u64 end64 =
+          std::min<u64>(static_cast<u64>(start) + size, 0x100000000ull);
+      if (end64 <= start) {
+        return true;
+      }
+      const u32 start_page = code_page_for_normalized_addr(start);
+      const u32 end_page =
+          code_page_for_normalized_addr(static_cast<u32>(end64 - 1u));
+      for (u32 page = start_page; page <= end_page; ++page) {
+        if (code_page_maybe_compiled(page)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
+        g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
+        g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr ||
+        ((cpu_.cop0_sr_ & (1u << 16)) != 0u && block.has_store)) {
+      return reject_aggressive_preflight(
+          NativeBlockRejectDetail::ReducedHelperPreflightDisabled);
+    }
+
+    std::array<u32, 32> sim_gpr{};
+    for (u32 i = 0; i < sim_gpr.size(); ++i) {
+      sim_gpr[i] = cpu_.gpr_[i];
+    }
+    u32 sim_load_reg = 0;
+    u32 sim_load_value = 0;
+    u32 sim_next_load_reg = 0;
+    u32 sim_next_load_value = 0;
+    std::array<u32, DecodedBlock::kMaxInstructions * 4u> sim_store_addr{};
+    std::array<u8, DecodedBlock::kMaxInstructions * 4u> sim_store_value{};
+    u32 sim_store_count = 0;
+
+    auto sim_write_gpr = [&](u8 index, u32 value) {
+      if (index == 0u) {
+        sim_gpr[0] = 0;
+        return;
+      }
+      if (sim_load_reg == index) {
+        sim_load_reg = 0;
+      }
+      sim_gpr[index] = value;
+    };
+    auto sim_schedule_load = [&](u8 index, u32 value) {
+      if (index == 0u) {
+        sim_next_load_reg = 0;
+        sim_next_load_value = 0;
+        return;
+      }
+      if (sim_load_reg == index) {
+        sim_load_reg = 0;
+      }
+      sim_next_load_reg = index;
+      sim_next_load_value = value;
+    };
+    auto sim_advance_load_delay = [&]() {
+      if (sim_load_reg != 0u) {
+        sim_gpr[sim_load_reg] = sim_load_value;
+      }
+      sim_load_reg = sim_next_load_reg;
+      sim_load_value = sim_next_load_value;
+      sim_next_load_reg = 0;
+      sim_next_load_value = 0;
+      sim_gpr[0] = 0;
+    };
+    auto sim_read_ram_byte = [&](u32 phys) -> u8 {
+      for (u32 i = sim_store_count; i != 0u; --i) {
+        const u32 index = i - 1u;
+        if (sim_store_addr[index] == phys) {
+          return sim_store_value[index];
+        }
+      }
+      return context->ram_data[phys];
+    };
+    auto sim_write_ram_byte = [&](u32 phys, u8 value) {
+      if (sim_store_count >= sim_store_addr.size()) {
+        return;
+      }
+      sim_store_addr[sim_store_count] = phys;
+      sim_store_value[sim_store_count] = value;
+      ++sim_store_count;
+    };
+    auto sim_ram_load = [&](const DecodedInstruction &inst, u32 phys) {
+      u32 value = 0;
+      switch (inst.op) {
+      case DecodedOp::Lb:
+        value = static_cast<u32>(
+            static_cast<s32>(static_cast<int8_t>(sim_read_ram_byte(phys))));
+        break;
+      case DecodedOp::Lbu:
+        value = sim_read_ram_byte(phys);
+        break;
+      case DecodedOp::Lh: {
+        const u16 raw = static_cast<u16>(sim_read_ram_byte(phys)) |
+                        (static_cast<u16>(sim_read_ram_byte(phys + 1u))
+                         << 8);
+        value = static_cast<u32>(
+            static_cast<s32>(static_cast<int16_t>(raw)));
+        break;
+      }
+      case DecodedOp::Lhu:
+        value = static_cast<u16>(sim_read_ram_byte(phys)) |
+                (static_cast<u16>(sim_read_ram_byte(phys + 1u)) << 8);
+        break;
+      case DecodedOp::Lw:
+        value = static_cast<u32>(sim_read_ram_byte(phys)) |
+                (static_cast<u32>(sim_read_ram_byte(phys + 1u)) << 8) |
+                (static_cast<u32>(sim_read_ram_byte(phys + 2u)) << 16) |
+                (static_cast<u32>(sim_read_ram_byte(phys + 3u)) << 24);
+        break;
+      default:
+        break;
+      }
+      sim_schedule_load(inst.rt, value);
+    };
+    auto sim_ram_store = [&](const DecodedInstruction &inst, u32 phys) {
+      const u32 value = sim_gpr[inst.rt];
+      sim_write_ram_byte(phys, static_cast<u8>(value));
+      if (inst.op == DecodedOp::Sh || inst.op == DecodedOp::Sw) {
+        sim_write_ram_byte(phys + 1u, static_cast<u8>(value >> 8));
+      }
+      if (inst.op == DecodedOp::Sw) {
+        sim_write_ram_byte(phys + 2u, static_cast<u8>(value >> 16));
+        sim_write_ram_byte(phys + 3u, static_cast<u8>(value >> 24));
+      }
+    };
+    auto sim_alu = [&](const DecodedInstruction &inst) -> bool {
+      switch (inst.op) {
+      case DecodedOp::Nop:
+      case DecodedOp::Sync:
+        return true;
+      case DecodedOp::Sll:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rt] << inst.shamt);
+        return true;
+      case DecodedOp::Srl:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rt] >> inst.shamt);
+        return true;
+      case DecodedOp::Sra:
+        sim_write_gpr(inst.rd,
+                      static_cast<u32>(
+                          static_cast<s32>(sim_gpr[inst.rt]) >> inst.shamt));
+        return true;
+      case DecodedOp::Sllv:
+        sim_write_gpr(inst.rd,
+                      sim_gpr[inst.rt] << (sim_gpr[inst.rs] & 0x1Fu));
+        return true;
+      case DecodedOp::Srlv:
+        sim_write_gpr(inst.rd,
+                      sim_gpr[inst.rt] >> (sim_gpr[inst.rs] & 0x1Fu));
+        return true;
+      case DecodedOp::Srav:
+        sim_write_gpr(
+            inst.rd,
+            static_cast<u32>(static_cast<s32>(sim_gpr[inst.rt]) >>
+                             (sim_gpr[inst.rs] & 0x1Fu)));
+        return true;
+      case DecodedOp::Movz:
+        if (sim_gpr[inst.rt] == 0u) {
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs]);
+        }
+        return true;
+      case DecodedOp::Movn:
+        if (sim_gpr[inst.rt] != 0u) {
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs]);
+        }
+        return true;
+      case DecodedOp::Clear:
+        sim_write_gpr(inst.rd, 0);
+        return true;
+      case DecodedOp::Addu:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rs] + sim_gpr[inst.rt]);
+        return true;
+      case DecodedOp::Subu:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rs] - sim_gpr[inst.rt]);
+        return true;
+      case DecodedOp::And:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rs] & sim_gpr[inst.rt]);
+        return true;
+      case DecodedOp::Or:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rs] | sim_gpr[inst.rt]);
+        return true;
+      case DecodedOp::Xor:
+        sim_write_gpr(inst.rd, sim_gpr[inst.rs] ^ sim_gpr[inst.rt]);
+        return true;
+      case DecodedOp::Nor:
+        sim_write_gpr(inst.rd, ~(sim_gpr[inst.rs] | sim_gpr[inst.rt]));
+        return true;
+      case DecodedOp::Slt:
+        sim_write_gpr(inst.rd,
+                      static_cast<s32>(sim_gpr[inst.rs]) <
+                              static_cast<s32>(sim_gpr[inst.rt])
+                          ? 1u
+                          : 0u);
+        return true;
+      case DecodedOp::Sltu:
+        sim_write_gpr(inst.rd,
+                      sim_gpr[inst.rs] < sim_gpr[inst.rt] ? 1u : 0u);
+        return true;
+      case DecodedOp::Addiu:
+        sim_write_gpr(inst.rt,
+                      sim_gpr[inst.rs] + static_cast<u32>(inst.simm));
+        return true;
+      case DecodedOp::Slti:
+        sim_write_gpr(inst.rt,
+                      static_cast<s32>(sim_gpr[inst.rs]) < inst.simm ? 1u
+                                                                       : 0u);
+        return true;
+      case DecodedOp::Sltiu:
+        sim_write_gpr(inst.rt,
+                      sim_gpr[inst.rs] < static_cast<u32>(inst.simm) ? 1u
+                                                                       : 0u);
+        return true;
+      case DecodedOp::Andi:
+        sim_write_gpr(inst.rt, sim_gpr[inst.rs] & inst.imm);
+        return true;
+      case DecodedOp::Ori:
+        sim_write_gpr(inst.rt, sim_gpr[inst.rs] | inst.imm);
+        return true;
+      case DecodedOp::Xori:
+        sim_write_gpr(inst.rt, sim_gpr[inst.rs] ^ inst.imm);
+        return true;
+      case DecodedOp::Lui:
+        sim_write_gpr(inst.rt, static_cast<u32>(inst.imm) << 16);
+        return true;
+      default:
+        return false;
+      }
+    };
+
+    const u32 branch_index = block.instruction_count - 2u;
+    for (u32 i = 0; i < branch_index; ++i) {
+      const DecodedInstruction &inst = block.instructions[i];
+      ++aggressive_preflight_simulated_instructions;
+      if (is_x64_load_op(inst.op) || is_x64_aggressive_store_op(inst.op)) {
+        const u32 addr =
+            sim_gpr[inst.rs] + static_cast<u32>(inst.simm);
+        if (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu ||
+              inst.op == DecodedOp::Sh) &&
+             (addr & 1u) != 0u) ||
+            ((inst.op == DecodedOp::Lw || inst.op == DecodedOp::Sw) &&
+             (addr & 3u) != 0u)) {
+          return reject_aggressive_preflight(
+              NativeBlockRejectDetail::Unaligned);
+        }
+        if (!is_canonical_ram_alias(addr)) {
+          const NativeMemoryRegion region = classify_native_memory_region(addr);
+          if (region == NativeMemoryRegion::Scratchpad) {
+            aggressive_preflight_saw_scratchpad = true;
+          }
+          return reject_aggressive_preflight(
+              region == NativeMemoryRegion::Mmio
+                  ? NativeBlockRejectDetail::Mmio
+                  : NativeBlockRejectDetail::Memory);
+        }
+        const u32 phys = addr & 0x1FFFFFFFu;
+        if (is_x64_aggressive_store_op(inst.op)) {
+          const u32 store_size =
+              inst.op == DecodedOp::Sb
+                  ? 1u
+                  : (inst.op == DecodedOp::Sh ? 2u : 4u);
+          if (store_touches_compiled_code_page(phys, store_size)) {
+            return reject_aggressive_preflight(
+                NativeBlockRejectDetail::ICache);
+          }
+          sim_ram_store(inst, phys);
+        } else {
+          sim_ram_load(inst, phys);
+        }
+      } else if (!sim_alu(inst)) {
+        return reject_aggressive_preflight(
+            NativeBlockRejectDetail::
+                AggressiveReducedHelperBranchTailUnsupportedBody);
+      }
+      sim_advance_load_delay();
+    }
+    ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_passes;
+    stats_
+        .native_branch_tail_aggressive_reduced_helper_preflight_instructions +=
+        aggressive_preflight_simulated_instructions;
   }
 
   const bool branch_tail_reduced_ram_load =
@@ -2334,6 +2917,12 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   if (context->is_branch_tail) {
     ++stats_.native_branch_tail_entries;
     ++block.native_branch_tail_entry_count;
+    if (cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled() &&
+        context->uses_instruction_helpers &&
+        !block.native_aggressive_reduced_helper_branch_tail) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_helper_fallback_entries;
+    }
     const DecodedOp branch_op =
         block.instructions[context->branch_instruction_index].op;
     if (branch_op == DecodedOp::Bgtz) {
@@ -2358,9 +2947,25 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         ++stats_.native_branch_tail_reduced_helper_ram_load_entries;
       }
     }
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      ++stats_.native_branch_tail_aggressive_reduced_helper_entries;
+      if (block.has_load) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_ram_load_entries;
+      }
+      if (block.has_store) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_store_entries;
+      }
+      if (block.has_load && block.has_store) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries;
+      }
+    }
   }
   block.native_fn(block.native_context, &result);
-  if (block.native_reduced_helper_branch_tail &&
+  if ((block.native_reduced_helper_branch_tail ||
+       block.native_aggressive_reduced_helper_branch_tail) &&
       result.exit_reason == CpuBlockExitReason::Branch &&
       result.instructions != 0) {
     if (context->branch_taken) {
@@ -2383,13 +2988,38 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         ++stats_.native_branch_tail_blez_not_taken;
       }
     }
-    stats_.native_branch_tail_reduced_helper_prepare_helpers_avoided +=
-        result.instructions;
-    stats_.native_branch_tail_reduced_helper_finish_helpers_avoided +=
-        result.instructions;
-    ++stats_.native_branch_tail_reduced_helper_branch_helpers_avoided;
-    stats_.native_branch_tail_reduced_helper_memory_helpers_avoided +=
-        count_x64_load_ops(block);
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      stats_
+          .native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided +=
+          result.instructions;
+      stats_
+          .native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided +=
+          result.instructions;
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided;
+      stats_
+          .native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided +=
+          count_x64_memory_ops(block);
+      const u32 store8_ops = count_x64_store_ops(block, DecodedOp::Sb);
+      const u32 store16_ops = count_x64_store_ops(block, DecodedOp::Sh);
+      const u32 store32_ops = count_x64_store_ops(block, DecodedOp::Sw);
+      const u32 store_ops = store8_ops + store16_ops + store32_ops;
+      stats_.native_branch_tail_aggressive_reduced_helper_fast_store8 +=
+          store8_ops;
+      stats_.native_branch_tail_aggressive_reduced_helper_fast_store16 +=
+          store16_ops;
+      stats_.native_branch_tail_aggressive_reduced_helper_fast_store32 +=
+          store32_ops;
+      stats_.native_memory_fastpath_stores += store_ops;
+    } else {
+      stats_.native_branch_tail_reduced_helper_prepare_helpers_avoided +=
+          result.instructions;
+      stats_.native_branch_tail_reduced_helper_finish_helpers_avoided +=
+          result.instructions;
+      ++stats_.native_branch_tail_reduced_helper_branch_helpers_avoided;
+      stats_.native_branch_tail_reduced_helper_memory_helpers_avoided +=
+          count_x64_load_ops(block);
+    }
     record_native_branch_tail_trace(block, context->branch_taken, false, false,
                                     false);
   }
@@ -2431,6 +3061,20 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
           result.instructions;
       if (block.has_load) {
         stats_.native_branch_tail_reduced_helper_ram_load_instructions +=
+            result.instructions;
+      }
+    }
+    if (block.native_aggressive_reduced_helper_branch_tail) {
+      stats_.native_branch_tail_aggressive_reduced_helper_instructions +=
+          result.instructions;
+      if (block.has_load) {
+        stats_
+            .native_branch_tail_aggressive_reduced_helper_ram_load_instructions +=
+            result.instructions;
+      }
+      if (block.has_store) {
+        stats_
+            .native_branch_tail_aggressive_reduced_helper_store_instructions +=
             result.instructions;
       }
     }

@@ -139,6 +139,12 @@ enum class NativeBlockRejectDetail : u8 {
   ReducedHelperBranchTailUnsupportedBody,
   ReducedHelperBranchTailUnsupportedDelaySlot,
   ReducedHelperBranchTailCompareIrq,
+  AggressiveReducedHelperBranchTailDisabled,
+  AggressiveReducedHelperBranchTailMemory,
+  AggressiveReducedHelperBranchTailStore,
+  AggressiveReducedHelperBranchTailDelaySlotMemory,
+  AggressiveReducedHelperBranchTailUnsupportedBody,
+  AggressiveReducedHelperBranchTailUnsupportedDelaySlot,
 };
 
 enum class NativeMemoryRegion : u8 {
@@ -240,6 +246,7 @@ struct DecodedBlock {
   bool native_reduced_helper = false;
   bool native_reduced_helper_ram_load = false;
   bool native_reduced_helper_branch_tail = false;
+  bool native_aggressive_reduced_helper_branch_tail = false;
   bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =

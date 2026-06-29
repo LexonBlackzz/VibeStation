@@ -99,6 +99,18 @@ namespace {
             ImGui::TextDisabled("CLI override: branch tails %s",
                 cpu_x64_jit_branch_tail_enabled() ? "enabled" : "disabled");
         }
+        if (ImGui::Checkbox("Aggressive Reduced-Helper Branch Tails",
+                &g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled)) {
+            dirty = true;
+        }
+        if (g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override) {
+            ImGui::TextDisabled("CLI override: aggressive reduced-helper branch tails %s",
+                cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled()
+                    ? "enabled"
+                    : "disabled");
+        }
+        ImGui::TextDisabled(
+            "Experimental. Requires native branch tails. Attempts memory-containing branch-tail blocks with interpreter-validated fallback.");
         if (ImGui::Checkbox("Log Recent Native Branch Tails",
                 &g_cpu_x64_jit_branch_tail_logging)) {
             dirty = true;
