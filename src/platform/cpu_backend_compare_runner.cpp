@@ -69,6 +69,7 @@ struct CpuCompareCase {
   bool disable_alu_native_for_x64 = false;
   bool enable_aggressive_reduced_helper_branch_tail_for_x64 = false;
   bool enable_native_prefix_for_x64 = false;
+  bool enable_aggressive_native_prefix_ram_for_x64 = false;
   bool require_all_native_disabled_fallback_when_available = false;
   bool require_memory_native_disabled_fallback_when_available = false;
   bool require_alu_native_disabled_fallback_when_available = false;
@@ -91,7 +92,12 @@ struct CpuCompareCase {
   bool require_native_prefix_cop2_blocker_when_available = false;
   bool require_native_prefix_other_blocker_when_available = false;
   bool require_native_prefix_ram_load_entry_when_available = false;
+  bool require_native_prefix_ram_load_aggressive_entry_when_available = false;
+  bool require_native_prefix_ram_load_full_preflight_when_available = false;
   bool require_native_prefix_ram_load_preflight_non_ram_when_available = false;
+  bool require_native_prefix_ram_load_adaptive_disable_when_available = false;
+  bool require_native_prefix_ram_load_adaptive_direct_entry_when_available =
+      false;
   bool require_native_prefix_reject_store_when_available = false;
   bool require_no_native_reduced_helper_ram_load_entry = false;
   bool require_no_native_reduced_helper_branch_tail_ram_load_entry = false;
@@ -459,6 +465,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_x64_jit_native_prefix_enabled =
       mode == CpuExecutionMode::X64Jit &&
       test_case.enable_native_prefix_for_x64;
+  g_cpu_x64_jit_aggressive_native_prefix_ram_enabled =
+      mode == CpuExecutionMode::X64Jit &&
+      test_case.enable_aggressive_native_prefix_ram_for_x64;
   CpuCompareRunResult out{};
   u32 executed = 0;
   size_t segment_index = 0;
@@ -2114,6 +2123,79 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(native_prefix_store_reject);
 
+  CpuCompareCase native_prefix_ram_lw_base_written_aggressive{};
+  native_prefix_ram_lw_base_written_aggressive.name =
+      "native_prefix_ram_load_base_written_aggressive";
+  native_prefix_ram_lw_base_written_aggressive.initial_gpr[1] = 1u;
+  native_prefix_ram_lw_base_written_aggressive.initial_gpr[8] = 0x80011700u;
+  native_prefix_ram_lw_base_written_aggressive.memory.push_back(
+      {0x00011710u, 0x13572468u});
+  native_prefix_ram_lw_base_written_aggressive.program = {
+      enc_i(0x09, 8, 8, 0x0010),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x05, 1, 0, 1),
+      enc_i(0x09, 0, 3, 0x0011),
+      enc_i(0x09, 0, 4, 0x0022),
+      enc_i(0x09, 0, 5, 0x0033),
+  };
+  native_prefix_ram_lw_base_written_aggressive.instructions = 5;
+  native_prefix_ram_lw_base_written_aggressive.disable_branch_tail_for_x64 =
+      true;
+  native_prefix_ram_lw_base_written_aggressive.enable_native_prefix_for_x64 =
+      true;
+  native_prefix_ram_lw_base_written_aggressive
+      .enable_aggressive_native_prefix_ram_for_x64 = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .enable_ram_load_fastpath_for_x64 = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_prefix_entry_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_prefix_ram_load_entry_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_prefix_ram_load_aggressive_entry_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_prefix_ram_load_full_preflight_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_prefix_bne_blocker_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_native_ram_load_fastpath_when_available = true;
+  native_prefix_ram_lw_base_written_aggressive
+      .require_no_native_instruction_helpers_when_available = true;
+  cases.push_back(native_prefix_ram_lw_base_written_aggressive);
+
+  CpuCompareCase native_prefix_ram_lw_scratchpad_adaptive{};
+  native_prefix_ram_lw_scratchpad_adaptive.name =
+      "native_prefix_ram_load_scratchpad_adaptive";
+  native_prefix_ram_lw_scratchpad_adaptive.initial_gpr[1] = 1u;
+  native_prefix_ram_lw_scratchpad_adaptive.initial_gpr[8] = 0x1F800000u;
+  native_prefix_ram_lw_scratchpad_adaptive.memory.push_back(
+      {0x1F800000u, 0x55667788u});
+  native_prefix_ram_lw_scratchpad_adaptive.program = {
+      enc_i(0x09, 0, 3, 7),
+      enc_i(0x23, 8, 2, 0),
+      enc_i(0x05, 1, 0, 0xFFFD),
+      enc_i(0x09, 0, 4, 1),
+  };
+  native_prefix_ram_lw_scratchpad_adaptive.instructions = 20;
+  native_prefix_ram_lw_scratchpad_adaptive.disable_branch_tail_for_x64 = true;
+  native_prefix_ram_lw_scratchpad_adaptive.enable_native_prefix_for_x64 = true;
+  native_prefix_ram_lw_scratchpad_adaptive
+      .enable_aggressive_native_prefix_ram_for_x64 = true;
+  native_prefix_ram_lw_scratchpad_adaptive.enable_ram_load_fastpath_for_x64 =
+      true;
+  native_prefix_ram_lw_scratchpad_adaptive.expect_x64_fallback = true;
+  native_prefix_ram_lw_scratchpad_adaptive
+      .require_native_prefix_ram_load_preflight_non_ram_when_available =
+      true;
+  native_prefix_ram_lw_scratchpad_adaptive
+      .require_native_prefix_ram_load_adaptive_disable_when_available = true;
+  native_prefix_ram_lw_scratchpad_adaptive
+      .require_native_prefix_ram_load_adaptive_direct_entry_when_available =
+      true;
+  native_prefix_ram_lw_scratchpad_adaptive.require_no_native_ram_load_fastpath =
+      true;
+  cases.push_back(native_prefix_ram_lw_scratchpad_adaptive);
+
   CpuCompareCase branch_tail_disabled{};
   branch_tail_disabled.name = "native_branch_tail_disabled_gate";
   branch_tail_disabled.initial_gpr[1] = 1u;
@@ -3024,8 +3106,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   const bool saved_aggressive_reduced_helper_branch_tail =
       g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled;
   const bool saved_native_prefix = g_cpu_x64_jit_native_prefix_enabled;
+  const bool saved_aggressive_native_prefix_ram =
+      g_cpu_x64_jit_aggressive_native_prefix_ram_enabled;
+  const bool saved_aggressive_native_prefix_ram_cli_override =
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override;
+  const bool saved_aggressive_native_prefix_ram_cli_value =
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_value;
   g_cpu_backend_compare_test_active = true;
   g_cpu_x64_jit_force_compile = true;
+  g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   int failures = 0;
   const std::array<CpuExecutionMode, 3> modes = {
@@ -3054,6 +3143,14 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           test_case.require_native_prefix_ram_load_entry_when_available ||
           test_case
               .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+          test_case
+              .require_native_prefix_ram_load_aggressive_entry_when_available ||
+          test_case
+              .require_native_prefix_ram_load_full_preflight_when_available ||
+          test_case
+              .require_native_prefix_ram_load_adaptive_disable_when_available ||
+          test_case
+              .require_native_prefix_ram_load_adaptive_direct_entry_when_available ||
           test_case.require_native_prefix_reject_store_when_available ||
           test_case.require_reduced_helper_preflight_mmio_when_available ||
           test_case.require_reduced_helper_preflight_unaligned_when_available ||
@@ -3402,9 +3499,39 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         }
         if (native_check_pass && result.stats.native_available &&
             test_case
+                .require_native_prefix_ram_load_aggressive_entry_when_available &&
+            result.stats.native_prefix_ram_load_aggressive_entries == 0) {
+          native_check = "native_prefix_ram_load_aggressive_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_prefix_ram_load_full_preflight_when_available &&
+            result.stats.native_prefix_ram_load_preflight_full_attempts == 0) {
+          native_check = "native_prefix_ram_load_full_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
                 .require_native_prefix_ram_load_preflight_non_ram_when_available &&
             result.stats.native_prefix_ram_load_preflight_non_ram == 0) {
           native_check = "native_prefix_ram_load_non_ram_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_prefix_ram_load_adaptive_disable_when_available &&
+            result.stats.native_prefix_ram_load_adaptive_disabled_blocks ==
+                0) {
+          native_check = "native_prefix_ram_load_adaptive_disable_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_native_prefix_ram_load_adaptive_direct_entry_when_available &&
+            result.stats.native_prefix_ram_load_adaptive_direct_entries ==
+                0) {
+          native_check = "native_prefix_ram_load_adaptive_direct_missing";
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
@@ -3651,6 +3778,14 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_native_prefix_ram_load_entry_when_available ||
            test_case
                .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+           test_case
+               .require_native_prefix_ram_load_aggressive_entry_when_available ||
+           test_case
+               .require_native_prefix_ram_load_full_preflight_when_available ||
+           test_case
+               .require_native_prefix_ram_load_adaptive_disable_when_available ||
+           test_case
+               .require_native_prefix_ram_load_adaptive_direct_entry_when_available ||
            test_case.require_native_prefix_reject_store_when_available ||
            test_case
                .require_native_branch_delay_memory_helper_when_available)) {
@@ -3686,9 +3821,17 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_native_prefix_ram_load_entry_when_available ||
            test_case
                .require_native_prefix_ram_load_preflight_non_ram_when_available ||
+           test_case
+               .require_native_prefix_ram_load_aggressive_entry_when_available ||
+           test_case
+               .require_native_prefix_ram_load_full_preflight_when_available ||
+           test_case
+               .require_native_prefix_ram_load_adaptive_disable_when_available ||
+           test_case
+               .require_native_prefix_ram_load_adaptive_direct_entry_when_available ||
            test_case.require_native_prefix_reject_store_when_available)) {
         LOG_INFO(
-            "CPU_COMPARE_NATIVE_PREFIX name=%s candidates=%llu compiled=%llu entries=%llu instructions=%llu exits=%llu blockers_bne=%llu blockers_beq=%llu blockers_jr=%llu blockers_cop2=%llu blockers_other=%llu rejects_too_short=%llu rejects_unsafe=%llu rejects_load_delay=%llu rejects_memory=%llu rejects_unsupported=%llu ram_load_candidates=%llu ram_load_entries=%llu ram_load_instr=%llu ram_preflight_passes=%llu ram_preflight_fallbacks=%llu ram_preflight_non_ram=%llu reject_store=%llu reject_load_base_written=%llu",
+            "CPU_COMPARE_NATIVE_PREFIX name=%s candidates=%llu compiled=%llu entries=%llu instructions=%llu exits=%llu blockers_bne=%llu blockers_beq=%llu blockers_jr=%llu blockers_cop2=%llu blockers_other=%llu rejects_too_short=%llu rejects_unsafe=%llu rejects_load_delay=%llu rejects_memory=%llu rejects_unsupported=%llu ram_load_candidates=%llu ram_load_entries=%llu ram_load_instr=%llu ram_preflight_passes=%llu ram_preflight_fallbacks=%llu ram_preflight_non_ram=%llu ram_full_preflight=%llu ram_full_work=%llu ram_aggressive_entries=%llu ram_aggressive_instr=%llu ram_adaptive_disabled=%llu ram_adaptive_direct=%llu ram_attempts_avoided=%llu reject_store=%llu reject_load_base_written=%llu",
             test_case.name,
             static_cast<unsigned long long>(
                 result.stats.native_prefix_candidate_blocks),
@@ -3732,6 +3875,22 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                 result.stats.native_prefix_ram_load_preflight_fallbacks),
             static_cast<unsigned long long>(
                 result.stats.native_prefix_ram_load_preflight_non_ram),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_preflight_full_attempts),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_prefix_ram_load_preflight_full_instructions),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_aggressive_entries),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_aggressive_instructions),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_adaptive_disabled_blocks),
+            static_cast<unsigned long long>(
+                result.stats.native_prefix_ram_load_adaptive_direct_entries),
+            static_cast<unsigned long long>(
+                result.stats
+                    .native_prefix_ram_load_adaptive_preflight_attempts_avoided),
             static_cast<unsigned long long>(
                 result.stats.native_prefix_reject_store),
             static_cast<unsigned long long>(
@@ -4075,6 +4234,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled =
       saved_aggressive_reduced_helper_branch_tail;
   g_cpu_x64_jit_native_prefix_enabled = saved_native_prefix;
+  g_cpu_x64_jit_aggressive_native_prefix_ram_enabled =
+      saved_aggressive_native_prefix_ram;
+  g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override =
+      saved_aggressive_native_prefix_ram_cli_override;
+  g_cpu_x64_jit_aggressive_native_prefix_ram_cli_value =
+      saved_aggressive_native_prefix_ram_cli_value;
   g_cpu_backend_compare_test_active = saved_compare_test_active;
   g_cpu_execution_mode_cli_override = saved_override;
   g_cpu_execution_mode_cli_value = saved_override_value;

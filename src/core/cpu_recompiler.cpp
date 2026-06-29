@@ -738,6 +738,51 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
   out.native_prefix_ram_load_preflight_disabled = delta_u64(
       current.native_prefix_ram_load_preflight_disabled,
       previous.native_prefix_ram_load_preflight_disabled);
+  out.native_prefix_ram_load_preflight_direct_attempts = delta_u64(
+      current.native_prefix_ram_load_preflight_direct_attempts,
+      previous.native_prefix_ram_load_preflight_direct_attempts);
+  out.native_prefix_ram_load_preflight_full_attempts = delta_u64(
+      current.native_prefix_ram_load_preflight_full_attempts,
+      previous.native_prefix_ram_load_preflight_full_attempts);
+  out.native_prefix_ram_load_preflight_full_instructions = delta_u64(
+      current.native_prefix_ram_load_preflight_full_instructions,
+      previous.native_prefix_ram_load_preflight_full_instructions);
+  out.native_prefix_ram_load_aggressive_candidate_blocks = delta_u64(
+      current.native_prefix_ram_load_aggressive_candidate_blocks,
+      previous.native_prefix_ram_load_aggressive_candidate_blocks);
+  out.native_prefix_ram_load_aggressive_entries = delta_u64(
+      current.native_prefix_ram_load_aggressive_entries,
+      previous.native_prefix_ram_load_aggressive_entries);
+  out.native_prefix_ram_load_aggressive_instructions = delta_u64(
+      current.native_prefix_ram_load_aggressive_instructions,
+      previous.native_prefix_ram_load_aggressive_instructions);
+  out.native_prefix_ram_load_aggressive_base_written_blocks = delta_u64(
+      current.native_prefix_ram_load_aggressive_base_written_blocks,
+      previous.native_prefix_ram_load_aggressive_base_written_blocks);
+  out.native_prefix_ram_load_adaptive_repeated_failures = delta_u64(
+      current.native_prefix_ram_load_adaptive_repeated_failures,
+      previous.native_prefix_ram_load_adaptive_repeated_failures);
+  out.native_prefix_ram_load_adaptive_disabled_blocks = delta_u64(
+      current.native_prefix_ram_load_adaptive_disabled_blocks,
+      previous.native_prefix_ram_load_adaptive_disabled_blocks);
+  out.native_prefix_ram_load_adaptive_direct_entries = delta_u64(
+      current.native_prefix_ram_load_adaptive_direct_entries,
+      previous.native_prefix_ram_load_adaptive_direct_entries);
+  out.native_prefix_ram_load_adaptive_preflight_attempts_avoided = delta_u64(
+      current.native_prefix_ram_load_adaptive_preflight_attempts_avoided,
+      previous.native_prefix_ram_load_adaptive_preflight_attempts_avoided);
+  out.native_prefix_ram_load_adaptive_disable_mmio = delta_u64(
+      current.native_prefix_ram_load_adaptive_disable_mmio,
+      previous.native_prefix_ram_load_adaptive_disable_mmio);
+  out.native_prefix_ram_load_adaptive_disable_non_ram = delta_u64(
+      current.native_prefix_ram_load_adaptive_disable_non_ram,
+      previous.native_prefix_ram_load_adaptive_disable_non_ram);
+  out.native_prefix_ram_load_adaptive_disable_scratchpad = delta_u64(
+      current.native_prefix_ram_load_adaptive_disable_scratchpad,
+      previous.native_prefix_ram_load_adaptive_disable_scratchpad);
+  out.native_prefix_ram_load_adaptive_disable_unaligned = delta_u64(
+      current.native_prefix_ram_load_adaptive_disable_unaligned,
+      previous.native_prefix_ram_load_adaptive_disable_unaligned);
   out.native_prefix_reject_load_fastpath_disabled = delta_u64(
       current.native_prefix_reject_load_fastpath_disabled,
       previous.native_prefix_reject_load_fastpath_disabled);
@@ -4073,7 +4118,7 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_prefix_reject_memory_risk),
            static_cast<unsigned long long>(
                delta.native_prefix_reject_unsupported_prefix_instruction));
-  LOG_INFO("CPU_BACKEND_STATS native_prefix_ram_load candidates=%llu entries=%llu instructions=%llu avg=%.2f preflight_passes=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu rejects=fastpath_disabled:%llu,load_base_written:%llu,store:%llu memory_op=lw:%llu,lb:%llu,lbu:%llu,lh:%llu,lhu:%llu,sb:%llu,sh:%llu,sw:%llu blockers=bne:%llu,beq:%llu,jr:%llu,cop2:%llu,other:%llu",
+  LOG_INFO("CPU_BACKEND_STATS native_prefix_ram_load candidates=%llu entries=%llu instructions=%llu avg=%.2f preflight_passes=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu direct_attempts=%llu full_attempts=%llu full_work=%llu rejects=fastpath_disabled:%llu,load_base_written:%llu,store:%llu memory_op=lw:%llu,lb:%llu,lbu:%llu,lh:%llu,lhu:%llu,sb:%llu,sh:%llu,sw:%llu blockers=bne:%llu,beq:%llu,jr:%llu,cop2:%llu,other:%llu",
            static_cast<unsigned long long>(
                delta.native_prefix_ram_load_candidate_blocks),
            static_cast<unsigned long long>(
@@ -4093,6 +4138,12 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_prefix_ram_load_preflight_non_ram),
            static_cast<unsigned long long>(
                delta.native_prefix_ram_load_preflight_disabled),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_direct_attempts),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_full_attempts),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_preflight_full_instructions),
            static_cast<unsigned long long>(
                delta.native_prefix_reject_load_fastpath_disabled),
            static_cast<unsigned long long>(
@@ -4124,6 +4175,32 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_prefix_ram_load_blocker_cop2),
            static_cast<unsigned long long>(
                delta.native_prefix_ram_load_blocker_other));
+  LOG_INFO("CPU_BACKEND_STATS native_prefix_ram_aggressive enabled=%u candidates=%llu entries=%llu instructions=%llu base_written=%llu adaptive_repeated=%llu adaptive_disabled=%llu adaptive_direct=%llu attempts_avoided=%llu disable_mmio=%llu disable_non_ram=%llu disable_scratchpad=%llu disable_unaligned=%llu",
+           cpu_x64_jit_aggressive_native_prefix_ram_enabled() ? 1u : 0u,
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_aggressive_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_aggressive_entries),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_aggressive_instructions),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_aggressive_base_written_blocks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_repeated_failures),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_disabled_blocks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_direct_entries),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_preflight_attempts_avoided),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_disable_mmio),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_disable_non_ram),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_disable_scratchpad),
+           static_cast<unsigned long long>(
+               delta.native_prefix_ram_load_adaptive_disable_unaligned));
   LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu exception_risk=%llu fallback_instruction=%llu unsupported_instruction=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),

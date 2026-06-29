@@ -246,8 +246,17 @@ struct DecodedBlock {
   bool native_reduced_helper = false;
   bool native_prefix = false;
   bool native_prefix_ram_load = false;
+  bool native_prefix_ram_load_aggressive = false;
+  bool native_prefix_ram_load_full_preflight = false;
   u32 native_prefix_instruction_count = 0;
   DecodedOp native_prefix_blocker_op = DecodedOp::Unsupported;
+  NativeBlockRejectDetail native_prefix_ram_load_preflight_last_failure =
+      NativeBlockRejectDetail::None;
+  NativeBlockRejectDetail native_prefix_ram_load_preflight_adaptive_disable =
+      NativeBlockRejectDetail::None;
+  u8 native_prefix_ram_load_preflight_failure_count = 0;
+  bool native_prefix_ram_load_preflight_last_failure_scratchpad = false;
+  bool native_prefix_ram_load_preflight_adaptive_disable_scratchpad = false;
   bool native_reduced_helper_ram_load = false;
   bool native_reduced_helper_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail = false;

@@ -111,6 +111,18 @@ namespace {
         }
         ImGui::TextDisabled(
             "Experimental. Requires native branch tails. Attempts memory-containing branch-tail blocks with interpreter-validated fallback.");
+        if (ImGui::Checkbox("Aggressive Native-Prefix RAM",
+                &g_cpu_x64_jit_aggressive_native_prefix_ram_enabled)) {
+            dirty = true;
+        }
+        if (g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override) {
+            ImGui::TextDisabled("CLI override: aggressive native-prefix RAM %s",
+                cpu_x64_jit_aggressive_native_prefix_ram_enabled()
+                    ? "enabled"
+                    : "disabled");
+        }
+        ImGui::TextDisabled(
+            "Experimental. Requires native-prefix and RAM load fastpath. Attempts more RAM-load prefix cases and adapts away repeated runtime failures.");
         if (ImGui::Checkbox("Log Recent Native Branch Tails",
                 &g_cpu_x64_jit_branch_tail_logging)) {
             dirty = true;

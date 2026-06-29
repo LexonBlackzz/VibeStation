@@ -2325,6 +2325,18 @@ int main(int argc, char *argv[]) {
       g_cpu_x64_jit_native_prefix_enabled = false;
       continue;
     }
+    if (a == "--jit-enable-aggressive-native-prefix-ram") {
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = true;
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_value = true;
+      g_cpu_x64_jit_aggressive_native_prefix_ram_enabled = true;
+      continue;
+    }
+    if (a == "--jit-disable-aggressive-native-prefix-ram") {
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = true;
+      g_cpu_x64_jit_aggressive_native_prefix_ram_cli_value = false;
+      g_cpu_x64_jit_aggressive_native_prefix_ram_enabled = false;
+      continue;
+    }
     if (a == "--jit-branch-tail-log") {
       g_cpu_x64_jit_branch_tail_logging = true;
       g_cpu_backend_stats_logging = true;

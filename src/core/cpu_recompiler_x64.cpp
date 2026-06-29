@@ -110,6 +110,27 @@ void record_aggressive_preflight_adaptive_disable(
   }
 }
 
+void record_native_prefix_ram_load_adaptive_disable(
+    CpuBackendStats &stats, NativeBlockRejectDetail detail, bool scratchpad) {
+  switch (detail) {
+  case NativeBlockRejectDetail::Mmio:
+    ++stats.native_prefix_ram_load_adaptive_disable_mmio;
+    break;
+  case NativeBlockRejectDetail::Memory:
+    if (scratchpad) {
+      ++stats.native_prefix_ram_load_adaptive_disable_scratchpad;
+    } else {
+      ++stats.native_prefix_ram_load_adaptive_disable_non_ram;
+    }
+    break;
+  case NativeBlockRejectDetail::Unaligned:
+    ++stats.native_prefix_ram_load_adaptive_disable_unaligned;
+    break;
+  default:
+    break;
+  }
+}
+
 bool is_x64_stage1_op(DecodedOp op) {
   switch (op) {
   case DecodedOp::Nop:
@@ -366,12 +387,14 @@ bool is_x64_native_prefix_block(const DecodedBlock &block,
                                 u32 &prefix_instruction_count,
                                 DecodedOp &blocker_op,
                                 bool &prefix_has_load,
+                                bool &prefix_needs_full_preflight,
                                 DecodedOp &reject_op,
                                 X64NativePrefixReject &reject_reason) {
   constexpr u32 kNativePrefixMinInstructions = 2;
   prefix_instruction_count = 0;
   blocker_op = DecodedOp::Unsupported;
   prefix_has_load = false;
+  prefix_needs_full_preflight = false;
   reject_op = DecodedOp::Unsupported;
   reject_reason = X64NativePrefixReject::None;
 
@@ -397,8 +420,11 @@ bool is_x64_native_prefix_block(const DecodedBlock &block,
         return false;
       }
       if (inst.rs != 0u && written[inst.rs]) {
-        reject_reason = X64NativePrefixReject::LoadBaseWritten;
-        return false;
+        if (!cpu_x64_jit_aggressive_native_prefix_ram_enabled()) {
+          reject_reason = X64NativePrefixReject::LoadBaseWritten;
+          return false;
+        }
+        prefix_needs_full_preflight = true;
       }
       ++prefix_instruction_count;
       prefix_has_load = true;
@@ -2139,6 +2165,15 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
           : classify_x64_reject_detail(block);
   block.native_prefix = false;
   block.native_prefix_ram_load = false;
+  block.native_prefix_ram_load_aggressive = false;
+  block.native_prefix_ram_load_full_preflight = false;
+  block.native_prefix_ram_load_preflight_last_failure =
+      NativeBlockRejectDetail::None;
+  block.native_prefix_ram_load_preflight_adaptive_disable =
+      NativeBlockRejectDetail::None;
+  block.native_prefix_ram_load_preflight_failure_count = 0;
+  block.native_prefix_ram_load_preflight_last_failure_scratchpad = false;
+  block.native_prefix_ram_load_preflight_adaptive_disable_scratchpad = false;
   block.native_prefix_instruction_count = 0;
   block.native_prefix_blocker_op = DecodedOp::Unsupported;
   if (cpu_x64_jit_native_prefix_enabled()) {
@@ -2151,12 +2186,19 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
       u32 prefix_instruction_count = 0;
       DecodedOp blocker_op = DecodedOp::Unsupported;
       bool prefix_has_load = false;
+      bool prefix_needs_full_preflight = false;
       DecodedOp prefix_reject_op = DecodedOp::Unsupported;
       if (is_x64_native_prefix_block(block, prefix_instruction_count,
                                      blocker_op, prefix_has_load,
+                                     prefix_needs_full_preflight,
                                      prefix_reject_op, prefix_reject)) {
         block.native_prefix = true;
         block.native_prefix_ram_load = prefix_has_load;
+        block.native_prefix_ram_load_aggressive =
+            prefix_has_load &&
+            cpu_x64_jit_aggressive_native_prefix_ram_enabled();
+        block.native_prefix_ram_load_full_preflight =
+            prefix_needs_full_preflight;
         block.native_prefix_instruction_count = prefix_instruction_count;
         block.native_prefix_blocker_op = blocker_op;
         block.native_reduced_helper = false;
@@ -2166,6 +2208,12 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
         if (block.native_prefix_ram_load) {
           ++stats_.native_prefix_ram_load_candidate_blocks;
           record_native_prefix_ram_load_blocker(stats_, blocker_op);
+          if (block.native_prefix_ram_load_aggressive) {
+            ++stats_.native_prefix_ram_load_aggressive_candidate_blocks;
+          }
+          if (block.native_prefix_ram_load_full_preflight) {
+            ++stats_.native_prefix_ram_load_aggressive_base_written_blocks;
+          }
         }
       } else {
         record_native_prefix_memory_reject(stats_, prefix_reject_op);
@@ -3190,16 +3238,295 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   const bool prefix_ram_load = block.native_prefix_ram_load;
   if (block.native_reduced_helper_ram_load || branch_tail_reduced_ram_load ||
       prefix_ram_load) {
+    bool prefix_preflight_saw_scratchpad = false;
+    auto reset_prefix_preflight_failure_streak = [&]() {
+      block.native_prefix_ram_load_preflight_last_failure =
+          NativeBlockRejectDetail::None;
+      block.native_prefix_ram_load_preflight_failure_count = 0;
+      block.native_prefix_ram_load_preflight_last_failure_scratchpad = false;
+    };
+    auto record_prefix_adaptive_failure =
+        [&](NativeBlockRejectDetail detail) {
+      if (!prefix_ram_load || !block.native_prefix_ram_load_aggressive ||
+          !aggressive_preflight_adaptive_detail(detail)) {
+        if (prefix_ram_load && block.native_prefix_ram_load_aggressive) {
+          reset_prefix_preflight_failure_streak();
+        }
+        return;
+      }
+      const bool same_failure =
+          block.native_prefix_ram_load_preflight_last_failure == detail &&
+          block.native_prefix_ram_load_preflight_last_failure_scratchpad ==
+              prefix_preflight_saw_scratchpad;
+      if (same_failure) {
+        if (block.native_prefix_ram_load_preflight_failure_count < 0xFFu) {
+          ++block.native_prefix_ram_load_preflight_failure_count;
+        }
+        ++stats_.native_prefix_ram_load_adaptive_repeated_failures;
+      } else {
+        block.native_prefix_ram_load_preflight_last_failure = detail;
+        block.native_prefix_ram_load_preflight_last_failure_scratchpad =
+            prefix_preflight_saw_scratchpad;
+        block.native_prefix_ram_load_preflight_failure_count = 1;
+      }
+      if (block.native_prefix_ram_load_preflight_adaptive_disable ==
+              NativeBlockRejectDetail::None &&
+          block.native_prefix_ram_load_preflight_failure_count >=
+              kAggressivePreflightAdaptiveDisableThreshold) {
+        block.native_prefix_ram_load_preflight_adaptive_disable = detail;
+        block.native_prefix_ram_load_preflight_adaptive_disable_scratchpad =
+            prefix_preflight_saw_scratchpad;
+        ++stats_.native_prefix_ram_load_adaptive_disabled_blocks;
+        record_native_prefix_ram_load_adaptive_disable(
+            stats_, detail, prefix_preflight_saw_scratchpad);
+      }
+    };
+
+    if (prefix_ram_load && block.native_prefix_ram_load_aggressive &&
+        block.native_prefix_ram_load_preflight_adaptive_disable !=
+            NativeBlockRejectDetail::None) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_prefix_ram_load_adaptive_direct_entries;
+      ++stats_
+            .native_prefix_ram_load_adaptive_preflight_attempts_avoided;
+      record_rejected_block(
+          block.native_prefix_ram_load_preflight_adaptive_disable);
+      return execute_block(block, max_cycles, max_instructions);
+    }
+
     NativeBlockRejectDetail preflight_detail =
         NativeBlockRejectDetail::None;
     const u32 preflight_instruction_count =
         prefix_ram_load ? native_instruction_count : block.instruction_count;
+    u32 prefix_preflight_simulated_instructions = 0;
+    auto check_prefix_preflight_load =
+        [&](const DecodedInstruction &inst,
+            u32 addr) -> NativeBlockRejectDetail {
+      if (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu) &&
+           (addr & 1u) != 0u) ||
+          (inst.op == DecodedOp::Lw && (addr & 3u) != 0u)) {
+        return NativeBlockRejectDetail::Unaligned;
+      }
+      if (!is_canonical_ram_alias(addr)) {
+        const NativeMemoryRegion region = classify_native_memory_region(addr);
+        if (region == NativeMemoryRegion::Scratchpad) {
+          prefix_preflight_saw_scratchpad = true;
+        }
+        return region == NativeMemoryRegion::Mmio
+                   ? NativeBlockRejectDetail::Mmio
+                   : NativeBlockRejectDetail::Memory;
+      }
+      return NativeBlockRejectDetail::None;
+    };
     if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
         g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
         g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr) {
       preflight_detail =
           NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
+    } else if (prefix_ram_load &&
+               block.native_prefix_ram_load_full_preflight) {
+      ++stats_.native_prefix_ram_load_preflight_full_attempts;
+      std::array<u32, 32> sim_gpr{};
+      for (u32 i = 0; i < sim_gpr.size(); ++i) {
+        sim_gpr[i] = cpu_.gpr_[i];
+      }
+      u32 sim_load_reg = cpu_.load_.reg;
+      u32 sim_load_value = cpu_.load_.value;
+      u32 sim_next_load_reg = cpu_.next_load_.reg;
+      u32 sim_next_load_value = cpu_.next_load_.value;
+      auto sim_write_gpr = [&](u8 index, u32 value) {
+        if (index == 0u) {
+          sim_gpr[0] = 0;
+          return;
+        }
+        if (sim_load_reg == index) {
+          sim_load_reg = 0;
+        }
+        sim_gpr[index] = value;
+      };
+      auto sim_schedule_load = [&](u8 index, u32 value) {
+        if (index == 0u) {
+          sim_next_load_reg = 0;
+          sim_next_load_value = 0;
+          return;
+        }
+        if (sim_load_reg == index) {
+          sim_load_reg = 0;
+        }
+        sim_next_load_reg = index;
+        sim_next_load_value = value;
+      };
+      auto sim_advance_load_delay = [&]() {
+        if (sim_load_reg != 0u) {
+          sim_gpr[sim_load_reg] = sim_load_value;
+        }
+        sim_load_reg = sim_next_load_reg;
+        sim_load_value = sim_next_load_value;
+        sim_next_load_reg = 0;
+        sim_next_load_value = 0;
+        sim_gpr[0] = 0;
+      };
+      auto sim_ram_load = [&](const DecodedInstruction &inst, u32 phys) {
+        u32 value = 0;
+        switch (inst.op) {
+        case DecodedOp::Lb:
+          value = static_cast<u32>(
+              static_cast<s32>(static_cast<int8_t>(context->ram_data[phys])));
+          break;
+        case DecodedOp::Lbu:
+          value = context->ram_data[phys];
+          break;
+        case DecodedOp::Lh: {
+          const u16 raw = static_cast<u16>(context->ram_data[phys]) |
+                          (static_cast<u16>(context->ram_data[phys + 1u])
+                           << 8);
+          value =
+              static_cast<u32>(static_cast<s32>(static_cast<int16_t>(raw)));
+          break;
+        }
+        case DecodedOp::Lhu:
+          value = static_cast<u16>(context->ram_data[phys]) |
+                  (static_cast<u16>(context->ram_data[phys + 1u]) << 8);
+          break;
+        case DecodedOp::Lw:
+          value = static_cast<u32>(context->ram_data[phys]) |
+                  (static_cast<u32>(context->ram_data[phys + 1u]) << 8) |
+                  (static_cast<u32>(context->ram_data[phys + 2u]) << 16) |
+                  (static_cast<u32>(context->ram_data[phys + 3u]) << 24);
+          break;
+        default:
+          break;
+        }
+        sim_schedule_load(inst.rt, value);
+      };
+      auto sim_alu = [&](const DecodedInstruction &inst) -> bool {
+        switch (inst.op) {
+        case DecodedOp::Nop:
+        case DecodedOp::Sync:
+          return true;
+        case DecodedOp::Sll:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rt] << inst.shamt);
+          return true;
+        case DecodedOp::Srl:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rt] >> inst.shamt);
+          return true;
+        case DecodedOp::Sra:
+          sim_write_gpr(
+              inst.rd,
+              static_cast<u32>(static_cast<s32>(sim_gpr[inst.rt]) >>
+                               inst.shamt));
+          return true;
+        case DecodedOp::Sllv:
+          sim_write_gpr(inst.rd,
+                        sim_gpr[inst.rt] << (sim_gpr[inst.rs] & 0x1Fu));
+          return true;
+        case DecodedOp::Srlv:
+          sim_write_gpr(inst.rd,
+                        sim_gpr[inst.rt] >> (sim_gpr[inst.rs] & 0x1Fu));
+          return true;
+        case DecodedOp::Srav:
+          sim_write_gpr(
+              inst.rd,
+              static_cast<u32>(static_cast<s32>(sim_gpr[inst.rt]) >>
+                               (sim_gpr[inst.rs] & 0x1Fu)));
+          return true;
+        case DecodedOp::Movz:
+          if (sim_gpr[inst.rt] == 0u) {
+            sim_write_gpr(inst.rd, sim_gpr[inst.rs]);
+          }
+          return true;
+        case DecodedOp::Movn:
+          if (sim_gpr[inst.rt] != 0u) {
+            sim_write_gpr(inst.rd, sim_gpr[inst.rs]);
+          }
+          return true;
+        case DecodedOp::Clear:
+          sim_write_gpr(inst.rd, 0);
+          return true;
+        case DecodedOp::Addu:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs] + sim_gpr[inst.rt]);
+          return true;
+        case DecodedOp::Subu:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs] - sim_gpr[inst.rt]);
+          return true;
+        case DecodedOp::And:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs] & sim_gpr[inst.rt]);
+          return true;
+        case DecodedOp::Or:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs] | sim_gpr[inst.rt]);
+          return true;
+        case DecodedOp::Xor:
+          sim_write_gpr(inst.rd, sim_gpr[inst.rs] ^ sim_gpr[inst.rt]);
+          return true;
+        case DecodedOp::Nor:
+          sim_write_gpr(inst.rd, ~(sim_gpr[inst.rs] | sim_gpr[inst.rt]));
+          return true;
+        case DecodedOp::Slt:
+          sim_write_gpr(inst.rd,
+                        static_cast<s32>(sim_gpr[inst.rs]) <
+                                static_cast<s32>(sim_gpr[inst.rt])
+                            ? 1u
+                            : 0u);
+          return true;
+        case DecodedOp::Sltu:
+          sim_write_gpr(inst.rd,
+                        sim_gpr[inst.rs] < sim_gpr[inst.rt] ? 1u : 0u);
+          return true;
+        case DecodedOp::Addiu:
+          sim_write_gpr(inst.rt,
+                        sim_gpr[inst.rs] + static_cast<u32>(inst.simm));
+          return true;
+        case DecodedOp::Slti:
+          sim_write_gpr(inst.rt,
+                        static_cast<s32>(sim_gpr[inst.rs]) < inst.simm ? 1u
+                                                                         : 0u);
+          return true;
+        case DecodedOp::Sltiu:
+          sim_write_gpr(inst.rt,
+                        sim_gpr[inst.rs] < static_cast<u32>(inst.simm) ? 1u
+                                                                         : 0u);
+          return true;
+        case DecodedOp::Andi:
+          sim_write_gpr(inst.rt, sim_gpr[inst.rs] & inst.imm);
+          return true;
+        case DecodedOp::Ori:
+          sim_write_gpr(inst.rt, sim_gpr[inst.rs] | inst.imm);
+          return true;
+        case DecodedOp::Xori:
+          sim_write_gpr(inst.rt, sim_gpr[inst.rs] ^ inst.imm);
+          return true;
+        case DecodedOp::Lui:
+          sim_write_gpr(inst.rt, static_cast<u32>(inst.imm) << 16);
+          return true;
+        default:
+          return false;
+        }
+      };
+
+      for (u32 i = 0; i < preflight_instruction_count; ++i) {
+        const DecodedInstruction &inst = block.instructions[i];
+        ++prefix_preflight_simulated_instructions;
+        if (is_x64_load_op(inst.op)) {
+          const u32 addr =
+              sim_gpr[inst.rs] + static_cast<u32>(inst.simm);
+          preflight_detail = check_prefix_preflight_load(inst, addr);
+          if (preflight_detail != NativeBlockRejectDetail::None) {
+            break;
+          }
+          sim_ram_load(inst, addr & 0x1FFFFFFFu);
+        } else if (!sim_alu(inst)) {
+          preflight_detail =
+              NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
+          break;
+        }
+        sim_advance_load_delay();
+      }
+      stats_.native_prefix_ram_load_preflight_full_instructions +=
+          prefix_preflight_simulated_instructions;
     } else {
+      if (prefix_ram_load) {
+        ++stats_.native_prefix_ram_load_preflight_direct_attempts;
+      }
       for (u32 i = 0; i < preflight_instruction_count; ++i) {
         const DecodedInstruction &inst = block.instructions[i];
         if (!is_x64_load_op(inst.op)) {
@@ -3207,17 +3534,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         }
         const u32 addr =
             cpu_.gpr_[inst.rs] + static_cast<u32>(inst.simm);
-        if (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu) &&
-             (addr & 1u) != 0u) ||
-            (inst.op == DecodedOp::Lw && (addr & 3u) != 0u)) {
-          preflight_detail = NativeBlockRejectDetail::Unaligned;
-          break;
-        }
-        if (!is_canonical_ram_alias(addr)) {
-          preflight_detail =
-              classify_native_memory_region(addr) == NativeMemoryRegion::Mmio
-                  ? NativeBlockRejectDetail::Mmio
-                  : NativeBlockRejectDetail::Memory;
+        preflight_detail = check_prefix_preflight_load(inst, addr);
+        if (preflight_detail != NativeBlockRejectDetail::None) {
           break;
         }
       }
@@ -3276,11 +3594,15 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         }
         ++stats_.native_ram_disabled_fallbacks;
       }
+      record_prefix_adaptive_failure(preflight_detail);
       record_rejected_block(preflight_detail);
       return execute_block(block, max_cycles, max_instructions);
     }
     if (prefix_ram_load) {
       ++stats_.native_prefix_ram_load_preflight_passes;
+      if (block.native_prefix_ram_load_aggressive) {
+        reset_prefix_preflight_failure_streak();
+      }
     }
   }
 
@@ -3408,6 +3730,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     ++stats_.native_prefix_entries;
     if (block.native_prefix_ram_load) {
       ++stats_.native_prefix_ram_load_entries;
+      if (block.native_prefix_ram_load_aggressive) {
+        ++stats_.native_prefix_ram_load_aggressive_entries;
+      }
     }
     ++stats_.native_alu_block_entries;
   } else if (block.has_memory) {
@@ -3561,6 +3886,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     stats_.native_prefix_instructions += result.instructions;
     if (block.native_prefix_ram_load) {
       stats_.native_prefix_ram_load_instructions += result.instructions;
+      if (block.native_prefix_ram_load_aggressive) {
+        stats_.native_prefix_ram_load_aggressive_instructions +=
+            result.instructions;
+      }
     }
   }
   if (block.native_reduced_helper) {
