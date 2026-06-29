@@ -158,6 +158,7 @@ inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override =
     false;
 inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_value =
     false;
+inline bool g_cpu_x64_jit_native_prefix_enabled = false;
 inline bool g_cpu_x64_jit_all_native_enabled = true;
 inline bool g_cpu_x64_jit_all_native_cli_override = false;
 inline bool g_cpu_x64_jit_all_native_cli_value = true;
@@ -202,6 +203,9 @@ inline bool cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled() {
   return g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override
              ? g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_value
              : g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled;
+}
+inline bool cpu_x64_jit_native_prefix_enabled() {
+  return g_cpu_x64_jit_native_prefix_enabled;
 }
 inline bool cpu_x64_jit_all_native_enabled() {
   return g_cpu_x64_jit_all_native_cli_override

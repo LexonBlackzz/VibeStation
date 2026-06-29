@@ -666,6 +666,51 @@ CpuBackendStats delta_stats(const CpuBackendStats &current,
         delta_u64(current.native_rejected_first_blocker_opcode_counts[i],
                   previous.native_rejected_first_blocker_opcode_counts[i]);
   }
+  out.native_prefix_candidate_blocks = delta_u64(
+      current.native_prefix_candidate_blocks,
+      previous.native_prefix_candidate_blocks);
+  out.native_prefix_compiled_blocks = delta_u64(
+      current.native_prefix_compiled_blocks,
+      previous.native_prefix_compiled_blocks);
+  out.native_prefix_entries =
+      delta_u64(current.native_prefix_entries,
+                previous.native_prefix_entries);
+  out.native_prefix_instructions = delta_u64(
+      current.native_prefix_instructions,
+      previous.native_prefix_instructions);
+  out.native_prefix_exits_to_blocker = delta_u64(
+      current.native_prefix_exits_to_blocker,
+      previous.native_prefix_exits_to_blocker);
+  out.native_prefix_blocker_bne =
+      delta_u64(current.native_prefix_blocker_bne,
+                previous.native_prefix_blocker_bne);
+  out.native_prefix_blocker_beq =
+      delta_u64(current.native_prefix_blocker_beq,
+                previous.native_prefix_blocker_beq);
+  out.native_prefix_blocker_jr =
+      delta_u64(current.native_prefix_blocker_jr,
+                previous.native_prefix_blocker_jr);
+  out.native_prefix_blocker_cop2 =
+      delta_u64(current.native_prefix_blocker_cop2,
+                previous.native_prefix_blocker_cop2);
+  out.native_prefix_blocker_other = delta_u64(
+      current.native_prefix_blocker_other,
+      previous.native_prefix_blocker_other);
+  out.native_prefix_reject_too_short = delta_u64(
+      current.native_prefix_reject_too_short,
+      previous.native_prefix_reject_too_short);
+  out.native_prefix_reject_unsafe_state = delta_u64(
+      current.native_prefix_reject_unsafe_state,
+      previous.native_prefix_reject_unsafe_state);
+  out.native_prefix_reject_load_delay_risk = delta_u64(
+      current.native_prefix_reject_load_delay_risk,
+      previous.native_prefix_reject_load_delay_risk);
+  out.native_prefix_reject_memory_risk = delta_u64(
+      current.native_prefix_reject_memory_risk,
+      previous.native_prefix_reject_memory_risk);
+  out.native_prefix_reject_unsupported_prefix_instruction = delta_u64(
+      current.native_prefix_reject_unsupported_prefix_instruction,
+      previous.native_prefix_reject_unsupported_prefix_instruction);
   out.cache_hits = delta_u64(current.cache_hits, previous.cache_hits);
   out.cache_misses = delta_u64(current.cache_misses, previous.cache_misses);
   out.invalidations =
@@ -1378,11 +1423,41 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
     const bool try_native =
         requested_x64_native && cpu_x64_jit_all_native_enabled();
     if (try_native) {
-      if (!ensure_x64_safety_checked(*block)) {
+      const bool native_safe = ensure_x64_safety_checked(*block);
+      const bool native_prefix_ready =
+          cpu_x64_jit_native_prefix_enabled() && block->native_prefix;
+      if (!native_safe && !native_prefix_ready) {
         ++stats_.native_to_decoded_fallbacks;
         record_native_block_rejection(
             *block, block->native_reject_detail);
         result = execute_block(*block, cycle_budget, instruction_budget);
+      } else if (native_prefix_ready) {
+        if (block->native_prefix_instruction_count > instruction_budget) {
+          ++stats_.native_to_decoded_fallbacks;
+          ++stats_.native_reject_budget;
+          ++stats_.native_rejected_block_count;
+          stats_.native_rejected_block_instructions +=
+              block->native_prefix_instruction_count;
+          record_native_block_rejection(*block,
+                                        NativeBlockRejectDetail::Budget);
+          result = execute_block(*block, cycle_budget, instruction_budget);
+        } else if (!should_attempt_x64_compile(*block)) {
+          ++stats_.native_to_decoded_fallbacks;
+          result = execute_block(*block, cycle_budget, instruction_budget);
+        } else {
+          if (!block->native_compile_attempted) {
+            (void)compile_x64_block(*block);
+          }
+          if (block->native_fn != nullptr) {
+            result =
+                execute_native_block(*block, cycle_budget, instruction_budget);
+          } else {
+            ++stats_.native_to_decoded_fallbacks;
+            record_native_block_rejection(
+                *block, NativeBlockRejectDetail::CompileFailure);
+            result = execute_block(*block, cycle_budget, instruction_budget);
+          }
+        }
       } else if (block->native_branch_tail &&
                  !cpu_x64_jit_branch_tail_enabled()) {
         ++stats_.native_to_decoded_fallbacks;
@@ -3363,6 +3438,11 @@ void CpuOptimizedBackend::log_stats_section(
                  delta.native_rejected_prefix_instructions)) /
                 static_cast<double>(
                     delta.native_rejected_prefix_total_instructions);
+  const double native_prefix_avg =
+      delta.native_prefix_entries == 0
+          ? 0.0
+          : static_cast<double>(delta.native_prefix_instructions) /
+                static_cast<double>(delta.native_prefix_entries);
 
   LOG_INFO("=== CPU Backend Stats ===");
   LOG_INFO("CPU_BACKEND_STATS frame=%u frames=%u mode=%s blocks=%u native_blocks=%llu code_bytes=%zu native_code_bytes=%zu",
@@ -3881,6 +3961,38 @@ void CpuOptimizedBackend::log_stats_section(
                delta.native_rejected_single_blocker_blocks),
            static_cast<unsigned long long>(
                delta.native_rejected_single_unsupported_blocker_blocks));
+  LOG_INFO("CPU_BACKEND_STATS native_prefix enabled=%u candidates=%llu compiled=%llu entries=%llu instructions=%llu avg=%.2f exits=%llu blockers=bne:%llu,beq:%llu,jr:%llu,cop2:%llu,other:%llu rejects=too_short:%llu,unsafe:%llu,load_delay:%llu,memory:%llu,unsupported:%llu",
+           cpu_x64_jit_native_prefix_enabled() ? 1u : 0u,
+           static_cast<unsigned long long>(
+               delta.native_prefix_candidate_blocks),
+           static_cast<unsigned long long>(
+               delta.native_prefix_compiled_blocks),
+           static_cast<unsigned long long>(delta.native_prefix_entries),
+           static_cast<unsigned long long>(
+               delta.native_prefix_instructions),
+           native_prefix_avg,
+           static_cast<unsigned long long>(
+               delta.native_prefix_exits_to_blocker),
+           static_cast<unsigned long long>(
+               delta.native_prefix_blocker_bne),
+           static_cast<unsigned long long>(
+               delta.native_prefix_blocker_beq),
+           static_cast<unsigned long long>(
+               delta.native_prefix_blocker_jr),
+           static_cast<unsigned long long>(
+               delta.native_prefix_blocker_cop2),
+           static_cast<unsigned long long>(
+               delta.native_prefix_blocker_other),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_too_short),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_unsafe_state),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_load_delay_risk),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_memory_risk),
+           static_cast<unsigned long long>(
+               delta.native_prefix_reject_unsupported_prefix_instruction));
   LOG_INFO("CPU_BACKEND_STATS rejection_counts branch=%llu memory=%llu cop0=%llu cop2_gte=%llu exception_unknown=%llu exception_risk=%llu fallback_instruction=%llu unsupported_instruction=%llu unsafe_state=%llu pc_state=%llu branch_delay_state=%llu load_delay_state=%llu irq_state=%llu invalidated_state=%llu other_state=%llu budget=%llu icache=%llu mmio=%llu unaligned=%llu",
            static_cast<unsigned long long>(delta.native_reject_branch),
            static_cast<unsigned long long>(delta.native_reject_memory),

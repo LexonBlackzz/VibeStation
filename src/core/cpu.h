@@ -147,6 +147,21 @@ struct CpuBackendStats {
   std::array<u64, kDecodedOpStatsCount> native_rejected_opcode_counts{};
   std::array<u64, kDecodedOpStatsCount>
       native_rejected_first_blocker_opcode_counts{};
+  u64 native_prefix_candidate_blocks = 0;
+  u64 native_prefix_compiled_blocks = 0;
+  u64 native_prefix_entries = 0;
+  u64 native_prefix_instructions = 0;
+  u64 native_prefix_exits_to_blocker = 0;
+  u64 native_prefix_blocker_bne = 0;
+  u64 native_prefix_blocker_beq = 0;
+  u64 native_prefix_blocker_jr = 0;
+  u64 native_prefix_blocker_cop2 = 0;
+  u64 native_prefix_blocker_other = 0;
+  u64 native_prefix_reject_too_short = 0;
+  u64 native_prefix_reject_unsafe_state = 0;
+  u64 native_prefix_reject_load_delay_risk = 0;
+  u64 native_prefix_reject_memory_risk = 0;
+  u64 native_prefix_reject_unsupported_prefix_instruction = 0;
   u64 cache_hits = 0;
   u64 cache_misses = 0;
   u64 invalidations = 0;
