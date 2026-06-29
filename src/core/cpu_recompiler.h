@@ -247,6 +247,18 @@ struct DecodedBlock {
   bool native_reduced_helper_ram_load = false;
   bool native_reduced_helper_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail = false;
+  bool native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
+      false;
+  u8 native_aggressive_reduced_helper_branch_tail_memory_ops = 0;
+  NativeBlockRejectDetail native_aggressive_reduced_helper_preflight_last_failure =
+      NativeBlockRejectDetail::None;
+  NativeBlockRejectDetail native_aggressive_reduced_helper_preflight_adaptive_disable =
+      NativeBlockRejectDetail::None;
+  u8 native_aggressive_reduced_helper_preflight_failure_count = 0;
+  bool native_aggressive_reduced_helper_preflight_last_failure_scratchpad =
+      false;
+  bool native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
+      false;
   bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =

@@ -102,6 +102,14 @@ struct CpuCompareCase {
       false;
   bool require_aggressive_reduced_helper_branch_tail_preflight_code_page_when_available =
       false;
+  bool require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available =
+      false;
+  bool require_aggressive_reduced_helper_branch_tail_full_preflight_when_available =
+      false;
+  bool require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available =
+      false;
+  bool require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available =
+      false;
   bool enable_ram_load_fastpath_for_x64 = false;
   bool require_native_ram_load_fastpath_when_available = false;
   bool require_no_native_ram_load_fastpath = false;
@@ -1100,6 +1108,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   aggressive_sw.require_no_native_instruction_helpers_when_available = true;
   aggressive_sw.require_no_native_branch_tail_helpers_when_available = true;
+  aggressive_sw
+      .require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available =
+      true;
   aggressive_sw.native_branch_should_be_taken = true;
   cases.push_back(aggressive_sw);
 
@@ -1270,6 +1281,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_no_native_instruction_helpers_when_available = true;
   aggressive_sw_base_after_alu
       .require_no_native_branch_tail_helpers_when_available = true;
+  aggressive_sw_base_after_alu
+      .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available =
+      true;
   aggressive_sw_base_after_alu.native_branch_should_be_taken = true;
   cases.push_back(aggressive_sw_base_after_alu);
 
@@ -1338,6 +1352,37 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available =
       true;
   cases.push_back(aggressive_sw_scratchpad_reject);
+
+  CpuCompareCase aggressive_sw_scratchpad_adaptive{};
+  aggressive_sw_scratchpad_adaptive.name =
+      "native_aggressive_reduced_helper_branch_tail_sw_scratchpad_adaptive";
+  aggressive_sw_scratchpad_adaptive.initial_gpr[1] = 0x1F800000u;
+  aggressive_sw_scratchpad_adaptive.initial_gpr[2] = 0x55667788u;
+  aggressive_sw_scratchpad_adaptive.initial_gpr[3] = 1u;
+  aggressive_sw_scratchpad_adaptive.initial_gpr[4] = 2u;
+  aggressive_sw_scratchpad_adaptive.memory.push_back({0x1F800000u, 0u});
+  aggressive_sw_scratchpad_adaptive.compare_memory_addresses.push_back(
+      0x1F800000u);
+  aggressive_sw_scratchpad_adaptive.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x05, 3, 4, 0xFFFE),
+      enc_i(0x00, 0, 0, 0),
+  };
+  aggressive_sw_scratchpad_adaptive.instructions = 15;
+  aggressive_sw_scratchpad_adaptive.enable_ram_load_fastpath_for_x64 = true;
+  aggressive_sw_scratchpad_adaptive
+      .enable_aggressive_reduced_helper_branch_tail_for_x64 = true;
+  aggressive_sw_scratchpad_adaptive.expect_x64_fallback = true;
+  aggressive_sw_scratchpad_adaptive
+      .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available =
+      true;
+  aggressive_sw_scratchpad_adaptive
+      .require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available =
+      true;
+  aggressive_sw_scratchpad_adaptive
+      .require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available =
+      true;
+  cases.push_back(aggressive_sw_scratchpad_adaptive);
 
   CpuCompareCase aggressive_sb_scratchpad_reject{};
   aggressive_sb_scratchpad_reject.name =
@@ -2715,6 +2760,14 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available ||
           test_case
               .require_aggressive_reduced_helper_branch_tail_preflight_code_page_when_available ||
+          test_case
+              .require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available ||
+          test_case
+              .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available ||
+          test_case
+              .require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available ||
+          test_case
+              .require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available ||
           test_case.disable_memory_native_for_x64 ||
           name.find("memory") != std::string_view::npos ||
           name.find("mmio") != std::string_view::npos;
@@ -3111,6 +3164,46 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available &&
+            result.stats
+                    .native_branch_tail_aggressive_reduced_helper_preflight_direct_attempts ==
+                0) {
+          native_check =
+              "native_aggressive_reduced_helper_branch_tail_direct_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available &&
+            result.stats
+                    .native_branch_tail_aggressive_reduced_helper_preflight_full_attempts ==
+                0) {
+          native_check =
+              "native_aggressive_reduced_helper_branch_tail_full_preflight_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available &&
+            result.stats
+                    .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks ==
+                0) {
+          native_check =
+              "native_aggressive_reduced_helper_branch_tail_adaptive_disable_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
+            test_case
+                .require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available &&
+            result.stats
+                    .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries ==
+                0) {
+          native_check =
+              "native_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_missing";
+          native_check_pass = false;
+        }
+        if (native_check_pass && result.stats.native_available &&
             test_case.require_native_ram_load_fastpath_when_available &&
             result.stats.native_memory_fastpath_loads == 0) {
           native_check = "native_ram_load_fastpath_missing";
@@ -3353,8 +3446,16 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case
                .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available ||
            test_case
-               .require_aggressive_reduced_helper_branch_tail_preflight_code_page_when_available)) {
-        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu branch_tail_ram_load_entries=%llu aggressive_entries=%llu aggressive_ram_entries=%llu aggressive_store_entries=%llu aggressive_mixed_entries=%llu fast_loads=%llu branch_tail_fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu branch_tail_preflight_fallbacks=%llu branch_tail_preflight_mmio=%llu branch_tail_preflight_unaligned=%llu branch_tail_preflight_non_ram=%llu branch_tail_preflight_disabled=%llu aggressive_preflight_fallbacks=%llu aggressive_preflight_mmio=%llu aggressive_preflight_unaligned=%llu aggressive_preflight_non_ram=%llu aggressive_preflight_disabled=%llu aggressive_preflight_code_page=%llu branch_tail_reject_load_base_written=%llu native_helpers=%llu",
+               .require_aggressive_reduced_helper_branch_tail_preflight_code_page_when_available ||
+           test_case
+               .require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available ||
+           test_case
+               .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available ||
+           test_case
+               .require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available ||
+           test_case
+               .require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available)) {
+        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu branch_tail_ram_load_entries=%llu aggressive_entries=%llu aggressive_ram_entries=%llu aggressive_store_entries=%llu aggressive_mixed_entries=%llu fast_loads=%llu branch_tail_fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu branch_tail_preflight_fallbacks=%llu branch_tail_preflight_mmio=%llu branch_tail_preflight_unaligned=%llu branch_tail_preflight_non_ram=%llu branch_tail_preflight_disabled=%llu aggressive_preflight_fallbacks=%llu aggressive_preflight_mmio=%llu aggressive_preflight_unaligned=%llu aggressive_preflight_non_ram=%llu aggressive_preflight_disabled=%llu aggressive_preflight_code_page=%llu aggressive_direct_preflight=%llu aggressive_direct_checks=%llu aggressive_full_preflight=%llu aggressive_adaptive_repeated=%llu aggressive_adaptive_disabled=%llu aggressive_adaptive_direct=%llu aggressive_adaptive_avoided=%llu branch_tail_reject_load_base_written=%llu native_helpers=%llu",
                  test_case.name,
                  static_cast<unsigned long long>(
                      result.stats.native_reduced_helper_entries),
@@ -3427,6 +3528,27 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                  static_cast<unsigned long long>(
                      result.stats
                          .native_branch_tail_aggressive_reduced_helper_preflight_code_page),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_preflight_direct_attempts),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_preflight_direct_checks),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_preflight_full_attempts),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_adaptive_repeated_failures),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries),
+                 static_cast<unsigned long long>(
+                     result.stats
+                         .native_branch_tail_aggressive_reduced_helper_adaptive_preflight_attempts_avoided),
                  static_cast<unsigned long long>(
                      result.stats
                          .native_branch_tail_reduced_helper_reject_load_base_written),

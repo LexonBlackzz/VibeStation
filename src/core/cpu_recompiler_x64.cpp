@@ -67,6 +67,48 @@ void destroy_x64_native_context(void *context) {
   delete static_cast<X64NativeContext *>(context);
 }
 
+constexpr u8 kAggressivePreflightAdaptiveDisableThreshold = 4;
+
+bool aggressive_preflight_adaptive_detail(NativeBlockRejectDetail detail) {
+  switch (detail) {
+  case NativeBlockRejectDetail::Mmio:
+  case NativeBlockRejectDetail::Memory:
+  case NativeBlockRejectDetail::Unaligned:
+  case NativeBlockRejectDetail::ICache:
+    return true;
+  default:
+    return false;
+  }
+}
+
+void record_aggressive_preflight_adaptive_disable(
+    CpuBackendStats &stats, NativeBlockRejectDetail detail, bool scratchpad) {
+  switch (detail) {
+  case NativeBlockRejectDetail::Mmio:
+    ++stats.native_branch_tail_aggressive_reduced_helper_adaptive_disable_mmio;
+    break;
+  case NativeBlockRejectDetail::Memory:
+    if (scratchpad) {
+      ++stats
+            .native_branch_tail_aggressive_reduced_helper_adaptive_disable_scratchpad;
+    } else {
+      ++stats
+            .native_branch_tail_aggressive_reduced_helper_adaptive_disable_non_ram;
+    }
+    break;
+  case NativeBlockRejectDetail::Unaligned:
+    ++stats
+          .native_branch_tail_aggressive_reduced_helper_adaptive_disable_unaligned;
+    break;
+  case NativeBlockRejectDetail::ICache:
+    ++stats
+          .native_branch_tail_aggressive_reduced_helper_adaptive_disable_code_page;
+    break;
+  default:
+    break;
+  }
+}
+
 bool is_x64_stage1_op(DecodedOp op) {
   switch (op) {
   case DecodedOp::Nop:
@@ -236,6 +278,36 @@ u8 x64_native_gpr_write_reg(const DecodedInstruction &inst) {
 
 bool x64_native_conditional_gpr_write(const DecodedInstruction &inst) {
   return inst.op == DecodedOp::Movz || inst.op == DecodedOp::Movn;
+}
+
+bool x64_aggressive_branch_tail_entry_address_preflight_candidate(
+    const DecodedBlock &block, u8 &memory_ops) {
+  memory_ops = 0;
+  if (!block.native_branch_tail || block.instruction_count < 2u) {
+    return false;
+  }
+
+  std::array<bool, 32> written{};
+  const u32 branch_index = block.instruction_count - 2u;
+  for (u32 i = 0; i < branch_index; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (is_x64_load_op(inst.op) || is_x64_aggressive_store_op(inst.op)) {
+      ++memory_ops;
+      if (inst.rs != 0u && written[inst.rs]) {
+        return false;
+      }
+      if (is_x64_load_op(inst.op) && inst.rt != 0u) {
+        written[inst.rt] = true;
+      }
+      continue;
+    }
+
+    const u8 write_reg = x64_native_gpr_write_reg(inst);
+    if (write_reg != 0u) {
+      written[write_reg] = true;
+    }
+  }
+  return memory_ops != 0u;
 }
 
 bool is_x64_reduced_helper_ram_load_block(
@@ -1885,6 +1957,24 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   block.native_aggressive_reduced_helper_branch_tail =
       block.native_stage1_safe &&
       aggressive_reduced_helper_branch_tail_candidate;
+  block.native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
+      false;
+  block.native_aggressive_reduced_helper_branch_tail_memory_ops = 0;
+  block.native_aggressive_reduced_helper_preflight_last_failure =
+      NativeBlockRejectDetail::None;
+  block.native_aggressive_reduced_helper_preflight_adaptive_disable =
+      NativeBlockRejectDetail::None;
+  block.native_aggressive_reduced_helper_preflight_failure_count = 0;
+  block.native_aggressive_reduced_helper_preflight_last_failure_scratchpad =
+      false;
+  block.native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
+      false;
+  if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory) {
+    block.native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
+        x64_aggressive_branch_tail_entry_address_preflight_candidate(
+            block,
+            block.native_aggressive_reduced_helper_branch_tail_memory_ops);
+  }
   block.native_reduced_helper_branch_tail =
       block.native_stage1_safe && reduced_helper_branch_tail_candidate &&
       !block.native_aggressive_reduced_helper_branch_tail;
@@ -1999,6 +2089,11 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
     if (block.native_aggressive_reduced_helper_branch_tail) {
       ++stats_
             .native_branch_tail_aggressive_reduced_helper_candidate_blocks;
+      if (block
+              .native_aggressive_reduced_helper_branch_tail_entry_address_preflight) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_direct_candidate_blocks;
+      }
     } else {
       ++stats_
             .native_branch_tail_aggressive_reduced_helper_rejected_blocks;
@@ -2401,18 +2496,20 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   }
 
   if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory) {
+    const bool direct_entry_address_preflight =
+        block
+            .native_aggressive_reduced_helper_branch_tail_entry_address_preflight;
     u32 aggressive_preflight_simulated_instructions = 0;
     bool aggressive_preflight_saw_scratchpad = false;
-    auto reject_aggressive_preflight =
-        [&](NativeBlockRejectDetail detail) -> CpuBlockRunResult {
-      ++stats_.native_to_decoded_fallbacks;
-      ++stats_.native_branch_tail_to_decoded_fallbacks;
-      ++stats_.native_reduced_helper_fallbacks;
-      ++stats_.native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
-      ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_fallbacks;
-      stats_
-          .native_branch_tail_aggressive_reduced_helper_preflight_instructions +=
-          aggressive_preflight_simulated_instructions;
+    auto reset_aggressive_preflight_failure_streak = [&]() {
+      block.native_aggressive_reduced_helper_preflight_last_failure =
+          NativeBlockRejectDetail::None;
+      block.native_aggressive_reduced_helper_preflight_failure_count = 0;
+      block.native_aggressive_reduced_helper_preflight_last_failure_scratchpad =
+          false;
+    };
+    auto count_aggressive_preflight_reject_detail =
+        [&](NativeBlockRejectDetail detail, bool scratchpad) {
       if (detail == NativeBlockRejectDetail::Mmio) {
         ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_mmio;
         ++stats_.native_reject_mmio;
@@ -2422,7 +2519,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         ++stats_.native_reject_unaligned;
       } else if (detail == NativeBlockRejectDetail::Memory) {
         ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_non_ram;
-        if (aggressive_preflight_saw_scratchpad) {
+        if (scratchpad) {
           ++stats_
                 .native_branch_tail_aggressive_reduced_helper_preflight_scratchpad;
         }
@@ -2435,6 +2532,84 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         ++stats_
               .native_branch_tail_aggressive_reduced_helper_preflight_disabled;
         ++stats_.native_ram_disabled_fallbacks;
+      }
+    };
+    const NativeBlockRejectDetail adaptive_disable_detail =
+        block.native_aggressive_reduced_helper_preflight_adaptive_disable;
+    if (adaptive_disable_detail != NativeBlockRejectDetail::None) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_branch_tail_to_decoded_fallbacks;
+      ++stats_.native_reduced_helper_fallbacks;
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries;
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_adaptive_preflight_attempts_avoided;
+      record_rejected_block(adaptive_disable_detail);
+      return execute_block(block, max_cycles, max_instructions);
+    }
+    auto reject_aggressive_preflight =
+        [&](NativeBlockRejectDetail detail) -> CpuBlockRunResult {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_branch_tail_to_decoded_fallbacks;
+      ++stats_.native_reduced_helper_fallbacks;
+      ++stats_.native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
+      ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_fallbacks;
+      if (direct_entry_address_preflight) {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_direct_fallbacks;
+      } else {
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_full_fallbacks;
+        stats_
+            .native_branch_tail_aggressive_reduced_helper_preflight_instructions +=
+            aggressive_preflight_simulated_instructions;
+      }
+      count_aggressive_preflight_reject_detail(
+          detail, aggressive_preflight_saw_scratchpad);
+      if (aggressive_preflight_adaptive_detail(detail)) {
+        const bool same_failure =
+            block.native_aggressive_reduced_helper_preflight_last_failure ==
+                detail &&
+            block
+                    .native_aggressive_reduced_helper_preflight_last_failure_scratchpad ==
+                aggressive_preflight_saw_scratchpad;
+        if (same_failure) {
+          if (block
+                  .native_aggressive_reduced_helper_preflight_failure_count <
+              0xFFu) {
+            ++block
+                  .native_aggressive_reduced_helper_preflight_failure_count;
+          }
+          ++stats_
+                .native_branch_tail_aggressive_reduced_helper_adaptive_repeated_failures;
+        } else {
+          block.native_aggressive_reduced_helper_preflight_last_failure =
+              detail;
+          block
+              .native_aggressive_reduced_helper_preflight_last_failure_scratchpad =
+              aggressive_preflight_saw_scratchpad;
+          block.native_aggressive_reduced_helper_preflight_failure_count = 1;
+        }
+        if (block
+                    .native_aggressive_reduced_helper_preflight_adaptive_disable ==
+                NativeBlockRejectDetail::None &&
+            block.native_aggressive_reduced_helper_preflight_failure_count >=
+                kAggressivePreflightAdaptiveDisableThreshold) {
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable =
+              detail;
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
+              aggressive_preflight_saw_scratchpad;
+          ++stats_
+                .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks;
+          record_aggressive_preflight_adaptive_disable(
+              stats_, detail, aggressive_preflight_saw_scratchpad);
+        }
+      } else {
+        reset_aggressive_preflight_failure_streak();
       }
       record_rejected_block(detail);
       return execute_block(block, max_cycles, max_instructions);
@@ -2462,6 +2637,46 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       return false;
     };
 
+    auto check_aggressive_preflight_memory_access =
+        [&](const DecodedInstruction &inst,
+            u32 addr) -> NativeBlockRejectDetail {
+      if (((inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu ||
+            inst.op == DecodedOp::Sh) &&
+           (addr & 1u) != 0u) ||
+          ((inst.op == DecodedOp::Lw || inst.op == DecodedOp::Sw) &&
+           (addr & 3u) != 0u)) {
+        return NativeBlockRejectDetail::Unaligned;
+      }
+      if (!is_canonical_ram_alias(addr)) {
+        const NativeMemoryRegion region = classify_native_memory_region(addr);
+        if (region == NativeMemoryRegion::Scratchpad) {
+          aggressive_preflight_saw_scratchpad = true;
+        }
+        return region == NativeMemoryRegion::Mmio
+                   ? NativeBlockRejectDetail::Mmio
+                   : NativeBlockRejectDetail::Memory;
+      }
+      if (is_x64_aggressive_store_op(inst.op)) {
+        const u32 phys = addr & 0x1FFFFFFFu;
+        const u32 store_size =
+            inst.op == DecodedOp::Sb
+                ? 1u
+                : (inst.op == DecodedOp::Sh ? 2u : 4u);
+        if (store_touches_compiled_code_page(phys, store_size)) {
+          return NativeBlockRejectDetail::ICache;
+        }
+      }
+      return NativeBlockRejectDetail::None;
+    };
+
+    if (direct_entry_address_preflight) {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_preflight_direct_attempts;
+    } else {
+      ++stats_
+            .native_branch_tail_aggressive_reduced_helper_preflight_full_attempts;
+    }
+
     if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
         g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
         g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr ||
@@ -2470,6 +2685,26 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
           NativeBlockRejectDetail::ReducedHelperPreflightDisabled);
     }
 
+    if (direct_entry_address_preflight) {
+      const u32 branch_index = block.instruction_count - 2u;
+      for (u32 i = 0; i < branch_index; ++i) {
+        const DecodedInstruction &inst = block.instructions[i];
+        if (!is_x64_load_op(inst.op) &&
+            !is_x64_aggressive_store_op(inst.op)) {
+          continue;
+        }
+        ++stats_
+              .native_branch_tail_aggressive_reduced_helper_preflight_direct_checks;
+        const u32 addr = cpu_.gpr_[inst.rs] + static_cast<u32>(inst.simm);
+        const NativeBlockRejectDetail detail =
+            check_aggressive_preflight_memory_access(inst, addr);
+        if (detail != NativeBlockRejectDetail::None) {
+          return reject_aggressive_preflight(detail);
+        }
+      }
+      ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_passes;
+      reset_aggressive_preflight_failure_streak();
+    } else {
     std::array<u32, 32> sim_gpr{};
     for (u32 i = 0; i < sim_gpr.size(); ++i) {
       sim_gpr[i] = cpu_.gpr_[i];
@@ -2725,9 +2960,11 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       sim_advance_load_delay();
     }
     ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_passes;
+    reset_aggressive_preflight_failure_streak();
     stats_
         .native_branch_tail_aggressive_reduced_helper_preflight_instructions +=
         aggressive_preflight_simulated_instructions;
+    }
   }
 
   const bool branch_tail_reduced_ram_load =
