@@ -1,5 +1,6 @@
 #pragma once
 #include "gte.h"
+#include "rr4_diagnostics.h"
 #include "types.h"
 #include <array>
 #include <cstddef>
@@ -504,6 +505,7 @@ private:
   u64 muldiv_result_ready_cycle_ = 0;
   u32 cycle_penalty_ = 0;
   bool executing_step_ = false;
+  Rr4DiagState rr4_diag_state_;
 
   // ── Helpers ────────────────────────────────────────────────────
   void set_reg(u32 index, u32 value);

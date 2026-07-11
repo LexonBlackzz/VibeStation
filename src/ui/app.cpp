@@ -25,6 +25,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <ctime>
 #include <vector>
@@ -1717,554 +1718,178 @@ void App::refresh_game_library() {
 
 
 void App::load_persistent_config() {
-    std::ifstream in(kAppConfigFileName);
-    if (!in.is_open()) {
-        return;
+    config_ = Config::load(kAppConfigFileName);
+
+    // Apply config values to globals for backward compatibility
+    config_.apply_to_globals();
+
+    // App-specific members not in Config
+    bios_path_ = config_.bios_path;
+    rom_directory_ = config_.rom_directory;
+    config_vsync_ = config_.vsync;
+    config_low_spec_mode_ = config_.low_spec_mode;
+    config_direct_disc_boot_ = config_.direct_disc_boot;
+    config_turbo_speed_percent_ = config_.turbo_speed_percent;
+    config_slowdown_speed_percent_ = config_.slowdown_speed_percent;
+    config_spu_diagnostic_mode_ = config_.spu_diagnostic_mode;
+    config_discord_rich_presence_ = config_.discord_rich_presence;
+    config_memory_card_mode_[0] = config_.memory_card_slot_mode[0];
+    config_memory_card_mode_[1] = config_.memory_card_slot_mode[1];
+    std::snprintf(log_path_, sizeof(log_path_), "%s", config_.log_file_path.c_str());
+
+    if (!rom_directory_.empty()) {
+        game_library_dirty_ = true;
     }
 
-    auto trim = [](std::string& s) {
-        const size_t begin = s.find_first_not_of(" \t\r\n");
-        if (begin == std::string::npos) {
-            s.clear();
-            return;
-        }
-        const size_t end = s.find_last_not_of(" \t\r\n");
-        s = s.substr(begin, end - begin + 1);
-        };
-    auto parse_bool = [](const std::string& v, bool fallback) {
-        if (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON") {
-            return true;
-        }
-        if (v == "0" || v == "false" || v == "FALSE" || v == "off" || v == "OFF") {
-            return false;
-        }
-        return fallback;
-        };
-    auto parse_cpu_mode = [](std::string v, CpuExecutionMode fallback) {
-        std::transform(v.begin(), v.end(), v.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        v.erase(std::remove(v.begin(), v.end(), '-'), v.end());
-        v.erase(std::remove(v.begin(), v.end(), '_'), v.end());
-        if (v == "1" || v == "decoded" || v == "decodedblock" ||
-            v == "blockinterpreter" || v == "blockinterp" || v == "block") {
-            return CpuExecutionMode::DecodedBlockInterpreter;
-        }
-        if (v == "2" || v == "x64jit" || v == "recompiler" ||
-            v == "jit" || v == "dynarec") {
-            return CpuExecutionMode::X64Jit;
-        }
-        if (v == "0" || v == "interpreter" || v == "interp") {
-            return CpuExecutionMode::Interpreter;
-        }
-        return fallback;
-        };
-
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-
-        std::string key = line.substr(0, eq);
-        std::string value = line.substr(eq + 1);
-        trim(key);
-        trim(value);
-
-        if (key == "bios_path") {
-            bios_path_ = value;
-        }
-        else if (key == "rom_directory") {
-            rom_directory_ = value;
-            game_library_dirty_ = true;
-        }
-        else if (key == "vsync") {
-            config_vsync_ = parse_bool(value, config_vsync_);
-        }
-        else if (key == "low_spec_mode") {
-            config_low_spec_mode_ = parse_bool(value, config_low_spec_mode_);
-            g_low_spec_mode = config_low_spec_mode_;
-        }
-        else if (key == "direct_disc_boot") {
-            config_direct_disc_boot_ =
-                parse_bool(value, config_direct_disc_boot_);
-        }
-        else if (key == "cpu_execution_mode") {
-            g_cpu_execution_mode = parse_cpu_mode(value, g_cpu_execution_mode);
-        }
-        else if (key == "cpu_x64_jit_hot_block_threshold") {
-            const unsigned long parsed =
-                std::strtoul(value.c_str(), nullptr, 10);
-            g_cpu_x64_jit_hot_block_threshold =
-                static_cast<u32>(std::min(1000000ul, parsed));
-        }
-        else if (key == "cpu_x64_jit_min_block_instructions") {
-            const unsigned long parsed =
-                std::strtoul(value.c_str(), nullptr, 10);
-            g_cpu_x64_jit_min_block_instructions =
-                static_cast<u32>(std::max(1ul, std::min(64ul, parsed)));
-        }
-        else if (key == "cpu_x64_jit_branch_tail_enabled") {
-            g_cpu_x64_jit_branch_tail_enabled =
-                parse_bool(value, g_cpu_x64_jit_branch_tail_enabled);
-        }
-        else if (key ==
-                 "cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled") {
-            g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled =
-                parse_bool(value,
-                    g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled);
-        }
-        else if (key == "cpu_x64_jit_aggressive_native_prefix_ram_enabled") {
-            g_cpu_x64_jit_aggressive_native_prefix_ram_enabled =
-                parse_bool(value,
-                    g_cpu_x64_jit_aggressive_native_prefix_ram_enabled);
-        }
-        else if (key == "cpu_x64_jit_all_native_enabled") {
-            g_cpu_x64_jit_all_native_enabled =
-                parse_bool(value, g_cpu_x64_jit_all_native_enabled);
-        }
-        else if (key == "cpu_x64_jit_native_memory_enabled") {
-            g_cpu_x64_jit_native_memory_enabled =
-                parse_bool(value, g_cpu_x64_jit_native_memory_enabled);
-        }
-        else if (key == "cpu_x64_jit_native_alu_enabled") {
-            g_cpu_x64_jit_native_alu_enabled =
-                parse_bool(value, g_cpu_x64_jit_native_alu_enabled);
-        }
-        else if (key == "memory_card_slot1_mode") {
-            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
-            config_memory_card_mode_[0] = std::max(0, std::min(2, parsed));
-        }
-        else if (key == "memory_card_slot2_mode") {
-            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
-            config_memory_card_mode_[1] = std::max(0, std::min(2, parsed));
-        }
-        else if (key == "turbo_speed_percent") {
-            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
-            config_turbo_speed_percent_ = normalize_turbo_speed_percent(parsed);
-        }
-        else if (key == "slowdown_speed_percent") {
-            const int parsed = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
-            config_slowdown_speed_percent_ = normalize_slowdown_speed_percent(parsed);
-        }
-        else if (key == "spu_diagnostic_mode") {
-            config_spu_diagnostic_mode_ = parse_bool(value, config_spu_diagnostic_mode_);
-        }
-        else if (key == "discord_rich_presence") {
-            config_discord_rich_presence_ =
-                parse_bool(value, config_discord_rich_presence_);
-        }
-        else if (key == "gpu_fast_mode") {
-            g_gpu_fast_mode = parse_bool(value, g_gpu_fast_mode);
-        }
-        else if (key == "gpu_extreme_fast_mode") {
-            g_gpu_extreme_fast_mode =
-                parse_bool(value, g_gpu_extreme_fast_mode);
-        }
-        else if (key == "mdec_debug_disable_dma1_reorder") {
-            g_mdec_debug_disable_dma1_reorder =
-                parse_bool(value, g_mdec_debug_disable_dma1_reorder);
-        }
-        else if (key == "mdec_debug_disable_chroma") {
-            g_mdec_debug_disable_chroma =
-                parse_bool(value, g_mdec_debug_disable_chroma);
-        }
-        else if (key == "mdec_debug_disable_luma") {
-            g_mdec_debug_disable_luma =
-                parse_bool(value, g_mdec_debug_disable_luma);
-        }
-        else if (key == "mdec_debug_force_solid_output") {
-            g_mdec_debug_force_solid_output =
-                parse_bool(value, g_mdec_debug_force_solid_output);
-        }
-        else if (key == "mdec_debug_swap_input_halfwords") {
-            g_mdec_debug_swap_input_halfwords =
-                parse_bool(value, g_mdec_debug_swap_input_halfwords);
-        }
-        else if (key == "mdec_debug_compare_macroblocks") {
-            g_mdec_debug_compare_macroblocks =
-                parse_bool(value, g_mdec_debug_compare_macroblocks);
-        }
-        else if (key == "mdec_debug_upload_probe") {
-            g_mdec_debug_upload_probe =
-                parse_bool(value, g_mdec_debug_upload_probe);
-        }
-        else if (key == "mdec_debug_color_block_mask") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_mdec_debug_color_block_mask =
-                static_cast<u8>(std::max(0ul, std::min(15ul, parsed)));
-        }
-        else if (key.rfind("bind_", 0) == 0) {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
-            for (const auto& entry : kKeyboardBindEntries) {
-                if (key == entry.config_key) {
-                    if (scancode == SDL_SCANCODE_UNKNOWN) {
-                        input_->clear_key_binding(entry.button);
+    // Key bindings are still handled via legacy INI file
+    {
+        std::ifstream in(kAppConfigFileName);
+        if (in.is_open()) {
+            auto trim = [](std::string& s) {
+                const size_t begin = s.find_first_not_of(" \t\r\n");
+                if (begin == std::string::npos) { s.clear(); return; }
+                const size_t end = s.find_last_not_of(" \t\r\n");
+                s = s.substr(begin, end - begin + 1);
+            };
+            std::string line;
+            while (std::getline(in, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                const size_t eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq);
+                std::string value = line.substr(eq + 1);
+                trim(key);
+                trim(value);
+                if (key.rfind("bind_", 0) == 0) {
+                    const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+                    const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
+                    for (const auto& entry : kKeyboardBindEntries) {
+                        if (key == entry.config_key) {
+                            if (scancode == SDL_SCANCODE_UNKNOWN) {
+                                input_->clear_key_binding(entry.button);
+                            } else {
+                                input_->set_key_binding(scancode, entry.button);
+                            }
+                            break;
+                        }
                     }
-                    else {
-                        input_->set_key_binding(scancode, entry.button);
-                    }
-                    break;
                 }
             }
         }
-        else if (key == "spu_output_buffer_seconds") {
-            const float parsed = std::strtof(value.c_str(), nullptr);
-            const float clamped = std::max(0.05f, std::min(8.0f, parsed));
-            g_spu_output_buffer_seconds = clamped;
-        }
-        else if (key == "spu_audio_target_latency_ms") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_spu_audio_target_latency_ms = static_cast<u32>(
-                std::clamp(parsed, 10ul, 500ul));
-        }
-        else if (key == "spu_audio_max_latency_ms") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_spu_audio_max_latency_ms = static_cast<u32>(
-                std::clamp(parsed, 10ul, 1000ul));
-        }
-        else if (key == "spu_audio_soft_latency_ms") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_spu_audio_soft_latency_ms = static_cast<u32>(
-                std::clamp(parsed, 10ul, 750ul));
-        }
-        else if (key == "spu_xa_buffer_seconds") {
-            const float parsed = std::strtof(value.c_str(), nullptr);
-            const float clamped = std::max(0.0f, std::min(5.0f, parsed));
-            g_spu_xa_buffer_seconds = clamped;
-        }
-        // Backward compatibility with older config keys in milliseconds.
-        else if (key == "spu_output_latency_ms") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_spu_audio_target_latency_ms = static_cast<u32>(
-                std::clamp(parsed, 10ul, 500ul));
-        }
-        else if (key == "spu_xa_latency_ms") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            const u32 clamped = static_cast<u32>(std::min(2000ul, parsed));
-            g_spu_xa_buffer_seconds = static_cast<float>(clamped) / 1000.0f;
-        }
-        else if (key == "spu_enable_audio_queue") {
-            g_spu_enable_audio_queue = parse_bool(value, g_spu_enable_audio_queue);
-        }
-        else if (key == "spu_enable_smooth_trim") {
-            g_spu_enable_smooth_trim =
-                parse_bool(value, g_spu_enable_smooth_trim);
-        }
-        else if (key == "spu_show_audio_stats") {
-            g_spu_show_audio_stats = parse_bool(value, g_spu_show_audio_stats);
-        }
-        else if (key == "spu_audio_stats_log") {
-            g_spu_audio_stats_log = parse_bool(value, g_spu_audio_stats_log);
-        }
-        else if (key == "spu_enable_lag_stutter") {
-            g_spu_enable_lag_stutter =
-                parse_bool(value, g_spu_enable_lag_stutter);
-        }
-        else if (key == "spu_enable_slowdown_stutter") {
-            g_spu_enable_slowdown_stutter =
-                parse_bool(value, g_spu_enable_slowdown_stutter);
-        }
-        else if (key == "advanced_sound_status_logging") {
-            g_spu_advanced_sound_status =
-                parse_bool(value, g_spu_advanced_sound_status);
-        }
-        else if (key == "log_level") {
-            g_log_level = parse_log_level_config(value, g_log_level);
-        }
-        else if (key == "log_timestamps") {
-            g_log_timestamp = parse_bool(value, g_log_timestamp);
-        }
-        else if (key == "log_collapse_repeats") {
-            g_log_dedupe = parse_bool(value, g_log_dedupe);
-        }
-        else if (key == "log_fmv_diagnostics") {
-            g_log_fmv_diagnostics =
-                parse_bool(value, g_log_fmv_diagnostics);
-        }
-        else if (key == "log_repeat_flush") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-            g_log_dedupe_flush = static_cast<u32>(std::max(1ul, parsed));
-        }
-        else if (key == "log_category_mask") {
-            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 0);
-            g_log_category_mask = static_cast<u32>(parsed);
-        }
-        else if (key == "log_file_path") {
-            std::snprintf(log_path_, sizeof(log_path_), "%s", value.c_str());
-        }
-        else if (key == "trace_dma") {
-            g_trace_dma = parse_bool(value, g_trace_dma);
-        }
-        else if (key == "trace_cdrom") {
-            g_trace_cdrom = parse_bool(value, g_trace_cdrom);
-        }
-        else if (key == "trace_cpu") {
-            g_trace_cpu = parse_bool(value, g_trace_cpu);
-        }
-        else if (key == "trace_bus") {
-            g_trace_bus = parse_bool(value, g_trace_bus);
-        }
-        else if (key == "trace_ram") {
-            g_trace_ram = parse_bool(value, g_trace_ram);
-        }
-        else if (key == "trace_gpu") {
-            g_trace_gpu = parse_bool(value, g_trace_gpu);
-        }
-        else if (key == "trace_spu") {
-            g_trace_spu = parse_bool(value, g_trace_spu);
-        }
-        else if (key == "trace_irq") {
-            g_trace_irq = parse_bool(value, g_trace_irq);
-        }
-        else if (key == "trace_timer") {
-            g_trace_timer = parse_bool(value, g_trace_timer);
-        }
-        else if (key == "trace_sio") {
-            g_trace_sio = parse_bool(value, g_trace_sio);
-        }
-        else if (key == "cpu_deep_diagnostics") {
-            g_cpu_deep_diagnostics =
-                parse_bool(value, g_cpu_deep_diagnostics);
-        }
-        else if (key == "trace_burst_cpu") {
-            g_trace_burst_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_cpu") {
-            g_trace_stride_cpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_bus") {
-            g_trace_burst_bus = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_bus") {
-            g_trace_stride_bus = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_ram") {
-            g_trace_burst_ram = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_ram") {
-            g_trace_stride_ram = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_dma") {
-            g_trace_burst_dma = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_dma") {
-            g_trace_stride_dma = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_cdrom") {
-            g_trace_burst_cdrom = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_cdrom") {
-            g_trace_stride_cdrom = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_gpu") {
-            g_trace_burst_gpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_gpu") {
-            g_trace_stride_gpu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_spu") {
-            g_trace_burst_spu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_spu") {
-            g_trace_stride_spu = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_irq") {
-            g_trace_burst_irq = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_irq") {
-            g_trace_stride_irq = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_timer") {
-            g_trace_burst_timer = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_timer") {
-            g_trace_stride_timer = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_burst_sio") {
-            g_trace_burst_sio = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "trace_stride_sio") {
-            g_trace_stride_sio = static_cast<u32>(std::max(1ul, std::strtoul(value.c_str(), nullptr, 10)));
-        }
-        else if (key == "detailed_profiling") {
-            g_profile_detailed_timing = parse_bool(value, g_profile_detailed_timing);
-        }
-        else if (key == "experimental_bios_size_mode") {
-            g_experimental_bios_size_mode = parse_bool(value, g_experimental_bios_size_mode);
-        }
-        else if (key == "unsafe_ps2_bios_mode") {
-            g_unsafe_ps2_bios_mode = parse_bool(value, g_unsafe_ps2_bios_mode);
-        }
-        else if (key == "experimental_unhandled_special_returns_zero") {
-            g_experimental_unhandled_special_returns_zero =
-                parse_bool(value, g_experimental_unhandled_special_returns_zero);
-        }
-        else if (key == "experimental_dma_command_sanitizer") {
-            g_experimental_dma_command_sanitizer =
-                parse_bool(value, g_experimental_dma_command_sanitizer);
-        }
-        else if (key == "deinterlace_mode") {
-            const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
-            const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
-            g_deinterlace_mode = static_cast<DeinterlaceMode>(idx);
-        }
-        else if (key == "bilinear_filtering") {
-            g_bilinear_filtering = parse_bool(value, g_bilinear_filtering);
-        }
-        else if (key == "output_resolution_mode") {
-            const unsigned long mode = std::strtoul(value.c_str(), nullptr, 10);
-            const int idx = static_cast<int>(std::max(0ul, std::min(2ul, mode)));
-            g_output_resolution_mode = static_cast<OutputResolutionMode>(idx);
-        }
-    }
-
-    g_spu_output_buffer_seconds =
-        std::max(0.05f, std::min(8.0f, g_spu_output_buffer_seconds));
-    g_spu_audio_target_latency_ms =
-        std::clamp(g_spu_audio_target_latency_ms, 10u, 500u);
-    g_spu_audio_soft_latency_ms = std::clamp(g_spu_audio_soft_latency_ms,
-        g_spu_audio_target_latency_ms, 750u);
-    g_spu_audio_max_latency_ms = std::clamp(g_spu_audio_max_latency_ms,
-        g_spu_audio_soft_latency_ms, 1000u);
-    g_spu_xa_buffer_seconds =
-        std::max(0.0f, std::min(5.0f, g_spu_xa_buffer_seconds));
-    if (!g_gpu_fast_mode) {
-        g_gpu_extreme_fast_mode = false;
-    }
-    memory_card_target_paths_ = resolve_memory_card_paths();
-
-    if (g_unsafe_ps2_bios_mode) {
-        g_experimental_bios_size_mode = true;
     }
 }
 
 void App::save_persistent_config() const {
-    std::ofstream out(kAppConfigFileName, std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        return;
-    }
+    // Sync config from App members (loaded from config file at startup)
+    Config out = config_;
+    out.bios_path = bios_path_;
+    out.rom_directory = rom_directory_;
+    out.vsync = config_vsync_;
+    out.low_spec_mode = config_low_spec_mode_;
+    out.direct_disc_boot = config_direct_disc_boot_;
+    out.turbo_speed_percent = config_turbo_speed_percent_;
+    out.slowdown_speed_percent = config_slowdown_speed_percent_;
+    out.spu_diagnostic_mode = config_spu_diagnostic_mode_;
+    out.discord_rich_presence = config_discord_rich_presence_;
+    out.memory_card_slot_mode[0] = config_memory_card_mode_[0];
+    out.memory_card_slot_mode[1] = config_memory_card_mode_[1];
+    out.log_file_path = log_path_;
 
-    out << "bios_path=" << bios_path_ << "\n";
-    out << "rom_directory=" << rom_directory_ << "\n";
-    out << "vsync=" << (config_vsync_ ? 1 : 0) << "\n";
-    out << "low_spec_mode=" << (config_low_spec_mode_ ? 1 : 0) << "\n";
-    out << "direct_disc_boot=" << (config_direct_disc_boot_ ? 1 : 0) << "\n";
-    out << "cpu_execution_mode="
-        << cpu_execution_mode_to_config_value(g_cpu_execution_mode) << "\n";
-    out << "cpu_x64_jit_hot_block_threshold="
-        << g_cpu_x64_jit_hot_block_threshold << "\n";
-    out << "cpu_x64_jit_min_block_instructions="
-        << g_cpu_x64_jit_min_block_instructions << "\n";
-    out << "cpu_x64_jit_branch_tail_enabled="
-        << (g_cpu_x64_jit_branch_tail_enabled ? 1 : 0) << "\n";
-    out << "cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled="
-        << (g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled ? 1 : 0)
-        << "\n";
-    out << "cpu_x64_jit_aggressive_native_prefix_ram_enabled="
-        << (g_cpu_x64_jit_aggressive_native_prefix_ram_enabled ? 1 : 0)
-        << "\n";
-    out << "cpu_x64_jit_all_native_enabled="
-        << (g_cpu_x64_jit_all_native_enabled ? 1 : 0) << "\n";
-    out << "cpu_x64_jit_native_memory_enabled="
-        << (g_cpu_x64_jit_native_memory_enabled ? 1 : 0) << "\n";
-    out << "cpu_x64_jit_native_alu_enabled="
-        << (g_cpu_x64_jit_native_alu_enabled ? 1 : 0) << "\n";
-    out << "memory_card_slot1_mode="
-        << std::max(0, std::min(2, config_memory_card_mode_[0])) << "\n";
-    out << "memory_card_slot2_mode="
-        << std::max(0, std::min(2, config_memory_card_mode_[1])) << "\n";
-    out << "turbo_speed_percent=" << config_turbo_speed_percent_ << "\n";
-    out << "slowdown_speed_percent=" << config_slowdown_speed_percent_ << "\n";
-    out << "spu_diagnostic_mode=" << (config_spu_diagnostic_mode_ ? 1 : 0) << "\n";
-    out << "discord_rich_presence=" << (config_discord_rich_presence_ ? 1 : 0) << "\n";
-    out << "gpu_fast_mode=" << (g_gpu_fast_mode ? 1 : 0) << "\n";
-    out << "gpu_extreme_fast_mode="
-        << ((g_gpu_fast_mode && g_gpu_extreme_fast_mode) ? 1 : 0) << "\n";
-    out << "mdec_debug_disable_dma1_reorder="
-        << (g_mdec_debug_disable_dma1_reorder ? 1 : 0) << "\n";
-    out << "mdec_debug_disable_chroma=" << (g_mdec_debug_disable_chroma ? 1 : 0) << "\n";
-    out << "mdec_debug_disable_luma=" << (g_mdec_debug_disable_luma ? 1 : 0) << "\n";
-    out << "mdec_debug_force_solid_output="
-        << (g_mdec_debug_force_solid_output ? 1 : 0) << "\n";
-    out << "mdec_debug_swap_input_halfwords="
-        << (g_mdec_debug_swap_input_halfwords ? 1 : 0) << "\n";
-    out << "mdec_debug_compare_macroblocks="
-        << (g_mdec_debug_compare_macroblocks ? 1 : 0) << "\n";
-    out << "mdec_debug_upload_probe="
-        << (g_mdec_debug_upload_probe ? 1 : 0) << "\n";
-    out << "mdec_debug_color_block_mask="
-        << static_cast<unsigned>(g_mdec_debug_color_block_mask & 0x0Fu) << "\n";
-    for (const auto& entry : kKeyboardBindEntries) {
-        out << entry.config_key << "="
-            << static_cast<int>(input_->key_for_button(entry.button)) << "\n";
+    // Sync from globals that UI panels write to directly
+    out.gpu_fast_mode = g_gpu_fast_mode;
+    out.gpu_extreme_fast_mode = g_gpu_extreme_fast_mode;
+    out.bilinear_filtering = g_bilinear_filtering;
+    out.deinterlace_mode = g_deinterlace_mode;
+    out.output_resolution_mode = g_output_resolution_mode;
+    out.log_level = g_log_level;
+    out.log_timestamps = g_log_timestamp;
+    out.log_collapse_repeats = g_log_dedupe;
+    out.log_fmv_diagnostics = g_log_fmv_diagnostics;
+    out.log_repeat_flush = g_log_dedupe_flush;
+    out.log_category_mask = g_log_category_mask;
+    out.cpu_deep_diagnostics = g_cpu_deep_diagnostics;
+    out.detailed_profiling = g_profile_detailed_timing;
+    out.experimental_bios_size_mode = g_experimental_bios_size_mode;
+    out.unsafe_ps2_bios_mode = g_unsafe_ps2_bios_mode;
+    out.experimental_unhandled_special_returns_zero = g_experimental_unhandled_special_returns_zero;
+    out.experimental_dma_command_sanitizer = g_experimental_dma_command_sanitizer;
+    out.cpu_execution_mode = g_cpu_execution_mode;
+    out.cpu_x64_jit.hot_block_threshold = g_cpu_x64_jit_hot_block_threshold;
+    out.cpu_x64_jit.min_block_instructions = g_cpu_x64_jit_min_block_instructions;
+    out.cpu_x64_jit.branch_tail_enabled = g_cpu_x64_jit_branch_tail_enabled;
+    out.cpu_x64_jit.aggressive_reduced_helper_branch_tail_enabled = g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled;
+    out.cpu_x64_jit.aggressive_native_prefix_ram_enabled = g_cpu_x64_jit_aggressive_native_prefix_ram_enabled;
+    out.cpu_x64_jit.all_native_enabled = g_cpu_x64_jit_all_native_enabled;
+    out.cpu_x64_jit.native_memory_enabled = g_cpu_x64_jit_native_memory_enabled;
+    out.cpu_x64_jit.native_alu_enabled = g_cpu_x64_jit_native_alu_enabled;
+    out.cpu_x64_jit.ram_load_fastpath_enabled = g_cpu_x64_jit_ram_load_fastpath_enabled;
+    out.spu.target_latency_ms = g_spu_audio_target_latency_ms;
+    out.spu.soft_latency_ms = g_spu_audio_soft_latency_ms;
+    out.spu.max_latency_ms = g_spu_audio_max_latency_ms;
+    out.spu.output_buffer_seconds = g_spu_output_buffer_seconds;
+    out.spu.xa_buffer_seconds = g_spu_xa_buffer_seconds;
+    out.spu.enable_audio_queue = g_spu_enable_audio_queue;
+    out.spu.enable_smooth_trim = g_spu_enable_smooth_trim;
+    out.spu.enable_lag_stutter = g_spu_enable_lag_stutter;
+    out.spu.enable_slowdown_stutter = g_spu_enable_slowdown_stutter;
+    out.spu.show_audio_stats = g_spu_show_audio_stats;
+    out.spu.audio_stats_log = g_spu_audio_stats_log;
+    out.spu.advanced_sound_status = g_spu_advanced_sound_status;
+    out.trace.dma = g_trace_dma;
+    out.trace.cdrom = g_trace_cdrom;
+    out.trace.cpu = g_trace_cpu;
+    out.trace.bus = g_trace_bus;
+    out.trace.ram = g_trace_ram;
+    out.trace.gpu = g_trace_gpu;
+    out.trace.spu = g_trace_spu;
+    out.trace.irq = g_trace_irq;
+    out.trace.timer = g_trace_timer;
+    out.trace.sio = g_trace_sio;
+    out.trace.burst_cpu = g_trace_burst_cpu;
+    out.trace.stride_cpu = g_trace_stride_cpu;
+    out.trace.burst_bus = g_trace_burst_bus;
+    out.trace.stride_bus = g_trace_stride_bus;
+    out.trace.burst_ram = g_trace_burst_ram;
+    out.trace.stride_ram = g_trace_stride_ram;
+    out.trace.burst_dma = g_trace_burst_dma;
+    out.trace.stride_dma = g_trace_stride_dma;
+    out.trace.burst_cdrom = g_trace_burst_cdrom;
+    out.trace.stride_cdrom = g_trace_stride_cdrom;
+    out.trace.burst_gpu = g_trace_burst_gpu;
+    out.trace.stride_gpu = g_trace_stride_gpu;
+    out.trace.burst_spu = g_trace_burst_spu;
+    out.trace.stride_spu = g_trace_stride_spu;
+    out.trace.burst_irq = g_trace_burst_irq;
+    out.trace.stride_irq = g_trace_stride_irq;
+    out.trace.burst_timer = g_trace_burst_timer;
+    out.trace.stride_timer = g_trace_stride_timer;
+    out.trace.burst_sio = g_trace_burst_sio;
+    out.trace.stride_sio = g_trace_stride_sio;
+    out.mdec_debug.disable_dma1_reorder = g_mdec_debug_disable_dma1_reorder;
+    out.mdec_debug.disable_chroma = g_mdec_debug_disable_chroma;
+    out.mdec_debug.disable_luma = g_mdec_debug_disable_luma;
+    out.mdec_debug.force_solid_output = g_mdec_debug_force_solid_output;
+    out.mdec_debug.swap_input_halfwords = g_mdec_debug_swap_input_halfwords;
+    out.mdec_debug.compare_macroblocks = g_mdec_debug_compare_macroblocks;
+    out.mdec_debug.upload_probe = g_mdec_debug_upload_probe;
+    out.mdec_debug.color_block_mask = g_mdec_debug_color_block_mask;
+
+    out.save(kAppConfigFileName);
+
+    {
+        std::ifstream in(kAppConfigFileName);
+        nlohmann::json j;
+        if (in.is_open()) {
+            try { in >> j; } catch (...) {}
+        }
+        for (const auto& entry : kKeyboardBindEntries) {
+            j[entry.config_key] = static_cast<int>(input_->key_for_button(entry.button));
+        }
+        std::ofstream out_stream(kAppConfigFileName, std::ios::out | std::ios::trunc);
+        if (out_stream.is_open()) {
+            out_stream << j.dump(2) << "\n";
+        }
     }
-    out << std::fixed << std::setprecision(3);
-    out << "spu_xa_buffer_seconds=" << g_spu_xa_buffer_seconds << "\n";
-    out.unsetf(std::ios::floatfield);
-    out << "spu_audio_target_latency_ms=" << g_spu_audio_target_latency_ms << "\n";
-    out << "spu_audio_soft_latency_ms=" << g_spu_audio_soft_latency_ms << "\n";
-    out << "spu_audio_max_latency_ms=" << g_spu_audio_max_latency_ms << "\n";
-    out << "spu_enable_audio_queue=" << (g_spu_enable_audio_queue ? 1 : 0) << "\n";
-    out << "spu_enable_smooth_trim=" << (g_spu_enable_smooth_trim ? 1 : 0) << "\n";
-    out << "spu_show_audio_stats=" << (g_spu_show_audio_stats ? 1 : 0) << "\n";
-    out << "spu_audio_stats_log=" << (g_spu_audio_stats_log ? 1 : 0) << "\n";
-    out << "spu_enable_lag_stutter=" << (g_spu_enable_lag_stutter ? 1 : 0) << "\n";
-    out << "spu_enable_slowdown_stutter="
-        << (g_spu_enable_slowdown_stutter ? 1 : 0) << "\n";
-    out << "advanced_sound_status_logging=" << (g_spu_advanced_sound_status ? 1 : 0) << "\n";
-    out << "log_level=" << log_level_to_config_value(g_log_level) << "\n";
-    out << "log_timestamps=" << (g_log_timestamp ? 1 : 0) << "\n";
-    out << "log_collapse_repeats=" << (g_log_dedupe ? 1 : 0) << "\n";
-    out << "log_fmv_diagnostics=" << (g_log_fmv_diagnostics ? 1 : 0) << "\n";
-    out << "log_repeat_flush=" << static_cast<unsigned>(g_log_dedupe_flush) << "\n";
-    out << "log_category_mask=" << g_log_category_mask << "\n";
-    out << "log_file_path=" << log_path_ << "\n";
-    out << "trace_dma=" << (g_trace_dma ? 1 : 0) << "\n";
-    out << "trace_cdrom=" << (g_trace_cdrom ? 1 : 0) << "\n";
-    out << "trace_cpu=" << (g_trace_cpu ? 1 : 0) << "\n";
-    out << "trace_bus=" << (g_trace_bus ? 1 : 0) << "\n";
-    out << "trace_ram=" << (g_trace_ram ? 1 : 0) << "\n";
-    out << "trace_gpu=" << (g_trace_gpu ? 1 : 0) << "\n";
-    out << "trace_spu=" << (g_trace_spu ? 1 : 0) << "\n";
-    out << "trace_irq=" << (g_trace_irq ? 1 : 0) << "\n";
-    out << "trace_timer=" << (g_trace_timer ? 1 : 0) << "\n";
-    out << "trace_sio=" << (g_trace_sio ? 1 : 0) << "\n";
-    out << "cpu_deep_diagnostics=" << (g_cpu_deep_diagnostics ? 1 : 0) << "\n";
-    out << "trace_burst_cpu=" << g_trace_burst_cpu << "\n";
-    out << "trace_stride_cpu=" << g_trace_stride_cpu << "\n";
-    out << "trace_burst_bus=" << g_trace_burst_bus << "\n";
-    out << "trace_stride_bus=" << g_trace_stride_bus << "\n";
-    out << "trace_burst_ram=" << g_trace_burst_ram << "\n";
-    out << "trace_stride_ram=" << g_trace_stride_ram << "\n";
-    out << "trace_burst_dma=" << g_trace_burst_dma << "\n";
-    out << "trace_stride_dma=" << g_trace_stride_dma << "\n";
-    out << "trace_burst_cdrom=" << g_trace_burst_cdrom << "\n";
-    out << "trace_stride_cdrom=" << g_trace_stride_cdrom << "\n";
-    out << "trace_burst_gpu=" << g_trace_burst_gpu << "\n";
-    out << "trace_stride_gpu=" << g_trace_stride_gpu << "\n";
-    out << "trace_burst_spu=" << g_trace_burst_spu << "\n";
-    out << "trace_stride_spu=" << g_trace_stride_spu << "\n";
-    out << "trace_burst_irq=" << g_trace_burst_irq << "\n";
-    out << "trace_stride_irq=" << g_trace_stride_irq << "\n";
-    out << "trace_burst_timer=" << g_trace_burst_timer << "\n";
-    out << "trace_stride_timer=" << g_trace_stride_timer << "\n";
-    out << "trace_burst_sio=" << g_trace_burst_sio << "\n";
-    out << "trace_stride_sio=" << g_trace_stride_sio << "\n";
-    out << "detailed_profiling=" << (g_profile_detailed_timing ? 1 : 0) << "\n";
-    out << "experimental_bios_size_mode=" << (g_experimental_bios_size_mode ? 1 : 0) << "\n";
-    out << "unsafe_ps2_bios_mode=" << (g_unsafe_ps2_bios_mode ? 1 : 0) << "\n";
-    out << "experimental_unhandled_special_returns_zero=" <<
-        (g_experimental_unhandled_special_returns_zero ? 1 : 0) << "\n";
-    out << "experimental_dma_command_sanitizer=" <<
-        (g_experimental_dma_command_sanitizer ? 1 : 0) << "\n";
-    out << "deinterlace_mode=" << static_cast<int>(g_deinterlace_mode) << "\n";
-    out << "bilinear_filtering=" << (g_bilinear_filtering ? 1 : 0) << "\n";
-    out << "output_resolution_mode=" << static_cast<int>(g_output_resolution_mode) << "\n";
 }
 
 void App::try_autoload_bios_from_config() {

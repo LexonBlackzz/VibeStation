@@ -2,6 +2,7 @@
 #include "../core/input_recorder.h"
 #include "emu_runner.h"
 #include "../integrations/discord_presence.h"
+#include "../core/config.h"
 #include "../core/renderer.h"
 #include "../core/system.h"
 #include "../core/types.h"
@@ -122,6 +123,7 @@ private:
 	unsigned int vram_debug_texture_ = 0;
 
 	// Configurable performance options
+	Config config_;
 	bool config_vsync_ = true;
 	bool config_low_spec_mode_ = false;
 	bool config_direct_disc_boot_ = false;
