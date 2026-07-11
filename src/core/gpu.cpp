@@ -1105,7 +1105,12 @@ void Gpu::gp0(u32 command) {
         gp0_irq_request();
         break;
     default:
-        LOG_WARN("GPU: Unhandled GP0 command 0x%02X", op);
+        if ((op >= 0x03 && op <= 0x1E) || op == 0xE0 || op >= 0xE7) {
+            // Legal NOP commands on PS1 hardware.
+        }
+        else {
+            LOG_WARN("GPU: Unhandled GP0 command 0x%02X", op);
+        }
         break;
     }
 
@@ -1173,12 +1178,17 @@ void Gpu::gp0_fill_rect() {
     u16 w = ((gp0_buffer_[2] & 0x3FF) + 0xF) & ~0xF; // Rounded up to 16 pixels
     u16 h = (gp0_buffer_[2] >> 16) & 0x1FF;
 
-    u16 color15 = c.to_15bit();
+    const u16 color15 = c.to_15bit();
+    const u16 out = force_set_mask_bit_ ? static_cast<u16>(color15 | 0x8000u) : color15;
     for (u16 dy = 0; dy < h; dy++) {
         for (u16 dx = 0; dx < w; dx++) {
             u16 px = (x + dx) % psx::VRAM_WIDTH;
             u16 py = (y + dy) % psx::VRAM_HEIGHT;
-            vram_[py * psx::VRAM_WIDTH + px] = color15;
+            const size_t index = static_cast<size_t>(py) * psx::VRAM_WIDTH + px;
+            if (check_mask_before_draw_ && (vram_[index] & 0x8000u)) {
+                continue;
+            }
+            vram_[index] = out;
         }
     }
 }
@@ -1343,11 +1353,11 @@ void Gpu::gp0_mono_polyline_start() {
 }
 
 void Gpu::gp0_shaded_line() {
-    // Keep line shading simple for now: use color of first vertex.
-    const Color c(gp0_buffer_[0]);
+    const Color c0(gp0_buffer_[0]);
+    const Color c1(gp0_buffer_[2]);
     const Vertex v0 = decode_vertex_word(gp0_buffer_[1]);
     const Vertex v1 = decode_vertex_word(gp0_buffer_[3]);
-    draw_line_segment(v0, v1, c, semi_transparency_mode_);
+    draw_gouraud_line_segment(v0, c0, v1, c1, semi_transparency_mode_);
 }
 
 void Gpu::gp0_shaded_polyline_start() {
@@ -1409,6 +1419,50 @@ void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) 
     }
 }
 
+void Gpu::draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
+    bool semi_transparent) {
+    const int dx_span = std::abs(static_cast<int>(b.x) - static_cast<int>(a.x));
+    const int dy_span = std::abs(static_cast<int>(b.y) - static_cast<int>(a.y));
+    if (dx_span > 1023 || dy_span > 511) {
+        return;
+    }
+    s16 x0 = a.x;
+    s16 y0 = a.y;
+    const s16 x1 = b.x;
+    const s16 y1 = b.y;
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    const int sx = (x0 < x1) ? 1 : -1;
+    const int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+    const int total = std::max(1, dx + dy);
+    int step = 0;
+    while (true) {
+        const float t = static_cast<float>(step) / static_cast<float>(total);
+        const u8 r = static_cast<u8>(static_cast<float>(ca.r) +
+            (static_cast<float>(cb.r) - static_cast<float>(ca.r)) * t + 0.5f);
+        const u8 g = static_cast<u8>(static_cast<float>(ca.g) +
+            (static_cast<float>(cb.g) - static_cast<float>(ca.g)) * t + 0.5f);
+        const u8 b_c = static_cast<u8>(static_cast<float>(ca.b) +
+            (static_cast<float>(cb.b) - static_cast<float>(ca.b)) * t + 0.5f);
+        const Color c(r, g, b_c);
+        set_pixel(x0, y0, c.to_15bit(), semi_transparent);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        ++step;
+        const int e2 = err * 2;
+        if (e2 > -dy) {
+            err -= dy;
+            x0 = static_cast<s16>(x0 + sx);
+        }
+        if (e2 < dx) {
+            err += dx;
+            y0 = static_cast<s16>(y0 + sy);
+        }
+    }
+}
+
 void Gpu::handle_polyline_word(u32 word) {
     if (!polyline_gouraud_) {
         if (is_polyline_terminator(word)) {
@@ -1439,10 +1493,10 @@ void Gpu::handle_polyline_word(u32 word) {
     }
 
     const Vertex next = decode_vertex_word(word);
-    // Keep Gouraud polyline visual path simple: draw segment using prior color.
-    draw_line_segment(polyline_prev_vertex_, next, polyline_prev_color_,
-        semi_transparency_mode_);
-    polyline_prev_color_ = Color(polyline_pending_color_word_);
+    const Color new_color(polyline_pending_color_word_);
+    draw_gouraud_line_segment(polyline_prev_vertex_, polyline_prev_color_,
+        next, new_color, semi_transparency_mode_);
+    polyline_prev_color_ = new_color;
     polyline_prev_vertex_ = next;
     polyline_waiting_vertex_ = false;
 }
@@ -1767,7 +1821,12 @@ void Gpu::gp1(u32 command) {
         gp1_get_info(command);
         break;
     default:
-        LOG_WARN("GPU: Unhandled GP1 command 0x%02X", op);
+        if ((op >= 0x09 && op <= 0x0F) || op >= 0x20) {
+            // Legal NOP commands on PS1 hardware.
+        }
+        else {
+            LOG_WARN("GPU: Unhandled GP1 command 0x%02X", op);
+        }
         break;
     }
 }
@@ -2396,6 +2455,7 @@ u16 Gpu::read_texel(u8 u, u8 v) const {
         return vram_[clut_y * psx::VRAM_WIDTH + cx];
     }
     case 2: // 15-bit direct
+    case 3: // Mode 3 is treated as 15-bit direct on PS1 hardware
         return vram_[ty * psx::VRAM_WIDTH + tx];
     default:
         return 0;
@@ -2404,8 +2464,13 @@ u16 Gpu::read_texel(u8 u, u8 v) const {
 
 void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     const u16 color15 = c.to_15bit();
-    if (edge(v0, v1, v2.x, v2.y) < 0) {
+    s32 area = edge(v0, v1, v2.x, v2.y);
+    if (area == 0) {
+        return;
+    }
+    if (area < 0) {
         std::swap(v1, v2);
+        area = -area;
     }
     const bool edge0_top_left = is_top_left_edge(v1, v2);
     const bool edge1_top_left = is_top_left_edge(v2, v0);
@@ -2994,8 +3059,10 @@ void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
 
     const s16 min_x = std::max(x, draw_x_min_);
     const s16 min_y = std::max(y, draw_y_min_);
-    const s16 max_x = std::min<s16>(static_cast<s16>(x + static_cast<s16>(w) - 1), draw_x_max_);
-    const s16 max_y = std::min<s16>(static_cast<s16>(y + static_cast<s16>(h) - 1), draw_y_max_);
+    s16 max_x = std::min<s16>(static_cast<s16>(x + static_cast<s16>(w) - 1), draw_x_max_);
+    s16 max_y = std::min<s16>(static_cast<s16>(y + static_cast<s16>(h) - 1), draw_y_max_);
+    max_x = std::min<s16>(max_x, static_cast<s16>(psx::VRAM_WIDTH - 1));
+    max_y = std::min<s16>(max_y, static_cast<s16>(psx::VRAM_HEIGHT - 1));
     if (min_x > max_x || min_y > max_y) {
         return;
     }

@@ -293,6 +293,8 @@ private:
   void draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2);
   void draw_rect(s16 x, s16 y, u16 w, u16 h, Color c);
   void draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent);
+  void draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
+      bool semi_transparent);
 
   void set_pixel(s16 x, s16 y, u16 color, bool semi_transparent = false);
   void set_pixel_clipped(s16 x, s16 y, u16 color,
