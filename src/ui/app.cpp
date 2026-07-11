@@ -1741,38 +1741,21 @@ void App::load_persistent_config() {
         game_library_dirty_ = true;
     }
 
-    // Key bindings are still handled via legacy INI file
+    // Key bindings are stored as JSON integer keys (e.g. "bind_start": 40)
     {
         std::ifstream in(kAppConfigFileName);
+        nlohmann::json j;
         if (in.is_open()) {
-            auto trim = [](std::string& s) {
-                const size_t begin = s.find_first_not_of(" \t\r\n");
-                if (begin == std::string::npos) { s.clear(); return; }
-                const size_t end = s.find_last_not_of(" \t\r\n");
-                s = s.substr(begin, end - begin + 1);
-            };
-            std::string line;
-            while (std::getline(in, line)) {
-                if (line.empty() || line[0] == '#') continue;
-                const size_t eq = line.find('=');
-                if (eq == std::string::npos) continue;
-                std::string key = line.substr(0, eq);
-                std::string value = line.substr(eq + 1);
-                trim(key);
-                trim(value);
-                if (key.rfind("bind_", 0) == 0) {
-                    const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
-                    const SDL_Scancode scancode = static_cast<SDL_Scancode>(parsed);
-                    for (const auto& entry : kKeyboardBindEntries) {
-                        if (key == entry.config_key) {
-                            if (scancode == SDL_SCANCODE_UNKNOWN) {
-                                input_->clear_key_binding(entry.button);
-                            } else {
-                                input_->set_key_binding(scancode, entry.button);
-                            }
-                            break;
-                        }
-                    }
+            try { in >> j; } catch (...) {}
+        }
+        for (const auto& entry : kKeyboardBindEntries) {
+            if (j.contains(entry.config_key) && j[entry.config_key].is_number()) {
+                const SDL_Scancode scancode =
+                    static_cast<SDL_Scancode>(j[entry.config_key].get<int>());
+                if (scancode == SDL_SCANCODE_UNKNOWN) {
+                    input_->clear_key_binding(entry.button);
+                } else {
+                    input_->set_key_binding(scancode, entry.button);
                 }
             }
         }
