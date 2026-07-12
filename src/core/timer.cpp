@@ -150,12 +150,7 @@ void Timers::tick(u32 cycles) {
     const u8 source = timers_[i].clock_source();
     u32 ticks = 0;
 
-    if (i == 0 && (source == 1 || source == 3)) {
-      const u32 divider = (sys_ != nullptr) ? sys_->gpu_dot_clock_divider() : 8u;
-      const u64 total = static_cast<u64>(timer0_dot_cycle_remainder_) + cycles;
-      ticks = static_cast<u32>(total / divider);
-      timer0_dot_cycle_remainder_ = static_cast<u32>(total % divider);
-    } else if (i == 2) {
+    if (i == 2) {
       // PSX-SPX timer2 clock source:
       //   0/1 = System Clock, 2/3 = System Clock / 8
       if (source == 2 || source == 3) {
@@ -213,11 +208,10 @@ void Timers::hblank_pulse() {
   hblank_active_ = true;
   process_sync_event(0, true);
 
-  // Keep a narrow HBlank tick for gated Timer 0 modes which only run during
-  // HBlank. Free-running dot-clock mode is advanced from CPU cycles in tick().
+  // Timer 0 source 1/3 is not fully dot-clock accurate yet; use one tick
+  // per HBlank pulse to keep BIOS timing from stalling.
   const u8 t0_source = timers_[0].clock_source();
-  if ((t0_source == 1 || t0_source == 3) && timers_[0].sync_enable() &&
-      timers_[0].sync_mode() == 2) {
+  if (t0_source == 1 || t0_source == 3) {
     tick_timer(0, 1);
   }
 
