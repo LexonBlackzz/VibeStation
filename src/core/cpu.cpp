@@ -552,6 +552,23 @@ void Cpu::set_reg(u32 index, u32 value) {
       }
     }
 
+    if (index == 30) {
+      const bool suspicious_s8 =
+          (value < 0x80000000u && value != 0u) ||
+          (value >= 0x81000000u && value < 0xA0000000u);
+      if (suspicious_s8) {
+        static u32 s8_watch_count = 0;
+        if (s8_watch_count < 64u) {
+          ++s8_watch_count;
+          LOG_WARN(
+              "CPU: suspicious $s8/$fp write pc=0x%08X old=0x%08X new=0x%08X "
+              "ra=0x%08X sp=0x%08X cyc=%llu",
+              current_pc_, gpr_[30], value, gpr_[31], gpr_[29],
+              static_cast<unsigned long long>(cycles_));
+        }
+      }
+    }
+
     if (index == 31) {
       const bool suspicious_ra =
           (value == 0u) ||
@@ -634,6 +651,22 @@ void Cpu::advance_load_delay() {
                               gpr_[29]);
     }
   }
+  if (cpu_diag_enabled() && load_.reg == 30) {
+    const bool suspicious_s8 =
+        (load_.value < 0x80000000u && load_.value != 0u) ||
+        (load_.value >= 0x81000000u && load_.value < 0xA0000000u);
+    if (suspicious_s8) {
+      static u32 s8_load_watch_count = 0;
+      if (s8_load_watch_count < 64u) {
+        ++s8_load_watch_count;
+        LOG_WARN(
+            "CPU: suspicious $s8/$fp LOAD pc=0x%08X old=0x%08X loaded=0x%08X "
+            "ra=0x%08X sp=0x%08X cyc=%llu",
+            current_pc_, gpr_[30], load_.value, gpr_[31], gpr_[29],
+            static_cast<unsigned long long>(cycles_));
+      }
+    }
+  }
   if (load_.reg != 0) {
     gpr_[load_.reg] = load_.value;
   }
@@ -649,6 +682,22 @@ void Cpu::flush_load_delay() {
     if (suspicious_ra) {
       log_suspicious_ra_write(sys_, current_pc_, gpr_[31], load_.value,
                               gpr_[29]);
+    }
+  }
+  if (cpu_diag_enabled() && load_.reg == 30) {
+    const bool suspicious_s8 =
+        (load_.value < 0x80000000u && load_.value != 0u) ||
+        (load_.value >= 0x81000000u && load_.value < 0xA0000000u);
+    if (suspicious_s8) {
+      static u32 s8_flush_watch_count = 0;
+      if (s8_flush_watch_count < 64u) {
+        ++s8_flush_watch_count;
+        LOG_WARN(
+            "CPU: suspicious $s8/$fp FLUSH pc=0x%08X old=0x%08X flushed=0x%08X "
+            "ra=0x%08X sp=0x%08X cyc=%llu",
+            current_pc_, gpr_[30], load_.value, gpr_[31], gpr_[29],
+            static_cast<unsigned long long>(cycles_));
+      }
     }
   }
   if (load_.reg != 0) {
