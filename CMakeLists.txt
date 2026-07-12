@@ -33,6 +33,14 @@ FetchContent_Declare(imgui
 )
 FetchContent_MakeAvailable(imgui)
 
+# nlohmann/json (header-only)
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # ── ImGui static library ────────────────────────────────────────────
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -73,6 +81,8 @@ set(VIBESTATION_SOURCES
     src/core/cpu.cpp
     src/core/cpu_recompiler.cpp
     src/core/cpu_recompiler_x64.cpp
+    src/core/config.cpp
+    src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp
     src/core/system.cpp
     src/core/renderer.cpp
@@ -138,7 +148,7 @@ add_dependencies(VibeStation vibestation_version_header)
 target_include_directories(VibeStation PRIVATE
     src
     "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static)
+target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak

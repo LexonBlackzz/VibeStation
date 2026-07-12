@@ -2287,13 +2287,12 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
     return 2;
   }
 
-  // The R3000A retires most integer instructions in one CPU tick in
-  // DuckStation's timing model; memory/device waits and coprocessor stalls are
-  // charged separately by the access helpers above. Keeping branch/store/COP
-  // opcodes at two ticks starves tight CD/MDEC streaming loops.
   switch (op(instruction)) {
   case 0x00:
     switch (funct(instruction)) {
+    case 0x08: // JR
+    case 0x09: // JALR
+      return 2;
     case 0x18: // MULT
     case 0x19: // MULTU
     case 0x1A: // DIV
@@ -2309,12 +2308,13 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x05: // BNE
   case 0x06: // BLEZ
   case 0x07: // BGTZ
+    return pending_branch_taken_ ? 2 : 1;
   case 0x10: // COP0
   case 0x11: // COP1
   case 0x13: // COP3
-    return 1;
+    return 2;
   case 0x12: // COP2 / GTE
-    return 1;
+    return 2;
   case 0x20: // LB
   case 0x21: // LH
   case 0x22: // LWL
@@ -2335,7 +2335,7 @@ u32 Cpu::instruction_cycles(u32 instruction) const {
   case 0x39: // SWC1
   case 0x3A: // SWC2
   case 0x3B: // SWC3
-    return 1;
+    return 2;
   default:
     return 1;
   }
