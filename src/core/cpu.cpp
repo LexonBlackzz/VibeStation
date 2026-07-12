@@ -958,6 +958,10 @@ void Cpu::exception(Exception cause) {
   static u32 logged_exception_count = 0;
   exception_raised_ = true;
   flush_load_delay();
+  // Clear synthetic GTE timing anchors so the exception handler never inherits
+  // phantom result/input stall constraints from the interrupted code path.
+  gte_result_ready_cycle_ = cycles_;
+  gte_input_ready_cycle_ = cycles_;
   std::memcpy(exception_return_regs_, gpr_, sizeof(gpr_));
   exception_return_hi_ = hi_;
   exception_return_lo_ = lo_;
