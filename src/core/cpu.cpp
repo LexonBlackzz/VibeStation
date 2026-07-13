@@ -1,12 +1,64 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
 #include "system.h"
+#include <array>
+#include <cstdio>
 
 namespace {
 inline bool cpu_diag_enabled() { return g_cpu_deep_diagnostics; }
 
 bool is_plausible_exec_addr(u32 addr);
 void log_stack_window(System *sys, const char *label, u32 sp);
+
+// ── Perimeter diagnostic ring buffer ──────────────────────────────
+// Tracks register writes whose value falls within ±1000 bytes of the
+// known-bad target addresses.  Written to disk only on AdEL/AdES.
+struct PerimeterTraceEntry {
+  u32 pc;
+  u32 reg_index;
+  u32 old_val;
+  u32 new_val;
+  u64 cycle;
+  const char *source; // "set_reg", "advance", "flush"
+};
+static std::array<PerimeterTraceEntry, 2048> g_perimeter_trace{};
+static size_t g_perimeter_idx = 0;
+static bool g_perimeter_has_written = false;
+
+void trace_perimeter(u32 pc, u32 reg, u32 old_val, u32 new_val,
+                     u64 cycle, const char *src) {
+  // Track ALL writes to $a1 (reg 5), $a3 (reg 7), and $s8 (reg 30).
+  // The old in_perimeter_window filter dropped values 0, KSEG0/KSEG1, and
+  // low-RAM addresses — exactly the values needed to diagnose the BIOS
+  // handler crash (e.g. $s8=0 safe-path, $s8=0x8003EB1C intermediate).
+  if (reg != 5 && reg != 7 && reg != 30) return;
+  g_perimeter_trace[g_perimeter_idx] = {pc, reg, old_val, new_val, cycle, src};
+  g_perimeter_idx = (g_perimeter_idx + 1) % g_perimeter_trace.size();
+  g_perimeter_has_written = true;
+}
+
+void dump_perimeter_trace(const char *path) {
+  if (!g_perimeter_has_written) return;
+  FILE *f = std::fopen(path, "w");
+  if (!f) return;
+  std::fprintf(f, "Perimeter crash dump — %zu entries\n\n", g_perimeter_trace.size());
+  // Start from the oldest entry
+  size_t start = g_perimeter_has_written &&
+                         g_perimeter_idx < g_perimeter_trace.size()
+                     ? g_perimeter_idx
+                     : 0;
+  size_t count = g_perimeter_has_written ? g_perimeter_trace.size() : 0;
+  for (size_t t = 0; t < count; ++t) {
+    size_t idx = (start + t) % g_perimeter_trace.size();
+    const auto &e = g_perimeter_trace[idx];
+    if (e.cycle == 0 && e.pc == 0) continue;
+    std::fprintf(f,
+        "[%zu/%zu] pc=0x%08X reg[%u] old=0x%08X new=0x%08X cyc=%llu src=%s\n",
+        t, count, e.pc, e.reg_index, e.old_val, e.new_val,
+        (unsigned long long)e.cycle, e.source);
+  }
+  std::fclose(f);
+}
 
 void log_dma_context(System *sys, u32 pc, u32 instr, const u32 *gpr) {
   static u32 last_pc = 0xFFFFFFFFu;
@@ -552,23 +604,6 @@ void Cpu::set_reg(u32 index, u32 value) {
       }
     }
 
-    if (index == 30) {
-      const bool suspicious_s8 =
-          (value < 0x80000000u && value != 0u) ||
-          (value >= 0x81000000u && value < 0xA0000000u);
-      if (suspicious_s8) {
-        static u32 s8_watch_count = 0;
-        if (s8_watch_count < 64u) {
-          ++s8_watch_count;
-          LOG_WARN(
-              "CPU: suspicious $s8/$fp write pc=0x%08X old=0x%08X new=0x%08X "
-              "ra=0x%08X sp=0x%08X cyc=%llu",
-              current_pc_, gpr_[30], value, gpr_[31], gpr_[29],
-              static_cast<unsigned long long>(cycles_));
-        }
-      }
-    }
-
     if (index == 31) {
       const bool suspicious_ra =
           (value == 0u) ||
@@ -577,12 +612,29 @@ void Cpu::set_reg(u32 index, u32 value) {
         log_suspicious_ra_write(sys_, current_pc_, gpr_[31], value, gpr_[29]);
       }
     }
+
+    if ((index == 5 || index == 30) && (value & 3u) != 0u) {
+      static u32 unaligned_reg_count = 0;
+      if (unaligned_reg_count < 64u) {
+        ++unaligned_reg_count;
+        LOG_WARN(
+            "CPU: UNALIGNED reg[%u] write pc=0x%08X old=0x%08X new=0x%08X "
+            "a1=0x%08X a2=0x%08X s8=0x%08X ra=0x%08X sp=0x%08X cyc=%llu",
+            index, current_pc_, gpr_[index], value, gpr_[5], gpr_[6],
+            gpr_[30], gpr_[31], gpr_[29],
+            static_cast<unsigned long long>(cycles_));
+      }
+    }
   }
 
   // Cancel any pending load to the same register
   if (load_.reg == index) {
     load_.reg = 0;
   }
+  if (next_load_.reg == index) {
+    next_load_.reg = 0;
+  }
+  trace_perimeter(current_pc_, index, gpr_[index], value, cycles_, "set_reg");
   gpr_[index] = value;
 }
 
@@ -611,8 +663,11 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
   case 5:
   case 7:
   case 9:
+    cop0_regs_[index] = value;
+    break;
   case 11:
     cop0_regs_[index] = value;
+    cop0_cause_ &= ~(1u << 15); // Writing Compare clears IP7
     break;
   case 6:
     // Match DuckStation/hardware-facing behavior: this debug-oriented
@@ -651,23 +706,22 @@ void Cpu::advance_load_delay() {
                               gpr_[29]);
     }
   }
-  if (cpu_diag_enabled() && load_.reg == 30) {
-    const bool suspicious_s8 =
-        (load_.value < 0x80000000u && load_.value != 0u) ||
-        (load_.value >= 0x81000000u && load_.value < 0xA0000000u);
-    if (suspicious_s8) {
-      static u32 s8_load_watch_count = 0;
-      if (s8_load_watch_count < 64u) {
-        ++s8_load_watch_count;
-        LOG_WARN(
-            "CPU: suspicious $s8/$fp LOAD pc=0x%08X old=0x%08X loaded=0x%08X "
-            "ra=0x%08X sp=0x%08X cyc=%llu",
-            current_pc_, gpr_[30], load_.value, gpr_[31], gpr_[29],
-            static_cast<unsigned long long>(cycles_));
-      }
+  if (cpu_diag_enabled() && (load_.reg == 5 || load_.reg == 30) &&
+      (load_.value & 3u) != 0u) {
+    static u32 unaligned_load_count = 0;
+    if (unaligned_load_count < 64u) {
+      ++unaligned_load_count;
+      LOG_WARN(
+          "CPU: UNALIGNED reg[%u] LOAD pc=0x%08X old=0x%08X loaded=0x%08X "
+          "a1=0x%08X a2=0x%08X s8=0x%08X ra=0x%08X sp=0x%08X cyc=%llu",
+          load_.reg, current_pc_, gpr_[load_.reg], load_.value, gpr_[5],
+          gpr_[6], gpr_[30], gpr_[31], gpr_[29],
+          static_cast<unsigned long long>(cycles_));
     }
   }
   if (load_.reg != 0) {
+    trace_perimeter(current_pc_, load_.reg, gpr_[load_.reg], load_.value,
+                    cycles_, "advance");
     gpr_[load_.reg] = load_.value;
   }
   load_ = next_load_;
@@ -684,23 +738,22 @@ void Cpu::flush_load_delay() {
                               gpr_[29]);
     }
   }
-  if (cpu_diag_enabled() && load_.reg == 30) {
-    const bool suspicious_s8 =
-        (load_.value < 0x80000000u && load_.value != 0u) ||
-        (load_.value >= 0x81000000u && load_.value < 0xA0000000u);
-    if (suspicious_s8) {
-      static u32 s8_flush_watch_count = 0;
-      if (s8_flush_watch_count < 64u) {
-        ++s8_flush_watch_count;
-        LOG_WARN(
-            "CPU: suspicious $s8/$fp FLUSH pc=0x%08X old=0x%08X flushed=0x%08X "
-            "ra=0x%08X sp=0x%08X cyc=%llu",
-            current_pc_, gpr_[30], load_.value, gpr_[31], gpr_[29],
-            static_cast<unsigned long long>(cycles_));
-      }
+  if (cpu_diag_enabled() && (load_.reg == 5 || load_.reg == 30) &&
+      (load_.value & 3u) != 0u) {
+    static u32 unaligned_flush_count = 0;
+    if (unaligned_flush_count < 64u) {
+      ++unaligned_flush_count;
+      LOG_WARN(
+          "CPU: UNALIGNED reg[%u] FLUSH pc=0x%08X old=0x%08X flushed=0x%08X "
+          "a1=0x%08X a2=0x%08X s8=0x%08X ra=0x%08X sp=0x%08X cyc=%llu",
+          load_.reg, current_pc_, gpr_[load_.reg], load_.value, gpr_[5],
+          gpr_[6], gpr_[30], gpr_[31], gpr_[29],
+          static_cast<unsigned long long>(cycles_));
     }
   }
   if (load_.reg != 0) {
+    trace_perimeter(current_pc_, load_.reg, gpr_[load_.reg], load_.value,
+                    cycles_, "flush");
     gpr_[load_.reg] = load_.value;
   }
   load_ = {0, 0};
@@ -731,6 +784,13 @@ u32 Cpu::cpu_data_read_penalty(u32 addr) const {
   // main-RAM data reads. We intentionally do not charge instruction fetches
   // yet because this core still lacks a comparable icache model.
   return is_main_ram_addr(addr) ? 4u : 0u;
+}
+
+u32 Cpu::cpu_data_write_penalty(u32 addr) const {
+  // PS1 stores to main RAM take ~3 cycles total. Our store ops have a
+  // 2-cycle baseline from instruction_cycles(), so add 1 extra cycle
+  // for the bus access cost.
+  return is_main_ram_addr(addr) ? 1u : 0u;
 }
 
 bool Cpu::gte_data_reg_reads_result(u32 reg) {
@@ -975,6 +1035,7 @@ void Cpu::store32(u32 addr, u32 value) {
     return;
   }
   sys_->write32(addr, value);
+  add_cycle_penalty(cpu_data_write_penalty(addr));
 }
 
 void Cpu::store16(u32 addr, u16 value) {
@@ -991,6 +1052,7 @@ void Cpu::store16(u32 addr, u16 value) {
     return;
   }
   sys_->write16(addr, value);
+  add_cycle_penalty(cpu_data_write_penalty(addr));
 }
 
 void Cpu::store8(u32 addr, u8 value) {
@@ -999,6 +1061,7 @@ void Cpu::store8(u32 addr, u8 value) {
     return;
   }
   sys_->write8(addr, value);
+  add_cycle_penalty(cpu_data_write_penalty(addr));
 }
 
 // ── Exception Handling ─────────────────────────────────────────────
@@ -1030,6 +1093,7 @@ void Cpu::exception(Exception cause) {
   u32 mode = cop0_sr_ & 0x3F;
   cop0_sr_ &= ~0x3Fu;
   cop0_sr_ |= (mode << 2) & 0x3F;
+  cop0_sr_ |= (1u << 1); // Set EXL to prevent nested exceptions
 
   // Set cause register
   if (cause != Exception::CopUnusable) {
@@ -1113,6 +1177,7 @@ void Cpu::exception(Exception cause) {
             sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
             sys_->read32(phys_pc + 0x08u));
         log_stack_window(sys_, "CPU: AdEL frame", gpr_[29]);
+        dump_perimeter_trace("perimeter_crash_dump.txt");
       }
     } else {
       ++repeated_adel_count;
@@ -1124,6 +1189,11 @@ void Cpu::exception(Exception cause) {
             static_cast<unsigned long long>(cycles_));
       }
     }
+  } else if (cause == Exception::AddrStoreErr) {
+    LOG_WARN("CPU: AdES exception pc=0x%08X bad_vaddr=0x%08X sr=0x%08X cyc=%llu",
+             current_pc_, cop0_badvaddr_, cop0_sr_,
+             static_cast<unsigned long long>(cycles_));
+    dump_perimeter_trace("perimeter_crash_dump.txt");
   } else if (cause == Exception::ReservedInst) {
     static u32 last_ri_pc = 0xFFFFFFFFu;
     static u32 last_ri_instr = 0xFFFFFFFFu;
@@ -1920,8 +1990,28 @@ u32 Cpu::step() {
 
   const u32 consumed_cycles = instruction_cycles(instruction) + cycle_penalty_;
 
-
   cycles_ += consumed_cycles;
+
+  // ── COP0 Count/Compare timer ────────────────────────────────────
+  // Count (R9) increments every CPU cycle. When Count == Compare,
+  // Cause IP7 (bit 15) is asserted. We approximate this by stepping
+  // Count forward by the consumed cycle count and checking for a match.
+  {
+    const u32 old_count = cop0_regs_[9];
+    cop0_regs_[9] = old_count + consumed_cycles;
+    // Check if Compare was crossed during this interval.
+    // Since Count wraps at 32 bits, use unsigned arithmetic.
+    const u32 compare = cop0_regs_[11];
+    if (old_count <= compare && compare <= cop0_regs_[9]) {
+      cop0_cause_ |= (1u << 15); // Set IP7
+    } else if (old_count > cop0_regs_[9]) {
+      // Wrapped around: check if compare is in [old_count, 0xFFFFFFFF] or [0, new_count]
+      if (compare >= old_count || compare <= cop0_regs_[9]) {
+        cop0_cause_ |= (1u << 15);
+      }
+    }
+  }
+
   executing_step_ = false;
 
   prev_pc_for_diag = current_pc_;
@@ -2720,6 +2810,22 @@ void Cpu::op_lhu(u32 i) {
 void Cpu::op_lw(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
   const u32 phys = addr & 0x1FFFFFFFu;
+  if (addr & 3u) {
+    static u32 preflush_unaligned_lw_count = 0;
+    if (preflush_unaligned_lw_count < 64u) {
+      ++preflush_unaligned_lw_count;
+      LOG_WARN(
+          "CPU: PRE-FLUSH UNALIGNED LW pc=0x%08X rs=%u rs_val=0x%08X "
+          "simm=0x%08X addr=0x%08X rt=%u "
+          "a1=0x%08X a2=0x%08X s8=0x%08X ra=0x%08X sp=0x%08X "
+          "load_reg=%u load_val=0x%08X next_reg=%u next_val=0x%08X cyc=%llu",
+          current_pc_, rs(i), gpr_[rs(i)],
+          static_cast<u32>(simm(i)), addr, rt(i),
+          gpr_[5], gpr_[6], gpr_[30], gpr_[31], gpr_[29],
+          load_.reg, load_.value, next_load_.reg, next_load_.value,
+          static_cast<unsigned long long>(cycles_));
+    }
+  }
   rr4_diag::on_op_lw(rr4_diag_state_, current_pc_, i, addr, gpr_, cycles_,
                      cop0_sr_, cop0_cause_, sys_->irq_pending());
   u32 val = load32(addr);
@@ -2824,6 +2930,22 @@ void Cpu::op_sh(u32 i) {
 void Cpu::op_sw(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
   u32 store_val = gpr_[rt(i)];
+  if (addr & 3u) {
+    static u32 preflush_unaligned_sw_count = 0;
+    if (preflush_unaligned_sw_count < 64u) {
+      ++preflush_unaligned_sw_count;
+      LOG_WARN(
+          "CPU: PRE-FLUSH UNALIGNED SW pc=0x%08X rs=%u rs_val=0x%08X "
+          "simm=0x%08X addr=0x%08X rt=%u rt_val=0x%08X "
+          "a1=0x%08X a2=0x%08X s8=0x%08X ra=0x%08X sp=0x%08X "
+          "load_reg=%u load_val=0x%08X next_reg=%u next_val=0x%08X cyc=%llu",
+          current_pc_, rs(i), gpr_[rs(i)],
+          static_cast<u32>(simm(i)), addr, rt(i), store_val,
+          gpr_[5], gpr_[6], gpr_[30], gpr_[31], gpr_[29],
+          load_.reg, load_.value, next_load_.reg, next_load_.value,
+          static_cast<unsigned long long>(cycles_));
+    }
+  }
   rr4_diag::on_op_sw(rr4_diag_state_, current_pc_, i, addr, store_val, gpr_,
                      cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
   store32(addr, store_val);

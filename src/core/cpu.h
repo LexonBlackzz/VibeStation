@@ -517,6 +517,7 @@ private:
   void write_cop0_reg(u32 index, u32 value);
   void raise_cop_unusable(u32 cop_index);
   u32 cpu_data_read_penalty(u32 addr) const;
+  u32 cpu_data_write_penalty(u32 addr) const;
   static bool gte_data_reg_reads_result(u32 reg);
   static bool gte_ctrl_reg_reads_result(u32 reg);
   u32 gte_input_stall_cycles() const;
