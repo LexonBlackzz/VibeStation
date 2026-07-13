@@ -490,8 +490,12 @@ s64 Gte::set_mac(int idx, s64 value) {
             flags |= (1u << (28 - idx)); // bits 27..25 for MAC1..3 negative overflow
         }
     }
-    mac[idx] = static_cast<s32>(idx == 0 ? value : (value >> sf));
+    mac[idx] = value;
     return value;
+}
+
+s32 Gte::mac_shifted(int idx) const {
+    return static_cast<s32>(mac[idx] >> sf);
 }
 
 void Gte::set_ir(int idx, s32 value, bool lm_flag) {
@@ -667,28 +671,29 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
     raw_mac[i] = result;
     set_mac(i + 1, result);
     if (i < 2)
-      set_ir(i + 1, mac[i + 1], lm);
+      set_ir(i + 1, mac_shifted(i + 1), lm);
   }
 
   // RTPS handles IR3 saturation slightly differently from generic IR writes:
-  // the stored IR3 value follows MAC3/lm clamping, but FLAG.22 is based on
-  // raw MAC3 >> 12 range checking.
+  // FLAG.22 is based on raw MAC3 >> 12 range checking, but the stored IR3
+  // value follows the normal MAC3>>sf/lm clamping.
   const s32 ir3_flag_value = static_cast<s32>(raw_mac[2] >> 12);
   if (ir3_flag_value < -0x8000 || ir3_flag_value > 0x7FFF)
     flags |= (1u << 22);
+  const s32 ir3_mac = mac_shifted(3);
   const s32 ir3_lower = lm ? 0 : -0x8000;
-  if (mac[3] < ir3_lower)
+  if (ir3_mac < ir3_lower)
     ir[3] = static_cast<s16>(ir3_lower);
-  else if (mac[3] > 0x7FFF)
+  else if (ir3_mac > 0x7FFF)
     ir[3] = 0x7FFF;
   else
-    ir[3] = static_cast<s16>(mac[3]);
+    ir[3] = static_cast<s16>(ir3_mac);
 
   // Push SZ FIFO.
-  // PSX-SPX: SZ3 = MAC3 SAR ((1-sf)*12). Since MAC3 already applies sf shift,
-  // this resolves to raw MAC3 >> 12 for both sf=0 and sf=1.
+  // PSX-SPX: SZ3 = MAC3 SAR ((1-SF)*12).
+  const int sz_shift = (sf == 0) ? 12 : 0;
   u16 sz_val =
-      static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> 12), 0, 0xFFFF,
+      static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> sz_shift), 0, 0xFFFF,
                              1u << 18));
   push_sz(sz_val);
 
@@ -842,14 +847,14 @@ void Gte::cmd_mvmva() {
           static_cast<s64>(mat[i][1]) * vec[1] +
           static_cast<s64>(mat[i][2]) * vec[2];
       set_mac(i + 1, result);
-      set_ir(i + 1, mac[i + 1], lm);
+      set_ir(i + 1, mac_shifted(i + 1), lm);
     } else {
       s64 result = static_cast<s64>(add[i]) << 12;
       result += static_cast<s64>(mat[i][0]) * vec[0];
       result += static_cast<s64>(mat[i][1]) * vec[1];
       result += static_cast<s64>(mat[i][2]) * vec[2];
       set_mac(i + 1, result);
-      set_ir(i + 1, mac[i + 1], lm);
+      set_ir(i + 1, mac_shifted(i + 1), lm);
     }
   }
 }
@@ -877,7 +882,7 @@ void Gte::normal_color_stage(int v_idx) {
     result += static_cast<s64>(light[i][1]) * v[1];
     result += static_cast<s64>(light[i][2]) * v[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
 
   // Stage 2: IR = BK + LCM * IR
@@ -888,11 +893,13 @@ void Gte::normal_color_stage(int v_idx) {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
 }
 
 void Gte::push_rgb_from_mac() {
+  // RGB = clamp(MAC SAR 4, 0..FF). On real PS1, RGB is extracted from the
+  // full MAC value with a fixed SAR 4 — independent of the sf shift.
   const u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   const u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
   const u8 b = static_cast<u8>(clamp(mac[3] >> 4, 0, 0xFF, 1u << 19));
@@ -901,12 +908,12 @@ void Gte::push_rgb_from_mac() {
 
 void Gte::apply_depth_cue_mac() {
   for (int i = 0; i < 3; ++i) {
-    const s64 mac_in = static_cast<s64>(mac[i + 1]) << sf;
+    const s64 mac_in = mac[i + 1];
     const s64 fc = static_cast<s64>(far_color[i]) << 12;
     const s64 result =
         mac_in + (((fc - mac_in) * static_cast<s64>(ir[0])) >> 12);
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
 }
 
@@ -926,7 +933,7 @@ void Gte::cmd_nccs(int v_idx) {
   for (int i = 0; i < 3; ++i) {
     const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   push_rgb_from_mac();
 }
@@ -942,7 +949,7 @@ void Gte::cmd_ncds(int v_idx) {
   for (int i = 0; i < 3; ++i) {
     const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   apply_depth_cue_mac();
   push_rgb_from_mac();
@@ -963,12 +970,12 @@ void Gte::cmd_cdp() {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   for (int i = 0; i < 3; ++i) {
     const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   apply_depth_cue_mac();
   push_rgb_from_mac();
@@ -980,7 +987,7 @@ void Gte::cmd_dpcs() {
     const s64 fc = static_cast<s64>(far_color[i]) << 12;
     const s64 result = color + (((fc - color) * static_cast<s64>(ir[0])) >> 12);
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   push_rgb_from_mac();
 }
@@ -991,7 +998,7 @@ void Gte::cmd_dcpl() {
     const s64 fc = static_cast<s64>(far_color[i]) << 12;
     const s64 result = col + (((fc - col) * static_cast<s64>(ir[0])) >> 12);
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   push_rgb_from_mac();
 }
@@ -1006,7 +1013,7 @@ void Gte::cmd_dpct() {
       const s64 result =
           color + (((fc - color) * static_cast<s64>(ir[0])) >> 12);
       set_mac(i + 1, result);
-      set_ir(i + 1, mac[i + 1], lm);
+      set_ir(i + 1, mac_shifted(i + 1), lm);
     }
     push_rgb_from_mac();
   }
@@ -1019,7 +1026,7 @@ void Gte::cmd_intpl() {
     const s64 result =
         ir_val + (((fc - ir_val) * static_cast<s64>(ir[0])) >> 12);
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   push_rgb_from_mac();
 }
@@ -1027,7 +1034,7 @@ void Gte::cmd_intpl() {
 void Gte::cmd_sqr() {
   for (int i = 1; i <= 3; i++) {
     set_mac(i, static_cast<s64>(ir[i]) * ir[i]);
-    set_ir(i, mac[i], lm);
+    set_ir(i, mac_shifted(i), lm);
   }
 }
 
@@ -1039,15 +1046,15 @@ void Gte::cmd_op() {
                  static_cast<s64>(rotation[0][0]) * ir[3]);
   set_mac(3, static_cast<s64>(rotation[0][0]) * ir[2] -
                  static_cast<s64>(rotation[1][1]) * ir[1]);
-  set_ir(1, mac[1], lm);
-  set_ir(2, mac[2], lm);
-  set_ir(3, mac[3], lm);
+  set_ir(1, mac_shifted(1), lm);
+  set_ir(2, mac_shifted(2), lm);
+  set_ir(3, mac_shifted(3), lm);
 }
 
 void Gte::cmd_gpf() {
   for (int i = 1; i <= 3; i++) {
     set_mac(i, static_cast<s64>(ir[0]) * ir[i]);
-    set_ir(i, mac[i], lm);
+    set_ir(i, mac_shifted(i), lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
@@ -1060,7 +1067,7 @@ void Gte::cmd_gpl() {
     s64 result =
         (static_cast<s64>(mac[i]) << sf) + static_cast<s64>(ir[0]) * ir[i];
     set_mac(i, result);
-    set_ir(i, mac[i], lm);
+    set_ir(i, mac_shifted(i), lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
@@ -1076,11 +1083,11 @@ void Gte::cmd_cc() {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   for (int i = 0; i < 3; i++) {
     set_mac(i + 1, static_cast<s64>(rgbc[i]) * ir[i + 1] << 4);
-    set_ir(i + 1, mac[i + 1], lm);
+    set_ir(i + 1, mac_shifted(i + 1), lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));

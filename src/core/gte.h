@@ -32,7 +32,7 @@ private:
   u16 sz[4] = {};             // SZ0-SZ3 (screen Z FIFO)
   u32 rgb_fifo[3] = {};       // RGB FIFO
 
-  s32 mac[4] = {};        // MAC0-MAC3 (accumulator)
+  s64 mac[4] = {};        // MAC0-MAC3 (accumulator) — 44-bit for MAC1..3
   u32 otz = 0;            // Average Z
   u32 lzcs = 0, lzcr = 0; // Leading zero count
 
@@ -80,6 +80,7 @@ private:
 
   // ── Helpers ────────────────────────────────────────────────────
   s64 set_mac(int idx, s64 value);
+  s32 mac_shifted(int idx) const; // MAC value with sf shift applied (MAC→IR transfer)
   void set_ir(int idx, s32 value, bool lm_flag);
   void push_sx(s16 val);
   void push_sy(s16 val);
