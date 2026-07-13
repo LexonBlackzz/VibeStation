@@ -32,7 +32,14 @@ struct AutoInputConfig {
   bool enabled() const { return mask != 0; }
 };
 
-static AutoInputConfig g_auto_input;
+// Each --auto-input button spec gets its own timing entry so that
+// --auto-input Start --auto-input-start 700 ... --auto-input Cross
+// --auto-input-start 1200 ...  doesn't overwrite Start's timing.
+static std::vector<AutoInputConfig> g_auto_inputs;
+// Index of the most-recently-added entry, for --auto-input-start etc.
+static int g_auto_input_last_idx = -1;
+// Legacy shared config used when no per-entry timing overrides exist.
+static AutoInputConfig g_auto_input_legacy;
 
 // Input recording/playback
 static InputRecorder::Config g_input_recorder_config;
@@ -67,6 +74,7 @@ static bool add_auto_input_buttons(const std::string &spec) {
   std::istringstream input(spec);
   std::string token;
   bool parsed_any = false;
+  u16 new_mask = 0;
   while (std::getline(input, token, ',')) {
     const size_t begin = token.find_first_not_of(" \t\r\n");
     if (begin == std::string::npos) {
@@ -82,27 +90,58 @@ static bool add_auto_input_buttons(const std::string &spec) {
     if (!parse_psx_button_name(token, button)) {
       return false;
     }
-    g_auto_input.mask |= static_cast<u16>(button);
+    new_mask |= static_cast<u16>(button);
     parsed_any = true;
+  }
+  if (parsed_any) {
+    g_auto_input_legacy.mask |= new_mask;
+    // Create a new per-button entry with ONLY this spec's buttons
+    // and the current timing defaults.
+    AutoInputConfig entry;
+    entry.mask = new_mask;
+    entry.start_frame = g_auto_input_legacy.start_frame;
+    entry.end_frame = g_auto_input_legacy.end_frame;
+    entry.period_frames = g_auto_input_legacy.period_frames;
+    entry.hold_frames = g_auto_input_legacy.hold_frames;
+    g_auto_inputs.push_back(entry);
+    g_auto_input_last_idx = static_cast<int>(g_auto_inputs.size()) - 1;
   }
   return parsed_any;
 }
 
 static u16 auto_input_buttons_for_frame(int frame_index) {
-  if (!g_auto_input.enabled() || frame_index < g_auto_input.start_frame) {
-    return 0xFFFFu;
+  u16 pressed = 0;
+  for (const auto &cfg : g_auto_inputs) {
+    if (!cfg.enabled() || frame_index < cfg.start_frame) {
+      continue;
+    }
+    if (cfg.end_frame > 0 && frame_index > cfg.end_frame) {
+      continue;
+    }
+    const int period = std::max(1, cfg.period_frames);
+    const int hold = std::max(1, std::min(cfg.hold_frames, period));
+    const int phase = (frame_index - cfg.start_frame) % period;
+    if (phase < hold) {
+      pressed |= cfg.mask;
+    }
   }
-  if (g_auto_input.end_frame > 0 && frame_index > g_auto_input.end_frame) {
-    return 0xFFFFu;
+  // Legacy single-config path (for --auto-mash etc.)
+  if (g_auto_input_legacy.enabled() && g_auto_inputs.empty()) {
+    if (frame_index >= g_auto_input_legacy.start_frame) {
+      if (g_auto_input_legacy.end_frame <= 0 ||
+          frame_index <= g_auto_input_legacy.end_frame) {
+        const int period = std::max(1, g_auto_input_legacy.period_frames);
+        const int hold = std::max(1,
+            std::min(g_auto_input_legacy.hold_frames, period));
+        const int phase =
+            (frame_index - g_auto_input_legacy.start_frame) % period;
+        if (phase < hold) {
+          pressed |= g_auto_input_legacy.mask;
+        }
+      }
+    }
   }
-
-  const int period = std::max(1, g_auto_input.period_frames);
-  const int hold = std::max(1, std::min(g_auto_input.hold_frames, period));
-  const int phase = (frame_index - g_auto_input.start_frame) % period;
-  if (phase >= hold) {
-    return 0xFFFFu;
-  }
-  return static_cast<u16>(0xFFFFu & ~g_auto_input.mask);
+  return (pressed != 0) ? static_cast<u16>(0xFFFFu & ~pressed) : 0xFFFFu;
 }
 
 #ifdef _WIN32
@@ -1105,11 +1144,13 @@ static int run_frame_test(const std::string &bios_path, int frames,
   LOG_INFO("=== VibeStation Frame Test ===");
   LOG_INFO("BIOS path: %s", bios_path.c_str());
   LOG_INFO("Frames: %d", frames);
-  if (g_auto_input.enabled()) {
-    LOG_INFO("Auto input: mask=0x%04X start=%d end=%d period=%d hold=%d",
-             static_cast<unsigned>(g_auto_input.mask), g_auto_input.start_frame,
-             g_auto_input.end_frame, g_auto_input.period_frames,
-             g_auto_input.hold_frames);
+  if (!g_auto_inputs.empty()) {
+    for (size_t idx = 0; idx < g_auto_inputs.size(); ++idx) {
+      const auto &cfg = g_auto_inputs[idx];
+      LOG_INFO("Auto input[%zu]: mask=0x%04X start=%d end=%d period=%d hold=%d",
+               idx, static_cast<unsigned>(cfg.mask), cfg.start_frame,
+               cfg.end_frame, cfg.period_frames, cfg.hold_frames);
+    }
   }
   if (!gpu_debug_path.empty()) {
     LOG_INFO("GPU debug file: %s", gpu_debug_path.c_str());
@@ -1664,11 +1705,13 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   LOG_INFO("Frames: %d", frames);
   LOG_INFO("Disc BIN: %s", bin_path.c_str());
   LOG_INFO("Disc CUE: %s", cue_path.c_str());
-  if (g_auto_input.enabled()) {
-    LOG_INFO("Auto input: mask=0x%04X start=%d end=%d period=%d hold=%d",
-             static_cast<unsigned>(g_auto_input.mask), g_auto_input.start_frame,
-             g_auto_input.end_frame, g_auto_input.period_frames,
-             g_auto_input.hold_frames);
+  if (!g_auto_inputs.empty()) {
+    for (size_t idx = 0; idx < g_auto_inputs.size(); ++idx) {
+      const auto &cfg = g_auto_inputs[idx];
+      LOG_INFO("Auto input[%zu]: mask=0x%04X start=%d end=%d period=%d hold=%d",
+               idx, static_cast<unsigned>(cfg.mask), cfg.start_frame,
+               cfg.end_frame, cfg.period_frames, cfg.hold_frames);
+    }
   }
 
   auto sys = std::make_unique<System>();
@@ -2566,35 +2609,67 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "WARN: Ignoring invalid auto mash spec: %s\n",
                 args[i + 1].c_str());
       } else {
-        g_auto_input.period_frames = 6;
-        g_auto_input.hold_frames = 2;
+        g_auto_input_legacy.period_frames = 6;
+        g_auto_input_legacy.hold_frames = 2;
+        // Also update the last per-button entry if one was just created.
+        if (g_auto_input_last_idx >= 0 &&
+            g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+          g_auto_inputs[g_auto_input_last_idx].period_frames = 6;
+          g_auto_inputs[g_auto_input_last_idx].hold_frames = 2;
+        }
       }
       ++i;
       continue;
     }
     if (a == "--auto-input-start" && (i + 1) < args.size()) {
-      g_auto_input.start_frame = std::max(1, std::atoi(args[i + 1].c_str()));
+      const int val = std::max(1, std::atoi(args[i + 1].c_str()));
+      g_auto_input_legacy.start_frame = val;
+      if (g_auto_input_last_idx >= 0 &&
+          g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+        g_auto_inputs[g_auto_input_last_idx].start_frame = val;
+      }
       ++i;
       continue;
     }
     if (a == "--auto-input-end" && (i + 1) < args.size()) {
-      g_auto_input.end_frame = std::max(0, std::atoi(args[i + 1].c_str()));
+      const int val = std::max(0, std::atoi(args[i + 1].c_str()));
+      g_auto_input_legacy.end_frame = val;
+      if (g_auto_input_last_idx >= 0 &&
+          g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+        g_auto_inputs[g_auto_input_last_idx].end_frame = val;
+      }
       ++i;
       continue;
     }
     if (a == "--auto-input-period" && (i + 1) < args.size()) {
-      g_auto_input.period_frames = std::max(1, std::atoi(args[i + 1].c_str()));
+      const int val = std::max(1, std::atoi(args[i + 1].c_str()));
+      g_auto_input_legacy.period_frames = val;
+      if (g_auto_input_last_idx >= 0 &&
+          g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+        g_auto_inputs[g_auto_input_last_idx].period_frames = val;
+      }
       ++i;
       continue;
     }
     if (a == "--auto-input-hold" && (i + 1) < args.size()) {
-      g_auto_input.hold_frames = std::max(1, std::atoi(args[i + 1].c_str()));
+      const int val = std::max(1, std::atoi(args[i + 1].c_str()));
+      g_auto_input_legacy.hold_frames = val;
+      if (g_auto_input_last_idx >= 0 &&
+          g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+        g_auto_inputs[g_auto_input_last_idx].hold_frames = val;
+      }
       ++i;
       continue;
     }
     if (a == "--auto-input-hold-key") {
-      g_auto_input.period_frames = 1;
-      g_auto_input.hold_frames = 1;
+      g_auto_input_legacy.period_frames = 1;
+      g_auto_input_legacy.hold_frames = 1;
+      // Also update the last per-button entry if one was just created.
+      if (g_auto_input_last_idx >= 0 &&
+          g_auto_input_last_idx < static_cast<int>(g_auto_inputs.size())) {
+        g_auto_inputs[g_auto_input_last_idx].period_frames = 1;
+        g_auto_inputs[g_auto_input_last_idx].hold_frames = 1;
+      }
       continue;
     }
     // Input recorder/playback flags

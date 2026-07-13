@@ -1455,10 +1455,12 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
     // Keep those devices at near-baseline cadence even in fast mode.
     const u32 dma_tick_stride = 16u;
+    const u32 timer_tick_stride = 16u;
     const u32 spu_sync_scanline_stride =
         aggressive_fast_mode ? 32u : (fast_mode ? 16u : 4u);
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
+    u32 timer_tick_budget = 0;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -1492,6 +1494,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             sio_.tick(dma_cycles);
             mdec_.tick(dma_cycles);
             cdrom_.tick(dma_cycles);
+            timers_.tick(dma_cycles);
             cycles_remaining =
                 (dma_cycles >= cycles_remaining) ? 0 : (cycles_remaining - dma_cycles);
         };
@@ -1558,6 +1561,12 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 service_dma();
                 dma_tick_budget -= dma_tick_stride;
             }
+
+            timer_tick_budget += spent_in_slice;
+            while (timer_tick_budget >= timer_tick_stride) {
+                timers_.tick(timer_tick_stride);
+                timer_tick_budget -= timer_tick_stride;
+            }
         }
         if (profile_detailed) {
             const auto end_loop = std::chrono::high_resolution_clock::now();
@@ -1574,7 +1583,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         if (profile_detailed) {
             start_timers = std::chrono::high_resolution_clock::now();
         }
-        timers_.tick(cycles_this_scanline);
+        // Flush any fractional timer ticks remaining from the CPU loop.
+        if (timer_tick_budget > 0) {
+            timers_.tick(timer_tick_budget);
+            timer_tick_budget = 0;
+        }
         timers_.hblank_pulse();
         if (profile_detailed) {
             const auto end_timers = std::chrono::high_resolution_clock::now();
@@ -2354,6 +2367,9 @@ u16 System::read16(u32 addr) {
         log_unhandled_bus_read(unhandled_r16_io, "read16", phys, true);
         return 0xFFFF;
     }
+    // Expansion 1
+    if (phys >= 0x1F000000 && phys < 0x1F800000)
+        return 0xFFFF;
     if (is_unmapped_physical(phys, mapped_ram_size))
         return 0xFFFF;
     log_unhandled_bus_read(unhandled_r16, "read16", phys, false);
@@ -2950,6 +2966,9 @@ void System::write16(u32 addr, u16 val) {
         return;
     }
 
+    // Expansion 1
+    if (phys >= 0x1F000000 && phys < 0x1F800000)
+        return;
 
     // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
     if (phys >= 0x1F803000 && phys < 0x1FC00000)
@@ -3238,6 +3257,10 @@ void System::write32(u32 addr, u32 val) {
                                 unhandled_w32_io.total);
         return;
     }
+
+    // Expansion 1
+    if (phys >= 0x1F000000 && phys < 0x1F800000)
+        return;
 
     // Unmapped region between I/O/Expansion2 and BIOS (silently ignore)
     if (phys >= 0x1F803000 && phys < 0x1FC00000)
