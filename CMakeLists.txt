@@ -79,12 +79,15 @@ set(VIBESTATION_SOURCES
     src/core/gpu.cpp
     src/core/gte.cpp
     src/core/cpu.cpp
+    src/core/component_serialize.cpp
     src/core/cpu_recompiler.cpp
     src/core/cpu_recompiler_x64.cpp
     src/core/config.cpp
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp
     src/core/system.cpp
+    src/core/system_snapshot.cpp
+    src/core/rewind.cpp
     src/core/renderer.cpp
     src/input/controller.cpp
     src/input/input_manager.cpp
