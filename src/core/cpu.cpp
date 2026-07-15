@@ -663,11 +663,14 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
   case 5:
   case 7:
   case 9:
+    // PS1: R3=BPC, R5=BDA, R7=DCIC, R9=BDAM (Breakpoint Data Address Mask).
+    // Simply store the value.
     cop0_regs_[index] = value;
     break;
   case 11:
+    // PS1: R11 = BPCM (Breakpoint Program Counter Mask). Not used in
+    // normal game execution.  Simply store the value.
     cop0_regs_[index] = value;
-    cop0_cause_ &= ~(1u << 15); // Writing Compare clears IP7
     break;
   case 6:
     // Match DuckStation/hardware-facing behavior: this debug-oriented
@@ -1089,11 +1092,11 @@ void Cpu::exception(Exception cause) {
     handler = 0x80000080;
   }
 
-  // Shift the Interrupt Enable/Kernel-User mode stack in SR
+  // Shift the Interrupt Enable/Kernel-User mode stack in SR.
+  // R3000A: IEc/KUc → IEp/KUp, new IEc=0, KUc=0 (kernel mode, interrupts off).
   u32 mode = cop0_sr_ & 0x3F;
   cop0_sr_ &= ~0x3Fu;
   cop0_sr_ |= (mode << 2) & 0x3F;
-  cop0_sr_ |= (1u << 1); // Set EXL to prevent nested exceptions
 
   // Set cause register
   if (cause != Exception::CopUnusable) {
@@ -1259,7 +1262,8 @@ void Cpu::exception(Exception cause) {
 }
 
 bool Cpu::check_irq() {
-  // Check if interrupts are enabled (IEc bit, bit 0 of SR)
+  // On R3000A, interrupts require IEc=1 (bit 0 of SR).
+  // KUc (bit 1) does not gate interrupts.
   bool iec = cop0_sr_ & 1;
   if (!iec)
     return false;
@@ -1992,25 +1996,9 @@ u32 Cpu::step() {
 
   cycles_ += consumed_cycles;
 
-  // ── COP0 Count/Compare timer ────────────────────────────────────
-  // Count (R9) increments every CPU cycle. When Count == Compare,
-  // Cause IP7 (bit 15) is asserted. We approximate this by stepping
-  // Count forward by the consumed cycle count and checking for a match.
-  {
-    const u32 old_count = cop0_regs_[9];
-    cop0_regs_[9] = old_count + consumed_cycles;
-    // Check if Compare was crossed during this interval.
-    // Since Count wraps at 32 bits, use unsigned arithmetic.
-    const u32 compare = cop0_regs_[11];
-    if (old_count <= compare && compare <= cop0_regs_[9]) {
-      cop0_cause_ |= (1u << 15); // Set IP7
-    } else if (old_count > cop0_regs_[9]) {
-      // Wrapped around: check if compare is in [old_count, 0xFFFFFFFF] or [0, new_count]
-      if (compare >= old_count || compare <= cop0_regs_[9]) {
-        cop0_cause_ |= (1u << 15);
-      }
-    }
-  }
+  // PS1 (R3000A) does NOT have COP0 Count/Compare registers.
+  // R9 = BDAM (Breakpoint Data Address Mask), R11 = BPCM (Breakpoint
+  // Program Counter Mask).  Neither is used in normal game execution.
 
   executing_step_ = false;
 
