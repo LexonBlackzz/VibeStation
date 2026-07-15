@@ -33,6 +33,8 @@ private:
   u32 rgb_fifo[3] = {};       // RGB FIFO
 
   s64 mac[4] = {};        // MAC0-MAC3 (accumulator) — 44-bit for MAC1..3
+                          // Note: MAC1-3 store the sf-shifted value (>> sf),
+                          // matching DuckStation's 32-bit MAC register behavior.
   u32 otz = 0;            // Average Z
   u32 lzcs = 0, lzcr = 0; // Leading zero count
 
@@ -80,8 +82,8 @@ private:
 
   // ── Helpers ────────────────────────────────────────────────────
   s64 set_mac(int idx, s64 value);
-  s32 mac_shifted(int idx) const; // MAC value with sf shift applied (MAC→IR transfer)
   void set_ir(int idx, s32 value, bool lm_flag);
+  void interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3);
   void push_sx(s16 val);
   void push_sy(s16 val);
   void push_sz(u16 val);
@@ -92,5 +94,4 @@ private:
   int count_leading_zeros16(u16 value) const;
   void normal_color_stage(int v_idx);
   void push_rgb_from_mac();
-  void apply_depth_cue_mac();
 };

@@ -489,13 +489,53 @@ s64 Gte::set_mac(int idx, s64 value) {
         if (value < kMacNegLimit) {
             flags |= (1u << (28 - idx)); // bits 27..25 for MAC1..3 negative overflow
         }
+        // Apply sf shift before storing (matches DuckStation's TruncateAndSetMAC).
+        // MAC registers are effectively 32-bit on real hardware.
+        value >>= sf;
     }
     mac[idx] = value;
     return value;
 }
 
-s32 Gte::mac_shifted(int idx) const {
-    return static_cast<s32>(mac[idx] >> sf);
+void Gte::interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3) {
+  // Two-step depth cue: [MAC,IR] = MAC+(FC-MAC)*IR0
+  //   Step 1: [IR1,IR2,IR3] = ((FC-SHL 12) - [MAC1,MAC2,MAC3]) SAR (sf*12)
+  //   Step 2: [MAC1,MAC2,MAC3] = (([IR1,IR2,IR3] * IR0) + [MAC1,MAC2,MAC3]) SAR (sf*12)
+  // Matching DuckStation's InterpolateColor — intermediate IR saturation is critical.
+  const s64 in_mac[3] = {in_mac1, in_mac2, in_mac3};
+
+  // Step 1: FC-MAC, with lm=false (signed IR range)
+  for (int i = 0; i < 3; ++i) {
+    const s64 diff = (static_cast<s64>(far_color[i]) << 12) - in_mac[i];
+    constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;
+    constexpr s64 kMacNegLimit = -0x80000000000LL;
+    if (diff > kMacPosLimit) {
+      flags |= (1u << (30 - i));
+    }
+    if (diff < kMacNegLimit) {
+      flags |= (1u << (27 - i));
+    }
+    const s64 shifted = diff >> sf;
+    mac[i + 1] = shifted;
+    set_ir(i + 1, static_cast<s32>(shifted), false);
+  }
+
+  // Step 2: IR*IR0 + in_MAC, with lm as specified
+  for (int i = 0; i < 3; ++i) {
+    const s64 result =
+        static_cast<s64>(ir[i + 1]) * static_cast<s64>(ir[0]) + in_mac[i];
+    constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;
+    constexpr s64 kMacNegLimit = -0x80000000000LL;
+    if (result > kMacPosLimit) {
+      flags |= (1u << (30 - i));
+    }
+    if (result < kMacNegLimit) {
+      flags |= (1u << (27 - i));
+    }
+    const s64 shifted = result >> sf;
+    mac[i + 1] = shifted;
+    set_ir(i + 1, static_cast<s32>(shifted), lm);
+  }
 }
 
 void Gte::set_ir(int idx, s32 value, bool lm_flag) {
@@ -671,7 +711,7 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
     raw_mac[i] = result;
     set_mac(i + 1, result);
     if (i < 2)
-      set_ir(i + 1, mac_shifted(i + 1), lm);
+      set_ir(i + 1, mac[i + 1], lm);
   }
 
   // RTPS handles IR3 saturation slightly differently from generic IR writes:
@@ -680,7 +720,7 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   const s32 ir3_flag_value = static_cast<s32>(raw_mac[2] >> 12);
   if (ir3_flag_value < -0x8000 || ir3_flag_value > 0x7FFF)
     flags |= (1u << 22);
-  const s32 ir3_mac = mac_shifted(3);
+  const s32 ir3_mac = mac[3];
   const s32 ir3_lower = lm ? 0 : -0x8000;
   if (ir3_mac < ir3_lower)
     ir[3] = static_cast<s16>(ir3_lower);
@@ -691,9 +731,10 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
 
   // Push SZ FIFO.
   // PSX-SPX: SZ3 = MAC3 SAR ((1-SF)*12).
-  const int sz_shift = (sf == 0) ? 12 : 0;
+  // But MAC3 in the spec is already sf-shifted. Since we have the raw value,
+  // always push raw >> 12 to match DuckStation's PushSZ(s32(z >> 12)).
   u16 sz_val =
-      static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> sz_shift), 0, 0xFFFF,
+      static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> 12), 0, 0xFFFF,
                              1u << 18));
   push_sz(sz_val);
 
@@ -847,14 +888,14 @@ void Gte::cmd_mvmva() {
           static_cast<s64>(mat[i][1]) * vec[1] +
           static_cast<s64>(mat[i][2]) * vec[2];
       set_mac(i + 1, result);
-      set_ir(i + 1, mac_shifted(i + 1), lm);
+      set_ir(i + 1, mac[i + 1], lm);
     } else {
       s64 result = static_cast<s64>(add[i]) << 12;
       result += static_cast<s64>(mat[i][0]) * vec[0];
       result += static_cast<s64>(mat[i][1]) * vec[1];
       result += static_cast<s64>(mat[i][2]) * vec[2];
       set_mac(i + 1, result);
-      set_ir(i + 1, mac_shifted(i + 1), lm);
+      set_ir(i + 1, mac[i + 1], lm);
     }
   }
 }
@@ -882,7 +923,7 @@ void Gte::normal_color_stage(int v_idx) {
     result += static_cast<s64>(light[i][1]) * v[1];
     result += static_cast<s64>(light[i][2]) * v[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
 
   // Stage 2: IR = BK + LCM * IR
@@ -893,7 +934,7 @@ void Gte::normal_color_stage(int v_idx) {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
 }
 
@@ -904,17 +945,6 @@ void Gte::push_rgb_from_mac() {
   const u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
   const u8 b = static_cast<u8>(clamp(mac[3] >> 4, 0, 0xFF, 1u << 19));
   push_rgb(r | (g << 8) | (b << 16) | (rgbc[3] << 24));
-}
-
-void Gte::apply_depth_cue_mac() {
-  for (int i = 0; i < 3; ++i) {
-    const s64 mac_in = mac[i + 1];
-    const s64 fc = static_cast<s64>(far_color[i]) << 12;
-    const s64 result =
-        mac_in + (((fc - mac_in) * static_cast<s64>(ir[0])) >> 12);
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
 }
 
 void Gte::cmd_ncs(int v_idx) {
@@ -933,7 +963,7 @@ void Gte::cmd_nccs(int v_idx) {
   for (int i = 0; i < 3; ++i) {
     const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
     set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
   push_rgb_from_mac();
 }
@@ -945,13 +975,18 @@ void Gte::cmd_ncct() {
 }
 
 void Gte::cmd_ncds(int v_idx) {
+  // NCDS: Normal Color Depth Single
+  // Stage 1: [IR1,IR2,IR3] = LLM * V
+  // Stage 2: [IR1,IR2,IR3] = BK + LCM * IR
   normal_color_stage(v_idx);
-  for (int i = 0; i < 3; ++i) {
-    const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
-  apply_depth_cue_mac();
+
+  // Stage 3: Color multiply — local variables (not stored to MAC)
+  const s64 in_mac1 = (static_cast<s64>(rgbc[0]) * static_cast<s64>(ir[1])) << 4;
+  const s64 in_mac2 = (static_cast<s64>(rgbc[1]) * static_cast<s64>(ir[2])) << 4;
+  const s64 in_mac3 = (static_cast<s64>(rgbc[2]) * static_cast<s64>(ir[3])) << 4;
+
+  // Stage 4: Depth cue
+  interpolate_color(in_mac1, in_mac2, in_mac3);
   push_rgb_from_mac();
 }
 
@@ -962,7 +997,8 @@ void Gte::cmd_ncdt() {
 }
 
 void Gte::cmd_cdp() {
-  // CC stage
+  // CDP: Color Depth Cue
+  // Stage 1: [IR1,IR2,IR3] = BK + LCM * IR (same as NCS stage 2)
   const s16 ir_copy[3] = {ir[1], ir[2], ir[3]};
   for (int i = 0; i < 3; ++i) {
     s64 result = static_cast<s64>(bg_color[i]) << 12;
@@ -970,71 +1006,66 @@ void Gte::cmd_cdp() {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
-  for (int i = 0; i < 3; ++i) {
-    const s64 result = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
-  apply_depth_cue_mac();
+
+  // Stage 2: Color multiply — local variables (not stored to MAC)
+  const s64 in_mac1 = (static_cast<s64>(rgbc[0]) * static_cast<s64>(ir[1])) << 4;
+  const s64 in_mac2 = (static_cast<s64>(rgbc[1]) * static_cast<s64>(ir[2])) << 4;
+  const s64 in_mac3 = (static_cast<s64>(rgbc[2]) * static_cast<s64>(ir[3])) << 4;
+
+  // Stage 3: Depth cue
+  interpolate_color(in_mac1, in_mac2, in_mac3);
   push_rgb_from_mac();
 }
 
 void Gte::cmd_dpcs() {
-  for (int i = 0; i < 3; ++i) {
-    const s64 color = static_cast<s64>(rgbc[i]) << 16;
-    const s64 fc = static_cast<s64>(far_color[i]) << 12;
-    const s64 result = color + (((fc - color) * static_cast<s64>(ir[0])) >> 12);
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
+  // DPCS: in_MAC = [R,G,B] SHL 16 (no sf shift for the initial store,
+  // matching DuckStation's TruncateAndSetMAC<1>(color<<16, 0)).
+  // Then two-step interpolation with far color.
+  const s64 in_mac1 = static_cast<s64>(rgbc[0]) << 16;
+  const s64 in_mac2 = static_cast<s64>(rgbc[1]) << 16;
+  const s64 in_mac3 = static_cast<s64>(rgbc[2]) << 16;
+  interpolate_color(in_mac1, in_mac2, in_mac3);
   push_rgb_from_mac();
 }
 
 void Gte::cmd_dcpl() {
-  for (int i = 0; i < 3; ++i) {
-    const s64 col = (static_cast<s64>(rgbc[i]) * static_cast<s64>(ir[i + 1])) << 4;
-    const s64 fc = static_cast<s64>(far_color[i]) << 12;
-    const s64 result = col + (((fc - col) * static_cast<s64>(ir[0])) >> 12);
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
+  // DCPL: in_MAC = [R*IR1,G*IR2,B*IR3] SHL 4
+  // No need to store to MAC — use local variables like DuckStation
+  const s64 in_mac1 = (static_cast<s64>(rgbc[0]) * static_cast<s64>(ir[1])) << 4;
+  const s64 in_mac2 = (static_cast<s64>(rgbc[1]) * static_cast<s64>(ir[2])) << 4;
+  const s64 in_mac3 = (static_cast<s64>(rgbc[2]) * static_cast<s64>(ir[3])) << 4;
+  interpolate_color(in_mac1, in_mac2, in_mac3);
   push_rgb_from_mac();
 }
 
 void Gte::cmd_dpct() {
+  // DPCT: three iterations of DPCS using RGB FIFO values
   for (int n = 0; n < 3; ++n) {
     const u32 src = rgb_fifo[0];
-    for (int i = 0; i < 3; ++i) {
-      const u8 src_comp = static_cast<u8>((src >> (i * 8)) & 0xFFu);
-      const s64 color = static_cast<s64>(src_comp) << 16;
-      const s64 fc = static_cast<s64>(far_color[i]) << 12;
-      const s64 result =
-          color + (((fc - color) * static_cast<s64>(ir[0])) >> 12);
-      set_mac(i + 1, result);
-      set_ir(i + 1, mac_shifted(i + 1), lm);
-    }
+    const s64 in_mac1 = static_cast<s64>(static_cast<u8>(src & 0xFFu)) << 16;
+    const s64 in_mac2 = static_cast<s64>(static_cast<u8>((src >> 8) & 0xFFu)) << 16;
+    const s64 in_mac3 = static_cast<s64>(static_cast<u8>((src >> 16) & 0xFFu)) << 16;
+    interpolate_color(in_mac1, in_mac2, in_mac3);
     push_rgb_from_mac();
   }
 }
 
 void Gte::cmd_intpl() {
-  for (int i = 0; i < 3; ++i) {
-    const s64 ir_val = static_cast<s64>(ir[i + 1]) << 12;
-    const s64 fc = static_cast<s64>(far_color[i]) << 12;
-    const s64 result =
-        ir_val + (((fc - ir_val) * static_cast<s64>(ir[0])) >> 12);
-    set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
-  }
+  // INTPL: [MAC1,MAC2,MAC3] = [IR1,IR2,IR3] SHL 12
+  // No need to store to MAC — use local variables
+  const s64 in_mac1 = static_cast<s64>(ir[1]) << 12;
+  const s64 in_mac2 = static_cast<s64>(ir[2]) << 12;
+  const s64 in_mac3 = static_cast<s64>(ir[3]) << 12;
+  interpolate_color(in_mac1, in_mac2, in_mac3);
   push_rgb_from_mac();
 }
 
 void Gte::cmd_sqr() {
   for (int i = 1; i <= 3; i++) {
     set_mac(i, static_cast<s64>(ir[i]) * ir[i]);
-    set_ir(i, mac_shifted(i), lm);
+    set_ir(i, mac[i], lm);
   }
 }
 
@@ -1046,15 +1077,15 @@ void Gte::cmd_op() {
                  static_cast<s64>(rotation[0][0]) * ir[3]);
   set_mac(3, static_cast<s64>(rotation[0][0]) * ir[2] -
                  static_cast<s64>(rotation[1][1]) * ir[1]);
-  set_ir(1, mac_shifted(1), lm);
-  set_ir(2, mac_shifted(2), lm);
-  set_ir(3, mac_shifted(3), lm);
+  set_ir(1, mac[1], lm);
+  set_ir(2, mac[2], lm);
+  set_ir(3, mac[3], lm);
 }
 
 void Gte::cmd_gpf() {
   for (int i = 1; i <= 3; i++) {
     set_mac(i, static_cast<s64>(ir[0]) * ir[i]);
-    set_ir(i, mac_shifted(i), lm);
+    set_ir(i, mac[i], lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
@@ -1067,7 +1098,7 @@ void Gte::cmd_gpl() {
     s64 result =
         (static_cast<s64>(mac[i]) << sf) + static_cast<s64>(ir[0]) * ir[i];
     set_mac(i, result);
-    set_ir(i, mac_shifted(i), lm);
+    set_ir(i, mac[i], lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
@@ -1083,11 +1114,11 @@ void Gte::cmd_cc() {
     result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
     result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
     set_mac(i + 1, result);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
   for (int i = 0; i < 3; i++) {
     set_mac(i + 1, static_cast<s64>(rgbc[i]) * ir[i + 1] << 4);
-    set_ir(i + 1, mac_shifted(i + 1), lm);
+    set_ir(i + 1, mac[i + 1], lm);
   }
   u8 r = static_cast<u8>(clamp(mac[1] >> 4, 0, 0xFF, 1u << 21));
   u8 g = static_cast<u8>(clamp(mac[2] >> 4, 0, 0xFF, 1u << 20));
