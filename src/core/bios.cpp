@@ -274,22 +274,19 @@ u32 Bios::read32(u32 offset) const {
 }
 
 void Bios::write8(u32 offset, u8 value) {
-  const size_t size = std::min<size_t>(
-      data_.size(), mapped_size_ == 0 ? psx::BIOS_SIZE : mapped_size_);
-  if (size == 0) {
-    return;
-  }
-  data_[static_cast<size_t>(offset % size)] = value;
+  // BIOS ROM is read-only on real PS1 hardware. Writes are silently ignored.
+  (void)offset;
+  (void)value;
 }
 
 void Bios::write16(u32 offset, u16 value) {
-  write8(offset + 0u, static_cast<u8>(value & 0xFFu));
-  write8(offset + 1u, static_cast<u8>((value >> 8) & 0xFFu));
+  // BIOS ROM is read-only on real PS1 hardware. Writes are silently ignored.
+  (void)offset;
+  (void)value;
 }
 
 void Bios::write32(u32 offset, u32 value) {
-  write8(offset + 0u, static_cast<u8>(value & 0xFFu));
-  write8(offset + 1u, static_cast<u8>((value >> 8) & 0xFFu));
-  write8(offset + 2u, static_cast<u8>((value >> 16) & 0xFFu));
-  write8(offset + 3u, static_cast<u8>((value >> 24) & 0xFFu));
+  // BIOS ROM is read-only on real PS1 hardware. Writes are silently ignored.
+  (void)offset;
+  (void)value;
 }
