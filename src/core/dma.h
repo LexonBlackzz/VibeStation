@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <vector>
 
 // ── DMA Controller ─────────────────────────────────────────────────
 // 7-channel DMA controller for the PS1.
@@ -64,6 +65,9 @@ public:
 
   void init(System *sys) { sys_ = sys; }
   void reset();
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
 
   u32 read(u32 offset) const;
   void write(u32 offset, u32 value);

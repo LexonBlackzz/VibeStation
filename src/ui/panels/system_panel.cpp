@@ -87,6 +87,36 @@ void App::draw_system_panel() {
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Reduces audio complexity and internal precision.");
                 ImGui::Separator();
+                ImGui::Text("Rewind");
+                if (ImGui::Checkbox("Enable Rewind (Hold Right Ctrl)",
+                    &config_rewind_enabled_)) {
+                    if (config_rewind_enabled_) {
+                        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
+                            static_cast<int>(system_ ? system_->target_fps() : 60.0));
+                    }
+                    save_persistent_config();
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Hold Right Ctrl to rewind. Captures one snapshot per frame.");
+                int rewind_seconds = config_rewind_buffer_seconds_;
+                if (ImGui::SliderInt("Buffer (seconds)", &rewind_seconds, 1, 10)) {
+                    config_rewind_buffer_seconds_ = std::clamp(rewind_seconds, 1, 10);
+                    emu_runner_.set_rewind_buffer_seconds(config_rewind_buffer_seconds_,
+                        static_cast<int>(system_ ? system_->target_fps() : 60.0));
+                    save_persistent_config();
+                }
+                if (config_rewind_enabled_) {
+                    const std::size_t count = emu_runner_.rewind_snapshot_count();
+                    const std::size_t mem = emu_runner_.rewind_memory_bytes();
+                    const double mem_mb = static_cast<double>(mem) / (1024.0 * 1024.0);
+                    ImGui::Text("Snapshots: %zu", count);
+                    ImGui::Text("Memory: %.1f MB", mem_mb);
+                    if (emu_runner_.is_rewind_active()) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                            "Rewinding...");
+                    }
+                }
+                ImGui::Separator();
                 ImGui::Text("Discord Rich Presence");
                 if (ImGui::Checkbox("Enable Discord RPC",
                     &config_discord_rich_presence_)) {

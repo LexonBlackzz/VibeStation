@@ -2,6 +2,7 @@
 #include "memory_card.h"
 #include "pad_controller.h"
 #include "types.h"
+#include <vector>
 
 #include <array>
 #include <string>
@@ -35,6 +36,9 @@ public:
   bool memory_card_inserted(u32 slot) const;
   bool memory_card_dirty(u32 slot) const;
   std::string memory_card_path(u32 slot) const;
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
 
   void tick(u32 cycles);
   bool saw_pad_cmd42() const { return saw_pad_cmd42_; }

@@ -451,6 +451,9 @@ public:
   void debug_set_state(const CpuDebugState &state);
   void debug_invalidate_icache_line(u32 addr);
 
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
+
 private:
   System *sys_ = nullptr;
   std::unique_ptr<CpuOptimizedBackend> optimized_backend_;

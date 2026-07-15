@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <vector>
 
 // ── Interrupt Controller ───────────────────────────────────────────
 // I_STAT (0x1F801070): Interrupt status — set by hardware, ack by writing 0
@@ -39,6 +40,9 @@ public:
 
   u32 stat() const { return i_stat_; }
   u32 mask() const { return i_mask_; }
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
   u64 request_count(Interrupt irq) const {
     return request_count_[static_cast<u32>(irq)];
   }

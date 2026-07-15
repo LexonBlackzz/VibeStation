@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <vector>
 
 // ── Hardware Timers (Root Counters) ────────────────────────────────
 // Timer 0: Pixel clock / dot clock
@@ -56,6 +57,9 @@ public:
   void tick(u32 cycles);
   void hblank_pulse();
   void set_vblank(bool active);
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
 
   // Side-effect-free diagnostic access. Unlike read(), this does not clear
   // the timer reached-target/reached-overflow flags in the mode register.

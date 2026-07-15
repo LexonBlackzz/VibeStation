@@ -54,6 +54,10 @@ struct Config {
     static constexpr int kMemoryCardSlotCount = 2;
     std::array<int, kMemoryCardSlotCount> memory_card_slot_mode = {0, 0};
 
+    // Rewind
+    bool rewind_enabled = false;
+    int rewind_buffer_seconds = 5;
+
     // Performance
     int turbo_speed_percent = 200;
     int slowdown_speed_percent = 50;

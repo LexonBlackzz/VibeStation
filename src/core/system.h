@@ -7,6 +7,7 @@
 #include "interrupt.h"
 #include "mdec.h"
 #include "ram.h"
+#include "rewind.h"
 #include "sio.h"
 #include "spu.h"
 #include "timer.h"
@@ -473,6 +474,10 @@ public:
   void debug_log_frame_state() const;
   void debug_log_recent_ram_writes(u32 addr, u32 radius_bytes,
                                    const char *log_prefix = "BUS") const;
+
+  // State save/restore for rewind
+  bool save_state(SystemSnapshot &out);
+  bool restore_state(const SystemSnapshot &snap);
 
   // Public component access
   Gpu &gpu() { return gpu_; }

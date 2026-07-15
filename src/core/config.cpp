@@ -185,6 +185,12 @@ Config Config::load(const std::string& path) {
     if (j.contains("slowdown_speed_percent") && j["slowdown_speed_percent"].is_number_integer()) {
         cfg.slowdown_speed_percent = normalize_slowdown_speed_percent(j["slowdown_speed_percent"].get<int>());
     }
+    // Rewind
+    get_bool("rewind_enabled", cfg.rewind_enabled);
+    if (j.contains("rewind_buffer_seconds") && j["rewind_buffer_seconds"].is_number_integer()) {
+        cfg.rewind_buffer_seconds = std::clamp(j["rewind_buffer_seconds"].get<int>(), 1, 10);
+    }
+
     get_bool("direct_disc_boot", cfg.direct_disc_boot);
     get_bool("spu_diagnostic_mode", cfg.spu_diagnostic_mode);
     get_bool("discord_rich_presence", cfg.discord_rich_presence);
@@ -370,6 +376,10 @@ void Config::save(const std::string& path) const {
     // Memory cards
     j["memory_card_slot1_mode"] = std::clamp(memory_card_slot_mode[0], 0, 2);
     j["memory_card_slot2_mode"] = std::clamp(memory_card_slot_mode[1], 0, 2);
+
+    // Rewind
+    j["rewind_enabled"] = rewind_enabled;
+    j["rewind_buffer_seconds"] = std::clamp(rewind_buffer_seconds, 1, 10);
 
     // Performance
     j["turbo_speed_percent"] = turbo_speed_percent;

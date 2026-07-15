@@ -640,6 +640,9 @@ void App::process_events(bool& quit) {
                 slowdown_hold_active_ = false;
                 apply_speed_override();
             }
+            if (emu_runner_.is_rewind_active()) {
+                emu_runner_.set_rewind_active(false);
+            }
         }
         if (pending_bind_index_ >= 0 && event.type == SDL_KEYDOWN &&
             !event.key.repeat) {
@@ -687,6 +690,19 @@ void App::process_events(bool& quit) {
             if (slowdown_hold_active_) {
                 slowdown_hold_active_ = false;
                 apply_speed_override();
+            }
+            continue;
+        }
+        if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+            event.key.keysym.sym == SDLK_RCTRL) {
+            if (config_rewind_enabled_ && emu_runner_.is_running()) {
+                emu_runner_.set_rewind_active(true);
+            }
+            continue;
+        }
+        if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_RCTRL) {
+            if (emu_runner_.is_rewind_active()) {
+                emu_runner_.set_rewind_active(false);
             }
             continue;
         }
@@ -1421,6 +1437,10 @@ bool App::start_bios_from_ui() {
     }
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
+    if (config_rewind_enabled_) {
+        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
+            static_cast<int>(system_->target_fps()));
+    }
     status_message_ = "Emulation started (BIOS)";
     return true;
 }
@@ -1461,6 +1481,10 @@ bool App::boot_disc_from_ui() {
     }
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
+    if (config_rewind_enabled_) {
+        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
+            static_cast<int>(system_->target_fps()));
+    }
     status_message_ = config_direct_disc_boot_
         ? "Direct booting disc (BIOS intro skipped)..."
         : "Booting disc from BIOS...";
@@ -1733,6 +1757,8 @@ void App::load_persistent_config() {
     config_slowdown_speed_percent_ = config_.slowdown_speed_percent;
     config_spu_diagnostic_mode_ = config_.spu_diagnostic_mode;
     config_discord_rich_presence_ = config_.discord_rich_presence;
+    config_rewind_enabled_ = config_.rewind_enabled;
+    config_rewind_buffer_seconds_ = config_.rewind_buffer_seconds;
     config_memory_card_mode_[0] = config_.memory_card_slot_mode[0];
     config_memory_card_mode_[1] = config_.memory_card_slot_mode[1];
     std::snprintf(log_path_, sizeof(log_path_), "%s", config_.log_file_path.c_str());
@@ -1774,6 +1800,8 @@ void App::save_persistent_config() const {
     out.slowdown_speed_percent = config_slowdown_speed_percent_;
     out.spu_diagnostic_mode = config_spu_diagnostic_mode_;
     out.discord_rich_presence = config_discord_rich_presence_;
+    out.rewind_enabled = config_rewind_enabled_;
+    out.rewind_buffer_seconds = config_rewind_buffer_seconds_;
     out.memory_card_slot_mode[0] = config_memory_card_mode_[0];
     out.memory_card_slot_mode[1] = config_memory_card_mode_[1];
     out.log_file_path = log_path_;

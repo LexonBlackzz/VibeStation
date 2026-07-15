@@ -73,6 +73,9 @@ public:
 
   void dma_write(u32 value) { write_command(value); }
   u32 dma_read() { return read_data(); }
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
   bool dma_in_request() const;
   bool dma_out_request() const;
   bool is_active() const;

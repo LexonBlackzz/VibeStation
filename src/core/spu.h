@@ -243,6 +243,12 @@ public:
   void tick(u32 cycles);
   void mark_synced_to_cpu(u64 cpu_cycle) { last_synced_cpu_cycle_ = cpu_cycle; }
 
+  const u8* spu_ram_data() const { return spu_ram_.data(); }
+  u8* spu_ram_mut_data() { return spu_ram_.data(); }
+  static constexpr u32 kSpuRamSize = RAM_SIZE_BYTES;
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
+
   u16 status() const { return spustat_; }
   const AudioDiag &audio_diag() const { return audio_diag_; }
   void reset_audio_diag();

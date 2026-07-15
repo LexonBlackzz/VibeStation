@@ -1,6 +1,7 @@
 #pragma once
 #include "types.h"
 #include <array>
+#include <vector>
 
 // ── Geometry Transformation Engine (GTE / COP2) ────────────────────
 // The GTE performs 3D math operations: perspective projection,
@@ -17,6 +18,9 @@ public:
 
   // Execute GTE command
   void execute(u32 command);
+
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
 
 private:
   // ── Data Registers (COP2 data) ─────────────────────────────────

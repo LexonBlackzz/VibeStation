@@ -388,6 +388,15 @@ void EmuRunner::worker_main() {
             system_->debug_log_frame_state();
         }
 
+        // Capture rewind snapshot after each frame
+        if (!skip_audio_for_turbo) {
+            SystemSnapshot snap;
+            snap.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
+            if (system_->save_state(snap)) {
+                rewind_manager_.push(std::move(snap));
+            }
+        }
+
         if (!publish_outputs) {
             frame_active_.store(false, std::memory_order_release);
             idle_cv_.notify_all();
@@ -544,6 +553,43 @@ void EmuRunner::worker_main() {
                 i < frames_to_run && running_.load(std::memory_order_acquire) &&
                 !stop_requested_.load(std::memory_order_acquire);
                 ++i) {
+                // Rewind: pop a snapshot and restore instead of running a frame
+                if (rewind_active_.load(std::memory_order_acquire)) {
+                    SystemSnapshot snap;
+                    if (rewind_manager_.pop(snap)) {
+                        frame_active_.store(true, std::memory_order_release);
+                        apply_input_state(*system_);
+                        system_->restore_state(snap);
+                        // Publish the restored frame for display
+                        RuntimeSnapshot snapshot{};
+                        snapshot.frame_id = static_cast<u64>(
+                            system_->boot_diag().frame_counter);
+                        snapshot.running = true;
+                        snapshot.boot_diag = system_->boot_diag();
+                        snapshot.profiling = system_->profiling_stats();
+                        snapshot.core_frame_ms = snapshot.profiling.total_ms;
+                        snapshot.cpu_backend = effective_cpu_execution_mode();
+                        snapshot.cpu_backend_stats = system_->cpu().cpu_backend_stats();
+                        snapshot.cpu_pc = system_->cpu().pc();
+                        FrameSnapshot frame{};
+                        const DisplaySampleInfo sample =
+                            system_->gpu().build_presented_display_rgba(frame.rgba, false);
+                        update_snapshot_display_diag_from_sample(
+                            snapshot.boot_diag, sample);
+                        frame.frame_id = snapshot.frame_id;
+                        frame.width = std::max(1, sample.width);
+                        frame.height = std::max(1, sample.height);
+                        publish_frame(std::move(frame), snapshot);
+                        completed_frame_count_.store(
+                            static_cast<u64>(system_->boot_diag().frame_counter),
+                            std::memory_order_release);
+                        frame_active_.store(false, std::memory_order_release);
+                        idle_cv_.notify_all();
+                        continue;
+                    }
+                    // Ring buffer empty — fall through to normal execution
+                }
+
                 const u64 cpu_cycles_advanced =
                     run_one_frame(true, false, false);
                 // Pace the emulator's actual master clock, not an assumed
@@ -570,4 +616,13 @@ void EmuRunner::worker_main() {
 
     frame_active_.store(false, std::memory_order_release);
     idle_cv_.notify_all();
+}
+
+void EmuRunner::init_rewind(int buffer_seconds, int fps) {
+    rewind_manager_.init(buffer_seconds, fps);
+    rewind_active_.store(false, std::memory_order_release);
+}
+
+void EmuRunner::set_rewind_active(bool active) {
+    rewind_active_.store(active, std::memory_order_release);
 }

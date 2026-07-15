@@ -76,6 +76,9 @@ public:
   u8 read8(u32 offset);
   void write8(u32 offset, u8 value);
 
+  void save_state(std::vector<u8>& buf) const;
+  void restore_state(const u8*& pos, size_t& remaining);
+
   void tick(u32 cycles);
 
   // DMA reads a word from the data buffer

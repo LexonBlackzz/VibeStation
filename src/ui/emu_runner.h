@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/rewind.h"
 #include "../core/system.h"
 #include "../core/types.h"
 #include <array>
@@ -73,6 +74,22 @@ public:
   }
   RuntimeSnapshot runtime_snapshot() const;
 
+  // Rewind control (called from UI thread)
+  void init_rewind(int buffer_seconds, int fps);
+  void set_rewind_active(bool active);
+  bool is_rewind_active() const {
+    return rewind_active_.load(std::memory_order_acquire);
+  }
+  std::size_t rewind_snapshot_count() const {
+    return rewind_manager_.snapshot_count();
+  }
+  std::size_t rewind_memory_bytes() const {
+    return rewind_manager_.memory_bytes();
+  }
+  void set_rewind_buffer_seconds(int seconds, int fps) {
+    rewind_manager_.set_buffer_seconds(seconds, fps);
+  }
+
 private:
   static u64 pack_input(u16 buttons, u8 lx, u8 ly, u8 rx, u8 ry);
   static void unpack_input(u64 packed, u16 &buttons, u8 &lx, u8 &ly, u8 &rx,
@@ -127,4 +144,8 @@ private:
   mutable std::mutex memcard_request_mutex_;
   bool has_pending_memcard_request_ = false;
   std::array<std::string, 2> pending_memcard_paths_{};
+
+  // Rewind
+  RewindManager rewind_manager_;
+  std::atomic<bool> rewind_active_{false};
 };

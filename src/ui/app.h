@@ -131,6 +131,8 @@ private:
 	int config_slowdown_speed_percent_ = 50;
 	bool config_spu_diagnostic_mode_ = false;
 	bool config_discord_rich_presence_ = false;
+	bool config_rewind_enabled_ = false;
+	int config_rewind_buffer_seconds_ = 5;
 	static constexpr int kMemoryCardSlotCount = 2;
 	std::array<int, kMemoryCardSlotCount> config_memory_card_mode_ = { 0, 0 };
 	std::array<std::string, kMemoryCardSlotCount> memory_card_target_paths_{};
