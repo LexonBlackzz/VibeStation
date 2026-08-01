@@ -633,6 +633,94 @@ static void pad_cpu_compare_program(CpuCompareCase &test_case,
   test_case.instructions = instruction_count;
 }
 
+static void append_deterministic_random_compare_cases(
+    std::vector<CpuCompareCase> &cases) {
+  struct RandomCaseSeed {
+    const char *name;
+    u32 value;
+  };
+  constexpr std::array<RandomCaseSeed, 4> seeds = {{
+      {"random_block_seed_13579BDF", 0x13579BDFu},
+      {"random_block_seed_2468ACE1", 0x2468ACE1u},
+      {"random_block_seed_C001D00D", 0xC001D00Du},
+      {"random_block_seed_5EED1234", 0x5EED1234u},
+  }};
+
+  for (const RandomCaseSeed &seed : seeds) {
+    CpuCompareCase test{};
+    test.name = seed.name;
+    test.initial_gpr[1] = 0x80012000u;
+
+    u32 random_state = seed.value;
+    auto next_random = [&]() {
+      random_state ^= random_state << 13u;
+      random_state ^= random_state >> 17u;
+      random_state ^= random_state << 5u;
+      return random_state;
+    };
+    auto random_work_gpr = [&]() {
+      return 2u + (next_random() % 14u);
+    };
+
+    for (u32 reg = 2; reg < 16u; ++reg) {
+      test.initial_gpr[reg] = next_random();
+    }
+    for (u32 word = 0; word < 16u; ++word) {
+      const u32 addr = 0x00012000u + word * 4u;
+      test.memory.push_back({addr, next_random()});
+      test.compare_memory_addresses.push_back(addr);
+    }
+
+    constexpr std::array<u32, 8> r_functions = {
+        0x21u, 0x23u, 0x24u, 0x25u, 0x26u, 0x27u, 0x2Au, 0x2Bu,
+    };
+    constexpr std::array<u32, 7> immediate_ops = {
+        0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu,
+    };
+    constexpr std::array<u32, 8> memory_ops = {
+        0x20u, 0x21u, 0x23u, 0x24u, 0x25u, 0x28u, 0x29u, 0x2Bu,
+    };
+
+    for (u32 instruction = 0; instruction < 16u; ++instruction) {
+      const u32 family = next_random() % 4u;
+      const u32 rs = random_work_gpr();
+      const u32 rt = random_work_gpr();
+      const u32 rd = random_work_gpr();
+      if (family == 0u) {
+        const u32 funct = r_functions[next_random() % r_functions.size()];
+        test.program.push_back(enc_r(rs, rt, rd, 0u, funct));
+      } else if (family == 1u) {
+        const u32 funct = next_random() % 3u;
+        const u32 shift_function =
+            funct == 0u ? 0x00u : (funct == 1u ? 0x02u : 0x03u);
+        test.program.push_back(
+            enc_r(0u, rt, rd, next_random() & 31u, shift_function));
+      } else if (family == 2u) {
+        const u32 op =
+            immediate_ops[next_random() % immediate_ops.size()];
+        test.program.push_back(
+            enc_i(op, op == 0x0Fu ? 0u : rs, rt,
+                  static_cast<u16>(next_random())));
+      } else {
+        const u32 op = memory_ops[next_random() % memory_ops.size()];
+        u32 byte_offset = next_random() & 0x3Fu;
+        if (op == 0x21u || op == 0x25u || op == 0x29u) {
+          byte_offset &= ~1u;
+        } else if (op == 0x23u || op == 0x2Bu) {
+          byte_offset &= ~3u;
+        }
+        test.program.push_back(
+            enc_i(op, 1u, rt, static_cast<u16>(byte_offset)));
+      }
+    }
+
+    test.instructions = static_cast<u32>(test.program.size());
+    test.segment_instructions.assign(test.instructions, 1u);
+    test.compare_segment_states = true;
+    cases.push_back(std::move(test));
+  }
+}
+
 static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   std::vector<CpuCompareCase> cases;
 
@@ -3202,6 +3290,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   ram_invalidation.instructions = 3;
   cases.push_back(ram_invalidation);
 
+  append_deterministic_random_compare_cases(cases);
   return cases;
 }
 
