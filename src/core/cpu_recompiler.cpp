@@ -2190,6 +2190,16 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
     break;
   }
 
+  // Conditional/taken branch timing is runtime state. instruction_cycles()
+  // observes pending_branch_taken_, so using it while decoding can bake the
+  // outcome of an unrelated live branch into a compiled block. Keep only the
+  // invariant base cost here; native branch emitters add the taken cycle after
+  // evaluating their own condition.
+  if (out.is_branch && out.op != DecodedOp::Jr &&
+      out.op != DecodedOp::Jalr) {
+    out.cycles = 1u;
+  }
+
   return out;
 }
 

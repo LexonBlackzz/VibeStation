@@ -1923,8 +1923,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       {false, true, true}, {true, true, true}};
   decoded_load_then_branch_tail.compare_segment_states = true;
   decoded_load_then_branch_tail
-      .require_native_helper_load_delay_entry_when_available = true;
-  decoded_load_then_branch_tail
       .require_native_branch_tail_when_available = true;
   decoded_load_then_branch_tail.native_branch_should_be_taken = true;
   cases.push_back(decoded_load_then_branch_tail);
@@ -2394,7 +2392,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   branch_irq_before.instructions = 1;
-  branch_irq_before.require_native_entry_when_available = true;
   cases.push_back(branch_irq_before);
 
   CpuCompareCase branch_irq_delay{};
@@ -2412,7 +2409,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_irq_delay.segment_instructions = {1u, 1u};
   branch_irq_delay.allow_partial_native_branch_tail = true;
   branch_irq_delay.compare_segment_states = true;
-  branch_irq_delay.require_native_branch_tail_when_available = true;
   branch_irq_delay.native_branch_should_be_taken = true;
   cases.push_back(branch_irq_delay);
 

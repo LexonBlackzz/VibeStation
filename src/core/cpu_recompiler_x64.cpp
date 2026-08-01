@@ -53,6 +53,7 @@ struct X64NativeContext {
   u32 current_instruction_index = 0;
   u32 branch_instruction_index = 0;
   bool uses_instruction_helpers = false;
+  bool inline_branch_tail = false;
   bool is_branch_tail = false;
   bool is_native_prefix = false;
   bool branch_taken = false;
@@ -727,6 +728,31 @@ bool block_uses_instruction_helpers(const DecodedBlock &block) {
     }
   }
   return false;
+}
+
+bool is_x64_inline_branch_tail_block(const DecodedBlock &block) {
+  if (!block.has_control_flow || block.has_memory || block.has_fallback ||
+      block.instruction_count < 2u) {
+    return false;
+  }
+
+  const u32 branch_index = block.instruction_count - 2u;
+  const DecodedInstruction &branch = block.instructions[branch_index];
+  const DecodedInstruction &delay = block.instructions[branch_index + 1u];
+  if (!branch.is_branch || !is_x64_branch_tail_op(branch.op) ||
+      delay.is_branch || delay.must_fallback || delay.may_raise_exception ||
+      !is_x64_stage1_op(delay.op)) {
+    return false;
+  }
+
+  for (u32 i = 0; i < branch_index; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (inst.is_branch || inst.must_fallback || inst.may_raise_exception ||
+        !is_x64_stage1_op(inst.op)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool is_x64_branch_likely(const DecodedInstruction &inst) {
@@ -1658,7 +1684,8 @@ void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
                     uintptr_t prepare_fn, uintptr_t memory_fn,
                     uintptr_t branch_fn, uintptr_t complex_fn,
                     uintptr_t finish_fn, uintptr_t helper_block_fn) {
-  if (block.native_reduced_helper_branch_tail ||
+  if (context.inline_branch_tail ||
+      block.native_reduced_helper_branch_tail ||
       block.native_aggressive_reduced_helper_branch_tail) {
     emit_x64_reduced_helper_branch_tail_block(context, block);
   } else if (context.uses_instruction_helpers) {
@@ -2671,12 +2698,16 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         block.has_control_flow && block.instruction_count >= 2u &&
         block.instructions[block.instruction_count - 2u].is_branch &&
         !context->is_native_prefix;
+    context->inline_branch_tail =
+        !context->is_native_prefix &&
+        is_x64_inline_branch_tail_block(block);
     context->uses_instruction_helpers =
-        (context->is_branch_tail &&
+        !context->inline_branch_tail &&
+        ((context->is_branch_tail &&
          !block.native_reduced_helper_branch_tail &&
          !block.native_aggressive_reduced_helper_branch_tail) ||
         (!context->is_native_prefix && block_uses_instruction_helpers(block) &&
-         !block.native_reduced_helper);
+         !block.native_reduced_helper));
     if (context->is_branch_tail) {
       context->branch_instruction_index = block.instruction_count - 2u;
     }
@@ -2889,14 +2920,15 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     return result;
   }
 
-  if ((block.native_reduced_helper_branch_tail ||
+  if ((context->inline_branch_tail ||
+       block.native_reduced_helper_branch_tail ||
        block.native_aggressive_reduced_helper_branch_tail) &&
       g_cpu_backend_compare_irq_on_branch) {
     if (block.native_aggressive_reduced_helper_branch_tail) {
       ++stats_
             .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
       ++stats_.native_branch_tail_aggressive_reduced_helper_irq_hook_fallbacks;
-    } else {
+    } else if (block.native_reduced_helper_branch_tail) {
       ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
       ++stats_.native_branch_tail_reduced_helper_irq_hook_fallbacks;
     }
@@ -3769,7 +3801,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   }
 
   if (active_load_delay && !context->uses_instruction_helpers &&
-      !block.native_reduced_helper) {
+      !block.native_reduced_helper && !context->inline_branch_tail) {
     ++stats_.native_helper_load_delay_fallbacks;
     return reject_to_decoded(stats_.native_reject_load_delay_state,
                              NativeBlockRejectDetail::LoadDelayState);
@@ -3850,7 +3882,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   }
 
   const u32 total_cycles = context->base_cycles + fetch_penalty;
-  if (total_cycles > max_cycles) {
+  const u32 maximum_cycles =
+      total_cycles + (context->inline_branch_tail ? 1u : 0u);
+  if (maximum_cycles > max_cycles) {
     ++stats_.native_to_decoded_fallbacks;
     ++stats_.native_reject_budget;
     record_rejected_block(NativeBlockRejectDetail::Budget);
@@ -3954,7 +3988,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       break;
     }
   }
-  if ((block.native_reduced_helper_branch_tail ||
+  if ((context->inline_branch_tail ||
+       block.native_reduced_helper_branch_tail ||
        block.native_aggressive_reduced_helper_branch_tail) &&
       result.exit_reason == CpuBlockExitReason::Branch &&
       result.instructions != 0) {
@@ -4001,7 +4036,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       stats_.native_branch_tail_aggressive_reduced_helper_fast_store32 +=
           store32_ops;
       stats_.native_memory_fastpath_stores += store_ops;
-    } else {
+    } else if (block.native_reduced_helper_branch_tail) {
       stats_.native_branch_tail_reduced_helper_prepare_helpers_avoided +=
           result.instructions;
       stats_.native_branch_tail_reduced_helper_finish_helpers_avoided +=
