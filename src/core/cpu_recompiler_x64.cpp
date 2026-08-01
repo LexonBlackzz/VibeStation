@@ -720,11 +720,39 @@ bool is_x64_aggressive_reduced_helper_branch_tail_block(
 
 bool block_uses_instruction_helpers(const DecodedBlock &block) {
   for (u32 i = 0; i < block.instruction_count; ++i) {
-    if (is_x64_memory_op(block.instructions[i].op)) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (inst.is_branch || inst.may_access_memory ||
+        !is_x64_stage1_op(inst.op)) {
       return true;
     }
   }
   return false;
+}
+
+bool is_x64_branch_likely(const DecodedInstruction &inst) {
+  switch (inst.op) {
+  case DecodedOp::Beql:
+  case DecodedOp::Bnel:
+  case DecodedOp::Blezl:
+  case DecodedOp::Bgtzl:
+    return true;
+  case DecodedOp::Bcondz:
+    return (inst.rt & 0x02u) != 0u;
+  default:
+    return false;
+  }
+}
+
+bool is_x64_inline_straight_block(const DecodedBlock &block) {
+  if (block.has_control_flow || block.has_memory || block.has_fallback) {
+    return false;
+  }
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    if (!is_x64_stage1_op(block.instructions[i].op)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 NativeBlockShape classify_x64_block_shape(const DecodedBlock &block) {
@@ -1096,6 +1124,17 @@ void emit_memory_helper_call(Xbyak::CodeGenerator &code,
   code.mov(code.ecx, code.r10d);
 #endif
   emit_absolute_call(code, memory_fn);
+}
+
+void emit_complex_helper_call(Xbyak::CodeGenerator &code,
+                              const Xbyak::Reg64 &ctx,
+                              uintptr_t complex_fn) {
+#if defined(_WIN32)
+  code.mov(code.rcx, ctx);
+#else
+  code.mov(code.rdi, ctx);
+#endif
+  emit_absolute_call(code, complex_fn);
 }
 
 void emit_ram_load_fastpath_or_memory_helper(
@@ -1533,7 +1572,7 @@ void emit_x64_reduced_helper_branch_tail_block(X64NativeContext &context,
 void emit_x64_helper_block(X64NativeContext &context,
                            const DecodedBlock &block, uintptr_t prepare_fn,
                            uintptr_t memory_fn, uintptr_t branch_fn,
-                           uintptr_t finish_fn) {
+                           uintptr_t complex_fn, uintptr_t finish_fn) {
   using namespace Xbyak;
   CodeGenerator &code = context.code;
   Label done;
@@ -1575,8 +1614,12 @@ void emit_x64_helper_block(X64NativeContext &context,
         code.test(code.al, code.al);
         code.jz(done, CodeGenerator::T_NEAR);
       }
-    } else {
+    } else if (is_x64_stage1_op(inst.op)) {
       emit_x64_instruction(code, inst, ctx, gpr);
+    } else {
+      emit_complex_helper_call(code, ctx, complex_fn);
+      code.test(code.al, code.al);
+      code.jz(done, CodeGenerator::T_NEAR);
     }
 
     code.mov(code.dword[gpr], 0);
@@ -1597,13 +1640,14 @@ void emit_x64_helper_block(X64NativeContext &context,
 
 void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
                     uintptr_t prepare_fn, uintptr_t memory_fn,
-                    uintptr_t branch_fn, uintptr_t finish_fn) {
+                    uintptr_t branch_fn, uintptr_t complex_fn,
+                    uintptr_t finish_fn) {
   if (block.native_reduced_helper_branch_tail ||
       block.native_aggressive_reduced_helper_branch_tail) {
     emit_x64_reduced_helper_branch_tail_block(context, block);
   } else if (context.uses_instruction_helpers) {
     emit_x64_helper_block(context, block, prepare_fn, memory_fn, branch_fn,
-                          finish_fn);
+                          complex_fn, finish_fn);
   } else {
     emit_x64_direct_block(context, block);
   }
@@ -1876,6 +1920,26 @@ bool CpuOptimizedBackend::x64_native_memory_instruction(void *context_ptr,
   return true;
 }
 
+bool CpuOptimizedBackend::x64_native_complex_instruction(void *context_ptr) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->backend == nullptr ||
+      context->block == nullptr ||
+      context->current_instruction_index >=
+          context->block->instruction_count) {
+    return false;
+  }
+
+  const DecodedInstruction &inst =
+      context->block->instructions[context->current_instruction_index];
+  const bool completed = context->backend->execute_decoded_instruction(inst);
+  if (completed && context->is_branch_tail && inst.is_branch &&
+      context->current_instruction_index == context->branch_instruction_index) {
+    context->branch_taken = context->cpu->pending_delay_slot_ &&
+                            context->cpu->pending_branch_taken_;
+  }
+  return completed;
+}
+
 void CpuOptimizedBackend::x64_native_branch_instruction(void *context_ptr,
                                                         u32 taken) {
   auto *context = static_cast<X64NativeContext *>(context_ptr);
@@ -1991,6 +2055,14 @@ bool CpuOptimizedBackend::x64_native_finish_instruction(
     return false;
   }
 
+  const bool annulled_likely_delay_slot =
+      context->is_branch_tail && index == context->branch_instruction_index &&
+      is_x64_branch_likely(inst) && !cpu.pending_delay_slot_;
+  if (annulled_likely_delay_slot) {
+    result->exit_reason = CpuBlockExitReason::Branch;
+    return false;
+  }
+
   if (completed_delay_slot) {
     result->exit_reason = CpuBlockExitReason::Branch;
   }
@@ -2015,37 +2087,11 @@ NativeBlockRejectReason CpuOptimizedBackend::classify_x64_reject_reason(
   if (block.instruction_count == 0) {
     return NativeBlockRejectReason::ExceptionOrUnknown;
   }
-  NativeBlockRejectDetail branch_tail_detail = NativeBlockRejectDetail::None;
-  if (is_x64_branch_tail_block(block, branch_tail_detail)) {
-    return NativeBlockRejectReason::None;
-  }
   for (u32 i = 0; i < block.instruction_count; ++i) {
     const DecodedInstruction &inst = block.instructions[i];
-    if (inst.is_branch) {
-      return NativeBlockRejectReason::Branch;
-    }
-    if (inst.may_access_memory) {
-      if (!is_x64_memory_op(inst.op)) {
-        return NativeBlockRejectReason::Memory;
-      }
-      continue;
-    }
-    if (inst.op == DecodedOp::Cop0) {
-      return NativeBlockRejectReason::Cop0;
-    }
-    if (inst.op == DecodedOp::Cop2) {
-      return NativeBlockRejectReason::Cop2;
-    }
-    if (inst.must_fallback || inst.may_raise_exception ||
-        !is_x64_stage2_op(inst.op)) {
+    if (inst.must_fallback || inst.op == DecodedOp::Unsupported) {
       return NativeBlockRejectReason::ExceptionOrUnknown;
     }
-  }
-  if (block.has_control_flow) {
-    return NativeBlockRejectReason::Branch;
-  }
-  if (block.has_fallback) {
-    return NativeBlockRejectReason::ExceptionOrUnknown;
   }
   return NativeBlockRejectReason::None;
 }
@@ -2057,38 +2103,14 @@ NativeBlockRejectDetail CpuOptimizedBackend::classify_x64_reject_detail(
   }
   for (u32 i = 0; i < block.instruction_count; ++i) {
     const DecodedInstruction &inst = block.instructions[i];
-    if (inst.is_branch) {
-      return NativeBlockRejectDetail::Branch;
-    }
-    if (inst.may_access_memory) {
-      if (!is_x64_memory_op(inst.op)) {
-        return NativeBlockRejectDetail::Memory;
-      }
-      continue;
-    }
-    if (inst.op == DecodedOp::Cop0) {
-      return NativeBlockRejectDetail::Cop0;
-    }
-    if (inst.op == DecodedOp::Cop2) {
-      return NativeBlockRejectDetail::Cop2;
-    }
     if (inst.must_fallback) {
       return NativeBlockRejectDetail::FallbackInstruction;
     }
-    if (inst.may_raise_exception) {
-      return NativeBlockRejectDetail::ExceptionRisk;
-    }
-    if (!is_x64_stage2_op(inst.op)) {
+    if (inst.op == DecodedOp::Unsupported) {
       return NativeBlockRejectDetail::UnsupportedInstruction;
     }
   }
-  if (block.has_control_flow) {
-    return NativeBlockRejectDetail::Branch;
-  }
-  if (block.has_fallback) {
-    return NativeBlockRejectDetail::FallbackInstruction;
-  }
-  return native_reject_detail_for_reason(block.native_reject_reason);
+  return NativeBlockRejectDetail::None;
 }
 
 bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
@@ -2154,8 +2176,7 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
         NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
   }
   const bool direct_reduced_helper =
-      block.native_stage1_safe && !block.native_branch_tail &&
-      (!block.has_memory || block.native_reduced_helper_ram_load);
+      block.native_stage1_safe && is_x64_inline_straight_block(block);
   block.native_reduced_helper =
       direct_reduced_helper || block.native_reduced_helper_branch_tail ||
       block.native_aggressive_reduced_helper_branch_tail;
@@ -2579,7 +2600,9 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         block.native_prefix ? block.native_prefix_instruction_count
                             : block.instruction_count;
     context->is_branch_tail =
-        block.native_branch_tail && !context->is_native_prefix;
+        block.has_control_flow && block.instruction_count >= 2u &&
+        block.instructions[block.instruction_count - 2u].is_branch &&
+        !context->is_native_prefix;
     context->uses_instruction_helpers =
         (context->is_branch_tail &&
          !block.native_reduced_helper_branch_tail &&
@@ -2617,6 +2640,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
             &CpuOptimizedBackend::x64_native_memory_instruction),
         reinterpret_cast<uintptr_t>(
             &CpuOptimizedBackend::x64_native_branch_instruction),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_complex_instruction),
         reinterpret_cast<uintptr_t>(
             &CpuOptimizedBackend::x64_native_finish_instruction));
     block.native_fn = context->code.getCode<DecodedBlock::NativeFn>();

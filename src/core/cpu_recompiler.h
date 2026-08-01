@@ -401,6 +401,7 @@ private:
                                              CpuBlockRunResult *result);
   static bool x64_native_memory_instruction(void *context, u32 op,
                                             u32 rt_or_value, u32 addr);
+  static bool x64_native_complex_instruction(void *context);
   static void x64_native_branch_instruction(void *context, u32 taken);
   static bool x64_native_finish_instruction(void *context, u32 index,
                                             CpuBlockRunResult *result,

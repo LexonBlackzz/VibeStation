@@ -2083,11 +2083,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 5, 0x0033),
   };
   native_prefix_jr.instructions = 5;
-  native_prefix_jr.enable_native_prefix_for_x64 = true;
-  native_prefix_jr.require_native_prefix_entry_when_available = true;
-  native_prefix_jr.require_native_prefix_jr_blocker_when_available = true;
-  native_prefix_jr.require_no_native_instruction_helpers_when_available =
-      true;
   cases.push_back(native_prefix_jr);
 
   CpuCompareCase native_prefix_cop2{};
@@ -2099,12 +2094,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 3, 3),
   };
   native_prefix_cop2.instructions = 4;
-  native_prefix_cop2.enable_native_prefix_for_x64 = true;
-  native_prefix_cop2.require_native_prefix_entry_when_available = true;
-  native_prefix_cop2.require_native_prefix_cop2_blocker_when_available =
-      true;
-  native_prefix_cop2.require_no_native_instruction_helpers_when_available =
-      true;
   cases.push_back(native_prefix_cop2);
 
   CpuCompareCase native_prefix_unsupported{};
@@ -2638,10 +2627,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_ram_load_fastpath_when_available = true;
   native_memory_then_decoded_load
       .require_native_memory_tier_entry_when_available = true;
-  native_memory_then_decoded_load
-      .require_native_reduced_helper_ram_load_entry_when_available = true;
-  native_memory_then_decoded_load
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_memory_then_decoded_load);
 
   CpuCompareCase decoded_then_native_fast_load{};
@@ -2669,10 +2654,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_ram_load_fastpath_when_available = true;
   decoded_then_native_fast_load
       .require_native_memory_tier_entry_when_available = true;
-  decoded_then_native_fast_load
-      .require_native_reduced_helper_ram_load_entry_when_available = true;
-  decoded_then_native_fast_load
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(decoded_then_native_fast_load);
 
   CpuCompareCase decoded_then_native_memory_load{};
@@ -2744,7 +2725,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 8, 0x0088),
   };
   jal.instructions = 4;
-  jal.expect_x64_fallback = true;
   cases.push_back(jal);
 
   CpuCompareCase jalr{};
@@ -2759,7 +2739,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 11, 0x0077),
   };
   jalr.instructions = 4;
-  jalr.expect_x64_fallback = true;
   cases.push_back(jalr);
 
   CpuCompareCase load_delay{};
@@ -2886,10 +2865,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   reduced_ram_load_widths.enable_ram_load_fastpath_for_x64 = true;
   reduced_ram_load_widths.require_full_native_when_available = true;
-  reduced_ram_load_widths
-      .require_native_reduced_helper_ram_load_entry_when_available = true;
-  reduced_ram_load_widths
-      .require_no_native_instruction_helpers_when_available = true;
   pad_cpu_compare_program(reduced_ram_load_widths);
   cases.push_back(reduced_ram_load_widths);
 
@@ -2915,10 +2890,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       {false, true, true}, {true, true, true}};
   reduced_ram_load_boundary.compare_segment_states = true;
   reduced_ram_load_boundary.enable_ram_load_fastpath_for_x64 = true;
-  reduced_ram_load_boundary
-      .require_native_reduced_helper_ram_load_entry_when_available = true;
-  reduced_ram_load_boundary
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(reduced_ram_load_boundary);
 
   CpuCompareCase reduced_ram_load_cancel{};
@@ -2935,10 +2906,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   reduced_ram_load_cancel.enable_ram_load_fastpath_for_x64 = true;
   reduced_ram_load_cancel.require_full_native_when_available = true;
-  reduced_ram_load_cancel
-      .require_native_reduced_helper_ram_load_entry_when_available = true;
-  reduced_ram_load_cancel
-      .require_no_native_instruction_helpers_when_available = true;
   pad_cpu_compare_program(reduced_ram_load_cancel);
   cases.push_back(reduced_ram_load_cancel);
 
@@ -3130,7 +3097,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 2, 6),
   };
   syscall_exception.instructions = 2;
-  syscall_exception.expect_x64_fallback = true;
+  syscall_exception.require_full_native_when_available = true;
   cases.push_back(syscall_exception);
 
   CpuCompareCase break_exception{};
@@ -3141,7 +3108,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 2, 6),
   };
   break_exception.instructions = 2;
-  break_exception.expect_x64_fallback = true;
+  break_exception.require_full_native_when_available = true;
   cases.push_back(break_exception);
 
   CpuCompareCase unaligned_lw{};
