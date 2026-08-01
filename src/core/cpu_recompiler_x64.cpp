@@ -582,8 +582,7 @@ bool is_x64_branch_tail_block(const DecodedBlock &block,
 bool is_x64_reduced_helper_branch_tail_block(
     const DecodedBlock &block, NativeBlockRejectDetail &reject_detail) {
   reject_detail = NativeBlockRejectDetail::None;
-  if (!g_cpu_x64_jit_reduced_helper_branch_tail_enabled) {
-    reject_detail = NativeBlockRejectDetail::ReducedHelperBranchTailDisabled;
+  if (!block.has_load) {
     return false;
   }
   if (!block.native_branch_tail || block.instruction_count < 2u) {
@@ -600,11 +599,6 @@ bool is_x64_reduced_helper_branch_tail_block(
     reject_detail = NativeBlockRejectDetail::ReducedHelperBranchTailStore;
     return false;
   }
-  if (block.has_load && !g_cpu_x64_jit_ram_load_fastpath_enabled) {
-    reject_detail = NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
-    return false;
-  }
-
   const u32 branch_index = block.instruction_count - 2u;
   std::array<bool, 32> written{};
   for (u32 i = 0; i < branch_index; ++i) {
@@ -2239,8 +2233,7 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
           block, aggressive_reduced_helper_branch_tail_detail);
   block.native_reduced_helper_ram_load =
       block.native_stage1_safe && !block.native_branch_tail &&
-      reduced_helper_ram_load_candidate &&
-      g_cpu_x64_jit_ram_load_fastpath_enabled;
+      reduced_helper_ram_load_candidate;
   block.native_aggressive_reduced_helper_branch_tail =
       block.native_stage1_safe &&
       aggressive_reduced_helper_branch_tail_candidate;
@@ -2265,11 +2258,6 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   block.native_reduced_helper_branch_tail =
       block.native_stage1_safe && reduced_helper_branch_tail_candidate &&
       !block.native_aggressive_reduced_helper_branch_tail;
-  if (reduced_helper_ram_load_candidate &&
-      !g_cpu_x64_jit_ram_load_fastpath_enabled) {
-    reduced_helper_detail =
-        NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
-  }
   const bool direct_reduced_helper =
       block.native_stage1_safe && is_x64_inline_straight_block(block);
   block.native_reduced_helper =
@@ -3515,8 +3503,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       }
       return NativeBlockRejectDetail::None;
     };
-    if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
-        g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
+    if (g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
         g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr) {
       preflight_detail =
           NativeBlockRejectDetail::ReducedHelperPreflightDisabled;
@@ -3739,10 +3726,6 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     }
 
     if (preflight_detail != NativeBlockRejectDetail::None) {
-      ++stats_.native_to_decoded_fallbacks;
-      if (block.native_branch_tail) {
-        ++stats_.native_branch_tail_to_decoded_fallbacks;
-      }
       if (!prefix_ram_load) {
         ++stats_.native_reduced_helper_fallbacks;
       }
@@ -3793,7 +3776,25 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       }
       record_prefix_adaptive_failure(preflight_detail);
       record_rejected_block(preflight_detail);
-      return execute_block(block, max_cycles, max_instructions);
+
+      // The address did not qualify for direct RAM access. Keep the block in
+      // the coherent native backend and execute it through precise operation
+      // semantics rather than rejecting the entire block to decoded mode.
+      context->max_cycles = max_cycles;
+      context->max_instructions = max_instructions;
+      ++block.native_entry_count;
+      if (context->is_branch_tail) {
+        ++stats_.native_branch_tail_entries;
+        ++block.native_branch_tail_entry_count;
+      } else if (block.has_memory) {
+        ++stats_.native_memory_block_entries;
+      }
+      x64_native_execute_helper_block(context, &result);
+      ++stats_.native_block_entries;
+      stats_.native_instructions += result.instructions;
+      stats_.native_cycles += result.cycles;
+      stats_.optimized_instructions += result.instructions;
+      return result;
     }
     if (prefix_ram_load) {
       ++stats_.native_prefix_ram_load_preflight_passes;
@@ -3886,7 +3887,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   const u32 total_cycles = context->base_cycles + fetch_penalty;
   const u32 maximum_cycles =
-      total_cycles + (context->inline_branch_tail ? 1u : 0u);
+      total_cycles +
+      (context->is_branch_tail && !context->uses_instruction_helpers ? 1u
+                                                                      : 0u);
   if (maximum_cycles > max_cycles) {
     ++stats_.native_to_decoded_fallbacks;
     ++stats_.native_reject_budget;

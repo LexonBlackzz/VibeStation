@@ -1107,8 +1107,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   reduced_bne_taken.enable_reduced_helper_branch_tail_for_x64 = true;
   reduced_bne_taken.require_full_native_when_available = true;
   reduced_bne_taken.require_native_branch_tail_when_available = true;
-  reduced_bne_taken
-      .require_native_reduced_helper_branch_tail_entry_when_available = true;
   reduced_bne_taken.require_no_native_instruction_helpers_when_available =
       true;
   reduced_bne_taken.require_no_native_branch_tail_helpers_when_available =
@@ -1263,7 +1261,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   reduced_bne_lw_scratchpad_reject.enable_ram_load_fastpath_for_x64 = true;
   reduced_bne_lw_scratchpad_reject.enable_reduced_helper_branch_tail_for_x64 =
       true;
-  reduced_bne_lw_scratchpad_reject.expect_x64_fallback = true;
+  reduced_bne_lw_scratchpad_reject
+      .require_native_entry_when_available = true;
+  reduced_bne_lw_scratchpad_reject
+      .require_native_memory_helper_when_available = true;
   reduced_bne_lw_scratchpad_reject
       .require_no_native_reduced_helper_branch_tail_ram_load_entry = true;
   reduced_bne_lw_scratchpad_reject
@@ -2261,7 +2262,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_prefix_ram_lw_scratchpad.enable_native_prefix_for_x64 = true;
   native_prefix_ram_lw_scratchpad.enable_ram_load_fastpath_for_x64 =
       true;
-  native_prefix_ram_lw_scratchpad.expect_x64_fallback = true;
+  native_prefix_ram_lw_scratchpad
+      .require_native_memory_helper_when_available = true;
   native_prefix_ram_lw_scratchpad
       .require_native_prefix_ram_load_preflight_non_ram_when_available =
       true;
@@ -2347,7 +2349,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .enable_aggressive_native_prefix_ram_for_x64 = true;
   native_prefix_ram_lw_scratchpad_adaptive.enable_ram_load_fastpath_for_x64 =
       true;
-  native_prefix_ram_lw_scratchpad_adaptive.expect_x64_fallback = true;
+  native_prefix_ram_lw_scratchpad_adaptive
+      .require_native_memory_helper_when_available = true;
   native_prefix_ram_lw_scratchpad_adaptive
       .require_native_prefix_ram_load_preflight_non_ram_when_available =
       true;
@@ -3439,7 +3442,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
 
         if (native_check_pass && result.stats.native_available &&
             test_case.require_native_memory_helper_when_available &&
-            result.stats.native_memory_helper_calls == 0) {
+            result.stats.native_memory_helper_calls == 0 &&
+            result.stats.native_memory_fastpath_loads == 0) {
           native_check = "native_memory_helper_missing";
           native_check_pass = false;
         }
