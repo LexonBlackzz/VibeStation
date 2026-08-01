@@ -1473,6 +1473,71 @@ static int run_frame_test(const std::string &bios_path, int frames,
   return 0;
 }
 
+struct BenchmarkStateHashes {
+  u64 state = 0;
+  u64 cpu_state = 0;
+  u64 ram = 0;
+  u64 cpu_debug = 0;
+  u64 gpr = 0;
+  u64 gte = 0;
+  u64 cop0_timing = 0;
+  u64 cpu_cycles = 0;
+  u32 display = 0;
+  u32 pc = 0;
+};
+
+static bool capture_benchmark_state_hashes(System &sys,
+                                           BenchmarkStateHashes &out) {
+  SystemSnapshot snapshot;
+  if (!sys.save_state(snapshot)) {
+    return false;
+  }
+  std::vector<u8> cpu_snapshot;
+  sys.cpu().save_state(cpu_snapshot);
+
+  constexpr size_t cpu_offset = sizeof(u32);
+  const size_t ram_offset = cpu_offset + cpu_snapshot.size();
+  constexpr size_t cop0_timing_size = sizeof(u32) * 32u + sizeof(u64) * 3u;
+  if (snapshot.data.size() < ram_offset + psx::RAM_MAX_SIZE ||
+      cpu_snapshot.size() < sizeof(CpuDebugState) + cop0_timing_size) {
+    return false;
+  }
+  const size_t gte_state_size =
+      cpu_snapshot.size() - sizeof(CpuDebugState) - cop0_timing_size;
+  const CpuDebugState final_cpu = sys.cpu().debug_state();
+
+  out.state =
+      benchmark_hash_bytes(snapshot.data.data(), snapshot.data.size());
+  out.cpu_state = benchmark_hash_bytes(snapshot.data.data() + cpu_offset,
+                                       cpu_snapshot.size());
+  out.ram = benchmark_hash_bytes(snapshot.data.data() + ram_offset,
+                                 psx::RAM_MAX_SIZE);
+  out.cpu_debug =
+      benchmark_hash_bytes(cpu_snapshot.data(), sizeof(CpuDebugState));
+  out.gpr = benchmark_hash_bytes(
+      reinterpret_cast<const u8 *>(final_cpu.gpr.data()),
+      final_cpu.gpr.size() * sizeof(final_cpu.gpr[0]));
+  out.gte = benchmark_hash_bytes(cpu_snapshot.data() + sizeof(CpuDebugState),
+                                 gte_state_size);
+  out.cop0_timing = benchmark_hash_bytes(
+      cpu_snapshot.data() + sizeof(CpuDebugState) + gte_state_size,
+      cop0_timing_size);
+  out.cpu_cycles = final_cpu.cycles;
+  out.display = sys.boot_diag().display_hash;
+  out.pc = sys.cpu().pc();
+  return true;
+}
+
+static double benchmark_percentile(const std::vector<double> &sorted,
+                                   double percentile) {
+  if (sorted.empty()) {
+    return 0.0;
+  }
+  const size_t index = static_cast<size_t>(std::ceil(
+      percentile * static_cast<double>(sorted.size()))) - 1u;
+  return sorted[std::min(index, sorted.size() - 1u)];
+}
+
 static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                              int measured_frames,
                              const std::string &bin_path,
@@ -1523,14 +1588,49 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     return 3;
   }
 
+  auto emit_checkpoint = [&](int absolute_frame) {
+    if ((absolute_frame % 30) != 0) {
+      return true;
+    }
+    BenchmarkStateHashes hashes{};
+    if (!capture_benchmark_state_hashes(*sys, hashes)) {
+      return false;
+    }
+    std::printf(
+        "CPU_BENCHMARK_CHECKPOINT backend=%s frame=%d state_hash=%016llX "
+        "cpu_state_hash=%016llX ram_hash=%016llX cpu_debug_hash=%016llX "
+        "gpr_hash=%016llX gte_state_hash=%016llX "
+        "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
+        "pc=%08X\n",
+        backend_token(effective_mode), absolute_frame,
+        static_cast<unsigned long long>(hashes.state),
+        static_cast<unsigned long long>(hashes.cpu_state),
+        static_cast<unsigned long long>(hashes.ram),
+        static_cast<unsigned long long>(hashes.cpu_debug),
+        static_cast<unsigned long long>(hashes.gpr),
+        static_cast<unsigned long long>(hashes.gte),
+        static_cast<unsigned long long>(hashes.cop0_timing),
+        static_cast<unsigned long long>(hashes.cpu_cycles), hashes.display,
+        hashes.pc);
+    return true;
+  };
+
   for (int frame = 0; frame < warmup_frames; ++frame) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(frame + 1));
     sys->run_frame();
+    if (!emit_checkpoint(frame + 1)) {
+      std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
+      return 1;
+    }
   }
 
   const CpuBackendStats before = sys->cpu().cpu_backend_stats();
   double cpu_ms = 0.0;
   double core_ms = 0.0;
+  std::vector<double> cpu_samples;
+  std::vector<double> core_samples;
+  cpu_samples.reserve(static_cast<size_t>(measured_frames));
+  core_samples.reserve(static_cast<size_t>(measured_frames));
   const auto wall_start = std::chrono::steady_clock::now();
   for (int frame = 0; frame < measured_frames; ++frame) {
     const int absolute_frame = warmup_frames + frame + 1;
@@ -1539,6 +1639,12 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     sys->run_frame();
     cpu_ms += sys->profiling_stats().cpu_ms;
     core_ms += sys->profiling_stats().total_ms;
+    cpu_samples.push_back(sys->profiling_stats().cpu_ms);
+    core_samples.push_back(sys->profiling_stats().total_ms);
+    if (!emit_checkpoint(absolute_frame)) {
+      std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
+      return 1;
+    }
   }
   const auto wall_end = std::chrono::steady_clock::now();
   const double wall_ms = std::chrono::duration<double, std::milli>(
@@ -1579,43 +1685,22 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : (100.0 * static_cast<double>(helper_assisted_instructions) /
              static_cast<double>(total_instructions));
 
-  SystemSnapshot snapshot;
-  if (!sys->save_state(snapshot)) {
+  BenchmarkStateHashes hashes{};
+  if (!capture_benchmark_state_hashes(*sys, hashes)) {
     std::printf("CPU_BENCHMARK_RESULT status=error reason=state_capture\n");
     return 1;
   }
-  const u64 state_hash = benchmark_hash_bytes(snapshot.data.data(),
-                                               snapshot.data.size());
-  std::vector<u8> cpu_snapshot;
-  sys->cpu().save_state(cpu_snapshot);
-  const size_t cpu_offset = sizeof(u32);
-  const size_t ram_offset = cpu_offset + cpu_snapshot.size();
-  const u64 cpu_state_hash = benchmark_hash_bytes(
-      snapshot.data.data() + cpu_offset, cpu_snapshot.size());
-  const u64 ram_hash = benchmark_hash_bytes(
-      snapshot.data.data() + ram_offset, psx::RAM_MAX_SIZE);
-  const CpuDebugState final_cpu = sys->cpu().debug_state();
-  const u64 gpr_hash = benchmark_hash_bytes(
-      reinterpret_cast<const u8 *>(final_cpu.gpr.data()),
-      final_cpu.gpr.size() * sizeof(final_cpu.gpr[0]));
-  const u64 cpu_debug_hash = benchmark_hash_bytes(
-      cpu_snapshot.data(), sizeof(CpuDebugState));
-  constexpr size_t cop0_timing_size = sizeof(u32) * 32u + sizeof(u64) * 3u;
-  const size_t gte_state_size =
-      cpu_snapshot.size() - sizeof(CpuDebugState) - cop0_timing_size;
-  const u64 gte_state_hash = benchmark_hash_bytes(
-      cpu_snapshot.data() + sizeof(CpuDebugState), gte_state_size);
-  const u64 cop0_timing_hash = benchmark_hash_bytes(
-      cpu_snapshot.data() + sizeof(CpuDebugState) + gte_state_size,
-      cop0_timing_size);
-  const System::BootDiagnostics &diag = sys->boot_diag();
+  std::sort(cpu_samples.begin(), cpu_samples.end());
+  std::sort(core_samples.begin(), core_samples.end());
   const double measured_divisor = static_cast<double>(measured_frames);
 
   std::printf(
       "CPU_BENCHMARK_RESULT status=ok requested_backend=%s "
       "effective_backend=%s native_emitter_available=%u "
       "warmup_frames=%d measured_frames=%d cpu_ms_avg=%.6f "
-      "core_ms_avg=%.6f wall_ms=%.3f native_coverage=%.3f "
+      "cpu_ms_p50=%.6f cpu_ms_p95=%.6f cpu_ms_p99=%.6f cpu_ms_max=%.6f "
+      "core_ms_avg=%.6f core_ms_p50=%.6f core_ms_p95=%.6f "
+      "core_ms_p99=%.6f core_ms_max=%.6f wall_ms=%.3f native_coverage=%.3f "
       "helper_assisted_coverage=%.3f native_inline_instructions=%llu "
       "native_helper_instructions=%llu native_instructions=%llu "
       "decoded_instructions=%llu "
@@ -1627,8 +1712,16 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "final_pc=%08X\n",
       backend_token(requested_mode), backend_token(effective_mode),
       availability.native_available ? 1u : 0u, warmup_frames,
-      measured_frames, cpu_ms / measured_divisor, core_ms / measured_divisor,
-      wall_ms, native_coverage, helper_assisted_coverage,
+      measured_frames, cpu_ms / measured_divisor,
+      benchmark_percentile(cpu_samples, 0.50),
+      benchmark_percentile(cpu_samples, 0.95),
+      benchmark_percentile(cpu_samples, 0.99),
+      cpu_samples.empty() ? 0.0 : cpu_samples.back(),
+      core_ms / measured_divisor, benchmark_percentile(core_samples, 0.50),
+      benchmark_percentile(core_samples, 0.95),
+      benchmark_percentile(core_samples, 0.99),
+      core_samples.empty() ? 0.0 : core_samples.back(), wall_ms,
+      native_coverage, helper_assisted_coverage,
       static_cast<unsigned long long>(inline_native_instructions),
       static_cast<unsigned long long>(helper_assisted_instructions),
       static_cast<unsigned long long>(native_instructions),
@@ -1640,15 +1733,16 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.cache_misses, before.cache_misses)),
       static_cast<unsigned long long>(
           delta(after.invalidations, before.invalidations)),
-      after.native_code_bytes, static_cast<unsigned long long>(state_hash),
-      static_cast<unsigned long long>(cpu_state_hash),
-      static_cast<unsigned long long>(ram_hash),
-      static_cast<unsigned long long>(cpu_debug_hash),
-      static_cast<unsigned long long>(gpr_hash),
-      static_cast<unsigned long long>(gte_state_hash),
-      static_cast<unsigned long long>(cop0_timing_hash),
-      static_cast<unsigned long long>(final_cpu.cycles),
-      diag.display_hash, sys->cpu().pc());
+      after.native_code_bytes,
+      static_cast<unsigned long long>(hashes.state),
+      static_cast<unsigned long long>(hashes.cpu_state),
+      static_cast<unsigned long long>(hashes.ram),
+      static_cast<unsigned long long>(hashes.cpu_debug),
+      static_cast<unsigned long long>(hashes.gpr),
+      static_cast<unsigned long long>(hashes.gte),
+      static_cast<unsigned long long>(hashes.cop0_timing),
+      static_cast<unsigned long long>(hashes.cpu_cycles), hashes.display,
+      hashes.pc);
   return 0;
 }
 
