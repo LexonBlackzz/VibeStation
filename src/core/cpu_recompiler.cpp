@@ -1777,14 +1777,10 @@ bool CpuOptimizedBackend::should_attempt_x64_compile(
   if (g_cpu_x64_jit_force_compile) {
     return true;
   }
-  if (block.instruction_count < g_cpu_x64_jit_min_block_instructions) {
-    ++stats_.native_short_block_skips;
-    ++stats_.native_rejected_block_count;
-    stats_.native_rejected_block_instructions += block.instruction_count;
-    record_native_block_rejection(block, NativeBlockRejectDetail::TooShort);
-    return false;
-  }
-  if (block.entry_count < g_cpu_x64_jit_hot_block_threshold) {
+  const u64 threshold = block.instruction_count >= 4u
+                            ? 2u
+                            : (block.instruction_count >= 2u ? 4u : 8u);
+  if (block.entry_count < threshold) {
     ++stats_.native_hot_threshold_skips;
     ++stats_.native_rejected_block_count;
     stats_.native_rejected_block_instructions += block.instruction_count;

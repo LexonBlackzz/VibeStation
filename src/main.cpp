@@ -2492,6 +2492,59 @@ int main(int argc, char *argv[]) {
   int audio_raw_drift_override = -1;
   int show_audio_stats_override = -1;
   int audio_stats_log_override = -1;
+  bool warned_obsolete_cpu_flag = false;
+  const auto obsolete_cpu_flag_arity = [](std::string_view flag) {
+    constexpr std::array<std::string_view, 8> with_value = {
+        "--jit-hot-threshold",
+        "--jit-min-block-instructions",
+        "--jit-memory-trace-pc",
+        "--jit-memory-trace-count",
+        "--jit-branch-tail-log-count",
+        "--jit-branch-tail-blacklist-pc",
+        "--cpu-backend-stats-log-frames",
+        "--frame-state-log-frames",
+    };
+    constexpr std::array<std::string_view, 29> without_value = {
+        "--jit-force-compile",
+        "--jit-disable-all-native",
+        "--jit-enable-all-native",
+        "--jit-disable-native-memory",
+        "--jit-enable-native-memory",
+        "--jit-disable-native-loads",
+        "--jit-disable-native-stores",
+        "--jit-disable-native-mmio",
+        "--jit-disable-native-ram",
+        "--jit-disable-native-load-delay",
+        "--jit-disable-native-mixed-load-store",
+        "--jit-memory-trace",
+        "--jit-enable-ram-load-fastpath",
+        "--jit-disable-ram-load-fastpath",
+        "--jit-disable-native-alu",
+        "--jit-enable-native-alu",
+        "--jit-disable-branch-tail",
+        "--jit-enable-branch-tail",
+        "--jit-enable-reduced-helper-branch-tail",
+        "--jit-disable-reduced-helper-branch-tail",
+        "--jit-enable-aggressive-reduced-helper-branch-tail",
+        "--jit-disable-aggressive-reduced-helper-branch-tail",
+        "--jit-enable-native-prefix",
+        "--jit-disable-native-prefix",
+        "--jit-enable-aggressive-native-prefix-ram",
+        "--jit-disable-aggressive-native-prefix-ram",
+        "--jit-branch-tail-log",
+        "--jit-clear-branch-tail-blacklist",
+        "--cpu-backend-stats-log",
+    };
+    if (std::find(with_value.begin(), with_value.end(), flag) !=
+        with_value.end()) {
+      return 1;
+    }
+    if (std::find(without_value.begin(), without_value.end(), flag) !=
+        without_value.end() || flag == "--no-cpu-backend-stats-log") {
+      return 0;
+    }
+    return -1;
+  };
   std::vector<std::string> passthrough;
   passthrough.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
@@ -2534,6 +2587,20 @@ int main(int argc, char *argv[]) {
     if (a == "--decoded" || a == "--block-interpreter") {
       g_cpu_execution_mode_cli_override = true;
       g_cpu_execution_mode_cli_value = CpuExecutionMode::DecodedBlockInterpreter;
+      continue;
+    }
+    const int obsolete_cpu_args = obsolete_cpu_flag_arity(a);
+    if (obsolete_cpu_args >= 0) {
+      if (!warned_obsolete_cpu_flag) {
+        std::fprintf(
+            stderr,
+            "WARN: Obsolete dynarec tuning flags are ignored; select only "
+            "Interpreter, Decoded, or x64 JIT.\n");
+        warned_obsolete_cpu_flag = true;
+      }
+      if (obsolete_cpu_args == 1 && (i + 1) < args.size()) {
+        ++i;
+      }
       continue;
     }
     if (a == "--jit-hot-threshold" && (i + 1) < args.size()) {

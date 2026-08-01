@@ -22,10 +22,6 @@ struct Config {
 
     // CPU
     CpuExecutionMode cpu_execution_mode = CpuExecutionMode::Interpreter;
-    struct CpuX64JitConfig {
-        u32 hot_block_threshold = 8;
-        u32 min_block_instructions = 2;
-    } cpu_x64_jit;
 
     // SPU
     struct SpuConfig {

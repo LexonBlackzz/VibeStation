@@ -67,19 +67,6 @@ namespace {
         bool dirty = false;
         draw_cpu_backend_mode_summary(stats, mode);
 
-        int hot_threshold =
-            static_cast<int>(g_cpu_x64_jit_hot_block_threshold);
-        if (ImGui::InputInt("x64 Hot Threshold", &hot_threshold)) {
-            g_cpu_x64_jit_hot_block_threshold =
-                static_cast<u32>(std::max(0, hot_threshold));
-            dirty = true;
-        }
-        int min_block = static_cast<int>(g_cpu_x64_jit_min_block_instructions);
-        if (ImGui::InputInt("x64 Min Block Instructions", &min_block)) {
-            g_cpu_x64_jit_min_block_instructions =
-                static_cast<u32>(std::max(1, min_block));
-            dirty = true;
-        }
         if (ImGui::Checkbox("Log Hot Native Rejects",
                 &g_cpu_backend_rejected_block_logging)) {
             dirty = true;

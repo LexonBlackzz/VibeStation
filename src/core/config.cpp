@@ -146,17 +146,9 @@ Config Config::load(const std::string& path) {
                 cfg.cpu_execution_mode);
         }
     }
-    auto jit = j.value("cpu_x64_jit", json::object());
-    auto jit_uint = [&](const char* key, u32& dest) {
-        if (jit.contains(key) && jit[key].is_number_unsigned()) {
-            dest = jit[key].get<u32>();
-        }
-    };
-    jit_uint("hot_block_threshold", cfg.cpu_x64_jit.hot_block_threshold);
-    jit_uint("min_block_instructions", cfg.cpu_x64_jit.min_block_instructions);
-    // Obsolete experimental tier keys are intentionally ignored. Loading an
-    // older file remains valid, and the next save rewrites this object with
-    // only the supported tuning values.
+    // cpu_x64_jit and all of its experimental tuning keys are obsolete. Keep
+    // accepting older JSON files, but compilation policy is automatic and the
+    // next save intentionally omits the object.
 
     // Memory cards
     if (j.contains("memory_card_slot1_mode") && j["memory_card_slot1_mode"].is_number_integer()) {
@@ -347,10 +339,6 @@ void Config::save(const std::string& path) const {
 
     // CPU
     j["cpu_execution_mode"] = cpu_mode_to_int(cpu_execution_mode);
-    j["cpu_x64_jit"] = {
-        {"hot_block_threshold", cpu_x64_jit.hot_block_threshold},
-        {"min_block_instructions", cpu_x64_jit.min_block_instructions},
-    };
 
     // Memory cards
     j["memory_card_slot1_mode"] = std::clamp(memory_card_slot_mode[0], 0, 2);
@@ -466,8 +454,6 @@ void Config::apply_to_globals() const {
 
     // CPU
     g_cpu_execution_mode = cpu_execution_mode;
-    g_cpu_x64_jit_hot_block_threshold = cpu_x64_jit.hot_block_threshold;
-    g_cpu_x64_jit_min_block_instructions = cpu_x64_jit.min_block_instructions;
 
     // SPU
     g_spu_audio_target_latency_ms = spu.target_latency_ms;

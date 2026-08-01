@@ -1827,8 +1827,6 @@ void App::save_persistent_config() const {
     out.experimental_unhandled_special_returns_zero = g_experimental_unhandled_special_returns_zero;
     out.experimental_dma_command_sanitizer = g_experimental_dma_command_sanitizer;
     out.cpu_execution_mode = g_cpu_execution_mode;
-    out.cpu_x64_jit.hot_block_threshold = g_cpu_x64_jit_hot_block_threshold;
-    out.cpu_x64_jit.min_block_instructions = g_cpu_x64_jit_min_block_instructions;
     out.spu.target_latency_ms = g_spu_audio_target_latency_ms;
     out.spu.soft_latency_ms = g_spu_audio_soft_latency_ms;
     out.spu.max_latency_ms = g_spu_audio_max_latency_ms;
