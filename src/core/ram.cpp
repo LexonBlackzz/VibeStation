@@ -56,16 +56,13 @@ void Ram::write32(u32 offset, u32 val) {
 }
 
 u8 Ram::scratch_read8(u32 offset) const {
-  const u8 value = scratchpad_[offset & (psx::SCRATCHPAD_SIZE - 1)];
-  ram_trace_event("SR8", offset, value);
-  return value;
+  return scratchpad_[offset & (psx::SCRATCHPAD_SIZE - 1)];
 }
 
 u16 Ram::scratch_read16(u32 offset) const {
   u32 off = offset & (psx::SCRATCHPAD_SIZE - 1);
   u16 val;
   std::memcpy(&val, &scratchpad_[off], sizeof(u16));
-  ram_trace_event("SR16", offset, val);
   return val;
 }
 
@@ -73,39 +70,19 @@ u32 Ram::scratch_read32(u32 offset) const {
   u32 off = offset & (psx::SCRATCHPAD_SIZE - 1);
   u32 val;
   std::memcpy(&val, &scratchpad_[off], sizeof(u32));
-  ram_trace_event("SR32", offset, val);
-  // Rate-limited diagnostic: log reads near BIOS handler save area (first 32 bytes)
-  if (off < 32u) {
-    static u32 sp_r32_count = 0;
-    if (sp_r32_count < 128u) {
-      ++sp_r32_count;
-      LOG_WARN("SCRATCHPAD: R32 off=0x%02X val=0x%08X", off, val);
-    }
-  }
   return val;
 }
 
 void Ram::scratch_write8(u32 offset, u8 val) {
   scratchpad_[offset & (psx::SCRATCHPAD_SIZE - 1)] = val;
-  ram_trace_event("SW8", offset, val);
 }
 
 void Ram::scratch_write16(u32 offset, u16 val) {
   u32 off = offset & (psx::SCRATCHPAD_SIZE - 1);
   std::memcpy(&scratchpad_[off], &val, sizeof(u16));
-  ram_trace_event("SW16", offset, val);
 }
 
 void Ram::scratch_write32(u32 offset, u32 val) {
   u32 off = offset & (psx::SCRATCHPAD_SIZE - 1);
   std::memcpy(&scratchpad_[off], &val, sizeof(u32));
-  ram_trace_event("SW32", offset, val);
-  // Rate-limited diagnostic: log writes near BIOS handler save area (first 32 bytes)
-  if (off < 32u) {
-    static u32 sp_w32_count = 0;
-    if (sp_w32_count < 128u) {
-      ++sp_w32_count;
-      LOG_WARN("SCRATCHPAD: W32 off=0x%02X val=0x%08X", off, val);
-    }
-  }
 }

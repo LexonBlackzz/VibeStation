@@ -457,11 +457,6 @@ void System::reset() {
     ram_.reset();
     ram_word_write_provenance_.fill({});
     cpu_ram_write_context_.fill({});
-    scratchpad_word_write_provenance_.fill({});
-    scratchpad_store_value_provenance_.fill({});
-    scratchpad_store_history_.fill({});
-    scratchpad_store_history_pos_ = 0;
-    scratchpad_store_history_count_ = 0;
     frame_cycles_ = 0;
     frame_cycle_remainder_ = 0.0;
     boot_diag_ = {};
@@ -830,43 +825,26 @@ void System::debug_note_main_ram_write(u32 addr, u32 value, u8 size) {
     ++mdec_upload_probe_.gpu_src_write_sample_count;
 }
 
-void System::debug_note_scratchpad_write(u32 offset, u32 value, u8 size) {
-    const u32 first_word = (offset & 0xFFFu) / sizeof(u32);
-    const u32 final_byte = std::min<u32>(
-        (offset & 0xFFFu) + std::max<u32>(size, 1u) - 1u, 0xFFFu);
-    const u32 last_word = final_byte / sizeof(u32);
-    const u32 source_pc = bus_access_from_dma_ ? 0u : cpu_.current_pc();
-    const RamWordWriteProvenance provenance = {
-        source_pc, value, read32_instruction(source_pc), size,
-        bus_access_from_dma_
-            ? static_cast<u8>(0x80u | bus_access_dma_channel_)
-            : static_cast<u8>(0u)};
-    for (u32 word = first_word; word <= last_word; ++word) {
-        scratchpad_word_write_provenance_[word] = provenance;
-    }
-}
-
 void System::debug_log_last_ram_word_write(u32 addr,
                                            const char *log_prefix) const {
     const char *prefix = (log_prefix && log_prefix[0] != '\0') ? log_prefix : "BUS";
     const u32 phys = psx::mask_address(addr);
-    const bool is_scratchpad = phys >= 0x1F800000u && phys < 0x1F801000u;
-    const u32 word_addr = is_scratchpad
-        ? ((phys - 0x1F800000u) & 0xFFCu)
-        : (phys & (psx::RAM_SIZE - 1u) & ~3u);
-    const RamWordWriteProvenance &entry = is_scratchpad
-        ? scratchpad_word_write_provenance_[word_addr / sizeof(u32)]
-        : ram_word_write_provenance_[word_addr / sizeof(u32)];
-    const u32 reported_addr = is_scratchpad ? 0x1F800000u + word_addr : word_addr;
+    if (phys >= psx::SCRATCHPAD_BASE && phys < psx::IO_BASE) {
+        return;
+    }
+    const u32 word_addr = phys & (psx::RAM_SIZE - 1u) & ~3u;
+    const RamWordWriteProvenance &entry =
+        ram_word_write_provenance_[word_addr / sizeof(u32)];
+    const u32 reported_addr = word_addr;
     if (entry.size == 0u) {
-        LOG_WARN("%s: no recorded writer for %s word 0x%08X", prefix,
-                 is_scratchpad ? "scratchpad" : "RAM", reported_addr);
+        LOG_WARN("%s: no recorded writer for RAM word 0x%08X", prefix,
+                 reported_addr);
         return;
     }
 
     if ((entry.origin & 0x80u) != 0u) {
-        LOG_WARN("%s: last %s writer word=0x%08X W%u value=0x%08X <- DMA%u",
-                 prefix, is_scratchpad ? "scratchpad" : "RAM", reported_addr,
+        LOG_WARN("%s: last RAM writer word=0x%08X W%u value=0x%08X <- DMA%u",
+                 prefix, reported_addr,
                  static_cast<unsigned>(entry.size), entry.value,
                  static_cast<unsigned>(entry.origin & 0x7Fu));
         if ((entry.origin & 0x7Fu) == 3u) {
@@ -906,111 +884,21 @@ void System::debug_log_last_ram_word_write(u32 addr,
         }
         return;
     }
-    LOG_WARN("%s: last %s writer word=0x%08X W%u value=0x%08X pc=0x%08X",
-             prefix, is_scratchpad ? "scratchpad" : "RAM", reported_addr,
+    LOG_WARN("%s: last RAM writer word=0x%08X W%u value=0x%08X pc=0x%08X",
+             prefix, reported_addr,
              static_cast<unsigned>(entry.size), entry.value, entry.pc);
-    if (!is_scratchpad) {
-        const CpuRamWriteContext &context = cpu_ram_write_context_[
-            (entry.pc >> 2u) % kCpuRamWriteContextSize];
-        if (context.pc == entry.pc) {
-            LOG_WARN(
-                "%s: last RAM writer context addr=0x%08X value=0x%08X "
-                "at=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X "
-                "a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X "
-                "t1=0x%08X cyc=%llu",
-                prefix, context.addr, context.value, context.at, context.v0,
-                context.v1, context.a0, context.a1, context.a2, context.a3,
-                context.t0, context.t1,
-                static_cast<unsigned long long>(context.cycle));
-        }
-    }
-    if (is_scratchpad && entry.instruction != 0u) {
-        LOG_WARN("%s: scratchpad writer instr=0x%08X", prefix,
-                 entry.instruction);
-        const ScratchpadStoreValueProvenance &value_source =
-            scratchpad_store_value_provenance_[word_addr / sizeof(u32)];
-        if (value_source.producer_pc != 0u) {
-            LOG_WARN(
-                "%s: scratchpad value r%u producer pc=0x%08X instr=0x%08X "
-                "load_addr=0x%08X v0=0x%08X t0=0x%08X",
-                prefix, static_cast<unsigned>(value_source.source_reg),
-                value_source.producer_pc, value_source.producer_instruction,
-                value_source.producer_addr, value_source.v0, value_source.t0);
-            if (value_source.producer_addr != 0u) {
-                debug_log_last_ram_word_write(value_source.producer_addr, prefix);
-            }
-            const u32 producer_code = value_source.producer_pc & 0x1FFFFFFFu;
-            const auto read_producer_code = [this](u32 address) {
-                return ram_.read32(address & (psx::RAM_SIZE - 1u));
-            };
-            LOG_WARN(
-                "%s: scratchpad value producer code %08X=%08X %08X=%08X "
-                "%08X=%08X %08X=%08X %08X=%08X",
-                prefix, producer_code - 0x08u,
-                read_producer_code(producer_code - 0x08u),
-                producer_code - 0x04u,
-                read_producer_code(producer_code - 0x04u), producer_code,
-                read_producer_code(producer_code), producer_code + 0x04u,
-                read_producer_code(producer_code + 0x04u), producer_code + 0x08u,
-                read_producer_code(producer_code + 0x08u));
-            LOG_WARN(
-                "%s: scratchpad value producer continuation %08X=%08X "
-                "%08X=%08X %08X=%08X %08X=%08X %08X=%08X",
-                prefix, producer_code + 0x0Cu,
-                read_producer_code(producer_code + 0x0Cu),
-                producer_code + 0x10u,
-                read_producer_code(producer_code + 0x10u),
-                producer_code + 0x14u,
-                read_producer_code(producer_code + 0x14u),
-                producer_code + 0x18u,
-                read_producer_code(producer_code + 0x18u),
-                producer_code + 0x1Cu,
-                read_producer_code(producer_code + 0x1Cu));
-        }
-    }
-}
-
-void System::debug_note_scratchpad_store_value_producer(
-    u32 addr, u32 value, u32 source_reg, u32 producer_pc,
-    u32 producer_instruction, u32 producer_addr, u32 v0, u32 t0) {
-    const u32 phys = psx::mask_address(addr);
-    if (phys < 0x1F800000u || phys >= 0x1F801000u) {
-        return;
-    }
-    const ScratchpadStoreValueProvenance source = {
-        producer_pc, producer_instruction, producer_addr,
-        v0, t0, static_cast<u8>(source_reg)};
-    scratchpad_store_value_provenance_
-        [(phys - 0x1F800000u) / sizeof(u32)] = source;
-    scratchpad_store_history_[scratchpad_store_history_pos_] = {
-        phys, value, source};
-    scratchpad_store_history_pos_ =
-        (scratchpad_store_history_pos_ + 1u) % kScratchpadStoreHistorySize;
-    scratchpad_store_history_count_ = std::min<u32>(
-        scratchpad_store_history_count_ + 1u, kScratchpadStoreHistorySize);
-}
-
-void System::debug_log_recent_scratchpad_stores(const char *log_prefix) const {
-    if (scratchpad_store_history_count_ == 0u) {
-        return;
-    }
-
-    const char *prefix =
-        (log_prefix && log_prefix[0] != '\0') ? log_prefix : "BUS";
-    LOG_WARN("%s: recent scratchpad pointer stores (oldest to newest)", prefix);
-    const u32 start =
-        (scratchpad_store_history_pos_ + kScratchpadStoreHistorySize -
-         scratchpad_store_history_count_) % kScratchpadStoreHistorySize;
-    for (u32 offset = 0; offset < scratchpad_store_history_count_; ++offset) {
-        const ScratchpadStoreHistoryEntry &entry = scratchpad_store_history_[
-            (start + offset) % kScratchpadStoreHistorySize];
+    const CpuRamWriteContext &context = cpu_ram_write_context_[
+        (entry.pc >> 2u) % kCpuRamWriteContextSize];
+    if (context.pc == entry.pc) {
         LOG_WARN(
-            "%s: scratchpad store addr=0x%08X value=0x%08X r%u load_pc=0x%08X "
-            "load_addr=0x%08X table_base=0x%08X table_index=0x%08X",
-            prefix, entry.addr, entry.value,
-            static_cast<unsigned>(entry.source.source_reg),
-            entry.source.producer_pc, entry.source.producer_addr,
-            entry.source.v0, entry.source.t0);
+            "%s: last RAM writer context addr=0x%08X value=0x%08X "
+            "at=0x%08X v0=0x%08X v1=0x%08X a0=0x%08X "
+            "a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X "
+            "t1=0x%08X cyc=%llu",
+            prefix, context.addr, context.value, context.at, context.v0,
+            context.v1, context.a0, context.a1, context.a2, context.a3,
+            context.t0, context.t1,
+            static_cast<unsigned long long>(context.cycle));
     }
 }
 
@@ -2807,7 +2695,6 @@ void System::write8(u32 addr, u8 val) {
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write8(phys - 0x1F800000, val);
-        debug_note_scratchpad_write(phys - 0x1F800000, val, 1);
         cpu_.notify_code_write(phys, 1);
         return;
     }
@@ -3061,7 +2948,6 @@ void System::write16(u32 addr, u16 val) {
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write16(phys - 0x1F800000, val);
-        debug_note_scratchpad_write(phys - 0x1F800000, val, 2);
         cpu_.notify_code_write(phys, 2);
         return;
     }
@@ -3368,7 +3254,6 @@ void System::write32(u32 addr, u32 val) {
     }
     if (phys >= 0x1F800000 && phys < 0x1F801000) {
         ram_.scratch_write32(phys - 0x1F800000, val);
-        debug_note_scratchpad_write(phys - 0x1F800000, val, 4);
         cpu_.notify_code_write(phys, 4);
         return;
     }

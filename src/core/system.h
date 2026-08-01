@@ -476,11 +476,6 @@ public:
                                    const char *log_prefix = "BUS") const;
   void debug_log_last_ram_word_write(u32 addr,
                                      const char *log_prefix = "BUS") const;
-  void debug_log_recent_scratchpad_stores(
-      const char *log_prefix = "BUS") const;
-  void debug_note_scratchpad_store_value_producer(
-      u32 addr, u32 value, u32 source_reg, u32 producer_pc,
-      u32 producer_instruction, u32 producer_addr, u32 v0, u32 t0);
 
   // State save/restore for rewind
   bool save_state(SystemSnapshot &out);
@@ -527,19 +522,6 @@ private:
     u32 t1 = 0;
     u64 cycle = 0;
   };
-  struct ScratchpadStoreValueProvenance {
-    u32 producer_pc = 0;
-    u32 producer_instruction = 0;
-    u32 producer_addr = 0;
-    u32 v0 = 0;
-    u32 t0 = 0;
-    u8 source_reg = 0;
-  };
-  struct ScratchpadStoreHistoryEntry {
-    u32 addr = 0;
-    u32 value = 0;
-    ScratchpadStoreValueProvenance source = {};
-  };
   struct StackTopBurstDebug {
     bool active = false;
     bool logged_context = false;
@@ -553,10 +535,8 @@ private:
   };
   static constexpr size_t kRamWriteHistorySize = 8192u;
   static constexpr size_t kCpuRamWriteContextSize = 1024u;
-  static constexpr size_t kScratchpadStoreHistorySize = 16u;
   void debug_note_main_ram_read(u32 addr, u32 value, u8 size);
   void debug_note_main_ram_write(u32 addr, u32 value, u8 size);
-  void debug_note_scratchpad_write(u32 offset, u32 value, u8 size);
   void debug_track_active_stack_write(const RamAccessLogEntry &entry);
   void debug_track_stack_top_write(const RamAccessLogEntry &entry);
   void debug_log_stack_top_burst_context(const RamAccessLogEntry &entry);
@@ -610,16 +590,8 @@ private:
       ram_word_write_provenance_{};
   std::array<CpuRamWriteContext, kCpuRamWriteContextSize>
       cpu_ram_write_context_{};
-  std::array<RamWordWriteProvenance, 0x1000u / sizeof(u32)>
-      scratchpad_word_write_provenance_{};
-  std::array<ScratchpadStoreValueProvenance, 0x1000u / sizeof(u32)>
-      scratchpad_store_value_provenance_{};
-  std::array<ScratchpadStoreHistoryEntry, kScratchpadStoreHistorySize>
-      scratchpad_store_history_{};
   u32 ram_write_history_pos_ = 0;
   u32 ram_write_history_count_ = 0;
-  u32 scratchpad_store_history_pos_ = 0;
-  u32 scratchpad_store_history_count_ = 0;
   StackTopBurstDebug stack_top_burst_ = {};
   u32 stack_top_write_log_budget_ = 64;
   bool stack_top_write_log_suppressed_ = false;

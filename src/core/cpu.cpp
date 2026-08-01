@@ -812,10 +812,6 @@ void Cpu::reset() {
   last_gte_command_pc_ = 0;
   last_gte_command_ = 0;
   g_collision_selection_trace = {};
-  last_scratchpad_control_transfer_cycle_ = 0;
-  last_scratchpad_control_transfer_pc_ = 0;
-  last_scratchpad_control_transfer_instruction_ = 0;
-  last_scratchpad_control_transfer_target_ = 0;
   muldiv_result_ready_cycle_ = 0;
   cycle_penalty_ = 0;
   executing_step_ = false;
@@ -1558,15 +1554,6 @@ void Cpu::exception(Exception cause) {
           log_collision_selection_trace(sys_);
         }
         log_spatial_grid_high_index_trace();
-        LOG_WARN(
-            "CPU: last scratchpad control transfer pc=0x%08X instr=0x%08X "
-            "target=0x%08X cyc=%llu",
-            last_scratchpad_control_transfer_pc_,
-            last_scratchpad_control_transfer_instruction_,
-            last_scratchpad_control_transfer_target_,
-            static_cast<unsigned long long>(
-                last_scratchpad_control_transfer_cycle_));
-        sys_->debug_log_recent_scratchpad_stores("CPU");
         log_register_provenance(
             sys_, std::array<u32, 16>{fault_rs, 1u, 2u, 3u, 9u, 4u, 5u,
                                        6u,       7u, 8u, 20u, 23u, 24u,
@@ -2790,13 +2777,6 @@ void Cpu::op_srav(u32 i) {
 
 void Cpu::op_jr(u32 i) {
   const u32 target = gpr_[rs(i)];
-  if ((target & 0x1FFFFFFFu) >= 0x1F800000u &&
-      (target & 0x1FFFFFFFu) < 0x1F800400u) {
-    last_scratchpad_control_transfer_pc_ = current_pc_;
-    last_scratchpad_control_transfer_instruction_ = i;
-    last_scratchpad_control_transfer_target_ = target;
-    last_scratchpad_control_transfer_cycle_ = cycles_;
-  }
   if (cpu_diag_enabled()) {
     if (target == 0u) {
       log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
@@ -2813,13 +2793,6 @@ void Cpu::op_jr(u32 i) {
 
 void Cpu::op_jalr(u32 i) {
   const u32 target = gpr_[rs(i)];
-  if ((target & 0x1FFFFFFFu) >= 0x1F800000u &&
-      (target & 0x1FFFFFFFu) < 0x1F800400u) {
-    last_scratchpad_control_transfer_pc_ = current_pc_;
-    last_scratchpad_control_transfer_instruction_ = i;
-    last_scratchpad_control_transfer_target_ = target;
-    last_scratchpad_control_transfer_cycle_ = cycles_;
-  }
   if (cpu_diag_enabled()) {
     if (target == 0u) {
       log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
@@ -3389,14 +3362,6 @@ void Cpu::op_sw(u32 i) {
   rr4_diag::on_op_sw(rr4_diag_state_, current_pc_, i, addr, store_val, gpr_,
                      cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
   store32(addr, store_val);
-  PerimeterTraceEntry value_producer = {};
-  const u32 source_reg = rt(i);
-  if (latest_perimeter_write(source_reg, &value_producer)) {
-    sys_->debug_note_scratchpad_store_value_producer(
-        addr, store_val, source_reg, value_producer.pc,
-        sys_->read32(value_producer.pc & 0x1FFFFFFFu),
-        value_producer.source_addr, gpr_[2], gpr_[8]);
-  }
 }
 
 void Cpu::op_swl(u32 i) {

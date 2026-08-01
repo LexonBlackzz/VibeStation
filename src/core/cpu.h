@@ -511,10 +511,6 @@ private:
   u64 last_gte_command_cycle_ = 0;
   u32 last_gte_command_pc_ = 0;
   u32 last_gte_command_ = 0;
-  u64 last_scratchpad_control_transfer_cycle_ = 0;
-  u32 last_scratchpad_control_transfer_pc_ = 0;
-  u32 last_scratchpad_control_transfer_instruction_ = 0;
-  u32 last_scratchpad_control_transfer_target_ = 0;
   u64 muldiv_result_ready_cycle_ = 0;
   u32 cycle_penalty_ = 0;
   bool executing_step_ = false;
