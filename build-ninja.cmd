@@ -11,7 +11,8 @@ if %errorlevel% neq 0 (
 
 set "CMAKE_FRESH_ARG="
 if not exist build-ninja\CMakeCache.txt goto configure
-for /f "delims=" %%L in ('%SystemRoot%\System32\find.exe /I "cl.exe" ^< build-ninja\CMakeCache.txt 2^>nul') do goto configure
+%SystemRoot%\System32\findstr.exe /I /L /C:"cl.exe" build-ninja\CMakeCache.txt >nul 2>nul
+if not errorlevel 1 goto configure
 echo Existing build-ninja cache uses a different compiler; refreshing it for MSVC x64.
 set "CMAKE_FRESH_ARG=--fresh"
 :configure
