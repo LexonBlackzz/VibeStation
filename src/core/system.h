@@ -563,10 +563,6 @@ private:
   bool hw_init_ = false;
   u64 frame_cycles_ = 0;
   double frame_cycle_remainder_ = 0.0;
-  // CPU/DMA work may finish a bounded instruction or block beyond a scanline
-  // budget. Carry that overshoot into following scanlines so execution mode
-  // cannot create or discard emulated time merely by changing block size.
-  u64 scheduler_cycle_debt_ = 0;
   std::string last_disc_bin_path_;
   std::string last_disc_cue_path_;
 
@@ -611,9 +607,6 @@ private:
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
   u64 spu_synced_cpu_cycle_ = 0;
-  // SIO transfer events are scheduled against CPU time. Synchronizing at bus
-  // accesses keeps their visibility independent of interpreter/JIT slice size.
-  u64 sio_synced_cpu_cycle_ = 0;
   bool spu_skip_sync_for_turbo_ = false;
   std::atomic<bool> ram_reaper_enabled_{false};
   std::atomic<u32> ram_reaper_range_start_{0};
@@ -667,7 +660,6 @@ private:
   bool input_playback_stop_requested_ = false;
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
-  void sync_sio_to_cpu();
   void maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes);
   void sync_spu_to_cpu();
   void apply_ram_reaper_for_frame();

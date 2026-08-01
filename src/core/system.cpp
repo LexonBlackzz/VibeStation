@@ -226,7 +226,6 @@ void System::note_cdrom_io(u32 phys_addr) {
 }
 
 void System::note_sio_io(u32 phys_addr) {
-    sync_sio_to_cpu();
     ++boot_diag_.sio_io_count;
     if (!boot_diag_.saw_sio_io) {
         boot_diag_.saw_sio_io = true;
@@ -365,26 +364,6 @@ bool System::load_spu_replacement_sample_from_file(const std::string& path,
     return spu_.load_replacement_sample_from_file(path, error);
 }
 
-void System::sync_sio_to_cpu() {
-    const u64 target_cycle = cpu_.cycle_count();
-    if (target_cycle < sio_synced_cpu_cycle_) {
-        // CPU state can move backwards when restoring a snapshot.
-        sio_synced_cpu_cycle_ = target_cycle;
-        return;
-    }
-
-    u64 delta = target_cycle - sio_synced_cpu_cycle_;
-    while (delta > 0) {
-        const u32 step =
-            (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
-            ? std::numeric_limits<u32>::max()
-            : static_cast<u32>(delta);
-        sio_.tick(step);
-        delta -= step;
-    }
-    sio_synced_cpu_cycle_ = target_cycle;
-}
-
 // Keep construction of the large embedded diagnostic histories out of the
 // header. Inlining the defaulted constructor makes MSVC instantiate several
 // megabytes of aggregate initialization in every System consumer.
@@ -479,7 +458,6 @@ void System::reset() {
     gpu_.reset();
     spu_.reset();
     cpu_.reset();
-    sio_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
     ram_.reset();
@@ -487,7 +465,6 @@ void System::reset() {
     cpu_ram_write_context_.fill({});
     frame_cycles_ = 0;
     frame_cycle_remainder_ = 0.0;
-    scheduler_cycle_debt_ = 0;
     boot_diag_ = {};
     saw_non_bios_exec_ = false;
     bios_menu_streak_after_non_bios_ = 0;
@@ -1595,6 +1572,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // Aggressive fast mode intentionally trades timing stability for throughput.
     const bool fast_mode = g_gpu_fast_mode;
     const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
+    const bool optimized_cpu_mode =
+        effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
     const u32 cpu_instruction_slice =
         aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
@@ -1630,23 +1609,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         if (profile_detailed) {
             start_loop = std::chrono::high_resolution_clock::now();
         }
-        u32 cycles_remaining = 0;
-        if (scheduler_cycle_debt_ >= cycles_this_scanline) {
-            scheduler_cycle_debt_ -= cycles_this_scanline;
-        } else {
-            cycles_remaining = cycles_this_scanline -
-                static_cast<u32>(scheduler_cycle_debt_);
-            scheduler_cycle_debt_ = 0;
-        }
-        auto consume_scanline_budget = [&](u32 consumed) {
-            if (consumed >= cycles_remaining) {
-                scheduler_cycle_debt_ +=
-                    static_cast<u64>(consumed - cycles_remaining);
-                cycles_remaining = 0;
-            } else {
-                cycles_remaining -= consumed;
-            }
-        };
+        u32 cycles_remaining = cycles_this_scanline;
         auto service_dma = [&]() {
             const u64 before_dma_cycles = cpu_.cycle_count();
             dma_.tick();
@@ -1659,26 +1622,66 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             frame_cycles_ += dma_cycles;
-            sync_sio_to_cpu();
+            sio_.tick(dma_cycles);
             mdec_.tick(dma_cycles);
             cdrom_.tick(dma_cycles);
             timers_.tick(dma_cycles);
-            consume_scanline_budget(dma_cycles);
+            cycles_remaining =
+                (dma_cycles >= cycles_remaining) ? 0 : (cycles_remaining - dma_cycles);
         };
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
                 std::min(cycles_remaining, cpu_instruction_slice * 4u);
-            CpuRunSliceResult run =
-                cpu_.run_slice(target_slice_cycles, cpu_instruction_slice);
-            if (run.cycles == 0 || run.instructions == 0) {
-                run.cycles = cpu_.step();
-                run.instructions = 1;
+            u32 spent_in_slice = 0;
+            u32 instructions_executed = 0;
+            u32 sio_slice_cycles = 0;
+            if (optimized_cpu_mode) {
+                CpuRunSliceResult run =
+                    cpu_.run_slice(target_slice_cycles, cpu_instruction_slice);
+                if (run.cycles == 0 || run.instructions == 0) {
+                    run.cycles = cpu_.step();
+                    run.instructions = 1;
+                }
+
+                spent_in_slice = run.cycles;
+                instructions_executed = run.instructions;
+                frame_cycles_ += run.cycles;
+                if (fast_mode) {
+                    sio_slice_cycles += run.cycles;
+                } else {
+                    sio_.tick(run.cycles);
+                }
+                cycles_remaining =
+                    (run.cycles >= cycles_remaining) ? 0 : (cycles_remaining - run.cycles);
+            } else {
+                while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
+                       instructions_executed < cpu_instruction_slice) {
+                    const CpuRunSliceResult run =
+                        cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
+                    const u32 consumed = run.cycles;
+                    if (consumed == 0) {
+                        break;
+                    }
+                    spent_in_slice += consumed;
+                    frame_cycles_ += consumed;
+                    if (fast_mode) {
+                        sio_slice_cycles += consumed;
+                    }
+                    else {
+                        // Advance SIO at instruction granularity so JOYPAD serial
+                        // handshakes don't stall for an entire scanline worth of CPU
+                        // polling loops.
+                        sio_.tick(consumed);
+                    }
+                    instructions_executed += std::max(1u, run.instructions);
+                    cycles_remaining =
+                        (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
+                }
+            }
+            if (fast_mode && sio_slice_cycles > 0) {
+                sio_.tick(sio_slice_cycles);
             }
 
-            const u32 spent_in_slice = run.cycles;
-            frame_cycles_ += run.cycles;
-            sync_sio_to_cpu();
-            consume_scanline_budget(run.cycles);
             if (spent_in_slice > 0) {
                 mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);

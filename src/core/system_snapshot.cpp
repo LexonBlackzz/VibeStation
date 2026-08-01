@@ -177,8 +177,6 @@ bool System::save_state(SystemSnapshot &out) {
   w.val(post_reg_);
   w.val(frame_cycles_);
   w.val(frame_cycle_remainder_);
-  w.val(scheduler_cycle_debt_);
-  w.val(sio_synced_cpu_cycle_);
 
   return true;
 }
@@ -252,17 +250,6 @@ bool System::restore_state(const SystemSnapshot &snap) {
   r.val(post_reg_);
   r.val(frame_cycles_);
   r.val(frame_cycle_remainder_);
-  // Added at the end of the snapshot so older states remain readable. BufReader
-  // initializes a missing trailing value to zero.
-  r.val(scheduler_cycle_debt_);
-  r.val(sio_synced_cpu_cycle_);
-  // SPU synchronization predates snapshotting its anchor. Both devices have
-  // just restored state corresponding to the restored CPU cycle.
-  spu_synced_cpu_cycle_ = cpu_.cycle_count();
-  spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
-  if (sio_synced_cpu_cycle_ == 0 && cpu_.cycle_count() != 0) {
-    sio_synced_cpu_cycle_ = cpu_.cycle_count();
-  }
 
   return true;
 }
