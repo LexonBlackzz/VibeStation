@@ -1,4 +1,5 @@
 #include "platform/cpu_backend_compare_runner.h"
+#include "core/gte.h"
 #include "core/system.h"
 #include <array>
 #include <memory>
@@ -7,6 +8,102 @@
 
 namespace {
 constexpr u32 kCpuComparePc = 0x80010000u;
+
+bool run_gte_final_accumulator_regression() {
+  // The first two matrix products stay within the signed 44-bit accumulator,
+  // while the third crosses the positive limit. The hardware exposes the
+  // final, unwrapped result shifted by SF and then truncated to 32 bits.
+  // Truncating the third intermediate result before that shift produces a
+  // different MAC value.
+  constexpr u32 kPositiveS16Pair = 0x7FFF7FFFu;
+  constexpr u32 kTranslation = 0x7FF6D83Fu;
+  constexpr u32 kExpectedMac = 0x8002D80Fu;
+  constexpr u32 kMvmvaShifted = 0x00080012u;
+
+  Gte gte;
+  gte.write_ctrl(0, kPositiveS16Pair);
+  gte.write_ctrl(1, kPositiveS16Pair);
+  gte.write_ctrl(2, kPositiveS16Pair);
+  gte.write_ctrl(3, kPositiveS16Pair);
+  gte.write_ctrl(4, 0x00007FFFu);
+  gte.write_ctrl(5, kTranslation);
+  gte.write_ctrl(6, kTranslation);
+  gte.write_ctrl(7, kTranslation);
+  gte.write_data(0, kPositiveS16Pair);
+  gte.write_data(1, 0x00007FFFu);
+  gte.execute(kMvmvaShifted);
+
+  const u32 mac1 = gte.read_data(25);
+  const u32 mac2 = gte.read_data(26);
+  const u32 mac3 = gte.read_data(27);
+  const bool passed =
+      mac1 == kExpectedMac && mac2 == kExpectedMac && mac3 == kExpectedMac;
+  LOG_INFO(
+      "GTE_REGRESSION name=final_accumulator_shift result=%s mac1=0x%08X "
+      "mac2=0x%08X mac3=0x%08X expected=0x%08X flags=0x%08X",
+      passed ? "PASS" : "FAIL", mac1, mac2, mac3, kExpectedMac,
+      gte.read_ctrl(31));
+  return passed;
+}
+
+bool run_gte_register_sign_extension_regression() {
+  Gte gte;
+  gte.write_data(1, 0x00008001u);
+  gte.write_data(3, 0x0000FFFFu);
+  gte.write_data(5, 0x00007FFFu);
+  gte.write_ctrl(26, 0x00008001u);
+
+  const u32 vz0 = gte.read_data(1);
+  const u32 vz1 = gte.read_data(3);
+  const u32 vz2 = gte.read_data(5);
+  const u32 h = gte.read_ctrl(26);
+  const bool passed = vz0 == 0xFFFF8001u && vz1 == 0xFFFFFFFFu &&
+                      vz2 == 0x00007FFFu && h == 0xFFFF8001u;
+  LOG_INFO(
+      "GTE_REGRESSION name=register_sign_extension result=%s "
+      "vz0=0x%08X vz1=0x%08X vz2=0x%08X h=0x%08X",
+      passed ? "PASS" : "FAIL", vz0, vz1, vz2, h);
+  return passed;
+}
+
+bool run_gte_writable_mac_regression() {
+  // Spyro clears MAC1-3 with MTC2 before using GPL as a vector scaler. If
+  // writes to the MAC registers are ignored, GPL incorporates stale results
+  // from an unrelated command and produces enormous, nondeterministic steps.
+  constexpr u32 kGplUnshifted = 0x00A0003Eu;
+  constexpr u32 kScale = 0x00001000u;
+  constexpr u32 kIr1 = 0x00000123u;
+  constexpr u32 kIr2 = 0xFFFFFF45u;
+  constexpr u32 kIr3 = 0x00000007u;
+
+  Gte gte;
+  gte.write_data(8, kScale);
+  gte.write_data(9, kIr1);
+  gte.write_data(10, kIr2);
+  gte.write_data(11, kIr3);
+  gte.write_data(25, 0x12345678u);
+  gte.write_data(26, 0x87654321u);
+  gte.write_data(27, 0x55AA55AAu);
+  gte.write_data(25, 0u);
+  gte.write_data(26, 0u);
+  gte.write_data(27, 0u);
+  gte.execute(kGplUnshifted);
+
+  const u32 mac1 = gte.read_data(25);
+  const u32 mac2 = gte.read_data(26);
+  const u32 mac3 = gte.read_data(27);
+  const u32 expected_mac1 = kIr1 << 12;
+  const u32 expected_mac2 = kIr2 << 12;
+  const u32 expected_mac3 = kIr3 << 12;
+  const bool passed = mac1 == expected_mac1 && mac2 == expected_mac2 &&
+                      mac3 == expected_mac3;
+  LOG_INFO(
+      "GTE_REGRESSION name=writable_mac_gpl result=%s mac=(0x%08X,0x%08X,0x%08X) "
+      "expected=(0x%08X,0x%08X,0x%08X)",
+      passed ? "PASS" : "FAIL", mac1, mac2, mac3, expected_mac1,
+      expected_mac2, expected_mac3);
+  return passed;
+}
 
 struct CpuCompareMemoryWord {
   u32 addr = 0;
@@ -3117,6 +3214,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   int failures = 0;
+  if (!run_gte_final_accumulator_regression()) {
+    ++failures;
+  }
+  if (!run_gte_register_sign_extension_regression()) {
+    ++failures;
+  }
+  if (!run_gte_writable_mac_regression()) {
+    ++failures;
+  }
   const std::array<CpuExecutionMode, 3> modes = {
       CpuExecutionMode::Interpreter,
       CpuExecutionMode::DecodedBlockInterpreter,

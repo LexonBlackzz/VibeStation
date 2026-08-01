@@ -8,17 +8,19 @@ u32 Gte::read_data(u32 reg) const {
     return (static_cast<u16>(v0[0])) |
            (static_cast<u32>(static_cast<u16>(v0[1])) << 16);
   case 1:
-    return static_cast<u16>(v0[2]);
+    // VZ0 is a signed 16-bit data register. COP2 reads sign-extend it to
+    // the CPU register width, just like the IR registers.
+    return static_cast<u32>(static_cast<s32>(v0[2]));
   case 2:
     return (static_cast<u16>(v1[0])) |
            (static_cast<u32>(static_cast<u16>(v1[1])) << 16);
   case 3:
-    return static_cast<u16>(v1[2]);
+    return static_cast<u32>(static_cast<s32>(v1[2]));
   case 4:
     return (static_cast<u16>(v2[0])) |
            (static_cast<u32>(static_cast<u16>(v2[1])) << 16);
   case 5:
-    return static_cast<u16>(v2[2]);
+    return static_cast<u32>(static_cast<s32>(v2[2]));
   case 6:
     return rgbc[0] | (rgbc[1] << 8) | (rgbc[2] << 16) | (rgbc[3] << 24);
   case 7:
@@ -152,7 +154,9 @@ u32 Gte::read_ctrl(u32 reg) const {
   case 25:
     return static_cast<u32>(ofy);
   case 26:
-    return static_cast<u32>(static_cast<s32>(h));
+    // H is sign-extended when read, but remains an unsigned 16-bit value
+    // when used by the perspective divider.
+    return static_cast<u32>(static_cast<s32>(static_cast<s16>(h)));
   case 27:
     return static_cast<u32>(static_cast<s32>(dqa));
   case 28:
@@ -248,6 +252,18 @@ void Gte::write_data(u32 reg, u32 value) {
     break;
   case 22:
     rgb_fifo[2] = value;
+    break;
+  case 24:
+    mac[0] = static_cast<s32>(value);
+    break;
+  case 25:
+    mac[1] = static_cast<s32>(value);
+    break;
+  case 26:
+    mac[2] = static_cast<s32>(value);
+    break;
+  case 27:
+    mac[3] = static_cast<s32>(value);
     break;
   case 28: // IRGB
     ir[1] = static_cast<s16>((value & 0x1F) * 0x80);
@@ -470,31 +486,56 @@ void Gte::execute(u32 command) {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+s64 Gte::normalize_mac(int idx, s64 value) {
+  // Matrix commands sign-extend each intermediate 44-bit accumulator stage.
+  // The final command result is shifted before the visible 32-bit MAC register
+  // is truncated, so this helper must not truncate the final result itself.
+  if (idx == 0) {
+    if (value > 0x7FFFFFFFLL) {
+      flags |= 1u << 16;
+    }
+    if (value < -0x80000000LL) {
+      flags |= 1u << 15;
+    }
+    return static_cast<s32>(value);
+  }
+
+  constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;  // +2^43 - 1
+  constexpr s64 kMacNegLimit = -0x80000000000LL; // -2^43
+  if (value > kMacPosLimit) {
+    flags |= 1u << (31 - idx); // MAC1..3 positive overflow: FLAG.30..28
+  }
+  if (value < kMacNegLimit) {
+    flags |= 1u << (28 - idx); // MAC1..3 negative overflow: FLAG.27..25
+  }
+
+  constexpr u64 kMacMask = (1ull << 44) - 1ull;
+  constexpr u64 kMacSignBit = 1ull << 43;
+  const u64 truncated = static_cast<u64>(value) & kMacMask;
+  return (truncated & kMacSignBit) != 0u
+      ? static_cast<s64>(truncated | ~kMacMask)
+      : static_cast<s64>(truncated);
+}
+
 s64 Gte::set_mac(int idx, s64 value) {
-    // MAC0 is 32-bit signed range, MAC1..3 are 44-bit signed range.
-    if (idx == 0) {
-        if (value > 0x7FFFFFFFLL) {
-            flags |= (1u << 16);
-        }
-        if (value < -0x80000000LL) {
-            flags |= (1u << 15);
-        }
-    }
-    else {
-        constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;  // +2^43-1
-        constexpr s64 kMacNegLimit = -0x80000000000LL; // -2^43
-        if (value > kMacPosLimit) {
-            flags |= (1u << (31 - idx)); // bits 30..28 for MAC1..3 positive overflow
-        }
-        if (value < kMacNegLimit) {
-            flags |= (1u << (28 - idx)); // bits 27..25 for MAC1..3 negative overflow
-        }
-        // Apply sf shift before storing (matches DuckStation's TruncateAndSetMAC).
-        // MAC registers are effectively 32-bit on real hardware.
-        value >>= sf;
-    }
-    mac[idx] = value;
-    return value;
+  // Overflow flags inspect the unshifted accumulator. The value exposed
+  // through MAC1–3 is then arithmetic-shifted and truncated to 32 bits.
+  normalize_mac(idx, value);
+  const s64 shifted = (idx == 0) ? value : (value >> sf);
+  mac[idx] = static_cast<s32>(shifted);
+  return mac[idx];
+}
+
+s64 Gte::multiply_accumulate(int idx, s64 base, const s16 *matrix_row,
+                             const s16 *vector) {
+  // The GTE sign-extends after the first and second products, then leaves the
+  // third sum intact so the command's shift happens before visible-MAC
+  // truncation. Normalizing the final sum early changes MAC/IR results.
+  s64 value = normalize_mac(
+      idx, base + static_cast<s64>(matrix_row[0]) * vector[0]);
+  value = normalize_mac(
+      idx, value + static_cast<s64>(matrix_row[1]) * vector[1]);
+  return value + static_cast<s64>(matrix_row[2]) * vector[2];
 }
 
 void Gte::interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3) {
@@ -506,35 +547,14 @@ void Gte::interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3) {
 
   // Step 1: FC-MAC, with lm=false (signed IR range)
   for (int i = 0; i < 3; ++i) {
-    const s64 diff = (static_cast<s64>(far_color[i]) << 12) - in_mac[i];
-    constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;
-    constexpr s64 kMacNegLimit = -0x80000000000LL;
-    if (diff > kMacPosLimit) {
-      flags |= (1u << (30 - i));
-    }
-    if (diff < kMacNegLimit) {
-      flags |= (1u << (27 - i));
-    }
-    const s64 shifted = diff >> sf;
-    mac[i + 1] = shifted;
-    set_ir(i + 1, static_cast<s32>(shifted), false);
+    set_mac(i + 1, (static_cast<s64>(far_color[i]) << 12) - in_mac[i]);
+    set_ir(i + 1, static_cast<s32>(mac[i + 1]), false);
   }
 
   // Step 2: IR*IR0 + in_MAC, with lm as specified
   for (int i = 0; i < 3; ++i) {
-    const s64 result =
-        static_cast<s64>(ir[i + 1]) * static_cast<s64>(ir[0]) + in_mac[i];
-    constexpr s64 kMacPosLimit = 0x7FFFFFFFFFFLL;
-    constexpr s64 kMacNegLimit = -0x80000000000LL;
-    if (result > kMacPosLimit) {
-      flags |= (1u << (30 - i));
-    }
-    if (result < kMacNegLimit) {
-      flags |= (1u << (27 - i));
-    }
-    const s64 shifted = result >> sf;
-    mac[i + 1] = shifted;
-    set_ir(i + 1, static_cast<s32>(shifted), lm);
+    set_mac(i + 1, static_cast<s64>(ir[i + 1]) * ir[0] + in_mac[i]);
+    set_ir(i + 1, static_cast<s32>(mac[i + 1]), lm);
   }
 }
 
@@ -704,14 +724,13 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   // MAC1-3 = TR + RT * V
   s64 raw_mac[3] = {};
   for (int i = 0; i < 3; i++) {
-    s64 result = static_cast<s64>(translation[i]) << 12;
-    result += static_cast<s64>(rotation[i][0]) * v[0];
-    result += static_cast<s64>(rotation[i][1]) * v[1];
-    result += static_cast<s64>(rotation[i][2]) * v[2];
-    raw_mac[i] = result;
-    set_mac(i + 1, result);
-    if (i < 2)
+    raw_mac[i] = multiply_accumulate(i + 1,
+                                     static_cast<s64>(translation[i]) << 12,
+                                     rotation[i], v);
+    set_mac(i + 1, raw_mac[i]);
+    if (i < 2) {
       set_ir(i + 1, mac[i + 1], lm);
+    }
   }
 
   // RTPS handles IR3 saturation slightly differently from generic IR writes:
@@ -880,20 +899,18 @@ void Gte::cmd_mvmva() {
       // The FC translation-vector selector has a hardware bug: the first
       // multiply plus translation affects the temporary IR value, then the
       // final MAC/IR is produced only from the remaining two products.
-      const s64 first =
-          (static_cast<s64>(add[i]) << 12) +
-          static_cast<s64>(mat[i][0]) * vec[0];
+      const s64 first = normalize_mac(
+          i + 1, (static_cast<s64>(add[i]) << 12) +
+                     static_cast<s64>(mat[i][0]) * vec[0]);
       set_ir(i + 1, static_cast<s32>(first >> sf), false);
-      const s64 result =
-          static_cast<s64>(mat[i][1]) * vec[1] +
-          static_cast<s64>(mat[i][2]) * vec[2];
+      const s64 result = normalize_mac(
+          i + 1, static_cast<s64>(mat[i][1]) * vec[1] +
+                     static_cast<s64>(mat[i][2]) * vec[2]);
       set_mac(i + 1, result);
       set_ir(i + 1, mac[i + 1], lm);
     } else {
-      s64 result = static_cast<s64>(add[i]) << 12;
-      result += static_cast<s64>(mat[i][0]) * vec[0];
-      result += static_cast<s64>(mat[i][1]) * vec[1];
-      result += static_cast<s64>(mat[i][2]) * vec[2];
+      const s64 result = multiply_accumulate(
+          i + 1, static_cast<s64>(add[i]) << 12, mat[i], vec);
       set_mac(i + 1, result);
       set_ir(i + 1, mac[i + 1], lm);
     }
@@ -918,10 +935,7 @@ void Gte::normal_color_stage(int v_idx) {
 
   // Stage 1: IR = LLM * V
   for (int i = 0; i < 3; ++i) {
-    s64 result = 0;
-    result += static_cast<s64>(light[i][0]) * v[0];
-    result += static_cast<s64>(light[i][1]) * v[1];
-    result += static_cast<s64>(light[i][2]) * v[2];
+    const s64 result = multiply_accumulate(i + 1, 0, light[i], v);
     set_mac(i + 1, result);
     set_ir(i + 1, mac[i + 1], lm);
   }
@@ -929,10 +943,8 @@ void Gte::normal_color_stage(int v_idx) {
   // Stage 2: IR = BK + LCM * IR
   const s16 ir_copy[3] = {ir[1], ir[2], ir[3]};
   for (int i = 0; i < 3; ++i) {
-    s64 result = static_cast<s64>(bg_color[i]) << 12;
-    result += static_cast<s64>(color_matrix[i][0]) * ir_copy[0];
-    result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
-    result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
+    const s64 result = multiply_accumulate(
+        i + 1, static_cast<s64>(bg_color[i]) << 12, color_matrix[i], ir_copy);
     set_mac(i + 1, result);
     set_ir(i + 1, mac[i + 1], lm);
   }
@@ -1001,10 +1013,8 @@ void Gte::cmd_cdp() {
   // Stage 1: [IR1,IR2,IR3] = BK + LCM * IR (same as NCS stage 2)
   const s16 ir_copy[3] = {ir[1], ir[2], ir[3]};
   for (int i = 0; i < 3; ++i) {
-    s64 result = static_cast<s64>(bg_color[i]) << 12;
-    result += static_cast<s64>(color_matrix[i][0]) * ir_copy[0];
-    result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
-    result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
+    const s64 result = multiply_accumulate(
+        i + 1, static_cast<s64>(bg_color[i]) << 12, color_matrix[i], ir_copy);
     set_mac(i + 1, result);
     set_ir(i + 1, mac[i + 1], lm);
   }
@@ -1107,12 +1117,10 @@ void Gte::cmd_gpl() {
 }
 
 void Gte::cmd_cc() {
-  s16 ir_copy[3] = {ir[1], ir[2], ir[3]};
+  const s16 ir_copy[3] = {ir[1], ir[2], ir[3]};
   for (int i = 0; i < 3; i++) {
-    s64 result = static_cast<s64>(bg_color[i]) << 12;
-    result += static_cast<s64>(color_matrix[i][0]) * ir_copy[0];
-    result += static_cast<s64>(color_matrix[i][1]) * ir_copy[1];
-    result += static_cast<s64>(color_matrix[i][2]) * ir_copy[2];
+    const s64 result = multiply_accumulate(
+        i + 1, static_cast<s64>(bg_color[i]) << 12, color_matrix[i], ir_copy);
     set_mac(i + 1, result);
     set_ir(i + 1, mac[i + 1], lm);
   }
@@ -1125,4 +1133,3 @@ void Gte::cmd_cc() {
   u8 b = static_cast<u8>(clamp(mac[3] >> 4, 0, 0xFF, 1u << 19));
   push_rgb(r | (g << 8) | (b << 16) | (rgbc[3] << 24));
 }
-

@@ -99,6 +99,12 @@ public:
   bool read_whole_sector() const { return read_whole_sector_; }
   int active_data_lba() const { return active_data_lba_; }
   int current_read_lba() const { return read_lba_; }
+  u64 debug_stream_generation() const { return stream_generation_; }
+  int debug_stream_start_lba() const { return stream_start_lba_; }
+  u8 debug_last_command() const { return last_command_; }
+  size_t debug_queued_sector_count() const {
+    return queued_sector_buffers_.size();
+  }
 
 private:
   System *sys_ = nullptr;
@@ -178,6 +184,8 @@ private:
   // Seek target
   u8 seek_mm_ = 0, seek_ss_ = 0, seek_ff_ = 0;
   int read_lba_ = 0;
+  u64 stream_generation_ = 0;
+  int stream_start_lba_ = -1;
   int pending_cycles_ = 0;
   int read_period_cycles_ = 0;
   bool command_busy_ = false;

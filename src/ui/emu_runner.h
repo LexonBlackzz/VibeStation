@@ -75,7 +75,7 @@ public:
   RuntimeSnapshot runtime_snapshot() const;
 
   // Rewind control (called from UI thread)
-  void init_rewind(int buffer_seconds, int fps);
+  void configure_rewind(bool enabled, int buffer_seconds, int fps);
   void set_rewind_active(bool active);
   bool is_rewind_active() const {
     return rewind_active_.load(std::memory_order_acquire);
@@ -147,5 +147,6 @@ private:
 
   // Rewind
   RewindManager rewind_manager_;
+  std::atomic<bool> rewind_enabled_{false};
   std::atomic<bool> rewind_active_{false};
 };

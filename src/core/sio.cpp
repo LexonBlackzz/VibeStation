@@ -101,6 +101,9 @@ void Sio::reset() {
   invalid_sequence_count_ = 0;
   irq_assert_count_ = 0;
   irq_ack_count_ = 0;
+  transfer_trace_.fill({});
+  transfer_trace_next_ = 0;
+  transfer_trace_count_ = 0;
 
   soft_reset();
 }
@@ -217,6 +220,7 @@ void Sio::do_transfer() {
     memory_card_transfer = true;
   };
 
+  const ActiveDevice active_before = active_device_;
   switch (active_device_) {
   case ActiveDevice::None:
     if (host_byte == 0x81 && memory_cards_[selected_slot].inserted()) {
@@ -288,6 +292,20 @@ void Sio::do_transfer() {
   }
 
   rebuild_stat();
+
+  TransferTraceEntry &trace = transfer_trace_[transfer_trace_next_];
+  trace.cycle = sys_ != nullptr ? sys_->cpu().cycle_count() : 0;
+  trace.ctrl = ctrl_;
+  trace.stat = stat_;
+  trace.host_byte = host_byte;
+  trace.device_byte = device_byte;
+  trace.active_before = static_cast<u8>(active_before);
+  trace.active_after = static_cast<u8>(active_device_);
+  trace.ack = ack;
+  trace.ack_pulse = false;
+  transfer_trace_next_ = (transfer_trace_next_ + 1u) % kTransferTraceSize;
+  transfer_trace_count_ =
+      (std::min)(transfer_trace_count_ + 1u, static_cast<u32>(kTransferTraceSize));
 }
 
 void Sio::do_ack() {
@@ -308,6 +326,50 @@ void Sio::do_ack() {
 
   if (can_transfer()) {
     begin_transfer();
+  }
+
+  TransferTraceEntry &trace = transfer_trace_[transfer_trace_next_];
+  trace.cycle = sys_ != nullptr ? sys_->cpu().cycle_count() : 0;
+  trace.ctrl = ctrl_;
+  trace.stat = stat_;
+  trace.host_byte = 0;
+  trace.device_byte = 0;
+  trace.active_before = static_cast<u8>(active_device_);
+  trace.active_after = static_cast<u8>(active_device_);
+  trace.ack = true;
+  trace.ack_pulse = true;
+  transfer_trace_next_ = (transfer_trace_next_ + 1u) % kTransferTraceSize;
+  transfer_trace_count_ =
+      (std::min)(transfer_trace_count_ + 1u, static_cast<u32>(kTransferTraceSize));
+}
+
+void Sio::debug_log_recent_transfers(const char *log_prefix) const {
+  if (transfer_trace_count_ == 0) {
+    LOG_WARN("%s: no recent JOY transfers captured", log_prefix);
+    return;
+  }
+
+  LOG_WARN("%s: recent JOY transfers count=%u", log_prefix,
+           transfer_trace_count_);
+  const u32 first =
+      (transfer_trace_next_ + static_cast<u32>(kTransferTraceSize) -
+       transfer_trace_count_) %
+      static_cast<u32>(kTransferTraceSize);
+  for (u32 i = 0; i < transfer_trace_count_; ++i) {
+    const TransferTraceEntry &trace =
+        transfer_trace_[(first + i) % static_cast<u32>(kTransferTraceSize)];
+    if (trace.ack_pulse) {
+      LOG_WARN("%s: JOY ACK cyc=%llu ctrl=0x%04X stat=0x%04X active=%u",
+               log_prefix, static_cast<unsigned long long>(trace.cycle),
+               trace.ctrl, trace.stat, trace.active_after);
+    } else {
+      LOG_WARN(
+          "%s: JOY XFER cyc=%llu host=0x%02X dev=0x%02X ack=%u ctrl=0x%04X "
+          "stat=0x%04X active=%u->%u",
+          log_prefix, static_cast<unsigned long long>(trace.cycle),
+          trace.host_byte, trace.device_byte, trace.ack ? 1u : 0u,
+          trace.ctrl, trace.stat, trace.active_before, trace.active_after);
+    }
   }
 }
 

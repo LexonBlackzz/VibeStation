@@ -56,6 +56,7 @@ private:
 
   // Gamepad button mapping (using SDL_GameController standard)
   void apply_gamepad_state();
+  void release_inactive_keyboard_buttons();
   void set_button_bit(u16 &mask, PsxButton button, bool pressed);
   void sync_combined_buttons();
 

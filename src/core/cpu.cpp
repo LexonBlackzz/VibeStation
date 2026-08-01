@@ -18,23 +18,299 @@ struct PerimeterTraceEntry {
   u32 reg_index;
   u32 old_val;
   u32 new_val;
+  u32 source_addr;
+  u32 rs_value;
+  u32 rt_value;
   u64 cycle;
   const char *source; // "set_reg", "advance", "flush"
 };
 static std::array<PerimeterTraceEntry, 2048> g_perimeter_trace{};
+static std::array<PerimeterTraceEntry, 32> g_latest_perimeter_write{};
+static std::array<bool, 32> g_has_latest_perimeter_write{};
 static size_t g_perimeter_idx = 0;
 static bool g_perimeter_has_written = false;
 
+struct GteSqrTrace {
+  bool valid = false;
+  u32 pc = 0;
+  u32 command = 0;
+  u32 ir1 = 0;
+  u32 ir2 = 0;
+  u32 ir3 = 0;
+  u32 mac1 = 0;
+  u32 mac2 = 0;
+  u32 mac3 = 0;
+  u32 flags = 0;
+  u64 cycle = 0;
+};
+
+static GteSqrTrace g_gte_sqr_trace{};
+
+// Spyro's scene query uses SQR followed by BGEZ to walk a linked list of
+// candidate records.  Keep only the most recently accepted record so an AdEL
+// can be tied back to the selection that led to it without per-frame logging.
+struct CollisionSelectionTrace {
+  bool valid = false;
+  u32 sqr_pc = 0;
+  u32 branch_pc = 0;
+  u32 record = 0;
+  u32 list_cursor = 0;
+  s32 delta_x = 0;
+  s32 delta_y = 0;
+  s32 delta_z = 0;
+  s32 distance_minus_radius_squared = 0;
+  u32 distance_squared = 0;
+  u32 radius_squared = 0;
+  u64 cycle = 0;
+};
+
+static CollisionSelectionTrace g_collision_selection_trace{};
+
+// Spyro derives a cell-table index from two coordinates shifted by 13, with a
+// 32-entry row stride.  Faults observed so far follow lookups with indices at
+// or above 0x400.  The row count is game-data dependent, so this is a trace
+// threshold rather than an assumed table bound.  Retain a tiny ring only for
+// those lookups so an eventual AdEL can be traced without general diagnostics.
+struct SpatialGridHighIndexTrace {
+  u32 pc = 0;
+  u32 address = 0;
+  u32 index = 0;
+  u32 value = 0;
+  u32 s4 = 0;
+  u32 s5 = 0;
+  u32 s6 = 0;
+  u32 s7 = 0;
+  u32 t8 = 0;
+  u32 t9 = 0;
+  u32 sp = 0;
+  u32 ra = 0;
+  u64 cycle = 0;
+};
+
+constexpr u32 kSpyroSpatialGridStart = 0x00176014u;
+constexpr u32 kSpyroSpatialGridTraceFirstIndex = 0x400u;
+constexpr u32 kSpyroSpatialGridTraceWordCount = 0x1000u;
+static std::array<SpatialGridHighIndexTrace, 16> g_spatial_grid_high_index_trace{};
+static size_t g_spatial_grid_high_index_trace_next = 0;
+static size_t g_spatial_grid_high_index_trace_count = 0;
+
+void log_spatial_grid_high_index_trace() {
+  if (g_spatial_grid_high_index_trace_count == 0) {
+    return;
+  }
+
+  constexpr size_t kEntriesToLog = 4;
+  const size_t count =
+      std::min(g_spatial_grid_high_index_trace_count, kEntriesToLog);
+  LOG_WARN("CPU: recent high-index spatial-grid lookups (index >= 0x%03X) count=%zu",
+           kSpyroSpatialGridTraceFirstIndex, count);
+  for (size_t i = count; i > 0; --i) {
+    const size_t index =
+        (g_spatial_grid_high_index_trace_next +
+         g_spatial_grid_high_index_trace.size() - i) %
+        g_spatial_grid_high_index_trace.size();
+    const SpatialGridHighIndexTrace &entry =
+        g_spatial_grid_high_index_trace[index];
+    LOG_WARN(
+        "CPU: grid high-index pc=0x%08X addr=0x%08X index=0x%03X value=0x%08X "
+        "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X t8=0x%08X t9=0x%08X "
+        "sp=0x%08X ra=0x%08X cyc=%llu",
+        entry.pc, entry.address, entry.index, entry.value, entry.s4, entry.s5,
+        entry.s6, entry.s7, entry.t8, entry.t9, entry.sp, entry.ra,
+        static_cast<unsigned long long>(entry.cycle));
+  }
+}
+
+void note_spatial_grid_high_index_lookup(u32 pc, u32 address, u32 value,
+                                         const u32 *gpr, u64 cycle) {
+  if (address <
+          kSpyroSpatialGridStart + kSpyroSpatialGridTraceFirstIndex * 4u ||
+      address >= kSpyroSpatialGridStart + kSpyroSpatialGridTraceWordCount * 4u) {
+    return;
+  }
+
+  SpatialGridHighIndexTrace &entry =
+      g_spatial_grid_high_index_trace[g_spatial_grid_high_index_trace_next];
+  entry.pc = pc;
+  entry.address = address;
+  entry.index = (address - kSpyroSpatialGridStart) / 4u;
+  entry.value = value;
+  entry.s4 = gpr[20];
+  entry.s5 = gpr[21];
+  entry.s6 = gpr[22];
+  entry.s7 = gpr[23];
+  entry.t8 = gpr[24];
+  entry.t9 = gpr[25];
+  entry.sp = gpr[29];
+  entry.ra = gpr[31];
+  entry.cycle = cycle;
+  g_spatial_grid_high_index_trace_next =
+      (g_spatial_grid_high_index_trace_next + 1u) %
+      g_spatial_grid_high_index_trace.size();
+  g_spatial_grid_high_index_trace_count =
+      std::min(g_spatial_grid_high_index_trace_count + 1u,
+               g_spatial_grid_high_index_trace.size());
+}
+
+void log_gte_sqr_trace() {
+  if (!g_gte_sqr_trace.valid) {
+    return;
+  }
+
+  const GteSqrTrace &entry = g_gte_sqr_trace;
+  LOG_WARN(
+      "CPU: last SQR pc=0x%08X instr=0x%08X "
+      "ir1=0x%08X ir2=0x%08X ir3=0x%08X "
+      "mac1=0x%08X mac2=0x%08X mac3=0x%08X flags=0x%08X cyc=%llu",
+      entry.pc, entry.command, entry.ir1, entry.ir2, entry.ir3, entry.mac1,
+      entry.mac2, entry.mac3, entry.flags,
+      static_cast<unsigned long long>(entry.cycle));
+}
+
+void log_collision_selection_trace(System *sys) {
+  if (!g_collision_selection_trace.valid) {
+    return;
+  }
+
+  const CollisionSelectionTrace &entry = g_collision_selection_trace;
+  LOG_WARN(
+      "CPU: selected SQR collision record=0x%08X list=0x%08X "
+      "sqr_pc=0x%08X branch_pc=0x%08X delta=(%d,%d,%d) "
+      "distance2=0x%08X radius2=0x%08X residual=%d cyc=%llu",
+      entry.record, entry.list_cursor, entry.sqr_pc, entry.branch_pc,
+      entry.delta_x, entry.delta_y, entry.delta_z, entry.distance_squared,
+      entry.radius_squared, entry.distance_minus_radius_squared,
+      static_cast<unsigned long long>(entry.cycle));
+
+  if (sys == nullptr) {
+    return;
+  }
+
+  const u32 resource = sys->read32(entry.record + 0x20u);
+  const u32 next = sys->read32(entry.record + 0x04u);
+  const u32 word_38 = sys->read32(entry.record + 0x38u);
+  const u32 word_3c = sys->read32(entry.record + 0x3Cu);
+  LOG_WARN(
+      "CPU: selected collision fields next=0x%08X resource=0x%08X "
+      "word38=0x%08X word3C=0x%08X index36=0x%04X type3C=0x%02X type3E=0x%02X",
+      next, resource, word_38, word_3c,
+      static_cast<unsigned>(sys->read16(entry.record + 0x36u)),
+      static_cast<unsigned>(sys->read8(entry.record + 0x3Cu)),
+      static_cast<unsigned>(sys->read8(entry.record + 0x3Eu)));
+
+  // The caller derives its cell table from *(0x80075778) + 0x1000.  If this
+  // global was written with the wrong level table, every later candidate can
+  // be perfectly read from disc yet still be the wrong record type.
+  constexpr u32 kSpyroSpatialGridGlobal = 0x80075778u;
+  const u32 grid_allocation = sys->read32(kSpyroSpatialGridGlobal);
+  LOG_WARN("CPU: selected collision grid global[0x%08X]=0x%08X table=0x%08X",
+           kSpyroSpatialGridGlobal, grid_allocation,
+           grid_allocation + 0x1000u);
+  sys->debug_log_last_ram_word_write(kSpyroSpatialGridGlobal, "CPU");
+}
+
 void trace_perimeter(u32 pc, u32 reg, u32 old_val, u32 new_val,
-                     u64 cycle, const char *src) {
+                     u64 cycle, const char *src, u32 source_addr = 0,
+                     u32 rs_value = 0, u32 rt_value = 0) {
   // Track ALL writes to $a1 (reg 5), $a3 (reg 7), and $s8 (reg 30).
   // The old in_perimeter_window filter dropped values 0, KSEG0/KSEG1, and
   // low-RAM addresses — exactly the values needed to diagnose the BIOS
   // handler crash (e.g. $s8=0 safe-path, $s8=0x8003EB1C intermediate).
-  if (reg != 5 && reg != 7 && reg != 30) return;
-  g_perimeter_trace[g_perimeter_idx] = {pc, reg, old_val, new_val, cycle, src};
+  switch (reg) {
+  case 1:  // at: retain vector-helper operands only.
+  case 2:  // v0
+  case 3:  // v1
+    if (pc < 0x80017758u || pc > 0x80017788u) {
+      return;
+    }
+    break;
+  case 4:  // a0
+  case 5:  // a1
+  case 6:  // a2
+  case 7:  // a3
+  case 8:  // t0
+  case 9:  // t1
+  case 20: // s4
+  case 23: // s7
+  case 24: // t8
+  case 29: // sp
+  case 30: // s8
+  case 31: // ra
+    break;
+  default:
+    return;
+  }
+  g_perimeter_trace[g_perimeter_idx] =
+      {pc, reg, old_val, new_val, source_addr, rs_value, rt_value, cycle, src};
+  g_latest_perimeter_write[reg] =
+      {pc, reg, old_val, new_val, source_addr, rs_value, rt_value, cycle, src};
+  g_has_latest_perimeter_write[reg] = true;
   g_perimeter_idx = (g_perimeter_idx + 1) % g_perimeter_trace.size();
   g_perimeter_has_written = true;
+}
+
+bool latest_perimeter_write(u32 reg, PerimeterTraceEntry *out_entry) {
+  if (reg >= g_latest_perimeter_write.size() || out_entry == nullptr ||
+      !g_has_latest_perimeter_write[reg]) {
+    return false;
+  }
+  *out_entry = g_latest_perimeter_write[reg];
+  return true;
+}
+
+template <size_t N>
+void log_register_provenance(System *sys,
+                             const std::array<u32, N> &registers) {
+  if (sys == nullptr || !g_perimeter_has_written) {
+    return;
+  }
+
+  for (size_t register_index = 0; register_index < registers.size();
+       ++register_index) {
+    const u32 reg = registers[register_index];
+    bool already_logged = false;
+    for (size_t prior_index = 0; prior_index < register_index; ++prior_index) {
+      if (registers[prior_index] == reg) {
+        already_logged = true;
+        break;
+      }
+    }
+    if (already_logged) {
+      continue;
+    }
+
+    // The most recent assignment often just adds an index or offset.  Keep
+    // the two preceding assignments as well so an address fault exposes the
+    // value producer without enabling the prohibitively expensive full trace.
+    u32 matches_logged = 0;
+    for (size_t offset = 0; offset < g_perimeter_trace.size(); ++offset) {
+      const size_t index =
+          (g_perimeter_idx + g_perimeter_trace.size() - 1u - offset) %
+          g_perimeter_trace.size();
+      const PerimeterTraceEntry &entry = g_perimeter_trace[index];
+      if (entry.reg_index != reg) {
+        continue;
+      }
+
+      const u32 code_addr = entry.pc & 0x1FFFFFFFu;
+      LOG_WARN(
+          "CPU: register provenance r%u source=%s pc=0x%08X old=0x%08X "
+          "new=0x%08X load_addr=0x%08X rs=0x%08X rt=0x%08X cyc=%llu instr=0x%08X",
+          reg, entry.source, entry.pc, entry.old_val, entry.new_val,
+          entry.source_addr, entry.rs_value, entry.rt_value,
+          static_cast<unsigned long long>(entry.cycle),
+          sys->read32(code_addr));
+      if (entry.source_addr != 0u) {
+        sys->debug_log_last_ram_word_write(entry.source_addr, "CPU");
+        if (g_cpu_deep_diagnostics) {
+          sys->debug_log_recent_ram_writes(entry.source_addr, 0x20u, "CPU");
+        }
+      }
+      if (++matches_logged == 3u) {
+        break;
+      }
+    }
+  }
 }
 
 void dump_perimeter_trace(const char *path) {
@@ -53,8 +329,9 @@ void dump_perimeter_trace(const char *path) {
     const auto &e = g_perimeter_trace[idx];
     if (e.cycle == 0 && e.pc == 0) continue;
     std::fprintf(f,
-        "[%zu/%zu] pc=0x%08X reg[%u] old=0x%08X new=0x%08X cyc=%llu src=%s\n",
+        "[%zu/%zu] pc=0x%08X reg[%u] old=0x%08X new=0x%08X src_addr=0x%08X rs=0x%08X rt=0x%08X cyc=%llu src=%s\n",
         t, count, e.pc, e.reg_index, e.old_val, e.new_val,
+        e.source_addr, e.rs_value, e.rt_value,
         (unsigned long long)e.cycle, e.source);
   }
   std::fclose(f);
@@ -402,6 +679,27 @@ void log_suspicious_ra_write(System *sys, u32 pc, u32 old_ra, u32 new_ra,
   }
 }
 
+void log_suspicious_s8_write(System *sys, u32 pc, u32 old_s8, u32 new_s8,
+                             u32 sp, u32 ra, const char *source) {
+  static u32 logged_count = 0;
+  if (sys == nullptr || logged_count >= 128u) {
+    return;
+  }
+
+  ++logged_count;
+  const u32 code_addr = pc & 0x1FFFFFFFu;
+  LOG_WARN(
+      "CPU: suspicious s8 %s pc=0x%08X old_s8=0x%08X new_s8=0x%08X "
+      "sp=0x%08X ra=0x%08X",
+      source, pc, old_s8, new_s8, sp, ra);
+  LOG_WARN(
+      "CPU: suspicious s8 code %08X=%08X %08X=%08X %08X=%08X",
+      code_addr - 4u, sys->read32(code_addr - 4u), code_addr,
+      sys->read32(code_addr), code_addr + 4u, sys->read32(code_addr + 4u));
+  log_stack_window(sys, "CPU: suspicious s8 frame", sp);
+  sys->debug_log_recent_ram_writes(sp, 0x80u, "CPU");
+}
+
 const char *exception_name(Exception cause) {
   switch (cause) {
   case Exception::Interrupt:
@@ -479,6 +777,15 @@ void Cpu::init(System *sys) {
 
 void Cpu::reset() {
   std::memset(gpr_, 0, sizeof(gpr_));
+  g_perimeter_trace.fill({});
+  g_latest_perimeter_write.fill({});
+  g_has_latest_perimeter_write.fill(false);
+  g_perimeter_idx = 0;
+  g_perimeter_has_written = false;
+  g_gte_sqr_trace = {};
+  g_spatial_grid_high_index_trace.fill({});
+  g_spatial_grid_high_index_trace_next = 0;
+  g_spatial_grid_high_index_trace_count = 0;
   pc_ = 0xBFC00000; // BIOS entry point
   next_pc_ = pc_ + 4;
   current_pc_ = 0;
@@ -501,6 +808,14 @@ void Cpu::reset() {
   cycles_ = 0;
   gte_input_ready_cycle_ = 0;
   gte_result_ready_cycle_ = 0;
+  last_gte_command_cycle_ = 0;
+  last_gte_command_pc_ = 0;
+  last_gte_command_ = 0;
+  g_collision_selection_trace = {};
+  last_scratchpad_control_transfer_cycle_ = 0;
+  last_scratchpad_control_transfer_pc_ = 0;
+  last_scratchpad_control_transfer_instruction_ = 0;
+  last_scratchpad_control_transfer_target_ = 0;
   muldiv_result_ready_cycle_ = 0;
   cycle_penalty_ = 0;
   executing_step_ = false;
@@ -613,7 +928,12 @@ void Cpu::set_reg(u32 index, u32 value) {
       }
     }
 
-    if ((index == 5 || index == 30) && (value & 3u) != 0u) {
+    if (index == 30 && (value & 3u) != 0u) {
+      log_suspicious_s8_write(sys_, current_pc_, gpr_[30], value, gpr_[29],
+                              gpr_[31], "register write");
+    }
+
+    if (index == 5 && (value & 3u) != 0u) {
       static u32 unaligned_reg_count = 0;
       if (unaligned_reg_count < 64u) {
         ++unaligned_reg_count;
@@ -634,7 +954,21 @@ void Cpu::set_reg(u32 index, u32 value) {
   if (next_load_.reg == index) {
     next_load_.reg = 0;
   }
-  trace_perimeter(current_pc_, index, gpr_[index], value, cycles_, "set_reg");
+  // Retain operands for the resource-selector dataflow in the existing
+  // fault-only ring. This avoids an instruction trace while preserving the
+  // packed selector, record index, and final table index on an address fault.
+  u32 source_rs_value = 0;
+  u32 source_rt_value = 0;
+  if ((index == 1 || index == 2 || index == 3 || index == 4 ||
+       index == 5 || index == 8 || index == 20 || index == 23 ||
+       index == 24) &&
+      sys_ != nullptr) {
+    const u32 instruction = sys_->read32_instruction(current_pc_);
+    source_rs_value = gpr_[(instruction >> 21) & 0x1Fu];
+    source_rt_value = gpr_[(instruction >> 16) & 0x1Fu];
+  }
+  trace_perimeter(current_pc_, index, gpr_[index], value, cycles_, "set_reg",
+                  0, source_rs_value, source_rt_value);
   gpr_[index] = value;
 }
 
@@ -673,15 +1007,19 @@ void Cpu::write_cop0_reg(u32 index, u32 value) {
     cop0_regs_[index] = value;
     break;
   case 6:
-    // Match DuckStation/hardware-facing behavior: this debug-oriented
-    // register is not software-writable in normal guest execution.
+    //this debug-oriented register is not software-writable in normal guest execution.
     break;
   case 8:
     // BadVaddr is exception-written, not guest-written.
     break;
-  case 12:
-    cop0_sr_ = value;
+  case 12: {
+    // PS1 SR write mask: bits 0-5, 8-15, 16, 22, 25, 28-31 are writable.
+    // Bits 6-7, 20-21, 23-24, 26-27 are hardwired to 0.
+    static constexpr u32 kSRWriteMask =
+        0b1111'0010'0111'1111'1111'1111'0011'1111u;
+    cop0_sr_ = (cop0_sr_ & ~kSRWriteMask) | (value & kSRWriteMask);
     break;
+  }
   case 13:
     // Only SW interrupt pending bits are writable.
     cop0_cause_ = (cop0_cause_ & ~0x300u) | (value & 0x300u);
@@ -709,8 +1047,11 @@ void Cpu::advance_load_delay() {
                               gpr_[29]);
     }
   }
-  if (cpu_diag_enabled() && (load_.reg == 5 || load_.reg == 30) &&
-      (load_.value & 3u) != 0u) {
+  if (cpu_diag_enabled() && load_.reg == 30 && (load_.value & 3u) != 0u) {
+    log_suspicious_s8_write(sys_, current_pc_ - 4u, gpr_[30], load_.value,
+                            gpr_[29], gpr_[31], "load commit");
+  }
+  if (cpu_diag_enabled() && load_.reg == 5 && (load_.value & 3u) != 0u) {
     static u32 unaligned_load_count = 0;
     if (unaligned_load_count < 64u) {
       ++unaligned_load_count;
@@ -723,8 +1064,8 @@ void Cpu::advance_load_delay() {
     }
   }
   if (load_.reg != 0) {
-    trace_perimeter(current_pc_, load_.reg, gpr_[load_.reg], load_.value,
-                    cycles_, "advance");
+    trace_perimeter(load_.source_pc, load_.reg, gpr_[load_.reg], load_.value,
+                    cycles_, "advance", load_.source_addr);
     gpr_[load_.reg] = load_.value;
   }
   load_ = next_load_;
@@ -741,8 +1082,11 @@ void Cpu::flush_load_delay() {
                               gpr_[29]);
     }
   }
-  if (cpu_diag_enabled() && (load_.reg == 5 || load_.reg == 30) &&
-      (load_.value & 3u) != 0u) {
+  if (cpu_diag_enabled() && load_.reg == 30 && (load_.value & 3u) != 0u) {
+    log_suspicious_s8_write(sys_, current_pc_ - 4u, gpr_[30], load_.value,
+                            gpr_[29], gpr_[31], "exception load flush");
+  }
+  if (cpu_diag_enabled() && load_.reg == 5 && (load_.value & 3u) != 0u) {
     static u32 unaligned_flush_count = 0;
     if (unaligned_flush_count < 64u) {
       ++unaligned_flush_count;
@@ -755,14 +1099,14 @@ void Cpu::flush_load_delay() {
     }
   }
   if (load_.reg != 0) {
-    trace_perimeter(current_pc_, load_.reg, gpr_[load_.reg], load_.value,
-                    cycles_, "flush");
+    trace_perimeter(load_.source_pc, load_.reg, gpr_[load_.reg], load_.value,
+                    cycles_, "flush", load_.source_addr);
     gpr_[load_.reg] = load_.value;
   }
   load_ = {0, 0};
 }
 
-void Cpu::schedule_load(u32 index, u32 value) {
+void Cpu::schedule_load(u32 index, u32 value, u32 source_addr) {
   if (index == 0) {
     next_load_ = {0, 0};
     return;
@@ -770,7 +1114,7 @@ void Cpu::schedule_load(u32 index, u32 value) {
   if (load_.reg == index) {
     load_.reg = 0;
   }
-  next_load_ = {index, value};
+  next_load_ = {index, value, current_pc_, source_addr};
 }
 
 void Cpu::add_cycle_penalty(u32 cycles) {
@@ -1033,6 +1377,8 @@ void Cpu::store32(u32 addr, u32 value) {
     return;
   }
   // Check if cache is isolated (COP0 SR bit 16)
+  // When Isc=1, stores target the ICache and invalidate the line.
+  // The BIOS FlushCache routine relies on this to invalidate all lines.
   if (cop0_sr_ & (1u << 16)) {
     invalidate_icache_line(addr);
     return;
@@ -1051,6 +1397,7 @@ void Cpu::store16(u32 addr, u16 value) {
     return;
   }
   if (cop0_sr_ & (1u << 16)) {
+    // Isc=1: stores hit the ICache and invalidate the line.
     invalidate_icache_line(addr);
     return;
   }
@@ -1060,6 +1407,7 @@ void Cpu::store16(u32 addr, u16 value) {
 
 void Cpu::store8(u32 addr, u8 value) {
   if (cop0_sr_ & (1u << 16)) {
+    // Isc=1: stores hit the ICache and invalidate the line.
     invalidate_icache_line(addr);
     return;
   }
@@ -1072,6 +1420,15 @@ void Cpu::store8(u32 addr, u8 value) {
 void Cpu::exception(Exception cause) {
   static u32 logged_exception_count = 0;
   exception_raised_ = true;
+
+  // An exception flushes a pending load on the R3000A.  Preserve the state
+  // observed by the faulting instruction first: otherwise the diagnostic
+  // register dump can show the value committed by that flush rather than the
+  // register value used to form BadVAddr.
+  u32 fault_gpr[32];
+  std::memcpy(fault_gpr, gpr_, sizeof(fault_gpr));
+  const PendingLoad fault_load = load_;
+  const PendingLoad fault_next_load = next_load_;
   flush_load_delay();
   // Clear synthetic GTE timing anchors so the exception handler never inherits
   // phantom result/input stall constraints from the interrupted code path.
@@ -1108,6 +1465,9 @@ void Cpu::exception(Exception cause) {
   if (in_delay_slot_) {
     cop0_epc_ = active_branch_pc_ != 0 ? active_branch_pc_ : (current_pc_ - 4);
     cop0_cause_ |= (1u << 31); // BD (Branch Delay) bit
+    // TAR is set to the address of the instruction in the delay slot (PC of current instruction + 4).
+    // This is the "next instruction to execute if the exception hadn't occurred".
+    cop0_jumpdest_ = current_pc_ + 4;
   } else {
     cop0_epc_ = current_pc_;
     cop0_cause_ &= ~(1u << 31);
@@ -1162,16 +1522,55 @@ void Cpu::exception(Exception cause) {
                static_cast<unsigned long long>(cycles_));
       if (sys_ != nullptr) {
         const u32 phys_pc = current_pc_ & 0x1FFFFFFFu;
+        const u32 fault_instruction = sys_->read32(phys_pc);
+        const u32 fault_rs = (fault_instruction >> 21) & 0x1Fu;
+        const u32 fault_rt = (fault_instruction >> 16) & 0x1Fu;
+        const u32 fault_addr =
+            fault_gpr[fault_rs] + static_cast<u32>(
+                                      static_cast<s32>(static_cast<s16>(
+                                          fault_instruction & 0xFFFFu)));
         LOG_WARN(
-            "CPU: AdEL ctx epc=0x%08X cause=0x%08X ra=0x%08X sp=0x%08X "
+            "CPU: AdEL pre-fault epc=0x%08X cause=0x%08X ra=0x%08X sp=0x%08X "
             "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X",
-            cop0_epc_, cop0_cause_, gpr_[31], gpr_[29], gpr_[2], gpr_[3],
-            gpr_[4], gpr_[5], gpr_[6], gpr_[7]);
+            cop0_epc_, cop0_cause_, fault_gpr[31], fault_gpr[29],
+            fault_gpr[2], fault_gpr[3], fault_gpr[4], fault_gpr[5],
+            fault_gpr[6], fault_gpr[7]);
         LOG_WARN(
-            "CPU: AdEL saved s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
-            "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X",
-            gpr_[16], gpr_[17], gpr_[18], gpr_[19], gpr_[20], gpr_[21],
-            gpr_[22], gpr_[23]);
+            "CPU: AdEL pre-fault saved s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X "
+            "s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X s8=0x%08X",
+            fault_gpr[16], fault_gpr[17], fault_gpr[18], fault_gpr[19],
+            fault_gpr[20], fault_gpr[21], fault_gpr[22], fault_gpr[23],
+            fault_gpr[30]);
+        LOG_WARN(
+            "CPU: AdEL operand instr=0x%08X rs=%u base=0x%08X rt=%u "
+            "effective=0x%08X pending_load=r%u:0x%08X next_load=r%u:0x%08X",
+            fault_instruction, fault_rs, fault_gpr[fault_rs], fault_rt,
+            fault_addr, fault_load.reg, fault_load.value, fault_next_load.reg,
+            fault_next_load.value);
+        LOG_WARN(
+            "CPU: last GTE command pc=0x%08X instr=0x%08X opcode=0x%02X "
+            "cyc=%llu",
+            last_gte_command_pc_, last_gte_command_,
+            last_gte_command_ & 0x3Fu,
+            static_cast<unsigned long long>(last_gte_command_cycle_));
+        if (last_gte_command_pc_ == g_gte_sqr_trace.pc) {
+          log_gte_sqr_trace();
+          log_collision_selection_trace(sys_);
+        }
+        log_spatial_grid_high_index_trace();
+        LOG_WARN(
+            "CPU: last scratchpad control transfer pc=0x%08X instr=0x%08X "
+            "target=0x%08X cyc=%llu",
+            last_scratchpad_control_transfer_pc_,
+            last_scratchpad_control_transfer_instruction_,
+            last_scratchpad_control_transfer_target_,
+            static_cast<unsigned long long>(
+                last_scratchpad_control_transfer_cycle_));
+        sys_->debug_log_recent_scratchpad_stores("CPU");
+        log_register_provenance(
+            sys_, std::array<u32, 16>{fault_rs, 1u, 2u, 3u, 9u, 4u, 5u,
+                                       6u,       7u, 8u, 20u, 23u, 24u,
+                                       29u,      30u, 31u});
         LOG_WARN(
             "CPU: AdEL code %08X=%08X %08X=%08X %08X=%08X %08X=%08X %08X=%08X",
             phys_pc - 0x08u, sys_->read32(phys_pc - 0x08u), phys_pc - 0x04u,
@@ -1179,7 +1578,7 @@ void Cpu::exception(Exception cause) {
             sys_->read32(phys_pc + 0x00u), phys_pc + 0x04u,
             sys_->read32(phys_pc + 0x04u), phys_pc + 0x08u,
             sys_->read32(phys_pc + 0x08u));
-        log_stack_window(sys_, "CPU: AdEL frame", gpr_[29]);
+        log_stack_window(sys_, "CPU: AdEL pre-fault frame", fault_gpr[29]);
         dump_perimeter_trace("perimeter_crash_dump.txt");
       }
     } else {
@@ -2034,6 +2433,21 @@ u32 Cpu::read_instruction_for_backend(u32 addr) const {
 }
 
 void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
+  // DMA and bus writes can replace executable overlays.  The interpreter uses
+  // its own I-cache, so invalidating only the optimized backend leaves it
+  // executing stale instructions after a CD DMA transfer.
+  if (size_bytes != 0u) {
+    const u32 first = psx::mask_address(phys_or_normalized_addr) & ~0x0Fu;
+    const u32 last = psx::mask_address(
+                         phys_or_normalized_addr + size_bytes - 1u) &
+                     ~0x0Fu;
+    for (u32 line = first;; line += 0x10u) {
+      icache_[(line >> 4) & 0xFFu].valid = false;
+      if (line == last) {
+        break;
+      }
+    }
+  }
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
@@ -2376,6 +2790,13 @@ void Cpu::op_srav(u32 i) {
 
 void Cpu::op_jr(u32 i) {
   const u32 target = gpr_[rs(i)];
+  if ((target & 0x1FFFFFFFu) >= 0x1F800000u &&
+      (target & 0x1FFFFFFFu) < 0x1F800400u) {
+    last_scratchpad_control_transfer_pc_ = current_pc_;
+    last_scratchpad_control_transfer_instruction_ = i;
+    last_scratchpad_control_transfer_target_ = target;
+    last_scratchpad_control_transfer_cycle_ = cycles_;
+  }
   if (cpu_diag_enabled()) {
     if (target == 0u) {
       log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
@@ -2392,6 +2813,13 @@ void Cpu::op_jr(u32 i) {
 
 void Cpu::op_jalr(u32 i) {
   const u32 target = gpr_[rs(i)];
+  if ((target & 0x1FFFFFFFu) >= 0x1F800000u &&
+      (target & 0x1FFFFFFFu) < 0x1F800400u) {
+    last_scratchpad_control_transfer_pc_ = current_pc_;
+    last_scratchpad_control_transfer_instruction_ = i;
+    last_scratchpad_control_transfer_target_ = target;
+    last_scratchpad_control_transfer_cycle_ = cycles_;
+  }
   if (cpu_diag_enabled()) {
     if (target == 0u) {
       log_zero_target_jump(sys_, current_pc_, gpr_, rs(i));
@@ -2602,6 +3030,29 @@ void Cpu::op_bcondz(u32 i) {
   const s32 val = static_cast<s32>(gpr_[rs(i)]);
   const bool taken = bgez ? (val >= 0) : (val < 0);
 
+  // The SQR scene-query loop continues while the residual is non-negative.
+  // A negative result accepts the current record and falls through to its
+  // parser.  This is deliberately keyed to the live SQR PC rather than an
+  // absolute overlay address: Spyro relocates this routine at runtime.
+  if (bgez && !likely && !link && rs(i) == 4u && !taken &&
+      g_gte_sqr_trace.valid &&
+      current_pc_ == g_gte_sqr_trace.pc + 0x3Cu) {
+    g_collision_selection_trace = {
+        true,
+        g_gte_sqr_trace.pc,
+        current_pc_,
+        gpr_[30],
+        gpr_[29],
+        static_cast<s32>(gpr_[1]),
+        static_cast<s32>(gpr_[2]),
+        static_cast<s32>(gpr_[3]),
+        val,
+        gpr_[9],
+        lo_,
+        cycles_ + static_cast<u64>(cycle_penalty_),
+    };
+  }
+
   if (likely && !taken) {
     // Branch-likely: not taken annuls the delay slot.
     pc_ = next_pc_;
@@ -2771,12 +3222,12 @@ void Cpu::op_lb(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
   u8 val = load8(addr);
   // Load delay: value takes effect after the next instruction
-  schedule_load(rt(i), static_cast<u32>(sign_extend_8(val)));
+  schedule_load(rt(i), static_cast<u32>(sign_extend_8(val)), addr);
 }
 
 void Cpu::op_lbu(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
-  schedule_load(rt(i), load8(addr));
+  schedule_load(rt(i), load8(addr), addr);
 }
 
 void Cpu::op_lh(u32 i) {
@@ -2784,7 +3235,7 @@ void Cpu::op_lh(u32 i) {
   u16 val = load16(addr);
   if (exception_raised_)
     return;
-  schedule_load(rt(i), static_cast<u32>(sign_extend_16(val)));
+  schedule_load(rt(i), static_cast<u32>(sign_extend_16(val)), addr);
 }
 
 void Cpu::op_lhu(u32 i) {
@@ -2792,7 +3243,7 @@ void Cpu::op_lhu(u32 i) {
   u16 val = load16(addr);
   if (exception_raised_)
     return;
-  schedule_load(rt(i), val);
+  schedule_load(rt(i), val, addr);
 }
 
 void Cpu::op_lw(u32 i) {
@@ -2819,10 +3270,11 @@ void Cpu::op_lw(u32 i) {
   u32 val = load32(addr);
   if (exception_raised_)
     return;
+  note_spatial_grid_high_index_lookup(current_pc_, phys, val, gpr_, cycles_);
   if (cpu_diag_enabled() && rt(i) == 31 && !is_plausible_exec_addr(val)) {
     log_suspicious_ra_load(sys_, current_pc_, gpr_, addr, val);
   }
-  schedule_load(rt(i), val);
+  schedule_load(rt(i), val, addr);
 }
 
 void Cpu::op_lwl(u32 i) {
@@ -2852,7 +3304,7 @@ void Cpu::op_lwl(u32 i) {
     result = 0;
     break;
   }
-  schedule_load(rt(i), result);
+  schedule_load(rt(i), result, addr);
 }
 
 void Cpu::op_lwr(u32 i) {
@@ -2881,7 +3333,7 @@ void Cpu::op_lwr(u32 i) {
     result = 0;
     break;
   }
-  schedule_load(rt(i), result);
+  schedule_load(rt(i), result, addr);
 }
 
 // ── Store Instructions ─────────────────────────────────────────────
@@ -2937,6 +3389,14 @@ void Cpu::op_sw(u32 i) {
   rr4_diag::on_op_sw(rr4_diag_state_, current_pc_, i, addr, store_val, gpr_,
                      cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
   store32(addr, store_val);
+  PerimeterTraceEntry value_producer = {};
+  const u32 source_reg = rt(i);
+  if (latest_perimeter_write(source_reg, &value_producer)) {
+    sys_->debug_note_scratchpad_store_value_producer(
+        addr, store_val, source_reg, value_producer.pc,
+        sys_->read32(value_producer.pc & 0x1FFFFFFFu),
+        value_producer.source_addr, gpr_[2], gpr_[8]);
+  }
 }
 
 void Cpu::op_swl(u32 i) {
@@ -3100,7 +3560,33 @@ void Cpu::op_cop2(u32 i) {
     if (sub & 0x10) {
       add_cycle_penalty(
           std::max(gte_result_stall_cycles(), gte_input_stall_cycles()));
+      last_gte_command_pc_ = current_pc_;
+      last_gte_command_ = i;
+      last_gte_command_cycle_ =
+          cycles_ + static_cast<u64>(cycle_penalty_);
+      const bool is_sqr = (i & 0x3Fu) == 0x28u;
+      const u32 ir1 = is_sqr ? gte.read_data(9) : 0u;
+      const u32 ir2 = is_sqr ? gte.read_data(10) : 0u;
+      const u32 ir3 = is_sqr ? gte.read_data(11) : 0u;
+      if (is_sqr) {
+        // A selection belongs to one SQR command only.  Do not let an older
+        // scene-query result be printed beside an unrelated later SQR fault.
+        g_collision_selection_trace = {};
+      }
       gte.execute(i);
+      if (is_sqr) {
+        g_gte_sqr_trace = {true,
+                           current_pc_,
+                           i,
+                           ir1,
+                           ir2,
+                           ir3,
+                           gte.read_data(25),
+                           gte.read_data(26),
+                           gte.read_data(27),
+                           gte.read_ctrl(31),
+                           cycles_ + static_cast<u64>(cycle_penalty_)};
+      }
       gte_result_ready_cycle_ = cycles_ + static_cast<u64>(cycle_penalty_) +
           static_cast<u64>(gte_command_cycles(i));
     } else {

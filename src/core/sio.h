@@ -59,6 +59,7 @@ public:
   u16 joy_ctrl_snapshot() const { return ctrl_; }
   u64 irq_assert_count() const { return irq_assert_count_; }
   u64 irq_ack_count() const { return irq_ack_count_; }
+  void debug_log_recent_transfers(const char *log_prefix = "SIO") const;
 
 private:
   enum class TransferState : u8 {
@@ -72,6 +73,20 @@ private:
     Controller,
     MemoryCard,
   };
+
+  struct TransferTraceEntry {
+    u64 cycle = 0;
+    u16 ctrl = 0;
+    u16 stat = 0;
+    u8 host_byte = 0;
+    u8 device_byte = 0;
+    u8 active_before = 0;
+    u8 active_after = 0;
+    bool ack = false;
+    bool ack_pulse = false;
+  };
+
+  static constexpr size_t kTransferTraceSize = 128;
 
   void rebuild_stat();
   bool is_transmitting() const;
@@ -128,4 +143,7 @@ private:
   u64 invalid_sequence_count_ = 0;
   u64 irq_assert_count_ = 0;
   u64 irq_ack_count_ = 0;
+  std::array<TransferTraceEntry, kTransferTraceSize> transfer_trace_{};
+  u32 transfer_trace_next_ = 0;
+  u32 transfer_trace_count_ = 0;
 };

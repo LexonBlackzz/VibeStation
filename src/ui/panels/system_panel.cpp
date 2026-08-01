@@ -90,10 +90,9 @@ void App::draw_system_panel() {
                 ImGui::Text("Rewind");
                 if (ImGui::Checkbox("Enable Rewind (Hold Right Ctrl)",
                     &config_rewind_enabled_)) {
-                    if (config_rewind_enabled_) {
-                        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
-                            static_cast<int>(system_ ? system_->target_fps() : 60.0));
-                    }
+                    emu_runner_.configure_rewind(config_rewind_enabled_,
+                        config_rewind_buffer_seconds_,
+                        static_cast<int>(system_ ? system_->target_fps() : 60.0));
                     save_persistent_config();
                 }
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),

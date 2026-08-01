@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <array>
 #include <vector>
 
 // ── DMA Controller ─────────────────────────────────────────────────
@@ -53,6 +54,7 @@ struct DmaChannel {
 class DmaController {
 public:
   struct TransferDebug {
+    u32 id = 0;
     u32 base_addr = 0;
     u32 block_ctrl = 0;
     u32 channel_ctrl = 0;
@@ -60,7 +62,21 @@ public:
     u32 first_addr = 0;
     u32 last_addr = 0;
     u64 cpu_cycle = 0;
+    u64 cd_stream_generation = 0;
+    s32 source_lba = -1;
+    s32 cd_stream_start_lba = -1;
+    s32 cd_next_read_lba = -1;
+    u32 cd_buffer_state = 0;
+    u32 cd_command_state = 0;
     bool from_ram = false;
+  };
+  struct RegisterWriteDebug {
+    u32 madr_pc = 0;
+    u32 bcr_pc = 0;
+    u32 chcr_pc = 0;
+    u64 madr_cycle = 0;
+    u64 bcr_cycle = 0;
+    u64 chcr_cycle = 0;
   };
 
   void init(System *sys) { sys_ = sys; }
@@ -76,11 +92,26 @@ public:
   const TransferDebug &last_debug(int channel) const {
     return last_debug_[channel & 0x7];
   }
+  u32 active_transfer_debug_id(int channel) const {
+    return active_transfer_debug_id_[channel & 0x7];
+  }
+  const TransferDebug *transfer_debug(u32 id) const;
+  const RegisterWriteDebug &last_register_write_debug(int channel) const {
+    return register_write_debug_[channel & 0x7];
+  }
 
 private:
   System *sys_ = nullptr;
   DmaChannel channels_[7];
   TransferDebug last_debug_[7];
+  // Spyro performs a very large number of short CD DMA slices before the
+  // eventual fault. Keep a session-scale history so RAM provenance still
+  // resolves the original transfer rather than falling back to the newest one.
+  static constexpr size_t kTransferDebugHistorySize = 262144u;
+  std::array<TransferDebug, kTransferDebugHistorySize> transfer_debug_history_{};
+  std::array<u32, 7> active_transfer_debug_id_{};
+  u32 next_transfer_debug_id_ = 0;
+  RegisterWriteDebug register_write_debug_[7];
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register

@@ -284,7 +284,10 @@ void Timers::process_sync_event(int index, bool active) {
 
   switch (t.sync_mode()) {
   case 1:
-    if (!active) {
+    // Modes 1 and 2 reset the counter on the blanking edge.  The edge is
+    // the start of the interval, not its trailing edge; resetting on the
+    // latter incorrectly includes an entire blank period in mode 1.
+    if (active) {
       t.counter = 0;
     }
     break;
@@ -294,7 +297,9 @@ void Timers::process_sync_event(int index, bool active) {
     }
     break;
   case 3:
-    if (!active) {
+    // Mode 3 pauses only until the first blanking edge.  The counter is
+    // released when blanking begins, not when it ends.
+    if (active) {
       t.sync_released = true;
     }
     break;

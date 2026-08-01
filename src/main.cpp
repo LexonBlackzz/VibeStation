@@ -43,6 +43,7 @@ static AutoInputConfig g_auto_input_legacy;
 
 // Input recording/playback
 static InputRecorder::Config g_input_recorder_config;
+static std::array<std::string, 2> g_boot_memory_card_paths;
 
 static bool parse_psx_button_name(const std::string &name, PsxButton &button) {
   std::string v = name;
@@ -1742,6 +1743,23 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
     }
     return 1;
   }
+  for (u32 slot = 0; slot < g_boot_memory_card_paths.size(); ++slot) {
+    const std::string &path = g_boot_memory_card_paths[slot];
+    if (path.empty()) {
+      continue;
+    }
+    if (!sys->set_memory_card_slot(slot, path)) {
+      LOG_ERROR("BOOT_TEST_FAIL reason=memory_card_load slot=%u path=%s",
+                slot, path.c_str());
+      if (owns_log && g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
+    LOG_INFO("BOOT_TEST memory_card slot=%u path=%s", slot, path.c_str());
+  }
 
   bool saw_cd_command = false;
   bool saw_cd_sector = false;
@@ -1799,6 +1817,11 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+
+    if (g_frame_state_log_frames != 0u &&
+        (static_cast<u32>(i + 1) % g_frame_state_log_frames) == 0u) {
+      sys->debug_log_frame_state();
+    }
 
     const u32 pc = sys->cpu().pc();
     const PcBand band = classify_pc_band(pc);
@@ -2422,6 +2445,16 @@ int main(int argc, char *argv[]) {
     if (a == "--frame-state-log-frames" && (i + 1) < args.size()) {
       g_frame_state_log_frames =
           static_cast<u32>(std::max(1, std::atoi(args[i + 1].c_str())));
+      ++i;
+      continue;
+    }
+    if (a == "--boot-card0" && (i + 1) < args.size()) {
+      g_boot_memory_card_paths[0] = args[i + 1];
+      ++i;
+      continue;
+    }
+    if (a == "--boot-card1" && (i + 1) < args.size()) {
+      g_boot_memory_card_paths[1] = args[i + 1];
       ++i;
       continue;
     }

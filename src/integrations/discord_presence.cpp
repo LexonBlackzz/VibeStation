@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -212,15 +213,25 @@ bool DiscordPresence::prepare_runtime_dependency() {
         return false;
     }
 
-    wchar_t module_path[MAX_PATH] = {};
-    const DWORD module_len = GetModuleFileNameW(nullptr, module_path, MAX_PATH);
-    if (module_len == 0 || module_len >= MAX_PATH) {
-        impl_->status_text = "Failed to resolve executable path for Discord SDK extraction";
-        return false;
+    std::filesystem::path output_dir;
+    const wchar_t* local_app_data = _wgetenv(L"LOCALAPPDATA");
+    if (local_app_data != nullptr && local_app_data[0] != L'\0') {
+        output_dir = std::filesystem::path(local_app_data) / L"VibeStation";
+    } else {
+        wchar_t module_path[MAX_PATH] = {};
+        const DWORD module_len = GetModuleFileNameW(nullptr, module_path, MAX_PATH);
+        if (module_len == 0 || module_len >= MAX_PATH) {
+            impl_->status_text = "Failed to resolve executable path for Discord SDK extraction";
+            return false;
+        }
+        output_dir = std::filesystem::path(module_path).parent_path();
     }
 
+    std::error_code dir_ec;
+    std::filesystem::create_directories(output_dir, dir_ec);
+
     const std::filesystem::path output_path =
-        std::filesystem::path(module_path).parent_path() / "discord_partner_sdk.dll";
+        output_dir / "discord_partner_sdk.dll";
 
     bool needs_write = true;
     std::error_code ec;

@@ -389,7 +389,8 @@ void EmuRunner::worker_main() {
         }
 
         // Capture rewind snapshot after each frame
-        if (!skip_audio_for_turbo) {
+        if (!skip_audio_for_turbo &&
+            rewind_enabled_.load(std::memory_order_acquire)) {
             SystemSnapshot snap;
             snap.frame_id = static_cast<u64>(system_->boot_diag().frame_counter);
             if (system_->save_state(snap)) {
@@ -618,11 +619,19 @@ void EmuRunner::worker_main() {
     idle_cv_.notify_all();
 }
 
-void EmuRunner::init_rewind(int buffer_seconds, int fps) {
-    rewind_manager_.init(buffer_seconds, fps);
+void EmuRunner::configure_rewind(bool enabled, int buffer_seconds, int fps) {
     rewind_active_.store(false, std::memory_order_release);
+    if (enabled) {
+        rewind_manager_.init(buffer_seconds, fps);
+        rewind_enabled_.store(true, std::memory_order_release);
+    } else {
+        rewind_enabled_.store(false, std::memory_order_release);
+        rewind_manager_.clear();
+    }
 }
 
 void EmuRunner::set_rewind_active(bool active) {
-    rewind_active_.store(active, std::memory_order_release);
+    rewind_active_.store(
+        active && rewind_enabled_.load(std::memory_order_acquire),
+        std::memory_order_release);
 }

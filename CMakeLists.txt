@@ -211,7 +211,6 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
     if(VIBESTATION_DISCORD_INCLUDE_DIR AND VIBESTATION_DISCORD_LIBRARY)
         target_compile_definitions(VibeStation PRIVATE VIBESTATION_HAS_DISCORD_SDK=1)
         target_include_directories(VibeStation PRIVATE ${VIBESTATION_DISCORD_INCLUDE_DIR})
-        target_link_libraries(VibeStation PRIVATE ${VIBESTATION_DISCORD_LIBRARY})
 
         find_file(VIBESTATION_DISCORD_DLL
             NAMES discord_partner_sdk.dll
@@ -249,6 +248,42 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
             endif()
         endif()
 
+        # Delay-load the SDK so the exe can start without the DLL present and
+        # extract the embedded copy first. MSVC uses /DELAYLOAD; MinGW needs a
+        # dlltool-generated delay-import library instead of the MSVC .lib.
+        set(VIBESTATION_DISCORD_LINK_LIB "${VIBESTATION_DISCORD_LIBRARY}")
+        if(MINGW AND VIBESTATION_DISCORD_DLL)
+            find_program(VIBESTATION_GENDEF_TOOL gendef)
+            find_program(VIBESTATION_DLLTOOL_TOOL dlltool)
+            if(VIBESTATION_GENDEF_TOOL AND VIBESTATION_DLLTOOL_TOOL)
+                set(VIBESTATION_DISCORD_DELAY_DEF
+                    "${CMAKE_CURRENT_BINARY_DIR}/discord_partner_sdk.def")
+                set(VIBESTATION_DISCORD_DELAY_LIB
+                    "${CMAKE_CURRENT_BINARY_DIR}/libdiscord_partner_sdk_delay.a")
+                add_custom_command(
+                    OUTPUT ${VIBESTATION_DISCORD_DELAY_LIB}
+                    COMMAND ${VIBESTATION_GENDEF_TOOL} ${VIBESTATION_DISCORD_DLL}
+                    COMMAND ${VIBESTATION_DLLTOOL_TOOL}
+                            -d ${VIBESTATION_DISCORD_DELAY_DEF}
+                            -D discord_partner_sdk.dll
+                            -y ${VIBESTATION_DISCORD_DELAY_LIB}
+                    DEPENDS ${VIBESTATION_DISCORD_DLL}
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                    COMMENT "Generating delay-import library for discord_partner_sdk.dll"
+                    VERBATIM)
+                add_custom_target(vibestation_discord_delaylib
+                    DEPENDS ${VIBESTATION_DISCORD_DELAY_LIB})
+                add_dependencies(VibeStation vibestation_discord_delaylib)
+                set(VIBESTATION_DISCORD_LINK_LIB
+                    "${VIBESTATION_DISCORD_DELAY_LIB}" delayimp)
+            else()
+                message(WARNING
+                    "gendef/dlltool not found; linking Discord SDK import library "
+                    "directly. The exe will require discord_partner_sdk.dll at startup.")
+            endif()
+        endif()
+        target_link_libraries(VibeStation PRIVATE ${VIBESTATION_DISCORD_LINK_LIB})
+
         message(STATUS "Discord Social SDK enabled from ${VIBESTATION_DISCORD_SDK_ROOT}")
     elseif(VIBESTATION_DISCORD_SDK_ROOT)
         message(WARNING
@@ -265,6 +300,12 @@ endif()
 if(MSVC)
     target_compile_options(VibeStation PRIVATE /W3 /permissive-)
     target_compile_definitions(VibeStation PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# MinGW: statically link the GCC runtime so the exe does not depend on
+# libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll at runtime.
+if(MINGW)
+    target_link_options(VibeStation PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 option(VIBESTATION_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)

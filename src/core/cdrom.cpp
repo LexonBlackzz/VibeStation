@@ -404,6 +404,8 @@ void CdRom::reset() {
   seek_ss_ = 0;
   seek_ff_ = 0;
   read_lba_ = 0;
+  stream_generation_ = 0;
+  stream_start_lba_ = -1;
   pending_cycles_ = 0;
   read_period_cycles_ = read_period_for_mode();
   command_busy_ = false;
@@ -679,6 +681,8 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   seek_ss_ = 0;
   seek_ff_ = 0;
   read_lba_ = 0;
+  stream_generation_ = 0;
+  stream_start_lba_ = -1;
   pending_cycles_ = 0;
   seek_target_lba_ = 0;
   seek_target_valid_ = false;
@@ -865,31 +869,41 @@ int CdRom::read_period_for_mode() const {
 }
 
 int CdRom::command_busy_for(u8 cmd) const {
+  // These represent the minimum delay between successive commands on real
+  // PS1 hardware. Games depend on accurate command busy times to avoid
+  // issuing commands before the drive has finished processing the previous one.
   switch (cmd) {
   case 0x01: // GetStat
-  case 0x10: // GetlocL
-  case 0x11: // GetlocP
-    return 1200;
+    return 15000;
   case 0x02: // Setloc
-  case 0x0E: // Setmode
-    return 2000;
+    return 15000;
   case 0x03: // Play
+    return 15000;
   case 0x06: // ReadN
-  case 0x1B: // ReadS
-    return 2400;
+    return 15000;
+  case 0x09: // Pause
+    return 15000;
+  case 0x0A: // Init
+    return 15000;
+  case 0x10: // GetlocL
+    return 15000;
+  case 0x11: // GetlocP
+    return 15000;
+  case 0x12: // Setsession
+    return 15000;
   case 0x15: // SeekL
   case 0x16: // SeekP
-    return 10000;
+    return 24000;
   case 0x1A: // GetID
-  case 0x12: // Setsession
+    return 56000;
+  case 0x1B: // ReadS
+    return 15000;
   case 0x1E: // ReadTOC
-    return 4000;
-  case 0x0A: // Init
-    return 6000;
-  case 0x09: // Pause
-    return 4000;
+    return 15000;
+  case 0x0E: // Setmode
+    return 15000;
   default:
-    return 2000;
+    return 15000;
   }
 }
 
@@ -907,6 +921,8 @@ void CdRom::schedule_second_response(int delay_cycles, u8 irq,
 
 void CdRom::start_read_stream(bool reads_mode) {
   clear_read_buffers_for_new_stream();
+  ++stream_generation_;
+  stream_start_lba_ = seek_target_valid_ ? seek_target_lba_ : read_lba_;
   last_sector_location_valid_ = false;
   last_sector_lba_ = -1;
   pending_reads_mode_ = reads_mode;
@@ -924,12 +940,13 @@ void CdRom::start_read_stream(bool reads_mode) {
   if (seek_target_valid_ && seek_target_lba_ != read_lba_) {
     state_ = State::Seeking;
     pending_read_start_ = true;
-    // A real drive does not produce the first ReadN/ReadS data IRQ almost
-    // immediately after a Setloc. Games commonly finish setting up their
-    // sector handler during this window; delivering sectors too early makes
-    // FMV streams skip their first frame headers.
-    const int startup_periods = (reads_mode && read_whole_sector_) ? 8 : 5;
-    pending_cycles_ = std::max(1, read_period_cycles_ * startup_periods);
+    // Real PS1 CD-ROM seek + spin-up takes 200-900ms depending on seek
+    // distance. Use ~200ms (6,774,000 cycles) for short seeks.
+    // Games depend on this delay to set up their sector handlers before
+    // the first data IRQ arrives. Delivering sectors too early causes
+    // FMV streams to skip frame headers and gameplay data corruption.
+    constexpr int kSeekStartupCycles = 6774000;
+    pending_cycles_ = std::max(1, kSeekStartupCycles);
   } else {
     state_ = State::Reading;
     pending_read_start_ = false;
@@ -1486,8 +1503,22 @@ void CdRom::queue_sector_buffer(std::vector<u8> payload, int source_lba,
 }
 
 CdRom::QueuedSectorBuffer CdRom::pop_queued_sector_for_data_ready() {
-  QueuedSectorBuffer next = std::move(queued_sector_buffers_.front());
-  queued_sector_buffers_.pop_front();
+  // A data-ready IRQ describes the sector currently presented by the drive.
+  // If the host missed earlier IRQs, delivering the oldest buffered payload
+  // after it has programmed DMA for a newer request writes a stale sector to
+  // the wrong destination.  Keep the most recent visible sector and discard
+  // the superseded backlog instead.
+  QueuedSectorBuffer next = std::move(queued_sector_buffers_.back());
+  const size_t discarded = queued_sector_buffers_.size() - 1u;
+  queued_sector_buffers_.clear();
+  if (g_log_fmv_diagnostics && discarded != 0u) {
+    static u32 stale_payload_log_count = 0;
+    if (stale_payload_log_count < 128u) {
+      ++stale_payload_log_count;
+      LOG_WARN("CDROM: discarded %zu stale queued sectors; presenting lba=%d",
+               discarded, next.data_lba);
+    }
+  }
   return next;
 }
 
@@ -2139,7 +2170,12 @@ void CdRom::cmd_seekl() {
   pending_read_start_ = false;
   read_startup_pending_ = false;
   state_ = State::Seeking;
-  pending_cycles_ = std::max(1, read_period_cycles_ / 2);
+  // Real PS1 CD-ROM seek takes 200-900ms depending on the seek distance.
+  // Use ~200ms (6,774,000 cycles at 33.8688 MHz) as a reasonable default.
+  // Games depend on accurate seek timing to avoid reading sectors before the
+  // drive has finished seeking to the correct position.
+  constexpr int kSeekCycles = 6774000;
+  pending_cycles_ = std::max(1, kSeekCycles);
   seek_error_ = false;
   enqueue_irq(3, {static_cast<u8>(stat_byte() & ~0x40u)});
   schedule_second_response(33868, 2, {stat_byte()});

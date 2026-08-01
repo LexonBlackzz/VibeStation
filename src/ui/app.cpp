@@ -810,6 +810,12 @@ void App::process_events(bool& quit) {
         if (should_route_keyboard_to_emu(event, io)) {
             input_->process_event(event);
         }
+        // Focus-loss must always reach input, otherwise a routed KEYDOWN can
+        // remain latched when its KEYUP is consumed by the UI.
+        if (event.type == SDL_WINDOWEVENT &&
+            event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+            input_->process_event(event);
+        }
         // Always process gamepad events
         if (event.type == SDL_CONTROLLERDEVICEADDED ||
             event.type == SDL_CONTROLLERDEVICEREMOVED ||
@@ -1435,12 +1441,10 @@ bool App::start_bios_from_ui() {
     if (!start_configured_input_movie()) {
         return false;
     }
+    emu_runner_.configure_rewind(config_rewind_enabled_,
+        config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
-    if (config_rewind_enabled_) {
-        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
-            static_cast<int>(system_->target_fps()));
-    }
     status_message_ = "Emulation started (BIOS)";
     return true;
 }
@@ -1479,12 +1483,10 @@ bool App::boot_disc_from_ui() {
     if (!start_configured_input_movie()) {
         return false;
     }
+    emu_runner_.configure_rewind(config_rewind_enabled_,
+        config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
-    if (config_rewind_enabled_) {
-        emu_runner_.init_rewind(config_rewind_buffer_seconds_,
-            static_cast<int>(system_->target_fps()));
-    }
     status_message_ = config_direct_disc_boot_
         ? "Direct booting disc (BIOS intro skipped)..."
         : "Booting disc from BIOS...";

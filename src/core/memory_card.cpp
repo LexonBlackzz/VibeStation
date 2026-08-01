@@ -343,7 +343,10 @@ MemoryCard::TransferResult MemoryCard::transfer(u8 data_in) {
     break;
   case State::ReadEnd:
     result.data_out = kEndByte;
-    result.ack = true;
+    // The terminal 0x47 is sent without a DSR/ACK pulse.  Acknowledging it
+    // keeps the serial transaction alive for one extra phase and can make a
+    // following controller/card selection consume the wrong response byte.
+    result.ack = false;
     state_ = State::Idle;
     break;
 
@@ -387,7 +390,9 @@ MemoryCard::TransferResult MemoryCard::transfer(u8 data_in) {
     }
     break;
   case State::WriteChecksum:
-    result.data_out = checksum_;
+    // The card returns the last byte sent by the host at this point.  The
+    // checksum is consumed internally and is not echoed back.
+    result.data_out = last_byte_;
     result.ack = true;
     state_ = State::WriteACK1;
     break;
@@ -445,8 +450,10 @@ MemoryCard::TransferResult MemoryCard::transfer(u8 data_in) {
     break;
   case State::GetID4:
     result.data_out = 0x80;
-    result.ack = true;
-    state_ = State::Command;
+    // Get-ID terminates with 0x80 and no DSR/ACK pulse.  Keeping the card
+    // selected here lets the next controller poll consume a card response.
+    result.ack = false;
+    state_ = State::Idle;
     break;
   }
 

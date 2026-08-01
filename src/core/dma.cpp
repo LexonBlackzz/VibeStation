@@ -118,8 +118,23 @@ void DmaController::reset() {
   for (auto &dbg : last_debug_) {
     dbg = {};
   }
+  transfer_debug_history_.fill({});
+  active_transfer_debug_id_.fill(0);
+  next_transfer_debug_id_ = 0;
+  for (auto &dbg : register_write_debug_) {
+    dbg = {};
+  }
   dpcr_ = 0x07654321;
   dicr_ = 0;
+}
+
+const DmaController::TransferDebug *DmaController::transfer_debug(u32 id) const {
+  if (id == 0u) {
+    return nullptr;
+  }
+  const TransferDebug &debug =
+      transfer_debug_history_[id % kTransferDebugHistorySize];
+  return debug.id == id ? &debug : nullptr;
 }
 
 u32 DmaController::read(u32 offset) const {
@@ -179,6 +194,10 @@ void DmaController::write(u32 offset, u32 value) {
     switch (reg) {
     case 0x0:
       ch.base_addr = value & 0x00FFFFFF; // 24-bit address
+      register_write_debug_[channel].madr_pc =
+          sys_ ? sys_->cpu().pc() : 0u;
+      register_write_debug_[channel].madr_cycle =
+          sys_ ? sys_->cpu().cycle_count() : 0ull;
       if (g_log_fmv_diagnostics && channel == 1) {
         LOG_WARN(
             "DMA: ch1 MADR write value=0x%08X bcr=0x%08X chcr=0x%08X cyc=%llu",
@@ -190,6 +209,9 @@ void DmaController::write(u32 offset, u32 value) {
     case 0x4:
       ch.block_ctrl = value;
       ch.block_words_remaining = 0;
+      register_write_debug_[channel].bcr_pc = sys_ ? sys_->cpu().pc() : 0u;
+      register_write_debug_[channel].bcr_cycle =
+          sys_ ? sys_->cpu().cycle_count() : 0ull;
       if (g_log_fmv_diagnostics && channel == 1) {
         LOG_WARN(
             "DMA: ch1 BCR write value=0x%08X madr=0x%08X chcr=0x%08X cyc=%llu",
@@ -209,6 +231,10 @@ void DmaController::write(u32 offset, u32 value) {
         value = sanitized;
       }
       ch.channel_ctrl = value;
+      register_write_debug_[channel].chcr_pc =
+          sys_ ? sys_->cpu().pc() : 0u;
+      register_write_debug_[channel].chcr_cycle =
+          sys_ ? sys_->cpu().cycle_count() : 0ull;
       if (g_log_fmv_diagnostics && channel == 1) {
         LOG_WARN(
             "DMA: ch1 CHCR write value=0x%08X madr=0x%08X bcr=0x%08X req=%u active=%u cyc=%llu",
@@ -415,7 +441,9 @@ void DmaController::dma_block(int channel, u32 max_words) {
   }
 
   bool from_ram = ch.from_ram();
-  int cdrom_dma_active_lba = -1;
+  int cdrom_dma_active_lba =
+      (channel == 3 && sys_ != nullptr) ? sys_->cdrom().active_data_lba() : -1;
+  const CdRom *cdrom = (channel == 3 && sys_ != nullptr) ? &sys_->cdrom() : nullptr;
   auto &dbg = last_debug_[channel];
   dbg.base_addr = addr & 0x00FFFFFFu;
   dbg.block_ctrl = ch.block_ctrl;
@@ -457,7 +485,6 @@ void DmaController::dma_block(int channel, u32 max_words) {
       const bool whole_sector = cd.read_whole_sector();
       const bool e0_sector = cd.mode() == 0xE0u;
       const bool c0_sector = cd.mode() == 0xC0u;
-      cdrom_dma_active_lba = cd.active_data_lba();
       if (cdrom_dma_begin_logs < 256u ||
           (whole_sector && cdrom_dma_whole_begin_logs < 512u) ||
           (e0_sector && cdrom_dma_e0_begin_logs < 512u) ||
@@ -489,6 +516,51 @@ void DmaController::dma_block(int channel, u32 max_words) {
       return;
     }
   }
+
+  // Preserve the exact transfer which owns each DMA RAM write.  `last_debug_`
+  // is only a per-channel snapshot and may have been replaced by the time a
+  // later CPU fault asks where a word originated.
+  dbg.transfer_words = transfer_words;
+  dbg.first_addr = addr & 0x001FFFFCu;
+  if (transfer_words != 0u) {
+    const s32 span = step * static_cast<s32>(transfer_words - 1u);
+    dbg.last_addr =
+        static_cast<u32>(static_cast<s32>(dbg.first_addr) + span) & 0x001FFFFCu;
+  } else {
+    dbg.last_addr = dbg.first_addr;
+  }
+  if (cdrom != nullptr) {
+    const u32 data_index = static_cast<u32>(std::max(0, cdrom->dma_data_index()));
+    const u32 buffer_words = static_cast<u32>(
+        std::min<size_t>(cdrom->dma_buffer_size() / sizeof(u32), 0xFFFFu));
+    dbg.cd_stream_generation = cdrom->debug_stream_generation();
+    dbg.cd_stream_start_lba = cdrom->debug_stream_start_lba();
+    dbg.cd_next_read_lba = cdrom->current_read_lba();
+    dbg.cd_buffer_state = (data_index & 0xFFFFu) | (buffer_words << 16u);
+    dbg.cd_command_state =
+        static_cast<u32>(cdrom->debug_last_command()) |
+        ((static_cast<u32>(cdrom->mode()) & 0xFFu) << 8u) |
+        (cdrom->read_whole_sector() ? (1u << 16u) : 0u) |
+        (cdrom->sector_data_ready() ? (1u << 17u) : 0u) |
+        (cdrom->sector_data_request() ? (1u << 18u) : 0u) |
+        ((static_cast<u32>(std::min<size_t>(cdrom->debug_queued_sector_count(), 0x1Fu)) &
+          0x1Fu)
+         << 19u);
+  } else {
+    dbg.cd_stream_generation = 0;
+    dbg.cd_stream_start_lba = -1;
+    dbg.cd_next_read_lba = -1;
+    dbg.cd_buffer_state = 0;
+    dbg.cd_command_state = 0;
+  }
+  dbg.source_lba = cdrom_dma_active_lba;
+  ++next_transfer_debug_id_;
+  if (next_transfer_debug_id_ == 0u) {
+    ++next_transfer_debug_id_;
+  }
+  dbg.id = next_transfer_debug_id_;
+  transfer_debug_history_[dbg.id % kTransferDebugHistorySize] = dbg;
+  active_transfer_debug_id_[channel] = dbg.id;
 
   if (from_ram && channel == 0 && g_mdec_debug_upload_probe) {
     sys_->debug_note_mdec_dma_in_begin(addr & 0x001FFFFCu, transfer_words);
@@ -632,7 +704,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
     static u32 cdrom_dma_whole_end_logs = 0;
     static u32 cdrom_dma_e0_end_logs = 0;
     static u32 cdrom_dma_c0_end_logs = 0;
-    const CdRom &cd = sys_->cdrom();
+      const CdRom &cd = *cdrom;
     const bool whole_sector = cd.read_whole_sector();
     const bool e0_sector = cd.mode() == 0xE0u;
     const bool c0_sector = cd.mode() == 0xC0u;

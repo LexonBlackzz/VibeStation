@@ -11,9 +11,12 @@ void App::sync_discord_presence_config() {
     if (!discord_presence_) {
         return;
     }
-    discord_presence_->prepare_runtime_dependency();
+    bool runtime_ready = true;
+    if (config_discord_rich_presence_) {
+        runtime_ready = discord_presence_->prepare_runtime_dependency();
+    }
     discord_presence_->configure(
-        config_discord_rich_presence_,
+        config_discord_rich_presence_ && runtime_ready,
         kDiscordApplicationId);
 }
 

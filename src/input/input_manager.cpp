@@ -77,6 +77,15 @@ void InputManager::process_event(const SDL_Event &event) {
     }
     break;
   }
+  case SDL_WINDOWEVENT:
+    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+      // SDL may not deliver the matching KEYUP after focus changes.  Leaving
+      // the old mask intact turns a single arrow-key press into permanent
+      // movement in the emulated pad.
+      keyboard_buttons_ = 0xFFFFu;
+      sync_combined_buttons();
+    }
+    break;
   case SDL_CONTROLLERDEVICEADDED:
     if (!gamepad_) {
       open_gamepad(event.cdevice.which);
@@ -93,6 +102,7 @@ void InputManager::process_event(const SDL_Event &event) {
 }
 
 void InputManager::update() {
+  release_inactive_keyboard_buttons();
   if (gamepad_) {
     apply_gamepad_state();
   } else {
@@ -199,4 +209,23 @@ void InputManager::set_button_bit(u16 &mask, PsxButton button, bool pressed) {
 
 void InputManager::sync_combined_buttons() {
   controller_.set_button_state(static_cast<u16>(keyboard_buttons_ & gamepad_buttons_));
+}
+
+void InputManager::release_inactive_keyboard_buttons() {
+  const Uint8 *keyboard_state = SDL_GetKeyboardState(nullptr);
+  if (keyboard_state == nullptr) {
+    return;
+  }
+
+  bool changed = false;
+  for (const auto &[key, button] : key_bindings_) {
+    const u16 bit = static_cast<u16>(button);
+    if ((keyboard_buttons_ & bit) == 0u && keyboard_state[key] == 0u) {
+      keyboard_buttons_ |= bit;
+      changed = true;
+    }
+  }
+  if (changed) {
+    sync_combined_buttons();
+  }
 }

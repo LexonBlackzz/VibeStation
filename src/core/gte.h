@@ -86,6 +86,9 @@ private:
 
   // ── Helpers ────────────────────────────────────────────────────
   s64 set_mac(int idx, s64 value);
+  s64 normalize_mac(int idx, s64 value);
+  s64 multiply_accumulate(int idx, s64 base, const s16 *matrix_row,
+                          const s16 *vector);
   void set_ir(int idx, s32 value, bool lm_flag);
   void interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3);
   void push_sx(s16 val);

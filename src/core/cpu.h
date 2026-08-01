@@ -444,6 +444,7 @@ public:
 
   // Debug access
   u32 pc() const { return pc_; }
+  u32 current_pc() const { return current_pc_; }
   u32 reg(int i) const { return gpr_[i]; }
   u64 cycle_count() const { return cycles_; }
   void add_cycle_penalty(u32 cycles);
@@ -470,6 +471,8 @@ private:
   struct PendingLoad {
     u32 reg = 0;
     u32 value = 0;
+    u32 source_pc = 0;
+    u32 source_addr = 0;
   };
   PendingLoad load_ = {};
   PendingLoad next_load_ = {};
@@ -505,6 +508,13 @@ private:
   u64 cycles_ = 0;
   u64 gte_input_ready_cycle_ = 0;
   u64 gte_result_ready_cycle_ = 0;
+  u64 last_gte_command_cycle_ = 0;
+  u32 last_gte_command_pc_ = 0;
+  u32 last_gte_command_ = 0;
+  u64 last_scratchpad_control_transfer_cycle_ = 0;
+  u32 last_scratchpad_control_transfer_pc_ = 0;
+  u32 last_scratchpad_control_transfer_instruction_ = 0;
+  u32 last_scratchpad_control_transfer_target_ = 0;
   u64 muldiv_result_ready_cycle_ = 0;
   u32 cycle_penalty_ = 0;
   bool executing_step_ = false;
@@ -514,7 +524,7 @@ private:
   void set_reg(u32 index, u32 value);
   void advance_load_delay();
   void flush_load_delay();
-  void schedule_load(u32 index, u32 value);
+  void schedule_load(u32 index, u32 value, u32 source_addr = 0);
   void begin_branch(bool taken, u32 target);
   u32 read_cop0_reg(u32 index) const;
   void write_cop0_reg(u32 index, u32 value);
