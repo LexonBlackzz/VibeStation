@@ -251,5 +251,8 @@ bool System::restore_state(const SystemSnapshot &snap) {
   r.val(frame_cycles_);
   r.val(frame_cycle_remainder_);
 
+  sio_synced_cpu_cycle_ = cpu_.cycle_count();
+  cpu_timing_boundary_requested_ = false;
+
   return true;
 }

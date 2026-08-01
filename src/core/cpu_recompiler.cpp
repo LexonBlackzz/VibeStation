@@ -1646,6 +1646,9 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
     total.cycles += result.cycles;
     total.instructions += result.instructions;
     stats_.executed_cycles += result.cycles;
+    if (cpu_.sys_->cpu_timing_boundary_requested()) {
+      return total;
+    }
   }
 
   return total;
@@ -2245,6 +2248,11 @@ CpuBlockRunResult CpuOptimizedBackend::execute_block(
       ++stats_.fallback_instructions;
     }
     finish_instruction(inst, result, decoded_executed && count_decoded);
+
+    if (cpu_.sys_->cpu_timing_boundary_requested()) {
+      result.exit_reason = CpuBlockExitReason::Budget;
+      break;
+    }
 
     if (cpu_.exception_raised_) {
       result.exit_reason = CpuBlockExitReason::Exception;

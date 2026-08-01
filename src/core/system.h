@@ -492,6 +492,12 @@ public:
   const CdRom &cdrom() const { return cdrom_; }
   const Bios &bios() const { return bios_; }
   InterruptController &irq() { return irq_; }
+  bool cpu_timing_boundary_requested() const {
+    return cpu_timing_boundary_requested_;
+  }
+  void consume_cpu_timing_boundary_request() {
+    cpu_timing_boundary_requested_ = false;
+  }
 
 private:
   struct RamAccessLogEntry {
@@ -607,6 +613,8 @@ private:
   bool saw_non_bios_exec_ = false;
   u32 bios_menu_streak_after_non_bios_ = 0;
   u64 spu_synced_cpu_cycle_ = 0;
+  u64 sio_synced_cpu_cycle_ = 0;
+  bool cpu_timing_boundary_requested_ = false;
   bool spu_skip_sync_for_turbo_ = false;
   std::atomic<bool> ram_reaper_enabled_{false};
   std::atomic<u32> ram_reaper_range_start_{0};
@@ -662,6 +670,7 @@ private:
   void note_sio_io(u32 phys_addr);
   void maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes);
   void sync_spu_to_cpu();
+  void sync_sio_to_cpu();
   void apply_ram_reaper_for_frame();
   void apply_gpu_reaper_for_frame();
   void apply_sound_reaper_for_frame();

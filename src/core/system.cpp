@@ -345,6 +345,24 @@ void System::sync_spu_to_cpu() {
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
+void System::sync_sio_to_cpu() {
+    const u64 target_cycle = cpu_.cycle_count();
+    if (target_cycle <= sio_synced_cpu_cycle_) {
+        return;
+    }
+
+    u64 delta = target_cycle - sio_synced_cpu_cycle_;
+    while (delta > 0) {
+        const u32 step =
+            (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
+            ? std::numeric_limits<u32>::max()
+            : static_cast<u32>(delta);
+        sio_.tick(step);
+        delta -= step;
+    }
+    sio_synced_cpu_cycle_ = target_cycle;
+}
+
 bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
                                            std::string* error) {
     sync_spu_to_cpu();
@@ -458,6 +476,8 @@ void System::reset() {
     gpu_.reset();
     spu_.reset();
     cpu_.reset();
+    sio_synced_cpu_cycle_ = cpu_.cycle_count();
+    cpu_timing_boundary_requested_ = false;
     spu_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
     ram_.reset();
@@ -1622,7 +1642,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             frame_cycles_ += dma_cycles;
-            sio_.tick(dma_cycles);
+            sync_sio_to_cpu();
             mdec_.tick(dma_cycles);
             cdrom_.tick(dma_cycles);
             timers_.tick(dma_cycles);
@@ -1634,25 +1654,37 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 std::min(cycles_remaining, cpu_instruction_slice * 4u);
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
-            u32 sio_slice_cycles = 0;
             if (optimized_cpu_mode) {
-                CpuRunSliceResult run =
-                    cpu_.run_slice(target_slice_cycles, cpu_instruction_slice);
-                if (run.cycles == 0 || run.instructions == 0) {
-                    run.cycles = cpu_.step();
-                    run.instructions = 1;
+                while (cycles_remaining > 0 &&
+                       spent_in_slice < target_slice_cycles &&
+                       instructions_executed < cpu_instruction_slice) {
+                    const u32 remaining_slice_cycles =
+                        target_slice_cycles - spent_in_slice;
+                    const u32 sio_event_cycles = sio_.cycles_until_event();
+                    const u32 run_cycles =
+                        sio_event_cycles == 0u
+                        ? remaining_slice_cycles
+                        : std::min(remaining_slice_cycles, sio_event_cycles);
+                    CpuRunSliceResult run = cpu_.run_slice(
+                        run_cycles,
+                        cpu_instruction_slice - instructions_executed);
+                    if (run.cycles == 0 || run.instructions == 0) {
+                        run.cycles = cpu_.step();
+                        run.instructions = 1;
+                    }
+                    const u32 consumed = run.cycles;
+                    if (consumed == 0) {
+                        break;
+                    }
+                    spent_in_slice += consumed;
+                    frame_cycles_ += consumed;
+                    sync_sio_to_cpu();
+                    consume_cpu_timing_boundary_request();
+                    instructions_executed += run.instructions;
+                    cycles_remaining =
+                        (consumed >= cycles_remaining) ? 0
+                                                      : (cycles_remaining - consumed);
                 }
-
-                spent_in_slice = run.cycles;
-                instructions_executed = run.instructions;
-                frame_cycles_ += run.cycles;
-                if (fast_mode) {
-                    sio_slice_cycles += run.cycles;
-                } else {
-                    sio_.tick(run.cycles);
-                }
-                cycles_remaining =
-                    (run.cycles >= cycles_remaining) ? 0 : (cycles_remaining - run.cycles);
             } else {
                 while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
                        instructions_executed < cpu_instruction_slice) {
@@ -1664,24 +1696,15 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                     }
                     spent_in_slice += consumed;
                     frame_cycles_ += consumed;
-                    if (fast_mode) {
-                        sio_slice_cycles += consumed;
-                    }
-                    else {
-                        // Advance SIO at instruction granularity so JOYPAD serial
-                        // handshakes don't stall for an entire scanline worth of CPU
-                        // polling loops.
-                        sio_.tick(consumed);
-                    }
+                    // Keep JOYPAD serial handshakes synchronized to the absolute
+                    // CPU clock. SIO MMIO accesses also synchronize immediately.
+                    sync_sio_to_cpu();
+                    consume_cpu_timing_boundary_request();
                     instructions_executed += std::max(1u, run.instructions);
                     cycles_remaining =
                         (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
                 }
             }
-            if (fast_mode && sio_slice_cycles > 0) {
-                sio_.tick(sio_slice_cycles);
-            }
-
             if (spent_in_slice > 0) {
                 mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);
@@ -2354,6 +2377,8 @@ u8 System::read8(u32 addr) {
         // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             return sio_.read8(io - 0x040);
         }
         // SIO (serial port) - not used by most games, return open bus
@@ -2459,6 +2484,8 @@ u16 System::read16(u32 addr) {
         // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             return sio_.read16(io - 0x040);
         }
         // SIO registers (0x1F801050-0x1F80105F) - not used by most games, return open bus
@@ -2559,6 +2586,8 @@ u32 System::read32(u32 addr) {
         // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             return sio_.read32(io - 0x040);
         }
         // GPU
@@ -2721,6 +2750,8 @@ void System::write8(u32 addr, u8 val) {
         // SIO (controller/memory card)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             sio_.write8(io - 0x040, val);
             return;
         }
@@ -2997,6 +3028,8 @@ void System::write16(u32 addr, u16 val) {
         // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             sio_.write16(io - 0x040, val);
             return;
         }
@@ -3307,6 +3340,8 @@ void System::write32(u32 addr, u32 val) {
         // PAD registers (0x1F801040-0x1F80104F)
         if (io >= 0x040 && io < 0x050) {
             note_sio_io(phys);
+            sync_sio_to_cpu();
+            cpu_timing_boundary_requested_ = true;
             sio_.write32(io - 0x040, val);
             return;
         }

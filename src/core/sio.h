@@ -41,6 +41,7 @@ public:
   void restore_state(const u8*& pos, size_t& remaining);
 
   void tick(u32 cycles);
+  u32 cycles_until_event() const;
   bool saw_pad_cmd42() const { return saw_pad_cmd42_; }
   bool saw_tx_cmd42() const { return saw_tx_cmd42_; }
   bool saw_pad_id() const { return saw_pad_id_; }

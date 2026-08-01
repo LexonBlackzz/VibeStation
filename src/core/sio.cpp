@@ -669,3 +669,10 @@ void Sio::tick(u32 cycles) {
     }
   }
 }
+
+u32 Sio::cycles_until_event() const {
+  if (!is_transmitting()) {
+    return 0;
+  }
+  return static_cast<u32>((std::max)(transfer_event_cycles_, 1));
+}
