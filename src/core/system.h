@@ -233,7 +233,8 @@ public:
     return requested;
   }
 
-  System() = default;
+  System();
+  ~System();
 
   // Initialization (called when user loads BIOS)
   void init_hardware();

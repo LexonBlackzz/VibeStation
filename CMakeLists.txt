@@ -4,13 +4,28 @@ project(VibeStation LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("\
+#if !defined(_M_X64) && !defined(__x86_64__)\n\
+#error VibeStation native JIT requires an x64 compiler target\n\
+#endif\n\
+int main() { return 0; }\n"
+    VIBESTATION_COMPILER_TARGETS_X64)
+
 set(VIBESTATION_X64_JIT_DEFAULT OFF)
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND
-        (MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"))
+        VIBESTATION_COMPILER_TARGETS_X64)
     set(VIBESTATION_X64_JIT_DEFAULT ON)
 endif()
 option(VIBESTATION_ENABLE_X64_JIT
     "Enable the native x64 CPU JIT/recompiler when supported" ${VIBESTATION_X64_JIT_DEFAULT})
+
+if(VIBESTATION_ENABLE_X64_JIT AND
+        (NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+         NOT VIBESTATION_COMPILER_TARGETS_X64))
+    message(FATAL_ERROR
+        "VIBESTATION_ENABLE_X64_JIT requires a Windows x64 compiler target")
+endif()
 
 # ── Fetch Dependencies ──────────────────────────────────────────────
 include(FetchContent)

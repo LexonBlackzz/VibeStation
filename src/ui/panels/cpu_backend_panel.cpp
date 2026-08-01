@@ -44,6 +44,11 @@ namespace {
                 "Forced reason: %s",
                 cpu_forced_interpreter_reason_name(forced_reason));
         }
+        else if (requested_mode == CpuExecutionMode::X64Jit &&
+                 !stats.native_available) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
+                "Effective backend: Decoded blocks (native emitter unavailable)");
+        }
         else {
             ImGui::Text("Effective backend: %s",
                 cpu_execution_mode_name(requested_mode));

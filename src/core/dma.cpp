@@ -111,6 +111,11 @@ void DmaController::recompute_dicr_master(bool request_irq_on_rise) {
   }
 }
 
+DmaController::DmaController()
+    : transfer_debug_history_(kTransferDebugHistorySize) {}
+
+DmaController::~DmaController() = default;
+
 void DmaController::reset() {
   for (auto &ch : channels_) {
     ch = {};
@@ -118,7 +123,8 @@ void DmaController::reset() {
   for (auto &dbg : last_debug_) {
     dbg = {};
   }
-  transfer_debug_history_.fill({});
+  std::fill(transfer_debug_history_.begin(), transfer_debug_history_.end(),
+            TransferDebug{});
   active_transfer_debug_id_.fill(0);
   next_transfer_debug_id_ = 0;
   for (auto &dbg : register_write_debug_) {

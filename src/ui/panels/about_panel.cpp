@@ -13,8 +13,13 @@ void App::panel_about() {
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
+        const CpuExecutionMode cpu_mode = effective_cpu_execution_mode();
+        const bool native_unavailable =
+            cpu_mode == CpuExecutionMode::X64Jit && system_ &&
+            !system_->cpu().cpu_backend_stats().native_available;
         ImGui::Text("CPU: MIPS R3000A %s",
-            cpu_execution_mode_name(effective_cpu_execution_mode()));
+            native_unavailable ? "decoded blocks (x64 JIT unavailable)"
+                               : cpu_execution_mode_name(cpu_mode));
         ImGui::Text("GPU: Software rasterizer");
         ImGui::Text("GTE: Fixed-point geometry engine");
         ImGui::Text("SPU: Gaussian + reverb core (stage 2)");

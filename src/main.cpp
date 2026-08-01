@@ -10,6 +10,7 @@
 #include "vibestation_version.h"
 #include <SDL.h>
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstdio>
@@ -21,6 +22,19 @@
 #include <sstream>
 #include <string_view>
 #include <vector>
+
+namespace {
+u64 benchmark_hash_bytes(const u8 *data, size_t size) {
+  constexpr u64 kOffset = 1469598103934665603ull;
+  constexpr u64 kPrime = 1099511628211ull;
+  u64 hash = kOffset;
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= data[i];
+    hash *= kPrime;
+  }
+  return hash;
+}
+} // namespace
 
 struct AutoInputConfig {
   u16 mask = 0;
@@ -1459,6 +1473,153 @@ static int run_frame_test(const std::string &bios_path, int frames,
   return 0;
 }
 
+static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
+                             int measured_frames,
+                             const std::string &bin_path,
+                             const std::string &cue_path) {
+  const CpuExecutionMode requested_mode = effective_cpu_execution_mode();
+  g_profile_detailed_timing = true;
+
+  auto sys = std::make_unique<System>();
+  if (!sys->load_bios(bios_path)) {
+    std::printf("CPU_BENCHMARK_RESULT status=error reason=bios_load\n");
+    return 1;
+  }
+  if (!cue_path.empty()) {
+    if (!sys->load_game(bin_path, cue_path)) {
+      std::printf("CPU_BENCHMARK_RESULT status=error reason=disc_load\n");
+      return 1;
+    }
+    if (!sys->boot_disc()) {
+      std::printf("CPU_BENCHMARK_RESULT status=error reason=disc_boot\n");
+      return 1;
+    }
+  } else {
+    sys->reset();
+  }
+
+  const CpuBackendStats availability = sys->cpu().cpu_backend_stats();
+  const auto backend_token = [](CpuExecutionMode mode) {
+    switch (mode) {
+    case CpuExecutionMode::Interpreter:
+      return "interpreter";
+    case CpuExecutionMode::DecodedBlockInterpreter:
+      return "decoded";
+    case CpuExecutionMode::X64Jit:
+      return "x64jit";
+    }
+    return "unknown";
+  };
+  const CpuExecutionMode effective_mode =
+      requested_mode == CpuExecutionMode::X64Jit &&
+              !availability.native_available
+          ? CpuExecutionMode::DecodedBlockInterpreter
+          : requested_mode;
+  if (requested_mode == CpuExecutionMode::X64Jit &&
+      !availability.native_available) {
+    std::printf(
+        "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
+        "requested=x64jit effective=decoded\n");
+    return 3;
+  }
+
+  for (int frame = 0; frame < warmup_frames; ++frame) {
+    sys->sio().set_button_state(auto_input_buttons_for_frame(frame + 1));
+    sys->run_frame();
+  }
+
+  const CpuBackendStats before = sys->cpu().cpu_backend_stats();
+  double cpu_ms = 0.0;
+  double core_ms = 0.0;
+  const auto wall_start = std::chrono::steady_clock::now();
+  for (int frame = 0; frame < measured_frames; ++frame) {
+    const int absolute_frame = warmup_frames + frame + 1;
+    sys->sio().set_button_state(
+        auto_input_buttons_for_frame(absolute_frame));
+    sys->run_frame();
+    cpu_ms += sys->profiling_stats().cpu_ms;
+    core_ms += sys->profiling_stats().total_ms;
+  }
+  const auto wall_end = std::chrono::steady_clock::now();
+  const double wall_ms = std::chrono::duration<double, std::milli>(
+                             wall_end - wall_start)
+                             .count();
+  const CpuBackendStats after = sys->cpu().cpu_backend_stats();
+
+  const auto delta = [](u64 end, u64 start) {
+    return end >= start ? end - start : end;
+  };
+  const u64 native_instructions =
+      delta(after.native_instructions, before.native_instructions);
+  const u64 decoded_instructions =
+      delta(after.decoded_instructions, before.decoded_instructions);
+  const u64 fallback_instructions =
+      delta(after.fallback_instructions, before.fallback_instructions);
+  const u64 total_instructions =
+      native_instructions + decoded_instructions + fallback_instructions;
+  const double native_coverage =
+      total_instructions == 0
+          ? 0.0
+          : (100.0 * static_cast<double>(native_instructions) /
+             static_cast<double>(total_instructions));
+  const u64 helper_calls =
+      delta(after.native_memory_helper_calls, before.native_memory_helper_calls) +
+      delta(after.native_branch_helper_calls, before.native_branch_helper_calls) +
+      delta(after.native_prepare_helper_calls, before.native_prepare_helper_calls) +
+      delta(after.native_finish_helper_calls, before.native_finish_helper_calls);
+  const u64 helper_assisted_instructions = std::min(
+      native_instructions,
+      delta(after.native_prepare_helper_calls,
+            before.native_prepare_helper_calls));
+  const u64 inline_native_instructions =
+      native_instructions - helper_assisted_instructions;
+  const double helper_assisted_coverage =
+      total_instructions == 0
+          ? 0.0
+          : (100.0 * static_cast<double>(helper_assisted_instructions) /
+             static_cast<double>(total_instructions));
+
+  SystemSnapshot snapshot;
+  if (!sys->save_state(snapshot)) {
+    std::printf("CPU_BENCHMARK_RESULT status=error reason=state_capture\n");
+    return 1;
+  }
+  const u64 state_hash = benchmark_hash_bytes(snapshot.data.data(),
+                                               snapshot.data.size());
+  const System::BootDiagnostics &diag = sys->boot_diag();
+  const double measured_divisor = static_cast<double>(measured_frames);
+
+  std::printf(
+      "CPU_BENCHMARK_RESULT status=ok requested_backend=%s "
+      "effective_backend=%s native_emitter_available=%u "
+      "warmup_frames=%d measured_frames=%d cpu_ms_avg=%.6f "
+      "core_ms_avg=%.6f wall_ms=%.3f native_coverage=%.3f "
+      "helper_assisted_coverage=%.3f native_inline_instructions=%llu "
+      "native_helper_instructions=%llu native_instructions=%llu "
+      "decoded_instructions=%llu "
+      "fallback_instructions=%llu helper_calls=%llu cache_hits=%llu "
+      "cache_misses=%llu invalidations=%llu native_code_bytes=%zu "
+      "state_hash=%016llX display_hash=%08X final_pc=%08X\n",
+      backend_token(requested_mode), backend_token(effective_mode),
+      availability.native_available ? 1u : 0u, warmup_frames,
+      measured_frames, cpu_ms / measured_divisor, core_ms / measured_divisor,
+      wall_ms, native_coverage, helper_assisted_coverage,
+      static_cast<unsigned long long>(inline_native_instructions),
+      static_cast<unsigned long long>(helper_assisted_instructions),
+      static_cast<unsigned long long>(native_instructions),
+      static_cast<unsigned long long>(decoded_instructions),
+      static_cast<unsigned long long>(fallback_instructions),
+      static_cast<unsigned long long>(helper_calls),
+      static_cast<unsigned long long>(delta(after.cache_hits, before.cache_hits)),
+      static_cast<unsigned long long>(
+          delta(after.cache_misses, before.cache_misses)),
+      static_cast<unsigned long long>(
+          delta(after.invalidations, before.invalidations)),
+      after.native_code_bytes, static_cast<unsigned long long>(state_hash),
+      diag.display_hash, sys->cpu().pc());
+  return 0;
+}
+
 static int run_spu_audio_test(const std::string &bios_path, int frames,
                               const std::string &bin_path,
                               const std::string &cue_path,
@@ -2890,6 +3051,34 @@ int main(int argc, char *argv[]) {
       }
     }
     const int rc = run_boot_disc_test(passthrough[1], frames, bin_path, cue_path);
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
+  }
+  if (passthrough.size() >= 4 &&
+      passthrough[0] == "--cpu-benchmark") {
+    const int warmup_frames = std::max(0, std::atoi(passthrough[2].c_str()));
+    const int measured_frames =
+        std::max(1, std::atoi(passthrough[3].c_str()));
+    std::string bin_path;
+    std::string cue_path;
+    if (passthrough.size() >= 6) {
+      bin_path = passthrough[4];
+      cue_path = passthrough[5];
+    } else if (passthrough.size() >= 5) {
+      cue_path = passthrough[4];
+      bin_path = resolve_first_bin_from_cue_cli(cue_path);
+      if (bin_path.empty()) {
+        std::printf(
+            "CPU_BENCHMARK_RESULT status=error reason=cue_bin_resolve\n");
+        return 1;
+      }
+    }
+    const int rc = run_cpu_benchmark(passthrough[1], warmup_frames,
+                                     measured_frames, bin_path, cue_path);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);

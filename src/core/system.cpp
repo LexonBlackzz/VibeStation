@@ -364,6 +364,12 @@ bool System::load_spu_replacement_sample_from_file(const std::string& path,
     return spu_.load_replacement_sample_from_file(path, error);
 }
 
+// Keep construction of the large embedded diagnostic histories out of the
+// header. Inlining the defaulted constructor makes MSVC instantiate several
+// megabytes of aggregate initialization in every System consumer.
+System::System() = default;
+System::~System() = default;
+
 void System::init_hardware() {
     if (hw_init_)
         return; // Already initialized

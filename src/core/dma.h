@@ -79,6 +79,9 @@ public:
     u64 chcr_cycle = 0;
   };
 
+  DmaController();
+  ~DmaController();
+
   void init(System *sys) { sys_ = sys; }
   void reset();
 
@@ -108,7 +111,7 @@ private:
   // eventual fault. Keep a session-scale history so RAM provenance still
   // resolves the original transfer rather than falling back to the newest one.
   static constexpr size_t kTransferDebugHistorySize = 262144u;
-  std::array<TransferDebug, kTransferDebugHistorySize> transfer_debug_history_{};
+  std::vector<TransferDebug> transfer_debug_history_;
   std::array<u32, 7> active_transfer_debug_id_{};
   u32 next_transfer_debug_id_ = 0;
   RegisterWriteDebug register_write_debug_[7];
