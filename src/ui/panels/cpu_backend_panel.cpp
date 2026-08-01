@@ -18,12 +18,17 @@ namespace {
     void draw_cpu_backend_instruction_mix(const CpuBackendStats& stats) {
         const u64 total = stats.decoded_instructions +
             stats.native_instructions + stats.fallback_instructions;
-        ImGui::Text("Instruction mix: native %.1f%%  decoded %.1f%%  fallback %.1f%%",
-            percent_of(stats.native_instructions, total),
+        const u64 helper_native = std::min(
+            stats.native_instructions, stats.native_prepare_helper_calls);
+        const u64 inline_native = stats.native_instructions - helper_native;
+        ImGui::Text("Instruction mix: inline %.1f%%  helper %.1f%%  decoded %.1f%%  fallback %.1f%%",
+            percent_of(inline_native, total),
+            percent_of(helper_native, total),
             percent_of(stats.decoded_instructions, total),
             percent_of(stats.fallback_instructions, total));
-        ImGui::Text("Instructions: native %llu  decoded %llu  fallback %llu",
-            static_cast<unsigned long long>(stats.native_instructions),
+        ImGui::Text("Instructions: inline %llu  helper %llu  decoded %llu  fallback %llu",
+            static_cast<unsigned long long>(inline_native),
+            static_cast<unsigned long long>(helper_native),
             static_cast<unsigned long long>(stats.decoded_instructions),
             static_cast<unsigned long long>(stats.fallback_instructions));
     }
@@ -75,81 +80,9 @@ namespace {
                 static_cast<u32>(std::max(1, min_block));
             dirty = true;
         }
-        ImGui::Checkbox("Force x64 Compile", &g_cpu_x64_jit_force_compile);
-        if (ImGui::Checkbox("Enable All Native x64",
-                &g_cpu_x64_jit_all_native_enabled)) {
-            dirty = true;
-        }
-        if (ImGui::Checkbox("Enable Native Memory Blocks (Experimental)",
-                            &g_cpu_x64_jit_native_memory_enabled)) {
-            dirty = true;
-        }
-        if (ImGui::Checkbox("Enable Native ALU Blocks",
-                &g_cpu_x64_jit_native_alu_enabled)) {
-            dirty = true;
-        }
-        if (g_cpu_x64_jit_all_native_cli_override ||
-            g_cpu_x64_jit_native_memory_cli_override ||
-            g_cpu_x64_jit_native_alu_cli_override) {
-            ImGui::TextDisabled("CLI native tiers: all %s  memory %s  ALU %s",
-                cpu_x64_jit_all_native_enabled() ? "on" : "off",
-                cpu_x64_jit_native_memory_enabled() ? "on" : "off",
-                cpu_x64_jit_native_alu_enabled() ? "on" : "off");
-        }
-        if (ImGui::Checkbox("Enable Native Branch Tails (experimental)",
-                &g_cpu_x64_jit_branch_tail_enabled)) {
-            dirty = true;
-        }
-        if (g_cpu_x64_jit_branch_tail_cli_override) {
-            ImGui::TextDisabled("CLI override: branch tails %s",
-                cpu_x64_jit_branch_tail_enabled() ? "enabled" : "disabled");
-        }
-        if (ImGui::Checkbox("Aggressive Reduced-Helper Branch Tails",
-                &g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled)) {
-            dirty = true;
-        }
-        if (g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override) {
-            ImGui::TextDisabled("CLI override: aggressive reduced-helper branch tails %s",
-                cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled()
-                    ? "enabled"
-                    : "disabled");
-        }
-        ImGui::TextDisabled(
-            "Experimental. Requires native branch tails. Attempts memory-containing branch-tail blocks with interpreter-validated fallback.");
-        if (ImGui::Checkbox("Aggressive Native-Prefix RAM",
-                &g_cpu_x64_jit_aggressive_native_prefix_ram_enabled)) {
-            dirty = true;
-        }
-        if (g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override) {
-            ImGui::TextDisabled("CLI override: aggressive native-prefix RAM %s",
-                cpu_x64_jit_aggressive_native_prefix_ram_enabled()
-                    ? "enabled"
-                    : "disabled");
-        }
-        ImGui::TextDisabled(
-            "Experimental. Requires native-prefix and RAM load fastpath. Attempts more RAM-load prefix cases and adapts away repeated runtime failures.");
-        if (ImGui::Checkbox("Log Recent Native Branch Tails",
-                &g_cpu_x64_jit_branch_tail_logging)) {
-            dirty = true;
-        }
-        int branch_tail_log_count =
-            static_cast<int>(g_cpu_x64_jit_branch_tail_log_count);
-        if (ImGui::InputInt("Branch Tail Log Count", &branch_tail_log_count)) {
-            g_cpu_x64_jit_branch_tail_log_count =
-                static_cast<u32>(std::max(1, branch_tail_log_count));
-            dirty = true;
-        }
         if (ImGui::Checkbox("Log Hot Native Rejects",
                 &g_cpu_backend_rejected_block_logging)) {
             dirty = true;
-        }
-        if (ImGui::Checkbox("Enable RAM load fastpath (experimental)",
-                &g_cpu_x64_jit_ram_load_fastpath_enabled)) {
-            dirty = true;
-        }
-        if (g_cpu_x64_jit_ram_load_fastpath_cli_override) {
-            ImGui::TextDisabled("CLI override: RAM load fastpath %s",
-                g_cpu_x64_jit_ram_load_fastpath_enabled ? "enabled" : "disabled");
         }
         int rejected_block_log_count =
             static_cast<int>(g_cpu_backend_rejected_block_log_count);

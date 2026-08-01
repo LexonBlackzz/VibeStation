@@ -1829,13 +1829,6 @@ void App::save_persistent_config() const {
     out.cpu_execution_mode = g_cpu_execution_mode;
     out.cpu_x64_jit.hot_block_threshold = g_cpu_x64_jit_hot_block_threshold;
     out.cpu_x64_jit.min_block_instructions = g_cpu_x64_jit_min_block_instructions;
-    out.cpu_x64_jit.branch_tail_enabled = g_cpu_x64_jit_branch_tail_enabled;
-    out.cpu_x64_jit.aggressive_reduced_helper_branch_tail_enabled = g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled;
-    out.cpu_x64_jit.aggressive_native_prefix_ram_enabled = g_cpu_x64_jit_aggressive_native_prefix_ram_enabled;
-    out.cpu_x64_jit.all_native_enabled = g_cpu_x64_jit_all_native_enabled;
-    out.cpu_x64_jit.native_memory_enabled = g_cpu_x64_jit_native_memory_enabled;
-    out.cpu_x64_jit.native_alu_enabled = g_cpu_x64_jit_native_alu_enabled;
-    out.cpu_x64_jit.ram_load_fastpath_enabled = g_cpu_x64_jit_ram_load_fastpath_enabled;
     out.spu.target_latency_ms = g_spu_audio_target_latency_ms;
     out.spu.soft_latency_ms = g_spu_audio_soft_latency_ms;
     out.spu.max_latency_ms = g_spu_audio_max_latency_ms;

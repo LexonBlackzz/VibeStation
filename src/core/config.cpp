@@ -154,21 +154,9 @@ Config Config::load(const std::string& path) {
     };
     jit_uint("hot_block_threshold", cfg.cpu_x64_jit.hot_block_threshold);
     jit_uint("min_block_instructions", cfg.cpu_x64_jit.min_block_instructions);
-    // Use lambda for jit bools
-    auto jit_bool = [&](const char* key, bool& dest) {
-        if (jit.contains(key) && jit[key].is_boolean()) {
-            dest = jit[key].get<bool>();
-        }
-    };
-    jit_bool("branch_tail_enabled", cfg.cpu_x64_jit.branch_tail_enabled);
-    jit_bool("aggressive_reduced_helper_branch_tail_enabled",
-        cfg.cpu_x64_jit.aggressive_reduced_helper_branch_tail_enabled);
-    jit_bool("aggressive_native_prefix_ram_enabled",
-        cfg.cpu_x64_jit.aggressive_native_prefix_ram_enabled);
-    jit_bool("all_native_enabled", cfg.cpu_x64_jit.all_native_enabled);
-    jit_bool("native_memory_enabled", cfg.cpu_x64_jit.native_memory_enabled);
-    jit_bool("native_alu_enabled", cfg.cpu_x64_jit.native_alu_enabled);
-    jit_bool("ram_load_fastpath_enabled", cfg.cpu_x64_jit.ram_load_fastpath_enabled);
+    // Obsolete experimental tier keys are intentionally ignored. Loading an
+    // older file remains valid, and the next save rewrites this object with
+    // only the supported tuning values.
 
     // Memory cards
     if (j.contains("memory_card_slot1_mode") && j["memory_card_slot1_mode"].is_number_integer()) {
@@ -362,15 +350,6 @@ void Config::save(const std::string& path) const {
     j["cpu_x64_jit"] = {
         {"hot_block_threshold", cpu_x64_jit.hot_block_threshold},
         {"min_block_instructions", cpu_x64_jit.min_block_instructions},
-        {"branch_tail_enabled", cpu_x64_jit.branch_tail_enabled},
-        {"aggressive_reduced_helper_branch_tail_enabled",
-            cpu_x64_jit.aggressive_reduced_helper_branch_tail_enabled},
-        {"aggressive_native_prefix_ram_enabled",
-            cpu_x64_jit.aggressive_native_prefix_ram_enabled},
-        {"all_native_enabled", cpu_x64_jit.all_native_enabled},
-        {"native_memory_enabled", cpu_x64_jit.native_memory_enabled},
-        {"native_alu_enabled", cpu_x64_jit.native_alu_enabled},
-        {"ram_load_fastpath_enabled", cpu_x64_jit.ram_load_fastpath_enabled},
     };
 
     // Memory cards
@@ -489,15 +468,6 @@ void Config::apply_to_globals() const {
     g_cpu_execution_mode = cpu_execution_mode;
     g_cpu_x64_jit_hot_block_threshold = cpu_x64_jit.hot_block_threshold;
     g_cpu_x64_jit_min_block_instructions = cpu_x64_jit.min_block_instructions;
-    g_cpu_x64_jit_branch_tail_enabled = cpu_x64_jit.branch_tail_enabled;
-    g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled =
-        cpu_x64_jit.aggressive_reduced_helper_branch_tail_enabled;
-    g_cpu_x64_jit_aggressive_native_prefix_ram_enabled =
-        cpu_x64_jit.aggressive_native_prefix_ram_enabled;
-    g_cpu_x64_jit_all_native_enabled = cpu_x64_jit.all_native_enabled;
-    g_cpu_x64_jit_native_memory_enabled = cpu_x64_jit.native_memory_enabled;
-    g_cpu_x64_jit_native_alu_enabled = cpu_x64_jit.native_alu_enabled;
-    g_cpu_x64_jit_ram_load_fastpath_enabled = cpu_x64_jit.ram_load_fastpath_enabled;
 
     // SPU
     g_spu_audio_target_latency_ms = spu.target_latency_ms;

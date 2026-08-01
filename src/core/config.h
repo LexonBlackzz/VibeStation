@@ -25,13 +25,6 @@ struct Config {
     struct CpuX64JitConfig {
         u32 hot_block_threshold = 8;
         u32 min_block_instructions = 2;
-        bool branch_tail_enabled = false;
-        bool aggressive_reduced_helper_branch_tail_enabled = false;
-        bool aggressive_native_prefix_ram_enabled = false;
-        bool all_native_enabled = true;
-        bool native_memory_enabled = true;
-        bool native_alu_enabled = true;
-        bool ram_load_fastpath_enabled = false;
     } cpu_x64_jit;
 
     // SPU
