@@ -1507,11 +1507,17 @@ void emit_x64_reduced_helper_branch_tail_block(X64NativeContext &context,
   code.mov(code.rax, code.ptr[code.r9]);
   code.mov(code.r10d,
            code.dword[ctx + offsetof(X64NativeContext, cycles_to_add)]);
+  // Taken R3000A branches consume one cycle more than not-taken branches.
+  // The branch outcome is only known at block entry, so it cannot be folded
+  // into the context's compile-time base cycle count.
+  Label cycle_count_ready;
+  code.cmp(code.byte[ctx + offsetof(X64NativeContext, branch_taken)], 0u);
+  code.je(cycle_count_ready, CodeGenerator::T_NEAR);
+  code.inc(code.r10d);
+  code.L(cycle_count_ready);
   code.add(code.rax, code.r10);
   code.mov(code.ptr[code.r9], code.rax);
 
-  code.mov(code.r10d,
-           code.dword[ctx + offsetof(X64NativeContext, cycles_to_add)]);
   code.mov(code.dword[result + offsetof(CpuBlockRunResult, cycles)],
            code.r10d);
   code.mov(code.r10d,
@@ -2594,6 +2600,12 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
            block.native_aggressive_reduced_helper_branch_tail) &&
           is_x64_load_op(block.instructions[i].op)) {
         context->base_cycles += 4u;
+      }
+      if (block.native_aggressive_reduced_helper_branch_tail &&
+          is_x64_aggressive_store_op(block.instructions[i].op)) {
+        // Aggressive stores are admitted only after their addresses have
+        // been proven to target main RAM. Match Cpu::cpu_data_write_penalty.
+        context->base_cycles += 1u;
       }
     }
 
