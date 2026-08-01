@@ -10,13 +10,18 @@ if %errorlevel% neq 0 (
 )
 
 set "CMAKE_FRESH_ARG="
+set "CMAKE_COMPILER_ARGS=-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
 if not exist build-ninja\CMakeCache.txt goto configure
-%SystemRoot%\System32\findstr.exe /I /L /C:"cl.exe" build-ninja\CMakeCache.txt >nul 2>nul && goto configure
+%SystemRoot%\System32\findstr.exe /I /L /C:"cl.exe" build-ninja\CMakeCache.txt >nul 2>nul && goto cached
+%SystemRoot%\System32\findstr.exe /I /L /C:"CMAKE_CXX_COMPILER:STRING=cl" build-ninja\CMakeCache.txt >nul 2>nul && goto cached
 echo Existing build-ninja cache uses a different compiler; refreshing it for MSVC x64.
 set "CMAKE_FRESH_ARG=--fresh"
+goto configure
+:cached
+set "CMAKE_COMPILER_ARGS="
 :configure
 echo Configuring CMake with Ninja...
-cmake %CMAKE_FRESH_ARG% -G Ninja -S . -B build-ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DVIBESTATION_ENABLE_X64_JIT=ON -DVIBESTATION_ENABLE_IPO=OFF
+cmake %CMAKE_FRESH_ARG% -G Ninja -S . -B build-ninja -DCMAKE_BUILD_TYPE=Release %CMAKE_COMPILER_ARGS% -DVIBESTATION_ENABLE_X64_JIT=ON -DVIBESTATION_ENABLE_IPO=OFF
 if %errorlevel% neq 0 (
     echo CMake configuration failed.
     exit /b %errorlevel%
