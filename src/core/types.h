@@ -144,9 +144,9 @@ inline bool g_cpu_backend_compare_test_active = false;
 inline bool g_cpu_x64_jit_force_compile = false;
 inline u32 g_cpu_x64_jit_hot_block_threshold = 8;
 inline u32 g_cpu_x64_jit_min_block_instructions = 2;
-// Native branch tails are opt-in while real-game correctness is being
-// validated. CLI overrides take precedence over the persisted UI setting.
-inline bool g_cpu_x64_jit_branch_tail_enabled = false;
+// The unified backend always compiles branch tails that pass its structural
+// and runtime accuracy guards. Legacy CLI overrides remain test-only state.
+inline bool g_cpu_x64_jit_branch_tail_enabled = true;
 inline bool g_cpu_x64_jit_branch_tail_cli_override = false;
 inline bool g_cpu_x64_jit_branch_tail_cli_value = false;
 inline bool g_cpu_x64_jit_branch_tail_logging = false;
