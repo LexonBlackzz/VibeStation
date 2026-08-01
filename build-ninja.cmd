@@ -8,7 +8,7 @@ if %errorlevel% neq 0 (
 
 set "CMAKE_FRESH_ARG="
 if exist build-ninja\CMakeCache.txt (
-    findstr /I /R "CMAKE_CXX_COMPILER.*cl.exe" build-ninja\CMakeCache.txt >nul
+    findstr /I /C:"/x64/cl.exe" build-ninja\CMakeCache.txt >nul
     if errorlevel 1 (
         echo Existing build-ninja cache uses a different compiler; refreshing it for MSVC x64.
         set "CMAKE_FRESH_ARG=--fresh"
