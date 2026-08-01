@@ -2687,7 +2687,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
 
   CpuCompareCase decoded_then_native_fast_load{};
   decoded_then_native_fast_load.name =
-      "decoded_load_then_native_ram_fast_load";
+      "decoded_load_then_coherent_load_rejects_active_delay";
   decoded_then_native_fast_load.initial_gpr[1] = 0x80011420u;
   decoded_then_native_fast_load.initial_gpr[2] = 0x11111111u;
   decoded_then_native_fast_load.initial_gpr[3] = 0x33333333u;
@@ -2706,10 +2706,11 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       {false, true, true}, {true, true, true}};
   decoded_then_native_fast_load.compare_segment_states = true;
   decoded_then_native_fast_load.enable_ram_load_fastpath_for_x64 = true;
-  decoded_then_native_fast_load
-      .require_native_ram_load_fastpath_when_available = true;
-  decoded_then_native_fast_load
-      .require_native_memory_tier_entry_when_available = true;
+  // The coherent emitter deliberately rejects a block entered with a live
+  // load delay. Spyro reaches this state in normal gameplay, and accepting it
+  // before the cross-block hazard is modeled exactly causes timing/state
+  // divergence. Keep this as an explicit accuracy gate for the safe fallback.
+  decoded_then_native_fast_load.expect_x64_fallback = true;
   cases.push_back(decoded_then_native_fast_load);
 
   CpuCompareCase decoded_then_native_memory_load{};

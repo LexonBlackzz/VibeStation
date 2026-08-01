@@ -40,6 +40,7 @@ struct X64NativeContext {
   u32 *active_branch_pc = nullptr;
   u32 *cycle_penalty = nullptr;
   const u8 *ram_data = nullptr;
+  const u32 *icache_tag = nullptr;
   bool *icache_valid = nullptr;
   u32 icache_line_stride = 0;
   u64 *ram_load_fastpath_counter = nullptr;
@@ -55,6 +56,7 @@ struct X64NativeContext {
   u32 current_instruction_index = 0;
   u32 branch_instruction_index = 0;
   bool uses_instruction_helpers = false;
+  bool coherent_straight_load = false;
   bool inline_branch_tail = false;
   bool is_branch_tail = false;
   bool is_native_prefix = false;
@@ -260,6 +262,24 @@ const char *x64_memory_region(u32 addr) {
 
 bool is_x64_stage2_op(DecodedOp op) {
   return is_x64_stage1_op(op) || is_x64_memory_op(op);
+}
+
+bool is_x64_coherent_straight_load_block(const DecodedBlock &block) {
+  if (!block.has_load || block.has_store || block.has_control_flow ||
+      block.has_fallback || block.instruction_count == 0u) {
+    return false;
+  }
+  for (u32 index = 0; index < block.instruction_count; ++index) {
+    const DecodedInstruction &inst = block.instructions[index];
+    const NativeOpKind kind = block.native_plan.operations[index].kind;
+    if (kind == NativeOpKind::InlineAlu) {
+      continue;
+    }
+    if (kind != NativeOpKind::InlineMemory || !is_x64_load_op(inst.op)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool is_x64_branch_tail_op(DecodedOp op) {
@@ -724,6 +744,15 @@ bool block_uses_instruction_helpers(const DecodedBlock &block) {
     }
   }
   return false;
+}
+
+bool is_x64_instruction_cacheable(u32 addr) {
+  if (addr >= 0xA0000000u && addr < 0xC0000000u) {
+    return false;
+  }
+  const u32 phys = psx::mask_address(addr);
+  return phys < 0x00800000u ||
+         (phys >= 0x1F800000u && phys < 0x1F801000u);
 }
 
 bool is_x64_inline_branch_tail_block(const DecodedBlock &block) {
@@ -1436,6 +1465,250 @@ void emit_branch_tail_condition(Xbyak::CodeGenerator &code,
   code.movzx(code.r10d, code.al);
 }
 
+void emit_coherent_icache_guard(Xbyak::CodeGenerator &code,
+                                const Xbyak::Reg64 &ctx,
+                                const Xbyak::Reg64 &result, u32 pc,
+                                u32 instruction_index,
+                                uintptr_t refill_icache_fn,
+                                Xbyak::Label &helper_exit) {
+  Xbyak::Label refill, hit;
+  const u32 index = (pc >> 4u) & 0xFFu;
+  const u32 tag = psx::mask_address(pc) & ~0x0Fu;
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, icache_valid)]);
+  if (index != 0u) {
+    code.mov(code.r10d, index);
+    code.imul(code.r10d,
+              code.dword[ctx + offsetof(X64NativeContext,
+                                        icache_line_stride)]);
+    code.add(code.rax, code.r10);
+  }
+  code.cmp(code.byte[code.rax], 0u);
+  code.je(refill, Xbyak::CodeGenerator::T_NEAR);
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, icache_tag)]);
+  if (index != 0u) {
+    code.mov(code.r10d, index);
+    code.imul(code.r10d,
+              code.dword[ctx + offsetof(X64NativeContext,
+                                        icache_line_stride)]);
+    code.add(code.rax, code.r10);
+  }
+  code.cmp(code.dword[code.rax], tag);
+  code.je(hit, Xbyak::CodeGenerator::T_NEAR);
+
+  code.L(refill);
+#if defined(_WIN32)
+  code.mov(code.rcx, ctx);
+  code.mov(code.edx, instruction_index);
+  code.mov(code.r8, result);
+#else
+  code.mov(code.rdi, ctx);
+  code.mov(code.esi, instruction_index);
+  code.mov(code.rdx, result);
+#endif
+  emit_absolute_call(code, refill_icache_fn);
+  code.test(code.al, code.al);
+  code.jz(helper_exit, Xbyak::CodeGenerator::T_NEAR);
+  code.L(hit);
+}
+
+void emit_coherent_ram_load(Xbyak::CodeGenerator &code,
+                            const Xbyak::Reg64 &ctx,
+                            const Xbyak::Reg64 &gpr,
+                            const DecodedInstruction &inst,
+                            Xbyak::Label &slow_exit) {
+  using namespace Xbyak;
+  Label mapped;
+
+  emit_read_gpr(code, code.r10d, gpr, inst.rs);
+  if (inst.simm != 0) {
+    code.add(code.r10d, static_cast<u32>(inst.simm));
+  }
+  if (inst.op == DecodedOp::Lh || inst.op == DecodedOp::Lhu) {
+    code.test(code.r10d, 1u);
+    code.jnz(slow_exit, CodeGenerator::T_NEAR);
+  } else if (inst.op == DecodedOp::Lw) {
+    code.test(code.r10d, 3u);
+    code.jnz(slow_exit, CodeGenerator::T_NEAR);
+  }
+
+  code.mov(code.eax, code.r10d);
+  code.and_(code.eax, 0x1FFFFFFFu);
+  code.cmp(code.eax, psx::RAM_SIZE);
+  code.jae(slow_exit, CodeGenerator::T_NEAR);
+  code.mov(code.edx, code.r10d);
+  code.and_(code.edx, 0xE0000000u);
+  code.cmp(code.edx, 0u);
+  code.je(mapped, CodeGenerator::T_NEAR);
+  code.cmp(code.edx, 0x80000000u);
+  code.je(mapped, CodeGenerator::T_NEAR);
+  code.cmp(code.edx, 0xA0000000u);
+  code.jne(slow_exit, CodeGenerator::T_NEAR);
+  code.L(mapped);
+
+  code.mov(code.r9, code.ptr[ctx + offsetof(X64NativeContext, ram_data)]);
+  switch (inst.op) {
+  case DecodedOp::Lb:
+    code.movsx(code.r10d, code.byte[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lbu:
+    code.movzx(code.r10d, code.byte[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lh:
+    code.movsx(code.r10d, code.word[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lhu:
+    code.movzx(code.r10d, code.word[code.r9 + code.rax]);
+    break;
+  case DecodedOp::Lw:
+    code.mov(code.r10d, code.dword[code.r9 + code.rax]);
+    break;
+  default:
+    code.jmp(slow_exit, CodeGenerator::T_NEAR);
+    return;
+  }
+
+  code.mov(code.rax,
+           code.ptr[ctx +
+                    offsetof(X64NativeContext, ram_load_fastpath_counter)]);
+  code.inc(code.qword[code.rax]);
+  if (inst.rt == 0u) {
+    code.mov(code.rax,
+             code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+    code.mov(code.dword[code.rax], 0u);
+    code.mov(code.rax,
+             code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+    code.mov(code.dword[code.rax], 0u);
+    return;
+  }
+
+  code.mov(code.rax, code.ptr[ctx + offsetof(X64NativeContext, load_reg)]);
+  code.cmp(code.dword[code.rax], static_cast<u32>(inst.rt));
+  Label no_cancel;
+  code.jne(no_cancel, CodeGenerator::T_NEAR);
+  code.mov(code.dword[code.rax], 0u);
+  code.L(no_cancel);
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_reg)]);
+  code.mov(code.dword[code.rax], static_cast<u32>(inst.rt));
+  code.mov(code.rax,
+           code.ptr[ctx + offsetof(X64NativeContext, next_load_value)]);
+  code.mov(code.dword[code.rax], code.r10d);
+}
+
+void emit_x64_coherent_straight_load_block(X64NativeContext &context,
+                                           const DecodedBlock &block,
+                                           uintptr_t refill_icache_fn,
+                                           uintptr_t precise_operation_fn) {
+  using namespace Xbyak;
+  CodeGenerator &code = context.code;
+  Label helper_exit, done;
+  code.push(code.r12);
+  code.push(code.r13);
+  code.push(code.r14);
+  code.sub(code.rsp, 32);
+#if defined(_WIN32)
+  const Reg64 ctx = code.r12;
+  const Reg64 result = code.r13;
+  const Reg64 gpr = code.r14;
+  code.mov(ctx, code.rcx);
+  code.mov(result, code.rdx);
+#else
+  const Reg64 ctx = code.r12;
+  const Reg64 result = code.r13;
+  const Reg64 gpr = code.r14;
+  code.mov(ctx, code.rdi);
+  code.mov(result, code.rsi);
+#endif
+  code.mov(gpr, code.ptr[ctx + offsetof(X64NativeContext, gpr)]);
+
+  u32 previous_line = 0xFFFFFFFFu;
+  for (u32 index = 0; index < context.instruction_count; ++index) {
+    const DecodedInstruction &inst = block.instructions[index];
+    const u32 line = inst.pc >> 4u;
+    if (line != previous_line && is_x64_instruction_cacheable(inst.pc)) {
+      emit_coherent_icache_guard(code, ctx, result, inst.pc, index,
+                                 refill_icache_fn, helper_exit);
+      previous_line = line;
+    }
+    if (is_x64_load_op(inst.op)) {
+      Label slow_memory, operation_done;
+      emit_coherent_ram_load(code, ctx, gpr, inst, slow_memory);
+
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, current_pc)]);
+      code.mov(code.dword[code.rax], inst.pc);
+      code.mov(code.rax, code.ptr[ctx + offsetof(X64NativeContext, pc)]);
+      code.mov(code.dword[code.rax], inst.pc + 4u);
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, next_pc)]);
+      code.mov(code.dword[code.rax], inst.pc + 8u);
+      emit_advance_load_delay(code, ctx, gpr);
+      code.mov(code.dword[gpr], 0u);
+
+      const u32 cycles = std::max<u32>(1u, inst.cycles) + 4u;
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, cycles)]);
+      code.add(code.qword[code.rax], cycles);
+      code.add(code.dword[result + offsetof(CpuBlockRunResult, cycles)],
+               cycles);
+      code.inc(
+          code.dword[result + offsetof(CpuBlockRunResult, instructions)]);
+      code.jmp(operation_done, CodeGenerator::T_NEAR);
+
+      code.L(slow_memory);
+#if defined(_WIN32)
+      code.mov(code.rcx, ctx);
+      code.mov(code.edx, index);
+      code.mov(code.r8, result);
+#else
+      code.mov(code.rdi, ctx);
+      code.mov(code.esi, index);
+      code.mov(code.rdx, result);
+#endif
+      emit_absolute_call(code, precise_operation_fn);
+      code.test(code.al, code.al);
+      code.jz(helper_exit, CodeGenerator::T_NEAR);
+      code.L(operation_done);
+    } else {
+      emit_x64_instruction(code, inst, ctx, gpr);
+
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, current_pc)]);
+      code.mov(code.dword[code.rax], inst.pc);
+      code.mov(code.rax, code.ptr[ctx + offsetof(X64NativeContext, pc)]);
+      code.mov(code.dword[code.rax], inst.pc + 4u);
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, next_pc)]);
+      code.mov(code.dword[code.rax], inst.pc + 8u);
+      emit_advance_load_delay(code, ctx, gpr);
+      code.mov(code.dword[gpr], 0u);
+
+      const u32 cycles = std::max<u32>(1u, inst.cycles);
+      code.mov(code.rax,
+               code.ptr[ctx + offsetof(X64NativeContext, cycles)]);
+      code.add(code.qword[code.rax], cycles);
+      code.add(code.dword[result + offsetof(CpuBlockRunResult, cycles)],
+               cycles);
+      code.inc(
+          code.dword[result + offsetof(CpuBlockRunResult, instructions)]);
+    }
+  }
+  code.mov(code.byte[result + offsetof(CpuBlockRunResult, exit_reason)],
+           static_cast<uint8_t>(CpuBlockExitReason::None));
+  code.jmp(done, CodeGenerator::T_NEAR);
+
+  code.L(helper_exit);
+  code.L(done);
+  code.add(code.rsp, 32);
+  code.pop(code.r14);
+  code.pop(code.r13);
+  code.pop(code.r12);
+  code.ret();
+  code.ready();
+}
+
 void emit_x64_direct_block(X64NativeContext &context,
                            const DecodedBlock &block) {
   using namespace Xbyak;
@@ -1693,8 +1966,14 @@ void emit_x64_single_helper_block(X64NativeContext &context,
 void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
                     uintptr_t prepare_fn, uintptr_t memory_fn,
                     uintptr_t branch_fn, uintptr_t complex_fn,
-                    uintptr_t finish_fn, uintptr_t helper_block_fn) {
-  if (context.inline_branch_tail ||
+                    uintptr_t finish_fn, uintptr_t helper_block_fn,
+                    uintptr_t refill_icache_fn,
+                    uintptr_t precise_operation_fn) {
+  if (context.coherent_straight_load) {
+    emit_x64_coherent_straight_load_block(context, block,
+                                          refill_icache_fn,
+                                          precise_operation_fn);
+  } else if (context.inline_branch_tail ||
       block.native_reduced_helper_branch_tail ||
       block.native_aggressive_reduced_helper_branch_tail) {
     emit_x64_reduced_helper_branch_tail_block(context, block);
@@ -1709,6 +1988,73 @@ void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
 
 bool CpuOptimizedBackend::x64_jit_available() const {
   return VIBESTATION_X64_JIT_SUPPORTED != 0;
+}
+
+bool CpuOptimizedBackend::x64_native_refill_icache(
+    void *context_ptr, u32 index, CpuBlockRunResult *result) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->cpu == nullptr ||
+      context->block == nullptr || result == nullptr ||
+      index >= context->instruction_count) {
+    if (result != nullptr) {
+      result->exit_reason = CpuBlockExitReason::Fallback;
+    }
+    return false;
+  }
+
+  Cpu &cpu = *context->cpu;
+  const u32 pc = context->block->instructions[index].pc;
+  cpu.executing_step_ = true;
+  cpu.exception_raised_ = false;
+  cpu.cycle_penalty_ = 0u;
+  (void)cpu.fetch32(pc);
+  const u32 penalty = cpu.cycle_penalty_;
+  cpu.cycle_penalty_ = 0u;
+  cpu.executing_step_ = false;
+  if (cpu.exception_raised_) {
+    constexpr u32 fault_cycles = 2u;
+    cpu.cycles_ += fault_cycles;
+    result->cycles += fault_cycles;
+    ++result->instructions;
+    result->exit_reason = CpuBlockExitReason::Exception;
+    return false;
+  }
+  cpu.cycles_ += penalty;
+  result->cycles += penalty;
+  return true;
+}
+
+bool CpuOptimizedBackend::x64_native_execute_precise_operation(
+    void *context_ptr, u32 index, CpuBlockRunResult *result) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->cpu == nullptr ||
+      context->block == nullptr || result == nullptr ||
+      index >= context->instruction_count) {
+    if (result != nullptr) {
+      result->exit_reason = CpuBlockExitReason::Fallback;
+    }
+    return false;
+  }
+
+  if (!x64_native_prepare_instruction(context_ptr, index, result)) {
+    return false;
+  }
+
+  Cpu &cpu = *context->cpu;
+  const DecodedInstruction &inst = context->block->instructions[index];
+  const u32 addr = cpu.gpr_[inst.rs] + static_cast<u32>(inst.simm);
+  const u32 argument =
+      is_x64_load_op(inst.op) ? static_cast<u32>(inst.rt)
+                              : cpu.gpr_[inst.rt];
+  if (!x64_native_memory_instruction(context_ptr,
+                                     static_cast<u32>(inst.op), argument,
+                                     addr)) {
+    cpu.execute(inst.bits);
+    ++context->backend->stats_.fallback_instructions;
+  }
+
+  cpu.gpr_[0] = 0u;
+  return x64_native_finish_instruction(context_ptr, index, result, 1u);
 }
 
 bool CpuOptimizedBackend::x64_native_prepare_instruction(
@@ -2134,6 +2480,14 @@ bool CpuOptimizedBackend::x64_native_finish_instruction(
              cd.busy_cycles_remaining(), cpu.sys_->debug_dma_read(0x70u),
              cpu.sys_->debug_dma_read(0x74u));
     context->memory_trace_current = false;
+  }
+
+  // MMIO helpers may make a device event immediately schedulable. Match the
+  // decoded backend by returning to the scheduler before executing another
+  // guest instruction from this block.
+  if (cpu.sys_->cpu_timing_boundary_requested()) {
+    result->exit_reason = CpuBlockExitReason::Budget;
+    return false;
   }
 
   const bool completed_delay_slot =
@@ -2690,6 +3044,7 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->active_branch_pc = &cpu_.active_branch_pc_;
     context->cycle_penalty = &cpu_.cycle_penalty_;
     context->ram_data = cpu_.sys_->jit_main_ram_data();
+    context->icache_tag = &cpu_.icache_[0].tag;
     context->icache_valid = &cpu_.icache_[0].valid;
     context->icache_line_stride = sizeof(cpu_.icache_[0]);
     context->ram_load_fastpath_counter =
@@ -2707,8 +3062,11 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->inline_branch_tail =
         !context->is_native_prefix &&
         is_x64_inline_branch_tail_block(block);
+    context->coherent_straight_load =
+        !context->is_native_prefix &&
+        is_x64_coherent_straight_load_block(block);
     context->uses_instruction_helpers =
-        !context->inline_branch_tail &&
+        !context->coherent_straight_load && !context->inline_branch_tail &&
         ((context->is_branch_tail &&
          !block.native_reduced_helper_branch_tail &&
          !block.native_aggressive_reduced_helper_branch_tail) ||
@@ -2722,7 +3080,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->last_pc = context->end_pc - 4u;
     for (u32 i = 0; i < context->instruction_count; ++i) {
       context->base_cycles += block.instructions[i].cycles;
-      if ((block.native_reduced_helper_ram_load ||
+      if ((context->coherent_straight_load ||
+           block.native_reduced_helper_ram_load ||
            block.native_prefix_ram_load ||
            block.native_reduced_helper_branch_tail ||
            block.native_aggressive_reduced_helper_branch_tail) &&
@@ -2750,7 +3109,11 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         reinterpret_cast<uintptr_t>(
             &CpuOptimizedBackend::x64_native_finish_instruction),
         reinterpret_cast<uintptr_t>(
-            &CpuOptimizedBackend::x64_native_execute_helper_block));
+            &CpuOptimizedBackend::x64_native_execute_helper_block),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_refill_icache),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_execute_precise_operation));
     block.native_fn = context->code.getCode<DecodedBlock::NativeFn>();
     block.native_code_bytes = context->code.getSize();
     block.native_context = context.release();
@@ -2948,6 +3311,77 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   const bool active_load_delay =
       cpu_.load_.reg != 0 || cpu_.next_load_.reg != 0;
+
+  if (context->coherent_straight_load) {
+    if (active_load_delay) {
+      return reject_to_decoded(stats_.native_reject_load_delay_state,
+                               NativeBlockRejectDetail::LoadDelayState);
+    }
+    if (cpu_.sys_->irq_pending()) {
+      cpu_.cop0_cause_ |= (1u << 10);
+    } else {
+      cpu_.cop0_cause_ &= ~(1u << 10);
+    }
+    if (cpu_.check_irq()) {
+      return reject_to_decoded(stats_.native_reject_irq_state,
+                               NativeBlockRejectDetail::IrqState);
+    }
+
+    struct FetchFill {
+      u32 index = 0;
+      u32 tag = 0;
+      u32 base = 0;
+    };
+    std::array<FetchFill, DecodedBlock::kMaxInstructions> fills{};
+    u32 fill_count = 0;
+    u32 fetch_penalty = 0;
+    for (u32 i = 0; i < native_instruction_count; ++i) {
+      const u32 pc = block.instructions[i].pc;
+      if ((pc & 3u) != 0u) {
+        ++stats_.native_to_decoded_fallbacks;
+        ++stats_.native_reject_icache;
+        record_rejected_block(NativeBlockRejectDetail::ICache);
+        return execute_block(block, max_cycles, max_instructions);
+      }
+      if (!cpu_.instruction_cacheable(pc)) {
+        continue;
+      }
+
+      const u32 index = (pc >> 4u) & 0xFFu;
+      const u32 tag = psx::mask_address(pc) & ~0x0Fu;
+      bool hit = cpu_.icache_[index].valid && cpu_.icache_[index].tag == tag;
+      for (u32 fill = 0; fill < fill_count; ++fill) {
+        if (fills[fill].index == index && fills[fill].tag == tag) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) {
+        fetch_penalty += 4u;
+        fills[fill_count++] = {index, tag, pc & ~0x0Fu};
+      }
+    }
+
+    const u32 total_cycles = context->base_cycles + fetch_penalty;
+    if (total_cycles > max_cycles) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_reject_budget;
+      record_rejected_block(NativeBlockRejectDetail::Budget);
+      return execute_block(block, max_cycles, max_instructions);
+    }
+    context->max_cycles = max_cycles;
+    context->max_instructions = max_instructions;
+    ++block.native_entry_count;
+    ++stats_.native_memory_block_entries;
+    block.native_fn(block.native_context, &result);
+    g_diag_current_pc = cpu_.current_pc_;
+    ++stats_.native_block_entries;
+    stats_.native_instructions += result.instructions;
+    stats_.native_cycles += result.cycles;
+    stats_.optimized_instructions += result.instructions;
+    return result;
+  }
+
   if (active_load_delay &&
       (block.native_reduced_helper_branch_tail ||
        block.native_aggressive_reduced_helper_branch_tail)) {

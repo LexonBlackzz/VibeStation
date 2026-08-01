@@ -456,6 +456,10 @@ private:
   bool ensure_x64_safety_checked(DecodedBlock &block);
   bool should_attempt_x64_compile(const DecodedBlock &block);
   bool compile_x64_block(DecodedBlock &block);
+  static bool x64_native_refill_icache(void *context, u32 index,
+                                       CpuBlockRunResult *result);
+  static bool x64_native_execute_precise_operation(
+      void *context, u32 index, CpuBlockRunResult *result);
   static bool x64_native_prepare_instruction(void *context, u32 index,
                                              CpuBlockRunResult *result);
   static bool x64_native_memory_instruction(void *context, u32 op,
