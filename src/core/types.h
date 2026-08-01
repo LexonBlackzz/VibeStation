@@ -180,10 +180,11 @@ inline bool g_cpu_x64_jit_memory_trace = false;
 inline bool g_cpu_x64_jit_memory_trace_pc_set = false;
 inline u32 g_cpu_x64_jit_memory_trace_pc = 0;
 inline u32 g_cpu_x64_jit_memory_trace_count = 128;
-// Opt-in groundwork only: aligned loads from the canonical 2 MiB main-RAM
-// aliases may bypass the shared memory helper. All other regions stay slow.
+// Aligned loads from canonical 2 MiB main-RAM aliases use guarded direct
+// access. Runtime checks keep MMIO, scratchpad, BIOS, and unaligned accesses
+// on the precise helper path.
 inline bool g_cpu_x64_jit_ram_load_fastpath_cli_override = false;
-inline bool g_cpu_x64_jit_ram_load_fastpath_enabled = false;
+inline bool g_cpu_x64_jit_ram_load_fastpath_enabled = true;
 inline bool g_cpu_x64_jit_native_alu_enabled = true;
 inline bool g_cpu_x64_jit_native_alu_cli_override = false;
 inline bool g_cpu_x64_jit_native_alu_cli_value = true;
