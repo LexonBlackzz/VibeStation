@@ -2,7 +2,7 @@
 rem PERSONAL BUILD HELPER: tailored to Lexon's local Visual Studio installation.
 rem This is not a portable or supported project build entry point.
 set "PATH=C:\Program Files (x86)\Microsoft Visual Studio\Installer;%PATH%"
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
 where cl.exe >nul 2>nul
 if %errorlevel% neq 0 (
     echo MSVC x64 compiler environment is unavailable.

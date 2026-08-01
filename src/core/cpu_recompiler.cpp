@@ -2194,14 +2194,17 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
 }
 
 CpuBlockRunResult CpuOptimizedBackend::execute_block(
-    DecodedBlock &block, u32 max_cycles, u32 max_instructions) {
+    DecodedBlock &block, u32 max_cycles, u32 max_instructions,
+    bool count_decoded) {
   CpuBlockRunResult result{};
   if (block.invalidated) {
     result.exit_reason = CpuBlockExitReason::Invalidated;
     return result;
   }
 
-  ++stats_.decoded_block_entries;
+  if (count_decoded) {
+    ++stats_.decoded_block_entries;
+  }
   for (u32 i = 0; i < block.instruction_count; ++i) {
     if (result.cycles >= max_cycles || result.instructions >= max_instructions) {
       result.exit_reason = CpuBlockExitReason::Budget;
@@ -2235,7 +2238,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_block(
       cpu_.execute(inst.bits);
       ++stats_.fallback_instructions;
     }
-    finish_instruction(inst, result, decoded_executed);
+    finish_instruction(inst, result, decoded_executed && count_decoded);
 
     if (cpu_.exception_raised_) {
       result.exit_reason = CpuBlockExitReason::Exception;

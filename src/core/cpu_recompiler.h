@@ -388,7 +388,8 @@ private:
   bool append_decoded_instruction(DecodedBlock &block,
                                   const DecodedInstruction &inst);
   CpuBlockRunResult execute_block(DecodedBlock &block, u32 max_cycles,
-                                  u32 max_instructions);
+                                  u32 max_instructions,
+                                  bool count_decoded = true);
   CpuBlockRunResult execute_native_block(DecodedBlock &block, u32 max_cycles,
                                          u32 max_instructions);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
@@ -410,6 +411,8 @@ private:
   static bool x64_native_memory_instruction(void *context, u32 op,
                                             u32 rt_or_value, u32 addr);
   static bool x64_native_complex_instruction(void *context);
+  static void x64_native_execute_helper_block(void *context,
+                                              CpuBlockRunResult *result);
   static void x64_native_branch_instruction(void *context, u32 taken);
   static bool x64_native_finish_instruction(void *context, u32 index,
                                             CpuBlockRunResult *result,

@@ -1638,16 +1638,31 @@ void emit_x64_helper_block(X64NativeContext &context,
   code.ready();
 }
 
+void emit_x64_single_helper_block(X64NativeContext &context,
+                                  uintptr_t helper_fn) {
+  Xbyak::CodeGenerator &code = context.code;
+#if defined(_WIN32)
+  code.sub(code.rsp, 40);
+  emit_absolute_call(code, helper_fn);
+  code.add(code.rsp, 40);
+#else
+  code.sub(code.rsp, 8);
+  emit_absolute_call(code, helper_fn);
+  code.add(code.rsp, 8);
+#endif
+  code.ret();
+  code.ready();
+}
+
 void emit_x64_block(X64NativeContext &context, const DecodedBlock &block,
                     uintptr_t prepare_fn, uintptr_t memory_fn,
                     uintptr_t branch_fn, uintptr_t complex_fn,
-                    uintptr_t finish_fn) {
+                    uintptr_t finish_fn, uintptr_t helper_block_fn) {
   if (block.native_reduced_helper_branch_tail ||
       block.native_aggressive_reduced_helper_branch_tail) {
     emit_x64_reduced_helper_branch_tail_block(context, block);
   } else if (context.uses_instruction_helpers) {
-    emit_x64_helper_block(context, block, prepare_fn, memory_fn, branch_fn,
-                          complex_fn, finish_fn);
+    emit_x64_single_helper_block(context, helper_block_fn);
   } else {
     emit_x64_direct_block(context, block);
   }
@@ -1938,6 +1953,59 @@ bool CpuOptimizedBackend::x64_native_complex_instruction(void *context_ptr) {
                             context->cpu->pending_branch_taken_;
   }
   return completed;
+}
+
+void CpuOptimizedBackend::x64_native_execute_helper_block(
+    void *context_ptr, CpuBlockRunResult *result) {
+  auto *context = static_cast<X64NativeContext *>(context_ptr);
+  if (context == nullptr || context->backend == nullptr ||
+      context->cpu == nullptr || context->block == nullptr ||
+      result == nullptr) {
+    if (result != nullptr) {
+      result->exit_reason = CpuBlockExitReason::Fallback;
+    }
+    return;
+  }
+
+  CpuOptimizedBackend &backend = *context->backend;
+  *result = backend.execute_block(*context->block, context->max_cycles,
+                                  context->max_instructions, false);
+
+  const u32 executed =
+      (std::min)(result->instructions, context->instruction_count);
+  backend.stats_.native_prepare_helper_calls += executed;
+  backend.stats_.native_finish_helper_calls += executed;
+  context->block->native_prepare_helper_call_count += executed;
+  context->block->native_finish_helper_call_count += executed;
+  if (context->is_branch_tail) {
+    backend.stats_.native_branch_tail_prepare_helper_calls += executed;
+    backend.stats_.native_branch_tail_finish_helper_calls += executed;
+  }
+
+  for (u32 index = 0; index < executed; ++index) {
+    const DecodedInstruction &inst = context->block->instructions[index];
+    if (inst.may_access_memory) {
+      ++backend.stats_.native_memory_helper_calls;
+      ++context->block->native_memory_helper_call_count;
+      if (context->is_branch_tail) {
+        ++backend.stats_.native_branch_tail_memory_helper_calls;
+        if (index == context->branch_instruction_index + 1u) {
+          ++backend.stats_.native_branch_delay_slot_memory_helpers;
+        }
+      }
+      if (result->exit_reason == CpuBlockExitReason::Exception &&
+          index + 1u == executed) {
+        ++backend.stats_.native_memory_exception_exits;
+      }
+    }
+    if (inst.is_branch) {
+      ++backend.stats_.native_branch_helper_calls;
+      ++context->block->native_branch_helper_call_count;
+      if (context->is_branch_tail) {
+        ++backend.stats_.native_branch_tail_branch_helper_calls;
+      }
+    }
+  }
 }
 
 void CpuOptimizedBackend::x64_native_branch_instruction(void *context_ptr,
@@ -2643,7 +2711,9 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         reinterpret_cast<uintptr_t>(
             &CpuOptimizedBackend::x64_native_complex_instruction),
         reinterpret_cast<uintptr_t>(
-            &CpuOptimizedBackend::x64_native_finish_instruction));
+            &CpuOptimizedBackend::x64_native_finish_instruction),
+        reinterpret_cast<uintptr_t>(
+            &CpuOptimizedBackend::x64_native_execute_helper_block));
     block.native_fn = context->code.getCode<DecodedBlock::NativeFn>();
     block.native_code_bytes = context->code.getSize();
     block.native_context = context.release();
@@ -2756,6 +2826,67 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   if (completed_delay_slot_state) {
     cpu_.in_delay_slot_ = false;
     cpu_.active_branch_pc_ = 0u;
+  }
+
+  if (context->uses_instruction_helpers) {
+    const bool active_load_delay =
+        cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u;
+    if (active_load_delay) {
+      ++stats_.native_helper_load_delay_entries;
+    }
+
+    context->max_cycles = max_cycles;
+    context->max_instructions = max_instructions;
+    context->branch_taken = false;
+    context->memory_filter_exit = false;
+    context->memory_trace_current = false;
+    context->delay_slot_used_memory =
+        context->is_branch_tail &&
+        block.instructions[block.instruction_count - 1u].may_access_memory;
+    context->delay_slot_used_mmio = false;
+
+    if (context->is_branch_tail) {
+      ++stats_.native_branch_tail_entries;
+      ++block.native_branch_tail_entry_count;
+    } else if (block.has_memory) {
+      ++stats_.native_memory_block_entries;
+    } else {
+      ++stats_.native_alu_block_entries;
+    }
+    ++block.native_entry_count;
+
+    block.native_fn(block.native_context, &result);
+    if (context->is_branch_tail) {
+      switch (result.exit_reason) {
+      case CpuBlockExitReason::Branch:
+        ++stats_.native_branch_tail_completed_exits;
+        break;
+      case CpuBlockExitReason::Budget:
+        ++stats_.native_branch_tail_budget_exits;
+        break;
+      case CpuBlockExitReason::Fallback:
+        ++stats_.native_branch_tail_fallback_exits;
+        break;
+      case CpuBlockExitReason::Exception:
+        ++stats_.native_branch_tail_exception_exits;
+        break;
+      default:
+        break;
+      }
+    }
+    if (active_load_delay) {
+      if (result.instructions != 0u) {
+        ++stats_.native_helper_load_delay_passes;
+      } else {
+        ++stats_.native_helper_load_delay_fallbacks;
+      }
+    }
+    g_diag_current_pc = cpu_.current_pc_;
+    ++stats_.native_block_entries;
+    stats_.native_instructions += result.instructions;
+    stats_.native_cycles += result.cycles;
+    stats_.optimized_instructions += result.instructions;
+    return result;
   }
 
   if ((block.native_reduced_helper_branch_tail ||

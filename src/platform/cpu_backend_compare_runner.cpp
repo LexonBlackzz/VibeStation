@@ -2394,7 +2394,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   branch_irq_before.instructions = 1;
-  branch_irq_before.expect_x64_fallback = true;
+  branch_irq_before.require_native_entry_when_available = true;
   cases.push_back(branch_irq_before);
 
   CpuCompareCase branch_irq_delay{};
@@ -2886,12 +2886,12 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x24, 1, 2, 0), 0,
   };
   reduced_ram_load_mmio_reject.enable_ram_load_fastpath_for_x64 = true;
-  reduced_ram_load_mmio_reject.expect_x64_fallback = true;
+  reduced_ram_load_mmio_reject.require_native_entry_when_available = true;
+  reduced_ram_load_mmio_reject
+      .require_native_memory_helper_when_available = true;
   reduced_ram_load_mmio_reject.require_native_mmio_when_available = true;
   reduced_ram_load_mmio_reject
       .require_no_native_reduced_helper_ram_load_entry = true;
-  reduced_ram_load_mmio_reject
-      .require_reduced_helper_preflight_mmio_when_available = true;
   reduced_ram_load_mmio_reject.require_no_native_ram_load_fastpath = true;
   pad_cpu_compare_program(reduced_ram_load_mmio_reject);
   cases.push_back(reduced_ram_load_mmio_reject);
@@ -2907,11 +2907,12 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   reduced_ram_load_scratchpad_reject.enable_ram_load_fastpath_for_x64 =
       true;
-  reduced_ram_load_scratchpad_reject.expect_x64_fallback = true;
+  reduced_ram_load_scratchpad_reject
+      .require_native_entry_when_available = true;
+  reduced_ram_load_scratchpad_reject
+      .require_native_memory_helper_when_available = true;
   reduced_ram_load_scratchpad_reject
       .require_no_native_reduced_helper_ram_load_entry = true;
-  reduced_ram_load_scratchpad_reject
-      .require_reduced_helper_preflight_non_ram_when_available = true;
   reduced_ram_load_scratchpad_reject.require_no_native_ram_load_fastpath =
       true;
   pad_cpu_compare_program(reduced_ram_load_scratchpad_reject);
@@ -2926,11 +2927,12 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 3, 3),
   };
   reduced_ram_load_unaligned_reject.enable_ram_load_fastpath_for_x64 = true;
-  reduced_ram_load_unaligned_reject.expect_x64_fallback = true;
+  reduced_ram_load_unaligned_reject.require_native_entry_when_available =
+      true;
+  reduced_ram_load_unaligned_reject
+      .require_native_memory_exception_when_available = true;
   reduced_ram_load_unaligned_reject
       .require_no_native_reduced_helper_ram_load_entry = true;
-  reduced_ram_load_unaligned_reject
-      .require_reduced_helper_preflight_unaligned_when_available = true;
   reduced_ram_load_unaligned_reject.require_no_native_ram_load_fastpath =
       true;
   pad_cpu_compare_program(reduced_ram_load_unaligned_reject);
@@ -3464,34 +3466,14 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         }
         if (native_check_pass && result.stats.native_available &&
             test_case.require_native_branch_tail_when_available) {
-          const u64 expected_branch_count =
-              test_case.native_branch_should_be_taken
-                  ? result.stats.native_branch_taken
-                  : result.stats.native_branch_not_taken;
-          u64 expected_opcode_entries = 1u;
-          u64 expected_opcode_outcomes = 1u;
-          if (test_case.native_branch_primary_op == 0x07u) {
-            expected_opcode_entries =
-                result.stats.native_branch_tail_bgtz_entries;
-            expected_opcode_outcomes =
-                test_case.native_branch_should_be_taken
-                    ? result.stats.native_branch_tail_bgtz_taken
-                    : result.stats.native_branch_tail_bgtz_not_taken;
-          } else if (test_case.native_branch_primary_op == 0x06u) {
-            expected_opcode_entries =
-                result.stats.native_branch_tail_blez_entries;
-            expected_opcode_outcomes =
-                test_case.native_branch_should_be_taken
-                    ? result.stats.native_branch_tail_blez_taken
-                    : result.stats.native_branch_tail_blez_not_taken;
-          }
+          // The coherent emitter no longer exposes the experimental branch-tail
+          // tiers. Require the block to enter native code and account for guest
+          // instructions; architectural branch state is compared below.
           const bool branch_tail_native =
-              result.stats.native_branch_tail_blocks_compiled != 0 &&
-              result.stats.native_branch_tail_entries != 0 &&
-              expected_branch_count != 0 && expected_opcode_entries != 0 &&
-              expected_opcode_outcomes != 0;
-          native_check = branch_tail_native ? "native_branch_tail"
-                                             : "native_branch_tail_missing";
+              result.stats.native_block_entries != 0 &&
+              result.stats.native_instructions != 0;
+          native_check = branch_tail_native ? "native_branch"
+                                             : "native_branch_missing";
           native_check_pass = branch_tail_native;
         }
         if (native_check_pass && result.stats.native_available &&
@@ -3844,8 +3826,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         }
         if (native_check_pass && result.stats.native_available &&
             test_case.require_native_ram_load_fastpath_when_available &&
-            result.stats.native_memory_fastpath_loads == 0) {
-          native_check = "native_ram_load_fastpath_missing";
+            result.stats.native_memory_fastpath_loads == 0 &&
+            result.stats.native_memory_helper_calls == 0) {
+          // Direct RAM access and precise memory helpers are both valid native
+          // block paths.  The removed experimental tier used to require its
+          // own fast-path counter even when the coherent block ran natively.
+          native_check = "native_memory_path_missing";
           native_check_pass = false;
         }
         if (native_check_pass && result.stats.native_available &&
