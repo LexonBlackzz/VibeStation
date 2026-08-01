@@ -31,7 +31,17 @@ const char *decoded_op_name(DecodedOp op) {
   case DecodedOp::Clear: return "Clear";
   case DecodedOp::Syscall: return "Syscall";
   case DecodedOp::Break: return "Break";
+  case DecodedOp::Mfhi: return "Mfhi";
+  case DecodedOp::Mthi: return "Mthi";
+  case DecodedOp::Mflo: return "Mflo";
+  case DecodedOp::Mtlo: return "Mtlo";
+  case DecodedOp::Mult: return "Mult";
+  case DecodedOp::Multu: return "Multu";
+  case DecodedOp::Div: return "Div";
+  case DecodedOp::Divu: return "Divu";
+  case DecodedOp::Add: return "Add";
   case DecodedOp::Addu: return "Addu";
+  case DecodedOp::Sub: return "Sub";
   case DecodedOp::Subu: return "Subu";
   case DecodedOp::And: return "And";
   case DecodedOp::Or: return "Or";
@@ -43,12 +53,18 @@ const char *decoded_op_name(DecodedOp op) {
   case DecodedOp::Bgez: return "Bgez";
   case DecodedOp::Bltzal: return "Bltzal";
   case DecodedOp::Bgezal: return "Bgezal";
+  case DecodedOp::Bcondz: return "Bcondz";
   case DecodedOp::J: return "J";
   case DecodedOp::Jal: return "Jal";
   case DecodedOp::Beq: return "Beq";
   case DecodedOp::Bne: return "Bne";
   case DecodedOp::Blez: return "Blez";
   case DecodedOp::Bgtz: return "Bgtz";
+  case DecodedOp::Beql: return "Beql";
+  case DecodedOp::Bnel: return "Bnel";
+  case DecodedOp::Blezl: return "Blezl";
+  case DecodedOp::Bgtzl: return "Bgtzl";
+  case DecodedOp::Addi: return "Addi";
   case DecodedOp::Addiu: return "Addiu";
   case DecodedOp::Slti: return "Slti";
   case DecodedOp::Sltiu: return "Sltiu";
@@ -58,14 +74,29 @@ const char *decoded_op_name(DecodedOp op) {
   case DecodedOp::Lui: return "Lui";
   case DecodedOp::Lb: return "Lb";
   case DecodedOp::Lh: return "Lh";
+  case DecodedOp::Lwl: return "Lwl";
   case DecodedOp::Lw: return "Lw";
   case DecodedOp::Lbu: return "Lbu";
   case DecodedOp::Lhu: return "Lhu";
+  case DecodedOp::Lwr: return "Lwr";
   case DecodedOp::Sb: return "Sb";
   case DecodedOp::Sh: return "Sh";
+  case DecodedOp::Swl: return "Swl";
   case DecodedOp::Sw: return "Sw";
+  case DecodedOp::Swr: return "Swr";
   case DecodedOp::Cop0: return "Cop0";
+  case DecodedOp::Cop1: return "Cop1";
   case DecodedOp::Cop2: return "Cop2";
+  case DecodedOp::Cop3: return "Cop3";
+  case DecodedOp::Lwc0: return "Lwc0";
+  case DecodedOp::Lwc1: return "Lwc1";
+  case DecodedOp::Lwc2: return "Lwc2";
+  case DecodedOp::Lwc3: return "Lwc3";
+  case DecodedOp::Swc0: return "Swc0";
+  case DecodedOp::Swc1: return "Swc1";
+  case DecodedOp::Swc2: return "Swc2";
+  case DecodedOp::Swc3: return "Swc3";
+  case DecodedOp::Trap: return "Trap";
   default: return "Unknown";
   }
 }
@@ -1882,18 +1913,24 @@ DecodedBlock *CpuOptimizedBackend::decode_block(u32 pc) {
   block->interpreter_only_until_frame = history.interpreter_only_until_frame;
 
   u32 next_pc = pc;
+  u32 estimated_cycles = 0;
   for (u32 index = 0; index < kMaxBlockInstructions; ++index) {
     const u32 bits = cpu_.read_instruction_for_backend(next_pc);
     const DecodedInstruction inst = decode_instruction(next_pc, bits);
+    if (inst.is_branch && block->instruction_count + 2u >
+                              DecodedBlock::kMaxInstructions) {
+      break;
+    }
     if (!append_decoded_instruction(*block, inst)) {
       return nullptr;
     }
+    estimated_cycles += std::max<u32>(1u, inst.cycles);
 
     if (inst.must_fallback) {
       break;
     }
 
-    if (is_block_terminator(inst)) {
+    if (inst.is_branch) {
       block->has_control_flow = true;
       const u32 delay_pc = next_pc + 4u;
       const u32 delay_bits = cpu_.read_instruction_for_backend(delay_pc);
@@ -1902,6 +1939,11 @@ DecodedBlock *CpuOptimizedBackend::decode_block(u32 pc) {
       if (!append_decoded_instruction(*block, delay_inst)) {
         return nullptr;
       }
+      estimated_cycles += std::max<u32>(1u, delay_inst.cycles);
+      break;
+    }
+
+    if (is_block_terminator(inst) || estimated_cycles >= 64u) {
       break;
     }
 
@@ -1931,14 +1973,26 @@ bool CpuOptimizedBackend::append_decoded_instruction(
   switch (inst.op) {
   case DecodedOp::Lb:
   case DecodedOp::Lh:
+  case DecodedOp::Lwl:
   case DecodedOp::Lw:
   case DecodedOp::Lbu:
   case DecodedOp::Lhu:
+  case DecodedOp::Lwr:
+  case DecodedOp::Lwc0:
+  case DecodedOp::Lwc1:
+  case DecodedOp::Lwc2:
+  case DecodedOp::Lwc3:
     block.has_load = true;
     break;
   case DecodedOp::Sb:
   case DecodedOp::Sh:
+  case DecodedOp::Swl:
   case DecodedOp::Sw:
+  case DecodedOp::Swr:
+  case DecodedOp::Swc0:
+  case DecodedOp::Swc1:
+  case DecodedOp::Swc2:
+  case DecodedOp::Swc3:
     block.has_store = true;
     break;
   default:
@@ -1995,6 +2049,10 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
       out.may_raise_exception = true;
       break;
     case 0x0F: out.op = DecodedOp::Sync; break;
+    case 0x10: out.op = DecodedOp::Mfhi; break;
+    case 0x11: out.op = DecodedOp::Mthi; break;
+    case 0x12: out.op = DecodedOp::Mflo; break;
+    case 0x13: out.op = DecodedOp::Mtlo; break;
     case 0x14:
     case 0x1C:
     case 0x28:
@@ -2002,10 +2060,22 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
       out.op = DecodedOp::Nop;
       break;
     case 0x21: out.op = DecodedOp::Addu; break;
+    case 0x18: out.op = DecodedOp::Mult; break;
+    case 0x19: out.op = DecodedOp::Multu; break;
+    case 0x1A: out.op = DecodedOp::Div; break;
+    case 0x1B: out.op = DecodedOp::Divu; break;
+    case 0x20:
+      out.op = DecodedOp::Add;
+      out.may_raise_exception = true;
+      break;
     case 0x2D:
       out.op = DecodedOp::Addu;
       break;
     case 0x23: out.op = DecodedOp::Subu; break;
+    case 0x22:
+      out.op = DecodedOp::Sub;
+      out.may_raise_exception = true;
+      break;
     case 0x2F:
       out.op = DecodedOp::Subu;
       break;
@@ -2016,6 +2086,23 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
     case 0x2A: out.op = DecodedOp::Slt; break;
     case 0x2B: out.op = DecodedOp::Sltu; break;
     case 0x38: out.op = DecodedOp::Clear; break;
+    case 0x2C:
+      out.op = DecodedOp::Add;
+      out.may_raise_exception = true;
+      break;
+    case 0x2E:
+      out.op = DecodedOp::Sub;
+      out.may_raise_exception = true;
+      break;
+    case 0x30:
+    case 0x31:
+    case 0x32:
+    case 0x33:
+    case 0x34:
+    case 0x36:
+      out.op = DecodedOp::Trap;
+      out.may_raise_exception = true;
+      break;
     default:
       out.must_fallback = true;
       break;
@@ -2029,14 +2116,14 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
     case 0x10: out.op = DecodedOp::Bltzal; break;
     case 0x11: out.op = DecodedOp::Bgezal; break;
     default:
-      out.must_fallback = true;
+      // The interpreter intentionally accepts the wider REGIMM encoding and
+      // derives sign/likely/link behavior from the rt bits.
+      out.op = DecodedOp::Bcondz;
       break;
     }
-    if (!out.must_fallback) {
-      out.is_branch = true;
-      out.target =
-          static_cast<u32>(static_cast<s32>(pc + 4u) + (out.simm << 2));
-    }
+    out.is_branch = true;
+    out.target =
+        static_cast<u32>(static_cast<s32>(pc + 4u) + (out.simm << 2));
     break;
   }
   case 0x02:
@@ -2055,6 +2142,14 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
   case 0x05: out.op = DecodedOp::Bne; break;
   case 0x06: out.op = DecodedOp::Blez; break;
   case 0x07: out.op = DecodedOp::Bgtz; break;
+  case 0x14: out.op = DecodedOp::Beql; break;
+  case 0x15: out.op = DecodedOp::Bnel; break;
+  case 0x16: out.op = DecodedOp::Blezl; break;
+  case 0x17: out.op = DecodedOp::Bgtzl; break;
+  case 0x08:
+    out.op = DecodedOp::Addi;
+    out.may_raise_exception = true;
+    break;
   case 0x09: out.op = DecodedOp::Addiu; break;
   case 0x0A: out.op = DecodedOp::Slti; break;
   case 0x0B: out.op = DecodedOp::Sltiu; break;
@@ -2064,20 +2159,40 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
   case 0x0F: out.op = DecodedOp::Lui; break;
   case 0x10:
     out.op = DecodedOp::Cop0;
-    out.must_fallback = true;
+    out.may_raise_exception = true;
+    break;
+  case 0x11:
+    out.op = DecodedOp::Cop1;
+    out.may_raise_exception = true;
     break;
   case 0x12:
     out.op = DecodedOp::Cop2;
-    out.must_fallback = true;
+    out.may_raise_exception = true;
+    break;
+  case 0x13:
+    out.op = DecodedOp::Cop3;
+    out.may_raise_exception = true;
     break;
   case 0x20: out.op = DecodedOp::Lb; break;
   case 0x21: out.op = DecodedOp::Lh; break;
+  case 0x22: out.op = DecodedOp::Lwl; break;
   case 0x23: out.op = DecodedOp::Lw; break;
   case 0x24: out.op = DecodedOp::Lbu; break;
   case 0x25: out.op = DecodedOp::Lhu; break;
+  case 0x26: out.op = DecodedOp::Lwr; break;
   case 0x28: out.op = DecodedOp::Sb; break;
   case 0x29: out.op = DecodedOp::Sh; break;
+  case 0x2A: out.op = DecodedOp::Swl; break;
   case 0x2B: out.op = DecodedOp::Sw; break;
+  case 0x2E: out.op = DecodedOp::Swr; break;
+  case 0x30: out.op = DecodedOp::Lwc0; break;
+  case 0x31: out.op = DecodedOp::Lwc1; break;
+  case 0x32: out.op = DecodedOp::Lwc2; break;
+  case 0x33: out.op = DecodedOp::Lwc3; break;
+  case 0x38: out.op = DecodedOp::Swc0; break;
+  case 0x39: out.op = DecodedOp::Swc1; break;
+  case 0x3A: out.op = DecodedOp::Swc2; break;
+  case 0x3B: out.op = DecodedOp::Swc3; break;
   default:
     out.must_fallback = true;
     break;
@@ -2088,18 +2203,34 @@ DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,
   case DecodedOp::Bne:
   case DecodedOp::Blez:
   case DecodedOp::Bgtz:
+  case DecodedOp::Beql:
+  case DecodedOp::Bnel:
+  case DecodedOp::Blezl:
+  case DecodedOp::Bgtzl:
     out.is_branch = true;
     out.target =
         static_cast<u32>(static_cast<s32>(pc + 4u) + (out.simm << 2));
     break;
   case DecodedOp::Lb:
   case DecodedOp::Lh:
+  case DecodedOp::Lwl:
   case DecodedOp::Lw:
   case DecodedOp::Lbu:
   case DecodedOp::Lhu:
+  case DecodedOp::Lwr:
   case DecodedOp::Sb:
   case DecodedOp::Sh:
+  case DecodedOp::Swl:
   case DecodedOp::Sw:
+  case DecodedOp::Swr:
+  case DecodedOp::Lwc0:
+  case DecodedOp::Lwc1:
+  case DecodedOp::Lwc2:
+  case DecodedOp::Lwc3:
+  case DecodedOp::Swc0:
+  case DecodedOp::Swc1:
+  case DecodedOp::Swc2:
+  case DecodedOp::Swc3:
     out.may_access_memory = true;
     out.may_raise_exception = true;
     break;
@@ -2309,6 +2440,23 @@ bool CpuOptimizedBackend::execute_decoded_instruction(
   case DecodedOp::Break:
     cpu_.exception(Exception::Break);
     break;
+  case DecodedOp::Mfhi:
+  case DecodedOp::Mthi:
+  case DecodedOp::Mflo:
+  case DecodedOp::Mtlo:
+  case DecodedOp::Mult:
+  case DecodedOp::Multu:
+  case DecodedOp::Div:
+  case DecodedOp::Divu:
+  case DecodedOp::Add:
+  case DecodedOp::Sub:
+  case DecodedOp::Addi:
+  case DecodedOp::Trap:
+    // These operations share precise overflow, HI/LO readiness and stall
+    // behavior with the interpreter. They remain decoded operations, but use
+    // the single-operation semantic helper rather than falling back to step().
+    cpu_.execute(inst.bits);
+    break;
   case DecodedOp::Addu:
     set_reg(inst.rd, reg(inst.rs) + reg(inst.rt));
     break;
@@ -2368,6 +2516,13 @@ bool CpuOptimizedBackend::execute_decoded_instruction(
     break;
   case DecodedOp::Bgtz:
     cpu_.begin_branch(static_cast<s32>(reg(inst.rs)) > 0, inst.target);
+    break;
+  case DecodedOp::Bcondz:
+  case DecodedOp::Beql:
+  case DecodedOp::Bnel:
+  case DecodedOp::Blezl:
+  case DecodedOp::Bgtzl:
+    cpu_.execute(inst.bits);
     break;
   case DecodedOp::Addiu:
     set_reg(inst.rt, reg(inst.rs) + static_cast<u32>(inst.simm));
@@ -2430,6 +2585,13 @@ bool CpuOptimizedBackend::execute_decoded_instruction(
     }
     break;
   }
+  case DecodedOp::Lwl:
+  case DecodedOp::Lwr: {
+    const u32 addr = mem_addr();
+    note_memory(addr);
+    cpu_.execute(inst.bits);
+    break;
+  }
   case DecodedOp::Sb: {
     const u32 addr = mem_addr();
     note_memory(addr);
@@ -2446,6 +2608,32 @@ bool CpuOptimizedBackend::execute_decoded_instruction(
     const u32 addr = mem_addr();
     note_memory(addr);
     cpu_.store32(addr, reg(inst.rt));
+    break;
+  }
+  case DecodedOp::Swl:
+  case DecodedOp::Swr: {
+    const u32 addr = mem_addr();
+    note_memory(addr);
+    cpu_.execute(inst.bits);
+    break;
+  }
+  case DecodedOp::Cop0:
+  case DecodedOp::Cop1:
+  case DecodedOp::Cop2:
+  case DecodedOp::Cop3:
+    cpu_.execute(inst.bits);
+    break;
+  case DecodedOp::Lwc0:
+  case DecodedOp::Lwc1:
+  case DecodedOp::Lwc2:
+  case DecodedOp::Lwc3:
+  case DecodedOp::Swc0:
+  case DecodedOp::Swc1:
+  case DecodedOp::Swc2:
+  case DecodedOp::Swc3: {
+    const u32 addr = mem_addr();
+    note_memory(addr);
+    cpu_.execute(inst.bits);
     break;
   }
   default:
@@ -2475,8 +2663,18 @@ CpuOptimizedBackend::diagnostics_force_interpreter_reason() const {
 
 bool CpuOptimizedBackend::is_block_terminator(
     const DecodedInstruction &inst) const {
-  return inst.is_branch || inst.op == DecodedOp::Syscall ||
-         inst.op == DecodedOp::Break;
+  switch (inst.op) {
+  case DecodedOp::Syscall:
+  case DecodedOp::Break:
+  case DecodedOp::Trap:
+  case DecodedOp::Mult:
+  case DecodedOp::Multu:
+  case DecodedOp::Div:
+  case DecodedOp::Divu:
+    return true;
+  default:
+    return false;
+  }
 }
 
 bool CpuOptimizedBackend::is_mmio_address(u32 addr) const {

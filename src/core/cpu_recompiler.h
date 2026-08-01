@@ -26,7 +26,17 @@ enum class DecodedOp : u16 {
   Clear,
   Syscall,
   Break,
+  Mfhi,
+  Mthi,
+  Mflo,
+  Mtlo,
+  Mult,
+  Multu,
+  Div,
+  Divu,
+  Add,
   Addu,
+  Sub,
   Subu,
   And,
   Or,
@@ -39,12 +49,18 @@ enum class DecodedOp : u16 {
   Bgez,
   Bltzal,
   Bgezal,
+  Bcondz,
   J,
   Jal,
   Beq,
   Bne,
   Blez,
   Bgtz,
+  Beql,
+  Bnel,
+  Blezl,
+  Bgtzl,
+  Addi,
   Addiu,
   Slti,
   Sltiu,
@@ -55,15 +71,30 @@ enum class DecodedOp : u16 {
 
   Lb,
   Lh,
+  Lwl,
   Lw,
   Lbu,
   Lhu,
+  Lwr,
   Sb,
   Sh,
+  Swl,
   Sw,
+  Swr,
 
   Cop0,
+  Cop1,
   Cop2,
+  Cop3,
+  Lwc0,
+  Lwc1,
+  Lwc2,
+  Lwc3,
+  Swc0,
+  Swc1,
+  Swc2,
+  Swc3,
+  Trap,
 };
 
 enum class CpuBlockExitReason : u8 {
@@ -198,7 +229,7 @@ struct DecodedInstruction {
 };
 
 struct DecodedBlock {
-  static constexpr u32 kMaxInstructions = 17;
+  static constexpr u32 kMaxInstructions = 16;
   using NativeFn = void (*)(void *, CpuBlockRunResult *);
 
   DecodedBlock() = default;

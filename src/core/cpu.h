@@ -19,7 +19,7 @@ struct CpuRunSliceResult {
 };
 
 struct CpuBackendStats {
-  static constexpr size_t kDecodedOpStatsCount = 64;
+  static constexpr size_t kDecodedOpStatsCount = 96;
 
   bool available = false;
   bool active = false;

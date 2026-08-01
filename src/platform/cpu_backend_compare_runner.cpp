@@ -834,6 +834,111 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(compat_specials);
   cases.push_back(compat_specials);
 
+  CpuCompareCase hilo_muldiv{};
+  hilo_muldiv.name = "decoded_hilo_muldiv_timing";
+  hilo_muldiv.initial_gpr[1] = 0xFFFFFFF9u;
+  hilo_muldiv.initial_gpr[2] = 3u;
+  hilo_muldiv.program = {
+      enc_r(1, 2, 0, 0, 0x18), // MULT
+      enc_r(0, 0, 3, 0, 0x12), // MFLO
+      enc_r(0, 0, 4, 0, 0x10), // MFHI
+      enc_r(1, 2, 0, 0, 0x1A), // DIV
+      enc_r(0, 0, 5, 0, 0x12), // MFLO
+      enc_r(0, 0, 6, 0, 0x10), // MFHI
+      enc_r(2, 1, 0, 0, 0x19), // MULTU
+      enc_r(0, 0, 7, 0, 0x12), // MFLO
+      enc_r(2, 1, 0, 0, 0x1B), // DIVU
+      enc_r(0, 0, 8, 0, 0x12), // MFLO
+      enc_r(0, 0, 9, 0, 0x10), // MFHI
+      enc_r(3, 0, 0, 0, 0x11), // MTHI
+      enc_r(4, 0, 0, 0, 0x13), // MTLO
+  };
+  pad_cpu_compare_program(hilo_muldiv);
+  cases.push_back(hilo_muldiv);
+
+  CpuCompareCase overflow_add{};
+  overflow_add.name = "decoded_add_overflow";
+  overflow_add.initial_gpr[1] = 0x7FFFFFFFu;
+  overflow_add.initial_gpr[2] = 1u;
+  overflow_add.program = {enc_r(1, 2, 3, 0, 0x20)};
+  overflow_add.instructions = 1;
+  cases.push_back(overflow_add);
+
+  CpuCompareCase overflow_sub{};
+  overflow_sub.name = "decoded_sub_overflow";
+  overflow_sub.initial_gpr[1] = 0x80000000u;
+  overflow_sub.initial_gpr[2] = 1u;
+  overflow_sub.program = {enc_r(1, 2, 3, 0, 0x22)};
+  overflow_sub.instructions = 1;
+  cases.push_back(overflow_sub);
+
+  CpuCompareCase overflow_addi{};
+  overflow_addi.name = "decoded_addi_overflow";
+  overflow_addi.initial_gpr[1] = 0x7FFFFFFFu;
+  overflow_addi.program = {enc_i(0x08, 1, 2, 1)};
+  overflow_addi.instructions = 1;
+  cases.push_back(overflow_addi);
+
+  CpuCompareCase unaligned_merge{};
+  unaligned_merge.name = "decoded_unaligned_load_store_merge";
+  unaligned_merge.initial_gpr[1] = 0x80011201u;
+  unaligned_merge.initial_gpr[2] = 0xAABBCCDDu;
+  unaligned_merge.memory = {
+      {0x00011200u, 0x44332211u},
+      {0x00011204u, 0x88776655u},
+  };
+  unaligned_merge.compare_memory_addresses = {0x00011200u, 0x00011204u};
+  unaligned_merge.program = {
+      enc_i(0x22, 1, 2, 2), // LWL
+      enc_i(0x26, 1, 2, 0), // LWR
+      0,
+      enc_i(0x2A, 1, 2, 2), // SWL
+      enc_i(0x2E, 1, 2, 0), // SWR
+  };
+  pad_cpu_compare_program(unaligned_merge);
+  cases.push_back(unaligned_merge);
+
+  CpuCompareCase cop_transfers{};
+  cop_transfers.name = "decoded_cop0_cop2_lwc2_swc2";
+  cop_transfers.initial_gpr[1] = 0x80011300u;
+  cop_transfers.initial_gpr[2] = 0x00000401u;
+  cop_transfers.initial_gpr[4] = 0x12345678u;
+  cop_transfers.memory = {{0x00011300u, 0x89ABCDEFu}};
+  cop_transfers.compare_memory_addresses = {0x00011300u, 0x00011304u};
+  cop_transfers.program = {
+      (0x10u << 26) | (4u << 21) | (2u << 16) | (12u << 11), // MTC0 SR
+      (0x10u << 26) | (0u << 21) | (3u << 16) | (12u << 11), // MFC0 SR
+      (0x12u << 26) | (4u << 21) | (4u << 16) | (6u << 11),  // MTC2 RGB
+      enc_i(0x3A, 1, 6, 4),                                  // SWC2 RGB
+      enc_i(0x32, 1, 7, 0),                                  // LWC2 OTZ
+      (0x12u << 26) | (0u << 21) | (5u << 16) | (7u << 11),  // MFC2 OTZ
+      0,
+  };
+  pad_cpu_compare_program(cop_transfers);
+  cases.push_back(cop_transfers);
+
+  CpuCompareCase branch_likely_not_taken{};
+  branch_likely_not_taken.name = "decoded_beql_not_taken_annuls_delay";
+  branch_likely_not_taken.initial_gpr[1] = 1u;
+  branch_likely_not_taken.initial_gpr[2] = 2u;
+  branch_likely_not_taken.program = {
+      enc_i(0x14, 1, 2, 1), enc_i(0x09, 0, 3, 0x1111),
+      enc_i(0x09, 0, 4, 0x2222),
+  };
+  branch_likely_not_taken.instructions = 2;
+  cases.push_back(branch_likely_not_taken);
+
+  CpuCompareCase branch_likely_taken{};
+  branch_likely_taken.name = "decoded_beql_taken_delay";
+  branch_likely_taken.initial_gpr[1] = 1u;
+  branch_likely_taken.initial_gpr[2] = 1u;
+  branch_likely_taken.program = {
+      enc_i(0x14, 1, 2, 1), enc_i(0x09, 0, 3, 0x1111),
+      enc_i(0x09, 0, 4, 0x2222),
+  };
+  branch_likely_taken.instructions = 3;
+  cases.push_back(branch_likely_taken);
+
   CpuCompareCase decoded_load_then_movz_cancel{};
   decoded_load_then_movz_cancel.name =
       "decoded_load_then_native_movz_cancel";
