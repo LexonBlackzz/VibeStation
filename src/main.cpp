@@ -1586,6 +1586,28 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   }
   const u64 state_hash = benchmark_hash_bytes(snapshot.data.data(),
                                                snapshot.data.size());
+  std::vector<u8> cpu_snapshot;
+  sys->cpu().save_state(cpu_snapshot);
+  const size_t cpu_offset = sizeof(u32);
+  const size_t ram_offset = cpu_offset + cpu_snapshot.size();
+  const u64 cpu_state_hash = benchmark_hash_bytes(
+      snapshot.data.data() + cpu_offset, cpu_snapshot.size());
+  const u64 ram_hash = benchmark_hash_bytes(
+      snapshot.data.data() + ram_offset, psx::RAM_MAX_SIZE);
+  const CpuDebugState final_cpu = sys->cpu().debug_state();
+  const u64 gpr_hash = benchmark_hash_bytes(
+      reinterpret_cast<const u8 *>(final_cpu.gpr.data()),
+      final_cpu.gpr.size() * sizeof(final_cpu.gpr[0]));
+  const u64 cpu_debug_hash = benchmark_hash_bytes(
+      cpu_snapshot.data(), sizeof(CpuDebugState));
+  constexpr size_t cop0_timing_size = sizeof(u32) * 32u + sizeof(u64) * 3u;
+  const size_t gte_state_size =
+      cpu_snapshot.size() - sizeof(CpuDebugState) - cop0_timing_size;
+  const u64 gte_state_hash = benchmark_hash_bytes(
+      cpu_snapshot.data() + sizeof(CpuDebugState), gte_state_size);
+  const u64 cop0_timing_hash = benchmark_hash_bytes(
+      cpu_snapshot.data() + sizeof(CpuDebugState) + gte_state_size,
+      cop0_timing_size);
   const System::BootDiagnostics &diag = sys->boot_diag();
   const double measured_divisor = static_cast<double>(measured_frames);
 
@@ -1599,7 +1621,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "decoded_instructions=%llu "
       "fallback_instructions=%llu helper_calls=%llu cache_hits=%llu "
       "cache_misses=%llu invalidations=%llu native_code_bytes=%zu "
-      "state_hash=%016llX display_hash=%08X final_pc=%08X\n",
+      "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
+      "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
+      "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
+      "final_pc=%08X\n",
       backend_token(requested_mode), backend_token(effective_mode),
       availability.native_available ? 1u : 0u, warmup_frames,
       measured_frames, cpu_ms / measured_divisor, core_ms / measured_divisor,
@@ -1616,6 +1641,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       static_cast<unsigned long long>(
           delta(after.invalidations, before.invalidations)),
       after.native_code_bytes, static_cast<unsigned long long>(state_hash),
+      static_cast<unsigned long long>(cpu_state_hash),
+      static_cast<unsigned long long>(ram_hash),
+      static_cast<unsigned long long>(cpu_debug_hash),
+      static_cast<unsigned long long>(gpr_hash),
+      static_cast<unsigned long long>(gte_state_hash),
+      static_cast<unsigned long long>(cop0_timing_hash),
+      static_cast<unsigned long long>(final_cpu.cycles),
       diag.display_hash, sys->cpu().pc());
   return 0;
 }

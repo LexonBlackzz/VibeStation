@@ -9,6 +9,8 @@
 #include "sio.h"
 #include "timer.h"
 
+#include <array>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -939,8 +941,40 @@ void Cpu::save_state(std::vector<u8>& buf) const {
   };
   auto write_val = [&](const auto& v) { write(&v, sizeof(v)); };
 
-  CpuDebugState ds = debug_state();
-  write(&ds, sizeof(CpuDebugState));
+  // CpuDebugState contains padding around its bool members. Serializing the
+  // object representation directly made otherwise-identical snapshots hash
+  // differently depending on whatever bytes occupied that padding. Preserve
+  // the existing layout while explicitly canonicalizing every unused byte.
+  const CpuDebugState ds = debug_state();
+  std::array<u8, sizeof(CpuDebugState)> canonical_ds{};
+  auto copy_member = [&](size_t offset, const void *value, size_t size) {
+    std::memcpy(canonical_ds.data() + offset, value, size);
+  };
+#define COPY_CPU_DEBUG_MEMBER(member)                                         \
+  copy_member(offsetof(CpuDebugState, member), &ds.member, sizeof(ds.member))
+  COPY_CPU_DEBUG_MEMBER(gpr);
+  COPY_CPU_DEBUG_MEMBER(pc);
+  COPY_CPU_DEBUG_MEMBER(next_pc);
+  COPY_CPU_DEBUG_MEMBER(current_pc);
+  COPY_CPU_DEBUG_MEMBER(hi);
+  COPY_CPU_DEBUG_MEMBER(lo);
+  COPY_CPU_DEBUG_MEMBER(load_reg);
+  COPY_CPU_DEBUG_MEMBER(load_value);
+  COPY_CPU_DEBUG_MEMBER(next_load_reg);
+  COPY_CPU_DEBUG_MEMBER(next_load_value);
+  COPY_CPU_DEBUG_MEMBER(in_delay_slot);
+  COPY_CPU_DEBUG_MEMBER(pending_delay_slot);
+  COPY_CPU_DEBUG_MEMBER(pending_branch_taken);
+  COPY_CPU_DEBUG_MEMBER(pending_branch_pc);
+  COPY_CPU_DEBUG_MEMBER(active_branch_pc);
+  COPY_CPU_DEBUG_MEMBER(exception_raised);
+  COPY_CPU_DEBUG_MEMBER(cop0_sr);
+  COPY_CPU_DEBUG_MEMBER(cop0_cause);
+  COPY_CPU_DEBUG_MEMBER(cop0_epc);
+  COPY_CPU_DEBUG_MEMBER(cop0_badvaddr);
+  COPY_CPU_DEBUG_MEMBER(cycles);
+#undef COPY_CPU_DEBUG_MEMBER
+  write(canonical_ds.data(), canonical_ds.size());
 
   gte.save_state(buf);
 
