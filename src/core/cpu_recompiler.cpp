@@ -101,6 +101,256 @@ const char *decoded_op_name(DecodedOp op) {
   }
 }
 
+constexpr u32 gpr_mask(u8 reg) {
+  return reg == 0u ? 0u : (1u << reg);
+}
+
+bool decoded_op_creates_load_delay(const DecodedInstruction &inst) {
+  switch (inst.op) {
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lwl:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Lwr:
+    return true;
+  case DecodedOp::Cop0:
+  case DecodedOp::Cop2: {
+    const u32 cop_rs = (inst.bits >> 21u) & 0x1Fu;
+    return cop_rs == 0u || cop_rs == 2u;
+  }
+  default:
+    return false;
+  }
+}
+
+u32 decoded_op_gpr_reads(const DecodedInstruction &inst) {
+  switch (inst.op) {
+  case DecodedOp::Sll:
+  case DecodedOp::Srl:
+  case DecodedOp::Sra:
+    return gpr_mask(inst.rt);
+  case DecodedOp::Sllv:
+  case DecodedOp::Srlv:
+  case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Mult:
+  case DecodedOp::Multu:
+  case DecodedOp::Div:
+  case DecodedOp::Divu:
+  case DecodedOp::Add:
+  case DecodedOp::Addu:
+  case DecodedOp::Sub:
+  case DecodedOp::Subu:
+  case DecodedOp::And:
+  case DecodedOp::Or:
+  case DecodedOp::Xor:
+  case DecodedOp::Nor:
+  case DecodedOp::Slt:
+  case DecodedOp::Sltu:
+  case DecodedOp::Beq:
+  case DecodedOp::Bne:
+  case DecodedOp::Beql:
+  case DecodedOp::Bnel:
+    return gpr_mask(inst.rs) | gpr_mask(inst.rt);
+  case DecodedOp::Jr:
+  case DecodedOp::Jalr:
+  case DecodedOp::Mthi:
+  case DecodedOp::Mtlo:
+  case DecodedOp::Bltz:
+  case DecodedOp::Bgez:
+  case DecodedOp::Bltzal:
+  case DecodedOp::Bgezal:
+  case DecodedOp::Bcondz:
+  case DecodedOp::Blez:
+  case DecodedOp::Bgtz:
+  case DecodedOp::Blezl:
+  case DecodedOp::Bgtzl:
+  case DecodedOp::Addi:
+  case DecodedOp::Addiu:
+  case DecodedOp::Slti:
+  case DecodedOp::Sltiu:
+  case DecodedOp::Andi:
+  case DecodedOp::Ori:
+  case DecodedOp::Xori:
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lwl:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Lwr:
+  case DecodedOp::Lwc0:
+  case DecodedOp::Lwc1:
+  case DecodedOp::Lwc2:
+  case DecodedOp::Lwc3:
+    return gpr_mask(inst.rs);
+  case DecodedOp::Sb:
+  case DecodedOp::Sh:
+  case DecodedOp::Swl:
+  case DecodedOp::Sw:
+  case DecodedOp::Swr:
+    return gpr_mask(inst.rs) | gpr_mask(inst.rt);
+  case DecodedOp::Swc0:
+  case DecodedOp::Swc1:
+  case DecodedOp::Swc2:
+  case DecodedOp::Swc3:
+    return gpr_mask(inst.rs);
+  case DecodedOp::Cop0:
+  case DecodedOp::Cop2: {
+    const u32 cop_rs = (inst.bits >> 21u) & 0x1Fu;
+    return (cop_rs == 4u || cop_rs == 6u) ? gpr_mask(inst.rt) : 0u;
+  }
+  default:
+    return 0u;
+  }
+}
+
+u32 decoded_op_gpr_writes(const DecodedInstruction &inst) {
+  switch (inst.op) {
+  case DecodedOp::Sll:
+  case DecodedOp::Srl:
+  case DecodedOp::Sra:
+  case DecodedOp::Sllv:
+  case DecodedOp::Srlv:
+  case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Clear:
+  case DecodedOp::Mfhi:
+  case DecodedOp::Mflo:
+  case DecodedOp::Add:
+  case DecodedOp::Addu:
+  case DecodedOp::Sub:
+  case DecodedOp::Subu:
+  case DecodedOp::And:
+  case DecodedOp::Or:
+  case DecodedOp::Xor:
+  case DecodedOp::Nor:
+  case DecodedOp::Slt:
+  case DecodedOp::Sltu:
+    return gpr_mask(inst.rd);
+  case DecodedOp::Jalr:
+    return gpr_mask(inst.rd);
+  case DecodedOp::Bltzal:
+  case DecodedOp::Bgezal:
+  case DecodedOp::Jal:
+    return gpr_mask(31u);
+  case DecodedOp::Bcondz:
+    return (inst.rt & 0x10u) != 0u ? gpr_mask(31u) : 0u;
+  case DecodedOp::Addi:
+  case DecodedOp::Addiu:
+  case DecodedOp::Slti:
+  case DecodedOp::Sltiu:
+  case DecodedOp::Andi:
+  case DecodedOp::Ori:
+  case DecodedOp::Xori:
+  case DecodedOp::Lui:
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lwl:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Lwr:
+    return gpr_mask(inst.rt);
+  case DecodedOp::Cop0:
+  case DecodedOp::Cop2: {
+    const u32 cop_rs = (inst.bits >> 21u) & 0x1Fu;
+    return (cop_rs == 0u || cop_rs == 2u) ? gpr_mask(inst.rt) : 0u;
+  }
+  default:
+    return 0u;
+  }
+}
+
+NativeOpKind classify_native_op_kind(const DecodedInstruction &inst,
+                                     NativeHelperKind &helper) {
+  helper = NativeHelperKind::None;
+  if (inst.must_fallback || inst.op == DecodedOp::Unsupported) {
+    helper = NativeHelperKind::Unsupported;
+    return NativeOpKind::Fallback;
+  }
+  if (inst.is_branch) {
+    return NativeOpKind::InlineBranch;
+  }
+  switch (inst.op) {
+  case DecodedOp::Nop:
+  case DecodedOp::Sll:
+  case DecodedOp::Srl:
+  case DecodedOp::Sra:
+  case DecodedOp::Sllv:
+  case DecodedOp::Srlv:
+  case DecodedOp::Srav:
+  case DecodedOp::Movz:
+  case DecodedOp::Movn:
+  case DecodedOp::Sync:
+  case DecodedOp::Clear:
+  case DecodedOp::Addu:
+  case DecodedOp::Subu:
+  case DecodedOp::And:
+  case DecodedOp::Or:
+  case DecodedOp::Xor:
+  case DecodedOp::Nor:
+  case DecodedOp::Slt:
+  case DecodedOp::Sltu:
+  case DecodedOp::Addiu:
+  case DecodedOp::Slti:
+  case DecodedOp::Sltiu:
+  case DecodedOp::Andi:
+  case DecodedOp::Ori:
+  case DecodedOp::Xori:
+  case DecodedOp::Lui:
+    return NativeOpKind::InlineAlu;
+  case DecodedOp::Mfhi:
+  case DecodedOp::Mthi:
+  case DecodedOp::Mflo:
+  case DecodedOp::Mtlo:
+  case DecodedOp::Mult:
+  case DecodedOp::Multu:
+  case DecodedOp::Div:
+  case DecodedOp::Divu:
+    return NativeOpKind::InlineHiLo;
+  case DecodedOp::Lb:
+  case DecodedOp::Lh:
+  case DecodedOp::Lw:
+  case DecodedOp::Lbu:
+  case DecodedOp::Lhu:
+  case DecodedOp::Sb:
+  case DecodedOp::Sh:
+  case DecodedOp::Sw:
+    return NativeOpKind::InlineMemory;
+  case DecodedOp::Lwl:
+  case DecodedOp::Lwr:
+  case DecodedOp::Swl:
+  case DecodedOp::Swr:
+    helper = NativeHelperKind::UnalignedMemory;
+    return NativeOpKind::PreciseHelper;
+  case DecodedOp::Cop0:
+    helper = NativeHelperKind::Cop0;
+    return NativeOpKind::PreciseHelper;
+  case DecodedOp::Cop2:
+  case DecodedOp::Lwc2:
+  case DecodedOp::Swc2:
+    helper = NativeHelperKind::Gte;
+    return NativeOpKind::PreciseHelper;
+  case DecodedOp::Add:
+  case DecodedOp::Sub:
+  case DecodedOp::Addi:
+  case DecodedOp::Syscall:
+  case DecodedOp::Break:
+  case DecodedOp::Trap:
+    helper = NativeHelperKind::Exception;
+    return NativeOpKind::PreciseHelper;
+  default:
+    helper = inst.may_access_memory ? NativeHelperKind::Memory
+                                    : NativeHelperKind::Unsupported;
+    return NativeOpKind::PreciseHelper;
+  }
+}
+
 const char *native_reject_detail_name(NativeBlockRejectDetail detail) {
   switch (detail) {
   case NativeBlockRejectDetail::Branch: return "branch";
@@ -1902,6 +2152,7 @@ DecodedBlock *CpuOptimizedBackend::decode_block(u32 pc) {
   }
 
   DecodedBlock *raw = block.get();
+  build_native_plan(*raw);
   ++stats_.decoded_blocks;
   blocks_[raw->start_key] = std::move(block);
   register_block_pages(*raw);
@@ -1950,6 +2201,82 @@ bool CpuOptimizedBackend::append_decoded_instruction(
     break;
   }
   return true;
+}
+
+void CpuOptimizedBackend::build_native_plan(DecodedBlock &block) const {
+  NativeBlockPlan plan{};
+  plan.instruction_count = block.instruction_count;
+  std::array<u8, 32> use_scores{};
+
+  for (u32 index = 0; index < block.instruction_count; ++index) {
+    const DecodedInstruction &inst = block.instructions[index];
+    NativeOpPlan &operation = plan.operations[index];
+    operation.instruction_index = static_cast<u8>(index);
+    operation.base_cycles = std::max<u8>(1u, inst.cycles);
+    operation.gpr_read_mask = decoded_op_gpr_reads(inst);
+    operation.gpr_write_mask = decoded_op_gpr_writes(inst);
+    operation.is_delay_slot =
+        index != 0u && block.instructions[index - 1u].is_branch;
+    operation.creates_load_delay = decoded_op_creates_load_delay(inst);
+    operation.may_cancel_load_delay = operation.gpr_write_mask != 0u;
+    operation.kind = classify_native_op_kind(inst, operation.helper);
+    operation.terminates_execution =
+        inst.is_branch || inst.must_fallback ||
+        inst.op == DecodedOp::Syscall || inst.op == DecodedOp::Break ||
+        inst.op == DecodedOp::Trap;
+
+    plan.estimated_cycles += operation.base_cycles;
+    plan.gpr_read_mask |= operation.gpr_read_mask;
+    plan.gpr_write_mask |= operation.gpr_write_mask;
+    plan.has_branch = plan.has_branch || inst.is_branch;
+    plan.has_delay_slot = plan.has_delay_slot || operation.is_delay_slot;
+    plan.has_memory = plan.has_memory || inst.may_access_memory;
+    plan.has_exception_path =
+        plan.has_exception_path || inst.may_raise_exception;
+    plan.has_fallback =
+        plan.has_fallback || operation.kind == NativeOpKind::Fallback;
+    if (operation.helper != NativeHelperKind::None) {
+      ++plan.helper_operation_count;
+    }
+
+    for (u32 reg = 1u; reg < 32u; ++reg) {
+      const u32 mask = 1u << reg;
+      if ((operation.gpr_read_mask & mask) != 0u) {
+        use_scores[reg] = static_cast<u8>(
+            std::min<u32>(255u, static_cast<u32>(use_scores[reg]) + 2u));
+      }
+      if ((operation.gpr_write_mask & mask) != 0u) {
+        use_scores[reg] = static_cast<u8>(
+            std::min<u32>(255u, static_cast<u32>(use_scores[reg]) + 1u));
+      }
+    }
+  }
+
+  u32 live = 0u;
+  for (u32 index = block.instruction_count; index != 0u; --index) {
+    NativeOpPlan &operation = plan.operations[index - 1u];
+    operation.gpr_live_out_mask = live;
+    live = (live & ~operation.gpr_write_mask) | operation.gpr_read_mask;
+  }
+
+  for (u32 slot = 0; slot < 6u; ++slot) {
+    u32 best_reg = 0u;
+    u8 best_score = 0u;
+    for (u32 reg = 1u; reg < 32u; ++reg) {
+      const u32 mask = 1u << reg;
+      if ((plan.preferred_cache_mask & mask) == 0u &&
+          use_scores[reg] > best_score) {
+        best_reg = reg;
+        best_score = use_scores[reg];
+      }
+    }
+    if (best_reg == 0u) {
+      break;
+    }
+    plan.preferred_cache_mask |= 1u << best_reg;
+  }
+
+  block.native_plan = plan;
 }
 
 DecodedInstruction CpuOptimizedBackend::decode_instruction(u32 pc,

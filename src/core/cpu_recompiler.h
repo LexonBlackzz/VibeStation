@@ -228,6 +228,54 @@ struct DecodedInstruction {
   bool must_fallback = false;
 };
 
+enum class NativeOpKind : u8 {
+  InlineAlu,
+  InlineBranch,
+  InlineHiLo,
+  InlineMemory,
+  PreciseHelper,
+  Fallback,
+};
+
+enum class NativeHelperKind : u8 {
+  None,
+  Memory,
+  UnalignedMemory,
+  Cop0,
+  Gte,
+  Exception,
+  Unsupported,
+};
+
+struct NativeOpPlan {
+  u32 gpr_read_mask = 0;
+  u32 gpr_write_mask = 0;
+  u32 gpr_live_out_mask = 0;
+  NativeOpKind kind = NativeOpKind::Fallback;
+  NativeHelperKind helper = NativeHelperKind::Unsupported;
+  u8 instruction_index = 0;
+  u8 base_cycles = 1;
+  bool is_delay_slot = false;
+  bool creates_load_delay = false;
+  bool may_cancel_load_delay = false;
+  bool terminates_execution = false;
+};
+
+struct NativeBlockPlan {
+  std::array<NativeOpPlan, 16> operations{};
+  u32 instruction_count = 0;
+  u32 estimated_cycles = 0;
+  u32 gpr_read_mask = 0;
+  u32 gpr_write_mask = 0;
+  u32 preferred_cache_mask = 0;
+  u32 helper_operation_count = 0;
+  bool has_branch = false;
+  bool has_delay_slot = false;
+  bool has_memory = false;
+  bool has_exception_path = false;
+  bool has_fallback = false;
+};
+
 struct DecodedBlock {
   static constexpr u32 kMaxInstructions = 16;
   using NativeFn = void (*)(void *, CpuBlockRunResult *);
@@ -243,6 +291,7 @@ struct DecodedBlock {
   u32 generation = 0;
   std::array<DecodedInstruction, kMaxInstructions> instructions{};
   u32 instruction_count = 0;
+  NativeBlockPlan native_plan{};
   std::array<std::pair<u32, u32>, kMaxInstructions> tracked_ranges{};
   u32 tracked_range_count = 0;
   std::array<u32, kMaxInstructions> registered_pages{};
@@ -385,6 +434,7 @@ private:
   DecodedBlock *lookup_or_decode(u32 pc);
   DecodedBlock *decode_block(u32 pc);
   DecodedInstruction decode_instruction(u32 pc, u32 bits) const;
+  void build_native_plan(DecodedBlock &block) const;
   bool append_decoded_instruction(DecodedBlock &block,
                                   const DecodedInstruction &inst);
   CpuBlockRunResult execute_block(DecodedBlock &block, u32 max_cycles,
