@@ -1609,74 +1609,6 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
             result = execute_block(*block, cycle_budget, instruction_budget);
           }
         }
-      } else if (block->native_branch_tail &&
-                 !cpu_x64_jit_branch_tail_enabled()) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_branch_tail_disabled_fallbacks;
-        ++stats_.native_rejected_block_count;
-        stats_.native_rejected_block_instructions += block->instruction_count;
-        record_native_block_rejection(*block,
-                                      NativeBlockRejectDetail::BranchTailDisabled);
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->native_branch_tail &&
-                 native_branch_tail_pc_blacklisted(*block)) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_branch_tail_blacklisted_fallbacks;
-        ++stats_.native_rejected_block_count;
-        stats_.native_rejected_block_instructions += block->instruction_count;
-        record_native_block_rejection(
-            *block, NativeBlockRejectDetail::BranchTailBlacklisted);
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->has_memory &&
-                 !cpu_x64_jit_native_memory_enabled()) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_memory_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->has_load &&
-                 g_cpu_x64_jit_disable_native_loads) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_load_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->has_store &&
-                 g_cpu_x64_jit_disable_native_stores) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_store_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->has_load && block->has_store &&
-                 g_cpu_x64_jit_disable_native_mixed_load_store) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_mixed_memory_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->has_memory &&
-                 g_cpu_x64_jit_disable_native_load_delay &&
-                 (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u)) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_load_delay_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->native_memory_runtime_filter_reason != 0u) {
-        ++stats_.native_to_decoded_fallbacks;
-        if (block->native_memory_runtime_filter_reason == 1u) {
-          ++stats_.native_mmio_disabled_fallbacks;
-        } else {
-          ++stats_.native_ram_disabled_fallbacks;
-        }
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (!block->native_branch_tail && !block->has_memory &&
-                 !cpu_x64_jit_native_alu_enabled()) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_alu_disabled_fallbacks;
-        result = execute_block(*block, cycle_budget, instruction_budget);
-      } else if (block->instruction_count > instruction_budget &&
-                 !(block->native_branch_tail &&
-                   g_cpu_backend_compare_allow_partial_branch_tail) &&
-                 !(block->has_memory &&
-                   g_cpu_backend_compare_allow_partial_memory_helper)) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_reject_budget;
-        ++stats_.native_rejected_block_count;
-        stats_.native_rejected_block_instructions += block->instruction_count;
-        record_native_block_rejection(*block, NativeBlockRejectDetail::Budget);
-        result = execute_block(*block, cycle_budget, instruction_budget);
       } else if (!should_attempt_x64_compile(*block)) {
         ++stats_.native_to_decoded_fallbacks;
         result = execute_block(*block, cycle_budget, instruction_budget);
@@ -1800,6 +1732,7 @@ void CpuOptimizedBackend::begin_frame(u32 frame_index) {
 }
 
 void CpuOptimizedBackend::flush() {
+  dispatch_cache_.fill({});
   blocks_.clear();
   blocks_by_page_.clear();
   rejected_block_profiles_.clear();
@@ -1863,6 +1796,16 @@ bool CpuOptimizedBackend::should_attempt_x64_compile(
 
 DecodedBlock *CpuOptimizedBackend::lookup_or_decode(u32 pc) {
   const u32 key = normalized_code_addr(pc);
+  DispatchEntry &dispatch = dispatch_cache_[(key >> 2u) &
+                                            (kDispatchCacheSize - 1u)];
+  if (dispatch.block != nullptr && dispatch.tag == key &&
+      dispatch.generation == dispatch.block->generation &&
+      !dispatch.block->invalidated) {
+    ++stats_.cache_hits;
+    return dispatch.block;
+  }
+
+  ++stats_.cache_misses;
   auto history = block_history_.find(key);
   if (history != block_history_.end() &&
       history->second.interpreter_only_until_frame > current_frame_) {
@@ -1873,15 +1816,20 @@ DecodedBlock *CpuOptimizedBackend::lookup_or_decode(u32 pc) {
   if (existing != blocks_.end()) {
     DecodedBlock *block = existing->second.get();
     if (!block->invalidated) {
-      ++stats_.cache_hits;
+      dispatch = {key, block->generation, block};
       return block;
     }
     unregister_block_pages(*block);
     blocks_.erase(existing);
   }
 
-  ++stats_.cache_misses;
-  return decode_block(pc);
+  DecodedBlock *block = decode_block(pc);
+  if (block != nullptr) {
+    dispatch = {key, block->generation, block};
+  } else {
+    dispatch = {};
+  }
+  return block;
 }
 
 DecodedBlock *CpuOptimizedBackend::decode_block(u32 pc) {
@@ -1895,6 +1843,10 @@ DecodedBlock *CpuOptimizedBackend::decode_block(u32 pc) {
   auto block = std::make_unique<DecodedBlock>();
   block->start_pc = pc;
   block->start_key = normalized_code_addr(pc);
+  block->generation = next_block_generation_++;
+  if (next_block_generation_ == 0u) {
+    next_block_generation_ = 1u;
+  }
   block->compile_frame = current_frame_;
 
   BlockHistory &history = block_history_[block->start_key];
@@ -2809,6 +2761,12 @@ bool CpuOptimizedBackend::ranges_overlap(u32 a0, u32 a1, u32 b0,
 
 void CpuOptimizedBackend::mark_block_invalidated(DecodedBlock &block) {
   block.invalidated = true;
+  DispatchEntry &dispatch =
+      dispatch_cache_[(block.start_key >> 2u) & (kDispatchCacheSize - 1u)];
+  if (dispatch.block == &block) {
+    dispatch = {};
+  }
+  ++block.generation;
   ++stats_.invalidations;
 
   BlockHistory &history = block_history_[block.start_key];

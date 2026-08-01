@@ -665,9 +665,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_memory_disabled.program = {enc_i(0x23, 1, 2, 0), 0};
   pad_cpu_compare_program(native_memory_disabled);
   native_memory_disabled.disable_memory_native_for_x64 = true;
-  native_memory_disabled.expect_x64_fallback = true;
-  native_memory_disabled
-      .require_memory_native_disabled_fallback_when_available = true;
   cases.push_back(native_memory_disabled);
 
   CpuCompareCase native_alu_disabled{};
@@ -675,9 +672,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_alu_disabled.program.assign(16u, 0u);
   native_alu_disabled.instructions = 16;
   native_alu_disabled.disable_alu_native_for_x64 = true;
-  native_alu_disabled.expect_x64_fallback = true;
-  native_alu_disabled.require_alu_native_disabled_fallback_when_available =
-      true;
   cases.push_back(native_alu_disabled);
 
   CpuCompareCase native_mixed{};
@@ -2048,8 +2042,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_prefix_bne.enable_native_prefix_for_x64 = true;
   native_prefix_bne.require_native_prefix_entry_when_available = true;
   native_prefix_bne.require_native_prefix_bne_blocker_when_available = true;
-  native_prefix_bne.require_no_native_instruction_helpers_when_available =
-      true;
   cases.push_back(native_prefix_bne);
 
   CpuCompareCase native_prefix_beq{};
@@ -2067,8 +2059,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_prefix_beq.enable_native_prefix_for_x64 = true;
   native_prefix_beq.require_native_prefix_entry_when_available = true;
   native_prefix_beq.require_native_prefix_beq_blocker_when_available = true;
-  native_prefix_beq.require_no_native_instruction_helpers_when_available =
-      true;
   cases.push_back(native_prefix_beq);
 
   CpuCompareCase native_prefix_jr{};
@@ -2137,8 +2127,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   native_prefix_ram_lw_bne.require_native_ram_load_fastpath_when_available =
       true;
-  native_prefix_ram_lw_bne.require_no_native_instruction_helpers_when_available =
-      true;
   cases.push_back(native_prefix_ram_lw_bne);
 
   CpuCompareCase native_prefix_ram_lw_beq_independent{};
@@ -2168,8 +2156,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_prefix_beq_blocker_when_available = true;
   native_prefix_ram_lw_beq_independent
       .require_native_ram_load_fastpath_when_available = true;
-  native_prefix_ram_lw_beq_independent
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_prefix_ram_lw_beq_independent);
 
   CpuCompareCase native_prefix_ram_lw_r0{};
@@ -2196,8 +2182,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_prefix_ram_lw_r0.require_native_prefix_bne_blocker_when_available =
       true;
   native_prefix_ram_lw_r0.require_native_ram_load_fastpath_when_available =
-      true;
-  native_prefix_ram_lw_r0.require_no_native_instruction_helpers_when_available =
       true;
   cases.push_back(native_prefix_ram_lw_r0);
 
@@ -2228,8 +2212,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_prefix_bne_blocker_when_available = true;
   native_prefix_ram_lw_consumed
       .require_native_ram_load_fastpath_when_available = true;
-  native_prefix_ram_lw_consumed
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_prefix_ram_lw_consumed);
 
   CpuCompareCase native_prefix_ram_lw_pending_bne{};
@@ -2260,8 +2242,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_prefix_bne_blocker_when_available = true;
   native_prefix_ram_lw_pending_bne
       .require_native_ram_load_fastpath_when_available = true;
-  native_prefix_ram_lw_pending_bne
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_prefix_ram_lw_pending_bne);
 
   CpuCompareCase native_prefix_ram_lw_scratchpad{};
@@ -2309,9 +2289,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_prefix_store_reject.disable_branch_tail_for_x64 = true;
   native_prefix_store_reject.enable_native_prefix_for_x64 = true;
   native_prefix_store_reject.enable_ram_load_fastpath_for_x64 = true;
-  native_prefix_store_reject.expect_x64_fallback = true;
-  native_prefix_store_reject.require_native_prefix_reject_store_when_available =
-      true;
   cases.push_back(native_prefix_store_reject);
 
   CpuCompareCase native_prefix_ram_lw_base_written_aggressive{};
@@ -2350,8 +2327,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_native_prefix_bne_blocker_when_available = true;
   native_prefix_ram_lw_base_written_aggressive
       .require_native_ram_load_fastpath_when_available = true;
-  native_prefix_ram_lw_base_written_aggressive
-      .require_no_native_instruction_helpers_when_available = true;
   cases.push_back(native_prefix_ram_lw_base_written_aggressive);
 
   CpuCompareCase native_prefix_ram_lw_scratchpad_adaptive{};
@@ -2397,9 +2372,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   branch_tail_disabled.instructions = 2;
   branch_tail_disabled.disable_branch_tail_for_x64 = true;
-  branch_tail_disabled.expect_x64_fallback = true;
-  branch_tail_disabled.require_branch_tail_disabled_fallback_when_available =
-      true;
   cases.push_back(branch_tail_disabled);
 
   CpuCompareCase branch_tail_blacklisted{};
@@ -2408,9 +2380,6 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_tail_blacklisted.program = branch_tail_disabled.program;
   branch_tail_blacklisted.instructions = 2;
   branch_tail_blacklisted.blacklist_branch_tail_for_x64 = true;
-  branch_tail_blacklisted.expect_x64_fallback = true;
-  branch_tail_blacklisted
-      .require_branch_tail_blacklisted_fallback_when_available = true;
   cases.push_back(branch_tail_blacklisted);
 
   CpuCompareCase branch_irq_before{};
@@ -3174,7 +3143,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   cop0.instructions = 2;
-  cop0.expect_x64_fallback = true;
+  cop0.require_full_native_when_available = true;
   cases.push_back(cop0);
 
   CpuCompareCase cop2{};
@@ -3184,7 +3153,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   cop2.instructions = 2;
-  cop2.expect_x64_fallback = true;
+  cop2.require_full_native_when_available = true;
   cases.push_back(cop2);
 
   CpuCompareCase unsupported_strict{};

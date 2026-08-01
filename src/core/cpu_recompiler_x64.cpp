@@ -2729,15 +2729,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 
   auto *context = static_cast<X64NativeContext *>(block.native_context);
   const u32 native_instruction_count = context->instruction_count;
-  if (native_instruction_count > max_instructions &&
-      !(context->is_branch_tail &&
-        g_cpu_backend_compare_allow_partial_branch_tail) &&
-      !(block.has_memory &&
-        g_cpu_backend_compare_allow_partial_memory_helper)) {
+  if (!context->uses_instruction_helpers &&
+      native_instruction_count > max_instructions) {
     ++stats_.native_to_decoded_fallbacks;
-    if (block.native_branch_tail) {
-      ++stats_.native_branch_tail_to_decoded_fallbacks;
-    }
     ++stats_.native_reject_budget;
     record_rejected_block(NativeBlockRejectDetail::Budget);
     return execute_block(block, max_cycles, max_instructions);

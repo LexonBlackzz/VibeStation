@@ -240,6 +240,7 @@ struct DecodedBlock {
 
   u32 start_pc = 0;
   u32 start_key = 0;
+  u32 generation = 0;
   std::array<DecodedInstruction, kMaxInstructions> instructions{};
   u32 instruction_count = 0;
   std::array<std::pair<u32, u32>, kMaxInstructions> tracked_ranges{};
@@ -334,6 +335,7 @@ private:
   static constexpr u32 kInterpreterFallbackFrames = 15;
   static constexpr u32 kInterpreterOnlyFrames = 60;
   static constexpr size_t kMaxDecodedBlocks = 16384u;
+  static constexpr size_t kDispatchCacheSize = 4096u;
   static constexpr u32 kCodePageShift = 12;
   static constexpr u32 kCodePageSize = 1u << kCodePageShift;
   static constexpr u32 kCodePageCount = 1u << (32u - kCodePageShift);
@@ -344,6 +346,12 @@ private:
     u32 compile_count_in_window = 0;
     u32 invalidation_count_in_window = 0;
     u32 interpreter_only_until_frame = 0;
+  };
+
+  struct DispatchEntry {
+    u32 tag = 0;
+    u32 generation = 0;
+    DecodedBlock *block = nullptr;
   };
 
   struct NativeRejectedBlockProfile {
@@ -447,6 +455,7 @@ private:
   void warn_x64_unavailable_once();
 
   Cpu &cpu_;
+  std::array<DispatchEntry, kDispatchCacheSize> dispatch_cache_{};
   std::unordered_map<u32, std::unique_ptr<DecodedBlock>> blocks_;
   std::unordered_map<u32, BlockHistory> block_history_;
   std::unordered_map<u32, NativeRejectedBlockProfile> rejected_block_profiles_;
@@ -454,6 +463,7 @@ private:
   std::unordered_map<u32, std::vector<DecodedBlock *>> blocks_by_page_;
   std::array<u64, kCodePageBitmapWordCount> compiled_code_page_bitmap_{};
   u32 invalidation_query_stamp_ = 0;
+  u32 next_block_generation_ = 1;
   u64 native_branch_tail_trace_sequence_ = 0;
   u64 native_memory_trace_emitted_ = 0;
   u32 current_frame_ = 0;
