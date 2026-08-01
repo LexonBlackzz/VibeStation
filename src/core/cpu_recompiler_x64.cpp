@@ -2886,7 +2886,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     }
     ++block.native_entry_count;
 
-    block.native_fn(block.native_context, &result);
+    // Helper-only blocks already execute as one bounded decoded operation in
+    // C++. Calling a native thunk solely to call back here adds two host ABI
+    // transitions without executing any guest instruction natively.
+    x64_native_execute_helper_block(context, &result);
     if (context->is_branch_tail) {
       switch (result.exit_reason) {
       case CpuBlockExitReason::Branch:
