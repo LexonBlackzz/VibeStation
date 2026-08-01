@@ -40,6 +40,8 @@ struct X64NativeContext {
   u32 *active_branch_pc = nullptr;
   u32 *cycle_penalty = nullptr;
   const u8 *ram_data = nullptr;
+  bool *icache_valid = nullptr;
+  u32 icache_line_stride = 0;
   u64 *ram_load_fastpath_counter = nullptr;
   u64 *branch_tail_ram_load_fastpath_counter = nullptr;
   u32 end_pc = 0;
@@ -1352,6 +1354,20 @@ void emit_aggressive_reduced_helper_ram_store(
   } else {
     code.mov(code.dword[code.r9 + code.rax], code.ecx);
   }
+
+  // System::write* invalidates the corresponding interpreter I-cache line on
+  // every RAM write.  The compiled-code-page preflight above proves that no
+  // dynarec block needs invalidating, but the interpreter cache is independent
+  // of that bitmap and must still observe self-modifying/data-overlay writes.
+  code.mov(code.r10d, code.eax);
+  code.shr(code.r10d, 4u);
+  code.and_(code.r10d, 0xFFu);
+  code.imul(code.r10d,
+            code.dword[ctx + offsetof(X64NativeContext,
+                                      icache_line_stride)]);
+  code.mov(code.r9,
+           code.ptr[ctx + offsetof(X64NativeContext, icache_valid)]);
+  code.mov(code.byte[code.r9 + code.r10], 0u);
 }
 
 void emit_branch_helper_call(Xbyak::CodeGenerator &code,
@@ -2674,6 +2690,8 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->active_branch_pc = &cpu_.active_branch_pc_;
     context->cycle_penalty = &cpu_.cycle_penalty_;
     context->ram_data = cpu_.sys_->jit_main_ram_data();
+    context->icache_valid = &cpu_.icache_[0].valid;
+    context->icache_line_stride = sizeof(cpu_.icache_[0]);
     context->ram_load_fastpath_counter =
         &stats_.native_memory_fastpath_loads;
     context->branch_tail_ram_load_fastpath_counter =
