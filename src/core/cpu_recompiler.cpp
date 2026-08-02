@@ -1823,11 +1823,17 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
         requested_mode == CpuExecutionMode::X64Jit && x64_jit_available();
     const bool try_native =
         requested_x64_native && cpu_x64_jit_all_native_enabled();
-    if (try_native) {
+    if (try_native && block->native_decoded_only) {
+      ++stats_.native_to_decoded_fallbacks;
+      result = execute_block(*block, cycle_budget, instruction_budget);
+    } else if (try_native) {
       const bool native_safe = ensure_x64_safety_checked(*block);
       const bool native_prefix_ready =
           cpu_x64_jit_native_prefix_enabled() && block->native_prefix;
       if (!native_safe && !native_prefix_ready) {
+        if (!g_cpu_backend_compare_test_active) {
+          block->native_decoded_only = true;
+        }
         ++stats_.native_to_decoded_fallbacks;
         record_native_block_rejection(
             *block, block->native_reject_detail);
@@ -1849,7 +1855,10 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
           if (!block->native_compile_attempted) {
             (void)compile_x64_block(*block);
           }
-          if (block->native_fn != nullptr) {
+          if (block->native_decoded_only) {
+            ++stats_.native_to_decoded_fallbacks;
+            result = execute_block(*block, cycle_budget, instruction_budget);
+          } else if (block->native_fn != nullptr) {
             result =
                 execute_native_block(*block, cycle_budget, instruction_budget);
           } else {
@@ -1866,7 +1875,10 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
         if (!block->native_compile_attempted) {
           (void)compile_x64_block(*block);
         }
-        if (block->native_fn != nullptr) {
+        if (block->native_decoded_only) {
+          ++stats_.native_to_decoded_fallbacks;
+          result = execute_block(*block, cycle_budget, instruction_budget);
+        } else if (block->native_fn != nullptr) {
           result =
               execute_native_block(*block, cycle_budget, instruction_budget);
         } else {

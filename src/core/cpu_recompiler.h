@@ -322,6 +322,7 @@ struct DecodedBlock {
   bool has_store = false;
   u8 native_memory_runtime_filter_reason = 0;
   bool native_compile_attempted = false;
+  bool native_decoded_only = false;
   bool native_safety_checked = false;
   bool native_stage1_safe = false;
   bool native_reduced_helper = false;

@@ -16,6 +16,12 @@
 #endif
 
 namespace {
+struct X64IcacheLinePlan {
+  u32 index = 0;
+  u32 tag = 0;
+  u32 base = 0;
+};
+
 struct X64NativeContext {
 #if VIBESTATION_X64_JIT_SUPPORTED
   explicit X64NativeContext(size_t code_size) : code(code_size) {}
@@ -55,6 +61,10 @@ struct X64NativeContext {
   u32 max_instructions = 0;
   u32 current_instruction_index = 0;
   u32 branch_instruction_index = 0;
+  std::array<X64IcacheLinePlan, DecodedBlock::kMaxInstructions>
+      icache_lines{};
+  u32 icache_line_count = 0;
+  bool instruction_pcs_aligned = true;
   bool uses_instruction_helpers = false;
   bool coherent_straight_load = false;
   bool inline_branch_tail = false;
@@ -3024,6 +3034,35 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
 
 #if VIBESTATION_X64_JIT_SUPPORTED
   try {
+    const bool is_native_prefix = block.native_prefix;
+    const bool is_branch_tail =
+        block.has_control_flow && block.instruction_count >= 2u &&
+        block.instructions[block.instruction_count - 2u].is_branch &&
+        !is_native_prefix;
+    const bool inline_branch_tail =
+        !is_native_prefix && is_x64_inline_branch_tail_block(block);
+    const bool coherent_straight_load =
+        !is_native_prefix && is_x64_coherent_straight_load_block(block);
+    const bool uses_instruction_helpers =
+        !coherent_straight_load && !inline_branch_tail &&
+        ((is_branch_tail && !block.native_reduced_helper_branch_tail &&
+          !block.native_aggressive_reduced_helper_branch_tail) ||
+         (!is_native_prefix && block_uses_instruction_helpers(block) &&
+          !block.native_reduced_helper));
+
+    // A helper-only block executes execute_block() directly; its generated
+    // thunk never performs guest work. Branch tails also fail to amortize the
+    // current native entry/exit synchronization. Keep both on
+    // the decoded engine until the unified prologue and register cache make
+    // them profitable. Comparison tests retain the native path so the emitter
+    // and helper ABI are still exercised explicitly.
+    const bool unprofitable_branch = is_branch_tail;
+    if ((uses_instruction_helpers || unprofitable_branch) &&
+        !g_cpu_backend_compare_test_active) {
+      block.native_decoded_only = true;
+      return false;
+    }
+
     auto context = std::make_unique<X64NativeContext>(8192);
     context->backend = this;
     context->cpu = &cpu_;
@@ -3051,27 +3090,39 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         &stats_.native_memory_fastpath_loads;
     context->branch_tail_ram_load_fastpath_counter =
         &stats_.native_branch_tail_ram_load_fastpath_loads;
-    context->is_native_prefix = block.native_prefix;
+    context->is_native_prefix = is_native_prefix;
     context->instruction_count =
         block.native_prefix ? block.native_prefix_instruction_count
                             : block.instruction_count;
-    context->is_branch_tail =
-        block.has_control_flow && block.instruction_count >= 2u &&
-        block.instructions[block.instruction_count - 2u].is_branch &&
-        !context->is_native_prefix;
-    context->inline_branch_tail =
-        !context->is_native_prefix &&
-        is_x64_inline_branch_tail_block(block);
-    context->coherent_straight_load =
-        !context->is_native_prefix &&
-        is_x64_coherent_straight_load_block(block);
-    context->uses_instruction_helpers =
-        !context->coherent_straight_load && !context->inline_branch_tail &&
-        ((context->is_branch_tail &&
-         !block.native_reduced_helper_branch_tail &&
-         !block.native_aggressive_reduced_helper_branch_tail) ||
-        (!context->is_native_prefix && block_uses_instruction_helpers(block) &&
-         !block.native_reduced_helper));
+    for (u32 i = 0; i < context->instruction_count; ++i) {
+      const u32 pc = block.instructions[i].pc;
+      if ((pc & 3u) != 0u) {
+        context->instruction_pcs_aligned = false;
+        continue;
+      }
+      if (!is_x64_instruction_cacheable(pc)) {
+        continue;
+      }
+      const X64IcacheLinePlan line = {
+          (pc >> 4u) & 0xFFu, psx::mask_address(pc) & ~0x0Fu,
+          pc & ~0x0Fu};
+      bool duplicate = false;
+      for (u32 existing = 0; existing < context->icache_line_count;
+           ++existing) {
+        const X64IcacheLinePlan &other = context->icache_lines[existing];
+        if (other.index == line.index && other.tag == line.tag) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        context->icache_lines[context->icache_line_count++] = line;
+      }
+    }
+    context->is_branch_tail = is_branch_tail;
+    context->inline_branch_tail = inline_branch_tail;
+    context->coherent_straight_load = coherent_straight_load;
+    context->uses_instruction_helpers = uses_instruction_helpers;
     if (context->is_branch_tail) {
       context->branch_instruction_index = block.instruction_count - 2u;
     }
@@ -3327,38 +3378,20 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
                                NativeBlockRejectDetail::IrqState);
     }
 
-    struct FetchFill {
-      u32 index = 0;
-      u32 tag = 0;
-      u32 base = 0;
-    };
-    std::array<FetchFill, DecodedBlock::kMaxInstructions> fills{};
-    u32 fill_count = 0;
-    u32 fetch_penalty = 0;
-    for (u32 i = 0; i < native_instruction_count; ++i) {
-      const u32 pc = block.instructions[i].pc;
-      if ((pc & 3u) != 0u) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_reject_icache;
-        record_rejected_block(NativeBlockRejectDetail::ICache);
-        return execute_block(block, max_cycles, max_instructions);
-      }
-      if (!cpu_.instruction_cacheable(pc)) {
-        continue;
-      }
+    if (!context->instruction_pcs_aligned) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_reject_icache;
+      record_rejected_block(NativeBlockRejectDetail::ICache);
+      return execute_block(block, max_cycles, max_instructions);
+    }
 
-      const u32 index = (pc >> 4u) & 0xFFu;
-      const u32 tag = psx::mask_address(pc) & ~0x0Fu;
-      bool hit = cpu_.icache_[index].valid && cpu_.icache_[index].tag == tag;
-      for (u32 fill = 0; fill < fill_count; ++fill) {
-        if (fills[fill].index == index && fills[fill].tag == tag) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) {
+    u32 fetch_penalty = 0;
+    for (u32 line_index = 0; line_index < context->icache_line_count;
+         ++line_index) {
+      const X64IcacheLinePlan &line = context->icache_lines[line_index];
+      if (!cpu_.icache_[line.index].valid ||
+          cpu_.icache_[line.index].tag != line.tag) {
         fetch_penalty += 4u;
-        fills[fill_count++] = {index, tag, pc & ~0x0Fu};
       }
     }
 
@@ -4294,72 +4327,49 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   context->delay_slot_used_mmio = false;
 
   if (!context->uses_instruction_helpers) {
-  struct FetchFill {
-    u32 index = 0;
-    u32 tag = 0;
-    u32 base = 0;
-  };
-  std::array<FetchFill, DecodedBlock::kMaxInstructions> fills{};
-  u32 fill_count = 0;
-  u32 fetch_penalty = 0;
-
-  for (u32 i = 0; i < native_instruction_count; ++i) {
-    const u32 pc = block.instructions[i].pc;
-    if ((pc & 3u) != 0) {
+    if (!context->instruction_pcs_aligned) {
       ++stats_.native_to_decoded_fallbacks;
       ++stats_.native_reject_icache;
       record_rejected_block(NativeBlockRejectDetail::ICache);
       return execute_block(block, max_cycles, max_instructions);
     }
 
-    if (!cpu_.instruction_cacheable(pc)) {
-      continue;
+    std::array<const X64IcacheLinePlan *, DecodedBlock::kMaxInstructions>
+        fills{};
+    u32 fill_count = 0;
+    u32 fetch_penalty = 0;
+    for (u32 line_index = 0; line_index < context->icache_line_count;
+         ++line_index) {
+      const X64IcacheLinePlan &line = context->icache_lines[line_index];
+      if (!cpu_.icache_[line.index].valid ||
+          cpu_.icache_[line.index].tag != line.tag) {
+        fetch_penalty += 4u;
+        fills[fill_count++] = &line;
+      }
     }
 
-    const u32 index = (pc >> 4) & 0xFFu;
-    const u32 tag = psx::mask_address(pc) & ~0x0Fu;
-    bool hit = cpu_.icache_[index].valid && cpu_.icache_[index].tag == tag;
+    const u32 total_cycles = context->base_cycles + fetch_penalty;
+    const u32 maximum_cycles =
+        total_cycles + (context->is_branch_tail ? 1u : 0u);
+    if (maximum_cycles > max_cycles) {
+      ++stats_.native_to_decoded_fallbacks;
+      ++stats_.native_reject_budget;
+      record_rejected_block(NativeBlockRejectDetail::Budget);
+      return execute_block(block, max_cycles, max_instructions);
+    }
+
     for (u32 fill = 0; fill < fill_count; ++fill) {
-      if (fills[fill].index == index && fills[fill].tag == tag) {
-        hit = true;
-        break;
+      const X64IcacheLinePlan &planned = *fills[fill];
+      auto &line = cpu_.icache_[planned.index];
+      line.tag = planned.tag;
+      for (u32 word = 0; word < 4u; ++word) {
+        line.words[word] =
+            cpu_.sys_->read32_instruction(planned.base + word * 4u);
       }
+      line.valid = true;
     }
-    if (!hit) {
-      fetch_penalty += 4u;
-      if (fill_count >= fills.size()) {
-        ++stats_.native_to_decoded_fallbacks;
-        ++stats_.native_reject_icache;
-        record_rejected_block(NativeBlockRejectDetail::ICache);
-        return execute_block(block, max_cycles, max_instructions);
-      }
-      fills[fill_count++] = {index, tag, pc & ~0x0Fu};
-    }
-  }
 
-  const u32 total_cycles = context->base_cycles + fetch_penalty;
-  const u32 maximum_cycles =
-      total_cycles +
-      (context->is_branch_tail && !context->uses_instruction_helpers ? 1u
-                                                                      : 0u);
-  if (maximum_cycles > max_cycles) {
-    ++stats_.native_to_decoded_fallbacks;
-    ++stats_.native_reject_budget;
-    record_rejected_block(NativeBlockRejectDetail::Budget);
-    return execute_block(block, max_cycles, max_instructions);
-  }
-
-  for (u32 fill = 0; fill < fill_count; ++fill) {
-    auto &line = cpu_.icache_[fills[fill].index];
-    line.tag = fills[fill].tag;
-    for (u32 word = 0; word < 4u; ++word) {
-      line.words[word] =
-          cpu_.sys_->read32_instruction(fills[fill].base + word * 4u);
-    }
-    line.valid = true;
-  }
-
-  context->cycles_to_add = total_cycles;
+    context->cycles_to_add = total_cycles;
   } else {
     context->cycles_to_add = 0;
   }
