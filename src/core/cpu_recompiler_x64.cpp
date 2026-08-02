@@ -6,6 +6,13 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <unordered_map>
+#include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #if defined(VIBESTATION_ENABLE_X64_JIT) && \
     (defined(_M_X64) || defined(__x86_64__))
@@ -16,6 +23,67 @@
 #endif
 
 namespace {
+constexpr size_t kX64CodeSlabSize = 4u * 1024u * 1024u;
+constexpr size_t kX64CodePoolLimit = 64u * 1024u * 1024u;
+constexpr size_t kX64BlockCodeReservation = 8192u;
+
+#if VIBESTATION_X64_JIT_SUPPORTED && defined(_WIN32)
+struct X64CodeSlab {
+  X64CodeSlab() {
+    data = static_cast<u8 *>(
+        VirtualAlloc(nullptr, kX64CodeSlabSize, MEM_COMMIT | MEM_RESERVE,
+                     PAGE_EXECUTE_READWRITE));
+  }
+  ~X64CodeSlab() {
+    if (data != nullptr) {
+      VirtualFree(data, 0, MEM_RELEASE);
+    }
+  }
+
+  X64CodeSlab(const X64CodeSlab &) = delete;
+  X64CodeSlab &operator=(const X64CodeSlab &) = delete;
+
+  u8 *data = nullptr;
+  size_t used = 0;
+};
+
+struct X64CodePool {
+  void *allocate(size_t size) {
+    const size_t aligned_size = (size + 15u) & ~size_t{15u};
+    if (slabs.empty() ||
+        slabs.back()->used + aligned_size > kX64CodeSlabSize) {
+      if (slabs.size() * kX64CodeSlabSize >= kX64CodePoolLimit) {
+        return nullptr;
+      }
+      auto slab = std::make_unique<X64CodeSlab>();
+      if (slab->data == nullptr) {
+        return nullptr;
+      }
+      slabs.push_back(std::move(slab));
+    }
+    X64CodeSlab &slab = *slabs.back();
+    void *result = slab.data + slab.used;
+    slab.used += aligned_size;
+    return result;
+  }
+
+  std::vector<std::unique_ptr<X64CodeSlab>> slabs;
+};
+
+std::unordered_map<CpuOptimizedBackend *, std::unique_ptr<X64CodePool>>
+    g_x64_code_pools;
+
+void *allocate_x64_code(CpuOptimizedBackend *backend, size_t size) {
+  auto &pool = g_x64_code_pools[backend];
+  if (!pool) {
+    pool = std::make_unique<X64CodePool>();
+  }
+  return pool->allocate(size);
+}
+#else
+void *allocate_x64_code(CpuOptimizedBackend *, size_t) { return nullptr; }
+#endif
+
 struct X64IcacheLinePlan {
   u32 index = 0;
   u32 tag = 0;
@@ -24,7 +92,8 @@ struct X64IcacheLinePlan {
 
 struct X64NativeContext {
 #if VIBESTATION_X64_JIT_SUPPORTED
-  explicit X64NativeContext(size_t code_size) : code(code_size) {}
+  X64NativeContext(size_t code_size, void *code_buffer)
+      : code(code_size, code_buffer) {}
   Xbyak::CodeGenerator code;
 #endif
   CpuOptimizedBackend *backend = nullptr;
@@ -65,6 +134,7 @@ struct X64NativeContext {
       icache_lines{};
   u32 icache_line_count = 0;
   bool instruction_pcs_aligned = true;
+  bool assumes_no_load_delay = false;
   bool uses_instruction_helpers = false;
   bool coherent_straight_load = false;
   bool inline_branch_tail = false;
@@ -1744,7 +1814,9 @@ void emit_x64_direct_block(X64NativeContext &context,
     } else {
       emit_x64_instruction(code, inst, ctx, gpr);
     }
-    emit_advance_load_delay(code, ctx, gpr);
+    if (!context.assumes_no_load_delay) {
+      emit_advance_load_delay(code, ctx, gpr);
+    }
     code.mov(code.dword[gpr], 0);
   }
 
@@ -1811,7 +1883,9 @@ void emit_x64_reduced_helper_branch_tail_block(X64NativeContext &context,
     } else {
       emit_x64_instruction(code, inst, ctx, gpr);
     }
-    emit_advance_load_delay(code, ctx, gpr);
+    if (!context.assumes_no_load_delay) {
+      emit_advance_load_delay(code, ctx, gpr);
+    }
     code.mov(code.dword[gpr], 0);
   }
 
@@ -1820,11 +1894,15 @@ void emit_x64_reduced_helper_branch_tail_block(X64NativeContext &context,
   emit_branch_tail_condition(code, gpr, branch);
   code.mov(code.byte[ctx + offsetof(X64NativeContext, branch_taken)],
            code.r10b);
-  emit_advance_load_delay(code, ctx, gpr);
+  if (!context.assumes_no_load_delay) {
+    emit_advance_load_delay(code, ctx, gpr);
+  }
   code.mov(code.dword[gpr], 0);
 
   emit_x64_instruction(code, delay, ctx, gpr);
-  emit_advance_load_delay(code, ctx, gpr);
+  if (!context.assumes_no_load_delay) {
+    emit_advance_load_delay(code, ctx, gpr);
+  }
   code.mov(code.dword[gpr], 0);
 
   Label not_taken, have_pc;
@@ -3056,14 +3134,28 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     // the decoded engine until the unified prologue and register cache make
     // them profitable. Comparison tests retain the native path so the emitter
     // and helper ABI are still exercised explicitly.
-    const bool unprofitable_branch = is_branch_tail;
+    const bool self_loop_branch =
+        inline_branch_tail && block.instruction_count >= 2u &&
+        block.instructions[block.instruction_count - 2u].target ==
+            block.start_pc;
+    const bool unprofitable_branch =
+        is_branch_tail && !self_loop_branch;
     if ((uses_instruction_helpers || unprofitable_branch) &&
         !g_cpu_backend_compare_test_active) {
       block.native_decoded_only = true;
       return false;
     }
 
-    auto context = std::make_unique<X64NativeContext>(8192);
+    void *code_buffer =
+        allocate_x64_code(this, kX64BlockCodeReservation);
+#if defined(_WIN32)
+    if (code_buffer == nullptr) {
+      ++stats_.native_compile_failures;
+      return false;
+    }
+#endif
+    auto context = std::make_unique<X64NativeContext>(
+        kX64BlockCodeReservation, code_buffer);
     context->backend = this;
     context->cpu = &cpu_;
     context->block = &block;
@@ -3123,6 +3215,11 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
     context->inline_branch_tail = inline_branch_tail;
     context->coherent_straight_load = coherent_straight_load;
     context->uses_instruction_helpers = uses_instruction_helpers;
+    context->assumes_no_load_delay =
+        !g_cpu_backend_compare_test_active &&
+        (self_loop_branch ||
+         (!block.has_memory && !block.has_control_flow &&
+          !uses_instruction_helpers));
     if (context->is_branch_tail) {
       context->branch_instruction_index = block.instruction_count - 2u;
     }
@@ -3204,6 +3301,129 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
 #endif
 }
 
+CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
+    DecodedBlock &first_block, u32 max_cycles, u32 max_instructions) {
+  CpuBlockRunResult total{};
+  DecodedBlock *block = &first_block;
+
+  for (u32 chain_length = 0; chain_length < 32u; ++chain_length) {
+    if (block == nullptr || block->invalidated || block->native_fn == nullptr ||
+        block->native_context == nullptr) {
+      break;
+    }
+
+    auto *context = static_cast<X64NativeContext *>(block->native_context);
+    if (!context->inline_branch_tail || context->uses_instruction_helpers ||
+        !context->instruction_pcs_aligned) {
+      break;
+    }
+    if (context->assumes_no_load_delay &&
+        (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u)) {
+      break;
+    }
+
+    const u32 remaining_cycles = max_cycles - total.cycles;
+    const u32 remaining_instructions = max_instructions - total.instructions;
+    if (context->instruction_count > remaining_instructions) {
+      break;
+    }
+    if (cpu_.pc_ != block->start_pc ||
+        cpu_.next_pc_ != block->start_pc + 4u) {
+      break;
+    }
+
+    const bool completed_delay_slot_state =
+        cpu_.in_delay_slot_ && !cpu_.pending_delay_slot_ &&
+        !cpu_.pending_branch_taken_ && cpu_.pending_branch_pc_ == 0u &&
+        cpu_.current_pc_ == cpu_.active_branch_pc_ + 4u;
+    if (cpu_.pending_delay_slot_ ||
+        (cpu_.in_delay_slot_ && !completed_delay_slot_state) ||
+        cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
+      break;
+    }
+    if (completed_delay_slot_state) {
+      cpu_.in_delay_slot_ = false;
+      cpu_.active_branch_pc_ = 0u;
+    }
+
+    if (cpu_.sys_->irq_pending()) {
+      cpu_.cop0_cause_ |= (1u << 10);
+    } else {
+      cpu_.cop0_cause_ &= ~(1u << 10);
+    }
+    if (cpu_.check_irq()) {
+      break;
+    }
+
+    std::array<const X64IcacheLinePlan *, DecodedBlock::kMaxInstructions>
+        fills{};
+    u32 fill_count = 0;
+    u32 fetch_penalty = 0;
+    for (u32 line_index = 0; line_index < context->icache_line_count;
+         ++line_index) {
+      const X64IcacheLinePlan &planned = context->icache_lines[line_index];
+      if (!cpu_.icache_[planned.index].valid ||
+          cpu_.icache_[planned.index].tag != planned.tag) {
+        fetch_penalty += 4u;
+        fills[fill_count++] = &planned;
+      }
+    }
+
+    const u32 total_block_cycles = context->base_cycles + fetch_penalty;
+    if (total_block_cycles + 1u > remaining_cycles) {
+      break;
+    }
+    for (u32 fill = 0; fill < fill_count; ++fill) {
+      const X64IcacheLinePlan &planned = *fills[fill];
+      auto &line = cpu_.icache_[planned.index];
+      line.tag = planned.tag;
+      for (u32 word = 0; word < 4u; ++word) {
+        line.words[word] =
+            cpu_.sys_->read32_instruction(planned.base + word * 4u);
+      }
+      line.valid = true;
+    }
+
+    CpuBlockRunResult result{};
+    context->max_cycles = remaining_cycles;
+    context->max_instructions = remaining_instructions;
+    context->cycles_to_add = total_block_cycles;
+    context->branch_taken = false;
+    ++stats_.native_branch_tail_entries;
+    ++block->native_branch_tail_entry_count;
+    ++block->native_entry_count;
+    block->native_fn(block->native_context, &result);
+    if (result.instructions == 0u) {
+      break;
+    }
+
+    ++stats_.native_block_entries;
+    stats_.native_instructions += result.instructions;
+    stats_.native_cycles += result.cycles;
+    stats_.optimized_instructions += result.instructions;
+    total.cycles += result.cycles;
+    total.instructions += result.instructions;
+    total.exit_reason = result.exit_reason;
+    g_diag_current_pc = cpu_.current_pc_;
+
+    if (total.cycles >= max_cycles || total.instructions >= max_instructions ||
+        cpu_.exception_raised_ ||
+        cpu_.sys_->cpu_timing_boundary_requested()) {
+      break;
+    }
+
+    if (cpu_.pc_ != block->start_pc) {
+      break;
+    }
+    ++block->entry_count;
+  }
+
+  if (total.instructions == 0u && !cpu_.exception_raised_) {
+    return execute_block(first_block, max_cycles, max_instructions);
+  }
+  return total;
+}
+
 CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     DecodedBlock &block, u32 max_cycles, u32 max_instructions) {
   CpuBlockRunResult result{};
@@ -3249,6 +3469,13 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   }
 
   auto *context = static_cast<X64NativeContext *>(block.native_context);
+  if (context->inline_branch_tail && !context->uses_instruction_helpers &&
+      block.instruction_count >= 2u &&
+      block.instructions[block.instruction_count - 2u].target ==
+          block.start_pc &&
+      !g_cpu_backend_compare_test_active) {
+    return execute_native_branch_chain(block, max_cycles, max_instructions);
+  }
   const u32 native_instruction_count = context->instruction_count;
   if (!context->uses_instruction_helpers &&
       native_instruction_count > max_instructions) {
@@ -3277,6 +3504,12 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   if (completed_delay_slot_state) {
     cpu_.in_delay_slot_ = false;
     cpu_.active_branch_pc_ = 0u;
+  }
+
+  if (context->assumes_no_load_delay &&
+      (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u)) {
+    return reject_to_decoded(stats_.native_reject_load_delay_state,
+                             NativeBlockRejectDetail::LoadDelayState);
   }
 
   if (context->uses_instruction_helpers) {
@@ -4585,4 +4818,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   stats_.native_cycles += result.cycles;
   stats_.optimized_instructions += result.instructions;
   return result;
+}
+
+void CpuOptimizedBackend::reset_x64_code_pool() {
+#if VIBESTATION_X64_JIT_SUPPORTED && defined(_WIN32)
+  g_x64_code_pools.erase(this);
+#endif
 }

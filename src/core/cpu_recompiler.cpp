@@ -1748,7 +1748,10 @@ CpuOptimizedBackend::CpuOptimizedBackend(Cpu &cpu) : cpu_(cpu) {
   stats_.available = true;
 }
 
-CpuOptimizedBackend::~CpuOptimizedBackend() = default;
+CpuOptimizedBackend::~CpuOptimizedBackend() {
+  blocks_.clear();
+  reset_x64_code_pool();
+}
 
 CpuRunSliceResult CpuOptimizedBackend::run_slice(
     u32 max_cycles, u32 max_instructions, CpuExecutionMode requested_mode) {
@@ -1999,6 +2002,7 @@ void CpuOptimizedBackend::begin_frame(u32 frame_index) {
 void CpuOptimizedBackend::flush() {
   dispatch_cache_.fill({});
   blocks_.clear();
+  reset_x64_code_pool();
   blocks_by_page_.clear();
   rejected_block_profiles_.clear();
   recent_native_branch_tails_.clear();

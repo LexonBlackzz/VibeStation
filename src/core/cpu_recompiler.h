@@ -443,6 +443,9 @@ private:
                                   bool count_decoded = true);
   CpuBlockRunResult execute_native_block(DecodedBlock &block, u32 max_cycles,
                                          u32 max_instructions);
+  CpuBlockRunResult execute_native_branch_chain(DecodedBlock &block,
+                                                u32 max_cycles,
+                                                u32 max_instructions);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
   bool prepare_instruction(const DecodedInstruction &inst,
                            CpuBlockRunResult &result);
@@ -457,6 +460,7 @@ private:
   bool ensure_x64_safety_checked(DecodedBlock &block);
   bool should_attempt_x64_compile(const DecodedBlock &block);
   bool compile_x64_block(DecodedBlock &block);
+  void reset_x64_code_pool();
   static bool x64_native_refill_icache(void *context, u32 index,
                                        CpuBlockRunResult *result);
   static bool x64_native_execute_precise_operation(
