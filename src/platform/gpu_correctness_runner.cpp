@@ -212,15 +212,13 @@ bool compare_vram(const char *name, const Gpu &gpu,
     ++mismatch_count;
   }
 
-  const u64 touched_words = expected_metrics.nonzero_words;
   std::fprintf(stdout,
                "[GPU TEST] RAW  %-24s actual_hash=%016llX expected_hash=%016llX "
-               "nonzero=%llu touched=%llu mismatches=%zu\n",
+               "nonzero=%llu mismatches=%zu\n",
                name,
                static_cast<unsigned long long>(actual_metrics.hash),
                static_cast<unsigned long long>(expected_metrics.hash),
                static_cast<unsigned long long>(actual_metrics.nonzero_words),
-               static_cast<unsigned long long>(touched_words),
                mismatch_count);
 
   g_gpu_test_suite_signature =
