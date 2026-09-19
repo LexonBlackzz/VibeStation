@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -164,9 +165,9 @@ bool compare_vram(const char *name, const Gpu &gpu,
 }
 
 bool test_flat_triangle() {
-  Gpu gpu;
-  gpu.init(nullptr);
-  gpu.reset();
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
 
   std::vector<u16> expected(kVramPixels, 0);
 
@@ -182,18 +183,18 @@ bool test_flat_triangle() {
         return color;
       });
 
-  gpu.gp0(rgb_command(0x20, v0.r, v0.g, v0.b));
-  gpu.gp0(vertex_word(v0.x, v0.y));
-  gpu.gp0(vertex_word(v1.x, v1.y));
-  gpu.gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(rgb_command(0x20, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(vertex_word(v2.x, v2.y));
 
-  return compare_vram("flat triangle", gpu, expected);
+  return compare_vram("flat triangle", *gpu, expected);
 }
 
 bool test_gouraud_triangle() {
-  Gpu gpu;
-  gpu.init(nullptr);
-  gpu.reset();
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
 
   std::vector<u16> expected(kVramPixels, 0);
 
@@ -211,14 +212,14 @@ bool test_gouraud_triangle() {
         return pack_rgb15(r, g, bl);
       });
 
-  gpu.gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
-  gpu.gp0(vertex_word(v0.x, v0.y));
-  gpu.gp0(rgb_word(v1.r, v1.g, v1.b));
-  gpu.gp0(vertex_word(v1.x, v1.y));
-  gpu.gp0(rgb_word(v2.r, v2.g, v2.b));
-  gpu.gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+  gpu->gp0(vertex_word(v2.x, v2.y));
 
-  return compare_vram("gouraud triangle", gpu, expected);
+  return compare_vram("gouraud triangle", *gpu, expected);
 }
 
 void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
@@ -242,15 +243,15 @@ void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
 }
 
 bool test_raw_textured_triangle() {
-  Gpu gpu;
-  gpu.init(nullptr);
-  gpu.reset();
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0104u; // X page 4 (256px), 15-bit direct.
   constexpr int tex_base_x = 256;
   constexpr int tex_base_y = 0;
-  seed_direct_texture(gpu, expected, tex_base_x, tex_base_y, 64, 64, false);
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 64, 64, false);
 
   const RefVertex v0{20, 70, 128, 128, 128, 2, 3};
   const RefVertex v1{70, 75, 128, 128, 128, 42, 5};
@@ -268,27 +269,27 @@ bool test_raw_textured_triangle() {
         return vram[source];
       });
 
-  gpu.gp0(rgb_command(0x25, 128, 128, 128)); // Raw textured triangle.
-  gpu.gp0(vertex_word(v0.x, v0.y));
-  gpu.gp0(uv_word(v0.u, v0.v, 0));
-  gpu.gp0(vertex_word(v1.x, v1.y));
-  gpu.gp0(uv_word(v1.u, v1.v, texpage));
-  gpu.gp0(vertex_word(v2.x, v2.y));
-  gpu.gp0(uv_word(v2.u, v2.v, 0));
+  gpu->gp0(rgb_command(0x25, 128, 128, 128)); // Raw textured triangle.
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, 0));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
 
-  return compare_vram("raw textured triangle", gpu, expected);
+  return compare_vram("raw textured triangle", *gpu, expected);
 }
 
 bool test_gouraud_textured_triangle() {
-  Gpu gpu;
-  gpu.init(nullptr);
-  gpu.reset();
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0105u; // X page 5 (320px), 15-bit direct.
   constexpr int tex_base_x = 320;
   constexpr int tex_base_y = 0;
-  seed_direct_texture(gpu, expected, tex_base_x, tex_base_y, 64, 64, true);
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 64, 64, true);
 
   const RefVertex v0{100, 70, 128, 72, 220, 3, 4};
   const RefVertex v1{152, 80, 240, 128, 52, 47, 8};
@@ -310,17 +311,17 @@ bool test_gouraud_textured_triangle() {
                               clamp_u8(mb));
       });
 
-  gpu.gp0(rgb_command(0x34, v0.r, v0.g, v0.b));
-  gpu.gp0(vertex_word(v0.x, v0.y));
-  gpu.gp0(uv_word(v0.u, v0.v, 0));
-  gpu.gp0(rgb_word(v1.r, v1.g, v1.b));
-  gpu.gp0(vertex_word(v1.x, v1.y));
-  gpu.gp0(uv_word(v1.u, v1.v, texpage));
-  gpu.gp0(rgb_word(v2.r, v2.g, v2.b));
-  gpu.gp0(vertex_word(v2.x, v2.y));
-  gpu.gp0(uv_word(v2.u, v2.v, 0));
+  gpu->gp0(rgb_command(0x34, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, 0));
+  gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
 
-  return compare_vram("gouraud textured triangle", gpu, expected);
+  return compare_vram("gouraud textured triangle", *gpu, expected);
 }
 
 } // namespace
