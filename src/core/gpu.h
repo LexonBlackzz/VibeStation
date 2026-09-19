@@ -305,7 +305,19 @@ private:
   void set_pixel_clipped(s16 x, s16 y, u16 color,
                          bool semi_transparent = false);
   void write_pixel_opaque_clipped(s16 x, s16 y, u16 color);
-  u16 read_texel(u8 u, u8 v) const;
+  struct TextureSampleState {
+    u8 keep_x = 0xFF;
+    u8 keep_y = 0xFF;
+    u8 replace_x = 0;
+    u8 replace_y = 0;
+    u8 depth = 0;
+    u16 tex_base_x = 0;
+    u16 tex_base_y = 0;
+    u16 clut_x = 0;
+    size_t clut_row = 0;
+  };
+  TextureSampleState prepare_texture_sample_state() const;
+  u16 read_texel(const TextureSampleState &state, u8 u, u8 v) const;
   static bool is_polyline_terminator(u32 word) {
     return (word & 0xF000F000u) == 0x50005000u;
   }
