@@ -475,6 +475,60 @@ void App::panel_performance() {
             ImGui::TextDisabled(
                 "GPU here is CPU-side emulated GPU command time, not host GPU timestamp/present time.");
 
+            ImGui::Separator();
+            ImGui::Text("GPU Command Detail:");
+            auto gpu_detail_row = [](const char* label, double ms, u32 commands) {
+                ImGui::Text("%-18s %7.3f ms  %6u cmds", label, ms, commands);
+            };
+            gpu_detail_row("Flat polygons", stats.gpu_flat_ms,
+                stats.gpu_flat_commands);
+            gpu_detail_row("Gouraud polygons", stats.gpu_gouraud_ms,
+                stats.gpu_gouraud_commands);
+            gpu_detail_row("Textured polygons", stats.gpu_textured_ms,
+                stats.gpu_textured_commands);
+            gpu_detail_row("Gouraud + texture", stats.gpu_gouraud_textured_ms,
+                stats.gpu_gouraud_textured_commands);
+            gpu_detail_row("Rectangles", stats.gpu_rect_ms,
+                stats.gpu_rect_commands);
+            gpu_detail_row("Lines", stats.gpu_line_ms,
+                stats.gpu_line_commands);
+            gpu_detail_row("VRAM transfers", stats.gpu_transfer_ms,
+                stats.gpu_transfer_commands);
+            gpu_detail_row("Other GP0", stats.gpu_other_ms,
+                stats.gpu_other_commands);
+
+            const double gpu_attributed_ms =
+                stats.gpu_flat_ms + stats.gpu_gouraud_ms +
+                stats.gpu_textured_ms + stats.gpu_gouraud_textured_ms +
+                stats.gpu_rect_ms + stats.gpu_line_ms +
+                stats.gpu_transfer_ms + stats.gpu_other_ms;
+            const double gpu_unattributed_ms =
+                std::max(0.0, stats.gpu_ms - gpu_attributed_ms);
+            ImGui::Text("Dispatch attributed: %.3f ms   GP0 overhead/data: %.3f ms",
+                gpu_attributed_ms, gpu_unattributed_ms);
+
+            ImGui::Separator();
+            ImGui::Text("Textured Raster Work:");
+            const double coverage_percent =
+                (stats.gpu_candidate_pixels != 0)
+                ? (100.0 * static_cast<double>(stats.gpu_covered_pixels) /
+                    static_cast<double>(stats.gpu_candidate_pixels))
+                : 0.0;
+            ImGui::Text("Candidates: %llu   covered/sampled: %llu (%.1f%%)",
+                static_cast<unsigned long long>(stats.gpu_candidate_pixels),
+                static_cast<unsigned long long>(stats.gpu_covered_pixels),
+                coverage_percent);
+            ImGui::Text("Texels 4/8/15-bit: %llu / %llu / %llu",
+                static_cast<unsigned long long>(stats.gpu_texel_samples_4bit),
+                static_cast<unsigned long long>(stats.gpu_texel_samples_8bit),
+                static_cast<unsigned long long>(stats.gpu_texel_samples_15bit));
+            ImGui::Text("Transparent: %llu   semi-transparent: %llu",
+                static_cast<unsigned long long>(stats.gpu_transparent_texels),
+                static_cast<unsigned long long>(
+                    stats.gpu_semitransparent_pixels));
+            ImGui::TextDisabled(
+                "Raster counters cover textured triangles/quads and textured rectangles.");
+
             draw_performance_gpu_dip_diagnostics();
         }
         else {
