@@ -1,10 +1,27 @@
 #include "gpu.h"
 #include "system.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 
 namespace {
+    const std::array<u32, 32768>& rgb555_to_rgba_lut() {
+        static const std::array<u32, 32768> lut = [] {
+            std::array<u32, 32768> values{};
+            for (u32 pixel = 0; pixel < values.size(); ++pixel) {
+                const u32 r5 = pixel & 0x1Fu;
+                const u32 g5 = (pixel >> 5) & 0x1Fu;
+                const u32 b5 = (pixel >> 10) & 0x1Fu;
+                values[pixel] =
+                    ((r5 << 3) | (r5 >> 2)) |
+                    (((g5 << 3) | (g5 >> 2)) << 8) |
+                    (((b5 << 3) | (b5 >> 2)) << 16) | 0xFF000000u;
+            }
+            return values;
+        }();
+        return lut;
+    }
     inline bool fmv_diagnostics_enabled() {
         return g_log_fmv_diagnostics;
     }
@@ -2092,11 +2109,12 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
     info.width = std::max(1, width);
     info.height = std::max(1, height);
 
-    if (rgba != nullptr) {
-        rgba->assign(static_cast<size_t>(info.width) * static_cast<size_t>(info.height),
-            0xFF000000u);
-    }
+    const size_t output_pixel_count =
+        static_cast<size_t>(info.width) * static_cast<size_t>(info.height);
     if (!info.display_enabled) {
+        if (rgba != nullptr) {
+            rgba->assign(output_pixel_count, 0xFF000000u);
+        }
         return info;
     }
 
@@ -2115,28 +2133,25 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         display_vram_left + src_width <= static_cast<int>(psx::VRAM_WIDTH) &&
         display_vram_top + src_height <= static_cast<int>(psx::VRAM_HEIGHT)) {
         std::vector<u32>& out = *rgba;
+        out.resize(output_pixel_count);
+        const auto& rgb_lut = rgb555_to_rgba_lut();
         for (int y = 0; y < info.height; ++y) {
-            const int src_y =
-                (src_height > 0) ? ((y * src_height) / info.height) : 0;
             const size_t src_row =
-                static_cast<size_t>(display_vram_top + src_y) * psx::VRAM_WIDTH;
+                static_cast<size_t>(display_vram_top + y) * psx::VRAM_WIDTH +
+                static_cast<size_t>(display_vram_left);
             const size_t dst_row = static_cast<size_t>(y) * static_cast<size_t>(info.width);
+            const u16* src = vram_.data() + src_row;
+            u32* dst = out.data() + dst_row;
             for (int x = 0; x < info.width; ++x) {
-                const int src_x =
-                    (src_width > 0) ? ((x * src_width) / info.width) : 0;
-                const u16 pixel =
-                    vram_[src_row + static_cast<size_t>(display_vram_left + src_x)];
-                const u8 r5 = static_cast<u8>(pixel & 0x1F);
-                const u8 g5 = static_cast<u8>((pixel >> 5) & 0x1F);
-                const u8 b5 = static_cast<u8>((pixel >> 10) & 0x1F);
-                out[dst_row + static_cast<size_t>(x)] =
-                    static_cast<u32>((r5 << 3) | (r5 >> 2)) |
-                    (static_cast<u32>((g5 << 3) | (g5 >> 2)) << 8) |
-                    (static_cast<u32>((b5 << 3) | (b5 >> 2)) << 16) | 0xFF000000u;
+                dst[x] = rgb_lut[src[x] & 0x7FFFu];
             }
         }
         suppress_isolated_bottom_noise_row(rgba, info.width, info.height);
         return info;
+    }
+
+    if (rgba != nullptr) {
+        rgba->assign(output_pixel_count, 0xFF000000u);
     }
 
     auto read_rgb = [&](int vram_y, int x, u8& r, u8& g, u8& b) -> bool {
@@ -2326,7 +2341,9 @@ DisplayDebugInfo Gpu::debug_display_info() const {
 
 void Gpu::vblank() {
     static u64 vblank_count = 0;
-    presented_display_info_ = build_display_rgba(presented_display_rgba_, true);
+    // Presentation needs pixels every VBlank, but display hashing/non-black
+    // statistics are diagnostic work and are recomputed on demand.
+    presented_display_info_ = build_display_rgba(presented_display_rgba_, false);
     presented_display_valid_ = true;
     frame_complete_ = true;
     if (sys_ && fmv_diagnostics_enabled()) {
