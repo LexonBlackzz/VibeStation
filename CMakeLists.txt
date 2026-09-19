@@ -77,6 +77,7 @@ target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
 set(VIBESTATION_SOURCES
     src/main.cpp
     src/platform/cpu_backend_compare_runner.cpp
+    src/platform/gpu_correctness_runner.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
     src/core/bios.cpp
@@ -333,4 +334,12 @@ if(VIBESTATION_ENABLE_IPO)
     else()
         message(STATUS "IPO/LTO not supported: ${VIBESTATION_IPO_ERROR}")
     endif()
+endif()
+
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME vibestation_gpu_correctness
+        COMMAND $<TARGET_FILE:VibeStation> --gpu-self-test)
+    set_tests_properties(vibestation_gpu_correctness PROPERTIES TIMEOUT 30)
 endif()
