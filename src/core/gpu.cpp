@@ -1585,13 +1585,14 @@ void Gpu::gp0_textured_rect() {
 
     // Textured rectangle draw path (supports 4/8/15-bit tex fetch via
     // read_texel).
+    const TextureSampleState texture = prepare_texture_sample_state();
     for (u16 dy = 0; dy < h; ++dy) {
         for (u16 dx = 0; dx < w; ++dx) {
             const u16 src_dx = tex_rect_x_flip_ ? static_cast<u16>(w - 1 - dx) : dx;
             const u16 src_dy = tex_rect_y_flip_ ? static_cast<u16>(h - 1 - dy) : dy;
             const u8 src_u = static_cast<u8>(u + src_dx);
             const u8 src_v = static_cast<u8>(v + src_dy);
-            u16 texel = read_texel(src_u, src_v);
+            u16 texel = read_texel(texture, src_u, src_v);
             if (texel == 0) {
                 continue; // Color 0 transparent in many textured modes.
             }
@@ -2437,43 +2438,60 @@ void Gpu::write_pixel_opaque_clipped(s16 x, s16 y, u16 color) {
     vram_[index] = out;
 }
 
-u16 Gpu::read_texel(u8 u, u8 v) const {
-    // Texture window operates on 8-bit UV domain.
+Gpu::TextureSampleState Gpu::prepare_texture_sample_state() const {
+    TextureSampleState state{};
     const u8 mask_x = static_cast<u8>(tex_window_mask_x_ & 0xFFu);
     const u8 mask_y = static_cast<u8>(tex_window_mask_y_ & 0xFFu);
     const u8 off_x = static_cast<u8>(tex_window_off_x_ & 0xFFu);
     const u8 off_y = static_cast<u8>(tex_window_off_y_ & 0xFFu);
-    const u8 uw = static_cast<u8>((u & static_cast<u8>(~mask_x)) | (off_x & mask_x));
-    const u8 vw = static_cast<u8>((v & static_cast<u8>(~mask_y)) | (off_y & mask_y));
 
-    const u16 tex_base_x = static_cast<u16>((texpage_ & 0xF) * 64);
-    const u16 tex_base_y = static_cast<u16>(((texpage_ >> 4) & 1) * 256);
-    const u16 clut_x = static_cast<u16>((clut_ & 0x3F) * 16);
-    const u16 clut_y = static_cast<u16>((clut_ >> 6) & 0x1FF);
-    const u8 depth = static_cast<u8>((texpage_ >> 7) & 0x3);
-    const u16 tx = static_cast<u16>((tex_base_x + uw) & (psx::VRAM_WIDTH - 1));
-    const u16 ty = static_cast<u16>((tex_base_y + vw) & (psx::VRAM_HEIGHT - 1));
+    state.keep_x = static_cast<u8>(~mask_x);
+    state.keep_y = static_cast<u8>(~mask_y);
+    state.replace_x = static_cast<u8>(off_x & mask_x);
+    state.replace_y = static_cast<u8>(off_y & mask_y);
+    state.depth = static_cast<u8>((texpage_ >> 7) & 0x3u);
+    state.tex_base_x = static_cast<u16>((texpage_ & 0xFu) * 64u);
+    state.tex_base_y = static_cast<u16>(((texpage_ >> 4) & 1u) * 256u);
+    state.clut_x = static_cast<u16>((clut_ & 0x3Fu) * 16u);
+    const u16 clut_y = static_cast<u16>((clut_ >> 6) & 0x1FFu);
+    state.clut_row = static_cast<size_t>(clut_y) * psx::VRAM_WIDTH;
+    return state;
+}
 
-    switch (depth) {
-    case 0: { // 4-bit indexed
-        const u16 word_x =
-            static_cast<u16>((tex_base_x + (uw >> 2)) & (psx::VRAM_WIDTH - 1));
-        const u16 packed = vram_[ty * psx::VRAM_WIDTH + word_x];
-        const u16 index = static_cast<u16>((packed >> ((uw & 3) * 4)) & 0xF);
-        const u16 cx = static_cast<u16>((clut_x + index) & (psx::VRAM_WIDTH - 1));
-        return vram_[clut_y * psx::VRAM_WIDTH + cx];
+u16 Gpu::read_texel(const TextureSampleState &state, u8 u, u8 v) const {
+    const u8 uw = static_cast<u8>((u & state.keep_x) | state.replace_x);
+    const u8 vw = static_cast<u8>((v & state.keep_y) | state.replace_y);
+    const u16 ty = static_cast<u16>(
+        (state.tex_base_y + vw) & (psx::VRAM_HEIGHT - 1));
+    const size_t texture_row = static_cast<size_t>(ty) * psx::VRAM_WIDTH;
+
+    switch (state.depth) {
+    case 0: {
+        const u16 word_x = static_cast<u16>(
+            (state.tex_base_x + (uw >> 2)) & (psx::VRAM_WIDTH - 1));
+        const u16 packed = vram_[texture_row + word_x];
+        const u16 index =
+            static_cast<u16>((packed >> ((uw & 3u) * 4u)) & 0xFu);
+        const u16 cx = static_cast<u16>(
+            (state.clut_x + index) & (psx::VRAM_WIDTH - 1));
+        return vram_[state.clut_row + cx];
     }
-    case 1: { // 8-bit indexed
-        const u16 word_x =
-            static_cast<u16>((tex_base_x + (uw >> 1)) & (psx::VRAM_WIDTH - 1));
-        const u16 packed = vram_[ty * psx::VRAM_WIDTH + word_x];
-        const u16 index = static_cast<u16>((packed >> ((uw & 1) * 8)) & 0xFF);
-        const u16 cx = static_cast<u16>((clut_x + index) & (psx::VRAM_WIDTH - 1));
-        return vram_[clut_y * psx::VRAM_WIDTH + cx];
+    case 1: {
+        const u16 word_x = static_cast<u16>(
+            (state.tex_base_x + (uw >> 1)) & (psx::VRAM_WIDTH - 1));
+        const u16 packed = vram_[texture_row + word_x];
+        const u16 index =
+            static_cast<u16>((packed >> ((uw & 1u) * 8u)) & 0xFFu);
+        const u16 cx = static_cast<u16>(
+            (state.clut_x + index) & (psx::VRAM_WIDTH - 1));
+        return vram_[state.clut_row + cx];
     }
-    case 2: // 15-bit direct
-    case 3: // Mode 3 is treated as 15-bit direct on PS1 hardware
-        return vram_[ty * psx::VRAM_WIDTH + tx];
+    case 2:
+    case 3: {
+        const u16 tx = static_cast<u16>(
+            (state.tex_base_x + uw) & (psx::VRAM_WIDTH - 1));
+        return vram_[texture_row + tx];
+    }
     default:
         return 0;
     }
@@ -2768,6 +2786,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     const bool edge0_top_left = is_top_left_edge(v1, v2);
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
+    const TextureSampleState texture = prepare_texture_sample_state();
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2826,7 +2845,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                     edge_inside_ccw(w2, edge2_top_left)) {
                     const u8 u = static_cast<u8>(u_num / area);
                     const u8 v_coord = static_cast<u8>(v_num / area);
-                    const u16 texel = read_texel(u, v_coord);
+                    const u16 texel = read_texel(texture, u, v_coord);
                     if (texel != 0) {
                         u16 out15 = texel;
                         if (!raw_texture) {
@@ -2925,7 +2944,7 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
                     static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
-                const u16 texel = read_texel(u, v_coord);
+                const u16 texel = read_texel(texture, u, v_coord);
                 if (texel != 0) {
                     u16 out15 = texel;
                     if (!raw_texture) {
@@ -2971,6 +2990,7 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
     const bool edge0_top_left = is_top_left_edge(v1, v2);
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
+    const TextureSampleState texture = prepare_texture_sample_state();
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -3057,7 +3077,7 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     edge_inside_ccw(w2, edge2_top_left)) {
                     const u8 u = static_cast<u8>(u_num / area);
                     const u8 v_coord = static_cast<u8>(v_num / area);
-                    const u16 texel = read_texel(u, v_coord);
+                    const u16 texel = read_texel(texture, u, v_coord);
                     if (texel != 0) {
                         const u8 mr = static_cast<u8>(std::clamp(r_num / area, 0, 255));
                         const u8 mg = static_cast<u8>(std::clamp(g_num / area, 0, 255));
@@ -3211,7 +3231,7 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
                     static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
-                const u16 texel = read_texel(u, v_coord);
+                const u16 texel = read_texel(texture, u, v_coord);
                 if (texel != 0) {
                     const u8 mr = static_cast<u8>(std::clamp(static_cast<int>(r_value), 0, 255));
                     const u8 mg = static_cast<u8>(std::clamp(static_cast<int>(g_value), 0, 255));
