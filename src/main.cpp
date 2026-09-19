@@ -2479,6 +2479,9 @@ int main(int argc, char *argv[]) {
   if (std::find(args.begin(), args.end(), "--gpu-self-test") != args.end()) {
     return run_gpu_correctness_tests();
   }
+  if (std::find(args.begin(), args.end(), "--gpu-benchmark") != args.end()) {
+    return run_gpu_microbenchmark();
+  }
 
   auto trim_cli_arg = [](const std::string &input) {
     const size_t begin = input.find_first_not_of(" \t\r\n");
