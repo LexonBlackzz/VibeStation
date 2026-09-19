@@ -6,6 +6,7 @@
 #include "core/input_recorder.h"
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
+#include "platform/gpu_correctness_runner.h"
 #include "ui/app.h"
 #include "vibestation_version.h"
 #include <SDL.h>
@@ -2473,6 +2474,13 @@ int main(int argc, char *argv[]) {
   args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
   for (int i = 1; i < argc; ++i) {
     args.emplace_back(argv[i]);
+  }
+
+  if (std::find(args.begin(), args.end(), "--gpu-self-test") != args.end()) {
+    return run_gpu_correctness_tests();
+  }
+  if (std::find(args.begin(), args.end(), "--gpu-benchmark") != args.end()) {
+    return run_gpu_microbenchmark();
   }
 
   auto trim_cli_arg = [](const std::string &input) {

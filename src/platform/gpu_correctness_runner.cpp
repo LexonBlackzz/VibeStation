@@ -1,0 +1,878 @@
+#include "platform/gpu_correctness_runner.h"
+
+#include "core/gpu.h"
+#include "core/types.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+struct RefVertex {
+  s16 x = 0;
+  s16 y = 0;
+  u8 r = 0;
+  u8 g = 0;
+  u8 b = 0;
+  u8 u = 0;
+  u8 v = 0;
+};
+
+constexpr size_t kVramPixels =
+    static_cast<size_t>(psx::VRAM_WIDTH) * psx::VRAM_HEIGHT;
+
+s32 edge(const RefVertex &a, const RefVertex &b, s16 x, s16 y) {
+  return static_cast<s32>(b.x - a.x) * (y - a.y) -
+         static_cast<s32>(b.y - a.y) * (x - a.x);
+}
+
+bool is_top_left(const RefVertex &a, const RefVertex &b) {
+  const int dy = static_cast<int>(b.y) - static_cast<int>(a.y);
+  const int dx = static_cast<int>(b.x) - static_cast<int>(a.x);
+  return (dy < 0) || (dy == 0 && dx > 0);
+}
+
+bool inside_edge(s32 value, bool top_left) {
+  return value > 0 || (value == 0 && top_left);
+}
+
+int clamp_u8(int value) {
+  return std::max(0, std::min(value, 255));
+}
+
+u16 pack_rgb15(int r, int g, int b) {
+  const u16 rr = static_cast<u16>(clamp_u8(r) >> 3);
+  const u16 gg = static_cast<u16>(clamp_u8(g) >> 3);
+  const u16 bb = static_cast<u16>(clamp_u8(b) >> 3);
+  return static_cast<u16>(rr | (gg << 5) | (bb << 10));
+}
+
+u16 modulate_texel(u16 texel, int mr, int mg, int mb) {
+  const int tr = texel & 0x1F;
+  const int tg = (texel >> 5) & 0x1F;
+  const int tb = (texel >> 10) & 0x1F;
+  const int rr = std::min(31, (tr * mr) >> 7);
+  const int rg = std::min(31, (tg * mg) >> 7);
+  const int rb = std::min(31, (tb * mb) >> 7);
+  return static_cast<u16>((rr & 0x1F) | ((rg & 0x1F) << 5) |
+                          ((rb & 0x1F) << 10) | (texel & 0x8000u));
+}
+
+u16 reference_read_texel(const std::vector<u16> &vram, u16 texpage, u16 clut,
+                         u8 mask_x, u8 mask_y, u8 off_x, u8 off_y,
+                         u8 u, u8 v) {
+  const u8 uw =
+      static_cast<u8>((u & static_cast<u8>(~mask_x)) | (off_x & mask_x));
+  const u8 vw =
+      static_cast<u8>((v & static_cast<u8>(~mask_y)) | (off_y & mask_y));
+
+  const u16 tex_base_x = static_cast<u16>((texpage & 0xFu) * 64u);
+  const u16 tex_base_y = static_cast<u16>(((texpage >> 4) & 1u) * 256u);
+  const u16 clut_x = static_cast<u16>((clut & 0x3Fu) * 16u);
+  const u16 clut_y = static_cast<u16>((clut >> 6) & 0x1FFu);
+  const u8 depth = static_cast<u8>((texpage >> 7) & 0x3u);
+  const u16 ty =
+      static_cast<u16>((tex_base_y + vw) & (psx::VRAM_HEIGHT - 1));
+
+  switch (depth) {
+  case 0: {
+    const u16 word_x = static_cast<u16>(
+        (tex_base_x + (uw >> 2)) & (psx::VRAM_WIDTH - 1));
+    const u16 packed =
+        vram[static_cast<size_t>(ty) * psx::VRAM_WIDTH + word_x];
+    const u16 index =
+        static_cast<u16>((packed >> ((uw & 3u) * 4u)) & 0xFu);
+    const u16 cx =
+        static_cast<u16>((clut_x + index) & (psx::VRAM_WIDTH - 1));
+    return vram[static_cast<size_t>(clut_y) * psx::VRAM_WIDTH + cx];
+  }
+  case 1: {
+    const u16 word_x = static_cast<u16>(
+        (tex_base_x + (uw >> 1)) & (psx::VRAM_WIDTH - 1));
+    const u16 packed =
+        vram[static_cast<size_t>(ty) * psx::VRAM_WIDTH + word_x];
+    const u16 index =
+        static_cast<u16>((packed >> ((uw & 1u) * 8u)) & 0xFFu);
+    const u16 cx =
+        static_cast<u16>((clut_x + index) & (psx::VRAM_WIDTH - 1));
+    return vram[static_cast<size_t>(clut_y) * psx::VRAM_WIDTH + cx];
+  }
+  case 2:
+  case 3: {
+    const u16 tx =
+        static_cast<u16>((tex_base_x + uw) & (psx::VRAM_WIDTH - 1));
+    return vram[static_cast<size_t>(ty) * psx::VRAM_WIDTH + tx];
+  }
+  default:
+    return 0;
+  }
+}
+
+u32 rgb_command(u8 opcode, u8 r, u8 g, u8 b) {
+  return (static_cast<u32>(opcode) << 24) |
+         (static_cast<u32>(b) << 16) |
+         (static_cast<u32>(g) << 8) | static_cast<u32>(r);
+}
+
+u32 rgb_word(u8 r, u8 g, u8 b) {
+  return (static_cast<u32>(b) << 16) |
+         (static_cast<u32>(g) << 8) | static_cast<u32>(r);
+}
+
+u32 vertex_word(s16 x, s16 y) {
+  return static_cast<u32>(static_cast<u16>(x)) |
+         (static_cast<u32>(static_cast<u16>(y)) << 16);
+}
+
+u32 uv_word(u8 u, u8 v, u16 high) {
+  return static_cast<u32>(u) | (static_cast<u32>(v) << 8) |
+         (static_cast<u32>(high) << 16);
+}
+
+template <typename PixelFn>
+void reference_triangle(std::vector<u16> &vram, RefVertex v0, RefVertex v1,
+                        RefVertex v2, PixelFn &&pixel_fn) {
+  s32 area = edge(v0, v1, v2.x, v2.y);
+  if (area == 0) {
+    return;
+  }
+  if (area < 0) {
+    std::swap(v1, v2);
+    area = -area;
+  }
+
+  const bool edge0_top_left = is_top_left(v1, v2);
+  const bool edge1_top_left = is_top_left(v2, v0);
+  const bool edge2_top_left = is_top_left(v0, v1);
+
+  const int min_x = std::max(
+      0, std::min({static_cast<int>(v0.x), static_cast<int>(v1.x),
+                   static_cast<int>(v2.x)}));
+  const int max_x = std::min(
+      static_cast<int>(psx::VRAM_WIDTH) - 1,
+      std::max({static_cast<int>(v0.x), static_cast<int>(v1.x),
+                static_cast<int>(v2.x)}));
+  const int min_y = std::max(
+      0, std::min({static_cast<int>(v0.y), static_cast<int>(v1.y),
+                   static_cast<int>(v2.y)}));
+  const int max_y = std::min(
+      static_cast<int>(psx::VRAM_HEIGHT) - 1,
+      std::max({static_cast<int>(v0.y), static_cast<int>(v1.y),
+                static_cast<int>(v2.y)}));
+
+  for (int y = min_y; y <= max_y; ++y) {
+    for (int x = min_x; x <= max_x; ++x) {
+      const s32 w0 = edge(v1, v2, static_cast<s16>(x), static_cast<s16>(y));
+      const s32 w1 = edge(v2, v0, static_cast<s16>(x), static_cast<s16>(y));
+      const s32 w2 = edge(v0, v1, static_cast<s16>(x), static_cast<s16>(y));
+      if (!inside_edge(w0, edge0_top_left) ||
+          !inside_edge(w1, edge1_top_left) ||
+          !inside_edge(w2, edge2_top_left)) {
+        continue;
+      }
+
+      const size_t index =
+          static_cast<size_t>(y) * psx::VRAM_WIDTH + static_cast<size_t>(x);
+      vram[index] = pixel_fn(vram, v0, v1, v2, w0, w1, w2, area, x, y);
+    }
+  }
+}
+
+struct VramMetrics {
+  u64 hash = 1469598103934665603ull;
+  u64 nonzero_words = 0;
+  u64 changed_words = 0;
+  u16 min_x = 0;
+  u16 min_y = 0;
+  u16 max_x = 0;
+  u16 max_y = 0;
+  bool has_changed_bounds = false;
+};
+
+VramMetrics measure_vram(const u16 *data, const std::vector<u16> *baseline = nullptr) {
+  constexpr u64 kPrime = 1099511628211ull;
+  VramMetrics metrics{};
+  for (size_t i = 0; i < kVramPixels; ++i) {
+    const u16 value = data[i];
+    metrics.hash ^= static_cast<u8>(value & 0xFFu);
+    metrics.hash *= kPrime;
+    metrics.hash ^= static_cast<u8>(value >> 8);
+    metrics.hash *= kPrime;
+
+    if (value != 0) {
+      ++metrics.nonzero_words;
+    }
+
+    if (baseline != nullptr && value != (*baseline)[i]) {
+      ++metrics.changed_words;
+      const u16 x = static_cast<u16>(i % psx::VRAM_WIDTH);
+      const u16 y = static_cast<u16>(i / psx::VRAM_WIDTH);
+      if (!metrics.has_changed_bounds) {
+        metrics.min_x = metrics.max_x = x;
+        metrics.min_y = metrics.max_y = y;
+        metrics.has_changed_bounds = true;
+      } else {
+        metrics.min_x = std::min(metrics.min_x, x);
+        metrics.min_y = std::min(metrics.min_y, y);
+        metrics.max_x = std::max(metrics.max_x, x);
+        metrics.max_y = std::max(metrics.max_y, y);
+      }
+    }
+  }
+  return metrics;
+}
+
+u64 combine_suite_signature(u64 signature, u64 value) {
+  constexpr u64 kPrime = 1099511628211ull;
+  for (int byte = 0; byte < 8; ++byte) {
+    signature ^= static_cast<u8>((value >> (byte * 8)) & 0xFFu);
+    signature *= kPrime;
+  }
+  return signature;
+}
+
+u64 g_gpu_test_suite_signature = 1469598103934665603ull;
+
+bool compare_vram(const char *name, const Gpu &gpu,
+                  const std::vector<u16> &expected) {
+  const u16 *actual = gpu.vram();
+  const VramMetrics actual_metrics = measure_vram(actual);
+  const VramMetrics expected_metrics = measure_vram(expected.data());
+
+  size_t mismatch_count = 0;
+  for (size_t i = 0; i < expected.size(); ++i) {
+    if (actual[i] == expected[i]) {
+      continue;
+    }
+
+    if (mismatch_count < 8) {
+      const size_t x = i % psx::VRAM_WIDTH;
+      const size_t y = i / psx::VRAM_WIDTH;
+      std::fprintf(stderr,
+                   "[GPU TEST] %s mismatch at (%zu,%zu): expected=%04X actual=%04X\n",
+                   name, x, y, static_cast<unsigned>(expected[i]),
+                   static_cast<unsigned>(actual[i]));
+    }
+    ++mismatch_count;
+  }
+
+  std::fprintf(stdout,
+               "[GPU TEST] RAW  %-24s actual_hash=%016llX expected_hash=%016llX "
+               "nonzero=%llu mismatches=%zu\n",
+               name,
+               static_cast<unsigned long long>(actual_metrics.hash),
+               static_cast<unsigned long long>(expected_metrics.hash),
+               static_cast<unsigned long long>(actual_metrics.nonzero_words),
+               mismatch_count);
+
+  g_gpu_test_suite_signature =
+      combine_suite_signature(g_gpu_test_suite_signature, actual_metrics.hash);
+  g_gpu_test_suite_signature =
+      combine_suite_signature(g_gpu_test_suite_signature,
+                              static_cast<u64>(mismatch_count));
+
+  if (mismatch_count != 0) {
+    std::fprintf(stderr, "[GPU TEST] FAIL %-24s (%zu mismatched pixels)\n",
+                 name, mismatch_count);
+    return false;
+  }
+
+  std::fprintf(stdout, "[GPU TEST] PASS %-24s\n", name);
+  return true;
+}
+
+bool test_flat_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+
+  const RefVertex v0{10, 10, 248, 120, 40, 0, 0};
+  const RefVertex v1{43, 15, 248, 120, 40, 0, 0};
+  const RefVertex v2{17, 39, 248, 120, 40, 0, 0};
+  const u16 color = pack_rgb15(v0.r, v0.g, v0.b);
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [color](const std::vector<u16> &, const RefVertex &, const RefVertex &,
+              const RefVertex &, s32, s32, s32, s32, int, int) {
+        return color;
+      });
+
+  gpu->gp0(rgb_command(0x20, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+
+  return compare_vram("flat triangle", *gpu, expected);
+}
+
+bool test_gouraud_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+
+  const RefVertex v0{50, 12, 240, 24, 32, 0, 0};
+  const RefVertex v1{91, 23, 20, 232, 48, 0, 0};
+  const RefVertex v2{59, 55, 36, 64, 248, 0, 0};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [](const std::vector<u16> &, const RefVertex &a, const RefVertex &b,
+         const RefVertex &c, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const int r = (w0 * a.r + w1 * b.r + w2 * c.r) / area;
+        const int g = (w0 * a.g + w1 * b.g + w2 * c.g) / area;
+        const int bl = (w0 * a.b + w1 * b.b + w2 * c.b) / area;
+        return pack_rgb15(r, g, bl);
+      });
+
+  gpu->gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+
+  return compare_vram("gouraud triangle", *gpu, expected);
+}
+
+void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
+                         int base_y, int width, int height, bool white) {
+  u16 *actual = gpu.vram_mut_data();
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      const u16 pixel = white
+                            ? static_cast<u16>(0x7FFFu)
+                            : static_cast<u16>(
+                                  1u | ((x & 0x1F) << 0) |
+                                  ((y & 0x1F) << 5) |
+                                  (((x + y) & 0x1F) << 10));
+      const size_t index =
+          static_cast<size_t>(base_y + y) * psx::VRAM_WIDTH +
+          static_cast<size_t>(base_x + x);
+      actual[index] = pixel;
+      expected[index] = pixel;
+    }
+  }
+}
+
+bool test_raw_textured_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0104u; // X page 4 (256px), 15-bit direct.
+  constexpr int tex_base_x = 256;
+  constexpr int tex_base_y = 0;
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 64, 64, false);
+
+  const RefVertex v0{20, 70, 128, 128, 128, 2, 3};
+  const RefVertex v1{70, 75, 128, 128, 128, 42, 5};
+  const RefVertex v2{26, 120, 128, 128, 128, 6, 45};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+         const RefVertex &c, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const u8 u = static_cast<u8>((w0 * a.u + w1 * b.u + w2 * c.u) / area);
+        const u8 v = static_cast<u8>((w0 * a.v + w1 * b.v + w2 * c.v) / area);
+        const size_t source =
+            static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+            static_cast<size_t>(tex_base_x + u);
+        return vram[source];
+      });
+
+  gpu->gp0(rgb_command(0x25, 128, 128, 128)); // Raw textured triangle.
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, 0));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
+
+  return compare_vram("raw textured triangle", *gpu, expected);
+}
+
+bool test_gouraud_textured_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0105u; // X page 5 (320px), 15-bit direct.
+  constexpr int tex_base_x = 320;
+  constexpr int tex_base_y = 0;
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 64, 64, true);
+
+  const RefVertex v0{100, 70, 128, 72, 220, 3, 4};
+  const RefVertex v1{152, 80, 240, 128, 52, 47, 8};
+  const RefVertex v2{109, 130, 64, 244, 160, 9, 51};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+         const RefVertex &c, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const u8 u = static_cast<u8>((w0 * a.u + w1 * b.u + w2 * c.u) / area);
+        const u8 v = static_cast<u8>((w0 * a.v + w1 * b.v + w2 * c.v) / area);
+        const int mr = (w0 * a.r + w1 * b.r + w2 * c.r) / area;
+        const int mg = (w0 * a.g + w1 * b.g + w2 * c.g) / area;
+        const int mb = (w0 * a.b + w1 * b.b + w2 * c.b) / area;
+        const size_t source =
+            static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+            static_cast<size_t>(tex_base_x + u);
+        return modulate_texel(vram[source], clamp_u8(mr), clamp_u8(mg),
+                              clamp_u8(mb));
+      });
+
+  gpu->gp0(rgb_command(0x34, v0.r, v0.g, v0.b));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, 0));
+  gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
+
+  return compare_vram("gouraud textured triangle", *gpu, expected);
+}
+
+void seed_palette(Gpu &gpu, std::vector<u16> &expected, u16 clut,
+                  int entries) {
+  const int clut_x = (clut & 0x3F) * 16;
+  const int clut_y = (clut >> 6) & 0x1FF;
+  u16 *actual = gpu.vram_mut_data();
+  for (int i = 0; i < entries; ++i) {
+    const u16 color = (i == 0)
+                          ? 0u
+                          : static_cast<u16>(
+                                1u | ((i * 3) & 0x1F) |
+                                (((i * 5) & 0x1F) << 5) |
+                                (((i * 7) & 0x1F) << 10));
+    const size_t index =
+        static_cast<size_t>(clut_y) * psx::VRAM_WIDTH +
+        static_cast<size_t>((clut_x + i) & (psx::VRAM_WIDTH - 1));
+    actual[index] = color;
+    expected[index] = color;
+  }
+}
+
+bool test_4bit_clut_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0006u; // X page 6, 4-bit indexed.
+  constexpr u16 clut = static_cast<u16>((180u << 6) | 2u);
+  constexpr int tex_base_x = 384;
+  constexpr int tex_base_y = 0;
+
+  seed_palette(*gpu, expected, clut, 16);
+  u16 *actual = gpu->vram_mut_data();
+  for (int v = 0; v < 64; ++v) {
+    for (int word = 0; word < 16; ++word) {
+      u16 packed = 0;
+      for (int nibble = 0; nibble < 4; ++nibble) {
+        const int u = word * 4 + nibble;
+        const u16 index = static_cast<u16>(((u + v * 3) % 15) + 1);
+        packed |= static_cast<u16>(index << (nibble * 4));
+      }
+      const size_t index =
+          static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+          static_cast<size_t>(tex_base_x + word);
+      actual[index] = packed;
+      expected[index] = packed;
+    }
+  }
+
+  const RefVertex v0{180, 40, 128, 128, 128, 1, 2};
+  const RefVertex v1{228, 46, 128, 128, 128, 53, 4};
+  const RefVertex v2{187, 93, 128, 128, 128, 7, 57};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+          const RefVertex &cv, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const u8 u =
+            static_cast<u8>((w0 * a.u + w1 * b.u + w2 * cv.u) / area);
+        const u8 v =
+            static_cast<u8>((w0 * a.v + w1 * b.v + w2 * cv.v) / area);
+        return reference_read_texel(vram, texpage, clut, 0, 0, 0, 0, u, v);
+      });
+
+  gpu->gp0(rgb_command(0x25, 128, 128, 128));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, clut));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
+
+  return compare_vram("4-bit CLUT triangle", *gpu, expected);
+}
+
+bool test_8bit_clut_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0087u; // X page 7, 8-bit indexed.
+  constexpr u16 clut = static_cast<u16>((210u << 6) | 4u);
+  constexpr int tex_base_x = 448;
+  constexpr int tex_base_y = 0;
+
+  seed_palette(*gpu, expected, clut, 256);
+  u16 *actual = gpu->vram_mut_data();
+  for (int v = 0; v < 64; ++v) {
+    for (int word = 0; word < 32; ++word) {
+      const int u0 = word * 2;
+      const u16 i0 = static_cast<u16>(((u0 * 5 + v * 7) % 255) + 1);
+      const u16 i1 = static_cast<u16>((((u0 + 1) * 5 + v * 7) % 255) + 1);
+      const u16 packed = static_cast<u16>(i0 | (i1 << 8));
+      const size_t index =
+          static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+          static_cast<size_t>(tex_base_x + word);
+      actual[index] = packed;
+      expected[index] = packed;
+    }
+  }
+
+  const RefVertex v0{250, 44, 128, 128, 128, 2, 3};
+  const RefVertex v1{305, 51, 128, 128, 128, 58, 6};
+  const RefVertex v2{258, 104, 128, 128, 128, 9, 60};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+          const RefVertex &cv, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const u8 u =
+            static_cast<u8>((w0 * a.u + w1 * b.u + w2 * cv.u) / area);
+        const u8 v =
+            static_cast<u8>((w0 * a.v + w1 * b.v + w2 * cv.v) / area);
+        return reference_read_texel(vram, texpage, clut, 0, 0, 0, 0, u, v);
+      });
+
+  gpu->gp0(rgb_command(0x25, 128, 128, 128));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, clut));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
+
+  return compare_vram("8-bit CLUT triangle", *gpu, expected);
+}
+
+bool test_texture_window_triangle() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0108u; // X page 8, 15-bit direct.
+  constexpr u16 clut = 0;
+  constexpr int tex_base_x = 512;
+  constexpr int tex_base_y = 0;
+  constexpr u8 mask_x = 24;
+  constexpr u8 mask_y = 8;
+  constexpr u8 off_x = 16;
+  constexpr u8 off_y = 8;
+
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 64, 64, false);
+
+  const RefVertex v0{340, 40, 128, 128, 128, 0, 0};
+  const RefVertex v1{390, 46, 128, 128, 128, 47, 2};
+  const RefVertex v2{347, 92, 128, 128, 128, 5, 43};
+
+  reference_triangle(
+      expected, v0, v1, v2,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+          const RefVertex &cv, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+        const u8 u =
+            static_cast<u8>((w0 * a.u + w1 * b.u + w2 * cv.u) / area);
+        const u8 v =
+            static_cast<u8>((w0 * a.v + w1 * b.v + w2 * cv.v) / area);
+        return reference_read_texel(vram, texpage, clut, mask_x, mask_y,
+                                    off_x, off_y, u, v);
+      });
+
+  const u32 tex_window =
+      0xE2000000u |
+      3u |             // mask X => 24
+      (1u << 5) |      // mask Y => 8
+      (2u << 10) |     // offset X => 16
+      (1u << 15);      // offset Y => 8
+  gpu->gp0(tex_window);
+
+  gpu->gp0(rgb_command(0x25, 128, 128, 128));
+  gpu->gp0(vertex_word(v0.x, v0.y));
+  gpu->gp0(uv_word(v0.u, v0.v, clut));
+  gpu->gp0(vertex_word(v1.x, v1.y));
+  gpu->gp0(uv_word(v1.u, v1.v, texpage));
+  gpu->gp0(vertex_word(v2.x, v2.y));
+  gpu->gp0(uv_word(v2.u, v2.v, 0));
+
+  return compare_vram("texture window triangle", *gpu, expected);
+}
+
+} // namespace
+
+int run_gpu_correctness_tests() {
+  g_gpu_test_suite_signature = 1469598103934665603ull;
+
+  const bool old_fast = g_gpu_fast_mode;
+  const bool old_extreme = g_gpu_extreme_fast_mode;
+  g_gpu_fast_mode = false;
+  g_gpu_extreme_fast_mode = false;
+
+  const std::array<std::pair<const char *, bool (*)()>, 7> tests = {{
+      {"flat triangle", &test_flat_triangle},
+      {"gouraud triangle", &test_gouraud_triangle},
+      {"raw textured triangle", &test_raw_textured_triangle},
+      {"gouraud textured triangle", &test_gouraud_textured_triangle},
+      {"4-bit CLUT triangle", &test_4bit_clut_triangle},
+      {"8-bit CLUT triangle", &test_8bit_clut_triangle},
+      {"texture window triangle", &test_texture_window_triangle},
+  }};
+
+  int failed = 0;
+  std::fprintf(stdout, "[GPU TEST] Running %zu deterministic GPU tests...\n",
+               tests.size());
+  for (const auto &test : tests) {
+    if (!test.second()) {
+      ++failed;
+    }
+  }
+
+  g_gpu_fast_mode = old_fast;
+  g_gpu_extreme_fast_mode = old_extreme;
+
+  std::fprintf(stdout, "[GPU TEST] SUITE signature=%016llX failed=%d total=%zu\n",
+               static_cast<unsigned long long>(g_gpu_test_suite_signature),
+               failed, tests.size());
+
+  if (failed != 0) {
+    std::fprintf(stderr, "[GPU TEST] %d/%zu tests failed.\n", failed,
+                 tests.size());
+    return 1;
+  }
+
+  std::fprintf(stdout, "[GPU TEST] All %zu tests passed.\n", tests.size());
+  return 0;
+}
+
+
+namespace {
+
+template <typename SetupFn, typename DrawFn>
+void run_gpu_benchmark_case(const char *name, int iterations,
+                            SetupFn &&setup, DrawFn &&draw) {
+  constexpr int kRuns = 5;
+  constexpr int kWarmupIterations = 8;
+  std::array<double, kRuns> ns_per_triangle{};
+  u64 checksum = 1469598103934665603ull;
+
+  for (int run = 0; run < kRuns; ++run) {
+    auto gpu = std::make_unique<Gpu>();
+    gpu->init(nullptr);
+    gpu->reset();
+
+    std::vector<u16> scratch(kVramPixels, 0);
+    setup(*gpu, scratch);
+
+    for (int i = 0; i < kWarmupIterations; ++i) {
+      draw(*gpu);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+      draw(*gpu);
+    }
+    const auto end = std::chrono::steady_clock::now();
+
+    const double elapsed_ns =
+        std::chrono::duration<double, std::nano>(end - start).count();
+    ns_per_triangle[run] = elapsed_ns / static_cast<double>(iterations);
+
+    const VramMetrics metrics = measure_vram(gpu->vram());
+    checksum = combine_suite_signature(checksum, metrics.hash);
+  }
+
+  std::sort(ns_per_triangle.begin(), ns_per_triangle.end());
+  const double best_ns = ns_per_triangle.front();
+  const double median_ns = ns_per_triangle[kRuns / 2];
+  const double worst_ns = ns_per_triangle.back();
+  const double triangles_per_second = 1.0e9 / median_ns;
+
+  std::fprintf(
+      stdout,
+      "[GPU BENCH] %-26s median_ns=%.1f best_ns=%.1f worst_ns=%.1f "
+      "triangles_per_sec=%.1f checksum=%016llX\n",
+      name, median_ns, best_ns, worst_ns, triangles_per_second,
+      static_cast<unsigned long long>(checksum));
+}
+
+void benchmark_seed_4bit(Gpu &gpu, std::vector<u16> &scratch,
+                         u16 texpage, u16 clut) {
+  seed_palette(gpu, scratch, clut, 16);
+  u16 *vram = gpu.vram_mut_data();
+  const int tex_base_x = (texpage & 0xFu) * 64;
+  const int tex_base_y = ((texpage >> 4) & 1u) * 256;
+  for (int v = 0; v < 128; ++v) {
+    for (int word = 0; word < 32; ++word) {
+      u16 packed = 0;
+      for (int nibble = 0; nibble < 4; ++nibble) {
+        const int u = word * 4 + nibble;
+        const u16 index = static_cast<u16>(((u + v * 3) % 15) + 1);
+        packed |= static_cast<u16>(index << (nibble * 4));
+      }
+      const size_t index =
+          static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+          static_cast<size_t>(tex_base_x + word);
+      vram[index] = packed;
+      scratch[index] = packed;
+    }
+  }
+}
+
+void benchmark_seed_8bit(Gpu &gpu, std::vector<u16> &scratch,
+                         u16 texpage, u16 clut) {
+  seed_palette(gpu, scratch, clut, 256);
+  u16 *vram = gpu.vram_mut_data();
+  const int tex_base_x = (texpage & 0xFu) * 64;
+  const int tex_base_y = ((texpage >> 4) & 1u) * 256;
+  for (int v = 0; v < 128; ++v) {
+    for (int word = 0; word < 64; ++word) {
+      const int u0 = word * 2;
+      const u16 i0 = static_cast<u16>(((u0 * 5 + v * 7) % 255) + 1);
+      const u16 i1 =
+          static_cast<u16>((((u0 + 1) * 5 + v * 7) % 255) + 1);
+      const u16 packed = static_cast<u16>(i0 | (i1 << 8));
+      const size_t index =
+          static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+          static_cast<size_t>(tex_base_x + word);
+      vram[index] = packed;
+      scratch[index] = packed;
+    }
+  }
+}
+
+} // namespace
+
+int run_gpu_microbenchmark() {
+  const bool old_fast = g_gpu_fast_mode;
+  const bool old_extreme = g_gpu_extreme_fast_mode;
+  g_gpu_fast_mode = false;
+  g_gpu_extreme_fast_mode = false;
+
+  constexpr int kIterations = 100;
+  std::fprintf(stdout,
+               "[GPU BENCH] deterministic raster benchmark: runs=5 "
+               "iterations=%d warmup=8 fast=off extreme=off\n",
+               kIterations);
+
+  {
+    constexpr u16 texpage = 0x0104u;
+    const RefVertex v0{40, 40, 128, 128, 128, 2, 3};
+    const RefVertex v1{220, 52, 128, 128, 128, 120, 8};
+    const RefVertex v2{58, 205, 128, 128, 128, 12, 120};
+    run_gpu_benchmark_case(
+        "15-bit raw textured", kIterations,
+        [=](Gpu &gpu, std::vector<u16> &scratch) {
+          seed_direct_texture(gpu, scratch, 256, 0, 128, 128, false);
+        },
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x25, 128, 128, 128));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(uv_word(v0.u, v0.v, 0));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(uv_word(v1.u, v1.v, texpage));
+          gpu.gp0(vertex_word(v2.x, v2.y));
+          gpu.gp0(uv_word(v2.u, v2.v, 0));
+        });
+  }
+
+  {
+    constexpr u16 texpage = 0x0006u;
+    constexpr u16 clut = static_cast<u16>((180u << 6) | 2u);
+    const RefVertex v0{260, 40, 128, 128, 128, 2, 3};
+    const RefVertex v1{438, 54, 128, 128, 128, 120, 8};
+    const RefVertex v2{278, 205, 128, 128, 128, 12, 120};
+    run_gpu_benchmark_case(
+        "4-bit CLUT textured", kIterations,
+        [=](Gpu &gpu, std::vector<u16> &scratch) {
+          benchmark_seed_4bit(gpu, scratch, texpage, clut);
+        },
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x25, 128, 128, 128));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(uv_word(v0.u, v0.v, clut));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(uv_word(v1.u, v1.v, texpage));
+          gpu.gp0(vertex_word(v2.x, v2.y));
+          gpu.gp0(uv_word(v2.u, v2.v, 0));
+        });
+  }
+
+  {
+    constexpr u16 texpage = 0x0087u;
+    constexpr u16 clut = static_cast<u16>((210u << 6) | 4u);
+    const RefVertex v0{470, 40, 128, 128, 128, 2, 3};
+    const RefVertex v1{648, 54, 128, 128, 128, 120, 8};
+    const RefVertex v2{488, 205, 128, 128, 128, 12, 120};
+    run_gpu_benchmark_case(
+        "8-bit CLUT textured", kIterations,
+        [=](Gpu &gpu, std::vector<u16> &scratch) {
+          benchmark_seed_8bit(gpu, scratch, texpage, clut);
+        },
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x25, 128, 128, 128));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(uv_word(v0.u, v0.v, clut));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(uv_word(v1.u, v1.v, texpage));
+          gpu.gp0(vertex_word(v2.x, v2.y));
+          gpu.gp0(uv_word(v2.u, v2.v, 0));
+        });
+  }
+
+  {
+    constexpr u16 texpage = 0x0108u;
+    const RefVertex v0{680, 40, 96, 64, 220, 2, 3};
+    const RefVertex v1{858, 54, 240, 128, 48, 120, 8};
+    const RefVertex v2{698, 205, 64, 240, 160, 12, 120};
+    run_gpu_benchmark_case(
+        "15-bit gouraud textured", kIterations,
+        [=](Gpu &gpu, std::vector<u16> &scratch) {
+          seed_direct_texture(gpu, scratch, 512, 0, 128, 128, true);
+        },
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x34, v0.r, v0.g, v0.b));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(uv_word(v0.u, v0.v, 0));
+          gpu.gp0(rgb_word(v1.r, v1.g, v1.b));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(uv_word(v1.u, v1.v, texpage));
+          gpu.gp0(rgb_word(v2.r, v2.g, v2.b));
+          gpu.gp0(vertex_word(v2.x, v2.y));
+          gpu.gp0(uv_word(v2.u, v2.v, 0));
+        });
+  }
+
+  g_gpu_fast_mode = old_fast;
+  g_gpu_extreme_fast_mode = old_extreme;
+  return 0;
+}
