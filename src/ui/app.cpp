@@ -460,7 +460,9 @@ void App::run() {
                 renderer_->upload_frame(turbo_frame_rgba_, 320, 240);
                 latest_frame_width_ = 320;
                 latest_frame_height_ = 240;
-                latest_frame_rgba_ = turbo_frame_rgba_;
+                // Swap ownership instead of copying the full scaled framebuffer.
+                // The old latest buffer becomes scratch storage for the next resample.
+                latest_frame_rgba_.swap(turbo_frame_rgba_);
             }
             else if (frame.width != output_width || frame.height != output_height) {
                 resample_rgba_nearest(frame.rgba, frame.width, frame.height,
@@ -468,13 +470,16 @@ void App::run() {
                 renderer_->upload_frame(scaled_frame_rgba_, output_width, output_height);
                 latest_frame_width_ = output_width;
                 latest_frame_height_ = output_height;
-                latest_frame_rgba_ = scaled_frame_rgba_;
+                // Keep both allocations alive and rotate them instead of copying pixels.
+                latest_frame_rgba_.swap(scaled_frame_rgba_);
             }
             else {
                 renderer_->upload_frame(frame.rgba, frame.width, frame.height);
                 latest_frame_width_ = frame.width;
                 latest_frame_height_ = frame.height;
-                latest_frame_rgba_ = std::move(frame.rgba);
+                // Return the previous UI framebuffer through the runner recycler rather
+                // than destroying its allocation on every unscaled frame.
+                latest_frame_rgba_.swap(frame.rgba);
             }
             emu_runner_.recycle_consumed_frame(std::move(frame));
         }
