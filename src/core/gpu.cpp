@@ -47,7 +47,7 @@ namespace {
             (op >= 0x3Cu && op <= 0x3Fu)) {
             return System::GpuProfileBucket::GouraudTextured;
         }
-        if (op >= 0x60u && op <= 0x7Fu) {
+        if (op == 0x02u || (op >= 0x60u && op <= 0x7Fu)) {
             return System::GpuProfileBucket::Rect;
         }
         if (op >= 0x40u && op <= 0x5Fu) {
