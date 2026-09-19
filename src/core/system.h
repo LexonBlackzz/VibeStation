@@ -124,9 +124,40 @@ public:
     double timers_ms = 0.0;
     double cdrom_ms = 0.0;
     double total_ms = 0.0;
+
+    // Detailed GPU command-dispatch timing. These are intentionally collected
+    // only while detailed profiling is enabled; the timing calls themselves
+    // would otherwise perturb normal emulation performance.
+    double gpu_flat_ms = 0.0;
+    double gpu_gouraud_ms = 0.0;
+    double gpu_textured_ms = 0.0;
+    double gpu_gouraud_textured_ms = 0.0;
+    double gpu_rect_ms = 0.0;
+    double gpu_line_ms = 0.0;
+    double gpu_transfer_ms = 0.0;
+    double gpu_other_ms = 0.0;
+
     u32 gpu_gp0_words = 0;
     u32 gpu_gp0_commands = 0;
     u32 gpu_draw_commands = 0;
+    u32 gpu_flat_commands = 0;
+    u32 gpu_gouraud_commands = 0;
+    u32 gpu_textured_commands = 0;
+    u32 gpu_gouraud_textured_commands = 0;
+    u32 gpu_rect_commands = 0;
+    u32 gpu_line_commands = 0;
+    u32 gpu_transfer_commands = 0;
+    u32 gpu_other_commands = 0;
+
+    // Raster work counters. candidate_pixels is bounding-box work visited by
+    // triangle rasterizers; covered_pixels passed the edge tests.
+    u64 gpu_candidate_pixels = 0;
+    u64 gpu_covered_pixels = 0;
+    u64 gpu_texel_samples_4bit = 0;
+    u64 gpu_texel_samples_8bit = 0;
+    u64 gpu_texel_samples_15bit = 0;
+    u64 gpu_transparent_texels = 0;
+    u64 gpu_semitransparent_pixels = 0;
   };
 
   struct MdecUploadProbe {
@@ -284,10 +315,79 @@ public:
   const ProfilingStats &profiling_stats() const { return profiling_stats_; }
   void reset_profiling_stats() { profiling_stats_ = {}; }
   void add_cpu_time(double ms) { profiling_stats_.cpu_ms += ms; }
+  enum class GpuProfileBucket : u8 {
+    Flat,
+    Gouraud,
+    Textured,
+    GouraudTextured,
+    Rect,
+    Line,
+    Transfer,
+    Other,
+  };
+
   void add_gpu_time(double ms) { profiling_stats_.gpu_ms += ms; }
   void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
   void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
   void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
+  void add_gpu_profile_bucket(GpuProfileBucket bucket, double ms) {
+    switch (bucket) {
+    case GpuProfileBucket::Flat:
+      profiling_stats_.gpu_flat_ms += ms;
+      ++profiling_stats_.gpu_flat_commands;
+      break;
+    case GpuProfileBucket::Gouraud:
+      profiling_stats_.gpu_gouraud_ms += ms;
+      ++profiling_stats_.gpu_gouraud_commands;
+      break;
+    case GpuProfileBucket::Textured:
+      profiling_stats_.gpu_textured_ms += ms;
+      ++profiling_stats_.gpu_textured_commands;
+      break;
+    case GpuProfileBucket::GouraudTextured:
+      profiling_stats_.gpu_gouraud_textured_ms += ms;
+      ++profiling_stats_.gpu_gouraud_textured_commands;
+      break;
+    case GpuProfileBucket::Rect:
+      profiling_stats_.gpu_rect_ms += ms;
+      ++profiling_stats_.gpu_rect_commands;
+      break;
+    case GpuProfileBucket::Line:
+      profiling_stats_.gpu_line_ms += ms;
+      ++profiling_stats_.gpu_line_commands;
+      break;
+    case GpuProfileBucket::Transfer:
+      profiling_stats_.gpu_transfer_ms += ms;
+      ++profiling_stats_.gpu_transfer_commands;
+      break;
+    case GpuProfileBucket::Other:
+      profiling_stats_.gpu_other_ms += ms;
+      ++profiling_stats_.gpu_other_commands;
+      break;
+    }
+  }
+  void add_gpu_raster_work(u64 candidate_pixels, u64 covered_pixels,
+                           u64 texel_samples, u8 texture_depth,
+                           u64 transparent_texels,
+                           u64 semitransparent_pixels) {
+    profiling_stats_.gpu_candidate_pixels += candidate_pixels;
+    profiling_stats_.gpu_covered_pixels += covered_pixels;
+    if (texel_samples != 0) {
+      switch (texture_depth & 0x3u) {
+      case 0:
+        profiling_stats_.gpu_texel_samples_4bit += texel_samples;
+        break;
+      case 1:
+        profiling_stats_.gpu_texel_samples_8bit += texel_samples;
+        break;
+      default:
+        profiling_stats_.gpu_texel_samples_15bit += texel_samples;
+        break;
+      }
+    }
+    profiling_stats_.gpu_transparent_texels += transparent_texels;
+    profiling_stats_.gpu_semitransparent_pixels += semitransparent_pixels;
+  }
   void add_cdrom_time(double ms) { profiling_stats_.cdrom_ms += ms; }
   void add_spu_time(double ms) { profiling_stats_.spu_ms += ms; }
   void add_dma_time(double ms) { profiling_stats_.dma_ms += ms; }
