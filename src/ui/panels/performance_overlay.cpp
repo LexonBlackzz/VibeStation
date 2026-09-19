@@ -529,6 +529,45 @@ void App::panel_performance() {
             ImGui::TextDisabled(
                 "Raster counters cover textured triangles/quads and textured rectangles.");
 
+            if (ImGui::Button("Copy GPU profiler snapshot")) {
+                char snapshot[2048];
+                std::snprintf(
+                    snapshot, sizeof(snapshot),
+                    "frame=%llu core_ms=%.3f gpu_ms=%.3f\n"
+                    "flat=%.3fms/%u gouraud=%.3fms/%u "
+                    "textured=%.3fms/%u gouraud_textured=%.3fms/%u\n"
+                    "rect=%.3fms/%u line=%.3fms/%u transfer=%.3fms/%u "
+                    "other=%.3fms/%u overhead_data=%.3fms\n"
+                    "candidates=%llu covered=%llu coverage=%.1f%%\n"
+                    "texels_4=%llu texels_8=%llu texels_15=%llu "
+                    "transparent=%llu semi=%llu\n"
+                    "gp0_words=%u gp0_commands=%u draw_commands=%u",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms, stats.gpu_ms,
+                    stats.gpu_flat_ms, stats.gpu_flat_commands,
+                    stats.gpu_gouraud_ms, stats.gpu_gouraud_commands,
+                    stats.gpu_textured_ms, stats.gpu_textured_commands,
+                    stats.gpu_gouraud_textured_ms,
+                    stats.gpu_gouraud_textured_commands,
+                    stats.gpu_rect_ms, stats.gpu_rect_commands,
+                    stats.gpu_line_ms, stats.gpu_line_commands,
+                    stats.gpu_transfer_ms, stats.gpu_transfer_commands,
+                    stats.gpu_other_ms, stats.gpu_other_commands,
+                    gpu_unattributed_ms,
+                    static_cast<unsigned long long>(stats.gpu_candidate_pixels),
+                    static_cast<unsigned long long>(stats.gpu_covered_pixels),
+                    coverage_percent,
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_4bit),
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_8bit),
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_15bit),
+                    static_cast<unsigned long long>(stats.gpu_transparent_texels),
+                    static_cast<unsigned long long>(
+                        stats.gpu_semitransparent_pixels),
+                    stats.gpu_gp0_words, stats.gpu_gp0_commands,
+                    stats.gpu_draw_commands);
+                ImGui::SetClipboardText(snapshot);
+            }
+
             draw_performance_gpu_dip_diagnostics();
         }
         else {
