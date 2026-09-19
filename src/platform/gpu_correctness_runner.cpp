@@ -258,7 +258,7 @@ bool test_raw_textured_triangle() {
 
   reference_triangle(
       expected, v0, v1, v2,
-      [](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
          const RefVertex &c, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
         const u8 u = static_cast<u8>((w0 * a.u + w1 * b.u + w2 * c.u) / area);
         const u8 v = static_cast<u8>((w0 * a.v + w1 * b.v + w2 * c.v) / area);
@@ -296,7 +296,7 @@ bool test_gouraud_textured_triangle() {
 
   reference_triangle(
       expected, v0, v1, v2,
-      [](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
+      [=](const std::vector<u16> &vram, const RefVertex &a, const RefVertex &b,
          const RefVertex &c, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
         const u8 u = static_cast<u8>((w0 * a.u + w1 * b.u + w2 * c.u) / area);
         const u8 v = static_cast<u8>((w0 * a.v + w1 * b.v + w2 * c.v) / area);
