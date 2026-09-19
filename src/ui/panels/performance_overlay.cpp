@@ -447,7 +447,8 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
 
 void App::panel_performance() {
     ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Performance Profiler", &show_perf_)) {
+    const bool was_open = show_perf_profiler_;
+    if (ImGui::Begin("Performance Profiler", &show_perf_profiler_)) {
         if (!has_started_emulation_) {
             ImGui::Text("Emulation not running.");
             ImGui::End();
@@ -695,4 +696,7 @@ void App::panel_performance() {
         ImGui::ProgressBar(usage, ImVec2(-1.0f, 0.0f));
     }
     ImGui::End();
+    if (was_open && !show_perf_profiler_) {
+        g_profile_detailed_timing = false;
+    }
 }
