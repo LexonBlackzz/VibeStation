@@ -30,6 +30,35 @@ namespace {
         return g_log_fmv_diagnostics || g_mdec_debug_upload_probe;
     }
 
+    System::GpuProfileBucket gpu_profile_bucket_for_opcode(u8 op) {
+        if ((op >= 0x20u && op <= 0x23u) ||
+            (op >= 0x28u && op <= 0x2Bu)) {
+            return System::GpuProfileBucket::Flat;
+        }
+        if ((op >= 0x30u && op <= 0x33u) ||
+            (op >= 0x38u && op <= 0x3Bu)) {
+            return System::GpuProfileBucket::Gouraud;
+        }
+        if ((op >= 0x24u && op <= 0x27u) ||
+            (op >= 0x2Cu && op <= 0x2Fu)) {
+            return System::GpuProfileBucket::Textured;
+        }
+        if ((op >= 0x34u && op <= 0x37u) ||
+            (op >= 0x3Cu && op <= 0x3Fu)) {
+            return System::GpuProfileBucket::GouraudTextured;
+        }
+        if (op >= 0x60u && op <= 0x7Fu) {
+            return System::GpuProfileBucket::Rect;
+        }
+        if (op >= 0x40u && op <= 0x5Fu) {
+            return System::GpuProfileBucket::Line;
+        }
+        if (op >= 0x80u && op <= 0xDFu) {
+            return System::GpuProfileBucket::Transfer;
+        }
+        return System::GpuProfileBucket::Other;
+    }
+
     int clamp_display_dimension(int value, int fallback, int max_value) {
         const int candidate = (value > 0) ? value : fallback;
         return std::max(1, std::min(candidate, max_value));
@@ -852,6 +881,10 @@ void Gpu::gp0(u32 command) {
     }
     // GP0 draw command bit1 selects semi-transparency for that command.
     semi_transparency_mode_ = (op >= 0x20 && op <= 0x7F) && ((op & 0x02u) != 0);
+    std::chrono::high_resolution_clock::time_point command_start{};
+    if (profile_detailed) {
+        command_start = std::chrono::high_resolution_clock::now();
+    }
     switch (op) {
     case 0x00:
         gp0_nop();
@@ -1129,6 +1162,14 @@ void Gpu::gp0(u32 command) {
             LOG_WARN("GPU: Unhandled GP0 command 0x%02X", op);
         }
         break;
+    }
+
+    if (profile_detailed && sys_) {
+        const auto command_end = std::chrono::high_resolution_clock::now();
+        sys_->add_gpu_profile_bucket(
+            gpu_profile_bucket_for_opcode(op),
+            std::chrono::duration<double, std::milli>(
+                command_end - command_start).count());
     }
 
     gp0_buffer_.clear();
