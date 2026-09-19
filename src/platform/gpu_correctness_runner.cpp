@@ -134,9 +134,67 @@ void reference_triangle(std::vector<u16> &vram, RefVertex v0, RefVertex v1,
   }
 }
 
+struct VramMetrics {
+  u64 hash = 1469598103934665603ull;
+  u64 nonzero_words = 0;
+  u64 changed_words = 0;
+  u16 min_x = 0;
+  u16 min_y = 0;
+  u16 max_x = 0;
+  u16 max_y = 0;
+  bool has_changed_bounds = false;
+};
+
+VramMetrics measure_vram(const u16 *data, const std::vector<u16> *baseline = nullptr) {
+  constexpr u64 kPrime = 1099511628211ull;
+  VramMetrics metrics{};
+  for (size_t i = 0; i < kVramPixels; ++i) {
+    const u16 value = data[i];
+    metrics.hash ^= static_cast<u8>(value & 0xFFu);
+    metrics.hash *= kPrime;
+    metrics.hash ^= static_cast<u8>(value >> 8);
+    metrics.hash *= kPrime;
+
+    if (value != 0) {
+      ++metrics.nonzero_words;
+    }
+
+    if (baseline != nullptr && value != (*baseline)[i]) {
+      ++metrics.changed_words;
+      const u16 x = static_cast<u16>(i % psx::VRAM_WIDTH);
+      const u16 y = static_cast<u16>(i / psx::VRAM_WIDTH);
+      if (!metrics.has_changed_bounds) {
+        metrics.min_x = metrics.max_x = x;
+        metrics.min_y = metrics.max_y = y;
+        metrics.has_changed_bounds = true;
+      } else {
+        metrics.min_x = std::min(metrics.min_x, x);
+        metrics.min_y = std::min(metrics.min_y, y);
+        metrics.max_x = std::max(metrics.max_x, x);
+        metrics.max_y = std::max(metrics.max_y, y);
+      }
+    }
+  }
+  return metrics;
+}
+
+u64 combine_suite_signature(u64 signature, u64 value) {
+  constexpr u64 kPrime = 1099511628211ull;
+  for (int byte = 0; byte < 8; ++byte) {
+    signature ^= static_cast<u8>((value >> (byte * 8)) & 0xFFu);
+    signature *= kPrime;
+  }
+  return signature;
+}
+
+u64 g_gpu_test_suite_signature = 1469598103934665603ull;
+
 bool compare_vram(const char *name, const Gpu &gpu,
                   const std::vector<u16> &expected) {
   const u16 *actual = gpu.vram();
+  const VramMetrics actual_metrics = measure_vram(actual);
+  const VramMetrics expected_metrics = measure_vram(expected.data());
+
   size_t mismatch_count = 0;
   for (size_t i = 0; i < expected.size(); ++i) {
     if (actual[i] == expected[i]) {
@@ -153,6 +211,23 @@ bool compare_vram(const char *name, const Gpu &gpu,
     }
     ++mismatch_count;
   }
+
+  const u64 touched_words = expected_metrics.nonzero_words;
+  std::fprintf(stdout,
+               "[GPU TEST] RAW  %-24s actual_hash=%016llX expected_hash=%016llX "
+               "nonzero=%llu touched=%llu mismatches=%zu\n",
+               name,
+               static_cast<unsigned long long>(actual_metrics.hash),
+               static_cast<unsigned long long>(expected_metrics.hash),
+               static_cast<unsigned long long>(actual_metrics.nonzero_words),
+               static_cast<unsigned long long>(touched_words),
+               mismatch_count);
+
+  g_gpu_test_suite_signature =
+      combine_suite_signature(g_gpu_test_suite_signature, actual_metrics.hash);
+  g_gpu_test_suite_signature =
+      combine_suite_signature(g_gpu_test_suite_signature,
+                              static_cast<u64>(mismatch_count));
 
   if (mismatch_count != 0) {
     std::fprintf(stderr, "[GPU TEST] FAIL %-24s (%zu mismatched pixels)\n",
@@ -327,6 +402,8 @@ bool test_gouraud_textured_triangle() {
 } // namespace
 
 int run_gpu_correctness_tests() {
+  g_gpu_test_suite_signature = 1469598103934665603ull;
+
   const bool old_fast = g_gpu_fast_mode;
   const bool old_extreme = g_gpu_extreme_fast_mode;
   g_gpu_fast_mode = false;
@@ -350,6 +427,10 @@ int run_gpu_correctness_tests() {
 
   g_gpu_fast_mode = old_fast;
   g_gpu_extreme_fast_mode = old_extreme;
+
+  std::fprintf(stdout, "[GPU TEST] SUITE signature=%016llX failed=%d total=%zu\n",
+               static_cast<unsigned long long>(g_gpu_test_suite_signature),
+               failed, tests.size());
 
   if (failed != 0) {
     std::fprintf(stderr, "[GPU TEST] %d/%zu tests failed.\n", failed,
