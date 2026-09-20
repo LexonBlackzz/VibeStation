@@ -1,9 +1,12 @@
 #pragma once
 
+#include "core/bios/bios.h"
 #include "core/ee/ee_cpu.h"
 #include "core/memory/ee_bus.h"
 #include "core/memory/ee_ram.h"
 #include "core/scheduler/scheduler.h"
+
+#include <string>
 
 namespace ps2 {
 
@@ -12,6 +15,11 @@ public:
     Ps2System();
 
     void reset(u32 entry_point = 0);
+    bool load_bios(const std::string& path, std::string& error);
+    bool boot_bios(std::string& error);
+
+    [[nodiscard]] Bios& bios() { return bios_; }
+    [[nodiscard]] const Bios& bios() const { return bios_; }
 
     [[nodiscard]] EeRam& ram() { return ram_; }
     [[nodiscard]] const EeRam& ram() const { return ram_; }
@@ -25,11 +33,17 @@ public:
     [[nodiscard]] EeCpu& ee() { return ee_; }
     [[nodiscard]] const EeCpu& ee() const { return ee_; }
 
+    [[nodiscard]] bool bios_started() const { return bios_started_; }
+    [[nodiscard]] u32 reset_instruction() const { return reset_instruction_; }
+
 private:
+    Bios bios_{};
     EeRam ram_{};
     EeBus bus_;
     Scheduler scheduler_{};
     EeCpu ee_;
+    bool bios_started_ = false;
+    u32 reset_instruction_ = 0;
 };
 
 } // namespace ps2

@@ -10,6 +10,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <string>
+
+#ifdef _WIN32
+#include <Windows.h>
+#include <commdlg.h>
+#endif
 
 namespace ps2::ui {
 
@@ -189,8 +196,18 @@ void Ps2App::process_events(bool& quit) {
         }
 
         if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
-            if (event.key.keysym.sym == SDLK_F5) {
-                reset_core();
+            const bool ctrl = (event.key.keysym.mod & KMOD_CTRL) != 0;
+            if (ctrl && event.key.keysym.sym == SDLK_b) {
+                const std::string path = open_bios_dialog();
+                if (!path.empty()) {
+                    load_bios_from_path(path);
+                }
+            } else if (event.key.keysym.sym == SDLK_F5) {
+                if (system_.bios().loaded()) {
+                    start_bios();
+                } else {
+                    reset_core();
+                }
             } else if (event.key.keysym.sym == SDLK_F9) {
                 show_ee_debug_ = !show_ee_debug_;
             }
@@ -246,7 +263,12 @@ void Ps2App::menu_bar() {
     }
 
     if (ImGui::BeginMenu("File")) {
-        ImGui::MenuItem("Load BIOS...", nullptr, false, false);
+        if (ImGui::MenuItem("Load BIOS...", "Ctrl+B")) {
+            const std::string path = open_bios_dialog();
+            if (!path.empty()) {
+                load_bios_from_path(path);
+            }
+        }
         ImGui::MenuItem("Load ELF...", nullptr, false, false);
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4")) {
@@ -258,9 +280,14 @@ void Ps2App::menu_bar() {
     }
 
     if (ImGui::BeginMenu("Emulation")) {
-        if (ImGui::MenuItem("Reset Core", "F5")) {
+        if (ImGui::MenuItem("Start BIOS", "F5", false,
+                            system_.bios().loaded())) {
+            start_bios();
+        }
+        if (ImGui::MenuItem("Reset Core")) {
             reset_core();
         }
+        ImGui::Separator();
         ImGui::MenuItem("Run", nullptr, false, false);
         ImGui::MenuItem("Pause", nullptr, false, false);
         ImGui::MenuItem("Step EE Instruction", nullptr, false, false);
@@ -277,7 +304,8 @@ void Ps2App::menu_bar() {
         ImGui::EndMenu();
     }
 
-    const float status_width = ImGui::CalcTextSize(status_message_.c_str()).x + 20.0f;
+    const float status_width =
+        ImGui::CalcTextSize(status_message_.c_str()).x + 20.0f;
     const float desired_x = ImGui::GetWindowWidth() - status_width;
     if (desired_x > ImGui::GetCursorPosX() + 20.0f) {
         ImGui::SameLine(desired_x);
@@ -301,31 +329,47 @@ void Ps2App::panel_main() {
     const ImVec4 text_color =
         ui_theme::current_startup_text_color(ui_theme::g_theme_settings);
     const ImVec4 secondary =
-        ui_theme::theme_lerp(text_color, ui_theme::g_theme_settings.background, 0.18f);
+        ui_theme::theme_lerp(
+            text_color, ui_theme::g_theme_settings.background, 0.18f);
 
     const char* title = "VibeStation";
     ImGui::PushStyleColor(ImGuiCol_Text, title_color);
     ImGui::SetWindowFontScale(2.0f);
     const ImVec2 title_size = ImGui::CalcTextSize(title);
-    ImGui::SetCursorPos(ImVec2(center_x - title_size.x * 0.5f, center_y - 115.0f));
+    ImGui::SetCursorPos(
+        ImVec2(center_x - title_size.x * 0.5f, center_y - 130.0f));
     ImGui::TextUnformatted(title);
     ImGui::SetWindowFontScale(1.0f);
     ImGui::PopStyleColor();
 
     const char* subtitle = "PlayStation 2 Experimental Core";
     const ImVec2 subtitle_size = ImGui::CalcTextSize(subtitle);
-    ImGui::SetCursorPos(ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 62.0f));
+    ImGui::SetCursorPos(
+        ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 0: core scaffold + UI shell";
+    const char* phase = "Phase 1: BIOS mapping + reset startup";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
-    ImGui::SetCursorPos(ImVec2(center_x - phase_size.x * 0.5f, center_y - 34.0f));
+    ImGui::SetCursorPos(
+        ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
     ImGui::TextColored(secondary, "%s", phase);
 
-    ImGui::SetCursorPos(ImVec2(center_x - 205.0f, center_y + 16.0f));
-    if (ImGui::Button("Reset Core", ImVec2(125.0f, 0.0f))) {
-        reset_core();
+    ImGui::SetCursorPos(ImVec2(center_x - 205.0f, center_y + 1.0f));
+    if (!system_.bios().loaded()) {
+        if (ImGui::Button("Load BIOS", ImVec2(125.0f, 0.0f))) {
+            const std::string path = open_bios_dialog();
+            if (!path.empty()) {
+                load_bios_from_path(path);
+            }
+        }
+    } else {
+        if (ImGui::Button(
+                system_.bios_started() ? "Restart BIOS" : "Start BIOS",
+                ImVec2(125.0f, 0.0f))) {
+            start_bios();
+        }
     }
+
     ImGui::SameLine();
     if (ImGui::Button("EE Debug", ImVec2(125.0f, 0.0f))) {
         show_ee_debug_ = true;
@@ -335,37 +379,55 @@ void Ps2App::panel_main() {
         show_system_ = true;
     }
 
-    ImGui::SetCursorPos(ImVec2(center_x - 260.0f, center_y + 72.0f));
-    ImGui::BeginChild("PS2CoreSummary", ImVec2(520.0f, 150.0f), true);
+    ImGui::SetCursorPos(ImVec2(center_x - 280.0f, center_y + 57.0f));
+    ImGui::BeginChild("PS2CoreSummary", ImVec2(560.0f, 190.0f), true);
     ImGui::TextColored(title_color, "Experimental core status");
     ImGui::Separator();
 
     const auto& state = system_.ee().state();
+
+    ImGui::Text("BIOS");
+    ImGui::SameLine(190.0f);
+    if (system_.bios().loaded()) {
+        if (system_.bios().romver().empty()) {
+            ImGui::Text("Loaded");
+        } else {
+            ImGui::Text(
+                "Loaded (ROMVER %s)", system_.bios().romver().c_str());
+        }
+    } else {
+        ImGui::TextDisabled("not loaded");
+    }
+
     ImGui::Text("EE RAM");
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(190.0f);
     ImGui::Text("%zu MiB", EeRam::kSize / (1024u * 1024u));
 
     ImGui::Text("EE PC");
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(190.0f);
     ImGui::Text("0x%08X", state.pc);
 
-    ImGui::Text("Scheduler tick");
-    ImGui::SameLine(180.0f);
-    ImGui::Text("%llu",
-        static_cast<unsigned long long>(system_.scheduler().now()));
+    ImGui::Text("Reset opcode");
+    ImGui::SameLine(190.0f);
+    if (system_.bios_started()) {
+        ImGui::Text("0x%08X", system_.reset_instruction());
+    } else {
+        ImGui::TextDisabled("not fetched");
+    }
 
-    ImGui::Text("R5900 execution");
-    ImGui::SameLine(180.0f);
-    ImGui::TextDisabled("not implemented yet");
+    ImGui::Text("BIOS execution");
+    ImGui::SameLine(190.0f);
+    ImGui::TextDisabled("R5900 interpreter pending");
 
     ImGui::Text("GS / IOP / SPU2");
-    ImGui::SameLine(180.0f);
+    ImGui::SameLine(190.0f);
     ImGui::TextDisabled("not implemented yet");
     ImGui::EndChild();
 }
 
 void Ps2App::panel_system() {
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 280.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(
+        ImVec2(600.0f, 430.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("PS2 System", &show_system_)) {
         ImGui::End();
         return;
@@ -375,31 +437,82 @@ void Ps2App::panel_system() {
 
     ImGui::Text("VibeStation PS2 Lab");
     ImGui::Separator();
-    ImGui::Text("EE RAM: %zu MiB", EeRam::kSize / (1024u * 1024u));
+
+    ImGui::Text(
+        "BIOS: %s", system_.bios().loaded() ? "loaded" : "not loaded");
+    if (system_.bios().loaded()) {
+        ImGui::TextWrapped("Path: %s", system_.bios().path().c_str());
+        ImGui::Text(
+            "Size: %zu MiB", Bios::kSize / (1024u * 1024u));
+        ImGui::Text(
+            "ROMVER: %s",
+            system_.bios().romver().empty()
+                ? "(not detected)"
+                : system_.bios().romver().c_str());
+        ImGui::Text(
+            "ROM mapping: 0x%08X / 0x%08X / 0x%08X",
+            Bios::kPhysicalBase, Bios::kCachedBase, Bios::kUncachedBase);
+    }
+
+    ImGui::Spacing();
+    ImGui::InputText(
+        "BIOS path", bios_path_input_.data(), bios_path_input_.size());
+
+    if (ImGui::Button("Browse...")) {
+        const std::string path = open_bios_dialog();
+        if (!path.empty()) {
+            load_bios_from_path(path);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load Path")) {
+        load_bios_from_path(bios_path_input_.data());
+    }
+    ImGui::SameLine();
+
+    if (!system_.bios().loaded()) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(
+            system_.bios_started() ? "Restart BIOS" : "Start BIOS")) {
+        start_bios();
+    }
+    if (!system_.bios().loaded()) {
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Separator();
     ImGui::Text("EE PC: 0x%08X", state.pc);
     ImGui::Text("EE next PC: 0x%08X", state.next_pc);
-    ImGui::Text("Scheduler tick: %llu",
+    ImGui::Text(
+        "Scheduler tick: %llu",
         static_cast<unsigned long long>(system_.scheduler().now()));
+
+    if (system_.bios_started()) {
+        ImGui::Text(
+            "Reset instruction: 0x%08X", system_.reset_instruction());
+        ImGui::TextColored(
+            ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+            "BIOS reset state is ready at 0x%08X.",
+            Bios::kResetVector);
+    }
 
     ImGui::Spacing();
     ImGui::TextDisabled("Subsystem readiness");
-    ImGui::BulletText("EE state: initialized");
+    ImGui::BulletText("BIOS ROM mapping: available");
+    ImGui::BulletText("EE reset startup: available");
     ImGui::BulletText("EE RAM/bus: available");
     ImGui::BulletText("Scheduler: available");
-    ImGui::BulletText("R5900 interpreter: pending");
+    ImGui::BulletText("R5900 interpreter/COP0: pending");
     ImGui::BulletText("ELF loader: pending");
     ImGui::BulletText("GS / IOP / SPU2: pending");
-
-    ImGui::Spacing();
-    if (ImGui::Button("Reset Core")) {
-        reset_core();
-    }
 
     ImGui::End();
 }
 
 void Ps2App::panel_ee_debug() {
-    ImGui::SetNextWindowSize(ImVec2(760.0f, 620.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(
+        ImVec2(760.0f, 650.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("EE Debug", &show_ee_debug_)) {
         ImGui::End();
         return;
@@ -410,9 +523,17 @@ void Ps2App::panel_ee_debug() {
     ImGui::Text("PC: 0x%08X", state.pc);
     ImGui::SameLine();
     ImGui::Text("Next PC: 0x%08X", state.next_pc);
-    ImGui::Text("HI: 0x%016llX   LO: 0x%016llX",
+    ImGui::Text(
+        "HI: 0x%016llX   LO: 0x%016llX",
         static_cast<unsigned long long>(state.hi),
         static_cast<unsigned long long>(state.lo));
+
+    if (system_.bios_started()) {
+        ImGui::Text(
+            "Instruction @ PC: 0x%08X", system_.reset_instruction());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(fetch only; execution not implemented)");
+    }
 
     ImGui::Separator();
 
@@ -422,8 +543,10 @@ void Ps2App::panel_ee_debug() {
         ImGuiTableFlags_ScrollY |
         ImGuiTableFlags_SizingStretchProp;
 
-    if (ImGui::BeginTable("EERegisters", 3, flags, ImVec2(0.0f, 470.0f))) {
-        ImGui::TableSetupColumn("Register", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+    if (ImGui::BeginTable(
+            "EERegisters", 3, flags, ImVec2(0.0f, 490.0f))) {
+        ImGui::TableSetupColumn(
+            "Register", ImGuiTableColumnFlags_WidthFixed, 90.0f);
         ImGui::TableSetupColumn("High 64");
         ImGui::TableSetupColumn("Low 64");
         ImGui::TableHeadersRow();
@@ -434,11 +557,13 @@ void Ps2App::panel_ee_debug() {
             ImGui::Text("r%d", i);
 
             ImGui::TableSetColumnIndex(1);
-            ImGui::Text("0x%016llX",
+            ImGui::Text(
+                "0x%016llX",
                 static_cast<unsigned long long>(state.gpr[i].hi));
 
             ImGui::TableSetColumnIndex(2);
-            ImGui::Text("0x%016llX",
+            ImGui::Text(
+                "0x%016llX",
                 static_cast<unsigned long long>(state.gpr[i].lo));
         }
 
@@ -449,31 +574,36 @@ void Ps2App::panel_ee_debug() {
 }
 
 void Ps2App::panel_scheduler() {
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 230.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(
+        ImVec2(430.0f, 230.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("PS2 Scheduler", &show_scheduler_)) {
         ImGui::End();
         return;
     }
 
-    ImGui::Text("Current tick: %llu",
+    ImGui::Text(
+        "Current tick: %llu",
         static_cast<unsigned long long>(system_.scheduler().now()));
-    ImGui::Text("Queue empty: %s", system_.scheduler().empty() ? "yes" : "no");
+    ImGui::Text(
+        "Queue empty: %s", system_.scheduler().empty() ? "yes" : "no");
 
     ImGui::Separator();
     ImGui::TextWrapped(
-        "The scheduler is already part of the PS2 core so asynchronous hardware "
-        "can be added without falling back to scanline-sized catch-up loops.");
+        "The scheduler is already part of the PS2 core so asynchronous "
+        "hardware can be added without falling back to scanline-sized "
+        "catch-up loops.");
 
     ImGui::Spacing();
     ImGui::TextDisabled(
-        "Event inspection will expand when EE timers, DMAC, GIF, VIF and GS "
-        "begin scheduling real work.");
+        "Event inspection will expand when EE timers, DMAC, GIF, VIF and "
+        "GS begin scheduling real work.");
 
     ImGui::End();
 }
 
 void Ps2App::panel_settings() {
-    ImGui::SetNextWindowSize(ImVec2(470.0f, 270.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(
+        ImVec2(470.0f, 270.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Settings", &show_settings_)) {
         ImGui::End();
         return;
@@ -489,12 +619,17 @@ void Ps2App::panel_settings() {
         std::max(0, preset_count - 1));
 
     const char* preview =
-        preset_count > 0 ? ui_theme::theme_preset_by_index(selected).label : "None";
+        preset_count > 0
+            ? ui_theme::theme_preset_by_index(selected).label
+            : "None";
 
     if (ImGui::BeginCombo("Theme Preset", preview)) {
         for (int i = 0; i < preset_count; ++i) {
-            const bool is_selected = i == ui_theme::g_selected_theme_preset_index;
-            if (ImGui::Selectable(ui_theme::theme_preset_by_index(i).label, is_selected)) {
+            const bool is_selected =
+                i == ui_theme::g_selected_theme_preset_index;
+            if (ImGui::Selectable(
+                    ui_theme::theme_preset_by_index(i).label,
+                    is_selected)) {
                 ui_theme::g_selected_theme_preset_index = i;
                 ui_theme::apply_theme_preset_by_index(i);
                 ui_theme::apply_theme_style(ImGui::GetStyle());
@@ -509,7 +644,8 @@ void Ps2App::panel_settings() {
 
     ImGui::Spacing();
     ImGui::TextDisabled(
-        "PS2 UI settings are stored separately in vibestation_ps2_imgui.ini.");
+        "PS2 UI settings are stored separately in "
+        "vibestation_ps2_imgui.ini.");
     ImGui::TextDisabled(
         "The normal PS1 VibeStation UI configuration is not modified.");
 
@@ -517,7 +653,8 @@ void Ps2App::panel_settings() {
 }
 
 void Ps2App::panel_about() {
-    ImGui::SetNextWindowSize(ImVec2(460.0f, 250.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(
+        ImVec2(470.0f, 280.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("About VibeStation PS2 Lab", &show_about_)) {
         ImGui::End();
         return;
@@ -525,25 +662,110 @@ void Ps2App::panel_about() {
 
     ImGui::SetWindowFontScale(1.35f);
     ImGui::TextColored(
-        ui_theme::current_startup_title_color(ui_theme::g_theme_settings),
+        ui_theme::current_startup_title_color(
+            ui_theme::g_theme_settings),
         "VibeStation");
     ImGui::SetWindowFontScale(1.0f);
 
     ImGui::Text("PlayStation 2 Experimental Core");
     ImGui::Separator();
     ImGui::TextWrapped(
-        "This build is an isolated PS2 research core. It intentionally mirrors "
-        "the VibeStation UI style without linking the PS1 System, GPU, SPU, "
+        "This build is an isolated PS2 research core. It mirrors the "
+        "VibeStation UI style without linking the PS1 System, GPU, SPU, "
         "renderer, or runtime classes.");
     ImGui::Spacing();
-    ImGui::TextDisabled("Current milestone: scaffold, EE RAM/bus, scheduler, UI shell.");
+    ImGui::TextWrapped(
+        "BIOS images are not distributed with VibeStation. Load a BIOS "
+        "dumped from hardware you own.");
+    ImGui::Spacing();
+    ImGui::TextDisabled(
+        "Current milestone: 4 MiB ROM0 loading, BIOS address aliases, "
+        "and EE reset-vector startup.");
 
     ImGui::End();
 }
 
+std::string Ps2App::open_bios_dialog() {
+#ifdef _WIN32
+    std::array<char, 1024> path{};
+
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFile = path.data();
+    dialog.nMaxFile = static_cast<DWORD>(path.size());
+    dialog.lpstrFilter =
+        "PS2 BIOS Images (*.bin)\0*.bin\0All Files (*.*)\0*.*\0";
+    dialog.nFilterIndex = 1;
+    dialog.lpstrTitle = "Select PlayStation 2 BIOS";
+    dialog.Flags =
+        OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (GetOpenFileNameA(&dialog)) {
+        return path.data();
+    }
+    return {};
+#else
+    status_message_ =
+        "Native BIOS picker is currently Windows-only; paste a path in "
+        "View > System.";
+    show_system_ = true;
+    return {};
+#endif
+}
+
+bool Ps2App::load_bios_from_path(const std::string& path) {
+    if (path.empty()) {
+        status_message_ = "BIOS path is empty.";
+        return false;
+    }
+
+    std::string error;
+    if (!system_.load_bios(path, error)) {
+        status_message_ = "BIOS load failed: " + error;
+        return false;
+    }
+
+    std::snprintf(
+        bios_path_input_.data(),
+        bios_path_input_.size(),
+        "%s",
+        path.c_str());
+
+    const std::string file_name =
+        std::filesystem::path(path).filename().string();
+
+    status_message_ = "BIOS loaded: " + file_name;
+    if (!system_.bios().romver().empty()) {
+        status_message_ +=
+            " (ROMVER " + system_.bios().romver() + ")";
+    }
+    return true;
+}
+
+bool Ps2App::start_bios() {
+    std::string error;
+    if (!system_.boot_bios(error)) {
+        status_message_ = "BIOS startup failed: " + error;
+        return false;
+    }
+
+    char message[160]{};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "BIOS ready at 0x%08X (reset opcode 0x%08X)",
+        Bios::kResetVector,
+        system_.reset_instruction());
+    status_message_ = message;
+    return true;
+}
+
 void Ps2App::reset_core() {
     system_.reset(0);
-    status_message_ = "PS2 core reset";
+    status_message_ =
+        system_.bios().loaded()
+            ? "PS2 core reset; BIOS remains loaded"
+            : "PS2 core reset";
 }
 
 } // namespace ps2::ui

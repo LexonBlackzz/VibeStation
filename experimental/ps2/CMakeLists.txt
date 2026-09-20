@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vibestation_ps2_core STATIC
+    core/bios/bios.cpp
     core/ps2_system.cpp
     core/ee/ee_cpu.cpp
     core/memory/ee_bus.cpp
@@ -82,6 +83,9 @@ if(VIBESTATION_PS2_ENABLE_UI)
         SDL2::SDL2-static
         ${VIBESTATION_PS2_OPENGL_LIBRARY}
     )
+    if(WIN32)
+        target_link_libraries(VibeStationPS2Lab PRIVATE comdlg32)
+    endif()
 endif()
 
 include(CTest)

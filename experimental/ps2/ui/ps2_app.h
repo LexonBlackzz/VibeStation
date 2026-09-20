@@ -2,6 +2,7 @@
 
 #include "core/ps2_system.h"
 
+#include <array>
 #include <string>
 
 struct SDL_Window;
@@ -25,6 +26,10 @@ private:
     void panel_scheduler();
     void panel_settings();
     void panel_about();
+
+    std::string open_bios_dialog();
+    bool load_bios_from_path(const std::string& path);
+    bool start_bios();
     void reset_core();
 
     SDL_Window* window_ = nullptr;
@@ -40,6 +45,7 @@ private:
     bool show_settings_ = false;
     bool show_about_ = false;
 
+    std::array<char, 1024> bios_path_input_{};
     std::string status_message_ = "PS2 experimental core ready";
 };
 

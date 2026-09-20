@@ -3,7 +3,7 @@
 namespace ps2 {
 
 Ps2System::Ps2System()
-    : bus_(ram_),
+    : bus_(ram_, bios_),
       ee_(bus_) {
     reset();
 }
@@ -12,6 +12,36 @@ void Ps2System::reset(u32 entry_point) {
     ram_.reset();
     scheduler_.reset();
     ee_.reset(entry_point);
+    bios_started_ = false;
+    reset_instruction_ = 0;
+}
+
+bool Ps2System::load_bios(const std::string& path, std::string& error) {
+    if (!bios_.load_file(path, error)) {
+        return false;
+    }
+
+    reset();
+    return true;
+}
+
+bool Ps2System::boot_bios(std::string& error) {
+    error.clear();
+    if (!bios_.loaded()) {
+        error = "No PS2 BIOS is loaded.";
+        return false;
+    }
+
+    reset(Bios::kResetVector);
+
+    if (!bus_.read32(ee_.state().pc, reset_instruction_)) {
+        error = "BIOS loaded, but the EE reset vector could not be fetched.";
+        reset();
+        return false;
+    }
+
+    bios_started_ = true;
+    return true;
 }
 
 } // namespace ps2

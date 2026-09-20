@@ -4,11 +4,12 @@
 
 namespace ps2 {
 
+class Bios;
 class EeRam;
 
 class EeBus {
 public:
-    explicit EeBus(EeRam& ram) : ram_(ram) {}
+    EeBus(EeRam& ram, const Bios& bios) : ram_(ram), bios_(bios) {}
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
@@ -24,6 +25,7 @@ private:
     [[nodiscard]] static u32 to_physical(u32 address);
 
     EeRam& ram_;
+    const Bios& bios_;
 };
 
 } // namespace ps2

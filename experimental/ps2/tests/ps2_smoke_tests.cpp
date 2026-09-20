@@ -1,6 +1,8 @@
 #include "core/ps2_system.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 
@@ -56,11 +58,15 @@ bool test_ram_bounds() {
     ps2::Ps2System system;
 
     ps2::u32 value = 0;
-    return expect(!system.bus().read32(static_cast<ps2::u32>(ps2::EeRam::kSize), value),
-                  "out-of-range read unexpectedly succeeded") &&
-           expect(!system.bus().write32(
-                      static_cast<ps2::u32>(ps2::EeRam::kSize - 2), 0xFFFFFFFFu),
-                  "cross-boundary write unexpectedly succeeded");
+    return expect(
+               !system.bus().read32(
+                   static_cast<ps2::u32>(ps2::EeRam::kSize), value),
+               "out-of-range read unexpectedly succeeded") &&
+           expect(
+               !system.bus().write32(
+                   static_cast<ps2::u32>(ps2::EeRam::kSize - 2),
+                   0xFFFFFFFFu),
+               "cross-boundary write unexpectedly succeeded");
 }
 
 bool test_scheduler_ordering() {
@@ -76,12 +82,15 @@ bool test_scheduler_ordering() {
     });
 
     return expect(fired.size() == 3, "wrong scheduler event count") &&
-           expect(fired[0] == ps2::EventType::Vif0,
-                  "first same-timestamp event lost insertion order") &&
-           expect(fired[1] == ps2::EventType::Gif,
-                  "second same-timestamp event lost insertion order") &&
-           expect(fired[2] == ps2::EventType::Gs,
-                  "later event fired out of order") &&
+           expect(
+               fired[0] == ps2::EventType::Vif0,
+               "first same-timestamp event lost insertion order") &&
+           expect(
+               fired[1] == ps2::EventType::Gif,
+               "second same-timestamp event lost insertion order") &&
+           expect(
+               fired[2] == ps2::EventType::Gs,
+               "later event fired out of order") &&
            expect(scheduler.now() == 20, "scheduler time mismatch");
 }
 
@@ -89,7 +98,8 @@ bool test_scheduler_cancel() {
     ps2::Scheduler scheduler;
     int fired = 0;
 
-    const auto cancelled = scheduler.schedule(ps2::EventType::EeDmac, 4);
+    const auto cancelled =
+        scheduler.schedule(ps2::EventType::EeDmac, 4);
     scheduler.schedule(ps2::EventType::Gs, 8);
     scheduler.cancel(cancelled);
 
@@ -106,9 +116,134 @@ bool test_ee_reset_state() {
 
     const auto& state = system.ee().state();
     return expect(state.pc == 0x00100000u, "EE reset PC mismatch") &&
-           expect(state.next_pc == 0x00100004u, "EE reset next PC mismatch") &&
-           expect(state.gpr[0].lo == 0 && state.gpr[0].hi == 0,
-                  "EE r0 reset state mismatch");
+           expect(
+               state.next_pc == 0x00100004u,
+               "EE reset next PC mismatch") &&
+           expect(
+               state.gpr[0].lo == 0 && state.gpr[0].hi == 0,
+               "EE r0 reset state mismatch");
+}
+
+std::filesystem::path create_test_bios() {
+    std::vector<ps2::u8> data(ps2::Bios::kSize, 0);
+
+    const auto write32 =
+        [&](std::size_t offset, ps2::u32 value) {
+            for (ps2::u32 i = 0; i < 4; ++i) {
+                data[offset + i] =
+                    static_cast<ps2::u8>(value >> (i * 8));
+            }
+        };
+
+    const auto write_entry =
+        [&](std::size_t offset, const char* name,
+            ps2::u16 ext_size, ps2::u32 file_size) {
+            for (std::size_t i = 0;
+                 i < 10 && name[i] != '\0'; ++i) {
+                data[offset + i] =
+                    static_cast<ps2::u8>(name[i]);
+            }
+            data[offset + 10] =
+                static_cast<ps2::u8>(ext_size);
+            data[offset + 11] =
+                static_cast<ps2::u8>(ext_size >> 8);
+            write32(offset + 12, file_size);
+        };
+
+    write32(0, 0x401A7800u);
+
+    constexpr std::size_t romdir = 0x1000;
+    write_entry(romdir + 0x00, "RESET", 0, 0x1000);
+    write_entry(romdir + 0x10, "ROMDIR", 0, 0x40);
+    write_entry(romdir + 0x20, "EXTINFO", 0, 0x20);
+    write_entry(romdir + 0x30, "ROMVER", 0, 0x10);
+
+    constexpr char romver[] = "TESTAC20260920\n";
+    for (std::size_t i = 0; i < sizeof(romver) - 1; ++i) {
+        data[0x1060 + i] =
+            static_cast<ps2::u8>(romver[i]);
+    }
+
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        "vibestation_ps2_test_bios.bin";
+    std::ofstream file(
+        path, std::ios::binary | std::ios::trunc);
+    file.write(
+        reinterpret_cast<const char*>(data.data()),
+        static_cast<std::streamsize>(data.size()));
+    return path;
+}
+
+bool test_bios_mapping_and_startup() {
+    const auto path = create_test_bios();
+
+    ps2::Ps2System system;
+    std::string error;
+    bool ok =
+        expect(
+            system.load_bios(path.string(), error),
+            "synthetic BIOS failed to load") &&
+        expect(
+            system.bios().loaded(),
+            "BIOS loaded flag not set") &&
+        expect(
+            system.bios().romver() == "TESTAC20260920",
+            "ROMVER parsing failed");
+
+    ps2::u32 physical = 0;
+    ps2::u32 cached = 0;
+    ps2::u32 uncached = 0;
+
+    ok =
+        expect(
+            system.bus().read32(
+                ps2::Bios::kPhysicalBase, physical) &&
+                physical == 0x401A7800u,
+            "physical BIOS mapping failed") &&
+        ok;
+    ok =
+        expect(
+            system.bus().read32(
+                ps2::Bios::kCachedBase, cached) &&
+                cached == physical,
+            "cached BIOS alias failed") &&
+        ok;
+    ok =
+        expect(
+            system.bus().read32(
+                ps2::Bios::kUncachedBase, uncached) &&
+                uncached == physical,
+            "uncached BIOS alias failed") &&
+        ok;
+    ok =
+        expect(
+            !system.bus().write32(
+                ps2::Bios::kResetVector, 0),
+            "BIOS unexpectedly accepted a write") &&
+        ok;
+
+    ok = expect(system.boot_bios(error), "BIOS startup failed") && ok;
+    ok =
+        expect(
+            system.ee().state().pc == ps2::Bios::kResetVector,
+            "EE reset vector mismatch") &&
+        ok;
+    ok =
+        expect(
+            system.ee().state().next_pc ==
+                ps2::Bios::kResetVector + 4,
+            "EE reset next-PC mismatch") &&
+        ok;
+    ok =
+        expect(
+            system.reset_instruction() == 0x401A7800u,
+            "BIOS reset instruction mismatch") &&
+        ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
 }
 
 } // namespace
@@ -121,6 +256,7 @@ int main() {
     ok = test_scheduler_ordering() && ok;
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;
+    ok = test_bios_mapping_and_startup() && ok;
 
     if (!ok) {
         return EXIT_FAILURE;
