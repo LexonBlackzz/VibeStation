@@ -1046,8 +1046,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     }
 
     if (block.has_branch && g_cpu_backend_compare_irq_on_branch) {
-      ++stats_.native_reject_irq_state;
-      return false;
+      return helper_step();
     }
 
     V2NativeRuntime runtime{};
@@ -1060,15 +1059,13 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       // behavior leaves the native tier before generated code is entered.
       if (g_trace_ram || g_trace_bus || g_ram_watch_diagnostics ||
           (cpu_.cop0_sr_ & (1u << 16)) != 0u) {
-        ++stats_.native_reject_unsafe_state;
-        return false;
+        return helper_step();
       }
 
       u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
       u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
       if (main_ram == nullptr || scratchpad == nullptr) {
-        ++stats_.native_reject_memory;
-        return false;
+        return helper_step();
       }
 
       for (u32 i = 0; i < block.store_count; ++i) {
@@ -1078,8 +1075,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         store_addrs[i] = addr;
 
         if ((addr & 3u) != 0u) {
-          ++stats_.native_reject_unaligned;
-          return false;
+          return helper_step();
         }
 
         const u32 phys = psx::mask_address(addr);
@@ -1088,8 +1084,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
             phys <= block.phys_end &&
             store_end >= static_cast<u64>(block.phys_start);
         if (touches_current_code) {
-          ++stats_.native_reject_icache;
-          return false;
+          return helper_step();
         }
 
         if (phys < psx::RAM_SIZE) {
@@ -1105,12 +1100,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           continue;
         }
 
-        if (phys >= 0x1F801000u && phys < 0x1F803000u) {
-          ++stats_.native_reject_mmio;
-        } else {
-          ++stats_.native_reject_memory;
-        }
-        return false;
+        return helper_step();
       }
     }
 
@@ -1174,8 +1164,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
-      ++stats_.native_reject_budget;
-      return false;
+      return helper_step();
     }
 
     cpu_.executing_step_ = true;
@@ -1233,6 +1222,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       stats_.native_memory_fastpath_stores += block.store_count;
     }
     stats_.native_instructions += count;
+    stats_.jit_v2_inline_instructions += count;
     stats_.optimized_instructions += count;
     stats_.native_cycles += consumed_cycles;
     stats_.executed_cycles += consumed_cycles;
@@ -1273,15 +1263,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
          result.instructions < max_instructions) {
 #if VIBESTATION_JIT_V2_X64
     if (!try_native()) {
-      if (needs_interpreter_icache_warmup) {
-        // The decoded backend intentionally does not populate Cpu::icache_.
-        // Execute exactly one architectural step so fetch32() performs the
-        // real line refill (including its cycle penalty), then let V2 retry at
-        // the following PC. This avoids permanently starving V2 while still
-        // keeping ordinary unsupported/state fallbacks block-decoded.
+      // Universal V2 should only get here for an internal codegen/allocation
+      // failure. Keep correctness with the generated step trampoline when
+      // available; the raw interpreter is now the last-resort safety net.
+      if (!helper_step()) {
         interpreter_step();
-      } else {
-        decoded_fallback(needs_short_decoded_fallback ? 1u : 8u);
       }
     }
 #else
