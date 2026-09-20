@@ -878,27 +878,29 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     // scratchpad/RAM address can evict a code line and force a 4-cycle refill
     // before the next guest instruction in this same native block.
     u32 fetch_penalty = 0u;
-    u32 store_cursor = 0u;
-    for (u32 i = 0; i < block.instruction_count; ++i) {
-      const u32 inst_pc = start_pc + i * 4u;
-      const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
-      const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
-      SimIcacheLine &fetch_state = sim_line(inst_index);
-      if (!fetch_state.valid || fetch_state.tag != inst_tag) {
-        fetch_penalty += 4u;
-        fetch_state.valid = true;
-        fetch_state.tag = inst_tag;
-        fetch_state.refilled = true;
-      }
+    if (block.has_store) {
+      u32 store_cursor = 0u;
+      for (u32 i = 0; i < block.instruction_count; ++i) {
+        const u32 inst_pc = start_pc + i * 4u;
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        SimIcacheLine &fetch_state = sim_line(inst_index);
+        if (!fetch_state.valid || fetch_state.tag != inst_tag) {
+          fetch_penalty += 4u;
+          fetch_state.valid = true;
+          fetch_state.tag = inst_tag;
+          fetch_state.refilled = true;
+        }
 
-      if (store_cursor < block.store_count &&
-          block.store_instruction_index[store_cursor] == i) {
-        const u32 store_phys = psx::mask_address(store_addrs[store_cursor]);
-        const u32 store_index = (store_phys >> 4u) & 0xFFu;
-        SimIcacheLine &store_state = sim_line(store_index);
-        store_state.valid = false;
-        store_state.refilled = false;
-        ++store_cursor;
+        if (store_cursor < block.store_count &&
+            block.store_instruction_index[store_cursor] == i) {
+          const u32 store_phys = psx::mask_address(store_addrs[store_cursor]);
+          const u32 store_index = (store_phys >> 4u) & 0xFFu;
+          SimIcacheLine &store_state = sim_line(store_index);
+          store_state.valid = false;
+          store_state.refilled = false;
+          ++store_cursor;
+        }
       }
     }
 
