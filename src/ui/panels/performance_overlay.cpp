@@ -689,6 +689,134 @@ void App::panel_performance() {
                 backend.native_helper_load_delay_passes),
             static_cast<unsigned long long>(
                 backend.native_helper_load_delay_fallbacks));
+
+        ImGui::Separator();
+        ImGui::Text("CPU Hot Blocks:");
+        if (!g_profile_detailed_timing) {
+            ImGui::TextDisabled(
+                "Open the full profiler with F12 to collect hot-block data.");
+        }
+        else if (backend.hot_block_count == 0) {
+            ImGui::TextDisabled("No decoded block executions collected yet.");
+        }
+        else {
+            const u64 shown_weight = [&]() {
+                u64 total = 0;
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    total += backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                return total;
+            }();
+            const double shown_share =
+                backend.hot_block_total_weight == 0
+                    ? 0.0
+                    : 100.0 * static_cast<double>(shown_weight) /
+                          static_cast<double>(backend.hot_block_total_weight);
+            ImGui::Text(
+                "Top %u of %u executed blocks cover %.1f%% of estimated guest instructions",
+                backend.hot_block_count, backend.hot_block_total_count,
+                shown_share);
+
+            if (ImGui::BeginTable(
+                    "cpu_hot_blocks", 7,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit,
+                    ImVec2(-1.0f, 260.0f))) {
+                ImGui::TableSetupColumn("PC");
+                ImGui::TableSetupColumn("Est instr");
+                ImGui::TableSetupColumn("Entries");
+                ImGui::TableSetupColumn("Native %");
+                ImGui::TableSetupColumn("Shape");
+                ImGui::TableSetupColumn("Reject/detail");
+                ImGui::TableSetupColumn("Ops");
+                ImGui::TableHeadersRow();
+
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("0x%08X", hot.start_pc);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(hot.entries));
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.1f%%", native_percent);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(hot.shape.data());
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TextUnformatted(hot.reject_detail.data());
+                    ImGui::TableSetColumnIndex(6);
+                    ImGui::TextUnformatted(hot.ops.data());
+                }
+                ImGui::EndTable();
+            }
+
+            if (ImGui::Button("Copy CPU hot-block snapshot")) {
+                std::string snapshot;
+                snapshot.reserve(8192);
+                char line[768];
+                std::snprintf(
+                    line, sizeof(line),
+                    "frame=%llu core_ms=%.3f cpu_ms=%.3f "
+                    "decoded=%llu native=%llu fallback=%llu\n"
+                    "hot_blocks=%u/%u shown_share=%.1f%%\n",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms,
+                    runtime_snapshot_.profiling.cpu_ms,
+                    static_cast<unsigned long long>(
+                        backend.decoded_instructions),
+                    static_cast<unsigned long long>(
+                        backend.native_instructions),
+                    static_cast<unsigned long long>(
+                        backend.fallback_instructions),
+                    backend.hot_block_count, backend.hot_block_total_count,
+                    shown_share);
+                snapshot += line;
+
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    std::snprintf(
+                        line, sizeof(line),
+                        "#%02u pc=%08X weight=%llu entries=%llu instr=%u "
+                        "native_entries=%llu native=%.1f%% compiled=%u "
+                        "decoded_only=%u prefix=%u branch=%u mem=%u load=%u "
+                        "store=%u fallback=%u shape=%s reject=%s ops=%s\n",
+                        i + 1u, hot.start_pc,
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions),
+                        static_cast<unsigned long long>(hot.entries),
+                        hot.instruction_count,
+                        static_cast<unsigned long long>(hot.native_entries),
+                        native_percent, hot.native_compiled ? 1u : 0u,
+                        hot.native_decoded_only ? 1u : 0u,
+                        hot.native_prefix_instruction_count,
+                        hot.has_control_flow ? 1u : 0u,
+                        hot.has_memory ? 1u : 0u,
+                        hot.has_load ? 1u : 0u,
+                        hot.has_store ? 1u : 0u,
+                        hot.has_fallback ? 1u : 0u,
+                        hot.shape.data(), hot.reject_detail.data(),
+                        hot.ops.data());
+                    snapshot += line;
+                }
+                ImGui::SetClipboardText(snapshot.c_str());
+            }
+        }
+
         if (config_vsync_ && swap_ms_ > 8.0) {
             ImGui::TextDisabled(
                 "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");
