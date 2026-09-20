@@ -2,6 +2,8 @@
 
 #include "common/types.h"
 
+#include <array>
+
 namespace ps2 {
 
 class Bios;
@@ -22,6 +24,8 @@ public:
         IopRam& iop_ram,
         GsPrivileged& gs,
         const Bios& bios);
+
+    void reset();
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
@@ -52,6 +56,11 @@ private:
     IopRam& iop_ram_;
     GsPrivileged& gs_;
     const Bios& bios_;
+
+    std::array<u8, 0x1000> vu0_micro_{};
+    std::array<u8, 0x1000> vu0_data_{};
+    std::array<u8, 0x4000> vu1_micro_{};
+    std::array<u8, 0x4000> vu1_data_{};
 };
 
 } // namespace ps2

@@ -33,6 +33,9 @@ struct EeCpuState {
     std::array<EeTlbEntry, 48> tlb{};
     std::array<u32, 32> fpr{};
     std::array<u32, 32> fcr{};
+    u32 fpu_acc = 0;
+    std::array<EeGpr, 32> vu_vf{};
+    std::array<u32, 32> vu_vi{};
     u64 instructions_executed = 0;
     u32 last_pc = 0;
     u32 last_instruction = 0;
@@ -72,6 +75,7 @@ private:
     bool execute_regimm(u32 pc, u32 instruction, std::string& error);
     bool execute_cop0(u32 pc, u32 instruction, std::string& error);
     bool execute_cop1(u32 pc, u32 instruction, std::string& error);
+    bool execute_cop2(u32 pc, u32 instruction, std::string& error);
     bool execute_mmi(u32 pc, u32 instruction, std::string& error);
 
     EeBus& bus_;

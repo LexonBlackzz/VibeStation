@@ -2,6 +2,8 @@
 
 #include "core/memory/ee_bus.h"
 
+#include <bit>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -63,6 +65,21 @@ void multiply_unsigned32(u32 lhs, u32 rhs, u64& lo, u64& hi) {
     hi = sign_extend_32(static_cast<u32>(result >> 32));
 }
 
+float ps2_fpu_input(u32 bits) {
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0) bits &= 0x80000000u;
+    else if (exponent == 0x7F800000u) bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+    return std::bit_cast<float>(bits);
+}
+
+u32 ps2_fpu_result(float value) {
+    u32 bits = std::bit_cast<u32>(value);
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0) return bits & 0x80000000u;
+    if (exponent == 0x7F800000u) return (bits & 0x80000000u) | 0x7F7FFFFFu;
+    return bits;
+}
+
 } // namespace
 
 void EeCpu::reset(u32 entry_point) {
@@ -75,6 +92,9 @@ void EeCpu::reset(u32 entry_point) {
     state_.cop0[16] = 0x00000440;
     state_.fcr[0] = 0x00002E30;
     state_.fcr[31] = 0x01000001;
+    state_.vu_vf[0].lo = 0;
+    state_.vu_vf[0].hi = 0x3F80000000000000ull;
+    state_.vu_vi[20] = 0x3F800000u;
     halted_ = false;
     halt_reason_.clear();
 }
@@ -250,16 +270,10 @@ bool EeCpu::execute_special(
             state_.hi);
         return true;
     case 0x21: // ADDU
-        write_gpr_word(
-            rd,
-            static_cast<u32>(gpr_u64(rs)) +
-                static_cast<u32>(gpr_u64(rt)));
+        write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) + static_cast<u32>(gpr_u64(rt)));
         return true;
     case 0x23: // SUBU
-        write_gpr_word(
-            rd,
-            static_cast<u32>(gpr_u64(rs)) -
-                static_cast<u32>(gpr_u64(rt)));
+        write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) - static_cast<u32>(gpr_u64(rt)));
         return true;
     case 0x24: // AND
         write_gpr64(rd, gpr_u64(rs) & gpr_u64(rt));
@@ -301,218 +315,291 @@ bool EeCpu::execute_special(
         write_gpr64(rd, gpr_u64(rt) >> (sa + 32u));
         return true;
     case 0x3F: // DSRA32
-        write_gpr64(
-            rd,
-            static_cast<u64>(
-                static_cast<s64>(gpr_u64(rt)) >> (sa + 32u)));
+        write_gpr64(rd, static_cast<u64>(static_cast<s64>(gpr_u64(rt)) >> (sa + 32u)));
         return true;
     default:
-        return fail(
-            pc,
-            instruction,
-            "Unsupported SPECIAL function " + hex32(funct),
-            error);
+        return fail(pc, instruction, "Unsupported SPECIAL function " + hex32(funct), error);
     }
 }
 
-bool EeCpu::execute_regimm(
-    u32 pc,
-    u32 instruction,
-    std::string& error) {
-    const u32 rs = (instruction >> 21) & 31u;
-    const u32 rt = (instruction >> 16) & 31u;
-
-    bool taken = false;
-    bool likely = false;
-    bool link = false;
-
-    switch (rt) {
-    case 0x00: taken = gpr_s64(rs) < 0; break;       // BLTZ
-    case 0x01: taken = gpr_s64(rs) >= 0; break;      // BGEZ
-    case 0x02: taken = gpr_s64(rs) < 0; likely = true; break;  // BLTZL
-    case 0x03: taken = gpr_s64(rs) >= 0; likely = true; break; // BGEZL
-    case 0x10: taken = gpr_s64(rs) < 0; link = true; break;    // BLTZAL
-    case 0x11: taken = gpr_s64(rs) >= 0; link = true; break;   // BGEZAL
-    case 0x12:
-        taken = gpr_s64(rs) < 0;
-        link = true;
-        likely = true;
-        break;
-    case 0x13:
-        taken = gpr_s64(rs) >= 0;
-        link = true;
-        likely = true;
-        break;
-    default:
-        return fail(
-            pc,
-            instruction,
-            "Unsupported REGIMM variant " + hex32(rt),
-            error);
+bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
+    const u32 rs=(instruction>>21)&31u; const u32 rt=(instruction>>16)&31u;
+    bool taken=false, likely=false, link=false;
+    switch(rt){
+    case 0x00: taken=gpr_s64(rs)<0; break;
+    case 0x01: taken=gpr_s64(rs)>=0; break;
+    case 0x02: taken=gpr_s64(rs)<0; likely=true; break;
+    case 0x03: taken=gpr_s64(rs)>=0; likely=true; break;
+    case 0x10: taken=gpr_s64(rs)<0; link=true; break;
+    case 0x11: taken=gpr_s64(rs)>=0; link=true; break;
+    case 0x12: taken=gpr_s64(rs)<0; link=true; likely=true; break;
+    case 0x13: taken=gpr_s64(rs)>=0; link=true; likely=true; break;
+    default: return fail(pc,instruction,"Unsupported REGIMM variant "+hex32(rt),error);
     }
-
-    if (link) {
-        write_gpr_word(31, pc + 8u);
-    }
-
-    if (taken) {
-        state_.next_pc = branch_target(pc, immediate(instruction));
-    } else if (likely) {
-        branch_likely_not_taken(pc);
-    }
-
+    if(link) write_gpr_word(31,pc+8u);
+    if(taken) state_.next_pc=branch_target(pc,immediate(instruction)); else if(likely) branch_likely_not_taken(pc);
     return true;
 }
 
-bool EeCpu::execute_cop0(
-    u32 pc,
-    u32 instruction,
-    std::string& error) {
-    const u32 rs = (instruction >> 21) & 31u;
-    const u32 rt = (instruction >> 16) & 31u;
-    const u32 rd = (instruction >> 11) & 31u;
-    const u32 sel = instruction & 7u;
-    const u32 funct = instruction & 63u;
-
-    if (rs == 0x00) { // MFC0
-        if (sel != 0) {
-            return fail(pc, instruction, "Unsupported COP0 select", error);
-        }
-        write_gpr_word(rt, state_.cop0[rd]);
-        return true;
-    }
-
-    if (rs == 0x04) { // MTC0
-        if (sel != 0) {
-            return fail(pc, instruction, "Unsupported COP0 select", error);
-        }
-        if (rd != 15) {
-            state_.cop0[rd] = static_cast<u32>(gpr_u64(rt));
-        }
-        return true;
-    }
-
-    if (rs == 0x10) {
-        switch (funct) {
-        case 0x01: // TLBR
-            return true;
-        case 0x02: { // TLBWI
-            const u32 index = state_.cop0[0] & 0x3Fu;
-            if (index < state_.tlb.size()) {
-                auto& entry = state_.tlb[index];
-                entry.page_mask = state_.cop0[5];
-                entry.entry_hi = state_.cop0[10];
-                entry.entry_lo0 = state_.cop0[2];
-                entry.entry_lo1 = state_.cop0[3];
-            }
-            return true;
-        }
-        case 0x06: // TLBWR
-        case 0x08: // TLBP
-            return true;
-        case 0x18: // ERET
-            state_.pc = state_.cop0[14];
-            state_.next_pc = state_.pc + 4;
-            state_.cop0[12] &= ~0x2u;
-            return true;
-        case 0x38: // EI/DI subset used during startup
-            state_.cop0[12] &= ~0x00010000u;
-            return true;
-        case 0x39:
-            state_.cop0[12] |= 0x00010000u;
-            return true;
-        default:
-            break;
-        }
-    }
-
-    return fail(pc, instruction, "Unsupported COP0 operation", error);
+bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
+    const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, sel=instruction&7u, funct=instruction&63u;
+    if(rs==0x00){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); write_gpr_word(rt,state_.cop0[rd]); return true; }
+    if(rs==0x04){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); if(rd!=15) state_.cop0[rd]=static_cast<u32>(gpr_u64(rt)); return true; }
+    if(rs==0x10){ switch(funct){
+        case 0x01: return true;
+        case 0x02:{ const u32 index=state_.cop0[0]&0x3Fu; if(index<state_.tlb.size()){auto& e=state_.tlb[index];e.page_mask=state_.cop0[5];e.entry_hi=state_.cop0[10];e.entry_lo0=state_.cop0[2];e.entry_lo1=state_.cop0[3];} return true;}
+        case 0x06: case 0x08: return true;
+        case 0x18: state_.pc=state_.cop0[14]; state_.next_pc=state_.pc+4; state_.cop0[12]&=~0x2u; return true;
+        case 0x38: state_.cop0[12]&=~0x00010000u; return true;
+        case 0x39: state_.cop0[12]|=0x00010000u; return true;
+        default: break;
+    }}
+    return fail(pc,instruction,"Unsupported COP0 operation",error);
 }
 
-bool EeCpu::execute_cop1(
-    u32 pc,
-    u32 instruction,
-    std::string& error) {
+bool EeCpu::execute_cop1(u32 pc, u32 instruction, std::string& error) {
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
     const u32 fs = (instruction >> 11) & 31u;
+    const u32 fd = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    constexpr u32 kCond = 0x00800000u;
 
     switch (rs) {
     case 0x00: // MFC1
         write_gpr_word(rt, state_.fpr[fs]);
         return true;
     case 0x02: // CFC1
-        write_gpr_word(rt, state_.fcr[fs]);
+        if (fs == 0) write_gpr_word(rt, 0x00002E00u);
+        else if (fs == 31) write_gpr_word(rt, state_.fcr[31]);
+        else write_gpr_word(rt, 0);
         return true;
     case 0x04: // MTC1
         state_.fpr[fs] = static_cast<u32>(gpr_u64(rt));
         return true;
     case 0x06: // CTC1
-        state_.fcr[fs] = static_cast<u32>(gpr_u64(rt));
+        if (fs == 31) state_.fcr[31] = static_cast<u32>(gpr_u64(rt));
         return true;
+    case 0x08: { // BC1
+        const bool cond = (state_.fcr[31] & kCond) != 0;
+        const u32 variant = rt & 3u;
+        const bool taken = (variant & 1u) != 0 ? cond : !cond;
+        const bool likely = (variant & 2u) != 0;
+        if (taken) state_.next_pc = branch_target(pc, immediate(instruction));
+        else if (likely) branch_likely_not_taken(pc);
+        return true;
+    }
     default:
-        return fail(pc, instruction, "Unsupported COP1 operation", error);
+        break;
+    }
+
+    if (rs == 0x14u) { // COP1.W
+        if (funct == 0x20u) { // CVT.S.W
+            const s32 value = static_cast<s32>(state_.fpr[fs]);
+            state_.fpr[fd] = ps2_fpu_result(static_cast<float>(value));
+            return true;
+        }
+        return fail(pc, instruction, "Unsupported COP1.W operation", error);
+    }
+
+    if (rs != 0x10u) return fail(pc, instruction, "Unsupported COP1 operation", error);
+
+    const u32 ft = rt;
+    const float a = ps2_fpu_input(state_.fpr[fs]);
+    const float b = ps2_fpu_input(state_.fpr[ft]);
+    const float acc = ps2_fpu_input(state_.fpu_acc);
+    auto set_fd = [&](float v) { state_.fpr[fd] = ps2_fpu_result(v); };
+    auto set_acc = [&](float v) { state_.fpu_acc = ps2_fpu_result(v); };
+    auto set_cond = [&](bool v) {
+        if (v) state_.fcr[31] |= kCond;
+        else state_.fcr[31] &= ~kCond;
+    };
+
+    switch (funct) {
+    case 0x00: set_fd(a + b); return true; // ADD.S
+    case 0x01: set_fd(a - b); return true; // SUB.S
+    case 0x02: set_fd(a * b); return true; // MUL.S
+    case 0x03: // DIV.S
+        if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0) {
+            const u32 sign = (state_.fpr[fs] ^ state_.fpr[ft]) & 0x80000000u;
+            state_.fpr[fd] = sign | 0x7F7FFFFFu;
+        } else set_fd(a / b);
+        return true;
+    case 0x04: // SQRT.S
+        set_fd(std::sqrt(std::fabs(b)));
+        return true;
+    case 0x05: state_.fpr[fd] = state_.fpr[fs] & 0x7FFFFFFFu; return true; // ABS.S
+    case 0x06: state_.fpr[fd] = state_.fpr[fs]; return true; // MOV.S
+    case 0x07: state_.fpr[fd] = state_.fpr[fs] ^ 0x80000000u; return true; // NEG.S
+    case 0x16: { // RSQRT.S
+        if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0) {
+            const u32 sign = (state_.fpr[fs] ^ state_.fpr[ft]) & 0x80000000u;
+            state_.fpr[fd] = sign | 0x7F7FFFFFu;
+        } else set_fd(a / std::sqrt(std::fabs(b)));
+        return true;
+    }
+    case 0x18: set_acc(a + b); return true; // ADDA.S
+    case 0x19: set_acc(a - b); return true; // SUBA.S
+    case 0x1A: set_acc(a * b); return true; // MULA.S
+    case 0x1C: set_fd(acc + (a * b)); return true; // MADD.S
+    case 0x1D: set_fd(acc - (a * b)); return true; // MSUB.S
+    case 0x1E: set_acc(acc + (a * b)); return true; // MADDA.S
+    case 0x1F: set_acc(acc - (a * b)); return true; // MSUBA.S
+    case 0x24: { // CVT.W.S (round toward zero)
+        if ((state_.fpr[fs] & 0x7F800000u) <= 0x4E800000u) {
+            const double d = static_cast<double>(a);
+            if (d > 2147483647.0) state_.fpr[fd] = 0x7FFFFFFFu;
+            else if (d < -2147483648.0) state_.fpr[fd] = 0x80000000u;
+            else state_.fpr[fd] = static_cast<u32>(static_cast<s32>(d));
+        } else state_.fpr[fd] = (state_.fpr[fs] & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu;
+        return true;
+    }
+    case 0x28: state_.fpr[fd] = (a >= b) ? state_.fpr[fs] : state_.fpr[ft]; return true; // MAX.S
+    case 0x29: state_.fpr[fd] = (a <= b) ? state_.fpr[fs] : state_.fpr[ft]; return true; // MIN.S
+    case 0x30: set_cond(false); return true; // C.F.S
+    case 0x32: set_cond(a == b); return true; // C.EQ.S
+    case 0x34: set_cond(a < b); return true; // C.LT.S
+    case 0x36: set_cond(a <= b); return true; // C.LE.S
+    default:
+        return fail(pc, instruction, "Unsupported COP1.S function " + hex32(funct), error);
     }
 }
 
-bool EeCpu::execute_mmi(
-    u32 pc,
-    u32 instruction,
-    std::string& error) {
+bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
-    const u32 rd = (instruction >> 11) & 31u;
+    const u32 fs = (instruction >> 11) & 31u;
+
+    auto lane_read = [&](u32 reg, u32 lane) -> u32 {
+        const EeGpr& v = state_.vu_vf[reg & 31u];
+        const u64 half = lane < 2 ? v.lo : v.hi;
+        return static_cast<u32>(half >> ((lane & 1u) * 32u));
+    };
+    auto lane_write = [&](u32 reg, u32 lane, u32 value) {
+        if ((reg & 31u) == 0) return;
+        EeGpr& v = state_.vu_vf[reg & 31u];
+        u64& half = lane < 2 ? v.lo : v.hi;
+        const u32 shift = (lane & 1u) * 32u;
+        half = (half & ~(0xFFFFFFFFull << shift)) | (static_cast<u64>(value) << shift);
+    };
+    auto selected = [&](u32 lane) {
+        static constexpr u32 bits[4] = {24u, 23u, 22u, 21u};
+        return ((instruction >> bits[lane]) & 1u) != 0;
+    };
+
+    switch (rs) {
+    case 0x01: // QMFC2
+        if (rt != 0) state_.gpr[rt] = state_.vu_vf[fs];
+        return true;
+    case 0x02: { // CFC2
+        if (rt == 0) return true;
+        u32 value = state_.vu_vi[fs];
+        if (fs == 20u) value &= 0x007FFFFFu;
+        write_gpr_word(rt, value);
+        return true;
+    }
+    case 0x05: // QMTC2
+        if (fs != 0) state_.vu_vf[fs] = state_.gpr[rt];
+        return true;
+    case 0x06: { // CTC2
+        if (fs == 0u || fs == 17u || fs == 26u || fs == 29u) return true;
+        const u32 value = static_cast<u32>(gpr_u64(rt));
+        if (fs == 20u) {
+            state_.vu_vi[20] = (value & 0x007FFFFFu) | 0x3F800000u;
+            return true;
+        }
+        if (fs == 28u) {
+            state_.vu_vi[28] = value & 0x00000C0Cu;
+            if ((value & 0x2u) != 0) {
+                for (u32 i = 1; i < 32; ++i) state_.vu_vf[i] = {};
+                for (u32 i = 1; i < 16; ++i) state_.vu_vi[i] = 0;
+                state_.vu_vi[29] &= ~0xFFu;
+            }
+            if ((value & 0x200u) != 0) state_.vu_vi[29] &= ~0xFF00u;
+            return true;
+        }
+        state_.vu_vi[fs] = value;
+        return true;
+    }
+    default:
+        break;
+    }
+
+    if (rs < 0x10u) return fail(pc, instruction, "Unsupported COP2 operation", error);
+
+    const u32 ft = (instruction >> 16) & 31u;
+    const u32 fd = (instruction >> 6) & 31u;
     const u32 funct = instruction & 63u;
 
-    switch (funct) {
-    case 0x10: // MFHI1
-        write_gpr64(rd, state_.hi1);
+    if (funct == 0x2Cu) { // VSUB
+        for (u32 lane = 0; lane < 4; ++lane) {
+            if (!selected(lane)) continue;
+            const float a = std::bit_cast<float>(lane_read(fs, lane));
+            const float b = std::bit_cast<float>(lane_read(ft, lane));
+            lane_write(fd, lane, std::bit_cast<u32>(a - b));
+        }
         return true;
-    case 0x11: // MTHI1
-        state_.hi1 = gpr_u64(rs);
+    }
+    if (funct == 0x30u) { // VIADD
+        const u32 it = ft & 0xFu;
+        const u32 is = fs & 0xFu;
+        const u32 id = fd & 0xFu;
+        if (id != 0) {
+            const s16 result = static_cast<s16>(state_.vu_vi[is]) + static_cast<s16>(state_.vu_vi[it]);
+            state_.vu_vi[id] = static_cast<u16>(result);
+        }
         return true;
-    case 0x12: // MFLO1
-        write_gpr64(rd, state_.lo1);
-        return true;
-    case 0x13: // MTLO1
-        state_.lo1 = gpr_u64(rs);
-        return true;
-    case 0x18: // MULT1
-        multiply_signed32(
-            static_cast<u32>(gpr_u64(rs)),
-            static_cast<u32>(gpr_u64(rt)),
-            state_.lo1,
-            state_.hi1);
-        write_gpr64(rd, state_.lo1);
-        return true;
-    case 0x19: // MULTU1
-        multiply_unsigned32(
-            static_cast<u32>(gpr_u64(rs)),
-            static_cast<u32>(gpr_u64(rt)),
-            state_.lo1,
-            state_.hi1);
-        write_gpr64(rd, state_.lo1);
-        return true;
-    case 0x1A: // DIV1
-        divide_signed32(
-            static_cast<u32>(gpr_u64(rs)),
-            static_cast<u32>(gpr_u64(rt)),
-            state_.lo1,
-            state_.hi1);
-        return true;
-    case 0x1B: // DIVU1
-        divide_unsigned32(
-            static_cast<u32>(gpr_u64(rs)),
-            static_cast<u32>(gpr_u64(rt)),
-            state_.lo1,
-            state_.hi1);
-        return true;
-    default:
-        return fail(
-            pc,
-            instruction,
-            "Unsupported MMI function " + hex32(funct),
-            error);
+    }
+    if (funct >= 0x3Cu) {
+        const u32 sub = (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
+        const u32 it = ft & 0xFu;
+        const u32 is = fs & 0xFu;
+        if (sub == 0x3Fu) { // VISWR
+            const u32 base = 0x11004000u + ((state_.vu_vi[is] & 0xFFFFu) * 16u & 0xFFFu);
+            for (u32 lane = 0; lane < 4; ++lane) {
+                if (selected(lane) && !bus_.write32(base + lane * 4u, state_.vu_vi[it] & 0xFFFFu))
+                    return fail(pc, instruction, "VISWR VU0 memory fault", error);
+            }
+            return true;
+        }
+        if (sub == 0x35u) { // VSQI
+            const u32 base = 0x11004000u + ((state_.vu_vi[it] & 0xFFFFu) * 16u & 0xFFFu);
+            for (u32 lane = 0; lane < 4; ++lane) {
+                if (selected(lane) && !bus_.write32(base + lane * 4u, lane_read(fs, lane)))
+                    return fail(pc, instruction, "VSQI VU0 memory fault", error);
+            }
+            if (ft != 0) state_.vu_vi[it] = static_cast<u16>(state_.vu_vi[it] + 1u);
+            return true;
+        }
+        return fail(pc, instruction, "Unsupported COP2 SPECIAL2 function " + hex32(sub), error);
+    }
+
+    return fail(pc, instruction, "Unsupported COP2 macro function " + hex32(funct), error);
+}
+
+bool EeCpu::execute_mmi(u32 pc,u32 instruction,std::string& error){
+    const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, funct=instruction&63u;
+    switch(funct){
+    case 0x10: write_gpr64(rd,state_.hi1); return true;
+    case 0x11: state_.hi1=gpr_u64(rs); return true;
+    case 0x12: write_gpr64(rd,state_.lo1); return true;
+    case 0x13: state_.lo1=gpr_u64(rs); return true;
+    case 0x18: multiply_signed32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); write_gpr64(rd,state_.lo1); return true;
+    case 0x19: multiply_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); write_gpr64(rd,state_.lo1); return true;
+    case 0x1A: divide_signed32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
+    case 0x1B: divide_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
+    case 0x29: { // MMI3
+        const u32 sub = (instruction >> 6) & 31u;
+        if (sub == 0x12u) { // POR
+            if (rd != 0) {
+                state_.gpr[rd].lo = state_.gpr[rs].lo | state_.gpr[rt].lo;
+                state_.gpr[rd].hi = state_.gpr[rs].hi | state_.gpr[rt].hi;
+            }
+            return true;
+        }
+        return fail(pc,instruction,"Unsupported MMI3 function "+hex32(sub),error);
+    }
+    default: return fail(pc,instruction,"Unsupported MMI function "+hex32(funct),error);
     }
 }
 
@@ -582,7 +669,7 @@ bool EeCpu::step(std::string& error) {
             state_.next_pc = branch_target(pc, imm);
         }
         break;
-    case 0x05: // BNE
+    case 0x05: // BND
         if (gpr_u64(rs) != gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
         }
@@ -640,6 +727,9 @@ bool EeCpu::step(std::string& error) {
     case 0x11:
         ok = execute_cop1(pc, instruction, error);
         break;
+    case 0x12:
+        ok = execute_cop2(pc, instruction, error);
+        break;
     case 0x14: // BEQL
         if (gpr_u64(rs) == gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
@@ -671,6 +761,30 @@ bool EeCpu::step(std::string& error) {
     case 0x19: // DADDIU
         write_gpr64(rt, gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));
         break;
+    case 0x1A: { // LDL
+        static constexpr u64 masks[8] = {
+            0x00FFFFFFFFFFFFFFull, 0x0000FFFFFFFFFFFFull, 0x000000FFFFFFFFFFull, 0x00000000FFFFFFFFull,
+            0x0000000000FFFFFFull, 0x000000000000FFFFull, 0x00000000000000FFull, 0x0000000000000000ull};
+        static constexpr u8 shifts[8] = {56,48,40,32,24,16,8,0};
+        const u32 address = effective_address();
+        const u32 shift = address & 7u;
+        u64 mem = 0;
+        if (!bus_.read64(address & ~7u, mem)) ok = load_fault("LDL", address);
+        else if (rt != 0) state_.gpr[rt].lo = (state_.gpr[rt].lo & masks[shift]) | (mem << shifts[shift]);
+        break;
+    }
+    case 0x1B: { // LDR
+        static constexpr u64 masks[8] = {
+            0x0000000000000000ull, 0xFF00000000000000ull, 0xFFFF000000000000ull, 0xFFFFFF0000000000ull,
+            0xFFFFFFFF00000000ull, 0xFFFFFFFFFF000000ull, 0xFFFFFFFFFFFF0000ull, 0xFFFFFFFFFFFFFF00ull};
+        static constexpr u8 shifts[8] = {0,8,16,24,32,40,48,56};
+        const u32 address = effective_address();
+        const u32 shift = address & 7u;
+        u64 mem = 0;
+        if (!bus_.read64(address & ~7u, mem)) ok = load_fault("LDR", address);
+        else if (rt != 0) state_.gpr[rt].lo = (state_.gpr[rt].lo & masks[shift]) | (mem >> shifts[shift]);
+        break;
+    }
     case 0x1C:
         ok = execute_mmi(pc, instruction, error);
         break;
@@ -776,12 +890,30 @@ bool EeCpu::step(std::string& error) {
     case 0x2B: { // SW
         const u32 address = effective_address();
         if (!bus_.write32(address, static_cast<u32>(gpr_u64(rt)))) {
-            ok = fail(
-                pc,
-                instruction,
-                "Store word fault to " + hex32(address),
-                error);
+            ok = fail(pc, instruction, "Store word fault to " + hex32(address), error);
         }
+        break;
+    }
+    case 0x2C: { // SDL
+        static constexpr u64 masks[8] = {
+            0xFFFFFFFFFFFFFF00ull,0xFFFFFFFFFFFF0000ull,0xFFFFFFFFFF000000ull,0xFFFFFFFF00000000ull,
+            0xFFFFFF0000000000ull,0xFFFF000000000000ull,0xFF00000000000000ull,0x0000000000000000ull};
+        static constexpr u8 shifts[8] = {56,48,40,32,24,16,8,0};
+        const u32 address = effective_address(); const u32 shift = address & 7u;
+        u64 mem = 0;
+        if (!bus_.read64(address & ~7u, mem) || !bus_.write64(address & ~7u, (gpr_u64(rt) >> shifts[shift]) | (mem & masks[shift])))
+            ok = fail(pc,instruction,"SDL fault at "+hex32(address),error);
+        break;
+    }
+    case 0x2D: { // SDR
+        static constexpr u64 masks[8] = {
+            0x0000000000000000ull,0x00000000000000FFull,0x000000000000FFFFull,0x0000000000FFFFFFull,
+            0x00000000FFFFFFFFull,0x000000FFFFFFFFFFull,0x0000FFFFFFFFFFFFull,0x00FFFFFFFFFFFFFFull};
+        static constexpr u8 shifts[8] = {0,8,16,24,32,40,48,56};
+        const u32 address = effective_address(); const u32 shift = address & 7u;
+        u64 mem = 0;
+        if (!bus_.read64(address & ~7u, mem) || !bus_.write64(address & ~7u, (gpr_u64(rt) << shifts[shift]) | (mem & masks[shift])))
+            ok = fail(pc,instruction,"SDR fault at "+hex32(address),error);
         break;
     }
     case 0x2F: // CACHE

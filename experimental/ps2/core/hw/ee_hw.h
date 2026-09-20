@@ -33,11 +33,41 @@ private:
     void generic_write32(u32 address, u32 value);
 
     u64 cycles_ = 0;
-    u64 timer0_epoch_ = 0;
-    u32 timer0_count_base_ = 0;
-    u32 timer0_mode_ = 0;
+    std::array<u64, 4> timer_epoch_{};
+    std::array<u32, 4> timer_count_base_{};
+    std::array<u32, 4> timer_mode_{};
+    std::array<u32, 4> timer_comp_{};
+    std::array<u32, 4> timer_hold_{};
 
     std::array<u8, kRegSize> regs_{};
+
+    static constexpr u32 kDmacBase = 0x10008000u;
+    static constexpr std::size_t kDmacSize = 0x6200u;
+    std::array<u8, kDmacSize> dmac_regs_{};
+
+    u32 ipu_cmd_ = 0;
+    u32 ipu_ctrl_ = 0;
+    u32 ipu_bp_ = 0;
+    u32 ipu_top_ = 0;
+    std::array<u64, 2> ipu_in_fifo_{};
+    std::array<u64, 2> ipu_out_fifo_{};
+
+    std::array<u8, 0x400> vif0_regs_{};
+    std::array<u8, 0x400> vif1_regs_{};
+    std::array<u64, 2> vif0_fifo_{};
+    std::array<u64, 2> vif1_fifo_{};
+
+    u32 gif_ctrl_ = 0;
+    u32 gif_mode_ = 0;
+    u32 gif_stat_ = 0;
+    std::array<u64, 2> gif_fifo_{};
+
+    std::array<u16, 0x100> dve_bus_{};
+    std::array<u16, 0x100> dve_regs_{};
+    u16 dve_current_reg_ = 0;
+    bool dve_command_executing_ = false;
+    bool dve_error_detected_ = false;
+
     u32 mch_ricm_ = 0;
     mutable u32 rdram_sdevid_ = 0;
 };

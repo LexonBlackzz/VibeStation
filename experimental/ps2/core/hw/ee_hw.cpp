@@ -10,14 +10,46 @@ constexpr u32 kDmacEnablew = 0x1000F590u;
 constexpr u32 kSbusF240 = 0x1000F240u;
 constexpr u32 kSbusF260 = 0x1000F260u;
 
+bool decode_timer(u32 address, u32& index, u32& reg) {
+    for (u32 i = 0; i < 4; ++i) {
+        const u32 base = 0x10000000u + (i * 0x800u);
+        if (address >= base && address < base + 0x40u) {
+            const u32 off = address - base;
+            if (off == 0x00u || off == 0x10u || off == 0x20u || off == 0x30u) {
+                index = i; reg = off; return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 void EeHw::reset() {
     cycles_ = 0;
-    timer0_epoch_ = 0;
-    timer0_count_base_ = 0;
-    timer0_mode_ = 0;
+    timer_epoch_.fill(0);
+    timer_count_base_.fill(0);
+    timer_mode_.fill(0);
+    timer_comp_.fill(0);
+    timer_hold_.fill(0);
     regs_.fill(0);
+    dmac_regs_.fill(0);
+    ipu_cmd_ = ipu_ctrl_ = ipu_bp_ = ipu_top_ = 0;
+    ipu_in_fifo_.fill(0);
+    ipu_out_fifo_.fill(0);
+    vif0_regs_.fill(0);
+    vif1_regs_.fill(0);
+    vif0_fifo_.fill(0);
+    vif1_fifo_.fill(0);
+    gif_ctrl_ = 0;
+    gif_mode_ = 0;
+    gif_stat_ = 0;
+    gif_fifo_.fill(0);
+    dve_bus_.fill(0);
+    dve_regs_.fill(0);
+    dve_current_reg_ = 0;
+    dve_command_executing_ = false;
+    dve_error_detected_ = false;
     mch_ricm_ = 0;
     rdram_sdevid_ = 0;
 
@@ -69,6 +101,22 @@ bool EeHw::read8(u32 address, u8& value) const {
 }
 
 bool EeHw::read16(u32 address, u16& value) const {
+    if (address >= 0x1A000000u && address < 0x1A000020u) {
+        const u32 offset = address & 0x1Fu;
+        if (offset == 0x06u) {
+            u16 result = dve_bus_[0x06] & 2u;
+            if (dve_error_detected_) result |= 1u;
+            if (dve_bus_[0x06] < 3u && dve_command_executing_) {
+                ++const_cast<EeHw*>(this)->dve_bus_[0x06];
+            } else {
+                const_cast<EeHw*>(this)->dve_command_executing_ = false;
+            }
+            value = result;
+            return true;
+        }
+        value = dve_bus_[offset];
+        return true;
+    }
     if (!in_reg_window(address, 2)) {
         return false;
     }
@@ -81,39 +129,65 @@ bool EeHw::read16(u32 address, u16& value) const {
 
 bool EeHw::read32(u32 address, u32& value) const {
     switch (address) {
-    case 0x10000000u: {
-        const u64 elapsed =
-            cycles_ >= timer0_epoch_ ? cycles_ - timer0_epoch_ : 0;
-        u32 rate = 1;
-        switch (timer0_mode_ & 0x3u) {
-        case 0:
-            rate = 2;      // BUSCLK = EE clock / 2.
-            break;
-        case 1:
-            rate = 32;     // BUSCLK / 16.
-            break;
-        case 2:
-            rate = 512;    // BUSCLK / 256.
-            break;
-        case 3:
-            // External HBlank clock. PCSX2's NTSC startup timing uses
-            // 18,876 EE cycles for one complete scanline.
-            rate = 18876;
-            break;
-        }
-
-        const u32 delta =
-            (timer0_mode_ & 0x80u) != 0
-                ? static_cast<u32>(elapsed / rate)
-                : 0u;
-        value = (timer0_count_base_ + delta) & 0xFFFFu;
+    case 0x10002000u: value = ipu_cmd_; return true;
+    case 0x10002010u: value = ipu_ctrl_; return true;
+    case 0x10002020u: value = ipu_bp_; return true;
+    case 0x10002030u: value = ipu_top_; return true;
+    default: break;
+    }
+    auto read_vif = [&](u32 base, const auto& regs) -> bool {
+        if (address < base || address + 4u > base + 0x400u) return false;
+        const u32 o = address - base;
+        value = static_cast<u32>(regs[o]) | (static_cast<u32>(regs[o+1]) << 8) |
+                (static_cast<u32>(regs[o+2]) << 16) | (static_cast<u32>(regs[o+3]) << 24);
+        return true;
+    };
+    if (read_vif(0x10003800u, vif0_regs_)) return true;
+    if (read_vif(0x10003C00u, vif1_regs_)) return true;
+    if (address >= kDmacBase && address + 4u <= kDmacBase + kDmacSize) {
+        const u32 o = address - kDmacBase;
+        value = static_cast<u32>(dmac_regs_[o]) |
+                (static_cast<u32>(dmac_regs_[o + 1]) << 8) |
+                (static_cast<u32>(dmac_regs_[o + 2]) << 16) |
+                (static_cast<u32>(dmac_regs_[o + 3]) << 24);
         return true;
     }
-    case 0x10000010u:
-        value = timer0_mode_;
+    switch (address) {
+    case 0x10003000u:
+        value = gif_ctrl_;
+        return true;
+    case 0x10003010u:
+        value = gif_mode_;
+        return true;
+    case 0x10003020u:
+        value = gif_stat_;
         return true;
     default:
         break;
+    }
+
+    u32 timer_index = 0;
+    u32 timer_reg = 0;
+    if (decode_timer(address, timer_index, timer_reg)) {
+        switch (timer_reg) {
+        case 0x00u: {
+            const u64 elapsed = cycles_ >= timer_epoch_[timer_index] ? cycles_ - timer_epoch_[timer_index] : 0;
+            u32 rate = 1;
+            switch (timer_mode_[timer_index] & 0x3u) {
+            case 0: rate = 2; break;
+            case 1: rate = 32; break;
+            case 2: rate = 512; break;
+            case 3: rate = 18876; break;
+            }
+            const u32 delta = (timer_mode_[timer_index] & 0x80u) != 0 ? static_cast<u32>(elapsed / rate) : 0u;
+            value = (timer_count_base_[timer_index] + delta) & 0xFFFFu;
+            return true;
+        }
+        case 0x10u: value = timer_mode_[timer_index]; return true;
+        case 0x20u: value = timer_comp_[timer_index]; return true;
+        case 0x30u: value = timer_hold_[timer_index]; return true;
+        default: break;
+        }
     }
 
     if (!in_reg_window(address, 4)) {
@@ -169,6 +243,8 @@ bool EeHw::read32(u32 address, u32& value) const {
 }
 
 bool EeHw::read64(u32 address, u64& value) const {
+    if (address >= 0x10007000u && address < 0x10007010u) { value = ipu_out_fifo_[(address - 0x10007000u) >> 3]; return true; }
+    if (address >= 0x10007010u && address < 0x10007020u) { value = ipu_in_fifo_[(address - 0x10007010u) >> 3]; return true; }
     u32 lo = 0;
     u32 hi = 0;
     if (!read32(address, lo) || !read32(address + 4, hi)) {
@@ -188,6 +264,41 @@ bool EeHw::write8(u32 address, u8 value) {
 }
 
 bool EeHw::write16(u32 address, u16 value) {
+    if (address >= 0x1A000000u && address < 0x1A000020u) {
+        const u32 offset = address & 0xFFu;
+        if (offset == 0x06u) {
+            dve_bus_[0x06] &= static_cast<u16>(~3u);
+        } else {
+            dve_bus_[offset] = value;
+        }
+
+        if (offset == 0x00u) {
+            if (dve_bus_[0x02] == 0x4Fu || dve_bus_[0x02] == 0x41u) {
+                dve_error_detected_ = true;
+            } else if ((dve_bus_[0x00] & 0x80u) != 0) {
+                if (dve_bus_[0x02] == 0x43u) {
+                    int size = static_cast<int>(dve_bus_[0x00] & 0x0Fu);
+                    dve_current_reg_ = dve_bus_[0x10];
+                    --size;
+                    for (int i = 0; i < size; ++i) {
+                        dve_regs_[dve_current_reg_ & 0xFFu] = dve_bus_[0x12 + i];
+                    }
+                    dve_command_executing_ = true;
+                    dve_error_detected_ = false;
+                } else if (dve_bus_[0x02] == 0x42u) {
+                    const int size = static_cast<int>(dve_bus_[0x00] & 0x0Fu);
+                    for (int i = 0; i < size; ++i) {
+                        dve_bus_[0x10 + i] = dve_regs_[dve_current_reg_ & 0xFFu];
+                    }
+                    dve_command_executing_ = true;
+                    dve_error_detected_ = false;
+                }
+            }
+        } else if (offset == 0x0Au) {
+            dve_error_detected_ = (value == 0);
+        }
+        return true;
+    }
     if (!in_reg_window(address, 2)) {
         return false;
     }
@@ -200,17 +311,117 @@ bool EeHw::write16(u32 address, u16 value) {
 
 bool EeHw::write32(u32 address, u32 value) {
     switch (address) {
-    case 0x10000000u:
-        timer0_count_base_ = value & 0xFFFFu;
-        timer0_epoch_ = cycles_;
+    case 0x10002000u:
+        ipu_cmd_ = value & 0x7FFFFFFFu;
+        // BCLR/SETTH are immediate in the hardware-facing bootstrap model.
+        ipu_ctrl_ &= ~0x80000000u;
         return true;
-    case 0x10000010u:
-        timer0_mode_ = value;
-        timer0_count_base_ = 0;
-        timer0_epoch_ = cycles_;
+    case 0x10002010u:
+        ipu_ctrl_ = value;
+        if ((value & 0x40000000u) != 0) {
+            ipu_cmd_ = 0; ipu_ctrl_ = 0; ipu_bp_ = 0; ipu_top_ = 0;
+            ipu_in_fifo_.fill(0); ipu_out_fifo_.fill(0);
+        }
+        return true;
+    case 0x10002020u: ipu_bp_ = value; return true;
+    case 0x10002030u: ipu_top_ = value; return true;
+    default: break;
+    }
+    auto write_vif = [&](u32 base, auto& regs, bool vif1) -> bool {
+        if (address < base || address + 4u > base + 0x400u) return false;
+        const u32 o = address - base;
+        if (o == 0x10u) { // FBRST
+            if ((value & 0x1u) != 0) {
+                std::array<u8, 16> rowcol{};
+                for (u32 i = 0; i < 16; ++i) rowcol[i] = regs[0x100u + i];
+                regs.fill(0);
+                for (u32 i = 0; i < 16; ++i) regs[0x100u + i] = rowcol[i];
+            }
+            u32 stat = static_cast<u32>(regs[0]) | (static_cast<u32>(regs[1]) << 8) |
+                       (static_cast<u32>(regs[2]) << 16) | (static_cast<u32>(regs[3]) << 24);
+            if ((value & 0x2u) != 0) stat |= 1u << 9;
+            if ((value & 0x4u) != 0) stat |= 1u << 8;
+            if ((value & 0x8u) != 0) stat &= ~((1u<<8)|(1u<<9)|(1u<<10)|(1u<<11)|(1u<<12)|(1u<<13));
+            for (u32 i=0;i<4;++i) regs[i]=static_cast<u8>(stat>>(i*8));
+            return true;
+        }
+        if (o == 0x00u && vif1) {
+            const u32 old = static_cast<u32>(regs[0]) | (static_cast<u32>(regs[1]) << 8) |
+                            (static_cast<u32>(regs[2]) << 16) | (static_cast<u32>(regs[3]) << 24);
+            value = (old & ~(1u << 23)) | (value & (1u << 23));
+        }
+        for (u32 i=0;i<4;++i) regs[o+i]=static_cast<u8>(value>>(i*8));
+        return true;
+    };
+    if (write_vif(0x10003800u, vif0_regs_, false)) return true;
+    if (write_vif(0x10003C00u, vif1_regs_, true)) return true;
+    if (address >= kDmacBase && address + 4u <= kDmacBase + kDmacSize) {
+        const u32 local = address - kDmacBase;
+        auto read_dmac = [&](u32 a) {
+            const u32 o = a - kDmacBase;
+            return static_cast<u32>(dmac_regs_[o]) |
+                   (static_cast<u32>(dmac_regs_[o + 1]) << 8) |
+                   (static_cast<u32>(dmac_regs_[o + 2]) << 16) |
+                   (static_cast<u32>(dmac_regs_[o + 3]) << 24);
+        };
+        auto store_dmac = [&](u32 a, u32 v) {
+            const u32 o = a - kDmacBase;
+            for (u32 i = 0; i < 4; ++i) dmac_regs_[o + i] = static_cast<u8>(v >> (i * 8));
+        };
+
+        if (address == 0x1000E010u || address == 0x1000E100u) {
+            const u32 old = read_dmac(0x1000E010u);
+            const u32 next = (old & ~(value & 0xFFFFu)) ^ (value & 0xFFFF0000u);
+            store_dmac(0x1000E010u, next);
+            return true;
+        }
+
+        const u32 lane = address & 0xFFu;
+        if (lane == 0x20u && address < 0x1000E000u) value &= 0xFFFFu; // QWC
+        if ((address == 0x1000D010u || address == 0x1000D410u)) value &= 0x7FFFFFFFu;
+        if (lane == 0x80u && address < 0x1000E000u) value &= 0x3FF0u; // SADR
+        (void)local;
+        store_dmac(address, value);
+        return true;
+    }
+    switch (address) {
+    case 0x10003000u: // GIF_CTRL
+        gif_ctrl_ = value & 0x9u;
+        if ((gif_ctrl_ & 0x1u) != 0) {
+            gif_fifo_.fill(0);
+            gif_stat_ = 0;
+        }
+        gif_stat_ = (gif_stat_ & ~(1u << 3)) | (gif_ctrl_ & (1u << 3));
+        return true;
+    case 0x10003010u: // GIF_MODE
+        gif_mode_ = value;
+        gif_stat_ = (gif_stat_ & ~0x5u) | (gif_mode_ & 0x5u);
         return true;
     default:
         break;
+    }
+
+    u32 timer_index = 0;
+    u32 timer_reg = 0;
+    if (decode_timer(address, timer_index, timer_reg)) {
+        switch (timer_reg) {
+        case 0x00u:
+            timer_count_base_[timer_index] = value & 0xFFFFu;
+            timer_epoch_[timer_index] = cycles_;
+            return true;
+        case 0x10u:
+            timer_mode_[timer_index] = value;
+            timer_count_base_[timer_index] = 0;
+            timer_epoch_[timer_index] = cycles_;
+            return true;
+        case 0x20u:
+            timer_comp_[timer_index] = value & 0xFFFFu;
+            return true;
+        case 0x30u:
+            timer_hold_[timer_index] = value & 0xFFFFu;
+            return true;
+        default: break;
+        }
     }
 
     if (!in_reg_window(address, 4)) {
@@ -251,6 +462,14 @@ bool EeHw::write32(u32 address, u32 value) {
 }
 
 bool EeHw::write64(u32 address, u64 value) {
+    if (address >= 0x10007000u && address < 0x10007010u) { ipu_out_fifo_[(address - 0x10007000u) >> 3] = value; return true; }
+    if (address >= 0x10007010u && address < 0x10007020u) { ipu_in_fifo_[(address - 0x10007010u) >> 3] = value; return true; }
+    if (address >= 0x10004000u && address < 0x10004010u) { vif0_fifo_[(address - 0x10004000u) >> 3] = value; return true; }
+    if (address >= 0x10005000u && address < 0x10005010u) { vif1_fifo_[(address - 0x10005000u) >> 3] = value; return true; }
+    if (address >= 0x10006000u && address < 0x10006010u) {
+        gif_fifo_[(address - 0x10006000u) >> 3] = value;
+        return true;
+    }
     return write32(address, static_cast<u32>(value)) &&
            write32(address + 4, static_cast<u32>(value >> 32));
 }

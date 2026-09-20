@@ -14,6 +14,7 @@ Ps2System::Ps2System()
 void Ps2System::reset(u32 entry_point) {
     ram_.reset();
     scratchpad_.reset();
+    bus_.reset();
     hw_.reset();
     iop_hw_.reset();
     iop_intc_.reset();
