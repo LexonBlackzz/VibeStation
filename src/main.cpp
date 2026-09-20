@@ -1578,6 +1578,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "decoded";
     case CpuExecutionMode::X64Jit:
       return "x64jit";
+    case CpuExecutionMode::X64JitV2:
+      return "x64jitv2";
     }
     return "unknown";
   };
@@ -1586,11 +1588,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
               !availability.native_available
           ? CpuExecutionMode::DecodedBlockInterpreter
           : requested_mode;
-  if (requested_mode == CpuExecutionMode::X64Jit &&
+  if ((requested_mode == CpuExecutionMode::X64Jit ||
+       requested_mode == CpuExecutionMode::X64JitV2) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
-        "requested=x64jit effective=decoded\n");
+        "requested=%s effective=%s\n",
+        backend_token(requested_mode), backend_token(effective_mode));
     return 3;
   }
 
@@ -1675,16 +1679,28 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : (100.0 * static_cast<double>(native_instructions) /
              static_cast<double>(total_instructions));
   const u64 helper_calls =
-      delta(after.native_memory_helper_calls, before.native_memory_helper_calls) +
-      delta(after.native_branch_helper_calls, before.native_branch_helper_calls) +
-      delta(after.native_prepare_helper_calls, before.native_prepare_helper_calls) +
-      delta(after.native_finish_helper_calls, before.native_finish_helper_calls);
-  const u64 helper_assisted_instructions = std::min(
-      native_instructions,
-      delta(after.native_prepare_helper_calls,
-            before.native_prepare_helper_calls));
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
+          : delta(after.native_memory_helper_calls,
+                  before.native_memory_helper_calls) +
+                delta(after.native_branch_helper_calls,
+                      before.native_branch_helper_calls) +
+                delta(after.native_prepare_helper_calls,
+                      before.native_prepare_helper_calls) +
+                delta(after.native_finish_helper_calls,
+                      before.native_finish_helper_calls);
+  const u64 helper_assisted_instructions =
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_helper_instructions,
+                  before.jit_v2_helper_instructions)
+          : std::min(native_instructions,
+                     delta(after.native_prepare_helper_calls,
+                           before.native_prepare_helper_calls));
   const u64 inline_native_instructions =
-      native_instructions - helper_assisted_instructions;
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_inline_instructions,
+                  before.jit_v2_inline_instructions)
+          : native_instructions - helper_assisted_instructions;
   const double helper_assisted_coverage =
       total_instructions == 0
           ? 0.0
