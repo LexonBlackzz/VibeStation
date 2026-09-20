@@ -3269,6 +3269,7 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                             static_cast<u8>(clamp_u8_i(g_num / area));
                         const u8 mb =
                             static_cast<u8>(clamp_u8_i(b_num / area));
+
                         u16 out15 = texel;
                         if (!raw_texture) {
                             if (dither_enabled_) {
@@ -3299,61 +3300,6 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     g_num += step_g_x;
                     b_num += step_b_x;
                 }
-            }
-            w0_row += step_w0_y;
-            w1_row += step_w1_y;
-            w2_row += step_w2_y;
-            u_row += step_u_y;
-            v_row += step_v_y;
-            r_row += step_r_y;
-            g_row += step_g_y;
-            b_row += step_b_y;
-        }
-        if (profile_raster) {
-                        ++profile_covered;
-                    }
-                    const u8 u = static_cast<u8>(u_num / area);
-                    const u8 v_coord = static_cast<u8>(v_num / area);
-                    const u16 texel = read_texel(texture, u, v_coord);
-                    if (profile_raster && texel == 0) {
-                        ++profile_transparent;
-                    }
-                    if (texel != 0) {
-                        const u8 mr = static_cast<u8>(std::clamp(r_num / area, 0, 255));
-                        const u8 mg = static_cast<u8>(std::clamp(g_num / area, 0, 255));
-                        const u8 mb = static_cast<u8>(std::clamp(b_num / area, 0, 255));
-
-                        u16 out15 = texel;
-                        if (!raw_texture) {
-                            if (dither_enabled_) {
-                                out15 =
-                                    modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
-                            }
-                            else {
-                                out15 = modulate_texel_15bit(texel, mr, mg, mb);
-                            }
-                        }
-                        const bool texel_semi =
-                            semi_transparency_mode_ && ((texel & 0x8000u) != 0);
-                        if (profile_raster && texel_semi) {
-                            ++profile_semi;
-                        }
-                        if (texel_semi) {
-                            set_pixel_clipped(x, y, out15, true);
-                        }
-                        else {
-                            write_pixel_opaque_clipped(x, y, out15);
-                        }
-                    }
-                }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                u_num += step_u_x;
-                v_num += step_v_x;
-                r_num += step_r_x;
-                g_num += step_g_x;
-                b_num += step_b_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
