@@ -2023,6 +2023,9 @@ void CpuOptimizedBackend::record_block_entry(DecodedBlock &block) {
     block.profile_frame_runtime_reject_details.fill(
         NativeBlockRejectDetail::None);
     block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
   }
   ++block.profile_frame_entries;
 }
@@ -2037,12 +2040,16 @@ void CpuOptimizedBackend::record_native_block_entry(DecodedBlock &block) {
     block.profile_frame_runtime_reject_details.fill(
         NativeBlockRejectDetail::None);
     block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
   }
   ++block.profile_frame_native_entries;
 }
 
 void CpuOptimizedBackend::record_runtime_reject(
-    DecodedBlock &block, NativeBlockRejectDetail detail) {
+    DecodedBlock &block, NativeBlockRejectDetail detail,
+    NativeMemoryRegion memory_region) {
   if (!g_profile_detailed_timing || detail == NativeBlockRejectDetail::None) {
     return;
   }
@@ -2054,9 +2061,28 @@ void CpuOptimizedBackend::record_runtime_reject(
     block.profile_frame_runtime_reject_details.fill(
         NativeBlockRejectDetail::None);
     block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
   }
 
   ++block.profile_frame_runtime_rejects;
+  if (detail == NativeBlockRejectDetail::Memory) {
+    switch (memory_region) {
+    case NativeMemoryRegion::Scratchpad:
+      ++block.profile_frame_memory_reject_scratchpad;
+      break;
+    case NativeMemoryRegion::BiosReadOnly:
+      ++block.profile_frame_memory_reject_bios;
+      break;
+    case NativeMemoryRegion::Ram:
+    case NativeMemoryRegion::Mmio:
+    case NativeMemoryRegion::UnknownSlow:
+    default:
+      ++block.profile_frame_memory_reject_unknown;
+      break;
+    }
+  }
   for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
        ++i) {
     if (block.profile_frame_runtime_reject_details[i] == detail) {
@@ -2124,18 +2150,42 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
     hot.runtime_rejects = block.profile_frame_runtime_rejects;
     NativeBlockRejectDetail dominant_runtime_reject =
         NativeBlockRejectDetail::None;
+    NativeBlockRejectDetail secondary_runtime_reject =
+        NativeBlockRejectDetail::None;
     u32 dominant_runtime_reject_count = 0;
+    u32 secondary_runtime_reject_count = 0;
     for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
          ++i) {
-      if (block.profile_frame_runtime_reject_counts[i] >
-          dominant_runtime_reject_count) {
-        dominant_runtime_reject =
-            block.profile_frame_runtime_reject_details[i];
-        dominant_runtime_reject_count =
-            block.profile_frame_runtime_reject_counts[i];
+      const u32 count = block.profile_frame_runtime_reject_counts[i];
+      const NativeBlockRejectDetail detail =
+          block.profile_frame_runtime_reject_details[i];
+      if (count > dominant_runtime_reject_count) {
+        secondary_runtime_reject = dominant_runtime_reject;
+        secondary_runtime_reject_count = dominant_runtime_reject_count;
+        dominant_runtime_reject = detail;
+        dominant_runtime_reject_count = count;
+      } else if (count > secondary_runtime_reject_count) {
+        secondary_runtime_reject = detail;
+        secondary_runtime_reject_count = count;
       }
     }
     hot.runtime_reject_dominant_count = dominant_runtime_reject_count;
+    hot.runtime_reject_secondary_count = secondary_runtime_reject_count;
+
+    NativeMemoryRegion dominant_memory_region = NativeMemoryRegion::UnknownSlow;
+    u32 dominant_memory_region_count = block.profile_frame_memory_reject_unknown;
+    if (block.profile_frame_memory_reject_scratchpad >
+        dominant_memory_region_count) {
+      dominant_memory_region = NativeMemoryRegion::Scratchpad;
+      dominant_memory_region_count =
+          block.profile_frame_memory_reject_scratchpad;
+    }
+    if (block.profile_frame_memory_reject_bios >
+        dominant_memory_region_count) {
+      dominant_memory_region = NativeMemoryRegion::BiosReadOnly;
+      dominant_memory_region_count = block.profile_frame_memory_reject_bios;
+    }
+    hot.runtime_memory_region_count = dominant_memory_region_count;
     hot.estimated_guest_instructions =
         block.profile_frame_entries *
         static_cast<u64>(block.instruction_count);
@@ -2152,6 +2202,13 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
                    native_reject_detail_name(block.native_reject_detail));
     copy_stat_text(hot.runtime_reject_detail,
                    native_reject_detail_name(dominant_runtime_reject));
+    copy_stat_text(hot.runtime_reject_secondary_detail,
+                   native_reject_detail_name(secondary_runtime_reject));
+    copy_stat_text(
+        hot.runtime_memory_region,
+        dominant_memory_region_count == 0
+            ? "none"
+            : native_memory_region_name(dominant_memory_region));
 
     std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
     for (u32 i = 0; i < block.instruction_count; ++i) {
