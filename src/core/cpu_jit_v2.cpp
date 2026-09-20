@@ -815,11 +815,21 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return helper_step();
     }
 
-    auto found = impl_->blocks.find(start_pc);
-    if (found != impl_->blocks.end()) {
-      Impl::Block &block = found->second;
+    Impl::Block *block_ptr = impl_->lookup_dispatch(start_pc);
+    if (block_ptr != nullptr) {
+      ++stats_.cache_hits;
+    } else {
+      auto found = impl_->blocks.find(start_pc);
+      if (found != impl_->blocks.end()) {
+        block_ptr = &found->second;
+        impl_->remember_dispatch(*block_ptr);
+        ++stats_.cache_hits;
+      }
+    }
+
+    if (block_ptr != nullptr) {
       bool coherent = true;
-      for (u32 i = 0; i < block.instruction_count; ++i) {
+      for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
         const u32 inst_pc = start_pc + i * 4u;
         if (!cpu_.instruction_cacheable(inst_pc)) {
           coherent = false;
@@ -830,18 +840,19 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
         const auto &inst_line = cpu_.icache_[inst_index];
         if (!inst_line.valid || inst_line.tag != inst_tag ||
-            inst_line.words[inst_word] != block.words[i]) {
+            inst_line.words[inst_word] != block_ptr->words[i]) {
           coherent = false;
           break;
         }
       }
       if (!coherent) {
-        impl_->blocks.erase(found);
-        found = impl_->blocks.end();
+        impl_->forget_dispatch(start_pc);
+        impl_->blocks.erase(start_pc);
+        block_ptr = nullptr;
       }
     }
 
-    if (found == impl_->blocks.end()) {
+    if (block_ptr == nullptr) {
       ++stats_.cache_misses;
       ++stats_.native_compile_attempts;
 
