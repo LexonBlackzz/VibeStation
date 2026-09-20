@@ -840,10 +840,62 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       }
     }
 
+    struct SimIcacheLine {
+      u32 index = 0;
+      u32 tag = 0;
+      bool valid = false;
+      bool refilled = false;
+    };
+    std::array<SimIcacheLine, 24> sim_icache{};
+    u32 sim_icache_count = 0u;
+    auto sim_line = [&](u32 index) -> SimIcacheLine & {
+      for (u32 i = 0; i < sim_icache_count; ++i) {
+        if (sim_icache[i].index == index) {
+          return sim_icache[i];
+        }
+      }
+      SimIcacheLine &state = sim_icache[sim_icache_count++];
+      state.index = index;
+      state.tag = cpu_.icache_[index].tag;
+      state.valid = cpu_.icache_[index].valid;
+      state.refilled = false;
+      return state;
+    };
+
+    // Model the interpreter's direct-mapped I-cache effects instruction by
+    // instruction. A data store invalidates by cache index, so an unrelated
+    // scratchpad/RAM address can evict a code line and force a 4-cycle refill
+    // before the next guest instruction in this same native block.
+    u32 fetch_penalty = 0u;
+    u32 store_cursor = 0u;
+    for (u32 i = 0; i < block.instruction_count; ++i) {
+      const u32 inst_pc = start_pc + i * 4u;
+      const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+      const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+      SimIcacheLine &fetch_state = sim_line(inst_index);
+      if (!fetch_state.valid || fetch_state.tag != inst_tag) {
+        fetch_penalty += 4u;
+        fetch_state.valid = true;
+        fetch_state.tag = inst_tag;
+        fetch_state.refilled = true;
+      }
+
+      if (store_cursor < block.store_count &&
+          block.store_instruction_index[store_cursor] == i) {
+        const u32 store_phys = psx::mask_address(store_addrs[store_cursor]);
+        const u32 store_index = (store_phys >> 4u) & 0xFFu;
+        SimIcacheLine &store_state = sim_line(store_index);
+        store_state.valid = false;
+        store_state.refilled = false;
+        ++store_cursor;
+      }
+    }
+
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
     const u32 worst_cycles =
-        block.base_cycles + main_ram_store_count + (block.has_branch ? 1u : 0u);
+        block.base_cycles + main_ram_store_count + fetch_penalty +
+        (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
       ++stats_.native_reject_budget;
@@ -863,7 +915,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
     const u32 count = block.instruction_count;
     const u32 consumed_cycles =
-        block.base_cycles + main_ram_store_count +
+        block.base_cycles + main_ram_store_count + fetch_penalty +
         ((block.has_branch && branch_taken) ? 1u : 0u);
 
     if (block.has_branch) {
@@ -909,13 +961,32 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     stats_.native_cycles += consumed_cycles;
     stats_.executed_cycles += consumed_cycles;
 
-    // Match System::write32's code-coherency notification after the direct
-    // write. Do this last: invalidation is allowed to erase the current V2
-    // block, so no Block references are touched after this loop.
+    // Commit the I-cache state that the interpreter would have produced
+    // while fetching instructions between these stores.
+    for (u32 i = 0; i < sim_icache_count; ++i) {
+      const SimIcacheLine &state = sim_icache[i];
+      auto &line = cpu_.icache_[state.index];
+      if (!state.valid) {
+        line.valid = false;
+        continue;
+      }
+      if (state.refilled || !line.valid || line.tag != state.tag) {
+        line.tag = state.tag;
+        for (u32 word = 0; word < 4u; ++word) {
+          line.words[word] =
+              cpu_.sys_->read32_instruction(state.tag + word * 4u);
+        }
+      }
+      line.valid = true;
+    }
+
+    // Direct memory writes still invalidate any compiled code that physically
+    // overlaps their targets. The CPU I-cache was modeled above, so use the
+    // backend-only hook here rather than invalidating it a second time.
     const u32 completed_store_count = block.store_count;
     if (completed_store_count != 0u) {
       for (u32 i = 0; i < completed_store_count; ++i) {
-        cpu_.notify_code_write(store_addrs[i], 4u);
+        cpu_.notify_jit_code_write_only(store_addrs[i], 4u);
       }
     }
     return true;
