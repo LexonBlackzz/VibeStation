@@ -577,6 +577,81 @@ bool test_gs_untextured_rasterization() {
 
     bool ok = true;
 
+    // Point coordinates use the GS nearest-pixel convention after XYOFFSET.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 0u); // point
+        ad(gs, 0x01, 0xA0403020u);
+        ad(gs, 0x05, xyz(16, 16));
+
+        ok = expect(gs.vram().read_pixel(0, 1, 1, 0, 1) == 0xA0403020u,
+                    "GS point raster pixel mismatch") && ok;
+        ok = expect(gs.stats().raster_draws == 1 &&
+                    gs.stats().raster_pixels == 1 &&
+                    gs.stats().skipped_raster_draws == 0,
+                    "GS point raster statistics mismatch") && ok;
+    }
+
+    // A center-to-center line excludes the terminal pixel according to the
+    // GS diamond-exit rule, avoiding duplicate endpoints in connected strips.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 1u); // line list
+        ad(gs, 0x01, 0xC0556677u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(48, 0));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xC0556677u &&
+                    gs.vram().read_pixel(0, 1, 0, 0, 1) == 0xC0556677u &&
+                    gs.vram().read_pixel(0, 2, 0, 0, 1) == 0xC0556677u,
+                    "GS line raster coverage mismatch") && ok;
+        ok = expect(gs.vram().read_pixel(0, 3, 0, 0, 1) == 0,
+                    "GS line raster included terminal endpoint") && ok;
+        ok = expect(gs.stats().raster_draws == 1 &&
+                    gs.stats().raster_pixels == 3,
+                    "GS line raster statistics mismatch") && ok;
+    }
+
+    // In a line strip the shared vertex is emitted by the following segment,
+    // not by both segments.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 2u); // line strip
+        ad(gs, 0x01, 0xE0112233u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(32, 0));
+        ad(gs, 0x05, xyz(32, 32));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xE0112233u &&
+                    gs.vram().read_pixel(0, 1, 0, 0, 1) == 0xE0112233u &&
+                    gs.vram().read_pixel(0, 2, 0, 0, 1) == 0xE0112233u &&
+                    gs.vram().read_pixel(0, 2, 1, 0, 1) == 0xE0112233u,
+                    "GS line-strip shared endpoint mismatch") && ok;
+        ok = expect(gs.vram().read_pixel(0, 2, 2, 0, 1) == 0,
+                    "GS line strip included final endpoint") && ok;
+        ok = expect(gs.stats().raster_draws == 2 &&
+                    gs.stats().raster_pixels == 4,
+                    "GS line-strip raster statistics mismatch") && ok;
+    }
+
     // Flat untextured 2x2 sprite.
     {
         ps2::GsCore gs;

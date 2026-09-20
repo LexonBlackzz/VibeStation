@@ -91,6 +91,17 @@ public:
     [[nodiscard]] static bool supported_target(const GsRasterContext& ctx);
     [[nodiscard]] static bool supported_texture(const GsTextureState& texture);
 
+    static u64 draw_point(
+        GsVram& vram,
+        const GsRasterContext& ctx,
+        const GsRasterVertex& vertex);
+
+    static u64 draw_line(
+        GsVram& vram,
+        const GsRasterContext& ctx,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b);
+
     static u64 draw_sprite(
         GsVram& vram,
         const GsRasterContext& ctx,

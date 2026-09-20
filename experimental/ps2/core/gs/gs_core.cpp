@@ -568,7 +568,11 @@ void GsCore::emit_primitive(
 
     const GsRasterContext ctx = raster_context();
     u64 pixels = 0;
-    if (prim == 6u && vertex_count >= 2u) {
+    if (prim == 0u && vertex_count >= 1u) {
+        pixels = GsRasterizer::draw_point(vram_, ctx, a);
+    } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
+        pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
+    } else if (prim == 6u && vertex_count >= 2u) {
         pixels = GsRasterizer::draw_sprite(vram_, ctx, a, b);
     } else if ((prim == 3u || prim == 4u || prim == 5u) && vertex_count >= 3u) {
         pixels = GsRasterizer::draw_triangle(vram_, ctx, a, b, c);
@@ -609,7 +613,7 @@ void GsCore::submit_vertex(u64 xyz) {
     v.q = std::bit_cast<float>(static_cast<u32>(registers_[kRegRgbaq] >> 32));
 
     switch (prim) {
-    case 0: // point: counted, raster support comes later.
+    case 0: // point
         draw_vertices_[0] = v;
         emit_primitive(v, {}, {}, 1);
         draw_vertex_count_ = 0;

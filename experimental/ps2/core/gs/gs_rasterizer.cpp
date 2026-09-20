@@ -434,6 +434,195 @@ bool GsRasterizer::draw_pixel(
     return true;
 }
 
+u64 GsRasterizer::draw_point(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    const GsRasterVertex& vertex) {
+    if (!supported_target(ctx) || !supported_texture(ctx.texture)) return 0;
+
+    const s32 x = static_cast<s32>(
+        std::floor(static_cast<double>(vertex.x) / 16.0 + 0.5));
+    const s32 y = static_cast<s32>(
+        std::floor(static_cast<double>(vertex.y) / 16.0 + 0.5));
+
+    s32 u = vertex.u;
+    s32 v = vertex.v;
+    if (ctx.texture.enabled && !ctx.texture.fst) {
+        u = stq_to_fixed(vertex.s, vertex.q, ctx.texture.width);
+        v = stq_to_fixed(vertex.t, vertex.q, ctx.texture.height);
+    }
+
+    const u32 rgba = shade_pixel(
+        vram, ctx.texture, u, v, vertex.rgba);
+    return draw_pixel(vram, ctx, x, y, vertex.z, rgba) ? 1u : 0u;
+}
+
+u64 GsRasterizer::draw_line(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b) {
+    if (!supported_target(ctx) || !supported_texture(ctx.texture)) return 0;
+
+    const double x0 = static_cast<double>(a.x) / 16.0;
+    const double y0 = static_cast<double>(a.y) / 16.0;
+    const double x1 = static_cast<double>(b.x) / 16.0;
+    const double y1 = static_cast<double>(b.y) / 16.0;
+    const double dx = x1 - x0;
+    const double dy = y1 - y0;
+
+    if (dx == 0.0 && dy == 0.0) {
+        return draw_point(vram, ctx, b);
+    }
+
+    const bool step_x = std::abs(dx) >= std::abs(dy);
+    const bool pos_x = dx >= 0.0;
+    const bool pos_y = dy >= 0.0;
+    const s32 dxi = pos_x ? 1 : -1;
+    const s32 dyi = pos_y ? 1 : -1;
+
+    double rx0 = std::floor(x0 + 0.5);
+    double ry0 = std::floor(y0 + 0.5);
+    double rx1 = std::floor(x1 + 0.5);
+    double ry1 = std::floor(y1 + 0.5);
+
+    // Match the GS diamond-exit endpoint rule used by the reference software
+    // renderer. This matters for connected line strips: adjacent segments do
+    // not double-draw their shared endpoint.
+    const auto exits_diamond = [&](double ex, double ey) {
+        const double distance = std::abs(ex) + std::abs(ey);
+        if (distance < 0.5) return false;
+        if (step_x) {
+            const bool direction_ok = pos_x ? ex > 0.0 : ex < 0.0;
+            return direction_ok &&
+                   (distance > 0.5 || ey >= 0.0);
+        }
+
+        const bool direction_ok = pos_y ? ey > 0.0 : ey < 0.0;
+        return direction_ok &&
+               (distance > 0.5 || ex >= 0.0);
+    };
+
+    const bool draw_first = !exits_diamond(x0 - rx0, y0 - ry0);
+    const bool draw_last = exits_diamond(x1 - rx1, y1 - ry1);
+
+    if (!draw_first) {
+        rx0 += step_x ? dxi : 0;
+        ry0 += step_x ? 0 : dyi;
+    }
+    if (!draw_last) {
+        rx1 -= step_x ? dxi : 0;
+        ry1 -= step_x ? 0 : dyi;
+    }
+
+    const s32 start_major =
+        static_cast<s32>(step_x ? rx0 : ry0);
+    const s32 end_major =
+        static_cast<s32>(step_x ? rx1 : ry1);
+    const s32 major_step = step_x ? dxi : dyi;
+
+    if ((major_step > 0 && start_major > end_major) ||
+        (major_step < 0 && start_major < end_major)) {
+        return 0;
+    }
+
+    auto interpolate_u32 = [](u32 lhs, u32 rhs, long double t) {
+        const long double value =
+            static_cast<long double>(lhs) +
+            (static_cast<long double>(rhs) -
+             static_cast<long double>(lhs)) * t;
+        return static_cast<u32>(std::clamp(
+            value,
+            static_cast<long double>(0),
+            static_cast<long double>(std::numeric_limits<u32>::max())));
+    };
+    auto interpolate_s32 = [](s32 lhs, s32 rhs, long double t) {
+        const long double value =
+            static_cast<long double>(lhs) +
+            (static_cast<long double>(rhs) -
+             static_cast<long double>(lhs)) * t;
+        return static_cast<s32>(std::clamp(
+            value,
+            static_cast<long double>(std::numeric_limits<s32>::min()),
+            static_cast<long double>(std::numeric_limits<s32>::max())));
+    };
+    auto interpolate_rgba_line = [](u32 lhs, u32 rhs, long double t) {
+        u32 out = 0;
+        for (u32 shift : {0u, 8u, 16u, 24u}) {
+            const long double value =
+                static_cast<long double>(channel(lhs, shift)) +
+                (static_cast<long double>(channel(rhs, shift)) -
+                 static_cast<long double>(channel(lhs, shift))) * t;
+            const u32 component = static_cast<u32>(
+                std::clamp(value, 0.0L, 255.0L));
+            out |= component << shift;
+        }
+        return out;
+    };
+
+    u64 pixels = 0;
+    for (s32 major = start_major;; major += major_step) {
+        long double t = 0.0L;
+        if (step_x) {
+            t = dx != 0.0
+                ? (static_cast<long double>(major) -
+                   static_cast<long double>(x0)) /
+                  static_cast<long double>(dx)
+                : 0.0L;
+        } else {
+            t = dy != 0.0
+                ? (static_cast<long double>(major) -
+                   static_cast<long double>(y0)) /
+                  static_cast<long double>(dy)
+                : 0.0L;
+        }
+        t = std::clamp(t, 0.0L, 1.0L);
+
+        const double dependent =
+            step_x ? y0 + dy * static_cast<double>(t)
+                   : x0 + dx * static_cast<double>(t);
+        const s32 x = step_x
+            ? major
+            : static_cast<s32>(std::floor(dependent + 0.5));
+        const s32 y = step_x
+            ? static_cast<s32>(std::floor(dependent + 0.5))
+            : major;
+
+        s32 u = interpolate_s32(a.u, b.u, t);
+        s32 v = interpolate_s32(a.v, b.v, t);
+        if (ctx.texture.enabled && !ctx.texture.fst) {
+            const float s = static_cast<float>(
+                static_cast<long double>(a.s) +
+                (static_cast<long double>(b.s) -
+                 static_cast<long double>(a.s)) * t);
+            const float tex_t = static_cast<float>(
+                static_cast<long double>(a.t) +
+                (static_cast<long double>(b.t) -
+                 static_cast<long double>(a.t)) * t);
+            const float q = static_cast<float>(
+                static_cast<long double>(a.q) +
+                (static_cast<long double>(b.q) -
+                 static_cast<long double>(a.q)) * t);
+            u = stq_to_fixed(s, q, ctx.texture.width);
+            v = stq_to_fixed(tex_t, q, ctx.texture.height);
+        }
+
+        const u32 vertex_rgba = ctx.gouraud
+            ? interpolate_rgba_line(a.rgba, b.rgba, t)
+            : b.rgba;
+        const u32 rgba = shade_pixel(
+            vram, ctx.texture, u, v, vertex_rgba);
+        const u32 z = interpolate_u32(a.z, b.z, t);
+        if (draw_pixel(vram, ctx, x, y, z, rgba)) {
+            ++pixels;
+        }
+
+        if (major == end_major) break;
+    }
+
+    return pixels;
+}
+
 u64 GsRasterizer::draw_sprite(
     GsVram& vram,
     const GsRasterContext& ctx,
