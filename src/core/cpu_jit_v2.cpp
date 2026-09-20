@@ -253,6 +253,127 @@ struct V2NativeRuntime {
 };
 
 using V2NativeFn = u32 (*)(u32 *, const V2NativeRuntime *);
+using V2StepHelperFn = u32 (*)(Cpu *);
+
+class V2CodeArena {
+public:
+  V2CodeArena() = default;
+  ~V2CodeArena() { reset(); }
+
+  V2CodeArena(const V2CodeArena &) = delete;
+  V2CodeArena &operator=(const V2CodeArena &) = delete;
+
+  void *copy_code(const void *src, size_t size) {
+    if (src == nullptr || size == 0u) {
+      return nullptr;
+    }
+
+    constexpr size_t kAlignment = 16u;
+    constexpr size_t kDefaultChunk = 4u * 1024u * 1024u;
+
+    if (chunks_.empty() ||
+        align_up(chunks_.back().used, kAlignment) + size >
+            chunks_.back().capacity) {
+      const size_t requested =
+          std::max(kDefaultChunk, align_up(size, static_cast<size_t>(4096u)));
+      Chunk chunk{};
+      chunk.base = allocate_executable(requested);
+      if (chunk.base == nullptr) {
+        return nullptr;
+      }
+      chunk.capacity = requested;
+      chunks_.push_back(chunk);
+    }
+
+    Chunk &chunk = chunks_.back();
+    const size_t offset = align_up(chunk.used, kAlignment);
+    u8 *dst = chunk.base + offset;
+    std::memcpy(dst, src, size);
+    chunk.used = offset + size;
+    bytes_used_ += size;
+
+#if defined(_WIN32)
+    FlushInstructionCache(GetCurrentProcess(), dst, size);
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin___clear_cache(reinterpret_cast<char *>(dst),
+                            reinterpret_cast<char *>(dst + size));
+#endif
+    return dst;
+  }
+
+  void reset() {
+    for (Chunk &chunk : chunks_) {
+      free_executable(chunk.base, chunk.capacity);
+    }
+    chunks_.clear();
+    bytes_used_ = 0u;
+  }
+
+  size_t bytes_used() const { return bytes_used_; }
+
+private:
+  struct Chunk {
+    u8 *base = nullptr;
+    size_t capacity = 0u;
+    size_t used = 0u;
+  };
+
+  static size_t align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1u) & ~(alignment - 1u);
+  }
+
+  static u8 *allocate_executable(size_t size) {
+#if defined(_WIN32)
+    return static_cast<u8 *>(VirtualAlloc(nullptr, size,
+                                         MEM_RESERVE | MEM_COMMIT,
+                                         PAGE_EXECUTE_READWRITE));
+#else
+    void *ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return ptr == MAP_FAILED ? nullptr : static_cast<u8 *>(ptr);
+#endif
+  }
+
+  static void free_executable(u8 *ptr, size_t size) {
+    if (ptr == nullptr) {
+      return;
+    }
+#if defined(_WIN32)
+    (void)size;
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
+    munmap(ptr, size);
+#endif
+  }
+
+  std::vector<Chunk> chunks_;
+  size_t bytes_used_ = 0u;
+};
+
+u32 v2_step_helper(Cpu *cpu) {
+  return cpu != nullptr ? cpu->step() : 0u;
+}
+
+std::unique_ptr<Xbyak::CodeGenerator> compile_step_helper_trampoline() {
+  auto code = std::make_unique<Xbyak::CodeGenerator>(256);
+#if defined(_WIN32)
+  code->sub(code->rsp, 40);
+#else
+  code->sub(code->rsp, 8);
+#endif
+  code->mov(code->rax,
+            reinterpret_cast<size_t>(&v2_step_helper));
+  code->call(code->rax);
+#if defined(_WIN32)
+  code->add(code->rsp, 40);
+#else
+  code->add(code->rsp, 8);
+#endif
+  code->ret();
+  code->ready();
+  return code;
+}
+
 
 int cache_slot(const std::array<u8, 6> &cached, u8 guest_reg) {
   for (int i = 0; i < static_cast<int>(cached.size()); ++i) {
