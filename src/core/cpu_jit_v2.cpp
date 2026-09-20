@@ -1356,6 +1356,7 @@ void CpuJitV2Backend::invalidate_range(u32 phys_or_normalized_addr,
     const u32 block_last = it->second.phys_end & ~0x0Fu;
     const bool overlaps = block_first <= last_line && block_last >= first_line;
     if (overlaps) {
+      impl_->forget_dispatch(it->second.start_pc);
       it = impl_->blocks.erase(it);
       ++stats_.invalidations;
       ++stats_.invalidation_blocks_invalidated;
@@ -1372,6 +1373,7 @@ void CpuJitV2Backend::begin_frame(u32 frame_index) {
 }
 
 void CpuJitV2Backend::flush() {
+  impl_->clear_dispatch();
   impl_->blocks.clear();
   impl_->rejected_pcs.clear();
   impl_->rejected_pages.clear();
