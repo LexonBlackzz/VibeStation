@@ -2449,6 +2449,11 @@ void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
       }
     }
   }
+  notify_jit_code_write_only(phys_or_normalized_addr, size_bytes);
+}
+
+void Cpu::notify_jit_code_write_only(u32 phys_or_normalized_addr,
+                                     u32 size_bytes) {
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
