@@ -1,6 +1,6 @@
 #include "core/ps2_system.h"
 
-#include <cstdlib>
+#include <array>\n#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -150,7 +150,24 @@ std::filesystem::path create_test_bios() {
             write32(offset + 12, file_size);
         };
 
-    write32(0, 0x401A7800u);
+    const std::array<ps2::u32, 9> reset_code = {
+        0x401A7800u, 0x00000000u, 0x2B410059u,
+        0x14200005u, 0x00000000u, 0x3C1ABFC0u,
+        0x375A0800u, 0x03400008u, 0x00000000u,
+    };
+    for (std::size_t i = 0; i < reset_code.size(); ++i) {
+        write32(i * 4, reset_code[i]);
+    }
+
+    const std::array<ps2::u32, 4> stage_two = {
+        0x3C1A9FC4u, 0x375A1000u, 0x03400008u, 0x00000000u,
+    };
+    for (std::size_t i = 0; i < stage_two.size(); ++i) {
+        write32(0x800 + (i * 4), stage_two[i]);
+    }
+
+    write32(0x41000, 0x24021234u);
+    write32(0x41004, 0x70000000u);
 
     constexpr std::size_t romdir = 0x1000;
     write_entry(romdir + 0x00, "RESET", 0, 0x1000);
@@ -239,6 +256,24 @@ bool test_bios_mapping_and_startup() {
         expect(
             system.reset_instruction() == 0x401A7800u,
             "BIOS reset instruction mismatch") &&
+        ok;
+
+    std::string run_error;
+    const ps2::u64 ran = system.run_ee(64, run_error);
+    ok =
+        expect(ran == 14, "unexpected synthetic BIOS instruction count") &&
+        ok;
+    ok =
+        expect(system.ee().state().pc == 0x9FC41004u,
+               "synthetic BIOS did not follow reset jumps") &&
+        ok;
+    ok =
+        expect(system.ee().state().gpr[2].lo == 0x1234u,
+               "synthetic BIOS ADDIU result mismatch") &&
+        ok;
+    ok =
+        expect(system.ee().halted(),
+               "unsupported instruction did not halt interpreter") &&
         ok;
 
     std::error_code remove_error;

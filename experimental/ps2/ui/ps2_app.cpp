@@ -122,6 +122,7 @@ void Ps2App::run() {
 
     while (!quit) {
         process_events(quit);
+        update_emulation();
 
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_NewFrame();
@@ -208,6 +209,13 @@ void Ps2App::process_events(bool& quit) {
                 } else {
                     reset_core();
                 }
+            } else if (event.key.keysym.sym == SDLK_F6) {
+                emulation_running_ = false;
+                status_message_ = "EE execution paused";
+            } else if (event.key.keysym.sym == SDLK_F8) {
+                if (!emulation_running_) {
+                    step_ee_once();
+                }
             } else if (event.key.keysym.sym == SDLK_F9) {
                 show_ee_debug_ = !show_ee_debug_;
             }
@@ -288,9 +296,26 @@ void Ps2App::menu_bar() {
             reset_core();
         }
         ImGui::Separator();
-        ImGui::MenuItem("Run", nullptr, false, false);
-        ImGui::MenuItem("Pause", nullptr, false, false);
-        ImGui::MenuItem("Step EE Instruction", nullptr, false, false);
+
+        const bool can_execute =
+            system_.bios_started() && !system_.ee().halted();
+
+        if (ImGui::MenuItem(
+                "Run", nullptr, false,
+                can_execute && !emulation_running_)) {
+            emulation_running_ = true;
+            status_message_ = "EE execution running";
+        }
+        if (ImGui::MenuItem(
+                "Pause", "F6", false, emulation_running_)) {
+            emulation_running_ = false;
+            status_message_ = "EE execution paused";
+        }
+        if (ImGui::MenuItem(
+                "Step EE Instruction", "F8", false,
+                can_execute && !emulation_running_)) {
+            step_ee_once();
+        }
         ImGui::EndMenu();
     }
 
@@ -348,7 +373,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 1: BIOS mapping + reset startup";
+    const char* phase = "Phase 2: live R5900 BIOS execution";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -417,7 +442,23 @@ void Ps2App::panel_main() {
 
     ImGui::Text("BIOS execution");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("R5900 interpreter pending");
+    if (!system_.bios_started()) {
+        ImGui::TextDisabled("not started");
+    } else if (system_.ee().halted()) {
+        ImGui::TextColored(
+            ImVec4(0.90f, 0.45f, 0.45f, 1.0f), "halted");
+    } else if (emulation_running_) {
+        ImGui::TextColored(
+            ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "running");
+    } else {
+        ImGui::Text("paused");
+    }
+
+    ImGui::Text("EE instructions");
+    ImGui::SameLine(190.0f);
+    ImGui::Text(
+        "%llu",
+        static_cast<unsigned long long>(state.instructions_executed));
 
     ImGui::Text("GS / IOP / SPU2");
     ImGui::SameLine(190.0f);
@@ -487,23 +528,33 @@ void Ps2App::panel_system() {
     ImGui::Text(
         "Scheduler tick: %llu",
         static_cast<unsigned long long>(system_.scheduler().now()));
+    ImGui::Text(
+        "EE instructions: %llu",
+        static_cast<unsigned long long>(state.instructions_executed));
+    ImGui::Text(
+        "EE state: %s",
+        system_.ee().halted()
+            ? "halted"
+            : (emulation_running_ ? "running" : "paused"));
 
     if (system_.bios_started()) {
         ImGui::Text(
             "Reset instruction: 0x%08X", system_.reset_instruction());
-        ImGui::TextColored(
-            ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-            "BIOS reset state is ready at 0x%08X.",
-            Bios::kResetVector);
+        if (system_.ee().halted()) {
+            ImGui::TextWrapped(
+                "EE halt: %s",
+                system_.ee().halt_reason().c_str());
+        }
     }
 
     ImGui::Spacing();
     ImGui::TextDisabled("Subsystem readiness");
     ImGui::BulletText("BIOS ROM mapping: available");
     ImGui::BulletText("EE reset startup: available");
-    ImGui::BulletText("EE RAM/bus: available");
+    ImGui::BulletText("EE interpreter/COP0 subset: running");
+    ImGui::BulletText("EE scratchpad: available");
+    ImGui::BulletText("Early EE timer/memory-control registers: available");
     ImGui::BulletText("Scheduler: available");
-    ImGui::BulletText("R5900 interpreter/COP0: pending");
     ImGui::BulletText("ELF loader: pending");
     ImGui::BulletText("GS / IOP / SPU2: pending");
 
@@ -528,11 +579,39 @@ void Ps2App::panel_ee_debug() {
         static_cast<unsigned long long>(state.hi),
         static_cast<unsigned long long>(state.lo));
 
-    if (system_.bios_started()) {
-        ImGui::Text(
-            "Instruction @ PC: 0x%08X", system_.reset_instruction());
-        ImGui::SameLine();
-        ImGui::TextDisabled("(fetch only; execution not implemented)");
+    u32 current_instruction = 0;
+    const bool can_fetch_current =
+        system_.bios_started() &&
+        system_.bus().read32(state.pc, current_instruction);
+
+    ImGui::Text(
+        "Instructions: %llu",
+        static_cast<unsigned long long>(state.instructions_executed));
+    ImGui::Text(
+        "Last: PC 0x%08X  opcode 0x%08X",
+        state.last_pc,
+        state.last_instruction);
+    if (can_fetch_current) {
+        ImGui::Text("Current opcode: 0x%08X", current_instruction);
+    }
+    ImGui::Text(
+        "COP0 PRId: 0x%08X  Status: 0x%08X  Count: 0x%08X",
+        state.cop0[15], state.cop0[12], state.cop0[9]);
+
+    if (system_.ee().halted()) {
+        ImGui::TextColored(
+            ImVec4(0.90f, 0.45f, 0.45f, 1.0f),
+            "HALTED");
+        ImGui::TextWrapped("%s", system_.ee().halt_reason().c_str());
+    } else if (system_.bios_started()) {
+        if (emulation_running_) {
+            if (ImGui::Button("Pause EE (F6)")) {
+                emulation_running_ = false;
+                status_message_ = "EE execution paused";
+            }
+        } else if (ImGui::Button("Step EE (F8)")) {
+            step_ee_once();
+        }
     }
 
     ImGui::Separator();
@@ -679,8 +758,8 @@ void Ps2App::panel_about() {
         "dumped from hardware you own.");
     ImGui::Spacing();
     ImGui::TextDisabled(
-        "Current milestone: 4 MiB ROM0 loading, BIOS address aliases, "
-        "and EE reset-vector startup.");
+        "Current milestone: live R5900 reset-code execution with COP0, "
+        "delay slots, scratchpad, and early EE hardware registers.");
 
     ImGui::End();
 }
@@ -725,6 +804,8 @@ bool Ps2App::load_bios_from_path(const std::string& path) {
         return false;
     }
 
+    emulation_running_ = false;
+
     std::snprintf(
         bios_path_input_.data(),
         bios_path_input_.size(),
@@ -749,18 +830,61 @@ bool Ps2App::start_bios() {
         return false;
     }
 
+    emulation_running_ = true;
+
     char message[160]{};
     std::snprintf(
         message,
         sizeof(message),
-        "BIOS ready at 0x%08X (reset opcode 0x%08X)",
+        "BIOS execution started at 0x%08X (reset opcode 0x%08X)",
         Bios::kResetVector,
         system_.reset_instruction());
     status_message_ = message;
     return true;
 }
 
+bool Ps2App::step_ee_once() {
+    if (!system_.bios_started() || system_.ee().halted()) {
+        return false;
+    }
+
+    std::string error;
+    if (!system_.step_ee(error)) {
+        emulation_running_ = false;
+        status_message_ = "EE halted: " + error;
+        return false;
+    }
+
+    char message[128]{};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "EE step -> PC 0x%08X (%llu instructions)",
+        system_.ee().state().pc,
+        static_cast<unsigned long long>(
+            system_.ee().state().instructions_executed));
+    status_message_ = message;
+    return true;
+}
+
+void Ps2App::update_emulation() {
+    if (!emulation_running_ ||
+        !system_.bios_started() ||
+        system_.ee().halted()) {
+        return;
+    }
+
+    std::string error;
+    system_.run_ee(20000, error);
+
+    if (system_.ee().halted()) {
+        emulation_running_ = false;
+        status_message_ = "EE halted: " + system_.ee().halt_reason();
+    }
+}
+
 void Ps2App::reset_core() {
+    emulation_running_ = false;
     system_.reset(0);
     status_message_ =
         system_.bios().loaded()

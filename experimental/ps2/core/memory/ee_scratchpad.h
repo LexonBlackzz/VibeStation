@@ -2,20 +2,18 @@
 
 #include "common/types.h"
 
+#include <array>
+#include <cstddef>
+
 namespace ps2 {
 
-class Bios;
-class EeHw;
-class EeRam;
-class EeScratchpad;
-
-class EeBus {
+class EeScratchpad {
 public:
-    EeBus(
-        EeRam& ram,
-        EeScratchpad& scratchpad,
-        EeHw& hw,
-        const Bios& bios);
+    static constexpr u32 kBase = 0x70000000u;
+    static constexpr std::size_t kSize = 16u * 1024u;
+
+    void reset();
+    [[nodiscard]] bool contains(u32 address, std::size_t width) const;
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
@@ -27,14 +25,8 @@ public:
     [[nodiscard]] bool write32(u32 address, u32 value);
     [[nodiscard]] bool write64(u32 address, u64 value);
 
-    void tick(u64 cycles);
-    [[nodiscard]] static u32 to_physical(u32 address);
-
 private:
-    EeRam& ram_;
-    EeScratchpad& scratchpad_;
-    EeHw& hw_;
-    const Bios& bios_;
+    std::array<u8, kSize> data_{};
 };
 
 } // namespace ps2

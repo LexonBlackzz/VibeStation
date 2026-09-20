@@ -30,6 +30,8 @@ private:
     std::string open_bios_dialog();
     bool load_bios_from_path(const std::string& path);
     bool start_bios();
+    bool step_ee_once();
+    void update_emulation();
     void reset_core();
 
     SDL_Window* window_ = nullptr;
@@ -44,6 +46,7 @@ private:
     bool show_scheduler_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;
+    bool emulation_running_ = false;
 
     std::array<char, 1024> bios_path_input_{};
     std::string status_message_ = "PS2 experimental core ready";
