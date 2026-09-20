@@ -34,6 +34,18 @@ struct GsTextureState {
     bool tcc = false;
     u32 tfx = 0;
     bool fst = true;
+
+    u32 cbp = 0;
+    u32 cpsm = 0;
+    bool csm2 = false;
+    u32 csa = 0;
+    u32 clut_bw = 0;
+    u32 clut_u = 0;
+    u32 clut_v = 0;
+
+    u32 ta0 = 0;
+    u32 ta1 = 0;
+    bool aem = false;
 };
 
 struct GsRasterContext {

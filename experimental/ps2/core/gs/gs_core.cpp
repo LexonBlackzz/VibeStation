@@ -23,6 +23,8 @@ constexpr u32 kRegClamp1 = 0x08;
 constexpr u32 kRegXyoffset1 = 0x18;
 constexpr u32 kRegPrmodecont = 0x1A;
 constexpr u32 kRegPrmode = 0x1B;
+constexpr u32 kRegTexclut = 0x1C;
+constexpr u32 kRegTexa = 0x3B;
 constexpr u32 kRegScissor1 = 0x40;
 constexpr u32 kRegAlpha1 = 0x42;
 constexpr u32 kRegColclamp = 0x46;
@@ -241,7 +243,7 @@ void GsCore::begin_host_to_local() {
     transfer_.total_pixels = transfer_.width * transfer_.height;
 
     if (transfer_.bw == 0 || transfer_.total_pixels == 0 ||
-        !GsVram::supported_color_psm(transfer_.psm)) {
+        !GsVram::supported_transfer_psm(transfer_.psm)) {
         ++stats_.unsupported_transfers;
         transfer_.active = false;
         return;
@@ -278,24 +280,7 @@ void GsCore::consume_image_qword(u64 lo, u64 hi) {
 }
 
 void GsCore::consume_pending_pixels() {
-    u32 bytes_per_pixel = 0;
-    switch (transfer_.psm) {
-    case 0: bytes_per_pixel = 4; break; // PSMCT32
-    case 1: bytes_per_pixel = 3; break; // PSMCT24
-    case 2: // PSMCT16
-    case 10: bytes_per_pixel = 2; break; // PSMCT16S
-    default: return;
-    }
-
-    u32 consumed = 0;
-    while (transfer_.active &&
-           transfer_.pending_size - consumed >= bytes_per_pixel) {
-        u32 value = 0;
-        for (u32 i = 0; i < bytes_per_pixel; ++i) {
-            value |= static_cast<u32>(transfer_.pending[consumed + i]) << (i * 8);
-        }
-        consumed += bytes_per_pixel;
-
+    auto store_pixel = [&](u32 value) {
         const u32 linear_x = transfer_.pixel_index % transfer_.width;
         const u32 linear_y = transfer_.pixel_index / transfer_.width;
         const u32 x = transfer_.dsax +
@@ -303,15 +288,60 @@ void GsCore::consume_pending_pixels() {
         const u32 y = transfer_.dsay +
             (transfer_.diry ? (transfer_.height - 1u - linear_y) : linear_y);
 
-        vram_.write_pixel(
-            transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
+        const bool indexed =
+            transfer_.psm == 19u || transfer_.psm == 20u ||
+            transfer_.psm == 27u || transfer_.psm == 36u ||
+            transfer_.psm == 44u;
+        const bool stored = indexed
+            ? vram_.write_index(
+                transfer_.psm, x, y, transfer_.bp, transfer_.bw, value)
+            : vram_.write_pixel(
+                transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
+        if (!stored) {
+            transfer_.active = false;
+            ++stats_.unsupported_transfers;
+            return;
+        }
+
         ++transfer_.pixel_index;
         ++stats_.host_to_local_pixels;
-
         if (transfer_.pixel_index >= transfer_.total_pixels) {
             transfer_.active = false;
             registers_[kRegTrxdir] =
                 (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+        }
+    };
+
+    u32 consumed = 0;
+
+    if (transfer_.psm == 20u || transfer_.psm == 36u ||
+        transfer_.psm == 44u) {
+        while (transfer_.active && consumed < transfer_.pending_size) {
+            const u8 packed = transfer_.pending[consumed++];
+            store_pixel(packed & 0x0Fu);
+            if (transfer_.active) store_pixel(packed >> 4);
+        }
+    } else {
+        u32 bytes_per_pixel = 0;
+        switch (transfer_.psm) {
+        case 0: bytes_per_pixel = 4; break; // PSMCT32
+        case 1: bytes_per_pixel = 3; break; // PSMCT24
+        case 2: // PSMCT16
+        case 10: bytes_per_pixel = 2; break; // PSMCT16S
+        case 19: // PSMT8
+        case 27: bytes_per_pixel = 1; break; // PSMT8H
+        default: return;
+        }
+
+        while (transfer_.active &&
+               transfer_.pending_size - consumed >= bytes_per_pixel) {
+            u32 value = 0;
+            for (u32 i = 0; i < bytes_per_pixel; ++i) {
+                value |= static_cast<u32>(
+                    transfer_.pending[consumed + i]) << (i * 8);
+            }
+            consumed += bytes_per_pixel;
+            store_pixel(value);
         }
     }
 
@@ -394,6 +424,22 @@ GsRasterContext GsCore::raster_context() const {
         texture.tcc = ((tex0 >> 34) & 1u) != 0;
         texture.tfx = static_cast<u32>((tex0 >> 35) & 0x3u);
         texture.fst = (prim & (1ull << 8)) != 0;
+
+        texture.cbp = static_cast<u32>((tex0 >> 37) & 0x3FFFu);
+        texture.cpsm = static_cast<u32>((tex0 >> 51) & 0xFu);
+        texture.csm2 = ((tex0 >> 55) & 1u) != 0;
+        texture.csa = static_cast<u32>((tex0 >> 56) & 0x1Fu);
+
+        const u64 texclut = registers_[kRegTexclut];
+        texture.clut_bw = static_cast<u32>(texclut & 0x3Fu);
+        texture.clut_u = static_cast<u32>((texclut >> 6) & 0x3Fu);
+        texture.clut_v = static_cast<u32>((texclut >> 12) & 0x3FFu);
+
+        const u64 texa = registers_[kRegTexa];
+        texture.ta0 = static_cast<u32>(texa & 0xFFu);
+        texture.aem = ((texa >> 15) & 1u) != 0;
+        texture.ta1 = static_cast<u32>((texa >> 32) & 0xFFu);
+
         texture.wms = static_cast<u32>(clamp & 0x3u);
         texture.wmt = static_cast<u32>((clamp >> 2) & 0x3u);
         texture.minu = static_cast<u32>((clamp >> 4) & 0x3FFu);

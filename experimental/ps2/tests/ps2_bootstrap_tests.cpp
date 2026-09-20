@@ -852,23 +852,28 @@ bool test_gs_fst_direct_color_texturing() {
                     "textured triangle draw count mismatch") && ok;
     }
 
-    // Valid texture state with FST clear must remain an explicit STQ skip.
+    // FST clear is now a supported STQ path. Default S/T/Q produces a
+    // deterministic origin sample rather than an explicit skip.
     {
         ps2::GsCore gs;
         gs.reset();
+        ok = expect(
+            gs.vram().write_pixel(0, 0, 0, texture_bp, 1, 0xFF123456u),
+            "STQ origin texture setup failed") && ok;
         ad(gs, 0x1A, 1u);
         ad(gs, 0x18, 0u);
         ad(gs, 0x40, scissor);
         ad(gs, 0x47, 0u);
         ad(gs, 0x4C, frame);
         ad(gs, 0x06, tex0(texture_bp, 1, 0, 1, 1, true, 1));
-        ad(gs, 0x00, 6u | (1u << 4)); // TME but FST=0.
+        ad(gs, 0x01, 0xFFFFFFFFu);
+        ad(gs, 0x00, 6u | (1u << 4)); // TME, STQ.
         ad(gs, 0x05, xyz(0, 0));
         ad(gs, 0x05, xyz(32, 32));
         ok = expect(
-            gs.stats().raster_draws == 0 &&
-            gs.stats().skipped_raster_draws == 1,
-            "STQ textured draw was not explicitly skipped") && ok;
+            gs.stats().raster_draws == 1 &&
+            gs.stats().skipped_raster_draws == 0,
+            "STQ textured draw was skipped") && ok;
     }
 
     return ok;
@@ -1147,6 +1152,204 @@ bool test_gs_stq_perspective_texturing() {
     return ok;
 }
 
+
+bool test_gs_indexed_textures_and_texa() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16);
+    };
+    auto uv = [](ps2::u32 u_fp, ps2::u32 v_fp) {
+        return static_cast<ps2::u64>(u_fp & 0x3FFFu) |
+               (static_cast<ps2::u64>(v_fp & 0x3FFFu) << 16);
+    };
+
+    bool ok = true;
+
+    // Indexed swizzle read/write, including the formats embedded in the high
+    // bits of PSMCT32 storage.
+    {
+        ps2::GsVram vram;
+        constexpr ps2::u32 bp = 32;
+        ok = expect(vram.write_index(19, 0, 0, bp, 2, 0x12u) &&
+                    vram.write_index(19, 1, 0, bp, 2, 0x34u),
+                    "PSMT8 write failed") && ok;
+        ok = expect(vram.read_index(19, 0, 0, bp, 2) == 0x12u &&
+                    vram.read_index(19, 1, 0, bp, 2) == 0x34u,
+                    "PSMT8 readback mismatch") && ok;
+        ok = expect(vram.byte_at((bp << 8) + 0u) == 0x12u &&
+                    vram.byte_at((bp << 8) + 4u) == 0x34u,
+                    "PSMT8 column swizzle mismatch") && ok;
+
+        constexpr ps2::u32 bp4 = 48;
+        ok = expect(vram.write_index(20, 0, 0, bp4, 2, 0xAu) &&
+                    vram.write_index(20, 1, 0, bp4, 2, 0xBu),
+                    "PSMT4 write failed") && ok;
+        ok = expect(vram.read_index(20, 0, 0, bp4, 2) == 0xAu &&
+                    vram.read_index(20, 1, 0, bp4, 2) == 0xBu,
+                    "PSMT4 readback mismatch") && ok;
+        ok = expect((vram.byte_at((bp4 << 8) + 0u) & 0x0Fu) == 0xAu &&
+                    (vram.byte_at((bp4 << 8) + 4u) & 0x0Fu) == 0xBu,
+                    "PSMT4 column swizzle mismatch") && ok;
+
+        constexpr ps2::u32 bph = 64;
+        ok = expect(vram.write_pixel(0, 0, 0, bph, 1, 0x11223344u) &&
+                    vram.write_index(27, 0, 0, bph, 1, 0xAAu),
+                    "PSMT8H write failed") && ok;
+        ok = expect(vram.read_pixel(0, 0, 0, bph, 1) == 0xAA223344u,
+                    "PSMT8H high-byte placement mismatch") && ok;
+        ok = expect(vram.write_index(36, 0, 0, bph, 1, 0x5u) &&
+                    vram.read_pixel(0, 0, 0, bph, 1) == 0xA5223344u,
+                    "PSMT4HL placement mismatch") && ok;
+        ok = expect(vram.write_index(44, 0, 0, bph, 1, 0xCu) &&
+                    vram.read_pixel(0, 0, 0, bph, 1) == 0xC5223344u,
+                    "PSMT4HH placement mismatch") && ok;
+    }
+
+    // CSM1 CLUT permutations and TEXA expansion.
+    {
+        ps2::GsVram vram;
+        constexpr ps2::u32 cbp = 96;
+
+        // Logical PSMT4 index 2 maps to raw T32 word 4.
+        vram.write_linear32(cbp, 4, 0x7F112233u);
+        ok = expect(
+            vram.read_clut_color(
+                20, 2, cbp, 0, false, 0, 0, 0, 0, 0, 0, false) ==
+                0x7F112233u,
+            "PSMT4 CSM1 32-bit CLUT permutation mismatch") && ok;
+
+        // Logical PSMT8 index 16 begins at the CSM1 source-column 64.
+        vram.write_linear32(cbp, 64, 0xCC445566u);
+        ok = expect(
+            vram.read_clut_color(
+                19, 16, cbp, 0, false, 0, 0, 0, 0, 0, 0, false) ==
+                0xCC445566u,
+            "PSMT8 CSM1 32-bit CLUT permutation mismatch") && ok;
+
+        constexpr ps2::u32 cbp16 = 104;
+        // Logical 4-bit index 2 maps to raw 16-bit halfword 8.
+        vram.write_linear16(cbp16, 8, 0x001Fu);
+        ok = expect(
+            vram.read_clut_color(
+                20, 2, cbp16, 2, false, 0, 0, 0, 0,
+                0x40u, 0xE0u, false) == 0x400000F8u,
+            "16-bit CLUT TEXA.TA0 expansion mismatch") && ok;
+        vram.write_linear16(cbp16, 8, 0x801Fu);
+        ok = expect(
+            vram.read_clut_color(
+                20, 2, cbp16, 2, false, 0, 0, 0, 0,
+                0x40u, 0xE0u, false) == 0xE00000F8u,
+            "16-bit CLUT TEXA.TA1 expansion mismatch") && ok;
+        vram.write_linear16(cbp16, 8, 0x0000u);
+        ok = expect(
+            vram.read_clut_color(
+                20, 2, cbp16, 2, false, 0, 0, 0, 0,
+                0x40u, 0xE0u, true) == 0,
+            "16-bit CLUT TEXA.AEM zero handling mismatch") && ok;
+    }
+
+    // Host-to-local IMAGE streams for indexed formats.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+
+        const ps2::u64 blit8 =
+            (static_cast<ps2::u64>(2u) << 48) |
+            (static_cast<ps2::u64>(19u) << 56);
+        ad(gs, 0x50, blit8);
+        ad(gs, 0x51, 0);
+        ad(gs, 0x52, 4ull | (1ull << 32));
+        ad(gs, 0x53, 0);
+        gs.write_gif_qword(
+            1ull | (1ull << 15) | (2ull << 58), 0);
+        gs.write_gif_qword(0x0000000004030201ull, 0);
+
+        ok = expect(!gs.transfer_active() &&
+                    gs.vram().read_index(19, 0, 0, 0, 2) == 1u &&
+                    gs.vram().read_index(19, 1, 0, 0, 2) == 2u &&
+                    gs.vram().read_index(19, 2, 0, 0, 2) == 3u &&
+                    gs.vram().read_index(19, 3, 0, 0, 2) == 4u,
+                    "PSMT8 IMAGE upload mismatch") && ok;
+
+        gs.reset();
+        const ps2::u64 blit4 =
+            (static_cast<ps2::u64>(2u) << 48) |
+            (static_cast<ps2::u64>(20u) << 56);
+        ad(gs, 0x50, blit4);
+        ad(gs, 0x51, 0);
+        ad(gs, 0x52, 4ull | (1ull << 32));
+        ad(gs, 0x53, 0);
+        gs.write_gif_qword(
+            1ull | (1ull << 15) | (2ull << 58), 0);
+        gs.write_gif_qword(0x0000000000004321ull, 0);
+
+        ok = expect(!gs.transfer_active() &&
+                    gs.vram().read_index(20, 0, 0, 0, 2) == 1u &&
+                    gs.vram().read_index(20, 1, 0, 0, 2) == 2u &&
+                    gs.vram().read_index(20, 2, 0, 0, 2) == 3u &&
+                    gs.vram().read_index(20, 3, 0, 0, 2) == 4u,
+                    "PSMT4 IMAGE nibble upload mismatch") && ok;
+    }
+
+    // End-to-end PSMT8 + CSM1 palette textured sprite.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        constexpr ps2::u32 texture_bp = 128;
+        constexpr ps2::u32 palette_bp = 160;
+
+        ok = expect(
+            gs.vram().write_index(19, 0, 0, texture_bp, 2, 2u) &&
+            gs.vram().write_index(19, 1, 0, texture_bp, 2, 3u),
+            "indexed sprite texture setup failed") && ok;
+        // CSM1 index 2/3 map to source words 4/5.
+        gs.vram().write_linear32(palette_bp, 4, 0xFF112233u);
+        gs.vram().write_linear32(palette_bp, 5, 0xFF445566u);
+
+        const ps2::u64 frame = static_cast<ps2::u64>(1u) << 16;
+        const ps2::u64 scissor =
+            (static_cast<ps2::u64>(3u) << 16) |
+            (static_cast<ps2::u64>(3u) << 48);
+        const ps2::u64 tex0 =
+            static_cast<ps2::u64>(texture_bp) |
+            (2ull << 14) |
+            (19ull << 20) |
+            (1ull << 26) |
+            (1ull << 34) |
+            (1ull << 35) |
+            (static_cast<ps2::u64>(palette_bp) << 37);
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x46, 1u);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0);
+        ad(gs, 0x08, 0u);
+        ad(gs, 0x00, 6u | (1u << 4) | (1u << 8));
+        ad(gs, 0x01, 0xFFFFFFFFu);
+        ad(gs, 0x03, uv(0, 0));
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x03, uv(32, 16));
+        ad(gs, 0x05, xyz(32, 16));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xFF112233u &&
+            gs.vram().read_pixel(0, 1, 0, 0, 1) == 0xFF445566u,
+            "PSMT8 palette textured sprite mismatch") && ok;
+        ok = expect(gs.stats().textured_raster_draws == 1,
+                    "indexed textured draw was skipped") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1186,6 +1389,7 @@ int main() {
     ok = test_gs_fst_direct_color_texturing() && ok;
     ok = test_gs_depth_layout_and_pixel_pipeline() && ok;
     ok = test_gs_stq_perspective_texturing() && ok;
+    ok = test_gs_indexed_textures_and_texa() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

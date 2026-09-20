@@ -236,13 +236,21 @@ bool GsRasterizer::supported_texture(const GsTextureState& texture) {
         return false;
     if (texture.tfx > 1u) // HIGHLIGHT/HIGHLIGHT2 not modeled yet.
         return false;
+    if (!GsVram::supported_texture_psm(texture.psm))
+        return false;
 
-    // PSMCT32 has native alpha. PSMCT24 is safe only when texture alpha is
-    // ignored. PSMCT16/16S require TEXA semantics before their alpha can be
-    // modeled correctly.
-    if (texture.psm == 0u) return true;
-    if (texture.psm == 1u && !texture.tcc) return true;
-    return false;
+    const bool indexed =
+        texture.psm == 19u || texture.psm == 20u ||
+        texture.psm == 27u || texture.psm == 36u ||
+        texture.psm == 44u;
+    if (indexed) {
+        if (texture.cpsm != 0u && texture.cpsm != 1u &&
+            texture.cpsm != 2u && texture.cpsm != 10u)
+            return false;
+        if (texture.csm2 && texture.clut_bw == 0)
+            return false;
+    }
+    return true;
 }
 
 u32 GsRasterizer::shade_pixel(
@@ -258,14 +266,53 @@ u32 GsRasterizer::shade_pixel(
     const s32 texel_v = wrap_coordinate(
         v >> 4, texture.height, texture.wmt, texture.minv, texture.maxv);
 
-    const u32 raw = vram.read_pixel(
-        texture.psm,
-        static_cast<u32>(texel_u),
-        static_cast<u32>(texel_v),
-        texture.bp,
-        texture.bw);
-    const u32 texture_rgba =
-        texture.psm == 1u ? ((raw & 0x00FFFFFFu) | 0x80000000u) : raw;
+    const u32 x = static_cast<u32>(texel_u);
+    const u32 y = static_cast<u32>(texel_v);
+    const bool indexed =
+        texture.psm == 19u || texture.psm == 20u ||
+        texture.psm == 27u || texture.psm == 36u ||
+        texture.psm == 44u;
+
+    u32 texture_rgba = 0;
+    if (indexed) {
+        const u32 index = vram.read_index(
+            texture.psm, x, y, texture.bp, texture.bw);
+        texture_rgba = vram.read_clut_color(
+            texture.psm,
+            index,
+            texture.cbp,
+            texture.cpsm,
+            texture.csm2,
+            texture.csa,
+            texture.clut_bw,
+            texture.clut_u,
+            texture.clut_v,
+            texture.ta0,
+            texture.ta1,
+            texture.aem);
+    } else {
+        const u32 raw = vram.read_pixel(
+            texture.psm, x, y, texture.bp, texture.bw);
+        if (texture.psm == 0u) {
+            texture_rgba = raw;
+        } else if (texture.psm == 1u) {
+            const u32 rgb = raw & 0x00FFFFFFu;
+            const u32 alpha =
+                (texture.aem && rgb == 0) ? 0u : (texture.ta0 & 0xFFu);
+            texture_rgba = rgb | (alpha << 24);
+        } else {
+            const u16 color = static_cast<u16>(raw);
+            const u32 alpha =
+                (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
+                (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
+                (texture.ta0 & 0xFFu);
+            texture_rgba =
+                (alpha << 24) |
+                ((static_cast<u32>(color) & 0x7C00u) << 9) |
+                ((static_cast<u32>(color) & 0x03E0u) << 6) |
+                ((static_cast<u32>(color) & 0x001Fu) << 3);
+        }
+    }
 
     if (texture.tfx == 1u) { // DECAL
         const u32 alpha = texture.tcc
