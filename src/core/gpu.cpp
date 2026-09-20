@@ -320,6 +320,38 @@ namespace {
         return true;
     }
 
+    struct ExactQuotientStepper {
+        s32 quotient = 0;
+        s32 remainder = 0;
+        s32 quotient_step = 0;
+        s32 remainder_step = 0;
+        s32 divisor = 1;
+
+        void advance() {
+            quotient += quotient_step;
+            remainder += remainder_step;
+            if (remainder >= divisor) {
+                remainder -= divisor;
+                ++quotient;
+            }
+            else if (remainder < 0) {
+                remainder += divisor;
+                --quotient;
+            }
+        }
+    };
+
+    inline ExactQuotientStepper make_exact_quotient_stepper(
+        s32 numerator, s32 numerator_step, s32 divisor) {
+        ExactQuotientStepper stepper{};
+        stepper.quotient = numerator / divisor;
+        stepper.remainder = numerator % divisor;
+        stepper.quotient_step = numerator_step / divisor;
+        stepper.remainder_step = numerator_step % divisor;
+        stepper.divisor = divisor;
+        return stepper;
+    }
+
     inline int dither_bias(s16 x, s16 y) {
         return kDitherTable[static_cast<u16>(y) & 0x3u]
             [static_cast<u16>(x) & 0x3u];
@@ -2798,13 +2830,22 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     span_min_x, span_max_x)) {
                 const s32 span_dx =
                     static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
-                s32 r_num = r_row + step_r_x * span_dx;
-                s32 g_num = g_row + step_g_x * span_dx;
-                s32 b_num = b_row + step_b_x * span_dx;
+                ExactQuotientStepper r_value =
+                    make_exact_quotient_stepper(
+                        r_row + step_r_x * span_dx, step_r_x, area);
+                ExactQuotientStepper g_value =
+                    make_exact_quotient_stepper(
+                        g_row + step_g_x * span_dx, step_g_x, area);
+                ExactQuotientStepper b_value =
+                    make_exact_quotient_stepper(
+                        b_row + step_b_x * span_dx, step_b_x, area);
                 for (s16 x = span_min_x; x <= span_max_x; ++x) {
-                    const u8 r = static_cast<u8>(clamp_u8_i(r_num / area));
-                    const u8 g = static_cast<u8>(clamp_u8_i(g_num / area));
-                    const u8 b = static_cast<u8>(clamp_u8_i(b_num / area));
+                    const u8 r =
+                        static_cast<u8>(clamp_u8_i(r_value.quotient));
+                    const u8 g =
+                        static_cast<u8>(clamp_u8_i(g_value.quotient));
+                    const u8 b =
+                        static_cast<u8>(clamp_u8_i(b_value.quotient));
                     const u16 out15 =
                         pack_rgb15_dithered(r, g, b, 0, x, y, dither_enabled_);
                     if (opaque_path) {
@@ -2813,9 +2854,9 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     else {
                         set_pixel_clipped(x, y, out15, true);
                     }
-                    r_num += step_r_x;
-                    g_num += step_g_x;
-                    b_num += step_b_x;
+                    r_value.advance();
+                    g_value.advance();
+                    b_value.advance();
                 }
             }
             w0_row += step_w0_y;
@@ -2976,11 +3017,15 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                     profile_covered += span_pixels;
                 }
 
-                s32 u_num = u_row + step_u_x * span_dx;
-                s32 v_num = v_row + step_v_x * span_dx;
+                ExactQuotientStepper u_value =
+                    make_exact_quotient_stepper(
+                        u_row + step_u_x * span_dx, step_u_x, area);
+                ExactQuotientStepper v_value =
+                    make_exact_quotient_stepper(
+                        v_row + step_v_x * span_dx, step_v_x, area);
                 for (s16 x = span_min_x; x <= span_max_x; ++x) {
-                    const u8 u = static_cast<u8>(u_num / area);
-                    const u8 v_coord = static_cast<u8>(v_num / area);
+                    const u8 u = static_cast<u8>(u_value.quotient);
+                    const u8 v_coord = static_cast<u8>(v_value.quotient);
                     const u16 texel = read_texel(texture, u, v_coord);
                     if (profile_raster && texel == 0) {
                         ++profile_transparent;
@@ -3011,8 +3056,8 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                             write_pixel_opaque_clipped(x, y, out15);
                         }
                     }
-                    u_num += step_u_x;
-                    v_num += step_v_x;
+                    u_value.advance();
+                    v_value.advance();
                 }
             }
             w0_row += step_w0_y;
@@ -3255,25 +3300,35 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     profile_covered += span_pixels;
                 }
 
-                s32 u_num = u_row + step_u_x * span_dx;
-                s32 v_num = v_row + step_v_x * span_dx;
-                s32 r_num = r_row + step_r_x * span_dx;
-                s32 g_num = g_row + step_g_x * span_dx;
-                s32 b_num = b_row + step_b_x * span_dx;
+                ExactQuotientStepper u_value =
+                    make_exact_quotient_stepper(
+                        u_row + step_u_x * span_dx, step_u_x, area);
+                ExactQuotientStepper v_value =
+                    make_exact_quotient_stepper(
+                        v_row + step_v_x * span_dx, step_v_x, area);
+                ExactQuotientStepper r_value =
+                    make_exact_quotient_stepper(
+                        r_row + step_r_x * span_dx, step_r_x, area);
+                ExactQuotientStepper g_value =
+                    make_exact_quotient_stepper(
+                        g_row + step_g_x * span_dx, step_g_x, area);
+                ExactQuotientStepper b_value =
+                    make_exact_quotient_stepper(
+                        b_row + step_b_x * span_dx, step_b_x, area);
                 for (s16 x = span_min_x; x <= span_max_x; ++x) {
-                    const u8 u = static_cast<u8>(u_num / area);
-                    const u8 v_coord = static_cast<u8>(v_num / area);
+                    const u8 u = static_cast<u8>(u_value.quotient);
+                    const u8 v_coord = static_cast<u8>(v_value.quotient);
                     const u16 texel = read_texel(texture, u, v_coord);
                     if (profile_raster && texel == 0) {
                         ++profile_transparent;
                     }
                     if (texel != 0) {
                         const u8 mr =
-                            static_cast<u8>(clamp_u8_i(r_num / area));
+                            static_cast<u8>(clamp_u8_i(r_value.quotient));
                         const u8 mg =
-                            static_cast<u8>(clamp_u8_i(g_num / area));
+                            static_cast<u8>(clamp_u8_i(g_value.quotient));
                         const u8 mb =
-                            static_cast<u8>(clamp_u8_i(b_num / area));
+                            static_cast<u8>(clamp_u8_i(b_value.quotient));
 
                         u16 out15 = texel;
                         if (!raw_texture) {
@@ -3299,11 +3354,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                             write_pixel_opaque_clipped(x, y, out15);
                         }
                     }
-                    u_num += step_u_x;
-                    v_num += step_v_x;
-                    r_num += step_r_x;
-                    g_num += step_g_x;
-                    b_num += step_b_x;
+                    u_value.advance();
+                    v_value.advance();
+                    r_value.advance();
+                    g_value.advance();
+                    b_value.advance();
                 }
             }
             w0_row += step_w0_y;
