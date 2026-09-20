@@ -258,7 +258,7 @@ void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
 void emit_write_guest(Xbyak::CodeGenerator &code,
                       const std::array<u8, 6> &cached, u8 guest_reg,
                       const Xbyak::Reg32 &src,
-                      std::array<bool, 3> &dirty) {
+                      std::array<bool, 6> &dirty) {
   using namespace Xbyak;
   if (guest_reg == 0u) {
     return;
@@ -301,7 +301,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
               code->dword[code->rdx + static_cast<int>(cached[slot]) * 4]);
   }
 
-  std::array<bool, 3> dirty{};
+  std::array<bool, 6> dirty{};
 
   for (const auto &inst : instructions) {
     const u8 dst = write_reg(inst);
