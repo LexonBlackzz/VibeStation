@@ -9,6 +9,75 @@
 #include <vector>
 
 namespace {
+    struct FramePhaseDiagnostics {
+        bool valid = false;
+        u32 render_frames = 0;
+        u32 reuse_frames = 0;
+        u32 draw_threshold = 0;
+        double render_cpu_ms = 0.0;
+        double render_gpu_ms = 0.0;
+        double render_core_ms = 0.0;
+        double reuse_cpu_ms = 0.0;
+        double reuse_gpu_ms = 0.0;
+        double reuse_core_ms = 0.0;
+    };
+
+    template <size_t N>
+    FramePhaseDiagnostics analyze_frame_phases(
+        const std::array<float, N>& cpu_history,
+        const std::array<float, N>& gpu_history,
+        const std::array<float, N>& core_history,
+        const std::array<u32, N>& draw_history,
+        int count,
+        int write_index) {
+        FramePhaseDiagnostics out{};
+        if (count < 8) {
+            return out;
+        }
+
+        u32 max_draws = 0;
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            max_draws = std::max(max_draws, draw_history[idx]);
+        }
+        if (max_draws < 16u) {
+            return out;
+        }
+
+        out.draw_threshold = std::max<u32>(8u, max_draws / 8u);
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            if (draw_history[idx] >= out.draw_threshold) {
+                ++out.render_frames;
+                out.render_cpu_ms += cpu_history[idx];
+                out.render_gpu_ms += gpu_history[idx];
+                out.render_core_ms += core_history[idx];
+            }
+            else {
+                ++out.reuse_frames;
+                out.reuse_cpu_ms += cpu_history[idx];
+                out.reuse_gpu_ms += gpu_history[idx];
+                out.reuse_core_ms += core_history[idx];
+            }
+        }
+
+        if (out.render_frames == 0 || out.reuse_frames == 0) {
+            return out;
+        }
+        out.render_cpu_ms /= static_cast<double>(out.render_frames);
+        out.render_gpu_ms /= static_cast<double>(out.render_frames);
+        out.render_core_ms /= static_cast<double>(out.render_frames);
+        out.reuse_cpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_gpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_core_ms /= static_cast<double>(out.reuse_frames);
+        out.valid = true;
+        return out;
+    }
+
     struct GpuDipDiagnostics {
         bool valid = false;
         int dip_count = 0;
@@ -576,6 +645,26 @@ void App::panel_performance() {
             }
 
             draw_performance_gpu_dip_diagnostics();
+
+            const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+                perf_cpu_ms_history_, perf_gpu_ms_history_,
+                perf_core_ms_history_, perf_gpu_draw_commands_history_,
+                perf_history_count_, perf_history_write_index_);
+            if (phase_diag.valid) {
+                ImGui::Separator();
+                ImGui::Text(
+                    "Render/reuse phases (draw threshold %u, history %u/%u):",
+                    phase_diag.draw_threshold, phase_diag.render_frames,
+                    phase_diag.reuse_frames);
+                ImGui::Text(
+                    "Render-active avg: CPU %.3f  GPU %.3f  Core %.3f ms",
+                    phase_diag.render_cpu_ms, phase_diag.render_gpu_ms,
+                    phase_diag.render_core_ms);
+                ImGui::Text(
+                    "Reuse/light avg:  CPU %.3f  GPU %.3f  Core %.3f ms",
+                    phase_diag.reuse_cpu_ms, phase_diag.reuse_gpu_ms,
+                    phase_diag.reuse_core_ms);
+            }
         }
         else {
             ImGui::TextDisabled("Detailed subsystem timings are disabled.");
@@ -714,7 +803,7 @@ void App::panel_performance() {
                     : 100.0 * static_cast<double>(shown_weight) /
                           static_cast<double>(backend.hot_block_total_weight);
             ImGui::Text(
-                "Top %u of %u executed blocks cover %.1f%% of estimated guest instructions",
+                "This frame: top %u of %u blocks cover %.1f%% of estimated guest instructions",
                 backend.hot_block_count, backend.hot_block_total_count,
                 shown_share);
 
@@ -762,29 +851,51 @@ void App::panel_performance() {
             }
 
             if (ImGui::Button("Copy CPU hot-block snapshot")) {
+                const EmuRunner::RuntimeSnapshot fresh_snapshot =
+                    emu_runner_.is_running()
+                        ? emu_runner_.runtime_snapshot()
+                        : runtime_snapshot_;
+                const CpuBackendStats& fresh_backend =
+                    fresh_snapshot.cpu_backend_stats;
+
+                u64 fresh_shown_weight = 0;
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    fresh_shown_weight +=
+                        fresh_backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                const double fresh_shown_share =
+                    fresh_backend.hot_block_total_weight == 0
+                        ? 0.0
+                        : 100.0 * static_cast<double>(fresh_shown_weight) /
+                              static_cast<double>(
+                                  fresh_backend.hot_block_total_weight);
+
                 std::string snapshot;
                 snapshot.reserve(8192);
                 char line[768];
                 std::snprintf(
                     line, sizeof(line),
                     "frame=%llu core_ms=%.3f cpu_ms=%.3f "
-                    "decoded=%llu native=%llu fallback=%llu\n"
+                    "gpu_ms=%.3f draws=%u decoded=%llu native=%llu fallback=%llu\n"
                     "hot_blocks=%u/%u shown_share=%.1f%%\n",
-                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
-                    runtime_snapshot_.core_frame_ms,
-                    runtime_snapshot_.profiling.cpu_ms,
+                    static_cast<unsigned long long>(fresh_snapshot.frame_id),
+                    fresh_snapshot.core_frame_ms,
+                    fresh_snapshot.profiling.cpu_ms,
+                    fresh_snapshot.profiling.gpu_ms,
+                    fresh_snapshot.profiling.gpu_draw_commands,
                     static_cast<unsigned long long>(
-                        backend.decoded_instructions),
+                        fresh_backend.decoded_instructions),
                     static_cast<unsigned long long>(
-                        backend.native_instructions),
+                        fresh_backend.native_instructions),
                     static_cast<unsigned long long>(
-                        backend.fallback_instructions),
-                    backend.hot_block_count, backend.hot_block_total_count,
-                    shown_share);
+                        fresh_backend.fallback_instructions),
+                    fresh_backend.hot_block_count,
+                    fresh_backend.hot_block_total_count,
+                    fresh_shown_share);
                 snapshot += line;
 
-                for (u32 i = 0; i < backend.hot_block_count; ++i) {
-                    const CpuHotBlockStats& hot = backend.hot_blocks[i];
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = fresh_backend.hot_blocks[i];
                     const double native_percent =
                         hot.entries == 0
                             ? 0.0
