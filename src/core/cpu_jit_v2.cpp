@@ -1074,18 +1074,48 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 void CpuJitV2Backend::invalidate_range(u32 phys_or_normalized_addr,
                                        u32 size_bytes) {
   ++stats_.invalidation_queries;
-  if (size_bytes == 0u || impl_->blocks.empty()) {
+  if (size_bytes == 0u) {
     return;
   }
 
   const u32 first = psx::mask_address(phys_or_normalized_addr);
   const u32 last =
       psx::mask_address(phys_or_normalized_addr + size_bytes - 1u);
+  const u32 first_page = first >> 12u;
+  const u32 last_page = last >> 12u;
+
+  bool maybe_rejected_code = false;
+  for (u32 page = first_page; page <= last_page; ++page) {
+    if (impl_->rejected_pages.find(page) != impl_->rejected_pages.end()) {
+      maybe_rejected_code = true;
+      break;
+    }
+  }
+  if (maybe_rejected_code) {
+    for (auto it = impl_->rejected_pcs.begin();
+         it != impl_->rejected_pcs.end();) {
+      const u32 page = psx::mask_address(*it) >> 12u;
+      if (page >= first_page && page <= last_page) {
+        it = impl_->rejected_pcs.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (u32 page = first_page; page <= last_page; ++page) {
+      impl_->rejected_pages.erase(page);
+    }
+  }
+
+  if (impl_->blocks.empty()) {
+    ++stats_.invalidation_fast_no_code_page_exits;
+    return;
+  }
+
   const u32 first_line = first & ~0x0Fu;
   const u32 last_line = last & ~0x0Fu;
 
   bool maybe_code = false;
-  for (u32 page = first >> 12u; page <= (last >> 12u); ++page) {
+  for (u32 page = first_page; page <= last_page; ++page) {
     if (impl_->code_pages.find(page) != impl_->code_pages.end()) {
       maybe_code = true;
       break;
