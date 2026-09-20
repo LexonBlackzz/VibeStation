@@ -623,6 +623,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 
 struct CpuJitV2Backend::Impl {
   struct Block {
+    V2BlockKind kind = V2BlockKind::Inline;
     u32 start_pc = 0;
     u32 phys_start = 0;
     u32 phys_end = 0;
@@ -639,11 +640,15 @@ struct CpuJitV2Backend::Impl {
     std::array<s32, 8> store_simm{};
     std::array<u8, 8> store_instruction_index{};
 #if VIBESTATION_JIT_V2_X64
-    std::unique_ptr<Xbyak::CodeGenerator> code;
     V2NativeFn fn = nullptr;
+    size_t code_size = 0u;
 #endif
   };
 
+#if VIBESTATION_JIT_V2_X64
+  V2CodeArena arena;
+  V2StepHelperFn step_helper_fn = nullptr;
+#endif
   std::unordered_map<u32, Block> blocks;
   // PCs which cannot currently form even the minimum V2 native block.
   // These are invalidated with code writes instead of being recompiled on
@@ -659,7 +664,12 @@ struct CpuJitV2Backend::Impl {
 CpuJitV2Backend::CpuJitV2Backend(Cpu &cpu)
     : cpu_(cpu), impl_(std::make_unique<Impl>()) {
   stats_.available = true;
-  stats_.native_available = VIBESTATION_JIT_V2_X64 != 0;
+#if VIBESTATION_JIT_V2_X64
+  impl_->step_helper_fn = install_step_helper(impl_->arena);
+  stats_.native_available = impl_->step_helper_fn != nullptr;
+#else
+  stats_.native_available = false;
+#endif
 }
 
 CpuJitV2Backend::~CpuJitV2Backend() = default;
