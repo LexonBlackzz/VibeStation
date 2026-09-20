@@ -772,6 +772,11 @@ static bool parse_cpu_execution_mode(const std::string &s,
     out = CpuExecutionMode::X64Jit;
     return true;
   }
+  if (v == "x64jitv2" || v == "jitv2" || v == "dynarecv2" ||
+      v == "recompilerv2") {
+    out = CpuExecutionMode::X64JitV2;
+    return true;
+  }
   return false;
 }
 
