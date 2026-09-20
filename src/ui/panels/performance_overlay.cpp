@@ -447,7 +447,8 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
 
 void App::panel_performance() {
     ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Performance Profiler", &show_perf_)) {
+    const bool was_open = show_perf_profiler_;
+    if (ImGui::Begin("Performance Profiler", &show_perf_profiler_)) {
         if (!has_started_emulation_) {
             ImGui::Text("Emulation not running.");
             ImGui::End();
@@ -474,6 +475,104 @@ void App::panel_performance() {
             ImGui::TextDisabled("*CPU excludes time already attributed to GPU.");
             ImGui::TextDisabled(
                 "GPU here is CPU-side emulated GPU command time, not host GPU timestamp/present time.");
+
+            ImGui::Separator();
+            ImGui::Text("GPU Command Detail:");
+            auto gpu_detail_row = [](const char* label, double ms, u32 commands) {
+                ImGui::Text("%-18s %7.3f ms  %6u cmds", label, ms, commands);
+            };
+            gpu_detail_row("Flat polygons", stats.gpu_flat_ms,
+                stats.gpu_flat_commands);
+            gpu_detail_row("Gouraud polygons", stats.gpu_gouraud_ms,
+                stats.gpu_gouraud_commands);
+            gpu_detail_row("Textured polygons", stats.gpu_textured_ms,
+                stats.gpu_textured_commands);
+            gpu_detail_row("Gouraud + texture", stats.gpu_gouraud_textured_ms,
+                stats.gpu_gouraud_textured_commands);
+            gpu_detail_row("Rectangles", stats.gpu_rect_ms,
+                stats.gpu_rect_commands);
+            gpu_detail_row("Lines", stats.gpu_line_ms,
+                stats.gpu_line_commands);
+            gpu_detail_row("VRAM transfers", stats.gpu_transfer_ms,
+                stats.gpu_transfer_commands);
+            gpu_detail_row("Other GP0", stats.gpu_other_ms,
+                stats.gpu_other_commands);
+
+            const double gpu_attributed_ms =
+                stats.gpu_flat_ms + stats.gpu_gouraud_ms +
+                stats.gpu_textured_ms + stats.gpu_gouraud_textured_ms +
+                stats.gpu_rect_ms + stats.gpu_line_ms +
+                stats.gpu_transfer_ms + stats.gpu_other_ms;
+            const double gpu_unattributed_ms =
+                std::max(0.0, stats.gpu_ms - gpu_attributed_ms);
+            ImGui::Text("Dispatch attributed: %.3f ms   GP0 overhead/data: %.3f ms",
+                gpu_attributed_ms, gpu_unattributed_ms);
+
+            ImGui::Separator();
+            ImGui::Text("Textured Raster Work:");
+            const double coverage_percent =
+                (stats.gpu_candidate_pixels != 0)
+                ? (100.0 * static_cast<double>(stats.gpu_covered_pixels) /
+                    static_cast<double>(stats.gpu_candidate_pixels))
+                : 0.0;
+            ImGui::Text(
+                "BBox pixels: %llu   covered/sampled: %llu (%.1f%% coverage)",
+                static_cast<unsigned long long>(stats.gpu_candidate_pixels),
+                static_cast<unsigned long long>(stats.gpu_covered_pixels),
+                coverage_percent);
+            if (stats.gpu_candidate_pixels != 0) {
+                ImGui::Text("Span rejection avoids up to %.1f%% of bbox pixels",
+                    100.0 - coverage_percent);
+            }
+            ImGui::Text("Texels 4/8/15-bit: %llu / %llu / %llu",
+                static_cast<unsigned long long>(stats.gpu_texel_samples_4bit),
+                static_cast<unsigned long long>(stats.gpu_texel_samples_8bit),
+                static_cast<unsigned long long>(stats.gpu_texel_samples_15bit));
+            ImGui::Text("Transparent: %llu   semi-transparent: %llu",
+                static_cast<unsigned long long>(stats.gpu_transparent_texels),
+                static_cast<unsigned long long>(
+                    stats.gpu_semitransparent_pixels));
+            ImGui::TextDisabled(
+                "BBox is the old bounding-box workload; accurate triangle spans now iterate only covered pixels.");
+
+            if (ImGui::Button("Copy GPU profiler snapshot")) {
+                char snapshot[2048];
+                std::snprintf(
+                    snapshot, sizeof(snapshot),
+                    "frame=%llu core_ms=%.3f gpu_ms=%.3f\n"
+                    "flat=%.3fms/%u gouraud=%.3fms/%u "
+                    "textured=%.3fms/%u gouraud_textured=%.3fms/%u\n"
+                    "rect=%.3fms/%u line=%.3fms/%u transfer=%.3fms/%u "
+                    "other=%.3fms/%u overhead_data=%.3fms\n"
+                    "candidates=%llu covered=%llu coverage=%.1f%%\n"
+                    "texels_4=%llu texels_8=%llu texels_15=%llu "
+                    "transparent=%llu semi=%llu\n"
+                    "gp0_words=%u gp0_commands=%u draw_commands=%u",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms, stats.gpu_ms,
+                    stats.gpu_flat_ms, stats.gpu_flat_commands,
+                    stats.gpu_gouraud_ms, stats.gpu_gouraud_commands,
+                    stats.gpu_textured_ms, stats.gpu_textured_commands,
+                    stats.gpu_gouraud_textured_ms,
+                    stats.gpu_gouraud_textured_commands,
+                    stats.gpu_rect_ms, stats.gpu_rect_commands,
+                    stats.gpu_line_ms, stats.gpu_line_commands,
+                    stats.gpu_transfer_ms, stats.gpu_transfer_commands,
+                    stats.gpu_other_ms, stats.gpu_other_commands,
+                    gpu_unattributed_ms,
+                    static_cast<unsigned long long>(stats.gpu_candidate_pixels),
+                    static_cast<unsigned long long>(stats.gpu_covered_pixels),
+                    coverage_percent,
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_4bit),
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_8bit),
+                    static_cast<unsigned long long>(stats.gpu_texel_samples_15bit),
+                    static_cast<unsigned long long>(stats.gpu_transparent_texels),
+                    static_cast<unsigned long long>(
+                        stats.gpu_semitransparent_pixels),
+                    stats.gpu_gp0_words, stats.gpu_gp0_commands,
+                    stats.gpu_draw_commands);
+                ImGui::SetClipboardText(snapshot);
+            }
 
             draw_performance_gpu_dip_diagnostics();
         }
@@ -602,4 +701,7 @@ void App::panel_performance() {
         ImGui::ProgressBar(usage, ImVec2(-1.0f, 0.0f));
     }
     ImGui::End();
+    if (was_open && !show_perf_profiler_) {
+        g_profile_detailed_timing = false;
+    }
 }

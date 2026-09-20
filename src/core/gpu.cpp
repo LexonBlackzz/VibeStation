@@ -30,6 +30,35 @@ namespace {
         return g_log_fmv_diagnostics || g_mdec_debug_upload_probe;
     }
 
+    System::GpuProfileBucket gpu_profile_bucket_for_opcode(u8 op) {
+        if ((op >= 0x20u && op <= 0x23u) ||
+            (op >= 0x28u && op <= 0x2Bu)) {
+            return System::GpuProfileBucket::Flat;
+        }
+        if ((op >= 0x30u && op <= 0x33u) ||
+            (op >= 0x38u && op <= 0x3Bu)) {
+            return System::GpuProfileBucket::Gouraud;
+        }
+        if ((op >= 0x24u && op <= 0x27u) ||
+            (op >= 0x2Cu && op <= 0x2Fu)) {
+            return System::GpuProfileBucket::Textured;
+        }
+        if ((op >= 0x34u && op <= 0x37u) ||
+            (op >= 0x3Cu && op <= 0x3Fu)) {
+            return System::GpuProfileBucket::GouraudTextured;
+        }
+        if (op == 0x02u || (op >= 0x60u && op <= 0x7Fu)) {
+            return System::GpuProfileBucket::Rect;
+        }
+        if (op >= 0x40u && op <= 0x5Fu) {
+            return System::GpuProfileBucket::Line;
+        }
+        if (op >= 0x80u && op <= 0xDFu) {
+            return System::GpuProfileBucket::Transfer;
+        }
+        return System::GpuProfileBucket::Other;
+    }
+
     int clamp_display_dimension(int value, int fallback, int max_value) {
         const int candidate = (value > 0) ? value : fallback;
         return std::max(1, std::min(candidate, max_value));
@@ -228,6 +257,67 @@ namespace {
 
     inline bool edge_inside_ccw(s32 w, bool top_left) {
         return (w > 0) || (w == 0 && top_left);
+    }
+
+    inline s64 floor_div_positive(s64 numerator, s64 denominator) {
+        s64 q = numerator / denominator;
+        const s64 r = numerator % denominator;
+        if (r != 0 && numerator < 0) {
+            --q;
+        }
+        return q;
+    }
+
+    inline s64 ceil_div_positive(s64 numerator, s64 denominator) {
+        s64 q = numerator / denominator;
+        const s64 r = numerator % denominator;
+        if (r != 0 && numerator > 0) {
+            ++q;
+        }
+        return q;
+    }
+
+    inline bool constrain_triangle_span(s32 w_at_min_x, s32 step_x,
+                                        bool top_left, int& lo, int& hi) {
+        const s64 threshold = top_left ? 0 : 1;
+        const s64 w = static_cast<s64>(w_at_min_x);
+        const s64 step = static_cast<s64>(step_x);
+        if (step > 0) {
+            lo = std::max(
+                lo, static_cast<int>(
+                        ceil_div_positive(threshold - w, step)));
+        }
+        else if (step < 0) {
+            hi = std::min(
+                hi, static_cast<int>(
+                        floor_div_positive(w - threshold, -step)));
+        }
+        else if (w < threshold) {
+            return false;
+        }
+        return lo <= hi;
+    }
+
+    inline bool triangle_scanline_span(
+        s16 min_x, s16 max_x,
+        s32 w0_row, s32 w1_row, s32 w2_row,
+        s32 step_w0_x, s32 step_w1_x, s32 step_w2_x,
+        bool edge0_top_left, bool edge1_top_left, bool edge2_top_left,
+        s16& span_min_x, s16& span_max_x) {
+        int lo = 0;
+        int hi = static_cast<int>(max_x) - static_cast<int>(min_x);
+        if (hi < 0 ||
+            !constrain_triangle_span(
+                w0_row, step_w0_x, edge0_top_left, lo, hi) ||
+            !constrain_triangle_span(
+                w1_row, step_w1_x, edge1_top_left, lo, hi) ||
+            !constrain_triangle_span(
+                w2_row, step_w2_x, edge2_top_left, lo, hi)) {
+            return false;
+        }
+        span_min_x = static_cast<s16>(static_cast<int>(min_x) + lo);
+        span_max_x = static_cast<s16>(static_cast<int>(min_x) + hi);
+        return true;
     }
 
     inline int dither_bias(s16 x, s16 y) {
@@ -852,6 +942,10 @@ void Gpu::gp0(u32 command) {
     }
     // GP0 draw command bit1 selects semi-transparency for that command.
     semi_transparency_mode_ = (op >= 0x20 && op <= 0x7F) && ((op & 0x02u) != 0);
+    std::chrono::high_resolution_clock::time_point command_start{};
+    if (profile_detailed) {
+        command_start = std::chrono::high_resolution_clock::now();
+    }
     switch (op) {
     case 0x00:
         gp0_nop();
@@ -1129,6 +1223,14 @@ void Gpu::gp0(u32 command) {
             LOG_WARN("GPU: Unhandled GP0 command 0x%02X", op);
         }
         break;
+    }
+
+    if (profile_detailed && sys_) {
+        const auto command_end = std::chrono::high_resolution_clock::now();
+        sys_->add_gpu_profile_bucket(
+            gpu_profile_bucket_for_opcode(op),
+            std::chrono::duration<double, std::milli>(
+                command_end - command_start).count());
     }
 
     gp0_buffer_.clear();
@@ -1586,6 +1688,11 @@ void Gpu::gp0_textured_rect() {
     // Textured rectangle draw path (supports 4/8/15-bit tex fetch via
     // read_texel).
     const TextureSampleState texture = prepare_texture_sample_state();
+    const bool profile_raster = g_profile_detailed_timing && sys_ != nullptr;
+    const u64 profile_samples =
+        static_cast<u64>(w) * static_cast<u64>(h);
+    u64 profile_transparent = 0;
+    u64 profile_semi = 0;
     for (u16 dy = 0; dy < h; ++dy) {
         for (u16 dx = 0; dx < w; ++dx) {
             const u16 src_dx = tex_rect_x_flip_ ? static_cast<u16>(w - 1 - dx) : dx;
@@ -1594,6 +1701,9 @@ void Gpu::gp0_textured_rect() {
             const u8 src_v = static_cast<u8>(v + src_dy);
             u16 texel = read_texel(texture, src_u, src_v);
             if (texel == 0) {
+                if (profile_raster) {
+                    ++profile_transparent;
+                }
                 continue; // Color 0 transparent in many textured modes.
             }
 
@@ -1609,9 +1719,17 @@ void Gpu::gp0_textured_rect() {
                 }
             }
             const bool texel_semi = semi_transparency_mode_ && ((texel & 0x8000u) != 0);
+            if (profile_raster && texel_semi) {
+                ++profile_semi;
+            }
             set_pixel(static_cast<s16>(x + dx), static_cast<s16>(y + dy), out15,
                 texel_semi);
         }
+    }
+    if (profile_raster) {
+        sys_->add_gpu_raster_work(
+            profile_samples, profile_samples, profile_samples,
+            texture.depth, profile_transparent, profile_semi);
     }
 }
 
@@ -2536,13 +2654,14 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
         s32 w2_row = edge(v0, v1, min_x, min_y);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     if (opaque_path) {
                         write_pixel_opaque_clipped(x, y, color15);
                     }
@@ -2550,9 +2669,6 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
                         set_pixel_clipped(x, y, color15, true);
                     }
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
@@ -2673,16 +2789,19 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
             w2_row * static_cast<s32>(v2.color.b);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 r_num = r_row;
-            s32 g_num = g_row;
-            s32 b_num = b_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                s32 r_num = r_row + step_r_x * span_dx;
+                s32 g_num = g_row + step_g_x * span_dx;
+                s32 b_num = b_row + step_b_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     const u8 r = static_cast<u8>(clamp_u8_i(r_num / area));
                     const u8 g = static_cast<u8>(clamp_u8_i(g_num / area));
                     const u8 b = static_cast<u8>(clamp_u8_i(b_num / area));
@@ -2694,13 +2813,10 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     else {
                         set_pixel_clipped(x, y, out15, true);
                     }
+                    r_num += step_r_x;
+                    g_num += step_g_x;
+                    b_num += step_b_x;
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                r_num += step_r_x;
-                g_num += step_g_x;
-                b_num += step_b_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
@@ -2787,6 +2903,11 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
     const TextureSampleState texture = prepare_texture_sample_state();
+    const bool profile_raster = g_profile_detailed_timing && sys_ != nullptr;
+    u64 profile_candidates = 0;
+    u64 profile_covered = 0;
+    u64 profile_transparent = 0;
+    u64 profile_semi = 0;
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -2798,6 +2919,11 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         max_y = std::min(max_y, draw_y_max_);
         if (max_x - min_x > 1023 || max_y - min_y > 511) {
             return;
+        }
+        if (profile_raster && min_x <= max_x && min_y <= max_y) {
+            profile_candidates +=
+                static_cast<u64>(static_cast<int>(max_x) - min_x + 1) *
+                static_cast<u64>(static_cast<int>(max_y) - min_y + 1);
         }
 
         const bool raw_texture = (gp0_command_ & 0x1u) != 0;
@@ -2834,31 +2960,50 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
             w2_row * static_cast<s32>(v2.v);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 u_num = u_row;
-            s32 v_num = v_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                const u64 span_pixels = static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+                if (profile_raster) {
+                    profile_covered += span_pixels;
+                }
+
+                s32 u_num = u_row + step_u_x * span_dx;
+                s32 v_num = v_row + step_v_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     const u8 u = static_cast<u8>(u_num / area);
                     const u8 v_coord = static_cast<u8>(v_num / area);
                     const u16 texel = read_texel(texture, u, v_coord);
+                    if (profile_raster && texel == 0) {
+                        ++profile_transparent;
+                    }
                     if (texel != 0) {
                         u16 out15 = texel;
                         if (!raw_texture) {
                             if (dither_enabled_) {
                                 out15 =
-                                    modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
+                                    modulate_texel_dithered_15bit(
+                                        texel, mr, mg, mb, x, y);
                             }
                             else {
-                                out15 = modulate_texel_15bit(texel, mr, mg, mb);
+                                out15 =
+                                    modulate_texel_15bit(texel, mr, mg, mb);
                             }
                         }
                         const bool texel_semi =
-                            semi_transparency_mode_ && ((texel & 0x8000u) != 0);
+                            semi_transparency_mode_ &&
+                            ((texel & 0x8000u) != 0);
+                        if (profile_raster && texel_semi) {
+                            ++profile_semi;
+                        }
                         if (texel_semi) {
                             set_pixel_clipped(x, y, out15, true);
                         }
@@ -2866,18 +3011,20 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                             write_pixel_opaque_clipped(x, y, out15);
                         }
                     }
+                    u_num += step_u_x;
+                    v_num += step_v_x;
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                u_num += step_u_x;
-                v_num += step_v_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
             w2_row += step_w2_y;
             u_row += step_u_y;
             v_row += step_v_y;
+        }
+        if (profile_raster) {
+            sys_->add_gpu_raster_work(
+                profile_candidates, profile_covered, profile_covered,
+                texture.depth, profile_transparent, profile_semi);
         }
         return;
     }
@@ -2891,6 +3038,11 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
     max_y = std::min(max_y, draw_y_max_);
     if (max_x - min_x > 1023 || max_y - min_y > 511)
         return;
+    if (profile_raster && min_x <= max_x && min_y <= max_y) {
+        profile_candidates +=
+            static_cast<u64>(static_cast<int>(max_x) - min_x + 1) *
+            static_cast<u64>(static_cast<int>(max_y) - min_y + 1);
+    }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
     const u8 mr = v0.color.r;
@@ -2940,11 +3092,17 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
             if (edge_inside_ccw(w0, edge0_top_left) &&
                 edge_inside_ccw(w1, edge1_top_left) &&
                 edge_inside_ccw(w2, edge2_top_left)) {
+                if (profile_raster) {
+                    ++profile_covered;
+                }
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
                     static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
                 const u16 texel = read_texel(texture, u, v_coord);
+                if (profile_raster && texel == 0) {
+                    ++profile_transparent;
+                }
                 if (texel != 0) {
                     u16 out15 = texel;
                     if (!raw_texture) {
@@ -2960,6 +3118,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                     }
                     else {
                         const bool texel_semi = (texel & 0x8000u) != 0;
+                        if (profile_raster && texel_semi) {
+                            ++profile_semi;
+                        }
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
@@ -2976,6 +3137,11 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         u_row_num += step_u_y_num;
         v_row_num += step_v_y_num;
     }
+    if (profile_raster) {
+        sys_->add_gpu_raster_work(
+            profile_candidates, profile_covered, profile_covered,
+            texture.depth, profile_transparent, profile_semi);
+    }
 }
 
 void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
@@ -2991,6 +3157,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
     const TextureSampleState texture = prepare_texture_sample_state();
+    const bool profile_raster = g_profile_detailed_timing && sys_ != nullptr;
+    u64 profile_candidates = 0;
+    u64 profile_covered = 0;
+    u64 profile_transparent = 0;
+    u64 profile_semi = 0;
     if (!g_gpu_fast_mode) {
         s16 min_x = std::min({ v0.x, v1.x, v2.x });
         s16 max_x = std::max({ v0.x, v1.x, v2.x });
@@ -3002,6 +3173,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         max_y = std::min(max_y, draw_y_max_);
         if (max_x - min_x > 1023 || max_y - min_y > 511) {
             return;
+        }
+        if (profile_raster && min_x <= max_x && min_y <= max_y) {
+            profile_candidates +=
+                static_cast<u64>(static_cast<int>(max_x) - min_x + 1) *
+                static_cast<u64>(static_cast<int>(max_y) - min_y + 1);
         }
 
         const bool raw_texture = (gp0_command_ & 0x1u) != 0;
@@ -3063,38 +3239,59 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             w2_row * static_cast<s32>(v2.color.b);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 u_num = u_row;
-            s32 v_num = v_row;
-            s32 r_num = r_row;
-            s32 g_num = g_row;
-            s32 b_num = b_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                const u64 span_pixels = static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+                if (profile_raster) {
+                    profile_covered += span_pixels;
+                }
+
+                s32 u_num = u_row + step_u_x * span_dx;
+                s32 v_num = v_row + step_v_x * span_dx;
+                s32 r_num = r_row + step_r_x * span_dx;
+                s32 g_num = g_row + step_g_x * span_dx;
+                s32 b_num = b_row + step_b_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     const u8 u = static_cast<u8>(u_num / area);
                     const u8 v_coord = static_cast<u8>(v_num / area);
                     const u16 texel = read_texel(texture, u, v_coord);
+                    if (profile_raster && texel == 0) {
+                        ++profile_transparent;
+                    }
                     if (texel != 0) {
-                        const u8 mr = static_cast<u8>(std::clamp(r_num / area, 0, 255));
-                        const u8 mg = static_cast<u8>(std::clamp(g_num / area, 0, 255));
-                        const u8 mb = static_cast<u8>(std::clamp(b_num / area, 0, 255));
+                        const u8 mr =
+                            static_cast<u8>(clamp_u8_i(r_num / area));
+                        const u8 mg =
+                            static_cast<u8>(clamp_u8_i(g_num / area));
+                        const u8 mb =
+                            static_cast<u8>(clamp_u8_i(b_num / area));
 
                         u16 out15 = texel;
                         if (!raw_texture) {
                             if (dither_enabled_) {
-                                out15 =
-                                    modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
+                                out15 = modulate_texel_dithered_15bit(
+                                    texel, mr, mg, mb, x, y);
                             }
                             else {
-                                out15 = modulate_texel_15bit(texel, mr, mg, mb);
+                                out15 =
+                                    modulate_texel_15bit(texel, mr, mg, mb);
                             }
                         }
                         const bool texel_semi =
-                            semi_transparency_mode_ && ((texel & 0x8000u) != 0);
+                            semi_transparency_mode_ &&
+                            ((texel & 0x8000u) != 0);
+                        if (profile_raster && texel_semi) {
+                            ++profile_semi;
+                        }
                         if (texel_semi) {
                             set_pixel_clipped(x, y, out15, true);
                         }
@@ -3102,15 +3299,12 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                             write_pixel_opaque_clipped(x, y, out15);
                         }
                     }
+                    u_num += step_u_x;
+                    v_num += step_v_x;
+                    r_num += step_r_x;
+                    g_num += step_g_x;
+                    b_num += step_b_x;
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                u_num += step_u_x;
-                v_num += step_v_x;
-                r_num += step_r_x;
-                g_num += step_g_x;
-                b_num += step_b_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
@@ -3120,6 +3314,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             r_row += step_r_y;
             g_row += step_g_y;
             b_row += step_b_y;
+        }
+        if (profile_raster) {
+            sys_->add_gpu_raster_work(
+                profile_candidates, profile_covered, profile_covered,
+                texture.depth, profile_transparent, profile_semi);
         }
         return;
     }
@@ -3142,6 +3341,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
     max_y = std::min(max_y, draw_y_max_);
     if (max_x - min_x > 1023 || max_y - min_y > 511)
         return;
+    if (profile_raster && min_x <= max_x && min_y <= max_y) {
+        profile_candidates +=
+            static_cast<u64>(static_cast<int>(max_x) - min_x + 1) *
+            static_cast<u64>(static_cast<int>(max_y) - min_y + 1);
+    }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
     const bool opaque_fast_path = !semi_transparency_mode_;
@@ -3227,11 +3431,17 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             if (edge_inside_ccw(w0, edge0_top_left) &&
                 edge_inside_ccw(w1, edge1_top_left) &&
                 edge_inside_ccw(w2, edge2_top_left)) {
+                if (profile_raster) {
+                    ++profile_covered;
+                }
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
                     static_cast<u8>(static_cast<s32>(v_value) & 0xFF);
                 const u16 texel = read_texel(texture, u, v_coord);
+                if (profile_raster && texel == 0) {
+                    ++profile_transparent;
+                }
                 if (texel != 0) {
                     const u8 mr = static_cast<u8>(std::clamp(static_cast<int>(r_value), 0, 255));
                     const u8 mg = static_cast<u8>(std::clamp(static_cast<int>(g_value), 0, 255));
@@ -3251,6 +3461,9 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     }
                     else {
                         const bool texel_semi = (texel & 0x8000u) != 0;
+                        if (profile_raster && texel_semi) {
+                            ++profile_semi;
+                        }
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
@@ -3272,6 +3485,11 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         r_row_num += step_r_y_num;
         g_row_num += step_g_y_num;
         b_row_num += step_b_y_num;
+    }
+    if (profile_raster) {
+        sys_->add_gpu_raster_work(
+            profile_candidates, profile_covered, profile_covered,
+            texture.depth, profile_transparent, profile_semi);
     }
 }
 

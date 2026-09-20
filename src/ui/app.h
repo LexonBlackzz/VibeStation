@@ -54,6 +54,7 @@ private:
 	bool show_debug_cpu_ = false;
 	bool show_vram_ = false;
 	bool show_perf_ = false;
+	bool show_perf_profiler_ = false;
 	bool show_logging_ = false;
 	bool show_sound_status_ = false;
 	bool show_grim_reaper_ = false;

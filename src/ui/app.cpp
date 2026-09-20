@@ -809,6 +809,10 @@ void App::process_events(bool& quit) {
             else if (no_mod && key == SDLK_F11) {
                 show_perf_ = !show_perf_;
             }
+            else if (no_mod && key == SDLK_F12) {
+                show_perf_profiler_ = !show_perf_profiler_;
+                g_profile_detailed_timing = show_perf_profiler_;
+            }
         }
 
         const ImGuiIO& io = ImGui::GetIO();
@@ -1013,6 +1017,8 @@ void App::render_ui() {
         panel_debug_cpu();
     if (show_vram_)
         panel_vram();
+    if (show_perf_profiler_)
+        panel_performance();
     if (show_sound_status_)
         panel_sound_status();
     if (show_bindings_config_)
@@ -1156,6 +1162,11 @@ void App::menu_bar() {
             ImGui::MenuItem("CPU Debug", "F9", &show_debug_cpu_);
             ImGui::MenuItem("Show VRAM", "F10", &show_vram_);
             ImGui::MenuItem("Performance Overlay", "F11", &show_perf_);
+            if (ImGui::MenuItem("Performance Profiler", "F12",
+                show_perf_profiler_)) {
+                show_perf_profiler_ = !show_perf_profiler_;
+                g_profile_detailed_timing = show_perf_profiler_;
+            }
             ImGui::MenuItem("Voice Levels", nullptr, &show_sound_status_);
             ImGui::MenuItem("Logging", nullptr, &show_logging_);
             ImGui::MenuItem("About", nullptr, &show_about_);

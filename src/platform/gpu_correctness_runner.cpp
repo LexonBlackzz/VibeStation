@@ -315,6 +315,52 @@ bool test_flat_triangle() {
   return compare_vram("flat triangle", *gpu, expected);
 }
 
+bool test_flat_span_edge_cases() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u8 r = 196;
+  constexpr u8 g = 92;
+  constexpr u8 b = 228;
+  const u16 color = pack_rgb15(r, g, b);
+
+  const std::array<std::array<RefVertex, 3>, 4> triangles = {{
+      {{{300, 190, r, g, b, 0, 0},
+        {360, 190, r, g, b, 0, 0},
+        {330, 235, r, g, b, 0, 0}}},
+      {{{390, 190, r, g, b, 0, 0},
+        {365, 235, r, g, b, 0, 0},
+        {420, 235, r, g, b, 0, 0}}},
+      {{{455, 185, r, g, b, 0, 0},
+        {458, 250, r, g, b, 0, 0},
+        {463, 188, r, g, b, 0, 0}}},
+      {{{-16, 350, r, g, b, 0, 0},
+        {42, 340, r, g, b, 0, 0},
+        {18, 405, r, g, b, 0, 0}}},
+  }};
+
+  for (const auto &tri : triangles) {
+    const RefVertex v0 = tri[0];
+    const RefVertex v1 = tri[1];
+    const RefVertex v2 = tri[2];
+
+    reference_triangle(
+        expected, v0, v1, v2,
+        [color](const std::vector<u16> &, const RefVertex &,
+                const RefVertex &, const RefVertex &, s32, s32, s32, s32,
+                int, int) { return color; });
+
+    gpu->gp0(rgb_command(0x20, r, g, b));
+    gpu->gp0(vertex_word(v0.x, v0.y));
+    gpu->gp0(vertex_word(v1.x, v1.y));
+    gpu->gp0(vertex_word(v2.x, v2.y));
+  }
+
+  return compare_vram("flat span edge cases", *gpu, expected);
+}
+
 bool test_gouraud_triangle() {
   auto gpu = std::make_unique<Gpu>();
   gpu->init(nullptr);
@@ -344,6 +390,62 @@ bool test_gouraud_triangle() {
   gpu->gp0(vertex_word(v2.x, v2.y));
 
   return compare_vram("gouraud triangle", *gpu, expected);
+}
+
+bool test_gouraud_span_edge_cases() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+
+  const std::array<std::array<RefVertex, 3>, 5> triangles = {{
+      // Flat top.
+      {{{20, 200, 240, 24, 32, 0, 0},
+        {70, 200, 20, 232, 48, 0, 0},
+        {45, 240, 36, 64, 248, 0, 0}}},
+      // Flat bottom.
+      {{{90, 200, 220, 48, 40, 0, 0},
+        {65, 240, 32, 220, 72, 0, 0},
+        {115, 240, 64, 52, 240, 0, 0}}},
+      // Very thin / steep edges.
+      {{{140, 200, 250, 40, 60, 0, 0},
+        {142, 260, 30, 240, 70, 0, 0},
+        {146, 202, 70, 80, 250, 0, 0}}},
+      // Partially clipped by the left side of VRAM/draw area.
+      {{{-12, 270, 240, 40, 80, 0, 0},
+        {40, 260, 40, 230, 90, 0, 0},
+        {12, 320, 80, 60, 245, 0, 0}}},
+      // Clockwise input winding; production swaps v1/v2 internally.
+      {{{210, 205, 220, 60, 40, 0, 0},
+        {225, 255, 40, 80, 240, 0, 0},
+        {270, 215, 60, 235, 80, 0, 0}}},
+  }};
+
+  for (const auto &tri : triangles) {
+    const RefVertex v0 = tri[0];
+    const RefVertex v1 = tri[1];
+    const RefVertex v2 = tri[2];
+
+    reference_triangle(
+        expected, v0, v1, v2,
+        [](const std::vector<u16> &, const RefVertex &a, const RefVertex &b,
+           const RefVertex &cv, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+          const int r = (w0 * a.r + w1 * b.r + w2 * cv.r) / area;
+          const int g = (w0 * a.g + w1 * b.g + w2 * cv.g) / area;
+          const int bl = (w0 * a.b + w1 * b.b + w2 * cv.b) / area;
+          return pack_rgb15(r, g, bl);
+        });
+
+    gpu->gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+    gpu->gp0(vertex_word(v0.x, v0.y));
+    gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+    gpu->gp0(vertex_word(v1.x, v1.y));
+    gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+    gpu->gp0(vertex_word(v2.x, v2.y));
+  }
+
+  return compare_vram("gouraud span edge cases", *gpu, expected);
 }
 
 void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
@@ -402,6 +504,61 @@ bool test_raw_textured_triangle() {
   gpu->gp0(uv_word(v2.u, v2.v, 0));
 
   return compare_vram("raw textured triangle", *gpu, expected);
+}
+
+bool test_textured_span_edge_cases() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+  constexpr u16 texpage = 0x0104u;
+  constexpr int tex_base_x = 256;
+  constexpr int tex_base_y = 0;
+  seed_direct_texture(*gpu, expected, tex_base_x, tex_base_y, 128, 128, false);
+
+  const std::array<std::array<RefVertex, 3>, 3> triangles = {{
+      {{{500, 180, 128, 128, 128, 4, 6},
+        {570, 180, 128, 128, 128, 100, 8},
+        {535, 235, 128, 128, 128, 48, 104}}},
+      {{{610, 185, 128, 128, 128, 5, 5},
+        {614, 250, 128, 128, 128, 12, 110},
+        {620, 188, 128, 128, 128, 105, 9}}},
+      {{{-10, 410, 128, 128, 128, 8, 8},
+        {55, 400, 128, 128, 128, 104, 10},
+        {20, 470, 128, 128, 128, 30, 110}}},
+  }};
+
+  for (const auto &tri : triangles) {
+    const RefVertex v0 = tri[0];
+    const RefVertex v1 = tri[1];
+    const RefVertex v2 = tri[2];
+
+    reference_triangle(
+        expected, v0, v1, v2,
+        [=](const std::vector<u16> &vram, const RefVertex &a,
+            const RefVertex &bb, const RefVertex &cv,
+            s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+          const u8 u =
+              static_cast<u8>((w0 * a.u + w1 * bb.u + w2 * cv.u) / area);
+          const u8 v =
+              static_cast<u8>((w0 * a.v + w1 * bb.v + w2 * cv.v) / area);
+          const size_t source =
+              static_cast<size_t>(tex_base_y + v) * psx::VRAM_WIDTH +
+              static_cast<size_t>(tex_base_x + u);
+          return vram[source];
+        });
+
+    gpu->gp0(rgb_command(0x25, 128, 128, 128));
+    gpu->gp0(vertex_word(v0.x, v0.y));
+    gpu->gp0(uv_word(v0.u, v0.v, 0));
+    gpu->gp0(vertex_word(v1.x, v1.y));
+    gpu->gp0(uv_word(v1.u, v1.v, texpage));
+    gpu->gp0(vertex_word(v2.x, v2.y));
+    gpu->gp0(uv_word(v2.u, v2.v, 0));
+  }
+
+  return compare_vram("textured span edge cases", *gpu, expected);
 }
 
 bool test_gouraud_textured_triangle() {
@@ -638,10 +795,13 @@ int run_gpu_correctness_tests() {
   g_gpu_fast_mode = false;
   g_gpu_extreme_fast_mode = false;
 
-  const std::array<std::pair<const char *, bool (*)()>, 7> tests = {{
+  const std::array<std::pair<const char *, bool (*)()>, 10> tests = {{
       {"flat triangle", &test_flat_triangle},
+      {"flat span edge cases", &test_flat_span_edge_cases},
       {"gouraud triangle", &test_gouraud_triangle},
+      {"gouraud span edge cases", &test_gouraud_span_edge_cases},
       {"raw textured triangle", &test_raw_textured_triangle},
+      {"textured span edge cases", &test_textured_span_edge_cases},
       {"gouraud textured triangle", &test_gouraud_textured_triangle},
       {"4-bit CLUT triangle", &test_4bit_clut_triangle},
       {"8-bit CLUT triangle", &test_8bit_clut_triangle},
@@ -846,6 +1006,23 @@ int run_gpu_microbenchmark() {
           gpu.gp0(uv_word(v1.u, v1.v, texpage));
           gpu.gp0(vertex_word(v2.x, v2.y));
           gpu.gp0(uv_word(v2.u, v2.v, 0));
+        });
+  }
+
+  {
+    const RefVertex v0{680, 40, 96, 64, 220, 0, 0};
+    const RefVertex v1{858, 54, 240, 128, 48, 0, 0};
+    const RefVertex v2{698, 205, 64, 240, 160, 0, 0};
+    run_gpu_benchmark_case(
+        "gouraud shaded", kIterations,
+        [](Gpu &, std::vector<u16> &) {},
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(rgb_word(v1.r, v1.g, v1.b));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(rgb_word(v2.r, v2.g, v2.b));
+          gpu.gp0(vertex_word(v2.x, v2.y));
         });
   }
 
