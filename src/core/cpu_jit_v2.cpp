@@ -271,13 +271,13 @@ void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
   }
   const int slot = cache_slot(cached, guest_reg);
   if (slot >= 0) {
-    const Reg32 &src = cache_host_reg(code, slot);
+    const Reg32 src = cache_host_reg(code, slot);
     if (src.getIdx() != dst.getIdx()) {
       code.mov(dst, src);
     }
     return;
   }
-  code.mov(dst, code.dword[code.rdx + static_cast<int>(guest_reg) * 4]);
+  code.mov(dst, code.dword[code.r15 + static_cast<int>(guest_reg) * 4]);
 }
 
 void emit_write_guest(Xbyak::CodeGenerator &code,
@@ -290,14 +290,14 @@ void emit_write_guest(Xbyak::CodeGenerator &code,
   }
   const int slot = cache_slot(cached, guest_reg);
   if (slot >= 0) {
-    const Reg32 &dst = cache_host_reg(code, slot);
+    const Reg32 dst = cache_host_reg(code, slot);
     if (dst.getIdx() != src.getIdx()) {
       code.mov(dst, src);
     }
     dirty[static_cast<size_t>(slot)] = true;
     return;
   }
-  code.mov(code.dword[code.rdx + static_cast<int>(guest_reg) * 4], src);
+  code.mov(code.dword[code.r15 + static_cast<int>(guest_reg) * 4], src);
 }
 
 std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
@@ -306,27 +306,34 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
 
-#if defined(_WIN32)
-  code->mov(code->rdx, code->rcx);
-#else
-  code->mov(code->rdx, code->rdi);
-#endif
-
-  // r12/r13 are callee-saved on both Win64 and SysV. Keeping two extra guest
-  // registers resident is worth the tiny block-entry/exit cost, and lets hot
-  // R3000A ALU sequences avoid substantially more Cpu::gpr_ traffic.
+  // V2 deliberately keeps architectural state virtual inside a block.
+  // r15 = guest GPR base, r14 = runtime/preflight data, rbx = branch result.
+  // r8-r13 are the six guest-register cache slots.
+  code->push(code->rbx);
   code->push(code->r12);
   code->push(code->r13);
+  code->push(code->r14);
+  code->push(code->r15);
+
+#if defined(_WIN32)
+  code->mov(code->r15, code->rcx);
+  code->mov(code->r14, code->rdx);
+#else
+  code->mov(code->r15, code->rdi);
+  code->mov(code->r14, code->rsi);
+#endif
+  code->xor_(code->ebx, code->ebx);
 
   for (size_t slot = 0; slot < cached.size(); ++slot) {
     if (cached[slot] == 0u) {
       continue;
     }
     code->mov(cache_host_reg(*code, static_cast<int>(slot)),
-              code->dword[code->rdx + static_cast<int>(cached[slot]) * 4]);
+              code->dword[code->r15 + static_cast<int>(cached[slot]) * 4]);
   }
 
   std::array<bool, 6> dirty{};
+  u32 store_index = 0;
 
   for (const auto &inst : instructions) {
     const u8 dst = write_reg(inst);
@@ -419,6 +426,27 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       code->xor_(code->eax, code->eax);
       emit_write_guest(*code, cached, dst, code->eax, dirty);
       break;
+
+    case V2AluOp::Sw: {
+      emit_read_guest(*code, code->ecx, cached, inst.rt);
+      const size_t ptr_offset =
+          offsetof(V2NativeRuntime, store_ptrs) +
+          static_cast<size_t>(store_index) * sizeof(u8 *);
+      code->mov(code->rax, code->ptr[code->r14 + static_cast<int>(ptr_offset)]);
+      code->mov(code->dword[code->rax], code->ecx);
+      ++store_index;
+      break;
+    }
+
+    case V2AluOp::Beq:
+    case V2AluOp::Bne:
+      emit_read_guest(*code, code->eax, cached, inst.rs);
+      emit_read_guest(*code, code->ecx, cached, inst.rt);
+      code->cmp(code->eax, code->ecx);
+      if (inst.op == V2AluOp::Beq) code->sete(code->bl);
+      else code->setne(code->bl);
+      code->movzx(code->ebx, code->bl);
+      break;
     }
   }
 
@@ -426,13 +454,17 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     if (cached[slot] == 0u || !dirty[slot]) {
       continue;
     }
-    code->mov(code->dword[code->rdx + static_cast<int>(cached[slot]) * 4],
+    code->mov(code->dword[code->r15 + static_cast<int>(cached[slot]) * 4],
               cache_host_reg(*code, static_cast<int>(slot)));
   }
 
-  code->mov(code->dword[code->rdx], 0u);
+  code->mov(code->dword[code->r15], 0u);
+  code->mov(code->eax, code->ebx);
+  code->pop(code->r15);
+  code->pop(code->r14);
   code->pop(code->r13);
   code->pop(code->r12);
+  code->pop(code->rbx);
   code->ret();
   code->ready();
   return code;
