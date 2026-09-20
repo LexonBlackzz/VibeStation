@@ -211,13 +211,19 @@ void Ps2App::process_events(bool& quit) {
                 }
             } else if (event.key.keysym.sym == SDLK_F6) {
                 emulation_running_ = false;
-                status_message_ = "EE execution paused";
+                status_message_ = "PS2 execution paused";
+            } else if (event.key.keysym.sym == SDLK_F7) {
+                if (!emulation_running_) {
+                    step_iop_once();
+                }
             } else if (event.key.keysym.sym == SDLK_F8) {
                 if (!emulation_running_) {
                     step_ee_once();
                 }
             } else if (event.key.keysym.sym == SDLK_F9) {
                 show_ee_debug_ = !show_ee_debug_;
+            } else if (event.key.keysym.sym == SDLK_F10) {
+                show_iop_debug_ = !show_iop_debug_;
             }
         }
     }
@@ -253,6 +259,9 @@ void Ps2App::render_ui() {
     }
     if (show_ee_debug_) {
         panel_ee_debug();
+    }
+    if (show_iop_debug_) {
+        panel_iop_debug();
     }
     if (show_scheduler_) {
         panel_scheduler();
@@ -298,18 +307,23 @@ void Ps2App::menu_bar() {
         ImGui::Separator();
 
         const bool can_execute =
-            system_.bios_started() && !system_.ee().halted();
+            system_.bios_started() && !system_.halted();
 
         if (ImGui::MenuItem(
                 "Run", nullptr, false,
                 can_execute && !emulation_running_)) {
             emulation_running_ = true;
-            status_message_ = "EE execution running";
+            status_message_ = "PS2 execution running";
         }
         if (ImGui::MenuItem(
                 "Pause", "F6", false, emulation_running_)) {
             emulation_running_ = false;
-            status_message_ = "EE execution paused";
+            status_message_ = "PS2 execution paused";
+        }
+        if (ImGui::MenuItem(
+                "Step IOP Instruction", "F7", false,
+                can_execute && !emulation_running_)) {
+            step_iop_once();
         }
         if (ImGui::MenuItem(
                 "Step EE Instruction", "F8", false,
@@ -322,6 +336,7 @@ void Ps2App::menu_bar() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("System", nullptr, &show_system_);
         ImGui::MenuItem("EE Debug", "F9", &show_ee_debug_);
+        ImGui::MenuItem("IOP Debug", "F10", &show_iop_debug_);
         ImGui::MenuItem("Scheduler", nullptr, &show_scheduler_);
         ImGui::Separator();
         ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
@@ -373,7 +388,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 3: EE startup to IOP handoff";
+    const char* phase = "Phase 4: dual EE + IOP BIOS execution";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -400,16 +415,17 @@ void Ps2App::panel_main() {
         show_ee_debug_ = true;
     }
     ImGui::SameLine();
-    if (ImGui::Button("System", ImVec2(125.0f, 0.0f))) {
-        show_system_ = true;
+    if (ImGui::Button("IOP Debug", ImVec2(125.0f, 0.0f))) {
+        show_iop_debug_ = true;
     }
 
     ImGui::SetCursorPos(ImVec2(center_x - 280.0f, center_y + 57.0f));
-    ImGui::BeginChild("PS2CoreSummary", ImVec2(560.0f, 190.0f), true);
+    ImGui::BeginChild("PS2CoreSummary", ImVec2(560.0f, 220.0f), true);
     ImGui::TextColored(title_color, "Experimental core status");
     ImGui::Separator();
 
     const auto& state = system_.ee().state();
+    const auto& iop_state = system_.iop().state();
 
     ImGui::Text("BIOS");
     ImGui::SameLine(190.0f);
@@ -444,7 +460,7 @@ void Ps2App::panel_main() {
     ImGui::SameLine(190.0f);
     if (!system_.bios_started()) {
         ImGui::TextDisabled("not started");
-    } else if (system_.ee().halted()) {
+    } else if (system_.halted()) {
         ImGui::TextColored(
             ImVec4(0.90f, 0.45f, 0.45f, 1.0f), "halted");
     } else if (emulation_running_) {
@@ -460,21 +476,32 @@ void Ps2App::panel_main() {
         "%llu",
         static_cast<unsigned long long>(state.instructions_executed));
 
+    ImGui::Text("IOP PC");
+    ImGui::SameLine(190.0f);
+    ImGui::Text("0x%08X", iop_state.pc);
+
+    ImGui::Text("IOP instructions");
+    ImGui::SameLine(190.0f);
+    ImGui::Text(
+        "%llu",
+        static_cast<unsigned long long>(iop_state.instructions_executed));
+
     ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("IOP RAM + IOP CPU");
+    ImGui::TextDisabled("IOP INTC/timers/DMAC + SIF/CDVD timing");
     ImGui::EndChild();
 }
 
 void Ps2App::panel_system() {
     ImGui::SetNextWindowSize(
-        ImVec2(600.0f, 430.0f), ImGuiCond_FirstUseEver);
+        ImVec2(650.0f, 560.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("PS2 System", &show_system_)) {
         ImGui::End();
         return;
     }
 
     const auto& state = system_.ee().state();
+    const auto& iop_state = system_.iop().state();
 
     ImGui::Text("VibeStation PS2 Lab");
     ImGui::Separator();
@@ -525,6 +552,8 @@ void Ps2App::panel_system() {
     ImGui::Separator();
     ImGui::Text("EE PC: 0x%08X", state.pc);
     ImGui::Text("EE next PC: 0x%08X", state.next_pc);
+    ImGui::Text("IOP PC: 0x%08X", iop_state.pc);
+    ImGui::Text("IOP next PC: 0x%08X", iop_state.next_pc);
     ImGui::Text(
         "Scheduler tick: %llu",
         static_cast<unsigned long long>(system_.scheduler().now()));
@@ -532,18 +561,24 @@ void Ps2App::panel_system() {
         "EE instructions: %llu",
         static_cast<unsigned long long>(state.instructions_executed));
     ImGui::Text(
-        "EE state: %s",
-        system_.ee().halted()
+        "IOP instructions: %llu",
+        static_cast<unsigned long long>(iop_state.instructions_executed));
+    ImGui::Text(
+        "Execution state: %s",
+        system_.halted()
             ? "halted"
             : (emulation_running_ ? "running" : "paused"));
 
     if (system_.bios_started()) {
         ImGui::Text(
-            "Reset instruction: 0x%08X", system_.reset_instruction());
-        if (system_.ee().halted()) {
+            "EE reset instruction: 0x%08X", system_.reset_instruction());
+        ImGui::Text(
+            "IOP reset instruction: 0x%08X",
+            system_.iop_reset_instruction());
+        if (system_.halted()) {
             ImGui::TextWrapped(
-                "EE halt: %s",
-                system_.ee().halt_reason().c_str());
+                "Halt: %s",
+                system_.halt_reason().c_str());
         }
     }
 
@@ -554,11 +589,15 @@ void Ps2App::panel_system() {
     ImGui::BulletText("EE interpreter/COP0 subset: running");
     ImGui::BulletText("EE scratchpad: available");
     ImGui::BulletText("Early EE SIO/SBUS/RDRAM/DMAC registers: available");
+    ImGui::BulletText("IOP RAM: 2 MiB shared with EE");
+    ImGui::BulletText("IOP R3000A interpreter/COP0: running");
+    ImGui::BulletText("EE/IOP clock interleave: 8:1 startup model");
     ImGui::BulletText("IOP hardware register window: partial");
+    ImGui::BulletText("SIF/SBUS bridge: partial");
+    ImGui::BulletText("CDVD bootstrap registers/SCMDs: partial");
     ImGui::BulletText("GS privileged registers: partial");
-    ImGui::BulletText("Scheduler: available");
-    ImGui::BulletText("IOP RAM / IOP CPU: next milestone");
-    ImGui::BulletText("ELF loader / GS renderer / SPU2: pending");
+    ImGui::BulletText("Scheduler: advancing with EE execution");
+    ImGui::BulletText("IOP timers/INTC/DMAC + full CDVD/SPU2: pending");
 
     ImGui::End();
 }
@@ -646,6 +685,88 @@ void Ps2App::panel_ee_debug() {
             ImGui::Text(
                 "0x%016llX",
                 static_cast<unsigned long long>(state.gpr[i].lo));
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+}
+
+
+void Ps2App::panel_iop_debug() {
+    ImGui::SetNextWindowSize(
+        ImVec2(680.0f, 620.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("IOP Debug", &show_iop_debug_)) {
+        ImGui::End();
+        return;
+    }
+
+    const auto& state = system_.iop().state();
+
+    ImGui::Text("PC: 0x%08X", state.pc);
+    ImGui::SameLine();
+    ImGui::Text("Next PC: 0x%08X", state.next_pc);
+    ImGui::Text(
+        "HI: 0x%08X   LO: 0x%08X",
+        state.hi,
+        state.lo);
+    ImGui::Text(
+        "Instructions: %llu",
+        static_cast<unsigned long long>(state.instructions_executed));
+
+    u32 current_instruction = 0;
+    const bool can_fetch_current =
+        system_.bios_started() &&
+        system_.iop_bus().read32(state.pc, current_instruction);
+
+    ImGui::Text(
+        "Last: PC 0x%08X  opcode 0x%08X",
+        state.last_pc,
+        state.last_instruction);
+    if (can_fetch_current) {
+        ImGui::Text("Current opcode: 0x%08X", current_instruction);
+    }
+    ImGui::Text(
+        "COP0 PRId: 0x%08X  Status: 0x%08X  Cause: 0x%08X  EPC: 0x%08X",
+        state.cop0[15],
+        state.cop0[12],
+        state.cop0[13],
+        state.cop0[14]);
+
+    if (system_.iop().halted()) {
+        ImGui::TextColored(
+            ImVec4(0.90f, 0.45f, 0.45f, 1.0f),
+            "HALTED");
+        ImGui::TextWrapped("%s", system_.iop().halt_reason().c_str());
+    } else if (system_.bios_started() && !emulation_running_) {
+        if (ImGui::Button("Step IOP (F7)")) {
+            step_iop_once();
+        }
+    }
+
+    ImGui::Separator();
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_Borders |
+        ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_SizingStretchProp;
+
+    if (ImGui::BeginTable(
+            "IOPRegisters", 2, flags, ImVec2(0.0f, 445.0f))) {
+        ImGui::TableSetupColumn(
+            "Register", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < 32; ++i) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("r%d", i);
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("0x%08X", state.gpr[i]);
         }
 
         ImGui::EndTable();
@@ -760,9 +881,9 @@ void Ps2App::panel_about() {
         "dumped from hardware you own.");
     ImGui::Spacing();
     ImGui::TextDisabled(
-        "Current milestone: execute the retail BIOS from EE reset through "
-        "early IOP/GS/DMAC probing, then stop deliberately at the first "
-        "IOP RAM access until the IOP CPU exists.");
+        "Current milestone: execute the retail BIOS with both the EE and "
+        "IOP alive, share the 2 MiB IOP RAM window, and advance the two "
+        "processors with the PS2 startup 8:1 clock relationship.");
 
     ImGui::End();
 }
@@ -839,7 +960,7 @@ bool Ps2App::start_bios() {
     std::snprintf(
         message,
         sizeof(message),
-        "BIOS execution started at 0x%08X (reset opcode 0x%08X)",
+        "EE+IOP BIOS execution started at 0x%08X (reset opcode 0x%08X)",
         Bios::kResetVector,
         system_.reset_instruction());
     status_message_ = message;
@@ -847,14 +968,14 @@ bool Ps2App::start_bios() {
 }
 
 bool Ps2App::step_ee_once() {
-    if (!system_.bios_started() || system_.ee().halted()) {
+    if (!system_.bios_started() || system_.halted()) {
         return false;
     }
 
     std::string error;
     if (!system_.step_ee(error)) {
         emulation_running_ = false;
-        status_message_ = "EE halted: " + error;
+        status_message_ = "Execution halted: " + error;
         return false;
     }
 
@@ -870,19 +991,44 @@ bool Ps2App::step_ee_once() {
     return true;
 }
 
+
+bool Ps2App::step_iop_once() {
+    if (!system_.bios_started() || system_.halted()) {
+        return false;
+    }
+
+    std::string error;
+    if (!system_.step_iop(error)) {
+        emulation_running_ = false;
+        status_message_ = "IOP halted: " + error;
+        return false;
+    }
+
+    char message[128]{};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "IOP step -> PC 0x%08X (%llu instructions)",
+        system_.iop().state().pc,
+        static_cast<unsigned long long>(
+            system_.iop().state().instructions_executed));
+    status_message_ = message;
+    return true;
+}
+
 void Ps2App::update_emulation() {
     if (!emulation_running_ ||
         !system_.bios_started() ||
-        system_.ee().halted()) {
+        system_.halted()) {
         return;
     }
 
     std::string error;
     system_.run_ee(20000, error);
 
-    if (system_.ee().halted()) {
+    if (system_.halted()) {
         emulation_running_ = false;
-        status_message_ = "EE halted: " + system_.ee().halt_reason();
+        status_message_ = "Execution halted: " + system_.halt_reason();
     }
 }
 

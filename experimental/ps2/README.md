@@ -37,11 +37,12 @@ The current BIOS path implements:
 - uncached ROM alias at `0xBFC00000`;
 - read-only BIOS bus behavior;
 - EE reset-vector startup at `0xBFC00000`;
-- reset-instruction fetch validation.
+- IOP reset-vector startup at `0xBFC00000`;
+- reset-instruction fetch validation for both processors.
 
 On Windows, use **File > Load BIOS...** or **Ctrl+B**. A manual BIOS path field is also available under **View > System**.
 
-"Start BIOS" now begins real EE instruction execution. The first interpreter pass implements the reset-path instructions, COP0 PRId/Status/Config access, TLBWI state capture, branch delay slots, EE scratchpad access, and minimal early timer/memory-controller registers. Unsupported instructions or device accesses halt the EE with an exact PC/opcode/reason instead of being silently ignored.
+"Start BIOS" now begins concurrent EE and IOP BIOS execution. The EE starts at its R5900 reset state while an isolated R3000A IOP interpreter starts from the same ROM reset vector with its own COP0 state. During this early milestone the system advances one IOP instruction for every eight EE instructions, matching the normal PS2 startup clock relationship at instruction granularity. Unsupported instructions or device accesses halt with an exact processor/PC/opcode/reason instead of being silently ignored.
 
 ## Current scope
 
@@ -56,16 +57,20 @@ The experimental build currently contains:
 - normal and branch-likely delay-slot execution;
 - HI/LO and HI1/LO1 multiply/divide paths used by the BIOS;
 - 16 KiB EE scratchpad;
-- early EE SIO, SBUS, RDRAM controller, and DMAC register behavior;
+- early EE SIO, SBUS, RDRAM controller, DMAC, and Timer0 behavior, including BUSCLK divisors and the HBlank clock source used by BIOS timing calibration;
+- a 2 MiB IOP RAM implementation, mirrored through the IOP's first 8 MiB and shared with the EE at physical `0x1C000000`;
+- an isolated R3000A IOP interpreter with COP0 reset state, branch delay slots, load delay handling, exceptions, unaligned word merges, and the MIPS-I startup instruction set;
+- an IOP bus with BIOS, cache-control, hardware-register, partial SIF/SBUS, and early CDVD mappings;
 - an IOP hardware-register window used by early BIOS probing;
+- early CDVD byte-port state for N-READY/status/interrupts, N-command parameters, S-command parameters/results, deterministic RTC reads, mecacon version/tray queries, and basic reset/NOP handling;
 - GS privileged-register backing used during early display initialization;
 - run/pause/single-step UI controls with explicit halt diagnostics;
 - a `Ps2System` composition root;
 - headless smoke tests;
 - a standalone SDL/OpenGL/ImGui VibeStation-style UI;
-- PS2 System, EE Debug, Scheduler, Settings, and About panels.
+- PS2 System, EE Debug, IOP Debug, Scheduler, Settings, and About panels.
 
-The current retail BIOS path intentionally stops when the EE first accesses IOP RAM. IOP RAM and the IOP CPU are not faked yet; they are the next subsystem milestone. Large parts of the R5900 instruction set, GS rendering, SPU2, ELF loading, and corruption support also remain incomplete.
+The previous IOP-RAM handoff halt is now removed: EE accesses in the `0x1C000000` physical window and IOP accesses to their low-RAM mirrors refer to the same 2 MiB backing store. The BIOS timing calibration path now sees Timer0's external HBlank source instead of the old placeholder /16 clock. CDVD is intentionally still a protocol scaffold rather than a disc engine: register-level bootstrap commands work, while real seek/read media commands remain unimplemented. The next fidelity milestones are IOP timers/INTC/DMAC, stronger SIF synchronization, full CDVD command/media timing, SPU2-facing IOP hardware, and replacing the current instruction-granularity 8:1 startup interleave with event/cycle scheduling. Large parts of the R5900 instruction set, GS rendering, SPU2, ELF loading, and corruption support also remain incomplete.
 
 ## UI isolation
 

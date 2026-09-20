@@ -4,6 +4,7 @@
 #include "core/gs/gs_privileged.h"
 #include "core/hw/ee_hw.h"
 #include "core/hw/iop_hw_window.h"
+#include "core/iop/iop_ram.h"
 #include "core/memory/ee_ram.h"
 #include "core/memory/ee_scratchpad.h"
 
@@ -14,12 +15,14 @@ EeBus::EeBus(
     EeScratchpad& scratchpad,
     EeHw& hw,
     IopHwWindow& iop_hw,
+    IopRam& iop_ram,
     GsPrivileged& gs,
     const Bios& bios)
     : ram_(ram),
       scratchpad_(scratchpad),
       hw_(hw),
       iop_hw_(iop_hw),
+      iop_ram_(iop_ram),
       gs_(gs),
       bios_(bios) {}
 
@@ -40,7 +43,7 @@ bool EeBus::read8(u32 address, u8& value) const {
         return ram_.read8(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.read8(iop_ram_offset(physical), value);
     }
     if (hw_.read8(physical, value)) {
         return true;
@@ -64,7 +67,7 @@ bool EeBus::read16(u32 address, u16& value) const {
         return ram_.read16(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.read16(iop_ram_offset(physical), value);
     }
     if (hw_.read16(physical, value)) {
         return true;
@@ -88,7 +91,7 @@ bool EeBus::read32(u32 address, u32& value) const {
         return ram_.read32(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.read32(iop_ram_offset(physical), value);
     }
     if (hw_.read32(physical, value)) {
         return true;
@@ -112,7 +115,7 @@ bool EeBus::read64(u32 address, u64& value) const {
         return ram_.read64(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.read64(iop_ram_offset(physical), value);
     }
     if (hw_.read64(physical, value)) {
         return true;
@@ -136,7 +139,7 @@ bool EeBus::write8(u32 address, u8 value) {
         return ram_.write8(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.write8(iop_ram_offset(physical), value);
     }
     if (hw_.write8(physical, value)) {
         return true;
@@ -157,7 +160,7 @@ bool EeBus::write16(u32 address, u16 value) {
         return ram_.write16(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.write16(iop_ram_offset(physical), value);
     }
     if (hw_.write16(physical, value)) {
         return true;
@@ -178,7 +181,7 @@ bool EeBus::write32(u32 address, u32 value) {
         return ram_.write32(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.write32(iop_ram_offset(physical), value);
     }
     if (hw_.write32(physical, value)) {
         return true;
@@ -199,7 +202,7 @@ bool EeBus::write64(u32 address, u64 value) {
         return ram_.write64(physical, value);
     }
     if (is_iop_ram_physical(physical)) {
-        return false;
+        return iop_ram_.write64(iop_ram_offset(physical), value);
     }
     if (hw_.write64(physical, value)) {
         return true;

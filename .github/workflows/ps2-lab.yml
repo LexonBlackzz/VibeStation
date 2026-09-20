@@ -1,0 +1,25 @@
+name: PS2 Lab Headless
+
+on:
+  push:
+    branches:
+      - ps2-lab
+    paths:
+      - "experimental/ps2/**"
+      - ".github/workflows/ps2-lab.yml"
+  pull_request:
+    paths:
+      - "experimental/ps2/**"
+      - ".github/workflows/ps2-lab.yml"
+
+jobs:
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S experimental/ps2 -B build-ps2-headless -DVIBESTATION_PS2_ENABLE_UI=OFF
+      - name: Build
+        run: cmake --build build-ps2-headless --parallel 2
+      - name: Test
+        run: ctest --test-dir build-ps2-headless --output-on-failure

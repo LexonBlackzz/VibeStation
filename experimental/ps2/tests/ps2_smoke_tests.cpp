@@ -160,6 +160,17 @@ std::filesystem::path create_test_bios() {
         write32(i * 4, reset_code[i]);
     }
 
+    const std::array<ps2::u32, 5> iop_stage = {
+        0x3C081234u, // LUI  t0, 0x1234
+        0x35085678u, // ORI  t0, t0, 0x5678
+        0xAC080100u, // SW   t0, 0x100(zero)
+        0x1000FFFFu, // BEQ  zero, zero, -1
+        0x00000000u, // delay slot
+    };
+    for (std::size_t i = 0; i < iop_stage.size(); ++i) {
+        write32(0x24 + (i * 4), iop_stage[i]);
+    }
+
     const std::array<ps2::u32, 4> stage_two = {
         0x3C1A9FC4u, 0x375A1000u, 0x03400008u, 0x00000000u,
     };
@@ -282,6 +293,305 @@ bool test_bios_mapping_and_startup() {
     return ok;
 }
 
+bool test_iop_reset_and_shared_ram() {
+    const auto path = create_test_bios();
+
+    ps2::Ps2System system;
+    std::string error;
+    bool ok =
+        expect(system.load_bios(path.string(), error),
+               "IOP test BIOS failed to load") &&
+        expect(system.boot_bios(error),
+               "IOP test BIOS failed to start");
+
+    const auto& reset = system.iop().state();
+    ok =
+        expect(reset.pc == ps2::Bios::kResetVector,
+               "IOP reset PC mismatch") &&
+        ok;
+    ok =
+        expect(reset.cop0[12] == 0x00400000u,
+               "IOP reset Status mismatch") &&
+        ok;
+    ok =
+        expect(reset.cop0[15] == 0x0000001Fu,
+               "IOP PRId mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_reset_instruction() == 0x401A7800u,
+               "IOP reset instruction mismatch") &&
+        ok;
+
+    const ps2::u64 executed = system.iop().run(8, error);
+    ok =
+        expect(executed == 8,
+               "IOP synthetic reset path instruction count mismatch") &&
+        ok;
+    ok =
+        expect(!system.iop().halted(),
+               "IOP halted during synthetic reset path") &&
+        ok;
+
+    ps2::u32 value = 0;
+    ok =
+        expect(system.iop_ram().read32(0x100u, value) &&
+                   value == 0x12345678u,
+               "IOP CPU did not write IOP RAM") &&
+        ok;
+
+    value = 0;
+    ok =
+        expect(system.bus().read32(0xBC000100u, value) &&
+                   value == 0x12345678u,
+               "EE could not read the IOP RAM window") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().write32(0x00200100u, 0xCAFEBABEu),
+               "IOP RAM mirror write failed") &&
+        ok;
+    value = 0;
+    ok =
+        expect(system.bus().read32(0xBC000100u, value) &&
+                   value == 0xCAFEBABEu,
+               "IOP RAM mirror did not alias the 2 MiB RAM") &&
+        ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
+}
+
+bool test_iop_ram_mirror_boundary() {
+    ps2::Ps2System system;
+
+    bool ok =
+        expect(
+            system.iop_bus().write32(0x001FFFFEu, 0x44332211u),
+            "IOP mirrored boundary write failed");
+
+    ps2::u8 byte = 0;
+    ok =
+        expect(system.iop_ram().read8(0x001FFFFEu, byte) &&
+                   byte == 0x11u,
+               "IOP mirror byte 0 mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_ram().read8(0x001FFFFFu, byte) &&
+                   byte == 0x22u,
+               "IOP mirror byte 1 mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_ram().read8(0x00000000u, byte) &&
+                   byte == 0x33u,
+               "IOP mirror wrapped byte 2 mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_ram().read8(0x00000001u, byte) &&
+                   byte == 0x44u,
+               "IOP mirror wrapped byte 3 mismatch") &&
+        ok;
+
+    ps2::u32 value = 0;
+    ok =
+        expect(system.iop_bus().read32(0x003FFFFEu, value) &&
+                   value == 0x44332211u,
+               "IOP mirrored boundary read failed") &&
+        ok;
+
+    return ok;
+}
+
+bool test_ee_iop_startup_interleave() {
+    const auto path = create_test_bios();
+
+    ps2::Ps2System system;
+    std::string error;
+    bool ok =
+        expect(system.load_bios(path.string(), error),
+               "interleave test BIOS failed to load") &&
+        expect(system.boot_bios(error),
+               "interleave test BIOS failed to start");
+
+    for (int i = 0; i < 7 && ok; ++i) {
+        ok =
+            expect(system.step_ee(error),
+                   "EE failed before first IOP interleave slot") &&
+            ok;
+    }
+
+    ok =
+        expect(system.iop().state().instructions_executed == 0,
+               "IOP ran too early in 8:1 startup interleave") &&
+        ok;
+
+    ok =
+        expect(system.step_ee(error),
+               "EE failed at first IOP interleave slot") &&
+        ok;
+    ok =
+        expect(system.iop().state().instructions_executed == 1,
+               "IOP did not run after eight EE startup steps") &&
+        ok;
+    ok =
+        expect(system.scheduler().now() == 8,
+               "scheduler did not advance with EE startup execution") &&
+        ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
+}
+
+bool test_iop_cache_isolation_blocks_ram_store() {
+    ps2::Ps2System system;
+
+    std::string error;
+    bool ok =
+        expect(system.iop_ram().write32(0x0000u, 0xAC080100u),
+               "failed to install IOP cache-isolation test opcode") &&
+        expect(system.iop_ram().write32(0x0100u, 0xDEADBEEFu),
+               "failed to seed IOP cache-isolation test RAM");
+
+    system.iop().reset(0x00000000u);
+    system.iop().state().gpr[8] = 0x12345678u;
+    system.iop().state().cop0[12] |= 0x00010000u;
+
+    ok =
+        expect(system.iop().step(error),
+               "IOP cache-isolated store instruction failed") &&
+        ok;
+
+    ps2::u32 value = 0;
+    ok =
+        expect(system.iop_ram().read32(0x0100u, value) &&
+                   value == 0xDEADBEEFu,
+               "cache-isolated IOP store incorrectly modified RAM") &&
+        ok;
+
+    return ok;
+}
+
+bool test_ee_timer0_clock_sources() {
+    ps2::Ps2System system;
+
+    ps2::u32 count = 0;
+    bool ok =
+        expect(system.bus().write32(0x10000010u, 0x83u),
+               "failed to configure Timer0 HBlank clock") &&
+        expect(system.bus().write32(0x10000000u, 0),
+               "failed to clear Timer0 count");
+
+    system.bus().tick(18875);
+    ok =
+        expect(system.bus().read32(0x10000000u, count) && count == 0,
+               "Timer0 HBlank clock advanced before a scanline") &&
+        ok;
+
+    system.bus().tick(1);
+    ok =
+        expect(system.bus().read32(0x10000000u, count) && count == 1,
+               "Timer0 HBlank clock did not advance at one scanline") &&
+        ok;
+
+    ok =
+        expect(system.bus().write32(0x10000010u, 0x81u),
+               "failed to configure Timer0 BUSCLK/16") &&
+        expect(system.bus().write32(0x10000000u, 0),
+               "failed to clear Timer0 BUSCLK/16 count") &&
+        ok;
+
+    system.bus().tick(32);
+    ok =
+        expect(system.bus().read32(0x10000000u, count) && count == 1,
+               "Timer0 BUSCLK/16 divider mismatch") &&
+        ok;
+
+    return ok;
+}
+
+bool test_cdvd_reset_status() {
+    ps2::Ps2System system;
+
+    ps2::u8 value = 0;
+    bool ok =
+        expect(system.iop_bus().read8(0xBF402005u, value) &&
+                   value == 0x4Cu,
+               "CDVD N-READY reset value mismatch");
+
+    ok =
+        expect(system.iop_bus().read8(0xBF40200Au, value) &&
+                   value == 0x01u,
+               "CDVD tray-open reset status mismatch") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().read8(0xBF40200Fu, value) &&
+                   value == 0x00u,
+               "CDVD reset disc type should be no-disc") &&
+        ok;
+
+    return ok;
+}
+
+bool test_cdvd_scommand_result_fifo() {
+    ps2::Ps2System system;
+
+    bool ok =
+        expect(system.iop_bus().write8(0xBF402016u, 0x08u),
+               "CDVD Read RTC S-command write failed");
+
+    ps2::u8 ready = 0;
+    ok =
+        expect(system.iop_bus().read8(0xBF402017u, ready) &&
+                   (ready & 0x40u) == 0,
+               "CDVD S-command result FIFO was not exposed") &&
+        ok;
+
+    const std::array<ps2::u8, 8> expected{
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x01u, 0x01u, 0x00u};
+
+    for (const ps2::u8 expected_byte : expected) {
+        ps2::u8 value = 0xFFu;
+        ok =
+            expect(system.iop_bus().read8(0xBF402018u, value) &&
+                       value == expected_byte,
+                   "CDVD RTC result byte mismatch") &&
+            ok;
+    }
+
+    ok =
+        expect(system.iop_bus().read8(0xBF402017u, ready) &&
+                   (ready & 0x40u) != 0,
+               "CDVD S-command FIFO did not return to empty") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().write8(0xBF402017u, 0x30u),
+               "CDVD mecacon parameter write failed") &&
+        ok;
+    ok =
+        expect(system.iop_bus().write8(0xBF402016u, 0x03u),
+               "CDVD mecacon S-command write failed") &&
+        ok;
+
+    ps2::u8 status = 0;
+    ps2::u8 tray = 0;
+    ok =
+        expect(system.iop_bus().read8(0xBF402018u, status) &&
+                   status == 0x01u,
+               "CDVD mecacon tray status mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_bus().read8(0xBF402018u, tray) &&
+                   tray == 0x08u,
+               "CDVD mecacon tray detail mismatch") &&
+        ok;
+
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -293,6 +603,13 @@ int main() {
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;
     ok = test_bios_mapping_and_startup() && ok;
+    ok = test_iop_reset_and_shared_ram() && ok;
+    ok = test_iop_ram_mirror_boundary() && ok;
+    ok = test_ee_iop_startup_interleave() && ok;
+    ok = test_iop_cache_isolation_blocks_ram_store() && ok;
+    ok = test_ee_timer0_clock_sources() && ok;
+    ok = test_cdvd_reset_status() && ok;
+    ok = test_cdvd_scommand_result_fifo() && ok;
 
     if (!ok) {
         return EXIT_FAILURE;

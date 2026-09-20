@@ -84,9 +84,27 @@ bool EeHw::read32(u32 address, u32& value) const {
     case 0x10000000u: {
         const u64 elapsed =
             cycles_ >= timer0_epoch_ ? cycles_ - timer0_epoch_ : 0;
+        u32 rate = 1;
+        switch (timer0_mode_ & 0x3u) {
+        case 0:
+            rate = 2;      // BUSCLK = EE clock / 2.
+            break;
+        case 1:
+            rate = 32;     // BUSCLK / 16.
+            break;
+        case 2:
+            rate = 512;    // BUSCLK / 256.
+            break;
+        case 3:
+            // External HBlank clock. PCSX2's NTSC startup timing uses
+            // 18,876 EE cycles for one complete scanline.
+            rate = 18876;
+            break;
+        }
+
         const u32 delta =
             (timer0_mode_ & 0x80u) != 0
-                ? static_cast<u32>(elapsed / 16u)
+                ? static_cast<u32>(elapsed / rate)
                 : 0u;
         value = (timer0_count_base_ + delta) & 0xFFFFu;
         return true;

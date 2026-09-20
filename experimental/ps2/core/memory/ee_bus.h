@@ -10,6 +10,7 @@ class EeRam;
 class EeScratchpad;
 class GsPrivileged;
 class IopHwWindow;
+class IopRam;
 
 class EeBus {
 public:
@@ -18,6 +19,7 @@ public:
         EeScratchpad& scratchpad,
         EeHw& hw,
         IopHwWindow& iop_hw,
+        IopRam& iop_ram,
         GsPrivileged& gs,
         const Bios& bios);
 
@@ -39,10 +41,15 @@ public:
     }
 
 private:
+    [[nodiscard]] static u32 iop_ram_offset(u32 physical) {
+        return physical - 0x1C000000u;
+    }
+
     EeRam& ram_;
     EeScratchpad& scratchpad_;
     EeHw& hw_;
     IopHwWindow& iop_hw_;
+    IopRam& iop_ram_;
     GsPrivileged& gs_;
     const Bios& bios_;
 };

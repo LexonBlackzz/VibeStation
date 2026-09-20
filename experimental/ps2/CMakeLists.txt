@@ -8,11 +8,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(vibestation_ps2_core STATIC
     core/bios/bios.cpp
+    core/cdvd/cdvd_hw.cpp
     core/ps2_system.cpp
     core/ee/ee_cpu.cpp
     core/gs/gs_privileged.cpp
     core/hw/ee_hw.cpp
     core/hw/iop_hw_window.cpp
+    core/iop/iop_bus.cpp
+    core/iop/iop_cpu.cpp
+    core/iop/iop_ram.cpp
     core/memory/ee_bus.cpp
     core/memory/ee_ram.cpp
     core/memory/ee_scratchpad.cpp

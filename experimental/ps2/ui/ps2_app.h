@@ -23,6 +23,7 @@ private:
     void panel_main();
     void panel_system();
     void panel_ee_debug();
+    void panel_iop_debug();
     void panel_scheduler();
     void panel_settings();
     void panel_about();
@@ -31,6 +32,7 @@ private:
     bool load_bios_from_path(const std::string& path);
     bool start_bios();
     bool step_ee_once();
+    bool step_iop_once();
     void update_emulation();
     void reset_core();
 
@@ -43,6 +45,7 @@ private:
 
     bool show_system_ = false;
     bool show_ee_debug_ = false;
+    bool show_iop_debug_ = false;
     bool show_scheduler_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;

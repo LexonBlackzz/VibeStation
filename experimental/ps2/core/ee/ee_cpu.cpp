@@ -552,10 +552,8 @@ bool EeCpu::step(std::string& error) {
     };
 
     const auto load_fault = [&](const char* kind, u32 address) {
-        std::string reason = std::string(kind) + " fault from " + hex32(address);
-        if (EeBus::is_iop_ram_physical(EeBus::to_physical(address))) {
-            reason += " (IOP RAM not implemented)";
-        }
+        const std::string reason =
+            std::string(kind) + " fault from " + hex32(address);
         return fail(pc, instruction, reason, error);
     };
 
@@ -753,11 +751,11 @@ bool EeCpu::step(std::string& error) {
     case 0x2B: { // SW
         const u32 address = effective_address();
         if (!bus_.write32(address, static_cast<u32>(gpr_u64(rt)))) {
-            std::string reason = "Store word fault to " + hex32(address);
-            if (EeBus::is_iop_ram_physical(EeBus::to_physical(address))) {
-                reason += " (IOP RAM not implemented)";
-            }
-            ok = fail(pc, instruction, reason, error);
+            ok = fail(
+                pc,
+                instruction,
+                "Store word fault to " + hex32(address),
+                error);
         }
         break;
     }
@@ -794,11 +792,11 @@ bool EeCpu::step(std::string& error) {
     case 0x3F: { // SD
         const u32 address = effective_address();
         if (!bus_.write64(address, gpr_u64(rt))) {
-            std::string reason = "Store doubleword fault to " + hex32(address);
-            if (EeBus::is_iop_ram_physical(EeBus::to_physical(address))) {
-                reason += " (IOP RAM not implemented)";
-            }
-            ok = fail(pc, instruction, reason, error);
+            ok = fail(
+                pc,
+                instruction,
+                "Store doubleword fault to " + hex32(address),
+                error);
         }
         break;
     }
