@@ -23,6 +23,8 @@ struct CpuHotBlockStats {
   u32 instruction_count = 0;
   u64 entries = 0;
   u64 native_entries = 0;
+  u64 runtime_rejects = 0;
+  u32 runtime_reject_dominant_count = 0;
   u64 estimated_guest_instructions = 0;
   u32 native_prefix_instruction_count = 0;
   bool native_compiled = false;
@@ -34,6 +36,7 @@ struct CpuHotBlockStats {
   bool has_fallback = false;
   std::array<char, 32> shape{};
   std::array<char, 48> reject_detail{};
+  std::array<char, 48> runtime_reject_detail{};
   std::array<char, 160> ops{};
 };
 
