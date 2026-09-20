@@ -393,6 +393,7 @@ GsRasterContext GsCore::raster_context() const {
         texture.height = th < 31u ? (1u << th) : 0u;
         texture.tcc = ((tex0 >> 34) & 1u) != 0;
         texture.tfx = static_cast<u32>((tex0 >> 35) & 0x3u);
+        texture.fst = (prim & (1ull << 8)) != 0;
         texture.wms = static_cast<u32>(clamp & 0x3u);
         texture.wmt = static_cast<u32>((clamp >> 2) & 0x3u);
         texture.minu = static_cast<u32>((clamp >> 4) & 0x3FFu);
@@ -419,7 +420,6 @@ bool GsCore::raster_state_supported() const {
     if (!GsRasterizer::supported_target(ctx)) return false;
 
     if (ctx.texture.enabled) {
-        if ((prim & (1ull << 8)) == 0) return false; // STQ not modeled yet.
         if (!GsRasterizer::supported_texture(ctx.texture)) return false;
     }
 
@@ -476,6 +476,10 @@ void GsCore::submit_vertex(u64 xyz) {
     const u64 uv = registers_[kRegUv];
     v.u = static_cast<s32>(uv & 0x3FFFu);
     v.v = static_cast<s32>((uv >> 16) & 0x3FFFu);
+    const u64 st = registers_[kRegSt];
+    v.s = std::bit_cast<float>(static_cast<u32>(st));
+    v.t = std::bit_cast<float>(static_cast<u32>(st >> 32));
+    v.q = std::bit_cast<float>(static_cast<u32>(registers_[kRegRgbaq] >> 32));
 
     switch (prim) {
     case 0: // point: counted, raster support comes later.

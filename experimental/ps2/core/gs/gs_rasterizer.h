@@ -11,8 +11,11 @@ struct GsRasterVertex {
     s32 y = 0;
     u32 z = 0;
     u32 rgba = 0;
-    s32 u = 0; // 10.4 fixed-point.
+    s32 u = 0; // 10.4 fixed-point for FST/UV mode.
     s32 v = 0;
+    float s = 0.0f; // STQ mode values.
+    float t = 0.0f;
+    float q = 1.0f;
 };
 
 struct GsTextureState {
@@ -30,6 +33,7 @@ struct GsTextureState {
     u32 maxv = 0;
     bool tcc = false;
     u32 tfx = 0;
+    bool fst = true;
 };
 
 struct GsRasterContext {

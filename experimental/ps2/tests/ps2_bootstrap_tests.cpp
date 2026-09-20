@@ -1075,6 +1075,78 @@ bool test_gs_depth_layout_and_pixel_pipeline() {
     return ok;
 }
 
+
+bool test_gs_stq_perspective_texturing() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16);
+    };
+    auto rgbaq = [](ps2::u32 rgba, float q) {
+        return static_cast<ps2::u64>(rgba) |
+               (static_cast<ps2::u64>(std::bit_cast<ps2::u32>(q)) << 32);
+    };
+    auto st = [](float s, float t) {
+        return static_cast<ps2::u64>(std::bit_cast<ps2::u32>(s)) |
+               (static_cast<ps2::u64>(std::bit_cast<ps2::u32>(t)) << 32);
+    };
+
+    ps2::GsCore gs;
+    gs.reset();
+    bool ok = true;
+
+    constexpr ps2::u32 texture_bp = 0x100u;
+    ok = expect(gs.vram().write_pixel(0, 0, 0, texture_bp, 1, 0xFF0000FFu) &&
+                gs.vram().write_pixel(0, 1, 0, texture_bp, 1, 0xFF00FF00u) &&
+                gs.vram().write_pixel(0, 0, 1, texture_bp, 1, 0xFFFF0000u) &&
+                gs.vram().write_pixel(0, 1, 1, texture_bp, 1, 0xFFFFFFFFu),
+                "STQ texture setup failed") && ok;
+
+    ad(gs, 0x1A, 1u);
+    ad(gs, 0x18, 0u);
+    ad(gs, 0x40,
+       (static_cast<ps2::u64>(3u) << 16) |
+       (static_cast<ps2::u64>(3u) << 48));
+    ad(gs, 0x46, 1u);
+    ad(gs, 0x4C, static_cast<ps2::u64>(1u) << 16);
+
+    const ps2::u64 tex0 =
+        static_cast<ps2::u64>(texture_bp) |
+        (1ull << 14) |          // TBW=1
+        (1ull << 26) |          // TW=1 => 2 texels
+        (1ull << 30) |          // TH=1
+        (1ull << 35);           // TFX=DECAL
+    ad(gs, 0x06, tex0);
+
+    // Triangle, TME=1, FST=0.  S and Q vary together on the right vertex,
+    // making S/Q perspective-correct rather than a plain affine S.
+    ad(gs, 0x00, 3u | (1u << 4));
+    ad(gs, 0x01, rgbaq(0xFF000000u, 1.0f));
+    ad(gs, 0x02, st(0.0f, 0.0f));
+    ad(gs, 0x05, xyz(0, 0));
+
+    ad(gs, 0x01, rgbaq(0xFF000000u, 2.0f));
+    ad(gs, 0x02, st(2.0f, 0.0f));
+    ad(gs, 0x05, xyz(32, 0));
+
+    ad(gs, 0x01, rgbaq(0xFF000000u, 1.0f));
+    ad(gs, 0x02, st(0.0f, 1.0f));
+    ad(gs, 0x05, xyz(0, 32));
+
+    // At pixel center (8,8), interpolated S=0.5 and Q=1.25, so
+    // S/Q*2 = 0.8 and the nearest integer texel is still x=0.
+    ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xFF0000FFu,
+                "GS STQ perspective sample mismatch") && ok;
+    ok = expect(gs.stats().textured_raster_draws == 1 &&
+                gs.stats().skipped_raster_draws == 0,
+                "GS STQ draw was skipped") && ok;
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1113,6 +1185,7 @@ int main() {
     ok = test_gs_display_extraction() && ok;
     ok = test_gs_fst_direct_color_texturing() && ok;
     ok = test_gs_depth_layout_and_pixel_pipeline() && ok;
+    ok = test_gs_stq_perspective_texturing() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";
