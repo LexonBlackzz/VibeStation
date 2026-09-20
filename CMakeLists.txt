@@ -165,11 +165,6 @@ target_include_directories(VibeStation PRIVATE
     src)
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
 
-# Most VibeStation translation units repeatedly parse the same stable standard
-# library headers. Keep the PCH intentionally free of project headers so normal
-# emulator edits do not invalidate it.
-target_precompile_headers(VibeStation PRIVATE src/pch.h)
-
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
         GIT_REPOSITORY https://github.com/herumi/xbyak.git
