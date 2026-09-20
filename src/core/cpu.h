@@ -358,6 +358,13 @@ struct CpuBackendStats {
   u64 jit_v2_helper_instructions = 0;
   u64 jit_v2_helper_entries = 0;
   u64 jit_v2_helper_blocks_compiled = 0;
+  u64 jit_v2_helper_state = 0;
+  u64 jit_v2_helper_icache = 0;
+  u64 jit_v2_helper_irq = 0;
+  u64 jit_v2_helper_unsupported = 0;
+  u64 jit_v2_helper_memory = 0;
+  u64 jit_v2_helper_budget = 0;
+  u64 jit_v2_helper_internal = 0;
   u64 fallback_instructions = 0;
   u64 interpreter_fallback_steps = 0;
   u64 forced_interpreter_slices = 0;
