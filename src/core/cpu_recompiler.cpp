@@ -2019,6 +2019,10 @@ void CpuOptimizedBackend::record_block_entry(DecodedBlock &block) {
     block.profile_entry_frame = current_frame_;
     block.profile_frame_entries = 0;
     block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
   }
   ++block.profile_frame_entries;
 }
@@ -2029,8 +2033,48 @@ void CpuOptimizedBackend::record_native_block_entry(DecodedBlock &block) {
     block.profile_entry_frame = current_frame_;
     block.profile_frame_entries = 0;
     block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
   }
   ++block.profile_frame_native_entries;
+}
+
+void CpuOptimizedBackend::record_runtime_reject(
+    DecodedBlock &block, NativeBlockRejectDetail detail) {
+  if (!g_profile_detailed_timing || detail == NativeBlockRejectDetail::None) {
+    return;
+  }
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
+  }
+
+  ++block.profile_frame_runtime_rejects;
+  for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
+       ++i) {
+    if (block.profile_frame_runtime_reject_details[i] == detail) {
+      ++block.profile_frame_runtime_reject_counts[i];
+      return;
+    }
+    if (block.profile_frame_runtime_reject_details[i] ==
+        NativeBlockRejectDetail::None) {
+      block.profile_frame_runtime_reject_details[i] = detail;
+      block.profile_frame_runtime_reject_counts[i] = 1;
+      return;
+    }
+  }
+
+  // Four distinct runtime reject causes in a single block/frame is already
+  // unusual. Fold any additional causes into the final slot rather than
+  // bloating every decoded block with a large histogram.
+  ++block.profile_frame_runtime_reject_counts.back();
 }
 
 void CpuOptimizedBackend::flush() {
@@ -2078,6 +2122,21 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
     hot.instruction_count = block.instruction_count;
     hot.entries = block.profile_frame_entries;
     hot.native_entries = block.profile_frame_native_entries;
+    hot.runtime_rejects = block.profile_frame_runtime_rejects;
+    NativeBlockRejectDetail dominant_runtime_reject =
+        NativeBlockRejectDetail::None;
+    u32 dominant_runtime_reject_count = 0;
+    for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
+         ++i) {
+      if (block.profile_frame_runtime_reject_counts[i] >
+          dominant_runtime_reject_count) {
+        dominant_runtime_reject =
+            block.profile_frame_runtime_reject_details[i];
+        dominant_runtime_reject_count =
+            block.profile_frame_runtime_reject_counts[i];
+      }
+    }
+    hot.runtime_reject_dominant_count = dominant_runtime_reject_count;
     hot.estimated_guest_instructions =
         block.profile_frame_entries *
         static_cast<u64>(block.instruction_count);
@@ -2092,6 +2151,8 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
     copy_stat_text(hot.shape, native_block_shape_name(block.native_shape));
     copy_stat_text(hot.reject_detail,
                    native_reject_detail_name(block.native_reject_detail));
+    copy_stat_text(hot.runtime_reject_detail,
+                   native_reject_detail_name(dominant_runtime_reject));
 
     std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
     for (u32 i = 0; i < block.instruction_count; ++i) {
