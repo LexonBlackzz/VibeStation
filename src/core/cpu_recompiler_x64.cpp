@@ -3138,8 +3138,11 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         inline_branch_tail && block.instruction_count >= 2u &&
         block.instructions[block.instruction_count - 2u].target ==
             block.start_pc;
+    const bool proven_hot_branch_tail =
+        is_branch_tail &&
+        block.entry_count >= g_cpu_x64_jit_hot_branch_tail_threshold;
     const bool unprofitable_branch =
-        is_branch_tail && !self_loop_branch;
+        is_branch_tail && !self_loop_branch && !proven_hot_branch_tail;
     if ((uses_instruction_helpers || unprofitable_branch) &&
         !g_cpu_backend_compare_test_active) {
       block.native_decoded_only = true;
