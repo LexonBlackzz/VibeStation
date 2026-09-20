@@ -59,10 +59,10 @@ The experimental build currently contains:
 - 16 KiB EE scratchpad;
 - early EE SIO, SBUS, RDRAM controller, DMAC, and Timer0 behavior, including BUSCLK divisors and the HBlank clock source used by BIOS timing calibration;
 - a 2 MiB IOP RAM implementation, mirrored through the IOP's first 8 MiB and shared with the EE at physical `0x1C000000`;
-- an isolated R3000A IOP interpreter with COP0 reset state, branch delay slots, load delay handling, exceptions, unaligned word merges, and the MIPS-I startup instruction set;
-- an IOP bus with BIOS, cache-control, hardware-register, partial SIF/SBUS, and early CDVD mappings;
+- an isolated R3000A IOP interpreter with COP0 reset state, branch delay slots, load delay handling, exceptions, external interrupt sampling, unaligned word merges, and the MIPS-I startup instruction set;
+- an IOP bus with BIOS, cache-control, hardware-register, explicit I_STAT/I_MASK/I_CTRL interrupt-controller semantics, partial SIF/SBUS, and early CDVD mappings;
 - an IOP hardware-register window used by early BIOS probing;
-- early CDVD byte-port state for N-READY/status/interrupts, N-command parameters, S-command parameters/results, deterministic RTC reads, mecacon version/tray queries, and basic reset/NOP handling;
+- early CDVD byte-port state for N-READY/status/interrupts, N-command parameters, S-command parameters/results, deterministic RTC reads, mecacon version/tray queries, basic reset/NOP handling, and CDVD command-complete delivery on IOP IRQ2;
 - GS privileged-register backing used during early display initialization;
 - run/pause/single-step UI controls with explicit halt diagnostics;
 - a `Ps2System` composition root;

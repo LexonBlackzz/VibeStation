@@ -3,7 +3,8 @@
 namespace ps2 {
 
 Ps2System::Ps2System()
-    : iop_bus_(iop_ram_, iop_hw_, hw_, cdvd_, bios_),
+    : cdvd_(iop_intc_),
+      iop_bus_(iop_ram_, iop_hw_, hw_, iop_intc_, cdvd_, bios_),
       bus_(ram_, scratchpad_, hw_, iop_hw_, iop_ram_, gs_, bios_),
       ee_(bus_),
       iop_(iop_bus_) {
@@ -15,6 +16,7 @@ void Ps2System::reset(u32 entry_point) {
     scratchpad_.reset();
     hw_.reset();
     iop_hw_.reset();
+    iop_intc_.reset();
     cdvd_.reset();
     iop_ram_.reset();
     iop_bus_.reset();

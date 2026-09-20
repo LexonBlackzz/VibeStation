@@ -592,6 +592,136 @@ bool test_cdvd_scommand_result_fifo() {
     return ok;
 }
 
+bool test_iop_intc_registers() {
+    ps2::Ps2System system;
+
+    bool ok =
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kIMask, 1u << 2),
+               "IOP I_MASK write failed") &&
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kICtrl, 1),
+               "IOP I_CTRL write failed");
+
+    system.iop_intc().raise(2);
+    ok =
+        expect(system.iop_intc().pending(),
+               "IOP INTC did not report enabled pending source") &&
+        ok;
+
+    ps2::u32 status = 0;
+    ok =
+        expect(system.iop_bus().read32(
+                   ps2::IopIntc::kIStat, status) &&
+                   (status & (1u << 2)) != 0,
+               "IOP I_STAT did not latch source 2") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kIStat, 0),
+               "IOP I_STAT acknowledge write failed") &&
+        ok;
+    ok =
+        expect(!system.iop_intc().pending(),
+               "IOP I_STAT zero write did not clear pending source") &&
+        ok;
+
+    system.iop_intc().raise(2);
+    ps2::u32 control = 0;
+    ok =
+        expect(system.iop_bus().read32(
+                   ps2::IopIntc::kICtrl, control) &&
+                   control == 1,
+               "IOP I_CTRL read value mismatch") &&
+        ok;
+    ok =
+        expect(system.iop_intc().control() == 0,
+               "IOP I_CTRL was not read-to-clear") &&
+        ok;
+    ok =
+        expect(!system.iop_intc().pending(),
+               "cleared I_CTRL still allowed an interrupt") &&
+        ok;
+
+    return ok;
+}
+
+bool test_iop_external_interrupt_exception() {
+    const auto path = create_test_bios();
+
+    ps2::Ps2System system;
+    std::string error;
+    bool ok =
+        expect(system.load_bios(path.string(), error),
+               "INTC test BIOS failed to load") &&
+        expect(system.boot_bios(error),
+               "INTC test BIOS failed to start");
+
+    // BEV + IP2 mask + current interrupt enable.
+    system.iop().state().cop0[12] = 0x00400401u;
+    ok =
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kIMask, 1u << 2),
+               "INTC test I_MASK write failed") &&
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kICtrl, 1),
+               "INTC test I_CTRL write failed") &&
+        ok;
+
+    system.iop_intc().raise(2);
+
+    ok =
+        expect(system.iop().step(error),
+               "IOP failed while taking external interrupt") &&
+        ok;
+
+    const auto& state = system.iop().state();
+    ok =
+        expect(state.last_pc == 0xBFC00180u,
+               "IOP external interrupt did not vector through BEV") &&
+        ok;
+    ok =
+        expect(state.cop0[14] == ps2::Bios::kResetVector,
+               "IOP interrupt EPC mismatch") &&
+        ok;
+    ok =
+        expect((state.cop0[13] & 0x7Cu) == 0,
+               "IOP interrupt exception code was not zero") &&
+        ok;
+    ok =
+        expect((state.cop0[13] & 0x400u) != 0,
+               "IOP Cause did not expose external interrupt IP2") &&
+        ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
+}
+
+bool test_cdvd_raises_iop_irq2() {
+    ps2::Ps2System system;
+
+    bool ok =
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kIMask, 1u << 2),
+               "CDVD IRQ I_MASK write failed") &&
+        expect(system.iop_bus().write32(
+                   ps2::IopIntc::kICtrl, 1),
+               "CDVD IRQ I_CTRL write failed");
+
+    ok =
+        expect(system.iop_bus().write8(0xBF402004u, 0x00u),
+               "CDVD NOP command write failed") &&
+        ok;
+    ok =
+        expect(system.iop_intc().pending(),
+               "CDVD command completion did not assert IOP IRQ2") &&
+        ok;
+
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -610,6 +740,9 @@ int main() {
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
+    ok = test_iop_intc_registers() && ok;
+    ok = test_iop_external_interrupt_exception() && ok;
+    ok = test_cdvd_raises_iop_irq2() && ok;
 
     if (!ok) {
         return EXIT_FAILURE;

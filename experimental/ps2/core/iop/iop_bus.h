@@ -10,6 +10,7 @@ class Bios;
 class CdvdHw;
 class EeHw;
 class IopHwWindow;
+class IopIntc;
 class IopRam;
 
 class IopBus {
@@ -18,6 +19,7 @@ public:
         IopRam& ram,
         IopHwWindow& hw,
         EeHw& ee_hw,
+        IopIntc& intc,
         CdvdHw& cdvd,
         const Bios& bios);
 
@@ -36,6 +38,8 @@ public:
         return to_physical(address) < 0x00800000u;
     }
 
+    [[nodiscard]] bool interrupt_pending() const;
+
 private:
     [[nodiscard]] bool read_sif32(u32 physical, u32& value) const;
     [[nodiscard]] bool write_sif32(u32 physical, u32 value);
@@ -43,6 +47,7 @@ private:
     IopRam& ram_;
     IopHwWindow& hw_;
     EeHw& ee_hw_;
+    IopIntc& intc_;
     CdvdHw& cdvd_;
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};

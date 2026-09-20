@@ -6,8 +6,13 @@
 
 namespace ps2 {
 
+class IopIntc;
+
 class CdvdHw {
 public:
+    explicit CdvdHw(IopIntc& intc)
+        : intc_(intc) {}
+
     static constexpr u32 kBase = 0x1F402000u;
     static constexpr u32 kSize = 0x40u;
 
@@ -25,6 +30,9 @@ private:
     [[nodiscard]] static bool contains(u32 physical, u32 width);
     void set_s_result(const u8* data, u8 size);
     void execute_s_command(u8 command);
+    void set_irq(u8 cause);
+
+    IopIntc& intc_;
 
     u8 n_command_ = 0;
     u8 ready_ = 0;

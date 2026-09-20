@@ -8,6 +8,7 @@
 #include "core/hw/iop_hw_window.h"
 #include "core/iop/iop_bus.h"
 #include "core/iop/iop_cpu.h"
+#include "core/iop/iop_intc.h"
 #include "core/iop/iop_ram.h"
 #include "core/memory/ee_bus.h"
 #include "core/memory/ee_ram.h"
@@ -53,6 +54,9 @@ public:
     [[nodiscard]] IopCpu& iop() { return iop_; }
     [[nodiscard]] const IopCpu& iop() const { return iop_; }
 
+    [[nodiscard]] IopIntc& iop_intc() { return iop_intc_; }
+    [[nodiscard]] const IopIntc& iop_intc() const { return iop_intc_; }
+
     [[nodiscard]] bool bios_started() const { return bios_started_; }
     [[nodiscard]] bool halted() const {
         return ee_.halted() || iop_.halted();
@@ -70,7 +74,8 @@ private:
     bool advance_iop_for_ee_step(std::string& error);
 
     Bios bios_{};
-    CdvdHw cdvd_{};
+    IopIntc iop_intc_{};
+    CdvdHw cdvd_;
     EeRam ram_{};
     EeScratchpad scratchpad_{};
     EeHw hw_{};

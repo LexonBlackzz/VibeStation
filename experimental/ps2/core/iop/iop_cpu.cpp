@@ -380,6 +380,29 @@ bool IopCpu::step(std::string& error) {
         return false;
     }
 
+    // The IOP INTC is wired to the R3000A external interrupt input.
+    // Do not interrupt a branch delay slot; PCSX2 also tests INTC after the
+    // branch+delay-slot pair has completed.
+    const bool external_irq = bus_.interrupt_pending();
+    if (external_irq) {
+        state_.cop0[13] |= 0x00000400u;
+    } else {
+        state_.cop0[13] &= ~0x00000400u;
+    }
+
+    const bool cop0_interrupt_enabled =
+        (state_.cop0[12] & 0x00000001u) != 0 &&
+        (state_.cop0[12] & state_.cop0[13] & 0x0000FF00u) != 0;
+
+    if (!next_is_delay_slot_ && cop0_interrupt_enabled) {
+        if (pending_load_.valid && pending_load_.reg != 0) {
+            state_.gpr[pending_load_.reg] = pending_load_.value;
+        }
+        pending_load_ = {};
+        next_load_ = {};
+        raise_exception(0, state_.pc, false);
+    }
+
     const u32 pc = state_.pc;
     const u32 old_next_pc = state_.next_pc;
     const bool in_delay_slot = next_is_delay_slot_;

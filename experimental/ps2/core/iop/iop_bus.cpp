@@ -4,6 +4,7 @@
 #include "core/cdvd/cdvd_hw.h"
 #include "core/hw/ee_hw.h"
 #include "core/hw/iop_hw_window.h"
+#include "core/iop/iop_intc.h"
 #include "core/iop/iop_ram.h"
 
 namespace ps2 {
@@ -20,11 +21,13 @@ IopBus::IopBus(
     IopRam& ram,
     IopHwWindow& hw,
     EeHw& ee_hw,
+    IopIntc& intc,
     CdvdHw& cdvd,
     const Bios& bios)
     : ram_(ram),
       hw_(hw),
       ee_hw_(ee_hw),
+      intc_(intc),
       cdvd_(cdvd),
       bios_(bios) {}
 
@@ -37,6 +40,10 @@ u32 IopBus::to_physical(u32 address) {
         return address & 0x1FFFFFFFu;
     }
     return address;
+}
+
+bool IopBus::interrupt_pending() const {
+    return intc_.pending();
 }
 
 bool IopBus::read_sif32(u32 physical, u32& value) const {
@@ -112,6 +119,9 @@ bool IopBus::read8(u32 address, u8& value) const {
     if (physical < kRamMirrorEnd) {
         return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
     }
+    if (intc_.read8(physical, value)) {
+        return true;
+    }
     if (cdvd_.read8(physical, value)) {
         return true;
     }
@@ -128,6 +138,11 @@ bool IopBus::read8(u32 address, u8& value) const {
 }
 
 bool IopBus::read16(u32 address, u16& value) const {
+    const u32 physical = to_physical(address);
+    if (intc_.read16(physical, value)) {
+        return true;
+    }
+
     u8 lo = 0;
     u8 hi = 0;
     if (!read8(address, lo) || !read8(address + 1, hi)) {
@@ -148,6 +163,9 @@ bool IopBus::read32(u32 address, u32& value) const {
     }
 
     const u32 physical = to_physical(address);
+    if (intc_.read32(physical, value)) {
+        return true;
+    }
     if (physical >= kSifBase && physical < kSifBase + 0x100u) {
         return read_sif32(physical, value);
     }
@@ -187,6 +205,9 @@ bool IopBus::write8(u32 address, u8 value) {
         return ram_.write8(
             physical & static_cast<u32>(IopRam::kSize - 1), value);
     }
+    if (intc_.write8(physical, value)) {
+        return true;
+    }
     if (cdvd_.write8(physical, value)) {
         return true;
     }
@@ -205,6 +226,11 @@ bool IopBus::write8(u32 address, u8 value) {
 }
 
 bool IopBus::write16(u32 address, u16 value) {
+    const u32 physical = to_physical(address);
+    if (intc_.write16(physical, value)) {
+        return true;
+    }
+
     return write8(address, static_cast<u8>(value)) &&
            write8(address + 1, static_cast<u8>(value >> 8));
 }
@@ -220,6 +246,9 @@ bool IopBus::write32(u32 address, u32 value) {
     }
 
     const u32 physical = to_physical(address);
+    if (intc_.write32(physical, value)) {
+        return true;
+    }
     if (physical >= kSifBase && physical < kSifBase + 0x100u) {
         return write_sif32(physical, value);
     }

@@ -1,5 +1,7 @@
 #include "core/cdvd/cdvd_hw.h"
 
+#include "core/iop/iop_intc.h"
+
 namespace ps2 {
 namespace {
 
@@ -132,6 +134,14 @@ void CdvdHw::execute_s_command(u8 command) {
     }
 
     s_param_count_ = 0;
+}
+
+void CdvdHw::set_irq(u8 cause) {
+    if ((intr_stat_ & cause) == 0) {
+        intr_stat_ |= cause;
+        // The PS2 CDVD controller is wired to IOP INTC source 2.
+        intc_.raise(2);
+    }
 }
 
 bool CdvdHw::contains(u32 physical, u32 width) {
@@ -273,7 +283,7 @@ bool CdvdHw::write8(u32 physical, u8 value) {
                 kDriveMechaInitialized |
                 kDriveDev9Connected;
             error_ = 0;
-            intr_stat_ |= 0x01u;
+            set_irq(0x01u);
             n_param_count_ = 0;
             if (value == 0x01u) {
                 status_ = 0;
@@ -282,7 +292,7 @@ bool CdvdHw::write8(u32 physical, u8 value) {
             // Full seek/read commands are not implemented yet.
             error_ = 0x10u;
             ready_ |= 0x01u;
-            intr_stat_ |= 0x01u;
+            set_irq(0x01u);
             n_param_count_ = 0;
         }
         return true;

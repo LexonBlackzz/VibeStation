@@ -16,6 +16,7 @@ add_library(vibestation_ps2_core STATIC
     core/hw/iop_hw_window.cpp
     core/iop/iop_bus.cpp
     core/iop/iop_cpu.cpp
+    core/iop/iop_intc.cpp
     core/iop/iop_ram.cpp
     core/memory/ee_bus.cpp
     core/memory/ee_ram.cpp

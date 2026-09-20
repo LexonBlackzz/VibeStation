@@ -591,6 +591,7 @@ void Ps2App::panel_system() {
     ImGui::BulletText("Early EE SIO/SBUS/RDRAM/DMAC registers: available");
     ImGui::BulletText("IOP RAM: 2 MiB shared with EE");
     ImGui::BulletText("IOP R3000A interpreter/COP0: running");
+    ImGui::BulletText("IOP INTC I_STAT/I_MASK/I_CTRL + IRQ2: available");
     ImGui::BulletText("EE/IOP clock interleave: 8:1 startup model");
     ImGui::BulletText("IOP hardware register window: partial");
     ImGui::BulletText("SIF/SBUS bridge: partial");
