@@ -968,16 +968,15 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         impl_->code_pages.insert(helper_block.phys_start >> 12u);
         auto inserted =
             impl_->blocks.emplace(start_pc, std::move(helper_block));
-        found = inserted.first;
+        block_ptr = &inserted.first->second;
+        impl_->remember_dispatch(*block_ptr);
         ++stats_.native_compile_successes;
         ++stats_.native_blocks_compiled;
         ++stats_.jit_v2_helper_blocks_compiled;
         (void)unsupported_bits;
       }
 
-      if (found != impl_->blocks.end()) {
-        // Helper-only block was installed above.
-      } else {
+      if (block_ptr == nullptr) {
       Impl::Block block{};
       block.start_pc = start_pc;
       block.instruction_count = static_cast<u32>(decoded.size());
@@ -1032,7 +1031,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         impl_->code_pages.insert(page);
       }
       auto inserted = impl_->blocks.emplace(start_pc, std::move(block));
-      found = inserted.first;
+      block_ptr = &inserted.first->second;
+      impl_->remember_dispatch(*block_ptr);
       ++stats_.native_compile_successes;
       ++stats_.native_blocks_compiled;
       if (has_branch) {
@@ -1043,11 +1043,12 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         ++stats_.native_alu_blocks_compiled;
       }
       }
-    } else {
-      ++stats_.cache_hits;
     }
 
-    Impl::Block &block = found->second;
+    if (block_ptr == nullptr) {
+      return helper_step();
+    }
+    Impl::Block &block = *block_ptr;
     if (block.instruction_count == 0u) {
       return helper_step();
     }
