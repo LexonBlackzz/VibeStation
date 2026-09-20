@@ -766,10 +766,81 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return false;
     }
 
+    if (block.has_branch && g_cpu_backend_compare_irq_on_branch) {
+      ++stats_.native_reject_irq_state;
+      return false;
+    }
+
+    V2NativeRuntime runtime{};
+    std::array<u32, 8> store_addrs{};
+    u32 main_ram_store_count = 0u;
+
+    if (block.has_store) {
+      // Direct writes intentionally bypass System::write32. Anything that
+      // requires tracing, watchpoints, MMIO semantics or isolated-cache store
+      // behavior leaves the native tier before generated code is entered.
+      if (g_trace_ram || g_trace_bus || g_ram_watch_diagnostics ||
+          (cpu_.cop0_sr_ & (1u << 16)) != 0u) {
+        ++stats_.native_reject_unsafe_state;
+        return false;
+      }
+
+      u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      if (main_ram == nullptr || scratchpad == nullptr) {
+        ++stats_.native_reject_memory;
+        return false;
+      }
+
+      for (u32 i = 0; i < block.store_count; ++i) {
+        const u8 base_reg = block.store_rs[i];
+        const u32 base = base_reg == 0u ? 0u : cpu_.gpr_[base_reg];
+        const u32 addr = base + static_cast<u32>(block.store_simm[i]);
+        store_addrs[i] = addr;
+
+        if ((addr & 3u) != 0u) {
+          ++stats_.native_reject_unaligned;
+          return false;
+        }
+
+        const u32 phys = psx::mask_address(addr);
+        const u64 store_end = static_cast<u64>(phys) + 3u;
+        const bool touches_current_code =
+            phys <= block.phys_end &&
+            store_end >= static_cast<u64>(block.phys_start);
+        if (touches_current_code) {
+          ++stats_.native_reject_icache;
+          return false;
+        }
+
+        if (phys < psx::RAM_SIZE) {
+          runtime.store_ptrs[i] = main_ram + phys;
+          ++main_ram_store_count;
+          continue;
+        }
+
+        if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+          const u32 scratch_off =
+              (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+          runtime.store_ptrs[i] = scratchpad + scratch_off;
+          continue;
+        }
+
+        if (phys >= 0x1F801000u && phys < 0x1F803000u) {
+          ++stats_.native_reject_mmio;
+        } else {
+          ++stats_.native_reject_memory;
+        }
+        return false;
+      }
+    }
+
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
-    if (block.instruction_count > remaining_cycles ||
-        block.instruction_count > remaining_instructions) {
+    const u32 worst_cycles =
+        block.base_cycles + main_ram_store_count + (block.has_branch ? 1u : 0u);
+    if (block.instruction_count > remaining_instructions ||
+        worst_cycles > remaining_cycles) {
       ++stats_.native_reject_budget;
       return false;
     }
@@ -783,25 +854,65 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     cpu_.pending_branch_taken_ = false;
     cpu_.pending_branch_pc_ = 0u;
 
-    block.fn(cpu_.gpr_);
+    const bool branch_taken = block.fn(cpu_.gpr_, &runtime) != 0u;
 
     const u32 count = block.instruction_count;
-    cpu_.current_pc_ = start_pc + (count - 1u) * 4u;
-    cpu_.pc_ = start_pc + count * 4u;
-    cpu_.next_pc_ = cpu_.pc_ + 4u;
-    cpu_.cycles_ += count;
+    const u32 consumed_cycles =
+        block.base_cycles + main_ram_store_count +
+        ((block.has_branch && branch_taken) ? 1u : 0u);
+
+    if (block.has_branch) {
+      const u32 branch_pc = start_pc + block.branch_index * 4u;
+      const u32 delay_pc = branch_pc + 4u;
+      cpu_.current_pc_ = delay_pc;
+      cpu_.pc_ = branch_taken ? block.branch_target : (branch_pc + 8u);
+      cpu_.next_pc_ = cpu_.pc_ + 4u;
+      cpu_.in_delay_slot_ = true;
+      cpu_.active_branch_pc_ = branch_pc;
+      ++stats_.native_branch_tail_entries;
+      if (branch_taken) {
+        ++stats_.native_branch_taken;
+      } else {
+        ++stats_.native_branch_not_taken;
+      }
+    } else {
+      cpu_.current_pc_ = start_pc + (count - 1u) * 4u;
+      cpu_.pc_ = start_pc + count * 4u;
+      cpu_.next_pc_ = cpu_.pc_ + 4u;
+    }
+
+    cpu_.cycles_ += consumed_cycles;
     cpu_.executing_step_ = false;
     g_diag_current_pc = cpu_.current_pc_;
     cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
 
-    result.cycles += count;
+    result.cycles += consumed_cycles;
     result.instructions += count;
     ++stats_.native_block_entries;
-    ++stats_.native_alu_block_entries;
+    if (block.has_branch) {
+      // Branch-tail blocks can also contain fast stores.
+    } else if (block.has_store) {
+      ++stats_.native_memory_block_entries;
+    } else {
+      ++stats_.native_alu_block_entries;
+    }
+    if (block.has_store) {
+      stats_.native_memory_fastpath_stores += block.store_count;
+    }
     stats_.native_instructions += count;
     stats_.optimized_instructions += count;
-    stats_.native_cycles += count;
-    stats_.executed_cycles += count;
+    stats_.native_cycles += consumed_cycles;
+    stats_.executed_cycles += consumed_cycles;
+
+    // Match System::write32's code-coherency notification after the direct
+    // write. Do this last: invalidation is allowed to erase the current V2
+    // block, so no Block references are touched after this loop.
+    const u32 completed_store_count = block.store_count;
+    if (completed_store_count != 0u) {
+      for (u32 i = 0; i < completed_store_count; ++i) {
+        cpu_.notify_code_write(store_addrs[i], 4u);
+      }
+    }
     return true;
   };
 #endif
