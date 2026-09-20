@@ -148,6 +148,7 @@ struct CpuCompareCase {
   bool require_v2_native_entry_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
+  bool require_v2_helper_entry_when_available = false;
   bool require_native_memory_helper_when_available = false;
   bool require_native_memory_exception_when_available = false;
   bool require_native_helper_load_delay_entry_when_available = false;
@@ -3445,6 +3446,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   cop2.instructions = 2;
   cop2.require_full_native_when_available = true;
+  cop2.require_v2_helper_entry_when_available = true;
   cases.push_back(cop2);
 
   CpuCompareCase unsupported_strict{};
@@ -3721,6 +3723,23 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check = branch_entered ? "v2_branch_not_taken_entered"
                                         : "v2_branch_not_taken_missing";
           native_check_pass = branch_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_helper_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_helper_unavailable";
+        } else {
+          const bool helper_entered =
+              result.stats.jit_v2_helper_entries != 0 &&
+              result.stats.jit_v2_helper_instructions != 0 &&
+              result.stats.decoded_instructions == 0 &&
+              result.stats.fallback_instructions == 0 &&
+              result.stats.interpreter_fallback_steps == 0;
+          native_check = helper_entered ? "v2_helper_entered"
+                                        : "v2_helper_missing";
+          native_check_pass = helper_entered;
         }
       }
 
