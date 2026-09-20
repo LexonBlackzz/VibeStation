@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -498,6 +499,10 @@ struct CpuJitV2Backend::Impl {
   };
 
   std::unordered_map<u32, Block> blocks;
+  // Conservative ever-compiled page set. Entries are intentionally retained
+  // until flush: stale positives cost only an occasional scan, while there can
+  // never be a false negative that misses self-modifying code.
+  std::unordered_set<u32> code_pages;
 };
 
 CpuJitV2Backend::CpuJitV2Backend(Cpu &cpu)
@@ -751,6 +756,12 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         return false;
       }
       block.fn = block.code->getCode<V2NativeFn>();
+      const u32 block_phys_first = block.phys_start;
+      const u32 block_phys_last = block.phys_end;
+      for (u32 page = block_phys_first >> 12u;
+           page <= (block_phys_last >> 12u); ++page) {
+        impl_->code_pages.insert(page);
+      }
       auto inserted = impl_->blocks.emplace(start_pc, std::move(block));
       found = inserted.first;
       ++stats_.native_compile_successes;
@@ -1024,6 +1035,18 @@ void CpuJitV2Backend::invalidate_range(u32 phys_or_normalized_addr,
   const u32 first_line = first & ~0x0Fu;
   const u32 last_line = last & ~0x0Fu;
 
+  bool maybe_code = false;
+  for (u32 page = first >> 12u; page <= (last >> 12u); ++page) {
+    if (impl_->code_pages.find(page) != impl_->code_pages.end()) {
+      maybe_code = true;
+      break;
+    }
+  }
+  if (!maybe_code) {
+    ++stats_.invalidation_fast_no_code_page_exits;
+    return;
+  }
+
   for (auto it = impl_->blocks.begin(); it != impl_->blocks.end();) {
     const u32 block_first = it->second.phys_start & ~0x0Fu;
     const u32 block_last = it->second.phys_end & ~0x0Fu;
@@ -1046,6 +1069,7 @@ void CpuJitV2Backend::begin_frame(u32 frame_index) {
 
 void CpuJitV2Backend::flush() {
   impl_->blocks.clear();
+  impl_->code_pages.clear();
   stats_ = {};
   stats_.available = true;
   stats_.native_available = VIBESTATION_JIT_V2_X64 != 0;
