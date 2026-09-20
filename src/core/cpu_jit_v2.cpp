@@ -1,4 +1,5 @@
 #include "cpu_jit_v2.h"
+#include "system.h"
 
 CpuJitV2Backend::CpuJitV2Backend(Cpu &cpu) : cpu_(cpu) {
   stats_.available = true;
