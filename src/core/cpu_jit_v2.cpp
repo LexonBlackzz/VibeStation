@@ -1,4 +1,5 @@
 #include "cpu_jit_v2.h"
+#include "cpu_recompiler.h"
 #include "system.h"
 
 #include <algorithm>
@@ -499,6 +500,11 @@ struct CpuJitV2Backend::Impl {
   };
 
   std::unordered_map<u32, Block> blocks;
+  // PCs which cannot currently form even the minimum V2 native block.
+  // These are invalidated with code writes instead of being recompiled on
+  // every execution.
+  std::unordered_set<u32> rejected_pcs;
+  std::unordered_set<u32> rejected_pages;
   // Conservative ever-compiled page set. Entries are intentionally retained
   // until flush: stale positives cost only an occasional scan, while there can
   // never be a false negative that misses self-modifying code.
@@ -531,6 +537,31 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     ++stats_.interpreter_fallback_steps;
     ++stats_.fallback_instructions;
     stats_.executed_cycles += consumed;
+  };
+
+  auto decoded_fallback = [&]() {
+    constexpr u32 kFallbackInstructionQuantum = 8u;
+    const u32 remaining_cycles = max_cycles - result.cycles;
+    const u32 remaining_instructions = max_instructions - result.instructions;
+    const u32 instruction_budget =
+        std::min<u32>(remaining_instructions, kFallbackInstructionQuantum);
+
+    if (cpu_.optimized_backend_ != nullptr && remaining_cycles != 0u &&
+        instruction_budget != 0u) {
+      const CpuRunSliceResult fallback = cpu_.optimized_backend_->run_slice(
+          remaining_cycles, instruction_budget,
+          CpuExecutionMode::DecodedBlockInterpreter);
+      if (fallback.instructions != 0u) {
+        result.cycles += fallback.cycles;
+        result.instructions += fallback.instructions;
+        stats_.decoded_instructions += fallback.instructions;
+        stats_.fallback_instructions += fallback.instructions;
+        stats_.executed_cycles += fallback.cycles;
+        return;
+      }
+    }
+
+    interpreter_step();
   };
 
 #if VIBESTATION_JIT_V2_X64
@@ -599,6 +630,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return false;
     }
 
+    if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
+      ++stats_.cache_hits;
+      return false;
+    }
+
     auto found = impl_->blocks.find(start_pc);
     if (found != impl_->blocks.end()) {
       Impl::Block &block = found->second;
@@ -641,6 +677,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       std::array<u8, 8> store_rs{};
       std::array<s32, 8> store_simm{};
       std::array<u8, 8> store_instruction_index{};
+      bool fetch_stopped_on_unsupported = false;
 
       auto fetch_decoded = [&](u32 i, V2DecodedInstruction &inst,
                                u32 &bits) -> bool {
@@ -656,7 +693,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           return false;
         }
         bits = inst_line.words[inst_word];
-        return decode_v2_alu(bits, inst);
+        if (!decode_v2_alu(bits, inst)) {
+          fetch_stopped_on_unsupported = true;
+          return false;
+        }
+        return true;
       };
 
       for (u32 i = 0; i < kMaxV2Instructions; ++i) {
@@ -717,6 +758,10 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
       if (decoded.size() < 2u) {
         ++stats_.native_compile_failures;
+        if (fetch_stopped_on_unsupported) {
+          impl_->rejected_pcs.insert(start_pc);
+          impl_->rejected_pages.insert(psx::mask_address(start_pc) >> 12u);
+        }
         return false;
       }
 
@@ -753,6 +798,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.code = compile_native_alu(decoded, block.cached_regs);
       if (!block.code) {
         ++stats_.native_compile_failures;
+        impl_->rejected_pcs.insert(start_pc);
+        impl_->rejected_pages.insert(psx::mask_address(start_pc) >> 12u);
         return false;
       }
       block.fn = block.code->getCode<V2NativeFn>();
@@ -1010,7 +1057,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
          result.instructions < max_instructions) {
 #if VIBESTATION_JIT_V2_X64
     if (!try_native()) {
-      interpreter_step();
+      decoded_fallback();
     }
 #else
     interpreter_step();
@@ -1071,6 +1118,8 @@ void CpuJitV2Backend::begin_frame(u32 frame_index) {
 
 void CpuJitV2Backend::flush() {
   impl_->blocks.clear();
+  impl_->rejected_pcs.clear();
+  impl_->rejected_pages.clear();
   impl_->code_pages.clear();
   stats_ = {};
   stats_.available = true;
