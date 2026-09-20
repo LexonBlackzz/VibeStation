@@ -1733,6 +1733,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "native_branch_entries=%llu "
       "native_compile_attempts=%llu native_compile_successes=%llu "
       "native_compile_failures=%llu native_blocks_compiled=%llu "
+      "v2_helper_state=%llu v2_helper_icache=%llu v2_helper_irq=%llu "
+      "v2_helper_unsupported=%llu v2_helper_memory=%llu "
+      "v2_helper_budget=%llu v2_helper_internal=%llu "
       "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
       "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
       "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
@@ -1779,6 +1782,21 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                                             before.native_compile_failures)),
       static_cast<unsigned long long>(delta(after.native_blocks_compiled,
                                             before.native_blocks_compiled)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_state, before.jit_v2_helper_state)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_icache, before.jit_v2_helper_icache)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_irq, before.jit_v2_helper_irq)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_unsupported,
+                before.jit_v2_helper_unsupported)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_memory, before.jit_v2_helper_memory)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_budget, before.jit_v2_helper_budget)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_internal, before.jit_v2_helper_internal)),
       static_cast<unsigned long long>(hashes.state),
       static_cast<unsigned long long>(hashes.cpu_state),
       static_cast<unsigned long long>(hashes.ram),
