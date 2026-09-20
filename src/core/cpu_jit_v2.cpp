@@ -32,6 +32,11 @@
 
 namespace {
 
+enum class V2BlockKind : u8 {
+  Inline,
+  StepHelper,
+};
+
 enum class V2AluOp : u8 {
   Nop,
   Sll,
@@ -372,6 +377,15 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_step_helper_trampoline() {
   code->ret();
   code->ready();
   return code;
+}
+
+V2StepHelperFn install_step_helper(V2CodeArena &arena) {
+  auto code = compile_step_helper_trampoline();
+  if (!code) {
+    return nullptr;
+  }
+  void *entry = arena.copy_code(code->getCode(), code->getSize());
+  return reinterpret_cast<V2StepHelperFn>(entry);
 }
 
 
