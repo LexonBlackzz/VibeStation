@@ -12,7 +12,9 @@ public:
     void reset();
     void tick(u64 cycles);
     void raise_intc(u32 irq);
+    void raise_dmac(u32 channel);
     [[nodiscard]] bool intc_pending() const;
+    [[nodiscard]] bool dmac_pending() const;
 
     [[nodiscard]] bool read8(u32 physical, u8& value) const;
     [[nodiscard]] bool read16(u32 physical, u16& value) const;

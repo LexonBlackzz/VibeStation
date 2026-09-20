@@ -40,7 +40,9 @@ public:
     [[nodiscard]] bool write64(u32 address, u64 value);
 
     void tick(u64 cycles);
+    void raise_dmac(u32 channel);
     [[nodiscard]] bool intc_pending() const;
+    [[nodiscard]] bool dmac_pending() const;
 
     [[nodiscard]] static u32 to_physical(u32 address);
     [[nodiscard]] static bool is_iop_ram_physical(u32 address) {

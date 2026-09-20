@@ -706,6 +706,8 @@ bool EeCpu::step(std::string& error) {
 
     if (bus_.intc_pending()) state_.cop0[13] |= 0x00000400u;
     else state_.cop0[13] &= ~0x00000400u;
+    if (bus_.dmac_pending()) state_.cop0[13] |= 0x00000800u;
+    else state_.cop0[13] &= ~0x00000800u;
 
     const u32 status = state_.cop0[12];
     if ((state_.cop0[13] & status & 0x0000FF00u) != 0 &&

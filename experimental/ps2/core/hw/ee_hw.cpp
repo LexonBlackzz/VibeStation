@@ -75,6 +75,32 @@ bool EeHw::intc_pending() const {
     return (generic_read32(kIntcStat) & generic_read32(kIntcMask) & 0xFFFFu) != 0;
 }
 
+void EeHw::raise_dmac(u32 channel) {
+    if (channel >= 10u) return;
+    const u32 offset = 0x1000E010u - kDmacBase;
+    u32 stat =
+        static_cast<u32>(dmac_regs_[offset]) |
+        (static_cast<u32>(dmac_regs_[offset + 1]) << 8) |
+        (static_cast<u32>(dmac_regs_[offset + 2]) << 16) |
+        (static_cast<u32>(dmac_regs_[offset + 3]) << 24);
+    stat |= 1u << channel;
+    for (u32 i = 0; i < 4; ++i) {
+        dmac_regs_[offset + i] = static_cast<u8>(stat >> (i * 8));
+    }
+}
+
+bool EeHw::dmac_pending() const {
+    const u32 offset = 0x1000E010u - kDmacBase;
+    const u32 stat =
+        static_cast<u32>(dmac_regs_[offset]) |
+        (static_cast<u32>(dmac_regs_[offset + 1]) << 8) |
+        (static_cast<u32>(dmac_regs_[offset + 2]) << 16) |
+        (static_cast<u32>(dmac_regs_[offset + 3]) << 24);
+    const u32 causes = stat & 0x03FFu;
+    const u32 masks = (stat >> 16) & 0x03FFu;
+    return (causes & masks) != 0;
+}
+
 bool EeHw::in_reg_window(u32 address, std::size_t width) const {
     if (address < kRegBase) {
         return false;

@@ -362,6 +362,83 @@ bool test_gif_packet_decode() {
     return ok;
 }
 
+
+bool test_gif_dma_engine() {
+    ps2::Ps2System system;
+    ps2::GifDma dma;
+    dma.reset();
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 dmac_stat = 0x1000E010u;
+    constexpr ps2::u32 gif_chcr = 0x1000A000u;
+    constexpr ps2::u32 gif_madr = 0x1000A010u;
+    constexpr ps2::u32 gif_qwc = 0x1000A020u;
+    constexpr ps2::u32 gif_tadr = 0x1000A030u;
+
+    const ps2::u64 gif_tag =
+        1ull | (1ull << 15) | (1ull << 60);
+    constexpr ps2::u64 ad_descriptor = 0xEull;
+
+    // Normal mode: two qwords from RAM become one GIF tag and one A+D write.
+    ok = expect(system.bus().write64(0x4000u, gif_tag) &&
+                system.bus().write64(0x4008u, ad_descriptor) &&
+                system.bus().write64(0x4010u, 6ull) &&
+                system.bus().write64(0x4018u, 0x00ull),
+                "GIF DMA normal payload setup failed") && ok;
+    ok = expect(system.bus().write32(dmac_ctrl, 1u) &&
+                system.bus().write32(dmac_stat, 1u << 18) &&
+                system.bus().write32(gif_madr, 0x4000u) &&
+                system.bus().write32(gif_qwc, 2u) &&
+                system.bus().write32(gif_chcr, 0x101u),
+                "GIF DMA normal register setup failed") && ok;
+    ok = expect(dma.service(system.bus(), system.gs_core(), error),
+                "GIF DMA normal first service failed") && ok;
+    ok = expect(dma.service(system.bus(), system.gs_core(), error),
+                "GIF DMA normal second service failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(system.gs_core().register_value(0x00) == 6ull,
+                "GIF DMA normal did not reach GS") && ok;
+    ok = expect(system.bus().read32(gif_qwc, value) && value == 0,
+                "GIF DMA normal QWC did not reach zero") && ok;
+    ok = expect(system.bus().read32(gif_chcr, value) && (value & 0x100u) == 0,
+                "GIF DMA normal STR did not clear") && ok;
+    ok = expect(system.bus().read32(dmac_stat, value) && (value & (1u << 2)) != 0,
+                "GIF DMA normal completion cause missing") && ok;
+    ok = expect(system.bus().dmac_pending(),
+                "GIF DMA normal completion did not assert DMAC pending") && ok;
+
+    // Clear the completion cause, then run an END source-chain tag.
+    ok = expect(system.bus().write32(dmac_stat, 1u << 2),
+                "GIF DMA status acknowledge failed") && ok;
+    const ps2::u32 dma_tag0 = 2u | (7u << 28);
+    const ps2::u64 dma_tag_lo = static_cast<ps2::u64>(dma_tag0);
+    ok = expect(system.bus().write64(0x5000u, dma_tag_lo) &&
+                system.bus().write64(0x5008u, 0) &&
+                system.bus().write64(0x5010u, gif_tag) &&
+                system.bus().write64(0x5018u, ad_descriptor) &&
+                system.bus().write64(0x5020u, 0xA5A5ull) &&
+                system.bus().write64(0x5028u, 0x4Cull),
+                "GIF DMA chain payload setup failed") && ok;
+    ok = expect(system.bus().write32(gif_tadr, 0x5000u) &&
+                system.bus().write32(gif_qwc, 0u) &&
+                system.bus().write32(gif_chcr, 0x105u),
+                "GIF DMA chain register setup failed") && ok;
+    ok = expect(dma.service(system.bus(), system.gs_core(), error),
+                "GIF DMA chain first service failed") && ok;
+    ok = expect(dma.service(system.bus(), system.gs_core(), error),
+                "GIF DMA chain second service failed") && ok;
+    ok = expect(system.gs_core().register_value(0x4C) == 0xA5A5ull,
+                "GIF DMA END chain did not reach GS") && ok;
+    ok = expect(system.bus().read32(gif_chcr, value) && (value & 0x100u) == 0,
+                "GIF DMA END chain STR did not clear") && ok;
+    ok = expect(system.bus().dmac_pending(),
+                "GIF DMA END chain did not assert DMAC pending") && ok;
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -393,6 +470,7 @@ int main() {
     ok = test_syscall_delay_slot_exception() && ok;
     ok = test_video_timing_vblank_irqs() && ok;
     ok = test_gif_packet_decode() && ok;
+    ok = test_gif_dma_engine() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";
