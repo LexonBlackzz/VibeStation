@@ -532,8 +532,22 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
       return false;
     }
-    if (cpu_.pending_delay_slot_ || cpu_.pending_branch_taken_ ||
-        cpu_.pending_branch_pc_ != 0u) {
+
+    // After a branch delay slot retires, Cpu::step() leaves a small amount of
+    // descriptive state behind until the next instruction begins. Normalize
+    // that exact completed state here just as the next interpreter step would.
+    const bool completed_delay_slot =
+        cpu_.in_delay_slot_ && !cpu_.pending_delay_slot_ &&
+        !cpu_.pending_branch_taken_ && cpu_.pending_branch_pc_ == 0u &&
+        cpu_.active_branch_pc_ != 0u &&
+        cpu_.current_pc_ == cpu_.active_branch_pc_ + 4u;
+    if (completed_delay_slot) {
+      cpu_.in_delay_slot_ = false;
+      cpu_.active_branch_pc_ = 0u;
+    }
+
+    if (cpu_.in_delay_slot_ || cpu_.pending_delay_slot_ ||
+        cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
       ++stats_.native_reject_branch_delay_state;
       return false;
     }
