@@ -539,12 +539,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     stats_.executed_cycles += consumed;
   };
 
-  auto decoded_fallback = [&]() {
-    constexpr u32 kFallbackInstructionQuantum = 8u;
+  auto decoded_fallback = [&](u32 quantum) {
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
     const u32 instruction_budget =
-        std::min<u32>(remaining_instructions, kFallbackInstructionQuantum);
+        std::min<u32>(remaining_instructions, std::max<u32>(1u, quantum));
 
     if (cpu_.optimized_backend_ != nullptr && remaining_cycles != 0u &&
         instruction_budget != 0u) {
@@ -565,7 +564,10 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
   };
 
 #if VIBESTATION_JIT_V2_X64
+  bool needs_short_decoded_fallback = false;
+
   auto state_allows_native = [&]() {
+    needs_short_decoded_fallback = false;
     if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
       return false;
     }
@@ -586,14 +588,17 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     if (cpu_.in_delay_slot_ || cpu_.pending_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
       ++stats_.native_reject_branch_delay_state;
+      needs_short_decoded_fallback = true;
       return false;
     }
     if (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u) {
       ++stats_.native_reject_load_delay_state;
+      needs_short_decoded_fallback = true;
       return false;
     }
     if (cpu_.next_pc_ != cpu_.pc_ + 4u) {
       ++stats_.native_reject_pc_state;
+      needs_short_decoded_fallback = true;
       return false;
     }
     return true;
@@ -1070,7 +1075,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         // keeping ordinary unsupported/state fallbacks block-decoded.
         interpreter_step();
       } else {
-        decoded_fallback();
+        decoded_fallback(needs_short_decoded_fallback ? 1u : 8u);
       }
     }
 #else
