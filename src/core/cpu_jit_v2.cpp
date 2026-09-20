@@ -683,7 +683,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
   stats_.available = true;
   stats_.active = true;
-  stats_.native_available = VIBESTATION_JIT_V2_X64 != 0;
+#if VIBESTATION_JIT_V2_X64
+  stats_.native_available = impl_->step_helper_fn != nullptr;
+#else
+  stats_.native_available = false;
+#endif
 
   auto interpreter_step = [&]() {
     const u32 consumed = cpu_.step();
@@ -694,29 +698,6 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     stats_.executed_cycles += consumed;
   };
 
-  auto decoded_fallback = [&](u32 quantum) {
-    const u32 remaining_cycles = max_cycles - result.cycles;
-    const u32 remaining_instructions = max_instructions - result.instructions;
-    const u32 instruction_budget =
-        std::min<u32>(remaining_instructions, std::max<u32>(1u, quantum));
-
-    if (cpu_.optimized_backend_ != nullptr && remaining_cycles != 0u &&
-        instruction_budget != 0u) {
-      const CpuRunSliceResult fallback = cpu_.optimized_backend_->run_slice(
-          remaining_cycles, instruction_budget,
-          CpuExecutionMode::DecodedBlockInterpreter);
-      if (fallback.instructions != 0u) {
-        result.cycles += fallback.cycles;
-        result.instructions += fallback.instructions;
-        stats_.decoded_instructions += fallback.instructions;
-        stats_.fallback_instructions += fallback.instructions;
-        stats_.executed_cycles += fallback.cycles;
-        return;
-      }
-    }
-
-    interpreter_step();
-  };
 
 #if VIBESTATION_JIT_V2_X64
   auto helper_step = [&]() -> bool {
@@ -739,10 +720,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     return true;
   };
 
-  bool needs_short_decoded_fallback = false;
-
   auto state_allows_native = [&]() {
-    needs_short_decoded_fallback = false;
     if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
       return false;
     }
@@ -762,7 +740,6 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
     if (cpu_.in_delay_slot_ || cpu_.pending_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
-      needs_short_decoded_fallback = true;
       return false;
     }
     if (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u) {
@@ -776,10 +753,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     return true;
   };
 
-  bool needs_interpreter_icache_warmup = false;
-
   auto try_native = [&]() -> bool {
-    needs_interpreter_icache_warmup = false;
     if (!state_allows_native()) {
       return helper_step();
     }
@@ -868,7 +842,6 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
         const auto &inst_line = cpu_.icache_[inst_index];
         if (!inst_line.valid || inst_line.tag != inst_tag) {
-          needs_interpreter_icache_warmup = true;
           return false;
         }
         bits = inst_line.words[inst_word];
