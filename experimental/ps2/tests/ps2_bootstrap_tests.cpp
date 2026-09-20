@@ -704,6 +704,176 @@ bool test_gs_display_extraction() {
     return ok;
 }
 
+
+bool test_gs_fst_direct_color_texturing() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag =
+            1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16);
+    };
+    auto uv = [](ps2::u32 u_fp, ps2::u32 v_fp) {
+        return static_cast<ps2::u64>(u_fp & 0x3FFFu) |
+               (static_cast<ps2::u64>(v_fp & 0x3FFFu) << 16);
+    };
+    auto tex0 = [](ps2::u32 bp, ps2::u32 bw, ps2::u32 psm,
+                   ps2::u32 tw, ps2::u32 th, bool tcc, ps2::u32 tfx) {
+        return static_cast<ps2::u64>(bp & 0x3FFFu) |
+               (static_cast<ps2::u64>(bw & 0x3Fu) << 14) |
+               (static_cast<ps2::u64>(psm & 0x3Fu) << 20) |
+               (static_cast<ps2::u64>(tw & 0xFu) << 26) |
+               (static_cast<ps2::u64>(th & 0xFu) << 30) |
+               (static_cast<ps2::u64>(tcc ? 1u : 0u) << 34) |
+               (static_cast<ps2::u64>(tfx & 0x3u) << 35);
+    };
+
+    constexpr ps2::u32 texture_bp = 32;
+    const ps2::u64 frame =
+        static_cast<ps2::u64>(1u) << 16; // FBP=0, FBW=1, PSMCT32.
+    const ps2::u64 scissor =
+        (static_cast<ps2::u64>(31u) << 16) |
+        (static_cast<ps2::u64>(31u) << 48);
+    bool ok = true;
+
+    // Exact 2x2 PSMCT32 DECAL sprite.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u32 colors[4] = {
+            0x11223344u, 0x55667788u,
+            0x99AABBCCu, 0xDDEEFF10u,
+        };
+        for (ps2::u32 y = 0; y < 2; ++y) {
+            for (ps2::u32 x = 0; x < 2; ++x) {
+                ok = expect(
+                    gs.vram().write_pixel(
+                        0, x, y, texture_bp, 1, colors[y * 2u + x]),
+                    "textured sprite source setup failed") && ok;
+            }
+        }
+
+        ad(gs, 0x1A, 1u); // PRMODECONT
+        ad(gs, 0x18, 0u); // XYOFFSET_1
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u); // TEST_1 disabled
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0(texture_bp, 1, 0, 1, 1, true, 1)); // DECAL
+        ad(gs, 0x08, 0u); // repeat U/V
+        ad(gs, 0x00, 6u | (1u << 4) | (1u << 8)); // sprite, TME, FST
+        ad(gs, 0x01, 0x80808080u);
+        ad(gs, 0x03, uv(0, 0));
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x03, uv(32, 32));
+        ad(gs, 0x05, xyz(32, 32));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == colors[0] &&
+            gs.vram().read_pixel(0, 1, 0, 0, 1) == colors[1] &&
+            gs.vram().read_pixel(0, 0, 1, 0, 1) == colors[2] &&
+            gs.vram().read_pixel(0, 1, 1, 0, 1) == colors[3],
+            "PSMCT32 DECAL sprite texels mismatch") && ok;
+        ok = expect(
+            gs.stats().textured_raster_draws == 1 &&
+            gs.stats().texture_samples == 4,
+            "textured sprite statistics mismatch") && ok;
+    }
+
+    // Repeat wrapping with MODULATE identity color (vertex channel 128).
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ok = expect(
+            gs.vram().write_pixel(0, 0, 0, texture_bp, 1, 0xFF204080u) &&
+            gs.vram().write_pixel(0, 1, 0, texture_bp, 1, 0xFF80A0C0u),
+            "repeat texture source setup failed") && ok;
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0(texture_bp, 1, 0, 1, 0, false, 0)); // MODULATE
+        ad(gs, 0x08, 0u); // REPEAT
+        ad(gs, 0x00, 6u | (1u << 4) | (1u << 8));
+        ad(gs, 0x01, 0x80808080u);
+        ad(gs, 0x03, uv(32, 0)); // Starts at texel 2 -> repeats to 0.
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x03, uv(64, 16));
+        ad(gs, 0x05, xyz(32, 16));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x80204080u &&
+            gs.vram().read_pixel(0, 1, 0, 0, 1) == 0x8080A0C0u,
+            "FST repeat/MODULATE texture mismatch") && ok;
+    }
+
+    // Affine FST triangle: XY and UV use the same fixed-point coordinates.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        for (ps2::u32 y = 0; y < 4; ++y) {
+            for (ps2::u32 x = 0; x < 4; ++x) {
+                const ps2::u32 color =
+                    0xFF000000u | (x + 1u) | ((y + 1u) << 8);
+                ok = expect(
+                    gs.vram().write_pixel(
+                        0, x, y, texture_bp, 1, color),
+                    "triangle texture source setup failed") && ok;
+            }
+        }
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0(texture_bp, 1, 0, 2, 2, true, 1)); // 4x4 DECAL
+        ad(gs, 0x08, 0u);
+        ad(gs, 0x00, 3u | (1u << 4) | (1u << 8)); // triangle, TME, FST
+        ad(gs, 0x01, 0xFFFFFFFFu);
+
+        ad(gs, 0x03, uv(0, 0));
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x03, uv(48, 0));
+        ad(gs, 0x05, xyz(48, 0));
+        ad(gs, 0x03, uv(0, 48));
+        ad(gs, 0x05, xyz(0, 48));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xFF000101u &&
+            gs.vram().read_pixel(0, 1, 0, 0, 1) == 0xFF000102u &&
+            gs.vram().read_pixel(0, 0, 1, 0, 1) == 0xFF000201u,
+            "affine FST triangle sampling mismatch") && ok;
+        ok = expect(gs.stats().textured_raster_draws == 1,
+                    "textured triangle draw count mismatch") && ok;
+    }
+
+    // Valid texture state with FST clear must remain an explicit STQ skip.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0(texture_bp, 1, 0, 1, 1, true, 1));
+        ad(gs, 0x00, 6u | (1u << 4)); // TME but FST=0.
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(32, 32));
+        ok = expect(
+            gs.stats().raster_draws == 0 &&
+            gs.stats().skipped_raster_draws == 1,
+            "STQ textured draw was not explicitly skipped") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -740,6 +910,7 @@ int main() {
     ok = test_gs_host_to_local_image_transfer() && ok;
     ok = test_gs_untextured_rasterization() && ok;
     ok = test_gs_display_extraction() && ok;
+    ok = test_gs_fst_direct_color_texturing() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

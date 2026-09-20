@@ -25,6 +25,8 @@ struct GsStats {
     u64 primitives = 0;
     u64 raster_draws = 0;
     u64 raster_pixels = 0;
+    u64 textured_raster_draws = 0;
+    u64 texture_samples = 0;
     u64 skipped_raster_draws = 0;
 };
 

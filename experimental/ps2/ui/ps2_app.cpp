@@ -491,7 +491,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 7: GS software output + display extraction";
+    const char* phase = "Phase 8: FST textured GS software output";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -605,7 +605,7 @@ void Ps2App::panel_main() {
 
     ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("Textured GS draws + blending/depth");
+    ImGui::TextDisabled("Paletted textures + TEXA + blending/depth");
     ImGui::EndChild();
 }
 
@@ -946,6 +946,8 @@ void Ps2App::panel_gs_debug() {
         row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
         row("Raster draws", static_cast<unsigned long long>(stats.raster_draws));
         row("Raster pixels", static_cast<unsigned long long>(stats.raster_pixels));
+        row("Textured raster draws", static_cast<unsigned long long>(stats.textured_raster_draws));
+        row("Texture samples", static_cast<unsigned long long>(stats.texture_samples));
         row("Skipped raster draws", static_cast<unsigned long long>(stats.skipped_raster_draws));
         ImGui::EndTable();
     }

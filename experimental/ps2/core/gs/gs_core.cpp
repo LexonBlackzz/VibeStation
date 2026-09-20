@@ -18,6 +18,8 @@ constexpr u32 kRegXyzf2 = 0x04;
 constexpr u32 kRegXyz2 = 0x05;
 constexpr u32 kRegXyzf3 = 0x0C;
 constexpr u32 kRegXyz3 = 0x0D;
+constexpr u32 kRegTex0_1 = 0x06;
+constexpr u32 kRegClamp1 = 0x08;
 constexpr u32 kRegXyoffset1 = 0x18;
 constexpr u32 kRegPrmodecont = 0x1A;
 constexpr u32 kRegPrmode = 0x1B;
@@ -331,7 +333,6 @@ u64 GsCore::effective_prim() const {
 GsRasterContext GsCore::raster_context() const {
     const u64 prim = effective_prim();
     const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
-    const u64 xyoffset = registers_[kRegXyoffset1 + ctxt];
     const u64 scissor = registers_[kRegScissor1 + ctxt];
     const u64 frame = registers_[kRegFrame1 + ctxt];
 
@@ -345,17 +346,38 @@ GsRasterContext GsCore::raster_context() const {
     ctx.scay0 = static_cast<s32>((scissor >> 32) & 0x7FFu);
     ctx.scay1 = static_cast<s32>((scissor >> 48) & 0x7FFu);
 
-    (void)xyoffset;
+    if ((prim & (1ull << 4)) != 0) {
+        const u64 tex0 = registers_[kRegTex0_1 + ctxt];
+        const u64 clamp = registers_[kRegClamp1 + ctxt];
+        auto& texture = ctx.texture;
+        texture.enabled = true;
+        texture.bp = static_cast<u32>(tex0 & 0x3FFFu);
+        texture.bw = static_cast<u32>((tex0 >> 14) & 0x3Fu);
+        texture.psm = static_cast<u32>((tex0 >> 20) & 0x3Fu);
+        const u32 tw = static_cast<u32>((tex0 >> 26) & 0xFu);
+        const u32 th = static_cast<u32>((tex0 >> 30) & 0xFu);
+        texture.width = tw < 31u ? (1u << tw) : 0u;
+        texture.height = th < 31u ? (1u << th) : 0u;
+        texture.tcc = ((tex0 >> 34) & 1u) != 0;
+        texture.tfx = static_cast<u32>((tex0 >> 35) & 0x3u);
+        texture.wms = static_cast<u32>(clamp & 0x3u);
+        texture.wmt = static_cast<u32>((clamp >> 2) & 0x3u);
+        texture.minu = static_cast<u32>((clamp >> 4) & 0x3FFu);
+        texture.maxu = static_cast<u32>((clamp >> 14) & 0x3FFu);
+        texture.minv = static_cast<u32>((clamp >> 24) & 0x3FFu);
+        texture.maxv = static_cast<u32>((clamp >> 34) & 0x3FFu);
+    }
+
     return ctx;
 }
 
 bool GsCore::raster_state_supported() const {
     const u64 prim = effective_prim();
 
-    // First software-raster milestone: flat, untextured, unblended geometry.
+    // Flat-color and FST/UV textured geometry are supported. Gouraud, fog,
+    // blending and AA remain explicit skips until their GS rules are modeled.
     constexpr u64 kUnsupportedPrim =
         (1ull << 3) | // IIP
-        (1ull << 4) | // TME
         (1ull << 5) | // FGE
         (1ull << 6) | // ABE
         (1ull << 7);  // AA1
@@ -363,11 +385,19 @@ bool GsCore::raster_state_supported() const {
 
     const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
     const u64 test = registers_[kRegTest1 + ctxt];
-    if ((test & 1u) != 0) return false;          // ATE
+    if ((test & 1u) != 0) return false;           // ATE
     if ((test & (1ull << 14)) != 0) return false; // DATE
     if ((test & (1ull << 16)) != 0) return false; // ZTE
 
-    return GsRasterizer::supported_target(raster_context());
+    const GsRasterContext ctx = raster_context();
+    if (!GsRasterizer::supported_target(ctx)) return false;
+
+    if (ctx.texture.enabled) {
+        if ((prim & (1ull << 8)) == 0) return false; // STQ not modeled yet.
+        if (!GsRasterizer::supported_texture(ctx.texture)) return false;
+    }
+
+    return true;
 }
 
 void GsCore::emit_primitive(
@@ -396,6 +426,10 @@ void GsCore::emit_primitive(
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
+    if (ctx.texture.enabled) {
+        ++stats_.textured_raster_draws;
+        stats_.texture_samples += pixels;
+    }
 }
 
 void GsCore::submit_vertex(u64 xyz) {
@@ -413,6 +447,9 @@ void GsCore::submit_vertex(u64 xyz) {
           static_cast<s32>(static_cast<u32>(xyoffset >> 32) & 0xFFFFu);
     v.z = static_cast<u32>(xyz >> 32);
     v.rgba = static_cast<u32>(registers_[kRegRgbaq]);
+    const u64 uv = registers_[kRegUv];
+    v.u = static_cast<s32>(uv & 0x3FFFu);
+    v.v = static_cast<s32>((uv >> 16) & 0x3FFFu);
 
     switch (prim) {
     case 0: // point: counted, raster support comes later.
