@@ -960,14 +960,23 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         }
       }
 
-      block.code = compile_native_alu(decoded, block.cached_regs);
-      if (!block.code) {
+      auto generated = compile_native_alu(decoded, block.cached_regs);
+      if (!generated) {
         ++stats_.native_compile_failures;
         impl_->rejected_pcs.insert(start_pc);
         impl_->rejected_pages.insert(psx::mask_address(start_pc) >> 12u);
         return false;
       }
-      block.fn = block.code->getCode<V2NativeFn>();
+      block.code_size = generated->getSize();
+      void *entry =
+          impl_->arena.copy_code(generated->getCode(), block.code_size);
+      if (entry == nullptr) {
+        ++stats_.native_compile_failures;
+        impl_->rejected_pcs.insert(start_pc);
+        impl_->rejected_pages.insert(psx::mask_address(start_pc) >> 12u);
+        return false;
+      }
+      block.fn = reinterpret_cast<V2NativeFn>(entry);
       const u32 block_phys_first = block.phys_start;
       const u32 block_phys_last = block.phys_end;
       for (u32 page = block_phys_first >> 12u;
@@ -1325,9 +1334,17 @@ void CpuJitV2Backend::flush() {
   impl_->rejected_pcs.clear();
   impl_->rejected_pages.clear();
   impl_->code_pages.clear();
+#if VIBESTATION_JIT_V2_X64
+  impl_->arena.reset();
+  impl_->step_helper_fn = install_step_helper(impl_->arena);
+#endif
   stats_ = {};
   stats_.available = true;
-  stats_.native_available = VIBESTATION_JIT_V2_X64 != 0;
+#if VIBESTATION_JIT_V2_X64
+  stats_.native_available = impl_->step_helper_fn != nullptr;
+#else
+  stats_.native_available = false;
+#endif
   current_frame_ = 0;
 }
 
@@ -1336,9 +1353,17 @@ CpuBackendStats CpuJitV2Backend::stats() const {
   out.available = true;
   out.active =
       effective_cpu_execution_mode() == CpuExecutionMode::X64JitV2;
-  out.native_available = VIBESTATION_JIT_V2_X64 != 0;
+#if VIBESTATION_JIT_V2_X64
+  out.native_available = impl_->step_helper_fn != nullptr;
+#else
+  out.native_available = false;
+#endif
   out.block_count = static_cast<u32>(impl_->blocks.size());
   out.native_blocks = static_cast<u64>(impl_->blocks.size());
-  out.native_code_bytes = impl_->blocks.size() * 4096u;
+#if VIBESTATION_JIT_V2_X64
+  out.native_code_bytes = impl_->arena.bytes_used();
+#else
+  out.native_code_bytes = 0u;
+#endif
   return out;
 }
