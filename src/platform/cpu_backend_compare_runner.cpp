@@ -316,6 +316,8 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "DecodedBlockInterpreter";
   case CpuExecutionMode::X64Jit:
     return "X64Jit";
+  case CpuExecutionMode::X64JitV2:
+    return "X64JitV2";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -3451,10 +3453,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 3> modes = {
+  const std::array<CpuExecutionMode, 4> modes = {
       CpuExecutionMode::Interpreter,
       CpuExecutionMode::DecodedBlockInterpreter,
       CpuExecutionMode::X64Jit,
+      CpuExecutionMode::X64JitV2,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
