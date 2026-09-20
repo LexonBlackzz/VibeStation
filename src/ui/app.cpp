@@ -5,7 +5,7 @@
 #include "ui/output_resolution_utils.h"
 #include "ui/screenshot_utils.h"
 #include "ui/theme_settings.h"
-#include "vibestation_version.h"
+#include "version.h"
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <imgui.h>
@@ -1571,7 +1571,7 @@ bool App::start_configured_input_movie() {
     const std::string disc_path =
         !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
     input_movie_cli_pending_ = false;
-    if (!input_recorder_.init(disc_path, VIBESTATION_FULL_VERSION_STRING)) {
+    if (!input_recorder_.init(disc_path, vibestation_full_version_string())) {
         const InputRecorder::Status movie_status = input_recorder_.status();
         status_message_ = "Input movie failed: " + movie_status.status_message;
         LOG_ERROR("%s", status_message_.c_str());
@@ -1610,7 +1610,7 @@ bool App::start_input_recording_from_ui() {
     input_recorder_.set_config(config);
     const std::string disc_path =
         !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
-    if (!input_recorder_.init(disc_path, VIBESTATION_FULL_VERSION_STRING)) {
+    if (!input_recorder_.init(disc_path, vibestation_full_version_string())) {
         status_message_ = "Input movie: " + input_recorder_.status().status_message;
         return false;
     }
@@ -1634,7 +1634,7 @@ bool App::start_input_playback_from_ui() {
     input_recorder_.set_config(config);
     const std::string disc_path =
         !game_cue_path_.empty() ? game_cue_path_ : game_bin_path_;
-    if (!input_recorder_.init(disc_path, VIBESTATION_FULL_VERSION_STRING)) {
+    if (!input_recorder_.init(disc_path, vibestation_full_version_string())) {
         status_message_ = "Input movie: " + input_recorder_.status().status_message;
         return false;
     }
