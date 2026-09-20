@@ -2,8 +2,8 @@ if(NOT DEFINED VIBESTATION_BUILD_NUMBER_FILE)
     message(FATAL_ERROR "VIBESTATION_BUILD_NUMBER_FILE is required")
 endif()
 
-if(NOT DEFINED VIBESTATION_VERSION_HEADER)
-    message(FATAL_ERROR "VIBESTATION_VERSION_HEADER is required")
+if(NOT DEFINED VIBESTATION_VERSION_SOURCE)
+    message(FATAL_ERROR "VIBESTATION_VERSION_SOURCE is required")
 endif()
 
 if(NOT DEFINED VIBESTATION_VERSION_STRING)
@@ -32,23 +32,31 @@ math(EXPR next_build_number "${build_number} + 1")
 set(full_version_string
     "VibeStation ${VIBESTATION_VERSION_STRING} Build ${build_number}")
 
-get_filename_component(version_header_dir "${VIBESTATION_VERSION_HEADER}" DIRECTORY)
-file(MAKE_DIRECTORY "${version_header_dir}")
+get_filename_component(version_source_dir "${VIBESTATION_VERSION_SOURCE}" DIRECTORY)
+file(MAKE_DIRECTORY "${version_source_dir}")
 
-set(version_header_content
-"#pragma once
+set(version_source_content
+"#include \"version.h\"
 
-#define VIBESTATION_VERSION_STRING \"${VIBESTATION_VERSION_STRING}\"
-#define VIBESTATION_BUILD_NUMBER ${build_number}
-#define VIBESTATION_FULL_VERSION_STRING \"${full_version_string}\"
+const char* vibestation_version_string() noexcept {
+    return \"${VIBESTATION_VERSION_STRING}\";
+}
+
+unsigned int vibestation_build_number() noexcept {
+    return ${build_number}u;
+}
+
+const char* vibestation_full_version_string() noexcept {
+    return \"${full_version_string}\";
+}
 ")
 
-set(version_header_tmp "${VIBESTATION_VERSION_HEADER}.tmp")
-file(WRITE "${version_header_tmp}" "${version_header_content}")
+set(version_source_tmp "${VIBESTATION_VERSION_SOURCE}.tmp")
+file(WRITE "${version_source_tmp}" "${version_source_content}")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-    "${version_header_tmp}" "${VIBESTATION_VERSION_HEADER}"
+    "${version_source_tmp}" "${VIBESTATION_VERSION_SOURCE}"
     COMMAND_ERROR_IS_FATAL ANY)
-file(REMOVE "${version_header_tmp}")
+file(REMOVE "${version_source_tmp}")
 
 file(WRITE "${VIBESTATION_BUILD_NUMBER_FILE}" "${next_build_number}\n")
 message(STATUS "Generated ${full_version_string}")

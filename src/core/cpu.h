@@ -18,14 +18,45 @@ struct CpuRunSliceResult {
   u32 instructions = 0;
 };
 
+struct CpuHotBlockStats {
+  u32 start_pc = 0;
+  u32 instruction_count = 0;
+  u64 entries = 0;
+  u64 native_entries = 0;
+  u64 runtime_rejects = 0;
+  u32 runtime_reject_dominant_count = 0;
+  u32 runtime_reject_secondary_count = 0;
+  u32 runtime_memory_region_count = 0;
+  u64 estimated_guest_instructions = 0;
+  u32 native_prefix_instruction_count = 0;
+  bool native_compiled = false;
+  bool native_decoded_only = false;
+  bool has_control_flow = false;
+  bool has_memory = false;
+  bool has_load = false;
+  bool has_store = false;
+  bool has_fallback = false;
+  std::array<char, 32> shape{};
+  std::array<char, 48> reject_detail{};
+  std::array<char, 48> runtime_reject_detail{};
+  std::array<char, 48> runtime_reject_secondary_detail{};
+  std::array<char, 32> runtime_memory_region{};
+  std::array<char, 160> ops{};
+};
+
 struct CpuBackendStats {
   static constexpr size_t kDecodedOpStatsCount = 96;
+  static constexpr size_t kHotBlockStatsCount = 16;
 
   bool available = false;
   bool active = false;
   bool native_available = false;
   u32 block_count = 0;
   u32 interpreter_only_blocks = 0;
+  u32 hot_block_count = 0;
+  std::array<CpuHotBlockStats, kHotBlockStatsCount> hot_blocks{};
+  u32 hot_block_total_count = 0;
+  u64 hot_block_total_weight = 0;
   u64 decoded_blocks = 0;
   u64 native_blocks = 0;
   u64 native_compile_attempts = 0;

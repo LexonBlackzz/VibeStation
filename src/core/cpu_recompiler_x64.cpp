@@ -216,6 +216,11 @@ void record_native_prefix_ram_load_adaptive_disable(
   }
 }
 
+bool is_x64_guarded_overflow_op(DecodedOp op) {
+  return op == DecodedOp::Add || op == DecodedOp::Sub ||
+         op == DecodedOp::Addi;
+}
+
 bool is_x64_stage1_op(DecodedOp op) {
   switch (op) {
   case DecodedOp::Nop:
@@ -229,7 +234,9 @@ bool is_x64_stage1_op(DecodedOp op) {
   case DecodedOp::Movn:
   case DecodedOp::Sync:
   case DecodedOp::Clear:
+  case DecodedOp::Add:
   case DecodedOp::Addu:
+  case DecodedOp::Sub:
   case DecodedOp::Subu:
   case DecodedOp::And:
   case DecodedOp::Or:
@@ -237,6 +244,7 @@ bool is_x64_stage1_op(DecodedOp op) {
   case DecodedOp::Nor:
   case DecodedOp::Slt:
   case DecodedOp::Sltu:
+  case DecodedOp::Addi:
   case DecodedOp::Addiu:
   case DecodedOp::Slti:
   case DecodedOp::Sltiu:
@@ -652,8 +660,10 @@ bool is_x64_branch_tail_block(const DecodedBlock &block,
 
   for (u32 i = 0; i < branch_index; ++i) {
     const DecodedInstruction &inst = block.instructions[i];
+    const bool guarded_overflow = is_x64_guarded_overflow_op(inst.op);
     if (inst.is_branch || inst.must_fallback ||
-        (!is_x64_stage2_op(inst.op) && !inst.may_access_memory)) {
+        (!is_x64_stage2_op(inst.op) && !inst.may_access_memory &&
+         !guarded_overflow)) {
       reject_detail = NativeBlockRejectDetail::BranchTailUnsupportedBody;
       return false;
     }
@@ -661,7 +671,8 @@ bool is_x64_branch_tail_block(const DecodedBlock &block,
       reject_detail = NativeBlockRejectDetail::BranchTailUnsupportedBody;
       return false;
     }
-    if (inst.may_raise_exception && !is_x64_memory_op(inst.op)) {
+    if (inst.may_raise_exception && !is_x64_memory_op(inst.op) &&
+        !guarded_overflow) {
       reject_detail = NativeBlockRejectDetail::BranchTailUnsupportedBody;
       return false;
     }
@@ -671,10 +682,14 @@ bool is_x64_branch_tail_block(const DecodedBlock &block,
     reject_detail = NativeBlockRejectDetail::BranchTailNestedDelayBranch;
     return false;
   }
+  const bool guarded_delay_overflow =
+      is_x64_guarded_overflow_op(delay.op);
   if (delay.must_fallback ||
-      (!is_x64_stage2_op(delay.op) && !delay.may_access_memory) ||
+      (!is_x64_stage2_op(delay.op) && !delay.may_access_memory &&
+       !guarded_delay_overflow) ||
       (delay.may_access_memory && !is_x64_memory_op(delay.op)) ||
-      (delay.may_raise_exception && !is_x64_memory_op(delay.op))) {
+      (delay.may_raise_exception && !is_x64_memory_op(delay.op) &&
+       !guarded_delay_overflow)) {
     reject_detail = NativeBlockRejectDetail::BranchTailUnsupportedDelaySlot;
     return false;
   }
@@ -793,7 +808,9 @@ bool is_x64_aggressive_reduced_helper_branch_tail_block(
                     AggressiveReducedHelperBranchTailMemory;
       return false;
     }
-    if (inst.may_raise_exception || !is_x64_stage1_op(inst.op)) {
+    const bool guarded_overflow = is_x64_guarded_overflow_op(inst.op);
+    if ((inst.may_raise_exception && !guarded_overflow) ||
+        (!is_x64_stage1_op(inst.op) && !guarded_overflow)) {
       reject_detail = NativeBlockRejectDetail::
           AggressiveReducedHelperBranchTailUnsupportedBody;
       return false;
@@ -806,13 +823,36 @@ bool is_x64_aggressive_reduced_helper_branch_tail_block(
         AggressiveReducedHelperBranchTailDelaySlotMemory;
     return false;
   }
-  if (delay.is_branch || delay.must_fallback || delay.may_raise_exception ||
-      !is_x64_stage1_op(delay.op)) {
+  const bool guarded_delay_overflow =
+      is_x64_guarded_overflow_op(delay.op);
+  if (delay.is_branch || delay.must_fallback ||
+      (delay.may_raise_exception && !guarded_delay_overflow) ||
+      (!is_x64_stage1_op(delay.op) && !guarded_delay_overflow)) {
     reject_detail = NativeBlockRejectDetail::
         AggressiveReducedHelperBranchTailUnsupportedDelaySlot;
     return false;
   }
   return true;
+}
+
+bool is_x64_guarded_overflow_branch_tail_candidate(
+    const DecodedBlock &block) {
+  if (!block.native_branch_tail || block.instruction_count < 2u) {
+    return false;
+  }
+
+  bool saw_guarded_overflow = false;
+  for (u32 i = 0; i < block.instruction_count; ++i) {
+    const DecodedInstruction &inst = block.instructions[i];
+    if (is_x64_guarded_overflow_op(inst.op)) {
+      saw_guarded_overflow = true;
+      continue;
+    }
+    if (inst.may_raise_exception && !inst.may_access_memory) {
+      return false;
+    }
+  }
+  return saw_guarded_overflow;
 }
 
 bool block_uses_instruction_helpers(const DecodedBlock &block) {
@@ -1028,6 +1068,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     code.xor_(code.eax, code.eax);
     emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
+  case DecodedOp::Add:
   case DecodedOp::Addu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
@@ -1035,6 +1076,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     }
     emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
+  case DecodedOp::Sub:
   case DecodedOp::Subu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.rt != 0) {
@@ -1095,6 +1137,7 @@ void emit_x64_instruction(Xbyak::CodeGenerator &code,
     code.movzx(code.eax, code.al);
     emit_write_gpr(code, ctx, gpr, inst.rd, code.eax);
     break;
+  case DecodedOp::Addi:
   case DecodedOp::Addiu:
     emit_read_gpr(code, code.eax, gpr, inst.rs);
     if (inst.simm != 0) {
@@ -2662,7 +2705,8 @@ NativeBlockRejectDetail CpuOptimizedBackend::classify_x64_reject_detail(
 
 bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   if (block.native_safety_checked) {
-    return block.native_stage1_safe;
+    return block.native_stage1_safe ||
+           block.native_guarded_overflow_branch_tail;
   }
 
   block.native_safety_checked = true;
@@ -2692,9 +2736,13 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   block.native_reduced_helper_ram_load =
       block.native_stage1_safe && !block.native_branch_tail &&
       reduced_helper_ram_load_candidate;
+  block.native_guarded_overflow_branch_tail =
+      aggressive_reduced_helper_branch_tail_candidate &&
+      is_x64_guarded_overflow_branch_tail_candidate(block);
   block.native_aggressive_reduced_helper_branch_tail =
-      block.native_stage1_safe &&
-      aggressive_reduced_helper_branch_tail_candidate;
+      aggressive_reduced_helper_branch_tail_candidate &&
+      (block.native_stage1_safe ||
+       block.native_guarded_overflow_branch_tail);
   block.native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
       false;
   block.native_aggressive_reduced_helper_branch_tail_memory_ops = 0;
@@ -2707,7 +2755,8 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
       false;
   block.native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
       false;
-  if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory) {
+  if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory &&
+      !block.native_guarded_overflow_branch_tail) {
     block.native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
         x64_aggressive_branch_tail_entry_address_preflight_candidate(
             block,
@@ -2747,7 +2796,9 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
   if (cpu_x64_jit_native_prefix_enabled()) {
     const bool branch_tail_disabled =
         block.native_branch_tail && !cpu_x64_jit_branch_tail_enabled();
-    if (!block.native_stage1_safe || branch_tail_disabled) {
+    if ((!block.native_stage1_safe &&
+         !block.native_guarded_overflow_branch_tail) ||
+        branch_tail_disabled) {
       ++stats_.native_prefix_candidate_blocks;
       X64NativePrefixReject prefix_reject =
           X64NativePrefixReject::None;
@@ -3048,7 +3099,8 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
       break;
     }
   }
-  if (!block.native_stage1_safe) {
+  if (!block.native_stage1_safe &&
+      !block.native_guarded_overflow_branch_tail) {
     if (block.has_control_flow) {
       ++stats_.native_branch_tail_rejects;
       DecodedOp rejected_branch_op = DecodedOp::Unsupported;
@@ -3086,7 +3138,8 @@ bool CpuOptimizedBackend::ensure_x64_safety_checked(DecodedBlock &block) {
     }
     return false;
   }
-  return true;
+  return block.native_stage1_safe ||
+         block.native_guarded_overflow_branch_tail;
 }
 
 bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
@@ -3138,8 +3191,11 @@ bool CpuOptimizedBackend::compile_x64_block(DecodedBlock &block) {
         inline_branch_tail && block.instruction_count >= 2u &&
         block.instructions[block.instruction_count - 2u].target ==
             block.start_pc;
+    const bool proven_hot_branch_tail =
+        is_branch_tail &&
+        block.entry_count >= g_cpu_x64_jit_hot_branch_tail_threshold;
     const bool unprofitable_branch =
-        is_branch_tail && !self_loop_branch;
+        is_branch_tail && !self_loop_branch && !proven_hot_branch_tail;
     if ((uses_instruction_helpers || unprofitable_branch) &&
         !g_cpu_backend_compare_test_active) {
       block.native_decoded_only = true;
@@ -3391,7 +3447,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
     context->branch_taken = false;
     ++stats_.native_branch_tail_entries;
     ++block->native_branch_tail_entry_count;
-    ++block->native_entry_count;
+    record_native_block_entry(*block);
     block->native_fn(block->native_context, &result);
     if (result.instructions == 0u) {
       break;
@@ -3415,7 +3471,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
     if (cpu_.pc_ != block->start_pc) {
       break;
     }
-    ++block->entry_count;
+    record_block_entry(*block);
   }
 
   if (total.instructions == 0u && !cpu_.exception_raised_) {
@@ -3427,10 +3483,13 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
 CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     DecodedBlock &block, u32 max_cycles, u32 max_instructions) {
   CpuBlockRunResult result{};
-  auto record_rejected_block = [&](NativeBlockRejectDetail detail) {
+  auto record_rejected_block =
+      [&](NativeBlockRejectDetail detail,
+          NativeMemoryRegion memory_region = NativeMemoryRegion::UnknownSlow) {
     ++stats_.native_rejected_block_count;
     stats_.native_rejected_block_instructions += block.instruction_count;
     record_native_block_rejection(block, detail);
+    record_runtime_reject(block, detail, memory_region);
   };
   auto reject_to_decoded = [&](u64 &specific_counter,
                                NativeBlockRejectDetail detail) {
@@ -3537,7 +3596,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     } else {
       ++stats_.native_alu_block_entries;
     }
-    ++block.native_entry_count;
+    record_native_block_entry(block);
 
     // Helper-only blocks already execute as one bounded decoded operation in
     // C++. Calling a native thunk solely to call back here adds two host ABI
@@ -3637,7 +3696,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     }
     context->max_cycles = max_cycles;
     context->max_instructions = max_instructions;
-    ++block.native_entry_count;
+    record_native_block_entry(block);
     ++stats_.native_memory_block_entries;
     block.native_fn(block.native_context, &result);
     g_diag_current_pc = cpu_.current_pc_;
@@ -3648,28 +3707,23 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     return result;
   }
 
-  if (active_load_delay &&
-      (block.native_reduced_helper_branch_tail ||
-       block.native_aggressive_reduced_helper_branch_tail)) {
-    if (block.native_aggressive_reduced_helper_branch_tail) {
-      ++stats_
-            .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
-      ++stats_
-            .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks;
-    } else {
-      ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
-      ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
-    }
+  if (active_load_delay && block.native_reduced_helper_branch_tail) {
+    ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
+    ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
     return reject_to_decoded(stats_.native_reject_load_delay_state,
                              NativeBlockRejectDetail::LoadDelayState);
   }
 
-  if (block.native_aggressive_reduced_helper_branch_tail && block.has_memory) {
+  if (block.native_aggressive_reduced_helper_branch_tail &&
+      (block.has_memory || block.native_guarded_overflow_branch_tail)) {
     const bool direct_entry_address_preflight =
         block
-            .native_aggressive_reduced_helper_branch_tail_entry_address_preflight;
+            .native_aggressive_reduced_helper_branch_tail_entry_address_preflight &&
+        !active_load_delay;
     u32 aggressive_preflight_simulated_instructions = 0;
     bool aggressive_preflight_saw_scratchpad = false;
+    NativeMemoryRegion aggressive_preflight_reject_region =
+        NativeMemoryRegion::UnknownSlow;
     auto reset_aggressive_preflight_failure_streak = [&]() {
       block.native_aggressive_reduced_helper_preflight_last_failure =
           NativeBlockRejectDetail::None;
@@ -3697,6 +3751,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         ++stats_
               .native_branch_tail_aggressive_reduced_helper_preflight_code_page;
         ++stats_.native_reject_icache;
+      } else if (detail == NativeBlockRejectDetail::ExceptionRisk) {
+        ++stats_.native_reject_exception_risk;
       } else {
         ++stats_
               .native_branch_tail_aggressive_reduced_helper_preflight_disabled;
@@ -3715,7 +3771,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
             .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries;
       ++stats_
             .native_branch_tail_aggressive_reduced_helper_adaptive_preflight_attempts_avoided;
-      record_rejected_block(adaptive_disable_detail);
+      record_rejected_block(
+          adaptive_disable_detail,
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region);
       return execute_block(block, max_cycles, max_instructions);
     }
     auto reject_aggressive_preflight =
@@ -3772,6 +3831,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
           block
               .native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
               aggressive_preflight_saw_scratchpad;
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region =
+              aggressive_preflight_reject_region;
           ++stats_
                 .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks;
           record_aggressive_preflight_adaptive_disable(
@@ -3780,7 +3842,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       } else {
         reset_aggressive_preflight_failure_streak();
       }
-      record_rejected_block(detail);
+      record_rejected_block(detail, aggressive_preflight_reject_region);
       return execute_block(block, max_cycles, max_instructions);
     };
 
@@ -3818,6 +3880,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       }
       if (!is_canonical_ram_alias(addr)) {
         const NativeMemoryRegion region = classify_native_memory_region(addr);
+        aggressive_preflight_reject_region = region;
         if (region == NativeMemoryRegion::Scratchpad) {
           aggressive_preflight_saw_scratchpad = true;
         }
@@ -3846,10 +3909,11 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
             .native_branch_tail_aggressive_reduced_helper_preflight_full_attempts;
     }
 
-    if (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
-        g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
-        g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr ||
-        ((cpu_.cop0_sr_ & (1u << 16)) != 0u && block.has_store)) {
+    if (block.has_memory &&
+        (!g_cpu_x64_jit_ram_load_fastpath_enabled ||
+         g_cpu_x64_jit_memory_trace || g_trace_ram || g_trace_bus ||
+         g_cpu_x64_jit_disable_native_ram || context->ram_data == nullptr ||
+         ((cpu_.cop0_sr_ & (1u << 16)) != 0u && block.has_store))) {
       return reject_aggressive_preflight(
           NativeBlockRejectDetail::ReducedHelperPreflightDisabled);
     }
@@ -3878,10 +3942,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     for (u32 i = 0; i < sim_gpr.size(); ++i) {
       sim_gpr[i] = cpu_.gpr_[i];
     }
-    u32 sim_load_reg = 0;
-    u32 sim_load_value = 0;
-    u32 sim_next_load_reg = 0;
-    u32 sim_next_load_value = 0;
+    u32 sim_load_reg = cpu_.load_.reg;
+    u32 sim_load_value = cpu_.load_.value;
+    u32 sim_next_load_reg = cpu_.next_load_.reg;
+    u32 sim_next_load_value = cpu_.next_load_.value;
     std::array<u32, DecodedBlock::kMaxInstructions * 4u> sim_store_addr{};
     std::array<u8, DecodedBlock::kMaxInstructions * 4u> sim_store_value{};
     u32 sim_store_count = 0;
@@ -3979,7 +4043,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         sim_write_ram_byte(phys + 3u, static_cast<u8>(value >> 24));
       }
     };
+    bool sim_overflow = false;
     auto sim_alu = [&](const DecodedInstruction &inst) -> bool {
+      sim_overflow = false;
       switch (inst.op) {
       case DecodedOp::Nop:
       case DecodedOp::Sync:
@@ -4022,9 +4088,31 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       case DecodedOp::Clear:
         sim_write_gpr(inst.rd, 0);
         return true;
+      case DecodedOp::Add: {
+        const s64 value =
+            static_cast<s64>(static_cast<s32>(sim_gpr[inst.rs])) +
+            static_cast<s64>(static_cast<s32>(sim_gpr[inst.rt]));
+        if (value < -0x80000000LL || value > 0x7FFFFFFFLL) {
+          sim_overflow = true;
+          return false;
+        }
+        sim_write_gpr(inst.rd, static_cast<u32>(static_cast<s32>(value)));
+        return true;
+      }
       case DecodedOp::Addu:
         sim_write_gpr(inst.rd, sim_gpr[inst.rs] + sim_gpr[inst.rt]);
         return true;
+      case DecodedOp::Sub: {
+        const s64 value =
+            static_cast<s64>(static_cast<s32>(sim_gpr[inst.rs])) -
+            static_cast<s64>(static_cast<s32>(sim_gpr[inst.rt]));
+        if (value < -0x80000000LL || value > 0x7FFFFFFFLL) {
+          sim_overflow = true;
+          return false;
+        }
+        sim_write_gpr(inst.rd, static_cast<u32>(static_cast<s32>(value)));
+        return true;
+      }
       case DecodedOp::Subu:
         sim_write_gpr(inst.rd, sim_gpr[inst.rs] - sim_gpr[inst.rt]);
         return true;
@@ -4051,6 +4139,17 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         sim_write_gpr(inst.rd,
                       sim_gpr[inst.rs] < sim_gpr[inst.rt] ? 1u : 0u);
         return true;
+      case DecodedOp::Addi: {
+        const s64 value =
+            static_cast<s64>(static_cast<s32>(sim_gpr[inst.rs])) +
+            static_cast<s64>(inst.simm);
+        if (value < -0x80000000LL || value > 0x7FFFFFFFLL) {
+          sim_overflow = true;
+          return false;
+        }
+        sim_write_gpr(inst.rt, static_cast<u32>(static_cast<s32>(value)));
+        return true;
+      }
       case DecodedOp::Addiu:
         sim_write_gpr(inst.rt,
                       sim_gpr[inst.rs] + static_cast<u32>(inst.simm));
@@ -4099,6 +4198,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         }
         if (!is_canonical_ram_alias(addr)) {
           const NativeMemoryRegion region = classify_native_memory_region(addr);
+          aggressive_preflight_reject_region = region;
           if (region == NativeMemoryRegion::Scratchpad) {
             aggressive_preflight_saw_scratchpad = true;
           }
@@ -4123,10 +4223,30 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         }
       } else if (!sim_alu(inst)) {
         return reject_aggressive_preflight(
-            NativeBlockRejectDetail::
-                AggressiveReducedHelperBranchTailUnsupportedBody);
+            sim_overflow
+                ? NativeBlockRejectDetail::ExceptionRisk
+                : NativeBlockRejectDetail::
+                      AggressiveReducedHelperBranchTailUnsupportedBody);
       }
       sim_advance_load_delay();
+    }
+
+    if (block.native_guarded_overflow_branch_tail) {
+      // The branch itself advances the load-delay pipeline before its delay
+      // slot executes. Mirror that state before validating a signed delay op.
+      sim_advance_load_delay();
+      const DecodedInstruction &delay =
+          block.instructions[branch_index + 1u];
+      if (is_x64_guarded_overflow_op(delay.op)) {
+        ++aggressive_preflight_simulated_instructions;
+        if (!sim_alu(delay)) {
+          return reject_aggressive_preflight(
+              sim_overflow
+                  ? NativeBlockRejectDetail::ExceptionRisk
+                  : NativeBlockRejectDetail::
+                        AggressiveReducedHelperBranchTailUnsupportedDelaySlot);
+        }
+      }
     }
     ++stats_.native_branch_tail_aggressive_reduced_helper_preflight_passes;
     reset_aggressive_preflight_failure_streak();
@@ -4500,7 +4620,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       // semantics rather than rejecting the entire block to decoded mode.
       context->max_cycles = max_cycles;
       context->max_instructions = max_instructions;
-      ++block.native_entry_count;
+      record_native_block_entry(block);
       if (context->is_branch_tail) {
         ++stats_.native_branch_tail_entries;
         ++block.native_branch_tail_entry_count;
@@ -4637,7 +4757,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   } else {
     ++stats_.native_alu_block_entries;
   }
-  ++block.native_entry_count;
+  record_native_block_entry(block);
   if (block.native_reduced_helper) {
     ++stats_.native_reduced_helper_entries;
     if (block.native_reduced_helper_ram_load) {

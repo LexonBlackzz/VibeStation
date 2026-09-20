@@ -2,9 +2,23 @@
 #include "system.h"
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <string>
 
 namespace {
+template <size_t N>
+void copy_stat_text(std::array<char, N>& out, const char* text) {
+  if (text == nullptr) {
+    text = "";
+  }
+  std::snprintf(out.data(), out.size(), "%s", text);
+}
+
+template <size_t N>
+void copy_stat_text(std::array<char, N>& out, const std::string& text) {
+  std::snprintf(out.data(), out.size(), "%s", text.c_str());
+}
+
 u64 delta_u64(u64 current, u64 previous) {
   return current >= previous ? current - previous : 0;
 }
@@ -1818,7 +1832,7 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
       continue;
     }
 
-    ++block->entry_count;
+    record_block_entry(*block);
     const u32 cycle_budget = max_cycles - total.cycles;
     const u32 instruction_budget = max_instructions - total.instructions;
     CpuBlockRunResult result{};
@@ -1999,6 +2013,95 @@ void CpuOptimizedBackend::begin_frame(u32 frame_index) {
   log_periodic_stats();
 }
 
+void CpuOptimizedBackend::record_block_entry(DecodedBlock &block) {
+  ++block.entry_count;
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
+  }
+  ++block.profile_frame_entries;
+}
+
+void CpuOptimizedBackend::record_native_block_entry(DecodedBlock &block) {
+  ++block.native_entry_count;
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
+  }
+  ++block.profile_frame_native_entries;
+}
+
+void CpuOptimizedBackend::record_runtime_reject(
+    DecodedBlock &block, NativeBlockRejectDetail detail,
+    NativeMemoryRegion memory_region) {
+  if (!g_profile_detailed_timing || detail == NativeBlockRejectDetail::None) {
+    return;
+  }
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+    block.profile_frame_runtime_rejects = 0;
+    block.profile_frame_runtime_reject_details.fill(
+        NativeBlockRejectDetail::None);
+    block.profile_frame_runtime_reject_counts.fill(0);
+    block.profile_frame_memory_reject_scratchpad = 0;
+    block.profile_frame_memory_reject_bios = 0;
+    block.profile_frame_memory_reject_unknown = 0;
+  }
+
+  ++block.profile_frame_runtime_rejects;
+  if (detail == NativeBlockRejectDetail::Memory) {
+    switch (memory_region) {
+    case NativeMemoryRegion::Scratchpad:
+      ++block.profile_frame_memory_reject_scratchpad;
+      break;
+    case NativeMemoryRegion::BiosReadOnly:
+      ++block.profile_frame_memory_reject_bios;
+      break;
+    case NativeMemoryRegion::Ram:
+    case NativeMemoryRegion::Mmio:
+    case NativeMemoryRegion::UnknownSlow:
+    default:
+      ++block.profile_frame_memory_reject_unknown;
+      break;
+    }
+  }
+  for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
+       ++i) {
+    if (block.profile_frame_runtime_reject_details[i] == detail) {
+      ++block.profile_frame_runtime_reject_counts[i];
+      return;
+    }
+    if (block.profile_frame_runtime_reject_details[i] ==
+        NativeBlockRejectDetail::None) {
+      block.profile_frame_runtime_reject_details[i] = detail;
+      block.profile_frame_runtime_reject_counts[i] = 1;
+      return;
+    }
+  }
+
+  // More distinct causes than the compact tracker can represent are still
+  // included in the total reject count; the dominant-reason field remains a
+  // best-effort diagnostic rather than a full histogram.
+}
+
 void CpuOptimizedBackend::flush() {
   dispatch_cache_.fill({});
   blocks_.clear();
@@ -2027,6 +2130,120 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
   out.code_bytes = 0;
   out.native_blocks = 0;
   out.native_code_bytes = 0;
+  out.hot_block_count = 0;
+  out.hot_block_total_count = 0;
+  out.hot_block_total_weight = 0;
+  out.hot_blocks = {};
+
+  auto insert_hot_block = [&](const DecodedBlock &block) {
+    if (!g_profile_detailed_timing ||
+        block.profile_entry_frame != current_frame_ ||
+        block.profile_frame_entries == 0 || block.instruction_count == 0) {
+      return;
+    }
+
+    CpuHotBlockStats hot{};
+    hot.start_pc = block.start_pc;
+    hot.instruction_count = block.instruction_count;
+    hot.entries = block.profile_frame_entries;
+    hot.native_entries = block.profile_frame_native_entries;
+    hot.runtime_rejects = block.profile_frame_runtime_rejects;
+    NativeBlockRejectDetail dominant_runtime_reject =
+        NativeBlockRejectDetail::None;
+    NativeBlockRejectDetail secondary_runtime_reject =
+        NativeBlockRejectDetail::None;
+    u32 dominant_runtime_reject_count = 0;
+    u32 secondary_runtime_reject_count = 0;
+    for (size_t i = 0; i < block.profile_frame_runtime_reject_details.size();
+         ++i) {
+      const u32 count = block.profile_frame_runtime_reject_counts[i];
+      const NativeBlockRejectDetail detail =
+          block.profile_frame_runtime_reject_details[i];
+      if (count > dominant_runtime_reject_count) {
+        secondary_runtime_reject = dominant_runtime_reject;
+        secondary_runtime_reject_count = dominant_runtime_reject_count;
+        dominant_runtime_reject = detail;
+        dominant_runtime_reject_count = count;
+      } else if (count > secondary_runtime_reject_count) {
+        secondary_runtime_reject = detail;
+        secondary_runtime_reject_count = count;
+      }
+    }
+    hot.runtime_reject_dominant_count = dominant_runtime_reject_count;
+    hot.runtime_reject_secondary_count = secondary_runtime_reject_count;
+
+    NativeMemoryRegion dominant_memory_region = NativeMemoryRegion::UnknownSlow;
+    u32 dominant_memory_region_count = block.profile_frame_memory_reject_unknown;
+    if (block.profile_frame_memory_reject_scratchpad >
+        dominant_memory_region_count) {
+      dominant_memory_region = NativeMemoryRegion::Scratchpad;
+      dominant_memory_region_count =
+          block.profile_frame_memory_reject_scratchpad;
+    }
+    if (block.profile_frame_memory_reject_bios >
+        dominant_memory_region_count) {
+      dominant_memory_region = NativeMemoryRegion::BiosReadOnly;
+      dominant_memory_region_count = block.profile_frame_memory_reject_bios;
+    }
+    hot.runtime_memory_region_count = dominant_memory_region_count;
+    hot.estimated_guest_instructions =
+        block.profile_frame_entries *
+        static_cast<u64>(block.instruction_count);
+    hot.native_prefix_instruction_count = block.native_prefix_instruction_count;
+    hot.native_compiled = block.native_fn != nullptr;
+    hot.native_decoded_only = block.native_decoded_only;
+    hot.has_control_flow = block.has_control_flow;
+    hot.has_memory = block.has_memory;
+    hot.has_load = block.has_load;
+    hot.has_store = block.has_store;
+    hot.has_fallback = block.has_fallback;
+    copy_stat_text(hot.shape, native_block_shape_name(block.native_shape));
+    copy_stat_text(hot.reject_detail,
+                   native_reject_detail_name(block.native_reject_detail));
+    copy_stat_text(hot.runtime_reject_detail,
+                   native_reject_detail_name(dominant_runtime_reject));
+    copy_stat_text(hot.runtime_reject_secondary_detail,
+                   native_reject_detail_name(secondary_runtime_reject));
+    copy_stat_text(
+        hot.runtime_memory_region,
+        dominant_memory_region_count == 0
+            ? "none"
+            : native_memory_region_name(dominant_memory_region));
+
+    std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
+    for (u32 i = 0; i < block.instruction_count; ++i) {
+      ops[i] = block.instructions[i].op;
+    }
+    copy_stat_text(hot.ops, decoded_ops_string(ops, block.instruction_count));
+
+    ++out.hot_block_total_count;
+    out.hot_block_total_weight += hot.estimated_guest_instructions;
+
+    size_t insert_at = out.hot_block_count;
+    for (size_t i = 0; i < out.hot_block_count; ++i) {
+      if (hot.estimated_guest_instructions >
+          out.hot_blocks[i].estimated_guest_instructions) {
+        insert_at = i;
+        break;
+      }
+    }
+
+    if (insert_at >= CpuBackendStats::kHotBlockStatsCount) {
+      return;
+    }
+
+    const size_t old_count = out.hot_block_count;
+    const size_t new_count = std::min(
+        old_count + 1u, CpuBackendStats::kHotBlockStatsCount);
+    if (new_count > old_count) {
+      out.hot_block_count = static_cast<u32>(new_count);
+    }
+    for (size_t i = new_count - 1; i > insert_at; --i) {
+      out.hot_blocks[i] = out.hot_blocks[i - 1];
+    }
+    out.hot_blocks[insert_at] = hot;
+  };
+
   for (const auto &entry : blocks_) {
     const DecodedBlock &block = *entry.second;
     if (block.interpreter_only_until_frame > current_frame_) {
@@ -2037,6 +2254,7 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
       ++out.native_blocks;
       out.native_code_bytes += block.native_code_bytes;
     }
+    insert_hot_block(block);
   }
   return out;
 }
@@ -2046,9 +2264,17 @@ bool CpuOptimizedBackend::should_attempt_x64_compile(
   if (g_cpu_x64_jit_force_compile) {
     return true;
   }
-  const u64 threshold = block.instruction_count >= 4u
-                            ? 2u
-                            : (block.instruction_count >= 2u ? 4u : 8u);
+  u64 threshold = block.instruction_count >= 4u
+                      ? 2u
+                      : (block.instruction_count >= 2u ? 4u : 8u);
+  const bool non_self_branch_tail =
+      block.native_branch_tail && block.instruction_count >= 2u &&
+      block.instructions[block.instruction_count - 2u].target !=
+          block.start_pc;
+  if (non_self_branch_tail) {
+    threshold = std::max<u64>(
+        threshold, g_cpu_x64_jit_hot_branch_tail_threshold);
+  }
   if (block.entry_count < threshold) {
     ++stats_.native_hot_threshold_skips;
     ++stats_.native_rejected_block_count;

@@ -12,6 +12,7 @@
 #include "spu.h"
 #include "timer.h"
 #include "types.h"
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <random>
@@ -158,6 +159,13 @@ public:
     u64 gpu_texel_samples_15bit = 0;
     u64 gpu_transparent_texels = 0;
     u64 gpu_semitransparent_pixels = 0;
+
+    // Detailed GTE command timing, indexed by the 6-bit GTE command opcode.
+    // Collected only while the full profiler is open.
+    std::array<double, 64> gte_command_ms{};
+    std::array<u32, 64> gte_command_counts{};
+    double gte_total_ms = 0.0;
+    u32 gte_total_commands = 0;
   };
 
   struct MdecUploadProbe {
@@ -387,6 +395,13 @@ public:
     }
     profiling_stats_.gpu_transparent_texels += transparent_texels;
     profiling_stats_.gpu_semitransparent_pixels += semitransparent_pixels;
+  }
+  void add_gte_profile(u32 opcode, double ms) {
+    const u32 index = opcode & 0x3Fu;
+    profiling_stats_.gte_command_ms[index] += ms;
+    ++profiling_stats_.gte_command_counts[index];
+    profiling_stats_.gte_total_ms += ms;
+    ++profiling_stats_.gte_total_commands;
   }
   void add_cdrom_time(double ms) { profiling_stats_.cdrom_ms += ms; }
   void add_spu_time(double ms) { profiling_stats_.spu_ms += ms; }

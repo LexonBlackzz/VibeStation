@@ -5,9 +5,107 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace {
+    const char* gte_command_name(u32 opcode) {
+        switch (opcode & 0x3Fu) {
+        case 0x01: return "RTPS";
+        case 0x06: return "NCLIP";
+        case 0x0C: return "OP";
+        case 0x10: return "DPCS";
+        case 0x11: return "INTPL";
+        case 0x12: return "MVMVA";
+        case 0x13: return "NCDS";
+        case 0x14: return "CDP";
+        case 0x16: return "NCDT";
+        case 0x1B: return "NCCS";
+        case 0x1C: return "CC";
+        case 0x1E: return "NCS";
+        case 0x20: return "NCT";
+        case 0x28: return "SQR";
+        case 0x29: return "DCPL";
+        case 0x2A: return "DPCT";
+        case 0x2D: return "AVSZ3";
+        case 0x2E: return "AVSZ4";
+        case 0x30: return "RTPT";
+        case 0x3D: return "GPF";
+        case 0x3E: return "GPL";
+        case 0x3F: return "NCCT";
+        default: return "UNKNOWN";
+        }
+    }
+
+    struct FramePhaseDiagnostics {
+        bool valid = false;
+        u32 render_frames = 0;
+        u32 reuse_frames = 0;
+        u32 draw_threshold = 0;
+        double render_cpu_ms = 0.0;
+        double render_gpu_ms = 0.0;
+        double render_core_ms = 0.0;
+        double reuse_cpu_ms = 0.0;
+        double reuse_gpu_ms = 0.0;
+        double reuse_core_ms = 0.0;
+    };
+
+    template <size_t N>
+    FramePhaseDiagnostics analyze_frame_phases(
+        const std::array<float, N>& cpu_history,
+        const std::array<float, N>& gpu_history,
+        const std::array<float, N>& core_history,
+        const std::array<u32, N>& draw_history,
+        int count,
+        int write_index) {
+        FramePhaseDiagnostics out{};
+        if (count < 8) {
+            return out;
+        }
+
+        u32 max_draws = 0;
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            max_draws = std::max(max_draws, draw_history[idx]);
+        }
+        if (max_draws < 16u) {
+            return out;
+        }
+
+        out.draw_threshold = std::max<u32>(8u, max_draws / 8u);
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            if (draw_history[idx] >= out.draw_threshold) {
+                ++out.render_frames;
+                out.render_cpu_ms += cpu_history[idx];
+                out.render_gpu_ms += gpu_history[idx];
+                out.render_core_ms += core_history[idx];
+            }
+            else {
+                ++out.reuse_frames;
+                out.reuse_cpu_ms += cpu_history[idx];
+                out.reuse_gpu_ms += gpu_history[idx];
+                out.reuse_core_ms += core_history[idx];
+            }
+        }
+
+        if (out.render_frames == 0 || out.reuse_frames == 0) {
+            return out;
+        }
+        out.render_cpu_ms /= static_cast<double>(out.render_frames);
+        out.render_gpu_ms /= static_cast<double>(out.render_frames);
+        out.render_core_ms /= static_cast<double>(out.render_frames);
+        out.reuse_cpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_gpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_core_ms /= static_cast<double>(out.reuse_frames);
+        out.valid = true;
+        return out;
+    }
+
     struct GpuDipDiagnostics {
         bool valid = false;
         int dip_count = 0;
@@ -575,6 +673,101 @@ void App::panel_performance() {
             }
 
             draw_performance_gpu_dip_diagnostics();
+
+            const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+                perf_cpu_ms_history_, perf_gpu_ms_history_,
+                perf_core_ms_history_, perf_gpu_draw_commands_history_,
+                perf_history_count_, perf_history_write_index_);
+            if (phase_diag.valid) {
+                ImGui::Separator();
+                ImGui::Text(
+                    "Render/reuse phases (draw threshold %u, history %u/%u):",
+                    phase_diag.draw_threshold, phase_diag.render_frames,
+                    phase_diag.reuse_frames);
+                ImGui::Text(
+                    "Render-active avg: CPU %.3f  GPU %.3f  Core %.3f ms",
+                    phase_diag.render_cpu_ms, phase_diag.render_gpu_ms,
+                    phase_diag.render_core_ms);
+                ImGui::Text(
+                    "Reuse/light avg:  CPU %.3f  GPU %.3f  Core %.3f ms",
+                    phase_diag.reuse_cpu_ms, phase_diag.reuse_gpu_ms,
+                    phase_diag.reuse_core_ms);
+            }
+
+            ImGui::Separator();
+            ImGui::Text("GTE Command Detail:");
+            if (stats.gte_total_commands == 0) {
+                ImGui::TextDisabled("No GTE commands executed in this frame.");
+            }
+            else {
+                struct GteRow {
+                    u32 opcode = 0;
+                    double ms = 0.0;
+                    u32 count = 0;
+                };
+                std::array<GteRow, 64> rows{};
+                u32 row_count = 0;
+                for (u32 opcode = 0; opcode < 64; ++opcode) {
+                    if (stats.gte_command_counts[opcode] == 0) {
+                        continue;
+                    }
+                    rows[row_count++] = {
+                        opcode,
+                        stats.gte_command_ms[opcode],
+                        stats.gte_command_counts[opcode],
+                    };
+                }
+                std::sort(rows.begin(), rows.begin() + row_count,
+                    [](const GteRow& a, const GteRow& b) {
+                        return a.ms > b.ms;
+                    });
+
+                ImGui::Text(
+                    "Total: %.3f ms / %u commands (inside CPU time)",
+                    stats.gte_total_ms, stats.gte_total_commands);
+                const u32 shown = std::min<u32>(row_count, 12u);
+                for (u32 i = 0; i < shown; ++i) {
+                    const GteRow& row = rows[i];
+                    const double avg_us =
+                        row.count == 0
+                            ? 0.0
+                            : (row.ms * 1000.0) /
+                                  static_cast<double>(row.count);
+                    ImGui::Text(
+                        "%-7s  op=%02X  %7.3f ms  %6u cmds  %6.2f us/cmd",
+                        gte_command_name(row.opcode), row.opcode, row.ms,
+                        row.count, avg_us);
+                }
+
+                if (ImGui::Button("Copy GTE profiler snapshot")) {
+                    std::string snapshot;
+                    snapshot.reserve(2048);
+                    char line[256];
+                    std::snprintf(
+                        line, sizeof(line),
+                        "frame=%llu cpu_ms=%.3f gte_ms=%.3f gte_commands=%u\n",
+                        static_cast<unsigned long long>(
+                            runtime_snapshot_.frame_id),
+                        stats.cpu_ms, stats.gte_total_ms,
+                        stats.gte_total_commands);
+                    snapshot += line;
+                    for (u32 i = 0; i < row_count; ++i) {
+                        const GteRow& row = rows[i];
+                        const double avg_us =
+                            row.count == 0
+                                ? 0.0
+                                : (row.ms * 1000.0) /
+                                      static_cast<double>(row.count);
+                        std::snprintf(
+                            line, sizeof(line),
+                            "%s op=%02X ms=%.3f count=%u avg_us=%.2f\n",
+                            gte_command_name(row.opcode), row.opcode, row.ms,
+                            row.count, avg_us);
+                        snapshot += line;
+                    }
+                    ImGui::SetClipboardText(snapshot.c_str());
+                }
+            }
         }
         else {
             ImGui::TextDisabled("Detailed subsystem timings are disabled.");
@@ -689,6 +882,182 @@ void App::panel_performance() {
                 backend.native_helper_load_delay_passes),
             static_cast<unsigned long long>(
                 backend.native_helper_load_delay_fallbacks));
+
+        ImGui::Separator();
+        ImGui::Text("CPU Hot Blocks:");
+        if (!g_profile_detailed_timing) {
+            ImGui::TextDisabled(
+                "Open the full profiler with F12 to collect hot-block data.");
+        }
+        else if (backend.hot_block_count == 0) {
+            ImGui::TextDisabled("No decoded block executions collected yet.");
+        }
+        else {
+            const u64 shown_weight = [&]() {
+                u64 total = 0;
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    total += backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                return total;
+            }();
+            const double shown_share =
+                backend.hot_block_total_weight == 0
+                    ? 0.0
+                    : 100.0 * static_cast<double>(shown_weight) /
+                          static_cast<double>(backend.hot_block_total_weight);
+            ImGui::Text(
+                "This frame: top %u of %u blocks cover %.1f%% of estimated guest instructions",
+                backend.hot_block_count, backend.hot_block_total_count,
+                shown_share);
+
+            if (ImGui::BeginTable(
+                    "cpu_hot_blocks", 8,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit,
+                    ImVec2(-1.0f, 260.0f))) {
+                ImGui::TableSetupColumn("PC");
+                ImGui::TableSetupColumn("Est instr");
+                ImGui::TableSetupColumn("Entries");
+                ImGui::TableSetupColumn("Native %");
+                ImGui::TableSetupColumn("Shape");
+                ImGui::TableSetupColumn("Reject/detail");
+                ImGui::TableSetupColumn("Runtime reject");
+                ImGui::TableSetupColumn("Ops");
+                ImGui::TableHeadersRow();
+
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("0x%08X", hot.start_pc);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(hot.entries));
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.1f%%", native_percent);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(hot.shape.data());
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TextUnformatted(hot.reject_detail.data());
+                    ImGui::TableSetColumnIndex(6);
+                    if (hot.runtime_rejects == 0) {
+                        ImGui::TextDisabled("-");
+                    } else {
+                        ImGui::Text("%llu %s (%u), %s (%u), mem=%s (%u)",
+                            static_cast<unsigned long long>(
+                                hot.runtime_rejects),
+                            hot.runtime_reject_detail.data(),
+                            hot.runtime_reject_dominant_count,
+                            hot.runtime_reject_secondary_detail.data(),
+                            hot.runtime_reject_secondary_count,
+                            hot.runtime_memory_region.data(),
+                            hot.runtime_memory_region_count);
+                    }
+                    ImGui::TableSetColumnIndex(7);
+                    ImGui::TextUnformatted(hot.ops.data());
+                }
+                ImGui::EndTable();
+            }
+
+            if (ImGui::Button("Copy CPU hot-block snapshot")) {
+                const EmuRunner::RuntimeSnapshot fresh_snapshot =
+                    emu_runner_.is_running()
+                        ? emu_runner_.runtime_snapshot()
+                        : runtime_snapshot_;
+                const CpuBackendStats& fresh_backend =
+                    fresh_snapshot.cpu_backend_stats;
+
+                u64 fresh_shown_weight = 0;
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    fresh_shown_weight +=
+                        fresh_backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                const double fresh_shown_share =
+                    fresh_backend.hot_block_total_weight == 0
+                        ? 0.0
+                        : 100.0 * static_cast<double>(fresh_shown_weight) /
+                              static_cast<double>(
+                                  fresh_backend.hot_block_total_weight);
+
+                std::string snapshot;
+                snapshot.reserve(8192);
+                char line[768];
+                std::snprintf(
+                    line, sizeof(line),
+                    "frame=%llu core_ms=%.3f cpu_ms=%.3f "
+                    "gpu_ms=%.3f draws=%u decoded=%llu native=%llu fallback=%llu\n"
+                    "hot_blocks=%u/%u shown_share=%.1f%%\n",
+                    static_cast<unsigned long long>(fresh_snapshot.frame_id),
+                    fresh_snapshot.core_frame_ms,
+                    fresh_snapshot.profiling.cpu_ms,
+                    fresh_snapshot.profiling.gpu_ms,
+                    fresh_snapshot.profiling.gpu_draw_commands,
+                    static_cast<unsigned long long>(
+                        fresh_backend.decoded_instructions),
+                    static_cast<unsigned long long>(
+                        fresh_backend.native_instructions),
+                    static_cast<unsigned long long>(
+                        fresh_backend.fallback_instructions),
+                    fresh_backend.hot_block_count,
+                    fresh_backend.hot_block_total_count,
+                    fresh_shown_share);
+                snapshot += line;
+
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = fresh_backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    std::snprintf(
+                        line, sizeof(line),
+                        "#%02u pc=%08X weight=%llu entries=%llu instr=%u "
+                        "native_entries=%llu native=%.1f%% compiled=%u "
+                        "runtime_rejects=%llu runtime_reason=%s "
+                        "runtime_reason_count=%u runtime_reason2=%s "
+                        "runtime_reason2_count=%u runtime_mem_region=%s "
+                        "runtime_mem_region_count=%u "
+                        "decoded_only=%u prefix=%u branch=%u mem=%u load=%u "
+                        "store=%u fallback=%u shape=%s reject=%s ops=%s\n",
+                        i + 1u, hot.start_pc,
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions),
+                        static_cast<unsigned long long>(hot.entries),
+                        hot.instruction_count,
+                        static_cast<unsigned long long>(hot.native_entries),
+                        native_percent, hot.native_compiled ? 1u : 0u,
+                        static_cast<unsigned long long>(hot.runtime_rejects),
+                        hot.runtime_reject_detail.data(),
+                        hot.runtime_reject_dominant_count,
+                        hot.runtime_reject_secondary_detail.data(),
+                        hot.runtime_reject_secondary_count,
+                        hot.runtime_memory_region.data(),
+                        hot.runtime_memory_region_count,
+                        hot.native_decoded_only ? 1u : 0u,
+                        hot.native_prefix_instruction_count,
+                        hot.has_control_flow ? 1u : 0u,
+                        hot.has_memory ? 1u : 0u,
+                        hot.has_load ? 1u : 0u,
+                        hot.has_store ? 1u : 0u,
+                        hot.has_fallback ? 1u : 0u,
+                        hot.shape.data(), hot.reject_detail.data(),
+                        hot.ops.data());
+                    snapshot += line;
+                }
+                ImGui::SetClipboardText(snapshot.c_str());
+            }
+        }
+
         if (config_vsync_ && swap_ms_ > 8.0) {
             ImGui::TextDisabled(
                 "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");

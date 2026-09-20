@@ -299,6 +299,15 @@ struct DecodedBlock {
   u32 last_invalidation_query = 0;
   u64 entry_count = 0;
   u64 native_entry_count = 0;
+  u32 profile_entry_frame = 0;
+  u64 profile_frame_entries = 0;
+  u64 profile_frame_native_entries = 0;
+  u64 profile_frame_runtime_rejects = 0;
+  std::array<NativeBlockRejectDetail, 8> profile_frame_runtime_reject_details{};
+  std::array<u32, 8> profile_frame_runtime_reject_counts{};
+  u32 profile_frame_memory_reject_scratchpad = 0;
+  u32 profile_frame_memory_reject_bios = 0;
+  u32 profile_frame_memory_reject_unknown = 0;
   u64 native_branch_tail_entry_count = 0;
   u64 native_prepare_helper_call_count = 0;
   u64 native_finish_helper_call_count = 0;
@@ -342,6 +351,9 @@ struct DecodedBlock {
   bool native_reduced_helper_ram_load = false;
   bool native_reduced_helper_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail = false;
+  // Signed ADD/SUB/ADDI are admitted only when the aggressive runtime
+  // preflight proves that the current invocation cannot overflow.
+  bool native_guarded_overflow_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
       false;
   u8 native_aggressive_reduced_helper_branch_tail_memory_ops = 0;
@@ -354,6 +366,9 @@ struct DecodedBlock {
       false;
   bool native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
       false;
+  NativeMemoryRegion
+      native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region =
+          NativeMemoryRegion::UnknownSlow;
   bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =
@@ -446,6 +461,11 @@ private:
   CpuBlockRunResult execute_native_branch_chain(DecodedBlock &block,
                                                 u32 max_cycles,
                                                 u32 max_instructions);
+  void record_block_entry(DecodedBlock &block);
+  void record_native_block_entry(DecodedBlock &block);
+  void record_runtime_reject(
+      DecodedBlock &block, NativeBlockRejectDetail detail,
+      NativeMemoryRegion memory_region = NativeMemoryRegion::UnknownSlow);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
   bool prepare_instruction(const DecodedInstruction &inst,
                            CpuBlockRunResult &result);
