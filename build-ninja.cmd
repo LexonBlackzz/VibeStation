@@ -10,7 +10,7 @@ if %errorlevel% neq 0 (
 )
 
 set "BUILD_JOBS=%VIBESTATION_BUILD_JOBS%"
-if not defined BUILD_JOBS set "BUILD_JOBS=16"
+if not defined BUILD_JOBS set "BUILD_JOBS=8"
 
 set "CMAKE_FRESH_ARG="
 set "CMAKE_COMPILER_ARGS=-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
