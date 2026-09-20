@@ -2,9 +2,23 @@
 #include "system.h"
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <string>
 
 namespace {
+template <size_t N>
+void copy_stat_text(std::array<char, N>& out, const char* text) {
+  if (text == nullptr) {
+    text = "";
+  }
+  std::snprintf(out.data(), out.size(), "%s", text);
+}
+
+template <size_t N>
+void copy_stat_text(std::array<char, N>& out, const std::string& text) {
+  std::snprintf(out.data(), out.size(), "%s", text.c_str());
+}
+
 u64 delta_u64(u64 current, u64 previous) {
   return current >= previous ? current - previous : 0;
 }
@@ -2027,6 +2041,70 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
   out.code_bytes = 0;
   out.native_blocks = 0;
   out.native_code_bytes = 0;
+  out.hot_block_count = 0;
+  out.hot_block_total_count = 0;
+  out.hot_block_total_weight = 0;
+  out.hot_blocks = {};
+
+  auto insert_hot_block = [&](const DecodedBlock &block) {
+    if (!g_profile_detailed_timing || block.entry_count == 0 ||
+        block.instruction_count == 0) {
+      return;
+    }
+
+    CpuHotBlockStats hot{};
+    hot.start_pc = block.start_pc;
+    hot.instruction_count = block.instruction_count;
+    hot.entries = block.entry_count;
+    hot.native_entries = block.native_entry_count;
+    hot.estimated_guest_instructions =
+        block.entry_count * static_cast<u64>(block.instruction_count);
+    hot.native_prefix_instruction_count = block.native_prefix_instruction_count;
+    hot.native_compiled = block.native_fn != nullptr;
+    hot.native_decoded_only = block.native_decoded_only;
+    hot.has_control_flow = block.has_control_flow;
+    hot.has_memory = block.has_memory;
+    hot.has_load = block.has_load;
+    hot.has_store = block.has_store;
+    hot.has_fallback = block.has_fallback;
+    copy_stat_text(hot.shape, native_block_shape_name(block.native_shape));
+    copy_stat_text(hot.reject_detail,
+                   native_reject_detail_name(block.native_reject_detail));
+
+    std::array<DecodedOp, DecodedBlock::kMaxInstructions> ops{};
+    for (u32 i = 0; i < block.instruction_count; ++i) {
+      ops[i] = block.instructions[i].op;
+    }
+    copy_stat_text(hot.ops, decoded_ops_string(ops, block.instruction_count));
+
+    ++out.hot_block_total_count;
+    out.hot_block_total_weight += hot.estimated_guest_instructions;
+
+    size_t insert_at = out.hot_block_count;
+    for (size_t i = 0; i < out.hot_block_count; ++i) {
+      if (hot.estimated_guest_instructions >
+          out.hot_blocks[i].estimated_guest_instructions) {
+        insert_at = i;
+        break;
+      }
+    }
+
+    if (insert_at >= CpuBackendStats::kHotBlockStatsCount) {
+      return;
+    }
+
+    const size_t old_count = out.hot_block_count;
+    const size_t new_count = std::min(
+        old_count + 1u, CpuBackendStats::kHotBlockStatsCount);
+    if (new_count > old_count) {
+      out.hot_block_count = static_cast<u32>(new_count);
+    }
+    for (size_t i = new_count - 1; i > insert_at; --i) {
+      out.hot_blocks[i] = out.hot_blocks[i - 1];
+    }
+    out.hot_blocks[insert_at] = hot;
+  };
+
   for (const auto &entry : blocks_) {
     const DecodedBlock &block = *entry.second;
     if (block.interpreter_only_until_frame > current_frame_) {
@@ -2037,6 +2115,7 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
       ++out.native_blocks;
       out.native_code_bytes += block.native_code_bytes;
     }
+    insert_hot_block(block);
   }
   return out;
 }
