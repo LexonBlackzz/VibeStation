@@ -20,7 +20,10 @@ public:
   CpuBackendStats stats() const;
 
 private:
+  struct Impl;
+
   Cpu &cpu_;
+  std::unique_ptr<Impl> impl_;
   CpuBackendStats stats_{};
   u32 current_frame_ = 0;
 };
