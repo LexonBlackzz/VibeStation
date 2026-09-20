@@ -2071,10 +2071,9 @@ void CpuOptimizedBackend::record_runtime_reject(
     }
   }
 
-  // Four distinct runtime reject causes in a single block/frame is already
-  // unusual. Fold any additional causes into the final slot rather than
-  // bloating every decoded block with a large histogram.
-  ++block.profile_frame_runtime_reject_counts.back();
+  // More distinct causes than the compact tracker can represent are still
+  // included in the total reject count; the dominant-reason field remains a
+  // best-effort diagnostic rather than a full histogram.
 }
 
 void CpuOptimizedBackend::flush() {
