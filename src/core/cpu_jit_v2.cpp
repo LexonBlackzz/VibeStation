@@ -625,27 +625,85 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
       std::vector<V2DecodedInstruction> decoded;
       std::array<u32, 16> words{};
-      constexpr u32 kMaxV2AluInstructions = 16u;
-      for (u32 i = 0; i < kMaxV2AluInstructions; ++i) {
+      constexpr u32 kMaxV2Instructions = 16u;
+      u32 written_mask = 0u;
+      u32 store_count = 0u;
+      bool has_store = false;
+      bool has_branch = false;
+      u32 branch_index = 0u;
+      s32 branch_simm = 0;
+      std::array<u8, 8> store_rs{};
+      std::array<s32, 8> store_simm{};
+
+      auto fetch_decoded = [&](u32 i, V2DecodedInstruction &inst,
+                               u32 &bits) -> bool {
         const u32 inst_pc = start_pc + i * 4u;
         if (!cpu_.instruction_cacheable(inst_pc)) {
-          break;
+          return false;
         }
         const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
         const u32 inst_word = (inst_pc >> 2u) & 0x03u;
         const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
         const auto &inst_line = cpu_.icache_[inst_index];
         if (!inst_line.valid || inst_line.tag != inst_tag) {
+          return false;
+        }
+        bits = inst_line.words[inst_word];
+        return decode_v2_alu(bits, inst);
+      };
+
+      for (u32 i = 0; i < kMaxV2Instructions; ++i) {
+        V2DecodedInstruction inst{};
+        u32 bits = 0u;
+        if (!fetch_decoded(i, inst, bits)) {
           break;
         }
 
-        V2DecodedInstruction inst{};
-        const u32 bits = inst_line.words[inst_word];
-        if (!decode_v2_alu(bits, inst)) {
+        if (is_v2_branch(inst.op)) {
+          // V2 branch blocks always include the architectural delay slot and
+          // end immediately after it. Keep the delay slot ALU-only for the
+          // first branch tier; memory delay slots remain interpreter territory.
+          if (i + 1u >= kMaxV2Instructions) {
+            break;
+          }
+          V2DecodedInstruction delay{};
+          u32 delay_bits = 0u;
+          if (!fetch_decoded(i + 1u, delay, delay_bits) ||
+              !is_v2_alu_only(delay.op)) {
+            break;
+          }
+
+          has_branch = true;
+          branch_index = static_cast<u32>(decoded.size());
+          branch_simm = inst.simm;
+          decoded.push_back(inst);
+          words[branch_index] = bits;
+          decoded.push_back(delay);
+          words[branch_index + 1u] = delay_bits;
           break;
         }
+
+        if (inst.op == V2AluOp::Sw) {
+          if (store_count >= store_rs.size()) {
+            break;
+          }
+          // Runtime address preflight uses the block-entry GPR value. If an
+          // earlier instruction rewrites the base, stop before this store.
+          if (inst.rs != 0u && (written_mask & (1u << inst.rs)) != 0u) {
+            break;
+          }
+          has_store = true;
+          store_rs[store_count] = inst.rs;
+          store_simm[store_count] = inst.simm;
+          ++store_count;
+        }
+
         decoded.push_back(inst);
-        words[i] = bits;
+        words[decoded.size() - 1u] = bits;
+        const u8 dst = write_reg(inst);
+        if (dst != 0u) {
+          written_mask |= 1u << dst;
+        }
       }
 
       if (decoded.size() < 2u) {
@@ -661,6 +719,27 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           psx::mask_address(start_pc + block.instruction_count * 4u - 1u);
       block.words = words;
       block.cached_regs = choose_cached_regs(decoded);
+      block.has_store = has_store;
+      block.has_branch = has_branch;
+      block.store_count = store_count;
+      block.store_rs = store_rs;
+      block.store_simm = store_simm;
+      block.branch_index = branch_index;
+      if (has_branch) {
+        const u32 branch_pc = start_pc + branch_index * 4u;
+        block.branch_target =
+            branch_pc + 4u + (static_cast<u32>(branch_simm) << 2u);
+      }
+      for (const auto &inst : decoded) {
+        if (inst.op == V2AluOp::Sw) {
+          block.base_cycles += 2u;
+        } else {
+          // Conditional branches cost one cycle when not taken and gain one
+          // more dynamically when taken. All currently-native ALU ops cost 1.
+          block.base_cycles += 1u;
+        }
+      }
+
       block.code = compile_native_alu(decoded, block.cached_regs);
       if (!block.code) {
         ++stats_.native_compile_failures;
@@ -671,7 +750,13 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       found = inserted.first;
       ++stats_.native_compile_successes;
       ++stats_.native_blocks_compiled;
-      ++stats_.native_alu_blocks_compiled;
+      if (has_branch) {
+        ++stats_.native_branch_tail_blocks_compiled;
+      } else if (has_store) {
+        ++stats_.native_memory_blocks_compiled;
+      } else {
+        ++stats_.native_alu_blocks_compiled;
+      }
     } else {
       ++stats_.cache_hits;
     }
