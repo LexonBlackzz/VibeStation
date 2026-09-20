@@ -18,6 +18,12 @@ constexpr u32 kRegXyzf2 = 0x04;
 constexpr u32 kRegXyz2 = 0x05;
 constexpr u32 kRegXyzf3 = 0x0C;
 constexpr u32 kRegXyz3 = 0x0D;
+constexpr u32 kRegXyoffset1 = 0x18;
+constexpr u32 kRegPrmodecont = 0x1A;
+constexpr u32 kRegPrmode = 0x1B;
+constexpr u32 kRegScissor1 = 0x40;
+constexpr u32 kRegTest1 = 0x47;
+constexpr u32 kRegFrame1 = 0x4C;
 constexpr u32 kRegBitbltbuf = 0x50;
 constexpr u32 kRegTrxpos = 0x51;
 constexpr u32 kRegTrxreg = 0x52;
@@ -37,7 +43,8 @@ void GsCore::reset() {
     transfer_ = {};
     stats_ = {};
     vram_.reset();
-    primitive_vertex_count_ = 0;
+    draw_vertices_.fill({});
+    draw_vertex_count_ = 0;
 }
 
 bool GsCore::write_gif_fifo32(u32 physical, u32 value) {
@@ -201,10 +208,9 @@ void GsCore::write_register(u32 address, u64 value) {
     }
 
     if (address == kRegPrim) {
-        primitive_vertex_count_ = 0;
-    } else if (address == kRegXyz2 || address == kRegXyz3 ||
-               address == kRegXyzf2 || address == kRegXyzf3) {
-        note_vertex_kick();
+        draw_vertex_count_ = 0;
+    } else if (address == kRegXyz2 || address == kRegXyzf2) {
+        submit_vertex(value);
     }
 }
 
@@ -316,31 +322,156 @@ void GsCore::consume_pending_pixels() {
     }
 }
 
-void GsCore::note_vertex_kick() {
-    ++stats_.vertices;
-    ++primitive_vertex_count_;
+u64 GsCore::effective_prim() const {
+    const u64 prim = registers_[kRegPrim] & 0x7FFu;
+    if ((registers_[kRegPrmodecont] & 1u) != 0) return prim;
+    return (prim & 0x7u) | (registers_[kRegPrmode] & 0x7F8u);
+}
 
-    switch (current_prim()) {
-    case 0: // point
-        ++stats_.primitives;
+GsRasterContext GsCore::raster_context() const {
+    const u64 prim = effective_prim();
+    const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
+    const u64 xyoffset = registers_[kRegXyoffset1 + ctxt];
+    const u64 scissor = registers_[kRegScissor1 + ctxt];
+    const u64 frame = registers_[kRegFrame1 + ctxt];
+
+    GsRasterContext ctx{};
+    ctx.fbp = static_cast<u32>(frame & 0x1FFu) << 5;
+    ctx.fbw = static_cast<u32>((frame >> 16) & 0x3Fu);
+    ctx.psm = static_cast<u32>((frame >> 24) & 0x3Fu);
+    ctx.fbmask = static_cast<u32>(frame >> 32);
+    ctx.scax0 = static_cast<s32>(scissor & 0x7FFu);
+    ctx.scax1 = static_cast<s32>((scissor >> 16) & 0x7FFu);
+    ctx.scay0 = static_cast<s32>((scissor >> 32) & 0x7FFu);
+    ctx.scay1 = static_cast<s32>((scissor >> 48) & 0x7FFu);
+
+    (void)xyoffset;
+    return ctx;
+}
+
+bool GsCore::raster_state_supported() const {
+    const u64 prim = effective_prim();
+
+    // First software-raster milestone: flat, untextured, unblended geometry.
+    constexpr u64 kUnsupportedPrim =
+        (1ull << 3) | // IIP
+        (1ull << 4) | // TME
+        (1ull << 5) | // FGE
+        (1ull << 6) | // ABE
+        (1ull << 7);  // AA1
+    if ((prim & kUnsupportedPrim) != 0) return false;
+
+    const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
+    const u64 test = registers_[kRegTest1 + ctxt];
+    if ((test & 1u) != 0) return false;          // ATE
+    if ((test & (1ull << 14)) != 0) return false; // DATE
+    if ((test & (1ull << 16)) != 0) return false; // ZTE
+
+    return GsRasterizer::supported_target(raster_context());
+}
+
+void GsCore::emit_primitive(
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    const GsRasterVertex& c,
+    u32 vertex_count) {
+    ++stats_.primitives;
+
+    const u32 prim = static_cast<u32>(effective_prim() & 0x7u);
+    if (!raster_state_supported()) {
+        ++stats_.skipped_raster_draws;
+        return;
+    }
+
+    const GsRasterContext ctx = raster_context();
+    u64 pixels = 0;
+    if (prim == 6u && vertex_count >= 2u) {
+        pixels = GsRasterizer::draw_sprite(vram_, ctx, a, b);
+    } else if ((prim == 3u || prim == 4u || prim == 5u) && vertex_count >= 3u) {
+        pixels = GsRasterizer::draw_triangle(vram_, ctx, a, b, c);
+    } else {
+        ++stats_.skipped_raster_draws;
+        return;
+    }
+
+    ++stats_.raster_draws;
+    stats_.raster_pixels += pixels;
+}
+
+void GsCore::submit_vertex(u64 xyz) {
+    ++stats_.vertices;
+
+    const u64 prim_reg = effective_prim();
+    const u32 prim = static_cast<u32>(prim_reg & 0x7u);
+    const u32 ctxt = static_cast<u32>((prim_reg >> 9) & 1u);
+    const u64 xyoffset = registers_[kRegXyoffset1 + ctxt];
+
+    GsRasterVertex v{};
+    v.x = static_cast<s32>(static_cast<u32>(xyz) & 0xFFFFu) -
+          static_cast<s32>(static_cast<u32>(xyoffset) & 0xFFFFu);
+    v.y = static_cast<s32>((static_cast<u32>(xyz) >> 16) & 0xFFFFu) -
+          static_cast<s32>(static_cast<u32>(xyoffset >> 32) & 0xFFFFu);
+    v.z = static_cast<u32>(xyz >> 32);
+    v.rgba = static_cast<u32>(registers_[kRegRgbaq]);
+
+    switch (prim) {
+    case 0: // point: counted, raster support comes later.
+        draw_vertices_[0] = v;
+        emit_primitive(v, {}, {}, 1);
+        draw_vertex_count_ = 0;
         break;
     case 1: // line list
-        if ((primitive_vertex_count_ % 2u) == 0) ++stats_.primitives;
+        draw_vertices_[draw_vertex_count_++] = v;
+        if (draw_vertex_count_ == 2) {
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], {}, 2);
+            draw_vertex_count_ = 0;
+        }
         break;
     case 2: // line strip
-        if (primitive_vertex_count_ >= 2u) ++stats_.primitives;
+        if (draw_vertex_count_ == 0) {
+            draw_vertices_[0] = v;
+            draw_vertex_count_ = 1;
+        } else {
+            draw_vertices_[1] = v;
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], {}, 2);
+            draw_vertices_[0] = draw_vertices_[1];
+            draw_vertex_count_ = 1;
+        }
         break;
     case 3: // triangle list
-        if ((primitive_vertex_count_ % 3u) == 0) ++stats_.primitives;
+        draw_vertices_[draw_vertex_count_++] = v;
+        if (draw_vertex_count_ == 3) {
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], draw_vertices_[2], 3);
+            draw_vertex_count_ = 0;
+        }
         break;
     case 4: // triangle strip
+        draw_vertices_[draw_vertex_count_++] = v;
+        if (draw_vertex_count_ == 3) {
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], draw_vertices_[2], 3);
+            draw_vertices_[0] = draw_vertices_[1];
+            draw_vertices_[1] = draw_vertices_[2];
+            draw_vertex_count_ = 2;
+        }
+        break;
     case 5: // triangle fan
-        if (primitive_vertex_count_ >= 3u) ++stats_.primitives;
+        draw_vertices_[draw_vertex_count_++] = v;
+        if (draw_vertex_count_ == 3) {
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], draw_vertices_[2], 3);
+            draw_vertices_[1] = draw_vertices_[2];
+            draw_vertex_count_ = 2;
+        }
         break;
     case 6: // sprite
-        if ((primitive_vertex_count_ % 2u) == 0) ++stats_.primitives;
+        draw_vertices_[draw_vertex_count_++] = v;
+        if (draw_vertex_count_ == 2) {
+            emit_primitive(draw_vertices_[0], draw_vertices_[1], {}, 2);
+            draw_vertex_count_ = 0;
+        }
         break;
     default:
+        ++stats_.skipped_raster_draws;
+        draw_vertex_count_ = 0;
         break;
     }
 }

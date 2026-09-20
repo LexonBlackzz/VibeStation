@@ -554,6 +554,104 @@ bool test_gs_host_to_local_image_transfer() {
     return ok;
 }
 
+
+bool test_gs_untextured_rasterization() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag =
+            1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp, ps2::u32 z = 0) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16) |
+               (static_cast<ps2::u64>(z) << 32);
+    };
+
+    const ps2::u64 frame =
+        static_cast<ps2::u64>(1u) << 16; // FBP=0, FBW=1, PSMCT32, FBMSK=0.
+    const ps2::u64 scissor =
+        (static_cast<ps2::u64>(31u) << 16) |
+        (static_cast<ps2::u64>(31u) << 48);
+
+    bool ok = true;
+
+    // Flat untextured 2x2 sprite.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u); // PRMODECONT.AC = use PRIM attributes.
+        ad(gs, 0x18, 0u); // XYOFFSET_1
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u); // TEST_1 disabled
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 6u); // sprite
+        ad(gs, 0x01, 0x44332211u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(32, 32));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x44332211u &&
+                    gs.vram().read_pixel(0, 1, 0, 0, 1) == 0x44332211u &&
+                    gs.vram().read_pixel(0, 0, 1, 0, 1) == 0x44332211u &&
+                    gs.vram().read_pixel(0, 1, 1, 0, 1) == 0x44332211u,
+                    "GS sprite raster pixels mismatch") && ok;
+        ok = expect(gs.vram().read_pixel(0, 2, 2, 0, 1) == 0,
+                    "GS sprite raster overran rectangle") && ok;
+        ok = expect(gs.stats().raster_draws == 1 &&
+                    gs.stats().raster_pixels == 4 &&
+                    gs.stats().skipped_raster_draws == 0,
+                    "GS sprite raster statistics mismatch") && ok;
+    }
+
+    // Flat untextured triangle list.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 3u); // triangle list
+        ad(gs, 0x01, 0x88776655u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(48, 0));
+        ad(gs, 0x05, xyz(0, 48));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x88776655u,
+                    "GS triangle failed to cover interior pixel") && ok;
+        ok = expect(gs.vram().read_pixel(0, 2, 2, 0, 1) == 0,
+                    "GS triangle covered exterior pixel") && ok;
+        ok = expect(gs.stats().raster_draws == 1 &&
+                    gs.stats().raster_pixels != 0,
+                    "GS triangle raster statistics mismatch") && ok;
+    }
+
+    // Textured draw must be observable as skipped, not silently approximated.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 6u | (1u << 4)); // sprite + TME
+        ad(gs, 0x01, 0xFFFFFFFFu);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(32, 32));
+
+        ok = expect(gs.stats().raster_draws == 0 &&
+                    gs.stats().skipped_raster_draws == 1,
+                    "unsupported textured draw was not skipped") && ok;
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0,
+                    "unsupported textured draw modified VRAM") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -588,6 +686,7 @@ int main() {
     ok = test_gif_dma_engine() && ok;
     ok = test_gs_vram_swizzle_addresses() && ok;
     ok = test_gs_host_to_local_image_transfer() && ok;
+    ok = test_gs_untextured_rasterization() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

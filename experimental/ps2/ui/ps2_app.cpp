@@ -394,7 +394,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 5: BIOS idle + GIF/GS command path";
+    const char* phase = "Phase 6: GIF DMA + GS VRAM + basic software raster";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -508,7 +508,7 @@ void Ps2App::panel_main() {
 
     ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("GS transfer engine + software rasterization");
+    ImGui::TextDisabled("Textured GS draws + display extraction");
     ImGui::EndChild();
 }
 
@@ -847,6 +847,9 @@ void Ps2App::panel_gs_debug() {
         row("Unsupported packed", static_cast<unsigned long long>(stats.unsupported_packed));
         row("Vertex kicks", static_cast<unsigned long long>(stats.vertices));
         row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
+        row("Raster draws", static_cast<unsigned long long>(stats.raster_draws));
+        row("Raster pixels", static_cast<unsigned long long>(stats.raster_pixels));
+        row("Skipped raster draws", static_cast<unsigned long long>(stats.skipped_raster_draws));
         ImGui::EndTable();
     }
 

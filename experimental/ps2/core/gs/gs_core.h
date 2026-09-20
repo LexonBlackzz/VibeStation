@@ -2,6 +2,7 @@
 
 #include "common/types.h"
 #include "core/gs/gs_vram.h"
+#include "core/gs/gs_rasterizer.h"
 
 #include <array>
 
@@ -22,6 +23,9 @@ struct GsStats {
     u64 unsupported_packed = 0;
     u64 vertices = 0;
     u64 primitives = 0;
+    u64 raster_draws = 0;
+    u64 raster_pixels = 0;
+    u64 skipped_raster_draws = 0;
 };
 
 class GsCore {
@@ -88,7 +92,15 @@ private:
     void begin_host_to_local();
     void consume_image_qword(u64 lo, u64 hi);
     void consume_pending_pixels();
-    void note_vertex_kick();
+    void submit_vertex(u64 xyz);
+    void emit_primitive(
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        const GsRasterVertex& c,
+        u32 vertex_count);
+    [[nodiscard]] u64 effective_prim() const;
+    [[nodiscard]] GsRasterContext raster_context() const;
+    [[nodiscard]] bool raster_state_supported() const;
 
     std::array<u64, 0x80> registers_{};
     std::array<u32, 4> fifo_words_{};
@@ -97,7 +109,8 @@ private:
     TransferState transfer_{};
     GsStats stats_{};
     GsVram vram_{};
-    u32 primitive_vertex_count_ = 0;
+    std::array<GsRasterVertex, 3> draw_vertices_{};
+    u32 draw_vertex_count_ = 0;
 };
 
 } // namespace ps2
