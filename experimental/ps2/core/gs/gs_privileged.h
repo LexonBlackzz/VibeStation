@@ -25,8 +25,31 @@ public:
     [[nodiscard]] bool write32(u32 address, u32 value);
     [[nodiscard]] bool write64(u32 address, u64 value);
 
+    void signal(u64 value);
+    void finish();
+    void label(u64 value);
+    void raise_vsync();
+
+    [[nodiscard]] bool irq_pending() const;
+    [[nodiscard]] u32 csr() const;
+    [[nodiscard]] u32 imr() const;
+    [[nodiscard]] u32 signal_id() const;
+    [[nodiscard]] u32 label_id() const;
+
 private:
+    static constexpr u32 kCsr = kBase + 0x1000u;
+    static constexpr u32 kImr = kBase + 0x1010u;
+    static constexpr u32 kSiglblid = kBase + 0x1080u;
+
+    [[nodiscard]] u32 load32(u32 address) const;
+    void store32(u32 address, u32 value);
+    void write_csr_command(u32 value);
+    void write_imr_value(u32 value);
+    void promote_queued_signal();
+
     std::array<u8, kSize> data_{};
+    bool queued_signal_ = false;
+    u64 queued_signal_value_ = 0;
 };
 
 } // namespace ps2

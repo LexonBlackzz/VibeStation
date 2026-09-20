@@ -8,6 +8,8 @@
 
 namespace ps2 {
 
+class GsPrivileged;
+
 struct GsStats {
     u64 gif_tags = 0;
     u64 gif_qwords = 0;
@@ -30,6 +32,9 @@ struct GsStats {
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
     u64 skipped_raster_draws = 0;
+    u64 signal_events = 0;
+    u64 finish_events = 0;
+    u64 label_events = 0;
 };
 
 class GsCore {
@@ -37,6 +42,7 @@ public:
     static constexpr u32 kGifFifoBase = 0x10006000u;
 
     void reset();
+    void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
     [[nodiscard]] bool write_gif_fifo64(u32 physical, u64 value);
@@ -116,6 +122,7 @@ private:
     GsVram vram_{};
     std::array<GsRasterVertex, 3> draw_vertices_{};
     u32 draw_vertex_count_ = 0;
+    GsPrivileged* privileged_ = nullptr;
 };
 
 } // namespace ps2

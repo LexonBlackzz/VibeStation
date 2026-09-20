@@ -1456,6 +1456,98 @@ bool test_gs_local_copy_and_depth_transfer() {
     return ok;
 }
 
+
+bool test_gs_signal_finish_label_and_imr() {
+    ps2::Ps2System system;
+    auto& gs = system.gs_core();
+    auto& priv = system.gs_privileged();
+
+    auto ad = [](ps2::GsCore& core, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        core.write_gif_qword(tag, 0xEull);
+        core.write_gif_qword(value, address);
+    };
+
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    ok = expect(priv.read32(0x12001000u, value) &&
+                (value & 0xFFFFC000u) == 0x551B4000u,
+                "GS CSR reset identity/FIFO mismatch") && ok;
+    ok = expect(priv.read32(0x12001010u, value) &&
+                value == 0x00007F00u,
+                "GS IMR reset mask mismatch") && ok;
+
+    // Unmask SIGNAL only. IMR uses one=masked.
+    ok = expect(priv.write32(0x12001010u, 0x00001E00u),
+                "GS IMR SIGNAL unmask failed") && ok;
+
+    ad(gs, 0x60, 0xFFFFFFFF12345678ull);
+    ok = expect((priv.csr() & 1u) != 0 &&
+                priv.signal_id() == 0x12345678u,
+                "GS SIGNAL state/SIGID mismatch") && ok;
+    ok = expect(priv.irq_pending(),
+                "unmasked GS SIGNAL did not become IRQ-pending") && ok;
+
+    // A second SIGNAL stalls/queues behind the first on hardware. Keep the
+    // first ID visible until CSR.SIGNAL is acknowledged, then promote it.
+    ad(gs, 0x60, 0x00FF00FFAA55AA55ull);
+    ok = expect(priv.signal_id() == 0x12345678u,
+                "queued SIGNAL replaced active SIGID too early") && ok;
+    ok = expect(priv.write32(0x12001000u, 1u),
+                "GS CSR SIGNAL acknowledge failed") && ok;
+    const ps2::u32 expected_queued =
+        (0x12345678u & ~0x00FF00FFu) |
+        (0xAA55AA55u & 0x00FF00FFu);
+    ok = expect((priv.csr() & 1u) != 0 &&
+                priv.signal_id() == expected_queued,
+                "queued GS SIGNAL promotion mismatch") && ok;
+    ok = expect(priv.write32(0x12001000u, 1u) &&
+                (priv.csr() & 1u) == 0,
+                "second GS SIGNAL acknowledge failed") && ok;
+
+    // LABEL updates LBLID with IDMSK but does not create an interrupt event.
+    ad(gs, 0x62, 0xFFFF000089ABCDEFu);
+    ok = expect(priv.label_id() == 0x89AB0000u,
+                "GS LABEL masked update mismatch") && ok;
+
+    // FINISH is independently maskable.
+    ok = expect(priv.write32(0x12001010u, 0x00001D00u),
+                "GS IMR FINISH unmask failed") && ok;
+    ad(gs, 0x61, 0);
+    ok = expect((priv.csr() & 2u) != 0 && priv.irq_pending(),
+                "GS FINISH did not set pending event") && ok;
+    ok = expect(priv.write32(0x12001000u, 2u) &&
+                (priv.csr() & 2u) == 0,
+                "GS FINISH acknowledge failed") && ok;
+
+    // VSINT participates in the same mask/event circuit.
+    ok = expect(priv.write32(0x12001010u, 0x00001700u),
+                "GS IMR VSINT unmask failed") && ok;
+    priv.raise_vsync();
+    ok = expect((priv.csr() & (1u << 3)) != 0 && priv.irq_pending(),
+                "GS VSINT pending state mismatch") && ok;
+    ok = expect(priv.write32(0x12001000u, 1u << 3) &&
+                (priv.csr() & (1u << 3)) == 0,
+                "GS VSINT acknowledge failed") && ok;
+
+    // CSR.RESET restores the hardware-visible interrupt masks/identity state.
+    ok = expect(priv.write32(0x12001000u, 1u << 9),
+                "GS CSR soft reset failed") && ok;
+    ok = expect(priv.imr() == 0x00007F00u &&
+                (priv.csr() & 0xFFFFC01Fu) == 0x551B4000u &&
+                priv.signal_id() == 0 && priv.label_id() == 0,
+                "GS CSR soft reset state mismatch") && ok;
+
+    const auto& stats = gs.stats();
+    ok = expect(stats.signal_events == 2 &&
+                stats.finish_events == 1 &&
+                stats.label_events == 1,
+                "GS synchronization event statistics mismatch") && ok;
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1497,6 +1589,7 @@ int main() {
     ok = test_gs_stq_perspective_texturing() && ok;
     ok = test_gs_indexed_textures_and_texa() && ok;
     ok = test_gs_local_copy_and_depth_transfer() && ok;
+    ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

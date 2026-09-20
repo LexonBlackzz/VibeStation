@@ -1,5 +1,7 @@
 #include "core/gs/gs_core.h"
 
+#include "core/gs/gs_privileged.h"
+
 #include <bit>
 
 namespace ps2 {
@@ -37,6 +39,9 @@ constexpr u32 kRegBitbltbuf = 0x50;
 constexpr u32 kRegTrxpos = 0x51;
 constexpr u32 kRegTrxreg = 0x52;
 constexpr u32 kRegTrxdir = 0x53;
+constexpr u32 kRegSignal = 0x60;
+constexpr u32 kRegFinish = 0x61;
+constexpr u32 kRegLabel = 0x62;
 
 u32 descriptor_at(u64 regs, u32 cursor) {
     return static_cast<u32>((regs >> ((cursor & 0xFu) * 4u)) & 0xFu);
@@ -220,6 +225,15 @@ void GsCore::write_register(u32 address, u64 value) {
         } else {
             transfer_ = {};
         }
+    } else if (address == kRegSignal) {
+        ++stats_.signal_events;
+        if (privileged_ != nullptr) privileged_->signal(value);
+    } else if (address == kRegFinish) {
+        ++stats_.finish_events;
+        if (privileged_ != nullptr) privileged_->finish();
+    } else if (address == kRegLabel) {
+        ++stats_.label_events;
+        if (privileged_ != nullptr) privileged_->label(value);
     }
 
     if (address == kRegPrim) {
