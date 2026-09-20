@@ -15,13 +15,21 @@
 
 #if defined(VIBESTATION_ENABLE_X64_JIT) && \
     (defined(_M_X64) || defined(__x86_64__))
-#include <xbyak/xbyak.h>
-#define VIBESTATION_JIT_V2_X64 1
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#endif
+#include <xbyak/xbyak.h>
+#define VIBESTATION_JIT_V2_X64 1
+#if defined(_WIN32)
 #include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #else
 #include <sys/mman.h>
 #include <unistd.h>
@@ -279,8 +287,10 @@ public:
     if (chunks_.empty() ||
         align_up(chunks_.back().used, kAlignment) + size >
             chunks_.back().capacity) {
+      const size_t page_aligned =
+          align_up(size, static_cast<size_t>(4096u));
       const size_t requested =
-          std::max(kDefaultChunk, align_up(size, static_cast<size_t>(4096u)));
+          page_aligned > kDefaultChunk ? page_aligned : kDefaultChunk;
       Chunk chunk{};
       chunk.base = allocate_executable(requested);
       if (chunk.base == nullptr) {
