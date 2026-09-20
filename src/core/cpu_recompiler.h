@@ -303,8 +303,8 @@ struct DecodedBlock {
   u64 profile_frame_entries = 0;
   u64 profile_frame_native_entries = 0;
   u64 profile_frame_runtime_rejects = 0;
-  std::array<NativeBlockRejectDetail, 4> profile_frame_runtime_reject_details{};
-  std::array<u32, 4> profile_frame_runtime_reject_counts{};
+  std::array<NativeBlockRejectDetail, 8> profile_frame_runtime_reject_details{};
+  std::array<u32, 8> profile_frame_runtime_reject_counts{};
   u64 native_branch_tail_entry_count = 0;
   u64 native_prepare_helper_call_count = 0;
   u64 native_finish_helper_call_count = 0;
