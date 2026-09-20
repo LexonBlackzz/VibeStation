@@ -2147,9 +2147,17 @@ bool CpuOptimizedBackend::should_attempt_x64_compile(
   if (g_cpu_x64_jit_force_compile) {
     return true;
   }
-  const u64 threshold = block.instruction_count >= 4u
-                            ? 2u
-                            : (block.instruction_count >= 2u ? 4u : 8u);
+  u64 threshold = block.instruction_count >= 4u
+                      ? 2u
+                      : (block.instruction_count >= 2u ? 4u : 8u);
+  const bool non_self_branch_tail =
+      block.native_branch_tail && block.instruction_count >= 2u &&
+      block.instructions[block.instruction_count - 2u].target !=
+          block.start_pc;
+  if (non_self_branch_tail) {
+    threshold = std::max<u64>(
+        threshold, g_cpu_x64_jit_hot_branch_tail_threshold);
+  }
   if (block.entry_count < threshold) {
     ++stats_.native_hot_threshold_skips;
     ++stats_.native_rejected_block_count;
