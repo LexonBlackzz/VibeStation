@@ -952,11 +952,15 @@ void App::panel_performance() {
                     if (hot.runtime_rejects == 0) {
                         ImGui::TextDisabled("-");
                     } else {
-                        ImGui::Text("%llu %s (%u)",
+                        ImGui::Text("%llu %s (%u), %s (%u), mem=%s (%u)",
                             static_cast<unsigned long long>(
                                 hot.runtime_rejects),
                             hot.runtime_reject_detail.data(),
-                            hot.runtime_reject_dominant_count);
+                            hot.runtime_reject_dominant_count,
+                            hot.runtime_reject_secondary_detail.data(),
+                            hot.runtime_reject_secondary_count,
+                            hot.runtime_memory_region.data(),
+                            hot.runtime_memory_region_count);
                     }
                     ImGui::TableSetColumnIndex(7);
                     ImGui::TextUnformatted(hot.ops.data());
@@ -1020,7 +1024,9 @@ void App::panel_performance() {
                         "#%02u pc=%08X weight=%llu entries=%llu instr=%u "
                         "native_entries=%llu native=%.1f%% compiled=%u "
                         "runtime_rejects=%llu runtime_reason=%s "
-                        "runtime_reason_count=%u "
+                        "runtime_reason_count=%u runtime_reason2=%s "
+                        "runtime_reason2_count=%u runtime_mem_region=%s "
+                        "runtime_mem_region_count=%u "
                         "decoded_only=%u prefix=%u branch=%u mem=%u load=%u "
                         "store=%u fallback=%u shape=%s reject=%s ops=%s\n",
                         i + 1u, hot.start_pc,
@@ -1033,6 +1039,10 @@ void App::panel_performance() {
                         static_cast<unsigned long long>(hot.runtime_rejects),
                         hot.runtime_reject_detail.data(),
                         hot.runtime_reject_dominant_count,
+                        hot.runtime_reject_secondary_detail.data(),
+                        hot.runtime_reject_secondary_count,
+                        hot.runtime_memory_region.data(),
+                        hot.runtime_memory_region_count,
                         hot.native_decoded_only ? 1u : 0u,
                         hot.native_prefix_instruction_count,
                         hot.has_control_flow ? 1u : 0u,
