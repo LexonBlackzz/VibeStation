@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,6 +17,15 @@
     (defined(_M_X64) || defined(__x86_64__))
 #include <xbyak/xbyak.h>
 #define VIBESTATION_JIT_V2_X64 1
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 #else
 #define VIBESTATION_JIT_V2_X64 0
 #endif
