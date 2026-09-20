@@ -366,6 +366,9 @@ struct DecodedBlock {
       false;
   bool native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
       false;
+  NativeMemoryRegion
+      native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region =
+          NativeMemoryRegion::UnknownSlow;
   bool native_branch_tail = false;
   bool native_rejected_unsafe = false;
   NativeBlockRejectReason native_reject_reason =
