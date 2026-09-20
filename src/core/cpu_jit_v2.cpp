@@ -170,7 +170,7 @@ u8 write_reg(const V2DecodedInstruction &inst) {
   return 0u;
 }
 
-std::array<u8, 3> choose_cached_regs(
+std::array<u8, 6> choose_cached_regs(
     const std::vector<V2DecodedInstruction> &instructions) {
   std::array<u8, 32> score{};
   for (const auto &inst : instructions) {
@@ -188,7 +188,7 @@ std::array<u8, 3> choose_cached_regs(
     }
   }
 
-  std::array<u8, 3> selected{};
+  std::array<u8, 6> selected{};
   for (u32 slot = 0; slot < selected.size(); ++slot) {
     u8 best_reg = 0u;
     u8 best_score = 0u;
@@ -217,7 +217,7 @@ std::array<u8, 3> choose_cached_regs(
 
 using V2NativeFn = void (*)(u32 *);
 
-int cache_slot(const std::array<u8, 3> &cached, u8 guest_reg) {
+int cache_slot(const std::array<u8, 6> &cached, u8 guest_reg) {
   for (int i = 0; i < static_cast<int>(cached.size()); ++i) {
     if (cached[static_cast<size_t>(i)] == guest_reg && guest_reg != 0u) {
       return i;
@@ -230,12 +230,15 @@ Xbyak::Reg32 cache_host_reg(Xbyak::CodeGenerator &code, int slot) {
   switch (slot) {
   case 0: return code.r8d;
   case 1: return code.r9d;
-  default: return code.r10d;
+  case 2: return code.r10d;
+  case 3: return code.r11d;
+  case 4: return code.r12d;
+  default: return code.r13d;
   }
 }
 
 void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
-                     const std::array<u8, 3> &cached, u8 guest_reg) {
+                     const std::array<u8, 6> &cached, u8 guest_reg) {
   using namespace Xbyak;
   if (guest_reg == 0u) {
     code.xor_(dst, dst);
@@ -253,7 +256,7 @@ void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
 }
 
 void emit_write_guest(Xbyak::CodeGenerator &code,
-                      const std::array<u8, 3> &cached, u8 guest_reg,
+                      const std::array<u8, 6> &cached, u8 guest_reg,
                       const Xbyak::Reg32 &src,
                       std::array<bool, 3> &dirty) {
   using namespace Xbyak;
@@ -274,7 +277,7 @@ void emit_write_guest(Xbyak::CodeGenerator &code,
 
 std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     const std::vector<V2DecodedInstruction> &instructions,
-    const std::array<u8, 3> &cached) {
+    const std::array<u8, 6> &cached) {
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
 
@@ -283,6 +286,12 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 #else
   code->mov(code->rdx, code->rdi);
 #endif
+
+  // r12/r13 are callee-saved on both Win64 and SysV. Keeping two extra guest
+  // registers resident is worth the tiny block-entry/exit cost, and lets hot
+  // R3000A ALU sequences avoid substantially more Cpu::gpr_ traffic.
+  code->push(code->r12);
+  code->push(code->r13);
 
   for (size_t slot = 0; slot < cached.size(); ++slot) {
     if (cached[slot] == 0u) {
@@ -397,6 +406,8 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   }
 
   code->mov(code->dword[code->rdx], 0u);
+  code->pop(code->r13);
+  code->pop(code->r12);
   code->ret();
   code->ready();
   return code;
@@ -409,11 +420,11 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 struct CpuJitV2Backend::Impl {
   struct Block {
     u32 start_pc = 0;
-    u32 phys_line = 0;
-    u32 icache_tag = 0;
+    u32 phys_start = 0;
+    u32 phys_end = 0;
     u32 instruction_count = 0;
-    std::array<u32, 4> words{};
-    std::array<u8, 3> cached_regs{};
+    std::array<u32, 16> words{};
+    std::array<u8, 6> cached_regs{};
 #if VIBESTATION_JIT_V2_X64
     std::unique_ptr<Xbyak::CodeGenerator> code;
     V2NativeFn fn = nullptr;
@@ -506,19 +517,26 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     auto found = impl_->blocks.find(start_pc);
     if (found != impl_->blocks.end()) {
       Impl::Block &block = found->second;
-      if (block.icache_tag != expected_tag || block.phys_line != expected_tag) {
+      bool coherent = true;
+      for (u32 i = 0; i < block.instruction_count; ++i) {
+        const u32 inst_pc = start_pc + i * 4u;
+        if (!cpu_.instruction_cacheable(inst_pc)) {
+          coherent = false;
+          break;
+        }
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_word = (inst_pc >> 2u) & 0x03u;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        const auto &inst_line = cpu_.icache_[inst_index];
+        if (!inst_line.valid || inst_line.tag != inst_tag ||
+            inst_line.words[inst_word] != block.words[i]) {
+          coherent = false;
+          break;
+        }
+      }
+      if (!coherent) {
         impl_->blocks.erase(found);
         found = impl_->blocks.end();
-      } else {
-        bool words_match = true;
-        for (u32 i = 0; i < block.instruction_count; ++i) {
-          words_match = words_match &&
-              block.words[i] == line.words[word_index + i];
-        }
-        if (!words_match) {
-          impl_->blocks.erase(found);
-          found = impl_->blocks.end();
-        }
       }
     }
 
@@ -527,11 +545,23 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       ++stats_.native_compile_attempts;
 
       std::vector<V2DecodedInstruction> decoded;
-      std::array<u32, 4> words{};
-      const u32 max_line_instructions = 4u - word_index;
-      for (u32 i = 0; i < max_line_instructions; ++i) {
+      std::array<u32, 16> words{};
+      constexpr u32 kMaxV2AluInstructions = 16u;
+      for (u32 i = 0; i < kMaxV2AluInstructions; ++i) {
+        const u32 inst_pc = start_pc + i * 4u;
+        if (!cpu_.instruction_cacheable(inst_pc)) {
+          break;
+        }
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_word = (inst_pc >> 2u) & 0x03u;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        const auto &inst_line = cpu_.icache_[inst_index];
+        if (!inst_line.valid || inst_line.tag != inst_tag) {
+          break;
+        }
+
         V2DecodedInstruction inst{};
-        const u32 bits = line.words[word_index + i];
+        const u32 bits = inst_line.words[inst_word];
         if (!decode_v2_alu(bits, inst)) {
           break;
         }
@@ -546,9 +576,10 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
       Impl::Block block{};
       block.start_pc = start_pc;
-      block.phys_line = expected_tag;
-      block.icache_tag = expected_tag;
       block.instruction_count = static_cast<u32>(decoded.size());
+      block.phys_start = psx::mask_address(start_pc);
+      block.phys_end =
+          psx::mask_address(start_pc + block.instruction_count * 4u - 1u);
       block.words = words;
       block.cached_regs = choose_cached_regs(decoded);
       block.code = compile_native_alu(decoded, block.cached_regs);
@@ -643,8 +674,10 @@ void CpuJitV2Backend::invalidate_range(u32 phys_or_normalized_addr,
   const u32 last_line = last & ~0x0Fu;
 
   for (auto it = impl_->blocks.begin(); it != impl_->blocks.end();) {
-    const u32 line = it->second.phys_line;
-    if (line >= first_line && line <= last_line) {
+    const u32 block_first = it->second.phys_start & ~0x0Fu;
+    const u32 block_last = it->second.phys_end & ~0x0Fu;
+    const bool overlaps = block_first <= last_line && block_last >= first_line;
+    if (overlaps) {
       it = impl_->blocks.erase(it);
       ++stats_.invalidations;
       ++stats_.invalidation_blocks_invalidated;
