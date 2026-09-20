@@ -874,6 +874,207 @@ bool test_gs_fst_direct_color_texturing() {
     return ok;
 }
 
+
+bool test_gs_depth_layout_and_pixel_pipeline() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp, ps2::u32 z = 0) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16) |
+               (static_cast<ps2::u64>(z) << 32);
+    };
+
+    bool ok = true;
+
+    // Depth formats use the GS Z swizzle, not the color swizzle.
+    {
+        ps2::GsVram vram;
+        const ps2::u32 color_address =
+            ps2::GsVram::pixel_address_bytes(0, 0, 0, 0, 1);
+        const ps2::u32 depth_address =
+            ps2::GsVram::depth_address_bytes(48, 0, 0, 0, 1);
+        ok = expect(
+            depth_address == (((color_address >> 2) ^ 0x600u) << 2),
+            "PSMZ32 swizzle XOR mismatch") && ok;
+        ok = expect(vram.write_depth(48, 0, 0, 0, 1, 0x12345678u) &&
+                    vram.read_depth(48, 0, 0, 0, 1) == 0x12345678u,
+                    "PSMZ32 read/write mismatch") && ok;
+        ok = expect(vram.write_depth(49, 1, 0, 0, 1, 0xAABBCCDDu) &&
+                    vram.read_depth(49, 1, 0, 0, 1) == 0x00BBCCDDu,
+                    "PSMZ24 masking mismatch") && ok;
+    }
+
+    const ps2::u64 frame =
+        static_cast<ps2::u64>(1u) << 16; // FBP=0, FBW=1, PSMCT32.
+    const ps2::u64 scissor =
+        (static_cast<ps2::u64>(7u) << 16) |
+        (static_cast<ps2::u64>(7u) << 48);
+
+    // Alpha test KEEP and RGB_ONLY.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x46, 1u); // COLCLAMP
+        ad(gs, 0x4C, frame);
+
+        // ATE=1, ATST=GREATER, AREF=0x80, AFAIL=KEEP.
+        const ps2::u64 test_keep =
+            1ull | (6ull << 1) | (0x80ull << 4);
+        ad(gs, 0x47, test_keep);
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0x40223344u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(16, 16));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0,
+                    "GS alpha KEEP failure wrote framebuffer") && ok;
+
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0xC0223344u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(16, 16));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xC0223344u,
+                    "GS alpha GREATER pass mismatch") && ok;
+
+        // Failed alpha with RGB_ONLY updates RGB while preserving destination A.
+        gs.vram().write_pixel(0, 1, 0, 0, 1, 0xAA010203u);
+        const ps2::u64 test_rgb =
+            test_keep | (3ull << 12);
+        ad(gs, 0x47, test_rgb);
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0x40112233u);
+        ad(gs, 0x05, xyz(16, 0));
+        ad(gs, 0x05, xyz(32, 16));
+        ok = expect(gs.vram().read_pixel(0, 1, 0, 0, 1) == 0xAA112233u,
+                    "GS alpha RGB_ONLY did not preserve destination alpha") && ok;
+    }
+
+    // ZTST=GEQUAL, Z write, and ZMSK.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x46, 1u);
+        ad(gs, 0x4C, frame);
+
+        constexpr ps2::u32 zbp_blocks = 128u;
+        const ps2::u64 zbuf =
+            static_cast<ps2::u64>(zbp_blocks >> 5) |
+            (static_cast<ps2::u64>(48u) << 24);
+        ad(gs, 0x4E, zbuf);
+        ad(gs, 0x47, (1ull << 16) | (2ull << 17)); // ZTE + GEQUAL.
+        ok = expect(gs.vram().write_depth(48, 0, 0, zbp_blocks, 1, 100u),
+                    "GS Z source setup failed") && ok;
+
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0xFF102030u);
+        ad(gs, 0x05, xyz(0, 0, 50u));
+        ad(gs, 0x05, xyz(16, 16, 50u));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0,
+                    "GS GEQUAL accepted smaller Z") && ok;
+        ok = expect(gs.vram().read_depth(48, 0, 0, zbp_blocks, 1) == 100u,
+                    "GS rejected Z changed depth buffer") && ok;
+
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0xFF405060u);
+        ad(gs, 0x05, xyz(0, 0, 150u));
+        ad(gs, 0x05, xyz(16, 16, 150u));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xFF405060u,
+                    "GS GEQUAL accepted draw color mismatch") && ok;
+        ok = expect(gs.vram().read_depth(48, 0, 0, zbp_blocks, 1) == 150u,
+                    "GS Z write mismatch") && ok;
+
+        // Set ZMSK and verify color still writes but depth does not.
+        ad(gs, 0x4E, zbuf | (1ull << 32));
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0xFF708090u);
+        ad(gs, 0x05, xyz(0, 0, 200u));
+        ad(gs, 0x05, xyz(16, 16, 200u));
+        ok = expect(gs.vram().read_depth(48, 0, 0, zbp_blocks, 1) == 150u,
+                    "GS ZMSK did not block depth write") && ok;
+    }
+
+    // Alpha blend equation, PABE bypass, and FBA.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x46, 1u);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+
+        // (Cs - Cd) * FIX/128 + Cd with FIX=0x40 => exact half blend.
+        const ps2::u64 alpha =
+            0ull | (1ull << 2) | (2ull << 4) | (1ull << 6) |
+            (0x40ull << 32);
+        ad(gs, 0x42, alpha);
+        gs.vram().write_pixel(0, 0, 0, 0, 1, 0x80204060u);
+        ad(gs, 0x00, 6u | (1u << 6)); // sprite + ABE
+        ad(gs, 0x01, 0x80A08040u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(16, 16));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x80606050u,
+                    "GS alpha blend equation mismatch") && ok;
+
+        // PABE bypasses blending when source alpha MSB is clear.
+        ad(gs, 0x49, 1u);
+        gs.vram().write_pixel(0, 1, 0, 0, 1, 0x80FFFFFFu);
+        ad(gs, 0x00, 6u | (1u << 6));
+        ad(gs, 0x01, 0x40112233u);
+        ad(gs, 0x05, xyz(16, 0));
+        ad(gs, 0x05, xyz(32, 16));
+        ok = expect(gs.vram().read_pixel(0, 1, 0, 0, 1) == 0x40112233u,
+                    "GS PABE did not bypass blending") && ok;
+
+        // FBA forces the framebuffer alpha MSB on normal writes.
+        ad(gs, 0x49, 0u);
+        ad(gs, 0x4A, 1u);
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0x00123456u);
+        ad(gs, 0x05, xyz(32, 0));
+        ad(gs, 0x05, xyz(48, 16));
+        ok = expect(gs.vram().read_pixel(0, 2, 0, 0, 1) == 0x80123456u,
+                    "GS FBA did not force alpha MSB") && ok;
+    }
+
+    // IIP/Gouraud barycentric color interpolation.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x46, 1u);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 3u | (1u << 3)); // triangle + IIP
+
+        ad(gs, 0x01, 0x800000FFu);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x01, 0x8000FF00u);
+        ad(gs, 0x05, xyz(48, 0));
+        ad(gs, 0x01, 0x80FF0000u);
+        ad(gs, 0x05, xyz(0, 48));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x802A2AAAu,
+                    "GS Gouraud interpolation mismatch") && ok;
+        ok = expect(gs.stats().raster_draws == 1 &&
+                    gs.stats().skipped_raster_draws == 0,
+                    "GS Gouraud draw was skipped") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -911,6 +1112,7 @@ int main() {
     ok = test_gs_untextured_rasterization() && ok;
     ok = test_gs_display_extraction() && ok;
     ok = test_gs_fst_direct_color_texturing() && ok;
+    ok = test_gs_depth_layout_and_pixel_pipeline() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

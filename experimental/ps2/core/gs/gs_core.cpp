@@ -24,8 +24,13 @@ constexpr u32 kRegXyoffset1 = 0x18;
 constexpr u32 kRegPrmodecont = 0x1A;
 constexpr u32 kRegPrmode = 0x1B;
 constexpr u32 kRegScissor1 = 0x40;
+constexpr u32 kRegAlpha1 = 0x42;
+constexpr u32 kRegColclamp = 0x46;
 constexpr u32 kRegTest1 = 0x47;
+constexpr u32 kRegPabe = 0x49;
+constexpr u32 kRegFba1 = 0x4A;
 constexpr u32 kRegFrame1 = 0x4C;
+constexpr u32 kRegZbuf1 = 0x4E;
 constexpr u32 kRegBitbltbuf = 0x50;
 constexpr u32 kRegTrxpos = 0x51;
 constexpr u32 kRegTrxreg = 0x52;
@@ -334,7 +339,10 @@ GsRasterContext GsCore::raster_context() const {
     const u64 prim = effective_prim();
     const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
     const u64 scissor = registers_[kRegScissor1 + ctxt];
+    const u64 alpha = registers_[kRegAlpha1 + ctxt];
+    const u64 test = registers_[kRegTest1 + ctxt];
     const u64 frame = registers_[kRegFrame1 + ctxt];
+    const u64 zbuf = registers_[kRegZbuf1 + ctxt];
 
     GsRasterContext ctx{};
     ctx.fbp = static_cast<u32>(frame & 0x1FFu) << 5;
@@ -345,6 +353,31 @@ GsRasterContext GsCore::raster_context() const {
     ctx.scax1 = static_cast<s32>((scissor >> 16) & 0x7FFu);
     ctx.scay0 = static_cast<s32>((scissor >> 32) & 0x7FFu);
     ctx.scay1 = static_cast<s32>((scissor >> 48) & 0x7FFu);
+
+    ctx.gouraud = (prim & (1ull << 3)) != 0;
+    ctx.alpha_blend = (prim & (1ull << 6)) != 0;
+
+    ctx.ate = (test & 1u) != 0;
+    ctx.atst = static_cast<u32>((test >> 1) & 0x7u);
+    ctx.aref = static_cast<u32>((test >> 4) & 0xFFu);
+    ctx.afail = static_cast<u32>((test >> 12) & 0x3u);
+    ctx.date = ((test >> 14) & 1u) != 0;
+    ctx.datm = ((test >> 15) & 1u) != 0;
+    ctx.zte = ((test >> 16) & 1u) != 0;
+    ctx.ztst = static_cast<u32>((test >> 17) & 0x3u);
+
+    ctx.zbp = static_cast<u32>(zbuf & 0x1FFu) << 5;
+    ctx.zpsm = static_cast<u32>((zbuf >> 24) & 0x3Fu);
+    ctx.zmask = ((zbuf >> 32) & 1u) != 0;
+
+    ctx.alpha_a = static_cast<u32>(alpha & 0x3u);
+    ctx.alpha_b = static_cast<u32>((alpha >> 2) & 0x3u);
+    ctx.alpha_c = static_cast<u32>((alpha >> 4) & 0x3u);
+    ctx.alpha_d = static_cast<u32>((alpha >> 6) & 0x3u);
+    ctx.alpha_fix = static_cast<u32>((alpha >> 32) & 0xFFu);
+    ctx.pabe = (registers_[kRegPabe] & 1u) != 0;
+    ctx.fba = (registers_[kRegFba1 + ctxt] & 1u) != 0;
+    ctx.color_clamp = (registers_[kRegColclamp] & 1u) != 0;
 
     if ((prim & (1ull << 4)) != 0) {
         const u64 tex0 = registers_[kRegTex0_1 + ctxt];
@@ -374,20 +407,13 @@ GsRasterContext GsCore::raster_context() const {
 bool GsCore::raster_state_supported() const {
     const u64 prim = effective_prim();
 
-    // Flat-color and FST/UV textured geometry are supported. Gouraud, fog,
-    // blending and AA remain explicit skips until their GS rules are modeled.
+    // Fog and AA coverage are still explicit skips. Gouraud, alpha blending,
+    // alpha/destination tests and Z buffering are handled by the software
+    // pixel pipeline.
     constexpr u64 kUnsupportedPrim =
-        (1ull << 3) | // IIP
         (1ull << 5) | // FGE
-        (1ull << 6) | // ABE
         (1ull << 7);  // AA1
     if ((prim & kUnsupportedPrim) != 0) return false;
-
-    const u32 ctxt = static_cast<u32>((prim >> 9) & 1u);
-    const u64 test = registers_[kRegTest1 + ctxt];
-    if ((test & 1u) != 0) return false;           // ATE
-    if ((test & (1ull << 14)) != 0) return false; // DATE
-    if ((test & (1ull << 16)) != 0) return false; // ZTE
 
     const GsRasterContext ctx = raster_context();
     if (!GsRasterizer::supported_target(ctx)) return false;

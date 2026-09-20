@@ -41,6 +41,32 @@ struct GsRasterContext {
     s32 scax1 = 0;
     s32 scay0 = 0;
     s32 scay1 = 0;
+
+    bool gouraud = false;
+    bool alpha_blend = false;
+
+    bool ate = false;
+    u32 atst = 1;
+    u32 aref = 0;
+    u32 afail = 0;
+    bool date = false;
+    bool datm = false;
+
+    bool zte = false;
+    u32 ztst = 1;
+    u32 zbp = 0;
+    u32 zpsm = 48;
+    bool zmask = true;
+
+    u32 alpha_a = 0;
+    u32 alpha_b = 1;
+    u32 alpha_c = 0;
+    u32 alpha_d = 1;
+    u32 alpha_fix = 0;
+    bool pabe = false;
+    bool fba = false;
+    bool color_clamp = true;
+
     GsTextureState texture{};
 };
 
@@ -63,11 +89,12 @@ public:
         const GsRasterVertex& c);
 
 private:
-    static bool write_color(
+    static bool draw_pixel(
         GsVram& vram,
         const GsRasterContext& ctx,
         s32 x,
         s32 y,
+        u32 z,
         u32 rgba);
     [[nodiscard]] static u32 shade_pixel(
         const GsVram& vram,
