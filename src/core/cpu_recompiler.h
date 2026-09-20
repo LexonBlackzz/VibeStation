@@ -348,6 +348,9 @@ struct DecodedBlock {
   bool native_reduced_helper_ram_load = false;
   bool native_reduced_helper_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail = false;
+  // Signed ADD/SUB/ADDI are admitted only when the aggressive runtime
+  // preflight proves that the current invocation cannot overflow.
+  bool native_guarded_overflow_branch_tail = false;
   bool native_aggressive_reduced_helper_branch_tail_entry_address_preflight =
       false;
   u8 native_aggressive_reduced_helper_branch_tail_memory_ops = 0;
