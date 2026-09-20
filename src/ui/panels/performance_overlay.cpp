@@ -515,10 +515,15 @@ void App::panel_performance() {
                 ? (100.0 * static_cast<double>(stats.gpu_covered_pixels) /
                     static_cast<double>(stats.gpu_candidate_pixels))
                 : 0.0;
-            ImGui::Text("Candidates: %llu   covered/sampled: %llu (%.1f%%)",
+            ImGui::Text(
+                "BBox pixels: %llu   covered/sampled: %llu (%.1f%% coverage)",
                 static_cast<unsigned long long>(stats.gpu_candidate_pixels),
                 static_cast<unsigned long long>(stats.gpu_covered_pixels),
                 coverage_percent);
+            if (stats.gpu_candidate_pixels != 0) {
+                ImGui::Text("Span rejection avoids up to %.1f%% of bbox pixels",
+                    100.0 - coverage_percent);
+            }
             ImGui::Text("Texels 4/8/15-bit: %llu / %llu / %llu",
                 static_cast<unsigned long long>(stats.gpu_texel_samples_4bit),
                 static_cast<unsigned long long>(stats.gpu_texel_samples_8bit),
@@ -528,7 +533,7 @@ void App::panel_performance() {
                 static_cast<unsigned long long>(
                     stats.gpu_semitransparent_pixels));
             ImGui::TextDisabled(
-                "Raster counters cover textured triangles/quads and textured rectangles.");
+                "BBox is the old bounding-box workload; accurate triangle spans now iterate only covered pixels.");
 
             if (ImGui::Button("Copy GPU profiler snapshot")) {
                 char snapshot[2048];
