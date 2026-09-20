@@ -2654,13 +2654,14 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
         s32 w2_row = edge(v0, v1, min_x, min_y);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     if (opaque_path) {
                         write_pixel_opaque_clipped(x, y, color15);
                     }
@@ -2668,9 +2669,6 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
                         set_pixel_clipped(x, y, color15, true);
                     }
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
@@ -2962,18 +2960,25 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
             w2_row * static_cast<s32>(v2.v);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 u_num = u_row;
-            s32 v_num = v_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
-                    if (profile_raster) {
-                        ++profile_covered;
-                    }
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                const u64 span_pixels = static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+                if (profile_raster) {
+                    profile_covered += span_pixels;
+                }
+
+                s32 u_num = u_row + step_u_x * span_dx;
+                s32 v_num = v_row + step_v_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     const u8 u = static_cast<u8>(u_num / area);
                     const u8 v_coord = static_cast<u8>(v_num / area);
                     const u16 texel = read_texel(texture, u, v_coord);
@@ -2985,14 +2990,17 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                         if (!raw_texture) {
                             if (dither_enabled_) {
                                 out15 =
-                                    modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y);
+                                    modulate_texel_dithered_15bit(
+                                        texel, mr, mg, mb, x, y);
                             }
                             else {
-                                out15 = modulate_texel_15bit(texel, mr, mg, mb);
+                                out15 =
+                                    modulate_texel_15bit(texel, mr, mg, mb);
                             }
                         }
                         const bool texel_semi =
-                            semi_transparency_mode_ && ((texel & 0x8000u) != 0);
+                            semi_transparency_mode_ &&
+                            ((texel & 0x8000u) != 0);
                         if (profile_raster && texel_semi) {
                             ++profile_semi;
                         }
@@ -3003,12 +3011,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                             write_pixel_opaque_clipped(x, y, out15);
                         }
                     }
+                    u_num += step_u_x;
+                    v_num += step_v_x;
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                u_num += step_u_x;
-                v_num += step_v_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
