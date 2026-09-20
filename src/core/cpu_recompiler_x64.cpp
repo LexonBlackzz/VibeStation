@@ -3434,6 +3434,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     ++stats_.native_rejected_block_count;
     stats_.native_rejected_block_instructions += block.instruction_count;
     record_native_block_rejection(block, detail);
+    record_runtime_reject(block, detail);
   };
   auto reject_to_decoded = [&](u64 &specific_counter,
                                NativeBlockRejectDetail detail) {
