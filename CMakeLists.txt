@@ -138,15 +138,15 @@ set(VIBESTATION_SOURCES
 set(VIBESTATION_VERSION_STRING "v0.6.0-dev")
 set(VIBESTATION_BUILD_NUMBER_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
-set(VIBESTATION_VERSION_HEADER
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.h")
+set(VIBESTATION_VERSION_SOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.cpp")
 
 add_custom_command(
-    OUTPUT "${VIBESTATION_VERSION_HEADER}"
+    OUTPUT "${VIBESTATION_VERSION_SOURCE}"
     COMMAND ${CMAKE_COMMAND}
         -DVIBESTATION_VERSION_STRING=${VIBESTATION_VERSION_STRING}
         -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
-        -DVIBESTATION_VERSION_HEADER=${VIBESTATION_VERSION_HEADER}
+        -DVIBESTATION_VERSION_SOURCE=${VIBESTATION_VERSION_SOURCE}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
@@ -154,20 +154,21 @@ add_custom_command(
     VERBATIM
     COMMENT "Updating VibeStation build metadata")
 
-add_custom_target(vibestation_version_header
-    DEPENDS "${VIBESTATION_VERSION_HEADER}")
-
-set_source_files_properties(src/ui/panels/about_panel.cpp PROPERTIES
-    OBJECT_DEPENDS "${VIBESTATION_VERSION_HEADER}")
+list(APPEND VIBESTATION_SOURCES "${VIBESTATION_VERSION_SOURCE}")
+set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
+    GENERATED TRUE
+    SKIP_PRECOMPILE_HEADERS ON)
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
 
-add_dependencies(VibeStation vibestation_version_header)
-
 target_include_directories(VibeStation PRIVATE
-    src
-    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    src)
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
+
+# Most VibeStation translation units repeatedly parse the same stable standard
+# library headers. Keep the PCH intentionally free of project headers so normal
+# emulator edits do not invalidate it.
+target_precompile_headers(VibeStation PRIVATE src/pch.h)
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
