@@ -1030,6 +1030,63 @@ bool test_gs_depth_layout_and_pixel_pipeline() {
         (static_cast<ps2::u64>(7u) << 16) |
         (static_cast<ps2::u64>(7u) << 48);
 
+    // FRAME.FBMSK is specified in RGBA32 bit positions even when the
+    // framebuffer is PSMCT16. Red/blue mask bits must be packed to RGB5A1.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 frame16 =
+            (1ull << 16) |
+            (2ull << 24) |
+            (0x00F800F8ull << 32);
+        ok = expect(
+            gs.vram().write_pixel(2, 0, 0, 0, 1, 0x7FFFu),
+            "PSMCT16 FBMASK destination setup failed") && ok;
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame16);
+        ad(gs, 0x00, 0u); // point
+        ad(gs, 0x01, 0x00000000u);
+        ad(gs, 0x05, xyz(0, 0));
+
+        ok = expect(
+            gs.vram().read_pixel(2, 0, 0, 0, 1) == 0x7C1Fu,
+            "PSMCT16 FBMASK packing mismatch") && ok;
+        ok = expect(
+            gs.stats().raster_draws == 1 &&
+            gs.stats().skipped_raster_draws == 0,
+            "PSMCT16 FBMASK draw was skipped") && ok;
+    }
+
+    // Alpha-only masking must preserve the RGB5A1 destination alpha bit.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 frame16_alpha =
+            (1ull << 16) |
+            (2ull << 24) |
+            (0x80000000ull << 32);
+        ok = expect(
+            gs.vram().write_pixel(2, 0, 0, 0, 1, 0x8000u),
+            "PSMCT16 alpha-mask destination setup failed") && ok;
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame16_alpha);
+        ad(gs, 0x00, 0u);
+        ad(gs, 0x01, 0x00FFFFFFu);
+        ad(gs, 0x05, xyz(0, 0));
+
+        ok = expect(
+            gs.vram().read_pixel(2, 0, 0, 0, 1) == 0xFFFFu,
+            "PSMCT16 alpha FBMASK mismatch") && ok;
+    }
+
     // Alpha test KEEP and RGB_ONLY.
     {
         ps2::GsCore gs;

@@ -223,7 +223,6 @@ u32 interpolate_z(
 
 bool GsRasterizer::supported_target(const GsRasterContext& ctx) {
     if (ctx.fbw == 0 || !GsVram::supported_color_psm(ctx.psm)) return false;
-    if ((ctx.psm == 2u || ctx.psm == 10u) && ctx.fbmask != 0) return false;
     if (ctx.zte && !GsVram::supported_depth_psm(ctx.zpsm)) return false;
     return true;
 }
@@ -443,12 +442,21 @@ bool GsRasterizer::draw_pixel(
             if (!vram.write_pixel(1, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else {
+            const u16 old = static_cast<u16>(
+                vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
             u16 packed = rgba32_to_16(output);
-            if (rgb_only) {
-                const u16 old = static_cast<u16>(
-                    vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
-                packed = static_cast<u16>((packed & 0x7FFFu) | (old & 0x8000u));
-            }
+
+            // FRAME.FBMSK is expressed in 32-bit RGBA channel bit positions
+            // even for PSMCT16/16S. Pack those mask bits to RGB5A1 exactly
+            // like the GS software reference path.
+            const u32 rb = ctx.fbmask & 0x00F800F8u;
+            const u32 ga = ctx.fbmask & 0x8000F800u;
+            u16 mask = static_cast<u16>(
+                (ga >> 16) | (rb >> 9) | (ga >> 6) | (rb >> 3));
+            if (rgb_only) mask = static_cast<u16>(mask | 0x8000u);
+
+            packed = static_cast<u16>(
+                (old & mask) | (packed & static_cast<u16>(~mask)));
             if (!vram.write_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
                 return false;
         }
