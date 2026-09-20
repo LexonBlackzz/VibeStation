@@ -722,6 +722,82 @@ bool test_cdvd_raises_iop_irq2() {
     return ok;
 }
 
+bool test_ee_lq_sq_silent_alignment() {
+    ps2::Ps2System system;
+
+    constexpr ps2::u32 code = 0x00002000u;
+    constexpr ps2::u32 load_base = 0x00001000u;
+    constexpr ps2::u64 load_lo = 0x8877665544332211ull;
+    constexpr ps2::u64 load_hi = 0xFFEEDDCCBBAA0099ull;
+
+    bool ok =
+        expect(system.bus().write64(load_base, load_lo),
+               "failed to seed LQ low half") &&
+        expect(system.bus().write64(load_base + 8u, load_hi),
+               "failed to seed LQ high half");
+
+    // LQ r3, 0(r2). r2 deliberately points inside the 16-byte block.
+    const ps2::u32 lq =
+        (0x1Eu << 26) | (2u << 21) | (3u << 16);
+    ok =
+        expect(system.bus().write32(code, lq),
+               "failed to install LQ instruction") &&
+        ok;
+
+    system.ee().reset(code);
+    system.ee().state().gpr[2].lo = load_base + 7u;
+
+    std::string error;
+    ok =
+        expect(system.ee().step(error),
+               "LQ instruction failed") &&
+        ok;
+    ok =
+        expect(system.ee().state().gpr[3].lo == load_lo,
+               "LQ low 64-bit half mismatch") &&
+        ok;
+    ok =
+        expect(system.ee().state().gpr[3].hi == load_hi,
+               "LQ high 64-bit half mismatch") &&
+        ok;
+
+    constexpr ps2::u32 store_base = 0x00001100u;
+    constexpr ps2::u64 store_lo = 0x0123456789ABCDEFull;
+    constexpr ps2::u64 store_hi = 0x0FEDCBA987654321ull;
+
+    const ps2::u32 sq =
+        (0x1Fu << 26) | (2u << 21) | (4u << 16);
+    ok =
+        expect(system.bus().write32(code, sq),
+               "failed to install SQ instruction") &&
+        ok;
+
+    system.ee().reset(code);
+    system.ee().state().gpr[2].lo = store_base + 0x0Fu;
+    system.ee().state().gpr[4].lo = store_lo;
+    system.ee().state().gpr[4].hi = store_hi;
+
+    ok =
+        expect(system.ee().step(error),
+               "SQ instruction failed") &&
+        ok;
+
+    ps2::u64 read_lo = 0;
+    ps2::u64 read_hi = 0;
+    ok =
+        expect(system.bus().read64(store_base, read_lo) &&
+                   read_lo == store_lo,
+               "SQ low 64-bit half mismatch") &&
+        ok;
+    ok =
+        expect(system.bus().read64(store_base + 8u, read_hi) &&
+                   read_hi == store_hi,
+               "SQ high 64-bit half mismatch") &&
+        ok;
+
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -743,6 +819,7 @@ int main() {
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
+    ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
         return EXIT_FAILURE;

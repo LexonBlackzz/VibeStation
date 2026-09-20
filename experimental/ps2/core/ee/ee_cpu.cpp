@@ -674,6 +674,31 @@ bool EeCpu::step(std::string& error) {
     case 0x1C:
         ok = execute_mmi(pc, instruction, error);
         break;
+    case 0x1E: { // LQ
+        const u32 address = effective_address() & ~0x0Fu;
+        u64 lo = 0;
+        u64 hi = 0;
+        if (!bus_.read64(address, lo) ||
+            !bus_.read64(address + 8u, hi)) {
+            ok = load_fault("Load quadword", address);
+        } else if (rt != 0) {
+            state_.gpr[rt].lo = lo;
+            state_.gpr[rt].hi = hi;
+        }
+        break;
+    }
+    case 0x1F: { // SQ
+        const u32 address = effective_address() & ~0x0Fu;
+        if (!bus_.write64(address, state_.gpr[rt].lo) ||
+            !bus_.write64(address + 8u, state_.gpr[rt].hi)) {
+            ok = fail(
+                pc,
+                instruction,
+                "Store quadword fault to " + hex32(address),
+                error);
+        }
+        break;
+    }
     case 0x20: { // LB
         const u32 address = effective_address();
         u8 value = 0;

@@ -56,7 +56,7 @@ The experimental build currently contains:
 - a deterministic event scheduler;
 - an EE CPU state container;
 - PS2 BIOS loading/reset startup;
-- an expanding R5900 interpreter with COP0/COP1 startup state;
+- an expanding R5900 interpreter with COP0/COP1 startup state and 128-bit LQ/SQ transfers;
 - normal and branch-likely delay-slot execution;
 - HI/LO and HI1/LO1 multiply/divide paths used by the BIOS;
 - 16 KiB EE scratchpad;
