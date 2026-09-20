@@ -146,6 +146,7 @@ struct CpuCompareCase {
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
   bool require_v2_native_entry_when_available = false;
+  bool require_v2_store_branch_entry_when_available = false;
   bool require_native_memory_helper_when_available = false;
   bool require_native_memory_exception_when_available = false;
   bool require_native_helper_load_delay_entry_when_available = false;
@@ -777,6 +778,36 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   jit_v2_native_smoke.instructions = 4;
   jit_v2_native_smoke.require_v2_native_entry_when_available = true;
   cases.push_back(jit_v2_native_smoke);
+
+  CpuCompareCase jit_v2_scratch_store_branch{};
+  jit_v2_scratch_store_branch.name =
+      "jit_v2_scratchpad_sw_sw_bne_delay_loop";
+  jit_v2_scratch_store_branch.initial_gpr[1] = 0x1F800000u;
+  jit_v2_scratch_store_branch.initial_gpr[2] = 0x11223344u;
+  jit_v2_scratch_store_branch.initial_gpr[3] = 0x55667788u;
+  jit_v2_scratch_store_branch.initial_gpr[4] = 1u;
+  jit_v2_scratch_store_branch.initial_gpr[5] = 0u;
+  jit_v2_scratch_store_branch.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x2B, 1, 3, 4),
+      enc_i(0x05, 4, 5, static_cast<u16>(-3)),
+      enc_i(0x09, 6, 6, 1),
+  };
+  jit_v2_scratch_store_branch.instructions = 8;
+  jit_v2_scratch_store_branch.compare_memory_addresses = {
+      0x1F800000u, 0x1F800004u,
+  };
+  jit_v2_scratch_store_branch.require_v2_store_branch_entry_when_available =
+      true;
+  cases.push_back(jit_v2_scratch_store_branch);
+
+  CpuCompareCase jit_v2_ram_store_branch = jit_v2_scratch_store_branch;
+  jit_v2_ram_store_branch.name = "jit_v2_ram_sw_sw_bne_delay_loop";
+  jit_v2_ram_store_branch.initial_gpr[1] = 0x80011000u;
+  jit_v2_ram_store_branch.compare_memory_addresses = {
+      0x00011000u, 0x00011004u,
+  };
+  cases.push_back(jit_v2_ram_store_branch);
 
   CpuCompareCase native_mixed{};
   native_mixed.name = "native_mixed_alu_immediate";
@@ -3604,6 +3635,22 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check = native_entered ? "v2_native_entered"
                                         : "v2_native_missing";
           native_check_pass = native_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_store_branch_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_store_branch_unavailable";
+        } else {
+          const bool store_branch_entered =
+              result.stats.native_branch_tail_entries != 0 &&
+              result.stats.native_memory_fastpath_stores >= 2 &&
+              result.stats.native_branch_taken != 0 &&
+              result.stats.native_instructions != 0;
+          native_check = store_branch_entered ? "v2_store_branch_entered"
+                                              : "v2_store_branch_missing";
+          native_check_pass = store_branch_entered;
         }
       }
 
