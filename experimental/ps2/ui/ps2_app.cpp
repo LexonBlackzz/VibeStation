@@ -373,7 +373,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 2: live R5900 BIOS execution";
+    const char* phase = "Phase 3: EE startup to IOP handoff";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -460,9 +460,9 @@ void Ps2App::panel_main() {
         "%llu",
         static_cast<unsigned long long>(state.instructions_executed));
 
-    ImGui::Text("GS / IOP / SPU2");
+    ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("not implemented yet");
+    ImGui::TextDisabled("IOP RAM + IOP CPU");
     ImGui::EndChild();
 }
 
@@ -553,10 +553,12 @@ void Ps2App::panel_system() {
     ImGui::BulletText("EE reset startup: available");
     ImGui::BulletText("EE interpreter/COP0 subset: running");
     ImGui::BulletText("EE scratchpad: available");
-    ImGui::BulletText("Early EE timer/memory-control registers: available");
+    ImGui::BulletText("Early EE SIO/SBUS/RDRAM/DMAC registers: available");
+    ImGui::BulletText("IOP hardware register window: partial");
+    ImGui::BulletText("GS privileged registers: partial");
     ImGui::BulletText("Scheduler: available");
-    ImGui::BulletText("ELF loader: pending");
-    ImGui::BulletText("GS / IOP / SPU2: pending");
+    ImGui::BulletText("IOP RAM / IOP CPU: next milestone");
+    ImGui::BulletText("ELF loader / GS renderer / SPU2: pending");
 
     ImGui::End();
 }
@@ -758,8 +760,9 @@ void Ps2App::panel_about() {
         "dumped from hardware you own.");
     ImGui::Spacing();
     ImGui::TextDisabled(
-        "Current milestone: live R5900 reset-code execution with COP0, "
-        "delay slots, scratchpad, and early EE hardware registers.");
+        "Current milestone: execute the retail BIOS from EE reset through "
+        "early IOP/GS/DMAC probing, then stop deliberately at the first "
+        "IOP RAM access until the IOP CPU exists.");
 
     ImGui::End();
 }

@@ -52,17 +52,20 @@ The experimental build currently contains:
 - a deterministic event scheduler;
 - an EE CPU state container;
 - PS2 BIOS loading/reset startup;
-- an initial R5900 interpreter and COP0 reset state;
-- branch/jump delay-slot execution;
+- an expanding R5900 interpreter with COP0/COP1 startup state;
+- normal and branch-likely delay-slot execution;
+- HI/LO and HI1/LO1 multiply/divide paths used by the BIOS;
 - 16 KiB EE scratchpad;
-- minimal early EE timer/memory-controller registers;
+- early EE SIO, SBUS, RDRAM controller, and DMAC register behavior;
+- an IOP hardware-register window used by early BIOS probing;
+- GS privileged-register backing used during early display initialization;
 - run/pause/single-step UI controls with explicit halt diagnostics;
 - a `Ps2System` composition root;
 - headless smoke tests;
 - a standalone SDL/OpenGL/ImGui VibeStation-style UI;
 - PS2 System, EE Debug, Scheduler, Settings, and About panels.
 
-Large parts of the R5900 instruction set, the remaining EE hardware map, ELF loading, GS rendering, IOP, SPU2, and corruption support are not implemented yet.
+The current retail BIOS path intentionally stops when the EE first accesses IOP RAM. IOP RAM and the IOP CPU are not faked yet; they are the next subsystem milestone. Large parts of the R5900 instruction set, GS rendering, SPU2, ELF loading, and corruption support also remain incomplete.
 
 ## UI isolation
 

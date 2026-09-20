@@ -2,7 +2,9 @@
 
 #include "core/bios/bios.h"
 #include "core/ee/ee_cpu.h"
+#include "core/gs/gs_privileged.h"
 #include "core/hw/ee_hw.h"
+#include "core/hw/iop_hw_window.h"
 #include "core/memory/ee_bus.h"
 #include "core/memory/ee_ram.h"
 #include "core/memory/ee_scratchpad.h"
@@ -24,12 +26,16 @@ public:
 
     [[nodiscard]] Bios& bios() { return bios_; }
     [[nodiscard]] const Bios& bios() const { return bios_; }
+
     [[nodiscard]] EeRam& ram() { return ram_; }
     [[nodiscard]] const EeRam& ram() const { return ram_; }
+
     [[nodiscard]] EeBus& bus() { return bus_; }
     [[nodiscard]] const EeBus& bus() const { return bus_; }
+
     [[nodiscard]] Scheduler& scheduler() { return scheduler_; }
     [[nodiscard]] const Scheduler& scheduler() const { return scheduler_; }
+
     [[nodiscard]] EeCpu& ee() { return ee_; }
     [[nodiscard]] const EeCpu& ee() const { return ee_; }
 
@@ -41,6 +47,8 @@ private:
     EeRam ram_{};
     EeScratchpad scratchpad_{};
     EeHw hw_{};
+    IopHwWindow iop_hw_{};
+    GsPrivileged gs_{};
     EeBus bus_;
     Scheduler scheduler_{};
     EeCpu ee_;
