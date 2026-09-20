@@ -62,3 +62,28 @@ jobs:
             build-linux/VibeStation
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Prepare offline source bundle
+        if: always()
+        run: |
+          rm -rf offline-bundle
+          mkdir -p offline-bundle/VibeStation offline-bundle/deps
+          rsync -a \
+            --exclude '.git' \
+            --exclude 'build-linux' \
+            ./ offline-bundle/VibeStation/
+          for dep in sdl2-src imgui-src nlohmann_json-src xbyak-src; do
+            if [ -d "build-linux/_deps/$dep" ]; then
+              cp -a "build-linux/_deps/$dep" "offline-bundle/deps/$dep"
+            fi
+          done
+          tar -C offline-bundle -czf VibeStation-offline-src.tar.gz .
+
+      - name: Upload offline source bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStation-offline-src
+          path: VibeStation-offline-src.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
