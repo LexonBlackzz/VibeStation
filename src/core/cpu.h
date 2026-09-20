@@ -351,6 +351,13 @@ struct CpuBackendStats {
   u64 decoded_instructions = 0;
   u64 native_instructions = 0;
   u64 native_cycles = 0;
+  // JIT V2 split: inline host instructions vs generated helper-backed guest
+  // instructions. Both are JIT-owned execution, but only the former are
+  // directly lowered to host code.
+  u64 jit_v2_inline_instructions = 0;
+  u64 jit_v2_helper_instructions = 0;
+  u64 jit_v2_helper_entries = 0;
+  u64 jit_v2_helper_blocks_compiled = 0;
   u64 fallback_instructions = 0;
   u64 interpreter_fallback_steps = 0;
   u64 forced_interpreter_slices = 0;
