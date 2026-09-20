@@ -41,6 +41,9 @@ enum class V2AluOp : u8 {
   Xori,
   Lui,
   Clear,
+  Sw,
+  Beq,
+  Bne,
 };
 
 struct V2DecodedInstruction {
@@ -99,6 +102,8 @@ bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
   }
 
   switch (primary) {
+  case 0x04: out.op = V2AluOp::Beq; return true;
+  case 0x05: out.op = V2AluOp::Bne; return true;
   case 0x09: out.op = V2AluOp::Addiu; return true;
   case 0x0A: out.op = V2AluOp::Slti; return true;
   case 0x0B: out.op = V2AluOp::Sltiu; return true;
@@ -106,6 +111,7 @@ bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
   case 0x0D: out.op = V2AluOp::Ori; return true;
   case 0x0E: out.op = V2AluOp::Xori; return true;
   case 0x0F: out.op = V2AluOp::Lui; return true;
+  case 0x2B: out.op = V2AluOp::Sw; return true;
   default: return false;
   }
 }
@@ -133,6 +139,10 @@ u32 read_mask(const V2DecodedInstruction &inst) {
   case V2AluOp::Ori:
   case V2AluOp::Xori:
     return reg(inst.rs);
+  case V2AluOp::Sw:
+  case V2AluOp::Beq:
+  case V2AluOp::Bne:
+    return reg(inst.rs) | reg(inst.rt);
   case V2AluOp::Nop:
   case V2AluOp::Lui:
   case V2AluOp::Clear:
@@ -165,9 +175,20 @@ u8 write_reg(const V2DecodedInstruction &inst) {
   case V2AluOp::Lui:
     return inst.rt;
   case V2AluOp::Nop:
+  case V2AluOp::Sw:
+  case V2AluOp::Beq:
+  case V2AluOp::Bne:
     return 0u;
   }
   return 0u;
+}
+
+bool is_v2_branch(V2AluOp op) {
+  return op == V2AluOp::Beq || op == V2AluOp::Bne;
+}
+
+bool is_v2_alu_only(V2AluOp op) {
+  return op != V2AluOp::Sw && !is_v2_branch(op);
 }
 
 std::array<u8, 6> choose_cached_regs(
@@ -215,7 +236,11 @@ std::array<u8, 6> choose_cached_regs(
 
 #if VIBESTATION_JIT_V2_X64
 
-using V2NativeFn = void (*)(u32 *);
+struct V2NativeRuntime {
+  std::array<u8 *, 8> store_ptrs{};
+};
+
+using V2NativeFn = u32 (*)(u32 *, const V2NativeRuntime *);
 
 int cache_slot(const std::array<u8, 6> &cached, u8 guest_reg) {
   for (int i = 0; i < static_cast<int>(cached.size()); ++i) {
