@@ -743,11 +743,9 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return false;
     }
     if (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u) {
-      needs_short_decoded_fallback = true;
       return false;
     }
     if (cpu_.next_pc_ != cpu_.pc_ + 4u) {
-      needs_short_decoded_fallback = true;
       return false;
     }
     return true;
