@@ -19,6 +19,8 @@ struct GsStats {
     u64 image_bytes = 0;
     u64 host_to_local_transfers = 0;
     u64 host_to_local_pixels = 0;
+    u64 local_to_local_transfers = 0;
+    u64 local_to_local_pixels = 0;
     u64 unsupported_transfers = 0;
     u64 unsupported_packed = 0;
     u64 vertices = 0;
@@ -92,6 +94,7 @@ private:
     void process_reglist_value(u32 descriptor, u64 value);
     void write_register(u32 address, u64 value);
     void begin_host_to_local();
+    void execute_local_to_local();
     void consume_image_qword(u64 lo, u64 hi);
     void consume_pending_pixels();
     void submit_vertex(u64 xyz);

@@ -1350,6 +1350,112 @@ bool test_gs_indexed_textures_and_texa() {
     return ok;
 }
 
+
+bool test_gs_local_copy_and_depth_transfer() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+
+    bool ok = true;
+
+    // Overlapping same-buffer copy must honor DIRX so source data is not
+    // destroyed before it is read.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ok = expect(
+            gs.vram().write_pixel(0, 0, 0, 0, 1, 0x11111111u) &&
+            gs.vram().write_pixel(0, 1, 0, 0, 1, 0x22222222u) &&
+            gs.vram().write_pixel(0, 2, 0, 0, 1, 0x33333333u),
+            "local-copy overlap source setup failed") && ok;
+
+        const ps2::u64 blit =
+            (static_cast<ps2::u64>(1u) << 16) |
+            (static_cast<ps2::u64>(1u) << 48);
+        const ps2::u64 pos =
+            (static_cast<ps2::u64>(1u) << 32) |
+            (1ull << 60); // SSAX=0, DSAX=1, DIRX=1.
+        ad(gs, 0x50, blit);
+        ad(gs, 0x51, pos);
+        ad(gs, 0x52, 3ull | (1ull << 32));
+        ad(gs, 0x53, 2u); // local -> local
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x11111111u &&
+            gs.vram().read_pixel(0, 1, 0, 0, 1) == 0x11111111u &&
+            gs.vram().read_pixel(0, 2, 0, 0, 1) == 0x22222222u &&
+            gs.vram().read_pixel(0, 3, 0, 0, 1) == 0x33333333u,
+            "DIRX overlap-safe local copy mismatch") && ok;
+        ok = expect(
+            gs.stats().local_to_local_transfers == 1 &&
+            gs.stats().local_to_local_pixels == 3 &&
+            (gs.register_value(0x53) & 3u) == 3u,
+            "local-copy completion/statistics mismatch") && ok;
+    }
+
+    // Indexed formats use the same transfer engine and preserve index values.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        constexpr ps2::u32 src_bp = 64;
+        constexpr ps2::u32 dst_bp = 96;
+        for (ps2::u32 x = 0; x < 4; ++x) {
+            ok = expect(
+                gs.vram().write_index(19, x, 0, src_bp, 2, 0x20u + x),
+                "indexed local-copy source setup failed") && ok;
+        }
+
+        const ps2::u64 blit =
+            static_cast<ps2::u64>(src_bp) |
+            (2ull << 16) |
+            (19ull << 24) |
+            (static_cast<ps2::u64>(dst_bp) << 32) |
+            (2ull << 48) |
+            (19ull << 56);
+        ad(gs, 0x50, blit);
+        ad(gs, 0x51, 0);
+        ad(gs, 0x52, 4ull | (1ull << 32));
+        ad(gs, 0x53, 2u);
+
+        ok = expect(
+            gs.vram().read_index(19, 0, 0, dst_bp, 2) == 0x20u &&
+            gs.vram().read_index(19, 1, 0, dst_bp, 2) == 0x21u &&
+            gs.vram().read_index(19, 2, 0, dst_bp, 2) == 0x22u &&
+            gs.vram().read_index(19, 3, 0, dst_bp, 2) == 0x23u,
+            "PSMT8 local-to-local copy mismatch") && ok;
+    }
+
+    // Host IMAGE transfers can initialize Z buffers using their transfer bpp.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        constexpr ps2::u32 zbp = 128;
+        const ps2::u64 blit =
+            (static_cast<ps2::u64>(zbp) << 32) |
+            (1ull << 48) |
+            (48ull << 56);
+        ad(gs, 0x50, blit);
+        ad(gs, 0x51, 0);
+        ad(gs, 0x52, 2ull | (1ull << 32));
+        ad(gs, 0x53, 0u);
+
+        gs.write_gif_qword(
+            1ull | (1ull << 15) | (2ull << 58), 0);
+        gs.write_gif_qword(
+            0x5566778811223344ull, 0);
+
+        ok = expect(
+            !gs.transfer_active() &&
+            gs.vram().read_depth(48, 0, 0, zbp, 1) == 0x11223344u &&
+            gs.vram().read_depth(48, 1, 0, zbp, 1) == 0x55667788u,
+            "PSMZ32 host IMAGE upload mismatch") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1390,6 +1496,7 @@ int main() {
     ok = test_gs_depth_layout_and_pixel_pipeline() && ok;
     ok = test_gs_stq_perspective_texturing() && ok;
     ok = test_gs_indexed_textures_and_texa() && ok;
+    ok = test_gs_local_copy_and_depth_transfer() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

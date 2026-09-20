@@ -212,8 +212,14 @@ void GsCore::write_register(u32 address, u64 value) {
 
     if (address == kRegTrxdir) {
         const u32 xdir = static_cast<u32>(value & 0x3u);
-        if (xdir == 0u) begin_host_to_local();
-        else transfer_ = {};
+        if (xdir == 0u) {
+            begin_host_to_local();
+        } else if (xdir == 2u) {
+            transfer_ = {};
+            execute_local_to_local();
+        } else {
+            transfer_ = {};
+        }
     }
 
     if (address == kRegPrim) {
@@ -253,6 +259,70 @@ void GsCore::begin_host_to_local() {
     ++stats_.host_to_local_transfers;
 }
 
+
+void GsCore::execute_local_to_local() {
+    const u64 blit = registers_[kRegBitbltbuf];
+    const u64 pos = registers_[kRegTrxpos];
+    const u64 reg = registers_[kRegTrxreg];
+
+    const u32 sbp = static_cast<u32>(blit & 0x3FFFu);
+    const u32 sbw = static_cast<u32>((blit >> 16) & 0x3Fu);
+    const u32 spsm = static_cast<u32>((blit >> 24) & 0x3Fu);
+    const u32 dbp = static_cast<u32>((blit >> 32) & 0x3FFFu);
+    const u32 dbw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    const u32 dpsm = static_cast<u32>((blit >> 56) & 0x3Fu);
+
+    const u32 ssax = static_cast<u32>(pos & 0x7FFu);
+    const u32 ssay = static_cast<u32>((pos >> 16) & 0x7FFu);
+    const u32 dsax = static_cast<u32>((pos >> 32) & 0x7FFu);
+    const u32 dsay = static_cast<u32>((pos >> 48) & 0x7FFu);
+    const bool diry = ((pos >> 59) & 1u) != 0;
+    const bool dirx = ((pos >> 60) & 1u) != 0;
+
+    const u32 width = static_cast<u32>(reg & 0xFFFu);
+    const u32 height = static_cast<u32>((reg >> 32) & 0xFFFu);
+    const u64 total = static_cast<u64>(width) * height;
+
+    const u32 src_bpp = GsVram::transfer_bpp(spsm);
+    const u32 dst_bpp = GsVram::transfer_bpp(dpsm);
+    if (sbw == 0 || dbw == 0 || total == 0 ||
+        !GsVram::supported_transfer_psm(spsm) ||
+        !GsVram::supported_transfer_psm(dpsm) ||
+        src_bpp == 0 || src_bpp != dst_bpp) {
+        ++stats_.unsupported_transfers;
+        registers_[kRegTrxdir] =
+            (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+        return;
+    }
+
+    ++stats_.local_to_local_transfers;
+
+    for (u32 linear_y = 0; linear_y < height; ++linear_y) {
+        const u32 row = diry ? (height - 1u - linear_y) : linear_y;
+        for (u32 linear_x = 0; linear_x < width; ++linear_x) {
+            const u32 column = dirx ? (width - 1u - linear_x) : linear_x;
+            const u32 sx = ssax + column;
+            const u32 sy = ssay + row;
+            const u32 dx = dsax + column;
+            const u32 dy = dsay + row;
+
+            const u32 value = vram_.read_transfer_pixel(
+                spsm, sx, sy, sbp, sbw);
+            if (!vram_.write_transfer_pixel(
+                    dpsm, dx, dy, dbp, dbw, value)) {
+                ++stats_.unsupported_transfers;
+                registers_[kRegTrxdir] =
+                    (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+                return;
+            }
+            ++stats_.local_to_local_pixels;
+        }
+    }
+
+    registers_[kRegTrxdir] =
+        (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+}
+
 void GsCore::consume_image_qword(u64 lo, u64 hi) {
     ++stats_.image_qwords;
     stats_.image_bytes += 16;
@@ -288,15 +358,8 @@ void GsCore::consume_pending_pixels() {
         const u32 y = transfer_.dsay +
             (transfer_.diry ? (transfer_.height - 1u - linear_y) : linear_y);
 
-        const bool indexed =
-            transfer_.psm == 19u || transfer_.psm == 20u ||
-            transfer_.psm == 27u || transfer_.psm == 36u ||
-            transfer_.psm == 44u;
-        const bool stored = indexed
-            ? vram_.write_index(
-                transfer_.psm, x, y, transfer_.bp, transfer_.bw, value)
-            : vram_.write_pixel(
-                transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
+        const bool stored = vram_.write_transfer_pixel(
+            transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
         if (!stored) {
             transfer_.active = false;
             ++stats_.unsupported_transfers;
@@ -324,10 +387,14 @@ void GsCore::consume_pending_pixels() {
     } else {
         u32 bytes_per_pixel = 0;
         switch (transfer_.psm) {
-        case 0: bytes_per_pixel = 4; break; // PSMCT32
-        case 1: bytes_per_pixel = 3; break; // PSMCT24
+        case 0: // PSMCT32
+        case 48: bytes_per_pixel = 4; break; // PSMZ32
+        case 1: // PSMCT24
+        case 49: bytes_per_pixel = 3; break; // PSMZ24
         case 2: // PSMCT16
-        case 10: bytes_per_pixel = 2; break; // PSMCT16S
+        case 10: // PSMCT16S
+        case 50: // PSMZ16
+        case 58: bytes_per_pixel = 2; break; // PSMZ16S
         case 19: // PSMT8
         case 27: bytes_per_pixel = 1; break; // PSMT8H
         default: return;

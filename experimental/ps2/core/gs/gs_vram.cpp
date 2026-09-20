@@ -234,7 +234,18 @@ bool GsVram::supported_texture_psm(u32 psm) {
 }
 
 bool GsVram::supported_transfer_psm(u32 psm) {
-    return supported_texture_psm(psm);
+    return supported_texture_psm(psm) || supported_depth_psm(psm);
+}
+
+u32 GsVram::transfer_bpp(u32 psm) {
+    switch (psm) {
+    case 0: case 48: return 32;
+    case 1: case 49: return 24;
+    case 2: case 10: case 50: case 58: return 16;
+    case 19: case 27: return 8;
+    case 20: case 36: case 44: return 4;
+    default: return 0;
+    }
 }
 
 u32 GsVram::pixel_address_bytes(
@@ -405,6 +416,28 @@ u32 GsVram::read_index(
     default:
         return 0;
     }
+}
+
+bool GsVram::write_transfer_pixel(
+    u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
+    if (supported_color_psm(psm))
+        return write_pixel(psm, x, y, bp, bw, value);
+    if (supported_depth_psm(psm))
+        return write_depth(psm, x, y, bp, bw, value);
+    if (supported_texture_psm(psm))
+        return write_index(psm, x, y, bp, bw, value);
+    return false;
+}
+
+u32 GsVram::read_transfer_pixel(
+    u32 psm, u32 x, u32 y, u32 bp, u32 bw) const {
+    if (supported_color_psm(psm))
+        return read_pixel(psm, x, y, bp, bw);
+    if (supported_depth_psm(psm))
+        return read_depth(psm, x, y, bp, bw);
+    if (supported_texture_psm(psm))
+        return read_index(psm, x, y, bp, bw);
+    return 0;
 }
 
 bool GsVram::write_linear32(u32 bp, u32 word_index, u32 value) {
