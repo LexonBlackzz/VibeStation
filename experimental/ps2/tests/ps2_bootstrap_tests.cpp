@@ -886,6 +886,43 @@ bool test_gs_fst_direct_color_texturing() {
             "FST repeat/MODULATE texture mismatch") && ok;
     }
 
+    // HIGHLIGHT and HIGHLIGHT2 share RGB math but differ in their
+    // TCC-enabled alpha result.
+    for (ps2::u32 tfx : {2u, 3u}) {
+        ps2::GsCore gs;
+        gs.reset();
+        ok = expect(
+            gs.vram().write_pixel(
+                0, 0, 0, texture_bp, 1, 0x40204080u),
+            "highlight texture source setup failed") && ok;
+
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x06, tex0(texture_bp, 1, 0, 0, 0, true, tfx));
+        ad(gs, 0x08, 0u);
+        ad(gs, 0x00, 6u | (1u << 4) | (1u << 8));
+        ad(gs, 0x01, 0x20104080u);
+        ad(gs, 0x03, uv(0, 0));
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x03, uv(16, 16));
+        ad(gs, 0x05, xyz(16, 16));
+
+        const ps2::u32 expected =
+            tfx == 2u ? 0x602440A0u : 0x402440A0u;
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == expected,
+            tfx == 2u
+                ? "GS HIGHLIGHT texture-function mismatch"
+                : "GS HIGHLIGHT2 texture-function mismatch") && ok;
+        ok = expect(
+            gs.stats().textured_raster_draws == 1 &&
+            gs.stats().skipped_raster_draws == 0,
+            "GS highlight texture draw was skipped") && ok;
+    }
+
     // Affine FST triangle: XY and UV use the same fixed-point coordinates.
     {
         ps2::GsCore gs;

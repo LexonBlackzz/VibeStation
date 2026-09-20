@@ -234,7 +234,7 @@ bool GsRasterizer::supported_texture(const GsTextureState& texture) {
         return false;
     if (texture.width > 1024u || texture.height > 1024u)
         return false;
-    if (texture.tfx > 1u) // HIGHLIGHT/HIGHLIGHT2 not modeled yet.
+    if (texture.tfx > 3u)
         return false;
     if (!GsVram::supported_texture_psm(texture.psm))
         return false;
@@ -321,14 +321,43 @@ u32 GsRasterizer::shade_pixel(
         return (texture_rgba & 0x00FFFFFFu) | alpha;
     }
 
+    const u32 vertex_alpha = channel(vertex_rgba, 24);
+
+    if (texture.tfx == 2u || texture.tfx == 3u) {
+        // HIGHLIGHT/HIGHLIGHT2:
+        //   RGB = clamp((Ct * Cv) / 128 + Av)
+        // HIGHLIGHT alpha adds Av to At when TCC is enabled, while
+        // HIGHLIGHT2 preserves At. With TCC disabled both use Av.
+        u32 out = 0;
+        for (u32 shift : {0u, 8u, 16u}) {
+            const u32 modulated =
+                modulate_channel(
+                    channel(texture_rgba, shift),
+                    channel(vertex_rgba, shift));
+            const u32 highlighted =
+                std::min(255u, modulated + vertex_alpha);
+            out |= highlighted << shift;
+        }
+
+        u32 alpha = vertex_alpha;
+        if (texture.tcc) {
+            const u32 texture_alpha = channel(texture_rgba, 24);
+            alpha = texture.tfx == 2u
+                ? std::min(255u, texture_alpha + vertex_alpha)
+                : texture_alpha;
+        }
+        out |= alpha << 24;
+        return out;
+    }
+
     // MODULATE uses GS 1.7 fixed-point color math: component*component >> 7.
     u32 out = 0;
     out |= modulate_channel(channel(texture_rgba, 0), channel(vertex_rgba, 0));
     out |= modulate_channel(channel(texture_rgba, 8), channel(vertex_rgba, 8)) << 8;
     out |= modulate_channel(channel(texture_rgba, 16), channel(vertex_rgba, 16)) << 16;
     const u32 alpha = texture.tcc
-        ? modulate_channel(channel(texture_rgba, 24), channel(vertex_rgba, 24))
-        : channel(vertex_rgba, 24);
+        ? modulate_channel(channel(texture_rgba, 24), vertex_alpha)
+        : vertex_alpha;
     out |= alpha << 24;
     return out;
 }
