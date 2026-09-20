@@ -3483,11 +3483,13 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
 CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     DecodedBlock &block, u32 max_cycles, u32 max_instructions) {
   CpuBlockRunResult result{};
-  auto record_rejected_block = [&](NativeBlockRejectDetail detail) {
+  auto record_rejected_block =
+      [&](NativeBlockRejectDetail detail,
+          NativeMemoryRegion memory_region = NativeMemoryRegion::UnknownSlow) {
     ++stats_.native_rejected_block_count;
     stats_.native_rejected_block_instructions += block.instruction_count;
     record_native_block_rejection(block, detail);
-    record_runtime_reject(block, detail);
+    record_runtime_reject(block, detail, memory_region);
   };
   auto reject_to_decoded = [&](u64 &specific_counter,
                                NativeBlockRejectDetail detail) {
@@ -3720,6 +3722,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         !active_load_delay;
     u32 aggressive_preflight_simulated_instructions = 0;
     bool aggressive_preflight_saw_scratchpad = false;
+    NativeMemoryRegion aggressive_preflight_reject_region =
+        NativeMemoryRegion::UnknownSlow;
     auto reset_aggressive_preflight_failure_streak = [&]() {
       block.native_aggressive_reduced_helper_preflight_last_failure =
           NativeBlockRejectDetail::None;
@@ -3767,7 +3771,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
             .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries;
       ++stats_
             .native_branch_tail_aggressive_reduced_helper_adaptive_preflight_attempts_avoided;
-      record_rejected_block(adaptive_disable_detail);
+      record_rejected_block(
+          adaptive_disable_detail,
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region);
       return execute_block(block, max_cycles, max_instructions);
     }
     auto reject_aggressive_preflight =
@@ -3824,6 +3831,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
           block
               .native_aggressive_reduced_helper_preflight_adaptive_disable_scratchpad =
               aggressive_preflight_saw_scratchpad;
+          block
+              .native_aggressive_reduced_helper_preflight_adaptive_disable_memory_region =
+              aggressive_preflight_reject_region;
           ++stats_
                 .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks;
           record_aggressive_preflight_adaptive_disable(
@@ -3832,7 +3842,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       } else {
         reset_aggressive_preflight_failure_streak();
       }
-      record_rejected_block(detail);
+      record_rejected_block(detail, aggressive_preflight_reject_region);
       return execute_block(block, max_cycles, max_instructions);
     };
 
@@ -3870,6 +3880,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       }
       if (!is_canonical_ram_alias(addr)) {
         const NativeMemoryRegion region = classify_native_memory_region(addr);
+        aggressive_preflight_reject_region = region;
         if (region == NativeMemoryRegion::Scratchpad) {
           aggressive_preflight_saw_scratchpad = true;
         }
@@ -4187,6 +4198,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
         }
         if (!is_canonical_ram_alias(addr)) {
           const NativeMemoryRegion region = classify_native_memory_region(addr);
+          aggressive_preflight_reject_region = region;
           if (region == NativeMemoryRegion::Scratchpad) {
             aggressive_preflight_saw_scratchpad = true;
           }
