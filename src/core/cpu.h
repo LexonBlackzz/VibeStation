@@ -467,6 +467,8 @@ public:
   CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
   u32 read_instruction_for_backend(u32 addr) const;
   void notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes);
+  void notify_jit_code_write_only(u32 phys_or_normalized_addr,
+                                  u32 size_bytes);
   void notify_cpu_backend_frame(u32 frame_index);
   void flush_cpu_backend();
   CpuBackendStats cpu_backend_stats() const;
