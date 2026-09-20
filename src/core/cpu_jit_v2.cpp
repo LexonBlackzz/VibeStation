@@ -855,6 +855,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       std::array<s32, 8> store_simm{};
       std::array<u8, 8> store_instruction_index{};
       bool fetch_stopped_on_unsupported = false;
+      u32 unsupported_bits = 0u;
 
       auto fetch_decoded = [&](u32 i, V2DecodedInstruction &inst,
                                u32 &bits) -> bool {
@@ -873,6 +874,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         bits = inst_line.words[inst_word];
         if (!decode_v2_alu(bits, inst)) {
           fetch_stopped_on_unsupported = true;
+          unsupported_bits = bits;
           return false;
         }
         return true;
@@ -934,15 +936,35 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         }
       }
 
-      if (decoded.size() < 2u) {
-        ++stats_.native_compile_failures;
-        if (fetch_stopped_on_unsupported) {
-          impl_->rejected_pcs.insert(start_pc);
-          impl_->rejected_pages.insert(psx::mask_address(start_pc) >> 12u);
+      if (decoded.empty()) {
+        if (!fetch_stopped_on_unsupported) {
+          return helper_step();
         }
-        return false;
+
+        // Universal baseline: an instruction V2 does not lower yet still gets
+        // a compiled block identity. Its entry is the single shared generated
+        // Cpu::step() trampoline, so ordinary executable code can no longer
+        // fail compilation merely because an opcode is not inline-native yet.
+        Impl::Block helper_block{};
+        helper_block.kind = V2BlockKind::StepHelper;
+        helper_block.start_pc = start_pc;
+        helper_block.phys_start = psx::mask_address(start_pc);
+        helper_block.phys_end = helper_block.phys_start + 3u;
+        helper_block.instruction_count = 1u;
+        helper_block.words[0] = line.words[word_index];
+        impl_->code_pages.insert(helper_block.phys_start >> 12u);
+        auto inserted =
+            impl_->blocks.emplace(start_pc, std::move(helper_block));
+        found = inserted.first;
+        ++stats_.native_compile_successes;
+        ++stats_.native_blocks_compiled;
+        ++stats_.jit_v2_helper_blocks_compiled;
+        (void)unsupported_bits;
       }
 
+      if (found != impl_->blocks.end()) {
+        // Helper-only block was installed above.
+      } else {
       Impl::Block block{};
       block.start_pc = start_pc;
       block.instruction_count = static_cast<u32>(decoded.size());
@@ -1007,13 +1029,20 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       } else {
         ++stats_.native_alu_blocks_compiled;
       }
+      }
     } else {
       ++stats_.cache_hits;
     }
 
     Impl::Block &block = found->second;
-    if (block.fn == nullptr || block.instruction_count == 0u) {
-      return false;
+    if (block.instruction_count == 0u) {
+      return helper_step();
+    }
+    if (block.kind == V2BlockKind::StepHelper) {
+      return helper_step();
+    }
+    if (block.fn == nullptr) {
+      return helper_step();
     }
 
     if (block.has_branch && g_cpu_backend_compare_irq_on_branch) {
