@@ -299,6 +299,9 @@ struct DecodedBlock {
   u32 last_invalidation_query = 0;
   u64 entry_count = 0;
   u64 native_entry_count = 0;
+  u32 profile_entry_frame = 0;
+  u64 profile_frame_entries = 0;
+  u64 profile_frame_native_entries = 0;
   u64 native_branch_tail_entry_count = 0;
   u64 native_prepare_helper_call_count = 0;
   u64 native_finish_helper_call_count = 0;
