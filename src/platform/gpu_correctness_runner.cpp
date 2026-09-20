@@ -346,6 +346,62 @@ bool test_gouraud_triangle() {
   return compare_vram("gouraud triangle", *gpu, expected);
 }
 
+bool test_gouraud_span_edge_cases() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+
+  std::vector<u16> expected(kVramPixels, 0);
+
+  const std::array<std::array<RefVertex, 3>, 5> triangles = {{
+      // Flat top.
+      {{{20, 200, 240, 24, 32, 0, 0},
+        {70, 200, 20, 232, 48, 0, 0},
+        {45, 240, 36, 64, 248, 0, 0}}},
+      // Flat bottom.
+      {{{90, 200, 220, 48, 40, 0, 0},
+        {65, 240, 32, 220, 72, 0, 0},
+        {115, 240, 64, 52, 240, 0, 0}}},
+      // Very thin / steep edges.
+      {{{140, 200, 250, 40, 60, 0, 0},
+        {142, 260, 30, 240, 70, 0, 0},
+        {146, 202, 70, 80, 250, 0, 0}}},
+      // Partially clipped by the left side of VRAM/draw area.
+      {{{-12, 270, 240, 40, 80, 0, 0},
+        {40, 260, 40, 230, 90, 0, 0},
+        {12, 320, 80, 60, 245, 0, 0}}},
+      // Clockwise input winding; production swaps v1/v2 internally.
+      {{{210, 205, 220, 60, 40, 0, 0},
+        {225, 255, 40, 80, 240, 0, 0},
+        {270, 215, 60, 235, 80, 0, 0}}},
+  }};
+
+  for (const auto &tri : triangles) {
+    const RefVertex v0 = tri[0];
+    const RefVertex v1 = tri[1];
+    const RefVertex v2 = tri[2];
+
+    reference_triangle(
+        expected, v0, v1, v2,
+        [](const std::vector<u16> &, const RefVertex &a, const RefVertex &b,
+           const RefVertex &cv, s32 w0, s32 w1, s32 w2, s32 area, int, int) {
+          const int r = (w0 * a.r + w1 * b.r + w2 * cv.r) / area;
+          const int g = (w0 * a.g + w1 * b.g + w2 * cv.g) / area;
+          const int bl = (w0 * a.b + w1 * b.b + w2 * cv.b) / area;
+          return pack_rgb15(r, g, bl);
+        });
+
+    gpu->gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+    gpu->gp0(vertex_word(v0.x, v0.y));
+    gpu->gp0(rgb_word(v1.r, v1.g, v1.b));
+    gpu->gp0(vertex_word(v1.x, v1.y));
+    gpu->gp0(rgb_word(v2.r, v2.g, v2.b));
+    gpu->gp0(vertex_word(v2.x, v2.y));
+  }
+
+  return compare_vram("gouraud span edge cases", *gpu, expected);
+}
+
 void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
                          int base_y, int width, int height, bool white) {
   u16 *actual = gpu.vram_mut_data();
@@ -638,9 +694,10 @@ int run_gpu_correctness_tests() {
   g_gpu_fast_mode = false;
   g_gpu_extreme_fast_mode = false;
 
-  const std::array<std::pair<const char *, bool (*)()>, 7> tests = {{
+  const std::array<std::pair<const char *, bool (*)()>, 8> tests = {{
       {"flat triangle", &test_flat_triangle},
       {"gouraud triangle", &test_gouraud_triangle},
+      {"gouraud span edge cases", &test_gouraud_span_edge_cases},
       {"raw textured triangle", &test_raw_textured_triangle},
       {"gouraud textured triangle", &test_gouraud_textured_triangle},
       {"4-bit CLUT triangle", &test_4bit_clut_triangle},
