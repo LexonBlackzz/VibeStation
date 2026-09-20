@@ -9,6 +9,34 @@
 #include <vector>
 
 namespace {
+    const char* gte_command_name(u32 opcode) {
+        switch (opcode & 0x3Fu) {
+        case 0x01: return "RTPS";
+        case 0x06: return "NCLIP";
+        case 0x0C: return "OP";
+        case 0x10: return "DPCS";
+        case 0x11: return "INTPL";
+        case 0x12: return "MVMVA";
+        case 0x13: return "NCDS";
+        case 0x14: return "CDP";
+        case 0x16: return "NCDT";
+        case 0x1B: return "NCCS";
+        case 0x1C: return "CC";
+        case 0x1E: return "NCS";
+        case 0x20: return "NCT";
+        case 0x28: return "SQR";
+        case 0x29: return "DCPL";
+        case 0x2A: return "DPCT";
+        case 0x2D: return "AVSZ3";
+        case 0x2E: return "AVSZ4";
+        case 0x30: return "RTPT";
+        case 0x3D: return "GPF";
+        case 0x3E: return "GPL";
+        case 0x3F: return "NCCT";
+        default: return "UNKNOWN";
+        }
+    }
+
     struct FramePhaseDiagnostics {
         bool valid = false;
         u32 render_frames = 0;
@@ -664,6 +692,81 @@ void App::panel_performance() {
                     "Reuse/light avg:  CPU %.3f  GPU %.3f  Core %.3f ms",
                     phase_diag.reuse_cpu_ms, phase_diag.reuse_gpu_ms,
                     phase_diag.reuse_core_ms);
+            }
+
+            ImGui::Separator();
+            ImGui::Text("GTE Command Detail:");
+            if (stats.gte_total_commands == 0) {
+                ImGui::TextDisabled("No GTE commands executed in this frame.");
+            }
+            else {
+                struct GteRow {
+                    u32 opcode = 0;
+                    double ms = 0.0;
+                    u32 count = 0;
+                };
+                std::array<GteRow, 64> rows{};
+                u32 row_count = 0;
+                for (u32 opcode = 0; opcode < 64; ++opcode) {
+                    if (stats.gte_command_counts[opcode] == 0) {
+                        continue;
+                    }
+                    rows[row_count++] = {
+                        opcode,
+                        stats.gte_command_ms[opcode],
+                        stats.gte_command_counts[opcode],
+                    };
+                }
+                std::sort(rows.begin(), rows.begin() + row_count,
+                    [](const GteRow& a, const GteRow& b) {
+                        return a.ms > b.ms;
+                    });
+
+                ImGui::Text(
+                    "Total: %.3f ms / %u commands (inside CPU time)",
+                    stats.gte_total_ms, stats.gte_total_commands);
+                const u32 shown = std::min<u32>(row_count, 12u);
+                for (u32 i = 0; i < shown; ++i) {
+                    const GteRow& row = rows[i];
+                    const double avg_us =
+                        row.count == 0
+                            ? 0.0
+                            : (row.ms * 1000.0) /
+                                  static_cast<double>(row.count);
+                    ImGui::Text(
+                        "%-7s  op=%02X  %7.3f ms  %6u cmds  %6.2f us/cmd",
+                        gte_command_name(row.opcode), row.opcode, row.ms,
+                        row.count, avg_us);
+                }
+
+                if (ImGui::Button("Copy GTE profiler snapshot")) {
+                    std::string snapshot;
+                    snapshot.reserve(2048);
+                    char line[256];
+                    std::snprintf(
+                        line, sizeof(line),
+                        "frame=%llu cpu_ms=%.3f gte_ms=%.3f gte_commands=%u\n",
+                        static_cast<unsigned long long>(
+                            runtime_snapshot_.frame_id),
+                        stats.cpu_ms, stats.gte_total_ms,
+                        stats.gte_total_commands);
+                    snapshot += line;
+                    for (u32 i = 0; i < row_count; ++i) {
+                        const GteRow& row = rows[i];
+                        const double avg_us =
+                            row.count == 0
+                                ? 0.0
+                                : (row.ms * 1000.0) /
+                                      static_cast<double>(row.count);
+                        std::snprintf(
+                            line, sizeof(line),
+                            "%s op=%02X ms=%.3f count=%u avg_us=%.2f\n",
+                            gte_command_name(row.opcode), row.opcode, row.ms,
+                            row.count, avg_us);
+                        snapshot += line;
+                    }
+                    ImGui::SetClipboardText(snapshot.c_str());
+                }
             }
         }
         else {
