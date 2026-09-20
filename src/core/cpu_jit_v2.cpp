@@ -599,7 +599,10 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     return true;
   };
 
+  bool needs_interpreter_icache_warmup = false;
+
   auto try_native = [&]() -> bool {
+    needs_interpreter_icache_warmup = false;
     if (!state_allows_native()) {
       return false;
     }
@@ -627,6 +630,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     auto &line = cpu_.icache_[index];
     if (!line.valid || line.tag != expected_tag) {
       ++stats_.native_reject_icache;
+      needs_interpreter_icache_warmup = true;
       return false;
     }
 
@@ -690,6 +694,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
         const auto &inst_line = cpu_.icache_[inst_index];
         if (!inst_line.valid || inst_line.tag != inst_tag) {
+          needs_interpreter_icache_warmup = true;
           return false;
         }
         bits = inst_line.words[inst_word];
@@ -1057,7 +1062,16 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
          result.instructions < max_instructions) {
 #if VIBESTATION_JIT_V2_X64
     if (!try_native()) {
-      decoded_fallback();
+      if (needs_interpreter_icache_warmup) {
+        // The decoded backend intentionally does not populate Cpu::icache_.
+        // Execute exactly one architectural step so fetch32() performs the
+        // real line refill (including its cycle penalty), then let V2 retry at
+        // the following PC. This avoids permanently starving V2 while still
+        // keeping ordinary unsupported/state fallbacks block-decoded.
+        interpreter_step();
+      } else {
+        decoded_fallback();
+      }
     }
 #else
     interpreter_step();
