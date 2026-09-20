@@ -774,6 +774,9 @@ void Cpu::init(System *sys) {
   if (!optimized_backend_) {
     optimized_backend_ = std::make_unique<CpuOptimizedBackend>(*this);
   }
+  if (!jit_v2_backend_) {
+    jit_v2_backend_ = std::make_unique<CpuJitV2Backend>(*this);
+  }
   reset();
 }
 
@@ -830,6 +833,9 @@ void Cpu::reset() {
   }
   if (optimized_backend_) {
     optimized_backend_->flush();
+  }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->flush();
   }
 }
 
@@ -2404,6 +2410,9 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   }
 
   const CpuExecutionMode mode = effective_cpu_execution_mode();
+  if (mode == CpuExecutionMode::X64JitV2 && jit_v2_backend_) {
+    return jit_v2_backend_->run_slice(max_cycles, max_instructions);
+  }
   if (mode != CpuExecutionMode::Interpreter && optimized_backend_) {
     return optimized_backend_->run_slice(max_cycles, max_instructions, mode);
   }
@@ -2440,11 +2449,17 @@ void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
+  }
 }
 
 void Cpu::notify_cpu_backend_frame(u32 frame_index) {
   if (optimized_backend_) {
     optimized_backend_->begin_frame(frame_index);
+  }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->begin_frame(frame_index);
   }
 }
 
@@ -2452,9 +2467,16 @@ void Cpu::flush_cpu_backend() {
   if (optimized_backend_) {
     optimized_backend_->flush();
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->flush();
+  }
 }
 
 CpuBackendStats Cpu::cpu_backend_stats() const {
+  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV2 &&
+      jit_v2_backend_) {
+    return jit_v2_backend_->stats();
+  }
   return optimized_backend_ ? optimized_backend_->stats() : CpuBackendStats{};
 }
 
