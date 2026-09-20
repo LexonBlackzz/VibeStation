@@ -911,7 +911,7 @@ void App::panel_performance() {
                 shown_share);
 
             if (ImGui::BeginTable(
-                    "cpu_hot_blocks", 7,
+                    "cpu_hot_blocks", 8,
                     ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                         ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit,
                     ImVec2(-1.0f, 260.0f))) {
@@ -921,6 +921,7 @@ void App::panel_performance() {
                 ImGui::TableSetupColumn("Native %");
                 ImGui::TableSetupColumn("Shape");
                 ImGui::TableSetupColumn("Reject/detail");
+                ImGui::TableSetupColumn("Runtime reject");
                 ImGui::TableSetupColumn("Ops");
                 ImGui::TableHeadersRow();
 
@@ -948,6 +949,16 @@ void App::panel_performance() {
                     ImGui::TableSetColumnIndex(5);
                     ImGui::TextUnformatted(hot.reject_detail.data());
                     ImGui::TableSetColumnIndex(6);
+                    if (hot.runtime_rejects == 0) {
+                        ImGui::TextDisabled("-");
+                    } else {
+                        ImGui::Text("%llu %s (%u)",
+                            static_cast<unsigned long long>(
+                                hot.runtime_rejects),
+                            hot.runtime_reject_detail.data(),
+                            hot.runtime_reject_dominant_count);
+                    }
+                    ImGui::TableSetColumnIndex(7);
                     ImGui::TextUnformatted(hot.ops.data());
                 }
                 ImGui::EndTable();
@@ -1008,6 +1019,8 @@ void App::panel_performance() {
                         line, sizeof(line),
                         "#%02u pc=%08X weight=%llu entries=%llu instr=%u "
                         "native_entries=%llu native=%.1f%% compiled=%u "
+                        "runtime_rejects=%llu runtime_reason=%s "
+                        "runtime_reason_count=%u "
                         "decoded_only=%u prefix=%u branch=%u mem=%u load=%u "
                         "store=%u fallback=%u shape=%s reject=%s ops=%s\n",
                         i + 1u, hot.start_pc,
@@ -1017,6 +1030,9 @@ void App::panel_performance() {
                         hot.instruction_count,
                         static_cast<unsigned long long>(hot.native_entries),
                         native_percent, hot.native_compiled ? 1u : 0u,
+                        static_cast<unsigned long long>(hot.runtime_rejects),
+                        hot.runtime_reject_detail.data(),
+                        hot.runtime_reject_dominant_count,
                         hot.native_decoded_only ? 1u : 0u,
                         hot.native_prefix_instruction_count,
                         hot.has_control_flow ? 1u : 0u,
