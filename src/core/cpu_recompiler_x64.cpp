@@ -3391,7 +3391,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
     context->branch_taken = false;
     ++stats_.native_branch_tail_entries;
     ++block->native_branch_tail_entry_count;
-    ++block->native_entry_count;
+    record_native_block_entry(*block);
     block->native_fn(block->native_context, &result);
     if (result.instructions == 0u) {
       break;
@@ -3415,7 +3415,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_branch_chain(
     if (cpu_.pc_ != block->start_pc) {
       break;
     }
-    ++block->entry_count;
+    record_block_entry(*block);
   }
 
   if (total.instructions == 0u && !cpu_.exception_raised_) {
@@ -3537,7 +3537,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     } else {
       ++stats_.native_alu_block_entries;
     }
-    ++block.native_entry_count;
+    record_native_block_entry(block);
 
     // Helper-only blocks already execute as one bounded decoded operation in
     // C++. Calling a native thunk solely to call back here adds two host ABI
@@ -3637,7 +3637,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     }
     context->max_cycles = max_cycles;
     context->max_instructions = max_instructions;
-    ++block.native_entry_count;
+    record_native_block_entry(block);
     ++stats_.native_memory_block_entries;
     block.native_fn(block.native_context, &result);
     g_diag_current_pc = cpu_.current_pc_;
@@ -4500,7 +4500,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       // semantics rather than rejecting the entire block to decoded mode.
       context->max_cycles = max_cycles;
       context->max_instructions = max_instructions;
-      ++block.native_entry_count;
+      record_native_block_entry(block);
       if (context->is_branch_tail) {
         ++stats_.native_branch_tail_entries;
         ++block.native_branch_tail_entry_count;
@@ -4637,7 +4637,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
   } else {
     ++stats_.native_alu_block_entries;
   }
-  ++block.native_entry_count;
+  record_native_block_entry(block);
   if (block.native_reduced_helper) {
     ++stats_.native_reduced_helper_entries;
     if (block.native_reduced_helper_ram_load) {
