@@ -645,6 +645,37 @@ struct CpuJitV2Backend::Impl {
 #endif
   };
 
+  static constexpr size_t kDispatchCacheSize = 1u << 16u;
+  struct DispatchCacheEntry {
+    u32 pc = 0u;
+    Block *block = nullptr;
+  };
+
+  Block *lookup_dispatch(u32 pc) {
+    DispatchCacheEntry &entry =
+        dispatch_cache[(pc >> 2u) & (kDispatchCacheSize - 1u)];
+    return entry.block != nullptr && entry.pc == pc ? entry.block : nullptr;
+  }
+
+  void remember_dispatch(Block &block) {
+    DispatchCacheEntry &entry =
+        dispatch_cache[(block.start_pc >> 2u) & (kDispatchCacheSize - 1u)];
+    entry.pc = block.start_pc;
+    entry.block = &block;
+  }
+
+  void forget_dispatch(u32 pc) {
+    DispatchCacheEntry &entry =
+        dispatch_cache[(pc >> 2u) & (kDispatchCacheSize - 1u)];
+    if (entry.block != nullptr && entry.pc == pc) {
+      entry = {};
+    }
+  }
+
+  void clear_dispatch() { dispatch_cache.fill({}); }
+
+  std::array<DispatchCacheEntry, kDispatchCacheSize> dispatch_cache{};
+
 #if VIBESTATION_JIT_V2_X64
   V2CodeArena arena;
   V2StepHelperFn step_helper_fn = nullptr;
