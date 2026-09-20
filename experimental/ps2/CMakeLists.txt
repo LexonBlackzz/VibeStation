@@ -24,8 +24,65 @@ else()
     target_compile_options(vibestation_ps2_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(VibeStationPS2Lab main.cpp)
-target_link_libraries(VibeStationPS2Lab PRIVATE vibestation_ps2_core)
+option(VIBESTATION_PS2_ENABLE_UI "Build the experimental VibeStation PS2 UI" ON)
+
+if(VIBESTATION_PS2_ENABLE_UI)
+    include(FetchContent)
+
+    FetchContent_Declare(SDL2
+        URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(SDL2)
+
+    FetchContent_Declare(imgui
+        URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.8.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(imgui)
+
+    if(WIN32)
+        set(VIBESTATION_PS2_OPENGL_LIBRARY opengl32)
+    else()
+        find_package(OpenGL REQUIRED)
+        set(VIBESTATION_PS2_OPENGL_LIBRARY OpenGL::GL)
+    endif()
+
+    add_library(vibestation_ps2_imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    target_include_directories(vibestation_ps2_imgui PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    target_link_libraries(vibestation_ps2_imgui PUBLIC
+        SDL2::SDL2-static
+        ${VIBESTATION_PS2_OPENGL_LIBRARY}
+    )
+
+    add_executable(VibeStationPS2Lab
+        main.cpp
+        ui/ps2_app.cpp
+        ui/theme_settings.cpp
+    )
+    target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
+    target_link_libraries(VibeStationPS2Lab PRIVATE
+        vibestation_ps2_core
+        vibestation_ps2_imgui
+        SDL2::SDL2-static
+        ${VIBESTATION_PS2_OPENGL_LIBRARY}
+    )
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
