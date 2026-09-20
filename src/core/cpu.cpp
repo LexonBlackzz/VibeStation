@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
+#include "cpu_jit_v2.h"
 #include "system.h"
 #include <array>
 #include <chrono>
