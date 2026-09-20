@@ -140,5 +140,6 @@ bool EeBus::write64(u32 address,u64 value){
     return gs_.write64(physical,value);
 }
 void EeBus::tick(u64 cycles){ hw_.tick(cycles); }
+bool EeBus::intc_pending() const { return hw_.intc_pending(); }
 
 } // namespace ps2

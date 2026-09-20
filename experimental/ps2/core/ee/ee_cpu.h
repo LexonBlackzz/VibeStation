@@ -65,6 +65,7 @@ private:
     void write_gpr64(u32 index, u64 value);
     void write_gpr_word(u32 index, u32 value);
     void branch_likely_not_taken(u32 pc);
+    void raise_exception(u32 code, u32 pc, bool in_delay_slot);
 
     bool fail(
         u32 pc,
@@ -81,6 +82,8 @@ private:
     EeBus& bus_;
     EeCpuState state_{};
     bool halted_ = false;
+    bool next_is_delay_slot_ = false;
+    bool current_is_delay_slot_ = false;
     std::string halt_reason_;
 };
 

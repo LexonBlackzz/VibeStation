@@ -83,7 +83,7 @@ bool IopBus::write_sif32(u32 physical, u32 value) {
     u32 current = 0;
     switch (reg) {
     case 0x00:
-        return true; // EE-owned path; read-only from the IOP.
+        return true;
     case 0x10:
         return ee_hw_.write32(0x1000F210u, value);
     case 0x20:
@@ -114,20 +114,11 @@ bool IopBus::read8(u32 address, u8& value) const {
         value = cache_control_[address - kCacheControlBase];
         return true;
     }
-
     const u32 physical = to_physical(address);
-    if (physical < kRamMirrorEnd) {
-        return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
-    }
-    if (intc_.read8(physical, value)) {
-        return true;
-    }
-    if (cdvd_.read8(physical, value)) {
-        return true;
-    }
-    if (hw_.read8(physical, value)) {
-        return true;
-    }
+    if (physical < kRamMirrorEnd) return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
+    if (intc_.read8(physical, value)) return true;
+    if (cdvd_.read8(physical, value)) return true;
+    if (hw_.read8(physical, value)) return true;
     if (physical >= kSifBase && physical < kSifBase + 0x100u) {
         u32 word = 0;
         if (!read_sif32(physical & ~3u, word)) return false;
@@ -139,16 +130,10 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
-    if (intc_.read16(physical, value)) {
-        return true;
-    }
-
-    u8 lo = 0;
-    u8 hi = 0;
-    if (!read8(address, lo) || !read8(address + 1, hi)) {
-        return false;
-    }
-    value = static_cast<u16>(lo) | (static_cast<u16>(hi) << 8);
+    if (intc_.read16(physical, value)) return true;
+    u8 lo=0, hi=0;
+    if (!read8(address, lo) || !read8(address+1, hi)) return false;
+    value = static_cast<u16>(lo) | (static_cast<u16>(hi)<<8);
     return true;
 }
 
@@ -156,122 +141,81 @@ bool IopBus::read32(u32 address, u32& value) const {
     if (address >= kCacheControlBase && address + 4 <= kCacheControlEnd) {
         const u32 offset = address - kCacheControlBase;
         value = static_cast<u32>(cache_control_[offset]) |
-                (static_cast<u32>(cache_control_[offset + 1]) << 8) |
-                (static_cast<u32>(cache_control_[offset + 2]) << 16) |
-                (static_cast<u32>(cache_control_[offset + 3]) << 24);
+                (static_cast<u32>(cache_control_[offset+1])<<8) |
+                (static_cast<u32>(cache_control_[offset+2])<<16) |
+                (static_cast<u32>(cache_control_[offset+3])<<24);
         return true;
     }
-
     const u32 physical = to_physical(address);
-    if (intc_.read32(physical, value)) {
-        return true;
-    }
-    if (physical >= kSifBase && physical < kSifBase + 0x100u) {
-        return read_sif32(physical, value);
-    }
-
+    if (intc_.read32(physical, value)) return true;
+    if (physical >= kSifBase && physical < kSifBase + 0x100u) return read_sif32(physical, value);
     if (physical < kRamMirrorEnd) {
-        // Compose mirrored RAM reads bytewise so accesses at the 2 MiB
-        // boundary wrap exactly like the four IOP RAM mirrors.
         value = 0;
-        for (u32 i = 0; i < 4; ++i) {
-            u8 byte = 0;
-            const u32 offset =
-                (physical + i) & static_cast<u32>(IopRam::kSize - 1);
-            if (!ram_.read8(offset, byte)) {
-                return false;
-            }
-            value |= static_cast<u32>(byte) << (i * 8);
+        for (u32 i=0;i<4;++i) {
+            u8 byte=0;
+            const u32 offset=(physical+i)&static_cast<u32>(IopRam::kSize-1);
+            if (!ram_.read8(offset, byte)) return false;
+            value |= static_cast<u32>(byte) << (i*8);
         }
         return true;
     }
-    if (cdvd_.read32(physical, value)) {
-        return true;
-    }
-    if (hw_.read32(physical, value)) {
-        return true;
-    }
+    if (cdvd_.read32(physical, value)) return true;
+    if (hw_.read32(physical, value)) return true;
     return bios_.read32_physical(physical, value);
 }
 
 bool IopBus::write8(u32 address, u8 value) {
     if (address >= kCacheControlBase && address < kCacheControlEnd) {
-        cache_control_[address - kCacheControlBase] = value;
-        return true;
+        cache_control_[address-kCacheControlBase]=value; return true;
     }
-
-    const u32 physical = to_physical(address);
-    if (physical < kRamMirrorEnd) {
-        return ram_.write8(
-            physical & static_cast<u32>(IopRam::kSize - 1), value);
-    }
-    if (intc_.write8(physical, value)) {
-        return true;
-    }
-    if (cdvd_.write8(physical, value)) {
-        return true;
-    }
-    if (hw_.write8(physical, value)) {
-        return true;
-    }
-    if (physical >= kSifBase && physical < kSifBase + 0x100u) {
-        u32 word = 0;
-        if (!read_sif32(physical & ~3u, word)) return false;
-        const u32 shift = (physical & 3u) * 8;
-        word = (word & ~(0xFFu << shift)) |
-               (static_cast<u32>(value) << shift);
-        return write_sif32(physical & ~3u, word);
+    const u32 physical=to_physical(address);
+    if (physical < kRamMirrorEnd) return ram_.write8(physical & static_cast<u32>(IopRam::kSize-1), value);
+    if (intc_.write8(physical,value)) return true;
+    if (cdvd_.write8(physical,value)) return true;
+    if (hw_.write8(physical,value)) return true;
+    if (physical >= kSifBase && physical < kSifBase+0x100u) {
+        u32 word=0; if(!read_sif32(physical&~3u,word)) return false;
+        const u32 shift=(physical&3u)*8;
+        word=(word&~(0xFFu<<shift))|(static_cast<u32>(value)<<shift);
+        return write_sif32(physical&~3u,word);
     }
     return false;
 }
 
 bool IopBus::write16(u32 address, u16 value) {
-    const u32 physical = to_physical(address);
-    if (intc_.write16(physical, value)) {
+    const u32 physical=to_physical(address);
+    if (physical == 0x1F801450u) {
+        if (!hw_.write16(physical, value)) return false;
+        if ((value & 0x2u) != 0) ee_hw_.raise_intc(1);
         return true;
     }
-
-    return write8(address, static_cast<u8>(value)) &&
-           write8(address + 1, static_cast<u8>(value >> 8));
+    if (intc_.write16(physical,value)) return true;
+    return write8(address,static_cast<u8>(value)) && write8(address+1,static_cast<u8>(value>>8));
 }
 
 bool IopBus::write32(u32 address, u32 value) {
     if (address >= kCacheControlBase && address + 4 <= kCacheControlEnd) {
-        const u32 offset = address - kCacheControlBase;
-        for (u32 i = 0; i < 4; ++i) {
-            cache_control_[offset + i] =
-                static_cast<u8>(value >> (i * 8));
-        }
+        const u32 offset=address-kCacheControlBase;
+        for(u32 i=0;i<4;++i) cache_control_[offset+i]=static_cast<u8>(value>>(i*8));
         return true;
     }
-
-    const u32 physical = to_physical(address);
-    if (intc_.write32(physical, value)) {
+    const u32 physical=to_physical(address);
+    if (physical == 0x1F801450u) {
+        if (!hw_.write32(physical, value)) return false;
+        if ((value & 0x2u) != 0) ee_hw_.raise_intc(1);
         return true;
     }
-    if (physical >= kSifBase && physical < kSifBase + 0x100u) {
-        return write_sif32(physical, value);
-    }
-
+    if (intc_.write32(physical,value)) return true;
+    if (physical >= kSifBase && physical < kSifBase+0x100u) return write_sif32(physical,value);
     if (physical < kRamMirrorEnd) {
-        // Preserve the 2 MiB mirror even for a word straddling its end.
-        for (u32 i = 0; i < 4; ++i) {
-            const u32 offset =
-                (physical + i) & static_cast<u32>(IopRam::kSize - 1);
-            if (!ram_.write8(
-                    offset,
-                    static_cast<u8>(value >> (i * 8)))) {
-                return false;
-            }
+        for(u32 i=0;i<4;++i){
+            const u32 offset=(physical+i)&static_cast<u32>(IopRam::kSize-1);
+            if(!ram_.write8(offset,static_cast<u8>(value>>(i*8)))) return false;
         }
         return true;
     }
-    if (cdvd_.write32(physical, value)) {
-        return true;
-    }
-    if (hw_.write32(physical, value)) {
-        return true;
-    }
+    if (cdvd_.write32(physical,value)) return true;
+    if (hw_.write32(physical,value)) return true;
     return false;
 }
 

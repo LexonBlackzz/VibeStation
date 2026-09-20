@@ -96,6 +96,8 @@ void EeCpu::reset(u32 entry_point) {
     state_.vu_vf[0].hi = 0x3F80000000000000ull;
     state_.vu_vi[20] = 0x3F800000u;
     halted_ = false;
+    next_is_delay_slot_ = false;
+    current_is_delay_slot_ = false;
     halt_reason_.clear();
 }
 
@@ -137,6 +139,34 @@ void EeCpu::write_gpr_word(u32 index, u32 value) {
 void EeCpu::branch_likely_not_taken(u32 pc) {
     state_.pc = pc + 8u;
     state_.next_pc = pc + 12u;
+    next_is_delay_slot_ = false;
+}
+
+void EeCpu::raise_exception(u32 code, u32 pc, bool in_delay_slot) {
+    u32& status = state_.cop0[12];
+    u32& cause = state_.cop0[13];
+
+    cause = (cause & ~0x8000007Cu) | ((code << 2) & 0x7Cu);
+
+    u32 offset = (code == 0) ? 0x200u : 0x180u;
+    if ((status & 0x2u) == 0) {
+        status |= 0x2u;
+        if (in_delay_slot) {
+            state_.cop0[14] = pc - 4u;
+            cause |= 0x80000000u;
+        } else {
+            state_.cop0[14] = pc;
+            cause &= ~0x80000000u;
+        }
+    } else {
+        offset = 0x180u;
+    }
+
+    const u32 base = (status & 0x00400000u) != 0 ? 0xBFC00200u : 0x80000000u;
+    state_.pc = base + offset;
+    state_.next_pc = state_.pc + 4u;
+    next_is_delay_slot_ = false;
+    current_is_delay_slot_ = false;
 }
 
 bool EeCpu::fail(
@@ -196,10 +226,12 @@ bool EeCpu::execute_special(
         return true;
     case 0x08: // JR
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
+        next_is_delay_slot_ = true;
         return true;
     case 0x09: // JALR
         write_gpr_word(rd, pc + 8u);
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
+        next_is_delay_slot_ = true;
         return true;
     case 0x0A: // MOVZ
         if (gpr_u64(rt) == 0) {
@@ -210,6 +242,9 @@ bool EeCpu::execute_special(
         if (gpr_u64(rt) != 0) {
             write_gpr64(rd, gpr_u64(rs));
         }
+        return true;
+    case 0x0C: // SYSCALL
+        raise_exception(8u, pc, current_is_delay_slot_);
         return true;
     case 0x0D: // BREAK
         return fail(pc, instruction, "BREAK instruction", error);
@@ -337,7 +372,14 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
     default: return fail(pc,instruction,"Unsupported REGIMM variant "+hex32(rt),error);
     }
     if(link) write_gpr_word(31,pc+8u);
-    if(taken) state_.next_pc=branch_target(pc,immediate(instruction)); else if(likely) branch_likely_not_taken(pc);
+    if(taken) {
+        state_.next_pc=branch_target(pc,immediate(instruction));
+        next_is_delay_slot_=true;
+    } else if(likely) {
+        branch_likely_not_taken(pc);
+    } else {
+        next_is_delay_slot_=true;
+    }
     return true;
 }
 
@@ -349,9 +391,30 @@ bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
         case 0x01: return true;
         case 0x02:{ const u32 index=state_.cop0[0]&0x3Fu; if(index<state_.tlb.size()){auto& e=state_.tlb[index];e.page_mask=state_.cop0[5];e.entry_hi=state_.cop0[10];e.entry_lo0=state_.cop0[2];e.entry_lo1=state_.cop0[3];} return true;}
         case 0x06: case 0x08: return true;
-        case 0x18: state_.pc=state_.cop0[14]; state_.next_pc=state_.pc+4; state_.cop0[12]&=~0x2u; return true;
-        case 0x38: state_.cop0[12]&=~0x00010000u; return true;
-        case 0x39: state_.cop0[12]|=0x00010000u; return true;
+        case 0x18:
+            if ((state_.cop0[12] & 0x4u) != 0) {
+                state_.pc=state_.cop0[30];
+                state_.cop0[12]&=~0x4u;
+            } else {
+                state_.pc=state_.cop0[14];
+                state_.cop0[12]&=~0x2u;
+            }
+            state_.next_pc=state_.pc+4;
+            next_is_delay_slot_=false;
+            current_is_delay_slot_=false;
+            return true;
+        case 0x38: {
+            const u32 status=state_.cop0[12];
+            if ((status & 0x00020000u) != 0 || (status & 0x6u) != 0 || (status & 0x18u) == 0)
+                state_.cop0[12]&=~0x00010000u;
+            return true;
+        }
+        case 0x39: {
+            const u32 status=state_.cop0[12];
+            if ((status & 0x00020000u) != 0 || (status & 0x6u) != 0 || (status & 0x18u) == 0)
+                state_.cop0[12]|=0x00010000u;
+            return true;
+        }
         default: break;
     }}
     return fail(pc,instruction,"Unsupported COP0 operation",error);
@@ -385,8 +448,14 @@ bool EeCpu::execute_cop1(u32 pc, u32 instruction, std::string& error) {
         const u32 variant = rt & 3u;
         const bool taken = (variant & 1u) != 0 ? cond : !cond;
         const bool likely = (variant & 2u) != 0;
-        if (taken) state_.next_pc = branch_target(pc, immediate(instruction));
-        else if (likely) branch_likely_not_taken(pc);
+        if (taken) {
+            state_.next_pc = branch_target(pc, immediate(instruction));
+            next_is_delay_slot_ = true;
+        } else if (likely) {
+            branch_likely_not_taken(pc);
+        } else {
+            next_is_delay_slot_ = true;
+        }
         return true;
     }
     default:
@@ -588,6 +657,25 @@ bool EeCpu::execute_mmi(u32 pc,u32 instruction,std::string& error){
     case 0x19: multiply_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); write_gpr64(rd,state_.lo1); return true;
     case 0x1A: divide_signed32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
     case 0x1B: divide_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
+    case 0x28: { // MMI1
+        const u32 sub = (instruction >> 6) & 31u;
+        if (sub == 0x10u) { // PADDUW
+            if (rd != 0) {
+                for (u32 lane = 0; lane < 4; ++lane) {
+                    const u64 a_half = lane < 2 ? state_.gpr[rs].lo : state_.gpr[rs].hi;
+                    const u64 b_half = lane < 2 ? state_.gpr[rt].lo : state_.gpr[rt].hi;
+                    const u32 shift = (lane & 1u) * 32u;
+                    const u64 sum = static_cast<u64>(static_cast<u32>(a_half >> shift)) +
+                                    static_cast<u64>(static_cast<u32>(b_half >> shift));
+                    const u32 value = sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(sum);
+                    u64& out_half = lane < 2 ? state_.gpr[rd].lo : state_.gpr[rd].hi;
+                    out_half = (out_half & ~(0xFFFFFFFFull << shift)) | (static_cast<u64>(value) << shift);
+                }
+            }
+            return true;
+        }
+        return fail(pc,instruction,"Unsupported MMI1 function "+hex32(sub),error);
+    }
     case 0x29: { // MMI3
         const u32 sub = (instruction >> 6) & 31u;
         if (sub == 0x12u) { // POR
@@ -613,6 +701,22 @@ bool EeCpu::step(std::string& error) {
 
     const u32 pc = state_.pc;
     const u32 old_next_pc = state_.next_pc;
+    current_is_delay_slot_ = next_is_delay_slot_;
+    next_is_delay_slot_ = false;
+
+    if (bus_.intc_pending()) state_.cop0[13] |= 0x00000400u;
+    else state_.cop0[13] &= ~0x00000400u;
+
+    const u32 status = state_.cop0[12];
+    if ((state_.cop0[13] & status & 0x0000FF00u) != 0 &&
+        (status & 0x00010001u) == 0x00010001u &&
+        (status & 0x6u) == 0) {
+        raise_exception(0u, pc, current_is_delay_slot_);
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        bus_.tick(1);
+        return true;
+    }
 
     u32 instruction = 0;
     if (!bus_.read32(pc, instruction)) {
@@ -657,32 +761,38 @@ bool EeCpu::step(std::string& error) {
         state_.next_pc =
             ((pc + 4u) & 0xF0000000u) |
             ((instruction & 0x03FFFFFFu) << 2);
+        next_is_delay_slot_ = true;
         break;
     case 0x03: // JAL
         write_gpr_word(31, pc + 8u);
         state_.next_pc =
             ((pc + 4u) & 0xF0000000u) |
             ((instruction & 0x03FFFFFFu) << 2);
+        next_is_delay_slot_ = true;
         break;
     case 0x04: // BEQ
         if (gpr_u64(rs) == gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
         }
+        next_is_delay_slot_ = true;
         break;
     case 0x05: // BND
         if (gpr_u64(rs) != gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
         }
+        next_is_delay_slot_ = true;
         break;
     case 0x06: // BLEZ
         if (gpr_s64(rs) <= 0) {
             state_.next_pc = branch_target(pc, imm);
         }
+        next_is_delay_slot_ = true;
         break;
     case 0x07: // BGTZ
         if (gpr_s64(rs) > 0) {
             state_.next_pc = branch_target(pc, imm);
         }
+        next_is_delay_slot_ = true;
         break;
     case 0x08: { // ADDI
         const s32 lhs = static_cast<s32>(static_cast<u32>(gpr_u64(rs)));
@@ -733,6 +843,7 @@ bool EeCpu::step(std::string& error) {
     case 0x14: // BEQL
         if (gpr_u64(rs) == gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
         } else {
             branch_likely_not_taken(pc);
         }
@@ -740,6 +851,7 @@ bool EeCpu::step(std::string& error) {
     case 0x15: // BNEL
         if (gpr_u64(rs) != gpr_u64(rt)) {
             state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
         } else {
             branch_likely_not_taken(pc);
         }
@@ -747,6 +859,7 @@ bool EeCpu::step(std::string& error) {
     case 0x16: // BLEZL
         if (gpr_s64(rs) <= 0) {
             state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
         } else {
             branch_likely_not_taken(pc);
         }
@@ -754,6 +867,7 @@ bool EeCpu::step(std::string& error) {
     case 0x17: // BGTZL
         if (gpr_s64(rs) > 0) {
             state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
         } else {
             branch_likely_not_taken(pc);
         }

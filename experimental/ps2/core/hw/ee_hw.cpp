@@ -3,6 +3,8 @@
 namespace ps2 {
 namespace {
 
+constexpr u32 kIntcStat = 0x1000F000u;
+constexpr u32 kIntcMask = 0x1000F010u;
 constexpr u32 kMchRicm = 0x1000F430u;
 constexpr u32 kMchDrd = 0x1000F440u;
 constexpr u32 kDmacEnabler = 0x1000F520u;
@@ -61,6 +63,16 @@ void EeHw::reset() {
 
 void EeHw::tick(u64 cycles) {
     cycles_ += cycles;
+}
+
+void EeHw::raise_intc(u32 irq) {
+    if (irq < 16u) {
+        generic_write32(kIntcStat, generic_read32(kIntcStat) | (1u << irq));
+    }
+}
+
+bool EeHw::intc_pending() const {
+    return (generic_read32(kIntcStat) & generic_read32(kIntcMask) & 0xFFFFu) != 0;
 }
 
 bool EeHw::in_reg_window(u32 address, std::size_t width) const {
@@ -426,6 +438,16 @@ bool EeHw::write32(u32 address, u32 value) {
 
     if (!in_reg_window(address, 4)) {
         return false;
+    }
+
+    if (address == kIntcStat) {
+        generic_write32(kIntcStat, generic_read32(kIntcStat) & ~value);
+        return true;
+    }
+
+    if (address == kIntcMask) {
+        generic_write32(kIntcMask, generic_read32(kIntcMask) ^ (value & 0xFFFFu));
+        return true;
     }
 
     if (address == kMchRicm) {

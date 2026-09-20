@@ -22,6 +22,7 @@ add_library(vibestation_ps2_core STATIC
     core/memory/ee_ram.cpp
     core/memory/ee_scratchpad.cpp
     core/scheduler/scheduler.cpp
+    core/video/video_timing.cpp
 )
 
 target_include_directories(vibestation_ps2_core PUBLIC
