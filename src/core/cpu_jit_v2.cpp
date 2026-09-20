@@ -45,6 +45,16 @@ enum class V2BlockKind : u8 {
   StepHelper,
 };
 
+enum class V2HelperReason : u8 {
+  State,
+  Icache,
+  Irq,
+  Unsupported,
+  Memory,
+  Budget,
+  Internal,
+};
+
 enum class V2AluOp : u8 {
   Nop,
   Sll,
@@ -741,7 +751,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
 
 #if VIBESTATION_JIT_V2_X64
-  auto helper_step = [&]() -> bool {
+  auto helper_step = [&](V2HelperReason reason) -> bool {
     if (impl_->step_helper_fn == nullptr ||
         result.instructions >= max_instructions ||
         result.cycles >= max_cycles) {
@@ -754,6 +764,15 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     ++stats_.native_block_entries;
     ++stats_.jit_v2_helper_entries;
     ++stats_.jit_v2_helper_instructions;
+    switch (reason) {
+    case V2HelperReason::State: ++stats_.jit_v2_helper_state; break;
+    case V2HelperReason::Icache: ++stats_.jit_v2_helper_icache; break;
+    case V2HelperReason::Irq: ++stats_.jit_v2_helper_irq; break;
+    case V2HelperReason::Unsupported: ++stats_.jit_v2_helper_unsupported; break;
+    case V2HelperReason::Memory: ++stats_.jit_v2_helper_memory; break;
+    case V2HelperReason::Budget: ++stats_.jit_v2_helper_budget; break;
+    case V2HelperReason::Internal: ++stats_.jit_v2_helper_internal; break;
+    }
     ++stats_.native_instructions;
     ++stats_.optimized_instructions;
     stats_.native_cycles += consumed;
@@ -794,7 +813,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
   auto try_native = [&]() -> bool {
     if (!state_allows_native()) {
-      return helper_step();
+      return helper_step(V2HelperReason::State);
     }
 
     // Match the interpreter's between-instruction hardware IRQ sampling.
@@ -804,12 +823,12 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       cpu_.cop0_cause_ &= ~(1u << 10);
     }
     if (cpu_.check_irq()) {
-      return helper_step();
+      return helper_step(V2HelperReason::Irq);
     }
 
     const u32 start_pc = cpu_.pc_;
     if (!cpu_.instruction_cacheable(start_pc)) {
-      return helper_step();
+      return helper_step(V2HelperReason::Icache);
     }
 
     const u32 index = (start_pc >> 4u) & 0xFFu;
@@ -817,12 +836,12 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
     if (!line.valid || line.tag != expected_tag) {
-      return helper_step();
+      return helper_step(V2HelperReason::Icache);
     }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
       ++stats_.cache_hits;
-      return helper_step();
+      return helper_step(V2HelperReason::Unsupported);
     }
 
     Impl::Block *block_ptr = impl_->lookup_dispatch(start_pc);
@@ -961,7 +980,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
       if (decoded.empty()) {
         if (!fetch_stopped_on_unsupported) {
-          return helper_step();
+          return helper_step(V2HelperReason::Icache);
         }
 
         // Universal baseline: an instruction V2 does not lower yet still gets
@@ -1056,21 +1075,21 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     }
 
     if (block_ptr == nullptr) {
-      return helper_step();
+      return helper_step(V2HelperReason::Internal);
     }
     Impl::Block &block = *block_ptr;
     if (block.instruction_count == 0u) {
-      return helper_step();
+      return helper_step(V2HelperReason::Internal);
     }
     if (block.kind == V2BlockKind::StepHelper) {
-      return helper_step();
+      return helper_step(V2HelperReason::Unsupported);
     }
     if (block.fn == nullptr) {
-      return helper_step();
+      return helper_step(V2HelperReason::Internal);
     }
 
     if (block.has_branch && g_cpu_backend_compare_irq_on_branch) {
-      return helper_step();
+      return helper_step(V2HelperReason::Irq);
     }
 
     V2NativeRuntime runtime{};
@@ -1083,13 +1102,13 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       // behavior leaves the native tier before generated code is entered.
       if (g_trace_ram || g_trace_bus || g_ram_watch_diagnostics ||
           (cpu_.cop0_sr_ & (1u << 16)) != 0u) {
-        return helper_step();
+        return helper_step(V2HelperReason::Memory);
       }
 
       u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
       u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
       if (main_ram == nullptr || scratchpad == nullptr) {
-        return helper_step();
+        return helper_step(V2HelperReason::Memory);
       }
 
       for (u32 i = 0; i < block.store_count; ++i) {
@@ -1099,7 +1118,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         store_addrs[i] = addr;
 
         if ((addr & 3u) != 0u) {
-          return helper_step();
+          return helper_step(V2HelperReason::Memory);
         }
 
         const u32 phys = psx::mask_address(addr);
@@ -1108,7 +1127,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
             phys <= block.phys_end &&
             store_end >= static_cast<u64>(block.phys_start);
         if (touches_current_code) {
-          return helper_step();
+          return helper_step(V2HelperReason::Memory);
         }
 
         if (phys < psx::RAM_SIZE) {
@@ -1124,7 +1143,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           continue;
         }
 
-        return helper_step();
+        return helper_step(V2HelperReason::Memory);
       }
     }
 
@@ -1188,7 +1207,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
-      return helper_step();
+      return helper_step(V2HelperReason::Budget);
     }
 
     cpu_.executing_step_ = true;
@@ -1290,7 +1309,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       // Universal V2 should only get here for an internal codegen/allocation
       // failure. Keep correctness with the generated step trampoline when
       // available; the raw interpreter is now the last-resort safety net.
-      if (!helper_step()) {
+      if (!helper_step(V2HelperReason::Internal)) {
         interpreter_step();
       }
     }
