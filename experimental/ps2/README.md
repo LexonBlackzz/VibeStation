@@ -41,7 +41,7 @@ The current BIOS path implements:
 
 On Windows, use **File > Load BIOS...** or **Ctrl+B**. A manual BIOS path field is also available under **View > System**.
 
-"Start BIOS" currently establishes the real reset state and verifies instruction fetch. It does not execute the BIOS yet; the R5900 interpreter and COP0 implementation are the next execution milestone.
+"Start BIOS" now begins real EE instruction execution. The first interpreter pass implements the reset-path instructions, COP0 PRId/Status/Config access, TLBWI state capture, branch delay slots, EE scratchpad access, and minimal early timer/memory-controller registers. Unsupported instructions or device accesses halt the EE with an exact PC/opcode/reason instead of being silently ignored.
 
 ## Current scope
 
@@ -52,12 +52,17 @@ The experimental build currently contains:
 - a deterministic event scheduler;
 - an EE CPU state container;
 - PS2 BIOS loading/reset startup;
+- an initial R5900 interpreter and COP0 reset state;
+- branch/jump delay-slot execution;
+- 16 KiB EE scratchpad;
+- minimal early EE timer/memory-controller registers;
+- run/pause/single-step UI controls with explicit halt diagnostics;
 - a `Ps2System` composition root;
 - headless smoke tests;
 - a standalone SDL/OpenGL/ImGui VibeStation-style UI;
 - PS2 System, EE Debug, Scheduler, Settings, and About panels.
 
-ELF loading, R5900 instruction execution, GS rendering, IOP, SPU2, and corruption support are not implemented yet.
+Large parts of the R5900 instruction set, the remaining EE hardware map, ELF loading, GS rendering, IOP, SPU2, and corruption support are not implemented yet.
 
 ## UI isolation
 

@@ -1,6 +1,7 @@
 #include "core/ps2_system.h"
 
-#include <array>\n#include <cstdlib>
+#include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>

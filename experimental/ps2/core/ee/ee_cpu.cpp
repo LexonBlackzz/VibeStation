@@ -39,7 +39,8 @@ s16 EeCpu::immediate(u32 instruction) {
 }
 
 u32 EeCpu::branch_target(u32 pc, s16 imm) {
-    return pc + 4u + static_cast<u32>(static_cast<s32>(imm) << 2);
+    return pc + 4u +
+        static_cast<u32>(static_cast<s32>(imm) * 4);
 }
 
 u64 EeCpu::sign_extend_word(u32 value) {
@@ -108,7 +109,7 @@ bool EeCpu::execute_special(
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
         return true;
     case 0x09: // JALR
-        write_gpr64(rd, static_cast<u64>(pc + 8u));
+        write_gpr_word(rd, pc + 8u);
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
         return true;
     case 0x0F: // SYNC
@@ -277,7 +278,7 @@ bool EeCpu::step(std::string& error) {
             ((instruction & 0x03FFFFFFu) << 2);
         break;
     case 0x03: // JAL
-        write_gpr64(31, static_cast<u64>(pc + 8u));
+        write_gpr_word(31, pc + 8u);
         state_.next_pc =
             ((pc + 4u) & 0xF0000000u) |
             ((instruction & 0x03FFFFFFu) << 2);
@@ -292,12 +293,13 @@ bool EeCpu::step(std::string& error) {
             state_.next_pc = branch_target(pc, imm);
         }
         break;
-    case 0x09: // ADDIU
-        write_gpr64(
-            rt,
-            gpr_u64(rs) +
-                static_cast<u64>(static_cast<s64>(imm)));
+    case 0x09: { // ADDIU
+        const u32 value =
+            static_cast<u32>(gpr_u64(rs)) +
+            static_cast<u32>(static_cast<s32>(imm));
+        write_gpr_word(rt, value);
         break;
+    }
     case 0x0A: // SLTI
         write_gpr64(
             rt,
