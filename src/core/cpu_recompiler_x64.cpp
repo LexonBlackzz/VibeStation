@@ -3705,18 +3705,9 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     return result;
   }
 
-  if (active_load_delay &&
-      (block.native_reduced_helper_branch_tail ||
-       block.native_aggressive_reduced_helper_branch_tail)) {
-    if (block.native_aggressive_reduced_helper_branch_tail) {
-      ++stats_
-            .native_branch_tail_aggressive_reduced_helper_runtime_fallbacks;
-      ++stats_
-            .native_branch_tail_aggressive_reduced_helper_load_delay_fallbacks;
-    } else {
-      ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
-      ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
-    }
+  if (active_load_delay && block.native_reduced_helper_branch_tail) {
+    ++stats_.native_branch_tail_reduced_helper_runtime_fallbacks;
+    ++stats_.native_branch_tail_reduced_helper_load_delay_fallbacks;
     return reject_to_decoded(stats_.native_reject_load_delay_state,
                              NativeBlockRejectDetail::LoadDelayState);
   }
@@ -3725,7 +3716,8 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
       (block.has_memory || block.native_guarded_overflow_branch_tail)) {
     const bool direct_entry_address_preflight =
         block
-            .native_aggressive_reduced_helper_branch_tail_entry_address_preflight;
+            .native_aggressive_reduced_helper_branch_tail_entry_address_preflight &&
+        !active_load_delay;
     u32 aggressive_preflight_simulated_instructions = 0;
     bool aggressive_preflight_saw_scratchpad = false;
     auto reset_aggressive_preflight_failure_streak = [&]() {
@@ -3939,10 +3931,10 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
     for (u32 i = 0; i < sim_gpr.size(); ++i) {
       sim_gpr[i] = cpu_.gpr_[i];
     }
-    u32 sim_load_reg = 0;
-    u32 sim_load_value = 0;
-    u32 sim_next_load_reg = 0;
-    u32 sim_next_load_value = 0;
+    u32 sim_load_reg = cpu_.load_.reg;
+    u32 sim_load_value = cpu_.load_.value;
+    u32 sim_next_load_reg = cpu_.next_load_.reg;
+    u32 sim_next_load_value = cpu_.next_load_.value;
     std::array<u32, DecodedBlock::kMaxInstructions * 4u> sim_store_addr{};
     std::array<u8, DecodedBlock::kMaxInstructions * 4u> sim_store_value{};
     u32 sim_store_count = 0;
