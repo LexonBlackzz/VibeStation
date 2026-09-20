@@ -76,6 +76,7 @@ enum class V2AluOp : u8 {
   Xori,
   Lui,
   Clear,
+  Lw,
   Sw,
   Beq,
   Bne,
@@ -146,6 +147,7 @@ bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
   case 0x0D: out.op = V2AluOp::Ori; return true;
   case 0x0E: out.op = V2AluOp::Xori; return true;
   case 0x0F: out.op = V2AluOp::Lui; return true;
+  case 0x23: out.op = V2AluOp::Lw; return true;
   case 0x2B: out.op = V2AluOp::Sw; return true;
   default: return false;
   }
@@ -173,6 +175,7 @@ u32 read_mask(const V2DecodedInstruction &inst) {
   case V2AluOp::Andi:
   case V2AluOp::Ori:
   case V2AluOp::Xori:
+  case V2AluOp::Lw:
     return reg(inst.rs);
   case V2AluOp::Sw:
   case V2AluOp::Beq:
@@ -210,6 +213,7 @@ u8 write_reg(const V2DecodedInstruction &inst) {
   case V2AluOp::Lui:
     return inst.rt;
   case V2AluOp::Nop:
+  case V2AluOp::Lw:
   case V2AluOp::Sw:
   case V2AluOp::Beq:
   case V2AluOp::Bne:
@@ -218,12 +222,55 @@ u8 write_reg(const V2DecodedInstruction &inst) {
   return 0u;
 }
 
+void count_v2_unsupported_opcode(CpuBackendStats &stats, u32 bits) {
+  const u32 primary = bits >> 26u;
+  switch (primary) {
+  case 0x23:
+    ++stats.jit_v2_unsupported_lw;
+    return;
+  case 0x20: case 0x21: case 0x22: case 0x24: case 0x25: case 0x26:
+    ++stats.jit_v2_unsupported_other_load;
+    return;
+  case 0x12:
+    ++stats.jit_v2_unsupported_cop2;
+    return;
+  case 0x10:
+    ++stats.jit_v2_unsupported_cop0;
+    return;
+  case 0x02: case 0x03:
+    ++stats.jit_v2_unsupported_jump;
+    return;
+  case 0x01: case 0x06: case 0x07:
+    ++stats.jit_v2_unsupported_other_branch;
+    return;
+  case 0x28: case 0x29: case 0x2A: case 0x2E:
+    ++stats.jit_v2_unsupported_store;
+    return;
+  case 0x00: {
+    const u32 funct = bits & 0x3Fu;
+    if (funct == 0x08 || funct == 0x09 || funct == 0x0C || funct == 0x0D) {
+      ++stats.jit_v2_unsupported_special_control;
+      return;
+    }
+    if (funct == 0x10 || funct == 0x11 || funct == 0x12 || funct == 0x13 ||
+        funct == 0x18 || funct == 0x19 || funct == 0x1A || funct == 0x1B) {
+      ++stats.jit_v2_unsupported_muldiv;
+      return;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  ++stats.jit_v2_unsupported_other;
+}
+
 bool is_v2_branch(V2AluOp op) {
   return op == V2AluOp::Beq || op == V2AluOp::Bne;
 }
 
 bool is_v2_alu_only(V2AluOp op) {
-  return op != V2AluOp::Sw && !is_v2_branch(op);
+  return op != V2AluOp::Lw && op != V2AluOp::Sw && !is_v2_branch(op);
 }
 
 std::array<u8, 6> choose_cached_regs(
@@ -273,6 +320,8 @@ std::array<u8, 6> choose_cached_regs(
 
 struct V2NativeRuntime {
   std::array<u8 *, 8> store_ptrs{};
+  u8 *load_ptr = nullptr;
+  u32 load_value = 0u;
 };
 
 using V2NativeFn = u32 (*)(u32 *, const V2NativeRuntime *);
@@ -594,6 +643,15 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       emit_write_guest(*code, cached, dst, code->eax, dirty);
       break;
 
+    case V2AluOp::Lw: {
+      code->mov(code->rax, code->ptr[code->r14 +
+          static_cast<int>(offsetof(V2NativeRuntime, load_ptr))]);
+      code->mov(code->eax, code->dword[code->rax]);
+      code->mov(code->dword[code->r14 +
+          static_cast<int>(offsetof(V2NativeRuntime, load_value))], code->eax);
+      break;
+    }
+
     case V2AluOp::Sw: {
       emit_read_guest(*code, code->ecx, cached, inst.rt);
       const size_t ptr_offset =
@@ -650,9 +708,14 @@ struct CpuJitV2Backend::Impl {
     u32 instruction_count = 0;
     u32 base_cycles = 0;
     u32 store_count = 0;
+    u8 load_rs = 0u;
+    u8 load_rt = 0u;
+    s32 load_simm = 0;
+    u32 load_index = 0u;
     u32 branch_index = 0;
     u32 branch_target = 0;
     bool has_store = false;
+    bool has_load = false;
     bool has_branch = false;
     std::array<u32, 16> words{};
     std::array<u8, 6> cached_regs{};
@@ -782,6 +845,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
   auto state_allows_native = [&]() {
     if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
+      ++stats_.jit_v2_state_diagnostics;
       return false;
     }
 
@@ -800,12 +864,15 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
     if (cpu_.in_delay_slot_ || cpu_.pending_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u) {
+      ++stats_.jit_v2_state_branch_delay;
       return false;
     }
     if (cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u) {
+      ++stats_.jit_v2_state_load_delay;
       return false;
     }
     if (cpu_.next_pc_ != cpu_.pc_ + 4u) {
+      ++stats_.jit_v2_state_pc;
       return false;
     }
     return true;
@@ -891,6 +958,11 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       u32 written_mask = 0u;
       u32 store_count = 0u;
       bool has_store = false;
+      bool has_load = false;
+      u8 load_rs = 0u;
+      u8 load_rt = 0u;
+      s32 load_simm = 0;
+      u32 load_index = 0u;
       bool has_branch = false;
       u32 branch_index = 0u;
       s32 branch_simm = 0;
@@ -953,7 +1025,25 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           break;
         }
 
-        if (inst.op == V2AluOp::Sw) {
+        if (inst.op == V2AluOp::Lw) {
+          // First load tier: execute one aligned direct load as the final
+          // instruction in the block. Materialize the R3000A pending load at
+          // block exit so the following guest instruction still observes the
+          // old register value.
+          if (inst.rs != 0u && (written_mask & (1u << inst.rs)) != 0u) {
+            break;
+          }
+          has_load = true;
+          load_rs = inst.rs;
+          load_rt = inst.rt;
+          load_simm = inst.simm;
+          load_index = static_cast<u32>(decoded.size());
+          decoded.push_back(inst);
+          words[decoded.size() - 1u] = bits;
+          break;
+        }
+
+        if (inst.op == V2AluOp::Sw || inst.op == V2AluOp::Lw) {
           if (store_count >= store_rs.size()) {
             break;
           }
@@ -1015,8 +1105,13 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.words = words;
       block.cached_regs = choose_cached_regs(decoded);
       block.has_store = has_store;
+      block.has_load = has_load;
       block.has_branch = has_branch;
       block.store_count = store_count;
+      block.load_rs = load_rs;
+      block.load_rt = load_rt;
+      block.load_simm = load_simm;
+      block.load_index = load_index;
       block.store_rs = store_rs;
       block.store_simm = store_simm;
       block.store_instruction_index = store_instruction_index;
@@ -1066,7 +1161,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       ++stats_.native_blocks_compiled;
       if (has_branch) {
         ++stats_.native_branch_tail_blocks_compiled;
-      } else if (has_store) {
+      } else if (has_store || has_load) {
         ++stats_.native_memory_blocks_compiled;
       } else {
         ++stats_.native_alu_blocks_compiled;
@@ -1082,6 +1177,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return helper_step(V2HelperReason::Internal);
     }
     if (block.kind == V2BlockKind::StepHelper) {
+      count_v2_unsupported_opcode(stats_, block.words[0]);
       return helper_step(V2HelperReason::Unsupported);
     }
     if (block.fn == nullptr) {
@@ -1095,6 +1191,29 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     V2NativeRuntime runtime{};
     std::array<u32, 8> store_addrs{};
     u32 main_ram_store_count = 0u;
+    u32 load_addr = 0u;
+    u32 main_ram_load_count = 0u;
+
+    if (block.has_load) {
+      const u32 base = block.load_rs == 0u ? 0u : cpu_.gpr_[block.load_rs];
+      load_addr = base + static_cast<u32>(block.load_simm);
+      if ((load_addr & 3u) != 0u) {
+        return helper_step(V2HelperReason::Memory);
+      }
+      const u32 phys = psx::mask_address(load_addr);
+      u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      if (phys < psx::RAM_SIZE && main_ram != nullptr) {
+        runtime.load_ptr = main_ram + phys;
+        main_ram_load_count = 1u;
+      } else if (phys >= 0x1F800000u && phys < 0x1F801000u &&
+                 scratchpad != nullptr) {
+        runtime.load_ptr = scratchpad +
+            ((phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u));
+      } else {
+        return helper_step(V2HelperReason::Memory);
+      }
+    }
 
     if (block.has_store) {
       // Direct writes intentionally bypass System::write32. Anything that
@@ -1203,8 +1322,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
     const u32 worst_cycles =
-        block.base_cycles + main_ram_store_count + fetch_penalty +
-        (block.has_branch ? 1u : 0u);
+        block.base_cycles + main_ram_store_count + main_ram_load_count * 4u +
+        fetch_penalty + (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
       return helper_step(V2HelperReason::Budget);
@@ -1223,7 +1342,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
 
     const u32 count = block.instruction_count;
     const u32 consumed_cycles =
-        block.base_cycles + main_ram_store_count + fetch_penalty +
+        block.base_cycles + main_ram_store_count + main_ram_load_count * 4u +
+        fetch_penalty +
         ((block.has_branch && branch_taken) ? 1u : 0u);
 
     if (block.has_branch) {
@@ -1246,6 +1366,17 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       cpu_.next_pc_ = cpu_.pc_ + 4u;
     }
 
+    if (block.has_load) {
+      if (block.load_rt != 0u) {
+        const u32 load_pc = start_pc + block.load_index * 4u;
+        cpu_.load_ = {block.load_rt, runtime.load_value, load_pc, load_addr};
+      } else {
+        cpu_.load_ = {};
+      }
+      cpu_.next_load_ = {};
+      ++stats_.native_memory_fastpath_loads;
+    }
+
     cpu_.cycles_ += consumed_cycles;
     cpu_.executing_step_ = false;
     g_diag_current_pc = cpu_.current_pc_;
@@ -1256,7 +1387,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     ++stats_.native_block_entries;
     if (block.has_branch) {
       // Branch-tail blocks can also contain fast stores.
-    } else if (block.has_store) {
+    } else if (block.has_store || block.has_load) {
       ++stats_.native_memory_block_entries;
     } else {
       ++stats_.native_alu_block_entries;
