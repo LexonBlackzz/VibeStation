@@ -439,6 +439,121 @@ bool test_gif_dma_engine() {
     return ok;
 }
 
+
+bool test_gs_vram_swizzle_addresses() {
+    ps2::GsVram vram;
+    bool ok = true;
+
+    ok = expect(vram.write_pixel(0, 8, 0, 0, 1, 0x44332211u),
+                "PSMCT32 swizzle write failed") && ok;
+    ok = expect(vram.byte_at(256) == 0x11u &&
+                vram.byte_at(257) == 0x22u &&
+                vram.byte_at(258) == 0x33u &&
+                vram.byte_at(259) == 0x44u,
+                "PSMCT32 x=8 block address mismatch") && ok;
+
+    vram.reset();
+    ok = expect(vram.write_pixel(2, 16, 0, 0, 1, 0xBEEFu),
+                "PSMCT16 swizzle write failed") && ok;
+    ok = expect(vram.byte_at(512) == 0xEFu &&
+                vram.byte_at(513) == 0xBEu,
+                "PSMCT16 x=16 block address mismatch") && ok;
+
+    vram.reset();
+    ok = expect(vram.write_pixel(10, 32, 0, 0, 1, 0x1234u),
+                "PSMCT16S swizzle write failed") && ok;
+    ok = expect(vram.byte_at(4096) == 0x34u &&
+                vram.byte_at(4097) == 0x12u,
+                "PSMCT16S x=32 block address mismatch") && ok;
+
+    return ok;
+}
+
+bool test_gs_host_to_local_image_transfer() {
+    ps2::GsCore gs;
+    gs.reset();
+
+    auto ad_packet = [&](ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag =
+            1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+
+    bool ok = true;
+
+    // 32-bit upload: 4 pixels, one IMAGE qword.
+    const ps2::u64 blit32 =
+        (static_cast<ps2::u64>(1u) << 48); // DBP=0, DBW=1, DPSM=PSMCT32
+    const ps2::u64 pos32 =
+        (static_cast<ps2::u64>(8u) << 32); // DSAX=8, DSAY=0
+    const ps2::u64 reg32 =
+        4ull | (1ull << 32); // 4x1
+    ad_packet(0x50, blit32);
+    ad_packet(0x51, pos32);
+    ad_packet(0x52, reg32);
+    ad_packet(0x53, 0);
+
+    const ps2::u64 image_tag32 =
+        1ull | (1ull << 15) | (2ull << 58);
+    gs.write_gif_qword(image_tag32, 0);
+    gs.write_gif_qword(
+        0x2222222211111111ull,
+        0x4444444433333333ull);
+
+    ok = expect(!gs.transfer_active(),
+                "PSMCT32 transfer did not complete") && ok;
+    ok = expect(gs.vram().read_pixel(0, 8, 0, 0, 1) == 0x11111111u &&
+                gs.vram().read_pixel(0, 9, 0, 0, 1) == 0x22222222u &&
+                gs.vram().read_pixel(0, 10, 0, 0, 1) == 0x33333333u &&
+                gs.vram().read_pixel(0, 11, 0, 0, 1) == 0x44444444u,
+                "PSMCT32 IMAGE upload pixel mismatch") && ok;
+
+    // 24-bit upload: six tightly-packed pixels span two GIF qwords.
+    gs.reset();
+    const ps2::u64 blit24 =
+        (static_cast<ps2::u64>(1u) << 48) |
+        (static_cast<ps2::u64>(1u) << 56);
+    const ps2::u64 reg24 = 6ull | (1ull << 32);
+    ad_packet(0x50, blit24);
+    ad_packet(0x51, 0);
+    ad_packet(0x52, reg24);
+    ad_packet(0x53, 0);
+
+    const ps2::u64 image_tag24 =
+        2ull | (1ull << 15) | (2ull << 58);
+    gs.write_gif_qword(image_tag24, 0);
+
+    // Pixel byte stream:
+    // 030201 060504 090807 0C0B0A 0F0E0D 121110, then qword padding.
+    gs.write_gif_qword(
+        0x0807060504030201ull,
+        0x100F0E0D0C0B0A09ull);
+    gs.write_gif_qword(
+        0x0000000000001211ull,
+        0);
+
+    ok = expect(!gs.transfer_active(),
+                "PSMCT24 transfer did not complete") && ok;
+    ok = expect(gs.vram().read_pixel(1, 0, 0, 0, 1) == 0x030201u &&
+                gs.vram().read_pixel(1, 1, 0, 0, 1) == 0x060504u &&
+                gs.vram().read_pixel(1, 2, 0, 0, 1) == 0x090807u &&
+                gs.vram().read_pixel(1, 3, 0, 0, 1) == 0x0C0B0Au &&
+                gs.vram().read_pixel(1, 4, 0, 0, 1) == 0x0F0E0Du &&
+                gs.vram().read_pixel(1, 5, 0, 0, 1) == 0x121110u,
+                "PSMCT24 qword-carry upload mismatch") && ok;
+
+    const auto& stats = gs.stats();
+    ok = expect(stats.host_to_local_transfers == 1 &&
+                stats.host_to_local_pixels == 6 &&
+                stats.image_qwords == 2,
+                "host-to-local transfer statistics mismatch") && ok;
+    ok = expect((gs.register_value(0x53) & 0x3u) == 3u,
+                "completed transfer did not deactivate TRXDIR") && ok;
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -471,6 +586,8 @@ int main() {
     ok = test_video_timing_vblank_irqs() && ok;
     ok = test_gif_packet_decode() && ok;
     ok = test_gif_dma_engine() && ok;
+    ok = test_gs_vram_swizzle_addresses() && ok;
+    ok = test_gs_host_to_local_image_transfer() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

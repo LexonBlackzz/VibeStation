@@ -18,6 +18,10 @@ constexpr u32 kRegXyzf2 = 0x04;
 constexpr u32 kRegXyz2 = 0x05;
 constexpr u32 kRegXyzf3 = 0x0C;
 constexpr u32 kRegXyz3 = 0x0D;
+constexpr u32 kRegBitbltbuf = 0x50;
+constexpr u32 kRegTrxpos = 0x51;
+constexpr u32 kRegTrxreg = 0x52;
+constexpr u32 kRegTrxdir = 0x53;
 
 u32 descriptor_at(u64 regs, u32 cursor) {
     return static_cast<u32>((regs >> ((cursor & 0xFu) * 4u)) & 0xFu);
@@ -30,7 +34,9 @@ void GsCore::reset() {
     fifo_words_.fill(0);
     fifo_word_mask_ = 0;
     gif_ = {};
+    transfer_ = {};
     stats_ = {};
+    vram_.reset();
     primitive_vertex_count_ = 0;
 }
 
@@ -188,11 +194,125 @@ void GsCore::write_register(u32 address, u64 value) {
     registers_[address] = value;
     ++stats_.register_writes;
 
+    if (address == kRegTrxdir) {
+        const u32 xdir = static_cast<u32>(value & 0x3u);
+        if (xdir == 0u) begin_host_to_local();
+        else transfer_ = {};
+    }
+
     if (address == kRegPrim) {
         primitive_vertex_count_ = 0;
     } else if (address == kRegXyz2 || address == kRegXyz3 ||
                address == kRegXyzf2 || address == kRegXyzf3) {
         note_vertex_kick();
+    }
+}
+
+
+void GsCore::begin_host_to_local() {
+    transfer_ = {};
+
+    const u64 blit = registers_[kRegBitbltbuf];
+    const u64 pos = registers_[kRegTrxpos];
+    const u64 reg = registers_[kRegTrxreg];
+
+    transfer_.bp = static_cast<u32>((blit >> 32) & 0x3FFFu);
+    transfer_.bw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    transfer_.psm = static_cast<u32>((blit >> 56) & 0x3Fu);
+    transfer_.dsax = static_cast<u32>((pos >> 32) & 0x7FFu);
+    transfer_.dsay = static_cast<u32>((pos >> 48) & 0x7FFu);
+    transfer_.diry = ((pos >> 59) & 1u) != 0;
+    transfer_.dirx = ((pos >> 60) & 1u) != 0;
+    transfer_.width = static_cast<u32>(reg & 0xFFFu);
+    transfer_.height = static_cast<u32>((reg >> 32) & 0xFFFu);
+    transfer_.total_pixels = transfer_.width * transfer_.height;
+
+    if (transfer_.bw == 0 || transfer_.total_pixels == 0 ||
+        !GsVram::supported_color_psm(transfer_.psm)) {
+        ++stats_.unsupported_transfers;
+        transfer_.active = false;
+        return;
+    }
+
+    transfer_.active = true;
+    ++stats_.host_to_local_transfers;
+}
+
+void GsCore::consume_image_qword(u64 lo, u64 hi) {
+    ++stats_.image_qwords;
+    stats_.image_bytes += 16;
+
+    if (!transfer_.active) return;
+
+    const u8 bytes[16] = {
+        static_cast<u8>(lo), static_cast<u8>(lo >> 8),
+        static_cast<u8>(lo >> 16), static_cast<u8>(lo >> 24),
+        static_cast<u8>(lo >> 32), static_cast<u8>(lo >> 40),
+        static_cast<u8>(lo >> 48), static_cast<u8>(lo >> 56),
+        static_cast<u8>(hi), static_cast<u8>(hi >> 8),
+        static_cast<u8>(hi >> 16), static_cast<u8>(hi >> 24),
+        static_cast<u8>(hi >> 32), static_cast<u8>(hi >> 40),
+        static_cast<u8>(hi >> 48), static_cast<u8>(hi >> 56),
+    };
+
+    for (u32 i = 0; i < 16; ++i) {
+        if (transfer_.pending_size < transfer_.pending.size()) {
+            transfer_.pending[transfer_.pending_size++] = bytes[i];
+        }
+    }
+
+    consume_pending_pixels();
+}
+
+void GsCore::consume_pending_pixels() {
+    u32 bytes_per_pixel = 0;
+    switch (transfer_.psm) {
+    case 0: bytes_per_pixel = 4; break; // PSMCT32
+    case 1: bytes_per_pixel = 3; break; // PSMCT24
+    case 2: // PSMCT16
+    case 10: bytes_per_pixel = 2; break; // PSMCT16S
+    default: return;
+    }
+
+    u32 consumed = 0;
+    while (transfer_.active &&
+           transfer_.pending_size - consumed >= bytes_per_pixel) {
+        u32 value = 0;
+        for (u32 i = 0; i < bytes_per_pixel; ++i) {
+            value |= static_cast<u32>(transfer_.pending[consumed + i]) << (i * 8);
+        }
+        consumed += bytes_per_pixel;
+
+        const u32 linear_x = transfer_.pixel_index % transfer_.width;
+        const u32 linear_y = transfer_.pixel_index / transfer_.width;
+        const u32 x = transfer_.dsax +
+            (transfer_.dirx ? (transfer_.width - 1u - linear_x) : linear_x);
+        const u32 y = transfer_.dsay +
+            (transfer_.diry ? (transfer_.height - 1u - linear_y) : linear_y);
+
+        vram_.write_pixel(
+            transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
+        ++transfer_.pixel_index;
+        ++stats_.host_to_local_pixels;
+
+        if (transfer_.pixel_index >= transfer_.total_pixels) {
+            transfer_.active = false;
+            registers_[kRegTrxdir] =
+                (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+        }
+    }
+
+    if (!transfer_.active) {
+        transfer_.pending_size = 0;
+        return;
+    }
+
+    if (consumed != 0) {
+        const u32 remaining = transfer_.pending_size - consumed;
+        for (u32 i = 0; i < remaining; ++i) {
+            transfer_.pending[i] = transfer_.pending[consumed + i];
+        }
+        transfer_.pending_size = remaining;
     }
 }
 
@@ -246,7 +366,7 @@ void GsCore::write_gif_qword(u64 lo, u64 hi) {
             --gif_.values_remaining;
         }
     } else {
-        ++stats_.image_qwords;
+        consume_image_qword(lo, hi);
         --gif_.values_remaining;
     }
 

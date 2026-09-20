@@ -810,6 +810,11 @@ void Ps2App::panel_gs_debug() {
 
     ImGui::Text("GIF packet active: %s", gs.packet_active() ? "yes" : "no");
     ImGui::Text("Current PRIM: %u", gs.current_prim());
+    ImGui::Text(
+        "Host->local: %s   PSM: 0x%02X   pixels left: %u",
+        gs.transfer_active() ? "active" : "idle",
+        gs.transfer_psm(),
+        gs.transfer_pixels_remaining());
     ImGui::Separator();
 
     if (ImGui::BeginTable("GSStats", 2,
@@ -835,6 +840,10 @@ void Ps2App::panel_gs_debug() {
         row("Packed writes", static_cast<unsigned long long>(stats.packed_writes));
         row("REGLIST writes", static_cast<unsigned long long>(stats.reglist_writes));
         row("IMAGE qwords", static_cast<unsigned long long>(stats.image_qwords));
+        row("IMAGE bytes", static_cast<unsigned long long>(stats.image_bytes));
+        row("Host->local transfers", static_cast<unsigned long long>(stats.host_to_local_transfers));
+        row("Host->local pixels", static_cast<unsigned long long>(stats.host_to_local_pixels));
+        row("Unsupported transfers", static_cast<unsigned long long>(stats.unsupported_transfers));
         row("Unsupported packed", static_cast<unsigned long long>(stats.unsupported_packed));
         row("Vertex kicks", static_cast<unsigned long long>(stats.vertices));
         row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
