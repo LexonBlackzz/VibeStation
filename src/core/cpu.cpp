@@ -1241,6 +1241,9 @@ void Cpu::invalidate_icache_line(u32 addr) {
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(addr & ~0x0Fu, 16u);
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->invalidate_range(addr & ~0x0Fu, 16u);
+  }
 }
 
 u32 Cpu::gte_command_cycles(u32 instruction) {
