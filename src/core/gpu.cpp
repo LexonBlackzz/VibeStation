@@ -259,6 +259,67 @@ namespace {
         return (w > 0) || (w == 0 && top_left);
     }
 
+    inline s64 floor_div_positive(s64 numerator, s64 denominator) {
+        s64 q = numerator / denominator;
+        const s64 r = numerator % denominator;
+        if (r != 0 && numerator < 0) {
+            --q;
+        }
+        return q;
+    }
+
+    inline s64 ceil_div_positive(s64 numerator, s64 denominator) {
+        s64 q = numerator / denominator;
+        const s64 r = numerator % denominator;
+        if (r != 0 && numerator > 0) {
+            ++q;
+        }
+        return q;
+    }
+
+    inline bool constrain_triangle_span(s32 w_at_min_x, s32 step_x,
+                                        bool top_left, int& lo, int& hi) {
+        const s64 threshold = top_left ? 0 : 1;
+        const s64 w = static_cast<s64>(w_at_min_x);
+        const s64 step = static_cast<s64>(step_x);
+        if (step > 0) {
+            lo = std::max(
+                lo, static_cast<int>(
+                        ceil_div_positive(threshold - w, step)));
+        }
+        else if (step < 0) {
+            hi = std::min(
+                hi, static_cast<int>(
+                        floor_div_positive(w - threshold, -step)));
+        }
+        else if (w < threshold) {
+            return false;
+        }
+        return lo <= hi;
+    }
+
+    inline bool triangle_scanline_span(
+        s16 min_x, s16 max_x,
+        s32 w0_row, s32 w1_row, s32 w2_row,
+        s32 step_w0_x, s32 step_w1_x, s32 step_w2_x,
+        bool edge0_top_left, bool edge1_top_left, bool edge2_top_left,
+        s16& span_min_x, s16& span_max_x) {
+        int lo = 0;
+        int hi = static_cast<int>(max_x) - static_cast<int>(min_x);
+        if (hi < 0 ||
+            !constrain_triangle_span(
+                w0_row, step_w0_x, edge0_top_left, lo, hi) ||
+            !constrain_triangle_span(
+                w1_row, step_w1_x, edge1_top_left, lo, hi) ||
+            !constrain_triangle_span(
+                w2_row, step_w2_x, edge2_top_left, lo, hi)) {
+            return false;
+        }
+        span_min_x = static_cast<s16>(static_cast<int>(min_x) + lo);
+        span_max_x = static_cast<s16>(static_cast<int>(min_x) + hi);
+        return true;
+    }
+
     inline int dither_bias(s16 x, s16 y) {
         return kDitherTable[static_cast<u16>(y) & 0x3u]
             [static_cast<u16>(x) & 0x3u];
@@ -2730,16 +2791,19 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
             w2_row * static_cast<s32>(v2.color.b);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 r_num = r_row;
-            s32 g_num = g_row;
-            s32 b_num = b_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                s32 r_num = r_row + step_r_x * span_dx;
+                s32 g_num = g_row + step_g_x * span_dx;
+                s32 b_num = b_row + step_b_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
                     const u8 r = static_cast<u8>(clamp_u8_i(r_num / area));
                     const u8 g = static_cast<u8>(clamp_u8_i(g_num / area));
                     const u8 b = static_cast<u8>(clamp_u8_i(b_num / area));
@@ -2751,13 +2815,10 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                     else {
                         set_pixel_clipped(x, y, out15, true);
                     }
+                    r_num += step_r_x;
+                    g_num += step_g_x;
+                    b_num += step_b_x;
                 }
-                w0 += step_w0_x;
-                w1 += step_w1_x;
-                w2 += step_w2_x;
-                r_num += step_r_x;
-                g_num += step_g_x;
-                b_num += step_b_x;
             }
             w0_row += step_w0_y;
             w1_row += step_w1_y;
@@ -3173,19 +3234,82 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             w2_row * static_cast<s32>(v2.color.b);
 
         for (s16 y = min_y; y <= max_y; ++y) {
-            s32 w0 = w0_row;
-            s32 w1 = w1_row;
-            s32 w2 = w2_row;
-            s32 u_num = u_row;
-            s32 v_num = v_row;
-            s32 r_num = r_row;
-            s32 g_num = g_row;
-            s32 b_num = b_row;
-            for (s16 x = min_x; x <= max_x; ++x) {
-                if (edge_inside_ccw(w0, edge0_top_left) &&
-                    edge_inside_ccw(w1, edge1_top_left) &&
-                    edge_inside_ccw(w2, edge2_top_left)) {
-                    if (profile_raster) {
+            s16 span_min_x = 0;
+            s16 span_max_x = -1;
+            if (triangle_scanline_span(
+                    min_x, max_x, w0_row, w1_row, w2_row,
+                    step_w0_x, step_w1_x, step_w2_x,
+                    edge0_top_left, edge1_top_left, edge2_top_left,
+                    span_min_x, span_max_x)) {
+                const s32 span_dx =
+                    static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+                const u64 span_pixels = static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+                if (profile_raster) {
+                    profile_covered += span_pixels;
+                }
+
+                s32 u_num = u_row + step_u_x * span_dx;
+                s32 v_num = v_row + step_v_x * span_dx;
+                s32 r_num = r_row + step_r_x * span_dx;
+                s32 g_num = g_row + step_g_x * span_dx;
+                s32 b_num = b_row + step_b_x * span_dx;
+                for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                    const u8 u = static_cast<u8>(u_num / area);
+                    const u8 v_coord = static_cast<u8>(v_num / area);
+                    const u16 texel = read_texel(texture, u, v_coord);
+                    if (profile_raster && texel == 0) {
+                        ++profile_transparent;
+                    }
+                    if (texel != 0) {
+                        const u8 mr =
+                            static_cast<u8>(clamp_u8_i(r_num / area));
+                        const u8 mg =
+                            static_cast<u8>(clamp_u8_i(g_num / area));
+                        const u8 mb =
+                            static_cast<u8>(clamp_u8_i(b_num / area));
+                        u16 out15 = texel;
+                        if (!raw_texture) {
+                            if (dither_enabled_) {
+                                out15 = modulate_texel_dithered_15bit(
+                                    texel, mr, mg, mb, x, y);
+                            }
+                            else {
+                                out15 =
+                                    modulate_texel_15bit(texel, mr, mg, mb);
+                            }
+                        }
+                        const bool texel_semi =
+                            semi_transparency_mode_ &&
+                            ((texel & 0x8000u) != 0);
+                        if (profile_raster && texel_semi) {
+                            ++profile_semi;
+                        }
+                        if (texel_semi) {
+                            set_pixel_clipped(x, y, out15, true);
+                        }
+                        else {
+                            write_pixel_opaque_clipped(x, y, out15);
+                        }
+                    }
+                    u_num += step_u_x;
+                    v_num += step_v_x;
+                    r_num += step_r_x;
+                    g_num += step_g_x;
+                    b_num += step_b_x;
+                }
+            }
+            w0_row += step_w0_y;
+            w1_row += step_w1_y;
+            w2_row += step_w2_y;
+            u_row += step_u_y;
+            v_row += step_v_y;
+            r_row += step_r_y;
+            g_row += step_g_y;
+            b_row += step_b_y;
+        }
+        if (profile_raster) {
                         ++profile_covered;
                     }
                     const u8 u = static_cast<u8>(u_num / area);
