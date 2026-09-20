@@ -1451,6 +1451,39 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   guarded_delay_addi_overflow.expect_x64_fallback = true;
   cases.push_back(guarded_delay_addi_overflow);
 
+  CpuCompareCase guarded_active_load_delay{};
+  guarded_active_load_delay.name =
+      "native_aggressive_branch_tail_active_load_delay";
+  guarded_active_load_delay.initial_gpr[1] = 0x80011720u;
+  guarded_active_load_delay.initial_gpr[2] = 0x11111111u;
+  guarded_active_load_delay.memory.push_back(
+      {0x00011720u, 0x00000007u});
+  guarded_active_load_delay.program = {
+      enc_i(0x23, 1, 2, 0),       // decoded LW leaves r2 pending
+      enc_r(2, 0, 3, 0, 0x21),    // ADDU sees old r2, then load commits
+      enc_i(0x05, 2, 0, 2),       // BNE sees loaded r2
+      enc_i(0x08, 2, 4, 1),       // ADDI delay sees loaded r2
+      0,
+      0,
+  };
+  guarded_active_load_delay.instructions = 4;
+  guarded_active_load_delay.segment_instructions = {1u, 3u};
+  guarded_active_load_delay.segment_native_tiers = {
+      {false, true, true}, {true, true, true}};
+  guarded_active_load_delay.compare_segment_states = true;
+  guarded_active_load_delay.enable_ram_load_fastpath_for_x64 = true;
+  guarded_active_load_delay
+      .enable_aggressive_reduced_helper_branch_tail_for_x64 = true;
+  guarded_active_load_delay
+      .require_native_aggressive_reduced_helper_branch_tail_entry_when_available =
+      true;
+  guarded_active_load_delay.require_native_branch_tail_when_available = true;
+  guarded_active_load_delay
+      .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available =
+      true;
+  guarded_active_load_delay.native_branch_should_be_taken = true;
+  cases.push_back(guarded_active_load_delay);
+
   CpuCompareCase aggressive_sw{};
   aggressive_sw.name = "native_aggressive_reduced_helper_branch_tail_sw";
   aggressive_sw.initial_gpr[1] = 0x80011640u;
