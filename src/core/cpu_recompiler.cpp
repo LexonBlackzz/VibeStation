@@ -1832,7 +1832,7 @@ CpuRunSliceResult CpuOptimizedBackend::run_slice(
       continue;
     }
 
-    ++block->entry_count;
+    record_block_entry(*block);
     const u32 cycle_budget = max_cycles - total.cycles;
     const u32 instruction_budget = max_instructions - total.instructions;
     CpuBlockRunResult result{};
@@ -2013,6 +2013,26 @@ void CpuOptimizedBackend::begin_frame(u32 frame_index) {
   log_periodic_stats();
 }
 
+void CpuOptimizedBackend::record_block_entry(DecodedBlock &block) {
+  ++block.entry_count;
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+  }
+  ++block.profile_frame_entries;
+}
+
+void CpuOptimizedBackend::record_native_block_entry(DecodedBlock &block) {
+  ++block.native_entry_count;
+  if (block.profile_entry_frame != current_frame_) {
+    block.profile_entry_frame = current_frame_;
+    block.profile_frame_entries = 0;
+    block.profile_frame_native_entries = 0;
+  }
+  ++block.profile_frame_native_entries;
+}
+
 void CpuOptimizedBackend::flush() {
   dispatch_cache_.fill({});
   blocks_.clear();
@@ -2047,18 +2067,20 @@ CpuBackendStats CpuOptimizedBackend::stats() const {
   out.hot_blocks = {};
 
   auto insert_hot_block = [&](const DecodedBlock &block) {
-    if (!g_profile_detailed_timing || block.entry_count == 0 ||
-        block.instruction_count == 0) {
+    if (!g_profile_detailed_timing ||
+        block.profile_entry_frame != current_frame_ ||
+        block.profile_frame_entries == 0 || block.instruction_count == 0) {
       return;
     }
 
     CpuHotBlockStats hot{};
     hot.start_pc = block.start_pc;
     hot.instruction_count = block.instruction_count;
-    hot.entries = block.entry_count;
-    hot.native_entries = block.native_entry_count;
+    hot.entries = block.profile_frame_entries;
+    hot.native_entries = block.profile_frame_native_entries;
     hot.estimated_guest_instructions =
-        block.entry_count * static_cast<u64>(block.instruction_count);
+        block.profile_frame_entries *
+        static_cast<u64>(block.instruction_count);
     hot.native_prefix_instruction_count = block.native_prefix_instruction_count;
     hot.native_compiled = block.native_fn != nullptr;
     hot.native_decoded_only = block.native_decoded_only;
