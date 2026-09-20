@@ -401,7 +401,7 @@ static void log_cpu_compare_failure_summary(
   }
 
   LOG_ERROR(
-      "CPU_COMPARE_FAIL name=%s mode=%s state=%u segment=%u irq=%u mem=%u "
+      "CPU_COMPARE_FAIL name=%s ref=Interpreter mode=%s state=%u segment=%u irq=%u mem=%u "
       "periph=%u seg_periph=%u expected=%u native=%u native_check=%s "
       "pc=%08X/%08X next=%08X/%08X current=%08X/%08X cyc=%llu/%llu "
       "first_reg=%d:%08X/%08X native_instr=%llu decoded_instr=%llu "
@@ -3548,6 +3548,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_force_compile = true;
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
+  LOG_INFO(
+      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2%s",
+      memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
     ++failures;
@@ -4255,10 +4258,13 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_execution_mode_cli_value = saved_override_value;
 
   if (failures != 0) {
-    LOG_ERROR("CPU backend compare test failed: %d case(s)", failures);
+    LOG_ERROR(
+        "CPU backend compare test failed: %d case(s) reference=Interpreter",
+        failures);
     return 1;
   }
-  LOG_INFO("CPU backend compare test passed");
+  LOG_INFO(
+      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2");
   return 0;
 }
 } // namespace
