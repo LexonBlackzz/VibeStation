@@ -1010,6 +1010,23 @@ int run_gpu_microbenchmark() {
   }
 
   {
+    const RefVertex v0{680, 40, 96, 64, 220, 0, 0};
+    const RefVertex v1{858, 54, 240, 128, 48, 0, 0};
+    const RefVertex v2{698, 205, 64, 240, 160, 0, 0};
+    run_gpu_benchmark_case(
+        "gouraud shaded", kIterations,
+        [](Gpu &, std::vector<u16> &) {},
+        [=](Gpu &gpu) {
+          gpu.gp0(rgb_command(0x30, v0.r, v0.g, v0.b));
+          gpu.gp0(vertex_word(v0.x, v0.y));
+          gpu.gp0(rgb_word(v1.r, v1.g, v1.b));
+          gpu.gp0(vertex_word(v1.x, v1.y));
+          gpu.gp0(rgb_word(v2.r, v2.g, v2.b));
+          gpu.gp0(vertex_word(v2.x, v2.y));
+        });
+  }
+
+  {
     constexpr u16 texpage = 0x0108u;
     const RefVertex v0{680, 40, 96, 64, 220, 2, 3};
     const RefVertex v1{858, 54, 240, 128, 48, 120, 8};
