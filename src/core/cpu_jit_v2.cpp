@@ -480,8 +480,16 @@ struct CpuJitV2Backend::Impl {
     u32 phys_start = 0;
     u32 phys_end = 0;
     u32 instruction_count = 0;
+    u32 base_cycles = 0;
+    u32 store_count = 0;
+    u32 branch_index = 0;
+    u32 branch_target = 0;
+    bool has_store = false;
+    bool has_branch = false;
     std::array<u32, 16> words{};
     std::array<u8, 6> cached_regs{};
+    std::array<u8, 8> store_rs{};
+    std::array<s32, 8> store_simm{};
 #if VIBESTATION_JIT_V2_X64
     std::unique_ptr<Xbyak::CodeGenerator> code;
     V2NativeFn fn = nullptr;
