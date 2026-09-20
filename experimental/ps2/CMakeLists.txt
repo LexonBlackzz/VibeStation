@@ -11,6 +11,7 @@ add_library(vibestation_ps2_core STATIC
     core/cdvd/cdvd_hw.cpp
     core/ps2_system.cpp
     core/ee/ee_cpu.cpp
+    core/gs/gs_core.cpp
     core/gs/gs_privileged.cpp
     core/hw/ee_hw.cpp
     core/hw/iop_hw_window.cpp

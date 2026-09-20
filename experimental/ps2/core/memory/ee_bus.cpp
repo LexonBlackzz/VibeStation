@@ -1,6 +1,7 @@
 #include "core/memory/ee_bus.h"
 
 #include "core/bios/bios.h"
+#include "core/gs/gs_core.h"
 #include "core/gs/gs_privileged.h"
 #include "core/hw/ee_hw.h"
 #include "core/hw/iop_hw_window.h"
@@ -12,9 +13,9 @@ namespace ps2 {
 
 EeBus::EeBus(EeRam& ram, EeScratchpad& scratchpad, EeHw& hw,
              IopHwWindow& iop_hw, IopRam& iop_ram, GsPrivileged& gs,
-             const Bios& bios)
+             GsCore& gs_core, const Bios& bios)
     : ram_(ram), scratchpad_(scratchpad), hw_(hw), iop_hw_(iop_hw),
-      iop_ram_(iop_ram), gs_(gs), bios_(bios) {}
+      iop_ram_(iop_ram), gs_(gs), gs_core_(gs_core), bios_(bios) {}
 
 void EeBus::reset() {
     vu0_micro_.fill(0);
@@ -116,6 +117,8 @@ bool EeBus::write16(u32 address,u16 value){
 bool EeBus::write32(u32 address,u32 value){
     if(scratchpad_.contains(address,4)) return scratchpad_.write32(address,value);
     const u32 physical=to_physical(address);
+    if (physical >= GsCore::kGifFifoBase && physical < GsCore::kGifFifoBase + 0x10u)
+        return gs_core_.write_gif_fifo32(physical, value);
     if (physical >= 0x11000000u && physical + 4u <= 0x11010000u) {
         for (u32 i = 0; i < 4u; ++i) if (!write8(physical + i, static_cast<u8>(value >> (i * 8)))) return false;
         return true;
@@ -129,6 +132,8 @@ bool EeBus::write32(u32 address,u32 value){
 bool EeBus::write64(u32 address,u64 value){
     if(scratchpad_.contains(address,8)) return scratchpad_.write64(address,value);
     const u32 physical=to_physical(address);
+    if (physical >= GsCore::kGifFifoBase && physical < GsCore::kGifFifoBase + 0x10u)
+        return gs_core_.write_gif_fifo64(physical, value);
     if (physical >= 0x11000000u && physical + 8u <= 0x11010000u) {
         for (u32 i = 0; i < 8u; ++i) if (!write8(physical + i, static_cast<u8>(value >> (i * 8)))) return false;
         return true;

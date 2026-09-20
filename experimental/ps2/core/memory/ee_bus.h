@@ -10,6 +10,7 @@ class Bios;
 class EeHw;
 class EeRam;
 class EeScratchpad;
+class GsCore;
 class GsPrivileged;
 class IopHwWindow;
 class IopRam;
@@ -23,6 +24,7 @@ public:
         IopHwWindow& iop_hw,
         IopRam& iop_ram,
         GsPrivileged& gs,
+        GsCore& gs_core,
         const Bios& bios);
 
     void reset();
@@ -56,6 +58,7 @@ private:
     IopHwWindow& iop_hw_;
     IopRam& iop_ram_;
     GsPrivileged& gs_;
+    GsCore& gs_core_;
     const Bios& bios_;
 
     std::array<u8, 0x1000> vu0_micro_{};

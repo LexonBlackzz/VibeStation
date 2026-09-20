@@ -2,6 +2,7 @@
 #include "core/bios/bios.h"
 #include "core/cdvd/cdvd_hw.h"
 #include "core/ee/ee_cpu.h"
+#include "core/gs/gs_core.h"
 #include "core/gs/gs_privileged.h"
 #include "core/hw/ee_hw.h"
 #include "core/hw/iop_hw_window.h"
@@ -33,6 +34,7 @@ public:
     EeCpu& ee(){return ee_;} const EeCpu& ee()const{return ee_;}
     IopCpu& iop(){return iop_;} const IopCpu& iop()const{return iop_;}
     IopIntc& iop_intc(){return iop_intc_;} const IopIntc& iop_intc()const{return iop_intc_;}
+    GsCore& gs_core(){return gs_core_;} const GsCore& gs_core()const{return gs_core_;}
     bool bios_started()const{return bios_started_;}
     bool halted()const{return ee_.halted()||iop_.halted();}
     std::string halt_reason()const;
@@ -41,7 +43,7 @@ public:
 private:
     bool advance_iop_for_ee_step(std::string& error);
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
-    EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{};
+    EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{};
     IopBus iop_bus_; EeBus bus_; Scheduler scheduler_{}; VideoTiming video_timing_{}; EeCpu ee_; IopCpu iop_;
     bool bios_started_=false; u32 reset_instruction_=0; u32 iop_reset_instruction_=0; u32 ee_iop_phase_=0;
 };

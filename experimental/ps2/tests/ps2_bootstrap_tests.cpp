@@ -303,6 +303,65 @@ bool test_video_timing_vblank_irqs() {
     return ok;
 }
 
+
+bool test_gif_packet_decode() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    constexpr ps2::u32 fifo = ps2::GsCore::kGifFifoBase;
+
+    // PACKED A+D packet: PRIM then FRAME_1.
+    const ps2::u64 packed_tag_lo =
+        2ull | (1ull << 15) | (1ull << 60);
+    ok = expect(system.bus().write64(fifo, packed_tag_lo) &&
+                system.bus().write64(fifo + 8u, 0xEull),
+                "GIF packed tag write failed") && ok;
+    ok = expect(system.bus().write64(fifo, 6ull) &&
+                system.bus().write64(fifo + 8u, 0x00ull),
+                "GIF PRIM A+D write failed") && ok;
+    ok = expect(system.bus().write64(fifo, 0x1122334455667788ull) &&
+                system.bus().write64(fifo + 8u, 0x4Cull),
+                "GIF FRAME_1 A+D write failed") && ok;
+    ok = expect(system.gs_core().register_value(0x00) == 6ull,
+                "GIF PRIM register mismatch") && ok;
+    ok = expect(system.gs_core().register_value(0x4C) == 0x1122334455667788ull,
+                "GIF FRAME_1 register mismatch") && ok;
+
+    // REGLIST packet with PRIM + XYZ2 in a single qword.
+    const ps2::u64 reglist_tag_lo =
+        1ull | (1ull << 15) | (1ull << 58) | (2ull << 60);
+    ok = expect(system.bus().write64(fifo, reglist_tag_lo) &&
+                system.bus().write64(fifo + 8u, 0x50ull),
+                "GIF reglist tag write failed") && ok;
+    const ps2::u64 xyz = 0x001234560078009Aull;
+    ok = expect(system.bus().write64(fifo, 3ull) &&
+                system.bus().write64(fifo + 8u, xyz),
+                "GIF reglist payload write failed") && ok;
+    ok = expect(system.gs_core().register_value(0x00) == 3ull,
+                "GIF reglist PRIM mismatch") && ok;
+    ok = expect(system.gs_core().register_value(0x05) == xyz,
+                "GIF reglist XYZ2 mismatch") && ok;
+
+    // IMAGE packet accounting.
+    const ps2::u64 image_tag_lo =
+        1ull | (1ull << 15) | (2ull << 58);
+    ok = expect(system.bus().write64(fifo, image_tag_lo) &&
+                system.bus().write64(fifo + 8u, 0),
+                "GIF image tag write failed") && ok;
+    ok = expect(system.bus().write64(fifo, 0x0123456789ABCDEFull) &&
+                system.bus().write64(fifo + 8u, 0xFEDCBA9876543210ull),
+                "GIF image payload write failed") && ok;
+
+    const auto& stats = system.gs_core().stats();
+    ok = expect(stats.gif_tags == 3, "GIF tag count mismatch") && ok;
+    ok = expect(stats.packed_writes == 2, "GIF packed write count mismatch") && ok;
+    ok = expect(stats.reglist_writes == 2, "GIF reglist write count mismatch") && ok;
+    ok = expect(stats.image_qwords == 1, "GIF image qword count mismatch") && ok;
+    ok = expect(stats.vertices == 1, "GIF vertex kick count mismatch") && ok;
+    ok = expect(stats.eop_packets == 3, "GIF EOP count mismatch") && ok;
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -333,6 +392,7 @@ int main() {
     ok = test_syscall_exception() && ok;
     ok = test_syscall_delay_slot_exception() && ok;
     ok = test_video_timing_vblank_irqs() && ok;
+    ok = test_gif_packet_decode() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";
