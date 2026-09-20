@@ -226,12 +226,11 @@ int cache_slot(const std::array<u8, 3> &cached, u8 guest_reg) {
   return -1;
 }
 
-const Xbyak::Reg32 &cache_host_reg(int slot) {
-  using namespace Xbyak;
+Xbyak::Reg32 cache_host_reg(Xbyak::CodeGenerator &code, int slot) {
   switch (slot) {
-  case 0: return r8d;
-  case 1: return r9d;
-  default: return r10d;
+  case 0: return code.r8d;
+  case 1: return code.r9d;
+  default: return code.r10d;
   }
 }
 
@@ -244,7 +243,7 @@ void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
   }
   const int slot = cache_slot(cached, guest_reg);
   if (slot >= 0) {
-    const Reg32 &src = cache_host_reg(slot);
+    const Reg32 &src = cache_host_reg(code, slot);
     if (src.getIdx() != dst.getIdx()) {
       code.mov(dst, src);
     }
@@ -263,7 +262,7 @@ void emit_write_guest(Xbyak::CodeGenerator &code,
   }
   const int slot = cache_slot(cached, guest_reg);
   if (slot >= 0) {
-    const Reg32 &dst = cache_host_reg(slot);
+    const Reg32 &dst = cache_host_reg(code, slot);
     if (dst.getIdx() != src.getIdx()) {
       code.mov(dst, src);
     }
@@ -289,7 +288,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     if (cached[slot] == 0u) {
       continue;
     }
-    code->mov(cache_host_reg(static_cast<int>(slot)),
+    code->mov(cache_host_reg(*code, static_cast<int>(slot)),
               code->dword[code->rdx + static_cast<int>(cached[slot]) * 4]);
   }
 
@@ -394,7 +393,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       continue;
     }
     code->mov(code->dword[code->rdx + static_cast<int>(cached[slot]) * 4],
-              cache_host_reg(static_cast<int>(slot)));
+              cache_host_reg(*code, static_cast<int>(slot)));
   }
 
   code->mov(code->dword[code->rdx], 0u);
