@@ -652,6 +652,58 @@ bool test_gs_untextured_rasterization() {
     return ok;
 }
 
+
+bool test_gs_display_extraction() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // Display circuit 1: 4x2 pixels, framebuffer starts at DBX=2, DBY=3.
+    constexpr ps2::u64 pmode = 1u;
+    constexpr ps2::u64 dispfb =
+        (static_cast<ps2::u64>(1u) << 9) |
+        (static_cast<ps2::u64>(2u) << 32) |
+        (static_cast<ps2::u64>(3u) << 43);
+    constexpr ps2::u64 display =
+        (static_cast<ps2::u64>(3u) << 32) |
+        (static_cast<ps2::u64>(1u) << 44);
+
+    ok = expect(system.gs_privileged().write64(0x12000000u, pmode) &&
+                system.gs_privileged().write64(0x12000070u, dispfb) &&
+                system.gs_privileged().write64(0x12000080u, display),
+                "GS display register setup failed") && ok;
+
+    const ps2::u32 colors[8] = {
+        0xFF000011u, 0xFF002200u, 0xFF330000u, 0xFF443322u,
+        0xFF556677u, 0xFF778899u, 0xFFABCDEFu, 0xFF102030u,
+    };
+    for (ps2::u32 y = 0; y < 2; ++y) {
+        for (ps2::u32 x = 0; x < 4; ++x) {
+            ok = expect(
+                system.gs_core().vram().write_pixel(
+                    0, 2u + x, 3u + y, 0, 1, colors[y * 4u + x]),
+                "GS display VRAM setup failed") && ok;
+        }
+    }
+
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+
+    const auto& out = system.gs_display();
+    ok = expect(out.valid(), "GS display surface not valid") && ok;
+    ok = expect(out.width() == 4 && out.height() == 2,
+                "GS display dimensions mismatch") && ok;
+    ok = expect(out.circuit() == 1 && out.psm() == 0,
+                "GS display metadata mismatch") && ok;
+    ok = expect(out.rgba8().size() == 8,
+                "GS display pixel count mismatch") && ok;
+    for (std::size_t i = 0; i < 8 && i < out.rgba8().size(); ++i) {
+        ok = expect(out.rgba8()[i] == colors[i],
+                    "GS display extracted pixel mismatch") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -687,6 +739,7 @@ int main() {
     ok = test_gs_vram_swizzle_addresses() && ok;
     ok = test_gs_host_to_local_image_transfer() && ok;
     ok = test_gs_untextured_rasterization() && ok;
+    ok = test_gs_display_extraction() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

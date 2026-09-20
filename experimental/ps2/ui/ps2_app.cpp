@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -132,6 +133,7 @@ void Ps2App::run() {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
+        update_display_texture();
         render_ui();
 
         ImGui::Render();
@@ -156,6 +158,14 @@ void Ps2App::run() {
 }
 
 void Ps2App::shutdown() {
+    if (display_texture_ != 0 && gl_context_ != nullptr) {
+        glDeleteTextures(1, &display_texture_);
+        display_texture_ = 0;
+        display_texture_width_ = 0;
+        display_texture_height_ = 0;
+        display_texture_generation_ = ~0ull;
+    }
+
     if (ImGui::GetCurrentContext() != nullptr) {
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_Shutdown();
@@ -177,6 +187,59 @@ void Ps2App::shutdown() {
     }
 
     SDL_Quit();
+}
+
+
+void Ps2App::update_display_texture() {
+    const auto& display = system_.gs_display();
+    if (!display.valid() || display.rgba8().empty()) {
+        return;
+    }
+    if (display_texture_generation_ == display.generation()) {
+        return;
+    }
+
+    if (display_texture_ == 0) {
+        glGenTextures(1, &display_texture_);
+        glBindTexture(GL_TEXTURE_2D, display_texture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, display_texture_);
+    }
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (display_texture_width_ != display.width() ||
+        display_texture_height_ != display.height()) {
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            static_cast<GLsizei>(display.width()),
+            static_cast<GLsizei>(display.height()),
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            display.rgba8().data());
+        display_texture_width_ = display.width();
+        display_texture_height_ = display.height();
+    } else {
+        glTexSubImage2D(
+            GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            static_cast<GLsizei>(display.width()),
+            static_cast<GLsizei>(display.height()),
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            display.rgba8().data());
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    display_texture_generation_ = display.generation();
 }
 
 void Ps2App::process_events(bool& quit) {
@@ -370,6 +433,40 @@ void Ps2App::panel_main() {
     const float center_x = start.x + (available.x * 0.5f);
     const float center_y = start.y + (available.y * 0.5f);
 
+    const auto& display = system_.gs_display();
+    if (display.valid() && display_texture_ != 0 &&
+        display.width() != 0 && display.height() != 0) {
+        const float aspect =
+            static_cast<float>(display.width()) /
+            static_cast<float>(display.height());
+        ImVec2 image_size = available;
+        if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
+            image_size.x = image_size.y * aspect;
+        } else if (aspect > 0.0f) {
+            image_size.y = image_size.x / aspect;
+        }
+        image_size.x = std::max(1.0f, image_size.x);
+        image_size.y = std::max(1.0f, image_size.y);
+
+        ImGui::SetCursorPos(ImVec2(
+            start.x + (available.x - image_size.x) * 0.5f,
+            start.y + (available.y - image_size.y) * 0.5f));
+        ImGui::Image(
+            (ImTextureID)(intptr_t)display_texture_,
+            image_size,
+            ImVec2(0.0f, 0.0f),
+            ImVec2(1.0f, 1.0f));
+
+        ImGui::SetCursorPos(ImVec2(start.x + 10.0f, start.y + 10.0f));
+        ImGui::TextDisabled(
+            "GS circuit %u  %ux%u  PSM 0x%02X",
+            display.circuit(),
+            display.width(),
+            display.height(),
+            display.psm());
+        return;
+    }
+
     const ImVec4 title_color =
         ui_theme::current_startup_title_color(ui_theme::g_theme_settings);
     const ImVec4 text_color =
@@ -394,7 +491,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 6: GIF DMA + GS VRAM + basic software raster";
+    const char* phase = "Phase 7: GS software output + display extraction";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -508,7 +605,7 @@ void Ps2App::panel_main() {
 
     ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("Textured GS draws + display extraction");
+    ImGui::TextDisabled("Textured GS draws + blending/depth");
     ImGui::EndChild();
 }
 

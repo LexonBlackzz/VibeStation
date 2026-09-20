@@ -13,6 +13,7 @@ add_library(vibestation_ps2_core STATIC
     core/ps2_system.cpp
     core/ee/ee_cpu.cpp
     core/gs/gs_core.cpp
+    core/gs/gs_display.cpp
     core/gs/gs_rasterizer.cpp
     core/gs/gs_vram.cpp
     core/gs/gs_privileged.cpp

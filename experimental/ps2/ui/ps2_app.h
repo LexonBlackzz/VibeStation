@@ -19,6 +19,7 @@ public:
 private:
     void process_events(bool& quit);
     void render_ui();
+    void update_display_texture();
     void menu_bar();
     void panel_main();
     void panel_system();
@@ -41,6 +42,10 @@ private:
     SDL_GLContext gl_context_ = nullptr;
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
+    unsigned int display_texture_ = 0;
+    u32 display_texture_width_ = 0;
+    u32 display_texture_height_ = 0;
+    u64 display_texture_generation_ = ~0ull;
 
     Ps2System system_{};
 
