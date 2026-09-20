@@ -490,6 +490,7 @@ struct CpuJitV2Backend::Impl {
     std::array<u8, 6> cached_regs{};
     std::array<u8, 8> store_rs{};
     std::array<s32, 8> store_simm{};
+    std::array<u8, 8> store_instruction_index{};
 #if VIBESTATION_JIT_V2_X64
     std::unique_ptr<Xbyak::CodeGenerator> code;
     V2NativeFn fn = nullptr;
@@ -634,6 +635,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       s32 branch_simm = 0;
       std::array<u8, 8> store_rs{};
       std::array<s32, 8> store_simm{};
+      std::array<u8, 8> store_instruction_index{};
 
       auto fetch_decoded = [&](u32 i, V2DecodedInstruction &inst,
                                u32 &bits) -> bool {
@@ -695,6 +697,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           has_store = true;
           store_rs[store_count] = inst.rs;
           store_simm[store_count] = inst.simm;
+          store_instruction_index[store_count] =
+              static_cast<u8>(decoded.size());
           ++store_count;
         }
 
@@ -724,6 +728,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.store_count = store_count;
       block.store_rs = store_rs;
       block.store_simm = store_simm;
+      block.store_instruction_index = store_instruction_index;
       block.branch_index = branch_index;
       if (has_branch) {
         const u32 branch_pc = start_pc + branch_index * 4u;
