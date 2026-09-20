@@ -24,6 +24,7 @@ private:
     void panel_system();
     void panel_ee_debug();
     void panel_iop_debug();
+    void panel_gs_debug();
     void panel_scheduler();
     void panel_settings();
     void panel_about();
@@ -46,6 +47,7 @@ private:
     bool show_system_ = false;
     bool show_ee_debug_ = false;
     bool show_iop_debug_ = false;
+    bool show_gs_debug_ = false;
     bool show_scheduler_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;

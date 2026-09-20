@@ -224,6 +224,8 @@ void Ps2App::process_events(bool& quit) {
                 show_ee_debug_ = !show_ee_debug_;
             } else if (event.key.keysym.sym == SDLK_F10) {
                 show_iop_debug_ = !show_iop_debug_;
+            } else if (event.key.keysym.sym == SDLK_F11) {
+                show_gs_debug_ = !show_gs_debug_;
             }
         }
     }
@@ -262,6 +264,9 @@ void Ps2App::render_ui() {
     }
     if (show_iop_debug_) {
         panel_iop_debug();
+    }
+    if (show_gs_debug_) {
+        panel_gs_debug();
     }
     if (show_scheduler_) {
         panel_scheduler();
@@ -337,6 +342,7 @@ void Ps2App::menu_bar() {
         ImGui::MenuItem("System", nullptr, &show_system_);
         ImGui::MenuItem("EE Debug", "F9", &show_ee_debug_);
         ImGui::MenuItem("IOP Debug", "F10", &show_iop_debug_);
+        ImGui::MenuItem("GS Debug", "F11", &show_gs_debug_);
         ImGui::MenuItem("Scheduler", nullptr, &show_scheduler_);
         ImGui::Separator();
         ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
@@ -388,7 +394,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 4: dual EE + IOP BIOS execution";
+    const char* phase = "Phase 5: BIOS idle + GIF/GS command path";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -486,9 +492,23 @@ void Ps2App::panel_main() {
         "%llu",
         static_cast<unsigned long long>(iop_state.instructions_executed));
 
+
+    const auto& gs_stats = system_.gs_core().stats();
+    ImGui::Text("GIF qwords");
+    ImGui::SameLine(190.0f);
+    ImGui::Text(
+        "%llu",
+        static_cast<unsigned long long>(gs_stats.gif_qwords));
+
+    ImGui::Text("GS primitives");
+    ImGui::SameLine(190.0f);
+    ImGui::Text(
+        "%llu",
+        static_cast<unsigned long long>(gs_stats.primitives));
+
     ImGui::Text("Next subsystem");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("IOP INTC/timers/DMAC + SIF/CDVD timing");
+    ImGui::TextDisabled("GS transfer engine + software rasterization");
     ImGui::EndChild();
 }
 
@@ -770,6 +790,98 @@ void Ps2App::panel_iop_debug() {
             ImGui::Text("0x%08X", state.gpr[i]);
         }
 
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+}
+
+
+void Ps2App::panel_gs_debug() {
+    ImGui::SetNextWindowSize(
+        ImVec2(610.0f, 560.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("GS Debug", &show_gs_debug_)) {
+        ImGui::End();
+        return;
+    }
+
+    const auto& gs = system_.gs_core();
+    const auto& stats = gs.stats();
+
+    ImGui::Text("GIF packet active: %s", gs.packet_active() ? "yes" : "no");
+    ImGui::Text("Current PRIM: %u", gs.current_prim());
+    ImGui::Separator();
+
+    if (ImGui::BeginTable("GSStats", 2,
+                          ImGuiTableFlags_Borders |
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Counter");
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableHeadersRow();
+
+        const auto row = [](const char* name, unsigned long long value) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(name);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%llu", value);
+        };
+
+        row("GIF tags", static_cast<unsigned long long>(stats.gif_tags));
+        row("GIF qwords", static_cast<unsigned long long>(stats.gif_qwords));
+        row("EOP packets", static_cast<unsigned long long>(stats.eop_packets));
+        row("Register writes", static_cast<unsigned long long>(stats.register_writes));
+        row("Packed writes", static_cast<unsigned long long>(stats.packed_writes));
+        row("REGLIST writes", static_cast<unsigned long long>(stats.reglist_writes));
+        row("IMAGE qwords", static_cast<unsigned long long>(stats.image_qwords));
+        row("Unsupported packed", static_cast<unsigned long long>(stats.unsupported_packed));
+        row("Vertex kicks", static_cast<unsigned long long>(stats.vertices));
+        row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Key GS registers");
+
+    struct RegisterRow {
+        const char* name;
+        u32 address;
+    };
+    static constexpr RegisterRow regs[] = {
+        {"PRIM", 0x00},
+        {"RGBAQ", 0x01},
+        {"XYZ2", 0x05},
+        {"SCISSOR_1", 0x40},
+        {"TEST_1", 0x47},
+        {"FRAME_1", 0x4C},
+        {"FRAME_2", 0x4D},
+        {"BITBLTBUF", 0x50},
+        {"TRXPOS", 0x51},
+        {"TRXREG", 0x52},
+        {"TRXDIR", 0x53},
+    };
+
+    if (ImGui::BeginTable("GSRegisters", 3,
+                          ImGuiTableFlags_Borders |
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Register");
+        ImGui::TableSetupColumn("Addr", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableHeadersRow();
+
+        for (const auto& reg : regs) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(reg.name);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("0x%02X", reg.address);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text(
+                "0x%016llX",
+                static_cast<unsigned long long>(gs.register_value(reg.address)));
+        }
         ImGui::EndTable();
     }
 
