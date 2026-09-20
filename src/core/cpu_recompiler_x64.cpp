@@ -12,6 +12,8 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 
 #if defined(VIBESTATION_ENABLE_X64_JIT) && \
@@ -27,17 +29,29 @@ constexpr size_t kX64CodeSlabSize = 4u * 1024u * 1024u;
 constexpr size_t kX64CodePoolLimit = 64u * 1024u * 1024u;
 constexpr size_t kX64BlockCodeReservation = 8192u;
 
-#if VIBESTATION_X64_JIT_SUPPORTED && defined(_WIN32)
+#if VIBESTATION_X64_JIT_SUPPORTED
 struct X64CodeSlab {
   X64CodeSlab() {
+#if defined(_WIN32)
     data = static_cast<u8 *>(
         VirtualAlloc(nullptr, kX64CodeSlabSize, MEM_COMMIT | MEM_RESERVE,
                      PAGE_EXECUTE_READWRITE));
+#else
+    void *ptr = mmap(nullptr, kX64CodeSlabSize,
+                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    data = ptr == MAP_FAILED ? nullptr : static_cast<u8 *>(ptr);
+#endif
   }
   ~X64CodeSlab() {
-    if (data != nullptr) {
-      VirtualFree(data, 0, MEM_RELEASE);
+    if (data == nullptr) {
+      return;
     }
+#if defined(_WIN32)
+    VirtualFree(data, 0, MEM_RELEASE);
+#else
+    munmap(data, kX64CodeSlabSize);
+#endif
   }
 
   X64CodeSlab(const X64CodeSlab &) = delete;
@@ -4941,7 +4955,7 @@ CpuBlockRunResult CpuOptimizedBackend::execute_native_block(
 }
 
 void CpuOptimizedBackend::reset_x64_code_pool() {
-#if VIBESTATION_X64_JIT_SUPPORTED && defined(_WIN32)
+#if VIBESTATION_X64_JIT_SUPPORTED
   g_x64_code_pools.erase(this);
 #endif
 }
