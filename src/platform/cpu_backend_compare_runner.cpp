@@ -147,6 +147,7 @@ struct CpuCompareCase {
   bool require_native_entry_when_available = false;
   bool require_v2_native_entry_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
+  bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_native_memory_helper_when_available = false;
   bool require_native_memory_exception_when_available = false;
   bool require_native_helper_load_delay_entry_when_available = false;
@@ -778,6 +779,21 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   jit_v2_native_smoke.instructions = 4;
   jit_v2_native_smoke.require_v2_native_entry_when_available = true;
   cases.push_back(jit_v2_native_smoke);
+
+  CpuCompareCase jit_v2_bne_not_taken{};
+  jit_v2_bne_not_taken.name = "jit_v2_bne_not_taken_delay";
+  jit_v2_bne_not_taken.initial_gpr[1] = 7u;
+  jit_v2_bne_not_taken.initial_gpr[2] = 7u;
+  jit_v2_bne_not_taken.program = {
+      0u,
+      enc_i(0x05, 1, 2, 2),
+      enc_i(0x09, 3, 3, 1),
+      0u,
+  };
+  jit_v2_bne_not_taken.instructions = 3;
+  jit_v2_bne_not_taken.require_v2_branch_not_taken_entry_when_available =
+      true;
+  cases.push_back(jit_v2_bne_not_taken);
 
   CpuCompareCase jit_v2_scratch_store_branch{};
   jit_v2_scratch_store_branch.name =
@@ -3651,6 +3667,21 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check = store_branch_entered ? "v2_store_branch_entered"
                                               : "v2_store_branch_missing";
           native_check_pass = store_branch_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_branch_not_taken_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_branch_unavailable";
+        } else {
+          const bool branch_entered =
+              result.stats.native_branch_tail_entries != 0 &&
+              result.stats.native_branch_not_taken != 0 &&
+              result.stats.native_instructions >= 2;
+          native_check = branch_entered ? "v2_branch_not_taken_entered"
+                                        : "v2_branch_not_taken_missing";
+          native_check_pass = branch_entered;
         }
       }
 
