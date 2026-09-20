@@ -153,7 +153,11 @@ inline bool g_cpu_x64_jit_branch_tail_logging = false;
 inline u32 g_cpu_x64_jit_branch_tail_log_count = 32;
 inline std::vector<u32> g_cpu_x64_jit_branch_tail_blacklist;
 inline bool g_cpu_x64_jit_reduced_helper_branch_tail_enabled = false;
-inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled = false;
+// Experimental profitability pass: let proven-hot branch tails use the
+// existing guarded reduced-helper path. Keep a meaningful hot threshold so
+// short-lived control-flow blocks stay decoded.
+inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_enabled = true;
+inline u64 g_cpu_x64_jit_hot_branch_tail_threshold = 64;
 inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_override =
     false;
 inline bool g_cpu_x64_jit_aggressive_reduced_helper_branch_tail_cli_value =
