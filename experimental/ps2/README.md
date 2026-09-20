@@ -14,7 +14,10 @@ cmake --build build-ps2
 ctest --test-dir build-ps2 --output-on-failure
 ```
 
-The standalone graphical executable is `VibeStationPS2Lab`.
+The standalone graphical executable is `VibeStationPS2Lab`. A headless
+`vibestation_ps2_bios_trace` executable is also built; pass it a BIOS path
+and an optional EE instruction budget to print the exact EE/IOP boundary
+without starting the UI.
 
 To build only the headless core/tests without SDL/ImGui dependencies:
 

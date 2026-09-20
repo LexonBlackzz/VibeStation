@@ -97,6 +97,11 @@ if(VIBESTATION_PS2_ENABLE_UI)
     endif()
 endif()
 
+add_executable(vibestation_ps2_bios_trace
+    tools/bios_trace.cpp
+)
+target_link_libraries(vibestation_ps2_bios_trace PRIVATE vibestation_ps2_core)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(vibestation_ps2_tests

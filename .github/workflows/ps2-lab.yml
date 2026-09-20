@@ -23,3 +23,9 @@ jobs:
         run: cmake --build build-ps2-headless --parallel 2
       - name: Test
         run: ctest --test-dir build-ps2-headless --output-on-failure
+      - name: Upload trace runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps2-bios-trace-linux
+          path: build-ps2-headless/vibestation_ps2_bios_trace
+          if-no-files-found: error
