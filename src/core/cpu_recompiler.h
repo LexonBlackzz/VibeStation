@@ -449,6 +449,8 @@ private:
   CpuBlockRunResult execute_native_branch_chain(DecodedBlock &block,
                                                 u32 max_cycles,
                                                 u32 max_instructions);
+  void record_block_entry(DecodedBlock &block);
+  void record_native_block_entry(DecodedBlock &block);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
   bool prepare_instruction(const DecodedInstruction &inst,
                            CpuBlockRunResult &result);
