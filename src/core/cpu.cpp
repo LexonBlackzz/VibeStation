@@ -2,6 +2,7 @@
 #include "cpu_recompiler.h"
 #include "system.h"
 #include <array>
+#include <chrono>
 #include <cstdio>
 
 namespace {
@@ -3538,7 +3539,17 @@ void Cpu::op_cop2(u32 i) {
         // scene-query result be printed beside an unrelated later SQR fault.
         g_collision_selection_trace = {};
       }
-      gte.execute(i);
+      if (g_profile_detailed_timing && sys_ != nullptr) {
+        const auto gte_start = std::chrono::high_resolution_clock::now();
+        gte.execute(i);
+        const auto gte_end = std::chrono::high_resolution_clock::now();
+        sys_->add_gte_profile(
+            i & 0x3Fu,
+            std::chrono::duration<double, std::milli>(
+                gte_end - gte_start).count());
+      } else {
+        gte.execute(i);
+      }
       if (is_sqr) {
         g_gte_sqr_trace = {true,
                            current_pc_,
