@@ -302,6 +302,9 @@ struct DecodedBlock {
   u32 profile_entry_frame = 0;
   u64 profile_frame_entries = 0;
   u64 profile_frame_native_entries = 0;
+  u64 profile_frame_runtime_rejects = 0;
+  std::array<NativeBlockRejectDetail, 4> profile_frame_runtime_reject_details{};
+  std::array<u32, 4> profile_frame_runtime_reject_counts{};
   u64 native_branch_tail_entry_count = 0;
   u64 native_prepare_helper_call_count = 0;
   u64 native_finish_helper_call_count = 0;
@@ -451,6 +454,8 @@ private:
                                                 u32 max_instructions);
   void record_block_entry(DecodedBlock &block);
   void record_native_block_entry(DecodedBlock &block);
+  void record_runtime_reject(DecodedBlock &block,
+                             NativeBlockRejectDetail detail);
   bool execute_decoded_instruction(const DecodedInstruction &inst);
   bool prepare_instruction(const DecodedInstruction &inst,
                            CpuBlockRunResult &result);
