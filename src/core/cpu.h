@@ -12,6 +12,7 @@
 
 class System;
 class CpuOptimizedBackend;
+class CpuJitV2Backend;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -489,7 +490,9 @@ public:
 private:
   System *sys_ = nullptr;
   std::unique_ptr<CpuOptimizedBackend> optimized_backend_;
+  std::unique_ptr<CpuJitV2Backend> jit_v2_backend_;
   friend class CpuOptimizedBackend;
+  friend class CpuJitV2Backend;
 
   // ── Registers ──────────────────────────────────────────────────
   u32 gpr_[32] = {};    // General purpose registers (r0 ≡ 0)
