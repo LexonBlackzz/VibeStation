@@ -333,15 +333,31 @@ bool test_vif1_flush_drains_vu1() {
         "VIF1 FLUSH service failed") && ok;
     if (!error.empty()) std::cerr << error << '\n';
 
-    ok = expect(!system.vu1().running(),
-                "VIF1 FLUSH did not drain VU1") && ok;
-
     ps2::u32 stat = 0;
+    ok = expect(system.vu1().running(),
+                "VIF1 FLUSH should wait while VU1 is active") && ok;
+    ok = expect(
+        system.bus().read32(0x10003C00u, stat) &&
+            (stat & 0x3u) == 1u,
+        "VIF1 FLUSH did not expose VPS waiting") && ok;
+
+    ok = expect(
+        system.vu1().run(8u, error) == 2u &&
+            !system.vu1().running(),
+        "VU1 flush microprogram did not terminate") && ok;
+    ok = expect(
+        dma.service(
+            system.bus(),
+            system.gs_core(),
+            system.gs_privileged(),
+            error),
+        "VIF1 FLUSH release service failed") && ok;
+
     ok = expect(
         system.bus().read32(0x10003C00u, stat) &&
             (stat & 0xFu) == 0u &&
             ((stat >> 24) & 0x1Fu) == 0u,
-        "VIF1 FLUSH left busy/wait/FQC status set") && ok;
+        "VIF1 FLUSH left busy/wait/FQC status set after release") && ok;
 
     return ok;
 }
