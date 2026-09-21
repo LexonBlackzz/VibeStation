@@ -37,6 +37,8 @@ public:
     }
     [[nodiscard]] u32 p() const { return p_; }
     [[nodiscard]] u32 random() const { return r_; }
+    [[nodiscard]] u32 status() const { return status_; }
+    [[nodiscard]] u32 mac() const { return mac_; }
     [[nodiscard]] const Vu1Stats& stats() const { return stats_; }
 
 private:
@@ -60,6 +62,9 @@ private:
     [[nodiscard]] static float as_float(u32 value);
     [[nodiscard]] static u32 as_bits(float value);
 
+    void begin_fmac();
+    [[nodiscard]] u32 fmac_result(u32 lane, float value);
+    void finish_fmac();
     void write_vf_lane(u32 reg, u32 lane, u32 value);
     void write_vi(u32 reg, u16 value);
 
