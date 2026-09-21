@@ -246,6 +246,9 @@ struct CpuBackendStats {
   u64 flushes = 0;
   u64 decoded_block_entries = 0;
   u64 native_block_entries = 0;
+  u64 native_chain_entries = 0;
+  u64 native_linked_transitions = 0;
+  u64 native_chain_max_blocks = 0;
   u64 native_branch_tail_entries = 0;
   u64 native_branch_taken = 0;
   u64 native_branch_not_taken = 0;

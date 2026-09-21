@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -372,11 +373,13 @@ using V3StepHelperFn = u32 (*)(Cpu *);
 // its block, so native code never follows a pointer into discarded metadata.
 struct V3ResidentBlock;
 struct V3ResidentSlot {
+  void *entry = nullptr;
   V3ResidentBlock *block = nullptr;
 };
 
 struct V3ResidentBlock {
   V3NativeFn fn = nullptr;
+  void *linked_fn = nullptr;
   V3ResidentSlot *successor = nullptr;
   V3ResidentSlot *taken_successor = nullptr;
   u32 start_pc = 0;
@@ -413,6 +416,14 @@ struct V3ResidentContext {
 };
 
 using V3ResidentFn = void (*)(V3ResidentContext *);
+
+// The linked ABI keeps the context in rbx, GPRs in r10, runtime in r11,
+// I-cache in r15, and totals in r12d/r13d/r14d. r8d is the next PC and rdi
+// identifies the last completed block. Only the chain exit writes totals.
+struct V3LinkedDispatch {
+  V3ResidentFn entry = nullptr;
+  void *exit = nullptr;
+};
 
 class V3CodeArena {
 public:
@@ -678,6 +689,52 @@ V3ResidentFn install_resident_dispatch(V3CodeArena &arena) {
   return reinterpret_cast<V3ResidentFn>(arena.copy_code(code->getCode(), code->getSize()));
 }
 
+V3LinkedDispatch install_linked_dispatch(V3CodeArena &arena) {
+  using namespace Xbyak;
+  auto code = std::make_unique<CodeGenerator>(512);
+  code->push(code->rbx);
+  code->push(code->rbp);
+  code->push(code->rsi);
+  code->push(code->rdi);
+  code->push(code->r12);
+  code->push(code->r13);
+  code->push(code->r14);
+  code->push(code->r15);
+#if defined(_WIN32)
+  code->mov(code->rbx, code->rcx);
+#else
+  code->mov(code->rbx, code->rdi);
+#endif
+  code->mov(code->r10, code->ptr[code->rbx + offsetof(V3ResidentContext, gpr)]);
+  code->mov(code->r11, code->ptr[code->rbx + offsetof(V3ResidentContext, runtime)]);
+  code->mov(code->r15, code->ptr[code->rbx + offsetof(V3ResidentContext, icache)]);
+  code->xor_(code->r12d, code->r12d);
+  code->xor_(code->r13d, code->r13d);
+  code->xor_(code->r14d, code->r14d);
+  code->xor_(code->r8d, code->r8d);
+  code->xor_(code->edi, code->edi);
+  code->mov(code->rax, code->ptr[code->rbx + offsetof(V3ResidentContext, first)]);
+  code->jmp(code->ptr[code->rax + offsetof(V3ResidentBlock, linked_fn)]);
+  const size_t exit_offset = code->getSize();
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, cycles)], code->r12d);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, instructions)], code->r13d);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, entries)], code->r14d);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, final_pc)], code->r8d);
+  code->mov(code->ptr[code->rbx + offsetof(V3ResidentContext, last)], code->rdi);
+  code->pop(code->r15);
+  code->pop(code->r14);
+  code->pop(code->r13);
+  code->pop(code->r12);
+  code->pop(code->rdi);
+  code->pop(code->rsi);
+  code->pop(code->rbp);
+  code->pop(code->rbx);
+  code->ret();
+  code->ready();
+  auto *entry = static_cast<u8 *>(arena.copy_code(code->getCode(), code->getSize()));
+  return {reinterpret_cast<V3ResidentFn>(entry), entry ? entry + exit_offset : nullptr};
+}
+
 
 int cache_slot(const std::array<u8, 6> &cached, u8 guest_reg) {
   for (int i = 0; i < static_cast<int>(cached.size()); ++i) {
@@ -774,9 +831,42 @@ void emit_commit_incoming_load(Xbyak::CodeGenerator &code,
 std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     const std::vector<V3DecodedInstruction> &instructions,
     const std::array<u8, 6> &cached, bool load_retired,
-    u32 load_index, u8 load_rt) {
+    u32 load_index, u8 load_rt,
+    const V3ResidentBlock *linked = nullptr, void *linked_exit = nullptr) {
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
+  code->setDefaultJmpNEAR(true);
+  Label linked_done, validation_line, validation_done;
+  if (linked != nullptr) {
+    code->mov(code->rsi, reinterpret_cast<size_t>(linked));
+    code->xor_(code->ecx, code->ecx);
+    code->L(validation_line);
+    code->cmp(code->ecx, linked->icache_line_count);
+    code->jae(validation_done);
+    code->movzx(code->eax, code->byte[code->rsi + offsetof(V3ResidentBlock, icache_indices) + code->rcx]);
+    code->imul(code->eax, code->eax, 24);
+    code->lea(code->rax, code->ptr[code->r15 + code->rax]);
+    code->cmp(code->byte[code->rax + 20], 0);
+    code->je(linked_done);
+    code->mov(code->edx, code->dword[code->rsi + offsetof(V3ResidentBlock, icache_tags) + code->rcx * 4]);
+    code->cmp(code->edx, code->dword[code->rax]);
+    code->jne(linked_done);
+    code->inc(code->ecx);
+    code->jmp(validation_line);
+    code->L(validation_done);
+    if (linked->kind != 0u) {
+      code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
+      code->je(linked_done);
+    }
+    code->mov(code->eax, code->r13d);
+    code->add(code->eax, linked->instruction_count);
+    code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, instruction_budget)]);
+    code->ja(linked_done);
+    code->mov(code->eax, code->r12d);
+    code->add(code->eax, linked->base_cycles + (linked->kind == 1u ? 1u : 0u));
+    code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, cycle_budget)]);
+    code->ja(linked_done);
+  }
 
   // V3 deliberately keeps architectural state virtual inside a block.
   // r10 = guest GPR base, r11 = runtime/preflight data, edx = branch result.
@@ -787,10 +877,11 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   const bool save_r13 = cached[3] != 0u;
   const bool save_r14 = cached[4] != 0u;
   const bool save_r15 = cached[5] != 0u;
-  if (save_r12) code->push(code->r12);
-  if (save_r13) code->push(code->r13);
-  if (save_r14) code->push(code->r14);
-  if (save_r15) code->push(code->r15);
+  if (linked == nullptr) {
+    if (save_r12) code->push(code->r12);
+    if (save_r13) code->push(code->r13);
+    if (save_r14) code->push(code->r14);
+    if (save_r15) code->push(code->r15);
 
 #if defined(_WIN32)
   code->mov(code->r10, code->rcx);
@@ -799,6 +890,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   code->mov(code->r10, code->rdi);
   code->mov(code->r11, code->rsi);
 #endif
+  }
   code->xor_(code->edx, code->edx);
 
   for (size_t slot = 0; slot < cached.size(); ++slot) {
@@ -989,6 +1081,42 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   }
 
   code->mov(code->dword[code->r10], 0u);
+  if (linked != nullptr) {
+    Label not_taken, next;
+    code->mov(code->rdi, reinterpret_cast<size_t>(linked));
+    code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)], 0);
+    code->add(code->r13d, linked->instruction_count);
+    code->add(code->r12d, linked->base_cycles);
+    code->inc(code->r14d);
+    code->mov(code->r8d, linked->next_pc);
+    if (linked->kind == 1u) {
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)]);
+      code->test(code->edx, code->edx);
+      code->jz(not_taken);
+      code->mov(code->r8d, linked->taken_pc);
+      code->inc(code->r12d);
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
+      code->mov(code->rax, reinterpret_cast<size_t>(linked->taken_successor));
+      code->jmp(next);
+      code->L(not_taken);
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_not_taken)]);
+    } else if (linked->kind == 2u) {
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)]);
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
+    } else {
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, alu_entries)]);
+    }
+    code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
+    code->L(next);
+    code->cmp(code->r14d, code->dword[code->rbx + offsetof(V3ResidentContext, entry_limit)]);
+    code->jae(linked_done);
+    code->jmp(code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
+    code->L(linked_done);
+    code->mov(code->rax, reinterpret_cast<size_t>(linked_exit));
+    code->jmp(code->rax);
+    code->ready();
+    return code;
+  }
   code->mov(code->eax, code->edx);
   if (save_r15) code->pop(code->r15);
   if (save_r14) code->pop(code->r14);
@@ -1086,13 +1214,20 @@ struct CpuJitV3Backend::Impl {
   V3CodeArena arena;
   V3StepHelperFn step_helper_fn = nullptr;
   V3ResidentFn resident_fn = nullptr;
+  V3LinkedDispatch linked_dispatch{};
+  bool use_linked = true;
   V3ResidentSlot *resident_slot(u32 pc) {
-    return &dispatch_entry(pc, true)->resident;
+    V3ResidentSlot *slot = &dispatch_entry(pc, true)->resident;
+    if (slot->entry == nullptr) slot->entry = linked_dispatch.exit;
+    return slot;
   }
 
   void unlink_resident(u32 pc) {
     DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry != nullptr) entry->resident.block = nullptr;
+    if (entry != nullptr) {
+      entry->resident.entry = linked_dispatch.exit;
+      entry->resident.block = nullptr;
+    }
   }
 #endif
   std::unordered_map<u32, Block> blocks;
@@ -1111,12 +1246,14 @@ CpuJitV3Backend::CpuJitV3Backend(Cpu &cpu)
     : cpu_(cpu), impl_(std::make_unique<Impl>()) {
   stats_.available = true;
 #if VIBESTATION_JIT_V3_X64
+  impl_->use_linked = std::getenv("VIBESTATION_V3_LEGACY_RESIDENT") == nullptr;
   static_assert(sizeof(Cpu::ICacheLine) == 24u, "resident I-cache stride");
   static_assert(offsetof(Cpu::ICacheLine, valid) == 20u,
                 "resident I-cache valid offset");
   impl_->step_helper_fn = install_step_helper(impl_->arena);
   try {
     impl_->resident_fn = install_resident_dispatch(impl_->arena);
+    impl_->linked_dispatch = install_linked_dispatch(impl_->arena);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "V3 resident dispatch codegen: %s\n", e.what());
   }
@@ -1610,7 +1747,23 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       block_ptr = &inserted.first->second;
       impl_->remember_dispatch(*block_ptr);
       if (block_ptr->resident.fn != nullptr) {
-        impl_->resident_slot(start_pc)->block = &block_ptr->resident;
+        if (impl_->linked_dispatch.exit != nullptr) {
+          try {
+            auto linked = compile_native_alu(decoded, {}, block_ptr->load_retired,
+                                             load_index, load_rt,
+                                             &block_ptr->resident,
+                                             impl_->linked_dispatch.exit);
+            block_ptr->resident.linked_fn =
+                impl_->arena.copy_code(linked->getCode(), linked->getSize());
+            block_ptr->code_size += linked->getSize();
+          } catch (const std::exception &e) {
+            std::fprintf(stderr, "V3 linked block codegen: %s\n", e.what());
+          }
+        }
+        V3ResidentSlot *slot = impl_->resident_slot(start_pc);
+        slot->block = &block_ptr->resident;
+        if (block_ptr->resident.linked_fn != nullptr)
+          slot->entry = block_ptr->resident.linked_fn;
       }
       ++stats_.native_compile_successes;
       ++stats_.native_blocks_compiled;
@@ -1809,7 +1962,12 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       cpu_.executing_step_ = true;
       cpu_.exception_raised_ = false;
       cpu_.cycle_penalty_ = 0u;
-      impl_->resident_fn(&resident);
+      if (impl_->use_linked && block.resident.linked_fn != nullptr &&
+          impl_->linked_dispatch.entry != nullptr) {
+        impl_->linked_dispatch.entry(&resident);
+      } else {
+        impl_->resident_fn(&resident);
+      }
       cpu_.executing_step_ = false;
       if (resident.last == nullptr) {
         return helper_step(V3HelperReason::Budget);
@@ -1841,6 +1999,13 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       result.cycles += resident.cycles;
       result.instructions += resident.instructions;
       stats_.native_block_entries += resident.entries;
+      if (impl_->use_linked && block.resident.linked_fn != nullptr &&
+          impl_->linked_dispatch.entry != nullptr) {
+        ++stats_.native_chain_entries;
+        stats_.native_linked_transitions += resident.entries - 1u;
+        stats_.native_chain_max_blocks = std::max<u64>(
+            stats_.native_chain_max_blocks, resident.entries);
+      }
       stats_.native_alu_block_entries += resident.alu_entries;
       stats_.native_branch_tail_entries += resident.branch_entries;
       stats_.native_branch_taken += resident.branch_taken;
@@ -2083,6 +2248,7 @@ void CpuJitV3Backend::flush() {
   impl_->arena.reset();
   impl_->step_helper_fn = install_step_helper(impl_->arena);
   impl_->resident_fn = install_resident_dispatch(impl_->arena);
+  impl_->linked_dispatch = install_linked_dispatch(impl_->arena);
 #endif
   stats_ = {};
   stats_.available = true;

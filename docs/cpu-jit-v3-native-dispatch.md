@@ -36,3 +36,23 @@ destination, then commits or cancels the pending value in generated code. It
 can continue through subsequent ALU instructions and branch delay slots.
 Additional memory instructions still end the block. The full CPU backend
 comparison suite passes with V3 included as a target.
+
+## Linked native entry experiment
+
+The first linked emitter tail-jumps through stable successor cells. A cell
+points to generated code or the shared chain exit; invalidation resets it
+before erasing metadata. Cycle, instruction, and block totals stay in host
+registers until exit. The legacy resident loop is available for A/B runs with
+`VIBESTATION_V3_LEGACY_RESIDENT=1`.
+
+The canonical Spyro image was not available in this workspace. An 840/60
+Crash Bandicoot (USA) run on the same host gave:
+
+| Path | CPU avg ms | p50 ms | p95 ms | Chain entries | Linked transitions | Max blocks | State | PC | Cycles |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |
+| Legacy resident loop | 79.311 | 72.414 | 115.077 | 0 | 0 | 0 | B86BF25F6769511B | 800141DC | 509552478 |
+| First linked emitter | 85.324 | 80.652 | 136.436 | 2,368,890 | 896,632 | 16 | B86BF25F6769511B | 800141DC | 509552478 |
+
+The first emitter averaged 1.38 blocks per linked chain entry. It still used
+a dynamic I-cache line loop and memory increments for branch statistics on
+each block, both candidates for removal from the hot path.

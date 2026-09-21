@@ -1758,6 +1758,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "fallback_instructions=%llu helper_calls=%llu cache_hits=%llu "
       "cache_misses=%llu invalidations=%llu native_code_bytes=%zu "
       "decoded_block_entries=%llu native_block_entries=%llu "
+      "native_chain_entries=%llu native_linked_transitions=%llu "
+      "native_chain_max_blocks=%llu "
       "native_alu_entries=%llu native_memory_entries=%llu "
       "native_branch_entries=%llu "
       "native_compile_attempts=%llu native_compile_successes=%llu "
@@ -1802,6 +1804,11 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.decoded_block_entries, before.decoded_block_entries)),
       static_cast<unsigned long long>(
           delta(after.native_block_entries, before.native_block_entries)),
+      static_cast<unsigned long long>(
+          delta(after.native_chain_entries, before.native_chain_entries)),
+      static_cast<unsigned long long>(delta(after.native_linked_transitions,
+                                            before.native_linked_transitions)),
+      static_cast<unsigned long long>(after.native_chain_max_blocks),
       static_cast<unsigned long long>(delta(after.native_alu_block_entries,
                                             before.native_alu_block_entries)),
       static_cast<unsigned long long>(delta(after.native_memory_block_entries,
