@@ -437,6 +437,65 @@ bool test_vu_mapping_and_cop2() {
     system.ee().reset(pc);
     ok = expect(system.ee().step(error), "CFC2 FBRST failed") && ok;
     ok = expect(system.ee().state().gpr[3].lo == 0, "CFC2 FBRST result mismatch") && ok;
+
+    auto pack2 = [](float x, float y) -> ps2::u64 {
+        return static_cast<ps2::u64>(std::bit_cast<ps2::u32>(x)) |
+               (static_cast<ps2::u64>(std::bit_cast<ps2::u32>(y)) << 32);
+    };
+
+    // VADD.xyzw vf3,vf1,vf2.
+    const ps2::u32 vadd =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x28u;
+    ok = expect(system.bus().write32(pc, vadd),
+                "VU0 VADD test write failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1] = {
+        pack2(1.0f, 2.0f),
+        pack2(3.0f, 4.0f),
+    };
+    system.ee().state().vu_vf[2] = {
+        pack2(10.0f, 20.0f),
+        pack2(30.0f, 40.0f),
+    };
+    ok = expect(system.ee().step(error),
+                "VU0 VADD macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 pack2(11.0f, 22.0f) &&
+             system.ee().state().vu_vf[3].hi ==
+                 pack2(33.0f, 44.0f),
+             "VU0 VADD macro result mismatch") && ok;
+
+    // VMULx.xz vf4,vf1,vf2: only X and Z lanes update, scalar is vf2.x.
+    const ps2::u32 vmulx_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (4u << 6) |
+        0x18u;
+    ok = expect(system.bus().write32(pc, vmulx_xz),
+                "VU0 VMULx test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[4] = {
+        pack2(99.0f, 98.0f),
+        pack2(97.0f, 96.0f),
+    };
+    ok = expect(system.ee().step(error),
+                "VU0 VMULx macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[4].lo ==
+                 pack2(10.0f, 98.0f) &&
+             system.ee().state().vu_vf[4].hi ==
+                 pack2(30.0f, 96.0f),
+             "VU0 VMULx destination mask mismatch") && ok;
+
     return ok;
 }
 
