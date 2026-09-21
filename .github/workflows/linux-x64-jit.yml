@@ -1,12 +1,10 @@
-name: Linux x64 JIT bring-up
+name: Linux x64 JIT
 
 on:
   push:
     branches:
-      - perf/cpu-jit-v2-linux-bench-1
-      - perf/cpu-jit-v2-rr4-gate-test
-      - perf/cpu-jit-v2-jump-tier-1
-      - perf/cpu-jit-v2-indirect-jump-1
+      - main
+      - integration/jit-v2-shippable-2026-09-21
   workflow_dispatch:
 
 jobs:
