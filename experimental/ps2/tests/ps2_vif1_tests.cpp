@@ -346,6 +346,95 @@ bool test_vif1_flush_drains_vu1() {
     return ok;
 }
 
+bool test_vif1_flush_waits_for_vu1() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.attach_vu1(system.vu1());
+    dma.reset();
+
+    // A two-pair VU program: E is observed on pair 0 and pair 1 is its
+    // mandatory delay slot.
+    bool ok = true;
+    ok = expect(
+             system.bus().write32(0x11008000u, 0u) &&
+                 system.bus().write32(0x11008004u, 0x40000000u) &&
+                 system.bus().write32(0x11008008u, 0u) &&
+                 system.bus().write32(0x1100800Cu, 0u),
+             "failed to install VU1 FLUSH test program") && ok;
+
+    constexpr ps2::u32 stream = 0x5800u;
+    constexpr ps2::u32 mscal = (0x14u << 24);
+    constexpr ps2::u32 flush = (0x11u << 24);
+    constexpr ps2::u32 mark = (0x07u << 24) | 0x1234u;
+
+    ok = expect(
+             write_words(
+                 system.bus(),
+                 stream,
+                 mscal,
+                 flush,
+                 mark,
+                 0u),
+             "failed to build VIF1 MSCAL/FLUSH packet") && ok;
+    ok = expect(
+             setup_normal_dma(system, stream, 1u),
+             "failed to arm VIF1 FLUSH DMA") && ok;
+
+    std::string error;
+    ok = expect(
+             dma.service(
+                 system.bus(),
+                 system.gs_core(),
+                 system.gs_privileged(),
+                 error),
+             "VIF1 FLUSH first service failed") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.vu1().running(),
+             "MSCAL did not leave VU1 running at FLUSH") && ok;
+    ok = expect(
+             system.bus().read32(0x10009000u, value) &&
+                 (value & 0x100u) != 0,
+             "VIF1 DMA completed before FLUSH released") && ok;
+    ok = expect(
+             system.bus().read32(0x10003C00u, value) &&
+                 (value & 0x3u) == 1u,
+             "VIF1 STAT did not expose VPS waiting") && ok;
+    ok = expect(
+             system.bus().read32(0x10003C30u, value) &&
+                 value == 0u,
+             "deferred MARK executed before VU1 completed") && ok;
+
+    ok = expect(
+             system.vu1().run(8u, error) == 2u &&
+                 !system.vu1().running(),
+             "VU1 FLUSH test program did not terminate") && ok;
+    ok = expect(
+             dma.service(
+                 system.bus(),
+                 system.gs_core(),
+                 system.gs_privileged(),
+                 error),
+             "VIF1 FLUSH release service failed") && ok;
+
+    ok = expect(
+             system.bus().read32(0x10003C30u, value) &&
+                 value == 0x1234u,
+             "deferred MARK was not decoded after FLUSH") && ok;
+    ok = expect(
+             system.bus().read32(0x10003C00u, value) &&
+                 (value & 0x3u) == 0u &&
+                 (value & (1u << 6)) != 0,
+             "VIF1 STAT did not return idle with MRK latched") && ok;
+    ok = expect(
+             system.bus().read32(0x10009000u, value) &&
+                 (value & 0x100u) == 0u,
+             "VIF1 FLUSH DMA did not complete after VU1") && ok;
+    return ok;
+}
+
 bool test_vif1_source_chain_tte() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -414,6 +503,7 @@ int main() {
     bool ok = true;
     ok = test_vif1_mpg_and_unpack() && ok;
     ok = test_vif1_direct_path2() && ok;
+    ok = test_vif1_flush_waits_for_vu1() && ok;
     ok = test_vif1_unpack_v4_5_expansion() && ok;
     ok = test_vif1_status_tracks_payload_progress() && ok;
     ok = test_vif1_flush_drains_vu1() && ok;
