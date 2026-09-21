@@ -98,6 +98,7 @@ void EeCpu::reset(u32 entry_point) {
     halted_ = false;
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
+    memory_exception_pending_ = false;
     halt_reason_.clear();
 }
 
@@ -224,6 +225,7 @@ bool EeCpu::translate_address(
             (virtual_address & vpn_mask) | asid;
 
         if ((entry_lo & 0x2u) == 0) {
+            memory_exception_pending_ = true;
             raise_exception(
                 store ? 3u : 2u,
                 fault_pc,
@@ -231,6 +233,7 @@ bool EeCpu::translate_address(
             return false;
         }
         if (store && (entry_lo & 0x4u) == 0) {
+            memory_exception_pending_ = true;
             raise_exception(1u, fault_pc, in_delay_slot);
             return false;
         }
@@ -251,6 +254,7 @@ bool EeCpu::translate_address(
         ((virtual_address >> 9) & 0x007FFFF0u);
     state_.cop0[10] =
         (virtual_address & 0xFFFFE000u) | asid;
+    memory_exception_pending_ = true;
     raise_exception(
         store ? 3u : 2u,
         fault_pc,
@@ -264,6 +268,12 @@ bool EeCpu::fail(
     u32 instruction,
     const std::string& reason,
     std::string& error) {
+    if (memory_exception_pending_) {
+        memory_exception_pending_ = false;
+        error.clear();
+        return true;
+    }
+
     halted_ = true;
     halt_reason_ =
         reason + " at PC " + hex32(pc) +
@@ -1520,7 +1530,23 @@ bool EeCpu::step(std::string& error) {
     }
 
     u32 instruction = 0;
-    if (!bus_.read32(pc, instruction)) {
+    u32 fetch_address = 0;
+    if (!translate_address(
+            pc,
+            false,
+            pc,
+            current_is_delay_slot_,
+            fetch_address)) {
+        memory_exception_pending_ = false;
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) {
+            state_.cop0[13] |= 0x00008000u;
+        }
+        bus_.tick(1);
+        return true;
+    }
+    if (!bus_.read32(fetch_address, instruction)) {
         return fail(
             pc,
             0,
@@ -1541,6 +1567,55 @@ bool EeCpu::step(std::string& error) {
     const auto effective_address = [&]() {
         return static_cast<u32>(
             gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));
+    };
+
+    const auto translate_memory = [&](u32 address, bool store, u32& out) {
+        return translate_address(
+            address,
+            store,
+            pc,
+            current_is_delay_slot_,
+            out);
+    };
+    const auto read8_mem = [&](u32 address, u8& value) {
+        u32 translated = 0;
+        return translate_memory(address, false, translated) &&
+               bus_.read8(translated, value);
+    };
+    const auto read16_mem = [&](u32 address, u16& value) {
+        u32 translated = 0;
+        return translate_memory(address, false, translated) &&
+               bus_.read16(translated, value);
+    };
+    const auto read32_mem = [&](u32 address, u32& value) {
+        u32 translated = 0;
+        return translate_memory(address, false, translated) &&
+               bus_.read32(translated, value);
+    };
+    const auto read64_mem = [&](u32 address, u64& value) {
+        u32 translated = 0;
+        return translate_memory(address, false, translated) &&
+               bus_.read64(translated, value);
+    };
+    const auto write8_mem = [&](u32 address, u8 value) {
+        u32 translated = 0;
+        return translate_memory(address, true, translated) &&
+               bus_.write8(translated, value);
+    };
+    const auto write16_mem = [&](u32 address, u16 value) {
+        u32 translated = 0;
+        return translate_memory(address, true, translated) &&
+               bus_.write16(translated, value);
+    };
+    const auto write32_mem = [&](u32 address, u32 value) {
+        u32 translated = 0;
+        return translate_memory(address, true, translated) &&
+               bus_.write32(translated, value);
+    };
+    const auto write64_mem = [&](u32 address, u64 value) {
+        u32 translated = 0;
+        return translate_memory(address, true, translated) &&
+               bus_.write64(translated, value);
     };
 
     const auto load_fault = [&](const char* kind, u32 address) {
@@ -1697,7 +1772,7 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address();
         const u32 shift = address & 7u;
         u64 mem = 0;
-        if (!bus_.read64(address & ~7u, mem)) ok = load_fault("LDL", address);
+        if (!read64_mem(address & ~7u, mem)) ok = load_fault("LDL", address);
         else if (rt != 0) state_.gpr[rt].lo = (state_.gpr[rt].lo & masks[shift]) | (mem << shifts[shift]);
         break;
     }
@@ -1709,7 +1784,7 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address();
         const u32 shift = address & 7u;
         u64 mem = 0;
-        if (!bus_.read64(address & ~7u, mem)) ok = load_fault("LDR", address);
+        if (!read64_mem(address & ~7u, mem)) ok = load_fault("LDR", address);
         else if (rt != 0) state_.gpr[rt].lo = (state_.gpr[rt].lo & masks[shift]) | (mem >> shifts[shift]);
         break;
     }
@@ -1720,8 +1795,8 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address() & ~0x0Fu;
         u64 lo = 0;
         u64 hi = 0;
-        if (!bus_.read64(address, lo) ||
-            !bus_.read64(address + 8u, hi)) {
+        if (!read64_mem(address, lo) ||
+            !read64_mem(address + 8u, hi)) {
             ok = load_fault("Load quadword", address);
         } else if (rt != 0) {
             state_.gpr[rt].lo = lo;
@@ -1731,8 +1806,8 @@ bool EeCpu::step(std::string& error) {
     }
     case 0x1F: { // SQ
         const u32 address = effective_address() & ~0x0Fu;
-        if (!bus_.write64(address, state_.gpr[rt].lo) ||
-            !bus_.write64(address + 8u, state_.gpr[rt].hi)) {
+        if (!write64_mem(address, state_.gpr[rt].lo) ||
+            !write64_mem(address + 8u, state_.gpr[rt].hi)) {
             ok = fail(
                 pc,
                 instruction,
@@ -1744,7 +1819,7 @@ bool EeCpu::step(std::string& error) {
     case 0x20: { // LB
         const u32 address = effective_address();
         u8 value = 0;
-        if (!bus_.read8(address, value)) {
+        if (!read8_mem(address, value)) {
             ok = load_fault("Load byte", address);
         } else {
             write_gpr64(rt, static_cast<u64>(static_cast<s64>(static_cast<s8>(value))));
@@ -1754,7 +1829,7 @@ bool EeCpu::step(std::string& error) {
     case 0x21: { // LH
         const u32 address = effective_address();
         u16 value = 0;
-        if (!bus_.read16(address, value)) {
+        if (!read16_mem(address, value)) {
             ok = load_fault("Load halfword", address);
         } else {
             write_gpr64(rt, static_cast<u64>(static_cast<s64>(static_cast<s16>(value))));
@@ -1764,7 +1839,7 @@ bool EeCpu::step(std::string& error) {
     case 0x22: { // LWL
         const u32 address = effective_address();
         u32 memory = 0;
-        if (!bus_.read32(address & ~3u, memory)) {
+        if (!read32_mem(address & ~3u, memory)) {
             ok = load_fault("LWL", address);
         } else {
             const u32 shift = (address & 3u) * 8u;
@@ -1779,7 +1854,7 @@ bool EeCpu::step(std::string& error) {
     case 0x23: { // LW
         const u32 address = effective_address();
         u32 value = 0;
-        if (!bus_.read32(address, value)) {
+        if (!read32_mem(address, value)) {
             ok = load_fault("Load word", address);
         } else {
             write_gpr_word(rt, value);
@@ -1789,7 +1864,7 @@ bool EeCpu::step(std::string& error) {
     case 0x24: { // LBU
         const u32 address = effective_address();
         u8 value = 0;
-        if (!bus_.read8(address, value)) {
+        if (!read8_mem(address, value)) {
             ok = load_fault("Load byte", address);
         } else {
             write_gpr64(rt, value);
@@ -1799,7 +1874,7 @@ bool EeCpu::step(std::string& error) {
     case 0x25: { // LHU
         const u32 address = effective_address();
         u16 value = 0;
-        if (!bus_.read16(address, value)) {
+        if (!read16_mem(address, value)) {
             ok = load_fault("Load halfword", address);
         } else {
             write_gpr64(rt, value);
@@ -1809,7 +1884,7 @@ bool EeCpu::step(std::string& error) {
     case 0x26: { // LWR
         const u32 address = effective_address();
         u32 memory = 0;
-        if (!bus_.read32(address & ~3u, memory)) {
+        if (!read32_mem(address & ~3u, memory)) {
             ok = load_fault("LWR", address);
         } else {
             const u32 shift = (address & 3u) * 8u;
@@ -1824,7 +1899,7 @@ bool EeCpu::step(std::string& error) {
     case 0x27: { // LWU
         const u32 address = effective_address();
         u32 value = 0;
-        if (!bus_.read32(address, value)) {
+        if (!read32_mem(address, value)) {
             ok = load_fault("Load word", address);
         } else {
             write_gpr64(rt, value);
@@ -1833,14 +1908,14 @@ bool EeCpu::step(std::string& error) {
     }
     case 0x28: { // SB
         const u32 address = effective_address();
-        if (!bus_.write8(address, static_cast<u8>(gpr_u64(rt)))) {
+        if (!write8_mem(address, static_cast<u8>(gpr_u64(rt)))) {
             ok = fail(pc, instruction, "Store byte fault to " + hex32(address), error);
         }
         break;
     }
     case 0x29: { // SH
         const u32 address = effective_address();
-        if (!bus_.write16(address, static_cast<u16>(gpr_u64(rt)))) {
+        if (!write16_mem(address, static_cast<u16>(gpr_u64(rt)))) {
             ok = fail(pc, instruction, "Store halfword fault to " + hex32(address), error);
         }
         break;
@@ -1849,14 +1924,14 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address();
         const u32 aligned = address & ~3u;
         u32 memory = 0;
-        if (!bus_.read32(aligned, memory)) {
+        if (!read32_mem(aligned, memory)) {
             ok = load_fault("SWL read", address);
         } else {
             const u32 shift = (address & 3u) * 8u;
             const u32 value =
                 (static_cast<u32>(gpr_u64(rt)) >> (24u - shift)) |
                 (memory & (0xFFFFFF00u << shift));
-            if (!bus_.write32(aligned, value)) {
+            if (!write32_mem(aligned, value)) {
                 ok = fail(pc, instruction, "SWL fault to " + hex32(address), error);
             }
         }
@@ -1864,7 +1939,7 @@ bool EeCpu::step(std::string& error) {
     }
     case 0x2B: { // SW
         const u32 address = effective_address();
-        if (!bus_.write32(address, static_cast<u32>(gpr_u64(rt)))) {
+        if (!write32_mem(address, static_cast<u32>(gpr_u64(rt)))) {
             ok = fail(pc, instruction, "Store word fault to " + hex32(address), error);
         }
         break;
@@ -1876,7 +1951,7 @@ bool EeCpu::step(std::string& error) {
         static constexpr u8 shifts[8] = {56,48,40,32,24,16,8,0};
         const u32 address = effective_address(); const u32 shift = address & 7u;
         u64 mem = 0;
-        if (!bus_.read64(address & ~7u, mem) || !bus_.write64(address & ~7u, (gpr_u64(rt) >> shifts[shift]) | (mem & masks[shift])))
+        if (!read64_mem(address & ~7u, mem) || !write64_mem(address & ~7u, (gpr_u64(rt) >> shifts[shift]) | (mem & masks[shift])))
             ok = fail(pc,instruction,"SDL fault at "+hex32(address),error);
         break;
     }
@@ -1887,7 +1962,7 @@ bool EeCpu::step(std::string& error) {
         static constexpr u8 shifts[8] = {0,8,16,24,32,40,48,56};
         const u32 address = effective_address(); const u32 shift = address & 7u;
         u64 mem = 0;
-        if (!bus_.read64(address & ~7u, mem) || !bus_.write64(address & ~7u, (gpr_u64(rt) << shifts[shift]) | (mem & masks[shift])))
+        if (!read64_mem(address & ~7u, mem) || !write64_mem(address & ~7u, (gpr_u64(rt) << shifts[shift]) | (mem & masks[shift])))
             ok = fail(pc,instruction,"SDR fault at "+hex32(address),error);
         break;
     }
@@ -1895,14 +1970,14 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address();
         const u32 aligned = address & ~3u;
         u32 memory = 0;
-        if (!bus_.read32(aligned, memory)) {
+        if (!read32_mem(aligned, memory)) {
             ok = load_fault("SWR read", address);
         } else {
             const u32 shift = (address & 3u) * 8u;
             const u32 value =
                 (static_cast<u32>(gpr_u64(rt)) << shift) |
                 (memory & (0x00FFFFFFu >> (24u - shift)));
-            if (!bus_.write32(aligned, value)) {
+            if (!write32_mem(aligned, value)) {
                 ok = fail(pc, instruction, "SWR fault to " + hex32(address), error);
             }
         }
@@ -1914,7 +1989,7 @@ bool EeCpu::step(std::string& error) {
     case 0x30: { // LL
         const u32 address = effective_address();
         u32 value = 0;
-        if (!bus_.read32(address, value)) {
+        if (!read32_mem(address, value)) {
             ok = load_fault("LL", address);
         } else {
             // Bootstrap is single-threaded; no competing agent can invalidate
@@ -1926,7 +2001,7 @@ bool EeCpu::step(std::string& error) {
     case 0x34: { // LLD
         const u32 address = effective_address();
         u64 value = 0;
-        if (!bus_.read64(address, value)) {
+        if (!read64_mem(address, value)) {
             ok = load_fault("LLD", address);
         } else {
             write_gpr64(rt, value);
@@ -1936,7 +2011,7 @@ bool EeCpu::step(std::string& error) {
     case 0x31: { // LWC1
         const u32 address = effective_address();
         u32 value = 0;
-        if (!bus_.read32(address, value)) {
+        if (!read32_mem(address, value)) {
             ok = load_fault("LWC1", address);
         } else {
             state_.fpr[rt] = value;
@@ -1946,7 +2021,7 @@ bool EeCpu::step(std::string& error) {
     case 0x37: { // LD
         const u32 address = effective_address();
         u64 value = 0;
-        if (!bus_.read64(address, value)) {
+        if (!read64_mem(address, value)) {
             ok = load_fault("Load doubleword", address);
         } else {
             write_gpr64(rt, value);
@@ -1956,7 +2031,7 @@ bool EeCpu::step(std::string& error) {
     case 0x38: { // SC
         const u32 address = effective_address();
         const u32 value = static_cast<u32>(gpr_u64(rt));
-        if (!bus_.write32(address, value)) {
+        if (!write32_mem(address, value)) {
             ok = fail(pc, instruction, "SC fault to " + hex32(address), error);
         } else {
             write_gpr_word(rt, 1u);
@@ -1965,7 +2040,7 @@ bool EeCpu::step(std::string& error) {
     }
     case 0x39: { // SWC1
         const u32 address = effective_address();
-        if (!bus_.write32(address, state_.fpr[rt])) {
+        if (!write32_mem(address, state_.fpr[rt])) {
             ok = fail(pc, instruction, "SWC1 fault to " + hex32(address), error);
         }
         break;
@@ -1973,7 +2048,7 @@ bool EeCpu::step(std::string& error) {
     case 0x3C: { // SCD
         const u32 address = effective_address();
         const u64 value = gpr_u64(rt);
-        if (!bus_.write64(address, value)) {
+        if (!write64_mem(address, value)) {
             ok = fail(pc, instruction, "SCD fault to " + hex32(address), error);
         } else {
             write_gpr64(rt, 1u);
@@ -1982,7 +2057,7 @@ bool EeCpu::step(std::string& error) {
     }
     case 0x3F: { // SD
         const u32 address = effective_address();
-        if (!bus_.write64(address, gpr_u64(rt))) {
+        if (!write64_mem(address, gpr_u64(rt))) {
             ok = fail(
                 pc,
                 instruction,
