@@ -722,6 +722,47 @@ bool test_cdvd_raises_iop_irq2() {
     return ok;
 }
 
+bool test_iop_spu2_register_window() {
+    ps2::Ps2System system;
+
+    ps2::u16 value16 = 0xFFFFu;
+    bool ok =
+        expect(system.iop_bus().read16(0x1F900344u, value16) &&
+                   value16 == 0,
+               "SPU2 core0 STATX reset value mismatch");
+
+    value16 = 0xFFFFu;
+    ok =
+        expect(system.iop_bus().read16(0x1F900744u, value16) &&
+                   value16 == 0,
+               "SPU2 core1 STATX reset value mismatch") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().write16(0xBF900188u, 0x55AAu),
+               "SPU2 KSEG1 16-bit write failed") &&
+        ok;
+    value16 = 0;
+    ok =
+        expect(system.iop_bus().read16(0x1F900188u, value16) &&
+                   value16 == 0x55AAu,
+               "SPU2 physical 16-bit readback mismatch") &&
+        ok;
+
+    ok =
+        expect(system.iop_bus().write32(0x1F900300u, 0x44332211u),
+               "SPU2 32-bit bootstrap write failed") &&
+        ok;
+    ps2::u32 value32 = 0;
+    ok =
+        expect(system.iop_bus().read32(0xBF900300u, value32) &&
+                   value32 == 0x44332211u,
+               "SPU2 KSEG1 32-bit readback mismatch") &&
+        ok;
+
+    return ok;
+}
+
 bool test_ee_lq_sq_silent_alignment() {
     ps2::Ps2System system;
 
@@ -819,6 +860,7 @@ int main() {
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
+    ok = test_iop_spu2_register_window() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
