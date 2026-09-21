@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - perf/cpu-jit-v2-linux-bench-1
+      - perf/cpu-jit-v2-rr4-gate-test
   workflow_dispatch:
 
 jobs:
