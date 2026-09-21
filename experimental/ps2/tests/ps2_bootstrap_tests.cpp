@@ -655,6 +655,70 @@ bool test_ee_break_exception_and_tlb_ops() {
     return ok;
 }
 
+bool test_ee_sa_and_qfsrv() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3600u;
+
+    // MTSA r1; MFSA r2.
+    constexpr ps2::u32 mtsa =
+        (1u << 21) | 0x29u;
+    constexpr ps2::u32 mfsa =
+        (2u << 11) | 0x28u;
+    // QFSRV r5,r3,r4 is MMI1 subfunction 0x1B.
+    constexpr ps2::u32 qfsrv =
+        (0x1Cu << 26) |
+        (3u << 21) |
+        (4u << 16) |
+        (5u << 11) |
+        (0x1Bu << 6) |
+        0x28u;
+    // MTSAB r1,3 and MTSAH r1,2.
+    constexpr ps2::u32 mtsab =
+        (0x01u << 26) | (1u << 21) | (0x18u << 16) | 3u;
+    constexpr ps2::u32 mtsah =
+        (0x01u << 26) | (1u << 21) | (0x19u << 16) | 2u;
+
+    bool ok = expect(
+        system.bus().write32(pc + 0u, mtsa) &&
+        system.bus().write32(pc + 4u, mfsa) &&
+        system.bus().write32(pc + 8u, qfsrv) &&
+        system.bus().write32(pc + 12u, mtsab) &&
+        system.bus().write32(pc + 16u, mtsah),
+        "SA/QFSRV test code write failed");
+
+    system.ee().reset(pc);
+    auto& state = system.ee().state();
+    state.gpr[1].lo = 8u; // QFSRV uses SA*8 => 64 bits.
+    state.gpr[3] = {
+        0xFFEEDDCCBBAA9988ull,
+        0x7766554433221100ull,
+    };
+    state.gpr[4] = {
+        0x0123456789ABCDEFull,
+        0xFEDCBA9876543210ull,
+    };
+
+    std::string error;
+    ok = expect(system.ee().step(error), "MTSA execution failed") && ok;
+    ok = expect(state.sa == 8u, "MTSA did not update SA") && ok;
+    ok = expect(system.ee().step(error), "MFSA execution failed") && ok;
+    ok = expect(state.gpr[2].lo == 8u, "MFSA result mismatch") && ok;
+
+    ok = expect(system.ee().step(error), "QFSRV execution failed") && ok;
+    ok = expect(
+        state.gpr[5].lo == 0xFEDCBA9876543210ull &&
+        state.gpr[5].hi == 0xFFEEDDCCBBAA9988ull,
+        "QFSRV 64-bit boundary result mismatch") && ok;
+
+    state.gpr[1].lo = 0xAu;
+    ok = expect(system.ee().step(error), "MTSAB execution failed") && ok;
+    ok = expect(state.sa == 9u, "MTSAB SA result mismatch") && ok;
+
+    ok = expect(system.ee().step(error), "MTSAH execution failed") && ok;
+    ok = expect(state.sa == 0u, "MTSAH SA result mismatch") && ok;
+    return ok;
+}
+
 bool test_ee_tlb_mapped_memory_and_refill() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x3400u;
@@ -2659,6 +2723,7 @@ int main() {
     ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_ee_break_exception_and_tlb_ops() && ok;
+    ok = test_ee_sa_and_qfsrv() && ok;
     ok = test_ee_tlb_mapped_memory_and_refill() && ok;
     ok = test_ee_integer_overflow_exception() && ok;
     ok = test_syscall_exception() && ok;
