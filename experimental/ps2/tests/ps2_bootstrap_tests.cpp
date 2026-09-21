@@ -2115,6 +2115,24 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_iop_halt_is_nonfatal_to_ee_bootstrap() {
+    ps2::Ps2System system;
+    // COP1 is not part of the PS1-derived IOP/R3000A ISA and deliberately
+    // forces the IOP interpreter into its diagnostic halt state.
+    constexpr ps2::u32 unsupported_iop = 0x44000000u;
+    bool ok = expect(
+        system.iop_bus().write32(0x1000u, unsupported_iop),
+        "IOP nonfatal-halt test setup failed");
+    system.iop().reset(0x1000u);
+
+    std::string error;
+    ok = expect(!system.iop().step(error) && system.iop_halted(),
+                "IOP did not enter diagnostic halt state") && ok;
+    ok = expect(!system.halted(),
+                "IOP diagnostic halt incorrectly stopped EE bootstrap") && ok;
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -2162,6 +2180,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_iop_halt_is_nonfatal_to_ee_bootstrap() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";
