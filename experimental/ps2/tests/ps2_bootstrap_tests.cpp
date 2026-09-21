@@ -335,6 +335,136 @@ bool test_mmi_bootstrap_packed_ops() {
     return ok;
 }
 
+bool test_mmi_bios_instruction_expansion() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2280u;
+    std::string error;
+    bool ok = true;
+
+    auto run = [&](ps2::u32 instruction) {
+        ok = expect(
+                 system.bus().write32(pc, instruction),
+                 "failed to install expanded MMI opcode") && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(
+                 system.ee().step(error),
+                 "expanded MMI opcode execution failed") && ok;
+    };
+
+    // PADDSW: signed word saturation is used by ROM-side packed math.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x800000007FFFFFFFull,
+        0x00000001FFFFFFFFull,
+    };
+    system.ee().state().gpr[2] = {
+        0xFFFFFFFF00000001ull,
+        0xFFFFFFFF00000002ull,
+    };
+    const ps2::u32 paddsw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x10u << 6) | 0x08u;
+    run(paddsw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x800000007FFFFFFFull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000000000001ull,
+             "PADDSW saturation mismatch") && ok;
+
+    // PSLLVW/PSRAVW operate on word 0 and word 2 and sign-extend each
+    // result into a 64-bit destination half.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0000000000000001ull,
+        0x0000000000000004ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0000000040000000ull,
+        0x00000000F0000000ull,
+    };
+    const ps2::u32 psllvw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x02u << 6) | 0x09u;
+    run(psllvw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0xFFFFFFFF80000000ull &&
+             system.ee().state().gpr[3].hi == 0,
+             "PSLLVW lane/sign extension mismatch") && ok;
+
+    const ps2::u32 psravw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x03u << 6) | 0x29u;
+    run(psravw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0000000020000000ull &&
+             system.ee().state().gpr[3].hi ==
+                 0xFFFFFFFFFF000000ull,
+             "PSRAVW lane/sign extension mismatch") && ok;
+
+    // PMULTW updates both accumulator lanes and returns both full products.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x00000000FFFFFFFEull,
+        0x0000000000010000ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0000000000000003ull,
+        0x0000000000010000ull,
+    };
+    const ps2::u32 pmultw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x0Cu << 6) | 0x09u;
+    run(pmultw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0xFFFFFFFFFFFFFFFAull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000100000000ull,
+             "PMULTW destination mismatch") && ok;
+    ok = expect(
+             system.ee().state().lo ==
+                 0xFFFFFFFFFFFFFFFAull &&
+             system.ee().state().hi ==
+                 0xFFFFFFFFFFFFFFFFull &&
+             system.ee().state().lo1 == 0 &&
+             system.ee().state().hi1 == 1,
+             "PMULTW accumulator mismatch") && ok;
+
+    // PMTHI/PMFHI cover the packed 128-bit HI transfer path.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x1122334455667788ull,
+        0x99AABBCCDDEEFF00ull,
+    };
+    const ps2::u32 pmthi =
+        (0x1Cu << 26) |
+        (1u << 21) |
+        (0x08u << 6) | 0x29u;
+    run(pmthi);
+    const ps2::u32 pmfhi =
+        (0x1Cu << 26) |
+        (3u << 11) |
+        (0x08u << 6) | 0x09u;
+    run(pmfhi);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x1122334455667788ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x99AABBCCDDEEFF00ull,
+             "PMTHI/PMFHI packed transfer mismatch") && ok;
+
+    return ok;
+}
+
 bool test_unaligned_doubleword_merges() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -2974,6 +3104,7 @@ int main() {
     ok = test_mmi_madd_and_plzcw() && ok;
     ok = test_mmi_pmfhl_pmthl() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
+    ok = test_mmi_bios_instruction_expansion() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
