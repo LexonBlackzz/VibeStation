@@ -41,6 +41,8 @@ constexpr u32 kOhciRhNps = 1u << 9;
 constexpr u32 kOhciPortPps = 1u << 8;
 constexpr u32 kFirewireBase = 0x1F808400u;
 constexpr u32 kFirewireSize = 0x150u;
+constexpr u32 kDev9Base = 0x10000000u;
+constexpr u32 kDev9Size = 0x00010000u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
@@ -663,6 +665,13 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical >= kDev9Base &&
+        physical < kDev9Base + kDev9Size) {
+        // No expansion-bay adapter is attached. Real IOP mappings still
+        // expose the DEV9 aperture and return zero for absent hardware.
+        value = 0;
+        return true;
+    }
     u32 ohci_value = 0;
     if (read_ohci(physical, 1u, ohci_value)) {
         value = static_cast<u8>(ohci_value);
@@ -697,6 +706,11 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
+    if (physical >= kDev9Base &&
+        physical + 2u <= kDev9Base + kDev9Size) {
+        value = 0;
+        return true;
+    }
     u32 ohci_value = 0;
     if (read_ohci(physical, 2u, ohci_value)) {
         value = static_cast<u16>(ohci_value);
@@ -735,6 +749,11 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical >= kDev9Base &&
+        physical + 4u <= kDev9Base + kDev9Size) {
+        value = 0;
+        return true;
+    }
     u32 ohci_value = 0;
     if (read_ohci(physical, 4u, ohci_value)) {
         value = ohci_value;
@@ -780,6 +799,10 @@ bool IopBus::write8(u32 address, u8 value) {
         cache_control_[address-kCacheControlBase]=value; return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kDev9Base &&
+        physical < kDev9Base + kDev9Size) {
+        return true;
+    }
     if (physical >= kOhciBase &&
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 1u, value);
@@ -812,6 +835,10 @@ bool IopBus::write8(u32 address, u8 value) {
 
 bool IopBus::write16(u32 address, u16 value) {
     const u32 physical=to_physical(address);
+    if (physical >= kDev9Base &&
+        physical + 2u <= kDev9Base + kDev9Size) {
+        return true;
+    }
     if (physical >= kOhciBase &&
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 2u, value);
@@ -847,6 +874,10 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kDev9Base &&
+        physical + 4u <= kDev9Base + kDev9Size) {
+        return true;
+    }
     if (physical >= kOhciBase &&
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 4u, value);
