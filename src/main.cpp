@@ -1637,6 +1637,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   const CpuBackendStats before = sys->cpu().cpu_backend_stats();
   double cpu_ms = 0.0;
   double core_ms = 0.0;
+  double gpu_ms = 0.0;
+  double spu_ms = 0.0;
+  double dma_ms = 0.0;
+  double timers_ms = 0.0;
+  double cdrom_ms = 0.0;
+  double gte_ms = 0.0;
+  u64 gte_commands = 0u;
   std::vector<double> cpu_samples;
   std::vector<double> core_samples;
   cpu_samples.reserve(static_cast<size_t>(measured_frames));
@@ -1647,9 +1654,17 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     sys->sio().set_button_state(
         auto_input_buttons_for_frame(absolute_frame));
     sys->run_frame();
-    cpu_ms += sys->profiling_stats().cpu_ms;
-    core_ms += sys->profiling_stats().total_ms;
-    cpu_samples.push_back(sys->profiling_stats().cpu_ms);
+    const auto &profile = sys->profiling_stats();
+    cpu_ms += profile.cpu_ms;
+    core_ms += profile.total_ms;
+    gpu_ms += profile.gpu_ms;
+    spu_ms += profile.spu_ms;
+    dma_ms += profile.dma_ms;
+    timers_ms += profile.timers_ms;
+    cdrom_ms += profile.cdrom_ms;
+    gte_ms += profile.gte_total_ms;
+    gte_commands += profile.gte_total_commands;
+    cpu_samples.push_back(profile.cpu_ms);
     core_samples.push_back(sys->profiling_stats().total_ms);
     if (!emit_checkpoint(absolute_frame)) {
       std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
@@ -1722,7 +1737,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "warmup_frames=%d measured_frames=%d cpu_ms_avg=%.6f "
       "cpu_ms_p50=%.6f cpu_ms_p95=%.6f cpu_ms_p99=%.6f cpu_ms_max=%.6f "
       "core_ms_avg=%.6f core_ms_p50=%.6f core_ms_p95=%.6f "
-      "core_ms_p99=%.6f core_ms_max=%.6f wall_ms=%.3f native_coverage=%.3f "
+      "core_ms_p99=%.6f core_ms_max=%.6f wall_ms=%.3f "
+      "gpu_ms_avg=%.6f spu_ms_avg=%.6f dma_ms_avg=%.6f "
+      "timers_ms_avg=%.6f cdrom_ms_avg=%.6f gte_ms_avg=%.6f "
+      "gte_commands=%llu gte_pct_cpu=%.3f native_coverage=%.3f "
       "helper_assisted_coverage=%.3f native_inline_instructions=%llu "
       "native_helper_instructions=%llu native_instructions=%llu "
       "decoded_instructions=%llu "
@@ -1751,6 +1769,11 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       benchmark_percentile(core_samples, 0.95),
       benchmark_percentile(core_samples, 0.99),
       core_samples.empty() ? 0.0 : core_samples.back(), wall_ms,
+      gpu_ms / measured_divisor, spu_ms / measured_divisor,
+      dma_ms / measured_divisor, timers_ms / measured_divisor,
+      cdrom_ms / measured_divisor, gte_ms / measured_divisor,
+      static_cast<unsigned long long>(gte_commands),
+      cpu_ms > 0.0 ? (100.0 * gte_ms / cpu_ms) : 0.0,
       native_coverage, helper_assisted_coverage,
       static_cast<unsigned long long>(inline_native_instructions),
       static_cast<unsigned long long>(helper_assisted_instructions),
