@@ -1060,6 +1060,95 @@ bool test_iop_sio2_dma_bootstrap_completion() {
     return ok;
 }
 
+bool test_ee_scratchpad_dma_round_trip() {
+    ps2::Ps2System system;
+    ps2::SprDma dma;
+    dma.reset();
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 from_base = 0x1000D000u;
+    constexpr ps2::u32 to_base = 0x1000D400u;
+    constexpr ps2::u32 str = 1u << 8;
+
+    ok = expect(
+             system.bus().write32(dmac_ctrl, 1u),
+             "failed to enable EE DMAC for SPR test") && ok;
+
+    // Channel 9: main memory -> scratchpad.
+    ok = expect(
+             system.bus().write64(0x4000u, 0x1122334455667788ull) &&
+             system.bus().write64(0x4008u, 0x99AABBCCDDEEFF00ull) &&
+             system.bus().write32(to_base + 0x10u, 0x4000u) &&
+             system.bus().write32(to_base + 0x20u, 1u) &&
+             system.bus().write32(to_base + 0x80u, 0x20u) &&
+             system.bus().write32(to_base + 0x00u, str),
+             "failed to program SPR-to DMA") && ok;
+    ok = expect(
+             dma.service(system.bus(), error),
+             "SPR-to DMA service failed") && ok;
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ps2::u32 chcr = 0;
+    ps2::u32 qwc = 0;
+    ps2::u32 stat = 0;
+    ok = expect(
+             system.bus().read64(0x70000020u, lo) &&
+             system.bus().read64(0x70000028u, hi) &&
+             lo == 0x1122334455667788ull &&
+             hi == 0x99AABBCCDDEEFF00ull,
+             "SPR-to DMA payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(to_base + 0x00u, chcr) &&
+             (chcr & str) == 0 &&
+             system.bus().read32(to_base + 0x20u, qwc) &&
+             qwc == 0,
+             "SPR-to DMA did not complete") && ok;
+    ok = expect(
+             system.bus().read32(0x1000E010u, stat) &&
+             (stat & (1u << 9)) != 0,
+             "SPR-to DMA completion IRQ missing") && ok;
+
+    // Acknowledge channel 9 before checking channel 8 independently.
+    ok = expect(
+             system.bus().write32(0x1000E010u, 1u << 9),
+             "failed to acknowledge SPR-to IRQ") && ok;
+
+    // Channel 8: scratchpad -> main memory, including scratchpad wrap.
+    ok = expect(
+             system.bus().write64(
+                 0x70003FF0u, 0x0123456789ABCDEFull) &&
+             system.bus().write64(
+                 0x70003FF8u, 0xFEDCBA9876543210ull) &&
+             system.bus().write32(from_base + 0x10u, 0x5000u) &&
+             system.bus().write32(from_base + 0x20u, 1u) &&
+             system.bus().write32(from_base + 0x80u, 0x3FF0u) &&
+             system.bus().write32(from_base + 0x00u, str),
+             "failed to program SPR-from DMA") && ok;
+    error.clear();
+    ok = expect(
+             dma.service(system.bus(), error),
+             "SPR-from DMA service failed") && ok;
+
+    lo = hi = 0;
+    ok = expect(
+             system.bus().read64(0x5000u, lo) &&
+             system.bus().read64(0x5008u, hi) &&
+             lo == 0x0123456789ABCDEFull &&
+             hi == 0xFEDCBA9876543210ull,
+             "SPR-from DMA payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(from_base + 0x00u, chcr) &&
+             (chcr & str) == 0 &&
+             system.bus().read32(0x1000E010u, stat) &&
+             (stat & (1u << 8)) != 0,
+             "SPR-from DMA completion state mismatch") && ok;
+
+    return ok;
+}
+
 bool test_ee_lq_sq_silent_alignment() {
     ps2::Ps2System system;
 
@@ -1164,6 +1253,7 @@ int main() {
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
+    ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
