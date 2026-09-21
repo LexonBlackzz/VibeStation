@@ -1677,6 +1677,23 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           return false;
         }
       }
+
+      // A cache alias miss is safe to refill into an existing translation only
+      // when the words that will be fetched from backing memory still match
+      // what that translation lowered. Hit lines may intentionally contain
+      // stale self-modified code, so validate *only* lines that actually miss.
+      for (u32 i = 0; i < candidate.instruction_count; ++i) {
+        const u32 inst_pc = candidate.start_pc + i * 4u;
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        const auto &inst_line = cpu_.icache_[inst_index];
+        if (inst_line.valid && inst_line.tag == inst_tag) {
+          continue;
+        }
+        if (cpu_.sys_->read32_instruction(inst_pc) != candidate.words[i]) {
+          return false;
+        }
+      }
       return true;
     };
 
