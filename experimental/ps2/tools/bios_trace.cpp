@@ -48,6 +48,40 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
+    for (ps2::u32 channel = 9u; channel <= 10u; ++channel) {
+        const ps2::u32 base = 0x1F801490u + channel * 0x10u;
+        ps2::u32 madr = 0;
+        ps2::u32 bcr = 0;
+        ps2::u32 chcr = 0;
+        ps2::u32 tadr = 0;
+        (void)system.iop_bus().read32(base, madr);
+        (void)system.iop_bus().read32(base + 4u, bcr);
+        (void)system.iop_bus().read32(base + 8u, chcr);
+        (void)system.iop_bus().read32(base + 12u, tadr);
+        std::cout
+            << "IOP_DMAC" << channel
+            << "_MADR=0x" << std::hex << std::uppercase << madr
+            << " BCR=0x" << bcr
+            << " CHCR=0x" << chcr
+            << " TADR=0x" << tadr
+            << std::dec << '\n';
+
+        if (channel == 9u && tadr != 0u) {
+            ps2::u32 tag[4]{};
+            for (ps2::u32 index = 0; index < 4u; ++index) {
+                (void)system.iop_bus().read32(
+                    tadr + index * 4u,
+                    tag[index]);
+            }
+            std::cout
+                << "IOP_SIF0_TAG=0x" << std::hex << std::uppercase
+                << tag[0] << ",0x" << tag[1]
+                << ",0x" << tag[2] << ",0x" << tag[3]
+                << " SOURCE=0x" << (tag[0] & 0x00FFFFFFu)
+                << std::dec << '\n';
+        }
+    }
+
     auto print_code = [&](const char* label, ps2::u32 center) {
         std::cout << label;
         const ps2::u32 code_base = (center - 16u) & ~3u;
@@ -98,6 +132,19 @@ void print_state(const ps2::Ps2System& system) {
     for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
         ps2::u32 instruction = 0;
         const ps2::u32 address = iop_code_base + offset;
+        if (system.iop_bus().read32(address, instruction)) {
+            std::cout
+                << " [0x" << std::hex << std::uppercase << address
+                << "]=0x" << instruction;
+        }
+    }
+    std::cout << std::dec << '\n';
+
+    std::cout << "IOP_RA_CODE";
+    const ps2::u32 iop_ra_base = (iop.gpr[31] - 16u) & ~3u;
+    for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
+        ps2::u32 instruction = 0;
+        const ps2::u32 address = iop_ra_base + offset;
         if (system.iop_bus().read32(address, instruction)) {
             std::cout
                 << " [0x" << std::hex << std::uppercase << address
@@ -168,13 +215,35 @@ void print_state(const ps2::Ps2System& system) {
     ps2::u32 dmac_ctrl = 0;
     ps2::u32 dmac_stat = 0;
     ps2::u32 dmac_pcr = 0;
+    ps2::u32 ee_intc_stat = 0;
+    ps2::u32 ee_intc_mask = 0;
     (void)system.bus().read32(0x1000E000u, dmac_ctrl);
     (void)system.bus().read32(0x1000E010u, dmac_stat);
     (void)system.bus().read32(0x1000E020u, dmac_pcr);
+    (void)system.bus().read32(0x1000F000u, ee_intc_stat);
+    (void)system.bus().read32(0x1000F010u, ee_intc_mask);
     std::cout
         << "DMAC_CTRL=0x" << std::hex << std::uppercase << dmac_ctrl
         << " DMAC_STAT=0x" << dmac_stat
         << " DMAC_PCR=0x" << dmac_pcr
+        << " EE_INTC_STAT=0x" << ee_intc_stat
+        << " EE_INTC_MASK=0x" << ee_intc_mask
+        << std::dec << '\n';
+
+    ps2::u32 sif_regs[4]{};
+    for (ps2::u32 index = 0; index < 4u; ++index) {
+        (void)system.bus().read32(
+            0x1000F200u + index * 0x10u,
+            sif_regs[index]);
+    }
+    ps2::u32 iop_sbus = 0;
+    (void)system.iop_bus().read32(0x1F801450u, iop_sbus);
+    std::cout
+        << "SIF_MSCOM=0x" << std::hex << std::uppercase << sif_regs[0]
+        << " SIF_SMCOM=0x" << sif_regs[1]
+        << " SIF_MSFLAG=0x" << sif_regs[2]
+        << " SIF_SMFLAG=0x" << sif_regs[3]
+        << " IOP_SBUS_1450=0x" << iop_sbus
         << std::dec << '\n';
 
     const auto& vu = system.vu1();
