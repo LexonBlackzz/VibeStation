@@ -1272,6 +1272,48 @@ bool test_iop_ohci_bootstrap_reset() {
     return ok;
 }
 
+bool test_iop_firewire_bootstrap_probes() {
+    ps2::Ps2System system;
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F808400u, value) &&
+             value == 0xFFC00001u,
+             "i.Link node ID probe mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F808410u, value) &&
+             value == 0x8u,
+             "i.Link SCLK ready reset state mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F80847Cu, value) &&
+             value == 0x10000001u,
+             "i.Link node comparison probe mismatch") && ok;
+
+    ok = expect(
+             system.iop_bus().write32(0x1F808408u, 0x00800055u) &&
+             system.iop_bus().read32(0x1F808408u, value) &&
+             (value & 0x00800000u) == 0u &&
+             (value & 0x55u) == 0x55u,
+             "i.Link Bus ID reset bit did not self-clear") && ok;
+
+    ok = expect(
+             system.iop_bus().write32(0x1F808410u, 0u) &&
+             system.iop_bus().read32(0x1F808410u, value) &&
+             value == 0x8u,
+             "i.Link SCLK ready bit was lost") && ok;
+
+    // PHY read request must complete instead of leaving the read flag set.
+    ok = expect(
+             system.iop_bus().write32(0x1F808414u, 0x83000000u) &&
+             system.iop_bus().read32(0x1F808414u, value) &&
+             (value & 0x80000000u) == 0u &&
+             (value & 0x00000F00u) == 0x00000300u,
+             "i.Link PHY read request did not complete") && ok;
+
+    return ok;
+}
+
 bool test_iop_dma6_ordering_table_clear() {
     ps2::Ps2System system;
     bool ok = true;
@@ -1434,6 +1476,7 @@ int main() {
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
     ok = test_iop_ohci_bootstrap_reset() && ok;
+    ok = test_iop_firewire_bootstrap_probes() && ok;
     ok = test_iop_dma6_ordering_table_clear() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_ipu_dma_bootstrap_paths() && ok;
