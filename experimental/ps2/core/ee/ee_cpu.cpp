@@ -304,9 +304,33 @@ bool EeCpu::execute_special(
             state_.lo,
             state_.hi);
         return true;
+    case 0x20: { // ADD
+        const s64 result =
+            static_cast<s64>(static_cast<s32>(static_cast<u32>(gpr_u64(rs)))) +
+            static_cast<s64>(static_cast<s32>(static_cast<u32>(gpr_u64(rt))));
+        if (result < std::numeric_limits<s32>::min() ||
+            result > std::numeric_limits<s32>::max()) {
+            raise_exception(12u, pc, current_is_delay_slot_);
+        } else {
+            write_gpr_word(rd, static_cast<u32>(static_cast<s32>(result)));
+        }
+        return true;
+    }
     case 0x21: // ADDU
         write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) + static_cast<u32>(gpr_u64(rt)));
         return true;
+    case 0x22: { // SUB
+        const s64 result =
+            static_cast<s64>(static_cast<s32>(static_cast<u32>(gpr_u64(rs)))) -
+            static_cast<s64>(static_cast<s32>(static_cast<u32>(gpr_u64(rt))));
+        if (result < std::numeric_limits<s32>::min() ||
+            result > std::numeric_limits<s32>::max()) {
+            raise_exception(12u, pc, current_is_delay_slot_);
+        } else {
+            write_gpr_word(rd, static_cast<u32>(static_cast<s32>(result)));
+        }
+        return true;
+    }
     case 0x23: // SUBU
         write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) - static_cast<u32>(gpr_u64(rt)));
         return true;
@@ -328,9 +352,37 @@ bool EeCpu::execute_special(
     case 0x2B: // SLTU
         write_gpr64(rd, gpr_u64(rs) < gpr_u64(rt) ? 1u : 0u);
         return true;
+    case 0x2C: { // DADD
+        const s64 lhs = static_cast<s64>(gpr_u64(rs));
+        const s64 rhs = static_cast<s64>(gpr_u64(rt));
+        const s64 result = static_cast<s64>(
+            static_cast<u64>(lhs) + static_cast<u64>(rhs));
+        const bool overflow =
+            (rhs > 0 && lhs > std::numeric_limits<s64>::max() - rhs) ||
+            (rhs < 0 && lhs < std::numeric_limits<s64>::min() - rhs);
+        if (overflow) {
+            raise_exception(12u, pc, current_is_delay_slot_);
+        } else {
+            write_gpr64(rd, static_cast<u64>(result));
+        }
+        return true;
+    }
     case 0x2D: // DADDU
         write_gpr64(rd, gpr_u64(rs) + gpr_u64(rt));
         return true;
+    case 0x2E: { // DSUB
+        const s64 lhs = static_cast<s64>(gpr_u64(rs));
+        const s64 rhs = static_cast<s64>(gpr_u64(rt));
+        const bool overflow =
+            (rhs < 0 && lhs > std::numeric_limits<s64>::max() + rhs) ||
+            (rhs > 0 && lhs < std::numeric_limits<s64>::min() + rhs);
+        if (overflow) {
+            raise_exception(12u, pc, current_is_delay_slot_);
+        } else {
+            write_gpr64(rd, static_cast<u64>(lhs - rhs));
+        }
+        return true;
+    }
     case 0x2F: // DSUBU
         write_gpr64(rd, gpr_u64(rs) - gpr_u64(rt));
         return true;
@@ -812,7 +864,7 @@ bool EeCpu::step(std::string& error) {
         const s64 result = static_cast<s64>(lhs) + static_cast<s64>(imm);
         if (result < std::numeric_limits<s32>::min() ||
             result > std::numeric_limits<s32>::max()) {
-            ok = fail(pc, instruction, "ADDI overflow", error);
+            raise_exception(12u, pc, current_is_delay_slot_);
         } else {
             write_gpr_word(rt, static_cast<u32>(static_cast<s32>(result)));
         }
@@ -885,6 +937,19 @@ bool EeCpu::step(std::string& error) {
             branch_likely_not_taken(pc);
         }
         break;
+    case 0x18: { // DADDI
+        const s64 lhs = static_cast<s64>(gpr_u64(rs));
+        const s64 rhs = static_cast<s64>(imm);
+        const bool overflow =
+            (rhs > 0 && lhs > std::numeric_limits<s64>::max() - rhs) ||
+            (rhs < 0 && lhs < std::numeric_limits<s64>::min() - rhs);
+        if (overflow) {
+            raise_exception(12u, pc, current_is_delay_slot_);
+        } else {
+            write_gpr64(rt, static_cast<u64>(lhs + rhs));
+        }
+        break;
+    }
     case 0x19: // DADDIU
         write_gpr64(rt, gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));
         break;
