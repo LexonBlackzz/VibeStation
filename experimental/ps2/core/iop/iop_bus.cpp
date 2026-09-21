@@ -23,6 +23,11 @@ constexpr u32 kSpu2Base = 0x1F900000u;
 constexpr u32 kSpu2Statx0 = 0x344u;
 constexpr u32 kSpu2Statx1 = 0x744u;
 constexpr u32 kSpu2Size = 0x800u;
+constexpr u32 kSio2Ctrl = 0x1F808268u;
+constexpr u32 kSio2CmdStat = 0x1F80826Cu;
+constexpr u32 kSio2Intr = 0x1F808280u;
+constexpr u32 kSio2Start = 1u;
+constexpr u32 kSio2NoDevices = 0x0003D000u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
@@ -318,6 +323,25 @@ bool IopBus::write32(u32 address, u32 value) {
     const u32 physical=to_physical(address);
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
+    }
+    if (physical == kSio2Ctrl) {
+        if (!hw_.write32(physical, value)) return false;
+        if ((value & kSio2Start) != 0) {
+            // No controllers/cards are attached in the bootstrap core. Finish
+            // the transaction immediately and expose the same interrupt/status
+            // path SIO2MAN waits on.
+            if (!hw_.write32(kSio2CmdStat, kSio2NoDevices) ||
+                !hw_.write32(kSio2Intr, 1u)) {
+                return false;
+            }
+            intc_.raise(17u);
+        }
+        return true;
+    }
+    if (physical == kSio2Intr) {
+        u32 current = 0;
+        if (!hw_.read32(kSio2Intr, current)) return false;
+        return hw_.write32(kSio2Intr, current & ~value);
     }
     if (physical == kDma4Chcr ||
         physical == kDma7Chcr ||
