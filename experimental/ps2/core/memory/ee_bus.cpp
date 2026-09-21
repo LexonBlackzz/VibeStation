@@ -1,6 +1,7 @@
 #include "core/memory/ee_bus.h"
 
 #include "core/bios/bios.h"
+#include "core/cdvd/cdvd_hw.h"
 #include "core/gs/gs_core.h"
 #include "core/gs/gs_privileged.h"
 #include "core/hw/ee_hw.h"
@@ -12,10 +13,11 @@
 namespace ps2 {
 
 EeBus::EeBus(EeRam& ram, EeScratchpad& scratchpad, EeHw& hw,
-             IopHwWindow& iop_hw, IopRam& iop_ram, GsPrivileged& gs,
-             GsCore& gs_core, const Bios& bios)
+             IopHwWindow& iop_hw, IopRam& iop_ram, CdvdHw& cdvd,
+             GsPrivileged& gs, GsCore& gs_core, const Bios& bios)
     : ram_(ram), scratchpad_(scratchpad), hw_(hw), iop_hw_(iop_hw),
-      iop_ram_(iop_ram), gs_(gs), gs_core_(gs_core), bios_(bios) {}
+      iop_ram_(iop_ram), cdvd_(cdvd), gs_(gs), gs_core_(gs_core),
+      bios_(bios) {}
 
 void EeBus::reset() {
     vu0_micro_.fill(0);
@@ -48,6 +50,7 @@ bool EeBus::read8(u32 address, u8& value) const {
     if (physical >= 0x1100C000u && physical < 0x11010000u) { value = vu1_data_[physical - 0x1100C000u]; return true; }
     if(physical<EeRam::kSize) return ram_.read8(physical,value);
     if (is_iop_ram_physical(physical)) return iop_ram_.read8(iop_ram_offset(physical),value);
+    if(cdvd_.read8(physical,value)) return true;
     if(hw_.read8(physical,value)) return true;
     if(iop_hw_.read8(physical,value)) return true;
     if(gs_.read8(physical,value)) return true;
@@ -63,6 +66,7 @@ bool EeBus::read16(u32 address,u16& value) const {
     }
     if(physical<EeRam::kSize) return ram_.read16(physical,value);
     if(is_iop_ram_physical(physical)) return iop_ram_.read16(iop_ram_offset(physical),value);
+    if(cdvd_.read16(physical,value)) return true;
     if(hw_.read16(physical,value)) return true;
     if(iop_hw_.read16(physical,value)) return true;
     if(gs_.read16(physical,value)) return true;
@@ -78,6 +82,7 @@ bool EeBus::read32(u32 address,u32& value) const {
     }
     if(physical<EeRam::kSize) return ram_.read32(physical,value);
     if(is_iop_ram_physical(physical)) return iop_ram_.read32(iop_ram_offset(physical),value);
+    if(cdvd_.read32(physical,value)) return true;
     if(hw_.read32(physical,value)) return true;
     if(iop_hw_.read32(physical,value)) return true;
     if(gs_.read32(physical,value)) return true;
@@ -107,6 +112,7 @@ bool EeBus::write8(u32 address,u8 value){
     if (physical >= 0x1100C000u && physical < 0x11010000u) { vu1_data_[physical - 0x1100C000u] = value; return true; }
     if(physical<EeRam::kSize) return ram_.write8(physical,value);
     if(is_iop_ram_physical(physical)) return iop_ram_.write8(iop_ram_offset(physical),value);
+    if(cdvd_.write8(physical,value)) return true;
     if(hw_.write8(physical,value)) return true;
     if(iop_hw_.write8(physical,value)) return true;
     return gs_.write8(physical,value);
@@ -120,6 +126,7 @@ bool EeBus::write16(u32 address,u16 value){
     }
     if(physical<EeRam::kSize) return ram_.write16(physical,value);
     if(is_iop_ram_physical(physical)) return iop_ram_.write16(iop_ram_offset(physical),value);
+    if(cdvd_.write16(physical,value)) return true;
     if(hw_.write16(physical,value)) return true;
     if(iop_hw_.write16(physical,value)) return true;
     return gs_.write16(physical,value);
@@ -135,6 +142,7 @@ bool EeBus::write32(u32 address,u32 value){
     }
     if(physical<EeRam::kSize) return ram_.write32(physical,value);
     if(is_iop_ram_physical(physical)) return iop_ram_.write32(iop_ram_offset(physical),value);
+    if(cdvd_.write32(physical,value)) return true;
     if(hw_.write32(physical,value)) return true;
     if(iop_hw_.write32(physical,value)) return true;
     return gs_.write32(physical,value);

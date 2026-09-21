@@ -579,6 +579,12 @@ bool test_cdvd_reset_status() {
                "CDVD N-READY reset value mismatch");
 
     ok =
+        expect(system.bus().read8(0x1F402005u, value) &&
+                   value == 0x4Cu,
+               "EE CDVD N-READY mapping mismatch") &&
+        ok;
+
+    ok =
         expect(system.iop_bus().read8(0xBF40200Au, value) &&
                    value == 0x01u,
                "CDVD tray-open reset status mismatch") &&

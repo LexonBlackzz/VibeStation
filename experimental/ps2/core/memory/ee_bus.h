@@ -7,6 +7,7 @@
 namespace ps2 {
 
 class Bios;
+class CdvdHw;
 class EeHw;
 class EeRam;
 class EeScratchpad;
@@ -23,6 +24,7 @@ public:
         EeHw& hw,
         IopHwWindow& iop_hw,
         IopRam& iop_ram,
+        CdvdHw& cdvd,
         GsPrivileged& gs,
         GsCore& gs_core,
         const Bios& bios);
@@ -62,6 +64,7 @@ private:
     EeHw& hw_;
     IopHwWindow& iop_hw_;
     IopRam& iop_ram_;
+    CdvdHw& cdvd_;
     GsPrivileged& gs_;
     GsCore& gs_core_;
     const Bios& bios_;
