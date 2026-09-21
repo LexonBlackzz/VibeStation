@@ -55,6 +55,124 @@ bool test_mmi_padduw() {
     return ok;
 }
 
+bool test_mmi_bootstrap_packed_ops() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2200u;
+    std::string error;
+    bool ok = true;
+
+    auto run = [&](ps2::u32 instruction) {
+        ok = expect(
+                 system.bus().write32(pc, instruction),
+                 "failed to install MMI bootstrap opcode") && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(
+                 system.ee().step(error),
+                 "MMI bootstrap opcode execution failed") && ok;
+    };
+
+    // PEXTLW r1,r1,r2 exercises both interleave semantics and rd==rs aliasing.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    system.ee().state().gpr[2] = {
+        0xBBBBBBBBAAAAAAAAull,
+        0xDDDDDDDDCCCCCCCCull,
+    };
+    const ps2::u32 pextlw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (1u << 11) |
+        (0x12u << 6) | 0x08u;
+    run(pextlw);
+    ok = expect(
+             system.ee().state().gpr[1].lo ==
+                 0x11111111AAAAAAAAull &&
+             system.ee().state().gpr[1].hi ==
+                 0x22222222BBBBBBBBull,
+             "PEXLW interleave/alias mismatch") && ok;
+
+    // PAND r3,r1,r2.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0xFF00FF00AA55AA55ull,
+        0x0F0FF0F012345678ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0FF00FF0FFFF0000ull,
+        0x3333CCCCFFFFFFFFull,
+    };
+    const ps2::u32 pand =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x12u << 6) | 0x09u;
+    run(pand);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 (0xFF00FF00AA55AA55ull &
+                  0x0FF00FF0FFFF0000ull) &&
+             system.ee().state().gpr[3].hi ==
+                 (0x0F0FF0F012345678ull &
+                  0x3333CCCCFFFFFFFFull),
+             "PAND result mismatch") && ok;
+
+    // PCPYLD r3,r1,r2 => low = rt.low, high = rs.low.
+    const ps2::u32 pcpyld =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x0Eu << 6) | 0x09u;
+    run(pcpyld);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0FF00FF0FFFF0000ull &&
+             system.ee().state().gpr[3].hi ==
+                 0xFF00FF00AA55AA55ull,
+             "PCPYLD result mismatch") && ok;
+
+    // PADDUH saturates each halfword independently.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0xFFFF000180007FFFull,
+        0x0001000200030004ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x00010001FFFF0001ull,
+        0xFFFF000100020001ull,
+    };
+    const ps2::u32 padduh =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x14u << 6) | 0x28u;
+    run(padduh);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0xFFFF0002FFFF8000ull,
+             "PADDUH saturation mismatch") && ok;
+
+    // PSLLW keeps four independent 32-bit lanes.
+    system.ee().reset(pc);
+    system.ee().state().gpr[2] = {
+        0x0000000200000001ull,
+        0x8000000040000000ull,
+    };
+    const ps2::u32 psllw =
+        (2u << 16) | (3u << 11) |
+        (3u << 6) | 0x3Cu |
+        (0x1Cu << 26);
+    run(psllw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0000001000000008ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000000000000ull,
+             "PSLLW lane shift mismatch") && ok;
+
+    return ok;
+}
+
 bool test_unaligned_doubleword_merges() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -2331,6 +2449,7 @@ int main() {
     bool ok = true;
     ok = test_mmi_por_128() && ok;
     ok = test_mmi_padduw() && ok;
+    ok = test_mmi_bootstrap_packed_ops() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
