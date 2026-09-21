@@ -24,6 +24,7 @@ public:
         const Bios& bios);
 
     void reset();
+    void tick(u64 cycles);
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
@@ -42,6 +43,21 @@ public:
     void raise_dma_irq(u32 channel);
 
 private:
+    struct RootCounter {
+        u64 count = 0;
+        u32 mode = 0;
+        u64 target = 0;
+        u64 phase = 0;
+    };
+
+    [[nodiscard]] static bool decode_root_counter(
+        u32 physical,
+        u32& index,
+        u32& reg);
+    [[nodiscard]] u64 root_counter_rate(u32 index) const;
+    [[nodiscard]] bool read_root_counter(u32 physical, u32 width, u32& value) const;
+    [[nodiscard]] bool write_root_counter(u32 physical, u32 width, u32 value);
+
     [[nodiscard]] bool write_dma_icr(u32 physical, u32 value);
     [[nodiscard]] bool read_sif32(u32 physical, u32& value) const;
     [[nodiscard]] bool write_sif32(u32 physical, u32 value);
@@ -54,6 +70,7 @@ private:
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};
     std::array<u8, 0x800> spu2_regs_{};
+    std::array<RootCounter, 6> root_counters_{};
 };
 
 } // namespace ps2
