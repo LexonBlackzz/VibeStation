@@ -596,11 +596,13 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   auto code = std::make_unique<CodeGenerator>(4096);
 
   // V3 deliberately keeps architectural state virtual inside a block.
-  // r15 = guest GPR base, r14 = runtime/preflight data, rbx = branch result.
-  // r8-r13 are the six guest-register cache slots.
-  code->push(code->rbx);
-  code->push(code->r12);
-  code->push(code->r13);
+  // r15 = guest GPR base, r14 = runtime/preflight data, edx = branch result.
+  // r8-r13 are the six guest-register cache slots. Only r12/r13 need
+  // preserving, and only when those cache slots are actually populated.
+  const bool save_r12 = cached[4] != 0u;
+  const bool save_r13 = cached[5] != 0u;
+  if (save_r12) code->push(code->r12);
+  if (save_r13) code->push(code->r13);
   code->push(code->r14);
   code->push(code->r15);
 
@@ -611,7 +613,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   code->mov(code->r15, code->rdi);
   code->mov(code->r14, code->rsi);
 #endif
-  code->xor_(code->ebx, code->ebx);
+  code->xor_(code->edx, code->edx);
 
   for (size_t slot = 0; slot < cached.size(); ++slot) {
     if (cached[slot] == 0u) {
@@ -769,9 +771,9 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       emit_read_guest(*code, code->eax, cached, inst.rs);
       emit_read_guest(*code, code->ecx, cached, inst.rt);
       code->cmp(code->eax, code->ecx);
-      if (inst.op == V3AluOp::Beq) code->sete(code->bl);
-      else code->setne(code->bl);
-      code->movzx(code->ebx, code->bl);
+      if (inst.op == V3AluOp::Beq) code->sete(code->dl);
+      else code->setne(code->dl);
+      code->movzx(code->edx, code->dl);
       break;
     }
 
@@ -793,12 +795,11 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   }
 
   code->mov(code->dword[code->r15], 0u);
-  code->mov(code->eax, code->ebx);
+  code->mov(code->eax, code->edx);
   code->pop(code->r15);
   code->pop(code->r14);
-  code->pop(code->r13);
-  code->pop(code->r12);
-  code->pop(code->rbx);
+  if (save_r13) code->pop(code->r13);
+  if (save_r12) code->pop(code->r12);
   code->ret();
   code->ready();
   return code;
