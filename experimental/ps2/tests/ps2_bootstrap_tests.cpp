@@ -134,6 +134,66 @@ bool test_bootstrap_mmio() {
     return ok;
 }
 
+bool test_ee_timer_events() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 count = 0x10000000u;
+    constexpr ps2::u32 mode = 0x10000010u;
+    constexpr ps2::u32 comp = 0x10000020u;
+    constexpr ps2::u32 intc_stat = 0x1000F000u;
+    constexpr ps2::u32 intc_mask = 0x1000F010u;
+
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    // BUSCLK timer, zero-return, enabled, compare IRQ enabled.
+    constexpr ps2::u32 compare_mode =
+        (1u << 6) | (1u << 7) | (1u << 8);
+    ok = expect(system.bus().write32(intc_mask, 1u << 9),
+                "timer INTC mask enable failed") && ok;
+    ok = expect(system.bus().write32(count, 0u) &&
+                system.bus().write32(comp, 3u) &&
+                system.bus().write32(mode, compare_mode),
+                "timer compare setup failed") && ok;
+
+    system.bus().tick(6u); // BUSCLK is EE clock / 2 => three timer ticks.
+    ok = expect(system.bus().read32(count, value) && value == 0u,
+                "timer zero-return compare mismatch") && ok;
+    ok = expect(system.bus().read32(mode, value) &&
+                (value & (1u << 10)) != 0,
+                "timer compare flag missing") && ok;
+    ok = expect(system.bus().read32(intc_stat, value) &&
+                (value & (1u << 9)) != 0,
+                "timer compare IRQ missing") && ok;
+
+    // Clear both the INTC cause and sticky compare event, then ensure a later
+    // compare edge can raise the source again.
+    ok = expect(system.bus().write32(intc_stat, 1u << 9) &&
+                system.bus().write32(mode, compare_mode | (1u << 10)),
+                "timer compare acknowledge failed") && ok;
+    system.bus().tick(6u);
+    ok = expect(system.bus().read32(intc_stat, value) &&
+                (value & (1u << 9)) != 0,
+                "timer compare IRQ did not retrigger after flag clear") && ok;
+
+    // Overflow has its own sticky flag/enable but shares the same timer INTC
+    // source.
+    ok = expect(system.bus().write32(intc_stat, 1u << 9) &&
+                system.bus().write32(mode, (1u << 7) | (1u << 9) |
+                                           (1u << 10) | (1u << 11)) &&
+                system.bus().write32(count, 0xFFFFu),
+                "timer overflow setup failed") && ok;
+    system.bus().tick(2u);
+    ok = expect(system.bus().read32(count, value) && value == 0u,
+                "timer overflow count mismatch") && ok;
+    ok = expect(system.bus().read32(mode, value) &&
+                (value & (1u << 11)) != 0,
+                "timer overflow flag missing") && ok;
+    ok = expect(system.bus().read32(intc_stat, value) &&
+                (value & (1u << 9)) != 0,
+                "timer overflow IRQ missing") && ok;
+    return ok;
+}
+
 bool test_ee_intc_register_semantics() {
     ps2::Ps2System system;
     ps2::u32 value = 0;
@@ -2035,6 +2095,7 @@ int main() {
     ok = test_mmi_padduw() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_bootstrap_mmio() && ok;
+    ok = test_ee_timer_events() && ok;
     ok = test_ee_intc_register_semantics() && ok;
     ok = test_vu_mapping_and_cop2() && ok;
     ok = test_ee_intc_cpu_exception() && ok;
