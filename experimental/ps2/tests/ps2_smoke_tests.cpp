@@ -775,6 +775,51 @@ bool test_cdvd_raises_iop_irq2() {
     return ok;
 }
 
+bool test_iop_root_counters() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // Timer2: system clock / 8, target=3, reset on target, IRQ on target.
+    ok = expect(system.iop_bus().write16(0x1F801128u, 3u),
+                "IOP Timer2 target write failed") && ok;
+    ok = expect(system.iop_bus().write16(
+                    0x1F801124u,
+                    static_cast<ps2::u16>(
+                        (1u << 9) | // /8 prescaler
+                        (1u << 4) | // IRQ on target
+                        (1u << 3))), // reset on target
+                "IOP Timer2 mode write failed") && ok;
+
+    system.iop_bus().tick(23u);
+    ps2::u16 count = 0;
+    ok = expect(system.iop_bus().read16(0x1F801120u, count) &&
+                    count == 2u,
+                "IOP Timer2 prescaler advanced too early") && ok;
+
+    system.iop_bus().tick(1u);
+    ok = expect(system.iop_bus().read16(0x1F801120u, count) &&
+                    count == 0u,
+                "IOP Timer2 target reset mismatch") && ok;
+    ok = expect((system.iop_intc().status() & (1u << 6)) != 0,
+                "IOP Timer2 target IRQ missing") && ok;
+
+    ps2::u16 mode = 0;
+    ok = expect(system.iop_bus().read16(0x1F801124u, mode) &&
+                    (mode & (1u << 11)) != 0,
+                "IOP Timer2 target flag missing") && ok;
+
+    // Timer4: verify the 32-bit counter and /16 prescaler selection.
+    ok = expect(system.iop_bus().write32(0x1F801494u, 2u << 13),
+                "IOP Timer4 mode write failed") && ok;
+    system.iop_bus().tick(31u);
+    ps2::u32 count32 = 0;
+    ok = expect(system.iop_bus().read32(0x1F801490u, count32) &&
+                    count32 == 1u,
+                "IOP Timer4 /16 prescaler mismatch") && ok;
+
+    return ok;
+}
+
 bool test_iop_spu2_register_window() {
     ps2::Ps2System system;
 
@@ -1050,6 +1095,7 @@ int main() {
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
+    ok = test_iop_root_counters() && ok;
     ok = test_iop_spu2_register_window() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
