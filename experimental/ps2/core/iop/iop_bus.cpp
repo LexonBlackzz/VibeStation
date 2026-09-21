@@ -50,6 +50,186 @@ IopBus::IopBus(
 void IopBus::reset() {
     cache_control_.fill(0);
     spu2_regs_.fill(0);
+    root_counters_.fill({});
+    for (u32 i = 0; i < root_counters_.size(); ++i) {
+        root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
+        root_counters_[i].target =
+            i < 3u ? 0x10000ull : 0x100000000ull;
+    }
+}
+
+bool IopBus::decode_root_counter(
+    u32 physical,
+    u32& index,
+    u32& reg) {
+    static constexpr u32 bases[6] = {
+        0x1F801100u, 0x1F801110u, 0x1F801120u,
+        0x1F801480u, 0x1F801490u, 0x1F8014A0u,
+    };
+    for (u32 i = 0; i < 6u; ++i) {
+        if (physical >= bases[i] && physical < bases[i] + 0x0Cu) {
+            index = i;
+            reg = (physical - bases[i]) & ~3u;
+            return true;
+        }
+    }
+    return false;
+}
+
+u64 IopBus::root_counter_rate(u32 index) const {
+    const u32 mode = root_counters_[index].mode;
+    if (index == 0u) return (mode & (1u << 8)) != 0 ? 3u : 1u;
+    if (index == 1u) return (mode & (1u << 8)) != 0 ? 2344u : 1u;
+    if (index == 2u) return (mode & (1u << 9)) != 0 ? 8u : 1u;
+    if (index == 3u) return (mode & (1u << 8)) != 0 ? 2344u : 1u;
+
+    switch ((mode >> 13) & 0x3u) {
+    case 1: return 8u;
+    case 2: return 16u;
+    case 3: return 256u;
+    default: return 1u;
+    }
+}
+
+bool IopBus::read_root_counter(
+    u32 physical,
+    u32 width,
+    u32& value) const {
+    u32 index = 0;
+    u32 reg = 0;
+    if (!decode_root_counter(physical, index, reg)) return false;
+
+    static constexpr u32 bases[6] = {
+        0x1F801100u, 0x1F801110u, 0x1F801120u,
+        0x1F801480u, 0x1F801490u, 0x1F8014A0u,
+    };
+    const u32 byte_offset = physical - (bases[index] + reg);
+    if (byte_offset + width > 4u) return false;
+
+    u32 raw = 0;
+    if (reg == 0u) {
+        raw = static_cast<u32>(root_counters_[index].count);
+    } else if (reg == 4u) {
+        raw = root_counters_[index].mode;
+    } else if (reg == 8u) {
+        raw = static_cast<u32>(root_counters_[index].target);
+    } else {
+        return false;
+    }
+
+    if (index < 3u) raw &= 0xFFFFu;
+    const u32 bits = width * 8u;
+    const u32 mask =
+        bits == 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    value = (raw >> (byte_offset * 8u)) & mask;
+    return true;
+}
+
+bool IopBus::write_root_counter(
+    u32 physical,
+    u32 width,
+    u32 value) {
+    u32 index = 0;
+    u32 reg = 0;
+    if (!decode_root_counter(physical, index, reg)) return false;
+
+    static constexpr u32 bases[6] = {
+        0x1F801100u, 0x1F801110u, 0x1F801120u,
+        0x1F801480u, 0x1F801490u, 0x1F8014A0u,
+    };
+    const u32 byte_offset = physical - (bases[index] + reg);
+    if (byte_offset + width > 4u) return false;
+
+    u32 current = 0;
+    if (reg == 0u) {
+        current = static_cast<u32>(root_counters_[index].count);
+    } else if (reg == 4u) {
+        current = root_counters_[index].mode;
+    } else if (reg == 8u) {
+        current = static_cast<u32>(root_counters_[index].target);
+    } else {
+        return false;
+    }
+
+    const u32 bits = width * 8u;
+    const u32 lane_mask =
+        bits == 32u
+            ? 0xFFFFFFFFu
+            : ((1u << bits) - 1u) << (byte_offset * 8u);
+    const u32 merged =
+        (current & ~lane_mask) |
+        ((value << (byte_offset * 8u)) & lane_mask);
+
+    RootCounter& counter = root_counters_[index];
+    const u64 counter_mask =
+        index < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+
+    if (reg == 0u) {
+        counter.count = merged & counter_mask;
+        counter.phase = 0;
+        return true;
+    }
+
+    if (reg == 4u) {
+        // Writable control bits plus hardware-owned IRQ/target/overflow flags.
+        counter.mode =
+            (merged & 0x63FFu) |
+            (counter.mode & 0x1C00u);
+        counter.count = 0;
+        counter.phase = 0;
+        return true;
+    }
+
+    counter.target = merged & counter_mask;
+    return true;
+}
+
+void IopBus::tick(u64 cycles) {
+    static constexpr u32 irq_sources[6] = {
+        4u, 5u, 6u, 14u, 15u, 16u,
+    };
+
+    for (u32 i = 0; i < root_counters_.size(); ++i) {
+        RootCounter& counter = root_counters_[i];
+        const u64 rate = root_counter_rate(i);
+        counter.phase += cycles;
+        const u64 increments = counter.phase / rate;
+        counter.phase %= rate;
+        if (increments == 0) continue;
+
+        const u64 maximum =
+            i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+
+        for (u64 step = 0; step < increments; ++step) {
+            ++counter.count;
+
+            if (counter.target <= maximum &&
+                counter.count >= counter.target) {
+                const bool first = (counter.mode & (1u << 11)) == 0;
+                counter.mode |= 1u << 11;
+                if (first && (counter.mode & (1u << 4)) != 0) {
+                    intc_.raise(irq_sources[i]);
+                }
+                if ((counter.mode & (1u << 3)) != 0) {
+                    counter.count =
+                        counter.target == 0 ? 0 : counter.count - counter.target;
+                } else {
+                    // A non-resetting target fires once until the next wrap or
+                    // target write, matching the bootstrap-visible behavior.
+                    counter.target = maximum + 1u;
+                }
+            }
+
+            if (counter.count > maximum) {
+                const bool first = (counter.mode & (1u << 12)) == 0;
+                counter.mode |= 1u << 12;
+                if (first && (counter.mode & (1u << 5)) != 0) {
+                    intc_.raise(irq_sources[i]);
+                }
+                counter.count &= maximum;
+            }
+        }
+    }
 }
 
 u32 IopBus::to_physical(u32 address) {
