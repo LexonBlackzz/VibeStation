@@ -1221,6 +1221,63 @@ bool test_ee_scratchpad_dma_round_trip() {
     return ok;
 }
 
+bool test_iop_dma6_ordering_table_clear() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    constexpr ps2::u32 madr = 0x0000100Cu;
+    constexpr ps2::u32 words = 4u;
+
+    ok = expect(
+             system.iop_bus().write32(
+                 0x1F8010F4u,
+                 (1u << 23) | (1u << (16u + 6u))),
+             "failed to enable IOP DMA6 interrupt") && ok;
+    ok = expect(
+             system.iop_bus().write32(0x1F8010E0u, madr) &&
+             system.iop_bus().write32(0x1F8010E4u, words) &&
+             system.iop_bus().write32(0x1F8010E8u, 0x11000002u),
+             "IOP DMA6 OTC programming failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.iop_ram().read32(0x100Cu, value) &&
+             value == 0x00001008u,
+             "IOP DMA6 first OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1008u, value) &&
+             value == 0x00001004u,
+             "IOP DMA6 second OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1004u, value) &&
+             value == 0x00001000u,
+             "IOP DMA6 third OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1000u, value) &&
+             value == 0x00FFFFFFu,
+             "IOP DMA6 OTC terminator mismatch") && ok;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F8010E8u, value) &&
+             (value & 0x01000000u) == 0u,
+             "IOP DMA6 start bit did not clear") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F8010E4u, value) &&
+             value == 0u,
+             "IOP DMA6 BCR did not complete") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F8010F4u, value) &&
+             (value & (1u << 30)) != 0u &&
+             (value & 0x80000000u) != 0u,
+             "IOP DMA6 completion flag missing") && ok;
+    ok = expect(
+             system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+             (value & (1u << 3)) != 0u,
+             "IOP DMA6 did not raise DMA interrupt") && ok;
+
+    return ok;
+}
+
 bool test_ee_lq_sq_silent_alignment() {
     ps2::Ps2System system;
 
@@ -1325,6 +1382,7 @@ int main() {
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
+    ok = test_iop_dma6_ordering_table_clear() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_ipu_dma_bootstrap_paths() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
