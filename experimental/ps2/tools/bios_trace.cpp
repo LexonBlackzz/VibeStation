@@ -1,5 +1,6 @@
 #include "core/ps2_system.h"
 
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <iostream>
@@ -69,17 +70,79 @@ void print_state(const ps2::Ps2System& system) {
         std::cout << "IOP_HALTED=0\n";
     }
 
+    ps2::u32 vif0_stat = 0;
+    ps2::u32 vif0_chcr = 0;
+    ps2::u32 vif0_qwc = 0;
     ps2::u32 vif_stat = 0;
     ps2::u32 vif_chcr = 0;
     ps2::u32 vif_qwc = 0;
+    (void)system.bus().read32(0x10003800u, vif0_stat);
+    (void)system.bus().read32(0x10008000u, vif0_chcr);
+    (void)system.bus().read32(0x10008020u, vif0_qwc);
     (void)system.bus().read32(0x10003C00u, vif_stat);
     (void)system.bus().read32(0x10009000u, vif_chcr);
     (void)system.bus().read32(0x10009020u, vif_qwc);
     std::cout
-        << "VIF1_STAT=0x" << std::hex << std::uppercase << vif_stat
+        << "VIF0_STAT=0x" << std::hex << std::uppercase << vif0_stat
+        << " VIF0_CHCR=0x" << vif0_chcr
+        << " VIF0_QWC=0x" << vif0_qwc
+        << " VIF1_STAT=0x" << vif_stat
         << " VIF1_CHCR=0x" << vif_chcr
         << " VIF1_QWC=0x" << vif_qwc
         << std::dec << '\n';
+
+    ps2::u32 dmac_ctrl = 0;
+    ps2::u32 dmac_stat = 0;
+    ps2::u32 dmac_pcr = 0;
+    ps2::u32 dmac_sqwc = 0;
+    ps2::u32 dmac_rbsr = 0;
+    ps2::u32 dmac_rbor = 0;
+    ps2::u32 dmac_stadr = 0;
+    (void)system.bus().read32(0x1000E000u, dmac_ctrl);
+    (void)system.bus().read32(0x1000E010u, dmac_stat);
+    (void)system.bus().read32(0x1000E020u, dmac_pcr);
+    (void)system.bus().read32(0x1000E030u, dmac_sqwc);
+    (void)system.bus().read32(0x1000E040u, dmac_rbsr);
+    (void)system.bus().read32(0x1000E050u, dmac_rbor);
+    (void)system.bus().read32(0x1000E060u, dmac_stadr);
+    std::cout
+        << "DMAC_CTRL=0x" << std::hex << std::uppercase << dmac_ctrl
+        << " DMAC_STAT=0x" << dmac_stat
+        << " DMAC_PCR=0x" << dmac_pcr
+        << " DMAC_SQWC=0x" << dmac_sqwc
+        << " DMAC_RBSR=0x" << dmac_rbsr
+        << " DMAC_RBOR=0x" << dmac_rbor
+        << " DMAC_STADR=0x" << dmac_stadr
+        << std::dec << '\n';
+
+    constexpr std::array<ps2::u32, 10> dma_bases = {
+        0x10008000u, 0x10009000u, 0x1000A000u, 0x1000B000u,
+        0x1000B400u, 0x1000C000u, 0x1000C400u, 0x1000C800u,
+        0x1000D000u, 0x1000D400u,
+    };
+    for (ps2::u32 channel = 0; channel < dma_bases.size(); ++channel) {
+        const ps2::u32 base = dma_bases[channel];
+        ps2::u32 chcr = 0;
+        ps2::u32 madr = 0;
+        ps2::u32 qwc = 0;
+        ps2::u32 tadr = 0;
+        ps2::u32 sadr = 0;
+        (void)system.bus().read32(base + 0x00u, chcr);
+        (void)system.bus().read32(base + 0x10u, madr);
+        (void)system.bus().read32(base + 0x20u, qwc);
+        (void)system.bus().read32(base + 0x30u, tadr);
+        if (channel >= 8u) {
+            (void)system.bus().read32(base + 0x80u, sadr);
+        }
+        std::cout
+            << "DMA" << channel
+            << "_CHCR=0x" << std::hex << std::uppercase << chcr
+            << " MADR=0x" << madr
+            << " QWC=0x" << qwc
+            << " TADR=0x" << tadr;
+        if (channel >= 8u) std::cout << " SADR=0x" << sadr;
+        std::cout << std::dec << '\n';
+    }
 
     const auto& vu0 = system.vu0();
     const auto& vu0_stats = vu0.stats();
