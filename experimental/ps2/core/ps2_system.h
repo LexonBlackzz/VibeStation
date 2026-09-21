@@ -18,6 +18,7 @@
 #include "core/memory/ee_scratchpad.h"
 #include "core/scheduler/scheduler.h"
 #include "core/video/video_timing.h"
+#include "core/vu/vu1.h"
 #include <string>
 namespace ps2 {
 class Ps2System {
@@ -41,6 +42,7 @@ public:
     GsCore& gs_core(){return gs_core_;} const GsCore& gs_core()const{return gs_core_;}
     GsPrivileged& gs_privileged(){return gs_;} const GsPrivileged& gs_privileged()const{return gs_;}
     GsDisplay& gs_display(){return gs_display_;} const GsDisplay& gs_display()const{return gs_display_;}
+    Vu1& vu1(){return vu1_;} const Vu1& vu1()const{return vu1_;}
     bool bios_started()const{return bios_started_;}
     bool halted()const{return ee_.halted()||iop_.halted();}
     std::string halt_reason()const;
@@ -50,7 +52,7 @@ private:
     bool advance_iop_for_ee_step(std::string& error);
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
     EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{}; GsDisplay gs_display_{};
-    IopBus iop_bus_; EeBus bus_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; Vif1Dma vif1_dma_{}; EeCpu ee_; IopCpu iop_;
+    IopBus iop_bus_; EeBus bus_; Vu1 vu1_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; Vif1Dma vif1_dma_{}; EeCpu ee_; IopCpu iop_;
     bool bios_started_=false; u32 reset_instruction_=0; u32 iop_reset_instruction_=0; u32 ee_iop_phase_=0;
 };
 } // namespace ps2
