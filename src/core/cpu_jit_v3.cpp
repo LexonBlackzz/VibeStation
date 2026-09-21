@@ -364,6 +364,9 @@ struct V3NativeRuntime {
   u32 dynamic_target = 0u;
   u32 incoming_load_reg = 0u;
   u32 incoming_load_value = 0u;
+  u32 incoming_load_pc = 0u;
+  u32 incoming_load_addr = 0u;
+  u32 load_addr = 0u;
 };
 
 using V3NativeFn = u32 (*)(u32 *, const V3NativeRuntime *);
@@ -389,8 +392,10 @@ struct V3ResidentBlock {
   u32 base_cycles = 0;
   u32 tail_index = 0;
   u32 kind = 0; // 0: sequential, 1: conditional branch, 2: fixed jump
-  u32 has_retired_load = 0;
+  u32 has_load = 0;
+  u32 load_retired = 0;
   u32 load_rs = 0;
+  u32 load_rt = 0;
   u32 load_index = 0;
   s32 load_simm = 0;
   u32 icache_line_count = 0;
@@ -867,7 +872,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
       code->je(linked_done);
     }
-    if (linked->has_retired_load != 0u) {
+    if (linked->has_load != 0u) {
       if (linked->load_index != 0u && linked->load_rs != 0u) {
         code->cmp(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)],
                   linked->load_rs);
@@ -881,6 +886,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       if (linked->load_simm != 0) {
         code->add(code->eax, static_cast<u32>(linked->load_simm));
       }
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, load_addr)], code->eax);
       code->test(code->eax, 3);
       code->jnz(linked_done);
       code->and_(code->eax, 0x1FFFFFFF);
@@ -912,10 +918,10 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     code->ja(linked_done);
     code->mov(code->eax, code->r12d);
     code->add(code->eax, linked->base_cycles + (linked->kind == 1u ? 1u : 0u));
-    if (linked->has_retired_load != 0u) code->add(code->eax, code->edx);
+    if (linked->has_load != 0u) code->add(code->eax, code->edx);
     code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, cycle_budget)]);
     code->ja(linked_done);
-    if (linked->has_retired_load != 0u) code->add(code->r12d, code->edx);
+    if (linked->has_load != 0u) code->add(code->r12d, code->edx);
   }
 
   // V3 deliberately keeps architectural state virtual inside a block.
@@ -1134,7 +1140,18 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   if (linked != nullptr) {
     Label not_taken, next;
     code->mov(code->rdi, reinterpret_cast<size_t>(linked));
-    code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)], 0);
+    if (linked->has_load != 0u && linked->load_retired == 0u) {
+      code->mov(code->eax, code->dword[code->r11 + offsetof(V3NativeRuntime, load_value)]);
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_value)], code->eax);
+      code->mov(code->eax, code->dword[code->r11 + offsetof(V3NativeRuntime, load_addr)]);
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_addr)], code->eax);
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_pc)],
+                linked->start_pc + linked->load_index * 4u);
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)],
+                static_cast<u32>(linked->load_rt));
+    } else {
+      code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)], 0);
+    }
     code->add(code->r13d, linked->instruction_count);
     code->add(code->r12d, linked->base_cycles);
     code->inc(code->r14d);
@@ -1153,7 +1170,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     } else if (linked->kind == 2u) {
       code->inc(code->ebp);
       code->inc(code->r9d);
-    } else if (linked->has_retired_load != 0u) {
+    } else if (linked->has_load != 0u) {
       code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, memory_entries)]);
     }
     code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
@@ -1267,6 +1284,7 @@ struct CpuJitV3Backend::Impl {
   V3ResidentFn resident_fn = nullptr;
   V3LinkedDispatch linked_dispatch{};
   bool use_linked = true;
+  bool link_pending_lw = true;
   V3ResidentSlot *resident_slot(u32 pc) {
     V3ResidentSlot *slot = &dispatch_entry(pc, true)->resident;
     if (slot->entry == nullptr) slot->entry = linked_dispatch.exit;
@@ -1298,6 +1316,7 @@ CpuJitV3Backend::CpuJitV3Backend(Cpu &cpu)
   stats_.available = true;
 #if VIBESTATION_JIT_V3_X64
   impl_->use_linked = std::getenv("VIBESTATION_V3_LEGACY_RESIDENT") == nullptr;
+  impl_->link_pending_lw = std::getenv("VIBESTATION_V3_NO_PENDING_LW") == nullptr;
   static_assert(sizeof(Cpu::ICacheLine) == 24u, "resident I-cache stride");
   static_assert(offsetof(Cpu::ICacheLine, valid) == 20u,
                 "resident I-cache valid offset");
@@ -1762,15 +1781,18 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
       block.fn = reinterpret_cast<V3NativeFn>(entry);
       if (!has_store &&
-          (!has_load || (impl_->use_linked && block.load_retired)) &&
+          (!has_load || (impl_->use_linked &&
+                         (block.load_retired || impl_->link_pending_lw))) &&
           !jump_dynamic) {
         auto &resident = block.resident;
         resident.fn = block.fn;
         resident.start_pc = start_pc;
         resident.instruction_count = block.instruction_count;
         resident.base_cycles = block.base_cycles;
-        resident.has_retired_load = block.load_retired ? 1u : 0u;
+        resident.has_load = block.has_load ? 1u : 0u;
+        resident.load_retired = block.load_retired ? 1u : 0u;
         resident.load_rs = block.load_rs;
+        resident.load_rt = block.load_rt;
         resident.load_index = block.load_index;
         resident.load_simm = block.load_simm;
         resident.icache_line_count = block.icache_line_count;
@@ -1861,6 +1883,8 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const Cpu::PendingLoad incoming_load = cpu_.load_;
     runtime.incoming_load_reg = incoming_load.reg;
     runtime.incoming_load_value = incoming_load.value;
+    runtime.incoming_load_pc = incoming_load.source_pc;
+    runtime.incoming_load_addr = incoming_load.source_addr;
     std::array<u32, 8> store_addrs{};
     u32 main_ram_store_count = 0u;
     u32 load_addr = 0u;
@@ -2111,7 +2135,15 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       cpu_.pending_delay_slot_ = false;
       cpu_.pending_branch_taken_ = false;
       cpu_.pending_branch_pc_ = 0u;
-      cpu_.load_ = {};
+      if (impl_->use_linked && block.resident.linked_fn != nullptr &&
+          impl_->linked_dispatch.entry != nullptr &&
+          runtime.incoming_load_reg != 0u) {
+        cpu_.load_ = {static_cast<u8>(runtime.incoming_load_reg),
+                      runtime.incoming_load_value, runtime.incoming_load_pc,
+                      runtime.incoming_load_addr};
+      } else {
+        cpu_.load_ = {};
+      }
       cpu_.next_load_ = {};
       cpu_.cycles_ += resident.cycles;
       g_diag_current_pc = cpu_.current_pc_;

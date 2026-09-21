@@ -103,3 +103,14 @@ comparison suite passes. The Spyro gate still matches state
 The linked path is 13.9% faster by CPU average in this A/B run. It still
 exits often at cache misses and event budgets, so longer native chains remain
 the next priority.
+
+## Pending LW across links
+
+The linked ABI also carries an LW pending value, source PC, and source address
+across block jumps and restores them to CPU state on a chain exit. The full
+comparison suite and canonical Spyro state/PC/cycle gate pass. Spyro now has
+3,620,702 linked transitions across 1,520,967 chain entries, or 3.38 blocks
+per entry, with a maximum of 21. Disabling this extension with
+`VIBESTATION_V3_NO_PENDING_LW=1` gives 3,092,854 transitions and 3.08 blocks
+per entry. The host changed speed during A/B runs (pending LW measured both
+4.500 and 8.099 ms), so the timing effect needs a controlled repeat.
