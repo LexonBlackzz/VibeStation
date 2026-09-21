@@ -874,6 +874,48 @@ bool test_iop_spu2_dma_bootstrap_completion() {
     return ok;
 }
 
+bool test_iop_sio2_dma_bootstrap_completion() {
+    ps2::Ps2System system;
+    bool ok = expect(
+        system.iop_bus().write32(
+            0x1F801574u,
+            0x00B00000u), // master + DMA11/12 enables
+        "failed to enable SIO2 DMA interrupts");
+
+    ok = expect(
+        system.iop_bus().write32(0x1F801548u, 0x01000201u),
+        "SIO2 IN DMA11 CHCR write failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+        system.iop_bus().read32(0x1F801548u, value) &&
+            (value & 0x01000000u) == 0,
+        "SIO2 DMA11 start bit did not clear") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F801574u, value) &&
+            (value & (1u << 28)) != 0 &&
+            (value & 0x80000000u) != 0,
+        "SIO2 DMA11 DICR2 completion missing") && ok;
+
+    ok = expect(
+        system.iop_bus().write32(0x1F801558u, 0x01000201u),
+        "SIO2 OUT DMA12 CHCR write failed") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F801558u, value) &&
+            (value & 0x01000000u) == 0,
+        "SIO2 DMA12 start bit did not clear") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F801574u, value) &&
+            (value & (1u << 29)) != 0,
+        "SIO2 DMA12 DICR2 completion missing") && ok;
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 3)) != 0,
+        "SIO2 DMA did not raise IOP DMA interrupt") && ok;
+
+    return ok;
+}
+
 bool test_ee_lq_sq_silent_alignment() {
     ps2::Ps2System system;
 
@@ -974,6 +1016,7 @@ int main() {
     ok = test_cdvd_raises_iop_irq2() && ok;
     ok = test_iop_spu2_register_window() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
+    ok = test_iop_sio2_dma_bootstrap_completion() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
