@@ -388,6 +388,11 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    u32 timer_value = 0;
+    if (read_root_counter(physical, 1u, timer_value)) {
+        value = static_cast<u8>(timer_value);
+        return true;
+    }
     if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
         value = spu2_regs_[physical - kSpu2Base];
         return true;
@@ -407,6 +412,11 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
+    u32 timer_value = 0;
+    if (read_root_counter(physical, 2u, timer_value)) {
+        value = static_cast<u16>(timer_value);
+        return true;
+    }
     if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
         const u32 offset = physical - kSpu2Base;
         value = static_cast<u16>(spu2_regs_[offset]) |
@@ -430,6 +440,11 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    u32 timer_value = 0;
+    if (read_root_counter(physical, 4u, timer_value)) {
+        value = timer_value;
+        return true;
+    }
     if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
         const u32 offset = physical - kSpu2Base;
         value = static_cast<u32>(spu2_regs_[offset]) |
@@ -460,6 +475,11 @@ bool IopBus::write8(u32 address, u8 value) {
         cache_control_[address-kCacheControlBase]=value; return true;
     }
     const u32 physical=to_physical(address);
+    u32 timer_index = 0;
+    u32 timer_reg = 0;
+    if (decode_root_counter(physical, timer_index, timer_reg)) {
+        return write_root_counter(physical, 1u, value);
+    }
     if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
         spu2_regs_[physical - kSpu2Base] = value;
         return true;
@@ -479,6 +499,11 @@ bool IopBus::write8(u32 address, u8 value) {
 
 bool IopBus::write16(u32 address, u16 value) {
     const u32 physical=to_physical(address);
+    u32 timer_index = 0;
+    u32 timer_reg = 0;
+    if (decode_root_counter(physical, timer_index, timer_reg)) {
+        return write_root_counter(physical, 2u, value);
+    }
     if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
         const u32 offset = physical - kSpu2Base;
         spu2_regs_[offset] = static_cast<u8>(value);
@@ -501,6 +526,11 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    u32 timer_index = 0;
+    u32 timer_reg = 0;
+    if (decode_root_counter(physical, timer_index, timer_reg)) {
+        return write_root_counter(physical, 4u, value);
+    }
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
     }
