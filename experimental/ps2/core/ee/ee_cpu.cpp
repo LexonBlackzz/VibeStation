@@ -1,6 +1,7 @@
 #include "core/ee/ee_cpu.h"
 
 #include "core/memory/ee_bus.h"
+#include "core/vu/vu1.h"
 
 #include <bit>
 #include <cmath>
@@ -888,6 +889,97 @@ bool EeCpu::execute_cop1(u32 pc, u32 instruction, std::string& error) {
     }
 }
 
+bool EeCpu::run_vu0_micro(
+    u32 start_address,
+    std::string& error) {
+    error.clear();
+    if (vu0_micro_ == nullptr) {
+        error = "VU0 micro interpreter is not attached";
+        return false;
+    }
+
+    auto vf_lane = [](const EeGpr& value, u32 lane) -> u32 {
+        const u64 half = lane < 2u ? value.lo : value.hi;
+        return static_cast<u32>(
+            half >> ((lane & 1u) * 32u));
+    };
+
+    // Macro- and micro-mode VU0 share the same architectural register file.
+    // Import the EE-visible macro state immediately before the call.
+    for (u32 reg = 1; reg < 32u; ++reg) {
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            vu0_micro_->set_vf(
+                reg, lane, vf_lane(state_.vu_vf[reg], lane));
+        }
+    }
+    for (u32 reg = 1; reg < 16u; ++reg) {
+        vu0_micro_->set_vi(
+            reg, static_cast<u16>(state_.vu_vi[reg]));
+    }
+    vu0_micro_->set_acc(
+        0u, static_cast<u32>(state_.vu_acc.lo));
+    vu0_micro_->set_acc(
+        1u, static_cast<u32>(state_.vu_acc.lo >> 32));
+    vu0_micro_->set_acc(
+        2u, static_cast<u32>(state_.vu_acc.hi));
+    vu0_micro_->set_acc(
+        3u, static_cast<u32>(state_.vu_acc.hi >> 32));
+    vu0_micro_->set_status(state_.vu_vi[16]);
+    vu0_micro_->set_mac(state_.vu_vi[17]);
+    vu0_micro_->set_clip(state_.vu_vi[18]);
+    vu0_micro_->set_random(state_.vu_vi[20]);
+    vu0_micro_->set_immediate(state_.vu_vi[21]);
+    vu0_micro_->set_q(state_.vu_vi[22]);
+    vu0_micro_->set_p(state_.vu_vi[23]);
+
+    // Hardware VU0 runs concurrently with the EE.  The bootstrap interpreter
+    // serializes a VCALL until its E-bit delay slot retires so subsequent
+    // macro-mode register reads observe deterministic completed results.
+    state_.vu_vi[29] |= 1u;
+    vu0_micro_->start(start_address);
+    std::string vu_error;
+    constexpr u64 kBootstrapMicroBudget = 262144u;
+    vu0_micro_->run(kBootstrapMicroBudget, vu_error);
+    state_.vu_vi[29] &= ~1u;
+
+    if (!vu_error.empty()) {
+        error = vu_error;
+        return false;
+    }
+    if (vu0_micro_->running()) {
+        error = "VU0 microprogram exceeded bootstrap instruction budget";
+        return false;
+    }
+
+    // Export the completed micro-mode state back to the macro register view.
+    for (u32 reg = 1; reg < 32u; ++reg) {
+        state_.vu_vf[reg].lo =
+            static_cast<u64>(vu0_micro_->vf(reg, 0u)) |
+            (static_cast<u64>(vu0_micro_->vf(reg, 1u)) << 32);
+        state_.vu_vf[reg].hi =
+            static_cast<u64>(vu0_micro_->vf(reg, 2u)) |
+            (static_cast<u64>(vu0_micro_->vf(reg, 3u)) << 32);
+    }
+    for (u32 reg = 1; reg < 16u; ++reg) {
+        state_.vu_vi[reg] = vu0_micro_->vi(reg);
+    }
+    state_.vu_acc.lo =
+        static_cast<u64>(vu0_micro_->acc(0u)) |
+        (static_cast<u64>(vu0_micro_->acc(1u)) << 32);
+    state_.vu_acc.hi =
+        static_cast<u64>(vu0_micro_->acc(2u)) |
+        (static_cast<u64>(vu0_micro_->acc(3u)) << 32);
+    state_.vu_vi[16] = vu0_micro_->status();
+    state_.vu_vi[17] = vu0_micro_->mac();
+    state_.vu_vi[18] = vu0_micro_->clip();
+    state_.vu_vi[20] = vu0_micro_->random();
+    state_.vu_vi[21] = vu0_micro_->immediate();
+    state_.vu_vi[22] = vu0_micro_->q();
+    state_.vu_vi[23] = vu0_micro_->p();
+    state_.vu_vi[26] = (vu0_micro_->pc() / 8u) & 0x1FFu;
+    return true;
+}
+
 bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
@@ -1320,6 +1412,28 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             fd,
             state_.vu_vi[fs & 0xFu] | state_.vu_vi[ft & 0xFu]);
         return true;
+    case 0x38: { // VCALLMS
+        std::string vu_error;
+        if (!run_vu0_micro((instruction >> 6) & 0x7FFFu, vu_error)) {
+            return fail(
+                pc,
+                instruction,
+                "VU0 VCALLMS failed: " + vu_error,
+                error);
+        }
+        return true;
+    }
+    case 0x39: { // VCALLMSR
+        std::string vu_error;
+        if (!run_vu0_micro(state_.vu_vi[27] & 0xFFFFu, vu_error)) {
+            return fail(
+                pc,
+                instruction,
+                "VU0 VCALLMSR failed: " + vu_error,
+                error);
+        }
+        return true;
+    }
     default:
         break;
     }
