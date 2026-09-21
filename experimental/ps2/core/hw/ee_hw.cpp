@@ -79,7 +79,7 @@ void EeHw::tick(u64 cycles) {
         case 0: rate = 2; break;       // BUSCLK (EE clock / 2)
         case 1: rate = 32; break;      // BUSCLK / 16
         case 2: rate = 512; break;     // BUSCLK / 256
-        case 3: rate = 18740; break;   // Approx. NTSC HBLANK in EE clocks
+        case 3: rate = 18876; break;   // Bootstrap HBLANK divisor used by BIOS calibration
         }
 
         timer_phase_[i] += cycles;
