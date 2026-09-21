@@ -36,11 +36,11 @@ bool EeBus::read8(u32 address, u8& value) const {
     if (physical >= 0x11004000u && physical < 0x11008000u) { value = vu0_data_[(physical - 0x11004000u) & 0xFFFu]; return true; }
     if (physical >= 0x11008000u && physical < 0x1100C000u) { value = vu1_micro_[physical - 0x11008000u]; return true; }
     if (physical >= 0x1100C000u && physical < 0x11010000u) { value = vu1_data_[physical - 0x1100C000u]; return true; }
-    if (physical<EeRam::kSize) return ram_.read8(physical,value);
+    if(physical<EeRam::kSize) return ram_.read8(physical,value);
     if (is_iop_ram_physical(physical)) return iop_ram_.read8(iop_ram_offset(physical),value);
-    if (hw_.read8(physical,value)) return true;
-    if (iop_hw_.read8(physical,value)) return true;
-    if (gs_.read8(physical,value)) return true;
+    if(hw_.read8(physical,value)) return true;
+    if(iop_hw_.read8(physical,value)) return true;
+    if(gs_.read8(physical,value)) return true;
     return bios_.read8_physical(physical,value);
 }
 bool EeBus::read16(u32 address,u16& value) const {
@@ -145,6 +145,7 @@ bool EeBus::write64(u32 address,u64 value){
     return gs_.write64(physical,value);
 }
 void EeBus::tick(u64 cycles){ hw_.tick(cycles); }
+void EeBus::raise_intc(u32 irq){ hw_.raise_intc(irq); }
 void EeBus::raise_dmac(u32 channel){ hw_.raise_dmac(channel); }
 bool EeBus::intc_pending() const { return hw_.intc_pending(); }
 bool EeBus::dmac_pending() const { return hw_.dmac_pending(); }
