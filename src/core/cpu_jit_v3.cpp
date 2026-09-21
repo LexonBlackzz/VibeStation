@@ -835,6 +835,9 @@ struct CpuJitV3Backend::Impl {
     bool has_branch = false;
     bool has_jump = false;
     std::array<u32, 16> words{};
+    u8 icache_line_count = 0u;
+    std::array<u8, 5> icache_indices{};
+    std::array<u32, 5> icache_tags{};
     std::array<u8, 6> cached_regs{};
     std::array<u8, 8> store_rs{};
     std::array<s32, 8> store_simm{};
@@ -1064,18 +1067,13 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
     if (block_ptr != nullptr) {
       bool coherent = true;
-      for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
-        const u32 inst_pc = start_pc + i * 4u;
-        if (!cpu_.instruction_cacheable(inst_pc)) {
-          coherent = false;
-          break;
-        }
-        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
-        const u32 inst_word = (inst_pc >> 2u) & 0x03u;
-        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
-        const auto &inst_line = cpu_.icache_[inst_index];
-        if (!inst_line.valid || inst_line.tag != inst_tag ||
-            inst_line.words[inst_word] != block_ptr->words[i]) {
+      // A block's instruction words cannot change without a code-write
+      // invalidation. The hot path only needs to prove that the direct-mapped
+      // I-cache still contains the same physical lines. Check each line once
+      // instead of cacheability/tag/word for every guest instruction.
+      for (u32 i = 0; i < block_ptr->icache_line_count; ++i) {
+        const auto &inst_line = cpu_.icache_[block_ptr->icache_indices[i]];
+        if (!inst_line.valid || inst_line.tag != block_ptr->icache_tags[i]) {
           coherent = false;
           break;
         }
@@ -1257,6 +1255,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         helper_block.phys_end = helper_block.phys_start + 3u;
         helper_block.instruction_count = 1u;
         helper_block.words[0] = line.words[word_index];
+        helper_block.icache_line_count = 1u;
+        helper_block.icache_indices[0] = static_cast<u8>(index);
+        helper_block.icache_tags[0] = expected_tag;
         impl_->code_pages.insert(helper_block.phys_start >> 12u);
         auto inserted =
             impl_->blocks.emplace(start_pc, std::move(helper_block));
@@ -1276,6 +1277,23 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       block.phys_end =
           psx::mask_address(start_pc + block.instruction_count * 4u - 1u);
       block.words = words;
+      // Sequential blocks span at most five 16-byte I-cache lines at the
+      // current 16-instruction cap. Precompute their identities once.
+      u32 previous_index = 0xFFFFFFFFu;
+      u32 previous_tag = 0xFFFFFFFFu;
+      for (u32 i = 0; i < block.instruction_count; ++i) {
+        const u32 inst_pc = start_pc + i * 4u;
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        if (i != 0u && inst_index == previous_index && inst_tag == previous_tag) {
+          continue;
+        }
+        const u32 slot = block.icache_line_count++;
+        block.icache_indices[slot] = static_cast<u8>(inst_index);
+        block.icache_tags[slot] = inst_tag;
+        previous_index = inst_index;
+        previous_tag = inst_tag;
+      }
       block.cached_regs = choose_cached_regs(decoded);
       block.has_store = has_store;
       block.has_load = has_load;
