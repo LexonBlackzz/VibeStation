@@ -7,6 +7,8 @@
 #include "core/iop/iop_intc.h"
 #include "core/iop/iop_ram.h"
 
+#include <algorithm>
+
 namespace ps2 {
 namespace {
 
@@ -31,6 +33,12 @@ constexpr u32 kSio2CmdStat = 0x1F80826Cu;
 constexpr u32 kSio2Intr = 0x1F808280u;
 constexpr u32 kSio2Start = 1u;
 constexpr u32 kSio2NoDevices = 0x0003D000u;
+constexpr u32 kOhciBase = 0x1F801600u;
+constexpr u32 kOhciSize = 0x100u;
+constexpr u32 kOhciFrameCycles = 36864u;
+constexpr u32 kOhciIntrMie = 1u << 31;
+constexpr u32 kOhciRhNps = 1u << 9;
+constexpr u32 kOhciPortPps = 1u << 8;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
@@ -53,11 +61,163 @@ IopBus::IopBus(
 void IopBus::reset() {
     cache_control_.fill(0);
     spu2_regs_.fill(0);
+    reset_ohci(true);
     root_counters_.fill({});
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
         root_counters_[i].target =
             i < 3u ? 0x10000ull : 0x100000000ull;
+    }
+}
+
+void IopBus::reset_ohci(bool hard) {
+    const u32 ownership =
+        hard ? 0u : (ohci_regs_[1] & (1u << 8));
+    ohci_regs_.fill(0);
+    ohci_regs_[0] = 0x10u; // OHCI 1.0 revision.
+    ohci_regs_[1] = hard ? 0u : (ownership | (3u << 6)); // USB suspend after HCR.
+    ohci_regs_[4] = kOhciIntrMie;
+    ohci_regs_[13] = 0x27782EDFu; // FSMPS/FI reset values used by OHCI drivers.
+    ohci_regs_[17] = 0x628u;      // Low-speed threshold.
+    ohci_regs_[18] = kOhciRhNps | 2u; // Two-port root hub, no power switching.
+    ohci_regs_[21] = kOhciPortPps;
+    ohci_regs_[22] = kOhciPortPps;
+    ohci_frame_phase_ = 0;
+}
+
+bool IopBus::read_ohci(
+    u32 physical,
+    u32 width,
+    u32& value) const {
+    if (physical < kOhciBase ||
+        physical + width > kOhciBase + kOhciSize ||
+        width == 0u || width > 4u) {
+        return false;
+    }
+
+    const u32 offset = physical - kOhciBase;
+    const u32 aligned = offset & ~3u;
+    const u32 byte_offset = offset & 3u;
+    if (byte_offset + width > 4u) return false;
+    const u32 index = aligned >> 2;
+
+    u32 raw = 0;
+    if (index == 5u) {
+        // InterruptEnable and InterruptDisable expose the same mask.
+        raw = ohci_regs_[4];
+    } else if (index == 14u) {
+        // A lightweight frame countdown is enough for BIOS/USBD timing probes.
+        const u32 fi = ohci_regs_[13] & 0x3FFFu;
+        const u64 elapsed =
+            ohci_frame_phase_ % kOhciFrameCycles;
+        raw = static_cast<u32>(
+            (static_cast<u64>(fi) *
+             (kOhciFrameCycles - elapsed)) /
+            kOhciFrameCycles);
+    } else if (index == 21u || index == 22u) {
+        // No devices connected, but the root ports are powered.
+        raw = kOhciPortPps;
+    } else if (index < ohci_regs_.size()) {
+        raw = ohci_regs_[index];
+    } else {
+        raw = 0xFFFFFFFFu;
+    }
+
+    const u32 bits = width * 8u;
+    const u32 mask =
+        bits == 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    value = (raw >> (byte_offset * 8u)) & mask;
+    return true;
+}
+
+bool IopBus::write_ohci(
+    u32 physical,
+    u32 width,
+    u32 value) {
+    if (physical < kOhciBase ||
+        physical + width > kOhciBase + kOhciSize ||
+        width == 0u || width > 4u) {
+        return false;
+    }
+
+    const u32 offset = physical - kOhciBase;
+    const u32 aligned = offset & ~3u;
+    const u32 byte_offset = offset & 3u;
+    if (byte_offset + width > 4u) return false;
+    const u32 index = aligned >> 2;
+    if (index >= ohci_regs_.size()) return true;
+
+    u32 current = 0;
+    (void)read_ohci(kOhciBase + aligned, 4u, current);
+    const u32 bits = width * 8u;
+    const u32 lane_mask =
+        bits == 32u
+            ? 0xFFFFFFFFu
+            : ((1u << bits) - 1u) << (byte_offset * 8u);
+    const u32 merged =
+        (current & ~lane_mask) |
+        ((value << (byte_offset * 8u)) & lane_mask);
+
+    switch (index) {
+    case 0: // HcRevision is read-only.
+    case 7: // HcPeriodCurrentED
+    case 12: // HcDoneHead
+    case 14: // HcFmRemaining
+    case 15: // HcFmNumber
+        return true;
+    case 1: // HcControl
+        ohci_regs_[1] = merged;
+        return true;
+    case 2: // HcCommandStatus
+        if ((merged & 1u) != 0) {
+            // Host-controller reset is self-clearing. A generic backing store
+            // would leave HCR stuck and trap firmware in its reset wait loop.
+            reset_ohci(false);
+            return true;
+        }
+        // No devices/lists are being scheduled in the bootstrap model, so
+        // CLF/BLF/OCR complete immediately instead of remaining busy forever.
+        ohci_regs_[2] = 0;
+        return true;
+    case 3: // HcInterruptStatus: write-one-to-clear.
+        ohci_regs_[3] &= ~merged;
+        return true;
+    case 4: // HcInterruptEnable
+        ohci_regs_[4] |= merged;
+        return true;
+    case 5: // HcInterruptDisable
+        ohci_regs_[4] &= ~merged;
+        return true;
+    case 6: // HcHCCA
+        ohci_regs_[6] = merged & 0xFFFFFF00u;
+        return true;
+    case 8: // HcControlHeadED
+    case 9: // HcControlCurrentED
+    case 10: // HcBulkHeadED
+    case 11: // HcBulkCurrentED
+        ohci_regs_[index] = merged & 0xFFFFFFF0u;
+        return true;
+    case 13: // HcFmInterval
+        ohci_regs_[13] = merged;
+        return true;
+    case 16: // HcPeriodicStart
+    case 17: // HcLSThreshold
+        ohci_regs_[index] = merged & 0xFFFFu;
+        return true;
+    case 18: // HcRhDescriptorA: bootstrap model has fixed capabilities.
+    case 19: // HcRhDescriptorB
+        return true;
+    case 20: // HcRhStatus: no attached devices/change events to latch.
+        ohci_regs_[20] = 0;
+        return true;
+    case 21:
+    case 22:
+        // Root-port reset/power requests complete immediately with no device.
+        ohci_regs_[index] = kOhciPortPps;
+        return true;
+    default:
+        ohci_regs_[index] = merged;
+        return true;
     }
 }
 
@@ -188,6 +348,13 @@ bool IopBus::write_root_counter(
 }
 
 void IopBus::tick(u64 cycles) {
+    ohci_frame_phase_ += cycles;
+    while (ohci_frame_phase_ >= kOhciFrameCycles) {
+        ohci_frame_phase_ -= kOhciFrameCycles;
+        ohci_regs_[15] =
+            (ohci_regs_[15] + 1u) & 0xFFFFu;
+    }
+
     static constexpr u32 irq_sources[6] = {
         4u, 5u, 6u, 14u, 15u, 16u,
     };
@@ -391,6 +558,11 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    u32 ohci_value = 0;
+    if (read_ohci(physical, 1u, ohci_value)) {
+        value = static_cast<u8>(ohci_value);
+        return true;
+    }
     u32 timer_value = 0;
     if (read_root_counter(physical, 1u, timer_value)) {
         value = static_cast<u8>(timer_value);
@@ -415,6 +587,11 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
+    u32 ohci_value = 0;
+    if (read_ohci(physical, 2u, ohci_value)) {
+        value = static_cast<u16>(ohci_value);
+        return true;
+    }
     u32 timer_value = 0;
     if (read_root_counter(physical, 2u, timer_value)) {
         value = static_cast<u16>(timer_value);
@@ -443,6 +620,11 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    u32 ohci_value = 0;
+    if (read_ohci(physical, 4u, ohci_value)) {
+        value = ohci_value;
+        return true;
+    }
     u32 timer_value = 0;
     if (read_root_counter(physical, 4u, timer_value)) {
         value = timer_value;
@@ -478,6 +660,10 @@ bool IopBus::write8(u32 address, u8 value) {
         cache_control_[address-kCacheControlBase]=value; return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kOhciBase &&
+        physical < kOhciBase + kOhciSize) {
+        return write_ohci(physical, 1u, value);
+    }
     u32 timer_index = 0;
     u32 timer_reg = 0;
     if (decode_root_counter(physical, timer_index, timer_reg)) {
@@ -502,6 +688,10 @@ bool IopBus::write8(u32 address, u8 value) {
 
 bool IopBus::write16(u32 address, u16 value) {
     const u32 physical=to_physical(address);
+    if (physical >= kOhciBase &&
+        physical < kOhciBase + kOhciSize) {
+        return write_ohci(physical, 2u, value);
+    }
     u32 timer_index = 0;
     u32 timer_reg = 0;
     if (decode_root_counter(physical, timer_index, timer_reg)) {
@@ -529,6 +719,10 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kOhciBase &&
+        physical < kOhciBase + kOhciSize) {
+        return write_ohci(physical, 4u, value);
+    }
     u32 timer_index = 0;
     u32 timer_reg = 0;
     if (decode_root_counter(physical, timer_index, timer_reg)) {
