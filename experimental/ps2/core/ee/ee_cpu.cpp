@@ -1156,6 +1156,25 @@ bool EeCpu::execute_mmi(
             store(out);
             return true;
 
+        case 0x10: // PADDSW
+        case 0x11: // PSUBSW
+            for (u32 i = 0; i < 4u; ++i) {
+                const s64 av = static_cast<s32>(get32(a, i));
+                const s64 bv = static_cast<s32>(get32(b, i));
+                const s64 result =
+                    sub == 0x10u ? av + bv : av - bv;
+                const s64 clamped =
+                    result > std::numeric_limits<s32>::max()
+                        ? std::numeric_limits<s32>::max()
+                        : result < std::numeric_limits<s32>::min()
+                            ? std::numeric_limits<s32>::min()
+                            : result;
+                set32(out, i, static_cast<u32>(
+                    static_cast<s32>(clamped)));
+            }
+            store(out);
+            return true;
+
         case 0x12: // PEXTLW
             for (u32 i = 0; i < 2u; ++i) {
                 set32(out, i * 2u, get32(b, i));
@@ -1170,6 +1189,24 @@ bool EeCpu::execute_mmi(
             set32(out, 3u, get32(a, 2u));
             store(out);
             return true;
+        case 0x14: // PADDSH
+        case 0x15: // PSUBSH
+            for (u32 i = 0; i < 8u; ++i) {
+                const s32 av = static_cast<s16>(get16(a, i));
+                const s32 bv = static_cast<s16>(get16(b, i));
+                const s32 result =
+                    sub == 0x14u ? av + bv : av - bv;
+                const s32 clamped =
+                    result > std::numeric_limits<s16>::max()
+                        ? std::numeric_limits<s16>::max()
+                        : result < std::numeric_limits<s16>::min()
+                            ? std::numeric_limits<s16>::min()
+                            : result;
+                set16(out, i, static_cast<u16>(
+                    static_cast<s16>(clamped)));
+            }
+            store(out);
+            return true;
         case 0x16: // PEXTLH
             for (u32 i = 0; i < 4u; ++i) {
                 set16(out, i * 2u, get16(b, i));
@@ -1181,6 +1218,24 @@ bool EeCpu::execute_mmi(
             for (u32 i = 0; i < 4u; ++i) {
                 set16(out, i, get16(b, i * 2u));
                 set16(out, i + 4u, get16(a, i * 2u));
+            }
+            store(out);
+            return true;
+        case 0x18: // PADDSB
+        case 0x19: // PSUBSB
+            for (u32 i = 0; i < 16u; ++i) {
+                const s16 av = static_cast<s8>(get8(a, i));
+                const s16 bv = static_cast<s8>(get8(b, i));
+                const s16 result =
+                    sub == 0x18u ? av + bv : av - bv;
+                const s16 clamped =
+                    result > std::numeric_limits<s8>::max()
+                        ? std::numeric_limits<s8>::max()
+                        : result < std::numeric_limits<s8>::min()
+                            ? std::numeric_limits<s8>::min()
+                            : result;
+                set8(out, i, static_cast<u8>(
+                    static_cast<s8>(clamped)));
             }
             store(out);
             return true;
@@ -1405,6 +1460,63 @@ bool EeCpu::execute_mmi(
     auto mmi2 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x02: // PSLLVW
+            out.lo = sign_extend_32(
+                get32(b, 0u) << (get32(a, 0u) & 31u));
+            out.hi = sign_extend_32(
+                get32(b, 2u) << (get32(a, 2u) & 31u));
+            store(out);
+            return true;
+        case 0x03: // PSRLVW
+            out.lo = sign_extend_32(
+                get32(b, 0u) >> (get32(a, 0u) & 31u));
+            out.hi = sign_extend_32(
+                get32(b, 2u) >> (get32(a, 2u) & 31u));
+            store(out);
+            return true;
+        case 0x08: // PMFHI
+            out.lo = state_.hi;
+            out.hi = state_.hi1;
+            store(out);
+            return true;
+        case 0x09: // PMFLO
+            out.lo = state_.lo;
+            out.hi = state_.lo1;
+            store(out);
+            return true;
+        case 0x0A: // PINTH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i));
+                set16(out, i * 2u + 1u, get16(a, i + 4u));
+            }
+            store(out);
+            return true;
+        case 0x0C: { // PMULTW
+            const s64 p0 =
+                static_cast<s64>(static_cast<s32>(get32(a, 0u))) *
+                static_cast<s64>(static_cast<s32>(get32(b, 0u)));
+            const s64 p1 =
+                static_cast<s64>(static_cast<s32>(get32(a, 2u))) *
+                static_cast<s64>(static_cast<s32>(get32(b, 2u)));
+            multiply_signed32(
+                get32(a, 0u), get32(b, 0u),
+                state_.lo, state_.hi);
+            multiply_signed32(
+                get32(a, 2u), get32(b, 2u),
+                state_.lo1, state_.hi1);
+            out.lo = static_cast<u64>(p0);
+            out.hi = static_cast<u64>(p1);
+            store(out);
+            return true;
+        }
+        case 0x0D: // PDIVW
+            divide_signed32(
+                get32(a, 0u), get32(b, 0u),
+                state_.lo, state_.hi);
+            divide_signed32(
+                get32(a, 2u), get32(b, 2u),
+                state_.lo1, state_.hi1);
+            return true;
         case 0x0E: // PCPYLD
             out.lo = b.lo;
             out.hi = a.lo;
@@ -1458,6 +1570,56 @@ bool EeCpu::execute_mmi(
     auto mmi3 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x03: // PSRAVW
+            out.lo = sign_extend_32(static_cast<u32>(
+                static_cast<s32>(get32(b, 0u)) >>
+                (get32(a, 0u) & 31u)));
+            out.hi = sign_extend_32(static_cast<u32>(
+                static_cast<s32>(get32(b, 2u)) >>
+                (get32(a, 2u) & 31u)));
+            store(out);
+            return true;
+        case 0x08: // PMTHI
+            state_.hi = a.lo;
+            state_.hi1 = a.hi;
+            return true;
+        case 0x09: // PMTLO
+            state_.lo = a.lo;
+            state_.lo1 = a.hi;
+            return true;
+        case 0x0A: // PINTEH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i * 2u));
+                set16(out, i * 2u + 1u, get16(a, i * 2u));
+            }
+            store(out);
+            return true;
+        case 0x0C: { // PMULTUW
+            const u64 p0 =
+                static_cast<u64>(get32(a, 0u)) *
+                static_cast<u64>(get32(b, 0u));
+            const u64 p1 =
+                static_cast<u64>(get32(a, 2u)) *
+                static_cast<u64>(get32(b, 2u));
+            multiply_unsigned32(
+                get32(a, 0u), get32(b, 0u),
+                state_.lo, state_.hi);
+            multiply_unsigned32(
+                get32(a, 2u), get32(b, 2u),
+                state_.lo1, state_.hi1);
+            out.lo = p0;
+            out.hi = p1;
+            store(out);
+            return true;
+        }
+        case 0x0D: // PDIVUW
+            divide_unsigned32(
+                get32(a, 0u), get32(b, 0u),
+                state_.lo, state_.hi);
+            divide_unsigned32(
+                get32(a, 2u), get32(b, 2u),
+                state_.lo1, state_.hi1);
+            return true;
         case 0x0E: // PCPYUD
             out.lo = a.hi;
             out.hi = b.hi;
