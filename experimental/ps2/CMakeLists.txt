@@ -10,6 +10,7 @@ add_library(vibestation_ps2_core STATIC
     core/bios/bios.cpp
     core/cdvd/cdvd_hw.cpp
     core/dma/gif_dma.cpp
+    core/dma/ipu_dma.cpp
     core/dma/sif_dma.cpp
     core/dma/spr_dma.cpp
     core/dma/vif0_dma.cpp
