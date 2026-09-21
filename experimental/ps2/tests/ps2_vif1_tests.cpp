@@ -194,6 +194,103 @@ bool test_vif1_direct_path2() {
     return ok;
 }
 
+bool test_vif1_status_tracks_payload_progress() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    constexpr ps2::u32 stream = 0x5800u;
+    constexpr ps2::u32 strow = 0x30000000u;
+
+    bool ok = expect(
+        write_words(system.bus(), stream, 0u, 0u, 0u, strow) &&
+        write_words(system.bus(), stream + 0x10u, 1u, 2u, 3u, 4u),
+        "failed to build VIF1 status packet");
+    ok = expect(setup_normal_dma(system, stream, 2u),
+                "failed to arm VIF1 status DMA") && ok;
+
+    std::string error;
+    ok = expect(
+        dma.service(
+            system.bus(),
+            system.gs_core(),
+            system.gs_privileged(),
+            error),
+        "VIF1 status first service failed") && ok;
+
+    ps2::u32 stat = 0;
+    ok = expect(
+        system.bus().read32(0x10003C00u, stat) &&
+            (stat & 0x3u) == 3u,
+        "VIF1 VPS did not expose payload transfer") && ok;
+    ok = expect(
+        ((stat >> 24) & 0x1Fu) == 1u,
+        "VIF1 FQC did not track remaining DMA qword") && ok;
+
+    ok = expect(
+        dma.service(
+            system.bus(),
+            system.gs_core(),
+            system.gs_privileged(),
+            error),
+        "VIF1 status second service failed") && ok;
+    ok = expect(
+        system.bus().read32(0x10003C00u, stat) &&
+            (stat & 0x3u) == 0u &&
+            ((stat >> 24) & 0x1Fu) == 0u,
+        "VIF1 status did not return idle on completion") && ok;
+
+    return ok;
+}
+
+bool test_vif1_flush_drains_vu1() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.attach_vu1(system.vu1());
+    dma.reset();
+
+    // E-bit pair followed by the architectural delay-slot pair.
+    bool ok = expect(
+        system.bus().write32(0x11008000u, 0u) &&
+        system.bus().write32(0x11008004u, 0x40000000u) &&
+        system.bus().write32(0x11008008u, 0u) &&
+        system.bus().write32(0x1100800Cu, 0u),
+        "failed to build VU1 flush microprogram");
+    system.vu1().start(0u);
+    ok = expect(system.vu1().running(),
+                "VU1 flush test did not start VU1") && ok;
+
+    constexpr ps2::u32 stream = 0x5A00u;
+    constexpr ps2::u32 flush = 0x11000000u;
+    ok = expect(
+        write_words(system.bus(), stream, flush, 0u, 0u, 0u),
+        "failed to build VIF1 FLUSH packet") && ok;
+    ok = expect(setup_normal_dma(system, stream, 1u),
+                "failed to arm VIF1 FLUSH DMA") && ok;
+
+    std::string error;
+    ok = expect(
+        dma.service(
+            system.bus(),
+            system.gs_core(),
+            system.gs_privileged(),
+            error),
+        "VIF1 FLUSH service failed") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+
+    ok = expect(!system.vu1().running(),
+                "VIF1 FLUSH did not drain VU1") && ok;
+
+    ps2::u32 stat = 0;
+    ok = expect(
+        system.bus().read32(0x10003C00u, stat) &&
+            (stat & 0xFu) == 0u &&
+            ((stat >> 24) & 0x1Fu) == 0u,
+        "VIF1 FLUSH left busy/wait/FQC status set") && ok;
+
+    return ok;
+}
+
 bool test_vif1_source_chain_tte() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -262,6 +359,8 @@ int main() {
     bool ok = true;
     ok = test_vif1_mpg_and_unpack() && ok;
     ok = test_vif1_direct_path2() && ok;
+    ok = test_vif1_status_tracks_payload_progress() && ok;
+    ok = test_vif1_flush_drains_vu1() && ok;
     ok = test_vif1_source_chain_tte() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VIF1 tests passed.\n";
