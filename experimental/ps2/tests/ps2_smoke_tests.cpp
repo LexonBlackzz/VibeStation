@@ -874,6 +874,40 @@ bool test_iop_spu2_dma_bootstrap_completion() {
     return ok;
 }
 
+bool test_iop_sio2_minimal_transfer_status() {
+    ps2::Ps2System system;
+    ps2::u32 value = 0;
+
+    bool ok = expect(
+        system.iop_bus().read32(0x1F808270u, value) &&
+            value == 0x0000000Fu,
+        "SIO2 PORT_STAT reset value mismatch");
+
+    ok = expect(
+        system.iop_bus().write32(0x1F808268u, 1u),
+        "SIO2 CTRL start write failed") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F80826Cu, value) &&
+            value == 0x0003D000u,
+        "SIO2 no-device CMD_STAT mismatch") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F808280u, value) &&
+            (value & 1u) != 0,
+        "SIO2 local interrupt status missing") && ok;
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 17)) != 0,
+        "SIO2 transfer did not raise IOP IRQ17") && ok;
+
+    ok = expect(
+        system.iop_bus().write32(0x1F808280u, 1u) &&
+        system.iop_bus().read32(0x1F808280u, value) &&
+            value == 0u,
+        "SIO2 local interrupt acknowledge failed") && ok;
+
+    return ok;
+}
+
 bool test_iop_sio2_dma_bootstrap_completion() {
     ps2::Ps2System system;
     bool ok = expect(
@@ -1016,6 +1050,7 @@ int main() {
     ok = test_cdvd_raises_iop_irq2() && ok;
     ok = test_iop_spu2_register_window() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
+    ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
