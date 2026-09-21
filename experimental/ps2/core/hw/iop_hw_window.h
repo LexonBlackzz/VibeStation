@@ -7,12 +7,15 @@
 
 namespace ps2 {
 
+class IopIntc;
+
 class IopHwWindow {
 public:
     static constexpr u32 kBase = 0x1F800000u;
     static constexpr std::size_t kSize = 64u * 1024u;
 
     void reset();
+    void tick(u64 cycles, IopIntc& intc);
     [[nodiscard]] bool contains(u32 address, std::size_t width) const;
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
@@ -26,7 +29,27 @@ public:
     [[nodiscard]] bool write64(u32 address, u64 value);
 
 private:
+    [[nodiscard]] static bool decode_timer(
+        u32 address,
+        u32& index,
+        u32& reg,
+        u32& byte_offset);
+    [[nodiscard]] u32 timer_value(u32 index, u32 reg) const;
+    void write_timer(u32 index, u32 reg, u32 value);
+    void write_timer_partial(
+        u32 index,
+        u32 reg,
+        u32 byte_offset,
+        u32 width,
+        u32 value);
+    [[nodiscard]] u32 timer_rate(u32 index) const;
+    void fire_timer_irq(IopIntc& intc, u32 index, bool overflow);
+
     std::array<u8, kSize> data_{};
+    std::array<u64, 6> timer_phase_{};
+    std::array<u32, 6> timer_count_{};
+    std::array<u32, 6> timer_mode_{};
+    std::array<u32, 6> timer_target_{};
 };
 
 } // namespace ps2
