@@ -493,6 +493,36 @@ bool EeCpu::execute_special(
     case 0x2F: // DSUBU
         write_gpr64(rd, gpr_u64(rs) - gpr_u64(rt));
         return true;
+    case 0x30: // TGE
+        if (gpr_s64(rs) >= gpr_s64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x31: // TGEU
+        if (gpr_u64(rs) >= gpr_u64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x32: // TLT
+        if (gpr_s64(rs) < gpr_s64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x33: // TLTU
+        if (gpr_u64(rs) < gpr_u64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x34: // TEQ
+        if (gpr_u64(rs) == gpr_u64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x36: // TNE
+        if (gpr_u64(rs) != gpr_u64(rt)) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
     case 0x38: // DSLL
         write_gpr64(rd, gpr_u64(rt) << sa);
         return true;
@@ -537,6 +567,40 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
         state_.sa =
             ((static_cast<u32>(gpr_u64(rs)) & 0x7u) ^
              (static_cast<u32>(immediate(instruction)) & 0x7u)) << 1u;
+        return true;
+    case 0x08: // TGEI
+        if (gpr_s64(rs) >= static_cast<s64>(immediate(instruction))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x09: // TGEIU
+        if (gpr_u64(rs) >= static_cast<u64>(
+                static_cast<s64>(immediate(instruction)))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x0A: // TLTI
+        if (gpr_s64(rs) < static_cast<s64>(immediate(instruction))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x0B: // TLTIU
+        if (gpr_u64(rs) < static_cast<u64>(
+                static_cast<s64>(immediate(instruction)))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x0C: // TEQI
+        if (gpr_u64(rs) == static_cast<u64>(
+                static_cast<s64>(immediate(instruction)))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
+        return true;
+    case 0x0E: // TNEI
+        if (gpr_u64(rs) != static_cast<u64>(
+                static_cast<s64>(immediate(instruction)))) {
+            raise_exception(13u, pc, current_is_delay_slot_);
+        }
         return true;
     default: return fail(pc,instruction,"Unsupported REGIMM variant "+hex32(rt),error);
     }
