@@ -11,11 +11,6 @@
 namespace ps2 {
 namespace {
 
-constexpr u32 kVu1MicroBase = 0x11008000u;
-constexpr u32 kVu1DataBase = 0x1100C000u;
-constexpr u32 kVif1Itop = 0x10003CD0u;
-constexpr u32 kVif1Top = 0x10003CE0u;
-
 u32 ft(u32 code) { return (code >> 16) & 0x1Fu; }
 u32 fs(u32 code) { return (code >> 11) & 0x1Fu; }
 u32 fd(u32 code) { return (code >> 6) & 0x1Fu; }
@@ -108,8 +103,23 @@ float eexp_approx(float value) {
 
 } // namespace
 
-Vu1::Vu1(EeBus& bus, GsCore& gs)
-    : bus_(bus), gs_(gs) {
+Vu1::Vu1(
+    EeBus& bus,
+    GsCore& gs,
+    u32 micro_base,
+    u32 data_base,
+    u32 memory_mask,
+    u32 vif_itop,
+    u32 vif_top,
+    bool xgkick_enabled)
+    : bus_(bus),
+      gs_(gs),
+      micro_base_(micro_base),
+      data_base_(data_base),
+      memory_mask_(memory_mask),
+      vif_itop_(vif_itop),
+      vif_top_(vif_top),
+      xgkick_enabled_(xgkick_enabled) {
     reset();
 }
 
@@ -134,7 +144,9 @@ void Vu1::reset() {
 }
 
 void Vu1::start(u32 address) {
-    pc_ = ((address & 0x7FFu) * 8u) & 0x3FFFu;
+    pc_ =
+        ((address & (memory_mask_ >> 3u)) * 8u) &
+        memory_mask_;
     branch_countdown_ = 0;
     end_countdown_ = 0;
     running_ = true;
@@ -222,12 +234,29 @@ void Vu1::write_vi(u32 reg, u16 value) {
     vi_[reg] = value;
 }
 
+void Vu1::set_vf(u32 reg, u32 lane, u32 value) {
+    reg &= 31u;
+    lane &= 3u;
+    if (reg == 0u) return;
+    vf_[reg][lane] = value;
+}
+
+void Vu1::set_vi(u32 reg, u16 value) {
+    write_vi(reg, value);
+}
+
+void Vu1::set_acc(u32 lane, u32 value) {
+    acc_[lane & 3u] = value;
+}
+
 bool Vu1::read_data_word(u32 byte_offset, u32& value) const {
-    return bus_.read32(kVu1DataBase + (byte_offset & 0x3FFFu), value);
+    return bus_.read32(
+        data_base_ + (byte_offset & memory_mask_), value);
 }
 
 bool Vu1::write_data_word(u32 byte_offset, u32 value) {
-    return bus_.write32(kVu1DataBase + (byte_offset & 0x3FFFu), value);
+    return bus_.write32(
+        data_base_ + (byte_offset & memory_mask_), value);
 }
 
 bool Vu1::read_data_qword(
@@ -248,14 +277,19 @@ bool Vu1::read_data_qword(
 }
 
 void Vu1::schedule_branch(u32 target) {
-    branch_target_ = target & 0x3FFFu;
+    branch_target_ = target & memory_mask_;
     branch_countdown_ = 2;
 }
 
 bool Vu1::xgkick(u16 qword_address, std::string& error) {
     error.clear();
+    if (!xgkick_enabled_) {
+        ++stats_.unsupported_lower;
+        return true;
+    }
     u32 byte_offset =
-        (static_cast<u32>(qword_address) & 0x3FFu) * 16u;
+        (static_cast<u32>(qword_address) &
+         (memory_mask_ >> 4u)) * 16u;
     bool current_tag_eop = false;
 
     // XGKICK is asynchronous on hardware.  For the bootstrap interpreter we
@@ -275,7 +309,7 @@ bool Vu1::xgkick(u16 qword_address, std::string& error) {
 
         gs_.write_gif_qword(lo, hi);
         ++stats_.xgkick_qwords;
-        byte_offset = (byte_offset + 16u) & 0x3FFFu;
+        byte_offset = (byte_offset + 16u) & memory_mask_;
 
         if (!gs_.packet_active() && current_tag_eop) {
             ++stats_.xgkicks;
@@ -649,7 +683,7 @@ bool Vu1::execute_lower(u32 code, std::string& error) {
 
     auto read_vector = [&](u32 reg, u32 qword) -> bool {
         if (reg == 0) return true;
-        const u32 base = (qword & 0x3FFu) * 16u;
+        const u32 base = (qword & (memory_mask_ >> 4u)) * 16u;
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             u32 value = 0;
@@ -659,7 +693,7 @@ bool Vu1::execute_lower(u32 code, std::string& error) {
         return true;
     };
     auto write_vector = [&](u32 reg, u32 qword) -> bool {
-        const u32 base = (qword & 0x3FFu) * 16u;
+        const u32 base = (qword & (memory_mask_ >> 4u)) * 16u;
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             if (!write_data_word(base + lane * 4u, vf_[reg][lane])) {
@@ -910,7 +944,7 @@ bool Vu1::execute_lower_special(
 
     auto read_vector = [&](u32 reg, u32 qword) -> bool {
         if (reg == 0) return true;
-        const u32 base = (qword & 0x3FFu) * 16u;
+        const u32 base = (qword & (memory_mask_ >> 4u)) * 16u;
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             u32 value = 0;
@@ -920,7 +954,7 @@ bool Vu1::execute_lower_special(
         return true;
     };
     auto write_vector = [&](u32 reg, u32 qword) -> bool {
-        const u32 base = (qword & 0x3FFu) * 16u;
+        const u32 base = (qword & (memory_mask_ >> 4u)) * 16u;
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             if (!write_data_word(base + lane * 4u, vf_[reg][lane])) {
@@ -1025,7 +1059,7 @@ bool Vu1::execute_lower_special(
             return true;
         case 0x1A: { // XTOP
             u32 value = 0;
-            if (!bus_.read32(kVif1Top, value)) {
+            if (!bus_.read32(vif_top_, value)) {
                 error = "VU1 XTOP VIF1 TOP read fault";
                 return false;
             }
@@ -1107,7 +1141,7 @@ bool Vu1::execute_lower_special(
             return true;
         case 0x1A: { // XITOP
             u32 value = 0;
-            if (!bus_.read32(kVif1Itop, value)) {
+            if (!bus_.read32(vif_itop_, value)) {
                 error = "VU1 XITOP VIF1 ITOP read fault";
                 return false;
             }
@@ -1149,7 +1183,7 @@ bool Vu1::execute_lower_special(
         }
         case 0x0F: { // ILWR
             const u32 base =
-                static_cast<u32>(vi_[is(code)] & 0x3FFu) * 16u;
+                static_cast<u32>(vi_[is(code)] & (memory_mask_ >> 4u)) * 16u;
             for (u32 lane = 0; lane < 4u; ++lane) {
                 if (!lane_enabled(code, lane)) continue;
                 u32 value = 0;
@@ -1227,7 +1261,7 @@ bool Vu1::execute_lower_special(
             return true;
         case 0x0F: { // ISWR
             const u32 base =
-                static_cast<u32>(vi_[is(code)] & 0x3FFu) * 16u;
+                static_cast<u32>(vi_[is(code)] & (memory_mask_ >> 4u)) * 16u;
             for (u32 lane = 0; lane < 4u; ++lane) {
                 if (!lane_enabled(code, lane)) continue;
                 if (!write_data_word(
@@ -1255,16 +1289,16 @@ bool Vu1::step(std::string& error) {
 
     u32 lower = 0;
     u32 upper = 0;
-    if (!bus_.read32(kVu1MicroBase + (pc_ & 0x3FFFu), lower) ||
+    if (!bus_.read32(micro_base_ + (pc_ & memory_mask_), lower) ||
         !bus_.read32(
-            kVu1MicroBase + ((pc_ + 4u) & 0x3FFFu),
+            micro_base_ + ((pc_ + 4u) & memory_mask_),
             upper)) {
         error = "VU1 microcode fetch fault";
         running_ = false;
         return false;
     }
 
-    pc_ = (pc_ + 8u) & 0x3FFFu;
+    pc_ = (pc_ + 8u) & memory_mask_;
 
     if ((upper & 0x40000000u) != 0 && end_countdown_ == 0) {
         // E executes one delay-slot instruction before stopping.
@@ -1294,7 +1328,7 @@ bool Vu1::step(std::string& error) {
     if (branch_countdown_ != 0) {
         --branch_countdown_;
         if (branch_countdown_ == 0) {
-            pc_ = branch_target_ & 0x3FFFu;
+            pc_ = branch_target_ & memory_mask_;
         }
     }
 
