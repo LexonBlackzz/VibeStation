@@ -965,6 +965,9 @@ bool test_iop_spu2_dma_bootstrap_completion() {
         system.iop_bus().write32(0x1F8010F4u, 0x00900000u),
         "failed to enable SPU2 DMA4 interrupt") && ok;
     ok = expect(
+        system.iop_bus().write16(0x1F9001B0u, 1u),
+        "failed to set SPU2 core0 DMA busy token") && ok;
+    ok = expect(
         system.iop_bus().write32(0x1F8010C8u, 0x01000201u),
         "SPU2 DMA4 CHCR write failed") && ok;
 
@@ -989,11 +992,17 @@ bool test_iop_spu2_dma_bootstrap_completion() {
             (statx & 0x0080u) != 0 &&
             (statx & 0x0400u) == 0,
         "SPU2 core0 STATX did not become DMA-ready") && ok;
+    ok = expect(
+        system.iop_bus().read16(0x1F9001B0u, statx) && statx == 0u,
+        "SPU2 core0 DMA busy token did not clear") && ok;
 
     // DICR2: master enable + DMA7 (index 0) enable.
     ok = expect(
         system.iop_bus().write32(0x1F801574u, 0x00810000u),
         "failed to enable SPU2 DMA7 interrupt") && ok;
+    ok = expect(
+        system.iop_bus().write16(0x1F9005B0u, 2u),
+        "failed to set SPU2 core1 DMA busy token") && ok;
     ok = expect(
         system.iop_bus().write32(0x1F801508u, 0x01000201u),
         "SPU2 DMA7 CHCR write failed") && ok;
@@ -1012,6 +1021,9 @@ bool test_iop_spu2_dma_bootstrap_completion() {
             (statx & 0x0080u) != 0 &&
             (statx & 0x0400u) == 0,
         "SPU2 core1 STATX did not become DMA-ready") && ok;
+    ok = expect(
+        system.iop_bus().read16(0x1F9005B0u, statx) && statx == 0u,
+        "SPU2 core1 DMA busy token did not clear") && ok;
 
     return ok;
 }

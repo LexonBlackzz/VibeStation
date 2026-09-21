@@ -598,6 +598,8 @@ bool IopBus::write32(u32 address, u32 value) {
             if (channel == 4u || channel == 7u) {
                 const u32 stat_offset =
                     channel == 4u ? kSpu2Statx0 : kSpu2Statx1;
+                const u32 dma_status_offset =
+                    channel == 4u ? 0x1B0u : 0x5B0u;
                 u16 stat =
                     static_cast<u16>(spu2_regs_[stat_offset]) |
                     (static_cast<u16>(
@@ -607,6 +609,10 @@ bool IopBus::write32(u32 address, u32 value) {
                 spu2_regs_[stat_offset] = static_cast<u8>(stat);
                 spu2_regs_[stat_offset + 1u] =
                     static_cast<u8>(stat >> 8);
+                // libsd writes a per-core DMA-busy token here and waits for
+                // the SPU2 to clear it once the IOP DMA channel completes.
+                spu2_regs_[dma_status_offset] = 0;
+                spu2_regs_[dma_status_offset + 1u] = 0;
             }
 
             raise_dma_irq(channel);
