@@ -27,6 +27,7 @@ struct EeCpuState {
     u64 lo = 0;
     u64 hi1 = 0;
     u64 lo1 = 0;
+    u32 sa = 0;
     u32 pc = 0;
     u32 next_pc = 4;
     std::array<u32, 32> cop0{};
