@@ -14,7 +14,12 @@ constexpr u32 kRamMirrorEnd = 0x00800000u;
 constexpr u32 kSifBase = 0x1D000000u;
 constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
+constexpr u32 kDma4Chcr = 0x1F8010C8u;
+constexpr u32 kDma7Chcr = 0x1F801508u;
+constexpr u32 kDmaStart = 1u << 24;
 constexpr u32 kSpu2Base = 0x1F900000u;
+constexpr u32 kSpu2Statx0 = 0x344u;
+constexpr u32 kSpu2Statx1 = 0x744u;
 constexpr u32 kSpu2Size = 0x800u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
@@ -311,6 +316,31 @@ bool IopBus::write32(u32 address, u32 value) {
     const u32 physical=to_physical(address);
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
+    }
+    if (physical == kDma4Chcr || physical == kDma7Chcr) {
+        u32 stored = value;
+        if ((value & kDmaStart) != 0) {
+            // For the BIOS-video milestone, model the two SPU2 DMA channels
+            // as immediately completing. Audio payload consumption can be
+            // added with the SPU2 core later, but firmware must not spin on a
+            // permanently asserted CHCR start bit during sound initialization.
+            stored &= ~kDmaStart;
+        }
+        if (!hw_.write32(physical, stored)) return false;
+
+        if ((value & kDmaStart) != 0) {
+            const u32 stat_offset =
+                physical == kDma4Chcr ? kSpu2Statx0 : kSpu2Statx1;
+            u16 stat =
+                static_cast<u16>(spu2_regs_[stat_offset]) |
+                (static_cast<u16>(spu2_regs_[stat_offset + 1u]) << 8);
+            stat = static_cast<u16>((stat | 0x0080u) & ~0x0400u);
+            spu2_regs_[stat_offset] = static_cast<u8>(stat);
+            spu2_regs_[stat_offset + 1u] =
+                static_cast<u8>(stat >> 8);
+            raise_dma_irq(physical == kDma4Chcr ? 4u : 7u);
+        }
+        return true;
     }
     if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
         const u32 offset = physical - kSpu2Base;
