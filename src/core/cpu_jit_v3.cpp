@@ -712,6 +712,9 @@ V3LinkedDispatch install_linked_dispatch(V3CodeArena &arena) {
   code->xor_(code->r13d, code->r13d);
   code->xor_(code->r14d, code->r14d);
   code->xor_(code->r8d, code->r8d);
+  code->xor_(code->r9d, code->r9d);
+  code->xor_(code->esi, code->esi);
+  code->xor_(code->ebp, code->ebp);
   code->xor_(code->edi, code->edi);
   code->mov(code->rax, code->ptr[code->rbx + offsetof(V3ResidentContext, first)]);
   code->jmp(code->ptr[code->rax + offsetof(V3ResidentBlock, linked_fn)]);
@@ -719,6 +722,12 @@ V3LinkedDispatch install_linked_dispatch(V3CodeArena &arena) {
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, cycles)], code->r12d);
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, instructions)], code->r13d);
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, entries)], code->r14d);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)], code->ebp);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)], code->r9d);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, branch_not_taken)], code->esi);
+  code->mov(code->eax, code->r14d);
+  code->sub(code->eax, code->ebp);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, alu_entries)], code->eax);
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, final_pc)], code->r8d);
   code->mov(code->ptr[code->rbx + offsetof(V3ResidentContext, last)], code->rdi);
   code->pop(code->r15);
@@ -836,24 +845,15 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
   code->setDefaultJmpNEAR(true);
-  Label linked_done, validation_line, validation_done;
+  Label linked_done;
   if (linked != nullptr) {
-    code->mov(code->rsi, reinterpret_cast<size_t>(linked));
-    code->xor_(code->ecx, code->ecx);
-    code->L(validation_line);
-    code->cmp(code->ecx, linked->icache_line_count);
-    code->jae(validation_done);
-    code->movzx(code->eax, code->byte[code->rsi + offsetof(V3ResidentBlock, icache_indices) + code->rcx]);
-    code->imul(code->eax, code->eax, 24);
-    code->lea(code->rax, code->ptr[code->r15 + code->rax]);
-    code->cmp(code->byte[code->rax + 20], 0);
-    code->je(linked_done);
-    code->mov(code->edx, code->dword[code->rsi + offsetof(V3ResidentBlock, icache_tags) + code->rcx * 4]);
-    code->cmp(code->edx, code->dword[code->rax]);
-    code->jne(linked_done);
-    code->inc(code->ecx);
-    code->jmp(validation_line);
-    code->L(validation_done);
+    for (u32 line = 0; line < linked->icache_line_count; ++line) {
+      const int offset = static_cast<int>(linked->icache_indices[line]) * 24;
+      code->cmp(code->byte[code->r15 + offset + 20], 0);
+      code->je(linked_done);
+      code->cmp(code->dword[code->r15 + offset], linked->icache_tags[line]);
+      code->jne(linked_done);
+    }
     if (linked->kind != 0u) {
       code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
       code->je(linked_done);
@@ -1090,21 +1090,19 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     code->inc(code->r14d);
     code->mov(code->r8d, linked->next_pc);
     if (linked->kind == 1u) {
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)]);
+      code->inc(code->ebp);
       code->test(code->edx, code->edx);
       code->jz(not_taken);
       code->mov(code->r8d, linked->taken_pc);
       code->inc(code->r12d);
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
+      code->inc(code->r9d);
       code->mov(code->rax, reinterpret_cast<size_t>(linked->taken_successor));
       code->jmp(next);
       code->L(not_taken);
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_not_taken)]);
+      code->inc(code->esi);
     } else if (linked->kind == 2u) {
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)]);
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
-    } else {
-      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, alu_entries)]);
+      code->inc(code->ebp);
+      code->inc(code->r9d);
     }
     code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
     code->L(next);

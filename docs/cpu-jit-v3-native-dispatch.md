@@ -56,3 +56,10 @@ Crash Bandicoot (USA) run on the same host gave:
 The first emitter averaged 1.38 blocks per linked chain entry. It still used
 a dynamic I-cache line loop and memory increments for branch statistics on
 each block, both candidates for removal from the hot path.
+
+Unrolling the fixed I-cache comparisons and keeping branch counters in host
+registers reduced native code from 6,334,147 to 6,161,998 bytes. On the same
+Crash run it measured 84.943 ms average, 80.236 ms p50, and 139.301 ms p95,
+with identical state, PC, cycles, instruction counts, and chain counts. The
+small average change is within the observed host variance; this alone does
+not close the gap to the legacy path.
