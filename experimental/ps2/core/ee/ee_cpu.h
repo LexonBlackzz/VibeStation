@@ -8,6 +8,7 @@
 namespace ps2 {
 
 class EeBus;
+class Vu1;
 
 struct EeGpr {
     u64 lo = 0;
@@ -45,7 +46,8 @@ struct EeCpuState {
 
 class EeCpu {
 public:
-    explicit EeCpu(EeBus& bus) : bus_(bus) {}
+    explicit EeCpu(EeBus& bus, Vu1* vu0_micro = nullptr)
+        : bus_(bus), vu0_micro_(vu0_micro) {}
 
     void reset(u32 entry_point = 0);
     bool step(std::string& error);
@@ -89,9 +91,11 @@ private:
     bool execute_cop0(u32 pc, u32 instruction, std::string& error);
     bool execute_cop1(u32 pc, u32 instruction, std::string& error);
     bool execute_cop2(u32 pc, u32 instruction, std::string& error);
+    bool run_vu0_micro(u32 start_address, std::string& error);
     bool execute_mmi(u32 pc, u32 instruction, std::string& error);
 
     EeBus& bus_;
+    Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
