@@ -129,6 +129,94 @@ bool test_mmi_madd_and_plzcw() {
     return ok;
 }
 
+bool test_mmi_pmfhl_pmthl() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2180u;
+    std::string error;
+    bool ok = true;
+
+    // PMTHL.LW copies the four source words into the low words of
+    // LO/HI/LO1/HI1, preserving their upper 32 bits.
+    constexpr ps2::u32 pmthl =
+        (0x1Cu << 26) |
+        (1u << 21) |
+        (0u << 6) |
+        0x31u;
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    system.ee().state().lo = 0xAAAAAAAA00000000ull;
+    system.ee().state().hi = 0xBBBBBBBB00000000ull;
+    system.ee().state().lo1 = 0xCCCCCCCC00000000ull;
+    system.ee().state().hi1 = 0xDDDDDDDD00000000ull;
+    ok = expect(system.bus().write32(pc, pmthl),
+                "PMTHL test opcode write failed") && ok;
+    ok = expect(system.ee().step(error),
+                "PMTHL execution failed") && ok;
+    ok = expect(system.ee().state().lo ==
+                    0xAAAAAAAA11111111ull &&
+                system.ee().state().hi ==
+                    0xBBBBBBBB22222222ull &&
+                system.ee().state().lo1 ==
+                    0xCCCCCCCC33333333ull &&
+                system.ee().state().hi1 ==
+                    0xDDDDDDDD44444444ull,
+                "PMTHL accumulator mapping mismatch") && ok;
+
+    // PMFHL.LW reconstructs the four low accumulator words.
+    constexpr ps2::u32 pmfhl_lw =
+        (0x1Cu << 26) |
+        (2u << 11) |
+        (0u << 6) |
+        0x30u;
+    ok = expect(system.bus().write32(pc + 4u, pmfhl_lw),
+                "PMFHL.LW test opcode write failed") && ok;
+    system.ee().state().pc = pc + 4u;
+    system.ee().state().next_pc = pc + 8u;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "PMFHL.LW execution failed") && ok;
+    ok = expect(system.ee().state().gpr[2].lo ==
+                    0x2222222211111111ull &&
+                system.ee().state().gpr[2].hi ==
+                    0x4444444433333333ull,
+                "PMFHL.LW result mismatch") && ok;
+
+    // PMFHL.SH saturates each signed accumulator word to a halfword.
+    constexpr ps2::u32 pmfhl_sh =
+        (0x1Cu << 26) |
+        (3u << 11) |
+        (4u << 6) |
+        0x30u;
+    system.ee().state().lo =
+        0xFFFF7FFF00008000ull;
+    system.ee().state().hi =
+        0xFFFFFFD60000002Aull;
+    system.ee().state().lo1 =
+        0x00007FFF00000001ull;
+    system.ee().state().hi1 =
+        0xFFFF8000FFFFFFFFull;
+    ok = expect(system.bus().write32(pc + 8u, pmfhl_sh),
+                "PMFHL.SH test opcode write failed") && ok;
+    system.ee().state().pc = pc + 8u;
+    system.ee().state().next_pc = pc + 12u;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "PMFHL.SH execution failed") && ok;
+
+    const ps2::u64 expected_lo =
+        0xFFD6002A80007FFFull;
+    const ps2::u64 expected_hi =
+        0x8000FFFF7FFF0001ull;
+    ok = expect(system.ee().state().gpr[3].lo == expected_lo &&
+                    system.ee().state().gpr[3].hi == expected_hi,
+                "PMFHL.SH saturation mismatch") && ok;
+
+    return ok;
+}
+
 bool test_mmi_bootstrap_packed_ops() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2200u;
@@ -2830,6 +2918,7 @@ int main() {
     ok = test_mmi_por_128() && ok;
     ok = test_mmi_padduw() && ok;
     ok = test_mmi_madd_and_plzcw() && ok;
+    ok = test_mmi_pmfhl_pmthl() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
