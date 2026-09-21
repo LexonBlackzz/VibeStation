@@ -16,6 +16,8 @@ constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
 constexpr u32 kDma4Chcr = 0x1F8010C8u;
 constexpr u32 kDma7Chcr = 0x1F801508u;
+constexpr u32 kDma11Chcr = 0x1F801548u;
+constexpr u32 kDma12Chcr = 0x1F801558u;
 constexpr u32 kDmaStart = 1u << 24;
 constexpr u32 kSpu2Base = 0x1F900000u;
 constexpr u32 kSpu2Statx0 = 0x344u;
@@ -317,28 +319,42 @@ bool IopBus::write32(u32 address, u32 value) {
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
     }
-    if (physical == kDma4Chcr || physical == kDma7Chcr) {
+    if (physical == kDma4Chcr ||
+        physical == kDma7Chcr ||
+        physical == kDma11Chcr ||
+        physical == kDma12Chcr) {
         u32 stored = value;
         if ((value & kDmaStart) != 0) {
-            // For the BIOS-video milestone, model the two SPU2 DMA channels
-            // as immediately completing. Audio payload consumption can be
-            // added with the SPU2 core later, but firmware must not spin on a
-            // permanently asserted CHCR start bit during sound initialization.
+            // Peripheral payload engines are outside the BIOS-video
+            // milestone. Complete SPU2 and SIO2 DMA immediately so firmware
+            // can finish sound/pad initialization without hanging. SIF9/10
+            // remain fully serviced by SifDma and are intentionally excluded.
             stored &= ~kDmaStart;
         }
         if (!hw_.write32(physical, stored)) return false;
 
         if ((value & kDmaStart) != 0) {
-            const u32 stat_offset =
-                physical == kDma4Chcr ? kSpu2Statx0 : kSpu2Statx1;
-            u16 stat =
-                static_cast<u16>(spu2_regs_[stat_offset]) |
-                (static_cast<u16>(spu2_regs_[stat_offset + 1u]) << 8);
-            stat = static_cast<u16>((stat | 0x0080u) & ~0x0400u);
-            spu2_regs_[stat_offset] = static_cast<u8>(stat);
-            spu2_regs_[stat_offset + 1u] =
-                static_cast<u8>(stat >> 8);
-            raise_dma_irq(physical == kDma4Chcr ? 4u : 7u);
+            u32 channel = 0;
+            if (physical == kDma4Chcr) channel = 4u;
+            else if (physical == kDma7Chcr) channel = 7u;
+            else if (physical == kDma11Chcr) channel = 11u;
+            else channel = 12u;
+
+            if (channel == 4u || channel == 7u) {
+                const u32 stat_offset =
+                    channel == 4u ? kSpu2Statx0 : kSpu2Statx1;
+                u16 stat =
+                    static_cast<u16>(spu2_regs_[stat_offset]) |
+                    (static_cast<u16>(
+                        spu2_regs_[stat_offset + 1u]) << 8);
+                stat =
+                    static_cast<u16>((stat | 0x0080u) & ~0x0400u);
+                spu2_regs_[stat_offset] = static_cast<u8>(stat);
+                spu2_regs_[stat_offset + 1u] =
+                    static_cast<u8>(stat >> 8);
+            }
+
+            raise_dma_irq(channel);
         }
         return true;
     }
