@@ -59,6 +59,12 @@ public:
     [[nodiscard]] const std::string& halt_reason() const { return halt_reason_; }
     void clear_halt();
 
+    // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
+    // register file. These helpers bridge the bootstrap interpreter state.
+    void sync_vu0_to_micro();
+    void sync_vu0_from_micro();
+    void set_vu0_micro_running(bool running);
+
 private:
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
