@@ -960,6 +960,21 @@ bool EeCpu::step(std::string& error) {
         }
         break;
     }
+    case 0x22: { // LWL
+        const u32 address = effective_address();
+        u32 memory = 0;
+        if (!bus_.read32(address & ~3u, memory)) {
+            ok = load_fault("LWL", address);
+        } else {
+            const u32 shift = (address & 3u) * 8u;
+            const u32 old = static_cast<u32>(gpr_u64(rt));
+            const u32 value =
+                (old & (0x00FFFFFFu >> shift)) |
+                (memory << (24u - shift));
+            write_gpr_word(rt, value);
+        }
+        break;
+    }
     case 0x23: { // LW
         const u32 address = effective_address();
         u32 value = 0;
@@ -990,6 +1005,21 @@ bool EeCpu::step(std::string& error) {
         }
         break;
     }
+    case 0x26: { // LWR
+        const u32 address = effective_address();
+        u32 memory = 0;
+        if (!bus_.read32(address & ~3u, memory)) {
+            ok = load_fault("LWR", address);
+        } else {
+            const u32 shift = (address & 3u) * 8u;
+            const u32 old = static_cast<u32>(gpr_u64(rt));
+            const u32 value =
+                (old & (0xFFFFFF00u << (24u - shift))) |
+                (memory >> shift);
+            write_gpr_word(rt, value);
+        }
+        break;
+    }
     case 0x27: { // LWU
         const u32 address = effective_address();
         u32 value = 0;
@@ -1011,6 +1041,23 @@ bool EeCpu::step(std::string& error) {
         const u32 address = effective_address();
         if (!bus_.write16(address, static_cast<u16>(gpr_u64(rt)))) {
             ok = fail(pc, instruction, "Store halfword fault to " + hex32(address), error);
+        }
+        break;
+    }
+    case 0x2A: { // SWL
+        const u32 address = effective_address();
+        const u32 aligned = address & ~3u;
+        u32 memory = 0;
+        if (!bus_.read32(aligned, memory)) {
+            ok = load_fault("SWL read", address);
+        } else {
+            const u32 shift = (address & 3u) * 8u;
+            const u32 value =
+                (static_cast<u32>(gpr_u64(rt)) >> (24u - shift)) |
+                (memory & (0xFFFFFF00u << shift));
+            if (!bus_.write32(aligned, value)) {
+                ok = fail(pc, instruction, "SWL fault to " + hex32(address), error);
+            }
         }
         break;
     }
@@ -1043,9 +1090,48 @@ bool EeCpu::step(std::string& error) {
             ok = fail(pc,instruction,"SDR fault at "+hex32(address),error);
         break;
     }
+    case 0x2E: { // SWR
+        const u32 address = effective_address();
+        const u32 aligned = address & ~3u;
+        u32 memory = 0;
+        if (!bus_.read32(aligned, memory)) {
+            ok = load_fault("SWR read", address);
+        } else {
+            const u32 shift = (address & 3u) * 8u;
+            const u32 value =
+                (static_cast<u32>(gpr_u64(rt)) << shift) |
+                (memory & (0x00FFFFFFu >> (24u - shift)));
+            if (!bus_.write32(aligned, value)) {
+                ok = fail(pc, instruction, "SWR fault to " + hex32(address), error);
+            }
+        }
+        break;
+    }
     case 0x2F: // CACHE
     case 0x33: // PREF
         break;
+    case 0x30: { // LL
+        const u32 address = effective_address();
+        u32 value = 0;
+        if (!bus_.read32(address, value)) {
+            ok = load_fault("LL", address);
+        } else {
+            // Bootstrap is single-threaded; no competing agent can invalidate
+            // the reservation between LL and SC yet.
+            write_gpr_word(rt, value);
+        }
+        break;
+    }
+    case 0x34: { // LLD
+        const u32 address = effective_address();
+        u64 value = 0;
+        if (!bus_.read64(address, value)) {
+            ok = load_fault("LLD", address);
+        } else {
+            write_gpr64(rt, value);
+        }
+        break;
+    }
     case 0x31: { // LWC1
         const u32 address = effective_address();
         u32 value = 0;
@@ -1066,10 +1152,30 @@ bool EeCpu::step(std::string& error) {
         }
         break;
     }
+    case 0x38: { // SC
+        const u32 address = effective_address();
+        const u32 value = static_cast<u32>(gpr_u64(rt));
+        if (!bus_.write32(address, value)) {
+            ok = fail(pc, instruction, "SC fault to " + hex32(address), error);
+        } else {
+            write_gpr_word(rt, 1u);
+        }
+        break;
+    }
     case 0x39: { // SWC1
         const u32 address = effective_address();
         if (!bus_.write32(address, state_.fpr[rt])) {
             ok = fail(pc, instruction, "SWC1 fault to " + hex32(address), error);
+        }
+        break;
+    }
+    case 0x3C: { // SCD
+        const u32 address = effective_address();
+        const u64 value = gpr_u64(rt);
+        if (!bus_.write64(address, value)) {
+            ok = fail(pc, instruction, "SCD fault to " + hex32(address), error);
+        } else {
+            write_gpr64(rt, 1u);
         }
         break;
     }
