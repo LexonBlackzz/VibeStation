@@ -742,6 +742,7 @@ bool IopCpu::step(std::string& error) {
     pending_load_ = next_load_;
     state_.gpr[0] = 0;
     ++state_.instructions_executed;
+    bus_.tick(1);
     return true;
 }
 
