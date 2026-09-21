@@ -142,13 +142,20 @@ void EeCpu::branch_likely_not_taken(u32 pc) {
     next_is_delay_slot_ = false;
 }
 
-void EeCpu::raise_exception(u32 code, u32 pc, bool in_delay_slot) {
+void EeCpu::raise_exception(
+    u32 code,
+    u32 pc,
+    bool in_delay_slot,
+    bool tlb_refill) {
     u32& status = state_.cop0[12];
     u32& cause = state_.cop0[13];
 
     cause = (cause & ~0x8000007Cu) | ((code << 2) & 0x7Cu);
 
-    u32 offset = (code == 0) ? 0x200u : 0x180u;
+    u32 offset =
+        code == 0 ? 0x200u :
+        tlb_refill ? 0x000u :
+        0x180u;
     if ((status & 0x2u) == 0) {
         status |= 0x2u;
         if (in_delay_slot) {
@@ -162,11 +169,94 @@ void EeCpu::raise_exception(u32 code, u32 pc, bool in_delay_slot) {
         offset = 0x180u;
     }
 
-    const u32 base = (status & 0x00400000u) != 0 ? 0xBFC00200u : 0x80000000u;
+    const u32 base =
+        (status & 0x00400000u) != 0
+            ? 0xBFC00200u
+            : 0x80000000u;
     state_.pc = base + offset;
     state_.next_pc = state_.pc + 4u;
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
+}
+
+bool EeCpu::translate_address(
+    u32 virtual_address,
+    bool store,
+    u32 fault_pc,
+    bool in_delay_slot,
+    u32& translated) {
+    // Keep the existing bootstrap-friendly direct mappings for kuseg and
+    // KSEG0/KSEG1.  Kernel mapped segments use the R5900's software-managed
+    // TLB and are where the retail BIOS begins relying on wired entries.
+    if (virtual_address < 0xC0000000u) {
+        translated = virtual_address;
+        return true;
+    }
+
+    const u32 asid = state_.cop0[10] & 0xFFu;
+    for (const auto& entry : state_.tlb) {
+        const u32 pair_mask =
+            (entry.page_mask & 0x01FFE000u) | 0x1FFFu;
+        const u32 vpn_mask = ~pair_mask;
+        if ((entry.entry_hi & vpn_mask) !=
+            (virtual_address & vpn_mask)) {
+            continue;
+        }
+
+        const bool global =
+            (entry.entry_lo0 & 1u) != 0 &&
+            (entry.entry_lo1 & 1u) != 0;
+        if (!global && (entry.entry_hi & 0xFFu) != asid) {
+            continue;
+        }
+
+        const u32 page_size = (pair_mask + 1u) >> 1;
+        const bool odd_page =
+            (virtual_address & page_size) != 0;
+        const u32 entry_lo =
+            odd_page ? entry.entry_lo1 : entry.entry_lo0;
+
+        state_.cop0[8] = virtual_address;
+        state_.cop0[4] =
+            (state_.cop0[4] & 0xFF800000u) |
+            ((virtual_address >> 9) & 0x007FFFF0u);
+        state_.cop0[10] =
+            (virtual_address & vpn_mask) | asid;
+
+        if ((entry_lo & 0x2u) == 0) {
+            raise_exception(
+                store ? 3u : 2u,
+                fault_pc,
+                in_delay_slot);
+            return false;
+        }
+        if (store && (entry_lo & 0x4u) == 0) {
+            raise_exception(1u, fault_pc, in_delay_slot);
+            return false;
+        }
+
+        const u32 pfn = (entry_lo >> 6) & 0x000FFFFFu;
+        const u32 page_offset_mask = page_size - 1u;
+        const u32 physical_base =
+            (pfn << 12) & ~page_offset_mask;
+        translated =
+            physical_base |
+            (virtual_address & page_offset_mask);
+        return true;
+    }
+
+    state_.cop0[8] = virtual_address;
+    state_.cop0[4] =
+        (state_.cop0[4] & 0xFF800000u) |
+        ((virtual_address >> 9) & 0x007FFFF0u);
+    state_.cop0[10] =
+        (virtual_address & 0xFFFFE000u) | asid;
+    raise_exception(
+        store ? 3u : 2u,
+        fault_pc,
+        in_delay_slot,
+        true);
+    return false;
 }
 
 bool EeCpu::fail(
