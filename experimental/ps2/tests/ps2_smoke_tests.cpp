@@ -650,6 +650,38 @@ bool test_cdvd_reset_status() {
     return ok;
 }
 
+bool test_cdvd_iop_segment_mirror() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 canonical = 0;
+    ps2::u8 mirrored = 0;
+    ok = expect(
+             system.iop_bus().read8(0x1F402005u, canonical) &&
+             system.iop_bus().read8(0x1F400005u, mirrored) &&
+             canonical == mirrored &&
+             mirrored == 0x4Cu,
+             "CDVD 1F40 segment mirror read mismatch") && ok;
+
+    // S-command writes through an alternate page must hit the same device.
+    ok = expect(
+             system.iop_bus().write8(0x1F40A016u, 0x08u),
+             "CDVD mirrored S-command write failed") && ok;
+    ps2::u8 ready = 0;
+    ok = expect(
+             system.iop_bus().read8(0x1F402017u, ready) &&
+             (ready & 0x40u) == 0u,
+             "CDVD mirrored S-command did not expose result FIFO") && ok;
+
+    ps2::u8 first = 0xFFu;
+    ok = expect(
+             system.iop_bus().read8(0x1F40FF18u, first) &&
+             first == 0u,
+             "CDVD mirrored result FIFO read mismatch") && ok;
+
+    return ok;
+}
+
 bool test_cdvd_scommand_result_fifo() {
     ps2::Ps2System system;
 
@@ -1536,6 +1568,7 @@ int main() {
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
     ok = test_cdvd_reset_status() && ok;
+    ok = test_cdvd_iop_segment_mirror() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
