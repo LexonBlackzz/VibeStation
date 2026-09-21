@@ -12,6 +12,8 @@ namespace {
 
 constexpr u32 kRamMirrorEnd = 0x00800000u;
 constexpr u32 kSifBase = 0x1D000000u;
+constexpr u32 kSpu2Base = 0x1F900000u;
+constexpr u32 kSpu2Size = 0x800u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
@@ -33,6 +35,7 @@ IopBus::IopBus(
 
 void IopBus::reset() {
     cache_control_.fill(0);
+    spu2_regs_.fill(0);
 }
 
 u32 IopBus::to_physical(u32 address) {
@@ -115,6 +118,10 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
+        value = spu2_regs_[physical - kSpu2Base];
+        return true;
+    }
     if (physical < kRamMirrorEnd) return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
     if (intc_.read8(physical, value)) return true;
     if (cdvd_.read8(physical, value)) return true;
@@ -130,6 +137,12 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
+    if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
+        const u32 offset = physical - kSpu2Base;
+        value = static_cast<u16>(spu2_regs_[offset]) |
+                (static_cast<u16>(spu2_regs_[offset + 1u]) << 8);
+        return true;
+    }
     if (intc_.read16(physical, value)) return true;
     u8 lo=0, hi=0;
     if (!read8(address, lo) || !read8(address+1, hi)) return false;
@@ -147,6 +160,14 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
+        const u32 offset = physical - kSpu2Base;
+        value = static_cast<u32>(spu2_regs_[offset]) |
+                (static_cast<u32>(spu2_regs_[offset + 1u]) << 8) |
+                (static_cast<u32>(spu2_regs_[offset + 2u]) << 16) |
+                (static_cast<u32>(spu2_regs_[offset + 3u]) << 24);
+        return true;
+    }
     if (intc_.read32(physical, value)) return true;
     if (physical >= kSifBase && physical < kSifBase + 0x100u) return read_sif32(physical, value);
     if (physical < kRamMirrorEnd) {
@@ -169,6 +190,10 @@ bool IopBus::write8(u32 address, u8 value) {
         cache_control_[address-kCacheControlBase]=value; return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
+        spu2_regs_[physical - kSpu2Base] = value;
+        return true;
+    }
     if (physical < kRamMirrorEnd) return ram_.write8(physical & static_cast<u32>(IopRam::kSize-1), value);
     if (intc_.write8(physical,value)) return true;
     if (cdvd_.write8(physical,value)) return true;
@@ -184,6 +209,12 @@ bool IopBus::write8(u32 address, u8 value) {
 
 bool IopBus::write16(u32 address, u16 value) {
     const u32 physical=to_physical(address);
+    if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
+        const u32 offset = physical - kSpu2Base;
+        spu2_regs_[offset] = static_cast<u8>(value);
+        spu2_regs_[offset + 1u] = static_cast<u8>(value >> 8);
+        return true;
+    }
     if (physical == 0x1F801450u) {
         if (!hw_.write16(physical, value)) return false;
         if ((value & 0x2u) != 0) ee_hw_.raise_intc(1);
@@ -200,6 +231,13 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
+        const u32 offset = physical - kSpu2Base;
+        for (u32 i = 0; i < 4u; ++i) {
+            spu2_regs_[offset + i] = static_cast<u8>(value >> (i * 8));
+        }
+        return true;
+    }
     if (physical == 0x1F801450u) {
         if (!hw_.write32(physical, value)) return false;
         if ((value & 0x2u) != 0) ee_hw_.raise_intc(1);
