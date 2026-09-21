@@ -1751,6 +1751,36 @@ bool test_gs_fog_dither_scanmask_and_context2() {
             "packed FOG field decode mismatch") && ok;
     }
 
+    // Packed texture-state descriptors carry their native 64-bit register
+    // payload in the low half of the GIF qword.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 tex0_1 = 0x0123456789ABCDEFull;
+        const ps2::u64 tex0_2 = 0x0011223344556677ull;
+        const ps2::u64 clamp_1 = 0x000003FFABC01234ull;
+        const ps2::u64 clamp_2 = 0x000000123456789Aull;
+
+        auto packed = [&](ps2::u32 descriptor, ps2::u64 value) {
+            const ps2::u64 tag =
+                1ull | (1ull << 15) | (1ull << 60);
+            gs.write_gif_qword(tag, descriptor);
+            gs.write_gif_qword(value, 0);
+        };
+
+        packed(0x06, tex0_1);
+        packed(0x07, tex0_2);
+        packed(0x08, clamp_1);
+        packed(0x09, clamp_2);
+
+        ok = expect(
+            gs.register_value(0x06) == tex0_1 &&
+            gs.register_value(0x07) == tex0_2 &&
+            gs.register_value(0x08) == clamp_1 &&
+            gs.register_value(0x09) == clamp_2,
+            "packed TEX0/CLAMP descriptor decode mismatch") && ok;
+    }
+
     // FGE blends RGB toward FOGCOL using the per-vertex fog coefficient.
     {
         ps2::GsCore gs;
