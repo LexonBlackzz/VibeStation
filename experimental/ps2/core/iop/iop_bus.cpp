@@ -287,7 +287,7 @@ bool IopBus::write_dma_icr(u32 physical, u32 value) {
     }
 
     if (!hw_.write32(physical, next)) return false;
-    if ((next & 0x80000000u) != 0) {
+    if (force || (enables & flags) != 0) {
         intc_.raise(3);
     }
     return true;
@@ -330,8 +330,7 @@ void IopBus::raise_dma_irq(u32 channel) {
     }
 
     (void)hw_.write32(address, current);
-    if (sif_always_routes ||
-        (current & 0x80000000u) != 0) {
+    if (sif_always_routes || force || enabled) {
         intc_.raise(3);
     }
 }

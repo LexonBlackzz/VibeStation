@@ -1009,9 +1009,13 @@ bool test_iop_spu2_dma_bootstrap_completion() {
         system.iop_bus().read16(0x1F9001B0u, statx) && statx == 0u,
         "SPU2 core0 DMA busy token did not clear") && ok;
 
-    // DICR2: master enable + DMA7 (index 0) enable.
+    // DICR2 routes an enabled channel interrupt even when its master bit is
+    // clear. The master bit only controls DICR2's aggregate bit 31.
     ok = expect(
-        system.iop_bus().write32(0x1F801574u, 0x00810000u),
+        system.iop_bus().write32(ps2::IopIntc::kIStat, 0xFFFFFFF7u),
+        "failed to clear the first-bank DMA interrupt") && ok;
+    ok = expect(
+        system.iop_bus().write32(0x1F801574u, 0x00010000u),
         "failed to enable SPU2 DMA7 interrupt") && ok;
     ok = expect(
         system.iop_bus().write16(0x1F9005B0u, 2u),
@@ -1027,8 +1031,12 @@ bool test_iop_spu2_dma_bootstrap_completion() {
     ok = expect(
         system.iop_bus().read32(0x1F801574u, value) &&
             (value & (1u << 24)) != 0 &&
-            (value & 0x80000000u) != 0,
+            (value & 0x80000000u) == 0,
         "SPU2 DMA7 DICR2 completion missing") && ok;
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 3)) != 0,
+        "SPU2 DMA7 did not route its enabled DICR2 interrupt") && ok;
     ok = expect(
         system.iop_bus().read16(0x1F900744u, statx) &&
             (statx & 0x0080u) != 0 &&
