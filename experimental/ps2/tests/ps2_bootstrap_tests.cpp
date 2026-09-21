@@ -1571,6 +1571,14 @@ bool test_gs_display_extraction() {
                 system.gs_privileged().write64(0x12000080u, display),
                 "GS display register setup failed") && ok;
 
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+    ok = expect(
+        system.gs_display().valid() &&
+        !system.gs_display().has_visible_pixels() &&
+        system.gs_display().nonzero_pixel_count() == 0,
+        "valid black scanout was treated as visible output") && ok;
+
     const ps2::u32 colors[8] = {
         0xFF000011u, 0xFF002200u, 0xFF330000u, 0xFF443322u,
         0xFF556677u, 0xFF778899u, 0xFFABCDEFu, 0xFF102030u,
@@ -1595,6 +1603,9 @@ bool test_gs_display_extraction() {
                 "GS display metadata mismatch") && ok;
     ok = expect(out.rgba8().size() == 8,
                 "GS display pixel count mismatch") && ok;
+    ok = expect(out.has_visible_pixels() &&
+                out.nonzero_pixel_count() == 8,
+                "GS visible-pixel milestone mismatch") && ok;
     for (std::size_t i = 0; i < 8 && i < out.rgba8().size(); ++i) {
         ok = expect(out.rgba8()[i] == colors[i],
                     "GS display extracted pixel mismatch") && ok;

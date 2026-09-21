@@ -41,6 +41,7 @@ void GsDisplay::reset() {
     height_ = 0;
     circuit_ = 0;
     psm_ = 0;
+    nonzero_pixel_count_ = 0;
     ++generation_;
     rgba8_.clear();
 }
@@ -241,6 +242,12 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
             ? 3u
             : (frames[0].valid ? 1u : 2u);
     psm_ = frames[base_circuit].psm;
+    nonzero_pixel_count_ = 0;
+    for (const u32 pixel : rgba8_) {
+        if ((pixel & 0x00FFFFFFu) != 0) {
+            ++nonzero_pixel_count_;
+        }
+    }
     ++generation_;
 }
 

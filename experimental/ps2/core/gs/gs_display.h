@@ -20,6 +20,12 @@ public:
     [[nodiscard]] u32 circuit() const { return circuit_; }
     [[nodiscard]] u32 psm() const { return psm_; }
     [[nodiscard]] u64 generation() const { return generation_; }
+    [[nodiscard]] u64 nonzero_pixel_count() const {
+        return nonzero_pixel_count_;
+    }
+    [[nodiscard]] bool has_visible_pixels() const {
+        return valid_ && nonzero_pixel_count_ != 0;
+    }
     [[nodiscard]] const std::vector<u32>& rgba8() const { return rgba8_; }
 
 private:
@@ -29,6 +35,7 @@ private:
     u32 circuit_ = 0;
     u32 psm_ = 0;
     u64 generation_ = 0;
+    u64 nonzero_pixel_count_ = 0;
     std::vector<u32> rgba8_;
 };
 

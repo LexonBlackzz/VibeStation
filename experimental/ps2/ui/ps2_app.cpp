@@ -1282,10 +1282,11 @@ void Ps2App::update_emulation() {
     constexpr auto kBootstrapCpuTimeSlice =
         std::chrono::milliseconds(14);
 
-    // Before the first valid PCRTC frame exists, spend most of the host frame
-    // advancing BIOS initialization. Once scanout is alive, return to the
-    // smaller slice so the debugger/UI stay comfortably responsive.
-    const bool bootstrap_turbo = !system_.gs_display().valid();
+    // PCRTC can become valid while it still scans an untouched black buffer.
+    // Keep the larger bootstrap slice until the composed display actually
+    // contains visible RGB data; validity alone is not a first-frame signal.
+    const bool bootstrap_turbo =
+        !system_.gs_display().has_visible_pixels();
     const u64 max_instructions =
         bootstrap_turbo
             ? kBootstrapMaxInstructionsPerFrame
