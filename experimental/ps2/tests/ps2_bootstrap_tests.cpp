@@ -2218,9 +2218,17 @@ bool test_gs_signal_finish_label_and_imr() {
     priv.raise_vsync();
     ok = expect((priv.csr() & (1u << 3)) != 0 && priv.irq_pending(),
                 "GS VSINT pending state mismatch") && ok;
+    ok = expect((priv.csr() & (1u << 13)) != 0,
+                "GS CSR FIELD did not advance to odd") && ok;
     ok = expect(priv.write32(0x12001000u, 1u << 3) &&
                 (priv.csr() & (1u << 3)) == 0,
                 "GS VSINT acknowledge failed") && ok;
+
+    priv.raise_vsync();
+    ok = expect((priv.csr() & (1u << 13)) == 0,
+                "GS CSR FIELD did not advance back to even") && ok;
+    ok = expect(priv.write32(0x12001000u, 1u << 3),
+                "second GS VSINT acknowledge failed") && ok;
 
     // CSR.RESET restores the hardware-visible interrupt masks/identity state.
     ok = expect(priv.write32(0x12001000u, 1u << 9),
