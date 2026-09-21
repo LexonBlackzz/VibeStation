@@ -391,7 +391,8 @@ void Ps2App::menu_bar() {
         }
         if (ImGui::MenuItem(
                 "Step IOP Instruction", "F7", false,
-                can_execute && !emulation_running_)) {
+                can_execute && !emulation_running_ &&
+                !system_.iop_halted())) {
             step_iop_once();
         }
         if (ImGui::MenuItem(
@@ -492,7 +493,7 @@ void Ps2App::panel_main() {
         ImVec2(center_x - subtitle_size.x * 0.5f, center_y - 77.0f));
     ImGui::TextColored(text_color, "%s", subtitle);
 
-    const char* phase = "Phase 8: FST textured GS software output";
+    const char* phase = "BIOS bootstrap: VIF1 + VU1 + GS display";
     const ImVec2 phase_size = ImGui::CalcTextSize(phase);
     ImGui::SetCursorPos(
         ImVec2(center_x - phase_size.x * 0.5f, center_y - 49.0f));
@@ -604,9 +605,23 @@ void Ps2App::panel_main() {
         "%llu",
         static_cast<unsigned long long>(gs_stats.primitives));
 
-    ImGui::Text("Next subsystem");
+    const auto& vu_stats = system_.vu1().stats();
+    ImGui::Text("VU1 / XGKICK");
     ImGui::SameLine(190.0f);
-    ImGui::TextDisabled("Paletted textures + TEXA + blending/depth");
+    ImGui::Text(
+        "%llu instr / %llu kicks",
+        static_cast<unsigned long long>(vu_stats.instructions),
+        static_cast<unsigned long long>(vu_stats.xgkicks));
+
+    ImGui::Text("IOP state");
+    ImGui::SameLine(190.0f);
+    if (system_.iop_halted()) {
+        ImGui::TextColored(
+            ImVec4(0.90f, 0.65f, 0.30f, 1.0f),
+            "halted (EE/GS continuing)");
+    } else {
+        ImGui::Text("running");
+    }
     ImGui::EndChild();
 }
 
@@ -697,6 +712,14 @@ void Ps2App::panel_system() {
             ImGui::TextWrapped(
                 "Halt: %s",
                 system_.halt_reason().c_str());
+        }
+        if (system_.iop_halted()) {
+            ImGui::TextColored(
+                ImVec4(0.90f, 0.65f, 0.30f, 1.0f),
+                "IOP halted; EE/GS bootstrap is still running");
+            ImGui::TextWrapped(
+                "IOP: %s",
+                system_.iop().halt_reason().c_str());
         }
     }
 
@@ -1286,6 +1309,9 @@ void Ps2App::update_emulation() {
     } else if (!error.empty()) {
         emulation_running_ = false;
         status_message_ = "Execution stopped: " + error;
+    } else if (system_.iop_halted()) {
+        status_message_ =
+            "IOP halted; EE/GS continuing for BIOS bootstrap";
     }
 }
 
