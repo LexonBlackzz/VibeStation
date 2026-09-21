@@ -62,6 +62,8 @@ private:
     [[nodiscard]] bool read_ohci(u32 physical, u32 width, u32& value) const;
     [[nodiscard]] bool write_ohci(u32 physical, u32 width, u32 value);
     void reset_ohci(bool hard);
+    [[nodiscard]] bool read_firewire(u32 physical, u32 width, u32& value) const;
+    [[nodiscard]] bool write_firewire(u32 physical, u32 width, u32 value);
     [[nodiscard]] bool read_sif32(u32 physical, u32& value) const;
     [[nodiscard]] bool write_sif32(u32 physical, u32 value);
 
@@ -75,6 +77,7 @@ private:
     std::array<u8, 0x800> spu2_regs_{};
     std::array<u32, 0x40> ohci_regs_{};
     u64 ohci_frame_phase_ = 0;
+    std::array<u32, 0x60> firewire_regs_{};
     std::array<RootCounter, 6> root_counters_{};
 };
 
