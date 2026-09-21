@@ -531,6 +531,71 @@ bool test_ee_di_ei_privilege_gate() {
     return ok;
 }
 
+bool test_ee_break_exception_and_tlb_ops() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3200u;
+    std::string error;
+    bool ok = true;
+
+    ok = expect(
+             system.bus().write32(pc, 0x0000000Du),
+             "BREAK test write failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().cop0[12] = 0u;
+    ok = expect(
+             system.ee().step(error),
+             "BREAK exception execution failed") && ok;
+    ok = expect(
+             !system.ee().halted() &&
+             system.ee().state().pc == 0x80000180u &&
+             system.ee().state().cop0[14] == pc &&
+             (system.ee().state().cop0[13] & 0x7Cu) == 0x24u,
+             "BREAK did not raise architectural exception") && ok;
+
+    constexpr ps2::u32 tlbwi = 0x42000002u;
+    constexpr ps2::u32 tlbp  = 0x42000008u;
+    constexpr ps2::u32 tlbr  = 0x42000001u;
+    ok = expect(
+             system.bus().write32(pc + 0u, tlbwi) &&
+             system.bus().write32(pc + 4u, tlbp) &&
+             system.bus().write32(pc + 8u, tlbr),
+             "TLB test code write failed") && ok;
+
+    system.ee().reset(pc);
+    system.ee().state().cop0[0] = 7u;
+    system.ee().state().cop0[5] = 0x00006000u;
+    system.ee().state().cop0[10] = 0x1234402Au;
+    system.ee().state().cop0[2] = 0x0012341Fu;
+    system.ee().state().cop0[3] = 0x0056781Fu;
+
+    ok = expect(system.ee().step(error),
+                "TLBWI execution failed") && ok;
+
+    // Probe the same VPN/ASID after clobbering the index.
+    system.ee().state().cop0[0] = 0x80000000u;
+    system.ee().state().cop0[10] = 0x1234402Au;
+    ok = expect(system.ee().step(error),
+                "TLBP execution failed") && ok;
+    ok = expect(
+             system.ee().state().cop0[0] == 7u,
+             "TLBP did not find written entry") && ok;
+
+    system.ee().state().cop0[5] = 0u;
+    system.ee().state().cop0[10] = 0u;
+    system.ee().state().cop0[2] = 0u;
+    system.ee().state().cop0[3] = 0u;
+    ok = expect(system.ee().step(error),
+                "TLBR execution failed") && ok;
+    ok = expect(
+             system.ee().state().cop0[5] == 0x00006000u &&
+             system.ee().state().cop0[10] == 0x1234402Au &&
+             system.ee().state().cop0[2] == 0x0012341Fu &&
+             system.ee().state().cop0[3] == 0x0056781Fu,
+             "TLBR state round-trip mismatch") && ok;
+
+    return ok;
+}
+
 bool test_ee_integer_overflow_exception() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x3000u;
@@ -2459,6 +2524,7 @@ int main() {
     ok = test_ee_intc_cpu_exception() && ok;
     ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
+    ok = test_ee_break_exception_and_tlb_ops() && ok;
     ok = test_ee_integer_overflow_exception() && ok;
     ok = test_syscall_exception() && ok;
     ok = test_syscall_delay_slot_exception() && ok;
