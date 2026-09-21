@@ -1221,6 +1221,57 @@ bool test_ee_scratchpad_dma_round_trip() {
     return ok;
 }
 
+bool test_iop_ohci_bootstrap_reset() {
+    ps2::Ps2System system;
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F801600u, value) &&
+             value == 0x10u,
+             "OHCI revision reset value mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801648u, value) &&
+             value == 0x202u,
+             "OHCI root-hub descriptor mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801654u, value) &&
+             value == 0x100u,
+             "OHCI root-port power/reset state mismatch") && ok;
+
+    // HCR must self-clear. Retaining this bit in a generic register window
+    // leaves BIOS USB initialization in a permanent reset poll.
+    ok = expect(
+             system.iop_bus().write32(0x1F801608u, 1u) &&
+             system.iop_bus().read32(0x1F801608u, value) &&
+             value == 0u,
+             "OHCI host-controller reset bit did not self-clear") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801604u, value) &&
+             (value & 0xC0u) == 0xC0u,
+             "OHCI soft reset did not enter suspend state") && ok;
+
+    // With no USB devices attached, list-filled flags may retire immediately
+    // but must never remain stuck as busy.
+    ok = expect(
+             system.iop_bus().write32(0x1F801608u, 0x6u) &&
+             system.iop_bus().read32(0x1F801608u, value) &&
+             value == 0u,
+             "OHCI list-filled flags did not retire") && ok;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F80163Cu, value) &&
+             value == 0u,
+             "OHCI frame number did not reset to zero") && ok;
+    system.iop_bus().tick(36864u);
+    ok = expect(
+             system.iop_bus().read32(0x1F80163Cu, value) &&
+             value == 1u,
+             "OHCI frame number did not advance") && ok;
+
+    return ok;
+}
+
 bool test_iop_dma6_ordering_table_clear() {
     ps2::Ps2System system;
     bool ok = true;
@@ -1382,6 +1433,7 @@ int main() {
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
+    ok = test_iop_ohci_bootstrap_reset() && ok;
     ok = test_iop_dma6_ordering_table_clear() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_ipu_dma_bootstrap_paths() && ok;
