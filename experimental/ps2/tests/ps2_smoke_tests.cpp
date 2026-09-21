@@ -179,7 +179,9 @@ std::filesystem::path create_test_bios() {
     }
 
     write32(0x41000, 0x24021234u);
-    write32(0x41004, 0x70000000u);
+    // Deliberately unsupported MMI funct 0x02. MADD (funct 0x00) is a real
+    // R5900 instruction and can no longer serve as the synthetic halt marker.
+    write32(0x41004, 0x70000002u);
 
     constexpr std::size_t romdir = 0x1000;
     write_entry(romdir + 0x00, "RESET", 0, 0x1000);
