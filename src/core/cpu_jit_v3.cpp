@@ -773,7 +773,8 @@ void emit_commit_incoming_load(Xbyak::CodeGenerator &code,
 
 std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     const std::vector<V3DecodedInstruction> &instructions,
-    const std::array<u8, 6> &cached) {
+    const std::array<u8, 6> &cached, bool load_retired,
+    u32 load_index, u8 load_rt) {
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
 
@@ -969,6 +970,14 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       }
       emit_commit_incoming_load(*code, cached, cancel_reg);
     }
+    // A load becomes visible after exactly one following instruction. That
+    // instruction reads the old value above; its own write cancels the load.
+    if (load_retired && instruction_index == load_index + 1u &&
+        load_rt != 0u && dst != load_rt) {
+      code->mov(code->eax, code->dword[code->r11 +
+          static_cast<int>(offsetof(V3NativeRuntime, load_value))]);
+      emit_write_guest(*code, cached, load_rt, code->eax, dirty);
+    }
   }
 
   for (size_t slot = 0; slot < cached.size(); ++slot) {
@@ -1014,6 +1023,7 @@ struct CpuJitV3Backend::Impl {
     bool jump_dynamic = false;
     bool has_store = false;
     bool has_load = false;
+    bool load_retired = false;
     bool has_branch = false;
     bool has_jump = false;
     std::array<u32, 16> words{};
@@ -1408,10 +1418,11 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         }
 
         if (inst.op == V3AluOp::Lw) {
-          // First load tier: execute one aligned direct load as the final
-          // instruction in the block. Materialize the R3000A pending load at
-          // block exit so the following guest instruction still observes the
-          // old register value.
+          // Only one load is preflighted per block. The following instruction
+          // may now execute in the same block with the old register value.
+          if (has_load) {
+            break;
+          }
           if (inst.rs != 0u && (written_mask & (1u << inst.rs)) != 0u) {
             break;
           }
@@ -1422,10 +1433,13 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           load_index = static_cast<u32>(decoded.size());
           decoded.push_back(inst);
           words[decoded.size() - 1u] = bits;
-          break;
+          continue;
         }
 
         if (inst.op == V3AluOp::Sw || inst.op == V3AluOp::Lw) {
+          if (has_load) {
+            break;
+          }
           if (store_count >= store_rs.size()) {
             break;
           }
@@ -1508,6 +1522,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       block.cached_regs = choose_cached_regs(decoded);
       block.has_store = has_store;
       block.has_load = has_load;
+      block.load_retired = has_load && decoded.size() > load_index + 1u;
       block.has_branch = has_branch;
       block.has_jump = has_jump;
       block.store_count = store_count;
@@ -1539,7 +1554,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         }
       }
 
-      auto generated = compile_native_alu(decoded, block.cached_regs);
+      auto generated = compile_native_alu(decoded, block.cached_regs,
+                                          block.load_retired, load_index,
+                                          load_rt);
       if (!generated) {
         ++stats_.native_compile_failures;
         impl_->rejected_pcs.insert(start_pc);
@@ -1889,7 +1906,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     // inside generated code. A final native load becomes the new pending load.
     cpu_.load_ = {};
     cpu_.next_load_ = {};
-    if (block.has_load) {
+    if (block.has_load && !block.load_retired) {
       if (block.load_rt != 0u) {
         const u32 load_pc = start_pc + block.load_index * 4u;
         cpu_.load_ = {block.load_rt, runtime.load_value, load_pc, load_addr};

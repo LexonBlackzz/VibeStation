@@ -322,6 +322,8 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "X64Jit";
   case CpuExecutionMode::X64JitV2:
     return "X64JitV2";
+  case CpuExecutionMode::X64JitV3:
+    return "X64JitV3";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -3549,7 +3551,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   LOG_INFO(
-      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2%s",
+      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3%s",
       memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
@@ -3561,11 +3563,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 4> modes = {
+  const std::array<CpuExecutionMode, 5> modes = {
       CpuExecutionMode::Interpreter,
       CpuExecutionMode::DecodedBlockInterpreter,
       CpuExecutionMode::X64Jit,
       CpuExecutionMode::X64JitV2,
+      CpuExecutionMode::X64JitV3,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
@@ -4264,7 +4267,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
     return 1;
   }
   LOG_INFO(
-      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2");
+      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3");
   return 0;
 }
 } // namespace
