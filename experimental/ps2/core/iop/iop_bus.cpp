@@ -16,6 +16,9 @@ constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
 constexpr u32 kDma4Chcr = 0x1F8010C8u;
 constexpr u32 kDma7Chcr = 0x1F801508u;
+constexpr u32 kDma6Madr = 0x1F8010E0u;
+constexpr u32 kDma6Bcr = 0x1F8010E4u;
+constexpr u32 kDma6Chcr = 0x1F8010E8u;
 constexpr u32 kDma11Chcr = 0x1F801548u;
 constexpr u32 kDma12Chcr = 0x1F801558u;
 constexpr u32 kDmaStart = 1u << 24;
@@ -534,6 +537,52 @@ bool IopBus::write32(u32 address, u32 value) {
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
     }
+    if (physical == kDma6Chcr) {
+        u32 stored = value;
+        if ((value & kDmaStart) != 0) {
+            u32 madr = 0;
+            u32 bcr = 0;
+            if (!hw_.read32(kDma6Madr, madr) ||
+                !hw_.read32(kDma6Bcr, bcr)) {
+                return false;
+            }
+
+            // IOP DMA6 is the PS1-compatible ordering-table clear channel.
+            // The BIOS-visible transfer walks backward through IOP RAM,
+            // linking each word to the previous address and terminating with
+            // 0x00FFFFFF. PCSX2 accepts this canonical CHCR value as the
+            // hardware OTC operation as well.
+            if ((value & 0x11000003u) == 0x11000002u) {
+                const u32 words =
+                    std::min<u32>(
+                        bcr,
+                        static_cast<u32>(IopRam::kSize / 4u));
+                u32 address =
+                    madr & static_cast<u32>(IopRam::kSize - 1u);
+                for (u32 i = 0; i < words; ++i) {
+                    const u32 link =
+                        i + 1u == words
+                            ? 0x00FFFFFFu
+                            : ((address - 4u) & 0x00FFFFFFu);
+                    if (!ram_.write32(address, link)) return false;
+                    address =
+                        (address - 4u) &
+                        static_cast<u32>(IopRam::kSize - 1u);
+                }
+                (void)hw_.write32(kDma6Madr, address);
+                (void)hw_.write32(kDma6Bcr, 0u);
+            }
+
+            stored &= ~kDmaStart;
+        }
+
+        if (!hw_.write32(kDma6Chcr, stored)) return false;
+        if ((value & kDmaStart) != 0) {
+            raise_dma_irq(6u);
+        }
+        return true;
+    }
+
     if (physical == kSio2Ctrl) {
         if (!hw_.write32(physical, value)) return false;
         if ((value & kSio2Start) != 0) {
