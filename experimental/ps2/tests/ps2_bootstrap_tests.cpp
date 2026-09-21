@@ -83,6 +83,87 @@ bool test_unaligned_doubleword_merges() {
     return ok;
 }
 
+bool test_unaligned_word_and_atomic_memory_ops() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2000u;
+    constexpr ps2::u32 base = 0x1000u;
+    bool ok = true;
+    std::string error;
+
+    auto run_mem = [&](ps2::u32 opcode, ps2::u16 imm, ps2::u64 rt_value) {
+        const ps2::u32 instruction =
+            (opcode << 26) | (2u << 21) | (3u << 16) | imm;
+        ok = expect(system.bus().write32(pc, instruction),
+                    "failed to install EE memory opcode") && ok;
+        system.ee().reset(pc);
+        system.ee().state().gpr[2].lo = base;
+        system.ee().state().gpr[3].lo = rt_value;
+        error.clear();
+        ok = expect(system.ee().step(error),
+                    "EE memory opcode execution failed") && ok;
+    };
+
+    ok = expect(system.bus().write32(base, 0x44332211u),
+                "failed to seed unaligned word memory") && ok;
+
+    run_mem(0x22u, 1u, 0xAABBCCDDu); // LWL
+    ok = expect(
+             system.ee().state().gpr[3].lo == 0x000000002211CCDDull,
+             "LWL merge mismatch") && ok;
+
+    run_mem(0x26u, 2u, 0xAABBCCDDu); // LWR
+    ok = expect(
+             system.ee().state().gpr[3].lo == 0xFFFFFFFFAABB4433ull,
+             "LWR merge mismatch") && ok;
+
+    ok = expect(system.bus().write32(base, 0x44332211u),
+                "failed to reseed SWL memory") && ok;
+    run_mem(0x2Au, 1u, 0xA1B2C3D4u); // SWL
+    ps2::u32 word = 0;
+    ok = expect(system.bus().read32(base, word) &&
+                    word == 0x4433A1B2u,
+                "SWL merge mismatch") && ok;
+
+    ok = expect(system.bus().write32(base, 0x44332211u),
+                "failed to reseed SWR memory") && ok;
+    run_mem(0x2Eu, 2u, 0xA1B2C3D4u); // SWR
+    ok = expect(system.bus().read32(base, word) &&
+                    word == 0xC3D42211u,
+                "SWR merge mismatch") && ok;
+
+    ok = expect(system.bus().write32(base, 0x89ABCDEFu),
+                "failed to seed LL memory") && ok;
+    run_mem(0x30u, 0u, 0u); // LL
+    ok = expect(
+             system.ee().state().gpr[3].lo == 0xFFFFFFFF89ABCDEFull,
+             "LL load/sign extension mismatch") && ok;
+
+    run_mem(0x38u, 0u, 0x12345678u); // SC
+    ok = expect(system.bus().read32(base, word) &&
+                    word == 0x12345678u,
+                "SC store mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].lo == 1u,
+                "SC success result mismatch") && ok;
+
+    constexpr ps2::u64 wide = 0x1122334455667788ull;
+    ok = expect(system.bus().write64(base, wide),
+                "failed to seed LLD memory") && ok;
+    run_mem(0x34u, 0u, 0u); // LLD
+    ok = expect(system.ee().state().gpr[3].lo == wide,
+                "LLD load mismatch") && ok;
+
+    constexpr ps2::u64 replacement = 0x8877665544332211ull;
+    run_mem(0x3Cu, 0u, replacement); // SCD
+    ps2::u64 wide_read = 0;
+    ok = expect(system.bus().read64(base, wide_read) &&
+                    wide_read == replacement,
+                "SCD store mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].lo == 1u,
+                "SCD success result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_bootstrap_mmio() {
     ps2::Ps2System system;
     bool ok = true;
@@ -2155,6 +2236,7 @@ int main() {
     ok = test_mmi_por_128() && ok;
     ok = test_mmi_padduw() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
+    ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
     ok = test_ee_timer_events() && ok;
     ok = test_ee_intc_register_semantics() && ok;
