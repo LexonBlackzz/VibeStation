@@ -46,6 +46,14 @@ constexpr u32 kDev9Size = 0x00010000u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
+bool is_iop_peripheral_open_bus(u32 physical) {
+    // The R3000A peripheral/expansion area contains many optional devices.
+    // Uninstalled slots read as zero in the compatibility path instead of
+    // raising a fatal CPU-side bus error. Keep ROM0 (0x1FC00000+) excluded.
+    return physical >= 0x1F000000u &&
+           physical < 0x1FC00000u;
+}
+
 } // namespace
 
 IopBus::IopBus(
@@ -701,7 +709,12 @@ bool IopBus::read8(u32 address, u8& value) const {
         value = static_cast<u8>(word >> ((physical & 3u) * 8));
         return true;
     }
-    return bios_.read8_physical(physical, value);
+    if (bios_.read8_physical(physical, value)) return true;
+    if (is_iop_peripheral_open_bus(physical)) {
+        value = 0;
+        return true;
+    }
+    return false;
 }
 
 bool IopBus::read16(u32 address, u16& value) const {
@@ -791,7 +804,12 @@ bool IopBus::read32(u32 address, u32& value) const {
     }
     if (cdvd_.read32(physical, value)) return true;
     if (hw_.read32(physical, value)) return true;
-    return bios_.read32_physical(physical, value);
+    if (bios_.read32_physical(physical, value)) return true;
+    if (is_iop_peripheral_open_bus(physical)) {
+        value = 0;
+        return true;
+    }
+    return false;
 }
 
 bool IopBus::write8(u32 address, u8 value) {
@@ -830,6 +848,7 @@ bool IopBus::write8(u32 address, u8 value) {
         word=(word&~(0xFFu<<shift))|(static_cast<u32>(value)<<shift);
         return write_sif32(physical&~3u,word);
     }
+    if (is_iop_peripheral_open_bus(physical)) return true;
     return false;
 }
 
@@ -1021,6 +1040,7 @@ bool IopBus::write32(u32 address, u32 value) {
     }
     if (cdvd_.write32(physical,value)) return true;
     if (hw_.write32(physical,value)) return true;
+    if (is_iop_peripheral_open_bus(physical)) return true;
     return false;
 }
 
