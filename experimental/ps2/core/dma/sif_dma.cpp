@@ -428,8 +428,9 @@ bool SifDma::service_sif0(
             (ee_chcr & 0x0000FFFFu) |
             (ee_tag0 & 0xFFFF0000u);
 
-        // Well-formed SIF packets terminate both sides together. If only one
-        // tag marks end, stop rather than walking arbitrary IOP memory.
+        // The IOP and EE chains terminate independently. In particular, the
+        // IOP commonly ends a packet and interrupts its producer while the EE
+        // destination chain remains armed for the next packet.
         if (iop_end || ee_end) break;
     }
 
@@ -437,19 +438,19 @@ bool SifDma::service_sif0(
         !ee_bus.write32(kEeSif0 + kEeQwc, 0u) ||
         !ee_bus.write32(
             kEeSif0 + kEeChcr,
-            ee_chcr & ~kEeStr) ||
+            ee_end ? (ee_chcr & ~kEeStr) : ee_chcr) ||
         !iop_bus.write32(kIopDma9Madr, last_iop_madr) ||
         !iop_bus.write32(kIopDma9Tadr, tadr) ||
-        !iop_bus.write32(kIopDma9Bcr, 0u) ||
         !iop_bus.write32(
             kIopDma9Chcr,
-            iop_chcr & ~kIopDmaStart)) {
+            iop_end ? (iop_chcr & ~kIopDmaStart) : iop_chcr) ||
+        (iop_end && !iop_bus.write32(kIopDma9Bcr, 0u))) {
         error = "SIF0 completion state write failed";
         return false;
     }
 
-    ee_bus.raise_dmac(5);
-    iop_bus.raise_dma_irq(9);
+    if (ee_end) ee_bus.raise_dmac(5);
+    if (iop_end) iop_bus.raise_dma_irq(9);
     (void)iop_intc;
     return true;
 }

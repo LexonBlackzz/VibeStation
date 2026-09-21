@@ -228,12 +228,125 @@ bool test_sif0_iop_to_ee() {
     return ok;
 }
 
+bool test_sif0_completes_each_side_independently() {
+    ps2::Ps2System system;
+    ps2::SifDma dma;
+    dma.reset();
+
+    constexpr ps2::u32 iop_tag = 0x00005000u;
+    constexpr ps2::u32 first_source = 0x00006000u;
+    constexpr ps2::u32 second_source = 0x00006100u;
+    constexpr ps2::u32 first_destination = 0x00009000u;
+    constexpr ps2::u32 second_destination = 0x00009100u;
+
+    bool ok = true;
+    auto write_tag = [&](ps2::u32 tag_address,
+                         ps2::u32 source,
+                         ps2::u32 ee_tag,
+                         ps2::u32 destination) {
+        return system.iop_bus().write32(
+                   tag_address + 0u,
+                   0x80000000u | source) &&
+               system.iop_bus().write32(tag_address + 4u, 4u) &&
+               system.iop_bus().write32(tag_address + 8u, ee_tag) &&
+               system.iop_bus().write32(
+                   tag_address + 12u,
+                   destination);
+    };
+
+    // The first IOP tag interrupts and ends that side, but the EE CNT tag
+    // deliberately leaves the destination chain running.
+    ok = expect(
+             write_tag(
+                 iop_tag,
+                 first_source,
+                 1u | (1u << 28),
+                 first_destination) &&
+             system.iop_bus().write32(first_source, 0x11111111u) &&
+             system.iop_bus().write32(first_source + 4u, 0x22222222u) &&
+             system.iop_bus().write32(first_source + 8u, 0x33333333u) &&
+             system.iop_bus().write32(first_source + 12u, 0x44444444u),
+             "failed to build split-completion SIF0 packet") && ok;
+
+    ok = expect(
+             system.bus().write32(0x1000E000u, 1u) &&
+             system.bus().write32(
+                 0x1000C000u,
+                 0x100u | (1u << 2)) &&
+             system.iop_bus().write32(0x1F80152Cu, iop_tag) &&
+             system.iop_bus().write32(
+                 0x1F801528u,
+                 0x01000000u),
+             "failed to arm split-completion SIF0 DMA") && ok;
+
+    std::string error;
+    ok = expect(
+             dma.service(
+                 system.bus(),
+                 system.iop_bus(),
+                 system.iop_intc(),
+                 error),
+             "split-completion SIF0 service failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.bus().read32(0x1000C000u, value) &&
+             (value & 0x100u) != 0,
+             "SIF0 ended EE chain with only the IOP end tag") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801528u, value) &&
+             (value & 0x01000000u) == 0,
+             "SIF0 did not end the IOP chain") && ok;
+    ok = expect(
+             system.bus().read32(0x1000E010u, value) &&
+             (value & (1u << 5)) == 0,
+             "SIF0 raised an early EE completion interrupt") && ok;
+
+    // Rearming only the IOP side must continue into the still-active EE chain.
+    ok = expect(
+             write_tag(
+                 iop_tag + 0x10u,
+                 second_source,
+                 1u | (7u << 28),
+                 second_destination) &&
+             system.iop_bus().write32(second_source, 0xAAAAAAAAu) &&
+             system.iop_bus().write32(second_source + 4u, 0xBBBBBBBBu) &&
+             system.iop_bus().write32(second_source + 8u, 0xCCCCCCCCu) &&
+             system.iop_bus().write32(second_source + 12u, 0xDDDDDDDDu) &&
+             system.iop_bus().write32(
+                 0x1F801528u,
+                 0x01000000u),
+             "failed to rearm the IOP SIF0 side") && ok;
+    ok = expect(
+             dma.service(
+                 system.bus(),
+                 system.iop_bus(),
+                 system.iop_intc(),
+                 error),
+             "continued SIF0 service failed") && ok;
+    ok = expect(
+             system.bus().read32(second_destination, value) &&
+             value == 0xAAAAAAAAu,
+             "continued SIF0 payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(0x1000C000u, value) &&
+             (value & 0x100u) == 0,
+             "SIF0 EE END tag did not stop the EE chain") && ok;
+    ok = expect(
+             system.bus().read32(0x1000E010u, value) &&
+             (value & (1u << 5)) != 0,
+             "SIF0 EE END tag did not raise completion") && ok;
+
+    return ok;
+}
+
 } // namespace
 
 int main() {
     bool ok = true;
     ok = test_sif1_ee_to_iop() && ok;
     ok = test_sif0_iop_to_ee() && ok;
+    ok = test_sif0_completes_each_side_independently() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 SIF tests passed.\n";
     return EXIT_SUCCESS;
