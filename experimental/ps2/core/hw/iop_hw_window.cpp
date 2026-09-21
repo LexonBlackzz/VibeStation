@@ -33,6 +33,8 @@ constexpr u32 kTimerIrqs[6] = {4u, 5u, 6u, 14u, 15u, 16u};
 
 void IopHwWindow::reset() {
     data_.fill(0);
+    // SIO2 PORT_STAT reset value used by SIO2MAN during device probing.
+    data_[0x8270u] = 0x0Fu;
     timer_phase_.fill(0);
     timer_count_.fill(0);
     timer_target_.fill(0);
