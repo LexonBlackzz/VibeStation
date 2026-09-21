@@ -113,6 +113,22 @@ void EeHw::tick(u64 cycles) {
     }
 }
 
+u32 EeHw::vif1_stat() const {
+    return static_cast<u32>(vif1_regs_[0]) |
+           (static_cast<u32>(vif1_regs_[1]) << 8) |
+           (static_cast<u32>(vif1_regs_[2]) << 16) |
+           (static_cast<u32>(vif1_regs_[3]) << 24);
+}
+
+void EeHw::update_vif1_stat(u32 set_bits, u32 clear_bits) {
+    u32 value = vif1_stat();
+    value |= set_bits;
+    value &= ~clear_bits;
+    for (u32 i = 0; i < 4u; ++i) {
+        vif1_regs_[i] = static_cast<u8>(value >> (i * 8));
+    }
+}
+
 void EeHw::raise_intc(u32 irq) {
     if (irq < 16u) {
         generic_write32(kIntcStat, generic_read32(kIntcStat) | (1u << irq));
