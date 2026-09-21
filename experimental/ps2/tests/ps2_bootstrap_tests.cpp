@@ -55,6 +55,80 @@ bool test_mmi_padduw() {
     return ok;
 }
 
+bool test_mmi_madd_and_plzcw() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2100u;
+    std::string error;
+    bool ok = true;
+
+    // MADD r3,r1,r2 accumulates into the primary LO/HI pair.
+    constexpr ps2::u32 madd =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        0x00u;
+    system.ee().reset(pc);
+    system.ee().state().lo = 2u;
+    system.ee().state().hi = 0u;
+    system.ee().state().gpr[1].lo = 3u;
+    system.ee().state().gpr[2].lo = 0xFFFFFFFCu;
+    ok = expect(system.bus().write32(pc, madd),
+                "MADD test opcode write failed") && ok;
+    ok = expect(system.ee().step(error),
+                "MADD execution failed") && ok;
+    ok = expect(system.ee().state().lo == 0xFFFFFFFFFFFFFFF6ull &&
+                    system.ee().state().hi == 0xFFFFFFFFFFFFFFFFull,
+                "MADD accumulator mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].lo ==
+                    0xFFFFFFFFFFFFFFF6ull,
+                "MADD destination mismatch") && ok;
+
+    // MADDU1 uses the secondary accumulator pair.
+    constexpr ps2::u32 maddu1 =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        0x21u;
+    system.ee().reset(pc);
+    system.ee().state().lo1 = 5u;
+    system.ee().state().hi1 = 0u;
+    system.ee().state().gpr[1].lo = 0xFFFFFFFFu;
+    system.ee().state().gpr[2].lo = 2u;
+    ok = expect(system.bus().write32(pc, maddu1),
+                "MADDU1 test opcode write failed") && ok;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "MADDU1 execution failed") && ok;
+    ok = expect(system.ee().state().lo1 == 3u &&
+                    system.ee().state().hi1 == 2u,
+                "MADDU1 accumulator mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].lo == 3u,
+                "MADDU1 destination mismatch") && ok;
+
+    // PLZCW counts the leading sign run, excluding the sign bit itself,
+    // independently for the two low words of rs.
+    constexpr ps2::u32 plzcw =
+        (0x1Cu << 26) |
+        (1u << 21) | (3u << 11) |
+        0x04u;
+    system.ee().reset(pc);
+    system.ee().state().gpr[1].lo =
+        (static_cast<ps2::u64>(0xFFFFFFF0u) << 32) | 1u;
+    system.ee().state().gpr[3].hi =
+        0xAABBCCDDEEFF0011ull;
+    ok = expect(system.bus().write32(pc, plzcw),
+                "PLZCW test opcode write failed") && ok;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "PLZCW execution failed") && ok;
+    ok = expect(system.ee().state().gpr[3].lo ==
+                    ((static_cast<ps2::u64>(27u) << 32) | 30u),
+                "PLZCW count mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].hi ==
+                    0xAABBCCDDEEFF0011ull,
+                "PLZCW incorrectly modified upper 64 bits") && ok;
+
+    return ok;
+}
+
 bool test_mmi_bootstrap_packed_ops() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2200u;
@@ -2755,6 +2829,7 @@ int main() {
     bool ok = true;
     ok = test_mmi_por_128() && ok;
     ok = test_mmi_padduw() && ok;
+    ok = test_mmi_madd_and_plzcw() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
