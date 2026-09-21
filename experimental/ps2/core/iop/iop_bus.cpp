@@ -54,6 +54,13 @@ bool is_iop_peripheral_open_bus(u32 physical) {
            physical < 0x1FC00000u;
 }
 
+u32 canonical_cdvd_address(u32 physical) {
+    if ((physical & 0xFFFF0000u) == 0x1F400000u) {
+        return CdvdHw::kBase | (physical & 0xFFu);
+    }
+    return physical;
+}
+
 } // namespace
 
 IopBus::IopBus(
@@ -701,7 +708,7 @@ bool IopBus::read8(u32 address, u8& value) const {
     }
     if (physical < kRamMirrorEnd) return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
     if (intc_.read8(physical, value)) return true;
-    if (cdvd_.read8(physical, value)) return true;
+    if (cdvd_.read8(canonical_cdvd_address(physical), value)) return true;
     if (hw_.read8(physical, value)) return true;
     if (physical >= kSifBase && physical < kSifBase + 0x100u) {
         u32 word = 0;
@@ -802,7 +809,7 @@ bool IopBus::read32(u32 address, u32& value) const {
         }
         return true;
     }
-    if (cdvd_.read32(physical, value)) return true;
+    if (cdvd_.read32(canonical_cdvd_address(physical), value)) return true;
     if (hw_.read32(physical, value)) return true;
     if (bios_.read32_physical(physical, value)) return true;
     if (is_iop_peripheral_open_bus(physical)) {
@@ -840,7 +847,7 @@ bool IopBus::write8(u32 address, u8 value) {
     }
     if (physical < kRamMirrorEnd) return ram_.write8(physical & static_cast<u32>(IopRam::kSize-1), value);
     if (intc_.write8(physical,value)) return true;
-    if (cdvd_.write8(physical,value)) return true;
+    if (cdvd_.write8(canonical_cdvd_address(physical),value)) return true;
     if (hw_.write8(physical,value)) return true;
     if (physical >= kSifBase && physical < kSifBase+0x100u) {
         u32 word=0; if(!read_sif32(physical&~3u,word)) return false;
@@ -1038,7 +1045,7 @@ bool IopBus::write32(u32 address, u32 value) {
         }
         return true;
     }
-    if (cdvd_.write32(physical,value)) return true;
+    if (cdvd_.write32(canonical_cdvd_address(physical),value)) return true;
     if (hw_.write32(physical,value)) return true;
     if (is_iop_peripheral_open_bus(physical)) return true;
     return false;
