@@ -37,7 +37,7 @@ private:
     void generic_write32(u32 address, u32 value);
 
     u64 cycles_ = 0;
-    std::array<u64, 4> timer_epoch_{};
+    std::array<u64, 4> timer_phase_{};
     std::array<u32, 4> timer_count_base_{};
     std::array<u32, 4> timer_mode_{};
     std::array<u32, 4> timer_comp_{};
