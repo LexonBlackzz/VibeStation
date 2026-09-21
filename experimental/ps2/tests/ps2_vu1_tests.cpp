@@ -1,5 +1,6 @@
 #include "core/ps2_system.h"
 
+#include <bit>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -95,6 +96,103 @@ bool test_xgkick_to_gs() {
     return ok;
 }
 
+bool test_vu1_efu_and_random_ops() {
+    ps2::Ps2System system;
+
+    bool ok = true;
+    const ps2::u32 source_words[4] = {
+        std::bit_cast<ps2::u32>(1.0f),
+        std::bit_cast<ps2::u32>(2.0f),
+        std::bit_cast<ps2::u32>(3.0f),
+        std::bit_cast<ps2::u32>(4.0f),
+    };
+    for (ps2::u32 lane = 0; lane < 4u; ++lane) {
+        ok = expect(
+                 system.bus().write32(
+                     0x1100C000u + lane * 4u,
+                     source_words[lane]),
+                 "failed to seed VU1 EFU vector") && ok;
+    }
+
+    // LQ.xyzw vf1, 0(vi0)
+    constexpr ps2::u32 lq_vf1 =
+        (0xFu << 21) | (1u << 16);
+    // ESADD vf1 -> P (T3_00 index 0x1c)
+    constexpr ps2::u32 esadd_vf1 =
+        (0x40u << 25) |
+        (1u << 11) |
+        (0x1Cu << 6) |
+        0x3Cu;
+    // RINIT from vf1.x (T3_10 index 0x10)
+    constexpr ps2::u32 rinit_vf1x =
+        (0x40u << 25) |
+        (1u << 11) |
+        (0x10u << 6) |
+        0x3Eu;
+    // RGET.xyzw -> vf2 (T3_01 index 0x10)
+    constexpr ps2::u32 rget_vf2 =
+        (0x40u << 25) |
+        (0xFu << 21) |
+        (2u << 16) |
+        (0x10u << 6) |
+        0x3Du;
+    // RNEXT.xyzw -> vf3 (T3_00 index 0x10)
+    constexpr ps2::u32 rnext_vf3 =
+        (0x40u << 25) |
+        (0xFu << 21) |
+        (3u << 16) |
+        (0x10u << 6) |
+        0x3Cu;
+
+    ok = expect(write_micro_pair(system, 0u, lq_vf1, 0u),
+                "failed to write VU1 EFU LQ") && ok;
+    ok = expect(write_micro_pair(system, 1u, esadd_vf1, 0u),
+                "failed to write VU1 ESADD") && ok;
+    ok = expect(write_micro_pair(system, 2u, rinit_vf1x, 0u),
+                "failed to write VU1 RINIT") && ok;
+    ok = expect(write_micro_pair(system, 3u, rget_vf2, 0u),
+                "failed to write VU1 RGET") && ok;
+    ok = expect(write_micro_pair(system, 4u, rnext_vf3, 0u),
+                "failed to write VU1 RNEXT") && ok;
+
+    system.vu1().start(0u);
+    std::string error;
+    const ps2::u64 executed = system.vu1().run(5u, error);
+    ok = expect(error.empty() && executed == 5u,
+                "VU1 EFU/random microprogram failed") && ok;
+
+    ok = expect(
+             system.vu1().p() == std::bit_cast<ps2::u32>(14.0f),
+             "VU1 ESADD P result mismatch") && ok;
+
+    const ps2::u32 initial_random =
+        0x3F800000u | (source_words[0] & 0x007FFFFFu);
+    ok = expect(
+             system.vu1().vf(2u, 0u) == initial_random &&
+             system.vu1().vf(2u, 1u) == initial_random &&
+             system.vu1().vf(2u, 2u) == initial_random &&
+             system.vu1().vf(2u, 3u) == initial_random,
+             "VU1 RGET lanes mismatch") && ok;
+
+    ps2::u32 expected_next = initial_random;
+    const ps2::u32 x = (expected_next >> 4) & 1u;
+    const ps2::u32 y = (expected_next >> 22) & 1u;
+    expected_next <<= 1u;
+    expected_next ^= x ^ y;
+    expected_next =
+        (expected_next & 0x007FFFFFu) | 0x3F800000u;
+
+    ok = expect(
+             system.vu1().random() == expected_next &&
+             system.vu1().vf(3u, 0u) == expected_next,
+             "VU1 RNEXT result mismatch") && ok;
+    ok = expect(
+             system.vu1().stats().unsupported_lower == 0u,
+             "VU1 EFU/random ops counted as unsupported") && ok;
+
+    return ok;
+}
+
 bool test_vif1_mscal_starts_vu1() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -138,6 +236,7 @@ bool test_vif1_mscal_starts_vu1() {
 int main() {
     bool ok = true;
     ok = test_xgkick_to_gs() && ok;
+    ok = test_vu1_efu_and_random_ops() && ok;
     ok = test_vif1_mscal_starts_vu1() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VU1 tests passed.\n";
