@@ -108,6 +108,14 @@ void print_state(const ps2::Ps2System& system) {
         << '\n';
 
     const auto& display = system.gs_display();
+    ps2::u64 framebuffer_hash = 1469598103934665603ull;
+    ps2::u64 nonzero_pixels = 0;
+    for (const ps2::u32 pixel : display.rgba8()) {
+        framebuffer_hash ^= pixel;
+        framebuffer_hash *= 1099511628211ull;
+        if ((pixel & 0x00FFFFFFu) != 0) ++nonzero_pixels;
+    }
+
     std::cout
         << "DISPLAY_VALID=" << (display.valid() ? 1 : 0)
         << " DISPLAY_WIDTH=" << display.width()
@@ -116,7 +124,34 @@ void print_state(const ps2::Ps2System& system) {
         << " DISPLAY_PSM=0x" << std::hex << std::uppercase << display.psm()
         << std::dec
         << " DISPLAY_GENERATION=" << display.generation()
+        << " DISPLAY_NONZERO_PIXELS=" << nonzero_pixels
+        << " DISPLAY_HASH=0x" << std::hex << std::uppercase
+        << framebuffer_hash << std::dec
         << '\n';
+
+    ps2::u64 pmode = 0;
+    ps2::u64 smode2 = 0;
+    ps2::u64 dispfb1 = 0;
+    ps2::u64 display1 = 0;
+    ps2::u64 dispfb2 = 0;
+    ps2::u64 display2 = 0;
+    ps2::u64 bgcolor = 0;
+    (void)system.gs_privileged().read64(0x12000000u, pmode);
+    (void)system.gs_privileged().read64(0x12000020u, smode2);
+    (void)system.gs_privileged().read64(0x12000070u, dispfb1);
+    (void)system.gs_privileged().read64(0x12000080u, display1);
+    (void)system.gs_privileged().read64(0x12000090u, dispfb2);
+    (void)system.gs_privileged().read64(0x120000A0u, display2);
+    (void)system.gs_privileged().read64(0x120000E0u, bgcolor);
+    std::cout
+        << "PCRTC_PMODE=0x" << std::hex << std::uppercase << pmode
+        << " PCRTC_SMODE2=0x" << smode2
+        << " PCRTC_DISPFB1=0x" << dispfb1
+        << " PCRTC_DISPLAY1=0x" << display1
+        << " PCRTC_DISPFB2=0x" << dispfb2
+        << " PCRTC_DISPLAY2=0x" << display2
+        << " PCRTC_BGCOLOR=0x" << bgcolor
+        << std::dec << '\n';
 }
 
 } // namespace
@@ -156,6 +191,7 @@ int main(int argc, char** argv) {
             break;
         }
         remaining -= ran;
+        system.refresh_display();
 
         if (ran == 0 && !system.halted()) {
             std::cerr << "TRACE_STALLED_WITHOUT_HALT\n";
