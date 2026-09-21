@@ -410,6 +410,7 @@ struct V3ResidentContext {
   const u8 *icache = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
+  u32 direct_icache_refill = 1u;
   u32 cycle_budget = 0;
   u32 instruction_budget = 0;
   u32 branch_allowed = 1;
@@ -858,16 +859,17 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
   code->setDefaultJmpNEAR(true);
-  Label linked_done;
+  Label linked_done, linked_icache_miss, linked_after_icache;
   if (linked != nullptr) {
     Label load_ram, load_ready;
     for (u32 line = 0; line < linked->icache_line_count; ++line) {
       const int offset = static_cast<int>(linked->icache_indices[line]) * 24;
       code->cmp(code->byte[code->r15 + offset + 20], 0);
-      code->je(linked_done);
+      code->je(linked_icache_miss);
       code->cmp(code->dword[code->r15 + offset], linked->icache_tags[line]);
-      code->jne(linked_done);
+      code->jne(linked_icache_miss);
     }
+    code->L(linked_after_icache);
     if (linked->kind != 0u) {
       code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
       code->je(linked_done);
@@ -1176,6 +1178,77 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
     code->L(next);
     code->jmp(code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
+
+    // Cold path for a normal direct-mapped R3000A I-cache alias/eviction.
+    // Code writes separately invalidate the compiled block/link cell, so a
+    // tag miss here means the compiled guest code is still valid: refill the
+    // architectural cache line, charge the exact four-cycle fill penalty, and
+    // remain inside the native chain.
+    code->L(linked_icache_miss);
+    code->cmp(code->dword[code->rbx +
+                  offsetof(V3ResidentContext, direct_icache_refill)], 0);
+    code->je(linked_done);
+
+    // Do not mutate cache/timing state unless the complete block can fit even
+    // in the worst refill case. This keeps slice-boundary behavior on the
+    // existing precise exit path.
+    code->mov(code->eax, code->r13d);
+    code->add(code->eax, linked->instruction_count);
+    code->cmp(code->eax,
+              code->dword[code->rbx +
+                  offsetof(V3ResidentContext, instruction_budget)]);
+    code->ja(linked_done);
+    code->mov(code->eax, code->r12d);
+    code->add(code->eax,
+              linked->base_cycles + (linked->kind == 1u ? 1u : 0u) +
+                  (linked->has_load != 0u ? 4u : 0u) +
+                  linked->icache_line_count * 4u);
+    code->cmp(code->eax,
+              code->dword[code->rbx +
+                  offsetof(V3ResidentContext, cycle_budget)]);
+    code->ja(linked_done);
+
+    for (u32 line = 0; line < linked->icache_line_count; ++line) {
+      Label refill, line_ready;
+      const u32 index = linked->icache_indices[line];
+      const u32 tag = linked->icache_tags[line];
+      const int offset = static_cast<int>(index) * 24;
+
+      code->cmp(code->byte[code->r15 + offset + 20], 0);
+      code->je(refill);
+      code->cmp(code->dword[code->r15 + offset], tag);
+      code->je(line_ready);
+      code->L(refill);
+
+      if (tag < 0x00800000u) {
+        const u32 ram_offset = tag & 0x001FFFFFu;
+        code->mov(code->rax,
+                  code->ptr[code->rbx +
+                      offsetof(V3ResidentContext, main_ram)]);
+        code->test(code->rax, code->rax);
+        code->jz(linked_done);
+        code->movups(code->xmm0, code->xword[code->rax + ram_offset]);
+      } else if (tag >= 0x1F800000u && tag < 0x1F801000u) {
+        const u32 scratch_offset =
+            (tag - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+        code->mov(code->rax,
+                  code->ptr[code->rbx +
+                      offsetof(V3ResidentContext, scratchpad)]);
+        code->test(code->rax, code->rax);
+        code->jz(linked_done);
+        code->movups(code->xmm0, code->xword[code->rax + scratch_offset]);
+      } else {
+        code->jmp(linked_done);
+      }
+
+      code->mov(code->dword[code->r15 + offset], tag);
+      code->movups(code->xword[code->r15 + offset + 4], code->xmm0);
+      code->mov(code->byte[code->r15 + offset + 20], 1);
+      code->add(code->r12d, 4u);
+      code->L(line_ready);
+    }
+    code->jmp(linked_after_icache);
+
     code->L(linked_done);
     code->mov(code->rax, reinterpret_cast<size_t>(linked_exit));
     code->jmp(code->rax);
@@ -2214,6 +2287,10 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       resident.icache = reinterpret_cast<const u8 *>(cpu_.icache_.data());
       resident.main_ram = cpu_.sys_->jit_main_ram_data_mut();
       resident.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      // read32_instruction() only takes the slower observable RAM path when
+      // RAM tracing is enabled. Preserve that behavior by leaving refills on
+      // the old C++ path in tracing sessions.
+      resident.direct_icache_refill = g_trace_ram ? 0u : 1u;
       resident.cycle_budget = remaining_cycles;
       resident.instruction_budget = remaining_instructions;
       resident.branch_allowed = g_cpu_backend_compare_irq_on_branch ? 0u : 1u;
