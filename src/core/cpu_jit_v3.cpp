@@ -1456,6 +1456,17 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
     const u32 resume_pc = cpu_.next_pc_;
     const u32 branch_pc = cpu_.pending_branch_pc_;
+
+    // Cpu::step() samples the external IRQ line at every instruction boundary,
+    // including immediately before a branch delay slot. The interrupt itself
+    // is deferred until the delay slot retires, but Cause.IP2 must already
+    // reflect the sampled line in the architectural state.
+    if (cpu_.sys_->irq_pending()) {
+      cpu_.cop0_cause_ |= (1u << 10);
+    } else {
+      cpu_.cop0_cause_ &= ~(1u << 10);
+    }
+
     cpu_.executing_step_ = true;
     cpu_.exception_raised_ = false;
     cpu_.cycle_penalty_ = 0u;
