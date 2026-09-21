@@ -259,6 +259,49 @@ bool test_ee_intc_cpu_exception() {
     return ok;
 }
 
+bool test_ee_cop0_count_compare_irq() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2A00u;
+    bool ok = expect(
+        system.bus().write32(pc, 0u) &&
+        system.bus().write32(pc + 4u, 0u),
+        "COP0 timer NOP setup failed");
+
+    system.ee().reset(pc);
+    system.ee().state().cop0[9] = 5u;
+    system.ee().state().cop0[11] = 6u;
+    system.ee().state().cop0[12] =
+        0x00010001u | 0x00008000u; // EIE | IE | IP7 mask.
+
+    std::string error;
+    ok = expect(system.ee().step(error),
+                "COP0 timer compare-producing step failed") && ok;
+    ok = expect((system.ee().state().cop0[13] & 0x00008000u) != 0,
+                "COP0 Count==Compare did not assert IP7") && ok;
+
+    ok = expect(system.ee().step(error),
+                "COP0 timer interrupt exception failed") && ok;
+    ok = expect(system.ee().state().pc == 0x80000200u,
+                "COP0 timer interrupt vector mismatch") && ok;
+    ok = expect(system.ee().state().cop0[14] == pc + 4u,
+                "COP0 timer EPC mismatch") && ok;
+
+    // MTC0 Compare must acknowledge the pending timer line.
+    constexpr ps2::u32 mtc0_compare =
+        (0x10u << 26) | (0x04u << 21) | (2u << 16) | (11u << 11);
+    ok = expect(system.bus().write32(pc, mtc0_compare),
+                "MTC0 Compare setup failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().cop0[13] = 0x00008000u;
+    system.ee().state().gpr[2].lo = 0x12345678u;
+    ok = expect(system.ee().step(error),
+                "MTC0 Compare execution failed") && ok;
+    ok = expect(system.ee().state().cop0[11] == 0x12345678u &&
+                (system.ee().state().cop0[13] & 0x00008000u) == 0,
+                "MTC0 Compare did not clear IP7") && ok;
+    return ok;
+}
+
 bool test_ee_di_ei_privilege_gate() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2C00;
@@ -2099,6 +2142,7 @@ int main() {
     ok = test_ee_intc_register_semantics() && ok;
     ok = test_vu_mapping_and_cop2() && ok;
     ok = test_ee_intc_cpu_exception() && ok;
+    ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_syscall_exception() && ok;
     ok = test_syscall_delay_slot_exception() && ok;
