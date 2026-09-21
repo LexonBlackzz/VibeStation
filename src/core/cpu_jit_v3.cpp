@@ -1277,7 +1277,12 @@ struct CpuJitV3Backend::Impl {
   std::array<std::unique_ptr<DispatchPage>, 1u << 16u> dispatch_pages{};
 
 #if VIBESTATION_JIT_V3_X64
+  struct DelaySlotCode {
+    u32 word = 0u;
+    V3NativeFn fn = nullptr;
+  };
   V3CodeArena arena;
+  std::unordered_map<u32, DelaySlotCode> delay_slot_code;
   V3StepHelperFn step_helper_fn = nullptr;
   V3ResidentFn resident_fn = nullptr;
   V3LinkedDispatch linked_dispatch{};
@@ -1392,6 +1397,101 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     return true;
   };
 
+  auto try_native_pending_delay_slot = [&]() -> bool {
+    // Cpu::step() leaves a branch's architectural delay slot pending after a
+    // helper executes the branch itself. Most of these slots are ordinary
+    // ALU/NOP instructions. Execute those directly instead of forcing a
+    // second Cpu::step(), but deliberately leave memory/control slots on the
+    // precise helper path for now.
+    if (!cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
+        cpu_.pc_ != cpu_.pending_branch_pc_ + 4u ||
+        cpu_.next_load_.reg != 0u ||
+        g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
+      return false;
+    }
+    if (result.instructions >= max_instructions || result.cycles >= max_cycles) {
+      return false;
+    }
+
+    const u32 delay_pc = cpu_.pc_;
+    if (!cpu_.instruction_cacheable(delay_pc)) {
+      return false;
+    }
+    const u32 index = (delay_pc >> 4u) & 0xFFu;
+    const u32 word_index = (delay_pc >> 2u) & 0x03u;
+    const u32 expected_tag = psx::mask_address(delay_pc) & ~0x0Fu;
+    const auto &line = cpu_.icache_[index];
+    if (!line.valid || line.tag != expected_tag) {
+      return false;
+    }
+
+    const u32 bits = line.words[word_index];
+    V3DecodedInstruction inst{};
+    if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
+      return false;
+    }
+
+    auto &entry = impl_->delay_slot_code[delay_pc];
+    if (entry.fn == nullptr || entry.word != bits) {
+      std::vector<V3DecodedInstruction> one{inst};
+      try {
+        auto generated = compile_native_alu(one, {}, false, 0u, 0u);
+        entry.fn = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
+            generated->getCode(), generated->getSize()));
+        entry.word = bits;
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "V3 native delay-slot codegen: %s\n", e.what());
+        entry.fn = nullptr;
+      }
+    }
+    if (entry.fn == nullptr) {
+      return false;
+    }
+
+    V3NativeRuntime runtime{};
+    runtime.incoming_load_reg = cpu_.load_.reg;
+    runtime.incoming_load_value = cpu_.load_.value;
+    runtime.incoming_load_pc = cpu_.load_.source_pc;
+    runtime.incoming_load_addr = cpu_.load_.source_addr;
+
+    const u32 resume_pc = cpu_.next_pc_;
+    const u32 branch_pc = cpu_.pending_branch_pc_;
+    cpu_.executing_step_ = true;
+    cpu_.exception_raised_ = false;
+    cpu_.cycle_penalty_ = 0u;
+    entry.fn(cpu_.gpr_, &runtime);
+    cpu_.executing_step_ = false;
+
+    cpu_.current_pc_ = delay_pc;
+    cpu_.pc_ = resume_pc;
+    cpu_.next_pc_ = resume_pc + 4u;
+    cpu_.in_delay_slot_ = true;
+    cpu_.active_branch_pc_ = branch_pc;
+    cpu_.pending_delay_slot_ = false;
+    cpu_.pending_branch_taken_ = false;
+    cpu_.pending_branch_pc_ = 0u;
+    cpu_.load_ = {};
+    cpu_.next_load_ = {};
+    cpu_.cycles_ += 1u;
+    g_diag_current_pc = cpu_.current_pc_;
+    cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+
+    ++result.cycles;
+    ++result.instructions;
+    ++stats_.native_block_entries;
+    ++stats_.native_alu_block_entries;
+    ++stats_.native_instructions;
+    ++stats_.jit_v2_inline_instructions;
+    ++stats_.optimized_instructions;
+    ++stats_.native_cycles;
+    ++stats_.executed_cycles;
+
+    // The next architectural boundary must resample IRQs. Cpu::step() defers
+    // them for the delay slot itself, but not for the target/fallthrough.
+    native_streak = false;
+    return true;
+  };
+
   auto state_allows_native = [&]() {
     if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics) {
       ++stats_.jit_v2_state_diagnostics;
@@ -1431,6 +1531,10 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
   };
 
   auto try_native = [&]() -> bool {
+    if (!native_streak && cpu_.pending_delay_slot_ &&
+        try_native_pending_delay_slot()) {
+      return true;
+    }
     if (!native_streak) {
       if (!state_allows_native()) {
         return helper_step(V3HelperReason::State);
@@ -2393,6 +2497,9 @@ void CpuJitV3Backend::begin_frame(u32 frame_index) {
 void CpuJitV3Backend::flush() {
   impl_->clear_dispatch();
   impl_->blocks.clear();
+#if VIBESTATION_JIT_V3_X64
+  impl_->delay_slot_code.clear();
+#endif
   impl_->rejected_pcs.clear();
   impl_->rejected_pages.clear();
   impl_->code_pages.clear();
