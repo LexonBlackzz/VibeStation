@@ -1162,6 +1162,7 @@ struct CpuJitV3Backend::Impl {
     std::array<u8, 8> store_instruction_index{};
 #if VIBESTATION_JIT_V3_X64
     V3NativeFn fn = nullptr;
+    std::array<V3NativeFn, 17> prefix_fns{};
     V3ResidentBlock resident{};
     size_t code_size = 0u;
 #endif
@@ -1945,6 +1946,65 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         fetch_penalty + (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
+      // A slice may end inside a longer native block. Execute its safe ALU
+      // prefix natively, leaving the remaining PC for the next slice. This
+      // preserves the R3000A pending-load commit in the first instruction.
+      const u32 limit = std::min({remaining_instructions, remaining_cycles,
+                                  block.instruction_count - 1u});
+      std::vector<V3DecodedInstruction> prefix;
+      prefix.reserve(limit);
+      for (u32 i = 0; i < limit; ++i) {
+        V3DecodedInstruction inst{};
+        if (!decode_v3_alu(block.words[i], inst) ||
+            !is_v3_alu_only(inst.op)) {
+          break;
+        }
+        prefix.push_back(inst);
+      }
+      const u32 count = static_cast<u32>(prefix.size());
+      if (count != 0u) {
+        V3NativeFn &partial = block.prefix_fns[count];
+        if (partial == nullptr) {
+          try {
+            auto generated = compile_native_alu(prefix, {}, false, 0u, 0u);
+            partial = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
+                generated->getCode(), generated->getSize()));
+          } catch (const std::exception &e) {
+            std::fprintf(stderr, "V3 native prefix codegen: %s\n", e.what());
+          }
+        }
+        if (partial != nullptr) {
+          cpu_.executing_step_ = true;
+          cpu_.exception_raised_ = false;
+          cpu_.cycle_penalty_ = 0u;
+          partial(cpu_.gpr_, &runtime);
+          cpu_.executing_step_ = false;
+          cpu_.pc_ = start_pc + count * 4u;
+          cpu_.next_pc_ = cpu_.pc_ + 4u;
+          cpu_.current_pc_ = cpu_.pc_ - 4u;
+          cpu_.in_delay_slot_ = false;
+          cpu_.active_branch_pc_ = 0u;
+          cpu_.pending_delay_slot_ = false;
+          cpu_.pending_branch_taken_ = false;
+          cpu_.pending_branch_pc_ = 0u;
+          cpu_.load_ = {};
+          cpu_.next_load_ = {};
+          cpu_.cycles_ += count;
+          g_diag_current_pc = cpu_.current_pc_;
+          cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+          result.cycles += count;
+          result.instructions += count;
+          ++stats_.native_block_entries;
+          ++stats_.native_alu_block_entries;
+          stats_.native_instructions += count;
+          stats_.jit_v2_inline_instructions += count;
+          stats_.optimized_instructions += count;
+          stats_.native_cycles += count;
+          stats_.executed_cycles += count;
+          native_streak = true;
+          return true;
+        }
+      }
       return helper_step(V3HelperReason::Budget);
     }
 

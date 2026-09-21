@@ -63,3 +63,12 @@ Crash run it measured 84.943 ms average, 80.236 ms p50, and 139.301 ms p95,
 with identical state, PC, cycles, instruction counts, and chain counts. The
 small average change is within the observed host variance; this alone does
 not close the gap to the legacy path.
+
+When a slice ends inside a compiled block, V3 now lazily emits a native ALU
+prefix for the safe portion that fits. On the same 840/60 Crash workload,
+budget helper steps fell from 234,813 to 148,758, native inline instructions
+rose from 11,353,031 to 11,439,086, and the final state remained
+`B86BF25F6769511B`, PC `800141DC`, cycles `509552478`. The host speed changed
+between runs: a same-session control measured 41.096 ms average for the legacy
+resident loop versus 41.104 ms for linked execution. The linked path has no
+demonstrated timing advantage on this workload yet.
