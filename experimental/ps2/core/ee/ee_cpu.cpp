@@ -735,16 +735,16 @@ bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
             next_is_delay_slot_=false;
             current_is_delay_slot_=false;
             return true;
-        case 0x38: {
-            const u32 status=state_.cop0[12];
-            if ((status & 0x00020000u) != 0 || (status & 0x6u) != 0 || (status & 0x18u) == 0)
-                state_.cop0[12]&=~0x00010000u;
-            return true;
-        }
-        case 0x39: {
+        case 0x38: { // EI
             const u32 status=state_.cop0[12];
             if ((status & 0x00020000u) != 0 || (status & 0x6u) != 0 || (status & 0x18u) == 0)
                 state_.cop0[12]|=0x00010000u;
+            return true;
+        }
+        case 0x39: { // DI
+            const u32 status=state_.cop0[12];
+            if ((status & 0x00020000u) != 0 || (status & 0x6u) != 0 || (status & 0x18u) == 0)
+                state_.cop0[12]&=~0x00010000u;
             return true;
         }
         default: break;

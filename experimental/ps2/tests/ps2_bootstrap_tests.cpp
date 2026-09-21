@@ -726,8 +726,8 @@ bool test_ee_di_ei_privilege_gate() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2C00;
     // EI / DI COP0 functions.
-    const ps2::u32 ei = 0x42000039u;
-    const ps2::u32 di = 0x42000038u;
+    const ps2::u32 ei = 0x42000038u;
+    const ps2::u32 di = 0x42000039u;
     std::string error;
     bool ok = expect(system.bus().write32(pc, ei) && system.bus().write32(pc + 4u, di),
                      "EI/DI test code write failed");
@@ -749,6 +749,12 @@ bool test_ee_di_ei_privilege_gate() {
     ok = expect(system.ee().step(error), "kernel EI execution failed") && ok;
     ok = expect((system.ee().state().cop0[12] & 0x10000u) != 0,
                 "kernel EI did not set EIE") && ok;
+
+    system.ee().reset(pc + 4u);
+    system.ee().state().cop0[12] = 0x10000u; // kernel KSU, EIE=1
+    ok = expect(system.ee().step(error), "kernel DI execution failed") && ok;
+    ok = expect((system.ee().state().cop0[12] & 0x10000u) == 0,
+                "kernel DI did not clear EIE") && ok;
     return ok;
 }
 
