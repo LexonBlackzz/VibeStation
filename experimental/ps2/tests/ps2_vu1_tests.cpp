@@ -96,6 +96,75 @@ bool test_xgkick_to_gs() {
     return ok;
 }
 
+bool test_vu1_fmac_flags() {
+    ps2::Ps2System system;
+
+    const ps2::u32 a[4] = {
+        std::bit_cast<ps2::u32>(-1.0f),
+        std::bit_cast<ps2::u32>(2.0f),
+        0x00000001u,
+        0x7F7FFFFFu,
+    };
+    const ps2::u32 b[4] = {
+        std::bit_cast<ps2::u32>(0.0f),
+        std::bit_cast<ps2::u32>(-2.0f),
+        0u,
+        0x7F7FFFFFu,
+    };
+
+    bool ok = true;
+    for (ps2::u32 lane = 0; lane < 4u; ++lane) {
+        ok = expect(
+                 system.bus().write32(
+                     0x1100C000u + lane * 4u,
+                     a[lane]) &&
+                 system.bus().write32(
+                     0x1100C010u + lane * 4u,
+                     b[lane]),
+                 "failed to seed VU1 FMAC vectors") && ok;
+    }
+
+    constexpr ps2::u32 lq_vf1 =
+        (0xFu << 21) | (1u << 16);
+    constexpr ps2::u32 lq_vf2 =
+        (0xFu << 21) | (2u << 16) | 1u;
+    constexpr ps2::u32 add_vf3 =
+        (0xFu << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x28u;
+
+    ok = expect(write_micro_pair(system, 0u, lq_vf1, 0u),
+                "failed to write FMAC LQ vf1") && ok;
+    ok = expect(write_micro_pair(system, 1u, lq_vf2, 0u),
+                "failed to write FMAC LQ vf2") && ok;
+    ok = expect(write_micro_pair(system, 2u, 0u, add_vf3),
+                "failed to write FMAC ADD") && ok;
+
+    system.vu1().start(0u);
+    std::string error;
+    ok = expect(system.vu1().run(3u, error) == 3u &&
+                    error.empty(),
+                "VU1 FMAC flag program failed") && ok;
+
+    // X sign, Y zero, Z underflow+zero, W overflow.
+    ok = expect(system.vu1().mac() == 0x1286u,
+                "VU1 MAC flag layout mismatch") && ok;
+    ok = expect((system.vu1().status() & 0x3CFu) == 0x3CFu,
+                "VU1 STATUS current/sticky flags mismatch") && ok;
+
+    ok = expect(
+             system.vu1().vf(3u, 0u) ==
+                 std::bit_cast<ps2::u32>(-1.0f) &&
+             system.vu1().vf(3u, 1u) == 0u &&
+             system.vu1().vf(3u, 2u) == 0u &&
+             system.vu1().vf(3u, 3u) == 0x7F7FFFFFu,
+             "VU1 FMAC result normalization mismatch") && ok;
+
+    return ok;
+}
+
 bool test_vu1_efu_and_random_ops() {
     ps2::Ps2System system;
 
@@ -236,6 +305,7 @@ bool test_vif1_mscal_starts_vu1() {
 int main() {
     bool ok = true;
     ok = test_xgkick_to_gs() && ok;
+    ok = test_vu1_fmac_flags() && ok;
     ok = test_vu1_efu_and_random_ops() && ok;
     ok = test_vif1_mscal_starts_vu1() && ok;
     if (!ok) return EXIT_FAILURE;
