@@ -40,6 +40,40 @@ void print_state(const ps2::Ps2System& system) {
         << " EE_INSTRUCTIONS=" << ee.instructions_executed
         << '\n';
 
+    std::cout << "EE_GPR";
+    for (ps2::u32 index = 0; index < ee.gpr.size(); ++index) {
+        std::cout
+            << " R" << std::dec << index << "=0x"
+            << std::hex << std::uppercase << ee.gpr[index].lo;
+    }
+    std::cout << std::dec << '\n';
+
+    auto print_code = [&](const char* label, ps2::u32 center) {
+        std::cout << label;
+        const ps2::u32 code_base = (center - 16u) & ~3u;
+        for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
+            ps2::u32 instruction = 0;
+            const ps2::u32 address = code_base + offset;
+            if (system.bus().read32(address, instruction)) {
+                std::cout
+                    << " [0x" << std::hex << std::uppercase << address
+                    << "]=0x" << instruction;
+            }
+        }
+        std::cout << std::dec << '\n';
+    };
+    print_code("EE_CODE", ee.pc);
+    print_code("EE_RA_CODE", static_cast<ps2::u32>(ee.gpr[31].lo));
+
+    std::cout
+        << "EE_STATUS=0x" << std::hex << std::uppercase << ee.cop0[12]
+        << " EE_CAUSE=0x" << ee.cop0[13]
+        << " EE_EPC=0x" << ee.cop0[14]
+        << " EE_BADVADDR=0x" << ee.cop0[8]
+        << " EE_COUNT=0x" << ee.cop0[9]
+        << " EE_COMPARE=0x" << ee.cop0[11]
+        << std::dec << '\n';
+
     std::cout
         << "IOP_PC=0x" << std::hex << std::uppercase << iop.pc
         << " IOP_LAST_PC=0x" << iop.last_pc
@@ -50,6 +84,27 @@ void print_state(const ps2::Ps2System& system) {
         << std::dec
         << " IOP_INSTRUCTIONS=" << iop.instructions_executed
         << '\n';
+
+    std::cout << "IOP_GPR";
+    for (ps2::u32 index = 0; index < iop.gpr.size(); ++index) {
+        std::cout
+            << " R" << std::dec << index << "=0x"
+            << std::hex << std::uppercase << iop.gpr[index];
+    }
+    std::cout << std::dec << '\n';
+
+    std::cout << "IOP_CODE";
+    const ps2::u32 iop_code_base = (iop.pc - 16u) & ~3u;
+    for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
+        ps2::u32 instruction = 0;
+        const ps2::u32 address = iop_code_base + offset;
+        if (system.iop_bus().read32(address, instruction)) {
+            std::cout
+                << " [0x" << std::hex << std::uppercase << address
+                << "]=0x" << instruction;
+        }
+    }
+    std::cout << std::dec << '\n';
 
     std::cout
         << "IOP_ISTAT=0x" << std::hex << std::uppercase
@@ -69,16 +124,57 @@ void print_state(const ps2::Ps2System& system) {
         std::cout << "IOP_HALTED=0\n";
     }
 
-    ps2::u32 vif_stat = 0;
-    ps2::u32 vif_chcr = 0;
-    ps2::u32 vif_qwc = 0;
-    (void)system.bus().read32(0x10003C00u, vif_stat);
-    (void)system.bus().read32(0x10009000u, vif_chcr);
-    (void)system.bus().read32(0x10009020u, vif_qwc);
+    for (ps2::u32 channel = 0; channel < 2u; ++channel) {
+        ps2::u32 vif_stat = 0;
+        ps2::u32 vif_chcr = 0;
+        ps2::u32 vif_qwc = 0;
+        const ps2::u32 vif_base = 0x10003800u + channel * 0x400u;
+        const ps2::u32 dma_base = 0x10008000u + channel * 0x1000u;
+        (void)system.bus().read32(vif_base, vif_stat);
+        (void)system.bus().read32(dma_base, vif_chcr);
+        (void)system.bus().read32(dma_base + 0x20u, vif_qwc);
+        std::cout
+            << "VIF" << channel << "_STAT=0x"
+            << std::hex << std::uppercase << vif_stat
+            << " VIF" << channel << "_CHCR=0x" << vif_chcr
+            << " VIF" << channel << "_QWC=0x" << vif_qwc
+            << std::dec << '\n';
+    }
+
+    constexpr ps2::u32 kDmacChannels[] = {
+        0x10008000u, 0x10009000u, 0x1000A000u, 0x1000B000u,
+        0x1000B400u, 0x1000C000u, 0x1000C400u, 0x1000C800u,
+        0x1000D000u, 0x1000D400u,
+    };
+    for (ps2::u32 channel = 0; channel < 10u; ++channel) {
+        ps2::u32 chcr = 0;
+        ps2::u32 madr = 0;
+        ps2::u32 qwc = 0;
+        ps2::u32 tadr = 0;
+        const ps2::u32 base = kDmacChannels[channel];
+        (void)system.bus().read32(base, chcr);
+        (void)system.bus().read32(base + 0x10u, madr);
+        (void)system.bus().read32(base + 0x20u, qwc);
+        (void)system.bus().read32(base + 0x30u, tadr);
+        std::cout
+            << "DMAC" << channel
+            << "_CHCR=0x" << std::hex << std::uppercase << chcr
+            << " MADR=0x" << madr
+            << " QWC=0x" << qwc
+            << " TADR=0x" << tadr
+            << std::dec << '\n';
+    }
+
+    ps2::u32 dmac_ctrl = 0;
+    ps2::u32 dmac_stat = 0;
+    ps2::u32 dmac_pcr = 0;
+    (void)system.bus().read32(0x1000E000u, dmac_ctrl);
+    (void)system.bus().read32(0x1000E010u, dmac_stat);
+    (void)system.bus().read32(0x1000E020u, dmac_pcr);
     std::cout
-        << "VIF1_STAT=0x" << std::hex << std::uppercase << vif_stat
-        << " VIF1_CHCR=0x" << vif_chcr
-        << " VIF1_QWC=0x" << vif_qwc
+        << "DMAC_CTRL=0x" << std::hex << std::uppercase << dmac_ctrl
+        << " DMAC_STAT=0x" << dmac_stat
+        << " DMAC_PCR=0x" << dmac_pcr
         << std::dec << '\n';
 
     const auto& vu = system.vu1();
@@ -107,13 +203,24 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
         << '\n';
 
+    std::cout
+        << "GS_BITBLTBUF=0x" << std::hex << std::uppercase
+        << gs.register_value(0x50u)
+        << " GS_TRXPOS=0x" << gs.register_value(0x51u)
+        << " GS_TRXREG=0x" << gs.register_value(0x52u)
+        << " GS_TRXDIR=0x" << gs.register_value(0x53u)
+        << std::dec
+        << " GS_TRANSFER_ACTIVE=" << (gs.transfer_active() ? 1 : 0)
+        << " GS_TRANSFER_REMAINING=" << gs.transfer_pixels_remaining()
+        << " GS_TRANSFER_PSM=0x" << std::hex << std::uppercase
+        << gs.transfer_psm() << std::dec
+        << '\n';
+
     const auto& display = system.gs_display();
     ps2::u64 framebuffer_hash = 1469598103934665603ull;
-    ps2::u64 nonzero_pixels = 0;
     for (const ps2::u32 pixel : display.rgba8()) {
         framebuffer_hash ^= pixel;
         framebuffer_hash *= 1099511628211ull;
-        if ((pixel & 0x00FFFFFFu) != 0) ++nonzero_pixels;
     }
 
     std::cout
@@ -124,7 +231,7 @@ void print_state(const ps2::Ps2System& system) {
         << " DISPLAY_PSM=0x" << std::hex << std::uppercase << display.psm()
         << std::dec
         << " DISPLAY_GENERATION=" << display.generation()
-        << " DISPLAY_NONZERO_PIXELS=" << nonzero_pixels
+        << " DISPLAY_NONZERO_PIXELS=" << display.nonzero_pixel_count()
         << " DISPLAY_HASH=0x" << std::hex << std::uppercase
         << framebuffer_hash << std::dec
         << '\n';
