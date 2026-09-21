@@ -1000,6 +1000,40 @@ bool test_gs_display_extraction() {
                     "GS display extracted pixel mismatch") && ok;
     }
 
+    // Both circuits can be enabled while only circuit 2 has valid scanout
+    // state. The presenter must not blank merely because circuit 1 is first.
+    system.gs_privileged().reset();
+    system.gs_display().reset();
+    constexpr ps2::u64 pmode_both = 3u;
+    constexpr ps2::u64 dispfb2 =
+        static_cast<ps2::u64>(1u) << 9;
+    constexpr ps2::u64 display2 =
+        (static_cast<ps2::u64>(1u) << 32) |
+        (static_cast<ps2::u64>(0u) << 44);
+    ok = expect(
+        system.gs_privileged().write64(0x12000000u, pmode_both) &&
+        system.gs_privileged().write64(0x12000090u, dispfb2) &&
+        system.gs_privileged().write64(0x120000A0u, display2),
+        "GS circuit-2 fallback register setup failed") && ok;
+    ok = expect(
+        system.gs_core().vram().write_pixel(
+            0, 0u, 0u, 0u, 1u, 0xFFAABBCCu),
+        "GS circuit-2 fallback VRAM setup failed") && ok;
+
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+
+    ok = expect(
+        system.gs_display().valid() &&
+        system.gs_display().circuit() == 2u &&
+        system.gs_display().width() == 2u &&
+        system.gs_display().height() == 1u,
+        "GS display did not fall back to circuit 2") && ok;
+    ok = expect(
+        !system.gs_display().rgba8().empty() &&
+        system.gs_display().rgba8()[0] == 0xFFAABBCCu,
+        "GS circuit-2 fallback pixel mismatch") && ok;
+
     return ok;
 }
 
