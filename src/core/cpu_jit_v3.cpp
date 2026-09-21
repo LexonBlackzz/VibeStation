@@ -389,6 +389,10 @@ struct V3ResidentBlock {
   u32 base_cycles = 0;
   u32 tail_index = 0;
   u32 kind = 0; // 0: sequential, 1: conditional branch, 2: fixed jump
+  u32 has_retired_load = 0;
+  u32 load_rs = 0;
+  u32 load_index = 0;
+  s32 load_simm = 0;
   u32 icache_line_count = 0;
   std::array<u8, 5> icache_indices{};
   std::array<u32, 5> icache_tags{};
@@ -399,6 +403,8 @@ struct V3ResidentContext {
   u32 *gpr = nullptr;
   V3NativeRuntime *runtime = nullptr;
   const u8 *icache = nullptr;
+  u8 *main_ram = nullptr;
+  u8 *scratchpad = nullptr;
   u32 cycle_budget = 0;
   u32 instruction_budget = 0;
   u32 branch_allowed = 1;
@@ -407,6 +413,7 @@ struct V3ResidentContext {
   u32 instructions = 0;
   u32 entries = 0;
   u32 alu_entries = 0;
+  u32 memory_entries = 0;
   u32 branch_entries = 0;
   u32 branch_taken = 0;
   u32 branch_not_taken = 0;
@@ -727,6 +734,7 @@ V3LinkedDispatch install_linked_dispatch(V3CodeArena &arena) {
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, branch_not_taken)], code->esi);
   code->mov(code->eax, code->r14d);
   code->sub(code->eax, code->ebp);
+  code->sub(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, memory_entries)]);
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, alu_entries)], code->eax);
   code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, final_pc)], code->r8d);
   code->mov(code->ptr[code->rbx + offsetof(V3ResidentContext, last)], code->rdi);
@@ -847,6 +855,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   code->setDefaultJmpNEAR(true);
   Label linked_done;
   if (linked != nullptr) {
+    Label load_ram, load_ready;
     for (u32 line = 0; line < linked->icache_line_count; ++line) {
       const int offset = static_cast<int>(linked->icache_indices[line]) * 24;
       code->cmp(code->byte[code->r15 + offset + 20], 0);
@@ -858,14 +867,55 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
       code->je(linked_done);
     }
+    if (linked->has_retired_load != 0u) {
+      if (linked->load_index != 0u && linked->load_rs != 0u) {
+        code->cmp(code->dword[code->r11 + offsetof(V3NativeRuntime, incoming_load_reg)],
+                  linked->load_rs);
+        code->je(linked_done);
+      }
+      if (linked->load_rs == 0u) {
+        code->xor_(code->eax, code->eax);
+      } else {
+        code->mov(code->eax, code->dword[code->r10 + linked->load_rs * 4u]);
+      }
+      if (linked->load_simm != 0) {
+        code->add(code->eax, static_cast<u32>(linked->load_simm));
+      }
+      code->test(code->eax, 3);
+      code->jnz(linked_done);
+      code->and_(code->eax, 0x1FFFFFFF);
+      code->xor_(code->edx, code->edx);
+      code->cmp(code->eax, psx::RAM_SIZE);
+      code->jb(load_ram);
+      code->cmp(code->eax, 0x1F800000u);
+      code->jb(linked_done);
+      code->cmp(code->eax, 0x1F801000u);
+      code->jae(linked_done);
+      code->sub(code->eax, 0x1F800000u);
+      code->mov(code->rcx, code->ptr[code->rbx + offsetof(V3ResidentContext, scratchpad)]);
+      code->test(code->rcx, code->rcx);
+      code->jz(linked_done);
+      code->lea(code->rax, code->ptr[code->rcx + code->rax]);
+      code->jmp(load_ready);
+      code->L(load_ram);
+      code->mov(code->rcx, code->ptr[code->rbx + offsetof(V3ResidentContext, main_ram)]);
+      code->test(code->rcx, code->rcx);
+      code->jz(linked_done);
+      code->lea(code->rax, code->ptr[code->rcx + code->rax]);
+      code->mov(code->edx, 4);
+      code->L(load_ready);
+      code->mov(code->ptr[code->r11 + offsetof(V3NativeRuntime, load_ptr)], code->rax);
+    }
     code->mov(code->eax, code->r13d);
     code->add(code->eax, linked->instruction_count);
     code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, instruction_budget)]);
     code->ja(linked_done);
     code->mov(code->eax, code->r12d);
     code->add(code->eax, linked->base_cycles + (linked->kind == 1u ? 1u : 0u));
+    if (linked->has_retired_load != 0u) code->add(code->eax, code->edx);
     code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, cycle_budget)]);
     code->ja(linked_done);
+    if (linked->has_retired_load != 0u) code->add(code->r12d, code->edx);
   }
 
   // V3 deliberately keeps architectural state virtual inside a block.
@@ -1103,6 +1153,8 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     } else if (linked->kind == 2u) {
       code->inc(code->ebp);
       code->inc(code->r9d);
+    } else if (linked->has_retired_load != 0u) {
+      code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, memory_entries)]);
     }
     code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
     code->L(next);
@@ -1709,12 +1761,18 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         return false;
       }
       block.fn = reinterpret_cast<V3NativeFn>(entry);
-      if (!has_store && !has_load && !jump_dynamic) {
+      if (!has_store &&
+          (!has_load || (impl_->use_linked && block.load_retired)) &&
+          !jump_dynamic) {
         auto &resident = block.resident;
         resident.fn = block.fn;
         resident.start_pc = start_pc;
         resident.instruction_count = block.instruction_count;
         resident.base_cycles = block.base_cycles;
+        resident.has_retired_load = block.load_retired ? 1u : 0u;
+        resident.load_rs = block.load_rs;
+        resident.load_index = block.load_index;
+        resident.load_simm = block.load_simm;
         resident.icache_line_count = block.icache_line_count;
         resident.icache_indices = block.icache_indices;
         resident.icache_tags = block.icache_tags;
@@ -1759,8 +1817,11 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             std::fprintf(stderr, "V3 linked block codegen: %s\n", e.what());
           }
         }
+        if (block_ptr->has_load && block_ptr->resident.linked_fn == nullptr)
+          block_ptr->resident.fn = nullptr;
         V3ResidentSlot *slot = impl_->resident_slot(start_pc);
-        slot->block = &block_ptr->resident;
+        slot->block = block_ptr->resident.fn != nullptr && !block_ptr->has_load
+                          ? &block_ptr->resident : nullptr;
         if (block_ptr->resident.linked_fn != nullptr)
           slot->entry = block_ptr->resident.linked_fn;
       }
@@ -2014,6 +2075,8 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       resident.gpr = cpu_.gpr_;
       resident.runtime = &runtime;
       resident.icache = reinterpret_cast<const u8 *>(cpu_.icache_.data());
+      resident.main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      resident.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
       resident.cycle_budget = remaining_cycles;
       resident.instruction_budget = remaining_instructions;
       resident.branch_allowed = g_cpu_backend_compare_irq_on_branch ? 0u : 1u;
@@ -2065,6 +2128,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             stats_.native_chain_max_blocks, resident.entries);
       }
       stats_.native_alu_block_entries += resident.alu_entries;
+      stats_.native_memory_block_entries += resident.memory_entries;
       stats_.native_branch_tail_entries += resident.branch_entries;
       stats_.native_branch_taken += resident.branch_taken;
       stats_.native_branch_not_taken += resident.branch_not_taken;

@@ -85,3 +85,21 @@ At commit `8758b39`, the 840/60 run passed the exact gate: state
 
 The linked path averages 1.30 guest blocks per C++ chain entry on this run,
 and does not yet outperform the legacy resident loop on this host.
+
+## Linked LW continuation
+
+Safe LW blocks whose pending load retires inside the same block now calculate
+their RAM or scratchpad address in generated x64, take the RAM cycle penalty,
+and continue through the stable successor cell. Invalid addresses, pending
+load hazards, and unavailable fast memory leave the chain. The full CPU
+comparison suite passes. The Spyro gate still matches state
+`CDEAA474CF09AF42`, PC `80016488`, cycles `510309192`.
+
+| Spyro path, same build/session | CPU avg ms | p50 ms | p95 ms | Native instructions | Helper instructions | Block entries | Chain entries | Linked transitions | Blocks per chain | Max blocks | Code bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Linked with LW | 4.795 | 4.828 | 5.529 | 14,552,064 | 1,685,300 | 8,002,108 | 1,485,056 | 3,092,854 | 3.08 | 16 | 5,744,221 |
+| Legacy resident control | 5.572 | 5.580 | 6.357 | 14,552,064 | 1,685,300 | 8,002,108 | 0 | 0 | — | 0 | 5,444,589 |
+
+The linked path is 13.9% faster by CPU average in this A/B run. It still
+exits often at cache misses and event budgets, so longer native chains remain
+the next priority.
