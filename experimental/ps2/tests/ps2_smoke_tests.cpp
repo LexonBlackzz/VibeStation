@@ -1348,6 +1348,42 @@ bool test_iop_absent_dev9_aperture() {
     return ok;
 }
 
+bool test_iop_uninstalled_peripheral_open_bus() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 value8 = 0xFFu;
+    ps2::u16 value16 = 0xFFFFu;
+    ps2::u32 value32 = 0xFFFFFFFFu;
+
+    ok = expect(
+             system.iop_bus().read8(0x1F000123u, value8) &&
+             value8 == 0u,
+             "IOP open-bus byte probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read16(0xBF000200u, value16) &&
+             value16 == 0u,
+             "IOP open-bus KSEG1 halfword probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F500000u, value32) &&
+             value32 == 0u,
+             "IOP open-bus word probe did not return zero") && ok;
+
+    ok = expect(
+             system.iop_bus().write8(0x1F000123u, 0xAAu) &&
+             system.iop_bus().write16(0x1F500002u, 0x55AAu) &&
+             system.iop_bus().write32(0x1FA00000u, 0x12345678u),
+             "IOP open-bus probe writes faulted") && ok;
+
+    // The ROM0 window must remain outside permissive open-bus handling.
+    value32 = 0;
+    ok = expect(
+             !system.iop_bus().read32(0x1FC00000u, value32),
+             "unloaded ROM0 was incorrectly treated as open bus") && ok;
+
+    return ok;
+}
+
 bool test_iop_dma6_ordering_table_clear() {
     ps2::Ps2System system;
     bool ok = true;
@@ -1512,6 +1548,7 @@ int main() {
     ok = test_iop_ohci_bootstrap_reset() && ok;
     ok = test_iop_firewire_bootstrap_probes() && ok;
     ok = test_iop_absent_dev9_aperture() && ok;
+    ok = test_iop_uninstalled_peripheral_open_bus() && ok;
     ok = test_iop_dma6_ordering_table_clear() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_ipu_dma_bootstrap_paths() && ok;
