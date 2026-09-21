@@ -247,7 +247,8 @@ bool EeCpu::execute_special(
         raise_exception(8u, pc, current_is_delay_slot_);
         return true;
     case 0x0D: // BREAK
-        return fail(pc, instruction, "BREAK instruction", error);
+        raise_exception(9u, pc, current_is_delay_slot_);
+        return true;
     case 0x0F: // SYNC
         return true;
     case 0x10: // MFHI
@@ -448,9 +449,61 @@ bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
         return true;
     }
     if(rs==0x10){ switch(funct){
-        case 0x01: return true;
-        case 0x02:{ const u32 index=state_.cop0[0]&0x3Fu; if(index<state_.tlb.size()){auto& e=state_.tlb[index];e.page_mask=state_.cop0[5];e.entry_hi=state_.cop0[10];e.entry_lo0=state_.cop0[2];e.entry_lo1=state_.cop0[3];} return true;}
-        case 0x06: case 0x08: return true;
+        case 0x01: { // TLBR
+            const u32 index = state_.cop0[0] & 0x3Fu;
+            if (index < state_.tlb.size()) {
+                const auto& e = state_.tlb[index];
+                state_.cop0[5] = e.page_mask;
+                state_.cop0[10] = e.entry_hi;
+                state_.cop0[2] = e.entry_lo0;
+                state_.cop0[3] = e.entry_lo1;
+            }
+            return true;
+        }
+        case 0x02: { // TLBWI
+            const u32 index = state_.cop0[0] & 0x3Fu;
+            if(index<state_.tlb.size()){
+                auto& e=state_.tlb[index];
+                e.page_mask=state_.cop0[5];
+                e.entry_hi=state_.cop0[10];
+                e.entry_lo0=state_.cop0[2];
+                e.entry_lo1=state_.cop0[3];
+            }
+            return true;
+        }
+        case 0x06: { // TLBWR
+            const u32 index = state_.cop0[1] % state_.tlb.size();
+            auto& e = state_.tlb[index];
+            e.page_mask = state_.cop0[5];
+            e.entry_hi = state_.cop0[10];
+            e.entry_lo0 = state_.cop0[2];
+            e.entry_lo1 = state_.cop0[3];
+            return true;
+        }
+        case 0x08: { // TLBP
+            const u32 probe = state_.cop0[10];
+            state_.cop0[0] = 0x80000000u;
+            for (u32 index = 0; index < state_.tlb.size(); ++index) {
+                const auto& e = state_.tlb[index];
+                const u32 vpn_mask =
+                    ~(e.page_mask | 0x1FFFu);
+                const bool vpn_match =
+                    (e.entry_hi & vpn_mask) ==
+                    (probe & vpn_mask);
+                const bool global =
+                    (e.entry_lo0 & 1u) != 0 &&
+                    (e.entry_lo1 & 1u) != 0;
+                const bool asid_match =
+                    global ||
+                    ((e.entry_hi & 0xFFu) ==
+                     (probe & 0xFFu));
+                if (vpn_match && asid_match) {
+                    state_.cop0[0] = index;
+                    break;
+                }
+            }
+            return true;
+        }
         case 0x18:
             if ((state_.cop0[12] & 0x4u) != 0) {
                 state_.pc=state_.cop0[30];
