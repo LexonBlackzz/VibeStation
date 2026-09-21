@@ -3,6 +3,7 @@
 #include "common/types.h"
 
 #include <array>
+#include <cstddef>
 
 namespace ps2 {
 
