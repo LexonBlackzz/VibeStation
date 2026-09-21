@@ -697,15 +697,10 @@ GsRasterContext GsCore::raster_context() const {
 }
 
 bool GsCore::raster_state_supported() const {
-    const u64 prim = effective_prim();
-
-    // AA1 coverage is still an explicit skip. Fog, Gouraud, alpha blending,
-    // alpha/destination tests and Z buffering are handled by the software
-    // pixel pipeline.
-    constexpr u64 kUnsupportedPrim =
-        (1ull << 7);  // AA1
-    if ((prim & kUnsupportedPrim) != 0) return false;
-
+    // Bootstrap renderer policy: AA1 is accepted and rendered without edge
+    // coverage rather than dropping the whole primitive. Fog, Gouraud, alpha
+    // blending, alpha/destination tests and Z buffering are handled by the
+    // software pixel pipeline.
     const GsRasterContext ctx = raster_context();
     if (!GsRasterizer::supported_target(ctx)) return false;
 
