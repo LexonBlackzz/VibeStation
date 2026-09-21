@@ -305,6 +305,12 @@ bool is_v3_alu_only(V3AluOp op) {
 
 std::array<u8, 6> choose_cached_regs(
     const std::vector<V3DecodedInstruction> &instructions) {
+  // V3 commonly emits very short blocks. Loading and spilling a six-register
+  // host cache around a 1-3 instruction block costs more than direct GPR
+  // accesses, especially before resident block linking removes the call edge.
+  if (instructions.size() <= 3u) {
+    return {};
+  }
   std::array<u8, 32> score{};
   for (const auto &inst : instructions) {
     const u32 reads = read_mask(inst);
