@@ -39,8 +39,10 @@ public:
     }
 
     [[nodiscard]] bool interrupt_pending() const;
+    void raise_dma_irq(u32 channel);
 
 private:
+    [[nodiscard]] bool write_dma_icr(u32 physical, u32 value);
     [[nodiscard]] bool read_sif32(u32 physical, u32& value) const;
     [[nodiscard]] bool write_sif32(u32 physical, u32 value);
 
