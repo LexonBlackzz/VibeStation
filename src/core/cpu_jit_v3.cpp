@@ -1668,6 +1668,18 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       if (!impl_->use_linked || candidate.resident.linked_fn == nullptr) {
         return false;
       }
+      // The generated refill must not mutate architectural I-cache state and
+      // then discover that the block cannot execute. Load blocks still have
+      // address/load-delay preflight after the cache check, so keep them on
+      // the old precise entry path until that preflight is moved ahead of the
+      // refill. ALU/control blocks only have guards already covered by the
+      // cold-path worst-case budget check (and the compare-only branch IRQ
+      // gate below).
+      if (candidate.has_load ||
+          (candidate.resident.kind != 0u &&
+           g_cpu_backend_compare_irq_on_branch)) {
+        return false;
+      }
       for (u32 i = 0; i < candidate.icache_line_count; ++i) {
         const u32 tag = candidate.icache_tags[i];
         const bool ram = tag < 0x00800000u;
