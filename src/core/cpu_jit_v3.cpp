@@ -916,7 +916,10 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
   stats_.native_available = false;
 #endif
 
+  bool native_streak = false;
+
   auto interpreter_step = [&]() {
+    native_streak = false;
     const u32 consumed = cpu_.step();
     result.cycles += consumed;
     ++result.instructions;
@@ -928,6 +931,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
 #if VIBESTATION_JIT_V3_X64
   auto helper_step = [&](V3HelperReason reason) -> bool {
+    native_streak = false;
     if (impl_->step_helper_fn == nullptr ||
         result.instructions >= max_instructions ||
         result.cycles >= max_cycles) {
@@ -995,18 +999,33 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
   };
 
   auto try_native = [&]() -> bool {
-    if (!state_allows_native()) {
-      return helper_step(V3HelperReason::State);
-    }
+    if (!native_streak) {
+      if (!state_allows_native()) {
+        return helper_step(V3HelperReason::State);
+      }
 
-    // Match the interpreter's between-instruction hardware IRQ sampling.
-    if (cpu_.sys_->irq_pending()) {
-      cpu_.cop0_cause_ |= (1u << 10);
+      // IRQ can only change when we cross back through a helper/MMIO/event
+      // boundary. Pure native blocks touch GPRs, RAM/scratchpad and local CPU
+      // timing state only, so resampling it for every 1-2 instruction block is
+      // redundant. The outer slice still tests timing boundaries after every
+      // block.
+      if (cpu_.sys_->irq_pending()) {
+        cpu_.cop0_cause_ |= (1u << 10);
+      } else {
+        cpu_.cop0_cause_ &= ~(1u << 10);
+      }
+      if (cpu_.check_irq()) {
+        return helper_step(V3HelperReason::Irq);
+      }
     } else {
-      cpu_.cop0_cause_ &= ~(1u << 10);
-    }
-    if (cpu_.check_irq()) {
-      return helper_step(V3HelperReason::Irq);
+      // A native branch block has already retired its architectural delay slot.
+      // Cpu::step() would clear this descriptive state at the beginning of the
+      // next instruction; do exactly that without re-running the full state
+      // predicate.
+      if (cpu_.in_delay_slot_) {
+        cpu_.in_delay_slot_ = false;
+        cpu_.active_branch_pc_ = 0u;
+      }
     }
 
     const u32 start_pc = cpu_.pc_;
@@ -1610,6 +1629,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         cpu_.notify_jit_code_write_only(store_addrs[i], 4u);
       }
     }
+    native_streak = true;
     return true;
   };
 #endif
