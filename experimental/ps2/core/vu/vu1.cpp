@@ -479,39 +479,43 @@ bool Vu1::execute_upper_special(
     const u32 t = ft(code);
 
     auto acc_scalar_math = [&](float scalar, int kind) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float lhs = as_float(vf_[s][lane]);
-            if (kind == 0) acc_[lane] = as_bits(lhs + scalar);
-            else if (kind == 1) acc_[lane] = as_bits(lhs - scalar);
+            float result = 0.0f;
+            if (kind == 0) result = lhs + scalar;
+            else if (kind == 1) result = lhs - scalar;
             else if (kind == 2) {
-                acc_[lane] = as_bits(
-                    as_float(acc_[lane]) + lhs * scalar);
+                result = as_float(acc_[lane]) + lhs * scalar;
             } else if (kind == 3) {
-                acc_[lane] = as_bits(
-                    as_float(acc_[lane]) - lhs * scalar);
+                result = as_float(acc_[lane]) - lhs * scalar;
             } else {
-                acc_[lane] = as_bits(lhs * scalar);
+                result = lhs * scalar;
             }
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
     auto acc_vector_math = [&](int kind) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float lhs = as_float(vf_[s][lane]);
             const float rhs = as_float(vf_[t][lane]);
-            if (kind == 0) acc_[lane] = as_bits(lhs + rhs);
-            else if (kind == 1) acc_[lane] = as_bits(lhs - rhs);
+            float result = 0.0f;
+            if (kind == 0) result = lhs + rhs;
+            else if (kind == 1) result = lhs - rhs;
             else if (kind == 2) {
-                acc_[lane] = as_bits(
-                    as_float(acc_[lane]) + lhs * rhs);
+                result = as_float(acc_[lane]) + lhs * rhs;
             } else if (kind == 3) {
-                acc_[lane] = as_bits(
-                    as_float(acc_[lane]) - lhs * rhs);
+                result = as_float(acc_[lane]) - lhs * rhs;
             } else {
-                acc_[lane] = as_bits(lhs * rhs);
+                result = lhs * rhs;
             }
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
     auto convert_itof = [&](u32 shift) {
         for (u32 lane = 0; lane < 4u; ++lane) {
@@ -615,12 +619,17 @@ bool Vu1::execute_upper_special(
         if (group == 0x3Cu) acc_vector_math(1);
         else if (group == 0x3Du) acc_vector_math(3);
         else if (group == 0x3Eu) {
-            acc_[0] = as_bits(
-                as_float(vf_[s][1]) * as_float(vf_[t][2]));
-            acc_[1] = as_bits(
-                as_float(vf_[s][2]) * as_float(vf_[t][0]));
-            acc_[2] = as_bits(
-                as_float(vf_[s][0]) * as_float(vf_[t][1]));
+            const float results[3] = {
+                as_float(vf_[s][1]) * as_float(vf_[t][2]),
+                as_float(vf_[s][2]) * as_float(vf_[t][0]),
+                as_float(vf_[s][0]) * as_float(vf_[t][1]),
+            };
+            begin_fmac();
+            for (u32 lane = 0; lane < 3u; ++lane) {
+                if (!lane_enabled(code, lane)) continue;
+                acc_[lane] = fmac_result(lane, results[lane]);
+            }
+            finish_fmac();
         } else {
             // VNOP
         }
