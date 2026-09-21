@@ -44,6 +44,68 @@ s32 saturating_float_to_int(float value) {
     return static_cast<s32>(value);
 }
 
+float eatan_approx(float value) {
+    static constexpr float c[9] = {
+        0.999999344348907f,
+        -0.333298563957214f,
+        0.199465364217758f,
+        -0.139085337519646f,
+        0.096420042216778f,
+        -0.055909886956215f,
+        0.021861229091883f,
+        -0.004054057877511f,
+        0.785398185253143f,
+    };
+
+    const float v2 = value * value;
+    float power = value;
+    float result = 0.0f;
+    for (u32 i = 0; i < 8u; ++i) {
+        result += c[i] * power;
+        power *= v2;
+    }
+    return result + c[8];
+}
+
+float esin_approx(float value) {
+    static constexpr float c[5] = {
+        1.0f,
+        -0.166666567325592f,
+        0.008333025500178f,
+        -0.000198074136279f,
+        0.000002601886990f,
+    };
+
+    const float v2 = value * value;
+    float power = value;
+    float result = 0.0f;
+    for (u32 i = 0; i < 5u; ++i) {
+        result += c[i] * power;
+        power *= v2;
+    }
+    return result;
+}
+
+float eexp_approx(float value) {
+    static constexpr float c[6] = {
+        0.249998688697815f,
+        0.031257584691048f,
+        0.002591371303424f,
+        0.000171562001924f,
+        0.000005430199963f,
+        0.000000690600018f,
+    };
+
+    float poly = 1.0f;
+    float power = value;
+    for (u32 i = 0; i < 6u; ++i) {
+        poly += c[i] * power;
+        power *= value;
+    }
+    const float fourth = poly * poly * poly * poly;
+    return fourth == 0.0f ? 0.0f : 1.0f / fourth;
+}
+
 } // namespace
 
 Vu1::Vu1(EeBus& bus, GsCore& gs)
@@ -59,6 +121,7 @@ void Vu1::reset() {
     i_ = 0;
     q_ = as_bits(1.0f);
     p_ = 0;
+    r_ = as_bits(1.0f);
     status_ = 0;
     mac_ = 0;
     clip_ = 0;
@@ -423,7 +486,26 @@ bool Vu1::execute_upper_special(
         return true;
     case 0x06: acc_scalar_math(bc, 4); return true;
     case 0x07:
-        if (group == 0x3Cu) {
+        auto set_p = [&](float value) {
+        p_ = as_bits(value);
+    };
+    auto vector_sum_squares = [&]() {
+        const u32 s = fs(code);
+        const float x = as_float(vf_[s][0]);
+        const float y = as_float(vf_[s][1]);
+        const float z = as_float(vf_[s][2]);
+        return x * x + y * y + z * z;
+    };
+    auto random_to_ft = [&]() {
+        if (ft(code) == 0u) return;
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (lane_enabled(code, lane)) {
+                write_vf_lane(ft(code), lane, r_);
+            }
+        }
+    };
+
+    if (group == 0x3Cu) {
             acc_scalar_math(as_float(q_), 4);
             return true;
         }
@@ -826,6 +908,36 @@ bool Vu1::execute_lower_special(
                 it(code),
                 static_cast<u16>(vf_[fs(code)][fsf(code)]));
             return true;
+        case 0x10: // RNEXT
+            if (ft(code) != 0u) {
+                const u32 x = (r_ >> 4) & 1u;
+                const u32 y = (r_ >> 22) & 1u;
+                r_ <<= 1u;
+                r_ ^= x ^ y;
+                r_ = (r_ & 0x007FFFFFu) | 0x3F800000u;
+                random_to_ft();
+            }
+            return true;
+        case 0x1C: // ESADD
+            set_p(vector_sum_squares());
+            return true;
+        case 0x1D: { // EATANxy
+            const u32 s = fs(code);
+            const float x = as_float(vf_[s][0]);
+            const float y = as_float(vf_[s][1]);
+            set_p(x == 0.0f ? 0.0f : eatan_approx(y / x));
+            return true;
+        }
+        case 0x1E: { // ESQRT
+            float value = as_float(vf_[fs(code)][fsf(code)]);
+            if (value >= 0.0f) value = std::sqrt(value);
+            set_p(value);
+            return true;
+        }
+        case 0x1F: // ESIN
+            set_p(esin_approx(
+                as_float(vf_[fs(code)][fsf(code)])));
+            return true;
         case 0x19: // MFP
             for (u32 lane = 0; lane < 4u; ++lane) {
                 if (lane_enabled(code, lane)) {
@@ -886,6 +998,35 @@ bool Vu1::execute_lower_special(
             }
             return true;
         }
+        case 0x10: // RGET
+            random_to_ft();
+            return true;
+        case 0x1C: { // ERSADD
+            float value = vector_sum_squares();
+            if (value != 0.0f) value = 1.0f / value;
+            set_p(value);
+            return true;
+        }
+        case 0x1D: { // EATANxz
+            const u32 s = fs(code);
+            const float x = as_float(vf_[s][0]);
+            const float z = as_float(vf_[s][2]);
+            set_p(x == 0.0f ? 0.0f : eatan_approx(z / x));
+            return true;
+        }
+        case 0x1E: { // ERSQRT
+            float value = as_float(vf_[fs(code)][fsf(code)]);
+            if (value >= 0.0f) {
+                value = std::sqrt(value);
+                if (value != 0.0f) value = 1.0f / value;
+            }
+            set_p(value);
+            return true;
+        }
+        case 0x1F: // EATAN
+            set_p(eatan_approx(
+                as_float(vf_[fs(code)][fsf(code)])));
+            return true;
         case 0x1A: { // XITOP
             u32 value = 0;
             if (!bus_.read32(kVif1Itop, value)) {
@@ -942,6 +1083,36 @@ bool Vu1::execute_lower_special(
             }
             return true;
         }
+        case 0x10: // RINIT
+            r_ =
+                0x3F800000u |
+                (vf_[fs(code)][fsf(code)] & 0x007FFFFFu);
+            return true;
+        case 0x1C: { // ELENG
+            float value = vector_sum_squares();
+            if (value >= 0.0f) value = std::sqrt(value);
+            set_p(value);
+            return true;
+        }
+        case 0x1D: { // ESUM
+            const u32 s = fs(code);
+            set_p(
+                as_float(vf_[s][0]) +
+                as_float(vf_[s][1]) +
+                as_float(vf_[s][2]) +
+                as_float(vf_[s][3]));
+            return true;
+        }
+        case 0x1E: { // ERCPR
+            float value = as_float(vf_[fs(code)][fsf(code)]);
+            if (value != 0.0f) value = 1.0f / value;
+            set_p(value);
+            return true;
+        }
+        case 0x1F: // EEXP
+            set_p(eexp_approx(
+                as_float(vf_[fs(code)][fsf(code)])));
+            return true;
         default:
             ++stats_.unsupported_lower;
             return true;
@@ -957,6 +1128,20 @@ bool Vu1::execute_lower_special(
                 error = "VU1 SQD data write fault";
                 return false;
             }
+            return true;
+        }
+        case 0x10: // RXOR
+            r_ =
+                0x3F800000u |
+                ((r_ ^ vf_[fs(code)][fsf(code)]) & 0x007FFFFFu);
+            return true;
+        case 0x1C: { // ERLENG
+            float value = vector_sum_squares();
+            if (value >= 0.0f) {
+                value = std::sqrt(value);
+                if (value != 0.0f) value = 1.0f / value;
+            }
+            set_p(value);
             return true;
         }
         case 0x0E: // WAITQ
