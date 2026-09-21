@@ -1112,9 +1112,21 @@ bool test_iop_sio2_minimal_transfer_status() {
     ps2::u32 value = 0;
 
     bool ok = expect(
+        system.iop_bus().read32(0x1F808268u, value) &&
+            value == 0x000003BCu,
+        "SIO2 CTRL reset value mismatch");
+    ok = expect(
+        system.iop_bus().read32(0x1F80826Cu, value) &&
+            value == 0x0001D100u,
+        "SIO2 CMD_STAT reset value mismatch") && ok;
+    ok = expect(
         system.iop_bus().read32(0x1F808270u, value) &&
             value == 0x0000000Fu,
-        "SIO2 PORT_STAT reset value mismatch");
+        "SIO2 PORT_STAT reset value mismatch") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F808274u, value) &&
+            value == 0u,
+        "SIO2 FIFO_STAT reset value mismatch") && ok;
 
     ok = expect(
         system.iop_bus().write32(0x1F808268u, 1u),
