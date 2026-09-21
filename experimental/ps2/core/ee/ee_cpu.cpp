@@ -65,6 +65,45 @@ void multiply_unsigned32(u32 lhs, u32 rhs, u64& lo, u64& hi) {
     hi = sign_extend_32(static_cast<u32>(result >> 32));
 }
 
+void madd_signed32(
+    u32 lhs,
+    u32 rhs,
+    u64& lo,
+    u64& hi) {
+    const u64 accumulator =
+        static_cast<u64>(static_cast<u32>(lo)) |
+        (static_cast<u64>(static_cast<u32>(hi)) << 32);
+    const s64 product =
+        static_cast<s64>(static_cast<s32>(lhs)) *
+        static_cast<s64>(static_cast<s32>(rhs));
+    const u64 result =
+        accumulator + static_cast<u64>(product);
+    lo = sign_extend_32(static_cast<u32>(result));
+    hi = sign_extend_32(static_cast<u32>(result >> 32));
+}
+
+void madd_unsigned32(
+    u32 lhs,
+    u32 rhs,
+    u64& lo,
+    u64& hi) {
+    const u64 accumulator =
+        static_cast<u64>(static_cast<u32>(lo)) |
+        (static_cast<u64>(static_cast<u32>(hi)) << 32);
+    const u64 result =
+        accumulator +
+        static_cast<u64>(lhs) * static_cast<u64>(rhs);
+    lo = sign_extend_32(static_cast<u32>(result));
+    hi = sign_extend_32(static_cast<u32>(result >> 32));
+}
+
+u32 leading_sign_bits_excluding_sign(u32 value) {
+    if ((value & 0x80000000u) != 0) {
+        value = ~value;
+    }
+    return std::countl_zero(value) - 1u;
+}
+
 float ps2_fpu_input(u32 bits) {
     const u32 exponent = bits & 0x7F800000u;
     if (exponent == 0) bits &= 0x80000000u;
@@ -1462,6 +1501,38 @@ bool EeCpu::execute_mmi(
     };
 
     switch (funct) {
+    case 0x00: // MADD
+        madd_signed32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo,
+            state_.hi);
+        write_gpr64(rd, state_.lo);
+        return true;
+    case 0x01: // MADDU
+        madd_unsigned32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo,
+            state_.hi);
+        write_gpr64(rd, state_.lo);
+        return true;
+    case 0x04: { // PLZCW
+        if (rd != 0u) {
+            EeGpr out = state_.gpr[rd];
+            const u32 word0 =
+                leading_sign_bits_excluding_sign(
+                    static_cast<u32>(gpr_u64(rs)));
+            const u32 word1 =
+                leading_sign_bits_excluding_sign(
+                    static_cast<u32>(gpr_u64(rs) >> 32));
+            out.lo =
+                static_cast<u64>(word0) |
+                (static_cast<u64>(word1) << 32);
+            state_.gpr[rd] = out;
+        }
+        return true;
+    }
     case 0x08:
         if (mmi0(sa)) return true;
         return fail(
@@ -1517,6 +1588,22 @@ bool EeCpu::execute_mmi(
             static_cast<u32>(gpr_u64(rt)),
             state_.lo1,
             state_.hi1);
+        return true;
+    case 0x20: // MADD1
+        madd_signed32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        write_gpr64(rd, state_.lo1);
+        return true;
+    case 0x21: // MADDU1
+        madd_unsigned32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        write_gpr64(rd, state_.lo1);
         return true;
     case 0x28:
         if (mmi1(sa)) return true;
