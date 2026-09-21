@@ -194,6 +194,61 @@ bool test_vif1_direct_path2() {
     return ok;
 }
 
+bool test_vif1_unpack_v4_5_expansion() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    constexpr ps2::u32 stream = 0x5600u;
+    constexpr ps2::u32 stmod_addrow =
+        (0x05u << 24) | 1u;
+    constexpr ps2::u32 unpack_v4_5 =
+        (0x6Fu << 24) | (1u << 16) | 0x0020u;
+    constexpr ps2::u32 packed =
+        31u | (1u << 5) | (2u << 10) | (1u << 15);
+
+    bool ok = expect(
+        write_words(
+            system.bus(),
+            stream,
+            stmod_addrow,
+            unpack_v4_5,
+            packed,
+            0u),
+        "failed to build VIF1 V4-5 packet");
+    ok = expect(
+        setup_normal_dma(system, stream, 1u),
+        "failed to arm VIF1 V4-5 DMA") && ok;
+
+    std::string error;
+    ok = expect(
+        dma.service(
+            system.bus(),
+            system.gs_core(),
+            system.gs_privileged(),
+            error),
+        "VIF1 V4-5 DMA service failed") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+
+    const ps2::u32 expected[4] = {
+        31u << 3,
+        1u << 3,
+        2u << 3,
+        1u << 7,
+    };
+    for (ps2::u32 lane = 0; lane < 4u; ++lane) {
+        ps2::u32 value = 0;
+        ok = expect(
+            system.bus().read32(
+                0x1100C000u + 0x20u * 16u + lane * 4u,
+                value) &&
+            value == expected[lane],
+            "VIF1 V4-5 expansion/mode mismatch") && ok;
+    }
+
+    return ok;
+}
+
 bool test_vif1_status_tracks_payload_progress() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -359,6 +414,7 @@ int main() {
     bool ok = true;
     ok = test_vif1_mpg_and_unpack() && ok;
     ok = test_vif1_direct_path2() && ok;
+    ok = test_vif1_unpack_v4_5_expansion() && ok;
     ok = test_vif1_status_tracks_payload_progress() && ok;
     ok = test_vif1_flush_drains_vu1() && ok;
     ok = test_vif1_source_chain_tte() && ok;
