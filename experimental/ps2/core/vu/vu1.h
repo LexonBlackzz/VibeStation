@@ -20,7 +20,15 @@ struct Vu1Stats {
 
 class Vu1 {
 public:
-    Vu1(EeBus& bus, GsCore& gs);
+    Vu1(
+        EeBus& bus,
+        GsCore& gs,
+        u32 micro_base = 0x11008000u,
+        u32 data_base = 0x1100C000u,
+        u32 memory_mask = 0x3FFFu,
+        u32 vif_itop = 0x10003CD0u,
+        u32 vif_top = 0x10003CE0u,
+        bool xgkick_enabled = true);
 
     void reset();
     void start(u32 address);
@@ -35,10 +43,24 @@ public:
     [[nodiscard]] u32 vf(u32 index, u32 lane) const {
         return vf_[index & 31u][lane & 3u];
     }
+    [[nodiscard]] u32 acc(u32 lane) const { return acc_[lane & 3u]; }
+    [[nodiscard]] u32 immediate() const { return i_; }
+    [[nodiscard]] u32 q() const { return q_; }
     [[nodiscard]] u32 p() const { return p_; }
     [[nodiscard]] u32 random() const { return r_; }
     [[nodiscard]] u32 status() const { return status_; }
     [[nodiscard]] u32 mac() const { return mac_; }
+    [[nodiscard]] u32 clip() const { return clip_; }
+    void set_vf(u32 reg, u32 lane, u32 value);
+    void set_vi(u32 reg, u16 value);
+    void set_acc(u32 lane, u32 value);
+    void set_immediate(u32 value) { i_ = value; }
+    void set_q(u32 value) { q_ = value; }
+    void set_p(u32 value) { p_ = value; }
+    void set_random(u32 value) { r_ = value; }
+    void set_status(u32 value) { status_ = value & 0xFFFu; }
+    void set_mac(u32 value) { mac_ = value & 0xFFFFu; }
+    void set_clip(u32 value) { clip_ = value & 0xFFFFFFu; }
     [[nodiscard]] const Vu1Stats& stats() const { return stats_; }
 
 private:
@@ -70,6 +92,12 @@ private:
 
     EeBus& bus_;
     GsCore& gs_;
+    u32 micro_base_ = 0x11008000u;
+    u32 data_base_ = 0x1100C000u;
+    u32 memory_mask_ = 0x3FFFu;
+    u32 vif_itop_ = 0x10003CD0u;
+    u32 vif_top_ = 0x10003CE0u;
+    bool xgkick_enabled_ = true;
 
     std::array<std::array<u32, 4>, 32> vf_{};
     std::array<u16, 16> vi_{};
