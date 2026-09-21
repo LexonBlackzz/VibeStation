@@ -26,9 +26,13 @@ constexpr u32 kRegXyoffset1 = 0x18;
 constexpr u32 kRegPrmodecont = 0x1A;
 constexpr u32 kRegPrmode = 0x1B;
 constexpr u32 kRegTexclut = 0x1C;
+constexpr u32 kRegScanmsk = 0x22;
 constexpr u32 kRegTexa = 0x3B;
+constexpr u32 kRegFogcol = 0x3D;
 constexpr u32 kRegScissor1 = 0x40;
 constexpr u32 kRegAlpha1 = 0x42;
+constexpr u32 kRegDimx = 0x44;
+constexpr u32 kRegDthe = 0x45;
 constexpr u32 kRegColclamp = 0x46;
 constexpr u32 kRegTest1 = 0x47;
 constexpr u32 kRegPabe = 0x49;
@@ -185,7 +189,8 @@ void GsCore::process_packed(u32 descriptor, u64 lo, u64 hi) {
     case 0x08: // CLAMP_1
     case 0x09: // CLAMP_2
     case 0x0A: // FOG
-        write_register(descriptor, lo);
+        // Packed FOG stores F in bits 100..107 of the 128-bit payload.
+        write_register(0x0A, static_cast<u64>((hi >> 36) & 0xFFu) << 56);
         return;
     case 0x0E: // A+D
         write_register(static_cast<u32>(hi & 0xFFu), lo);
@@ -238,8 +243,10 @@ void GsCore::write_register(u32 address, u64 value) {
 
     if (address == kRegPrim) {
         draw_vertex_count_ = 0;
-    } else if (address == kRegXyz2 || address == kRegXyzf2) {
-        submit_vertex(value);
+    } else if (address == kRegXyz2) {
+        submit_vertex(value, false);
+    } else if (address == kRegXyzf2) {
+        submit_vertex(value, true);
     }
 }
 
@@ -489,6 +496,11 @@ GsRasterContext GsCore::raster_context() const {
     ctx.pabe = (registers_[kRegPabe] & 1u) != 0;
     ctx.fba = (registers_[kRegFba1 + ctxt] & 1u) != 0;
     ctx.color_clamp = (registers_[kRegColclamp] & 1u) != 0;
+    ctx.fog_enabled = (prim & (1ull << 5)) != 0;
+    ctx.fog_color = static_cast<u32>(registers_[kRegFogcol]) & 0x00FFFFFFu;
+    ctx.scanmask = static_cast<u32>(registers_[kRegScanmsk]) & 0x3u;
+    ctx.dither = (registers_[kRegDthe] & 1u) != 0;
+    ctx.dimx = registers_[kRegDimx];
 
     if ((prim & (1ull << 4)) != 0) {
         const u64 tex0 = registers_[kRegTex0_1 + ctxt];
@@ -535,11 +547,10 @@ GsRasterContext GsCore::raster_context() const {
 bool GsCore::raster_state_supported() const {
     const u64 prim = effective_prim();
 
-    // Fog and AA coverage are still explicit skips. Gouraud, alpha blending,
+    // AA1 coverage is still an explicit skip. Fog, Gouraud, alpha blending,
     // alpha/destination tests and Z buffering are handled by the software
     // pixel pipeline.
     constexpr u64 kUnsupportedPrim =
-        (1ull << 5) | // FGE
         (1ull << 7);  // AA1
     if ((prim & kUnsupportedPrim) != 0) return false;
 
@@ -589,7 +600,7 @@ void GsCore::emit_primitive(
     }
 }
 
-void GsCore::submit_vertex(u64 xyz) {
+void GsCore::submit_vertex(u64 xyz, bool xyzf) {
     ++stats_.vertices;
 
     const u64 prim_reg = effective_prim();
@@ -602,7 +613,12 @@ void GsCore::submit_vertex(u64 xyz) {
           static_cast<s32>(static_cast<u32>(xyoffset) & 0xFFFFu);
     v.y = static_cast<s32>((static_cast<u32>(xyz) >> 16) & 0xFFFFu) -
           static_cast<s32>(static_cast<u32>(xyoffset >> 32) & 0xFFFFu);
-    v.z = static_cast<u32>(xyz >> 32);
+    v.z = xyzf
+        ? static_cast<u32>((xyz >> 32) & 0x00FFFFFFu)
+        : static_cast<u32>(xyz >> 32);
+    v.fog = xyzf
+        ? static_cast<u32>((xyz >> 56) & 0xFFu)
+        : static_cast<u32>((registers_[0x0A] >> 56) & 0xFFu);
     v.rgba = static_cast<u32>(registers_[kRegRgbaq]);
     const u64 uv = registers_[kRegUv];
     v.u = static_cast<s32>(uv & 0x3FFFu);

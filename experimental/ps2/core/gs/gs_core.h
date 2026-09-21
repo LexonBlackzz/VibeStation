@@ -103,7 +103,7 @@ private:
     void execute_local_to_local();
     void consume_image_qword(u64 lo, u64 hi);
     void consume_pending_pixels();
-    void submit_vertex(u64 xyz);
+    void submit_vertex(u64 xyz, bool xyzf);
     void emit_primitive(
         const GsRasterVertex& a,
         const GsRasterVertex& b,

@@ -50,6 +50,33 @@ u32 modulate_channel(u32 texture, u32 vertex) {
     return std::min(255u, (texture * vertex) >> 7);
 }
 
+
+s32 dither_value(u64 dimx, s32 x, s32 y) {
+    const u32 index =
+        (static_cast<u32>(y) & 3u) * 4u +
+        (static_cast<u32>(x) & 3u);
+    const u32 raw = static_cast<u32>((dimx >> (index * 4u)) & 0x7u);
+    return (raw & 0x4u) != 0
+        ? static_cast<s32>(raw) - 8
+        : static_cast<s32>(raw);
+}
+
+u32 interpolate_scalar(
+    s64 w0,
+    s64 w1,
+    s64 w2,
+    s64 area,
+    u32 a,
+    u32 b,
+    u32 c) {
+    const s64 numerator =
+        w0 * static_cast<s64>(a) +
+        w1 * static_cast<s64>(b) +
+        w2 * static_cast<s64>(c);
+    return static_cast<u32>(
+        std::clamp<s64>(numerator / area, 0, 255));
+}
+
 s32 wrap_coordinate(
     s32 coordinate,
     u32 size,
@@ -361,6 +388,37 @@ u32 GsRasterizer::shade_pixel(
     return out;
 }
 
+u32 GsRasterizer::apply_fog(u32 rgba, u32 fog_color, u32 fog) {
+    fog &= 0xFFu;
+    u32 out = rgba & 0xFF000000u;
+    for (u32 shift : {0u, 8u, 16u}) {
+        const u32 source = channel(rgba, shift);
+        const u32 target = channel(fog_color, shift);
+        const u32 value =
+            (source * fog + target * (256u - fog)) >> 8;
+        out |= (value & 0xFFu) << shift;
+    }
+    return out;
+}
+
+u32 GsRasterizer::apply_dither(
+    u32 rgba,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y) {
+    if (!ctx.dither || (ctx.psm != 2u && ctx.psm != 10u)) return rgba;
+
+    const s32 d = dither_value(ctx.dimx, x, y);
+    u32 out = rgba & 0xFF000000u;
+    for (u32 shift : {0u, 8u, 16u}) {
+        s32 value = static_cast<s32>(channel(rgba, shift)) + d;
+        if (ctx.color_clamp) value = std::clamp(value, 0, 255);
+        else value &= 0xFF;
+        out |= static_cast<u32>(value) << shift;
+    }
+    return out;
+}
+
 bool GsRasterizer::draw_pixel(
     GsVram& vram,
     const GsRasterContext& ctx,
@@ -370,6 +428,13 @@ bool GsRasterizer::draw_pixel(
     u32 rgba) {
     if (x < ctx.scax0 || x > ctx.scax1 || y < ctx.scay0 || y > ctx.scay1)
         return false;
+
+    // SCANMSK 2 prohibits even lines; 3 prohibits odd lines. Value 1 is
+    // reserved and is treated as normal rendering.
+    if ((ctx.scanmask == 2u && (y & 1) == 0) ||
+        (ctx.scanmask == 3u && (y & 1) != 0)) {
+        return false;
+    }
 
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
@@ -444,6 +509,7 @@ bool GsRasterizer::draw_pixel(
         } else {
             const u16 old = static_cast<u16>(
                 vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
+            output = apply_dither(output, ctx, x, y);
             u16 packed = rgba32_to_16(output);
 
             // FRAME.FBMSK is expressed in 32-bit RGBA channel bit positions
@@ -489,8 +555,9 @@ u64 GsRasterizer::draw_point(
         v = stq_to_fixed(vertex.t, vertex.q, ctx.texture.height);
     }
 
-    const u32 rgba = shade_pixel(
+    u32 rgba = shade_pixel(
         vram, ctx.texture, u, v, vertex.rgba);
+    if (ctx.fog_enabled) rgba = apply_fog(rgba, ctx.fog_color, vertex.fog);
     return draw_pixel(vram, ctx, x, y, vertex.z, rgba) ? 1u : 0u;
 }
 
@@ -647,8 +714,16 @@ u64 GsRasterizer::draw_line(
         const u32 vertex_rgba = ctx.gouraud
             ? interpolate_rgba_line(a.rgba, b.rgba, t)
             : b.rgba;
-        const u32 rgba = shade_pixel(
+        u32 rgba = shade_pixel(
             vram, ctx.texture, u, v, vertex_rgba);
+        if (ctx.fog_enabled) {
+            const u32 fog = static_cast<u32>(std::clamp<long double>(
+                static_cast<long double>(a.fog) +
+                (static_cast<long double>(b.fog) -
+                 static_cast<long double>(a.fog)) * t,
+                0.0L, 255.0L));
+            rgba = apply_fog(rgba, ctx.fog_color, fog);
+        }
         const u32 z = interpolate_u32(a.z, b.z, t);
         if (draw_pixel(vram, ctx, x, y, z, rgba)) {
             ++pixels;
@@ -724,7 +799,26 @@ u64 GsRasterizer::draw_sprite(
                 u = stq_to_fixed(s, q, ctx.texture.width);
                 v = stq_to_fixed(t, q, ctx.texture.height);
             }
-            const u32 rgba = shade_pixel(vram, ctx.texture, u, v, b.rgba);
+            u32 rgba = shade_pixel(vram, ctx.texture, u, v, b.rgba);
+            if (ctx.fog_enabled) {
+                const long double fx = dx != 0
+                    ? std::clamp(
+                        static_cast<long double>(px - a.x) /
+                        static_cast<long double>(dx), 0.0L, 1.0L)
+                    : 0.0L;
+                const long double fy = dy != 0
+                    ? std::clamp(
+                        static_cast<long double>(py - a.y) /
+                        static_cast<long double>(dy), 0.0L, 1.0L)
+                    : 0.0L;
+                const long double t_fog = (fx + fy) * 0.5L;
+                const u32 fog = static_cast<u32>(std::clamp<long double>(
+                    static_cast<long double>(a.fog) +
+                    (static_cast<long double>(b.fog) -
+                     static_cast<long double>(a.fog)) * t_fog,
+                    0.0L, 255.0L));
+                rgba = apply_fog(rgba, ctx.fog_color, fog);
+            }
             if (draw_pixel(vram, ctx, x, y, b.z, rgba)) ++pixels;
         }
     }
@@ -794,8 +888,13 @@ u64 GsRasterizer::draw_triangle(
                 ? interpolate_rgba(
                     w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
                 : c.rgba;
-            const u32 rgba = shade_pixel(
+            u32 rgba = shade_pixel(
                 vram, ctx.texture, u, v, vertex_rgba);
+            if (ctx.fog_enabled) {
+                const u32 fog = interpolate_scalar(
+                    w0, w1, w2, area, a.fog, b.fog, c.fog);
+                rgba = apply_fog(rgba, ctx.fog_color, fog);
+            }
             const u32 z = interpolate_z(
                 w0, w1, w2, area, a.z, b.z, c.z);
             if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;

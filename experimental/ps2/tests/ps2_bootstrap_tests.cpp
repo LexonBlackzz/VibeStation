@@ -1717,6 +1717,132 @@ bool test_gs_signal_finish_label_and_imr() {
     return ok;
 }
 
+
+bool test_gs_fog_dither_scanmask_and_context2() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag =
+            1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xyz = [](ps2::u32 x_fp, ps2::u32 y_fp, ps2::u32 z = 0) {
+        return static_cast<ps2::u64>(x_fp & 0xFFFFu) |
+               (static_cast<ps2::u64>(y_fp & 0xFFFFu) << 16) |
+               (static_cast<ps2::u64>(z) << 32);
+    };
+
+    const ps2::u64 frame32 = static_cast<ps2::u64>(1u) << 16;
+    const ps2::u64 scissor =
+        (static_cast<ps2::u64>(31u) << 16) |
+        (static_cast<ps2::u64>(31u) << 48);
+    bool ok = true;
+
+    // Packed FOG uses bits 100..107, not the low 64-bit payload.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 tag =
+            1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xAull);
+        gs.write_gif_qword(0, static_cast<ps2::u64>(0x5Au) << 36);
+        ok = expect(
+            gs.register_value(0x0A) ==
+                (static_cast<ps2::u64>(0x5Au) << 56),
+            "packed FOG field decode mismatch") && ok;
+    }
+
+    // FGE blends RGB toward FOGCOL using the per-vertex fog coefficient.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame32);
+        ad(gs, 0x3D, 0x00FF0000u); // blue fog
+        ad(gs, 0x0A, static_cast<ps2::u64>(128u) << 56);
+        ad(gs, 0x00, 1u << 5); // point + FGE
+        ad(gs, 0x01, 0x800000FFu); // red
+        ad(gs, 0x05, xyz(0, 0));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x807F007Full,
+            "GS fog blend mismatch") && ok;
+        ok = expect(gs.stats().skipped_raster_draws == 0,
+                    "FGE draw was still rejected") && ok;
+    }
+
+    // DTHE/DIMX only affect 16-bit color quantization.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 frame16 =
+            (static_cast<ps2::u64>(1u) << 16) |
+            (static_cast<ps2::u64>(2u) << 24);
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame16);
+        ad(gs, 0x44, 3u); // DIMX[0][0] = +3
+        ad(gs, 0x45, 1u); // DTHE
+        ad(gs, 0x00, 0u);
+        ad(gs, 0x01, 0x80050505u);
+        ad(gs, 0x05, xyz(0, 0));
+
+        ok = expect(
+            gs.vram().read_pixel(2, 0, 0, 0, 1) == 0x8421u,
+            "GS 16-bit dithering mismatch") && ok;
+    }
+
+    // SCANMSK=2 prohibits even scanlines while leaving odd scanlines active.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame32);
+        ad(gs, 0x22, 2u);
+        ad(gs, 0x00, 6u); // sprite
+        ad(gs, 0x01, 0xA0112233u);
+        ad(gs, 0x05, xyz(0, 0));
+        ad(gs, 0x05, xyz(16, 32));
+
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0,
+                    "SCANMSK drew prohibited even line") && ok;
+        ok = expect(gs.vram().read_pixel(0, 0, 1, 0, 1) == 0xA0112233u,
+                    "SCANMSK suppressed allowed odd line") && ok;
+    }
+
+    // CTXT=1 must use the second XYOFFSET/SCISSOR/TEST/FRAME register bank.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        const ps2::u64 frame2 =
+            1ull |
+            (static_cast<ps2::u64>(1u) << 16); // FBP=1 -> BP 32
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x19, 0u);
+        ad(gs, 0x41, scissor);
+        ad(gs, 0x48, 0u);
+        ad(gs, 0x4D, frame2);
+        ad(gs, 0x00, 1ull << 9); // point + CTXT=1
+        ad(gs, 0x01, 0xCC445566u);
+        ad(gs, 0x05, xyz(0, 0));
+
+        ok = expect(
+            gs.vram().read_pixel(0, 0, 0, 32, 1) == 0xCC445566u,
+            "GS context-2 FRAME target mismatch") && ok;
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0,
+                    "GS context-2 draw leaked into context-1 target") && ok;
+    }
+
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1748,6 +1874,7 @@ int main() {
     ok = test_syscall_delay_slot_exception() && ok;
     ok = test_video_timing_vblank_irqs() && ok;
     ok = test_gif_packet_decode() && ok;
+    ok = test_gs_fog_dither_scanmask_and_context2() && ok;
     ok = test_gif_dma_engine() && ok;
     ok = test_gs_vram_swizzle_addresses() && ok;
     ok = test_gs_host_to_local_image_transfer() && ok;

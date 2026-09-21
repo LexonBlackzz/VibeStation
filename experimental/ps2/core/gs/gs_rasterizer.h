@@ -16,6 +16,7 @@ struct GsRasterVertex {
     float s = 0.0f; // STQ mode values.
     float t = 0.0f;
     float q = 1.0f;
+    u32 fog = 0xFFu;
 };
 
 struct GsTextureState {
@@ -83,6 +84,12 @@ struct GsRasterContext {
     bool fba = false;
     bool color_clamp = true;
 
+    bool fog_enabled = false;
+    u32 fog_color = 0;
+    u32 scanmask = 0;
+    bool dither = false;
+    u64 dimx = 0;
+
     GsTextureState texture{};
 };
 
@@ -129,6 +136,15 @@ private:
         s32 u,
         s32 v,
         u32 vertex_rgba);
+    [[nodiscard]] static u32 apply_fog(
+        u32 rgba,
+        u32 fog_color,
+        u32 fog);
+    [[nodiscard]] static u32 apply_dither(
+        u32 rgba,
+        const GsRasterContext& ctx,
+        s32 x,
+        s32 y);
 };
 
 } // namespace ps2
