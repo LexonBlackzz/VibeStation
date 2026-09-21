@@ -942,6 +942,17 @@ bool test_iop_spu2_register_window() {
                "SPU2 KSEG1 32-bit readback mismatch") &&
         ok;
 
+    ok =
+        expect(system.iop_bus().write16(0xBF900B60u, 0xA55Au),
+               "SPU2 high register write failed") &&
+        ok;
+    value16 = 0;
+    ok =
+        expect(system.iop_bus().read16(0x1F900B60u, value16) &&
+                   value16 == 0xA55Au,
+               "SPU2 high register alias mismatch") &&
+        ok;
+
     return ok;
 }
 

@@ -69,7 +69,7 @@ private:
     CdvdHw& cdvd_;
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};
-    std::array<u8, 0x800> spu2_regs_{};
+    std::array<u8, 0x10000> spu2_regs_{};
     std::array<RootCounter, 6> root_counters_{};
 };
 
