@@ -655,6 +655,73 @@ bool test_ee_break_exception_and_tlb_ops() {
     return ok;
 }
 
+bool test_ee_tlb_mapped_memory_and_refill() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3400u;
+    constexpr ps2::u32 virtual_base = 0xC0004000u;
+    constexpr ps2::u32 physical_base = 0x00002000u;
+
+    // LW r3,0(r2); SW r4,4(r2)
+    constexpr ps2::u32 lw =
+        (0x23u << 26) | (2u << 21) | (3u << 16);
+    constexpr ps2::u32 sw =
+        (0x2Bu << 26) | (2u << 21) | (4u << 16) | 4u;
+
+    bool ok = expect(
+        system.bus().write32(pc, lw) &&
+        system.bus().write32(pc + 4u, sw) &&
+        system.bus().write32(physical_base, 0x89ABCDEFu),
+        "TLB mapped-memory test setup failed");
+
+    system.ee().reset(pc);
+    auto& state = system.ee().state();
+    state.gpr[2].lo = virtual_base;
+    state.gpr[4].lo = 0x12345678u;
+
+    auto& entry = state.tlb[0];
+    entry.page_mask = 0u;
+    entry.entry_hi = virtual_base; // ASID 0.
+    entry.entry_lo0 =
+        ((physical_base >> 12) << 6) | 0x7u; // G|V|D.
+    entry.entry_lo1 =
+        (((physical_base + 0x1000u) >> 12) << 6) | 0x7u;
+
+    std::string error;
+    ok = expect(system.ee().step(error),
+                "TLB-mapped LW execution failed") && ok;
+    ok = expect(state.gpr[3].lo == 0xFFFFFFFF89ABCDEFull,
+                "TLB-mapped LW value mismatch") && ok;
+
+    ok = expect(system.ee().step(error),
+                "TLB-mapped SW execution failed") && ok;
+    ps2::u32 stored = 0;
+    ok = expect(
+        system.bus().read32(physical_base + 4u, stored) &&
+            stored == 0x12345678u,
+        "TLB-mapped SW did not reach physical RAM") && ok;
+
+    // A missing mapped address should enter the refill vector rather than
+    // halting the interpreter.
+    system.ee().reset(pc);
+    state.gpr[2].lo = 0xC1000000u;
+    state.cop0[12] = 0u; // BEV=EXL=0.
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "TLB refill exception step failed") && ok;
+    ok = expect(!system.ee().halted(),
+                "TLB miss incorrectly halted EE") && ok;
+    ok = expect(state.pc == 0x80000000u,
+                "TLB miss did not use refill vector") && ok;
+    ok = expect((state.cop0[13] & 0x7Cu) == 0x08u,
+                "TLB miss Cause mismatch") && ok;
+    ok = expect(state.cop0[8] == 0xC1000000u,
+                "TLB miss BadVAddr mismatch") && ok;
+    ok = expect((state.cop0[10] & 0xFFFFE000u) == 0xC1000000u,
+                "TLB miss EntryHi VPN2 mismatch") && ok;
+
+    return ok;
+}
+
 bool test_ee_integer_overflow_exception() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x3000u;
@@ -2592,6 +2659,7 @@ int main() {
     ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_ee_break_exception_and_tlb_ops() && ok;
+    ok = test_ee_tlb_mapped_memory_and_refill() && ok;
     ok = test_ee_integer_overflow_exception() && ok;
     ok = test_syscall_exception() && ok;
     ok = test_syscall_delay_slot_exception() && ok;
