@@ -81,6 +81,17 @@ void print_state(const ps2::Ps2System& system) {
         << " VIF1_QWC=0x" << vif_qwc
         << std::dec << '\n';
 
+    const auto& vu0 = system.vu0();
+    const auto& vu0_stats = vu0.stats();
+    std::cout
+        << "VU0_RUNNING=" << (vu0.running() ? 1 : 0)
+        << " VU0_PC=0x" << std::hex << std::uppercase << vu0.pc()
+        << std::dec
+        << " VU0_INSTRUCTIONS=" << vu0_stats.instructions
+        << " VU0_UNSUPPORTED_UPPER=" << vu0_stats.unsupported_upper
+        << " VU0_UNSUPPORTED_LOWER=" << vu0_stats.unsupported_lower
+        << '\n';
+
     const auto& vu = system.vu1();
     const auto& vu_stats = vu.stats();
     std::cout
