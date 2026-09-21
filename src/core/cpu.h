@@ -12,6 +12,7 @@
 
 class System;
 class CpuOptimizedBackend;
+class CpuJitV2Backend;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -350,6 +351,34 @@ struct CpuBackendStats {
   u64 decoded_instructions = 0;
   u64 native_instructions = 0;
   u64 native_cycles = 0;
+  // JIT V2 split: inline host instructions vs generated helper-backed guest
+  // instructions. Both are JIT-owned execution, but only the former are
+  // directly lowered to host code.
+  u64 jit_v2_inline_instructions = 0;
+  u64 jit_v2_helper_instructions = 0;
+  u64 jit_v2_helper_entries = 0;
+  u64 jit_v2_helper_blocks_compiled = 0;
+  u64 jit_v2_helper_state = 0;
+  u64 jit_v2_helper_icache = 0;
+  u64 jit_v2_helper_irq = 0;
+  u64 jit_v2_helper_unsupported = 0;
+  u64 jit_v2_helper_memory = 0;
+  u64 jit_v2_helper_budget = 0;
+  u64 jit_v2_helper_internal = 0;
+  u64 jit_v2_state_branch_delay = 0;
+  u64 jit_v2_state_load_delay = 0;
+  u64 jit_v2_state_pc = 0;
+  u64 jit_v2_state_diagnostics = 0;
+  u64 jit_v2_unsupported_lw = 0;
+  u64 jit_v2_unsupported_other_load = 0;
+  u64 jit_v2_unsupported_cop2 = 0;
+  u64 jit_v2_unsupported_cop0 = 0;
+  u64 jit_v2_unsupported_jump = 0;
+  u64 jit_v2_unsupported_other_branch = 0;
+  u64 jit_v2_unsupported_special_control = 0;
+  u64 jit_v2_unsupported_muldiv = 0;
+  u64 jit_v2_unsupported_store = 0;
+  u64 jit_v2_unsupported_other = 0;
   u64 fallback_instructions = 0;
   u64 interpreter_fallback_steps = 0;
   u64 forced_interpreter_slices = 0;
@@ -466,6 +495,8 @@ public:
   CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
   u32 read_instruction_for_backend(u32 addr) const;
   void notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes);
+  void notify_jit_code_write_only(u32 phys_or_normalized_addr,
+                                  u32 size_bytes);
   void notify_cpu_backend_frame(u32 frame_index);
   void flush_cpu_backend();
   CpuBackendStats cpu_backend_stats() const;
@@ -489,7 +520,9 @@ public:
 private:
   System *sys_ = nullptr;
   std::unique_ptr<CpuOptimizedBackend> optimized_backend_;
+  std::unique_ptr<CpuJitV2Backend> jit_v2_backend_;
   friend class CpuOptimizedBackend;
+  friend class CpuJitV2Backend;
 
   // ── Registers ──────────────────────────────────────────────────
   u32 gpr_[32] = {};    // General purpose registers (r0 ≡ 0)

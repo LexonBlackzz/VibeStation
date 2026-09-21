@@ -9,7 +9,8 @@ void App::draw_system_panel() {
                 const char* cpu_backend_labels[] = {
                     "Interpreter",
                     "Decoded Block",
-                    "x64 JIT"
+                    "x64 JIT",
+                    "x64 JIT V2"
                 };
                 int cpu_backend_index =
                     cpu_execution_mode_to_config_value(g_cpu_execution_mode);

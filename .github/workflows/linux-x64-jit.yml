@@ -1,0 +1,90 @@
+name: Linux x64 JIT
+
+on:
+  push:
+    branches:
+      - main
+      - integration/jit-v2-shippable-2026-09-21
+  workflow_dispatch:
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxss-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libudev-dev \
+            libdbus-1-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVIBESTATION_ENABLE_X64_JIT=ON \
+            -DVIBESTATION_ENABLE_DISCORD_RPC=OFF \
+            -DVIBESTATION_ENABLE_IPO=ON \
+            -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build-linux --parallel 2
+
+      - name: CPU backend compare
+        run: ./build-linux/VibeStation --cpu-backend-compare-test
+
+      - name: GPU self test
+        run: ./build-linux/VibeStation --gpu-self-test
+
+      - name: Upload Linux executable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStation-linux-x64
+          path: |
+            build-linux/VibeStation
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Prepare offline source bundle
+        if: always()
+        run: |
+          rm -rf offline-bundle
+          mkdir -p offline-bundle/VibeStation offline-bundle/deps
+          rsync -a \
+            --exclude '.git' \
+            --exclude 'build-linux' \
+            ./ offline-bundle/VibeStation/
+          for dep in sdl2-src imgui-src nlohmann_json-src xbyak-src; do
+            if [ -d "build-linux/_deps/$dep" ]; then
+              cp -a "build-linux/_deps/$dep" "offline-bundle/deps/$dep"
+            fi
+          done
+          tar -C offline-bundle -czf VibeStation-offline-src.tar.gz .
+
+      - name: Upload offline source bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStation-offline-src
+          path: VibeStation-offline-src.tar.gz
+          if-no-files-found: warn
+          retention-days: 7

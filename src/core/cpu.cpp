@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
+#include "cpu_jit_v2.h"
 #include "system.h"
 #include <array>
 #include <chrono>
@@ -773,6 +774,9 @@ void Cpu::init(System *sys) {
   if (!optimized_backend_) {
     optimized_backend_ = std::make_unique<CpuOptimizedBackend>(*this);
   }
+  if (!jit_v2_backend_) {
+    jit_v2_backend_ = std::make_unique<CpuJitV2Backend>(*this);
+  }
   reset();
 }
 
@@ -829,6 +833,9 @@ void Cpu::reset() {
   }
   if (optimized_backend_) {
     optimized_backend_->flush();
+  }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->flush();
   }
 }
 
@@ -1234,6 +1241,9 @@ void Cpu::invalidate_icache_line(u32 addr) {
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(addr & ~0x0Fu, 16u);
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->invalidate_range(addr & ~0x0Fu, 16u);
+  }
 }
 
 u32 Cpu::gte_command_cycles(u32 instruction) {
@@ -1385,8 +1395,10 @@ void Cpu::store32(u32 addr, u32 value) {
 }
 
 void Cpu::store16(u32 addr, u16 value) {
-  rr4_diag::on_store16(rr4_diag_state_, current_pc_, addr, value, gpr_,
-                       cycles_, *sys_);
+  if (g_log_fmv_diagnostics) {
+    rr4_diag::on_store16(rr4_diag_state_, current_pc_, addr, value, gpr_,
+                         cycles_, *sys_);
+  }
 
   if (addr & 1) {
     cop0_badvaddr_ = addr;
@@ -1777,9 +1789,11 @@ u32 Cpu::step() {
     return fault_cycles;
   }
 
-  rr4_diag::on_step(rr4_diag_state_, current_pc_, instruction, gpr_, cycles_,
-                    cpu_diag, cop0_sr_, cop0_cause_, sys_->irq_pending(),
-                    *sys_);
+  if (g_log_fmv_diagnostics || cpu_diag) {
+    rr4_diag::on_step(rr4_diag_state_, current_pc_, instruction, gpr_, cycles_,
+                      cpu_diag, cop0_sr_, cop0_cause_, sys_->irq_pending(),
+                      *sys_);
+  }
 
   if (cpu_diag) {
     if (current_pc_ >= 0xBFC02B58u && current_pc_ <= 0xBFC02B7Cu) {
@@ -2403,6 +2417,9 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   }
 
   const CpuExecutionMode mode = effective_cpu_execution_mode();
+  if (mode == CpuExecutionMode::X64JitV2 && jit_v2_backend_) {
+    return jit_v2_backend_->run_slice(max_cycles, max_instructions);
+  }
   if (mode != CpuExecutionMode::Interpreter && optimized_backend_) {
     return optimized_backend_->run_slice(max_cycles, max_instructions, mode);
   }
@@ -2436,8 +2453,16 @@ void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
       }
     }
   }
+  notify_jit_code_write_only(phys_or_normalized_addr, size_bytes);
+}
+
+void Cpu::notify_jit_code_write_only(u32 phys_or_normalized_addr,
+                                     u32 size_bytes) {
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
+  }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
 }
 
@@ -2445,15 +2470,25 @@ void Cpu::notify_cpu_backend_frame(u32 frame_index) {
   if (optimized_backend_) {
     optimized_backend_->begin_frame(frame_index);
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->begin_frame(frame_index);
+  }
 }
 
 void Cpu::flush_cpu_backend() {
   if (optimized_backend_) {
     optimized_backend_->flush();
   }
+  if (jit_v2_backend_) {
+    jit_v2_backend_->flush();
+  }
 }
 
 CpuBackendStats Cpu::cpu_backend_stats() const {
+  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV2 &&
+      jit_v2_backend_) {
+    return jit_v2_backend_->stats();
+  }
   return optimized_backend_ ? optimized_backend_->stats() : CpuBackendStats{};
 }
 
@@ -3239,8 +3274,10 @@ void Cpu::op_lw(u32 i) {
           static_cast<unsigned long long>(cycles_));
     }
   }
-  rr4_diag::on_op_lw(rr4_diag_state_, current_pc_, i, addr, gpr_, cycles_,
-                     cop0_sr_, cop0_cause_, sys_->irq_pending());
+  if (g_log_fmv_diagnostics) {
+    rr4_diag::on_op_lw(rr4_diag_state_, current_pc_, i, addr, gpr_, cycles_,
+                       cop0_sr_, cop0_cause_, sys_->irq_pending());
+  }
   u32 val = load32(addr);
   if (exception_raised_)
     return;
@@ -3314,8 +3351,10 @@ void Cpu::op_lwr(u32 i) {
 
 void Cpu::op_sb(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
-  rr4_diag::on_op_sb(rr4_diag_state_, current_pc_, i, addr, gpr_,
-                     cop0_sr_, cop0_cause_, sys_->irq_pending());
+  if (g_log_fmv_diagnostics) {
+    rr4_diag::on_op_sb(rr4_diag_state_, current_pc_, i, addr, gpr_,
+                       cop0_sr_, cop0_cause_, sys_->irq_pending());
+  }
   const u32 phys = addr & 0x1FFFFFFFu;
   if (cpu_diag_enabled() && current_pc_ == 0xBFC02B7Cu &&
       phys >= 0x00047680u && phys < 0x000476C0u) {
@@ -3337,7 +3376,9 @@ void Cpu::op_sb(u32 i) {
 
 void Cpu::op_sh(u32 i) {
   u32 addr = gpr_[rs(i)] + static_cast<u32>(simm(i));
-  rr4_diag::on_op_sh(rr4_diag_state_, current_pc_, i, addr, gpr_);
+  if (g_log_fmv_diagnostics) {
+    rr4_diag::on_op_sh(rr4_diag_state_, current_pc_, i, addr, gpr_);
+  }
   store16(addr, static_cast<u16>(gpr_[rt(i)]));
 }
 
@@ -3360,8 +3401,10 @@ void Cpu::op_sw(u32 i) {
           static_cast<unsigned long long>(cycles_));
     }
   }
-  rr4_diag::on_op_sw(rr4_diag_state_, current_pc_, i, addr, store_val, gpr_,
-                     cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
+  if (g_log_fmv_diagnostics) {
+    rr4_diag::on_op_sw(rr4_diag_state_, current_pc_, i, addr, store_val, gpr_,
+                       cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
+  }
   store32(addr, store_val);
 }
 

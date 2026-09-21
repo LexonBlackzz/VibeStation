@@ -772,6 +772,11 @@ static bool parse_cpu_execution_mode(const std::string &s,
     out = CpuExecutionMode::X64Jit;
     return true;
   }
+  if (v == "x64jitv2" || v == "jitv2" || v == "dynarecv2" ||
+      v == "recompilerv2") {
+    out = CpuExecutionMode::X64JitV2;
+    return true;
+  }
   return false;
 }
 
@@ -1573,6 +1578,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "decoded";
     case CpuExecutionMode::X64Jit:
       return "x64jit";
+    case CpuExecutionMode::X64JitV2:
+      return "x64jitv2";
     }
     return "unknown";
   };
@@ -1581,11 +1588,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
               !availability.native_available
           ? CpuExecutionMode::DecodedBlockInterpreter
           : requested_mode;
-  if (requested_mode == CpuExecutionMode::X64Jit &&
+  if ((requested_mode == CpuExecutionMode::X64Jit ||
+       requested_mode == CpuExecutionMode::X64JitV2) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
-        "requested=x64jit effective=decoded\n");
+        "requested=%s effective=%s\n",
+        backend_token(requested_mode), backend_token(effective_mode));
     return 3;
   }
 
@@ -1628,6 +1637,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   const CpuBackendStats before = sys->cpu().cpu_backend_stats();
   double cpu_ms = 0.0;
   double core_ms = 0.0;
+  double gpu_ms = 0.0;
+  double spu_ms = 0.0;
+  double dma_ms = 0.0;
+  double timers_ms = 0.0;
+  double cdrom_ms = 0.0;
+  double gte_ms = 0.0;
+  u64 gte_commands = 0u;
   std::vector<double> cpu_samples;
   std::vector<double> core_samples;
   cpu_samples.reserve(static_cast<size_t>(measured_frames));
@@ -1638,9 +1654,17 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     sys->sio().set_button_state(
         auto_input_buttons_for_frame(absolute_frame));
     sys->run_frame();
-    cpu_ms += sys->profiling_stats().cpu_ms;
-    core_ms += sys->profiling_stats().total_ms;
-    cpu_samples.push_back(sys->profiling_stats().cpu_ms);
+    const auto &profile = sys->profiling_stats();
+    cpu_ms += profile.cpu_ms;
+    core_ms += profile.total_ms;
+    gpu_ms += profile.gpu_ms;
+    spu_ms += profile.spu_ms;
+    dma_ms += profile.dma_ms;
+    timers_ms += profile.timers_ms;
+    cdrom_ms += profile.cdrom_ms;
+    gte_ms += profile.gte_total_ms;
+    gte_commands += profile.gte_total_commands;
+    cpu_samples.push_back(profile.cpu_ms);
     core_samples.push_back(sys->profiling_stats().total_ms);
     if (!emit_checkpoint(absolute_frame)) {
       std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
@@ -1670,16 +1694,28 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : (100.0 * static_cast<double>(native_instructions) /
              static_cast<double>(total_instructions));
   const u64 helper_calls =
-      delta(after.native_memory_helper_calls, before.native_memory_helper_calls) +
-      delta(after.native_branch_helper_calls, before.native_branch_helper_calls) +
-      delta(after.native_prepare_helper_calls, before.native_prepare_helper_calls) +
-      delta(after.native_finish_helper_calls, before.native_finish_helper_calls);
-  const u64 helper_assisted_instructions = std::min(
-      native_instructions,
-      delta(after.native_prepare_helper_calls,
-            before.native_prepare_helper_calls));
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
+          : delta(after.native_memory_helper_calls,
+                  before.native_memory_helper_calls) +
+                delta(after.native_branch_helper_calls,
+                      before.native_branch_helper_calls) +
+                delta(after.native_prepare_helper_calls,
+                      before.native_prepare_helper_calls) +
+                delta(after.native_finish_helper_calls,
+                      before.native_finish_helper_calls);
+  const u64 helper_assisted_instructions =
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_helper_instructions,
+                  before.jit_v2_helper_instructions)
+          : std::min(native_instructions,
+                     delta(after.native_prepare_helper_calls,
+                           before.native_prepare_helper_calls));
   const u64 inline_native_instructions =
-      native_instructions - helper_assisted_instructions;
+      requested_mode == CpuExecutionMode::X64JitV2
+          ? delta(after.jit_v2_inline_instructions,
+                  before.jit_v2_inline_instructions)
+          : native_instructions - helper_assisted_instructions;
   const double helper_assisted_coverage =
       total_instructions == 0
           ? 0.0
@@ -1701,7 +1737,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "warmup_frames=%d measured_frames=%d cpu_ms_avg=%.6f "
       "cpu_ms_p50=%.6f cpu_ms_p95=%.6f cpu_ms_p99=%.6f cpu_ms_max=%.6f "
       "core_ms_avg=%.6f core_ms_p50=%.6f core_ms_p95=%.6f "
-      "core_ms_p99=%.6f core_ms_max=%.6f wall_ms=%.3f native_coverage=%.3f "
+      "core_ms_p99=%.6f core_ms_max=%.6f wall_ms=%.3f "
+      "gpu_ms_avg=%.6f spu_ms_avg=%.6f dma_ms_avg=%.6f "
+      "timers_ms_avg=%.6f cdrom_ms_avg=%.6f gte_ms_avg=%.6f "
+      "gte_commands=%llu gte_pct_cpu=%.3f native_coverage=%.3f "
       "helper_assisted_coverage=%.3f native_inline_instructions=%llu "
       "native_helper_instructions=%llu native_instructions=%llu "
       "decoded_instructions=%llu "
@@ -1712,6 +1751,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "native_branch_entries=%llu "
       "native_compile_attempts=%llu native_compile_successes=%llu "
       "native_compile_failures=%llu native_blocks_compiled=%llu "
+      "v2_helper_state=%llu v2_helper_icache=%llu v2_helper_irq=%llu "
+      "v2_helper_unsupported=%llu v2_helper_memory=%llu "
+      "v2_helper_budget=%llu v2_helper_internal=%llu "
       "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
       "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
       "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
@@ -1727,6 +1769,11 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       benchmark_percentile(core_samples, 0.95),
       benchmark_percentile(core_samples, 0.99),
       core_samples.empty() ? 0.0 : core_samples.back(), wall_ms,
+      gpu_ms / measured_divisor, spu_ms / measured_divisor,
+      dma_ms / measured_divisor, timers_ms / measured_divisor,
+      cdrom_ms / measured_divisor, gte_ms / measured_divisor,
+      static_cast<unsigned long long>(gte_commands),
+      cpu_ms > 0.0 ? (100.0 * gte_ms / cpu_ms) : 0.0,
       native_coverage, helper_assisted_coverage,
       static_cast<unsigned long long>(inline_native_instructions),
       static_cast<unsigned long long>(helper_assisted_instructions),
@@ -1758,6 +1805,21 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                                             before.native_compile_failures)),
       static_cast<unsigned long long>(delta(after.native_blocks_compiled,
                                             before.native_blocks_compiled)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_state, before.jit_v2_helper_state)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_icache, before.jit_v2_helper_icache)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_irq, before.jit_v2_helper_irq)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_unsupported,
+                before.jit_v2_helper_unsupported)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_memory, before.jit_v2_helper_memory)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_budget, before.jit_v2_helper_budget)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_helper_internal, before.jit_v2_helper_internal)),
       static_cast<unsigned long long>(hashes.state),
       static_cast<unsigned long long>(hashes.cpu_state),
       static_cast<unsigned long long>(hashes.ram),

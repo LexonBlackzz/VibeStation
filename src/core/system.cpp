@@ -402,8 +402,6 @@ void System::init_hardware() {
     cpu_.init(this);
 
     hw_init_ = true;
-    printf("[System] Hardware initialized\n");
-    fflush(stdout);
 }
 
 bool System::load_bios(const std::string& path) {

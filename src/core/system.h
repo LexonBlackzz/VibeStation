@@ -509,6 +509,8 @@ public:
   void write16(u32 addr, u16 val);
   void write32(u32 addr, u32 val);
   const u8 *jit_main_ram_data() const { return ram_.data(); }
+  u8 *jit_main_ram_data_mut() { return ram_.data(); }
+  u8 *jit_scratchpad_data_mut() { return ram_.scratch_data(); }
 
   // Component access (for DMA)
   bool irq_pending() { return irq_.pending(); }

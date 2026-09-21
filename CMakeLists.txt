@@ -13,18 +13,17 @@ int main() { return 0; }\n"
     VIBESTATION_COMPILER_TARGETS_X64)
 
 set(VIBESTATION_X64_JIT_DEFAULT OFF)
-if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND
-        VIBESTATION_COMPILER_TARGETS_X64)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND VIBESTATION_COMPILER_TARGETS_X64)
     set(VIBESTATION_X64_JIT_DEFAULT ON)
 endif()
 option(VIBESTATION_ENABLE_X64_JIT
     "Enable the native x64 CPU JIT/recompiler when supported" ${VIBESTATION_X64_JIT_DEFAULT})
 
 if(VIBESTATION_ENABLE_X64_JIT AND
-        (NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+        (NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
          NOT VIBESTATION_COMPILER_TARGETS_X64))
     message(FATAL_ERROR
-        "VIBESTATION_ENABLE_X64_JIT requires a Windows x64 compiler target")
+        "VIBESTATION_ENABLE_X64_JIT requires an x64 compiler target")
 endif()
 
 # ── Fetch Dependencies ──────────────────────────────────────────────
@@ -71,7 +70,12 @@ target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
-target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
+if(WIN32)
+    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static OpenGL::GL)
+endif()
 
 # ── VibeStation Executable ──────────────────────────────────────────
 set(VIBESTATION_SOURCES
@@ -98,6 +102,7 @@ set(VIBESTATION_SOURCES
     src/core/component_serialize.cpp
     src/core/cpu_recompiler.cpp
     src/core/cpu_recompiler_x64.cpp
+    src/core/cpu_jit_v2.cpp
     src/core/config.cpp
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp

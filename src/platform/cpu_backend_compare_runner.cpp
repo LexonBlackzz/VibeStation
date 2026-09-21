@@ -145,6 +145,10 @@ struct CpuCompareCase {
   bool experimental_unknown_fallback = false;
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
+  bool require_v2_native_entry_when_available = false;
+  bool require_v2_store_branch_entry_when_available = false;
+  bool require_v2_branch_not_taken_entry_when_available = false;
+  bool require_v2_helper_entry_when_available = false;
   bool require_native_memory_helper_when_available = false;
   bool require_native_memory_exception_when_available = false;
   bool require_native_helper_load_delay_entry_when_available = false;
@@ -316,6 +320,8 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "DecodedBlockInterpreter";
   case CpuExecutionMode::X64Jit:
     return "X64Jit";
+  case CpuExecutionMode::X64JitV2:
+    return "X64JitV2";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -373,6 +379,49 @@ static void log_cpu_compare_program(const CpuCompareCase &test_case) {
               kCpuComparePc + static_cast<u32>(i * 4u),
               test_case.program[i]);
   }
+}
+
+static void log_cpu_compare_failure_summary(
+    const CpuCompareCase &test_case, CpuExecutionMode mode,
+    const CpuCompareRunResult &reference, const CpuCompareRunResult &actual,
+    bool state_pass, bool segment_state_pass, bool irq_state_pass,
+    bool memory_state_pass, bool peripheral_state_pass,
+    bool segment_peripheral_pass, bool expected_state_pass,
+    bool native_check_pass, const char *native_check) {
+  int first_reg = -1;
+  u32 first_reg_ref = 0;
+  u32 first_reg_actual = 0;
+  for (u32 i = 0; i < 32u; ++i) {
+    if (reference.state.gpr[i] != actual.state.gpr[i]) {
+      first_reg = static_cast<int>(i);
+      first_reg_ref = reference.state.gpr[i];
+      first_reg_actual = actual.state.gpr[i];
+      break;
+    }
+  }
+
+  LOG_ERROR(
+      "CPU_COMPARE_FAIL name=%s ref=Interpreter mode=%s state=%u segment=%u irq=%u mem=%u "
+      "periph=%u seg_periph=%u expected=%u native=%u native_check=%s "
+      "pc=%08X/%08X next=%08X/%08X current=%08X/%08X cyc=%llu/%llu "
+      "first_reg=%d:%08X/%08X native_instr=%llu decoded_instr=%llu "
+      "fallback_instr=%llu",
+      test_case.name, cpu_compare_mode_name(mode),
+      state_pass ? 1u : 0u, segment_state_pass ? 1u : 0u,
+      irq_state_pass ? 1u : 0u, memory_state_pass ? 1u : 0u,
+      peripheral_state_pass ? 1u : 0u,
+      segment_peripheral_pass ? 1u : 0u,
+      expected_state_pass ? 1u : 0u, native_check_pass ? 1u : 0u,
+      native_check,
+      reference.state.pc, actual.state.pc,
+      reference.state.next_pc, actual.state.next_pc,
+      reference.state.current_pc, actual.state.current_pc,
+      static_cast<unsigned long long>(reference.state.cycles),
+      static_cast<unsigned long long>(actual.state.cycles),
+      first_reg, first_reg_ref, first_reg_actual,
+      static_cast<unsigned long long>(actual.stats.native_instructions),
+      static_cast<unsigned long long>(actual.stats.decoded_instructions),
+      static_cast<unsigned long long>(actual.stats.fallback_instructions));
 }
 
 static bool cpu_debug_states_equal(const CpuDebugState &a,
@@ -462,10 +511,9 @@ static bool cpu_compare_expected_state_pass(const CpuCompareCase &test_case,
       return;
     }
     pass = false;
-    LOG_ERROR("CPU_COMPARE_EXPECTED_DIFF name=%s mode=%s field=%s expected=0x%llX actual=0x%llX",
-              test_case.name, cpu_compare_mode_name(mode), field_name,
-              static_cast<unsigned long long>(expected),
-              static_cast<unsigned long long>(actual));
+    (void)field_name;
+    (void)expected;
+    (void)actual;
   };
 
   field("pc", test_case.expected_pc, state.pc);
@@ -761,6 +809,64 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_alu_disabled.instructions = 16;
   native_alu_disabled.disable_alu_native_for_x64 = true;
   cases.push_back(native_alu_disabled);
+
+  CpuCompareCase jit_v2_native_smoke{};
+  jit_v2_native_smoke.name = "jit_v2_native_register_cache_smoke";
+  jit_v2_native_smoke.initial_gpr[1] = 0x12345678u;
+  jit_v2_native_smoke.program = {
+      enc_i(0x09, 1, 2, 7),
+      enc_i(0x0E, 2, 3, 0x55AA),
+      enc_r(2, 3, 4, 0, 0x21),
+      enc_i(0x0C, 4, 5, 0x0FFF),
+  };
+  jit_v2_native_smoke.instructions = 4;
+  jit_v2_native_smoke.require_v2_native_entry_when_available = true;
+  cases.push_back(jit_v2_native_smoke);
+
+  CpuCompareCase jit_v2_bne_not_taken{};
+  jit_v2_bne_not_taken.name = "jit_v2_bne_not_taken_delay";
+  jit_v2_bne_not_taken.initial_gpr[1] = 7u;
+  jit_v2_bne_not_taken.initial_gpr[2] = 7u;
+  jit_v2_bne_not_taken.program = {
+      0u,
+      enc_i(0x05, 1, 2, 2),
+      enc_i(0x09, 3, 3, 1),
+      0u,
+  };
+  jit_v2_bne_not_taken.instructions = 3;
+  jit_v2_bne_not_taken.require_v2_branch_not_taken_entry_when_available =
+      true;
+  cases.push_back(jit_v2_bne_not_taken);
+
+  CpuCompareCase jit_v2_scratch_store_branch{};
+  jit_v2_scratch_store_branch.name =
+      "jit_v2_scratchpad_sw_sw_bne_delay_loop";
+  jit_v2_scratch_store_branch.initial_gpr[1] = 0x1F800000u;
+  jit_v2_scratch_store_branch.initial_gpr[2] = 0x11223344u;
+  jit_v2_scratch_store_branch.initial_gpr[3] = 0x55667788u;
+  jit_v2_scratch_store_branch.initial_gpr[4] = 1u;
+  jit_v2_scratch_store_branch.initial_gpr[5] = 0u;
+  jit_v2_scratch_store_branch.program = {
+      enc_i(0x2B, 1, 2, 0),
+      enc_i(0x2B, 1, 3, 4),
+      enc_i(0x05, 4, 5, static_cast<u16>(-3)),
+      enc_i(0x09, 6, 6, 1),
+  };
+  jit_v2_scratch_store_branch.instructions = 8;
+  jit_v2_scratch_store_branch.compare_memory_addresses = {
+      0x1F800000u, 0x1F800004u,
+  };
+  jit_v2_scratch_store_branch.require_v2_store_branch_entry_when_available =
+      true;
+  cases.push_back(jit_v2_scratch_store_branch);
+
+  CpuCompareCase jit_v2_ram_store_branch = jit_v2_scratch_store_branch;
+  jit_v2_ram_store_branch.name = "jit_v2_ram_sw_sw_bne_delay_loop";
+  jit_v2_ram_store_branch.initial_gpr[1] = 0x80011000u;
+  jit_v2_ram_store_branch.compare_memory_addresses = {
+      0x00011000u, 0x00011004u,
+  };
+  cases.push_back(jit_v2_ram_store_branch);
 
   CpuCompareCase native_mixed{};
   native_mixed.name = "native_mixed_alu_immediate";
@@ -3340,6 +3446,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   cop2.instructions = 2;
   cop2.require_full_native_when_available = true;
+  cop2.require_v2_helper_entry_when_available = true;
   cases.push_back(cop2);
 
   CpuCompareCase unsupported_strict{};
@@ -3441,6 +3548,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_force_compile = true;
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
+  LOG_INFO(
+      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2%s",
+      memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
     ++failures;
@@ -3451,10 +3561,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 3> modes = {
+  const std::array<CpuExecutionMode, 4> modes = {
       CpuExecutionMode::Interpreter,
       CpuExecutionMode::DecodedBlockInterpreter,
       CpuExecutionMode::X64Jit,
+      CpuExecutionMode::X64JitV2,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
@@ -3541,10 +3652,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           if (!cpu_debug_states_equal(reference.segment_states[segment],
                                       result.segment_states[segment])) {
             segment_state_pass = false;
-            log_cpu_debug_state_diff(
-                test_case.name, cpu_compare_mode_name(mode),
-                reference.segment_states[segment],
-                result.segment_states[segment]);
+            // Compact mode reports only the final per-case summary.
           }
         }
         segment_peripheral_pass =
@@ -3573,6 +3681,70 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           cpu_compare_expected_state_pass(test_case, mode, result.state);
       bool native_check_pass = true;
       const char *native_check = "not_required";
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_native_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_native_unavailable";
+        } else {
+          const bool native_entered =
+              result.stats.native_blocks_compiled != 0 &&
+              result.stats.native_block_entries != 0 &&
+              result.stats.native_instructions != 0 &&
+              result.stats.native_code_bytes != 0;
+          native_check = native_entered ? "v2_native_entered"
+                                        : "v2_native_missing";
+          native_check_pass = native_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_store_branch_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_store_branch_unavailable";
+        } else {
+          const bool store_branch_entered =
+              result.stats.native_branch_tail_entries != 0 &&
+              result.stats.native_memory_fastpath_stores >= 2 &&
+              result.stats.native_branch_taken != 0 &&
+              result.stats.native_instructions != 0;
+          native_check = store_branch_entered ? "v2_store_branch_entered"
+                                              : "v2_store_branch_missing";
+          native_check_pass = store_branch_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_branch_not_taken_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_branch_unavailable";
+        } else {
+          const bool branch_entered =
+              result.stats.native_branch_tail_entries != 0 &&
+              result.stats.native_branch_not_taken != 0 &&
+              result.stats.native_instructions >= 2;
+          native_check = branch_entered ? "v2_branch_not_taken_entered"
+                                        : "v2_branch_not_taken_missing";
+          native_check_pass = branch_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV2 &&
+          test_case.require_v2_helper_entry_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v2_helper_unavailable";
+        } else {
+          const bool helper_entered =
+              result.stats.jit_v2_helper_entries != 0 &&
+              result.stats.jit_v2_helper_instructions != 0 &&
+              result.stats.decoded_instructions == 0 &&
+              result.stats.fallback_instructions == 0 &&
+              result.stats.interpreter_fallback_steps == 0;
+          native_check = helper_entered ? "v2_helper_entered"
+                                        : "v2_helper_missing";
+          native_check_pass = helper_entered;
+        }
+      }
 
       if (mode == CpuExecutionMode::X64Jit) {
         if (test_case.require_full_native_when_available) {
@@ -4037,493 +4209,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
              irq_state_pass && peripheral_state_pass && memory_state_pass &&
              expected_state_pass && native_check_pass;
       const char *outcome = cpu_compare_outcome(mode, result.stats);
-      LOG_INFO(
-          "CPU_COMPARE name=%s mode=%s result=%s outcome=%s native_check=%s pc=0x%08X next_pc=0x%08X current_pc=0x%08X instr=%u cycles=%llu decoded_instr=%llu native_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_load_helpers=%llu native_mem_store_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu forced_reason=%s forced_slices=%llu forced_instr=%llu native_blocks=%llu native_attempts=%llu native_successes=%llu native_compiled=%llu native_entries=%llu native_code_bytes=%llu native_available=%u",
-          test_case.name, cpu_compare_mode_name(mode),
-          pass ? "PASS" : "FAIL", outcome, native_check, result.state.pc,
-          result.state.next_pc, result.state.current_pc, result.run.instructions,
-          static_cast<unsigned long long>(result.state.cycles),
-          static_cast<unsigned long long>(result.stats.decoded_instructions),
-          static_cast<unsigned long long>(result.stats.native_instructions),
-          static_cast<unsigned long long>(result.stats.fallback_instructions),
-          static_cast<unsigned long long>(
-              result.stats.native_memory_helper_calls),
-          static_cast<unsigned long long>(
-              result.stats.native_memory_helper_load_calls),
-          static_cast<unsigned long long>(
-              result.stats.native_memory_helper_store_calls),
-          static_cast<unsigned long long>(
-              result.stats.native_memory_exception_exits),
-          static_cast<unsigned long long>(
-              result.stats.native_helper_load_delay_entries),
-          static_cast<unsigned long long>(
-              result.stats.native_helper_load_delay_passes),
-          static_cast<unsigned long long>(
-              result.stats.native_helper_load_delay_fallbacks),
-          cpu_forced_interpreter_reason_name(
-              result.stats.forced_interpreter_last_reason),
-          static_cast<unsigned long long>(
-              result.stats.forced_interpreter_slices),
-          static_cast<unsigned long long>(
-              result.stats.forced_interpreter_instructions),
-          static_cast<unsigned long long>(result.stats.native_blocks),
-          static_cast<unsigned long long>(result.stats.native_compile_attempts),
-          static_cast<unsigned long long>(result.stats.native_compile_successes),
-          static_cast<unsigned long long>(result.stats.native_blocks_compiled),
-          static_cast<unsigned long long>(result.stats.native_block_entries),
-          static_cast<unsigned long long>(result.stats.native_code_bytes),
-          result.stats.native_available ? 1u : 0u);
-
-      if (mode == CpuExecutionMode::X64Jit &&
-          (test_case.require_full_native_when_available ||
-           test_case.require_native_entry_when_available ||
-           test_case.require_native_memory_helper_when_available ||
-           test_case.require_native_memory_exception_when_available ||
-           test_case.require_native_helper_load_delay_entry_when_available ||
-           test_case.require_native_branch_tail_when_available ||
-           test_case
-               .require_native_reduced_helper_ram_load_entry_when_available ||
-           test_case
-               .require_native_reduced_helper_branch_tail_entry_when_available ||
-           test_case
-               .require_native_reduced_helper_branch_tail_ram_load_entry_when_available ||
-           test_case
-               .require_native_aggressive_reduced_helper_branch_tail_entry_when_available ||
-           test_case
-               .require_native_aggressive_reduced_helper_branch_tail_store_entry_when_available ||
-           test_case
-               .require_native_aggressive_reduced_helper_branch_tail_mixed_entry_when_available ||
-           test_case.require_native_prefix_entry_when_available ||
-           test_case.require_native_prefix_ram_load_entry_when_available ||
-           test_case
-               .require_native_prefix_ram_load_preflight_non_ram_when_available ||
-           test_case
-               .require_native_prefix_ram_load_aggressive_entry_when_available ||
-           test_case
-               .require_native_prefix_ram_load_full_preflight_when_available ||
-           test_case
-               .require_native_prefix_ram_load_adaptive_disable_when_available ||
-           test_case
-               .require_native_prefix_ram_load_adaptive_direct_entry_when_available ||
-           test_case.require_native_prefix_reject_store_when_available ||
-           test_case
-               .require_native_branch_delay_memory_helper_when_available)) {
-        LOG_INFO(
-            "CPU_COMPARE_NATIVE name=%s required=1 available=%u compiled=%u entered=%u native_instr=%llu decoded_instr=%llu fallback_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu code_bytes=%llu attempts=%llu successes=%llu force=%u hot_threshold=%u min_block=%u",
-            test_case.name, result.stats.native_available ? 1u : 0u,
-            result.stats.native_blocks_compiled != 0 ? 1u : 0u,
-            result.stats.native_block_entries != 0 ? 1u : 0u,
-            static_cast<unsigned long long>(result.stats.native_instructions),
-            static_cast<unsigned long long>(result.stats.decoded_instructions),
-            static_cast<unsigned long long>(result.stats.fallback_instructions),
-            static_cast<unsigned long long>(
-                result.stats.native_memory_helper_calls),
-            static_cast<unsigned long long>(
-                result.stats.native_memory_exception_exits),
-            static_cast<unsigned long long>(
-                result.stats.native_helper_load_delay_entries),
-            static_cast<unsigned long long>(
-                result.stats.native_helper_load_delay_passes),
-            static_cast<unsigned long long>(
-                result.stats.native_helper_load_delay_fallbacks),
-            static_cast<unsigned long long>(result.stats.native_code_bytes),
-            static_cast<unsigned long long>(result.stats.native_compile_attempts),
-            static_cast<unsigned long long>(
-                result.stats.native_compile_successes),
-            g_cpu_x64_jit_force_compile ? 1u : 0u,
-            g_cpu_x64_jit_hot_block_threshold,
-            g_cpu_x64_jit_min_block_instructions);
-      }
-
-      if (mode == CpuExecutionMode::X64Jit &&
-          (test_case.require_native_prefix_entry_when_available ||
-           test_case.require_native_prefix_ram_load_entry_when_available ||
-           test_case
-               .require_native_prefix_ram_load_preflight_non_ram_when_available ||
-           test_case
-               .require_native_prefix_ram_load_aggressive_entry_when_available ||
-           test_case
-               .require_native_prefix_ram_load_full_preflight_when_available ||
-           test_case
-               .require_native_prefix_ram_load_adaptive_disable_when_available ||
-           test_case
-               .require_native_prefix_ram_load_adaptive_direct_entry_when_available ||
-           test_case.require_native_prefix_reject_store_when_available)) {
-        LOG_INFO(
-            "CPU_COMPARE_NATIVE_PREFIX name=%s candidates=%llu compiled=%llu entries=%llu instructions=%llu exits=%llu blockers_bne=%llu blockers_beq=%llu blockers_jr=%llu blockers_cop2=%llu blockers_other=%llu rejects_too_short=%llu rejects_unsafe=%llu rejects_load_delay=%llu rejects_memory=%llu rejects_unsupported=%llu ram_load_candidates=%llu ram_load_entries=%llu ram_load_instr=%llu ram_preflight_passes=%llu ram_preflight_fallbacks=%llu ram_preflight_non_ram=%llu ram_full_preflight=%llu ram_full_work=%llu ram_aggressive_entries=%llu ram_aggressive_instr=%llu ram_adaptive_disabled=%llu ram_adaptive_direct=%llu ram_attempts_avoided=%llu reject_store=%llu reject_load_base_written=%llu",
-            test_case.name,
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_candidate_blocks),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_compiled_blocks),
-            static_cast<unsigned long long>(result.stats.native_prefix_entries),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_instructions),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_exits_to_blocker),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_blocker_bne),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_blocker_beq),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_blocker_jr),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_blocker_cop2),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_blocker_other),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_too_short),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_unsafe_state),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_load_delay_risk),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_memory_risk),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_prefix_reject_unsupported_prefix_instruction),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_candidate_blocks),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_entries),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_instructions),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_preflight_passes),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_preflight_fallbacks),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_preflight_non_ram),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_preflight_full_attempts),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_prefix_ram_load_preflight_full_instructions),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_aggressive_entries),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_aggressive_instructions),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_adaptive_disabled_blocks),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_ram_load_adaptive_direct_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_prefix_ram_load_adaptive_preflight_attempts_avoided),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_store),
-            static_cast<unsigned long long>(
-                result.stats.native_prefix_reject_load_base_written));
-      }
-
-      if (mode == CpuExecutionMode::X64Jit &&
-          test_case.require_native_branch_tail_when_available) {
-        LOG_INFO(
-            "CPU_COMPARE_BRANCH_TAIL name=%s blocks_compiled=%llu entries=%llu taken=%llu not_taken=%llu rejects=%llu delay_memory_helpers=%llu reduced_entries=%llu reduced_ram_load_entries=%llu reduced_instr=%llu reduced_ram_load_instr=%llu reduced_avoided_prepare=%llu reduced_avoided_finish=%llu reduced_avoided_branch=%llu reduced_avoided_memory=%llu aggressive_entries=%llu aggressive_ram_entries=%llu aggressive_store_entries=%llu aggressive_mixed_entries=%llu aggressive_instr=%llu aggressive_avoided_prepare=%llu aggressive_avoided_finish=%llu aggressive_avoided_branch=%llu aggressive_avoided_memory=%llu aggressive_fast_store32=%llu",
-            test_case.name,
-            static_cast<unsigned long long>(
-                result.stats.native_branch_tail_blocks_compiled),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_tail_entries),
-            static_cast<unsigned long long>(result.stats.native_branch_taken),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_not_taken),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_tail_rejects),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_delay_slot_memory_helpers),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_tail_reduced_helper_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_ram_load_entries),
-            static_cast<unsigned long long>(
-                result.stats.native_branch_tail_reduced_helper_instructions),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_ram_load_instructions),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_prepare_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_finish_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_branch_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_reduced_helper_memory_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_ram_load_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_store_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_instructions),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_prepare_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_finish_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_branch_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_memory_helpers_avoided),
-            static_cast<unsigned long long>(
-                result.stats
-                    .native_branch_tail_aggressive_reduced_helper_fast_store32));
-      }
-
-      if (mode == CpuExecutionMode::X64Jit &&
-          (test_case.enable_ram_load_fastpath_for_x64 ||
-           test_case.require_native_ram_load_fastpath_when_available ||
-           test_case.require_no_native_ram_load_fastpath)) {
-        LOG_INFO("CPU_COMPARE_RAM_FASTPATH name=%s enabled=%u fast_loads=%llu misses=%llu miss_disabled=%llu miss_trace=%llu miss_unaligned=%llu miss_non_ram=%llu memory_helpers=%llu load_helpers=%llu store_helpers=%llu ram_helpers=%llu scratch_helpers=%llu bios_helpers=%llu mmio_helpers=%llu unknown_helpers=%llu unaligned_helpers=%llu mmio_fast_loads=%llu",
-                 test_case.name,
-                 test_case.enable_ram_load_fastpath_for_x64 ? 1u : 0u,
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_loads),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_load_misses),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_load_miss_disabled),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_load_miss_trace),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_load_miss_unaligned),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_load_miss_non_ram),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_load_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_store_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_ram_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_scratchpad_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_bios_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_mmio_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_unknown_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_unaligned_calls),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_mmio_loads));
-      }
-
-      if (mode == CpuExecutionMode::X64Jit &&
-          (test_case
-               .require_native_reduced_helper_ram_load_entry_when_available ||
-           test_case
-               .require_native_reduced_helper_branch_tail_ram_load_entry_when_available ||
-           test_case.require_no_native_reduced_helper_ram_load_entry ||
-           test_case
-               .require_no_native_reduced_helper_branch_tail_ram_load_entry ||
-           test_case.require_reduced_helper_preflight_mmio_when_available ||
-           test_case
-               .require_reduced_helper_preflight_unaligned_when_available ||
-           test_case
-               .require_reduced_helper_preflight_non_ram_when_available ||
-           test_case
-               .require_reduced_helper_branch_tail_preflight_mmio_when_available ||
-           test_case
-               .require_reduced_helper_branch_tail_preflight_unaligned_when_available ||
-           test_case
-               .require_reduced_helper_branch_tail_preflight_non_ram_when_available ||
-           test_case
-               .require_reduced_helper_branch_tail_reject_load_base_written_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_preflight_code_page_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_direct_preflight_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_full_preflight_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_adaptive_disable_when_available ||
-           test_case
-               .require_aggressive_reduced_helper_branch_tail_adaptive_direct_entry_when_available)) {
-        LOG_INFO("CPU_COMPARE_REDUCED_HELPER_RAM name=%s entries=%llu ram_load_entries=%llu branch_tail_ram_load_entries=%llu aggressive_entries=%llu aggressive_ram_entries=%llu aggressive_store_entries=%llu aggressive_mixed_entries=%llu fast_loads=%llu branch_tail_fast_loads=%llu preflight_fallbacks=%llu preflight_mmio=%llu preflight_unaligned=%llu preflight_non_ram=%llu preflight_disabled=%llu branch_tail_preflight_fallbacks=%llu branch_tail_preflight_mmio=%llu branch_tail_preflight_unaligned=%llu branch_tail_preflight_non_ram=%llu branch_tail_preflight_disabled=%llu aggressive_preflight_fallbacks=%llu aggressive_preflight_mmio=%llu aggressive_preflight_unaligned=%llu aggressive_preflight_non_ram=%llu aggressive_preflight_disabled=%llu aggressive_preflight_code_page=%llu aggressive_direct_preflight=%llu aggressive_direct_checks=%llu aggressive_full_preflight=%llu aggressive_adaptive_repeated=%llu aggressive_adaptive_disabled=%llu aggressive_adaptive_direct=%llu aggressive_adaptive_avoided=%llu branch_tail_reject_load_base_written=%llu native_helpers=%llu",
-                 test_case.name,
-                 static_cast<unsigned long long>(
-                     result.stats.native_reduced_helper_entries),
-                 static_cast<unsigned long long>(
-                     result.stats.native_reduced_helper_ram_load_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_ram_load_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_store_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_mixed_memory_entries),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_fastpath_loads),
-                 static_cast<unsigned long long>(
-                     result.stats.native_branch_tail_ram_load_fastpath_loads),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_reduced_helper_ram_load_preflight_fallbacks),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_reduced_helper_ram_load_preflight_mmio),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_reduced_helper_ram_load_preflight_unaligned),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_reduced_helper_ram_load_preflight_non_ram),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_reduced_helper_ram_load_preflight_disabled),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_preflight_fallbacks),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_preflight_mmio),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_preflight_unaligned),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_preflight_non_ram),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_ram_load_preflight_disabled),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_fallbacks),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_mmio),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_unaligned),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_non_ram),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_disabled),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_code_page),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_direct_attempts),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_direct_checks),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_preflight_full_attempts),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_adaptive_repeated_failures),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_adaptive_disabled_blocks),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_adaptive_direct_entries),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_aggressive_reduced_helper_adaptive_preflight_attempts_avoided),
-                 static_cast<unsigned long long>(
-                     result.stats
-                         .native_branch_tail_reduced_helper_reject_load_base_written),
-                 static_cast<unsigned long long>(
-                     result.stats.native_memory_helper_calls));
-      }
+      (void)outcome;
 
       if (!pass) {
         ++failures;
-        if (!state_pass) {
-          log_cpu_debug_state_diff(test_case.name, cpu_compare_mode_name(mode),
-                                   reference.state, result.state);
-        }
-        if (!irq_state_pass) {
-          LOG_ERROR("CPU_COMPARE_IRQ_DIFF name=%s mode=%s reference_stat=0x%08X actual_stat=0x%08X reference_mask=0x%08X actual_mask=0x%08X",
-                    test_case.name, cpu_compare_mode_name(mode),
-                    reference.irq_stat, result.irq_stat,
-                    reference.irq_mask, result.irq_mask);
-        }
-        if (!memory_state_pass) {
-          LOG_ERROR("CPU_COMPARE_MEMORY_DIFF name=%s mode=%s reference_count=%zu actual_count=%zu",
-                    test_case.name, cpu_compare_mode_name(mode),
-                    reference.memory_values.size(),
-                    result.memory_values.size());
-        }
-        if (!peripheral_state_pass || !segment_peripheral_pass) {
-          LOG_ERROR("CPU_COMPARE_PERIPHERAL_DIFF name=%s mode=%s final=%u segment=%u reference_dma=0x%08X/0x%08X actual_dma=0x%08X/0x%08X reference_cd=%llu/%d/%d actual_cd=%llu/%d/%d",
-                    test_case.name, cpu_compare_mode_name(mode),
-                    peripheral_state_pass ? 1u : 0u,
-                    segment_peripheral_pass ? 1u : 0u,
-                    reference.peripherals.dma_dpcr,
-                    reference.peripherals.dma_dicr,
-                    result.peripherals.dma_dpcr,
-                    result.peripherals.dma_dicr,
-                    static_cast<unsigned long long>(
-                        reference.peripherals.cd_sector_count),
-                    reference.peripherals.cd_read_lba,
-                    reference.peripherals.cd_active_lba,
-                    static_cast<unsigned long long>(
-                        result.peripherals.cd_sector_count),
-                    result.peripherals.cd_read_lba,
-                    result.peripherals.cd_active_lba);
-        }
-        if (!native_check_pass) {
-          LOG_ERROR(
-              "CPU_COMPARE_BACKEND_DIFF name=%s mode=%s expected=%s outcome=%s native_available=%u native_blocks_compiled=%llu native_entries=%llu native_instr=%llu native_mem_helpers=%llu native_mem_exits=%llu helper_ld_entries=%llu helper_ld_passes=%llu helper_ld_fallbacks=%llu native_code_bytes=%llu decoded_instr=%llu fallback_instr=%llu interpreter_fallback_steps=%llu",
-              test_case.name, cpu_compare_mode_name(mode), native_check,
-              outcome, result.stats.native_available ? 1u : 0u,
-              static_cast<unsigned long long>(
-                  result.stats.native_blocks_compiled),
-              static_cast<unsigned long long>(
-                  result.stats.native_block_entries),
-              static_cast<unsigned long long>(result.stats.native_instructions),
-              static_cast<unsigned long long>(
-                  result.stats.native_memory_helper_calls),
-              static_cast<unsigned long long>(
-                  result.stats.native_memory_exception_exits),
-              static_cast<unsigned long long>(
-                  result.stats.native_helper_load_delay_entries),
-              static_cast<unsigned long long>(
-                  result.stats.native_helper_load_delay_passes),
-              static_cast<unsigned long long>(
-                  result.stats.native_helper_load_delay_fallbacks),
-              static_cast<unsigned long long>(result.stats.native_code_bytes),
-              static_cast<unsigned long long>(result.stats.decoded_instructions),
-              static_cast<unsigned long long>(result.stats.fallback_instructions),
-              static_cast<unsigned long long>(
-                  result.stats.interpreter_fallback_steps));
-        }
-        log_cpu_compare_program(test_case);
+        log_cpu_compare_failure_summary(
+            test_case, mode, reference, result, state_pass,
+            segment_state_pass, irq_state_pass, memory_state_pass,
+            peripheral_state_pass, segment_peripheral_pass,
+            expected_state_pass, native_check_pass, native_check);
       }
     }
   }
@@ -4564,10 +4258,13 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_execution_mode_cli_value = saved_override_value;
 
   if (failures != 0) {
-    LOG_ERROR("CPU backend compare test failed: %d case(s)", failures);
+    LOG_ERROR(
+        "CPU backend compare test failed: %d case(s) reference=Interpreter",
+        failures);
     return 1;
   }
-  LOG_INFO("CPU backend compare test passed");
+  LOG_INFO(
+      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2");
   return 0;
 }
 } // namespace
