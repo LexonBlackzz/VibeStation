@@ -35,6 +35,8 @@ public:
     [[nodiscard]] u32 vf(u32 index, u32 lane) const {
         return vf_[index & 31u][lane & 3u];
     }
+    [[nodiscard]] u32 p() const { return p_; }
+    [[nodiscard]] u32 random() const { return r_; }
     [[nodiscard]] const Vu1Stats& stats() const { return stats_; }
 
 private:
@@ -71,6 +73,7 @@ private:
     u32 i_ = 0;
     u32 q_ = 0x3F800000u;
     u32 p_ = 0;
+    u32 r_ = 0x3F800000u;
     u32 status_ = 0;
     u32 mac_ = 0;
     u32 clip_ = 0;
