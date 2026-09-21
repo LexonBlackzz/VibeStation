@@ -655,6 +655,49 @@ bool test_ee_break_exception_and_tlb_ops() {
     return ok;
 }
 
+bool test_ee_trap_instructions() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3800u;
+
+    // TEQ r1,r2 and TNEI r1,7.
+    constexpr ps2::u32 teq =
+        (1u << 21) | (2u << 16) | 0x34u;
+    constexpr ps2::u32 tnei =
+        (0x01u << 26) | (1u << 21) | (0x0Eu << 16) | 7u;
+
+    bool ok = expect(
+        system.bus().write32(pc, teq) &&
+        system.bus().write32(pc + 4u, tnei),
+        "trap test code write failed");
+
+    system.ee().reset(pc);
+    auto& state = system.ee().state();
+    state.cop0[12] = 0u;
+    state.gpr[1].lo = 5u;
+    state.gpr[2].lo = 5u;
+
+    std::string error;
+    ok = expect(system.ee().step(error),
+                "TEQ execution failed") && ok;
+    ok = expect(!system.ee().halted() &&
+                    state.pc == 0x80000180u &&
+                    (state.cop0[13] & 0x7Cu) == 0x34u,
+                "TEQ did not raise Trap exception") && ok;
+
+    system.ee().reset(pc + 4u);
+    state.cop0[12] = 0u;
+    state.gpr[1].lo = 5u;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "TNEI execution failed") && ok;
+    ok = expect(!system.ee().halted() &&
+                    state.pc == 0x80000180u &&
+                    (state.cop0[13] & 0x7Cu) == 0x34u,
+                "TNEI did not raise Trap exception") && ok;
+
+    return ok;
+}
+
 bool test_ee_sa_and_qfsrv() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x3600u;
@@ -2723,6 +2766,7 @@ int main() {
     ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_ee_break_exception_and_tlb_ops() && ok;
+    ok = test_ee_trap_instructions() && ok;
     ok = test_ee_sa_and_qfsrv() && ok;
     ok = test_ee_tlb_mapped_memory_and_refill() && ok;
     ok = test_ee_integer_overflow_exception() && ok;
