@@ -246,7 +246,7 @@ bool Vif1Dma::begin_command(
             return false;
         }
         if (vu1_ != nullptr) {
-            vu1_->start(immediate & 0x3FFu);
+            vu1_->start(immediate & 0x7FFu);
         }
         return finish_command(bus);
 
