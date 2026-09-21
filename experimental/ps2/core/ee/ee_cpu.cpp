@@ -1619,6 +1619,105 @@ bool EeCpu::execute_mmi(
             instruction,
             "Unsupported MMI3 function " + hex32(sa),
             error);
+    case 0x30: { // PMFHL
+        if (rd == 0u) return true;
+        EeGpr out{};
+
+        const auto low32 = [](u64 value) {
+            return static_cast<u32>(value);
+        };
+        const auto high32 = [](u64 value) {
+            return static_cast<u32>(value >> 32);
+        };
+        const auto clamp_s32 = [](s64 value) -> u64 {
+            if (value > std::numeric_limits<s32>::max()) {
+                return sign_extend_32(0x7FFFFFFFu);
+            }
+            if (value < std::numeric_limits<s32>::min()) {
+                return sign_extend_32(0x80000000u);
+            }
+            return sign_extend_32(
+                static_cast<u32>(static_cast<s32>(value)));
+        };
+        const auto clamp_s16 = [](u32 value) -> u16 {
+            const s32 signed_value = static_cast<s32>(value);
+            if (signed_value > std::numeric_limits<s16>::max()) {
+                return 0x7FFFu;
+            }
+            if (signed_value < std::numeric_limits<s16>::min()) {
+                return 0x8000u;
+            }
+            return static_cast<u16>(
+                static_cast<s16>(signed_value));
+        };
+
+        switch (sa) {
+        case 0x00: // LW
+            set32(out, 0u, low32(state_.lo));
+            set32(out, 1u, low32(state_.hi));
+            set32(out, 2u, low32(state_.lo1));
+            set32(out, 3u, low32(state_.hi1));
+            break;
+        case 0x01: // UW
+            set32(out, 0u, high32(state_.lo));
+            set32(out, 1u, high32(state_.hi));
+            set32(out, 2u, high32(state_.lo1));
+            set32(out, 3u, high32(state_.hi1));
+            break;
+        case 0x02: { // SLW
+            const s64 primary = static_cast<s64>(
+                static_cast<u64>(low32(state_.lo)) |
+                (static_cast<u64>(low32(state_.hi)) << 32));
+            const s64 secondary = static_cast<s64>(
+                static_cast<u64>(low32(state_.lo1)) |
+                (static_cast<u64>(low32(state_.hi1)) << 32));
+            out.lo = clamp_s32(primary);
+            out.hi = clamp_s32(secondary);
+            break;
+        }
+        case 0x03: // LH
+            set16(out, 0u, static_cast<u16>(state_.lo));
+            set16(out, 1u, static_cast<u16>(state_.lo >> 32));
+            set16(out, 2u, static_cast<u16>(state_.hi));
+            set16(out, 3u, static_cast<u16>(state_.hi >> 32));
+            set16(out, 4u, static_cast<u16>(state_.lo1));
+            set16(out, 5u, static_cast<u16>(state_.lo1 >> 32));
+            set16(out, 6u, static_cast<u16>(state_.hi1));
+            set16(out, 7u, static_cast<u16>(state_.hi1 >> 32));
+            break;
+        case 0x04: // SH
+            set16(out, 0u, clamp_s16(low32(state_.lo)));
+            set16(out, 1u, clamp_s16(high32(state_.lo)));
+            set16(out, 2u, clamp_s16(low32(state_.hi)));
+            set16(out, 3u, clamp_s16(high32(state_.hi)));
+            set16(out, 4u, clamp_s16(low32(state_.lo1)));
+            set16(out, 5u, clamp_s16(high32(state_.lo1)));
+            set16(out, 6u, clamp_s16(low32(state_.hi1)));
+            set16(out, 7u, clamp_s16(high32(state_.hi1)));
+            break;
+        default:
+            return true;
+        }
+
+        state_.gpr[rd] = out;
+        return true;
+    }
+    case 0x31: // PMTHL
+        if (sa == 0u) {
+            const auto replace_low32 = [](u64 original, u32 value) {
+                return (original & 0xFFFFFFFF00000000ull) |
+                       static_cast<u64>(value);
+            };
+            state_.lo =
+                replace_low32(state_.lo, get32(a, 0u));
+            state_.hi =
+                replace_low32(state_.hi, get32(a, 1u));
+            state_.lo1 =
+                replace_low32(state_.lo1, get32(a, 2u));
+            state_.hi1 =
+                replace_low32(state_.hi1, get32(a, 3u));
+        }
+        return true;
     case 0x34: { // PSLLH
         EeGpr out{};
         const u32 shift = sa & 0xFu;
