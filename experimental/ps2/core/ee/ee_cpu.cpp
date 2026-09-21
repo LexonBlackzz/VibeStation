@@ -659,6 +659,27 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
 bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
     const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, sel=instruction&7u, funct=instruction&63u;
     if(rs==0x00){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); write_gpr_word(rt,state_.cop0[rd]); return true; }
+    if(rs==0x08){ // BC0F / BC0T / BC0FL / BC0TL
+        if(rt>3u) return fail(pc,instruction,"Unsupported BC0 condition branch",error);
+        u32 dmac_stat=0, dmac_pcr=0;
+        if(!bus_.read32(0x1000E010u,dmac_stat) ||
+           !bus_.read32(0x1000E020u,dmac_pcr))
+            return fail(pc,instruction,"BC0 DMAC condition read fault",error);
+        const bool condition=
+            (((dmac_stat | ~dmac_pcr) & 0x3FFu) == 0x3FFu);
+        const bool branch_on_true=(rt & 1u)!=0;
+        const bool likely=(rt & 2u)!=0;
+        const bool take=condition==branch_on_true;
+        if(take){
+            state_.next_pc=branch_target(pc,immediate(instruction));
+            next_is_delay_slot_=true;
+        } else if(likely){
+            branch_likely_not_taken(pc);
+        } else {
+            next_is_delay_slot_=true;
+        }
+        return true;
+    }
     if(rs==0x04){
         if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error);
         if(rd!=15) {
