@@ -1122,7 +1122,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
             branch_pc + 4u + (static_cast<u32>(branch_simm) << 2u);
       }
       for (const auto &inst : decoded) {
-        if (inst.op == V2AluOp::Sw) {
+        if (inst.op == V2AluOp::Sw || inst.op == V2AluOp::Lw) {
           block.base_cycles += 2u;
         } else {
           // Conditional branches cost one cycle when not taken and gain one
