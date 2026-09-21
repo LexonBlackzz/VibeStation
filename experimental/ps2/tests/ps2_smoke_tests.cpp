@@ -1060,6 +1060,78 @@ bool test_iop_sio2_dma_bootstrap_completion() {
     return ok;
 }
 
+bool test_ee_ipu_dma_bootstrap_paths() {
+    ps2::Ps2System system;
+    ps2::IpuDma dma;
+    dma.reset();
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 dmac_stat = 0x1000E010u;
+    constexpr ps2::u32 from_base = 0x1000B000u;
+    constexpr ps2::u32 to_base = 0x1000B400u;
+    constexpr ps2::u32 str = 1u << 8;
+
+    ok = expect(
+             system.bus().write32(dmac_ctrl, 1u),
+             "failed to enable DMAC for IPU DMA test") && ok;
+
+    // Firmware probes can arm FROM_IPU with QWC=0 while OFC is empty.
+    ok = expect(
+             system.bus().write32(from_base + 0x20u, 0u) &&
+             system.bus().write32(from_base + 0x00u, str),
+             "failed to arm zero-QWC IPU0 DMA") && ok;
+    ok = expect(
+             dma.service(system.bus(), error),
+             "zero-QWC IPU0 DMA service failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.bus().read32(from_base + 0x00u, value) &&
+             (value & str) == 0,
+             "zero-QWC IPU0 DMA left STR set") && ok;
+    ok = expect(
+             system.bus().read32(dmac_stat, value) &&
+             (value & (1u << 3)) != 0,
+             "zero-QWC IPU0 completion IRQ missing") && ok;
+    ok = expect(
+             system.bus().write32(dmac_stat, 1u << 3),
+             "failed to acknowledge IPU0 DMA IRQ") && ok;
+
+    // TO_IPU consumes real memory payload into the modeled input FIFO.
+    ok = expect(
+             system.bus().write64(
+                 0x6000u, 0x0123456789ABCDEFull) &&
+             system.bus().write64(
+                 0x6008u, 0xFEDCBA9876543210ull) &&
+             system.bus().write32(to_base + 0x10u, 0x6000u) &&
+             system.bus().write32(to_base + 0x20u, 1u) &&
+             system.bus().write32(to_base + 0x00u, str),
+             "failed to arm IPU1 input DMA") && ok;
+    error.clear();
+    ok = expect(
+             dma.service(system.bus(), error),
+             "IPU1 input DMA service failed") && ok;
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ok = expect(
+             system.bus().read64(0x10007010u, lo) &&
+             system.bus().read64(0x10007018u, hi) &&
+             lo == 0x0123456789ABCDEFull &&
+             hi == 0xFEDCBA9876543210ull,
+             "IPU1 FIFO payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(to_base + 0x00u, value) &&
+             (value & str) == 0 &&
+             system.bus().read32(dmac_stat, value) &&
+             (value & (1u << 4)) != 0,
+             "IPU1 DMA completion state mismatch") && ok;
+
+    return ok;
+}
+
 bool test_ee_scratchpad_dma_round_trip() {
     ps2::Ps2System system;
     ps2::SprDma dma;
@@ -1254,6 +1326,7 @@ int main() {
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
+    ok = test_ee_ipu_dma_bootstrap_paths() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
