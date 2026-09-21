@@ -1276,19 +1276,36 @@ void Ps2App::update_emulation() {
     // 20k-instruction slice made one emulated NTSC field take hundreds of
     // host frames before the display could even be sampled.
     constexpr u64 kChunkInstructions = 8192;
-    constexpr u64 kMaxInstructionsPerFrame = 500000;
-    constexpr auto kCpuTimeSlice = std::chrono::milliseconds(8);
+    constexpr u64 kNormalMaxInstructionsPerFrame = 500000;
+    constexpr u64 kBootstrapMaxInstructionsPerFrame = 1500000;
+    constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(8);
+    constexpr auto kBootstrapCpuTimeSlice =
+        std::chrono::milliseconds(14);
 
-    const auto deadline = std::chrono::steady_clock::now() + kCpuTimeSlice;
+    // Before the first valid PCRTC frame exists, spend most of the host frame
+    // advancing BIOS initialization. Once scanout is alive, return to the
+    // smaller slice so the debugger/UI stay comfortably responsive.
+    const bool bootstrap_turbo = !system_.gs_display().valid();
+    const u64 max_instructions =
+        bootstrap_turbo
+            ? kBootstrapMaxInstructionsPerFrame
+            : kNormalMaxInstructionsPerFrame;
+    const auto cpu_time_slice =
+        bootstrap_turbo
+            ? kBootstrapCpuTimeSlice
+            : kNormalCpuTimeSlice;
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + cpu_time_slice;
     u64 executed = 0;
     std::string error;
 
-    while (executed < kMaxInstructionsPerFrame &&
+    while (executed < max_instructions &&
            !system_.halted()) {
         const u64 budget =
             std::min<u64>(
                 kChunkInstructions,
-                kMaxInstructionsPerFrame - executed);
+                max_instructions - executed);
         const u64 ran = system_.run_ee(budget, error);
         executed += ran;
 
