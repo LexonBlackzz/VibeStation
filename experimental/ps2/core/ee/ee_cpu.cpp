@@ -447,6 +447,12 @@ bool EeCpu::execute_special(
     case 0x27: // NOR
         write_gpr64(rd, ~(gpr_u64(rs) | gpr_u64(rt)));
         return true;
+    case 0x28: // MFSA
+        write_gpr64(rd, state_.sa);
+        return true;
+    case 0x29: // MTSA
+        state_.sa = static_cast<u32>(gpr_u64(rs));
+        return true;
     case 0x2A: // SLT
         write_gpr64(rd, gpr_s64(rs) < gpr_s64(rt) ? 1u : 0u);
         return true;
@@ -522,6 +528,16 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
     case 0x11: taken=gpr_s64(rs)>=0; link=true; break;
     case 0x12: taken=gpr_s64(rs)<0; link=true; likely=true; break;
     case 0x13: taken=gpr_s64(rs)>=0; link=true; likely=true; break;
+    case 0x18: // MTSAB
+        state_.sa =
+            (static_cast<u32>(gpr_u64(rs)) & 0xFu) ^
+            (static_cast<u32>(immediate(instruction)) & 0xFu);
+        return true;
+    case 0x19: // MTSAH
+        state_.sa =
+            ((static_cast<u32>(gpr_u64(rs)) & 0x7u) ^
+             (static_cast<u32>(immediate(instruction)) & 0x7u)) << 1u;
+        return true;
     default: return fail(pc,instruction,"Unsupported REGIMM variant "+hex32(rt),error);
     }
     if(link) write_gpr_word(31,pc+8u);
@@ -1255,6 +1271,29 @@ bool EeCpu::execute_mmi(
             }
             store(out);
             return true;
+        case 0x1B: { // QFSRV
+            const u32 shift = (state_.sa & 0xFu) << 3u;
+            if (shift == 0u) {
+                out = b;
+            } else if (shift < 64u) {
+                out.lo =
+                    (b.lo >> shift) |
+                    (b.hi << (64u - shift));
+                out.hi =
+                    (b.hi >> shift) |
+                    (a.lo << (64u - shift));
+            } else {
+                const u32 s = shift - 64u;
+                out.lo = b.hi >> s;
+                out.hi = a.lo >> s;
+                if (s != 0u) {
+                    out.lo |= a.lo << (64u - s);
+                    out.hi |= a.hi << (64u - s);
+                }
+            }
+            store(out);
+            return true;
+        }
         default:
             return false;
         }
