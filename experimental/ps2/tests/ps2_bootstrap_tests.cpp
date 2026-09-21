@@ -1634,6 +1634,60 @@ bool test_gs_display_extraction() {
         system.gs_display().rgba8()[0] == 0xFFAABBCCu,
         "GS circuit-2 fallback pixel mismatch") && ok;
 
+    // With both circuits valid, circuit 1 is blended over circuit 2. A fully
+    // transparent circuit-1 pixel must not hide visible circuit-2 BIOS output.
+    system.gs_privileged().reset();
+    system.gs_display().reset();
+    constexpr ps2::u64 blend_dispfb1 =
+        (static_cast<ps2::u64>(1u) << 9) |
+        (static_cast<ps2::u64>(1u) << 43);
+    constexpr ps2::u64 blend_dispfb2 =
+        static_cast<ps2::u64>(1u) << 9;
+    constexpr ps2::u64 blend_display =
+        static_cast<ps2::u64>(0u) << 32;
+    ok = expect(
+        system.gs_privileged().write64(0x12000000u, 3u) &&
+        system.gs_privileged().write64(0x12000070u, blend_dispfb1) &&
+        system.gs_privileged().write64(0x12000080u, blend_display) &&
+        system.gs_privileged().write64(0x12000090u, blend_dispfb2) &&
+        system.gs_privileged().write64(0x120000A0u, blend_display),
+        "GS dual-circuit register setup failed") && ok;
+    ok = expect(
+        system.gs_core().vram().write_pixel(
+            0u, 0u, 1u, 0u, 1u, 0x000000FFu) &&
+        system.gs_core().vram().write_pixel(
+            0u, 0u, 0u, 0u, 1u, 0xFFFF0000u),
+        "GS dual-circuit VRAM setup failed") && ok;
+
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+    ok = expect(
+        system.gs_display().valid() &&
+        system.gs_display().circuit() == 3u &&
+        !system.gs_display().rgba8().empty() &&
+        system.gs_display().rgba8()[0] == 0xFFFF0000u,
+        "transparent circuit 1 incorrectly hid circuit 2") && ok;
+
+    // MMOD=1 selects PMODE.ALP. ALP=0x40 is one-half in GS 1.7 alpha.
+    constexpr ps2::u64 half_alpha_pmode =
+        3u | (1u << 5) | (static_cast<ps2::u64>(0x40u) << 8);
+    ok = expect(
+        system.gs_privileged().write64(
+            0x12000000u,
+            half_alpha_pmode),
+        "GS constant-alpha PMODE setup failed") && ok;
+    ok = expect(
+        system.gs_core().vram().write_pixel(
+            0u, 0u, 1u, 0u, 1u, 0xFF0000FFu),
+        "GS constant-alpha source setup failed") && ok;
+
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+    ok = expect(
+        !system.gs_display().rgba8().empty() &&
+        system.gs_display().rgba8()[0] == 0xFF800080u,
+        "GS constant-alpha dual-circuit merge mismatch") && ok;
+
     return ok;
 }
 
