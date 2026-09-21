@@ -3065,6 +3065,19 @@ bool EeCpu::step(std::string& error) {
         }
         break;
     }
+    case 0x36: { // LQC2
+        const u32 address = effective_address() & ~0x0Fu;
+        u64 lo = 0;
+        u64 hi = 0;
+        if (!read64_mem(address, lo) ||
+            !read64_mem(address + 8u, hi)) {
+            ok = load_fault("LQC2", address);
+        } else if (rt != 0u) {
+            state_.vu_vf[rt].lo = lo;
+            state_.vu_vf[rt].hi = hi;
+        }
+        break;
+    }
     case 0x37: { // LD
         const u32 address = effective_address();
         u64 value = 0;
@@ -3099,6 +3112,18 @@ bool EeCpu::step(std::string& error) {
             ok = fail(pc, instruction, "SCD fault to " + hex32(address), error);
         } else {
             write_gpr64(rt, 1u);
+        }
+        break;
+    }
+    case 0x3E: { // SQC2
+        const u32 address = effective_address() & ~0x0Fu;
+        if (!write64_mem(address, state_.vu_vf[rt].lo) ||
+            !write64_mem(address + 8u, state_.vu_vf[rt].hi)) {
+            ok = fail(
+                pc,
+                instruction,
+                "SQC2 fault to " + hex32(address),
+                error);
         }
         break;
     }
