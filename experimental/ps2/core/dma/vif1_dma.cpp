@@ -43,6 +43,13 @@ constexpr u32 kChcrTte = 1u << 6;
 constexpr u32 kChcrTie = 1u << 7;
 constexpr u32 kChcrStr = 1u << 8;
 constexpr u32 kVif1Fdr = 1u << 23;
+constexpr u32 kVif1VpsMask = 0x3u;
+constexpr u32 kVif1Vew = 1u << 2;
+constexpr u32 kVif1Vgw = 1u << 3;
+constexpr u32 kVif1Mrk = 1u << 6;
+constexpr u32 kVif1Dbf = 1u << 7;
+constexpr u32 kVif1Int = 1u << 11;
+constexpr u32 kVif1FqcMask = 0x1Fu << 24;
 
 constexpr u32 kModeNormal = 0;
 constexpr u32 kModeChain = 1;
@@ -54,6 +61,15 @@ u32 apply_spr(u32 address, bool spr) {
 
 u32 cycle_length(u32 value) {
     return value == 0 ? 256u : value;
+}
+
+void set_vif1_vps(EeBus& bus, u32 vps) {
+    bus.update_vif1_stat(vps & kVif1VpsMask, kVif1VpsMask);
+}
+
+void set_vif1_fqc(EeBus& bus, u32 qwc) {
+    const u32 fqc = std::min(qwc, 16u) << 24;
+    bus.update_vif1_stat(fqc, kVif1FqcMask);
 }
 
 u32 extend_element(u32 value, u32 bits, bool is_unsigned) {
@@ -134,6 +150,9 @@ bool Vif1Dma::complete(EeBus& bus, u32 chcr) {
     end_after_qwc_ = false;
     if (!bus.write32(kVif1Qwc, 0u)) return false;
     if (!bus.write32(kVif1Chcr, chcr & ~kChcrStr)) return false;
+    bus.update_vif1_stat(
+        0u,
+        kVif1VpsMask | kVif1Vew | kVif1Vgw | kVif1FqcMask);
     bus.raise_dmac(1);
     return true;
 }
@@ -141,10 +160,12 @@ bool Vif1Dma::complete(EeBus& bus, u32 chcr) {
 bool Vif1Dma::finish_command(EeBus& bus) {
     payload_ = Payload::None;
     payload_index_ = 0;
+    set_vif1_vps(bus, 0u);
+    bus.update_vif1_stat(0u, kVif1Vew | kVif1Vgw);
     if (command_irq_pending_) {
-        // VIF1 interrupts are routed through EE INTC source 5.  A full VIS
-        // stall model can be layered on later; raising the interrupt here is
-        // enough for BIOS handlers while keeping the bootstrap stream moving.
+        // Keep bootstrap execution moving, but expose the command interrupt in
+        // STAT as well as routing it to the EE INTC.
+        bus.update_vif1_stat(kVif1Int, 0u);
         bus.raise_intc(5);
     }
     command_irq_pending_ = false;
@@ -161,6 +182,8 @@ bool Vif1Dma::begin_command(
     const u32 command = (word >> 24) & 0x7Fu;
     const u32 num_field = (word >> 16) & 0xFFu;
     const u32 immediate = word & 0xFFFFu;
+
+    set_vif1_vps(bus, 2u);
 
     if (!bus.write32(kVif1Code, word)) {
         error = "failed to mirror VIF1 CODE";
@@ -226,13 +249,28 @@ bool Vif1Dma::begin_command(
             error = "failed to write VIF1 MARK";
             return false;
         }
+        bus.update_vif1_stat(kVif1Mrk, 0u);
         return finish_command(bus);
 
     case 0x10: // FLUSHE
     case 0x11: // FLUSH
     case 0x13: // FLUSHA
-        // VU1 micro execution is not scheduled yet, therefore there is no
-        // asynchronous VU/PATH1 work for these commands to wait on.
+        if (vu1_ != nullptr && vu1_->running()) {
+            // The bootstrap core has no asynchronous VIF/GIF scheduler yet,
+            // so drain the active VU1 program synchronously at the fence. This
+            // preserves the ordering firmware expects from FLUSH/FLUSHE.
+            bus.update_vif1_stat(kVif1Vew | 1u, kVif1VpsMask);
+            std::string vu_error;
+            vu1_->run(1u << 20, vu_error);
+            if (!vu_error.empty()) {
+                error = "VU1 flush: " + vu_error;
+                return false;
+            }
+            if (vu1_->running()) {
+                error = "VU1 flush exceeded bootstrap execution budget";
+                return false;
+            }
+        }
         return finish_command(bus);
 
     case 0x14: // MSCAL
@@ -245,6 +283,9 @@ bool Vif1Dma::begin_command(
             error = "failed to update VIF1 double-buffer state";
             return false;
         }
+        bus.update_vif1_stat(
+            double_buffer_ ? kVif1Dbf : 0u,
+            kVif1Dbf);
         if (vu1_ != nullptr) {
             vu1_->start(immediate & 0x7FFu);
         }
@@ -259,16 +300,19 @@ bool Vif1Dma::begin_command(
     case 0x20: // STMASK
         payload_ = Payload::Mask;
         payload_index_ = 0;
+        set_vif1_vps(bus, 3u);
         return true;
 
     case 0x30: // STROW
         payload_ = Payload::Row;
         payload_index_ = 0;
+        set_vif1_vps(bus, 3u);
         return true;
 
     case 0x31: // STCOL
         payload_ = Payload::Col;
         payload_index_ = 0;
+        set_vif1_vps(bus, 3u);
         return true;
 
     case 0x4A: { // MPG
@@ -277,6 +321,7 @@ bool Vif1Dma::begin_command(
         mpg_words_remaining_ = instructions * 2u;
         payload_ = Payload::Mpg;
         payload_index_ = 0;
+        set_vif1_vps(bus, 3u);
         if (!bus.write32(kVif1Num, num_field)) {
             error = "failed to write VIF1 MPG NUM";
             return false;
@@ -292,6 +337,7 @@ bool Vif1Dma::begin_command(
         direct_words_.fill(0);
         payload_ = Payload::Direct;
         payload_index_ = 0;
+        set_vif1_vps(bus, 3u);
         return true;
     }
 
@@ -331,6 +377,7 @@ bool Vif1Dma::begin_command(
             }
 
             payload_ = Payload::Unpack;
+            set_vif1_vps(bus, 3u);
             if (!bus.write32(kVif1Num, num_field)) {
                 error = "failed to write VIF1 UNPACK NUM";
                 return false;
@@ -648,6 +695,10 @@ bool Vif1Dma::service_forward(
         return false;
     }
     qwc &= 0xFFFFu;
+    set_vif1_fqc(bus, qwc);
+    if (qwc != 0u && payload_ == Payload::None) {
+        set_vif1_vps(bus, 1u);
+    }
 
     if (mode == kModeNormal && qwc == 0) {
         if (!complete(bus, chcr)) {
@@ -766,6 +817,7 @@ bool Vif1Dma::service_forward(
             error = "VIF1 DMA tag state write failed";
             return false;
         }
+        set_vif1_fqc(bus, qwc);
 
         if ((chcr & kChcrTte) != 0) {
             if (!consume_word(bus, gs, static_cast<u32>(tag_hi), error) ||
@@ -805,6 +857,7 @@ bool Vif1Dma::service_forward(
         error = "failed to update VIF1 forward DMA progress";
         return false;
     }
+    set_vif1_fqc(bus, qwc);
 
     if (qwc == 0 && (mode == kModeNormal || end_after_qwc_)) {
         if (!complete(bus, chcr)) {
@@ -830,6 +883,8 @@ bool Vif1Dma::service_reverse(
         error = "failed to read VIF1 QWC";
         return false;
     }
+    qwc &= 0xFFFFu;
+    set_vif1_fqc(bus, qwc);
     if (qwc == 0) {
         if (!complete(bus, chcr)) {
             error = "failed to complete zero-length VIF1 DMA";
@@ -864,6 +919,7 @@ bool Vif1Dma::service_reverse(
         error = "failed to update VIF1 reverse DMA registers";
         return false;
     }
+    set_vif1_fqc(bus, qwc);
 
     if (qwc == 0 && !complete(bus, chcr)) {
         error = "failed to complete VIF1 reverse DMA";
