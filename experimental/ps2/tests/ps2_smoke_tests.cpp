@@ -410,6 +410,27 @@ bool test_iop_ram_mirror_boundary() {
     return ok;
 }
 
+bool test_iop_optional_extension_rom_windows() {
+    ps2::Ps2System system;
+
+    ps2::u32 value = 0xFFFFFFFFu;
+    bool ok = expect(
+        system.iop_bus().read32(0xBE000000u, value) && value == 0u,
+        "IOP ROM1 uncached window did not read as an absent ROM");
+    ok = expect(
+             system.iop_bus().read32(0x9E400000u, value) && value == 0u,
+             "IOP ROM2 cached window did not read as an absent ROM") &&
+         ok;
+    ok = expect(
+             system.iop_bus().write32(0xBE000000u, 0xFFFFFFFFu) &&
+                 system.iop_bus().read32(0x1E000000u, value) &&
+                 value == 0u,
+             "IOP optional ROM window did not remain read-only") &&
+         ok;
+
+    return ok;
+}
+
 bool test_ee_iop_startup_interleave() {
     const auto path = create_test_bios();
 
@@ -1098,6 +1119,7 @@ int main() {
     ok = test_bios_mapping_and_startup() && ok;
     ok = test_iop_reset_and_shared_ram() && ok;
     ok = test_iop_ram_mirror_boundary() && ok;
+    ok = test_iop_optional_extension_rom_windows() && ok;
     ok = test_ee_iop_startup_interleave() && ok;
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;

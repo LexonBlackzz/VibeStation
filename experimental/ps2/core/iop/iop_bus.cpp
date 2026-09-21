@@ -11,6 +11,8 @@ namespace ps2 {
 namespace {
 
 constexpr u32 kRamMirrorEnd = 0x00800000u;
+constexpr u32 kExtensionRomBase = 0x1E000000u;
+constexpr u32 kExtensionRomEnd = 0x1E800000u;
 constexpr u32 kSifBase = 0x1D000000u;
 constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
@@ -30,6 +32,11 @@ constexpr u32 kSio2Start = 1u;
 constexpr u32 kSio2NoDevices = 0x0003D000u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
+
+bool is_extension_rom(u32 physical, u32 width) {
+    return physical >= kExtensionRomBase &&
+           physical <= kExtensionRomEnd - width;
+}
 
 } // namespace
 
@@ -398,6 +405,10 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     if (physical < kRamMirrorEnd) return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
+    if (is_extension_rom(physical, 1u)) {
+        value = 0;
+        return true;
+    }
     if (intc_.read8(physical, value)) return true;
     if (cdvd_.read8(physical, value)) return true;
     if (hw_.read8(physical, value)) return true;
@@ -424,6 +435,10 @@ bool IopBus::read16(u32 address, u16& value) const {
         return true;
     }
     if (intc_.read16(physical, value)) return true;
+    if (is_extension_rom(physical, 2u)) {
+        value = 0;
+        return true;
+    }
     u8 lo=0, hi=0;
     if (!read8(address, lo) || !read8(address+1, hi)) return false;
     value = static_cast<u16>(lo) | (static_cast<u16>(hi)<<8);
@@ -465,6 +480,10 @@ bool IopBus::read32(u32 address, u32& value) const {
         }
         return true;
     }
+    if (is_extension_rom(physical, 4u)) {
+        value = 0;
+        return true;
+    }
     if (cdvd_.read32(physical, value)) return true;
     if (hw_.read32(physical, value)) return true;
     return bios_.read32_physical(physical, value);
@@ -485,6 +504,7 @@ bool IopBus::write8(u32 address, u8 value) {
         return true;
     }
     if (physical < kRamMirrorEnd) return ram_.write8(physical & static_cast<u32>(IopRam::kSize-1), value);
+    if (is_extension_rom(physical, 1u)) return true;
     if (intc_.write8(physical,value)) return true;
     if (cdvd_.write8(physical,value)) return true;
     if (hw_.write8(physical,value)) return true;
@@ -516,6 +536,7 @@ bool IopBus::write16(u32 address, u16 value) {
         return true;
     }
     if (intc_.write16(physical,value)) return true;
+    if (is_extension_rom(physical, 2u)) return true;
     return write8(address,static_cast<u8>(value)) && write8(address+1,static_cast<u8>(value>>8));
 }
 
@@ -613,6 +634,7 @@ bool IopBus::write32(u32 address, u32 value) {
         }
         return true;
     }
+    if (is_extension_rom(physical, 4u)) return true;
     if (cdvd_.write32(physical,value)) return true;
     if (hw_.write32(physical,value)) return true;
     return false;
