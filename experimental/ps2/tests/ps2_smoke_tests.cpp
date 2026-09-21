@@ -1314,6 +1314,40 @@ bool test_iop_firewire_bootstrap_probes() {
     return ok;
 }
 
+bool test_iop_absent_dev9_aperture() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 value8 = 0xFFu;
+    ps2::u16 value16 = 0xFFFFu;
+    ps2::u32 value32 = 0xFFFFFFFFu;
+
+    ok = expect(
+             system.iop_bus().read8(0x10000000u, value8) &&
+             value8 == 0u,
+             "absent DEV9 byte probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read16(0xB000146Eu, value16) &&
+             value16 == 0u,
+             "absent DEV9 KSEG1 halfword probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x10000040u, value32) &&
+             value32 == 0u,
+             "absent DEV9 word probe did not return zero") && ok;
+
+    ok = expect(
+             system.iop_bus().write8(0x10000000u, 0xAAu) &&
+             system.iop_bus().write16(0x10000002u, 0x55AAu) &&
+             system.iop_bus().write32(0x10000004u, 0x12345678u),
+             "absent DEV9 probe writes faulted") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x10000004u, value32) &&
+             value32 == 0u,
+             "absent DEV9 write unexpectedly created device state") && ok;
+
+    return ok;
+}
+
 bool test_iop_dma6_ordering_table_clear() {
     ps2::Ps2System system;
     bool ok = true;
@@ -1477,6 +1511,7 @@ int main() {
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
     ok = test_iop_ohci_bootstrap_reset() && ok;
     ok = test_iop_firewire_bootstrap_probes() && ok;
+    ok = test_iop_absent_dev9_aperture() && ok;
     ok = test_iop_dma6_ordering_table_clear() && ok;
     ok = test_ee_scratchpad_dma_round_trip() && ok;
     ok = test_ee_ipu_dma_bootstrap_paths() && ok;
