@@ -8,10 +8,12 @@
 namespace ps2 {
 
 class EeBus;
+class Vu1;
 
 class Vif0Dma {
 public:
     void reset();
+    void attach_vu0(Vu1& vu0) { vu0_ = &vu0; }
 
     [[nodiscard]] bool service(
         EeBus& bus,
@@ -25,6 +27,7 @@ private:
         Col,
         Mpg,
         Unpack,
+        WaitVu,
     };
 
     [[nodiscard]] bool complete(EeBus& bus, u32 chcr);
@@ -59,6 +62,9 @@ private:
     Payload payload_ = Payload::None;
     bool command_irq_pending_ = false;
     u32 payload_index_ = 0;
+    std::array<u32, 4> deferred_words_{};
+    u32 deferred_word_count_ = 0;
+    u32 deferred_word_index_ = 0;
 
     u32 cycle_ = 0;
     u32 mode_ = 0;
@@ -82,6 +88,8 @@ private:
     u32 unpack_bit_count_ = 0;
     std::array<u32, 4> unpack_vector_{};
     u32 unpack_component_ = 0;
+
+    Vu1* vu0_ = nullptr;
 };
 
 } // namespace ps2
