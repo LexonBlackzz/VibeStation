@@ -6,12 +6,13 @@
 
 namespace ps2 {
 
+class Bios;
 class IopIntc;
 
 class CdvdHw {
 public:
-    explicit CdvdHw(IopIntc& intc)
-        : intc_(intc) {}
+    CdvdHw(IopIntc& intc, const Bios& bios)
+        : intc_(intc), bios_(bios) {}
 
     static constexpr u32 kBase = 0x1F402000u;
     static constexpr u32 kSize = 0x40u;
@@ -31,8 +32,11 @@ private:
     void set_s_result(const u8* data, u8 size);
     void execute_s_command(u8 command);
     void set_irq(u8 cause);
+    [[nodiscard]] std::size_t config_base() const;
+    void seed_nvram_defaults();
 
     IopIntc& intc_;
+    const Bios& bios_;
 
     u8 n_command_ = 0;
     u8 ready_ = 0;
@@ -54,6 +58,12 @@ private:
     std::array<u8, 16> s_results_{};
     u8 s_result_count_ = 0;
     mutable u8 s_result_pos_ = 0;
+
+    std::array<u8, 1024> nvram_{};
+    u8 config_read_write_ = 0;
+    u8 config_offset_ = 0;
+    u8 config_blocks_ = 0;
+    u8 config_index_ = 0;
 };
 
 } // namespace ps2
