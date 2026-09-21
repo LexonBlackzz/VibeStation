@@ -25,10 +25,11 @@ bool Ps2System::advance_iop_for_ee_step(std::string& error){
         error="IOP step failed: "+iop_error;
         return false;
     }
+    iop_hw_.tick(1, iop_intc_);
     return true;
 }
 bool Ps2System::step_ee(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(halted()){error=halt_reason();return false;}if(!ee_.step(error)){error="EE halted: "+error;return false;}if(!gif_dma_.service(bus_,gs_core_,error)){error="GIF DMA: "+error;return false;}if(!vif1_dma_.service(bus_,gs_core_,gs_,error)){error="VIF1 DMA: "+error;return false;}if(vu1_.running()){std::string vu_error;vu1_.run(256,vu_error);if(!vu_error.empty()){error="VU1: "+vu_error;return false;}}scheduler_.run_until(scheduler_.now()+1,{});const u64 fields_before=video_timing_.fields_started();video_timing_.tick(1,hw_,iop_intc_);if(video_timing_.fields_started()!=fields_before){gs_.raise_vsync();gs_display_.update(gs_,gs_core_.vram());}if(gs_.irq_pending())hw_.raise_intc(0);return advance_iop_for_ee_step(error);}
-bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(iop_.halted()){error=iop_.halt_reason();return false;}return iop_.step(error);}
+bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(iop_.halted()){error=iop_.halt_reason();return false;}if(!iop_.step(error))return false;iop_hw_.tick(1,iop_intc_);return true;}
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return 0;}u64 executed=0;while(executed<instruction_budget&&!halted()){const u64 before=ee_.state().instructions_executed;if(!step_ee(error)){if(ee_.state().instructions_executed!=before)++executed;break;}++executed;}return executed;}
 void Ps2System::refresh_display(){gs_display_.update(gs_,gs_core_.vram());}
 std::string Ps2System::halt_reason()const{if(ee_.halted())return "EE: "+ee_.halt_reason();return {};}
