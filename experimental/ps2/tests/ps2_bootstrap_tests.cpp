@@ -943,6 +943,48 @@ bool test_vu_mapping_and_cop2() {
                  pack2(30.0f, 96.0f),
              "VU0 VMULx destination mask mismatch") && ok;
 
+    // LQC2/SQC2 are the normal EE-side 128-bit VU0 memory path.
+    constexpr ps2::u32 vector_base = 0x3000u;
+    ok = expect(
+             system.bus().write64(
+                 vector_base, 0x1122334455667788ull) &&
+             system.bus().write64(
+                 vector_base + 8u, 0x99AABBCCDDEEFF00ull),
+             "LQC2 source setup failed") && ok;
+    const ps2::u32 lqc2 =
+        (0x36u << 26) | (1u << 21) | (5u << 16);
+    ok = expect(
+             system.bus().write32(pc, lqc2),
+             "LQC2 opcode setup failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().gpr[1].lo = vector_base;
+    error.clear();
+    ok = expect(system.ee().step(error), "LQC2 execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[5].lo ==
+                 0x1122334455667788ull &&
+             system.ee().state().vu_vf[5].hi ==
+                 0x99AABBCCDDEEFF00ull,
+             "LQC2 vector result mismatch") && ok;
+
+    const ps2::u32 sqc2 =
+        (0x3Eu << 26) | (1u << 21) | (5u << 16) | 0x20u;
+    ok = expect(
+             system.bus().write32(pc, sqc2),
+             "SQC2 opcode setup failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    error.clear();
+    ok = expect(system.ee().step(error), "SQC2 execution failed") && ok;
+    ps2::u64 stored_lo = 0;
+    ps2::u64 stored_hi = 0;
+    ok = expect(
+             system.bus().read64(vector_base + 0x20u, stored_lo) &&
+             system.bus().read64(vector_base + 0x28u, stored_hi) &&
+             stored_lo == 0x1122334455667788ull &&
+             stored_hi == 0x99AABBCCDDEEFF00ull,
+             "SQC2 vector store mismatch") && ok;
+
     return ok;
 }
 
