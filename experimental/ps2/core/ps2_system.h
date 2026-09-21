@@ -44,7 +44,10 @@ public:
     GsDisplay& gs_display(){return gs_display_;} const GsDisplay& gs_display()const{return gs_display_;}
     Vu1& vu1(){return vu1_;} const Vu1& vu1()const{return vu1_;}
     bool bios_started()const{return bios_started_;}
-    bool halted()const{return ee_.halted()||iop_.halted();}
+    // The EE owns the user-visible bootstrap run state. An IOP halt is
+    // retained for diagnostics but does not discard EE/GS progress.
+    bool halted()const{return ee_.halted();}
+    bool iop_halted()const{return iop_.halted();}
     std::string halt_reason()const;
     u32 reset_instruction()const{return reset_instruction_;}
     u32 iop_reset_instruction()const{return iop_reset_instruction_;}
