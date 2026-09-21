@@ -439,6 +439,103 @@ bool test_mmi_bios_instruction_expansion() {
              system.ee().state().hi1 == 1,
              "PMULTW accumulator mismatch") && ok;
 
+    // PADSBH is the last defined MMI1 subgroup operation: subtract
+    // lower halfwords and add upper halfwords.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0004000300020001ull,
+        0x0008000700060005ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0001000100010001ull,
+        0x0001000100010001ull,
+    };
+    const ps2::u32 padsbh =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x04u << 6) | 0x28u;
+    run(padsbh);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0003000200010000ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0009000800070006ull,
+             "PADSBH mixed add/subtract mismatch") && ok;
+
+    // PMADDUW accumulates unsigned products into both packed HI/LO pairs.
+    system.ee().reset(pc);
+    system.ee().state().lo = 10u;
+    system.ee().state().hi = 0u;
+    system.ee().state().lo1 = 20u;
+    system.ee().state().hi1 = 0u;
+    system.ee().state().gpr[1] = {3u, 4u};
+    system.ee().state().gpr[2] = {5u, 6u};
+    const ps2::u32 pmadduw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x00u << 6) | 0x29u;
+    run(pmadduw);
+    ok = expect(
+             system.ee().state().gpr[3].lo == 25u &&
+             system.ee().state().gpr[3].hi == 44u &&
+             system.ee().state().lo == 25u &&
+             system.ee().state().lo1 == 44u,
+             "PMADDUW accumulator mismatch") && ok;
+
+    // PMULTH fills all eight 32-bit packed accumulator slots and exposes
+    // even slots through the destination register.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0004000300020001ull,
+        0x0008000700060005ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0002000200020002ull,
+        0x0002000200020002ull,
+    };
+    const ps2::u32 pmulth =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x1Cu << 6) | 0x09u;
+    run(pmulth);
+    ok = expect(
+             system.ee().state().lo ==
+                 0x0000000400000002ull &&
+             system.ee().state().hi ==
+                 0x0000000800000006ull &&
+             system.ee().state().lo1 ==
+                 0x0000000C0000000Aull &&
+             system.ee().state().hi1 ==
+                 0x000000100000000Eull &&
+             system.ee().state().gpr[3].lo ==
+                 0x0000000600000002ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000E0000000Aull,
+             "PMULTH accumulator layout mismatch") && ok;
+
+    // PDIVBW divides all four signed words by the first signed halfword.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x000000140000000Aull,
+        0x00000008FFFFFFF7ull,
+    };
+    system.ee().state().gpr[2].lo = 3u;
+    const ps2::u32 pdivbw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) |
+        (0x1Du << 6) | 0x09u;
+    run(pdivbw);
+    ok = expect(
+             system.ee().state().lo ==
+                 0x0000000600000003ull &&
+             system.ee().state().hi ==
+                 0x0000000200000001ull &&
+             system.ee().state().lo1 ==
+                 0x00000002FFFFFFFDull &&
+             system.ee().state().hi1 ==
+                 0x0000000200000000ull,
+             "PDIVBW quotient/remainder layout mismatch") && ok;
+
     // PMTHI/PMFHI cover the packed 128-bit HI transfer path.
     system.ee().reset(pc);
     system.ee().state().gpr[1] = {
