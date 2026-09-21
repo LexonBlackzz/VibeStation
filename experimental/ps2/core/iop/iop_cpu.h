@@ -16,6 +16,8 @@ struct IopCpuState {
     u32 pc = 0;
     u32 next_pc = 4;
     std::array<u32, 32> cop0{};
+    std::array<u32, 32> gte_data{};
+    std::array<u32, 32> gte_ctrl{};
     u64 instructions_executed = 0;
     u32 last_pc = 0;
     u32 last_instruction = 0;
@@ -67,6 +69,10 @@ private:
         u32 instruction,
         std::string& error);
     bool execute_cop0(
+        u32 pc,
+        u32 instruction,
+        std::string& error);
+    bool execute_cop2(
         u32 pc,
         u32 instruction,
         std::string& error);
