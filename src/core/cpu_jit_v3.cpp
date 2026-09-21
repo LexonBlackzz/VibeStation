@@ -6,7 +6,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -366,6 +368,52 @@ struct V3NativeRuntime {
 using V3NativeFn = u32 (*)(u32 *, const V3NativeRuntime *);
 using V3StepHelperFn = u32 (*)(Cpu *);
 
+// Link cells have stable addresses. Invalidation clears a cell before erasing
+// its block, so native code never follows a pointer into discarded metadata.
+struct V3ResidentBlock;
+struct V3ResidentSlot {
+  V3ResidentBlock *block = nullptr;
+};
+
+struct V3ResidentBlock {
+  V3NativeFn fn = nullptr;
+  V3ResidentSlot *successor = nullptr;
+  V3ResidentSlot *taken_successor = nullptr;
+  u32 start_pc = 0;
+  u32 next_pc = 0;
+  u32 taken_pc = 0;
+  u32 instruction_count = 0;
+  u32 base_cycles = 0;
+  u32 tail_index = 0;
+  u32 kind = 0; // 0: sequential, 1: conditional branch, 2: fixed jump
+  u32 icache_line_count = 0;
+  std::array<u8, 5> icache_indices{};
+  std::array<u32, 5> icache_tags{};
+};
+
+struct V3ResidentContext {
+  V3ResidentBlock *first = nullptr;
+  u32 *gpr = nullptr;
+  V3NativeRuntime *runtime = nullptr;
+  const u8 *icache = nullptr;
+  u32 cycle_budget = 0;
+  u32 instruction_budget = 0;
+  u32 branch_allowed = 1;
+  u32 entry_limit = 0xFFFFFFFFu;
+  u32 cycles = 0;
+  u32 instructions = 0;
+  u32 entries = 0;
+  u32 alu_entries = 0;
+  u32 branch_entries = 0;
+  u32 branch_taken = 0;
+  u32 branch_not_taken = 0;
+  u32 final_pc = 0;
+  u32 last_taken = 0;
+  V3ResidentBlock *last = nullptr;
+};
+
+using V3ResidentFn = void (*)(V3ResidentContext *);
+
 class V3CodeArena {
 public:
   V3CodeArena() = default;
@@ -494,6 +542,140 @@ V3StepHelperFn install_step_helper(V3CodeArena &arena) {
   }
   void *entry = arena.copy_code(code->getCode(), code->getSize());
   return reinterpret_cast<V3StepHelperFn>(entry);
+}
+
+V3ResidentFn install_resident_dispatch(V3CodeArena &arena) {
+  using namespace Xbyak;
+  auto code = std::make_unique<CodeGenerator>(4096);
+  code->setDefaultJmpNEAR(true);
+  Label execute, validate, done, sequential, branch_not_taken, choose_next;
+  Label selected_slot, no_alu, conditional_branch;
+  Label validation_line;
+  code->push(code->rbx);
+  code->push(code->rbp);
+  code->push(code->r12);
+  code->push(code->r13);
+  code->push(code->r14);
+  code->push(code->r15);
+#if defined(_WIN32)
+  code->sub(code->rsp, 40);
+  code->mov(code->rbx, code->rcx);
+#else
+  code->sub(code->rsp, 8);
+  code->mov(code->rbx, code->rdi);
+#endif
+  code->mov(code->r12, code->ptr[code->rbx + offsetof(V3ResidentContext, first)]);
+  code->mov(code->r13, code->ptr[code->rbx + offsetof(V3ResidentContext, gpr)]);
+  code->mov(code->r14, code->ptr[code->rbx + offsetof(V3ResidentContext, runtime)]);
+  code->mov(code->r15, code->ptr[code->rbx + offsetof(V3ResidentContext, icache)]);
+  code->jmp(execute); // The C++ entry path has already validated the first block.
+
+  code->L(validate);
+  code->test(code->r12, code->r12);
+  code->jz(done);
+  code->xor_(code->ecx, code->ecx);
+  code->L(validation_line);
+  code->cmp(code->ecx, code->dword[code->r12 + offsetof(V3ResidentBlock, icache_line_count)]);
+  code->jae(execute);
+  code->movzx(code->eax, code->byte[code->r12 + offsetof(V3ResidentBlock, icache_indices) + code->rcx]);
+  code->imul(code->eax, code->eax, 24); // Cpu::ICacheLine stride
+  code->lea(code->rdx, code->ptr[code->r15 + code->rax]);
+  code->cmp(code->byte[code->rdx + 20], 0); // Cpu::ICacheLine::valid
+  code->je(done);
+  code->mov(code->eax, code->dword[code->rdx]);
+  code->cmp(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, icache_tags) + code->rcx * 4]);
+  code->jne(done);
+  code->inc(code->ecx);
+  code->jmp(validation_line);
+
+  code->L(execute);
+  Label branch_ok;
+  code->cmp(code->dword[code->rbx + offsetof(V3ResidentContext, branch_allowed)], 0);
+  code->jne(branch_ok);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 0);
+  code->jne(done);
+  code->L(branch_ok);
+  code->mov(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, instructions)]);
+  code->add(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, instruction_count)]);
+  code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, instruction_budget)]);
+  code->ja(done);
+  code->mov(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, cycles)]);
+  code->add(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, base_cycles)]);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 1);
+  code->jne(sequential);
+  code->inc(code->eax); // Worst case: conditional branch is taken.
+  code->L(sequential);
+  code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, cycle_budget)]);
+  code->ja(done);
+#if defined(_WIN32)
+  code->mov(code->rcx, code->r13);
+  code->mov(code->rdx, code->r14);
+#else
+  code->mov(code->rdi, code->r13);
+  code->mov(code->rsi, code->r14);
+#endif
+  code->call(code->ptr[code->r12 + offsetof(V3ResidentBlock, fn)]);
+  code->mov(code->ebp, code->eax);
+  code->mov(code->dword[code->r14 + offsetof(V3NativeRuntime, incoming_load_reg)], 0);
+  code->mov(code->ptr[code->rbx + offsetof(V3ResidentContext, last)], code->r12);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, last_taken)], code->ebp);
+  code->mov(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, instruction_count)]);
+  code->add(code->dword[code->rbx + offsetof(V3ResidentContext, instructions)], code->eax);
+  code->mov(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, base_cycles)]);
+  code->add(code->dword[code->rbx + offsetof(V3ResidentContext, cycles)], code->eax);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, entries)]);
+  code->mov(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, next_pc)]);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 0);
+  code->je(choose_next);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_entries)]);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 1);
+  code->je(conditional_branch);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
+  code->jmp(choose_next);
+  code->L(conditional_branch);
+  code->test(code->ebp, code->ebp);
+  code->jz(branch_not_taken);
+  code->mov(code->eax, code->dword[code->r12 + offsetof(V3ResidentBlock, taken_pc)]);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, cycles)]);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_taken)]);
+  code->jmp(choose_next);
+  code->L(branch_not_taken);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, branch_not_taken)]);
+  code->L(choose_next);
+  code->mov(code->dword[code->rbx + offsetof(V3ResidentContext, final_pc)], code->eax);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 0);
+  code->jne(no_alu);
+  code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, alu_entries)]);
+  code->L(no_alu);
+  code->mov(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, entries)]);
+  code->cmp(code->eax, code->dword[code->rbx + offsetof(V3ResidentContext, entry_limit)]);
+  code->jae(done);
+  code->mov(code->rax, code->ptr[code->r12 + offsetof(V3ResidentBlock, successor)]);
+  code->cmp(code->dword[code->r12 + offsetof(V3ResidentBlock, kind)], 1);
+  code->jne(selected_slot);
+  code->test(code->ebp, code->ebp);
+  code->jz(selected_slot);
+  code->mov(code->rax, code->ptr[code->r12 + offsetof(V3ResidentBlock, taken_successor)]);
+  code->L(selected_slot);
+  code->test(code->rax, code->rax);
+  code->jz(done);
+  code->mov(code->r12, code->ptr[code->rax + offsetof(V3ResidentSlot, block)]);
+  code->jmp(validate);
+  code->L(done);
+#if defined(_WIN32)
+  code->add(code->rsp, 40);
+#else
+  code->add(code->rsp, 8);
+#endif
+  code->pop(code->r15);
+  code->pop(code->r14);
+  code->pop(code->r13);
+  code->pop(code->r12);
+  code->pop(code->rbp);
+  code->pop(code->rbx);
+  code->ret();
+  code->ready();
+  return reinterpret_cast<V3ResidentFn>(arena.copy_code(code->getCode(), code->getSize()));
 }
 
 
@@ -844,44 +1026,64 @@ struct CpuJitV3Backend::Impl {
     std::array<u8, 8> store_instruction_index{};
 #if VIBESTATION_JIT_V3_X64
     V3NativeFn fn = nullptr;
+    V3ResidentBlock resident{};
     size_t code_size = 0u;
 #endif
   };
 
-  static constexpr size_t kDispatchCacheSize = 1u << 16u;
-  struct DispatchCacheEntry {
-    u32 pc = 0u;
+  // A page is indexed by the low 16 bits of the guest PC. The top table keeps
+  // KUSEG/KSEG0/KSEG1 aliases distinct without allocating a 4 GB flat map.
+  struct DispatchEntry {
     Block *block = nullptr;
+#if VIBESTATION_JIT_V3_X64
+    V3ResidentSlot resident;
+#endif
+  };
+  struct DispatchPage {
+    std::array<DispatchEntry, 1u << 14u> entries{};
   };
 
+  DispatchEntry *dispatch_entry(u32 pc, bool create) {
+    auto &page = dispatch_pages[pc >> 16u];
+    if (!page) {
+      if (!create) return nullptr;
+      page = std::make_unique<DispatchPage>();
+    }
+    return &page->entries[(pc >> 2u) & 0x3FFFu];
+  }
+
   Block *lookup_dispatch(u32 pc) {
-    DispatchCacheEntry &entry =
-        dispatch_cache[(pc >> 2u) & (kDispatchCacheSize - 1u)];
-    return entry.block != nullptr && entry.pc == pc ? entry.block : nullptr;
+    DispatchEntry *entry = dispatch_entry(pc, false);
+    return entry != nullptr ? entry->block : nullptr;
   }
 
   void remember_dispatch(Block &block) {
-    DispatchCacheEntry &entry =
-        dispatch_cache[(block.start_pc >> 2u) & (kDispatchCacheSize - 1u)];
-    entry.pc = block.start_pc;
-    entry.block = &block;
+    dispatch_entry(block.start_pc, true)->block = &block;
   }
 
   void forget_dispatch(u32 pc) {
-    DispatchCacheEntry &entry =
-        dispatch_cache[(pc >> 2u) & (kDispatchCacheSize - 1u)];
-    if (entry.block != nullptr && entry.pc == pc) {
-      entry = {};
-    }
+    DispatchEntry *entry = dispatch_entry(pc, false);
+    if (entry != nullptr) entry->block = nullptr;
   }
 
-  void clear_dispatch() { dispatch_cache.fill({}); }
+  void clear_dispatch() {
+    for (auto &page : dispatch_pages) page.reset();
+  }
 
-  std::array<DispatchCacheEntry, kDispatchCacheSize> dispatch_cache{};
+  std::array<std::unique_ptr<DispatchPage>, 1u << 16u> dispatch_pages{};
 
 #if VIBESTATION_JIT_V3_X64
   V3CodeArena arena;
   V3StepHelperFn step_helper_fn = nullptr;
+  V3ResidentFn resident_fn = nullptr;
+  V3ResidentSlot *resident_slot(u32 pc) {
+    return &dispatch_entry(pc, true)->resident;
+  }
+
+  void unlink_resident(u32 pc) {
+    DispatchEntry *entry = dispatch_entry(pc, false);
+    if (entry != nullptr) entry->resident.block = nullptr;
+  }
 #endif
   std::unordered_map<u32, Block> blocks;
   // PCs which cannot currently form even the minimum V3 native block.
@@ -899,7 +1101,15 @@ CpuJitV3Backend::CpuJitV3Backend(Cpu &cpu)
     : cpu_(cpu), impl_(std::make_unique<Impl>()) {
   stats_.available = true;
 #if VIBESTATION_JIT_V3_X64
+  static_assert(sizeof(Cpu::ICacheLine) == 24u, "resident I-cache stride");
+  static_assert(offsetof(Cpu::ICacheLine, valid) == 20u,
+                "resident I-cache valid offset");
   impl_->step_helper_fn = install_step_helper(impl_->arena);
+  try {
+    impl_->resident_fn = install_resident_dispatch(impl_->arena);
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "V3 resident dispatch codegen: %s\n", e.what());
+  }
   stats_.native_available = impl_->step_helper_fn != nullptr;
 #else
   stats_.native_available = false;
@@ -1080,6 +1290,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
       if (!coherent) {
         impl_->forget_dispatch(start_pc);
+        impl_->unlink_resident(start_pc);
         impl_->blocks.erase(start_pc);
         block_ptr = nullptr;
       }
@@ -1345,6 +1556,33 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         return false;
       }
       block.fn = reinterpret_cast<V3NativeFn>(entry);
+      if (!has_store && !has_load && !jump_dynamic) {
+        auto &resident = block.resident;
+        resident.fn = block.fn;
+        resident.start_pc = start_pc;
+        resident.instruction_count = block.instruction_count;
+        resident.base_cycles = block.base_cycles;
+        resident.icache_line_count = block.icache_line_count;
+        resident.icache_indices = block.icache_indices;
+        resident.icache_tags = block.icache_tags;
+        if (has_branch) {
+          const u32 branch_pc = start_pc + block.branch_index * 4u;
+          resident.kind = 1u;
+          resident.tail_index = block.branch_index;
+          resident.next_pc = branch_pc + 8u;
+          resident.taken_pc = block.branch_target;
+          resident.successor = impl_->resident_slot(resident.next_pc);
+          resident.taken_successor = impl_->resident_slot(resident.taken_pc);
+        } else if (has_jump) {
+          resident.kind = 2u;
+          resident.tail_index = block.jump_index;
+          resident.next_pc = block.jump_target;
+          resident.successor = impl_->resident_slot(resident.next_pc);
+        } else {
+          resident.next_pc = start_pc + block.instruction_count * 4u;
+          resident.successor = impl_->resident_slot(resident.next_pc);
+        }
+      }
       const u32 block_phys_first = block.phys_start;
       const u32 block_phys_last = block.phys_end;
       for (u32 page = block_phys_first >> 12u;
@@ -1354,6 +1592,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       auto inserted = impl_->blocks.emplace(start_pc, std::move(block));
       block_ptr = &inserted.first->second;
       impl_->remember_dispatch(*block_ptr);
+      if (block_ptr->resident.fn != nullptr) {
+        impl_->resident_slot(start_pc)->block = &block_ptr->resident;
+      }
       ++stats_.native_compile_successes;
       ++stats_.native_blocks_compiled;
       if (has_branch || has_jump) {
@@ -1537,6 +1778,63 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
       return helper_step(V3HelperReason::Budget);
+    }
+
+    if (block.resident.fn != nullptr && impl_->resident_fn != nullptr) {
+      V3ResidentContext resident{};
+      resident.first = &block.resident;
+      resident.gpr = cpu_.gpr_;
+      resident.runtime = &runtime;
+      resident.icache = reinterpret_cast<const u8 *>(cpu_.icache_.data());
+      resident.cycle_budget = remaining_cycles;
+      resident.instruction_budget = remaining_instructions;
+      resident.branch_allowed = g_cpu_backend_compare_irq_on_branch ? 0u : 1u;
+      cpu_.executing_step_ = true;
+      cpu_.exception_raised_ = false;
+      cpu_.cycle_penalty_ = 0u;
+      impl_->resident_fn(&resident);
+      cpu_.executing_step_ = false;
+      if (resident.last == nullptr) {
+        return helper_step(V3HelperReason::Budget);
+      }
+
+      const V3ResidentBlock &last = *resident.last;
+      cpu_.pc_ = resident.final_pc;
+      cpu_.next_pc_ = cpu_.pc_ + 4u;
+      if (last.kind != 0u) {
+        const u32 tail_pc = last.start_pc + last.tail_index * 4u;
+        cpu_.current_pc_ = tail_pc + 4u;
+        cpu_.in_delay_slot_ = true;
+        cpu_.active_branch_pc_ = tail_pc;
+      } else {
+        cpu_.current_pc_ = last.start_pc +
+                           (last.instruction_count - 1u) * 4u;
+        cpu_.in_delay_slot_ = false;
+        cpu_.active_branch_pc_ = 0u;
+      }
+      cpu_.pending_delay_slot_ = false;
+      cpu_.pending_branch_taken_ = false;
+      cpu_.pending_branch_pc_ = 0u;
+      cpu_.load_ = {};
+      cpu_.next_load_ = {};
+      cpu_.cycles_ += resident.cycles;
+      g_diag_current_pc = cpu_.current_pc_;
+      cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+
+      result.cycles += resident.cycles;
+      result.instructions += resident.instructions;
+      stats_.native_block_entries += resident.entries;
+      stats_.native_alu_block_entries += resident.alu_entries;
+      stats_.native_branch_tail_entries += resident.branch_entries;
+      stats_.native_branch_taken += resident.branch_taken;
+      stats_.native_branch_not_taken += resident.branch_not_taken;
+      stats_.native_instructions += resident.instructions;
+      stats_.jit_v2_inline_instructions += resident.instructions;
+      stats_.optimized_instructions += resident.instructions;
+      stats_.native_cycles += resident.cycles;
+      stats_.executed_cycles += resident.cycles;
+      native_streak = true;
+      return true;
     }
 
     cpu_.executing_step_ = true;
@@ -1740,6 +2038,9 @@ void CpuJitV3Backend::invalidate_range(u32 phys_or_normalized_addr,
     const bool overlaps = block_first <= last_line && block_last >= first_line;
     if (overlaps) {
       impl_->forget_dispatch(it->second.start_pc);
+#if VIBESTATION_JIT_V3_X64
+      impl_->unlink_resident(it->second.start_pc);
+#endif
       it = impl_->blocks.erase(it);
       ++stats_.invalidations;
       ++stats_.invalidation_blocks_invalidated;
@@ -1764,6 +2065,7 @@ void CpuJitV3Backend::flush() {
 #if VIBESTATION_JIT_V3_X64
   impl_->arena.reset();
   impl_->step_helper_fn = install_step_helper(impl_->arena);
+  impl_->resident_fn = install_resident_dispatch(impl_->arena);
 #endif
   stats_ = {};
   stats_.available = true;
