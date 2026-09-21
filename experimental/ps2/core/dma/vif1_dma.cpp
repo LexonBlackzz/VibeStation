@@ -415,6 +415,7 @@ bool Vif1Dma::emit_unpack_vector(
         u32 value = filling ? row_[component] : vector[component];
         bool protect = false;
 
+        const bool mode_enabled = unpack_vl_ != 3u;
         if (!filling && unpack_masked_) {
             const u32 action =
                 (mask_ >> (mask_row * 8u + component * 2u)) & 0x3u;
@@ -424,7 +425,7 @@ bool Vif1Dma::emit_unpack_vector(
                 value = col_[mask_row];
             } else if (action == 3u) {
                 protect = true;
-            } else {
+            } else if (mode_enabled) {
                 switch (mode_ & 0x3u) {
                 case 1:
                     value += row_[component];
@@ -440,7 +441,7 @@ bool Vif1Dma::emit_unpack_vector(
                     break;
                 }
             }
-        } else if (!filling) {
+        } else if (!filling && mode_enabled) {
             switch (mode_ & 0x3u) {
             case 1:
                 value += row_[component];
@@ -590,8 +591,17 @@ bool Vif1Dma::consume_payload_word(
                 unpack_bit_count_ -= bits;
             }
 
-            unpack_vector_[unpack_component_] =
-                extend_element(raw, bits, unpack_unsigned_);
+            if (unpack_vl_ == 3u) {
+                // V4-5 is a packed 16-bit color-like format. X/Y/Z 5-bit
+                // fields expand to bits 7..3 and W expands to bit 7.
+                unpack_vector_[unpack_component_] =
+                    unpack_component_ == 3u
+                        ? (raw << 7u)
+                        : (raw << 3u);
+            } else {
+                unpack_vector_[unpack_component_] =
+                    extend_element(raw, bits, unpack_unsigned_);
+            }
             ++unpack_component_;
 
             const u32 components = unpack_vn_ + 1u;
