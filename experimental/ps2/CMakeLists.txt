@@ -149,4 +149,13 @@ if(BUILD_TESTING)
         NAME vibestation_ps2_vu1
         COMMAND $<TARGET_FILE:vibestation_ps2_vu1_tests>
     )
+
+    add_executable(vibestation_ps2_sif_tests
+        tests/ps2_sif_tests.cpp
+    )
+    target_link_libraries(vibestation_ps2_sif_tests PRIVATE vibestation_ps2_core)
+    add_test(
+        NAME vibestation_ps2_sif
+        COMMAND $<TARGET_FILE:vibestation_ps2_sif_tests>
+    )
 endif()
