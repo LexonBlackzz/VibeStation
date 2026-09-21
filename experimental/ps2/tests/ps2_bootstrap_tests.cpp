@@ -1181,6 +1181,67 @@ bool test_ee_cop0_count_compare_irq() {
     return ok;
 }
 
+bool test_ee_bc0_dmac_condition_branches() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2B00u;
+    std::string error;
+    bool ok = true;
+
+    // BC0F with every DMAC channel enabled and none complete: CPCOND0=false.
+    const ps2::u32 bc0f =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (0u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0f) &&
+             system.bus().write32(0x1000E020u, 0x3FFu),
+             "BC0F setup failed") && ok;
+    system.ee().reset(pc);
+    ok = expect(system.ee().step(error), "BC0F execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 4u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0F did not branch on incomplete DMAC condition") && ok;
+
+    // BC0TL is taken when no channels participate: (~CPC) satisfies condition.
+    const ps2::u32 bc0tl =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (3u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0tl) &&
+             system.bus().write32(0x1000E020u, 0u),
+             "BC0TL setup failed") && ok;
+    system.ee().reset(pc);
+    error.clear();
+    ok = expect(system.ee().step(error), "BC0TL execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 4u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0TL did not branch on satisfied DMAC condition") && ok;
+
+    // BC0FL must skip its delay slot when the false condition is not met.
+    const ps2::u32 bc0fl =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (2u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0fl),
+             "BC0FL setup failed") && ok;
+    system.ee().reset(pc);
+    error.clear();
+    ok = expect(system.ee().step(error), "BC0FL execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 8u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0FL likely-not-taken skip mismatch") && ok;
+
+    return ok;
+}
+
 bool test_ee_di_ei_privilege_gate() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2C00;
@@ -3443,6 +3504,7 @@ int main() {
     ok = test_vu_mapping_and_cop2() && ok;
     ok = test_ee_intc_cpu_exception() && ok;
     ok = test_ee_cop0_count_compare_irq() && ok;
+    ok = test_ee_bc0_dmac_condition_branches() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_ee_break_exception_and_tlb_ops() && ok;
     ok = test_ee_trap_instructions() && ok;
