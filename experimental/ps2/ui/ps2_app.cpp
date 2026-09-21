@@ -9,6 +9,7 @@
 #include <imgui_impl_sdl2.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
@@ -1247,12 +1248,44 @@ void Ps2App::update_emulation() {
         return;
     }
 
+    // Keep the desktop UI responsive while giving the interpreter enough
+    // runway to get through the retail BIOS boot sequence.  The old fixed
+    // 20k-instruction slice made one emulated NTSC field take hundreds of
+    // host frames before the display could even be sampled.
+    constexpr u64 kChunkInstructions = 8192;
+    constexpr u64 kMaxInstructionsPerFrame = 500000;
+    constexpr auto kCpuTimeSlice = std::chrono::milliseconds(8);
+
+    const auto deadline = std::chrono::steady_clock::now() + kCpuTimeSlice;
+    u64 executed = 0;
     std::string error;
-    system_.run_ee(20000, error);
+
+    while (executed < kMaxInstructionsPerFrame &&
+           !system_.halted()) {
+        const u64 budget =
+            std::min<u64>(
+                kChunkInstructions,
+                kMaxInstructionsPerFrame - executed);
+        const u64 ran = system_.run_ee(budget, error);
+        executed += ran;
+
+        if (ran == 0 || !error.empty() ||
+            std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+    }
+
+    // PCRTC register writes can become usable well before the simplified
+    // video timer reaches its next VBlank.  Sample once per host frame so the
+    // first BIOS pixels appear as soon as VRAM and DISPLAY/DISPFB are valid.
+    system_.refresh_display();
 
     if (system_.halted()) {
         emulation_running_ = false;
         status_message_ = "Execution halted: " + system_.halt_reason();
+    } else if (!error.empty()) {
+        emulation_running_ = false;
+        status_message_ = "Execution stopped: " + error;
     }
 }
 
