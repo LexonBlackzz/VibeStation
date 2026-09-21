@@ -65,7 +65,17 @@ private:
     void write_gpr64(u32 index, u64 value);
     void write_gpr_word(u32 index, u32 value);
     void branch_likely_not_taken(u32 pc);
-    void raise_exception(u32 code, u32 pc, bool in_delay_slot);
+    void raise_exception(
+        u32 code,
+        u32 pc,
+        bool in_delay_slot,
+        bool tlb_refill = false);
+    [[nodiscard]] bool translate_address(
+        u32 virtual_address,
+        bool store,
+        u32 fault_pc,
+        bool in_delay_slot,
+        u32& translated);
 
     bool fail(
         u32 pc,
