@@ -134,6 +134,7 @@ void EeCpu::reset(u32 entry_point) {
     state_.vu_vf[0].lo = 0;
     state_.vu_vf[0].hi = 0x3F80000000000000ull;
     state_.vu_vi[20] = 0x3F800000u;
+    state_.vu_vi[22] = 0x3F800000u;
     halted_ = false;
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
@@ -881,7 +882,9 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
         EeGpr& v = state_.vu_vf[reg & 31u];
         u64& half = lane < 2 ? v.lo : v.hi;
         const u32 shift = (lane & 1u) * 32u;
-        half = (half & ~(0xFFFFFFFFull << shift)) | (static_cast<u64>(value) << shift);
+        half =
+            (half & ~(0xFFFFFFFFull << shift)) |
+            (static_cast<u64>(value) << shift);
     };
     auto selected = [&](u32 lane) {
         static constexpr u32 bits[4] = {24u, 23u, 22u, 21u};
@@ -905,8 +908,13 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     case 0x06: { // CTC2
         if (fs == 0u || fs == 17u || fs == 26u || fs == 29u) return true;
         const u32 value = static_cast<u32>(gpr_u64(rt));
+        if (fs < 16u) {
+            state_.vu_vi[fs] = static_cast<u16>(value);
+            return true;
+        }
         if (fs == 20u) {
-            state_.vu_vi[20] = (value & 0x007FFFFFu) | 0x3F800000u;
+            state_.vu_vi[20] =
+                (value & 0x007FFFFFu) | 0x3F800000u;
             return true;
         }
         if (fs == 28u) {
@@ -916,7 +924,9 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
                 for (u32 i = 1; i < 16; ++i) state_.vu_vi[i] = 0;
                 state_.vu_vi[29] &= ~0xFFu;
             }
-            if ((value & 0x200u) != 0) state_.vu_vi[29] &= ~0xFF00u;
+            if ((value & 0x200u) != 0) {
+                state_.vu_vi[29] &= ~0xFF00u;
+            }
             return true;
         }
         state_.vu_vi[fs] = value;
@@ -926,11 +936,16 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
         break;
     }
 
-    if (rs < 0x10u) return fail(pc, instruction, "Unsupported COP2 operation", error);
+    if (rs < 0x10u) {
+        return fail(
+            pc, instruction, "Unsupported COP2 operation", error);
+    }
 
     const u32 ft = (instruction >> 16) & 31u;
     const u32 fd = (instruction >> 6) & 31u;
     const u32 funct = instruction & 63u;
+    const u32 fsf = (instruction >> 21) & 3u;
+    const u32 ftf = (instruction >> 23) & 3u;
 
     auto vu_float = [&](u32 reg, u32 lane) {
         return ps2_fpu_input(lane_read(reg, lane));
@@ -956,6 +971,55 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
                 lane,
                 op(vu_float(fs, lane), scalar));
         }
+    };
+    auto scalar_control_binary = [&](u32 control, auto op) {
+        const float scalar = ps2_fpu_input(state_.vu_vi[control]);
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            vu_write_float(fd, lane, op(vu_float(fs, lane), scalar));
+        }
+    };
+    auto vu0_address = [&](u32 vi) {
+        return 0x11004000u +
+            ((static_cast<u32>(vi) * 16u) & 0xFFFu);
+    };
+    auto read_vector = [&](u32 reg, u32 qword) -> bool {
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            u32 value = 0;
+            if (!bus_.read32(vu0_address(qword) + lane * 4u, value)) {
+                return false;
+            }
+            lane_write(reg, lane, value);
+        }
+        return true;
+    };
+    auto write_vector = [&](u32 reg, u32 qword) -> bool {
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            if (!bus_.write32(
+                    vu0_address(qword) + lane * 4u,
+                    lane_read(reg, lane))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto write_vi = [&](u32 reg, u32 value) {
+        reg &= 0xFu;
+        if (reg != 0u) state_.vu_vi[reg] = static_cast<u16>(value);
+    };
+    auto saturating_float_to_int = [](float value) -> s32 {
+        if (std::isnan(value)) return 0;
+        if (value >=
+            static_cast<float>(std::numeric_limits<s32>::max())) {
+            return std::numeric_limits<s32>::max();
+        }
+        if (value <=
+            static_cast<float>(std::numeric_limits<s32>::min())) {
+            return std::numeric_limits<s32>::min();
+        }
+        return static_cast<s32>(value);
     };
 
     const auto add = [](float x, float y) { return x + y; };
@@ -986,6 +1050,30 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     }
 
     switch (funct) {
+    case 0x1C: // VMULq
+        scalar_control_binary(22u, mul);
+        return true;
+    case 0x1D: // VMAXi
+        scalar_control_binary(21u, vmax);
+        return true;
+    case 0x1E: // VMULi
+        scalar_control_binary(21u, mul);
+        return true;
+    case 0x1F: // VMINIi
+        scalar_control_binary(21u, vmin);
+        return true;
+    case 0x20: // VADDq
+        scalar_control_binary(22u, add);
+        return true;
+    case 0x22: // VADDi
+        scalar_control_binary(21u, add);
+        return true;
+    case 0x24: // VSUBq
+        scalar_control_binary(22u, sub);
+        return true;
+    case 0x26: // VSUBi
+        scalar_control_binary(21u, sub);
+        return true;
     case 0x28: // VADD
         vector_binary(add);
         return true;
@@ -1001,44 +1089,302 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     case 0x2F: // VMINI
         vector_binary(vmin);
         return true;
+    case 0x30: // VIADD
+        write_vi(
+            fd,
+            static_cast<s16>(state_.vu_vi[fs & 0xFu]) +
+            static_cast<s16>(state_.vu_vi[ft & 0xFu]));
+        return true;
+    case 0x31: // VISUB
+        write_vi(
+            fd,
+            static_cast<s16>(state_.vu_vi[fs & 0xFu]) -
+            static_cast<s16>(state_.vu_vi[ft & 0xFu]));
+        return true;
+    case 0x32: { // VIADDI
+        s16 imm = static_cast<s16>((instruction >> 6) & 0x1Fu);
+        if ((imm & 0x10) != 0) imm |= static_cast<s16>(0xFFF0);
+        write_vi(
+            ft,
+            static_cast<s16>(state_.vu_vi[fs & 0xFu]) + imm);
+        return true;
+    }
+    case 0x34: // VIAND
+        write_vi(
+            fd,
+            state_.vu_vi[fs & 0xFu] & state_.vu_vi[ft & 0xFu]);
+        return true;
+    case 0x35: // VIOR
+        write_vi(
+            fd,
+            state_.vu_vi[fs & 0xFu] | state_.vu_vi[ft & 0xFu]);
+        return true;
     default:
         break;
     }
-    if (funct == 0x30u) { // VIADD
-        const u32 it = ft & 0xFu;
-        const u32 is = fs & 0xFu;
-        const u32 id = fd & 0xFu;
-        if (id != 0) {
-            const s16 result = static_cast<s16>(state_.vu_vi[is]) + static_cast<s16>(state_.vu_vi[it]);
-            state_.vu_vi[id] = static_cast<u16>(result);
-        }
-        return true;
-    }
+
     if (funct >= 0x3Cu) {
-        const u32 sub = (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
+        const u32 special =
+            (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
         const u32 it = ft & 0xFu;
         const u32 is = fs & 0xFu;
-        if (sub == 0x3Fu) { // VISWR
-            const u32 base = 0x11004000u + ((state_.vu_vi[is] & 0xFFFFu) * 16u & 0xFFFu);
-            for (u32 lane = 0; lane < 4; ++lane) {
-                if (selected(lane) && !bus_.write32(base + lane * 4u, state_.vu_vi[it] & 0xFFFFu))
-                    return fail(pc, instruction, "VISWR VU0 memory fault", error);
+
+        if (special >= 0x10u && special <= 0x13u) { // VITOF0/4/12/15
+            static constexpr u32 shifts[4] = {0u, 4u, 12u, 15u};
+            const u32 shift = shifts[special - 0x10u];
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const float value =
+                    static_cast<float>(
+                        static_cast<s32>(lane_read(fs, lane))) /
+                    static_cast<float>(1u << shift);
+                vu_write_float(ft, lane, value);
             }
             return true;
         }
-        if (sub == 0x35u) { // VSQI
-            const u32 base = 0x11004000u + ((state_.vu_vi[it] & 0xFFFFu) * 16u & 0xFFFu);
-            for (u32 lane = 0; lane < 4; ++lane) {
-                if (selected(lane) && !bus_.write32(base + lane * 4u, lane_read(fs, lane)))
-                    return fail(pc, instruction, "VSQI VU0 memory fault", error);
+        if (special >= 0x14u && special <= 0x17u) { // VFTOI0/4/12/15
+            static constexpr u32 shifts[4] = {0u, 4u, 12u, 15u};
+            const u32 shift = shifts[special - 0x14u];
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const float scaled =
+                    vu_float(fs, lane) *
+                    static_cast<float>(1u << shift);
+                lane_write(
+                    ft,
+                    lane,
+                    static_cast<u32>(
+                        saturating_float_to_int(scaled)));
             }
-            if (ft != 0) state_.vu_vi[it] = static_cast<u16>(state_.vu_vi[it] + 1u);
             return true;
         }
-        return fail(pc, instruction, "Unsupported COP2 SPECIAL2 function " + hex32(sub), error);
+        if (special == 0x1Du) { // VABS
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) {
+                    lane_write(
+                        ft,
+                        lane,
+                        lane_read(fs, lane) & 0x7FFFFFFFu);
+                }
+            }
+            return true;
+        }
+        if (special == 0x1Fu) { // VCLIPw
+            const float w = std::fabs(vu_float(ft, 3u));
+            u32 clip = (state_.vu_vi[18] << 6) & 0xFFFFFFu;
+            for (u32 lane = 0; lane < 3u; ++lane) {
+                const float value = vu_float(fs, lane);
+                if (value > w) clip |= 1u << (lane * 2u);
+                if (value < -w) clip |= 1u << (lane * 2u + 1u);
+            }
+            state_.vu_vi[18] = clip;
+            return true;
+        }
+        if (special == 0x2Fu) { // VNOP
+            return true;
+        }
+        if (special == 0x30u) { // VMOVE
+            const EeGpr source = state_.vu_vf[fs];
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const u64 half = lane < 2u ? source.lo : source.hi;
+                lane_write(
+                    ft,
+                    lane,
+                    static_cast<u32>(
+                        half >> ((lane & 1u) * 32u)));
+            }
+            return true;
+        }
+        if (special == 0x31u) { // VMR32
+            const EeGpr source = state_.vu_vf[fs];
+            auto source_lane = [&](u32 lane) {
+                const u32 rotated = (lane + 1u) & 3u;
+                const u64 half =
+                    rotated < 2u ? source.lo : source.hi;
+                return static_cast<u32>(
+                    half >> ((rotated & 1u) * 32u));
+            };
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) {
+                    lane_write(ft, lane, source_lane(lane));
+                }
+            }
+            return true;
+        }
+        if (special == 0x34u) { // VLQI
+            const u16 address =
+                static_cast<u16>(state_.vu_vi[is]);
+            if (!read_vector(ft, address)) {
+                return fail(
+                    pc, instruction, "VLQI VU0 memory fault", error);
+            }
+            write_vi(is, static_cast<u16>(address + 1u));
+            return true;
+        }
+        if (special == 0x35u) { // VSQI
+            const u16 address =
+                static_cast<u16>(state_.vu_vi[it]);
+            if (!write_vector(fs, address)) {
+                return fail(
+                    pc, instruction, "VSQI VU0 memory fault", error);
+            }
+            write_vi(it, static_cast<u16>(address + 1u));
+            return true;
+        }
+        if (special == 0x36u) { // VLQD
+            const u16 address =
+                static_cast<u16>(state_.vu_vi[is] - 1u);
+            write_vi(is, address);
+            if (!read_vector(ft, address)) {
+                return fail(
+                    pc, instruction, "VLQD VU0 memory fault", error);
+            }
+            return true;
+        }
+        if (special == 0x37u) { // VSQD
+            const u16 address =
+                static_cast<u16>(state_.vu_vi[it] - 1u);
+            write_vi(it, address);
+            if (!write_vector(fs, address)) {
+                return fail(
+                    pc, instruction, "VSQD VU0 memory fault", error);
+            }
+            return true;
+        }
+        if (special == 0x38u) { // VDIV
+            const float numerator = vu_float(fs, fsf);
+            const float denominator = vu_float(ft, ftf);
+            if (denominator == 0.0f) {
+                state_.vu_vi[22] = ps2_fpu_result(
+                    std::copysign(
+                        std::numeric_limits<float>::max(),
+                        numerator * denominator));
+            } else {
+                state_.vu_vi[22] =
+                    ps2_fpu_result(numerator / denominator);
+            }
+            return true;
+        }
+        if (special == 0x39u) { // VSQRT
+            state_.vu_vi[22] = ps2_fpu_result(
+                std::sqrt(std::fabs(vu_float(ft, ftf))));
+            return true;
+        }
+        if (special == 0x3Au) { // VRSQRT
+            const float numerator = vu_float(fs, fsf);
+            const float denominator =
+                std::sqrt(std::fabs(vu_float(ft, ftf)));
+            if (denominator == 0.0f) {
+                state_.vu_vi[22] = ps2_fpu_result(
+                    std::copysign(
+                        std::numeric_limits<float>::max(),
+                        numerator));
+            } else {
+                state_.vu_vi[22] =
+                    ps2_fpu_result(numerator / denominator);
+            }
+            return true;
+        }
+        if (special == 0x3Bu) { // VWAITQ
+            return true;
+        }
+        if (special == 0x3Cu) { // VMTIR
+            write_vi(it, lane_read(fs, fsf));
+            return true;
+        }
+        if (special == 0x3Du) { // VMFIR
+            const u32 value = static_cast<u32>(
+                static_cast<s32>(
+                    static_cast<s16>(state_.vu_vi[is])));
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) lane_write(ft, lane, value);
+            }
+            return true;
+        }
+        if (special == 0x3Eu) { // VILWR
+            const u32 base =
+                vu0_address(state_.vu_vi[is]);
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                u32 value = 0;
+                if (!bus_.read32(base + lane * 4u, value)) {
+                    return fail(
+                        pc,
+                        instruction,
+                        "VILWR VU0 memory fault",
+                        error);
+                }
+                write_vi(it, value);
+            }
+            return true;
+        }
+        if (special == 0x3Fu) { // VISWR
+            const u32 base =
+                vu0_address(state_.vu_vi[is]);
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane) &&
+                    !bus_.write32(
+                        base + lane * 4u,
+                        state_.vu_vi[it] & 0xFFFFu)) {
+                    return fail(
+                        pc,
+                        instruction,
+                        "VISWR VU0 memory fault",
+                        error);
+                }
+            }
+            return true;
+        }
+        if (special == 0x40u) { // VRNEXT
+            const u32 x = (state_.vu_vi[20] >> 4) & 1u;
+            const u32 y = (state_.vu_vi[20] >> 22) & 1u;
+            state_.vu_vi[20] <<= 1u;
+            state_.vu_vi[20] ^= x ^ y;
+            state_.vu_vi[20] =
+                (state_.vu_vi[20] & 0x007FFFFFu) | 0x3F800000u;
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) {
+                    lane_write(ft, lane, state_.vu_vi[20]);
+                }
+            }
+            return true;
+        }
+        if (special == 0x41u) { // VRGET
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) {
+                    lane_write(ft, lane, state_.vu_vi[20]);
+                }
+            }
+            return true;
+        }
+        if (special == 0x42u) { // VRINIT
+            state_.vu_vi[20] =
+                0x3F800000u |
+                (lane_read(fs, fsf) & 0x007FFFFFu);
+            return true;
+        }
+        if (special == 0x43u) { // VRXOR
+            state_.vu_vi[20] =
+                0x3F800000u |
+                ((state_.vu_vi[20] ^ lane_read(fs, fsf)) &
+                 0x007FFFFFu);
+            return true;
+        }
+
+        return fail(
+            pc,
+            instruction,
+            "Unsupported COP2 SPECIAL2 function " +
+                hex32(special),
+            error);
     }
 
-    return fail(pc, instruction, "Unsupported COP2 macro function " + hex32(funct), error);
+    return fail(
+        pc,
+        instruction,
+        "Unsupported COP2 macro function " + hex32(funct),
+        error);
 }
 
 bool EeCpu::execute_mmi(
