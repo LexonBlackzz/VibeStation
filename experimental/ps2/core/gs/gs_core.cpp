@@ -185,9 +185,17 @@ void GsCore::process_packed(u32 descriptor, u64 lo, u64 hi) {
         return;
     }
     case 0x06: // TEX0_1
+        write_register(kRegTex0_1, lo);
+        return;
     case 0x07: // TEX0_2
+        write_register(kRegTex0_1 + 1u, lo);
+        return;
     case 0x08: // CLAMP_1
+        write_register(kRegClamp1, lo);
+        return;
     case 0x09: // CLAMP_2
+        write_register(kRegClamp1 + 1u, lo);
+        return;
     case 0x0A: // FOG
         // Packed FOG stores F in bits 100..107 of the 128-bit payload.
         write_register(0x0A, static_cast<u64>((hi >> 36) & 0xFFu) << 56);
