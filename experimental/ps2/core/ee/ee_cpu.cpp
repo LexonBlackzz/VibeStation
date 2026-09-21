@@ -386,7 +386,15 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
 bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
     const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, sel=instruction&7u, funct=instruction&63u;
     if(rs==0x00){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); write_gpr_word(rt,state_.cop0[rd]); return true; }
-    if(rs==0x04){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); if(rd!=15) state_.cop0[rd]=static_cast<u32>(gpr_u64(rt)); return true; }
+    if(rs==0x04){
+        if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error);
+        if(rd!=15) {
+            state_.cop0[rd]=static_cast<u32>(gpr_u64(rt));
+            // MIPS Count/Compare timer: writing Compare acknowledges IP7.
+            if(rd==11) state_.cop0[13]&=~0x00008000u;
+        }
+        return true;
+    }
     if(rs==0x10){ switch(funct){
         case 0x01: return true;
         case 0x02:{ const u32 index=state_.cop0[0]&0x3Fu; if(index<state_.tlb.size()){auto& e=state_.tlb[index];e.page_mask=state_.cop0[5];e.entry_hi=state_.cop0[10];e.entry_lo0=state_.cop0[2];e.entry_lo1=state_.cop0[3];} return true;}
@@ -716,6 +724,9 @@ bool EeCpu::step(std::string& error) {
         raise_exception(0u, pc, current_is_delay_slot_);
         ++state_.instructions_executed;
         ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) {
+            state_.cop0[13] |= 0x00008000u;
+        }
         bus_.tick(1);
         return true;
     }
@@ -1091,6 +1102,9 @@ bool EeCpu::step(std::string& error) {
     state_.gpr[0] = {};
     ++state_.instructions_executed;
     ++state_.cop0[9];
+    if (state_.cop0[9] == state_.cop0[11]) {
+        state_.cop0[13] |= 0x00008000u;
+    }
     bus_.tick(1);
     return true;
 }
