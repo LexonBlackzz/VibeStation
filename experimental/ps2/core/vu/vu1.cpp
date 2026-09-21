@@ -297,75 +297,92 @@ bool Vu1::execute_upper(u32 code, std::string& error) {
     const u32 d = fd(code);
 
     auto binary = [&](u32 dst, auto fn) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
-            write_vf_lane(
-                dst,
-                lane,
-                as_bits(fn(
-                    as_float(vf_[s][lane]),
-                    as_float(vf_[t][lane]))));
+            const float result = fn(
+                as_float(vf_[s][lane]),
+                as_float(vf_[t][lane]));
+            write_vf_lane(dst, lane, fmac_result(lane, result));
         }
+        finish_fmac();
     };
     auto scalar = [&](u32 dst, float value, auto fn) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
-            write_vf_lane(
-                dst,
-                lane,
-                as_bits(fn(as_float(vf_[s][lane]), value)));
+            const float result =
+                fn(as_float(vf_[s][lane]), value);
+            write_vf_lane(dst, lane, fmac_result(lane, result));
         }
+        finish_fmac();
     };
     auto acc_binary = [&](auto fn) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
-            acc_[lane] = as_bits(fn(
+            const float result = fn(
                 as_float(vf_[s][lane]),
-                as_float(vf_[t][lane])));
+                as_float(vf_[t][lane]));
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
     auto acc_scalar = [&](float value, auto fn) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
-            acc_[lane] =
-                as_bits(fn(as_float(vf_[s][lane]), value));
+            const float result =
+                fn(as_float(vf_[s][lane]), value);
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
     auto madd_binary = [&](u32 dst, bool subtract) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float product =
                 as_float(vf_[s][lane]) * as_float(vf_[t][lane]);
             const float result =
                 as_float(acc_[lane]) + (subtract ? -product : product);
-            write_vf_lane(dst, lane, as_bits(result));
+            write_vf_lane(dst, lane, fmac_result(lane, result));
         }
+        finish_fmac();
     };
     auto madd_scalar = [&](u32 dst, float value, bool subtract) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float product = as_float(vf_[s][lane]) * value;
             const float result =
                 as_float(acc_[lane]) + (subtract ? -product : product);
-            write_vf_lane(dst, lane, as_bits(result));
+            write_vf_lane(dst, lane, fmac_result(lane, result));
         }
+        finish_fmac();
     };
     auto madda_binary = [&](bool subtract) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float product =
                 as_float(vf_[s][lane]) * as_float(vf_[t][lane]);
-            acc_[lane] = as_bits(
-                as_float(acc_[lane]) + (subtract ? -product : product));
+            const float result =
+                as_float(acc_[lane]) + (subtract ? -product : product);
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
     auto madda_scalar = [&](float value, bool subtract) {
+        begin_fmac();
         for (u32 lane = 0; lane < 4u; ++lane) {
             if (!lane_enabled(code, lane)) continue;
             const float product = as_float(vf_[s][lane]) * value;
-            acc_[lane] = as_bits(
-                as_float(acc_[lane]) + (subtract ? -product : product));
+            const float result =
+                as_float(acc_[lane]) + (subtract ? -product : product);
+            acc_[lane] = fmac_result(lane, result);
         }
+        finish_fmac();
     };
 
     const auto add = [](float a, float b) { return a + b; };
@@ -422,19 +439,23 @@ bool Vu1::execute_upper(u32 code, std::string& error) {
     case 0x2B: binary(d, vmax); return true;
     case 0x2C: binary(d, sub); return true;
     case 0x2D: madd_binary(d, true); return true;
-    case 0x2E:
-        if (d != 0) {
-            vf_[d][0] = as_bits(
-                as_float(acc_[0]) -
-                as_float(vf_[s][1]) * as_float(vf_[t][2]));
-            vf_[d][1] = as_bits(
-                as_float(acc_[1]) -
-                as_float(vf_[s][2]) * as_float(vf_[t][0]));
-            vf_[d][2] = as_bits(
-                as_float(acc_[2]) -
-                as_float(vf_[s][0]) * as_float(vf_[t][1]));
+    case 0x2E: { // OPMSUB
+        const float results[3] = {
+            as_float(acc_[0]) -
+                as_float(vf_[s][1]) * as_float(vf_[t][2]),
+            as_float(acc_[1]) -
+                as_float(vf_[s][2]) * as_float(vf_[t][0]),
+            as_float(acc_[2]) -
+                as_float(vf_[s][0]) * as_float(vf_[t][1]),
+        };
+        begin_fmac();
+        for (u32 lane = 0; lane < 3u; ++lane) {
+            if (!lane_enabled(code, lane)) continue;
+            write_vf_lane(d, lane, fmac_result(lane, results[lane]));
         }
+        finish_fmac();
         return true;
+    }
     case 0x2F: binary(d, vmin); return true;
     case 0x3C:
     case 0x3D:
