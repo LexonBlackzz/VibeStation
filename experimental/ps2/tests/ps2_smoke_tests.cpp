@@ -510,6 +510,57 @@ bool test_ee_timer0_clock_sources() {
     return ok;
 }
 
+bool test_iop_timer_progress_and_irq() {
+    ps2::IopHwWindow hw;
+    ps2::IopIntc intc;
+    hw.reset();
+    intc.reset();
+
+    bool ok = true;
+
+    // Timer0: target=3, reset on target, repeated target IRQ.
+    ok = expect(hw.write16(0x1F801108u, 3u),
+                "IOP Timer0 target write failed") && ok;
+    ok = expect(hw.write16(
+                    0x1F801104u,
+                    (1u << 3) | (1u << 4) | (1u << 6)),
+                "IOP Timer0 mode write failed") && ok;
+
+    hw.tick(2u, intc);
+    ps2::u16 count16 = 0;
+    ok = expect(hw.read16(0x1F801100u, count16) &&
+                    count16 == 2u,
+                "IOP Timer0 count did not advance") && ok;
+    ok = expect((intc.status() & (1u << 4)) == 0,
+                "IOP Timer0 IRQ fired before target") && ok;
+
+    hw.tick(1u, intc);
+    ok = expect(hw.read16(0x1F801100u, count16) &&
+                    count16 == 0u,
+                "IOP Timer0 did not reset at target") && ok;
+    ps2::u16 mode16 = 0;
+    ok = expect(hw.read16(0x1F801104u, mode16) &&
+                    (mode16 & (1u << 11)) != 0,
+                "IOP Timer0 target flag missing") && ok;
+    ok = expect((intc.status() & (1u << 4)) != 0,
+                "IOP Timer0 target IRQ missing") && ok;
+
+    // Timer4: prescale /8.
+    ok = expect(hw.write32(0x1F801494u, 1u << 13),
+                "IOP Timer4 prescale write failed") && ok;
+    hw.tick(7u, intc);
+    ps2::u32 count32 = 0;
+    ok = expect(hw.read32(0x1F801490u, count32) &&
+                    count32 == 0u,
+                "IOP Timer4 /8 advanced early") && ok;
+    hw.tick(1u, intc);
+    ok = expect(hw.read32(0x1F801490u, count32) &&
+                    count32 == 1u,
+                "IOP Timer4 /8 divider mismatch") && ok;
+
+    return ok;
+}
+
 bool test_cdvd_reset_status() {
     ps2::Ps2System system;
 
@@ -855,6 +906,7 @@ int main() {
     ok = test_ee_iop_startup_interleave() && ok;
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;
+    ok = test_iop_timer_progress_and_irq() && ok;
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
     ok = test_iop_intc_registers() && ok;
