@@ -337,7 +337,8 @@ bool SifDma::service_sif1(
     }
 
     ee_bus.raise_dmac(6);
-    iop_intc.raise(3);
+    iop_bus.raise_dma_irq(10);
+    (void)iop_intc;
     (void)saw_end;
     return true;
 }
@@ -448,7 +449,8 @@ bool SifDma::service_sif0(
     }
 
     ee_bus.raise_dmac(5);
-    iop_intc.raise(3);
+    iop_bus.raise_dma_irq(9);
+    (void)iop_intc;
     return true;
 }
 
