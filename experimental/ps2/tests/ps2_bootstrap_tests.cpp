@@ -413,6 +413,46 @@ bool test_ee_di_ei_privilege_gate() {
     return ok;
 }
 
+bool test_ee_integer_overflow_exception() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3000u;
+    constexpr ps2::u32 add =
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x20u;
+    bool ok = expect(system.bus().write32(pc, add),
+                     "ADD overflow test write failed");
+
+    system.ee().reset(pc);
+    system.ee().state().cop0[12] = 0;
+    system.ee().state().gpr[1].lo = 0x7FFFFFFFu;
+    system.ee().state().gpr[2].lo = 1u;
+    std::string error;
+    ok = expect(system.ee().step(error),
+                "ADD overflow exception execution failed") && ok;
+    ok = expect(!system.ee().halted(),
+                "ADD overflow incorrectly halted EE") && ok;
+    ok = expect(system.ee().state().pc == 0x80000180u,
+                "ADD overflow vector mismatch") && ok;
+    ok = expect(system.ee().state().cop0[14] == pc,
+                "ADD overflow EPC mismatch") && ok;
+    ok = expect((system.ee().state().cop0[13] & 0x7Cu) == 0x30u,
+                "ADD overflow Cause mismatch") && ok;
+
+    constexpr ps2::u32 daddi =
+        (0x18u << 26) | (1u << 21) | (2u << 16) | 1u;
+    ok = expect(system.bus().write32(pc, daddi),
+                "DADDI test write failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().gpr[1].lo = 0x0000000100000000ull;
+    error.clear();
+    ok = expect(system.ee().step(error),
+                "DADDI execution failed") && ok;
+    ok = expect(system.ee().state().gpr[2].lo ==
+                    0x0000000100000001ull,
+                "DADDI result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_syscall_exception() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -2244,6 +2284,7 @@ int main() {
     ok = test_ee_intc_cpu_exception() && ok;
     ok = test_ee_cop0_count_compare_irq() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
+    ok = test_ee_integer_overflow_exception() && ok;
     ok = test_syscall_exception() && ok;
     ok = test_syscall_delay_slot_exception() && ok;
     ok = test_video_timing_vblank_irqs() && ok;
