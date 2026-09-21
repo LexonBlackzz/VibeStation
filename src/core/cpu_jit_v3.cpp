@@ -1658,7 +1658,31 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
     if (!line.valid || line.tag != expected_tag) {
-      return helper_step(V3HelperReason::Icache);
+      // Aggressive V3 entry refill: an ordinary architectural I-cache miss
+      // does not require executing the guest instruction through Cpu::step().
+      // Reuse Cpu::fetch32() solely for its canonical line-fill behavior and
+      // four-cycle miss penalty, then compile/execute the still-pending guest
+      // instruction natively. Keep the old helper behavior when the slice has
+      // no room for the refill plus at least one minimum-cost instruction.
+      const u32 remaining_cycles = max_cycles - result.cycles;
+      if (remaining_cycles <= 4u) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      const u64 cycles_before_refill = cpu_.cycles_;
+      (void)cpu_.fetch32(start_pc);
+      if (cpu_.exception_raised_) {
+        return helper_step(V3HelperReason::Icache);
+      }
+      const u64 refill_cycles64 = cpu_.cycles_ - cycles_before_refill;
+      const u32 refill_cycles = static_cast<u32>(refill_cycles64);
+      result.cycles += refill_cycles;
+      stats_.native_cycles += refill_cycles;
+      stats_.executed_cycles += refill_cycles;
+
+      if (!line.valid || line.tag != expected_tag) {
+        return helper_step(V3HelperReason::Icache);
+      }
     }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
