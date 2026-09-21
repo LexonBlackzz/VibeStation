@@ -42,6 +42,8 @@ public:
     void tick(u64 cycles);
     void raise_intc(u32 irq);
     void raise_dmac(u32 channel);
+    void update_vif1_stat(u32 set_bits, u32 clear_bits);
+    [[nodiscard]] u32 vif1_stat() const;
     [[nodiscard]] bool intc_pending() const;
     [[nodiscard]] bool dmac_pending() const;
 
