@@ -1657,33 +1657,6 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 word_index = (start_pc >> 2u) & 0x03u;
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
-    if (!line.valid || line.tag != expected_tag) {
-      // Aggressive V3 entry refill: an ordinary architectural I-cache miss
-      // does not require executing the guest instruction through Cpu::step().
-      // Reuse Cpu::fetch32() solely for its canonical line-fill behavior and
-      // four-cycle miss penalty, then compile/execute the still-pending guest
-      // instruction natively. Keep the old helper behavior when the slice has
-      // no room for the refill plus at least one minimum-cost instruction.
-      const u32 remaining_cycles = max_cycles - result.cycles;
-      if (remaining_cycles <= 4u) {
-        return helper_step(V3HelperReason::Icache);
-      }
-
-      const u64 cycles_before_refill = cpu_.cycles_;
-      (void)cpu_.fetch32(start_pc);
-      if (cpu_.exception_raised_) {
-        return helper_step(V3HelperReason::Icache);
-      }
-      const u64 refill_cycles64 = cpu_.cycles_ - cycles_before_refill;
-      const u32 refill_cycles = static_cast<u32>(refill_cycles64);
-      result.cycles += refill_cycles;
-      stats_.native_cycles += refill_cycles;
-      stats_.executed_cycles += refill_cycles;
-
-      if (!line.valid || line.tag != expected_tag) {
-        return helper_step(V3HelperReason::Icache);
-      }
-    }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
       ++stats_.cache_hits;
@@ -1691,6 +1664,32 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     }
 
     Impl::Block *block_ptr = impl_->lookup_dispatch(start_pc);
+    auto linked_refillable = [&](const Impl::Block &candidate) {
+      if (!impl_->use_linked || candidate.resident.linked_fn == nullptr) {
+        return false;
+      }
+      for (u32 i = 0; i < candidate.icache_line_count; ++i) {
+        const u32 tag = candidate.icache_tags[i];
+        const bool ram = tag < 0x00800000u;
+        const bool scratch =
+            tag >= 0x1F800000u && tag < 0x1F801000u;
+        if (!ram && !scratch) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // A direct-mapped I-cache alias miss does not invalidate translated code.
+    // Actual code writes already erase overlapping V3 blocks through
+    // invalidate_range(). If a resident block exists, enter it and let its
+    // generated cold path perform the architectural refill and +4 cycle
+    // charge atomically with native execution.
+    const bool entry_icache_hit = line.valid && line.tag == expected_tag;
+    if (!entry_icache_hit &&
+        (block_ptr == nullptr || !linked_refillable(*block_ptr))) {
+      return helper_step(V3HelperReason::Icache);
+    }
     if (block_ptr != nullptr) {
       ++stats_.cache_hits;
     } else {
@@ -1715,7 +1714,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           break;
         }
       }
-      if (!coherent) {
+      if (!coherent && !linked_refillable(*block_ptr)) {
         impl_->forget_dispatch(start_pc);
         impl_->unlink_resident(start_pc);
         impl_->blocks.erase(start_pc);
