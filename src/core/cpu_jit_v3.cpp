@@ -1175,8 +1175,6 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     }
     code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
     code->L(next);
-    code->cmp(code->r14d, code->dword[code->rbx + offsetof(V3ResidentContext, entry_limit)]);
-    code->jae(linked_done);
     code->jmp(code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
     code->L(linked_done);
     code->mov(code->rax, reinterpret_cast<size_t>(linked_exit));

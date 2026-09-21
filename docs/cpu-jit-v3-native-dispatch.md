@@ -114,3 +114,15 @@ per entry, with a maximum of 21. Disabling this extension with
 `VIBESTATION_V3_NO_PENDING_LW=1` gives 3,092,854 transitions and 3.08 blocks
 per entry. The host changed speed during A/B runs (pending LW measured both
 4.500 and 8.099 ms), so the timing effect needs a controlled repeat.
+
+Alternating runs pinned to logical CPU 2 gave 4.689 and 4.494 ms without
+pending LW, and 4.471 and 4.267 ms with it, all with exact Spyro state, PC,
+and cycles. The mean of each pair is 4.592 versus 4.369 ms (4.9% faster).
+
+The linked emitter no longer checks its never-lowered maximum entry count
+after every block; the instruction budget already bounds the chain. A final
+pinned 840/60 Spyro run after that change passed the same exact gate and full
+CPU comparison suite: CPU avg 4.619 ms, p50 4.673 ms, p95 5.434 ms, 14,552,064
+native instructions, 1,685,300 helper instructions, 8,002,108 block entries,
+1,520,967 chain entries, 3,620,702 linked transitions, 5,913,234 code bytes.
+The final timing lies within the host's observed run-to-run variation.
