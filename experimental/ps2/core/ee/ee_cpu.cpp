@@ -706,48 +706,578 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     return fail(pc, instruction, "Unsupported COP2 macro function " + hex32(funct), error);
 }
 
-bool EeCpu::execute_mmi(u32 pc,u32 instruction,std::string& error){
-    const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, funct=instruction&63u;
-    switch(funct){
-    case 0x10: write_gpr64(rd,state_.hi1); return true;
-    case 0x11: state_.hi1=gpr_u64(rs); return true;
-    case 0x12: write_gpr64(rd,state_.lo1); return true;
-    case 0x13: state_.lo1=gpr_u64(rs); return true;
-    case 0x18: multiply_signed32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); write_gpr64(rd,state_.lo1); return true;
-    case 0x19: multiply_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); write_gpr64(rd,state_.lo1); return true;
-    case 0x1A: divide_signed32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
-    case 0x1B: divide_unsigned32(static_cast<u32>(gpr_u64(rs)),static_cast<u32>(gpr_u64(rt)),state_.lo1,state_.hi1); return true;
-    case 0x28: { // MMI1
-        const u32 sub = (instruction >> 6) & 31u;
-        if (sub == 0x10u) { // PADDUW
-            if (rd != 0) {
-                for (u32 lane = 0; lane < 4; ++lane) {
-                    const u64 a_half = lane < 2 ? state_.gpr[rs].lo : state_.gpr[rs].hi;
-                    const u64 b_half = lane < 2 ? state_.gpr[rt].lo : state_.gpr[rt].hi;
-                    const u32 shift = (lane & 1u) * 32u;
-                    const u64 sum = static_cast<u64>(static_cast<u32>(a_half >> shift)) +
-                                    static_cast<u64>(static_cast<u32>(b_half >> shift));
-                    const u32 value = sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(sum);
-                    u64& out_half = lane < 2 ? state_.gpr[rd].lo : state_.gpr[rd].hi;
-                    out_half = (out_half & ~(0xFFFFFFFFull << shift)) | (static_cast<u64>(value) << shift);
+bool EeCpu::execute_mmi(
+    u32 pc,
+    u32 instruction,
+    std::string& error) {
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+    const u32 sa = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+
+    const EeGpr a = state_.gpr[rs];
+    const EeGpr b = state_.gpr[rt];
+
+    auto get8 = [](const EeGpr& value, u32 lane) -> u8 {
+        const u64 half = lane < 8u ? value.lo : value.hi;
+        return static_cast<u8>(half >> ((lane & 7u) * 8u));
+    };
+    auto get16 = [](const EeGpr& value, u32 lane) -> u16 {
+        const u64 half = lane < 4u ? value.lo : value.hi;
+        return static_cast<u16>(half >> ((lane & 3u) * 16u));
+    };
+    auto get32 = [](const EeGpr& value, u32 lane) -> u32 {
+        const u64 half = lane < 2u ? value.lo : value.hi;
+        return static_cast<u32>(half >> ((lane & 1u) * 32u));
+    };
+    auto set8 = [](EeGpr& value, u32 lane, u8 v) {
+        u64& half = lane < 8u ? value.lo : value.hi;
+        const u32 shift = (lane & 7u) * 8u;
+        half =
+            (half & ~(0xFFull << shift)) |
+            (static_cast<u64>(v) << shift);
+    };
+    auto set16 = [](EeGpr& value, u32 lane, u16 v) {
+        u64& half = lane < 4u ? value.lo : value.hi;
+        const u32 shift = (lane & 3u) * 16u;
+        half =
+            (half & ~(0xFFFFull << shift)) |
+            (static_cast<u64>(v) << shift);
+    };
+    auto set32 = [](EeGpr& value, u32 lane, u32 v) {
+        u64& half = lane < 2u ? value.lo : value.hi;
+        const u32 shift = (lane & 1u) * 32u;
+        half =
+            (half & ~(0xFFFFFFFFull << shift)) |
+            (static_cast<u64>(v) << shift);
+    };
+    auto store = [&](const EeGpr& value) {
+        if (rd != 0u) state_.gpr[rd] = value;
+    };
+
+    auto mmi0 = [&](u32 sub) -> bool {
+        EeGpr out{};
+        switch (sub) {
+        case 0x00: // PADDW
+        case 0x01: // PSUBW
+        case 0x02: // PCGTW
+        case 0x03: // PMAXW
+            for (u32 i = 0; i < 4u; ++i) {
+                const u32 av = get32(a, i);
+                const u32 bv = get32(b, i);
+                u32 v = 0;
+                if (sub == 0x00u) v = av + bv;
+                else if (sub == 0x01u) v = av - bv;
+                else if (sub == 0x02u) {
+                    v = static_cast<s32>(av) > static_cast<s32>(bv)
+                        ? 0xFFFFFFFFu : 0u;
+                } else {
+                    v = static_cast<s32>(av) > static_cast<s32>(bv)
+                        ? av : bv;
                 }
+                set32(out, i, v);
             }
+            store(out);
             return true;
-        }
-        return fail(pc,instruction,"Unsupported MMI1 function "+hex32(sub),error);
-    }
-    case 0x29: { // MMI3
-        const u32 sub = (instruction >> 6) & 31u;
-        if (sub == 0x12u) { // POR
-            if (rd != 0) {
-                state_.gpr[rd].lo = state_.gpr[rs].lo | state_.gpr[rt].lo;
-                state_.gpr[rd].hi = state_.gpr[rs].hi | state_.gpr[rt].hi;
+
+        case 0x04: // PADDH
+        case 0x05: // PSUBH
+        case 0x06: // PCGTH
+        case 0x07: // PMAXH
+            for (u32 i = 0; i < 8u; ++i) {
+                const u16 av = get16(a, i);
+                const u16 bv = get16(b, i);
+                u16 v = 0;
+                if (sub == 0x04u) v = static_cast<u16>(av + bv);
+                else if (sub == 0x05u) v = static_cast<u16>(av - bv);
+                else if (sub == 0x06u) {
+                    v = static_cast<s16>(av) > static_cast<s16>(bv)
+                        ? 0xFFFFu : 0u;
+                } else {
+                    v = static_cast<s16>(av) > static_cast<s16>(bv)
+                        ? av : bv;
+                }
+                set16(out, i, v);
             }
+            store(out);
             return true;
+
+        case 0x08: // PADDB
+        case 0x09: // PSUBB
+        case 0x0A: // PCGTB
+            for (u32 i = 0; i < 16u; ++i) {
+                const u8 av = get8(a, i);
+                const u8 bv = get8(b, i);
+                u8 v = 0;
+                if (sub == 0x08u) v = static_cast<u8>(av + bv);
+                else if (sub == 0x09u) v = static_cast<u8>(av - bv);
+                else {
+                    v = static_cast<s8>(av) > static_cast<s8>(bv)
+                        ? 0xFFu : 0u;
+                }
+                set8(out, i, v);
+            }
+            store(out);
+            return true;
+
+        case 0x12: // PEXTLW
+            for (u32 i = 0; i < 2u; ++i) {
+                set32(out, i * 2u, get32(b, i));
+                set32(out, i * 2u + 1u, get32(a, i));
+            }
+            store(out);
+            return true;
+        case 0x13: // PPACW
+            set32(out, 0u, get32(b, 0u));
+            set32(out, 1u, get32(b, 2u));
+            set32(out, 2u, get32(a, 0u));
+            set32(out, 3u, get32(a, 2u));
+            store(out);
+            return true;
+        case 0x16: // PEXTLH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i));
+                set16(out, i * 2u + 1u, get16(a, i));
+            }
+            store(out);
+            return true;
+        case 0x17: // PPACH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i, get16(b, i * 2u));
+                set16(out, i + 4u, get16(a, i * 2u));
+            }
+            store(out);
+            return true;
+        case 0x1A: // PEXTLB
+            for (u32 i = 0; i < 8u; ++i) {
+                set8(out, i * 2u, get8(b, i));
+                set8(out, i * 2u + 1u, get8(a, i));
+            }
+            store(out);
+            return true;
+        case 0x1B: // PPACB
+            for (u32 i = 0; i < 8u; ++i) {
+                set8(out, i, get8(b, i * 2u));
+                set8(out, i + 8u, get8(a, i * 2u));
+            }
+            store(out);
+            return true;
+        case 0x1E: // PEXT5
+            for (u32 i = 0; i < 4u; ++i) {
+                const u32 v = get32(b, i);
+                set32(
+                    out,
+                    i,
+                    ((v & 0x001Fu) << 3) |
+                    ((v & 0x03E0u) << 6) |
+                    ((v & 0x7C00u) << 9) |
+                    ((v & 0x8000u) << 16));
+            }
+            store(out);
+            return true;
+        case 0x1F: // PPAC5
+            for (u32 i = 0; i < 4u; ++i) {
+                const u32 v = get32(b, i);
+                set32(
+                    out,
+                    i,
+                    ((v >> 3) & 0x001Fu) |
+                    ((v >> 6) & 0x03E0u) |
+                    ((v >> 9) & 0x7C00u) |
+                    ((v >> 16) & 0x8000u));
+            }
+            store(out);
+            return true;
+        default:
+            return false;
         }
-        return fail(pc,instruction,"Unsupported MMI3 function "+hex32(sub),error);
+    };
+
+    auto mmi1 = [&](u32 sub) -> bool {
+        EeGpr out{};
+        switch (sub) {
+        case 0x01: // PABSW
+            for (u32 i = 0; i < 4u; ++i) {
+                const s32 v = static_cast<s32>(get32(b, i));
+                set32(
+                    out,
+                    i,
+                    v == std::numeric_limits<s32>::min()
+                        ? 0x7FFFFFFFu
+                        : static_cast<u32>(v < 0 ? -v : v));
+            }
+            store(out);
+            return true;
+        case 0x02: // PCEQW
+        case 0x03: // PMINW
+            for (u32 i = 0; i < 4u; ++i) {
+                const u32 av = get32(a, i);
+                const u32 bv = get32(b, i);
+                set32(
+                    out,
+                    i,
+                    sub == 0x02u
+                        ? (av == bv ? 0xFFFFFFFFu : 0u)
+                        : (static_cast<s32>(av) < static_cast<s32>(bv)
+                            ? av : bv));
+            }
+            store(out);
+            return true;
+        case 0x05: // PABSH
+            for (u32 i = 0; i < 8u; ++i) {
+                const s16 v = static_cast<s16>(get16(b, i));
+                set16(
+                    out,
+                    i,
+                    v == std::numeric_limits<s16>::min()
+                        ? 0x7FFFu
+                        : static_cast<u16>(v < 0 ? -v : v));
+            }
+            store(out);
+            return true;
+        case 0x06: // PCEQH
+        case 0x07: // PMINH
+            for (u32 i = 0; i < 8u; ++i) {
+                const u16 av = get16(a, i);
+                const u16 bv = get16(b, i);
+                set16(
+                    out,
+                    i,
+                    sub == 0x06u
+                        ? (av == bv ? 0xFFFFu : 0u)
+                        : (static_cast<s16>(av) < static_cast<s16>(bv)
+                            ? av : bv));
+            }
+            store(out);
+            return true;
+        case 0x0A: // PCEQB
+            for (u32 i = 0; i < 16u; ++i) {
+                set8(
+                    out,
+                    i,
+                    get8(a, i) == get8(b, i) ? 0xFFu : 0u);
+            }
+            store(out);
+            return true;
+        case 0x10: // PADDUW
+        case 0x11: // PSUBUW
+            for (u32 i = 0; i < 4u; ++i) {
+                const u64 av = get32(a, i);
+                const u64 bv = get32(b, i);
+                u32 v = 0;
+                if (sub == 0x10u) {
+                    const u64 sum = av + bv;
+                    v = sum > 0xFFFFFFFFull
+                        ? 0xFFFFFFFFu
+                        : static_cast<u32>(sum);
+                } else {
+                    v = av <= bv
+                        ? 0u
+                        : static_cast<u32>(av - bv);
+                }
+                set32(out, i, v);
+            }
+            store(out);
+            return true;
+        case 0x12: // PEXTUW
+            for (u32 i = 0; i < 2u; ++i) {
+                set32(out, i * 2u, get32(b, i + 2u));
+                set32(out, i * 2u + 1u, get32(a, i + 2u));
+            }
+            store(out);
+            return true;
+        case 0x14: // PADDUH
+        case 0x15: // PSUBUH
+            for (u32 i = 0; i < 8u; ++i) {
+                const u32 av = get16(a, i);
+                const u32 bv = get16(b, i);
+                u16 v = 0;
+                if (sub == 0x14u) {
+                    const u32 sum = av + bv;
+                    v = static_cast<u16>(
+                        sum > 0xFFFFu ? 0xFFFFu : sum);
+                } else {
+                    v = av <= bv
+                        ? 0u
+                        : static_cast<u16>(av - bv);
+                }
+                set16(out, i, v);
+            }
+            store(out);
+            return true;
+        case 0x16: // PEXTUH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i + 4u));
+                set16(out, i * 2u + 1u, get16(a, i + 4u));
+            }
+            store(out);
+            return true;
+        case 0x18: // PADDUB
+        case 0x19: // PSUBUB
+            for (u32 i = 0; i < 16u; ++i) {
+                const u32 av = get8(a, i);
+                const u32 bv = get8(b, i);
+                u8 v = 0;
+                if (sub == 0x18u) {
+                    const u32 sum = av + bv;
+                    v = static_cast<u8>(
+                        sum > 0xFFu ? 0xFFu : sum);
+                } else {
+                    v = av <= bv
+                        ? 0u
+                        : static_cast<u8>(av - bv);
+                }
+                set8(out, i, v);
+            }
+            store(out);
+            return true;
+        case 0x1A: // PEXTUB
+            for (u32 i = 0; i < 8u; ++i) {
+                set8(out, i * 2u, get8(b, i + 8u));
+                set8(out, i * 2u + 1u, get8(a, i + 8u));
+            }
+            store(out);
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    auto mmi2 = [&](u32 sub) -> bool {
+        EeGpr out{};
+        switch (sub) {
+        case 0x0E: // PCPYLD
+            out.lo = b.lo;
+            out.hi = a.lo;
+            store(out);
+            return true;
+        case 0x12: // PAND
+            out.lo = a.lo & b.lo;
+            out.hi = a.hi & b.hi;
+            store(out);
+            return true;
+        case 0x13: // PXOR
+            out.lo = a.lo ^ b.lo;
+            out.hi = a.hi ^ b.hi;
+            store(out);
+            return true;
+        case 0x1A: // PEXEH
+            for (u32 i = 0; i < 8u; ++i) {
+                static constexpr u32 order[8] =
+                    {0u, 2u, 1u, 3u, 4u, 6u, 5u, 7u};
+                set16(out, i, get16(b, order[i]));
+            }
+            store(out);
+            return true;
+        case 0x1B: // PREVH
+            for (u32 i = 0; i < 8u; ++i) {
+                static constexpr u32 order[8] =
+                    {2u, 1u, 0u, 3u, 6u, 5u, 4u, 7u};
+                set16(out, i, get16(b, order[i]));
+            }
+            store(out);
+            return true;
+        case 0x1E: // PEXEW
+            set32(out, 0u, get32(b, 0u));
+            set32(out, 1u, get32(b, 2u));
+            set32(out, 2u, get32(b, 1u));
+            set32(out, 3u, get32(b, 3u));
+            store(out);
+            return true;
+        case 0x1F: // PROT3W
+            set32(out, 0u, get32(b, 1u));
+            set32(out, 1u, get32(b, 2u));
+            set32(out, 2u, get32(b, 0u));
+            set32(out, 3u, get32(b, 3u));
+            store(out);
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    auto mmi3 = [&](u32 sub) -> bool {
+        EeGpr out{};
+        switch (sub) {
+        case 0x0E: // PCPYUD
+            out.lo = a.hi;
+            out.hi = b.hi;
+            store(out);
+            return true;
+        case 0x12: // POR
+            out.lo = a.lo | b.lo;
+            out.hi = a.hi | b.hi;
+            store(out);
+            return true;
+        case 0x13: // PNOR
+            out.lo = ~(a.lo | b.lo);
+            out.hi = ~(a.hi | b.hi);
+            store(out);
+            return true;
+        case 0x1A: // PEXCH
+            for (u32 i = 0; i < 8u; ++i) {
+                static constexpr u32 order[8] =
+                    {0u, 2u, 1u, 3u, 4u, 6u, 5u, 7u};
+                set16(out, i, get16(b, order[i]));
+            }
+            store(out);
+            return true;
+        case 0x1B: // PCPYH
+            for (u32 i = 0; i < 4u; ++i) {
+                set16(out, i, get16(b, 0u));
+                set16(out, i + 4u, get16(b, 4u));
+            }
+            store(out);
+            return true;
+        case 0x1E: // PEXCW
+            set32(out, 0u, get32(b, 0u));
+            set32(out, 1u, get32(b, 2u));
+            set32(out, 2u, get32(b, 1u));
+            set32(out, 3u, get32(b, 3u));
+            store(out);
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    switch (funct) {
+    case 0x08:
+        if (mmi0(sa)) return true;
+        return fail(
+            pc,
+            instruction,
+            "Unsupported MMI0 function " + hex32(sa),
+            error);
+    case 0x09:
+        if (mmi2(sa)) return true;
+        return fail(
+            pc,
+            instruction,
+            "Unsupported MMI2 function " + hex32(sa),
+            error);
+    case 0x10: // MFHI1
+        write_gpr64(rd, state_.hi1);
+        return true;
+    case 0x11: // MTHI1
+        state_.hi1 = gpr_u64(rs);
+        return true;
+    case 0x12: // MFLO1
+        write_gpr64(rd, state_.lo1);
+        return true;
+    case 0x13: // MTLO1
+        state_.lo1 = gpr_u64(rs);
+        return true;
+    case 0x18: // MULT1
+        multiply_signed32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        write_gpr64(rd, state_.lo1);
+        return true;
+    case 0x19: // MULTU1
+        multiply_unsigned32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        write_gpr64(rd, state_.lo1);
+        return true;
+    case 0x1A: // DIV1
+        divide_signed32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        return true;
+    case 0x1B: // DIVU1
+        divide_unsigned32(
+            static_cast<u32>(gpr_u64(rs)),
+            static_cast<u32>(gpr_u64(rt)),
+            state_.lo1,
+            state_.hi1);
+        return true;
+    case 0x28:
+        if (mmi1(sa)) return true;
+        return fail(
+            pc,
+            instruction,
+            "Unsupported MMI1 function " + hex32(sa),
+            error);
+    case 0x29:
+        if (mmi3(sa)) return true;
+        return fail(
+            pc,
+            instruction,
+            "Unsupported MMI3 function " + hex32(sa),
+            error);
+    case 0x34: { // PSLLH
+        EeGpr out{};
+        const u32 shift = sa & 0xFu;
+        for (u32 i = 0; i < 8u; ++i) {
+            set16(out, i, static_cast<u16>(get16(b, i) << shift));
+        }
+        store(out);
+        return true;
     }
-    default: return fail(pc,instruction,"Unsupported MMI function "+hex32(funct),error);
+    case 0x36: { // PSRLH
+        EeGpr out{};
+        const u32 shift = sa & 0xFu;
+        for (u32 i = 0; i < 8u; ++i) {
+            set16(out, i, static_cast<u16>(get16(b, i) >> shift));
+        }
+        store(out);
+        return true;
+    }
+    case 0x37: { // PSRAH
+        EeGpr out{};
+        const u32 shift = sa & 0xFu;
+        for (u32 i = 0; i < 8u; ++i) {
+            set16(
+                out,
+                i,
+                static_cast<u16>(
+                    static_cast<s16>(get16(b, i)) >> shift));
+        }
+        store(out);
+        return true;
+    }
+    case 0x3C: { // PSLLW
+        EeGpr out{};
+        for (u32 i = 0; i < 4u; ++i) {
+            set32(out, i, get32(b, i) << sa);
+        }
+        store(out);
+        return true;
+    }
+    case 0x3E: { // PSRLW
+        EeGpr out{};
+        for (u32 i = 0; i < 4u; ++i) {
+            set32(out, i, get32(b, i) >> sa);
+        }
+        store(out);
+        return true;
+    }
+    case 0x3F: { // PSRAW
+        EeGpr out{};
+        for (u32 i = 0; i < 4u; ++i) {
+            set32(
+                out,
+                i,
+                static_cast<u32>(
+                    static_cast<s32>(get32(b, i)) >> sa));
+        }
+        store(out);
+        return true;
+    }
+    default:
+        return fail(
+            pc,
+            instruction,
+            "Unsupported MMI function " + hex32(funct),
+            error);
     }
 }
 
