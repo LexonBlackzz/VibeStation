@@ -29,6 +29,7 @@ add_library(vibestation_ps2_core STATIC
     core/memory/ee_scratchpad.cpp
     core/scheduler/scheduler.cpp
     core/video/video_timing.cpp
+    core/vu/vu1.cpp
 )
 
 target_include_directories(vibestation_ps2_core PUBLIC
@@ -137,5 +138,14 @@ if(BUILD_TESTING)
     add_test(
         NAME vibestation_ps2_vif1
         COMMAND $<TARGET_FILE:vibestation_ps2_vif1_tests>
+    )
+
+    add_executable(vibestation_ps2_vu1_tests
+        tests/ps2_vu1_tests.cpp
+    )
+    target_link_libraries(vibestation_ps2_vu1_tests PRIVATE vibestation_ps2_core)
+    add_test(
+        NAME vibestation_ps2_vu1
+        COMMAND $<TARGET_FILE:vibestation_ps2_vu1_tests>
     )
 endif()
