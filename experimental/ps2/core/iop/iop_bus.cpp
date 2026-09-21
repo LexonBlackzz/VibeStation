@@ -39,6 +39,8 @@ constexpr u32 kOhciFrameCycles = 36864u;
 constexpr u32 kOhciIntrMie = 1u << 31;
 constexpr u32 kOhciRhNps = 1u << 9;
 constexpr u32 kOhciPortPps = 1u << 8;
+constexpr u32 kFirewireBase = 0x1F808400u;
+constexpr u32 kFirewireSize = 0x150u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
 constexpr u32 kCacheControlEnd = 0xFFFE0200u;
 
@@ -62,6 +64,8 @@ void IopBus::reset() {
     cache_control_.fill(0);
     spu2_regs_.fill(0);
     reset_ohci(true);
+    firewire_regs_.fill(0);
+    firewire_regs_[(0x10u) >> 2] = 0x8u; // SCLK ready.
     root_counters_.fill({});
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
@@ -217,6 +221,107 @@ bool IopBus::write_ohci(
         return true;
     default:
         ohci_regs_[index] = merged;
+        return true;
+    }
+}
+
+bool IopBus::read_firewire(
+    u32 physical,
+    u32 width,
+    u32& value) const {
+    if (physical < kFirewireBase ||
+        physical + width > kFirewireBase + kFirewireSize ||
+        width == 0u || width > 4u) {
+        return false;
+    }
+
+    const u32 offset = physical - kFirewireBase;
+    const u32 aligned = offset & ~3u;
+    const u32 byte_offset = offset & 3u;
+    if (byte_offset + width > 4u) return false;
+    const u32 index = aligned >> 2;
+
+    u32 raw = 0;
+    if (aligned == 0x00u) {
+        raw = 0xFFC00001u; // BIOS-visible node ID.
+    } else if (aligned == 0x7Cu) {
+        raw = 0x10000001u; // Link/node comparison probe value.
+    } else if (index < firewire_regs_.size()) {
+        raw = firewire_regs_[index];
+    }
+
+    const u32 bits = width * 8u;
+    const u32 mask =
+        bits == 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    value = (raw >> (byte_offset * 8u)) & mask;
+    return true;
+}
+
+bool IopBus::write_firewire(
+    u32 physical,
+    u32 width,
+    u32 value) {
+    if (physical < kFirewireBase ||
+        physical + width > kFirewireBase + kFirewireSize ||
+        width == 0u || width > 4u) {
+        return false;
+    }
+
+    const u32 offset = physical - kFirewireBase;
+    const u32 aligned = offset & ~3u;
+    const u32 byte_offset = offset & 3u;
+    if (byte_offset + width > 4u) return false;
+    const u32 index = aligned >> 2;
+    if (index >= firewire_regs_.size()) return true;
+
+    u32 current = 0;
+    (void)read_firewire(kFirewireBase + aligned, 4u, current);
+    const u32 bits = width * 8u;
+    const u32 lane_mask =
+        bits == 32u
+            ? 0xFFFFFFFFu
+            : ((1u << bits) - 1u) << (byte_offset * 8u);
+    const u32 merged =
+        (current & ~lane_mask) |
+        ((value << (byte_offset * 8u)) & lane_mask);
+
+    switch (aligned) {
+    case 0x00u: // Node ID is read-only.
+    case 0x7Cu:
+        return true;
+    case 0x08u: // Control 0: Bus ID reset is self-clearing.
+        firewire_regs_[index] = merged & ~0x00800000u;
+        return true;
+    case 0x10u: // Control 2: expose SCLK ready after initialization.
+        firewire_regs_[index] = 0x8u;
+        return true;
+    case 0x14u: { // PHY access.
+        u32 result = merged;
+        if ((result & 0x40000000u) != 0) {
+            // PHY write completes immediately in the no-device bootstrap model.
+            result &= ~0x4000FFFFu;
+        } else if ((result & 0x80000000u) != 0) {
+            const u32 reg = (result >> 24) & 0xFu;
+            result &= ~0x80000000u;
+            result = (result & ~0x00000FFFu) | (reg << 8);
+        }
+        firewire_regs_[index] = result;
+        return true;
+    }
+    case 0x20u: // Interrupt status 0
+    case 0x28u: // Interrupt status 1
+    case 0x30u: // Interrupt status 2
+        firewire_regs_[index] &= ~merged;
+        return true;
+    case 0x24u: // Interrupt masks are direct writes.
+    case 0x2Cu:
+    case 0x34u:
+    case 0xB8u: // DMA control/status 0
+    case 0x138u: // DMA control/status 1
+        firewire_regs_[index] = merged;
+        return true;
+    default:
+        firewire_regs_[index] = merged;
         return true;
     }
 }
@@ -563,6 +668,11 @@ bool IopBus::read8(u32 address, u8& value) const {
         value = static_cast<u8>(ohci_value);
         return true;
     }
+    u32 fw_value = 0;
+    if (read_firewire(physical, 1u, fw_value)) {
+        value = static_cast<u8>(fw_value);
+        return true;
+    }
     u32 timer_value = 0;
     if (read_root_counter(physical, 1u, timer_value)) {
         value = static_cast<u8>(timer_value);
@@ -590,6 +700,11 @@ bool IopBus::read16(u32 address, u16& value) const {
     u32 ohci_value = 0;
     if (read_ohci(physical, 2u, ohci_value)) {
         value = static_cast<u16>(ohci_value);
+        return true;
+    }
+    u32 fw_value = 0;
+    if (read_firewire(physical, 2u, fw_value)) {
+        value = static_cast<u16>(fw_value);
         return true;
     }
     u32 timer_value = 0;
@@ -623,6 +738,11 @@ bool IopBus::read32(u32 address, u32& value) const {
     u32 ohci_value = 0;
     if (read_ohci(physical, 4u, ohci_value)) {
         value = ohci_value;
+        return true;
+    }
+    u32 fw_value = 0;
+    if (read_firewire(physical, 4u, fw_value)) {
+        value = fw_value;
         return true;
     }
     u32 timer_value = 0;
@@ -664,6 +784,10 @@ bool IopBus::write8(u32 address, u8 value) {
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 1u, value);
     }
+    if (physical >= kFirewireBase &&
+        physical < kFirewireBase + kFirewireSize) {
+        return write_firewire(physical, 1u, value);
+    }
     u32 timer_index = 0;
     u32 timer_reg = 0;
     if (decode_root_counter(physical, timer_index, timer_reg)) {
@@ -691,6 +815,10 @@ bool IopBus::write16(u32 address, u16 value) {
     if (physical >= kOhciBase &&
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 2u, value);
+    }
+    if (physical >= kFirewireBase &&
+        physical < kFirewireBase + kFirewireSize) {
+        return write_firewire(physical, 2u, value);
     }
     u32 timer_index = 0;
     u32 timer_reg = 0;
@@ -722,6 +850,10 @@ bool IopBus::write32(u32 address, u32 value) {
     if (physical >= kOhciBase &&
         physical < kOhciBase + kOhciSize) {
         return write_ohci(physical, 4u, value);
+    }
+    if (physical >= kFirewireBase &&
+        physical < kFirewireBase + kFirewireSize) {
+        return write_firewire(physical, 4u, value);
     }
     u32 timer_index = 0;
     u32 timer_reg = 0;
