@@ -133,7 +133,12 @@ void GsPrivileged::label(u64 value) {
 }
 
 void GsPrivileged::raise_vsync() {
-    store32(kCsr, csr() | kCsrVsint);
+    // CSR.FIELD is the currently displayed field: 0=even, 1=odd.  Retail
+    // synchronization code polls this bit around VSync, so advance it with
+    // each interlaced field instead of exposing a permanently-even display.
+    u32 state = csr() ^ (1u << 13);
+    state |= kCsrVsint;
+    store32(kCsr, state);
 }
 
 bool GsPrivileged::read8(u32 address, u8& value) const {
