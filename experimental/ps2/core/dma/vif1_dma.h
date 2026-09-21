@@ -10,10 +10,12 @@ namespace ps2 {
 class EeBus;
 class GsCore;
 class GsPrivileged;
+class Vu1;
 
 class Vif1Dma {
 public:
     void reset();
+    void attach_vu1(Vu1& vu1) { vu1_ = &vu1; }
 
     [[nodiscard]] bool service(
         EeBus& bus,
@@ -111,6 +113,8 @@ private:
     u32 unpack_bit_count_ = 0;
     std::array<u32, 4> unpack_vector_{};
     u32 unpack_component_ = 0;
+
+    Vu1* vu1_ = nullptr;
 };
 
 } // namespace ps2
