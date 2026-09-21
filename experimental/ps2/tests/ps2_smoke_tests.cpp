@@ -740,6 +740,97 @@ bool test_cdvd_scommand_result_fifo() {
     return ok;
 }
 
+bool test_cdvd_mechacon_config_nvram() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    auto write_param = [&](ps2::u8 value) {
+        return system.iop_bus().write8(0xBF402017u, value);
+    };
+    auto command = [&](ps2::u8 value) {
+        return system.iop_bus().write8(0xBF402016u, value);
+    };
+    auto read_result = [&](ps2::u8& value) {
+        return system.iop_bus().read8(0xBF402018u, value);
+    };
+
+    // Open config section 1 for two read blocks. With no BIOS identity loaded,
+    // the bootstrap model uses the legacy layout and seeds block 1 with the
+    // standard English OSD defaults.
+    ok = expect(
+             write_param(0u) &&
+             write_param(1u) &&
+             write_param(2u) &&
+             command(0x40u),
+             "CDVD OpenConfig command failed") && ok;
+    ps2::u8 value = 0xFFu;
+    ok = expect(
+             read_result(value) && value == 0u,
+             "CDVD OpenConfig did not return success") && ok;
+
+    ok = expect(
+             command(0x41u),
+             "CDVD first ReadConfig command failed") && ok;
+    std::array<ps2::u8, 16> first{};
+    for (auto& byte : first) {
+        ok = expect(
+                 read_result(byte),
+                 "CDVD first config block read failed") && ok;
+    }
+    ok = expect(
+             std::all_of(
+                 first.begin(),
+                 first.end(),
+                 [](ps2::u8 byte) { return byte == 0u; }),
+             "CDVD first legacy config block should reset to zero") && ok;
+
+    ok = expect(
+             command(0x41u),
+             "CDVD second ReadConfig command failed") && ok;
+    std::array<ps2::u8, 16> second{};
+    for (auto& byte : second) {
+        ok = expect(
+                 read_result(byte),
+                 "CDVD second config block read failed") && ok;
+    }
+    const std::array<ps2::u8, 16> english{
+        0x30u, 0x21u, 0x00u, 0x00u,
+        0x00u, 0x70u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x41u,
+    };
+    ok = expect(
+             second == english,
+             "CDVD seeded English OSD config mismatch") && ok;
+
+    ok = expect(
+             command(0x43u) &&
+             read_result(value) &&
+             value == 0u,
+             "CDVD CloseConfig did not return success") && ok;
+
+    // Legacy i.Link NVRAM starts at 0x1C0. SCMD 0x0A takes a word index
+    // and returns status followed by the word in the mechacon byte order.
+    ok = expect(
+             write_param(0x00u) &&
+             write_param(0xE0u) &&
+             command(0x0Au),
+             "CDVD ReadNVM command failed") && ok;
+    ps2::u8 status = 0xFFu;
+    ps2::u8 hi = 0xFFu;
+    ps2::u8 lo = 0xFFu;
+    ok = expect(
+             read_result(status) &&
+             read_result(hi) &&
+             read_result(lo) &&
+             status == 0u &&
+             hi == 0xACu &&
+             lo == 0x00u,
+             "CDVD ReadNVM i.Link word mismatch") && ok;
+
+    return ok;
+}
+
 bool test_iop_intc_registers() {
     ps2::Ps2System system;
 
@@ -1570,6 +1661,7 @@ int main() {
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_iop_segment_mirror() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
+    ok = test_cdvd_mechacon_config_nvram() && ok;
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
