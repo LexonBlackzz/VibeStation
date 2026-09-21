@@ -23,6 +23,17 @@ bool write_micro_pair(
            system.bus().write32(address + 4u, upper);
 }
 
+bool write_vu0_micro_pair(
+    ps2::Ps2System& system,
+    ps2::u32 instruction,
+    ps2::u32 lower,
+    ps2::u32 upper) {
+    const ps2::u32 address =
+        0x11000000u + (instruction & 0x1FFu) * 8u;
+    return system.bus().write32(address, lower) &&
+           system.bus().write32(address + 4u, upper);
+}
+
 bool write_qword(
     ps2::Ps2System& system,
     ps2::u32 qword,
@@ -262,6 +273,72 @@ bool test_vu1_efu_and_random_ops() {
     return ok;
 }
 
+bool test_ee_vcallms_runs_vu0_microcode() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x3600u;
+    constexpr ps2::u32 end_flag = 0x40000000u;
+
+    // VCALLMS 0: set VI1 in the E pair and VI2 in its mandatory delay pair.
+    constexpr ps2::u32 iaddu_vi1_5 =
+        (0x08u << 25) | (1u << 16) | 5u;
+    constexpr ps2::u32 iaddu_vi2_7 =
+        (0x08u << 25) | (2u << 16) | 7u;
+    constexpr ps2::u32 vcallms_0 =
+        (0x12u << 26) | (0x10u << 21) | 0x38u;
+
+    bool ok = true;
+    ok = expect(
+             write_vu0_micro_pair(
+                 system, 0u, iaddu_vi1_5, end_flag) &&
+             write_vu0_micro_pair(
+                 system, 1u, iaddu_vi2_7, 0u) &&
+             system.bus().write32(pc, vcallms_0),
+             "failed to build VU0 VCALLMS program") && ok;
+
+    system.ee().reset(pc);
+    std::string error;
+    ok = expect(
+             system.ee().step(error),
+             "EE VCALLMS execution failed") && ok;
+    ok = expect(error.empty(), "EE VCALLMS returned an error") && ok;
+    ok = expect(
+             system.ee().state().vu_vi[1] == 5u &&
+             system.ee().state().vu_vi[2] == 7u,
+             "VCALLMS did not export VU0 VI results") && ok;
+    ok = expect(
+             !system.vu0().running() &&
+             system.vu0().stats().instructions == 2u,
+             "VCALLMS did not retire through the E delay pair") && ok;
+
+    // VCALLMSR takes its entry point from CMSAR0 (VI control register 27).
+    constexpr ps2::u32 iaddu_vi3_9 =
+        (0x08u << 25) | (3u << 16) | 9u;
+    constexpr ps2::u32 iaddu_vi4_11 =
+        (0x08u << 25) | (4u << 16) | 11u;
+    constexpr ps2::u32 vcallmsr =
+        (0x12u << 26) | (0x10u << 21) | 0x39u;
+
+    ok = expect(
+             write_vu0_micro_pair(
+                 system, 2u, iaddu_vi3_9, end_flag) &&
+             write_vu0_micro_pair(
+                 system, 3u, iaddu_vi4_11, 0u) &&
+             system.bus().write32(pc + 4u, vcallmsr),
+             "failed to build VU0 VCALLMSR program") && ok;
+    system.ee().state().vu_vi[27] = 2u;
+    error.clear();
+    ok = expect(
+             system.ee().step(error),
+             "EE VCALLMSR execution failed") && ok;
+    ok = expect(
+             error.empty() &&
+             system.ee().state().vu_vi[3] == 9u &&
+             system.ee().state().vu_vi[4] == 11u,
+             "VCALLMSR did not execute CMSAR0 entry") && ok;
+
+    return ok;
+}
+
 bool test_vif1_mscal_starts_vu1() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -307,6 +384,7 @@ int main() {
     ok = test_xgkick_to_gs() && ok;
     ok = test_vu1_fmac_flags() && ok;
     ok = test_vu1_efu_and_random_ops() && ok;
+    ok = test_ee_vcallms_runs_vu0_microcode() && ok;
     ok = test_vif1_mscal_starts_vu1() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VU1 tests passed.\n";
