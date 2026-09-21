@@ -822,6 +822,28 @@ bool test_gs_untextured_rasterization() {
                     "GS point raster statistics mismatch") && ok;
     }
 
+    // AA1 is accepted during bootstrap and rendered without edge coverage.
+    {
+        ps2::GsCore gs;
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, scissor);
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, frame);
+        ad(gs, 0x00, 0u | (1u << 7)); // point + AA1
+        ad(gs, 0x01, 0xB0605040u);
+        ad(gs, 0x05, xyz(16, 16));
+
+        ok = expect(
+                 gs.vram().read_pixel(0, 1, 1, 0, 1) == 0xB0605040u,
+                 "GS AA1 bootstrap point was dropped") && ok;
+        ok = expect(
+                 gs.stats().raster_draws == 1 &&
+                 gs.stats().skipped_raster_draws == 0,
+                 "GS AA1 bootstrap draw statistics mismatch") && ok;
+    }
+
     // A center-to-center line excludes the terminal pixel according to the
     // GS diamond-exit rule, avoiding duplicate endpoints in connected strips.
     {
