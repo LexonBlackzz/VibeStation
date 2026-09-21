@@ -25,6 +25,16 @@ void EeBus::reset() {
 }
 
 u32 EeBus::to_physical(u32 address) {
+    // The EE exposes main RAM through uncached (0x2...) and uncached
+    // accelerated (0x3...) aliases in addition to the normal physical,
+    // KSEG0, and KSEG1 views. Retail kernel interrupt code uses the 0x2
+    // alias as soon as the scheduler starts.
+    if (address >= 0x20000000u && address < 0x22000000u) {
+        return address - 0x20000000u;
+    }
+    if (address >= 0x30000000u && address < 0x32000000u) {
+        return address - 0x30000000u;
+    }
     if (address >= 0x80000000u && address < 0xC0000000u) return address & 0x1FFFFFFFu;
     return address;
 }

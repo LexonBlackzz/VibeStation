@@ -40,6 +40,8 @@ bool test_ram_aliases() {
     ps2::Ps2System system;
 
     constexpr ps2::u32 physical = 0x00123450u;
+    constexpr ps2::u32 uncached = 0x20123450u;
+    constexpr ps2::u32 accelerated = 0x30123450u;
     constexpr ps2::u32 kseg0 = 0x80123450u;
     constexpr ps2::u32 kseg1 = 0xA0123450u;
     constexpr ps2::u32 value = 0xCAFEBABEu;
@@ -51,6 +53,10 @@ bool test_ram_aliases() {
     ps2::u32 readback = 0;
     return expect(system.bus().read32(physical, readback) && readback == value,
                   "physical alias mismatch") &&
+           expect(system.bus().read32(uncached, readback) && readback == value,
+                  "uncached RAM alias mismatch") &&
+           expect(system.bus().read32(accelerated, readback) && readback == value,
+                  "accelerated RAM alias mismatch") &&
            expect(system.bus().read32(kseg1, readback) && readback == value,
                   "KSEG1 alias mismatch");
 }
