@@ -71,7 +71,7 @@ void Vu1::reset() {
 }
 
 void Vu1::start(u32 address) {
-    pc_ = ((address & 0x3FFu) * 8u) & 0x3FFFu;
+    pc_ = ((address & 0x7FFu) * 8u) & 0x3FFFu;
     branch_countdown_ = 0;
     end_countdown_ = 0;
     running_ = true;
