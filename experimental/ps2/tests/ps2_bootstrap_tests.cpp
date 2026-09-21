@@ -540,6 +540,51 @@ bool test_cop2_bios_macro_expansion() {
                  std::bit_cast<ps2::u32>(3.0f),
              "VU0 VDIV Q result mismatch") && ok;
 
+    // VMULA + VMADD exercise the VU0 ACC path used by macro-mode
+    // vector setup code.
+    system.ee().reset(pc);
+    const auto fbits = [](float value) {
+        return std::bit_cast<ps2::u32>(value);
+    };
+    system.ee().state().vu_vf[1] = {
+        static_cast<ps2::u64>(fbits(1.0f)) |
+            (static_cast<ps2::u64>(fbits(2.0f)) << 32),
+        static_cast<ps2::u64>(fbits(3.0f)) |
+            (static_cast<ps2::u64>(fbits(4.0f)) << 32),
+    };
+    system.ee().state().vu_vf[2] = {
+        static_cast<ps2::u64>(fbits(5.0f)) |
+            (static_cast<ps2::u64>(fbits(6.0f)) << 32),
+        static_cast<ps2::u64>(fbits(7.0f)) |
+            (static_cast<ps2::u64>(fbits(8.0f)) << 32),
+    };
+    run(special2(0x2Au, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_acc.lo ==
+                 (static_cast<ps2::u64>(fbits(5.0f)) |
+                  (static_cast<ps2::u64>(fbits(12.0f)) << 32)) &&
+             system.ee().state().vu_acc.hi ==
+                 (static_cast<ps2::u64>(fbits(21.0f)) |
+                  (static_cast<ps2::u64>(fbits(32.0f)) << 32)),
+             "VU0 VMULA accumulator mismatch") && ok;
+
+    const ps2::u32 vmadd =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x29u;
+    run(vmadd);
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 (static_cast<ps2::u64>(fbits(10.0f)) |
+                  (static_cast<ps2::u64>(fbits(24.0f)) << 32)) &&
+             system.ee().state().vu_vf[3].hi ==
+                 (static_cast<ps2::u64>(fbits(42.0f)) |
+                  (static_cast<ps2::u64>(fbits(64.0f)) << 32)),
+             "VU0 VMADD accumulator result mismatch") && ok;
+
     // VMTIR/VMFIR round-trip signed 16-bit integer data.
     system.ee().reset(pc);
     system.ee().state().vu_vf[1].hi =
