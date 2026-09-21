@@ -36,6 +36,7 @@ struct EeCpuState {
     std::array<u32, 32> fcr{};
     u32 fpu_acc = 0;
     std::array<EeGpr, 32> vu_vf{};
+    EeGpr vu_acc{};
     std::array<u32, 32> vu_vi{};
     u64 instructions_executed = 0;
     u32 last_pc = 0;
