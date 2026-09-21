@@ -465,6 +465,116 @@ bool test_mmi_bios_instruction_expansion() {
     return ok;
 }
 
+bool test_cop2_bios_macro_expansion() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2300u;
+    std::string error;
+    bool ok = true;
+
+    auto special2 = [](
+        ps2::u32 sub,
+        ps2::u32 ft,
+        ps2::u32 fs,
+        ps2::u32 selector = 0xFu) {
+        return
+            (0x12u << 26) |
+            ((0x10u | (selector & 0xFu)) << 21) |
+            ((ft & 31u) << 16) |
+            ((fs & 31u) << 11) |
+            (((sub >> 2) & 31u) << 6) |
+            (0x3Cu | (sub & 3u));
+    };
+    auto run = [&](ps2::u32 instruction) {
+        ok = expect(
+                 system.bus().write32(pc, instruction),
+                 "failed to install COP2 macro opcode") && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(
+                 system.ee().step(error),
+                 "COP2 BIOS macro execution failed") && ok;
+    };
+
+    // VMOVE copies selected VU0 vector lanes without alias corruption.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    run(special2(0x30u, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_vf[2].lo ==
+                 0x2222222211111111ull &&
+             system.ee().state().vu_vf[2].hi ==
+                 0x4444444433333333ull,
+             "VU0 VMOVE result mismatch") && ok;
+
+    // VLQI reads VU0 data memory and post-increments its VI address.
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[1] = 4u;
+    ok = expect(
+             system.bus().write32(0x11004040u, 0x11111111u) &&
+             system.bus().write32(0x11004044u, 0x22222222u) &&
+             system.bus().write32(0x11004048u, 0x33333333u) &&
+             system.bus().write32(0x1100404Cu, 0x44444444u),
+             "VU0 VLQI data setup failed") && ok;
+    run(special2(0x34u, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_vf[2].lo ==
+                 0x2222222211111111ull &&
+             system.ee().state().vu_vf[2].hi ==
+                 0x4444444433333333ull &&
+             system.ee().state().vu_vi[1] == 5u,
+             "VU0 VLQI/post-increment mismatch") && ok;
+
+    // VDIV writes the VU0 Q control register.  Selector 0xF chooses W/W.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1].hi =
+        static_cast<ps2::u64>(std::bit_cast<ps2::u32>(6.0f)) << 32;
+    system.ee().state().vu_vf[2].hi =
+        static_cast<ps2::u64>(std::bit_cast<ps2::u32>(2.0f)) << 32;
+    run(special2(0x38u, 2u, 1u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vi[22] ==
+                 std::bit_cast<ps2::u32>(3.0f),
+             "VU0 VDIV Q result mismatch") && ok;
+
+    // VMTIR/VMFIR round-trip signed 16-bit integer data.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1].hi =
+        static_cast<ps2::u64>(0x0000FF80u) << 32;
+    run(special2(0x3Cu, 2u, 1u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vi[2] == 0xFF80u,
+             "VU0 VMTIR result mismatch") && ok;
+    run(special2(0x3Du, 3u, 2u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 0xFFFFFF80FFFFFF80ull &&
+             system.ee().state().vu_vf[3].hi ==
+                 0xFFFFFF80FFFFFF80ull,
+             "VU0 VMFIR sign extension mismatch") && ok;
+
+    // VI arithmetic no longer falls into the generic COP2 hard stop.
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[1] = 7u;
+    system.ee().state().vu_vi[2] = 5u;
+    const ps2::u32 visub =
+        (0x12u << 26) |
+        (0x10u << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x31u;
+    run(visub);
+    ok = expect(
+             system.ee().state().vu_vi[3] == 2u,
+             "VU0 VISUB result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_unaligned_doubleword_merges() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -3105,6 +3215,7 @@ int main() {
     ok = test_mmi_pmfhl_pmthl() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
     ok = test_mmi_bios_instruction_expansion() && ok;
+    ok = test_cop2_bios_macro_expansion() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
