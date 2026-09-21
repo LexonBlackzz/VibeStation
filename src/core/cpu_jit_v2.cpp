@@ -76,6 +76,8 @@ enum class V2AluOp : u8 {
   Xori,
   Lui,
   Clear,
+  J,
+  Jal,
   Lw,
   Sw,
   Beq,
@@ -90,6 +92,7 @@ struct V2DecodedInstruction {
   u8 shamt = 0;
   u16 imm = 0;
   s32 simm = 0;
+  u32 link_value = 0u;
 };
 
 bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
@@ -138,6 +141,8 @@ bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
   }
 
   switch (primary) {
+  case 0x02: out.op = V2AluOp::J; return true;
+  case 0x03: out.op = V2AluOp::Jal; return true;
   case 0x04: out.op = V2AluOp::Beq; return true;
   case 0x05: out.op = V2AluOp::Bne; return true;
   case 0x09: out.op = V2AluOp::Addiu; return true;
@@ -184,6 +189,8 @@ u32 read_mask(const V2DecodedInstruction &inst) {
   case V2AluOp::Nop:
   case V2AluOp::Lui:
   case V2AluOp::Clear:
+  case V2AluOp::J:
+  case V2AluOp::Jal:
     return 0u;
   }
   return 0u;
@@ -212,7 +219,10 @@ u8 write_reg(const V2DecodedInstruction &inst) {
   case V2AluOp::Xori:
   case V2AluOp::Lui:
     return inst.rt;
+  case V2AluOp::Jal:
+    return 31u;
   case V2AluOp::Nop:
+  case V2AluOp::J:
   case V2AluOp::Lw:
   case V2AluOp::Sw:
   case V2AluOp::Beq:
@@ -269,8 +279,13 @@ bool is_v2_branch(V2AluOp op) {
   return op == V2AluOp::Beq || op == V2AluOp::Bne;
 }
 
+bool is_v2_fixed_jump(V2AluOp op) {
+  return op == V2AluOp::J || op == V2AluOp::Jal;
+}
+
 bool is_v2_alu_only(V2AluOp op) {
-  return op != V2AluOp::Lw && op != V2AluOp::Sw && !is_v2_branch(op);
+  return op != V2AluOp::Lw && op != V2AluOp::Sw &&
+         !is_v2_branch(op) && !is_v2_fixed_jump(op);
 }
 
 std::array<u8, 6> choose_cached_regs(
@@ -643,6 +658,14 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       emit_write_guest(*code, cached, dst, code->eax, dirty);
       break;
 
+    case V2AluOp::J:
+      break;
+
+    case V2AluOp::Jal:
+      code->mov(code->eax, inst.link_value);
+      emit_write_guest(*code, cached, 31u, code->eax, dirty);
+      break;
+
     case V2AluOp::Lw: {
       code->mov(code->rax, code->ptr[code->r14 +
           static_cast<int>(offsetof(V2NativeRuntime, load_ptr))]);
@@ -714,9 +737,12 @@ struct CpuJitV2Backend::Impl {
     u32 load_index = 0u;
     u32 branch_index = 0;
     u32 branch_target = 0;
+    u32 jump_index = 0;
+    u32 jump_target = 0;
     bool has_store = false;
     bool has_load = false;
     bool has_branch = false;
+    bool has_jump = false;
     std::array<u32, 16> words{};
     std::array<u8, 6> cached_regs{};
     std::array<u8, 8> store_rs{};
@@ -966,6 +992,9 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       bool has_branch = false;
       u32 branch_index = 0u;
       s32 branch_simm = 0;
+      bool has_jump = false;
+      u32 jump_index = 0u;
+      u32 jump_target = 0u;
       std::array<u8, 8> store_rs{};
       std::array<s32, 8> store_simm{};
       std::array<u8, 8> store_instruction_index{};
@@ -998,6 +1027,32 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         V2DecodedInstruction inst{};
         u32 bits = 0u;
         if (!fetch_decoded(i, inst, bits)) {
+          break;
+        }
+
+        if (is_v2_fixed_jump(inst.op)) {
+          // Fixed jumps are always taken and include the architectural delay
+          // slot. JAL writes $ra before the delay slot, matching the R3000A.
+          if (i + 1u >= kMaxV2Instructions) {
+            break;
+          }
+          V2DecodedInstruction delay{};
+          u32 delay_bits = 0u;
+          if (!fetch_decoded(i + 1u, delay, delay_bits) ||
+              !is_v2_alu_only(delay.op)) {
+            break;
+          }
+
+          const u32 jump_pc = start_pc + i * 4u;
+          inst.link_value = jump_pc + 8u;
+          has_jump = true;
+          jump_index = static_cast<u32>(decoded.size());
+          jump_target = ((jump_pc + 4u) & 0xF0000000u) |
+                        ((bits & 0x03FFFFFFu) << 2u);
+          decoded.push_back(inst);
+          words[jump_index] = bits;
+          decoded.push_back(delay);
+          words[jump_index + 1u] = delay_bits;
           break;
         }
 
@@ -1107,6 +1162,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.has_store = has_store;
       block.has_load = has_load;
       block.has_branch = has_branch;
+      block.has_jump = has_jump;
       block.store_count = store_count;
       block.load_rs = load_rs;
       block.load_rt = load_rt;
@@ -1116,13 +1172,16 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.store_simm = store_simm;
       block.store_instruction_index = store_instruction_index;
       block.branch_index = branch_index;
+      block.jump_index = jump_index;
+      block.jump_target = jump_target;
       if (has_branch) {
         const u32 branch_pc = start_pc + branch_index * 4u;
         block.branch_target =
             branch_pc + 4u + (static_cast<u32>(branch_simm) << 2u);
       }
       for (const auto &inst : decoded) {
-        if (inst.op == V2AluOp::Sw || inst.op == V2AluOp::Lw) {
+        if (inst.op == V2AluOp::Sw || inst.op == V2AluOp::Lw ||
+            inst.op == V2AluOp::J || inst.op == V2AluOp::Jal) {
           block.base_cycles += 2u;
         } else {
           // Conditional branches cost one cycle when not taken and gain one
@@ -1159,7 +1218,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       impl_->remember_dispatch(*block_ptr);
       ++stats_.native_compile_successes;
       ++stats_.native_blocks_compiled;
-      if (has_branch) {
+      if (has_branch || has_jump) {
         ++stats_.native_branch_tail_blocks_compiled;
       } else if (has_store || has_load) {
         ++stats_.native_memory_blocks_compiled;
@@ -1184,7 +1243,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       return helper_step(V2HelperReason::Internal);
     }
 
-    if (block.has_branch && g_cpu_backend_compare_irq_on_branch) {
+    if ((block.has_branch || block.has_jump) &&
+        g_cpu_backend_compare_irq_on_branch) {
       return helper_step(V2HelperReason::Irq);
     }
 
@@ -1346,7 +1406,17 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
         fetch_penalty +
         ((block.has_branch && branch_taken) ? 1u : 0u);
 
-    if (block.has_branch) {
+    if (block.has_jump) {
+      const u32 jump_pc = start_pc + block.jump_index * 4u;
+      const u32 delay_pc = jump_pc + 4u;
+      cpu_.current_pc_ = delay_pc;
+      cpu_.pc_ = block.jump_target;
+      cpu_.next_pc_ = cpu_.pc_ + 4u;
+      cpu_.in_delay_slot_ = true;
+      cpu_.active_branch_pc_ = jump_pc;
+      ++stats_.native_branch_tail_entries;
+      ++stats_.native_branch_taken;
+    } else if (block.has_branch) {
       const u32 branch_pc = start_pc + block.branch_index * 4u;
       const u32 delay_pc = branch_pc + 4u;
       cpu_.current_pc_ = delay_pc;
@@ -1385,8 +1455,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
     result.cycles += consumed_cycles;
     result.instructions += count;
     ++stats_.native_block_entries;
-    if (block.has_branch) {
-      // Branch-tail blocks can also contain fast stores.
+    if (block.has_branch || block.has_jump) {
+      // Control-flow blocks can also contain fast memory operations.
     } else if (block.has_store || block.has_load) {
       ++stats_.native_memory_block_entries;
     } else {
