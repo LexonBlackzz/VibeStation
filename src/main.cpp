@@ -777,6 +777,11 @@ static bool parse_cpu_execution_mode(const std::string &s,
     out = CpuExecutionMode::X64JitV2;
     return true;
   }
+  if (v == "x64jitv3" || v == "jitv3" || v == "dynarecv3" ||
+      v == "recompilerv3") {
+    out = CpuExecutionMode::X64JitV3;
+    return true;
+  }
   return false;
 }
 
@@ -1580,6 +1585,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "x64jit";
     case CpuExecutionMode::X64JitV2:
       return "x64jitv2";
+    case CpuExecutionMode::X64JitV3:
+      return "x64jitv3";
     }
     return "unknown";
   };
@@ -1589,7 +1596,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           ? CpuExecutionMode::DecodedBlockInterpreter
           : requested_mode;
   if ((requested_mode == CpuExecutionMode::X64Jit ||
-       requested_mode == CpuExecutionMode::X64JitV2) &&
+       requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
@@ -1694,7 +1702,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : (100.0 * static_cast<double>(native_instructions) /
              static_cast<double>(total_instructions));
   const u64 helper_calls =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
           : delta(after.native_memory_helper_calls,
                   before.native_memory_helper_calls) +
@@ -1705,14 +1714,16 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                 delta(after.native_finish_helper_calls,
                       before.native_finish_helper_calls);
   const u64 helper_assisted_instructions =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_instructions,
                   before.jit_v2_helper_instructions)
           : std::min(native_instructions,
                      delta(after.native_prepare_helper_calls,
                            before.native_prepare_helper_calls));
   const u64 inline_native_instructions =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_inline_instructions,
                   before.jit_v2_inline_instructions)
           : native_instructions - helper_assisted_instructions;

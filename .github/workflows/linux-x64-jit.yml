@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - integration/jit-v2-shippable-2026-09-21
+      - perf/cpu-jit-v3-native-dispatch-1
   workflow_dispatch:
 
 jobs:

@@ -103,6 +103,7 @@ set(VIBESTATION_SOURCES
     src/core/cpu_recompiler.cpp
     src/core/cpu_recompiler_x64.cpp
     src/core/cpu_jit_v2.cpp
+    src/core/cpu_jit_v3.cpp
     src/core/config.cpp
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp

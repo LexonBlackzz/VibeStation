@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
 #include "cpu_jit_v2.h"
+#include "cpu_jit_v3.h"
 #include "system.h"
 #include <array>
 #include <chrono>
@@ -777,6 +778,9 @@ void Cpu::init(System *sys) {
   if (!jit_v2_backend_) {
     jit_v2_backend_ = std::make_unique<CpuJitV2Backend>(*this);
   }
+  if (!jit_v3_backend_) {
+    jit_v3_backend_ = std::make_unique<CpuJitV3Backend>(*this);
+  }
   reset();
 }
 
@@ -836,6 +840,9 @@ void Cpu::reset() {
   }
   if (jit_v2_backend_) {
     jit_v2_backend_->flush();
+  }
+  if (jit_v3_backend_) {
+    jit_v3_backend_->flush();
   }
 }
 
@@ -2417,6 +2424,9 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   }
 
   const CpuExecutionMode mode = effective_cpu_execution_mode();
+  if (mode == CpuExecutionMode::X64JitV3 && jit_v3_backend_) {
+    return jit_v3_backend_->run_slice(max_cycles, max_instructions);
+  }
   if (mode == CpuExecutionMode::X64JitV2 && jit_v2_backend_) {
     return jit_v2_backend_->run_slice(max_cycles, max_instructions);
   }
@@ -2464,6 +2474,9 @@ void Cpu::notify_jit_code_write_only(u32 phys_or_normalized_addr,
   if (jit_v2_backend_) {
     jit_v2_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
+  if (jit_v3_backend_) {
+    jit_v3_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
+  }
 }
 
 void Cpu::notify_cpu_backend_frame(u32 frame_index) {
@@ -2472,6 +2485,9 @@ void Cpu::notify_cpu_backend_frame(u32 frame_index) {
   }
   if (jit_v2_backend_) {
     jit_v2_backend_->begin_frame(frame_index);
+  }
+  if (jit_v3_backend_) {
+    jit_v3_backend_->begin_frame(frame_index);
   }
 }
 
@@ -2482,9 +2498,16 @@ void Cpu::flush_cpu_backend() {
   if (jit_v2_backend_) {
     jit_v2_backend_->flush();
   }
+  if (jit_v3_backend_) {
+    jit_v3_backend_->flush();
+  }
 }
 
 CpuBackendStats Cpu::cpu_backend_stats() const {
+  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV3 &&
+      jit_v3_backend_) {
+    return jit_v3_backend_->stats();
+  }
   if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV2 &&
       jit_v2_backend_) {
     return jit_v2_backend_->stats();
