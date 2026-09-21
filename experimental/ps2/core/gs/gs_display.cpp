@@ -11,6 +11,7 @@ namespace {
 constexpr u32 kPmode = 0x12000000u;
 constexpr u32 kDispfb1 = 0x12000070u;
 constexpr u32 kDisplay1 = 0x12000080u;
+constexpr u32 kBgcolor = 0x120000E0u;
 constexpr u32 kCircuitStride = 0x20u;
 
 u32 expand5(u32 v) {
@@ -60,7 +61,17 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
         return;
     }
 
-    auto present_circuit = [&](u32 circuit) -> bool {
+    struct CircuitFrame {
+        bool valid = false;
+        u32 width = 0;
+        u32 height = 0;
+        u32 psm = 0;
+        std::vector<u32> pixels;
+    };
+
+    auto extract_circuit = [&](u32 circuit) {
+        CircuitFrame frame{};
+
         u64 dispfb = 0;
         u64 display = 0;
         if (!regs.read64(
@@ -69,7 +80,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
             !regs.read64(
                 kDisplay1 + circuit * kCircuitStride,
                 display)) {
-            return false;
+            return frame;
         }
 
         const u32 fbp =
@@ -94,14 +105,13 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
 
         const u32 width = dw / magh;
         const u32 height = dh / magv;
-
-        if (fbw == 0 || width == 0 || height == 0 ||
+        if (fbw == 0u || width == 0u || height == 0u ||
             width > 2048u || height > 2048u ||
             !GsVram::supported_color_psm(psm)) {
-            return false;
+            return frame;
         }
 
-        rgba8_.resize(
+        frame.pixels.resize(
             static_cast<std::size_t>(width) * height);
         for (u32 y = 0; y < height; ++y) {
             for (u32 x = 0; x < width; ++x) {
@@ -112,31 +122,126 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
                         dby + y,
                         fbp,
                         fbw);
-                rgba8_[
+                frame.pixels[
                     static_cast<std::size_t>(y) * width + x] =
                     to_rgba8(psm, raw);
             }
         }
 
-        valid_ = true;
-        width_ = width;
-        height_ = height;
-        circuit_ = circuit + 1u;
-        psm_ = psm;
-        ++generation_;
-        return true;
+        frame.valid = true;
+        frame.width = width;
+        frame.height = height;
+        frame.psm = psm;
+        return frame;
     };
 
-    // Prefer circuit 1, but do not blank the output merely because BIOS
-    // enabled it before finishing DISPFB1/DISPLAY1 setup.  Circuit 2 is a
-    // valid independent scanout source and is used during some transitions.
+    CircuitFrame frames[2];
     for (u32 circuit = 0; circuit < 2u; ++circuit) {
-        if (enabled[circuit] && present_circuit(circuit)) {
-            return;
+        if (enabled[circuit]) {
+            frames[circuit] = extract_circuit(circuit);
         }
     }
 
-    if (valid_) reset();
+    if (!frames[0].valid && !frames[1].valid) {
+        if (valid_) reset();
+        return;
+    }
+
+    // PCRTC first lays circuit 2 (or BGCOLOR) down, then blends circuit 1 on
+    // top.  This matters during BIOS transitions where both EN1 and EN2 are
+    // set but circuit 1 carries zero alpha; picking circuit 1 directly would
+    // incorrectly present a black frame.
+    const u32 base_circuit =
+        frames[0].valid ? 0u : 1u;
+    const u32 width = frames[base_circuit].width;
+    const u32 height = frames[base_circuit].height;
+
+    u64 bgcolor = 0;
+    (void)regs.read64(kBgcolor, bgcolor);
+    const u32 background =
+        static_cast<u32>(bgcolor & 0x00FFFFFFu) |
+        0xFF000000u;
+
+    rgba8_.assign(
+        static_cast<std::size_t>(width) * height,
+        background);
+
+    const bool slbg = ((pmode >> 7) & 1u) != 0;
+    if (!slbg && frames[1].valid) {
+        const u32 copy_width = std::min(width, frames[1].width);
+        const u32 copy_height = std::min(height, frames[1].height);
+        for (u32 y = 0; y < copy_height; ++y) {
+            for (u32 x = 0; x < copy_width; ++x) {
+                rgba8_[static_cast<std::size_t>(y) * width + x] =
+                    frames[1].pixels[
+                        static_cast<std::size_t>(y) *
+                            frames[1].width +
+                        x];
+            }
+        }
+    }
+
+    if (frames[0].valid) {
+        const bool constant_alpha = ((pmode >> 5) & 1u) != 0;
+        const u32 alp = static_cast<u32>((pmode >> 8) & 0xFFu);
+        const u32 copy_width = std::min(width, frames[0].width);
+        const u32 copy_height = std::min(height, frames[0].height);
+
+        auto blend_channel = [](u32 src, u32 dst, u32 alpha128) {
+            const u32 inv = 128u - std::min(alpha128, 128u);
+            return std::min(
+                255u,
+                (src * std::min(alpha128, 128u) +
+                 dst * inv +
+                 64u) >> 7);
+        };
+
+        for (u32 y = 0; y < copy_height; ++y) {
+            for (u32 x = 0; x < copy_width; ++x) {
+                const std::size_t dst_index =
+                    static_cast<std::size_t>(y) * width + x;
+                const u32 src =
+                    frames[0].pixels[
+                        static_cast<std::size_t>(y) *
+                            frames[0].width +
+                        x];
+                const u32 dst = rgba8_[dst_index];
+
+                const u32 alpha128 =
+                    constant_alpha
+                        ? std::min(alp, 128u)
+                        : std::min(
+                              128u,
+                              ((src >> 24) & 0xFFu));
+
+                const u32 r = blend_channel(
+                    src & 0xFFu,
+                    dst & 0xFFu,
+                    alpha128);
+                const u32 g = blend_channel(
+                    (src >> 8) & 0xFFu,
+                    (dst >> 8) & 0xFFu,
+                    alpha128);
+                const u32 b = blend_channel(
+                    (src >> 16) & 0xFFu,
+                    (dst >> 16) & 0xFFu,
+                    alpha128);
+
+                rgba8_[dst_index] =
+                    r | (g << 8) | (b << 16) | 0xFF000000u;
+            }
+        }
+    }
+
+    valid_ = true;
+    width_ = width;
+    height_ = height;
+    circuit_ =
+        frames[0].valid && frames[1].valid
+            ? 3u
+            : (frames[0].valid ? 1u : 2u);
+    psm_ = frames[base_circuit].psm;
+    ++generation_;
 }
 
 } // namespace ps2
