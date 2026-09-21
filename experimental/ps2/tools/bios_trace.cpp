@@ -84,8 +84,8 @@ void print_state(const ps2::Ps2System& system) {
 
     auto print_code = [&](const char* label, ps2::u32 center) {
         std::cout << label;
-        const ps2::u32 code_base = (center - 16u) & ~3u;
-        for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
+        const ps2::u32 code_base = (center - 32u) & ~3u;
+        for (ps2::u32 offset = 0; offset < 68u; offset += 4u) {
             ps2::u32 instruction = 0;
             const ps2::u32 address = code_base + offset;
             if (system.bus().read32(address, instruction)) {
@@ -98,6 +98,7 @@ void print_state(const ps2::Ps2System& system) {
     };
     print_code("EE_CODE", ee.pc);
     print_code("EE_RA_CODE", static_cast<ps2::u32>(ee.gpr[31].lo));
+    print_code("EE_EPC_CODE", ee.cop0[14]);
 
     std::cout
         << "EE_STATUS=0x" << std::hex << std::uppercase << ee.cop0[12]
@@ -127,31 +128,22 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
-    std::cout << "IOP_CODE";
-    const ps2::u32 iop_code_base = (iop.pc - 16u) & ~3u;
-    for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
-        ps2::u32 instruction = 0;
-        const ps2::u32 address = iop_code_base + offset;
-        if (system.iop_bus().read32(address, instruction)) {
-            std::cout
-                << " [0x" << std::hex << std::uppercase << address
-                << "]=0x" << instruction;
+    auto print_iop_code = [&](const char* label, ps2::u32 center) {
+        std::cout << label;
+        const ps2::u32 code_base = (center - 32u) & ~3u;
+        for (ps2::u32 offset = 0; offset < 68u; offset += 4u) {
+            ps2::u32 instruction = 0;
+            const ps2::u32 address = code_base + offset;
+            if (system.iop_bus().read32(address, instruction)) {
+                std::cout
+                    << " [0x" << std::hex << std::uppercase << address
+                    << "]=0x" << instruction;
+            }
         }
-    }
-    std::cout << std::dec << '\n';
-
-    std::cout << "IOP_RA_CODE";
-    const ps2::u32 iop_ra_base = (iop.gpr[31] - 16u) & ~3u;
-    for (ps2::u32 offset = 0; offset < 36u; offset += 4u) {
-        ps2::u32 instruction = 0;
-        const ps2::u32 address = iop_ra_base + offset;
-        if (system.iop_bus().read32(address, instruction)) {
-            std::cout
-                << " [0x" << std::hex << std::uppercase << address
-                << "]=0x" << instruction;
-        }
-    }
-    std::cout << std::dec << '\n';
+        std::cout << std::dec << '\n';
+    };
+    print_iop_code("IOP_CODE", iop.pc);
+    print_iop_code("IOP_RA_CODE", iop.gpr[31]);
 
     std::cout
         << "IOP_ISTAT=0x" << std::hex << std::uppercase
