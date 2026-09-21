@@ -162,6 +162,55 @@ u32 Vu1::as_bits(float value) {
     return std::bit_cast<u32>(value);
 }
 
+void Vu1::begin_fmac() {
+    mac_ = 0;
+}
+
+u32 Vu1::fmac_result(u32 lane, float value) {
+    const u32 shift = 3u - (lane & 3u);
+    const u32 bits = as_bits(value);
+    const u32 sign = bits & 0x80000000u;
+    const u32 exponent = (bits >> 23) & 0xFFu;
+
+    if (sign != 0) {
+        mac_ |= 0x0010u << shift;
+    }
+
+    if (value == 0.0f) {
+        mac_ |= 0x0001u << shift;
+        return bits;
+    }
+
+    if (exponent == 0u) {
+        // VU FMAC flushes denormal results to signed zero while recording
+        // both zero and underflow for the component.
+        mac_ |= 0x0101u << shift;
+        return sign;
+    }
+
+    if (exponent == 0xFFu) {
+        // Clamp infinities/NaNs to the largest finite VU value and report
+        // overflow. This matches the bootstrap-visible VU1 overflow mode.
+        mac_ |= 0x1000u << shift;
+        return sign | 0x7F7FFFFFu;
+    }
+
+    return bits;
+}
+
+void Vu1::finish_fmac() {
+    u32 current = 0;
+    if ((mac_ & 0x000Fu) != 0) current |= 0x1u;
+    if ((mac_ & 0x00F0u) != 0) current |= 0x2u;
+    if ((mac_ & 0x0F00u) != 0) current |= 0x4u;
+    if ((mac_ & 0xF000u) != 0) current |= 0x8u;
+
+    // Bits 0..3 are current Z/S/U/O flags. Bits 6..9 are sticky copies.
+    // Preserve the remaining status control bits while accumulating sticky
+    // conditions across FMAC operations.
+    status_ = (status_ & 0xFF0u) | current | (current << 6);
+}
+
 void Vu1::write_vf_lane(u32 reg, u32 lane, u32 value) {
     if ((reg & 31u) == 0) return;
     vf_[reg & 31u][lane & 3u] = value;
