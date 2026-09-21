@@ -78,6 +78,8 @@ enum class V2AluOp : u8 {
   Clear,
   J,
   Jal,
+  Jr,
+  Jalr,
   Lw,
   Sw,
   Beq,
@@ -114,6 +116,8 @@ bool decode_v2_alu(u32 bits, V2DecodedInstruction &out) {
     case 0x00: out.op = V2AluOp::Sll; return true;
     case 0x02: out.op = V2AluOp::Srl; return true;
     case 0x03: out.op = V2AluOp::Sra; return true;
+    case 0x08: out.op = V2AluOp::Jr; return true;
+    case 0x09: out.op = V2AluOp::Jalr; return true;
     case 0x0F: out.op = V2AluOp::Nop; return true; // SYNC
     case 0x14:
     case 0x1C:
@@ -174,6 +178,9 @@ u32 read_mask(const V2DecodedInstruction &inst) {
   case V2AluOp::Slt:
   case V2AluOp::Sltu:
     return reg(inst.rs) | reg(inst.rt);
+  case V2AluOp::Jr:
+  case V2AluOp::Jalr:
+    return reg(inst.rs);
   case V2AluOp::Addiu:
   case V2AluOp::Slti:
   case V2AluOp::Sltiu:
@@ -221,7 +228,10 @@ u8 write_reg(const V2DecodedInstruction &inst) {
     return inst.rt;
   case V2AluOp::Jal:
     return 31u;
+  case V2AluOp::Jalr:
+    return inst.rd;
   case V2AluOp::Nop:
+  case V2AluOp::Jr:
   case V2AluOp::J:
   case V2AluOp::Lw:
   case V2AluOp::Sw:
@@ -283,9 +293,14 @@ bool is_v2_fixed_jump(V2AluOp op) {
   return op == V2AluOp::J || op == V2AluOp::Jal;
 }
 
+bool is_v2_dynamic_jump(V2AluOp op) {
+  return op == V2AluOp::Jr || op == V2AluOp::Jalr;
+}
+
 bool is_v2_alu_only(V2AluOp op) {
   return op != V2AluOp::Lw && op != V2AluOp::Sw &&
-         !is_v2_branch(op) && !is_v2_fixed_jump(op);
+         !is_v2_branch(op) && !is_v2_fixed_jump(op) &&
+         !is_v2_dynamic_jump(op);
 }
 
 std::array<u8, 6> choose_cached_regs(
@@ -337,6 +352,7 @@ struct V2NativeRuntime {
   std::array<u8 *, 8> store_ptrs{};
   u8 *load_ptr = nullptr;
   u32 load_value = 0u;
+  u32 dynamic_target = 0u;
 };
 
 using V2NativeFn = u32 (*)(u32 *, const V2NativeRuntime *);
@@ -666,6 +682,24 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       emit_write_guest(*code, cached, 31u, code->eax, dirty);
       break;
 
+    case V2AluOp::Jr:
+      emit_read_guest(*code, code->eax, cached, inst.rs);
+      code->mov(code->dword[code->r14 +
+          static_cast<int>(offsetof(V2NativeRuntime, dynamic_target))],
+          code->eax);
+      break;
+
+    case V2AluOp::Jalr:
+      // Capture the target before writing the link register. This matters for
+      // the legal but nasty rd == rs case.
+      emit_read_guest(*code, code->eax, cached, inst.rs);
+      code->mov(code->dword[code->r14 +
+          static_cast<int>(offsetof(V2NativeRuntime, dynamic_target))],
+          code->eax);
+      code->mov(code->eax, inst.link_value);
+      emit_write_guest(*code, cached, inst.rd, code->eax, dirty);
+      break;
+
     case V2AluOp::Lw: {
       code->mov(code->rax, code->ptr[code->r14 +
           static_cast<int>(offsetof(V2NativeRuntime, load_ptr))]);
@@ -739,6 +773,7 @@ struct CpuJitV2Backend::Impl {
     u32 branch_target = 0;
     u32 jump_index = 0;
     u32 jump_target = 0;
+    bool jump_dynamic = false;
     bool has_store = false;
     bool has_load = false;
     bool has_branch = false;
@@ -993,6 +1028,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       u32 branch_index = 0u;
       s32 branch_simm = 0;
       bool has_jump = false;
+      bool jump_dynamic = false;
       u32 jump_index = 0u;
       u32 jump_target = 0u;
       std::array<u8, 8> store_rs{};
@@ -1030,9 +1066,10 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           break;
         }
 
-        if (is_v2_fixed_jump(inst.op)) {
-          // Fixed jumps are always taken and include the architectural delay
-          // slot. JAL writes $ra before the delay slot, matching the R3000A.
+        if (is_v2_fixed_jump(inst.op) || is_v2_dynamic_jump(inst.op)) {
+          // J/JAL/JR/JALR are always taken and include the architectural delay
+          // slot. Link instructions write their destination before the delay
+          // slot, while JR/JALR capture the dynamic target before that slot.
           if (i + 1u >= kMaxV2Instructions) {
             break;
           }
@@ -1046,9 +1083,12 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
           const u32 jump_pc = start_pc + i * 4u;
           inst.link_value = jump_pc + 8u;
           has_jump = true;
+          jump_dynamic = is_v2_dynamic_jump(inst.op);
           jump_index = static_cast<u32>(decoded.size());
-          jump_target = ((jump_pc + 4u) & 0xF0000000u) |
-                        ((bits & 0x03FFFFFFu) << 2u);
+          if (!jump_dynamic) {
+            jump_target = ((jump_pc + 4u) & 0xF0000000u) |
+                          ((bits & 0x03FFFFFFu) << 2u);
+          }
           decoded.push_back(inst);
           words[jump_index] = bits;
           decoded.push_back(delay);
@@ -1174,6 +1214,7 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       block.branch_index = branch_index;
       block.jump_index = jump_index;
       block.jump_target = jump_target;
+      block.jump_dynamic = jump_dynamic;
       if (has_branch) {
         const u32 branch_pc = start_pc + branch_index * 4u;
         block.branch_target =
@@ -1181,7 +1222,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       }
       for (const auto &inst : decoded) {
         if (inst.op == V2AluOp::Sw || inst.op == V2AluOp::Lw ||
-            inst.op == V2AluOp::J || inst.op == V2AluOp::Jal) {
+            inst.op == V2AluOp::J || inst.op == V2AluOp::Jal ||
+            inst.op == V2AluOp::Jr || inst.op == V2AluOp::Jalr) {
           block.base_cycles += 2u;
         } else {
           // Conditional branches cost one cycle when not taken and gain one
@@ -1410,7 +1452,8 @@ CpuRunSliceResult CpuJitV2Backend::run_slice(u32 max_cycles,
       const u32 jump_pc = start_pc + block.jump_index * 4u;
       const u32 delay_pc = jump_pc + 4u;
       cpu_.current_pc_ = delay_pc;
-      cpu_.pc_ = block.jump_target;
+      cpu_.pc_ = block.jump_dynamic ? runtime.dynamic_target
+                                    : block.jump_target;
       cpu_.next_pc_ = cpu_.pc_ + 4u;
       cpu_.in_delay_slot_ = true;
       cpu_.active_branch_pc_ = jump_pc;
