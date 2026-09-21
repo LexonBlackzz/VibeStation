@@ -72,3 +72,16 @@ rose from 11,353,031 to 11,439,086, and the final state remained
 between runs: a same-session control measured 41.096 ms average for the legacy
 resident loop versus 41.104 ms for linked execution. The linked path has no
 demonstrated timing advantage on this workload yet.
+
+The canonical Spyro image is at
+`D:\Misc\pSXfin_1_13-1220\cdimages\Spyro the Dragon (USA).cue` on this host.
+At commit `8758b39`, the 840/60 run passed the exact gate: state
+`CDEAA474CF09AF42`, PC `80016488`, cycles `510309192`.
+
+| Spyro path | CPU avg ms | p50 ms | p95 ms | Native instructions | Helper instructions | Block entries | Chain entries | Linked transitions | Max blocks | Budget helpers | Code bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Linked | 5.529 | 5.456 | 6.398 | 14,552,064 | 1,685,300 | 8,002,108 | 2,339,990 | 701,072 | 16 | 264,520 | 5,444,586 |
+| Legacy resident control | 5.458 | 5.431 | 6.074 | 14,552,064 | 1,685,300 | 8,002,108 | 0 | 0 | 0 | 264,520 | 5,444,586 |
+
+The linked path averages 1.30 guest blocks per C++ chain entry on this run,
+and does not yet outperform the legacy resident loop on this host.
