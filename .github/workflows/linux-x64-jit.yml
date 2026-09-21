@@ -6,6 +6,7 @@ on:
       - perf/cpu-jit-v2-linux-bench-1
       - perf/cpu-jit-v2-rr4-gate-test
       - perf/cpu-jit-v2-jump-tier-1
+      - perf/cpu-jit-v2-indirect-jump-1
   workflow_dispatch:
 
 jobs:
