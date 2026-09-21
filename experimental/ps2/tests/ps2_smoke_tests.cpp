@@ -472,6 +472,57 @@ bool test_ee_iop_startup_interleave() {
     return ok;
 }
 
+bool test_ee_sbus_iop_commands() {
+    const auto path = create_test_bios();
+
+    ps2::Ps2System system;
+    std::string error;
+    bool ok =
+        expect(system.load_bios(path.string(), error),
+               "SBUS test BIOS failed to load") &&
+        expect(system.boot_bios(error),
+               "SBUS test BIOS failed to start");
+
+    ok = expect(
+             system.iop_ram().write32(0x100u, 0xDEADBEEFu),
+             "failed to seed IOP RAM before SBUS reset") &&
+         ok;
+    ok = expect(
+             system.bus().write32(0x1000F240u, 1u << 19) &&
+                 system.step_ee(error),
+             "EE SBUS IOP reset request failed") &&
+         ok;
+
+    ps2::u32 value = 0xFFFFFFFFu;
+    ok = expect(
+             system.iop_ram().read32(0x100u, value) && value == 0u,
+             "EE SBUS reset did not clear IOP RAM") &&
+         ok;
+    ok = expect(
+             system.iop().state().pc == ps2::Bios::kResetVector,
+             "EE SBUS reset did not reset the IOP CPU") &&
+         ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801450u, value) && value == 0x8u,
+             "EE SBUS reset did not restore IOP ICFG") &&
+         ok;
+    ok = expect(
+             system.iop_intc().control() == 1u,
+             "EE SBUS reset did not enable IOP interrupt control") &&
+         ok;
+
+    ok = expect(
+             system.bus().write32(0x1000F240u, 1u << 18) &&
+                 system.step_ee(error) &&
+                 (system.iop_intc().status() & (1u << 1)) != 0,
+             "EE SBUS interrupt request did not reach IOP INTC") &&
+         ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
+}
+
 bool test_iop_cache_isolation_blocks_ram_store() {
     ps2::Ps2System system;
 
@@ -1121,6 +1172,7 @@ int main() {
     ok = test_iop_ram_mirror_boundary() && ok;
     ok = test_iop_optional_extension_rom_windows() && ok;
     ok = test_ee_iop_startup_interleave() && ok;
+    ok = test_ee_sbus_iop_commands() && ok;
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;

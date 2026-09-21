@@ -54,11 +54,25 @@ void EeHw::reset() {
     dve_error_detected_ = false;
     mch_ricm_ = 0;
     rdram_sdevid_ = 0;
+    iop_interrupt_requested_ = false;
+    iop_reset_requested_ = false;
 
     // Reset values used by the retail BIOS during early hardware probing.
     generic_write32(kDmacEnabler, 0x1201u);
     generic_write32(kDmacEnablew, 0x1201u);
     generic_write32(kSbusF260, 0x1D000060u);
+}
+
+bool EeHw::take_iop_interrupt_request() {
+    const bool requested = iop_interrupt_requested_;
+    iop_interrupt_requested_ = false;
+    return requested;
+}
+
+bool EeHw::take_iop_reset_request() {
+    const bool requested = iop_reset_requested_;
+    iop_reset_requested_ = false;
+    return requested;
 }
 
 void EeHw::tick(u64 cycles) {
@@ -553,6 +567,12 @@ bool EeHw::write32(u32 address, u32 value) {
     }
 
     if (address == kSbusF240) {
+        if ((value & (1u << 18)) != 0) {
+            iop_interrupt_requested_ = true;
+        }
+        if ((value & (1u << 19)) != 0) {
+            iop_reset_requested_ = true;
+        }
         u32 old_value = generic_read32(address);
         if ((value & 0x100u) != 0) {
             old_value |= 0x100u;

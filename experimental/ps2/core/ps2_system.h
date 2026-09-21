@@ -55,6 +55,7 @@ public:
     u32 iop_reset_instruction()const{return iop_reset_instruction_;}
 private:
     bool advance_iop_for_ee_step(std::string& error);
+    void reset_iop_subsystem();
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
     EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{}; GsDisplay gs_display_{};
     IopBus iop_bus_; EeBus bus_; Vu1 vu1_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; Vif0Dma vif0_dma_{}; Vif1Dma vif1_dma_{}; SifDma sif_dma_{}; EeCpu ee_; IopCpu iop_;

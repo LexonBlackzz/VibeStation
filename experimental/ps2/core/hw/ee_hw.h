@@ -17,6 +17,8 @@ public:
     [[nodiscard]] u32 vif1_stat() const;
     [[nodiscard]] bool intc_pending() const;
     [[nodiscard]] bool dmac_pending() const;
+    [[nodiscard]] bool take_iop_interrupt_request();
+    [[nodiscard]] bool take_iop_reset_request();
 
     [[nodiscard]] bool read8(u32 physical, u8& value) const;
     [[nodiscard]] bool read16(u32 physical, u16& value) const;
@@ -76,6 +78,8 @@ private:
 
     u32 mch_ricm_ = 0;
     mutable u32 rdram_sdevid_ = 0;
+    bool iop_interrupt_requested_ = false;
+    bool iop_reset_requested_ = false;
 };
 
 } // namespace ps2
