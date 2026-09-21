@@ -1675,9 +1675,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       // refill. ALU/control blocks only have guards already covered by the
       // cold-path worst-case budget check (and the compare-only branch IRQ
       // gate below).
-      if (candidate.has_load ||
-          (candidate.resident.kind != 0u &&
-           g_cpu_backend_compare_irq_on_branch)) {
+      if (candidate.has_load || candidate.resident.kind != 0u) {
         return false;
       }
       for (u32 i = 0; i < candidate.icache_line_count; ++i) {
