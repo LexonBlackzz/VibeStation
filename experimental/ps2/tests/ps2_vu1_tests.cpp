@@ -103,7 +103,7 @@ bool test_vif1_mscal_starts_vu1() {
 
     constexpr ps2::u32 stream = 0x7000u;
     constexpr ps2::u32 mscal =
-        (0x14u << 24) | 4u;
+        (0x14u << 24) | 0x404u;
 
     bool ok = true;
     ok = expect(
@@ -129,7 +129,7 @@ bool test_vif1_mscal_starts_vu1() {
              "VIF1 MSCAL DMA service failed") && ok;
     ok = expect(error.empty(), "VIF1 MSCAL returned an error") && ok;
     ok = expect(system.vu1().running(), "MSCAL did not start VU1") && ok;
-    ok = expect(system.vu1().pc() == 32u, "MSCAL start PC mismatch") && ok;
+    ok = expect(system.vu1().pc() == 0x2020u, "MSCAL 11-bit start PC mismatch") && ok;
     return ok;
 }
 
