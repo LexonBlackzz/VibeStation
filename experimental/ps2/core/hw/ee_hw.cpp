@@ -29,7 +29,7 @@ bool decode_timer(u32 address, u32& index, u32& reg) {
 
 void EeHw::reset() {
     cycles_ = 0;
-    timer_epoch_.fill(0);
+    timer_phase_.fill(0);
     timer_count_base_.fill(0);
     timer_mode_.fill(0);
     timer_comp_.fill(0);
@@ -63,6 +63,54 @@ void EeHw::reset() {
 
 void EeHw::tick(u64 cycles) {
     cycles_ += cycles;
+
+    for (u32 i = 0; i < 4u; ++i) {
+        u32& mode = timer_mode_[i];
+
+        // CUE=0 pauses the counter. Gate timing is intentionally permissive
+        // until H/V gate edges are supplied by VideoTiming; BIOS bootstrap
+        // primarily relies on free-running timers.
+        if ((mode & (1u << 7)) == 0) {
+            continue;
+        }
+
+        u64 rate = 2;
+        switch (mode & 0x3u) {
+        case 0: rate = 2; break;       // BUSCLK (EE clock / 2)
+        case 1: rate = 32; break;      // BUSCLK / 16
+        case 2: rate = 512; break;     // BUSCLK / 256
+        case 3: rate = 18740; break;   // Approx. NTSC HBLANK in EE clocks
+        }
+
+        timer_phase_[i] += cycles;
+        while (timer_phase_[i] >= rate) {
+            timer_phase_[i] -= rate;
+
+            const u32 previous = timer_count_base_[i] & 0xFFFFu;
+            u32 next = (previous + 1u) & 0xFFFFu;
+
+            if (next == (timer_comp_[i] & 0xFFFFu)) {
+                const bool flag_was_clear = (mode & (1u << 10)) == 0;
+                mode |= 1u << 10;
+                if (flag_was_clear && (mode & (1u << 8)) != 0) {
+                    raise_intc(9u + i);
+                }
+                if ((mode & (1u << 6)) != 0) {
+                    next = 0;
+                }
+            }
+
+            if (previous == 0xFFFFu) {
+                const bool flag_was_clear = (mode & (1u << 11)) == 0;
+                mode |= 1u << 11;
+                if (flag_was_clear && (mode & (1u << 9)) != 0) {
+                    raise_intc(9u + i);
+                }
+            }
+
+            timer_count_base_[i] = next;
+        }
+    }
 }
 
 void EeHw::raise_intc(u32 irq) {
@@ -208,19 +256,9 @@ bool EeHw::read32(u32 address, u32& value) const {
     u32 timer_reg = 0;
     if (decode_timer(address, timer_index, timer_reg)) {
         switch (timer_reg) {
-        case 0x00u: {
-            const u64 elapsed = cycles_ >= timer_epoch_[timer_index] ? cycles_ - timer_epoch_[timer_index] : 0;
-            u32 rate = 1;
-            switch (timer_mode_[timer_index] & 0x3u) {
-            case 0: rate = 2; break;
-            case 1: rate = 32; break;
-            case 2: rate = 512; break;
-            case 3: rate = 18876; break;
-            }
-            const u32 delta = (timer_mode_[timer_index] & 0x80u) != 0 ? static_cast<u32>(elapsed / rate) : 0u;
-            value = (timer_count_base_[timer_index] + delta) & 0xFFFFu;
+        case 0x00u:
+            value = timer_count_base_[timer_index] & 0xFFFFu;
             return true;
-        }
         case 0x10u: value = timer_mode_[timer_index]; return true;
         case 0x20u: value = timer_comp_[timer_index]; return true;
         case 0x30u: value = timer_hold_[timer_index]; return true;
@@ -445,13 +483,17 @@ bool EeHw::write32(u32 address, u32 value) {
         switch (timer_reg) {
         case 0x00u:
             timer_count_base_[timer_index] = value & 0xFFFFu;
-            timer_epoch_[timer_index] = cycles_;
+            timer_phase_[timer_index] = 0;
             return true;
-        case 0x10u:
-            timer_mode_[timer_index] = value;
-            timer_count_base_[timer_index] = 0;
-            timer_epoch_[timer_index] = cycles_;
+        case 0x10u: {
+            // MODE bits 10/11 are sticky event flags. Writing a one clears
+            // the corresponding flag; bits 0..9 replace the timer settings.
+            u32 flags = timer_mode_[timer_index] & 0xC00u;
+            flags &= ~(value & 0xC00u);
+            timer_mode_[timer_index] = (value & 0x3FFu) | flags;
+            timer_phase_[timer_index] = 0;
             return true;
+        }
         case 0x20u:
             timer_comp_[timer_index] = value & 0xFFFFu;
             return true;
