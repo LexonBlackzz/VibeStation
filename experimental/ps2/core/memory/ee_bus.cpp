@@ -147,6 +147,8 @@ bool EeBus::write64(u32 address,u64 value){
 void EeBus::tick(u64 cycles){ hw_.tick(cycles); }
 void EeBus::raise_intc(u32 irq){ hw_.raise_intc(irq); }
 void EeBus::raise_dmac(u32 channel){ hw_.raise_dmac(channel); }
+void EeBus::update_vif1_stat(u32 set_bits,u32 clear_bits){ hw_.update_vif1_stat(set_bits,clear_bits); }
+u32 EeBus::vif1_stat() const { return hw_.vif1_stat(); }
 bool EeBus::intc_pending() const { return hw_.intc_pending(); }
 bool EeBus::dmac_pending() const { return hw_.dmac_pending(); }
 
