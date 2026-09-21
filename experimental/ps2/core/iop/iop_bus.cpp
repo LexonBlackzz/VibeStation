@@ -12,6 +12,8 @@ namespace {
 
 constexpr u32 kRamMirrorEnd = 0x00800000u;
 constexpr u32 kSifBase = 0x1D000000u;
+constexpr u32 kDmaIcr = 0x1F8010F4u;
+constexpr u32 kDmaIcr2 = 0x1F801574u;
 constexpr u32 kSpu2Base = 0x1F900000u;
 constexpr u32 kSpu2Size = 0x800u;
 constexpr u32 kCacheControlBase = 0xFFFE0100u;
@@ -47,6 +49,82 @@ u32 IopBus::to_physical(u32 address) {
 
 bool IopBus::interrupt_pending() const {
     return intc_.pending();
+}
+
+bool IopBus::write_dma_icr(u32 physical, u32 value) {
+    if (physical != kDmaIcr && physical != kDmaIcr2) {
+        return false;
+    }
+
+    u32 current = 0;
+    if (!hw_.read32(physical, current)) return false;
+
+    // Lower 24 bits are normal control fields. Bits 24..30 are channel
+    // completion flags and acknowledge by writing one. Bit 31 reflects the
+    // aggregate interrupt condition.
+    u32 next =
+        (current & 0xFF000000u) |
+        (value & 0x00FFFFFFu);
+    next &= ~(value & 0x7F000000u);
+
+    const u32 enables = (next >> 16) & 0x7Fu;
+    const u32 flags = (next >> 24) & 0x7Fu;
+    const bool force = (next & (1u << 15)) != 0;
+    const bool master = (next & (1u << 23)) != 0;
+    if (force || (master && (enables & flags) != 0)) {
+        next |= 0x80000000u;
+    } else {
+        next &= ~0x80000000u;
+    }
+
+    if (!hw_.write32(physical, next)) return false;
+    if ((next & 0x80000000u) != 0) {
+        intc_.raise(3);
+    }
+    return true;
+}
+
+void IopBus::raise_dma_irq(u32 channel) {
+    u32 address = 0;
+    u32 index = 0;
+    bool sif_always_routes = false;
+
+    if (channel <= 6u) {
+        address = kDmaIcr;
+        index = channel;
+    } else if (channel <= 12u) {
+        address = kDmaIcr2;
+        index = channel - 7u;
+        // IOP DMA9/10 are SIF0/SIF1. Retail firmware expects their DMA
+        // completion to reach INTC source 3 even during early DICR2 setup.
+        sif_always_routes = channel == 9u || channel == 10u;
+    } else {
+        return;
+    }
+
+    u32 current = 0;
+    if (!hw_.read32(address, current)) return;
+
+    current |= 1u << (24u + index);
+
+    const bool enabled =
+        (current & (1u << (16u + index))) != 0;
+    const bool master =
+        (current & (1u << 23)) != 0;
+    const bool force =
+        (current & (1u << 15)) != 0;
+
+    if (force || (master && enabled)) {
+        current |= 0x80000000u;
+    } else {
+        current &= ~0x80000000u;
+    }
+
+    (void)hw_.write32(address, current);
+    if (sif_always_routes ||
+        (current & 0x80000000u) != 0) {
+        intc_.raise(3);
+    }
 }
 
 bool IopBus::read_sif32(u32 physical, u32& value) const {
@@ -231,6 +309,9 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    if (physical == kDmaIcr || physical == kDmaIcr2) {
+        return write_dma_icr(physical, value);
+    }
     if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
         const u32 offset = physical - kSpu2Base;
         for (u32 i = 0; i < 4u; ++i) {
