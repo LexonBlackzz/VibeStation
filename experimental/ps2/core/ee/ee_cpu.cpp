@@ -916,6 +916,29 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     case 0x05: // QMTC2
         if (fs != 0) state_.vu_vf[fs] = state_.gpr[rt];
         return true;
+    case 0x08: { // BC2F / BC2T / BC2FL / BC2TL
+        const bool condition = (state_.vu_vi[29] & 0x100u) != 0;
+        const bool branch_on_true = (rt & 1u) != 0;
+        const bool likely = (rt & 2u) != 0;
+        if (rt > 3u) {
+            return fail(
+                pc,
+                instruction,
+                "Unsupported BC2 condition branch",
+                error);
+        }
+        const bool take = condition == branch_on_true;
+        if (take) {
+            state_.next_pc =
+                branch_target(pc, immediate(instruction));
+            next_is_delay_slot_ = true;
+        } else if (likely) {
+            branch_likely_not_taken(pc);
+        } else {
+            next_is_delay_slot_ = true;
+        }
+        return true;
+    }
     case 0x06: { // CTC2
         if (fs == 0u || fs == 17u || fs == 26u || fs == 29u) return true;
         const u32 value = static_cast<u32>(gpr_u64(rt));
