@@ -814,6 +814,66 @@ bool test_iop_spu2_register_window() {
     return ok;
 }
 
+bool test_iop_spu2_dma_bootstrap_completion() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // DICR: master enable + DMA4 enable.
+    ok = expect(
+        system.iop_bus().write32(0x1F8010F4u, 0x00900000u),
+        "failed to enable SPU2 DMA4 interrupt") && ok;
+    ok = expect(
+        system.iop_bus().write32(0x1F8010C8u, 0x01000201u),
+        "SPU2 DMA4 CHCR write failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+        system.iop_bus().read32(0x1F8010C8u, value) &&
+            (value & 0x01000000u) == 0,
+        "SPU2 DMA4 start bit did not clear") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F8010F4u, value) &&
+            (value & (1u << 28)) != 0 &&
+            (value & 0x80000000u) != 0,
+        "SPU2 DMA4 DICR completion missing") && ok;
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 3)) != 0,
+        "SPU2 DMA4 did not raise IOP DMA interrupt") && ok;
+
+    ps2::u16 statx = 0;
+    ok = expect(
+        system.iop_bus().read16(0x1F900344u, statx) &&
+            (statx & 0x0080u) != 0 &&
+            (statx & 0x0400u) == 0,
+        "SPU2 core0 STATX did not become DMA-ready") && ok;
+
+    // DICR2: master enable + DMA7 (index 0) enable.
+    ok = expect(
+        system.iop_bus().write32(0x1F801574u, 0x00810000u),
+        "failed to enable SPU2 DMA7 interrupt") && ok;
+    ok = expect(
+        system.iop_bus().write32(0x1F801508u, 0x01000201u),
+        "SPU2 DMA7 CHCR write failed") && ok;
+
+    ok = expect(
+        system.iop_bus().read32(0x1F801508u, value) &&
+            (value & 0x01000000u) == 0,
+        "SPU2 DMA7 start bit did not clear") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F801574u, value) &&
+            (value & (1u << 24)) != 0 &&
+            (value & 0x80000000u) != 0,
+        "SPU2 DMA7 DICR2 completion missing") && ok;
+    ok = expect(
+        system.iop_bus().read16(0x1F900744u, statx) &&
+            (statx & 0x0080u) != 0 &&
+            (statx & 0x0400u) == 0,
+        "SPU2 core1 STATX did not become DMA-ready") && ok;
+
+    return ok;
+}
+
 bool test_ee_lq_sq_silent_alignment() {
     ps2::Ps2System system;
 
@@ -913,6 +973,7 @@ int main() {
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
     ok = test_iop_spu2_register_window() && ok;
+    ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {
