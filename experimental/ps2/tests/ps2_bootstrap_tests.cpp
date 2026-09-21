@@ -985,6 +985,41 @@ bool test_vu_mapping_and_cop2() {
              stored_hi == 0x99AABBCCDDEEFF00ull,
              "SQC2 vector store mismatch") && ok;
 
+    // BC2 reads the COP2 condition from VPU_STAT bit 8.
+    const ps2::u32 bc2t =
+        (0x12u << 26) |
+        (0x08u << 21) |
+        (1u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc2t),
+             "BC2T opcode setup failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[29] = 0x100u;
+    error.clear();
+    ok = expect(system.ee().step(error), "BC2T execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 4u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC2T branch target mismatch") && ok;
+
+    const ps2::u32 bc2fl =
+        (0x12u << 26) |
+        (0x08u << 21) |
+        (2u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc2fl),
+             "BC2FL opcode setup failed") && ok;
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[29] = 0x100u;
+    error.clear();
+    ok = expect(system.ee().step(error), "BC2FL execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 8u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC2FL likely-not-taken skip mismatch") && ok;
+
     return ok;
 }
 
