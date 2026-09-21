@@ -713,14 +713,77 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     const u32 fd = (instruction >> 6) & 31u;
     const u32 funct = instruction & 63u;
 
-    if (funct == 0x2Cu) { // VSUB
-        for (u32 lane = 0; lane < 4; ++lane) {
+    auto vu_float = [&](u32 reg, u32 lane) {
+        return ps2_fpu_input(lane_read(reg, lane));
+    };
+    auto vu_write_float = [&](u32 reg, u32 lane, float value) {
+        lane_write(reg, lane, ps2_fpu_result(value));
+    };
+    auto vector_binary = [&](auto op) {
+        for (u32 lane = 0; lane < 4u; ++lane) {
             if (!selected(lane)) continue;
-            const float a = std::bit_cast<float>(lane_read(fs, lane));
-            const float b = std::bit_cast<float>(lane_read(ft, lane));
-            lane_write(fd, lane, std::bit_cast<u32>(a - b));
+            vu_write_float(
+                fd,
+                lane,
+                op(vu_float(fs, lane), vu_float(ft, lane)));
         }
+    };
+    auto broadcast_binary = [&](u32 source_lane, auto op) {
+        const float scalar = vu_float(ft, source_lane & 3u);
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            vu_write_float(
+                fd,
+                lane,
+                op(vu_float(fs, lane), scalar));
+        }
+    };
+
+    const auto add = [](float x, float y) { return x + y; };
+    const auto sub = [](float x, float y) { return x - y; };
+    const auto mul = [](float x, float y) { return x * y; };
+    const auto vmax = [](float x, float y) { return std::fmax(x, y); };
+    const auto vmin = [](float x, float y) { return std::fmin(x, y); };
+
+    if (funct <= 0x03u) { // VADDx/y/z/w
+        broadcast_binary(funct, add);
         return true;
+    }
+    if (funct >= 0x04u && funct <= 0x07u) { // VSUBx/y/z/w
+        broadcast_binary(funct & 3u, sub);
+        return true;
+    }
+    if (funct >= 0x10u && funct <= 0x13u) { // VMAXx/y/z/w
+        broadcast_binary(funct & 3u, vmax);
+        return true;
+    }
+    if (funct >= 0x14u && funct <= 0x17u) { // VMINIx/y/z/w
+        broadcast_binary(funct & 3u, vmin);
+        return true;
+    }
+    if (funct >= 0x18u && funct <= 0x1Bu) { // VMULx/y/z/w
+        broadcast_binary(funct & 3u, mul);
+        return true;
+    }
+
+    switch (funct) {
+    case 0x28: // VADD
+        vector_binary(add);
+        return true;
+    case 0x2A: // VMUL
+        vector_binary(mul);
+        return true;
+    case 0x2B: // VMAX
+        vector_binary(vmax);
+        return true;
+    case 0x2C: // VSUB
+        vector_binary(sub);
+        return true;
+    case 0x2F: // VMINI
+        vector_binary(vmin);
+        return true;
+    default:
+        break;
     }
     if (funct == 0x30u) { // VIADD
         const u32 it = ft & 0xFu;
