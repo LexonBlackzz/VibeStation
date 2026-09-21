@@ -57,6 +57,7 @@ IopBus::IopBus(
 void IopBus::reset() {
     cache_control_.fill(0);
     spu2_regs_.fill(0);
+    spu2_dma4_irq_cycles_ = 0;
     root_counters_.fill({});
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
@@ -235,6 +236,15 @@ void IopBus::tick(u64 cycles) {
                 }
                 counter.count &= maximum;
             }
+        }
+    }
+
+    if (spu2_dma4_irq_cycles_ != 0) {
+        if (cycles >= spu2_dma4_irq_cycles_) {
+            spu2_dma4_irq_cycles_ = 0;
+            intc_.raise(9u);
+        } else {
+            spu2_dma4_irq_cycles_ -= cycles;
         }
     }
 }
@@ -616,6 +626,19 @@ bool IopBus::write32(u32 address, u32 value) {
             }
 
             raise_dma_irq(channel);
+            if (channel == 4u) {
+                // SPU2 core 0 completion also asserts the dedicated SPU
+                // interrupt. Delay it by the transfer length so libsd can
+                // install its waiter before the completion callback runs.
+                u32 bcr = 0;
+                (void)hw_.read32(physical - 4u, bcr);
+                const u64 words =
+                    static_cast<u64>(bcr & 0xFFFFu) *
+                    static_cast<u64>(bcr >> 16);
+                // The SPU2 engine accounts for two halfwords per IOP DMA
+                // word and 24 IOP cycles per halfword.
+                spu2_dma4_irq_cycles_ = words == 0u ? 48u : words * 48u;
+            }
         }
         return true;
     }

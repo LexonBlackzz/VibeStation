@@ -985,6 +985,19 @@ bool test_iop_spu2_dma_bootstrap_completion() {
         system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
             (value & (1u << 3)) != 0,
         "SPU2 DMA4 did not raise IOP DMA interrupt") && ok;
+    ok = expect(
+        (value & (1u << 9)) == 0,
+        "SPU2 DMA4 raised its dedicated interrupt synchronously") && ok;
+    system.iop_bus().tick(47u);
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 9)) == 0,
+        "SPU2 DMA4 interrupt fired before one SPU2 word interval") && ok;
+    system.iop_bus().tick(1u);
+    ok = expect(
+        system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+            (value & (1u << 9)) != 0,
+        "SPU2 DMA4 did not raise the delayed dedicated interrupt") && ok;
 
     ps2::u16 statx = 0;
     ok = expect(

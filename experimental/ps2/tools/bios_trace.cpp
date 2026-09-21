@@ -82,6 +82,24 @@ void print_state(const ps2::Ps2System& system) {
         }
     }
 
+    ps2::u32 dma4_madr = 0;
+    ps2::u32 dma4_bcr = 0;
+    ps2::u32 dma4_chcr = 0;
+    ps2::u32 dma_icr = 0;
+    ps2::u32 dma_icr2 = 0;
+    (void)system.iop_bus().read32(0x1F8010C0u, dma4_madr);
+    (void)system.iop_bus().read32(0x1F8010C4u, dma4_bcr);
+    (void)system.iop_bus().read32(0x1F8010C8u, dma4_chcr);
+    (void)system.iop_bus().read32(0x1F8010F4u, dma_icr);
+    (void)system.iop_bus().read32(0x1F801574u, dma_icr2);
+    std::cout
+        << "IOP_DMAC4_MADR=0x" << std::hex << std::uppercase << dma4_madr
+        << " BCR=0x" << dma4_bcr
+        << " CHCR=0x" << dma4_chcr
+        << " DICR=0x" << dma_icr
+        << " DICR2=0x" << dma_icr2
+        << std::dec << '\n';
+
     auto print_code = [&](const char* label, ps2::u32 center) {
         std::cout << label;
         const ps2::u32 code_base = (center - 32u) & ~3u;

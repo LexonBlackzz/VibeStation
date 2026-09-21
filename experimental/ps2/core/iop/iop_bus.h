@@ -71,6 +71,7 @@ private:
     std::array<u8, 0x100> cache_control_{};
     std::array<u8, 0x10000> spu2_regs_{};
     std::array<RootCounter, 6> root_counters_{};
+    u64 spu2_dma4_irq_cycles_ = 0;
 };
 
 } // namespace ps2
