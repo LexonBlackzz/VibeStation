@@ -29,6 +29,24 @@ ps2::u64 parse_budget(const char* text, ps2::u64 fallback) {
     return value;
 }
 
+bool visible_frame_ready(const ps2::Ps2System& system) {
+    const auto& stats = system.gs_core().stats();
+    const bool gs_wrote_pixels =
+        stats.host_to_local_pixels != 0 ||
+        stats.local_to_local_pixels != 0 ||
+        stats.raster_pixels != 0;
+    if (!gs_wrote_pixels || !system.gs_display().valid()) {
+        return false;
+    }
+
+    for (const ps2::u32 pixel : system.gs_display().rgba8()) {
+        if ((pixel & 0x00FFFFFFu) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void print_state(const ps2::Ps2System& system) {
     const auto& ee = system.ee().state();
     const auto& iop = system.iop().state();
@@ -191,7 +209,8 @@ void print_state(const ps2::Ps2System& system) {
     }
 
     std::cout
-        << "DISPLAY_VALID=" << (display.valid() ? 1 : 0)
+        << "VISIBLE_FRAME_READY=" << (visible_frame_ready(system) ? 1 : 0)
+        << " DISPLAY_VALID=" << (display.valid() ? 1 : 0)
         << " DISPLAY_WIDTH=" << display.width()
         << " DISPLAY_HEIGHT=" << display.height()
         << " DISPLAY_CIRCUIT=" << display.circuit()
@@ -202,6 +221,19 @@ void print_state(const ps2::Ps2System& system) {
         << " DISPLAY_HASH=0x" << std::hex << std::uppercase
         << framebuffer_hash << std::dec
         << '\n';
+
+    if (nonzero_pixels != 0) {
+        for (std::size_t i = 0; i < display.rgba8().size(); ++i) {
+            const ps2::u32 pixel = display.rgba8()[i];
+            if ((pixel & 0x00FFFFFFu) == 0) continue;
+            std::cout
+                << "DISPLAY_FIRST_NONZERO_INDEX=" << i
+                << " DISPLAY_FIRST_NONZERO_RGBA=0x"
+                << std::hex << std::uppercase << pixel
+                << std::dec << '\n';
+            break;
+        }
+    }
 
     ps2::u64 pmode = 0;
     ps2::u64 smode2 = 0;
@@ -257,6 +289,7 @@ int main(int argc, char** argv) {
     }
 
     ps2::u64 remaining = budget;
+    bool reached_visible_frame = false;
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
             remaining < kChunk ? remaining : kChunk;
@@ -266,6 +299,11 @@ int main(int argc, char** argv) {
         }
         remaining -= ran;
         system.refresh_display();
+
+        if (visible_frame_ready(system)) {
+            reached_visible_frame = true;
+            break;
+        }
 
         if (ran == 0 && !system.halted()) {
             std::cerr << "TRACE_STALLED_WITHOUT_HALT\n";
@@ -279,6 +317,14 @@ int main(int argc, char** argv) {
     if (system.halted()) {
         std::cout << "HALT_REASON=" << system.halt_reason() << '\n';
         return 10;
+    }
+
+    if (reached_visible_frame) {
+        std::cout
+            << "FIRST_VISIBLE_FRAME_EE_INSTRUCTIONS="
+            << system.ee().state().instructions_executed
+            << '\n';
+        return 0;
     }
 
     std::cout
