@@ -3,6 +3,7 @@
 #include "core/gs/gs_core.h"
 #include "core/gs/gs_privileged.h"
 #include "core/memory/ee_bus.h"
+#include "core/vu/vu1.h"
 
 #include <algorithm>
 
@@ -236,9 +237,6 @@ bool Vif1Dma::begin_command(
 
     case 0x14: // MSCAL
     case 0x15: // MSCALF
-        // Preserve the VIF1 double-buffer bookkeeping even before the VU1
-        // micro interpreter lands.  This keeps subsequent FLG UNPACK addresses
-        // pointed at the same buffers the BIOS intended.
         top_ = tops_;
         double_buffer_ = !double_buffer_;
         tops_ = double_buffer_ ? ((base_ + offset_) & 0x3FFu) : base_;
@@ -247,9 +245,15 @@ bool Vif1Dma::begin_command(
             error = "failed to update VIF1 double-buffer state";
             return false;
         }
+        if (vu1_ != nullptr) {
+            vu1_->start(immediate & 0x3FFu);
+        }
         return finish_command(bus);
 
     case 0x17: // MSCNT
+        if (vu1_ != nullptr) {
+            vu1_->continue_run();
+        }
         return finish_command(bus);
 
     case 0x20: // STMASK
