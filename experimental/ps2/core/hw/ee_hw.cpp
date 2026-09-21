@@ -122,8 +122,8 @@ u32 EeHw::vif1_stat() const {
 
 void EeHw::update_vif1_stat(u32 set_bits, u32 clear_bits) {
     u32 value = vif1_stat();
-    value |= set_bits;
     value &= ~clear_bits;
+    value |= set_bits;
     for (u32 i = 0; i < 4u; ++i) {
         vif1_regs_[i] = static_cast<u8>(value >> (i * 8));
     }
