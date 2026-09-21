@@ -32,6 +32,7 @@ private:
         Mpg,
         Direct,
         Unpack,
+        WaitVu,
     };
 
     [[nodiscard]] bool complete(EeBus& bus, u32 chcr);
@@ -81,6 +82,9 @@ private:
     bool command_irq_pending_ = false;
     u32 active_code_ = 0;
     u32 payload_index_ = 0;
+    std::array<u32, 4> deferred_words_{};
+    u32 deferred_word_count_ = 0;
+    u32 deferred_word_index_ = 0;
 
     u32 cycle_ = 0;
     u32 mode_ = 0;
