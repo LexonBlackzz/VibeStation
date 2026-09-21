@@ -486,26 +486,7 @@ bool Vu1::execute_upper_special(
         return true;
     case 0x06: acc_scalar_math(bc, 4); return true;
     case 0x07:
-        auto set_p = [&](float value) {
-        p_ = as_bits(value);
-    };
-    auto vector_sum_squares = [&]() {
-        const u32 s = fs(code);
-        const float x = as_float(vf_[s][0]);
-        const float y = as_float(vf_[s][1]);
-        const float z = as_float(vf_[s][2]);
-        return x * x + y * y + z * z;
-    };
-    auto random_to_ft = [&]() {
-        if (ft(code) == 0u) return;
-        for (u32 lane = 0; lane < 4u; ++lane) {
-            if (lane_enabled(code, lane)) {
-                write_vf_lane(ft(code), lane, r_);
-            }
-        }
-    };
-
-    if (group == 0x3Cu) {
+        if (group == 0x3Cu) {
             acc_scalar_math(as_float(q_), 4);
             return true;
         }
@@ -868,6 +849,24 @@ bool Vu1::execute_lower_special(
             }
         }
         return true;
+    };
+    auto set_p = [&](float value) {
+        p_ = as_bits(value);
+    };
+    auto vector_sum_squares = [&]() {
+        const u32 s = fs(code);
+        const float x = as_float(vf_[s][0]);
+        const float y = as_float(vf_[s][1]);
+        const float z = as_float(vf_[s][2]);
+        return x * x + y * y + z * z;
+    };
+    auto random_to_ft = [&]() {
+        if (ft(code) == 0u) return;
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (lane_enabled(code, lane)) {
+                write_vf_lane(ft(code), lane, r_);
+            }
+        }
     };
 
     if (group == 0x3Cu) {
