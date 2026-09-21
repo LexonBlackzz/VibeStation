@@ -119,6 +119,15 @@ bool test_sif1_ee_to_iop() {
     ok = expect(
              (system.iop_intc().status() & (1u << 3)) != 0,
              "SIF1 did not raise IOP DMA interrupt") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 27)) != 0,
+             "SIF1 DMA10 DICR2 completion flag missing") && ok;
+    ok = expect(
+             system.iop_bus().write32(0x1F801574u, 1u << 27) &&
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 27)) == 0,
+             "SIF1 DMA10 DICR2 flag did not acknowledge") && ok;
 
     return ok;
 }
@@ -206,6 +215,15 @@ bool test_sif0_iop_to_ee() {
     ok = expect(
              (system.iop_intc().status() & (1u << 3)) != 0,
              "SIF0 did not raise IOP DMA interrupt") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 26)) != 0,
+             "SIF0 DMA9 DICR2 completion flag missing") && ok;
+    ok = expect(
+             system.iop_bus().write32(0x1F801574u, 1u << 26) &&
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 26)) == 0,
+             "SIF0 DMA9 DICR2 flag did not acknowledge") && ok;
 
     return ok;
 }
