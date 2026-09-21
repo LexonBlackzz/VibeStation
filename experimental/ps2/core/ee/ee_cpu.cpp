@@ -1405,6 +1405,16 @@ bool EeCpu::execute_mmi(
     auto mmi2 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x08: // PMFHI
+            out.lo = state_.hi;
+            out.hi = state_.hi1;
+            store(out);
+            return true;
+        case 0x09: // PMFLO
+            out.lo = state_.lo;
+            out.hi = state_.lo1;
+            store(out);
+            return true;
         case 0x0E: // PCPYLD
             out.lo = b.lo;
             out.hi = a.lo;
@@ -1458,6 +1468,14 @@ bool EeCpu::execute_mmi(
     auto mmi3 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x08: // PMTHI
+            state_.hi = a.lo;
+            state_.hi1 = a.hi;
+            return true;
+        case 0x09: // PMTLO
+            state_.lo = a.lo;
+            state_.lo1 = a.hi;
+            return true;
         case 0x0E: // PCPYUD
             out.lo = a.hi;
             out.hi = b.hi;

@@ -217,6 +217,59 @@ bool test_mmi_pmfhl_pmthl() {
     return ok;
 }
 
+bool test_mmi_packed_accumulator_moves() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x21C0u;
+    std::string error;
+    bool ok = true;
+
+    auto run = [&](ps2::u32 instruction, const char* message) {
+        ok = expect(system.bus().write32(pc, instruction), message) && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(system.ee().step(error), message) && ok;
+    };
+
+    constexpr ps2::u32 pmfhi =
+        (0x1Cu << 26) | (2u << 11) | (0x08u << 6) | 0x09u;
+    constexpr ps2::u32 pmflo =
+        (0x1Cu << 26) | (3u << 11) | (0x09u << 6) | 0x09u;
+    constexpr ps2::u32 pmthi =
+        (0x1Cu << 26) | (4u << 21) | (0x08u << 6) | 0x29u;
+    constexpr ps2::u32 pmtlo =
+        (0x1Cu << 26) | (5u << 21) | (0x09u << 6) | 0x29u;
+
+    system.ee().reset(pc);
+    system.ee().state().hi = 0x0123456789ABCDEFull;
+    system.ee().state().hi1 = 0xFEDCBA9876543210ull;
+    system.ee().state().lo = 0x1111222233334444ull;
+    system.ee().state().lo1 = 0xAAAABBBBCCCCDDDDull;
+    run(pmfhi, "PMFHI execution failed");
+    run(pmflo, "PMFLO execution failed");
+    ok = expect(system.ee().state().gpr[2].lo == 0x0123456789ABCDEFull &&
+                    system.ee().state().gpr[2].hi == 0xFEDCBA9876543210ull,
+                "PMFHI packed result mismatch") && ok;
+    ok = expect(system.ee().state().gpr[3].lo == 0x1111222233334444ull &&
+                    system.ee().state().gpr[3].hi == 0xAAAABBBBCCCCDDDDull,
+                "PMFLO packed result mismatch") && ok;
+
+    system.ee().state().gpr[4] = {
+        0x8877665544332211ull, 0x1020304050607080ull};
+    system.ee().state().gpr[5] = {
+        0xCAFEBABEDEADBEEFull, 0x0F1E2D3C4B5A6978ull};
+    run(pmthi, "PMTHI execution failed");
+    run(pmtlo, "PMTLO execution failed");
+    ok = expect(system.ee().state().hi == 0x8877665544332211ull &&
+                    system.ee().state().hi1 == 0x1020304050607080ull,
+                "PMTHI packed source mismatch") && ok;
+    ok = expect(system.ee().state().lo == 0xCAFEBABEDEADBEEFull &&
+                    system.ee().state().lo1 == 0x0F1E2D3C4B5A6978ull,
+                "PMTLO packed source mismatch") && ok;
+
+    return ok;
+}
+
 bool test_mmi_bootstrap_packed_ops() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2200u;
@@ -2990,6 +3043,7 @@ int main() {
     ok = test_mmi_padduw() && ok;
     ok = test_mmi_madd_and_plzcw() && ok;
     ok = test_mmi_pmfhl_pmthl() && ok;
+    ok = test_mmi_packed_accumulator_moves() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
