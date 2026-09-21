@@ -445,6 +445,69 @@ bool test_ee_iop_startup_interleave() {
     return ok;
 }
 
+bool test_iop_gte_bootstrap_transfers() {
+    ps2::Ps2System system;
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 mtc2_r1_d3 =
+        (0x12u << 26) | (0x04u << 21) | (1u << 16) | (3u << 11);
+    constexpr ps2::u32 mfc2_r2_d3 =
+        (0x12u << 26) | (0x00u << 21) | (2u << 16) | (3u << 11);
+    constexpr ps2::u32 gte_command =
+        (0x12u << 26) | (0x10u << 21) | 0x01u;
+    constexpr ps2::u32 lwc2_d4 =
+        (0x32u << 26) | (4u << 16) | 0x0100u;
+    constexpr ps2::u32 swc2_d4 =
+        (0x3Au << 26) | (4u << 16) | 0x0104u;
+
+    ok = expect(
+             system.iop_ram().write32(0x0000u, mtc2_r1_d3) &&
+             system.iop_ram().write32(0x0004u, mfc2_r2_d3) &&
+             system.iop_ram().write32(0x0008u, 0u) &&
+             system.iop_ram().write32(0x000Cu, gte_command) &&
+             system.iop_ram().write32(0x0010u, lwc2_d4) &&
+             system.iop_ram().write32(0x0014u, swc2_d4) &&
+             system.iop_ram().write32(0x0100u, 0xA1B2C3D4u),
+             "failed to build IOP GTE bootstrap program") && ok;
+
+    system.iop().reset(0x00000000u);
+    system.iop().state().gpr[1] = 0x12345678u;
+
+    ok = expect(system.iop().step(error), "IOP MTC2 failed") && ok;
+    ok = expect(
+             system.iop().state().gte_data[3] == 0x12345678u,
+             "IOP MTC2 GTE register mismatch") && ok;
+
+    ok = expect(system.iop().step(error), "IOP MFC2 failed") && ok;
+    ok = expect(system.iop().step(error), "IOP MFC2 delay-slot NOP failed") && ok;
+    ok = expect(
+             system.iop().state().gpr[2] == 0x12345678u,
+             "IOP MFC2 load-delay result mismatch") && ok;
+
+    ok = expect(
+             system.iop().step(error),
+             "IOP bootstrap GTE command retirement failed") && ok;
+    ok = expect(
+             !system.iop().halted() &&
+             system.iop().state().gte_ctrl[31] == 0u,
+             "IOP bootstrap GTE command unexpectedly halted") && ok;
+
+    ok = expect(system.iop().step(error), "IOP LWC2 failed") && ok;
+    ok = expect(
+             system.iop().state().gte_data[4] == 0xA1B2C3D4u,
+             "IOP LWC2 GTE data mismatch") && ok;
+    ok = expect(system.iop().step(error), "IOP SWC2 failed") && ok;
+
+    ps2::u32 stored = 0;
+    ok = expect(
+             system.iop_ram().read32(0x0104u, stored) &&
+             stored == 0xA1B2C3D4u,
+             "IOP SWC2 memory result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_iop_cache_isolation_blocks_ram_store() {
     ps2::Ps2System system;
 
@@ -1087,6 +1150,7 @@ int main() {
     ok = test_iop_reset_and_shared_ram() && ok;
     ok = test_iop_ram_mirror_boundary() && ok;
     ok = test_ee_iop_startup_interleave() && ok;
+    ok = test_iop_gte_bootstrap_transfers() && ok;
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
