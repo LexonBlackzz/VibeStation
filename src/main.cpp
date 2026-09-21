@@ -1767,6 +1767,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "v2_helper_state=%llu v2_helper_icache=%llu v2_helper_irq=%llu "
       "v2_helper_unsupported=%llu v2_helper_memory=%llu "
       "v2_helper_budget=%llu v2_helper_internal=%llu "
+      "v2_state_branch_delay=%llu v2_state_load_delay=%llu "
+      "v2_state_pc=%llu v2_state_diagnostics=%llu "
+      "v2_unsupported_lw=%llu v2_unsupported_other_load=%llu "
+      "v2_unsupported_cop2=%llu v2_unsupported_cop0=%llu "
+      "v2_unsupported_jump=%llu v2_unsupported_other_branch=%llu "
+      "v2_unsupported_special_control=%llu v2_unsupported_muldiv=%llu "
+      "v2_unsupported_store=%llu v2_unsupported_other=%llu "
       "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
       "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
       "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
@@ -1838,6 +1845,34 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.jit_v2_helper_budget, before.jit_v2_helper_budget)),
       static_cast<unsigned long long>(
           delta(after.jit_v2_helper_internal, before.jit_v2_helper_internal)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_branch_delay, before.jit_v2_state_branch_delay)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_load_delay, before.jit_v2_state_load_delay)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_pc, before.jit_v2_state_pc)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_diagnostics, before.jit_v2_state_diagnostics)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_lw, before.jit_v2_unsupported_lw)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other_load, before.jit_v2_unsupported_other_load)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_cop2, before.jit_v2_unsupported_cop2)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_cop0, before.jit_v2_unsupported_cop0)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_jump, before.jit_v2_unsupported_jump)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other_branch, before.jit_v2_unsupported_other_branch)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_special_control, before.jit_v2_unsupported_special_control)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_muldiv, before.jit_v2_unsupported_muldiv)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_store, before.jit_v2_unsupported_store)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other, before.jit_v2_unsupported_other)),
       static_cast<unsigned long long>(hashes.state),
       static_cast<unsigned long long>(hashes.cpu_state),
       static_cast<unsigned long long>(hashes.ram),
