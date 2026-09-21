@@ -510,10 +510,10 @@ Xbyak::Reg32 cache_host_reg(Xbyak::CodeGenerator &code, int slot) {
   switch (slot) {
   case 0: return code.r8d;
   case 1: return code.r9d;
-  case 2: return code.r10d;
-  case 3: return code.r11d;
-  case 4: return code.r12d;
-  default: return code.r13d;
+  case 2: return code.r12d;
+  case 3: return code.r13d;
+  case 4: return code.r14d;
+  default: return code.r15d;
   }
 }
 
@@ -532,7 +532,7 @@ void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
     }
     return;
   }
-  code.mov(dst, code.dword[code.r15 + static_cast<int>(guest_reg) * 4]);
+  code.mov(dst, code.dword[code.r10 + static_cast<int>(guest_reg) * 4]);
 }
 
 void emit_write_guest(Xbyak::CodeGenerator &code,
@@ -552,7 +552,7 @@ void emit_write_guest(Xbyak::CodeGenerator &code,
     dirty[static_cast<size_t>(slot)] = true;
     return;
   }
-  code.mov(code.dword[code.r15 + static_cast<int>(guest_reg) * 4], src);
+  code.mov(code.dword[code.r10 + static_cast<int>(guest_reg) * 4], src);
 }
 
 
@@ -565,7 +565,7 @@ void emit_commit_incoming_load(Xbyak::CodeGenerator &code,
                                u8 cancel_reg) {
   using namespace Xbyak;
   Label done;
-  code.mov(code.eax, code.dword[code.r14 +
+  code.mov(code.eax, code.dword[code.r11 +
       static_cast<int>(offsetof(V3NativeRuntime, incoming_load_reg))]);
   code.test(code.eax, code.eax);
   code.jz(done);
@@ -573,9 +573,9 @@ void emit_commit_incoming_load(Xbyak::CodeGenerator &code,
     code.cmp(code.eax, static_cast<u32>(cancel_reg));
     code.je(done);
   }
-  code.mov(code.ecx, code.dword[code.r14 +
+  code.mov(code.ecx, code.dword[code.r11 +
       static_cast<int>(offsetof(V3NativeRuntime, incoming_load_value))]);
-  code.mov(code.dword[code.r15 + code.rax * 4], code.ecx);
+  code.mov(code.dword[code.r10 + code.rax * 4], code.ecx);
   for (size_t slot = 0; slot < cached.size(); ++slot) {
     if (cached[slot] == 0u) {
       continue;
@@ -596,22 +596,25 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
   auto code = std::make_unique<CodeGenerator>(4096);
 
   // V3 deliberately keeps architectural state virtual inside a block.
-  // r15 = guest GPR base, r14 = runtime/preflight data, edx = branch result.
-  // r8-r13 are the six guest-register cache slots. Only r12/r13 need
-  // preserving, and only when those cache slots are actually populated.
-  const bool save_r12 = cached[4] != 0u;
-  const bool save_r13 = cached[5] != 0u;
+  // r10 = guest GPR base, r11 = runtime/preflight data, edx = branch result.
+  // Both pointer registers are caller-saved on x64, so tiny blocks need no
+  // stack traffic at all. Cache slots 2-5 use callee-saved registers and are
+  // preserved only when a longer block actually populates them.
+  const bool save_r12 = cached[2] != 0u;
+  const bool save_r13 = cached[3] != 0u;
+  const bool save_r14 = cached[4] != 0u;
+  const bool save_r15 = cached[5] != 0u;
   if (save_r12) code->push(code->r12);
   if (save_r13) code->push(code->r13);
-  code->push(code->r14);
-  code->push(code->r15);
+  if (save_r14) code->push(code->r14);
+  if (save_r15) code->push(code->r15);
 
 #if defined(_WIN32)
-  code->mov(code->r15, code->rcx);
-  code->mov(code->r14, code->rdx);
+  code->mov(code->r10, code->rcx);
+  code->mov(code->r11, code->rdx);
 #else
-  code->mov(code->r15, code->rdi);
-  code->mov(code->r14, code->rsi);
+  code->mov(code->r10, code->rdi);
+  code->mov(code->r11, code->rsi);
 #endif
   code->xor_(code->edx, code->edx);
 
@@ -620,7 +623,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       continue;
     }
     code->mov(cache_host_reg(*code, static_cast<int>(slot)),
-              code->dword[code->r15 + static_cast<int>(cached[slot]) * 4]);
+              code->dword[code->r10 + static_cast<int>(cached[slot]) * 4]);
   }
 
   std::array<bool, 6> dirty{};
@@ -730,7 +733,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 
     case V3AluOp::Jr:
       emit_read_guest(*code, code->eax, cached, inst.rs);
-      code->mov(code->dword[code->r14 +
+      code->mov(code->dword[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, dynamic_target))],
           code->eax);
       break;
@@ -739,7 +742,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       // Capture the target before writing the link register. This matters for
       // the legal but nasty rd == rs case.
       emit_read_guest(*code, code->eax, cached, inst.rs);
-      code->mov(code->dword[code->r14 +
+      code->mov(code->dword[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, dynamic_target))],
           code->eax);
       code->mov(code->eax, inst.link_value);
@@ -747,10 +750,10 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       break;
 
     case V3AluOp::Lw: {
-      code->mov(code->rax, code->ptr[code->r14 +
+      code->mov(code->rax, code->ptr[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, load_ptr))]);
       code->mov(code->eax, code->dword[code->rax]);
-      code->mov(code->dword[code->r14 +
+      code->mov(code->dword[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, load_value))], code->eax);
       break;
     }
@@ -760,7 +763,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       const size_t ptr_offset =
           offsetof(V3NativeRuntime, store_ptrs) +
           static_cast<size_t>(store_index) * sizeof(u8 *);
-      code->mov(code->rax, code->ptr[code->r14 + static_cast<int>(ptr_offset)]);
+      code->mov(code->rax, code->ptr[code->r11 + static_cast<int>(ptr_offset)]);
       code->mov(code->dword[code->rax], code->ecx);
       ++store_index;
       break;
@@ -790,14 +793,14 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     if (cached[slot] == 0u || !dirty[slot]) {
       continue;
     }
-    code->mov(code->dword[code->r15 + static_cast<int>(cached[slot]) * 4],
+    code->mov(code->dword[code->r10 + static_cast<int>(cached[slot]) * 4],
               cache_host_reg(*code, static_cast<int>(slot)));
   }
 
-  code->mov(code->dword[code->r15], 0u);
+  code->mov(code->dword[code->r10], 0u);
   code->mov(code->eax, code->edx);
-  code->pop(code->r15);
-  code->pop(code->r14);
+  if (save_r15) code->pop(code->r15);
+  if (save_r14) code->pop(code->r14);
   if (save_r13) code->pop(code->r13);
   if (save_r12) code->pop(code->r12);
   code->ret();
