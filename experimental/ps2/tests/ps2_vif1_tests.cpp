@@ -194,6 +194,120 @@ bool test_vif1_direct_path2() {
     return ok;
 }
 
+bool test_vif1_direct_visible_frame_pipeline() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    constexpr ps2::u32 stream = 0x5200u;
+    constexpr ps2::u32 direct_seven_qwords =
+        (0x50u << 24) | 7u;
+
+    const ps2::u64 setup_tag =
+        4ull | (1ull << 15) | (1ull << 60);
+    const ps2::u64 image_tag =
+        1ull | (1ull << 15) | (2ull << 58);
+
+    const ps2::u64 bitbltbuf =
+        1ull << 48; // DBP=0, DBW=1, DPSM=PSMCT32.
+    constexpr ps2::u64 trxpos = 0;
+    const ps2::u64 trxreg =
+        2ull | (2ull << 32);
+    constexpr ps2::u64 trxdir = 0;
+
+    constexpr ps2::u32 p0 = 0xFF0000FFu;
+    constexpr ps2::u32 p1 = 0xFF00FF00u;
+    constexpr ps2::u32 p2 = 0xFFFF0000u;
+    constexpr ps2::u32 p3 = 0xFFFFFFFFu;
+
+    bool ok = true;
+    ok = expect(
+             write_words(
+                 system.bus(),
+                 stream,
+                 0u,
+                 0u,
+                 0u,
+                 direct_seven_qwords),
+             "failed to build visible-frame DIRECT command") && ok;
+
+    auto write_qword = [&](ps2::u32 address, ps2::u64 lo, ps2::u64 hi) {
+        return write_words(
+            system.bus(),
+            address,
+            static_cast<ps2::u32>(lo),
+            static_cast<ps2::u32>(lo >> 32),
+            static_cast<ps2::u32>(hi),
+            static_cast<ps2::u32>(hi >> 32));
+    };
+    auto write_ad = [&](ps2::u32 address, ps2::u64 value, ps2::u32 reg) {
+        return write_qword(address, value, reg);
+    };
+
+    ok = expect(
+             write_qword(stream + 0x10u, setup_tag, 0xEull) &&
+             write_ad(stream + 0x20u, bitbltbuf, 0x50u) &&
+             write_ad(stream + 0x30u, trxpos, 0x51u) &&
+             write_ad(stream + 0x40u, trxreg, 0x52u) &&
+             write_ad(stream + 0x50u, trxdir, 0x53u) &&
+             write_qword(stream + 0x60u, image_tag, 0u) &&
+             write_qword(
+                 stream + 0x70u,
+                 static_cast<ps2::u64>(p0) |
+                     (static_cast<ps2::u64>(p1) << 32),
+                 static_cast<ps2::u64>(p2) |
+                     (static_cast<ps2::u64>(p3) << 32)),
+             "failed to build visible-frame GIF payload") && ok;
+
+    ok = expect(
+             setup_normal_dma(system, stream, 8u),
+             "failed to arm visible-frame VIF1 DMA") && ok;
+
+    std::string error;
+    ok = expect(
+             service_n(dma, system, 8u, error),
+             "visible-frame VIF1 DIRECT service failed") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+
+    // Scan out the same 2x2 framebuffer through PCRTC circuit 1.
+    constexpr ps2::u64 pmode = 1u;
+    constexpr ps2::u64 dispfb =
+        1ull << 9; // FBP=0, FBW=1, PSMCT32, DBX/DBY=0.
+    const ps2::u64 display =
+        1ull << 32 | // DW=1 -> 2 output pixels.
+        1ull << 44;  // DH=1 -> 2 output pixels.
+    ok = expect(
+             system.gs_privileged().write64(0x12000000u, pmode) &&
+             system.gs_privileged().write64(0x12000070u, dispfb) &&
+             system.gs_privileged().write64(0x12000080u, display),
+             "failed to configure visible-frame PCRTC") && ok;
+
+    system.refresh_display();
+    const auto& out = system.gs_display();
+    ok = expect(
+             out.valid() &&
+             out.width() == 2u &&
+             out.height() == 2u &&
+             out.rgba8().size() == 4u,
+             "visible-frame PCRTC output invalid") && ok;
+    ok = expect(
+             out.rgba8().size() == 4u &&
+             out.rgba8()[0] == p0 &&
+             out.rgba8()[1] == p1 &&
+             out.rgba8()[2] == p2 &&
+             out.rgba8()[3] == p3,
+             "VIF1 DIRECT -> GIF -> GS -> PCRTC pixel mismatch") && ok;
+
+    const auto& stats = system.gs_core().stats();
+    ok = expect(
+             stats.host_to_local_pixels == 4u &&
+             stats.image_qwords == 1u &&
+             stats.unsupported_transfers == 0u,
+             "visible-frame GS transfer statistics mismatch") && ok;
+
+    return ok;
+}
+
 bool test_vif1_unpack_v4_5_expansion() {
     ps2::Ps2System system;
     ps2::Vif1Dma dma;
@@ -519,6 +633,7 @@ int main() {
     bool ok = true;
     ok = test_vif1_mpg_and_unpack() && ok;
     ok = test_vif1_direct_path2() && ok;
+    ok = test_vif1_direct_visible_frame_pipeline() && ok;
     ok = test_vif1_flush_waits_for_vu1() && ok;
     ok = test_vif1_unpack_v4_5_expansion() && ok;
     ok = test_vif1_status_tracks_payload_progress() && ok;
