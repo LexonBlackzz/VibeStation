@@ -110,6 +110,9 @@ void Vif1Dma::reset() {
     command_irq_pending_ = false;
     active_code_ = 0;
     payload_index_ = 0;
+    deferred_words_.fill(0);
+    deferred_word_count_ = 0;
+    deferred_word_index_ = 0;
 
     cycle_ = 0;
     mode_ = 0;
@@ -211,6 +214,7 @@ bool Vif1Dma::begin_command(
             error = "failed to write VIF1 OFFSET state";
             return false;
         }
+        bus.update_vif1_stat(0u, kVif1Dbf);
         return finish_command(bus);
 
     case 0x03: // BASE
@@ -256,20 +260,13 @@ bool Vif1Dma::begin_command(
     case 0x11: // FLUSH
     case 0x13: // FLUSHA
         if (vu1_ != nullptr && vu1_->running()) {
-            // The bootstrap core has no asynchronous VIF/GIF scheduler yet,
-            // so drain the active VU1 program synchronously at the fence. This
-            // preserves the ordering firmware expects from FLUSH/FLUSHE.
-            bus.update_vif1_stat(kVif1Vew | 1u, kVif1VpsMask);
-            std::string vu_error;
-            vu1_->run(1u << 20, vu_error);
-            if (!vu_error.empty()) {
-                error = "VU1 flush: " + vu_error;
-                return false;
-            }
-            if (vu1_->running()) {
-                error = "VU1 flush exceeded bootstrap execution budget";
-                return false;
-            }
+            // VIF stops decoding after the fence until the active VU program
+            // reaches E.  The system scheduler continues to execute VU1 while
+            // this channel remains armed, so CPU polling sees VPS=waiting
+            // instead of an artificial long synchronous host stall.
+            payload_ = Payload::WaitVu;
+            set_vif1_vps(bus, 1u);
+            return true;
         }
         return finish_command(bus);
 
@@ -646,6 +643,10 @@ bool Vif1Dma::consume_payload_word(
         return true;
     }
 
+    case Payload::WaitVu:
+        error = "VIF1 attempted to consume data while waiting for VU1";
+        return false;
+
     case Payload::None:
         break;
     }
@@ -677,8 +678,16 @@ bool Vif1Dma::consume_qword(
         static_cast<u32>(hi),
         static_cast<u32>(hi >> 32),
     };
-    for (u32 word : words) {
-        if (!consume_word(bus, gs, word, error)) return false;
+    for (u32 i = 0; i < 4u; ++i) {
+        if (payload_ == Payload::WaitVu) {
+            deferred_word_count_ = 0;
+            deferred_word_index_ = 0;
+            for (u32 j = i; j < 4u; ++j) {
+                deferred_words_[deferred_word_count_++] = words[j];
+            }
+            return true;
+        }
+        if (!consume_word(bus, gs, words[i], error)) return false;
     }
     return true;
 }
@@ -706,6 +715,33 @@ bool Vif1Dma::service_forward(
     }
     qwc &= 0xFFFFu;
     set_vif1_fqc(bus, qwc);
+
+    if (payload_ == Payload::WaitVu) {
+        set_vif1_vps(bus, 1u);
+        if (vu1_ != nullptr && vu1_->running()) {
+            return true;
+        }
+
+        if (!finish_command(bus)) {
+            error = "failed to finish VIF1 VU wait";
+            return false;
+        }
+
+        while (deferred_word_index_ < deferred_word_count_) {
+            const u32 word = deferred_words_[deferred_word_index_++];
+            if (!consume_word(bus, gs, word, error)) {
+                if (error.empty()) error = "VIF1 deferred command decode failed";
+                return false;
+            }
+            if (payload_ == Payload::WaitVu) {
+                set_vif1_vps(bus, 1u);
+                return true;
+            }
+        }
+        deferred_word_count_ = 0;
+        deferred_word_index_ = 0;
+    }
+
     if (qwc != 0u && payload_ == Payload::None) {
         set_vif1_vps(bus, 1u);
     }
@@ -830,15 +866,31 @@ bool Vif1Dma::service_forward(
         set_vif1_fqc(bus, qwc);
 
         if ((chcr & kChcrTte) != 0) {
-            if (!consume_word(bus, gs, static_cast<u32>(tag_hi), error) ||
-                !consume_word(
-                    bus, gs, static_cast<u32>(tag_hi >> 32), error)) {
-                if (error.empty()) error = "VIF1 TTE command decode failed";
-                return false;
+            const u32 tte_words[2] = {
+                static_cast<u32>(tag_hi),
+                static_cast<u32>(tag_hi >> 32),
+            };
+            for (u32 i = 0; i < 2u; ++i) {
+                if (payload_ == Payload::WaitVu) {
+                    deferred_word_count_ = 0;
+                    deferred_word_index_ = 0;
+                    for (u32 j = i; j < 2u; ++j) {
+                        deferred_words_[deferred_word_count_++] =
+                            tte_words[j];
+                    }
+                    break;
+                }
+                if (!consume_word(bus, gs, tte_words[i], error)) {
+                    if (error.empty()) {
+                        error = "VIF1 TTE command decode failed";
+                    }
+                    return false;
+                }
             }
         }
 
-        if (qwc == 0 && end_after_qwc_) {
+        if (qwc == 0 && end_after_qwc_ &&
+            payload_ != Payload::WaitVu) {
             if (!complete(bus, chcr)) {
                 error = "VIF1 empty chain completion failed";
                 return false;
@@ -869,7 +921,9 @@ bool Vif1Dma::service_forward(
     }
     set_vif1_fqc(bus, qwc);
 
-    if (qwc == 0 && (mode == kModeNormal || end_after_qwc_)) {
+    if (qwc == 0 &&
+        payload_ != Payload::WaitVu &&
+        (mode == kModeNormal || end_after_qwc_)) {
         if (!complete(bus, chcr)) {
             error = "VIF1 forward DMA completion failed";
             return false;
