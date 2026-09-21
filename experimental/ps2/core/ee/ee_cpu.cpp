@@ -1709,6 +1709,96 @@ bool EeCpu::execute_mmi(
     auto store = [&](const EeGpr& value) {
         if (rd != 0u) state_.gpr[rd] = value;
     };
+    auto get_acc_slot = [&](u32 lane) -> u32 {
+        const u64 value =
+            lane < 2u ? state_.lo :
+            lane < 4u ? state_.hi :
+            lane < 6u ? state_.lo1 :
+                        state_.hi1;
+        return static_cast<u32>(
+            value >> ((lane & 1u) * 32u));
+    };
+    auto set_acc_slot = [&](u32 lane, u32 value) {
+        u64* target =
+            lane < 2u ? &state_.lo :
+            lane < 4u ? &state_.hi :
+            lane < 6u ? &state_.lo1 :
+                        &state_.hi1;
+        const u32 shift = (lane & 1u) * 32u;
+        *target =
+            (*target & ~(0xFFFFFFFFull << shift)) |
+            (static_cast<u64>(value) << shift);
+    };
+    auto get_lo_word = [&](u32 lane) -> u32 {
+        const u64 value = lane < 2u ? state_.lo : state_.lo1;
+        return static_cast<u32>(
+            value >> ((lane & 1u) * 32u));
+    };
+    auto set_lo_word = [&](u32 lane, u32 value) {
+        u64& target = lane < 2u ? state_.lo : state_.lo1;
+        const u32 shift = (lane & 1u) * 32u;
+        target =
+            (target & ~(0xFFFFFFFFull << shift)) |
+            (static_cast<u64>(value) << shift);
+    };
+    auto get_hi_word = [&](u32 lane) -> u32 {
+        const u64 value = lane < 2u ? state_.hi : state_.hi1;
+        return static_cast<u32>(
+            value >> ((lane & 1u) * 32u));
+    };
+    auto set_hi_word = [&](u32 lane, u32 value) {
+        u64& target = lane < 2u ? state_.hi : state_.hi1;
+        const u32 shift = (lane & 1u) * 32u;
+        target =
+            (target & ~(0xFFFFFFFFull << shift)) |
+            (static_cast<u64>(value) << shift);
+    };
+    auto finish_half_acc = [&](EeGpr& out) {
+        set32(out, 0u, get_acc_slot(0u));
+        set32(out, 1u, get_acc_slot(2u));
+        set32(out, 2u, get_acc_slot(4u));
+        set32(out, 3u, get_acc_slot(6u));
+    };
+    auto packed_word_accumulate = [&](
+        bool subtract_product,
+        bool unsigned_product,
+        EeGpr& out) {
+        for (u32 lane = 0; lane < 2u; ++lane) {
+            const u32 word = lane * 2u;
+            u64 accumulator =
+                static_cast<u64>(
+                    lane == 0u
+                        ? static_cast<u32>(state_.lo)
+                        : static_cast<u32>(state_.lo1)) |
+                (static_cast<u64>(
+                    lane == 0u
+                        ? static_cast<u32>(state_.hi)
+                        : static_cast<u32>(state_.hi1)) << 32);
+            u64 product = 0;
+            if (unsigned_product) {
+                product =
+                    static_cast<u64>(get32(a, word)) *
+                    static_cast<u64>(get32(b, word));
+            } else {
+                product = static_cast<u64>(
+                    static_cast<s64>(
+                        static_cast<s32>(get32(a, word))) *
+                    static_cast<s64>(
+                        static_cast<s32>(get32(b, word))));
+            }
+            const u64 result =
+                subtract_product
+                    ? accumulator - product
+                    : accumulator + product;
+            u64& lo = lane == 0u ? state_.lo : state_.lo1;
+            u64& hi = lane == 0u ? state_.hi : state_.hi1;
+            lo = sign_extend_32(static_cast<u32>(result));
+            hi = sign_extend_32(
+                static_cast<u32>(result >> 32));
+            if (lane == 0u) out.lo = result;
+            else out.hi = result;
+        }
+    };
 
     auto mmi0 = [&](u32 sub) -> bool {
         EeGpr out{};
@@ -1933,6 +2023,19 @@ bool EeCpu::execute_mmi(
             }
             store(out);
             return true;
+        case 0x04: // PADSBH
+            for (u32 i = 0; i < 8u; ++i) {
+                const u16 av = get16(a, i);
+                const u16 bv = get16(b, i);
+                set16(
+                    out,
+                    i,
+                    i < 4u
+                        ? static_cast<u16>(av - bv)
+                        : static_cast<u16>(av + bv));
+            }
+            store(out);
+            return true;
         case 0x05: // PABSH
             for (u32 i = 0; i < 8u; ++i) {
                 const s16 v = static_cast<s16>(get16(b, i));
@@ -2079,6 +2182,14 @@ bool EeCpu::execute_mmi(
     auto mmi2 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x00: // PMADDW
+            packed_word_accumulate(false, false, out);
+            store(out);
+            return true;
+        case 0x04: // PMSUBW
+            packed_word_accumulate(true, false, out);
+            store(out);
+            return true;
         case 0x02: // PSLLVW
             out.lo = sign_extend_32(
                 get32(b, 0u) << (get32(a, 0u) & 31u));
@@ -2141,6 +2252,54 @@ bool EeCpu::execute_mmi(
             out.hi = a.lo;
             store(out);
             return true;
+        case 0x10: // PMADDH
+        case 0x14: // PMSUBH
+            for (u32 i = 0; i < 8u; ++i) {
+                const s32 product =
+                    static_cast<s32>(
+                        static_cast<s16>(get16(a, i))) *
+                    static_cast<s32>(
+                        static_cast<s16>(get16(b, i)));
+                const u32 old = get_acc_slot(i);
+                const u32 value =
+                    sub == 0x10u
+                        ? old + static_cast<u32>(product)
+                        : old - static_cast<u32>(product);
+                set_acc_slot(i, value);
+            }
+            finish_half_acc(out);
+            store(out);
+            return true;
+        case 0x11: // PHMADH
+        case 0x15: // PHMSBH
+            for (u32 pair = 0; pair < 4u; ++pair) {
+                const u32 even = pair * 2u;
+                const u32 odd = even + 1u;
+                const s32 first =
+                    static_cast<s32>(
+                        static_cast<s16>(get16(a, odd))) *
+                    static_cast<s32>(
+                        static_cast<s16>(get16(b, odd)));
+                const s32 second =
+                    static_cast<s32>(
+                        static_cast<s16>(get16(a, even))) *
+                    static_cast<s32>(
+                        static_cast<s16>(get16(b, even)));
+                set_acc_slot(
+                    even,
+                    static_cast<u32>(
+                        sub == 0x11u
+                            ? first + second
+                            : first - second));
+                set_acc_slot(
+                    odd,
+                    sub == 0x11u
+                        ? static_cast<u32>(first)
+                        : ~static_cast<u32>(first));
+            }
+            finish_half_acc(out);
+            store(out);
+            return true;
         case 0x12: // PAND
             out.lo = a.lo & b.lo;
             out.hi = a.hi & b.hi;
@@ -2167,6 +2326,41 @@ bool EeCpu::execute_mmi(
             }
             store(out);
             return true;
+        case 0x1C: // PMULTH
+            for (u32 i = 0; i < 8u; ++i) {
+                const s32 product =
+                    static_cast<s32>(
+                        static_cast<s16>(get16(a, i))) *
+                    static_cast<s32>(
+                        static_cast<s16>(get16(b, i)));
+                set_acc_slot(i, static_cast<u32>(product));
+            }
+            finish_half_acc(out);
+            store(out);
+            return true;
+        case 0x1D: { // PDIVBW
+            const s16 divisor =
+                static_cast<s16>(get16(b, 0u));
+            for (u32 i = 0; i < 4u; ++i) {
+                const s32 dividend =
+                    static_cast<s32>(get32(a, i));
+                s32 quotient = 0;
+                s32 remainder = 0;
+                if (dividend == std::numeric_limits<s32>::min() &&
+                    divisor == -1) {
+                    quotient = std::numeric_limits<s32>::min();
+                } else if (divisor != 0) {
+                    quotient = dividend / divisor;
+                    remainder = dividend % divisor;
+                } else {
+                    quotient = dividend < 0 ? 1 : -1;
+                    remainder = dividend;
+                }
+                set_lo_word(i, static_cast<u32>(quotient));
+                set_hi_word(i, static_cast<u32>(remainder));
+            }
+            return true;
+        }
         case 0x1E: // PEXEW
             set32(out, 0u, get32(b, 0u));
             set32(out, 1u, get32(b, 2u));
@@ -2189,6 +2383,10 @@ bool EeCpu::execute_mmi(
     auto mmi3 = [&](u32 sub) -> bool {
         EeGpr out{};
         switch (sub) {
+        case 0x00: // PMADDUW
+            packed_word_accumulate(false, true, out);
+            store(out);
+            return true;
         case 0x03: // PSRAVW
             out.lo = sign_extend_32(static_cast<u32>(
                 static_cast<s32>(get32(b, 0u)) >>
