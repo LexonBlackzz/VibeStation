@@ -28,6 +28,7 @@ public:
     bool boot_bios(std::string& error);
     bool step_ee(std::string& error); bool step_iop(std::string& error);
     u64 run_ee(u64 instruction_budget,std::string& error);
+    void refresh_display();
     Bios& bios(){return bios_;} const Bios& bios()const{return bios_;}
     EeRam& ram(){return ram_;} const EeRam& ram()const{return ram_;}
     IopRam& iop_ram(){return iop_ram_;} const IopRam& iop_ram()const{return iop_ram_;}
