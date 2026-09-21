@@ -59,6 +59,64 @@ void print_state(const ps2::Ps2System& system) {
         << std::dec
         << " SCHEDULER_TICK=" << system.scheduler().now()
         << '\n';
+
+    if (system.iop_halted()) {
+        std::cout
+            << "IOP_HALTED=1 IOP_HALT_REASON="
+            << system.iop().halt_reason()
+            << '\n';
+    } else {
+        std::cout << "IOP_HALTED=0\n";
+    }
+
+    ps2::u32 vif_stat = 0;
+    ps2::u32 vif_chcr = 0;
+    ps2::u32 vif_qwc = 0;
+    (void)system.bus().read32(0x10003C00u, vif_stat);
+    (void)system.bus().read32(0x10009000u, vif_chcr);
+    (void)system.bus().read32(0x10009020u, vif_qwc);
+    std::cout
+        << "VIF1_STAT=0x" << std::hex << std::uppercase << vif_stat
+        << " VIF1_CHCR=0x" << vif_chcr
+        << " VIF1_QWC=0x" << vif_qwc
+        << std::dec << '\n';
+
+    const auto& vu = system.vu1();
+    const auto& vu_stats = vu.stats();
+    std::cout
+        << "VU1_RUNNING=" << (vu.running() ? 1 : 0)
+        << " VU1_PC=0x" << std::hex << std::uppercase << vu.pc()
+        << std::dec
+        << " VU1_INSTRUCTIONS=" << vu_stats.instructions
+        << " VU1_UNSUPPORTED_UPPER=" << vu_stats.unsupported_upper
+        << " VU1_UNSUPPORTED_LOWER=" << vu_stats.unsupported_lower
+        << " VU1_XGKICKS=" << vu_stats.xgkicks
+        << " VU1_XGKICK_QWORDS=" << vu_stats.xgkick_qwords
+        << '\n';
+
+    const auto& gs = system.gs_core();
+    const auto& gs_stats = gs.stats();
+    std::cout
+        << "GS_GIF_TAGS=" << gs_stats.gif_tags
+        << " GS_GIF_QWORDS=" << gs_stats.gif_qwords
+        << " GS_REGISTER_WRITES=" << gs_stats.register_writes
+        << " GS_PRIMITIVES=" << gs_stats.primitives
+        << " GS_RASTER_DRAWS=" << gs_stats.raster_draws
+        << " GS_RASTER_PIXELS=" << gs_stats.raster_pixels
+        << " GS_UNSUPPORTED_TRANSFERS=" << gs_stats.unsupported_transfers
+        << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
+        << '\n';
+
+    const auto& display = system.gs_display();
+    std::cout
+        << "DISPLAY_VALID=" << (display.valid() ? 1 : 0)
+        << " DISPLAY_WIDTH=" << display.width()
+        << " DISPLAY_HEIGHT=" << display.height()
+        << " DISPLAY_CIRCUIT=" << display.circuit()
+        << " DISPLAY_PSM=0x" << std::hex << std::uppercase << display.psm()
+        << std::dec
+        << " DISPLAY_GENERATION=" << display.generation()
+        << '\n';
 }
 
 } // namespace
