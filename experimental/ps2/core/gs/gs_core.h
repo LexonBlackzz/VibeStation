@@ -21,6 +21,10 @@ struct GsStats {
     u64 image_bytes = 0;
     u64 host_to_local_transfers = 0;
     u64 host_to_local_pixels = 0;
+    u64 local_to_host_transfers = 0;
+    u64 local_to_host_pixels = 0;
+    u64 local_to_host_qwords = 0;
+    u64 local_to_host_bytes = 0;
     u64 local_to_local_transfers = 0;
     u64 local_to_local_pixels = 0;
     u64 unsupported_transfers = 0;
@@ -47,6 +51,7 @@ public:
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
     [[nodiscard]] bool write_gif_fifo64(u32 physical, u64 value);
     void write_gif_qword(u64 lo, u64 hi);
+    [[nodiscard]] bool read_local_to_host_qword(u64& lo, u64& hi);
 
     [[nodiscard]] u64 register_value(u32 address) const {
         return registers_[address & 0x7Fu];
@@ -69,6 +74,7 @@ public:
 private:
     struct TransferState {
         bool active = false;
+        bool local_to_host = false;
         u32 bp = 0;
         u32 bw = 0;
         u32 psm = 0;
@@ -100,6 +106,7 @@ private:
     void process_reglist_value(u32 descriptor, u64 value);
     void write_register(u32 address, u64 value);
     void begin_host_to_local();
+    void begin_local_to_host();
     void execute_local_to_local();
     void consume_image_qword(u64 lo, u64 hi);
     void consume_pending_pixels();

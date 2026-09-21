@@ -1843,6 +1843,145 @@ bool test_gs_fog_dither_scanmask_and_context2() {
     return ok;
 }
 
+
+bool test_gs_local_to_host_transfer() {
+    ps2::GsCore gs;
+    gs.reset();
+
+    auto ad = [](ps2::GsCore& core, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        core.write_gif_qword(tag, 0xEull);
+        core.write_gif_qword(value, address);
+    };
+
+    bool ok = true;
+    const ps2::u32 pixels[6] = {
+        0x030201u, 0x060504u, 0x090807u,
+        0x0C0B0Au, 0x0F0E0Du, 0x121110u,
+    };
+    for (ps2::u32 x = 0; x < 6; ++x) {
+        ok = expect(gs.vram().write_pixel(1, x, 0, 0, 1, pixels[x]),
+                    "local-to-host source setup failed") && ok;
+    }
+
+    // Source side of BITBLTBUF: SBP=0, SBW=1, SPSM=PSMCT24.
+    const ps2::u64 blit =
+        (1ull << 16) |
+        (1ull << 24);
+    ad(gs, 0x50, blit);
+    ad(gs, 0x51, 0);
+    ad(gs, 0x52, 6ull | (1ull << 32));
+    ad(gs, 0x53, 1u);
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ok = expect(gs.transfer_active(),
+                "local-to-host transfer did not arm") && ok;
+    ok = expect(gs.read_local_to_host_qword(lo, hi),
+                "local-to-host first qword missing") && ok;
+    ok = expect(lo == 0x0807060504030201ull &&
+                hi == 0x100F0E0D0C0B0A09ull,
+                "local-to-host first 24-bit qword mismatch") && ok;
+    ok = expect(gs.transfer_active(),
+                "24-bit readback lost cross-qword remainder") && ok;
+
+    lo = hi = 0;
+    ok = expect(gs.read_local_to_host_qword(lo, hi),
+                "local-to-host second qword missing") && ok;
+    ok = expect(lo == 0x1211ull && hi == 0,
+                "local-to-host 24-bit tail mismatch") && ok;
+    ok = expect(!gs.transfer_active() &&
+                (gs.register_value(0x53) & 3u) == 3u,
+                "local-to-host transfer did not complete") && ok;
+
+    const auto& stats = gs.stats();
+    ok = expect(stats.local_to_host_transfers == 1 &&
+                stats.local_to_host_pixels == 6 &&
+                stats.local_to_host_qwords == 2 &&
+                stats.local_to_host_bytes == 18,
+                "local-to-host statistics mismatch") && ok;
+    return ok;
+}
+
+bool test_vif1_reverse_dma() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    auto ad = [](ps2::GsCore& core, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        core.write_gif_qword(tag, 0xEull);
+        core.write_gif_qword(value, address);
+    };
+
+    bool ok = true;
+    std::string error;
+
+    for (ps2::u32 x = 0; x < 4; ++x) {
+        ok = expect(
+            system.gs_core().vram().write_pixel(
+                0, x, 0, 0, 1, 0x11111111u * (x + 1u)),
+            "VIF1 reverse source setup failed") && ok;
+    }
+
+    const ps2::u64 blit = 1ull << 16; // SBP=0, SBW=1, SPSM=PSMCT32.
+    ad(system.gs_core(), 0x50, blit);
+    ad(system.gs_core(), 0x51, 0);
+    ad(system.gs_core(), 0x52, 4ull | (1ull << 32));
+    ad(system.gs_core(), 0x53, 1u);
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 dmac_stat = 0x1000E010u;
+    constexpr ps2::u32 vif1_chcr = 0x10009000u;
+    constexpr ps2::u32 vif1_madr = 0x10009010u;
+    constexpr ps2::u32 vif1_qwc = 0x10009020u;
+    constexpr ps2::u32 vif1_stat = 0x10003C00u;
+    constexpr ps2::u32 gs_busdir = 0x12001040u;
+
+    ok = expect(system.bus().write64(gs_busdir, 1u),
+                "GS BUSDIR reverse setup failed") && ok;
+    ok = expect(system.bus().write32(vif1_stat, 1u << 23),
+                "VIF1 FDR setup failed") && ok;
+    ok = expect(system.bus().write32(dmac_ctrl, 1u) &&
+                system.bus().write32(dmac_stat, 1u << 17) &&
+                system.bus().write32(vif1_madr, 0x6000u) &&
+                system.bus().write32(vif1_qwc, 1u) &&
+                system.bus().write32(vif1_chcr, 0x100u),
+                "VIF1 reverse DMA register setup failed") && ok;
+
+    ok = expect(dma.service(
+                    system.bus(),
+                    system.gs_core(),
+                    system.gs_privileged(),
+                    error),
+                "VIF1 reverse DMA service failed") && ok;
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ps2::u32 value = 0;
+    ok = expect(system.bus().read64(0x6000u, lo) &&
+                system.bus().read64(0x6008u, hi) &&
+                lo == 0x2222222211111111ull &&
+                hi == 0x4444444433333333ull,
+                "VIF1 reverse DMA RAM payload mismatch") && ok;
+    ok = expect(system.bus().read32(vif1_madr, value) &&
+                value == 0x6010u,
+                "VIF1 reverse MADR advance mismatch") && ok;
+    ok = expect(system.bus().read32(vif1_qwc, value) && value == 0,
+                "VIF1 reverse QWC did not reach zero") && ok;
+    ok = expect(system.bus().read32(vif1_chcr, value) &&
+                (value & 0x100u) == 0,
+                "VIF1 reverse STR did not clear") && ok;
+    ok = expect(system.bus().read32(dmac_stat, value) &&
+                (value & (1u << 1)) != 0,
+                "VIF1 reverse completion cause missing") && ok;
+    ok = expect(system.bus().dmac_pending(),
+                "VIF1 reverse completion did not assert DMAC pending") && ok;
+    ok = expect(!system.gs_core().transfer_active(),
+                "GS local-to-host transfer remained active") && ok;
+    return ok;
+}
+
 bool test_fpu_accumulator() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -1886,6 +2025,8 @@ int main() {
     ok = test_gs_indexed_textures_and_texa() && ok;
     ok = test_gs_local_copy_and_depth_transfer() && ok;
     ok = test_gs_signal_finish_label_and_imr() && ok;
+    ok = test_gs_local_to_host_transfer() && ok;
+    ok = test_vif1_reverse_dma() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 bootstrap tests passed.\n";

@@ -33,12 +33,14 @@ public:
     [[nodiscard]] bool irq_pending() const;
     [[nodiscard]] u32 csr() const;
     [[nodiscard]] u32 imr() const;
+    [[nodiscard]] u32 busdir() const;
     [[nodiscard]] u32 signal_id() const;
     [[nodiscard]] u32 label_id() const;
 
 private:
     static constexpr u32 kCsr = kBase + 0x1000u;
     static constexpr u32 kImr = kBase + 0x1010u;
+    static constexpr u32 kBusdir = kBase + 0x1040u;
     static constexpr u32 kSiglblid = kBase + 0x1080u;
 
     [[nodiscard]] u32 load32(u32 address) const;

@@ -57,6 +57,10 @@ u32 GsPrivileged::imr() const {
     return load32(kImr);
 }
 
+u32 GsPrivileged::busdir() const {
+    return load32(kBusdir) & 1u;
+}
+
 u32 GsPrivileged::signal_id() const {
     return load32(kSiglblid);
 }
@@ -207,6 +211,10 @@ bool GsPrivileged::write32(u32 address, u32 value) {
         write_imr_value(value);
         return true;
     }
+    if (address == kBusdir) {
+        store32(kBusdir, value & 1u);
+        return true;
+    }
     store32(address, value);
     return true;
 }
@@ -219,6 +227,10 @@ bool GsPrivileged::write64(u32 address, u64 value) {
     }
     if (address == kImr) {
         write_imr_value(static_cast<u32>(value));
+        return true;
+    }
+    if (address == kBusdir) {
+        store32(kBusdir, static_cast<u32>(value) & 1u);
         return true;
     }
 
