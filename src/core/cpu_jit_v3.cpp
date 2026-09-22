@@ -1,5 +1,6 @@
 #include "cpu_jit_v3.h"
 #include "cpu_recompiler.h"
+#include "jit_code_page_bitmap.h"
 #include "system.h"
 
 #include <algorithm>
@@ -1381,10 +1382,12 @@ struct CpuJitV3Backend::Impl {
   // every execution.
   std::unordered_set<u32> rejected_pcs;
   std::unordered_set<u32> rejected_pages;
-  // Conservative ever-compiled page set. Entries are intentionally retained
-  // until flush: stale positives cost only an occasional scan, while there can
-  // never be a false negative that misses self-modifying code.
-  std::unordered_set<u32> code_pages;
+  // Conservative ever-compiled page bitmap. Entries are intentionally retained
+  // until flush: stale positives only cost an uncommon invalidation check,
+  // while there can never be a false negative that misses self-modifying code.
+  // The same architecture-neutral primitive can be reused by future EE/IOP
+  // dynarecs with their own address width.
+  JitCodePageBitmap<29u, 12u> code_pages;
 };
 
 CpuJitV3Backend::CpuJitV3Backend(Cpu &cpu)
@@ -1876,7 +1879,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         helper_block.icache_line_count = 1u;
         helper_block.icache_indices[0] = static_cast<u8>(index);
         helper_block.icache_tags[0] = expected_tag;
-        impl_->code_pages.insert(helper_block.phys_start >> 12u);
+        impl_->code_pages.mark_page(helper_block.phys_start >> 12u);
         auto inserted =
             impl_->blocks.emplace(start_pc, std::move(helper_block));
         block_ptr = &inserted.first->second;
@@ -2006,7 +2009,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       const u32 block_phys_last = block.phys_end;
       for (u32 page = block_phys_first >> 12u;
            page <= (block_phys_last >> 12u); ++page) {
-        impl_->code_pages.insert(page);
+        impl_->code_pages.mark_page(page);
       }
       auto inserted = impl_->blocks.emplace(start_pc, std::move(block));
       block_ptr = &inserted.first->second;
@@ -2546,14 +2549,7 @@ void CpuJitV3Backend::invalidate_range(u32 phys_or_normalized_addr,
   const u32 first_line = first & ~0x0Fu;
   const u32 last_line = last & ~0x0Fu;
 
-  bool maybe_code = false;
-  for (u32 page = first_page; page <= last_page; ++page) {
-    if (impl_->code_pages.find(page) != impl_->code_pages.end()) {
-      maybe_code = true;
-      break;
-    }
-  }
-  if (!maybe_code) {
+  if (!impl_->code_pages.any_page(first_page, last_page)) {
     ++stats_.invalidation_fast_no_code_page_exits;
     return;
   }
