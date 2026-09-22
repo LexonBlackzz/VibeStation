@@ -427,7 +427,7 @@ static void log_cpu_compare_failure_summary(
       "periph=%u seg_periph=%u expected=%u native=%u native_check=%s "
       "pc=%08X/%08X next=%08X/%08X current=%08X/%08X cyc=%llu/%llu "
       "first_reg=%d:%08X/%08X native_instr=%llu decoded_instr=%llu "
-      "fallback_instr=%llu v4_bail_stage=%llu",
+      "fallback_instr=%llu",
       test_case.name, cpu_compare_mode_name(mode),
       state_pass ? 1u : 0u, segment_state_pass ? 1u : 0u,
       irq_state_pass ? 1u : 0u, memory_state_pass ? 1u : 0u,
@@ -443,8 +443,7 @@ static void log_cpu_compare_failure_summary(
       first_reg, first_reg_ref, first_reg_actual,
       static_cast<unsigned long long>(actual.stats.native_instructions),
       static_cast<unsigned long long>(actual.stats.decoded_instructions),
-      static_cast<unsigned long long>(actual.stats.fallback_instructions),
-      static_cast<unsigned long long>(actual.stats.native_reject_other_state));
+      static_cast<unsigned long long>(actual.stats.fallback_instructions));
 }
 
 static bool cpu_debug_states_equal(const CpuDebugState &a,
@@ -4444,18 +4443,6 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               (result.stats.invalidations != 0u &&
                result.stats.native_blocks_compiled >= 2u &&
                result.stats.block_count == 1u);
-          if (test_case.require_v4_page_local_invalidation_when_available &&
-              !page_local_invalidation) {
-            LOG_ERROR(
-                "V4_PAGE_LOCAL_GATE invalidations=%llu flushes=%llu compiled=%llu blocks=%u hits=%llu misses=%llu",
-                static_cast<unsigned long long>(result.stats.invalidations),
-                static_cast<unsigned long long>(result.stats.flushes),
-                static_cast<unsigned long long>(
-                    result.stats.native_blocks_compiled),
-                result.stats.block_count,
-                static_cast<unsigned long long>(result.stats.cache_hits),
-                static_cast<unsigned long long>(result.stats.cache_misses));
-          }
           const bool cached_same_page_retained =
               !test_case.require_v4_cached_same_page_retention_when_available ||
               (result.stats.invalidations != 0u &&
