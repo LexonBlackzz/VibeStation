@@ -73,6 +73,37 @@ struct V4DecodedInstruction {
   s32 simm = 0;
 };
 
+enum class V4ControlOp : u8 {
+  None,
+  J,
+  Jal,
+  Beq,
+  Bne,
+};
+
+struct V4DecodedControl {
+  V4ControlOp op = V4ControlOp::None;
+  u8 rs = 0;
+  u8 rt = 0;
+  s32 simm = 0;
+  u32 imm26 = 0;
+};
+
+bool decode_v4_control(u32 bits, V4DecodedControl &out) {
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.simm = static_cast<s32>(static_cast<s16>(bits & 0xFFFFu));
+  out.imm26 = bits & 0x03FFFFFFu;
+  switch ((bits >> 26) & 0x3Fu) {
+  case 0x02: out.op = V4ControlOp::J; return true;
+  case 0x03: out.op = V4ControlOp::Jal; return true;
+  case 0x04: out.op = V4ControlOp::Beq; return true;
+  case 0x05: out.op = V4ControlOp::Bne; return true;
+  default: return false;
+  }
+}
+
 bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
   out = {};
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
@@ -126,6 +157,8 @@ struct V4NativeState {
   u32 cache_epoch = 0;
   u32 pc = 0;
   u32 last_pc = 0;
+  u32 last_in_delay_slot = 0;
+  u32 active_branch_pc = 0;
   u32 cycles = 0;
   u32 instructions = 0;
   u32 cycle_budget = 0;
@@ -207,6 +240,7 @@ struct V4Block {
   u32 code_size = 0;
   V4NativeFn fn = nullptr;
   bool interpreter_only = false;
+  bool has_control = false;
 };
 
 struct V4DispatchEntry {
@@ -238,22 +272,9 @@ void emit_write_guest(Xbyak::CodeGenerator &code, u8 guest_reg,
   code.mov(code.dword[code.r10 + static_cast<int>(guest_reg) * 4], src);
 }
 
-std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
-    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &decoded,
-    u32 count, u32 start_pc) {
-  using namespace Xbyak;
-  auto code = std::make_unique<CodeGenerator>(4096);
-#if defined(_WIN32)
-  code->mov(code->r11, code->rcx);
-#else
-  code->mov(code->r11, code->rdi);
-#endif
-  code->mov(code->r10, code->ptr[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
-
-  for (u32 i = 0; i < count; ++i) {
-    const V4DecodedInstruction &inst = decoded[i];
-    switch (inst.op) {
+void emit_v4_alu_instruction(Xbyak::CodeGenerator *code,
+                             const V4DecodedInstruction &inst) {
+  switch (inst.op) {
     case V4AluOp::Nop:
       break;
 
@@ -366,11 +387,34 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
       emit_write_guest(*code, inst.rt, code->eax);
       break;
     }
+}
+
+std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &decoded,
+    u32 count, u32 start_pc) {
+  using namespace Xbyak;
+  auto code = std::make_unique<CodeGenerator>(4096);
+#if defined(_WIN32)
+  code->mov(code->r11, code->rcx);
+#else
+  code->mov(code->r11, code->rdi);
+#endif
+  code->mov(code->r10, code->ptr[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+
+  for (u32 i = 0; i < count; ++i) {
+    emit_v4_alu_instruction(code.get(), decoded[i]);
   }
 
   code->mov(code->dword[
       code->r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
       start_pc + (count - 1u) * 4u);
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
   code->add(code->dword[
       code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       count * 4u);
@@ -379,6 +423,90 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
   code->add(code->dword[
       code->r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       count);
+  code->ret();
+  code->ready();
+  return code;
+}
+
+std::unique_ptr<Xbyak::CodeGenerator> compile_v4_branch(
+    const V4DecodedControl &control, const V4DecodedInstruction &delay,
+    u32 branch_pc) {
+  using namespace Xbyak;
+  auto code = std::make_unique<CodeGenerator>(2048);
+#if defined(_WIN32)
+  code->mov(code->r11, code->rcx);
+#else
+  code->mov(code->r11, code->rdi);
+#endif
+  code->mov(code->r10, code->ptr[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+
+  const u32 fallthrough = branch_pc + 8u;
+  const u32 jump_target =
+      ((branch_pc + 4u) & 0xF0000000u) | (control.imm26 << 2u);
+  const u32 branch_target =
+      branch_pc + 4u + static_cast<u32>(control.simm * 4);
+
+  if (control.op == V4ControlOp::Beq ||
+      control.op == V4ControlOp::Bne) {
+    emit_read_guest(*code, code->eax, control.rs);
+    emit_read_guest(*code, code->ecx, control.rt);
+    code->cmp(code->eax, code->ecx);
+    if (control.op == V4ControlOp::Beq) {
+      code->sete(code->dl);
+    } else {
+      code->setne(code->dl);
+    }
+    code->movzx(code->edx, code->dl);
+  } else if (control.op == V4ControlOp::Jal) {
+    code->mov(code->eax, branch_pc + 8u);
+    emit_write_guest(*code, 31u, code->eax);
+  }
+
+  // The branch decision/target is captured before the architectural delay slot.
+  // JAL's link is also visible to the delay slot, matching R3000A behavior.
+  emit_v4_alu_instruction(code.get(), delay);
+
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      branch_pc + 4u);
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      branch_pc);
+  code->add(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+      2u);
+
+  if (control.op == V4ControlOp::J ||
+      control.op == V4ControlOp::Jal) {
+    code->mov(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        jump_target);
+    code->add(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+  } else {
+    Label not_taken, selected;
+    code->test(code->edx, code->edx);
+    code->jz(not_taken);
+    code->mov(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        branch_target);
+    code->add(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+    code->jmp(selected);
+
+    code->L(not_taken);
+    code->mov(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        fallthrough);
+    code->add(code->dword[
+        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code->L(selected);
+  }
+
   code->ret();
   code->ready();
   return code;
@@ -606,7 +734,14 @@ struct CpuJitV4Backend::Impl {
       decoded[count] = inst;
     }
 
-    if (count == 0u) {
+    V4DecodedControl control{};
+    V4DecodedInstruction delay{};
+    const bool simple_control =
+        count == 0u &&
+        decode_v4_control(cpu.read_instruction_for_backend(start_pc), control) &&
+        decode_v4_alu(cpu.read_instruction_for_backend(start_pc + 4u), delay);
+
+    if (count == 0u && !simple_control) {
       block->interpreter_only = true;
       install(start_pc, block);
       ++stats.interpreter_only_blocks;
@@ -616,8 +751,12 @@ struct CpuJitV4Backend::Impl {
 
     ++stats.native_compile_attempts;
     try {
-      std::unique_ptr<Xbyak::CodeGenerator> generated =
-          compile_v4_alu(decoded, count, start_pc);
+      std::unique_ptr<Xbyak::CodeGenerator> generated;
+      if (simple_control) {
+        generated = compile_v4_branch(control, delay, start_pc);
+      } else {
+        generated = compile_v4_alu(decoded, count, start_pc);
+      }
       block->code_size = static_cast<u32>(generated->getSize());
       void *entry = arena.copy_code(generated->getCode(), block->code_size);
       if (entry == nullptr) {
@@ -626,22 +765,28 @@ struct CpuJitV4Backend::Impl {
         return nullptr;
       }
       block->fn = reinterpret_cast<V4NativeFn>(entry);
-      block->instruction_count = count;
-      block->max_cycles = count;
+      block->instruction_count = simple_control ? 2u : count;
+      block->max_cycles = simple_control ? 3u : count;
+      block->has_control = simple_control;
     } catch (...) {
       --block_count;
       ++stats.native_compile_failures;
       return nullptr;
     }
 
-    for (u32 i = 0; i < count; ++i) {
+    const u32 translated_count = simple_control ? 2u : count;
+    for (u32 i = 0; i < translated_count; ++i) {
       code_pages.mark_address(psx::mask_address(start_pc + i * 4u));
     }
     install(start_pc, block);
 
     ++stats.native_compile_successes;
     ++stats.native_blocks_compiled;
-    ++stats.native_alu_blocks_compiled;
+    if (simple_control) {
+      ++stats.native_branch_tail_blocks_compiled;
+    } else {
+      ++stats.native_alu_blocks_compiled;
+    }
     ++stats.native_blocks;
     stats.block_count = static_cast<u32>(block_count);
     stats.native_code_bytes = arena.bytes_used();
@@ -701,7 +846,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
   // observe instruction-by-instruction state and are deliberately not a V4 hot
   // path concern.
   if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics ||
-      g_cpu_backend_compare_test_force_interpreter) {
+      g_cpu_backend_compare_test_force_interpreter ||
+      g_cpu_backend_compare_irq_on_branch) {
     while (result.cycles < max_cycles &&
            result.instructions < max_instructions) {
       fallback_one();
@@ -793,8 +939,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     cpu_.current_pc_ = native.last_pc;
     cpu_.pc_ = native.pc;
     cpu_.next_pc_ = native.pc + 4u;
-    cpu_.in_delay_slot_ = false;
-    cpu_.active_branch_pc_ = 0u;
+    cpu_.in_delay_slot_ = native.last_in_delay_slot != 0u;
+    cpu_.active_branch_pc_ = native.active_branch_pc;
     cpu_.pending_delay_slot_ = false;
     cpu_.pending_branch_taken_ = false;
     cpu_.pending_branch_pc_ = 0u;
@@ -807,7 +953,11 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     result.cycles += native.cycles;
     result.instructions += native.instructions;
     stats_.native_block_entries += native.block_entries;
-    stats_.native_alu_block_entries += native.block_entries;
+    if (block->has_control) {
+      ++stats_.native_branch_tail_entries;
+    } else {
+      ++stats_.native_alu_block_entries;
+    }
     if (native.block_entries > 1u) {
       ++stats_.native_chain_entries;
       stats_.native_linked_transitions += native.block_entries - 1u;
