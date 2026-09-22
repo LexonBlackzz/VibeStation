@@ -1872,8 +1872,8 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           block_ptr->resident.linked_fn != nullptr &&
           block_ptr->icache_line_count == 1u &&
           !block_ptr->has_load && !block_ptr->has_store &&
-          !block_ptr->has_branch && !block_ptr->has_jump &&
-          block_ptr->resident.kind == 0u;
+          (!(block_ptr->has_branch || block_ptr->has_jump) ||
+           !g_cpu_backend_compare_irq_on_branch);
       bool words_match = refillable;
       if (refillable) {
         for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
@@ -1889,10 +1889,15 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       const u32 remaining_cycles_now = max_cycles - result.cycles;
       const u32 remaining_instructions_now =
           max_instructions - result.instructions;
+      const u32 refill_block_worst_cycles =
+          refillable
+              ? (4u + block_ptr->base_cycles +
+                 (block_ptr->has_branch ? 1u : 0u))
+              : 0u;
       const bool whole_block_fits =
           refillable && words_match &&
           block_ptr->instruction_count <= remaining_instructions_now &&
-          block_ptr->base_cycles + 4u <= remaining_cycles_now;
+          refill_block_worst_cycles <= remaining_cycles_now;
 
       if (!whole_block_fits) {
         // Preserve the earlier exact single-instruction transaction as the
