@@ -155,6 +155,7 @@ struct CpuCompareCase {
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
+  bool require_v4_cached_same_page_retention_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
@@ -3530,6 +3531,25 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_page_local_invalidation_when_available = true;
   cases.push_back(v4_page_local_invalidation);
 
+  CpuCompareCase v4_cached_same_page_retention{};
+  v4_cached_same_page_retention.name =
+      "v4_cached_same_page_unrelated_write_retains_block";
+  v4_cached_same_page_retention.start_pc = 0x80010000u;
+  v4_cached_same_page_retention.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_cached_same_page_retention.start_pc),
+      0u,
+  };
+  // Touch another 16-byte I-cache line on the same 4 KiB physical page.
+  // The cached loop's exact guest I-cache snapshot remains valid.
+  v4_cached_same_page_retention.mutations.push_back(
+      {3u, v4_cached_same_page_retention.start_pc + 0x40u, 0xDEADBEEFu});
+  v4_cached_same_page_retention.instructions = 6u;
+  v4_cached_same_page_retention.require_v4_native_entry_when_available = true;
+  v4_cached_same_page_retention
+      .require_v4_cached_same_page_retention_when_available = true;
+  cases.push_back(v4_cached_same_page_retention);
+
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
@@ -4043,6 +4063,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
+           test_case.require_v4_cached_same_page_retention_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4072,6 +4093,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               (result.stats.invalidations != 0u &&
                result.stats.block_count >= 2u &&
                result.stats.native_blocks_compiled >= 2u);
+          const bool cached_same_page_retained =
+              !test_case.require_v4_cached_same_page_retention_when_available ||
+              (result.stats.invalidations != 0u &&
+               result.stats.native_blocks_compiled == 1u &&
+               result.stats.block_count == 1u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
@@ -4090,13 +4116,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                                               ? "v4_branch_not_folded"
                                               : (!page_local_invalidation
                                                      ? "v4_global_invalidation"
-                                                     : (!chain_entered
-                                                            ? "v4_chain_missing"
-                                                            : "v4_native_entered"))))));
+                                                     : (!cached_same_page_retained
+                                                            ? "v4_cached_same_page_recompiled"
+                                                            : (!chain_entered
+                                                                   ? "v4_chain_missing"
+                                                                   : "v4_native_entered")))))));
           native_check_pass =
               native_entered && load_entered && load_tail_folded &&
               branch_entered && folded_branch && page_local_invalidation &&
-              chain_entered;
+              cached_same_page_retained && chain_entered;
         }
       }
 
