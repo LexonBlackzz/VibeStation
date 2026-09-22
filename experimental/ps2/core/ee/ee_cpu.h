@@ -21,6 +21,13 @@ struct EeTlbEntry {
     u32 entry_lo1 = 0;
 };
 
+struct EeSyscallRecord {
+    u64 instruction = 0;
+    u32 pc = 0;
+    u32 number = 0;
+    std::array<u64, 4> args{};
+};
+
 struct EeCpuState {
     std::array<EeGpr, 32> gpr{};
     u64 hi = 0;
@@ -40,6 +47,10 @@ struct EeCpuState {
     u64 instructions_executed = 0;
     u32 last_pc = 0;
     u32 last_instruction = 0;
+    std::array<u64, 32> exception_counts{};
+    std::array<EeSyscallRecord, 64> recent_syscalls{};
+    u32 recent_syscall_count = 0;
+    u32 recent_syscall_next = 0;
 };
 
 class EeCpu {

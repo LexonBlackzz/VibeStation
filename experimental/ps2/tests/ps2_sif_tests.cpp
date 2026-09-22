@@ -114,15 +114,28 @@ bool test_sif1_ee_to_iop() {
              "SIF1 EE STR did not clear") && ok;
     ok = expect(
              system.iop_bus().read32(0x1F801538u, value) &&
+             (value & 0x01000000u) != 0,
+             "SIF1 IOP DMA completed without transfer latency") && ok;
+    ok = expect(
+             (system.iop_intc().status() & (1u << 3)) == 0,
+             "SIF1 raised its IOP interrupt without transfer latency") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 27)) == 0,
+             "SIF1 set its DMA10 flag without transfer latency") && ok;
+
+    dma.tick_iop(system.iop_bus());
+    ok = expect(
+             system.iop_bus().read32(0x1F801538u, value) &&
              (value & 0x01000000u) == 0,
-             "SIF1 IOP DMA start did not clear") && ok;
+             "SIF1 IOP DMA start did not clear after transfer latency") && ok;
     ok = expect(
              (system.iop_intc().status() & (1u << 3)) != 0,
-             "SIF1 did not raise IOP DMA interrupt") && ok;
+             "SIF1 did not raise its delayed IOP DMA interrupt") && ok;
     ok = expect(
              system.iop_bus().read32(0x1F801574u, value) &&
              (value & (1u << 27)) != 0,
-             "SIF1 DMA10 DICR2 completion flag missing") && ok;
+             "SIF1 delayed DMA10 DICR2 completion flag missing") && ok;
     ok = expect(
              system.iop_bus().write32(0x1F801574u, 1u << 27) &&
              system.iop_bus().read32(0x1F801574u, value) &&
@@ -206,19 +219,39 @@ bool test_sif0_iop_to_ee() {
     ps2::u32 value = 0;
     ok = expect(
              system.bus().read32(0x1000C000u, value) &&
+             (value & 0x100u) != 0,
+             "SIF0 EE DMA completed without transfer latency") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801528u, value) &&
+             (value & 0x01000000u) != 0,
+             "SIF0 IOP DMA completed in the transfer instruction") && ok;
+    ok = expect(
+             (system.iop_intc().status() & (1u << 3)) == 0,
+             "SIF0 raised its IOP interrupt in the transfer instruction") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801574u, value) &&
+             (value & (1u << 26)) == 0,
+             "SIF0 set its DMA9 flag in the transfer instruction") && ok;
+
+    dma.tick_ee(system.bus());
+    for (ps2::u32 i = 0; i < 4u; ++i) {
+        dma.tick_iop(system.iop_bus());
+    }
+    ok = expect(
+             system.bus().read32(0x1000C000u, value) &&
              (value & 0x100u) == 0,
-             "SIF0 EE STR did not clear") && ok;
+             "SIF0 EE STR did not clear after transfer latency") && ok;
     ok = expect(
              system.iop_bus().read32(0x1F801528u, value) &&
              (value & 0x01000000u) == 0,
-             "SIF0 IOP DMA start did not clear") && ok;
+             "SIF0 IOP DMA start did not clear on the next IOP cycle") && ok;
     ok = expect(
              (system.iop_intc().status() & (1u << 3)) != 0,
-             "SIF0 did not raise IOP DMA interrupt") && ok;
+             "SIF0 did not raise its deferred IOP DMA interrupt") && ok;
     ok = expect(
              system.iop_bus().read32(0x1F801574u, value) &&
              (value & (1u << 26)) != 0,
-             "SIF0 DMA9 DICR2 completion flag missing") && ok;
+             "SIF0 deferred DMA9 DICR2 completion flag missing") && ok;
     ok = expect(
              system.iop_bus().write32(0x1F801574u, 1u << 26) &&
              system.iop_bus().read32(0x1F801574u, value) &&
@@ -295,12 +328,20 @@ bool test_sif0_completes_each_side_independently() {
              "SIF0 ended EE chain with only the IOP end tag") && ok;
     ok = expect(
              system.iop_bus().read32(0x1F801528u, value) &&
-             (value & 0x01000000u) == 0,
-             "SIF0 did not end the IOP chain") && ok;
+             (value & 0x01000000u) != 0,
+             "SIF0 ended the IOP chain in the transfer instruction") && ok;
     ok = expect(
              system.bus().read32(0x1000E010u, value) &&
              (value & (1u << 5)) == 0,
              "SIF0 raised an early EE completion interrupt") && ok;
+
+    for (ps2::u32 i = 0; i < 4u; ++i) {
+        dma.tick_iop(system.iop_bus());
+    }
+    ok = expect(
+             system.iop_bus().read32(0x1F801528u, value) &&
+             (value & 0x01000000u) == 0,
+             "SIF0 did not end the IOP chain on the next IOP cycle") && ok;
 
     // Rearming only the IOP side must continue into the still-active EE chain.
     ok = expect(
@@ -330,12 +371,22 @@ bool test_sif0_completes_each_side_independently() {
              "continued SIF0 payload mismatch") && ok;
     ok = expect(
              system.bus().read32(0x1000C000u, value) &&
+             (value & 0x100u) != 0,
+             "SIF0 EE END tag completed without transfer latency") && ok;
+    ok = expect(
+             system.bus().read32(0x1000E010u, value) &&
+             (value & (1u << 5)) == 0,
+             "SIF0 EE END tag raised completion without latency") && ok;
+
+    dma.tick_ee(system.bus());
+    ok = expect(
+             system.bus().read32(0x1000C000u, value) &&
              (value & 0x100u) == 0,
              "SIF0 EE END tag did not stop the EE chain") && ok;
     ok = expect(
              system.bus().read32(0x1000E010u, value) &&
              (value & (1u << 5)) != 0,
-             "SIF0 EE END tag did not raise completion") && ok;
+             "SIF0 EE END tag did not raise delayed completion") && ok;
 
     return ok;
 }

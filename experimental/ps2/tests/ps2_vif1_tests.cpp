@@ -125,6 +125,10 @@ bool test_vif1_mpg_and_unpack() {
     }
 
     ok = expect(
+             system.bus().read32(0x10003CE0u, value) && value == 0u,
+             "VIF1 UNPACK incorrectly changed the MSCAL TOP register") && ok;
+
+    ok = expect(
              system.bus().read32(0x10009000u, value) &&
                  (value & 0x100u) == 0,
              "VIF1 normal DMA STR did not clear") && ok;
@@ -513,6 +517,64 @@ bool test_vif1_source_chain_tte() {
     return ok;
 }
 
+bool test_vif1_source_chain_scratchpad_tadr() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    constexpr ps2::u32 scratchpad_address = 0x70002290u;
+    constexpr ps2::u32 dmac_tadr = 0x80002290u;
+    constexpr ps2::u32 tag0 = 1u | (7u << 28); // END, one payload qword.
+    constexpr ps2::u32 stcycl = (0x01u << 24) | 0x0202u;
+    bool ok = true;
+    ok = expect(
+             system.bus().write32(scratchpad_address + 0u, tag0) &&
+                 system.bus().write32(scratchpad_address + 4u, 0u) &&
+                 system.bus().write32(scratchpad_address + 8u, stcycl) &&
+                 system.bus().write32(scratchpad_address + 12u, 0u) &&
+                 write_words(
+                     system.bus(),
+                     scratchpad_address + 0x10u,
+                     (0x07u << 24) | 0x55AAu,
+                     0u,
+                     0u,
+                     0u),
+             "failed to build scratchpad VIF1 source chain") && ok;
+
+    ok = expect(
+             system.bus().write32(0x1000E000u, 1u) &&
+                 system.bus().write32(0x10009030u, dmac_tadr) &&
+                 system.bus().write32(
+                     0x10009000u,
+                     0x101u | (1u << 2) | (1u << 6)),
+             "failed to arm scratchpad VIF1 source chain") && ok;
+
+    std::string error;
+    ok = expect(
+             dma.service(
+                 system.bus(),
+                 system.gs_core(),
+                 system.gs_privileged(),
+                 error),
+             "scratchpad VIF1 source-chain service failed") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.bus().read32(0x10003C40u, value) &&
+                 value == 0x0202u,
+             "scratchpad VIF1 tag command was not decoded") && ok;
+    ok = expect(
+             system.bus().read32(0x10003C30u, value) &&
+                 value == 0x55AAu,
+             "scratchpad VIF1 payload command was not decoded") && ok;
+    ok = expect(
+             system.bus().read32(0x10009000u, value) &&
+                 (value & 0x100u) == 0u,
+             "scratchpad VIF1 source chain did not complete") && ok;
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -524,6 +586,7 @@ int main() {
     ok = test_vif1_status_tracks_payload_progress() && ok;
     ok = test_vif1_flush_drains_vu1() && ok;
     ok = test_vif1_source_chain_tte() && ok;
+    ok = test_vif1_source_chain_scratchpad_tadr() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VIF1 tests passed.\n";
     return EXIT_SUCCESS;

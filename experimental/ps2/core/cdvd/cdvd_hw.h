@@ -54,6 +54,14 @@ private:
     std::array<u8, 16> s_results_{};
     u8 s_result_count_ = 0;
     mutable u8 s_result_pos_ = 0;
+
+    u8 config_mode_ = 0;
+    u8 config_area_ = 0;
+    u8 config_block_count_ = 0;
+    u8 config_block_index_ = 0;
+    std::array<std::array<u8, 16>, 4> config_area0_{};
+    std::array<std::array<u8, 16>, 2> config_area1_{};
+    std::array<std::array<u8, 16>, 7> config_area2_{};
 };
 
 } // namespace ps2

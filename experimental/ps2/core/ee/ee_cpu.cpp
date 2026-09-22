@@ -2,6 +2,7 @@
 
 #include "core/memory/ee_bus.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <iomanip>
@@ -187,6 +188,10 @@ void EeCpu::raise_exception(
     u32 pc,
     bool in_delay_slot,
     bool tlb_refill) {
+    if (code < state_.exception_counts.size()) {
+        ++state_.exception_counts[code];
+    }
+
     u32& status = state_.cop0[12];
     u32& cause = state_.cop0[13];
 
@@ -382,9 +387,24 @@ bool EeCpu::execute_special(
             write_gpr64(rd, gpr_u64(rs));
         }
         return true;
-    case 0x0C: // SYSCALL
+    case 0x0C: { // SYSCALL
+        auto& record =
+            state_.recent_syscalls[state_.recent_syscall_next];
+        record.instruction = state_.instructions_executed;
+        record.pc = pc;
+        record.number = static_cast<u32>(gpr_u64(3));
+        for (u32 i = 0; i < record.args.size(); ++i) {
+            record.args[i] = gpr_u64(4u + i);
+        }
+        state_.recent_syscall_next =
+            (state_.recent_syscall_next + 1u) %
+            static_cast<u32>(state_.recent_syscalls.size());
+        state_.recent_syscall_count = std::min(
+            state_.recent_syscall_count + 1u,
+            static_cast<u32>(state_.recent_syscalls.size()));
         raise_exception(8u, pc, current_is_delay_slot_);
         return true;
+    }
     case 0x0D: // BREAK
         raise_exception(9u, pc, current_is_delay_slot_);
         return true;
@@ -1015,10 +1035,11 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
         return true;
     }
     if (funct >= 0x3Cu) {
-        const u32 sub = (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
+        const u32 special2 =
+            (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
         const u32 it = ft & 0xFu;
         const u32 is = fs & 0xFu;
-        if (sub == 0x3Fu) { // VISWR
+        if (special2 == 0x3Bu) { // VISWR
             const u32 base = 0x11004000u + ((state_.vu_vi[is] & 0xFFFFu) * 16u & 0xFFFu);
             for (u32 lane = 0; lane < 4; ++lane) {
                 if (selected(lane) && !bus_.write32(base + lane * 4u, state_.vu_vi[it] & 0xFFFFu))
@@ -1026,7 +1047,7 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             }
             return true;
         }
-        if (sub == 0x35u) { // VSQI
+        if (special2 == 0x35u) { // VSQI
             const u32 base = 0x11004000u + ((state_.vu_vi[it] & 0xFFFFu) * 16u & 0xFFFu);
             for (u32 lane = 0; lane < 4; ++lane) {
                 if (selected(lane) && !bus_.write32(base + lane * 4u, lane_read(fs, lane)))
@@ -1035,7 +1056,37 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             if (ft != 0) state_.vu_vi[it] = static_cast<u16>(state_.vu_vi[it] + 1u);
             return true;
         }
-        return fail(pc, instruction, "Unsupported COP2 SPECIAL2 function " + hex32(sub), error);
+        if (special2 == 0x31u) { // VMR32
+            if (ft == 0u) return true;
+            const EeGpr source = state_.vu_vf[fs];
+            auto source_lane = [&](u32 lane) {
+                const u64 half = lane < 2u ? source.lo : source.hi;
+                return static_cast<u32>(half >> ((lane & 1u) * 32u));
+            };
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) {
+                    lane_write(ft, lane, source_lane((lane + 1u) & 3u));
+                }
+            }
+            return true;
+        }
+        if (special2 == 0x39u) { // VMFIR: sign-extend VI[is] into selected VF[ft] lanes.
+            const u32 value = static_cast<u32>(
+                static_cast<s32>(static_cast<s16>(state_.vu_vi[is])));
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (selected(lane)) lane_write(ft, lane, value);
+            }
+            return true;
+        }
+        // The retail BIOS executes this reserved COP2 encoding as padding.
+        // PCSX2 classifies SPECIAL2 0x3F as unknown; it has no architectural
+        // register effect, and must not be misdecoded as VISWR.
+        if (instruction == 0x4B000BFFu) return true;
+        return fail(
+            pc,
+            instruction,
+            "Unsupported COP2 SPECIAL2 function " + hex32(special2),
+            error);
     }
 
     return fail(pc, instruction, "Unsupported COP2 macro function " + hex32(funct), error);
@@ -2315,6 +2366,18 @@ bool EeCpu::step(std::string& error) {
         }
         break;
     }
+    case 0x36: { // LQC2
+        const u32 address = effective_address() & ~0x0Fu;
+        u64 lo = 0;
+        u64 hi = 0;
+        if (!read64_mem(address, lo) ||
+            !read64_mem(address + 8u, hi)) {
+            ok = load_fault("LQC2", address);
+        } else if (rt != 0u) {
+            state_.vu_vf[rt] = {lo, hi};
+        }
+        break;
+    }
     case 0x31: { // LWC1
         const u32 address = effective_address();
         u32 value = 0;
@@ -2359,6 +2422,19 @@ bool EeCpu::step(std::string& error) {
             ok = fail(pc, instruction, "SCD fault to " + hex32(address), error);
         } else {
             write_gpr64(rt, 1u);
+        }
+        break;
+    }
+    case 0x3E: { // SQC2
+        const u32 address = effective_address() & ~0x0Fu;
+        const EeGpr value = state_.vu_vf[rt];
+        if (!write64_mem(address, value.lo) ||
+            !write64_mem(address + 8u, value.hi)) {
+            ok = fail(
+                pc,
+                instruction,
+                "SQC2 fault to " + hex32(address),
+                error);
         }
         break;
     }

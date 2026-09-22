@@ -214,8 +214,14 @@ void IopBus::tick(u64 cycles) {
             if (counter.target <= maximum &&
                 counter.count >= counter.target) {
                 const bool first = (counter.mode & (1u << 11)) == 0;
+                const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 11;
-                if (first && (counter.mode & (1u << 4)) != 0) {
+                // The reached-target flag is sticky, but it does not suppress
+                // later interrupts in repeat mode.  THREADMAN relies on this
+                // distinction when it repeatedly reprograms the system timer
+                // for DelayThread and alarm deadlines.
+                if ((first || repeat) &&
+                    (counter.mode & (1u << 4)) != 0) {
                     intc_.raise(irq_sources[i]);
                 }
                 if ((counter.mode & (1u << 3)) != 0) {
@@ -230,8 +236,10 @@ void IopBus::tick(u64 cycles) {
 
             if (counter.count > maximum) {
                 const bool first = (counter.mode & (1u << 12)) == 0;
+                const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 12;
-                if (first && (counter.mode & (1u << 5)) != 0) {
+                if ((first || repeat) &&
+                    (counter.mode & (1u << 5)) != 0) {
                     intc_.raise(irq_sources[i]);
                 }
                 counter.count &= maximum;

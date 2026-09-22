@@ -9,6 +9,14 @@ namespace ps2 {
 
 class IopBus;
 
+struct IopSyscallRecord {
+    u64 instruction = 0;
+    u32 pc = 0;
+    u32 encoded = 0;
+    u32 v0 = 0;
+    std::array<u32, 4> args{};
+};
+
 struct IopCpuState {
     std::array<u32, 32> gpr{};
     u32 hi = 0;
@@ -19,6 +27,10 @@ struct IopCpuState {
     u64 instructions_executed = 0;
     u32 last_pc = 0;
     u32 last_instruction = 0;
+    std::array<u64, 32> exception_counts{};
+    std::array<IopSyscallRecord, 64> recent_syscalls{};
+    u32 recent_syscall_count = 0;
+    u32 recent_syscall_next = 0;
 };
 
 class IopCpu {

@@ -442,6 +442,12 @@ bool test_ee_iop_startup_interleave() {
         expect(system.boot_bios(error),
                "interleave test BIOS failed to start");
 
+    ok = expect(
+             system.bus().write64(0x11008000u, 0u),
+             "failed to install VU1 pacing test instruction") &&
+         ok;
+    system.vu1().start(0u);
+
     for (int i = 0; i < 7 && ok; ++i) {
         ok =
             expect(system.step_ee(error),
@@ -465,6 +471,10 @@ bool test_ee_iop_startup_interleave() {
     ok =
         expect(system.scheduler().now() == 8,
                "scheduler did not advance with EE startup execution") &&
+        ok;
+    ok =
+        expect(system.vu1().stats().instructions == 8u,
+               "VU1 did not advance once per EE startup step") &&
         ok;
 
     std::error_code remove_error;
@@ -956,6 +966,87 @@ bool test_iop_spu2_register_window() {
     return ok;
 }
 
+bool test_iop_bus_repeating_timer_irq() {
+    ps2::Ps2System system;
+
+    constexpr ps2::u32 timer5 = 0x1F8014A0u;
+    constexpr ps2::u32 timer5_irq = 1u << 16;
+    constexpr ps2::u32 reset_at_target = 1u << 3;
+    constexpr ps2::u32 irq_at_target = 1u << 4;
+    constexpr ps2::u32 repeat_irq = 1u << 6;
+
+    bool ok =
+        expect(system.iop_bus().write32(timer5 + 8u, 3u),
+               "IOP Timer5 target write failed") &&
+        expect(system.iop_bus().write32(
+                   timer5 + 4u,
+                   reset_at_target | irq_at_target | repeat_irq),
+               "IOP Timer5 repeat mode write failed");
+
+    system.iop_bus().tick(3u);
+    ok = expect((system.iop_intc().status() & timer5_irq) != 0,
+                "IOP Timer5 first repeated IRQ missing") && ok;
+
+    system.iop_intc().reset();
+    system.iop_bus().tick(3u);
+    ok = expect((system.iop_intc().status() & timer5_irq) != 0,
+                "IOP Timer5 sticky target flag suppressed repeat IRQ") && ok;
+
+    return ok;
+}
+
+bool test_cdvd_config_scommands() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // Match the SCPH-39001 BIOS request used by sceCdOpenConfig:
+    // read two blocks from configuration area 1.
+    for (const ps2::u8 parameter : {0x00u, 0x01u, 0x02u}) {
+        ok = expect(system.iop_bus().write8(
+                        0xBF402017u, parameter),
+                    "CDVD config-open parameter write failed") && ok;
+    }
+    ok = expect(system.iop_bus().write8(0xBF402016u, 0x40u),
+                "CDVD config-open command write failed") && ok;
+
+    ps2::u8 value = 0xFFu;
+    ok = expect(system.iop_bus().read8(0xBF402018u, value) &&
+                    value == 0,
+                "CDVD config-open command failed") && ok;
+
+    ok = expect(system.iop_bus().write8(0xBF402016u, 0x41u),
+                "CDVD first config-read command write failed") && ok;
+    for (int i = 0; i < 16; ++i) {
+        value = 0xFFu;
+        ok = expect(system.iop_bus().read8(0xBF402018u, value) &&
+                        value == 0,
+                    "CDVD first config block mismatch") && ok;
+    }
+
+    constexpr std::array<ps2::u8, 16> kUsEnglishConfig{
+        0x30u, 0x21u, 0x00u, 0x00u,
+        0x00u, 0x70u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x41u};
+    ok = expect(system.iop_bus().write8(0xBF402016u, 0x41u),
+                "CDVD second config-read command write failed") && ok;
+    for (const ps2::u8 expected : kUsEnglishConfig) {
+        value = 0xFFu;
+        ok = expect(system.iop_bus().read8(0xBF402018u, value) &&
+                        value == expected,
+                    "CDVD US-English config block mismatch") && ok;
+    }
+
+    ok = expect(system.iop_bus().write8(0xBF402016u, 0x43u),
+                "CDVD config-close command write failed") && ok;
+    value = 0xFFu;
+    ok = expect(system.iop_bus().read8(0xBF402018u, value) &&
+                    value == 0,
+                "CDVD config-close command failed") && ok;
+
+    return ok;
+}
+
 bool test_iop_spu2_dma_bootstrap_completion() {
     ps2::Ps2System system;
     bool ok = true;
@@ -1220,8 +1311,10 @@ int main() {
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
+    ok = test_iop_bus_repeating_timer_irq() && ok;
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
+    ok = test_cdvd_config_scommands() && ok;
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;

@@ -2,6 +2,7 @@
 
 #include "core/iop/iop_bus.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -102,6 +103,9 @@ void IopCpu::raise_exception(
     u32 code,
     u32 pc,
     bool in_delay_slot) {
+    const u32 exception = (code >> 2) & 31u;
+    ++state_.exception_counts[exception];
+
     state_.cop0[13] &= ~0x8000007Fu;
     state_.cop0[13] |= code & 0x7Cu;
 
@@ -172,9 +176,25 @@ bool IopCpu::execute_special(
         state_.next_pc = state_.gpr[rs];
         next_is_delay_slot_ = true;
         return true;
-    case 0x0C: // SYSCALL
+    case 0x0C: { // SYSCALL
+        auto& record =
+            state_.recent_syscalls[state_.recent_syscall_next];
+        record.instruction = state_.instructions_executed;
+        record.pc = pc;
+        record.encoded = (instruction >> 6) & 0xFFFFFu;
+        record.v0 = state_.gpr[2];
+        for (u32 i = 0; i < record.args.size(); ++i) {
+            record.args[i] = state_.gpr[4u + i];
+        }
+        state_.recent_syscall_next =
+            (state_.recent_syscall_next + 1u) %
+            static_cast<u32>(state_.recent_syscalls.size());
+        state_.recent_syscall_count = std::min(
+            state_.recent_syscall_count + 1u,
+            static_cast<u32>(state_.recent_syscalls.size()));
         raise_exception(0x20u, pc, in_delay_slot);
         return true;
+    }
     case 0x0D: // BREAK
         raise_exception(0x24u, pc, in_delay_slot);
         return true;

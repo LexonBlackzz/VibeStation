@@ -52,7 +52,55 @@ bool tag_ends(u32 tag_word) {
 
 } // namespace
 
-void SifDma::reset() {}
+void SifDma::reset() {
+    stats_ = {};
+    sif0_ee_completion_cycles_ = 0;
+    sif0_iop_completion_cycles_ = 0;
+    sif1_iop_completion_cycles_ = 0;
+}
+
+void SifDma::tick_ee(EeBus& ee_bus) {
+    if (sif0_ee_completion_cycles_ == 0 ||
+        --sif0_ee_completion_cycles_ != 0) {
+        return;
+    }
+
+    u32 chcr = 0;
+    if (!ee_bus.read32(kEeSif0 + kEeChcr, chcr)) {
+        return;
+    }
+    (void)ee_bus.write32(
+        kEeSif0 + kEeChcr,
+        chcr & ~kEeStr);
+    ee_bus.raise_dmac(5);
+}
+
+void SifDma::tick_iop(IopBus& iop_bus) {
+    if (sif0_iop_completion_cycles_ != 0 &&
+        --sif0_iop_completion_cycles_ == 0) {
+        u32 chcr = 0;
+        if (iop_bus.read32(kIopDma9Chcr, chcr)) {
+            (void)iop_bus.write32(
+                kIopDma9Chcr,
+                chcr & ~kIopDmaStart);
+            iop_bus.raise_dma_irq(9);
+        }
+    }
+
+    if (sif1_iop_completion_cycles_ == 0 ||
+        --sif1_iop_completion_cycles_ != 0) {
+        return;
+    }
+
+    u32 chcr = 0;
+    if (!iop_bus.read32(kIopDma10Chcr, chcr)) {
+        return;
+    }
+    (void)iop_bus.write32(
+        kIopDma10Chcr,
+        chcr & ~kIopDmaStart);
+    iop_bus.raise_dma_irq(10);
+}
 
 void SifDma::append_qword(
     std::vector<u32>& words,
@@ -262,6 +310,10 @@ bool SifDma::service_sif1(
     IopBus& iop_bus,
     IopIntc& iop_intc,
     std::string& error) {
+    if (sif1_iop_completion_cycles_ != 0) {
+        return true;
+    }
+
     u32 ee_chcr = 0;
     u32 iop_chcr = 0;
     if (!ee_bus.read32(kEeSif1 + kEeChcr, ee_chcr) ||
@@ -287,6 +339,7 @@ bool SifDma::service_sif1(
 
     std::size_t pos = 0;
     bool saw_end = false;
+    u32 payload_words = 0;
     while (pos + 4u <= stream.size()) {
         const u32 data = stream[pos + 0u];
         const u32 words = stream[pos + 1u] & 0x000FFFFCu;
@@ -298,6 +351,23 @@ bool SifDma::service_sif1(
             return false;
         }
 
+        ++stats_.sif1_packets;
+        auto& record = stats_.recent_sif1_packets[
+            stats_.recent_sif1_next];
+        record = {};
+        record.destination_tag = data;
+        record.words = words;
+        record.destination = destination;
+        for (u32 i = 0; i < std::min(words, 4u); ++i) {
+            record.payload[i] = stream[pos + i];
+        }
+        stats_.recent_sif1_next =
+            (stats_.recent_sif1_next + 1u) %
+            static_cast<u32>(stats_.recent_sif1_packets.size());
+        stats_.recent_sif1_count = std::min(
+            stats_.recent_sif1_count + 1u,
+            static_cast<u32>(stats_.recent_sif1_packets.size()));
+
         for (u32 i = 0; i < words; ++i) {
             if (!iop_bus.write32(
                     destination + i * 4u,
@@ -306,6 +376,8 @@ bool SifDma::service_sif1(
                 return false;
             }
         }
+
+        payload_words += words;
 
         if (!iop_bus.write32(
                 kIopDma10Madr,
@@ -326,18 +398,16 @@ bool SifDma::service_sif1(
 
     if (!ee_bus.write32(
             kEeSif1 + kEeChcr,
-            final_chcr & ~kEeStr) ||
-        !iop_bus.write32(kIopDma10Bcr, 0u) ||
-        !iop_bus.write32(kIopDma10Tadr, 0u) ||
-        !iop_bus.write32(
-            kIopDma10Chcr,
-            iop_chcr & ~kIopDmaStart)) {
+            final_chcr & ~kEeStr)) {
         error = "SIF1 completion state write failed";
         return false;
     }
 
     ee_bus.raise_dmac(6);
-    iop_bus.raise_dma_irq(10);
+    // The IOP side completes after the copied payload has consumed DMA
+    // time. Completing it in the same EE instruction can fire DMA10 before
+    // SIFMAN has installed the waiter that the interrupt is meant to wake.
+    sif1_iop_completion_cycles_ = std::max(1u, payload_words >> 2);
     (void)iop_intc;
     (void)saw_end;
     return true;
@@ -348,6 +418,11 @@ bool SifDma::service_sif0(
     IopBus& iop_bus,
     IopIntc& iop_intc,
     std::string& error) {
+    if (sif0_ee_completion_cycles_ != 0 ||
+        sif0_iop_completion_cycles_ != 0) {
+        return true;
+    }
+
     u32 ee_chcr = 0;
     u32 iop_chcr = 0;
     if (!ee_bus.read32(kEeSif0 + kEeChcr, ee_chcr) ||
@@ -370,6 +445,8 @@ bool SifDma::service_sif0(
     bool ee_end = false;
     u32 last_iop_madr = 0;
     u32 last_ee_madr = 0;
+    u32 iop_payload_words = 0;
+    u32 ee_payload_qwords = 0;
 
     for (u32 guard = 0;
          guard < 4096u && !(iop_end && ee_end);
@@ -396,6 +473,40 @@ bool SifDma::service_sif0(
         const u32 destination_words = qwc * 4u;
         const u32 copy_words =
             std::min(source_words, destination_words);
+        const u32 padded_source_words =
+            (source_words + 3u) & ~3u;
+        iop_payload_words += source_words;
+        ee_payload_qwords += qwc;
+
+        ++stats_.sif0_packets;
+        if (source_words != padded_source_words) {
+            ++stats_.sif0_padded_packets;
+            stats_.sif0_padding_words +=
+                padded_source_words - source_words;
+        }
+        if (destination_words != padded_source_words) {
+            ++stats_.sif0_stream_mismatches;
+        }
+
+        auto& record = stats_.recent_sif0_packets[
+            stats_.recent_sif0_next];
+        record = {};
+        record.source_tag = data;
+        record.source_words = source_words;
+        record.destination_tag = ee_tag0;
+        record.destination = destination;
+        for (u32 i = 0; i < std::min(source_words, 4u); ++i) {
+            if (!iop_bus.read32(source + i * 4u, record.payload[i])) {
+                error = "SIF0 IOP payload trace read fault";
+                return false;
+            }
+        }
+        stats_.recent_sif0_next =
+            (stats_.recent_sif0_next + 1u) %
+            static_cast<u32>(stats_.recent_sif0_packets.size());
+        stats_.recent_sif0_count = std::min(
+            stats_.recent_sif0_count + 1u,
+            static_cast<u32>(stats_.recent_sif0_packets.size()));
 
         for (u32 i = 0; i < destination_words; ++i) {
             u32 value = 0;
@@ -438,19 +549,24 @@ bool SifDma::service_sif0(
         !ee_bus.write32(kEeSif0 + kEeQwc, 0u) ||
         !ee_bus.write32(
             kEeSif0 + kEeChcr,
-            ee_end ? (ee_chcr & ~kEeStr) : ee_chcr) ||
+            ee_chcr) ||
         !iop_bus.write32(kIopDma9Madr, last_iop_madr) ||
         !iop_bus.write32(kIopDma9Tadr, tadr) ||
         !iop_bus.write32(
             kIopDma9Chcr,
-            iop_end ? (iop_chcr & ~kIopDmaStart) : iop_chcr) ||
-        (iop_end && !iop_bus.write32(kIopDma9Bcr, 0u))) {
+            iop_chcr)) {
         error = "SIF0 completion state write failed";
         return false;
     }
 
-    if (ee_end) ee_bus.raise_dmac(5);
-    if (iop_end) iop_bus.raise_dma_irq(9);
+    if (ee_end) {
+        sif0_ee_completion_cycles_ =
+            std::max(1u, ee_payload_qwords);
+    }
+    if (iop_end) {
+        sif0_iop_completion_cycles_ =
+            std::max(1u, iop_payload_words);
+    }
     (void)iop_intc;
     return true;
 }

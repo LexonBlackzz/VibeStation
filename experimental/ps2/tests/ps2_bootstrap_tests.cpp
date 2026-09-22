@@ -711,6 +711,110 @@ bool test_vu_mapping_and_cop2() {
                  pack2(30.0f, 96.0f),
              "VU0 VMULx destination mask mismatch") && ok;
 
+    // VMR32.xyzw vf5,vf4 rotates Y/Z/W/X into the destination lanes.
+    const ps2::u32 vmr32 =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (5u << 16) |
+        (4u << 11) |
+        (0x0Cu << 6) |
+        0x3Du;
+    ok = expect(system.bus().write32(pc, vmr32),
+                "VU0 VMR32 test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[4] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    ok = expect(system.ee().step(error),
+                "VU0 VMR32 macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[5].lo ==
+                 0x3333333322222222ull &&
+             system.ee().state().vu_vf[5].hi ==
+                 0x1111111144444444ull,
+             "VU0 VMR32 rotation mismatch") && ok;
+
+    // VMFIR.xz vf4, vi5 sign-extends VI and preserves masked-off lanes.
+    const ps2::u32 vmfir_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (4u << 16) |
+        (5u << 11) |
+        (0x0Eu << 6) |
+        0x3Du;
+    ok = expect(system.bus().write32(pc, vmfir_xz),
+                "VU0 VMFIR test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vi[5] = 0x8001u;
+    system.ee().state().vu_vf[4] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    ok = expect(system.ee().step(error),
+                "VU0 VMFIR macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[4].lo ==
+                 0x22222222FFFF8001ull &&
+             system.ee().state().vu_vf[4].hi ==
+                 0x44444444FFFF8001ull,
+             "VU0 VMFIR sign extension or destination mask mismatch") && ok;
+
+    // VISWR.x vi3, (vi2) stores the low integer register halfword.
+    const ps2::u32 viswr_x =
+        (0x12u << 26) |
+        (0x18u << 21) |
+        (3u << 16) |
+        (2u << 11) |
+        (0x0Eu << 6) |
+        0x3Fu;
+    ok = expect(system.bus().write32(pc, viswr_x),
+                "VU0 VISWR test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vi[2] = 1u;
+    system.ee().state().vu_vi[3] = 0x1234u;
+    ok = expect(system.ee().step(error),
+                "VU0 VISWR macro execution failed") && ok;
+    ok = expect(system.bus().read32(0x11004010u, value) && value == 0x1234u,
+                "VU0 VISWR integer memory store mismatch") && ok;
+
+    ok = expect(system.bus().write32(pc, 0x4B000BFFu),
+                "VU0 reserved BIOS padding write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    ok = expect(system.ee().step(error),
+                "VU0 reserved BIOS padding did not advance") && ok;
+    ok = expect(system.bus().read32(0x11004010u, value) && value == 0x1234u,
+                "VU0 reserved BIOS padding changed VU memory") && ok;
+
+    // SQC2/LQC2 round-trip a vector through EE memory.
+    const ps2::u32 sqc2 =
+        (0x3Eu << 26) | (6u << 21) | (5u << 16) | 0x30u;
+    const ps2::u32 lqc2 =
+        (0x36u << 26) | (6u << 21) | (7u << 16) | 0x30u;
+    ok = expect(
+             system.bus().write32(pc, sqc2) &&
+             system.bus().write32(pc + 4u, lqc2),
+             "VU0 quadword memory test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().gpr[6].lo = 0x3000u;
+    system.ee().state().vu_vf[5] = {
+        0x0123456789ABCDEFull,
+        0xFFEEDDCCBBAA9988ull,
+    };
+    ok = expect(system.ee().step(error) && system.ee().step(error),
+                "VU0 SQC2/LQC2 execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[7].lo ==
+                 0x0123456789ABCDEFull &&
+             system.ee().state().vu_vf[7].hi ==
+                 0xFFEEDDCCBBAA9988ull,
+             "VU0 SQC2/LQC2 round-trip mismatch") && ok;
+
     return ok;
 }
 

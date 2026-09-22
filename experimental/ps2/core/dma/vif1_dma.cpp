@@ -125,6 +125,9 @@ void Vif1Dma::reset() {
     top_ = 0;
     itop_ = 0;
     double_buffer_ = false;
+    recent_tags_.fill({});
+    recent_tag_next_ = 0;
+    recent_tag_count_ = 0;
 
     mpg_address_ = 0;
     mpg_words_remaining_ = 0;
@@ -386,14 +389,14 @@ bool Vif1Dma::begin_command(
                 while (unpack_target_remaining_ != 0) {
                     if (!emit_unpack_vector(bus, row_, true, error)) return false;
                 }
-                top_ = unpack_dest_ & 0x3FFu;
-                bus.write32(kVif1Top, top_);
                 return finish_command(bus);
             }
             return true;
         }
 
-        error = "unsupported VIF1 command";
+        error =
+            "unsupported VIF1 command " + std::to_string(command) +
+            " (word " + std::to_string(word) + ")";
         return false;
     }
 }
@@ -632,11 +635,6 @@ bool Vif1Dma::consume_payload_word(
                 // padding, not the beginning of the next command.
                 unpack_bits_ = 0;
                 unpack_bit_count_ = 0;
-                top_ = unpack_dest_ & 0x3FFu;
-                if (!bus.write32(kVif1Top, top_)) {
-                    error = "failed to update VIF1 TOP";
-                    return false;
-                }
                 return finish_command(bus);
             }
         }
@@ -767,7 +765,9 @@ bool Vif1Dma::service_forward(
 
         u64 tag_lo = 0;
         u64 tag_hi = 0;
-        const u32 tag_address = tadr & 0x7FFFFFF0u;
+        // TADR bit 31 selects the EE scratchpad for non-SPR DMA channels.
+        // Masking it away would instead fetch a tag from main RAM.
+        const u32 tag_address = apply_spr(tadr, (tadr & 0x80000000u) != 0);
         if (!bus.read64(tag_address, tag_lo) ||
             !bus.read64(tag_address + 8u, tag_hi)) {
             error = "VIF1 DMA tag fetch fault";
@@ -855,6 +855,13 @@ bool Vif1Dma::service_forward(
             end_after_qwc_ = true;
             break;
         }
+
+        recent_tags_[recent_tag_next_] = {
+            tag_address, tag0, tag1, tadr, madr};
+        recent_tag_next_ = (recent_tag_next_ + 1u) % recent_tags_.size();
+        recent_tag_count_ = std::min<u32>(
+            recent_tag_count_ + 1u,
+            static_cast<u32>(recent_tags_.size()));
 
         if (!bus.write32(kVif1Chcr, chcr) ||
             !bus.write32(kVif1Madr, madr) ||

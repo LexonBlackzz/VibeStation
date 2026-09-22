@@ -36,6 +36,29 @@ void CdvdHw::reset() {
     s_results_.fill(0);
     s_result_count_ = 0;
     s_result_pos_ = 0;
+
+    config_mode_ = 0;
+    config_area_ = 0;
+    config_block_count_ = 0;
+    config_block_index_ = 0;
+    for (auto& block : config_area0_) {
+        block.fill(0);
+    }
+    for (auto& block : config_area1_) {
+        block.fill(0);
+    }
+    for (auto& block : config_area2_) {
+        block.fill(0);
+    }
+
+    // Default SCPH-39001 OSD settings: English, 24-hour clock, and the
+    // standard US video configuration. Config area 1 is read as two
+    // 16-byte hardware blocks; libcdvd exposes 15 bytes from each block.
+    config_area1_[1] = {
+        0x30u, 0x21u, 0x00u, 0x00u,
+        0x00u, 0x70u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x41u};
 }
 
 void CdvdHw::set_s_result(const u8* data, u8 size) {
@@ -121,6 +144,101 @@ void CdvdHw::execute_s_command(u8 command) {
     case 0x15: { // Forbid DVD player.
         constexpr std::array<u8, 1> kResult{5};
         set_s_result(kResult.data(), 1);
+        break;
+    }
+    case 0x40: { // Open NVRAM configuration area.
+        if (s_param_count_ < 3 || s_params_[1] > 2u) {
+            constexpr std::array<u8, 1> kInvalid{0x80u};
+            set_s_result(kInvalid.data(), 1);
+            break;
+        }
+
+        config_mode_ = s_params_[0];
+        config_area_ = s_params_[1];
+        config_block_count_ = s_params_[2];
+        config_block_index_ = 0;
+        constexpr std::array<u8, 1> kOk{0};
+        set_s_result(kOk.data(), 1);
+        break;
+    }
+    case 0x41: { // Read the next NVRAM configuration block.
+        std::array<u8, 16> result{};
+        const std::array<u8, 16>* block = nullptr;
+        if (config_mode_ == 0 &&
+            config_block_index_ < config_block_count_) {
+            switch (config_area_) {
+            case 0:
+                if (config_block_index_ < config_area0_.size()) {
+                    block = &config_area0_[config_block_index_];
+                }
+                break;
+            case 1:
+                if (config_block_index_ < config_area1_.size()) {
+                    block = &config_area1_[config_block_index_];
+                }
+                break;
+            case 2:
+                if (config_block_index_ < config_area2_.size()) {
+                    block = &config_area2_[config_block_index_];
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        if (block != nullptr) {
+            result = *block;
+            ++config_block_index_;
+        } else if (config_mode_ != 0) {
+            result[0] = 0x80u;
+        }
+        set_s_result(result.data(), static_cast<u8>(result.size()));
+        break;
+    }
+    case 0x42: { // Write the next NVRAM configuration block.
+        bool written = false;
+        if (config_mode_ == 1 &&
+            config_block_index_ < config_block_count_ &&
+            s_param_count_ >= 16) {
+            std::array<u8, 16>* block = nullptr;
+            switch (config_area_) {
+            case 0:
+                if (config_block_index_ < config_area0_.size()) {
+                    block = &config_area0_[config_block_index_];
+                }
+                break;
+            case 1:
+                if (config_block_index_ < config_area1_.size()) {
+                    block = &config_area1_[config_block_index_];
+                }
+                break;
+            case 2:
+                if (config_block_index_ < config_area2_.size()) {
+                    block = &config_area2_[config_block_index_];
+                }
+                break;
+            default:
+                break;
+            }
+            if (block != nullptr) {
+                *block = s_params_;
+                ++config_block_index_;
+                written = true;
+            }
+        }
+        const std::array<u8, 1> result{
+            static_cast<u8>(written ? 0u : 0x80u)};
+        set_s_result(result.data(), 1);
+        break;
+    }
+    case 0x43: { // Close NVRAM configuration area.
+        config_mode_ = 0;
+        config_area_ = 0;
+        config_block_count_ = 0;
+        config_block_index_ = 0;
+        constexpr std::array<u8, 1> kOk{0};
+        set_s_result(kOk.data(), 1);
         break;
     }
     default: {

@@ -14,8 +14,21 @@ class Vu1;
 
 class Vif1Dma {
 public:
+    struct RecentTag {
+        u32 address = 0;
+        u32 tag0 = 0;
+        u32 tag1 = 0;
+        u32 next_tadr = 0;
+        u32 madr = 0;
+    };
+
     void reset();
     void attach_vu1(Vu1& vu1) { vu1_ = &vu1; }
+    [[nodiscard]] const std::array<RecentTag, 32>& recent_tags() const {
+        return recent_tags_;
+    }
+    [[nodiscard]] u32 recent_tag_next() const { return recent_tag_next_; }
+    [[nodiscard]] u32 recent_tag_count() const { return recent_tag_count_; }
 
     [[nodiscard]] bool service(
         EeBus& bus,
@@ -97,6 +110,10 @@ private:
     u32 top_ = 0;
     u32 itop_ = 0;
     bool double_buffer_ = false;
+
+    std::array<RecentTag, 32> recent_tags_{};
+    u32 recent_tag_next_ = 0;
+    u32 recent_tag_count_ = 0;
 
     u32 mpg_address_ = 0;
     u32 mpg_words_remaining_ = 0;

@@ -38,6 +38,8 @@ public:
     EeBus& bus(){return bus_;} const EeBus& bus()const{return bus_;}
     IopBus& iop_bus(){return iop_bus_;} const IopBus& iop_bus()const{return iop_bus_;}
     Scheduler& scheduler(){return scheduler_;} const Scheduler& scheduler()const{return scheduler_;}
+    const SifDma& sif_dma() const { return sif_dma_; }
+    const Vif1Dma& vif1_dma() const { return vif1_dma_; }
     EeCpu& ee(){return ee_;} const EeCpu& ee()const{return ee_;}
     IopCpu& iop(){return iop_;} const IopCpu& iop()const{return iop_;}
     IopIntc& iop_intc(){return iop_intc_;} const IopIntc& iop_intc()const{return iop_intc_;}
