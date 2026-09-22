@@ -780,11 +780,12 @@ void App::panel_performance() {
         const CpuBackendStats& backend = runtime_snapshot_.cpu_backend_stats;
         ImGui::Separator();
         draw_cpu_backend_mode_summary(backend, runtime_snapshot_.cpu_backend);
-        ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu",
+        ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu  Flushes: %llu",
             backend.block_count,
             static_cast<unsigned long long>(backend.cache_hits),
             static_cast<unsigned long long>(backend.cache_misses),
-            static_cast<unsigned long long>(backend.invalidations));
+            static_cast<unsigned long long>(backend.invalidations),
+            static_cast<unsigned long long>(backend.flushes));
         ImGui::Text("Invalidation queries: %llu  no-code exits: %llu",
             static_cast<unsigned long long>(backend.invalidation_queries),
             static_cast<unsigned long long>(
@@ -821,6 +822,10 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_block_entries),
             static_cast<unsigned long long>(backend.native_cycles),
             backend.native_code_bytes);
+        ImGui::Text("Native chains: %llu  transitions %llu  max blocks %llu",
+            static_cast<unsigned long long>(backend.native_chain_entries),
+            static_cast<unsigned long long>(backend.native_linked_transitions),
+            static_cast<unsigned long long>(backend.native_chain_max_blocks));
         ImGui::Text("Native fallback: rejected %llu  compile fail %llu  decoded %llu",
             static_cast<unsigned long long>(
                 backend.native_rejected_unsafe_blocks),
