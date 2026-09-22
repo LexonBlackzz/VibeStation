@@ -2124,7 +2124,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
           if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
-              (!is_v3_alu_only(delay.op) && !is_v3_load(delay.op))) {
+              !is_v3_alu_only(delay.op)) {
             staged_delay_refill_pending = false;
             break;
           }
@@ -2138,31 +2138,6 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             jump_target = ((jump_pc + 4u) & 0xF0000000u) |
                           ((bits & 0x03FFFFFFu) << 2u);
           }
-
-          if (is_v3_load(delay.op)) {
-            // Delay slots observe all writes performed by the control
-            // instruction itself. Address preflight happens before native
-            // execution, so reject bases whose value would change first.
-            u8 control_write = 0u;
-            if (inst.op == V3AluOp::Jal) control_write = 31u;
-            else if (inst.op == V3AluOp::Jalr) control_write = inst.rd;
-            const bool base_written_earlier =
-                delay.rs != 0u &&
-                (written_mask & (1u << delay.rs)) != 0u;
-            const bool base_written_by_control =
-                delay.rs != 0u && delay.rs == control_write;
-            if (base_written_earlier || base_written_by_control) {
-              staged_delay_refill_pending = false;
-              break;
-            }
-            has_load = true;
-            load_rs = delay.rs;
-            load_rt = delay.rt;
-            load_simm = delay.simm;
-            load_alignment_mask = v3_load_alignment_mask(delay.op);
-            load_index = jump_index + 1u;
-          }
-
           decoded.push_back(inst);
           words[jump_index] = bits;
           decoded.push_back(delay);
@@ -2180,7 +2155,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
           if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
-              (!is_v3_alu_only(delay.op) && !is_v3_load(delay.op))) {
+              !is_v3_alu_only(delay.op)) {
             staged_delay_refill_pending = false;
             break;
           }
@@ -2188,23 +2163,6 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           has_branch = true;
           branch_index = static_cast<u32>(decoded.size());
           branch_simm = inst.simm;
-
-          if (is_v3_load(delay.op)) {
-            // Conditional branches do not write a GPR, but an earlier
-            // instruction in this block may have rewritten the address base.
-            if (delay.rs != 0u &&
-                (written_mask & (1u << delay.rs)) != 0u) {
-              staged_delay_refill_pending = false;
-              break;
-            }
-            has_load = true;
-            load_rs = delay.rs;
-            load_rt = delay.rt;
-            load_simm = delay.simm;
-            load_alignment_mask = v3_load_alignment_mask(delay.op);
-            load_index = branch_index + 1u;
-          }
-
           decoded.push_back(inst);
           words[branch_index] = bits;
           decoded.push_back(delay);
