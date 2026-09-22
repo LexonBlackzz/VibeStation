@@ -446,6 +446,7 @@ struct V3ResidentContext {
   const u8 *icache = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
+  u32 mapped_main_ram_size = psx::RAM_SIZE;
   u32 direct_icache_refill = 1u;
   u32 cycle_budget = 0;
   u32 instruction_budget = 0;
@@ -931,7 +932,9 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       }
       code->and_(code->eax, 0x1FFFFFFF);
       code->xor_(code->edx, code->edx);
-      code->cmp(code->eax, psx::RAM_SIZE);
+      code->cmp(code->eax,
+                code->dword[code->rbx +
+                    offsetof(V3ResidentContext, mapped_main_ram_size)]);
       code->jb(load_ram);
       code->cmp(code->eax, 0x1F800000u);
       code->jb(linked_done);
@@ -944,6 +947,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       code->lea(code->rax, code->ptr[code->rcx + code->rax]);
       code->jmp(load_ready);
       code->L(load_ram);
+      code->and_(code->eax, psx::RAM_SIZE - 1u);
       code->mov(code->rcx, code->ptr[code->rbx + offsetof(V3ResidentContext, main_ram)]);
       code->test(code->rcx, code->rcx);
       code->jz(linked_done);
@@ -2166,8 +2170,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       const u32 phys = psx::mask_address(load_addr);
       u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
       u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
-      if (phys < psx::RAM_SIZE && main_ram != nullptr) {
-        runtime.load_ptr = main_ram + phys;
+      const u32 mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
+      if (phys < mapped_main_ram_size && main_ram != nullptr) {
+        runtime.load_ptr = main_ram + (phys & (psx::RAM_SIZE - 1u));
         main_ram_load_count = 1u;
       } else if (phys >= 0x1F800000u && phys < 0x1F801000u &&
                  scratchpad != nullptr) {
@@ -2364,6 +2369,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       resident.icache = reinterpret_cast<const u8 *>(cpu_.icache_.data());
       resident.main_ram = cpu_.sys_->jit_main_ram_data_mut();
       resident.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      resident.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
       // read32_instruction() only takes the slower observable RAM path when
       // RAM tracing is enabled. Preserve that behavior by leaving refills on
       // the old C++ path in tracing sessions.
