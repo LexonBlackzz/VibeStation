@@ -152,6 +152,7 @@ struct CpuCompareCase {
   bool require_v4_native_entry_when_available = false;
   bool require_v4_native_load_entry_when_available = false;
   bool require_v4_native_store_entry_when_available = false;
+  bool require_v4_store_smc_fallback_when_available = false;
   bool require_v4_load_tail_block_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
@@ -3876,6 +3877,21 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_store_pending_load);
 
+  CpuCompareCase v4_uncached_store_smc{};
+  v4_uncached_store_smc.name = "v4_uncached_store_code_page_fallback";
+  v4_uncached_store_smc.start_pc = 0xA0010000u;
+  v4_uncached_store_smc.initial_gpr[1] =
+      v4_uncached_store_smc.start_pc + 0x40u;
+  v4_uncached_store_smc.initial_gpr[2] = 0xCAFEBABEu;
+  v4_uncached_store_smc.memory.push_back({0x00010040u, 0u});
+  v4_uncached_store_smc.compare_memory_addresses.push_back(0x00010040u);
+  v4_uncached_store_smc.program = {
+      enc_i(0x2B, 1, 2, 0),
+  };
+  v4_uncached_store_smc.instructions = 1u;
+  v4_uncached_store_smc.require_v4_store_smc_fallback_when_available = true;
+  cases.push_back(v4_uncached_store_smc);
+
   CpuCompareCase v4_uncached_resident_chain{};
   v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
   v4_uncached_resident_chain.start_pc = 0xA0010000u;
@@ -4099,6 +4115,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           (test_case.require_v4_native_entry_when_available ||
            test_case.require_v4_native_load_entry_when_available ||
            test_case.require_v4_native_store_entry_when_available ||
+           test_case.require_v4_store_smc_fallback_when_available ||
            test_case.require_v4_load_tail_block_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
@@ -4119,6 +4136,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool store_entered =
               !test_case.require_v4_native_store_entry_when_available ||
               result.stats.native_memory_fastpath_stores != 0;
+          const bool store_smc_fallback =
+              !test_case.require_v4_store_smc_fallback_when_available ||
+              (result.stats.native_memory_fastpath_stores == 0u &&
+               result.stats.fallback_instructions != 0u);
           const bool load_tail_folded =
               !test_case.require_v4_load_tail_block_when_available ||
               (result.stats.native_memory_blocks_compiled == 1u &&
@@ -4153,7 +4174,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                          ? "v4_load_missing"
                          : (!store_entered
                                 ? "v4_store_missing"
-                                : (!load_tail_folded
+                                : (!store_smc_fallback
+                                       ? "v4_store_smc_not_guarded"
+                                       : (!load_tail_folded
                                 ? "v4_load_tail_not_folded"
                                 : (!branch_entered
                                        ? "v4_branch_missing"
@@ -4165,10 +4188,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                                                             ? "v4_cached_same_page_recompiled"
                                                             : (!chain_entered
                                                                    ? "v4_chain_missing"
-                                                                   : "v4_native_entered"))))))));
+                                                                   : "v4_native_entered")))))))));
           native_check_pass =
               native_entered && load_entered && store_entered &&
-              load_tail_folded &&
+              store_smc_fallback && load_tail_folded &&
               branch_entered && folded_branch && page_local_invalidation &&
               cached_same_page_retained && chain_entered;
         }
