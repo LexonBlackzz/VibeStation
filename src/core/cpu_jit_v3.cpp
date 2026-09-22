@@ -1660,6 +1660,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 word_index = (start_pc >> 2u) & 0x03u;
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
+    if (!line.valid || line.tag != expected_tag) {
+      return helper_step(V3HelperReason::Icache);
+    }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
       ++stats_.cache_hits;
@@ -1678,44 +1681,12 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
     }
 
-    auto single_line_alu_refillable = [&](const Impl::Block &candidate) {
-      if (!impl_->use_linked || candidate.resident.linked_fn == nullptr ||
-          candidate.has_load || candidate.has_store ||
-          candidate.resident.kind != 0u ||
-          candidate.icache_line_count != 1u) {
-        return false;
-      }
-      const u32 tag = candidate.icache_tags[0];
-      const bool ram = tag < 0x00800000u;
-      const bool scratch = tag >= 0x1F800000u && tag < 0x1F801000u;
-      if (!ram && !scratch) {
-        return false;
-      }
-
-      // Only the missed line is checked against backing memory. A hit line may
-      // architecturally contain stale self-modified code and must remain valid.
-      const auto &cached =
-          cpu_.icache_[candidate.icache_indices[0]];
-      if (cached.valid && cached.tag == tag) {
-        return true;
-      }
-      for (u32 i = 0; i < candidate.instruction_count; ++i) {
-        if (cpu_.sys_->read32_instruction(candidate.start_pc + i * 4u) !=
-            candidate.words[i]) {
-          return false;
-        }
-      }
-      return true;
-    };
-
-    const bool entry_icache_hit = line.valid && line.tag == expected_tag;
-    if (!entry_icache_hit &&
-        (block_ptr == nullptr || !single_line_alu_refillable(*block_ptr))) {
-      return helper_step(V3HelperReason::Icache);
-    }
-
     if (block_ptr != nullptr) {
       bool coherent = true;
+      // A block's instruction words cannot change without a code-write
+      // invalidation. The hot path only needs to prove that the direct-mapped
+      // I-cache still contains the same physical lines. Check each line once
+      // instead of cacheability/tag/word for every guest instruction.
       for (u32 i = 0; i < block_ptr->icache_line_count; ++i) {
         const auto &inst_line = cpu_.icache_[block_ptr->icache_indices[i]];
         if (!inst_line.valid || inst_line.tag != block_ptr->icache_tags[i]) {
@@ -1723,7 +1694,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           break;
         }
       }
-      if (!coherent && !single_line_alu_refillable(*block_ptr)) {
+      if (!coherent) {
         impl_->forget_dispatch(start_pc);
         impl_->unlink_resident(start_pc);
         impl_->blocks.erase(start_pc);
