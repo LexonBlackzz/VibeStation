@@ -392,6 +392,47 @@ bool IopCpu::execute_cop0(
     }
 }
 
+bool IopCpu::execute_cop2(
+    u32 pc,
+    u32 instruction,
+    std::string& error) {
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+
+    switch (rs) {
+    case 0x00: // MFC2
+        schedule_load(rt, state_.gte_data[rd]);
+        return true;
+    case 0x02: // CFC2
+        schedule_load(rt, state_.gte_ctrl[rd]);
+        return true;
+    case 0x04: // MTC2
+        state_.gte_data[rd] = state_.gpr[rt];
+        return true;
+    case 0x06: // CTC2
+        state_.gte_ctrl[rd] = state_.gpr[rt];
+        return true;
+    default:
+        break;
+    }
+
+    if (rs >= 0x10u) {
+        // The PS2-mode BIOS only needs the IOP's legacy GTE to survive
+        // capability/init probes before the visible startup path. Geometry
+        // execution is a PS1-compatibility concern, so retire commands here
+        // without inventing geometry results; FLAG remains clear.
+        state_.gte_ctrl[31] = 0;
+        return true;
+    }
+
+    return fail(
+        pc,
+        instruction,
+        "Unsupported IOP COP2 rs " + hex32(rs),
+        error);
+}
+
 bool IopCpu::step(std::string& error) {
     error.clear();
 
@@ -574,8 +615,18 @@ bool IopCpu::step(std::string& error) {
         ok = execute_cop0(pc, instruction, error);
         break;
     case 0x12:
-        ok = fail(pc, instruction, "IOP COP2/GTE not implemented", error);
+        ok = execute_cop2(pc, instruction, error);
         break;
+    case 0x32: { // LWC2
+        const u32 addr = address();
+        u32 value = 0;
+        if (!bus_.read32(addr, value)) {
+            ok = read_fault("LWC2", addr);
+        } else {
+            state_.gte_data[rt] = value;
+        }
+        break;
+    }
     case 0x20: { // LB
         const u32 addr = address();
         u8 value = 0;
@@ -734,6 +785,17 @@ bool IopCpu::step(std::string& error) {
                     "IOP SWR fault to " + hex32(addr),
                     error);
             }
+        }
+        break;
+    }
+    case 0x3A: { // SWC2
+        const u32 addr = address();
+        if (!write32(addr, state_.gte_data[rt])) {
+            ok = fail(
+                pc,
+                instruction,
+                "IOP SWC2 fault to " + hex32(addr),
+                error);
         }
         break;
     }

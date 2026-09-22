@@ -1,13 +1,11 @@
 #include "core/ps2_system.h"
 namespace ps2 {
 namespace {
-// VU1 runs at approximately the EE core clock. Advancing it once per EE
-// interpreter step keeps independently running microprograms moving without
-// giving persistent render loops hundreds of cycles for every EE instruction.
+// Keep independent VU1 execution synchronized to EE instruction steps.
 constexpr u64 kVu1InstructionsPerEeStep = 1;
 }
-Ps2System::Ps2System():cdvd_(iop_intc_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu1_(bus_,gs_core_),ee_(bus_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif1_dma_.attach_vu1(vu1_);reset();}
-void Ps2System::reset(u32 entry_point){ram_.reset();scratchpad_.reset();bus_.reset();hw_.reset();iop_hw_.reset();iop_intc_.reset();cdvd_.reset();iop_ram_.reset();iop_bus_.reset();gs_.reset();gs_core_.reset();gs_display_.reset();scheduler_.reset();video_timing_.reset();gif_dma_.reset();vif0_dma_.reset();vif1_dma_.reset();sif_dma_.reset();vu1_.reset();ee_.reset(entry_point);iop_.reset(Bios::kResetVector);bios_started_=false;reset_instruction_=0;iop_reset_instruction_=0;ee_iop_phase_=0;}
+Ps2System::Ps2System():cdvd_(iop_intc_,bios_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu0_(bus_,gs_core_,0x11000000u,0x11004000u,0x0FFFu,0x100038D0u,0x100038E0u,false),vu1_(bus_,gs_core_),ee_(bus_,&vu0_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif0_dma_.attach_vu0(vu0_);vif1_dma_.attach_vu1(vu1_);reset();}
+void Ps2System::reset(u32 entry_point){ram_.reset();scratchpad_.reset();bus_.reset();hw_.reset();iop_hw_.reset();iop_intc_.reset();cdvd_.reset();iop_ram_.reset();iop_bus_.reset();gs_.reset();gs_core_.reset();gs_display_.reset();scheduler_.reset();video_timing_.reset();gif_dma_.reset();vif0_dma_.reset();vif1_dma_.reset();sif_dma_.reset();spr_dma_.reset();ipu_dma_.reset();vu0_.reset();vu1_.reset();ee_.reset(entry_point);iop_.reset(Bios::kResetVector);bios_started_=false;reset_instruction_=0;iop_reset_instruction_=0;ee_iop_phase_=0;}
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
 bool Ps2System::boot_bios(std::string& error){error.clear();if(!bios_.loaded()){error="No PS2 BIOS is loaded.";return false;}reset(Bios::kResetVector);if(!bus_.read32(ee_.state().pc,reset_instruction_)){error="BIOS loaded, but the EE reset vector could not be fetched.";reset();return false;}if(!iop_bus_.read32(iop_.state().pc,iop_reset_instruction_)){error="BIOS loaded, but the IOP reset vector could not be fetched.";reset();return false;}bios_started_=true;return true;}
 bool Ps2System::advance_iop_for_ee_step(std::string& error){
@@ -57,6 +55,7 @@ bool Ps2System::step_ee(std::string& error) {
         error = "GIF DMA: " + error;
         return false;
     }
+    if (!vu0_.running()) ee_.sync_vu0_to_micro();
     if (!vif0_dma_.service(bus_, error)) {
         error = "VIF0 DMA: " + error;
         return false;
@@ -70,6 +69,27 @@ bool Ps2System::step_ee(std::string& error) {
         return false;
     }
     sif_dma_.tick_ee(bus_);
+    if (!spr_dma_.service(bus_, error)) {
+        error = "SPR DMA: " + error;
+        return false;
+    }
+    if (!ipu_dma_.service(bus_, error)) {
+        error = "IPU DMA: " + error;
+        return false;
+    }
+    if (vu0_.running()) {
+        ee_.set_vu0_micro_running(true);
+        std::string vu_error;
+        vu0_.run(256, vu_error);
+        if (!vu_error.empty()) {
+            error = "VU0: " + vu_error;
+            return false;
+        }
+        if (!vu0_.running()) {
+            ee_.set_vu0_micro_running(false);
+            ee_.sync_vu0_from_micro();
+        }
+    }
     if (vu1_.running()) {
         std::string vu_error;
         vu1_.run(kVu1InstructionsPerEeStep, vu_error);

@@ -1,5 +1,6 @@
 #include "core/ps2_system.h"
 
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <fstream>
@@ -27,6 +28,24 @@ ps2::u64 parse_budget(const char* text, ps2::u64 fallback) {
         return fallback;
     }
     return value;
+}
+
+bool visible_frame_ready(const ps2::Ps2System& system) {
+    const auto& stats = system.gs_core().stats();
+    const bool gs_wrote_pixels =
+        stats.host_to_local_pixels != 0 ||
+        stats.local_to_local_pixels != 0 ||
+        stats.raster_pixels != 0;
+    if (!gs_wrote_pixels || !system.gs_display().valid()) {
+        return false;
+    }
+
+    for (const ps2::u32 pixel : system.gs_display().rgba8()) {
+        if ((pixel & 0x00FFFFFFu) != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void print_state(const ps2::Ps2System& system) {
@@ -576,6 +595,17 @@ void print_state(const ps2::Ps2System& system) {
             << std::dec << '\n';
     }
 
+    const auto& vu0 = system.vu0();
+    const auto& vu0_stats = vu0.stats();
+    std::cout
+        << "VU0_RUNNING=" << (vu0.running() ? 1 : 0)
+        << " VU0_PC=0x" << std::hex << std::uppercase << vu0.pc()
+        << std::dec
+        << " VU0_INSTRUCTIONS=" << vu0_stats.instructions
+        << " VU0_UNSUPPORTED_UPPER=" << vu0_stats.unsupported_upper
+        << " VU0_UNSUPPORTED_LOWER=" << vu0_stats.unsupported_lower
+        << '\n';
+
     const auto& vu = system.vu1();
     const auto& vu_stats = vu.stats();
     std::cout
@@ -742,7 +772,8 @@ void print_state(const ps2::Ps2System& system) {
     }
 
     std::cout
-        << "DISPLAY_VALID=" << (display.valid() ? 1 : 0)
+        << "VISIBLE_FRAME_READY=" << (visible_frame_ready(system) ? 1 : 0)
+        << " DISPLAY_VALID=" << (display.valid() ? 1 : 0)
         << " DISPLAY_WIDTH=" << display.width()
         << " DISPLAY_HEIGHT=" << display.height()
         << " DISPLAY_CIRCUIT=" << display.circuit()
@@ -753,6 +784,19 @@ void print_state(const ps2::Ps2System& system) {
         << " DISPLAY_HASH=0x" << std::hex << std::uppercase
         << framebuffer_hash << std::dec
         << '\n';
+
+    if (display.nonzero_pixel_count() != 0) {
+        for (std::size_t i = 0; i < display.rgba8().size(); ++i) {
+            const ps2::u32 pixel = display.rgba8()[i];
+            if ((pixel & 0x00FFFFFFu) == 0) continue;
+            std::cout
+                << "DISPLAY_FIRST_NONZERO_INDEX=" << i
+                << " DISPLAY_FIRST_NONZERO_RGBA=0x"
+                << std::hex << std::uppercase << pixel
+                << std::dec << '\n';
+            break;
+        }
+    }
 
     ps2::u64 pmode = 0;
     ps2::u64 smode2 = 0;

@@ -388,6 +388,388 @@ bool test_mmi_bootstrap_packed_ops() {
     return ok;
 }
 
+bool test_mmi_bios_instruction_expansion() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2280u;
+    std::string error;
+    bool ok = true;
+
+    auto run = [&](ps2::u32 instruction) {
+        ok = expect(
+                 system.bus().write32(pc, instruction),
+                 "failed to install expanded MMI opcode") && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(
+                 system.ee().step(error),
+                 "expanded MMI opcode execution failed") && ok;
+    };
+
+    // PADDSW: signed word saturation is used by ROM-side packed math.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x800000007FFFFFFFull,
+        0x00000001FFFFFFFFull,
+    };
+    system.ee().state().gpr[2] = {
+        0xFFFFFFFF00000001ull,
+        0xFFFFFFFF00000002ull,
+    };
+    const ps2::u32 paddsw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x10u << 6) | 0x08u;
+    run(paddsw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x800000007FFFFFFFull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000000000001ull,
+             "PADDSW saturation mismatch") && ok;
+
+    // PSLLVW/PSRAVW operate on word 0 and word 2 and sign-extend each
+    // result into a 64-bit destination half.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0000000000000001ull,
+        0x0000000000000004ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0000000040000000ull,
+        0x00000000F0000000ull,
+    };
+    const ps2::u32 psllvw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x02u << 6) | 0x09u;
+    run(psllvw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0xFFFFFFFF80000000ull &&
+             system.ee().state().gpr[3].hi == 0,
+             "PSLLVW lane/sign extension mismatch") && ok;
+
+    const ps2::u32 psravw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x03u << 6) | 0x29u;
+    run(psravw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0000000020000000ull &&
+             system.ee().state().gpr[3].hi ==
+                 0xFFFFFFFFFF000000ull,
+             "PSRAVW lane/sign extension mismatch") && ok;
+
+    // PMULTW updates both accumulator lanes and returns both full products.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x00000000FFFFFFFEull,
+        0x0000000000010000ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0000000000000003ull,
+        0x0000000000010000ull,
+    };
+    const ps2::u32 pmultw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x0Cu << 6) | 0x09u;
+    run(pmultw);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0xFFFFFFFFFFFFFFFAull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000100000000ull,
+             "PMULTW destination mismatch") && ok;
+    ok = expect(
+             system.ee().state().lo ==
+                 0xFFFFFFFFFFFFFFFAull &&
+             system.ee().state().hi ==
+                 0xFFFFFFFFFFFFFFFFull &&
+             system.ee().state().lo1 == 0 &&
+             system.ee().state().hi1 == 1,
+             "PMULTW accumulator mismatch") && ok;
+
+    // PADSBH is the last defined MMI1 subgroup operation: subtract
+    // lower halfwords and add upper halfwords.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0004000300020001ull,
+        0x0008000700060005ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0001000100010001ull,
+        0x0001000100010001ull,
+    };
+    const ps2::u32 padsbh =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x04u << 6) | 0x28u;
+    run(padsbh);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x0003000200010000ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0009000800070006ull,
+             "PADSBH mixed add/subtract mismatch") && ok;
+
+    // PMADDUW accumulates unsigned products into both packed HI/LO pairs.
+    system.ee().reset(pc);
+    system.ee().state().lo = 10u;
+    system.ee().state().hi = 0u;
+    system.ee().state().lo1 = 20u;
+    system.ee().state().hi1 = 0u;
+    system.ee().state().gpr[1] = {3u, 4u};
+    system.ee().state().gpr[2] = {5u, 6u};
+    const ps2::u32 pmadduw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x00u << 6) | 0x29u;
+    run(pmadduw);
+    ok = expect(
+             system.ee().state().gpr[3].lo == 25u &&
+             system.ee().state().gpr[3].hi == 44u &&
+             system.ee().state().lo == 25u &&
+             system.ee().state().lo1 == 44u,
+             "PMADDUW accumulator mismatch") && ok;
+
+    // PMULTH fills all eight 32-bit packed accumulator slots and exposes
+    // even slots through the destination register.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x0004000300020001ull,
+        0x0008000700060005ull,
+    };
+    system.ee().state().gpr[2] = {
+        0x0002000200020002ull,
+        0x0002000200020002ull,
+    };
+    const ps2::u32 pmulth =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) | (3u << 11) |
+        (0x1Cu << 6) | 0x09u;
+    run(pmulth);
+    ok = expect(
+             system.ee().state().lo ==
+                 0x0000000400000002ull &&
+             system.ee().state().hi ==
+                 0x0000000800000006ull &&
+             system.ee().state().lo1 ==
+                 0x0000000C0000000Aull &&
+             system.ee().state().hi1 ==
+                 0x000000100000000Eull &&
+             system.ee().state().gpr[3].lo ==
+                 0x0000000600000002ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x0000000E0000000Aull,
+             "PMULTH accumulator layout mismatch") && ok;
+
+    // PDIVBW divides all four signed words by the first signed halfword.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x000000140000000Aull,
+        0x00000008FFFFFFF7ull,
+    };
+    system.ee().state().gpr[2].lo = 3u;
+    const ps2::u32 pdivbw =
+        (0x1Cu << 26) |
+        (1u << 21) | (2u << 16) |
+        (0x1Du << 6) | 0x09u;
+    run(pdivbw);
+    ok = expect(
+             system.ee().state().lo ==
+                 0x0000000600000003ull &&
+             system.ee().state().hi ==
+                 0x0000000200000001ull &&
+             system.ee().state().lo1 ==
+                 0x00000002FFFFFFFDull &&
+             system.ee().state().hi1 ==
+                 0x0000000200000000ull,
+             "PDIVBW quotient/remainder layout mismatch") && ok;
+
+    // PMTHI/PMFHI cover the packed 128-bit HI transfer path.
+    system.ee().reset(pc);
+    system.ee().state().gpr[1] = {
+        0x1122334455667788ull,
+        0x99AABBCCDDEEFF00ull,
+    };
+    const ps2::u32 pmthi =
+        (0x1Cu << 26) |
+        (1u << 21) |
+        (0x08u << 6) | 0x29u;
+    run(pmthi);
+    const ps2::u32 pmfhi =
+        (0x1Cu << 26) |
+        (3u << 11) |
+        (0x08u << 6) | 0x09u;
+    run(pmfhi);
+    ok = expect(
+             system.ee().state().gpr[3].lo ==
+                 0x1122334455667788ull &&
+             system.ee().state().gpr[3].hi ==
+                 0x99AABBCCDDEEFF00ull,
+             "PMTHI/PMFHI packed transfer mismatch") && ok;
+
+    return ok;
+}
+
+bool test_cop2_bios_macro_expansion() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2300u;
+    std::string error;
+    bool ok = true;
+
+    auto special2 = [](
+        ps2::u32 sub,
+        ps2::u32 ft,
+        ps2::u32 fs,
+        ps2::u32 selector = 0xFu) {
+        return
+            (0x12u << 26) |
+            ((0x10u | (selector & 0xFu)) << 21) |
+            ((ft & 31u) << 16) |
+            ((fs & 31u) << 11) |
+            (((sub >> 2) & 31u) << 6) |
+            (0x3Cu | (sub & 3u));
+    };
+    auto run = [&](ps2::u32 instruction) {
+        ok = expect(
+                 system.bus().write32(pc, instruction),
+                 "failed to install COP2 macro opcode") && ok;
+        system.ee().state().pc = pc;
+        system.ee().state().next_pc = pc + 4u;
+        error.clear();
+        ok = expect(
+                 system.ee().step(error),
+                 "COP2 BIOS macro execution failed") && ok;
+    };
+
+    // VMOVE copies selected VU0 vector lanes without alias corruption.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull,
+    };
+    run(special2(0x30u, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_vf[2].lo ==
+                 0x2222222211111111ull &&
+             system.ee().state().vu_vf[2].hi ==
+                 0x4444444433333333ull,
+             "VU0 VMOVE result mismatch") && ok;
+
+    // VLQI reads VU0 data memory and post-increments its VI address.
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[1] = 4u;
+    ok = expect(
+             system.bus().write32(0x11004040u, 0x11111111u) &&
+             system.bus().write32(0x11004044u, 0x22222222u) &&
+             system.bus().write32(0x11004048u, 0x33333333u) &&
+             system.bus().write32(0x1100404Cu, 0x44444444u),
+             "VU0 VLQI data setup failed") && ok;
+    run(special2(0x34u, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_vf[2].lo ==
+                 0x2222222211111111ull &&
+             system.ee().state().vu_vf[2].hi ==
+                 0x4444444433333333ull &&
+             system.ee().state().vu_vi[1] == 5u,
+             "VU0 VLQI/post-increment mismatch") && ok;
+
+    // VDIV writes the VU0 Q control register.  Selector 0xF chooses W/W.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1].hi =
+        static_cast<ps2::u64>(std::bit_cast<ps2::u32>(6.0f)) << 32;
+    system.ee().state().vu_vf[2].hi =
+        static_cast<ps2::u64>(std::bit_cast<ps2::u32>(2.0f)) << 32;
+    run(special2(0x38u, 2u, 1u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vi[22] ==
+                 std::bit_cast<ps2::u32>(3.0f),
+             "VU0 VDIV Q result mismatch") && ok;
+
+    // VMULA + VMADD exercise the VU0 ACC path used by macro-mode
+    // vector setup code.
+    system.ee().reset(pc);
+    const auto fbits = [](float value) {
+        return std::bit_cast<ps2::u32>(value);
+    };
+    system.ee().state().vu_vf[1] = {
+        static_cast<ps2::u64>(fbits(1.0f)) |
+            (static_cast<ps2::u64>(fbits(2.0f)) << 32),
+        static_cast<ps2::u64>(fbits(3.0f)) |
+            (static_cast<ps2::u64>(fbits(4.0f)) << 32),
+    };
+    system.ee().state().vu_vf[2] = {
+        static_cast<ps2::u64>(fbits(5.0f)) |
+            (static_cast<ps2::u64>(fbits(6.0f)) << 32),
+        static_cast<ps2::u64>(fbits(7.0f)) |
+            (static_cast<ps2::u64>(fbits(8.0f)) << 32),
+    };
+    run(special2(0x2Au, 2u, 1u));
+    ok = expect(
+             system.ee().state().vu_acc.lo ==
+                 (static_cast<ps2::u64>(fbits(5.0f)) |
+                  (static_cast<ps2::u64>(fbits(12.0f)) << 32)) &&
+             system.ee().state().vu_acc.hi ==
+                 (static_cast<ps2::u64>(fbits(21.0f)) |
+                  (static_cast<ps2::u64>(fbits(32.0f)) << 32)),
+             "VU0 VMULA accumulator mismatch") && ok;
+
+    const ps2::u32 vmadd =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x29u;
+    run(vmadd);
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 (static_cast<ps2::u64>(fbits(10.0f)) |
+                  (static_cast<ps2::u64>(fbits(24.0f)) << 32)) &&
+             system.ee().state().vu_vf[3].hi ==
+                 (static_cast<ps2::u64>(fbits(42.0f)) |
+                  (static_cast<ps2::u64>(fbits(64.0f)) << 32)),
+             "VU0 VMADD accumulator result mismatch") && ok;
+
+    // VMTIR/VMFIR round-trip signed 16-bit integer data.
+    system.ee().reset(pc);
+    system.ee().state().vu_vf[1].hi =
+        static_cast<ps2::u64>(0x0000FF80u) << 32;
+    run(special2(0x3Cu, 2u, 1u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vi[2] == 0xFF80u,
+             "VU0 VMTIR result mismatch") && ok;
+    run(special2(0x3Du, 3u, 2u, 0xFu));
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 0xFFFFFF80FFFFFF80ull &&
+             system.ee().state().vu_vf[3].hi ==
+                 0xFFFFFF80FFFFFF80ull,
+             "VU0 VMFIR sign extension mismatch") && ok;
+
+    // VI arithmetic no longer falls into the generic COP2 hard stop.
+    system.ee().reset(pc);
+    system.ee().state().vu_vi[1] = 7u;
+    system.ee().state().vu_vi[2] = 5u;
+    const ps2::u32 visub =
+        (0x12u << 26) |
+        (0x10u << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x31u;
+    run(visub);
+    ok = expect(
+             system.ee().state().vu_vi[3] == 2u,
+             "VU0 VISUB result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_unaligned_doubleword_merges() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -632,6 +1014,11 @@ bool test_ee_intc_register_semantics() {
 
 bool test_vu_mapping_and_cop2() {
     ps2::Ps2System system;
+    auto acc_lane = [&system](ps2::u32 lane) -> ps2::u32 {
+        const auto& acc = system.ee().state().vu_acc;
+        const ps2::u64 half = lane < 2u ? acc.lo : acc.hi;
+        return static_cast<ps2::u32>(half >> ((lane & 1u) * 32u));
+    };
     bool ok = system.bus().write32(0x11004000u, 0xAABBCCDDu);
     ps2::u32 value = 0;
     ok = expect(ok && system.bus().read32(0x11005000u, value) && value == 0xAABBCCDDu,
@@ -892,11 +1279,11 @@ bool test_vu_mapping_and_cop2() {
              system.ee().step(error) && system.ee().step(error),
              "VU0 outer-product execution failed") && ok;
     ok = expect(
-             system.ee().state().vu_acc[0] ==
+             acc_lane(0u) ==
                  std::bit_cast<ps2::u32>(12.0f) &&
-             system.ee().state().vu_acc[1] ==
+             acc_lane(1u) ==
                  std::bit_cast<ps2::u32>(12.0f) &&
-             system.ee().state().vu_acc[2] ==
+             acc_lane(2u) ==
                  std::bit_cast<ps2::u32>(5.0f) &&
              system.ee().state().vu_vf[3].lo ==
                  pack2(-3.0f, 6.0f) &&
@@ -930,21 +1317,19 @@ bool test_vu_mapping_and_cop2() {
     system.ee().state().vu_vf[2] = {
         pack2(4.0f, 5.0f), pack2(6.0f, 7.0f)};
     system.ee().state().vu_acc = {
-        std::bit_cast<ps2::u32>(90.0f),
-        std::bit_cast<ps2::u32>(91.0f),
-        std::bit_cast<ps2::u32>(92.0f),
-        std::bit_cast<ps2::u32>(93.0f)};
+        pack2(90.0f, 91.0f),
+        pack2(92.0f, 93.0f)};
     ok = expect(
              system.ee().step(error) && system.ee().step(error),
              "VU0 accumulator macro execution failed") && ok;
     ok = expect(
-             system.ee().state().vu_acc[0] ==
+             acc_lane(0u) ==
                  std::bit_cast<ps2::u32>(8.0f) &&
-             system.ee().state().vu_acc[1] ==
+             acc_lane(1u) ==
                  std::bit_cast<ps2::u32>(91.0f) &&
-             system.ee().state().vu_acc[2] ==
+             acc_lane(2u) ==
                  std::bit_cast<ps2::u32>(30.0f) &&
-             system.ee().state().vu_acc[3] ==
+             acc_lane(3u) ==
                  std::bit_cast<ps2::u32>(93.0f),
              "VU0 accumulator arithmetic or mask mismatch") && ok;
 
@@ -1154,6 +1539,67 @@ bool test_ee_cop0_count_compare_irq() {
     ok = expect(system.ee().state().cop0[11] == 0x12345678u &&
                 (system.ee().state().cop0[13] & 0x00008000u) == 0,
                 "MTC0 Compare did not clear IP7") && ok;
+    return ok;
+}
+
+bool test_ee_bc0_dmac_condition_branches() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 pc = 0x2B00u;
+    std::string error;
+    bool ok = true;
+
+    // BC0F with every DMAC channel enabled and none complete: CPCOND0=false.
+    const ps2::u32 bc0f =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (0u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0f) &&
+             system.bus().write32(0x1000E020u, 0x3FFu),
+             "BC0F setup failed") && ok;
+    system.ee().reset(pc);
+    ok = expect(system.ee().step(error), "BC0F execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 4u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0F did not branch on incomplete DMAC condition") && ok;
+
+    // BC0TL is taken when no channels participate: (~CPC) satisfies condition.
+    const ps2::u32 bc0tl =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (3u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0tl) &&
+             system.bus().write32(0x1000E020u, 0u),
+             "BC0TL setup failed") && ok;
+    system.ee().reset(pc);
+    error.clear();
+    ok = expect(system.ee().step(error), "BC0TL execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 4u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0TL did not branch on satisfied DMAC condition") && ok;
+
+    // BC0FL must skip its delay slot when the false condition is not met.
+    const ps2::u32 bc0fl =
+        (0x10u << 26) |
+        (0x08u << 21) |
+        (2u << 16) |
+        2u;
+    ok = expect(
+             system.bus().write32(pc, bc0fl),
+             "BC0FL setup failed") && ok;
+    system.ee().reset(pc);
+    error.clear();
+    ok = expect(system.ee().step(error), "BC0FL execution failed") && ok;
+    ok = expect(
+             system.ee().state().pc == pc + 8u &&
+             system.ee().state().next_pc == pc + 12u,
+             "BC0FL likely-not-taken skip mismatch") && ok;
+
     return ok;
 }
 
@@ -3427,6 +3873,8 @@ int main() {
     ok = test_mmi_pmfhl_pmthl() && ok;
     ok = test_mmi_packed_accumulator_moves() && ok;
     ok = test_mmi_bootstrap_packed_ops() && ok;
+    ok = test_mmi_bios_instruction_expansion() && ok;
+    ok = test_cop2_bios_macro_expansion() && ok;
     ok = test_unaligned_doubleword_merges() && ok;
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
@@ -3435,6 +3883,7 @@ int main() {
     ok = test_vu_mapping_and_cop2() && ok;
     ok = test_ee_intc_cpu_exception() && ok;
     ok = test_ee_cop0_count_compare_irq() && ok;
+    ok = test_ee_bc0_dmac_condition_branches() && ok;
     ok = test_ee_di_ei_privilege_gate() && ok;
     ok = test_ee_break_exception_and_tlb_ops() && ok;
     ok = test_ee_trap_instructions() && ok;

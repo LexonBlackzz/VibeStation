@@ -59,6 +59,11 @@ private:
     [[nodiscard]] bool write_root_counter(u32 physical, u32 width, u32 value);
 
     [[nodiscard]] bool write_dma_icr(u32 physical, u32 value);
+    [[nodiscard]] bool read_ohci(u32 physical, u32 width, u32& value) const;
+    [[nodiscard]] bool write_ohci(u32 physical, u32 width, u32 value);
+    void reset_ohci(bool hard);
+    [[nodiscard]] bool read_firewire(u32 physical, u32 width, u32& value) const;
+    [[nodiscard]] bool write_firewire(u32 physical, u32 width, u32 value);
     [[nodiscard]] bool read_sif32(u32 physical, u32& value) const;
     [[nodiscard]] bool write_sif32(u32 physical, u32 value);
 
@@ -70,6 +75,9 @@ private:
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};
     std::array<u8, 0x10000> spu2_regs_{};
+    std::array<u32, 0x40> ohci_regs_{};
+    u64 ohci_frame_phase_ = 0;
+    std::array<u32, 0x60> firewire_regs_{};
     std::array<RootCounter, 6> root_counters_{};
     u64 spu2_dma4_irq_cycles_ = 0;
 };

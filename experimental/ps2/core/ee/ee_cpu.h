@@ -8,6 +8,7 @@
 namespace ps2 {
 
 class EeBus;
+class Vu1;
 
 struct EeGpr {
     u64 lo = 0;
@@ -43,7 +44,7 @@ struct EeCpuState {
     std::array<u32, 32> fcr{};
     u32 fpu_acc = 0;
     std::array<EeGpr, 32> vu_vf{};
-    std::array<u32, 4> vu_acc{};
+    EeGpr vu_acc{};
     std::array<u32, 32> vu_vi{};
     u64 instructions_executed = 0;
     u32 last_pc = 0;
@@ -56,7 +57,8 @@ struct EeCpuState {
 
 class EeCpu {
 public:
-    explicit EeCpu(EeBus& bus) : bus_(bus) {}
+    explicit EeCpu(EeBus& bus, Vu1* vu0_micro = nullptr)
+        : bus_(bus), vu0_micro_(vu0_micro) {}
 
     void reset(u32 entry_point = 0);
     bool step(std::string& error);
@@ -67,6 +69,12 @@ public:
     [[nodiscard]] bool halted() const { return halted_; }
     [[nodiscard]] const std::string& halt_reason() const { return halt_reason_; }
     void clear_halt();
+
+    // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
+    // register file. These helpers bridge the bootstrap interpreter state.
+    void sync_vu0_to_micro();
+    void sync_vu0_from_micro();
+    void set_vu0_micro_running(bool running);
 
 private:
     [[nodiscard]] static s16 immediate(u32 instruction);
@@ -100,9 +108,11 @@ private:
     bool execute_cop0(u32 pc, u32 instruction, std::string& error);
     bool execute_cop1(u32 pc, u32 instruction, std::string& error);
     bool execute_cop2(u32 pc, u32 instruction, std::string& error);
+    bool run_vu0_micro(u32 start_address, std::string& error);
     bool execute_mmi(u32 pc, u32 instruction, std::string& error);
 
     EeBus& bus_;
+    Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
     bool halted_ = false;
     bool next_is_delay_slot_ = false;

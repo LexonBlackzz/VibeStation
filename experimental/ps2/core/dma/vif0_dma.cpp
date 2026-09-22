@@ -1,6 +1,7 @@
 #include "core/dma/vif0_dma.h"
 
 #include "core/memory/ee_bus.h"
+#include "core/vu/vu1.h"
 
 #include <algorithm>
 
@@ -90,6 +91,9 @@ void Vif0Dma::reset() {
     payload_ = Payload::None;
     command_irq_pending_ = false;
     payload_index_ = 0;
+    deferred_words_.fill(0);
+    deferred_word_count_ = 0;
+    deferred_word_index_ = 0;
     cycle_ = 0;
     mode_ = 0;
     mask_ = 0;
@@ -217,13 +221,25 @@ bool Vif0Dma::begin_command(
 
     case 0x10: // FLUSHE
     case 0x11: // FLUSH
-    case 0x13: // FLUSHA (reserved on VIF0, harmless during bootstrap)
+    case 0x13: // FLUSHA
+        if (vu0_ != nullptr && vu0_->running()) {
+            payload_ = Payload::WaitVu;
+            set_vps(bus, 1u);
+            return true;
+        }
+        return finish_command(bus);
+
     case 0x14: // MSCAL
     case 0x15: // MSCALF
+        if (vu0_ != nullptr) {
+            vu0_->start(immediate & 0x1FFu);
+        }
+        return finish_command(bus);
+
     case 0x17: // MSCNT
-        // VU0 micro-mode execution is not scheduled yet. Completing these
-        // fences/calls avoids leaving BIOS initialization stuck on channel 0;
-        // uploaded micro/data state is still retained for later VU0 work.
+        if (vu0_ != nullptr) {
+            vu0_->continue_run();
+        }
         return finish_command(bus);
 
     case 0x20: // STMASK
@@ -560,6 +576,10 @@ bool Vif0Dma::consume_payload_word(
         return true;
     }
 
+    case Payload::WaitVu:
+        error = "VIF0 attempted to consume data while waiting for VU0";
+        return false;
+
     case Payload::None:
         break;
     }
@@ -589,8 +609,16 @@ bool Vif0Dma::consume_qword(
         static_cast<u32>(hi),
         static_cast<u32>(hi >> 32),
     };
-    for (u32 word : words) {
-        if (!consume_word(bus, word, error)) return false;
+    for (u32 i = 0; i < 4u; ++i) {
+        if (payload_ == Payload::WaitVu) {
+            deferred_word_count_ = 0;
+            deferred_word_index_ = 0;
+            for (u32 j = i; j < 4u; ++j) {
+                deferred_words_[deferred_word_count_++] = words[j];
+            }
+            return true;
+        }
+        if (!consume_word(bus, words[i], error)) return false;
     }
     return true;
 }
@@ -633,6 +661,35 @@ bool Vif0Dma::service(
     }
     qwc &= 0xFFFFu;
     set_fqc(bus, qwc);
+
+    if (payload_ == Payload::WaitVu) {
+        set_vps(bus, 1u);
+        if (vu0_ != nullptr && vu0_->running()) {
+            return true;
+        }
+
+        if (!finish_command(bus)) {
+            error = "failed to finish VIF0 VU0 wait";
+            return false;
+        }
+
+        while (deferred_word_index_ < deferred_word_count_) {
+            const u32 word = deferred_words_[deferred_word_index_++];
+            if (!consume_word(bus, word, error)) {
+                if (error.empty()) {
+                    error = "VIF0 deferred command decode failed";
+                }
+                return false;
+            }
+            if (payload_ == Payload::WaitVu) {
+                set_vps(bus, 1u);
+                return true;
+            }
+        }
+        deferred_word_count_ = 0;
+        deferred_word_index_ = 0;
+    }
+
     if (qwc != 0u && payload_ == Payload::None) {
         set_vps(bus, 1u);
     }
@@ -765,22 +822,31 @@ bool Vif0Dma::service(
         set_fqc(bus, qwc);
 
         if ((chcr & kChcrTte) != 0) {
-            if (!consume_word(
-                    bus,
-                    static_cast<u32>(tag_hi),
-                    error) ||
-                !consume_word(
-                    bus,
-                    static_cast<u32>(tag_hi >> 32),
-                    error)) {
-                if (error.empty()) {
-                    error = "VIF0 TTE command decode failed";
+            const u32 tte_words[2] = {
+                static_cast<u32>(tag_hi),
+                static_cast<u32>(tag_hi >> 32),
+            };
+            for (u32 i = 0; i < 2u; ++i) {
+                if (payload_ == Payload::WaitVu) {
+                    deferred_word_count_ = 0;
+                    deferred_word_index_ = 0;
+                    for (u32 j = i; j < 2u; ++j) {
+                        deferred_words_[deferred_word_count_++] =
+                            tte_words[j];
+                    }
+                    break;
                 }
-                return false;
+                if (!consume_word(bus, tte_words[i], error)) {
+                    if (error.empty()) {
+                        error = "VIF0 TTE command decode failed";
+                    }
+                    return false;
+                }
             }
         }
 
-        if (qwc == 0 && end_after_qwc_) {
+        if (qwc == 0 && end_after_qwc_ &&
+            payload_ != Payload::WaitVu) {
             if (!complete(bus, chcr)) {
                 error = "VIF0 empty chain completion failed";
                 return false;
@@ -815,6 +881,7 @@ bool Vif0Dma::service(
     set_fqc(bus, qwc);
 
     if (qwc == 0 &&
+        payload_ != Payload::WaitVu &&
         (mode == kModeNormal || end_after_qwc_)) {
         if (!complete(bus, chcr)) {
             error = "VIF0 DMA completion failed";

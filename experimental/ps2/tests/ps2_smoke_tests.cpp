@@ -533,6 +533,69 @@ bool test_ee_sbus_iop_commands() {
     return ok;
 }
 
+bool test_iop_gte_bootstrap_transfers() {
+    ps2::Ps2System system;
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 mtc2_r1_d3 =
+        (0x12u << 26) | (0x04u << 21) | (1u << 16) | (3u << 11);
+    constexpr ps2::u32 mfc2_r2_d3 =
+        (0x12u << 26) | (0x00u << 21) | (2u << 16) | (3u << 11);
+    constexpr ps2::u32 gte_command =
+        (0x12u << 26) | (0x10u << 21) | 0x01u;
+    constexpr ps2::u32 lwc2_d4 =
+        (0x32u << 26) | (4u << 16) | 0x0100u;
+    constexpr ps2::u32 swc2_d4 =
+        (0x3Au << 26) | (4u << 16) | 0x0104u;
+
+    ok = expect(
+             system.iop_ram().write32(0x0000u, mtc2_r1_d3) &&
+             system.iop_ram().write32(0x0004u, mfc2_r2_d3) &&
+             system.iop_ram().write32(0x0008u, 0u) &&
+             system.iop_ram().write32(0x000Cu, gte_command) &&
+             system.iop_ram().write32(0x0010u, lwc2_d4) &&
+             system.iop_ram().write32(0x0014u, swc2_d4) &&
+             system.iop_ram().write32(0x0100u, 0xA1B2C3D4u),
+             "failed to build IOP GTE bootstrap program") && ok;
+
+    system.iop().reset(0x00000000u);
+    system.iop().state().gpr[1] = 0x12345678u;
+
+    ok = expect(system.iop().step(error), "IOP MTC2 failed") && ok;
+    ok = expect(
+             system.iop().state().gte_data[3] == 0x12345678u,
+             "IOP MTC2 GTE register mismatch") && ok;
+
+    ok = expect(system.iop().step(error), "IOP MFC2 failed") && ok;
+    ok = expect(system.iop().step(error), "IOP MFC2 delay-slot NOP failed") && ok;
+    ok = expect(
+             system.iop().state().gpr[2] == 0x12345678u,
+             "IOP MFC2 load-delay result mismatch") && ok;
+
+    ok = expect(
+             system.iop().step(error),
+             "IOP bootstrap GTE command retirement failed") && ok;
+    ok = expect(
+             !system.iop().halted() &&
+             system.iop().state().gte_ctrl[31] == 0u,
+             "IOP bootstrap GTE command unexpectedly halted") && ok;
+
+    ok = expect(system.iop().step(error), "IOP LWC2 failed") && ok;
+    ok = expect(
+             system.iop().state().gte_data[4] == 0xA1B2C3D4u,
+             "IOP LWC2 GTE data mismatch") && ok;
+    ok = expect(system.iop().step(error), "IOP SWC2 failed") && ok;
+
+    ps2::u32 stored = 0;
+    ok = expect(
+             system.iop_ram().read32(0x0104u, stored) &&
+             stored == 0xA1B2C3D4u,
+             "IOP SWC2 memory result mismatch") && ok;
+
+    return ok;
+}
+
 bool test_iop_cache_isolation_blocks_ram_store() {
     ps2::Ps2System system;
 
@@ -681,6 +744,38 @@ bool test_cdvd_reset_status() {
     return ok;
 }
 
+bool test_cdvd_iop_segment_mirror() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 canonical = 0;
+    ps2::u8 mirrored = 0;
+    ok = expect(
+             system.iop_bus().read8(0x1F402005u, canonical) &&
+             system.iop_bus().read8(0x1F400005u, mirrored) &&
+             canonical == mirrored &&
+             mirrored == 0x4Cu,
+             "CDVD 1F40 segment mirror read mismatch") && ok;
+
+    // S-command writes through an alternate page must hit the same device.
+    ok = expect(
+             system.iop_bus().write8(0x1F40A016u, 0x08u),
+             "CDVD mirrored S-command write failed") && ok;
+    ps2::u8 ready = 0;
+    ok = expect(
+             system.iop_bus().read8(0x1F402017u, ready) &&
+             (ready & 0x40u) == 0u,
+             "CDVD mirrored S-command did not expose result FIFO") && ok;
+
+    ps2::u8 first = 0xFFu;
+    ok = expect(
+             system.iop_bus().read8(0x1F40FF18u, first) &&
+             first == 0u,
+             "CDVD mirrored result FIFO read mismatch") && ok;
+
+    return ok;
+}
+
 bool test_cdvd_scommand_result_fifo() {
     ps2::Ps2System system;
 
@@ -735,6 +830,97 @@ bool test_cdvd_scommand_result_fifo() {
                    tray == 0x08u,
                "CDVD mecacon tray detail mismatch") &&
         ok;
+
+    return ok;
+}
+
+bool test_cdvd_mechacon_config_nvram() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    auto write_param = [&](ps2::u8 value) {
+        return system.iop_bus().write8(0xBF402017u, value);
+    };
+    auto command = [&](ps2::u8 value) {
+        return system.iop_bus().write8(0xBF402016u, value);
+    };
+    auto read_result = [&](ps2::u8& value) {
+        return system.iop_bus().read8(0xBF402018u, value);
+    };
+
+    // Open config section 1 for two read blocks. With no BIOS identity loaded,
+    // the bootstrap model uses the legacy layout and seeds block 1 with the
+    // standard English OSD defaults.
+    ok = expect(
+             write_param(0u) &&
+             write_param(1u) &&
+             write_param(2u) &&
+             command(0x40u),
+             "CDVD OpenConfig command failed") && ok;
+    ps2::u8 value = 0xFFu;
+    ok = expect(
+             read_result(value) && value == 0u,
+             "CDVD OpenConfig did not return success") && ok;
+
+    ok = expect(
+             command(0x41u),
+             "CDVD first ReadConfig command failed") && ok;
+    std::array<ps2::u8, 16> first{};
+    for (auto& byte : first) {
+        ok = expect(
+                 read_result(byte),
+                 "CDVD first config block read failed") && ok;
+    }
+    ok = expect(
+             std::all_of(
+                 first.begin(),
+                 first.end(),
+                 [](ps2::u8 byte) { return byte == 0u; }),
+             "CDVD first legacy config block should reset to zero") && ok;
+
+    ok = expect(
+             command(0x41u),
+             "CDVD second ReadConfig command failed") && ok;
+    std::array<ps2::u8, 16> second{};
+    for (auto& byte : second) {
+        ok = expect(
+                 read_result(byte),
+                 "CDVD second config block read failed") && ok;
+    }
+    const std::array<ps2::u8, 16> english{
+        0x30u, 0x21u, 0x00u, 0x00u,
+        0x00u, 0x70u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x41u,
+    };
+    ok = expect(
+             second == english,
+             "CDVD seeded English OSD config mismatch") && ok;
+
+    ok = expect(
+             command(0x43u) &&
+             read_result(value) &&
+             value == 0u,
+             "CDVD CloseConfig did not return success") && ok;
+
+    // Legacy i.Link NVRAM starts at 0x1C0. SCMD 0x0A takes a word index
+    // and returns status followed by the word in the mechacon byte order.
+    ok = expect(
+             write_param(0x00u) &&
+             write_param(0xE0u) &&
+             command(0x0Au),
+             "CDVD ReadNVM command failed") && ok;
+    ps2::u8 status = 0xFFu;
+    ps2::u8 hi = 0xFFu;
+    ps2::u8 lo = 0xFFu;
+    ok = expect(
+             read_result(status) &&
+             read_result(hi) &&
+             read_result(lo) &&
+             status == 0u &&
+             hi == 0xACu &&
+             lo == 0x00u,
+             "CDVD ReadNVM i.Link word mismatch") && ok;
 
     return ok;
 }
@@ -1145,9 +1331,21 @@ bool test_iop_sio2_minimal_transfer_status() {
     ps2::u32 value = 0;
 
     bool ok = expect(
+        system.iop_bus().read32(0x1F808268u, value) &&
+            value == 0x000003BCu,
+        "SIO2 CTRL reset value mismatch");
+    ok = expect(
+        system.iop_bus().read32(0x1F80826Cu, value) &&
+            value == 0x0001D100u,
+        "SIO2 CMD_STAT reset value mismatch") && ok;
+    ok = expect(
         system.iop_bus().read32(0x1F808270u, value) &&
             value == 0x0000000Fu,
-        "SIO2 PORT_STAT reset value mismatch");
+        "SIO2 PORT_STAT reset value mismatch") && ok;
+    ok = expect(
+        system.iop_bus().read32(0x1F808274u, value) &&
+            value == 0u,
+        "SIO2 FIFO_STAT reset value mismatch") && ok;
 
     ok = expect(
         system.iop_bus().write32(0x1F808268u, 1u),
@@ -1212,6 +1410,387 @@ bool test_iop_sio2_dma_bootstrap_completion() {
         system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
             (value & (1u << 3)) != 0,
         "SIO2 DMA did not raise IOP DMA interrupt") && ok;
+
+    return ok;
+}
+
+bool test_ee_ipu_dma_bootstrap_paths() {
+    ps2::Ps2System system;
+    ps2::IpuDma dma;
+    dma.reset();
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 dmac_stat = 0x1000E010u;
+    constexpr ps2::u32 from_base = 0x1000B000u;
+    constexpr ps2::u32 to_base = 0x1000B400u;
+    constexpr ps2::u32 str = 1u << 8;
+
+    ok = expect(
+             system.bus().write32(dmac_ctrl, 1u),
+             "failed to enable DMAC for IPU DMA test") && ok;
+
+    // Firmware probes can arm FROM_IPU with QWC=0 while OFC is empty.
+    ok = expect(
+             system.bus().write32(from_base + 0x20u, 0u) &&
+             system.bus().write32(from_base + 0x00u, str),
+             "failed to arm zero-QWC IPU0 DMA") && ok;
+    ok = expect(
+             dma.service(system.bus(), error),
+             "zero-QWC IPU0 DMA service failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.bus().read32(from_base + 0x00u, value) &&
+             (value & str) == 0,
+             "zero-QWC IPU0 DMA left STR set") && ok;
+    ok = expect(
+             system.bus().read32(dmac_stat, value) &&
+             (value & (1u << 3)) != 0,
+             "zero-QWC IPU0 completion IRQ missing") && ok;
+    ok = expect(
+             system.bus().write32(dmac_stat, 1u << 3),
+             "failed to acknowledge IPU0 DMA IRQ") && ok;
+
+    // TO_IPU consumes real memory payload into the modeled input FIFO.
+    ok = expect(
+             system.bus().write64(
+                 0x6000u, 0x0123456789ABCDEFull) &&
+             system.bus().write64(
+                 0x6008u, 0xFEDCBA9876543210ull) &&
+             system.bus().write32(to_base + 0x10u, 0x6000u) &&
+             system.bus().write32(to_base + 0x20u, 1u) &&
+             system.bus().write32(to_base + 0x00u, str),
+             "failed to arm IPU1 input DMA") && ok;
+    error.clear();
+    ok = expect(
+             dma.service(system.bus(), error),
+             "IPU1 input DMA service failed") && ok;
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ok = expect(
+             system.bus().read64(0x10007010u, lo) &&
+             system.bus().read64(0x10007018u, hi) &&
+             lo == 0x0123456789ABCDEFull &&
+             hi == 0xFEDCBA9876543210ull,
+             "IPU1 FIFO payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(to_base + 0x00u, value) &&
+             (value & str) == 0 &&
+             system.bus().read32(dmac_stat, value) &&
+             (value & (1u << 4)) != 0,
+             "IPU1 DMA completion state mismatch") && ok;
+
+    return ok;
+}
+
+bool test_ee_scratchpad_dma_round_trip() {
+    ps2::Ps2System system;
+    ps2::SprDma dma;
+    dma.reset();
+    std::string error;
+    bool ok = true;
+
+    constexpr ps2::u32 dmac_ctrl = 0x1000E000u;
+    constexpr ps2::u32 from_base = 0x1000D000u;
+    constexpr ps2::u32 to_base = 0x1000D400u;
+    constexpr ps2::u32 str = 1u << 8;
+
+    ok = expect(
+             system.bus().write32(dmac_ctrl, 1u),
+             "failed to enable EE DMAC for SPR test") && ok;
+
+    // Channel 9: main memory -> scratchpad.
+    ok = expect(
+             system.bus().write64(0x4000u, 0x1122334455667788ull) &&
+             system.bus().write64(0x4008u, 0x99AABBCCDDEEFF00ull) &&
+             system.bus().write32(to_base + 0x10u, 0x4000u) &&
+             system.bus().write32(to_base + 0x20u, 1u) &&
+             system.bus().write32(to_base + 0x80u, 0x20u) &&
+             system.bus().write32(to_base + 0x00u, str),
+             "failed to program SPR-to DMA") && ok;
+    ok = expect(
+             dma.service(system.bus(), error),
+             "SPR-to DMA service failed") && ok;
+
+    ps2::u64 lo = 0;
+    ps2::u64 hi = 0;
+    ps2::u32 chcr = 0;
+    ps2::u32 qwc = 0;
+    ps2::u32 stat = 0;
+    ok = expect(
+             system.bus().read64(0x70000020u, lo) &&
+             system.bus().read64(0x70000028u, hi) &&
+             lo == 0x1122334455667788ull &&
+             hi == 0x99AABBCCDDEEFF00ull,
+             "SPR-to DMA payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(to_base + 0x00u, chcr) &&
+             (chcr & str) == 0 &&
+             system.bus().read32(to_base + 0x20u, qwc) &&
+             qwc == 0,
+             "SPR-to DMA did not complete") && ok;
+    ok = expect(
+             system.bus().read32(0x1000E010u, stat) &&
+             (stat & (1u << 9)) != 0,
+             "SPR-to DMA completion IRQ missing") && ok;
+
+    // Acknowledge channel 9 before checking channel 8 independently.
+    ok = expect(
+             system.bus().write32(0x1000E010u, 1u << 9),
+             "failed to acknowledge SPR-to IRQ") && ok;
+
+    // Channel 8: scratchpad -> main memory, including scratchpad wrap.
+    ok = expect(
+             system.bus().write64(
+                 0x70003FF0u, 0x0123456789ABCDEFull) &&
+             system.bus().write64(
+                 0x70003FF8u, 0xFEDCBA9876543210ull) &&
+             system.bus().write32(from_base + 0x10u, 0x5000u) &&
+             system.bus().write32(from_base + 0x20u, 1u) &&
+             system.bus().write32(from_base + 0x80u, 0x3FF0u) &&
+             system.bus().write32(from_base + 0x00u, str),
+             "failed to program SPR-from DMA") && ok;
+    error.clear();
+    ok = expect(
+             dma.service(system.bus(), error),
+             "SPR-from DMA service failed") && ok;
+
+    lo = hi = 0;
+    ok = expect(
+             system.bus().read64(0x5000u, lo) &&
+             system.bus().read64(0x5008u, hi) &&
+             lo == 0x0123456789ABCDEFull &&
+             hi == 0xFEDCBA9876543210ull,
+             "SPR-from DMA payload mismatch") && ok;
+    ok = expect(
+             system.bus().read32(from_base + 0x00u, chcr) &&
+             (chcr & str) == 0 &&
+             system.bus().read32(0x1000E010u, stat) &&
+             (stat & (1u << 8)) != 0,
+             "SPR-from DMA completion state mismatch") && ok;
+
+    return ok;
+}
+
+bool test_iop_ohci_bootstrap_reset() {
+    ps2::Ps2System system;
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F801600u, value) &&
+             value == 0x10u,
+             "OHCI revision reset value mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801648u, value) &&
+             value == 0x202u,
+             "OHCI root-hub descriptor mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801654u, value) &&
+             value == 0x100u,
+             "OHCI root-port power/reset state mismatch") && ok;
+
+    // HCR must self-clear. Retaining this bit in a generic register window
+    // leaves BIOS USB initialization in a permanent reset poll.
+    ok = expect(
+             system.iop_bus().write32(0x1F801608u, 1u) &&
+             system.iop_bus().read32(0x1F801608u, value) &&
+             value == 0u,
+             "OHCI host-controller reset bit did not self-clear") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F801604u, value) &&
+             (value & 0xC0u) == 0xC0u,
+             "OHCI soft reset did not enter suspend state") && ok;
+
+    // With no USB devices attached, list-filled flags may retire immediately
+    // but must never remain stuck as busy.
+    ok = expect(
+             system.iop_bus().write32(0x1F801608u, 0x6u) &&
+             system.iop_bus().read32(0x1F801608u, value) &&
+             value == 0u,
+             "OHCI list-filled flags did not retire") && ok;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F80163Cu, value) &&
+             value == 0u,
+             "OHCI frame number did not reset to zero") && ok;
+    system.iop_bus().tick(36864u);
+    ok = expect(
+             system.iop_bus().read32(0x1F80163Cu, value) &&
+             value == 1u,
+             "OHCI frame number did not advance") && ok;
+
+    return ok;
+}
+
+bool test_iop_firewire_bootstrap_probes() {
+    ps2::Ps2System system;
+    bool ok = true;
+    ps2::u32 value = 0;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F808400u, value) &&
+             value == 0xFFC00001u,
+             "i.Link node ID probe mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F808410u, value) &&
+             value == 0x8u,
+             "i.Link SCLK ready reset state mismatch") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F80847Cu, value) &&
+             value == 0x10000001u,
+             "i.Link node comparison probe mismatch") && ok;
+
+    ok = expect(
+             system.iop_bus().write32(0x1F808408u, 0x00800055u) &&
+             system.iop_bus().read32(0x1F808408u, value) &&
+             (value & 0x00800000u) == 0u &&
+             (value & 0x55u) == 0x55u,
+             "i.Link Bus ID reset bit did not self-clear") && ok;
+
+    ok = expect(
+             system.iop_bus().write32(0x1F808410u, 0u) &&
+             system.iop_bus().read32(0x1F808410u, value) &&
+             value == 0x8u,
+             "i.Link SCLK ready bit was lost") && ok;
+
+    // PHY read request must complete instead of leaving the read flag set.
+    ok = expect(
+             system.iop_bus().write32(0x1F808414u, 0x83000000u) &&
+             system.iop_bus().read32(0x1F808414u, value) &&
+             (value & 0x80000000u) == 0u &&
+             (value & 0x00000F00u) == 0x00000300u,
+             "i.Link PHY read request did not complete") && ok;
+
+    return ok;
+}
+
+bool test_iop_absent_dev9_aperture() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 value8 = 0xFFu;
+    ps2::u16 value16 = 0xFFFFu;
+    ps2::u32 value32 = 0xFFFFFFFFu;
+
+    ok = expect(
+             system.iop_bus().read8(0x10000000u, value8) &&
+             value8 == 0u,
+             "absent DEV9 byte probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read16(0xB000146Eu, value16) &&
+             value16 == 0u,
+             "absent DEV9 KSEG1 halfword probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x10000040u, value32) &&
+             value32 == 0u,
+             "absent DEV9 word probe did not return zero") && ok;
+
+    ok = expect(
+             system.iop_bus().write8(0x10000000u, 0xAAu) &&
+             system.iop_bus().write16(0x10000002u, 0x55AAu) &&
+             system.iop_bus().write32(0x10000004u, 0x12345678u),
+             "absent DEV9 probe writes faulted") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x10000004u, value32) &&
+             value32 == 0u,
+             "absent DEV9 write unexpectedly created device state") && ok;
+
+    return ok;
+}
+
+bool test_iop_uninstalled_peripheral_open_bus() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    ps2::u8 value8 = 0xFFu;
+    ps2::u16 value16 = 0xFFFFu;
+    ps2::u32 value32 = 0xFFFFFFFFu;
+
+    ok = expect(
+             system.iop_bus().read8(0x1F000123u, value8) &&
+             value8 == 0u,
+             "IOP open-bus byte probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read16(0xBF000200u, value16) &&
+             value16 == 0u,
+             "IOP open-bus KSEG1 halfword probe did not return zero") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F500000u, value32) &&
+             value32 == 0u,
+             "IOP open-bus word probe did not return zero") && ok;
+
+    ok = expect(
+             system.iop_bus().write8(0x1F000123u, 0xAAu) &&
+             system.iop_bus().write16(0x1F500002u, 0x55AAu) &&
+             system.iop_bus().write32(0x1FA00000u, 0x12345678u),
+             "IOP open-bus probe writes faulted") && ok;
+
+    // The ROM0 window must remain outside permissive open-bus handling.
+    value32 = 0;
+    ok = expect(
+             !system.iop_bus().read32(0x1FC00000u, value32),
+             "unloaded ROM0 was incorrectly treated as open bus") && ok;
+
+    return ok;
+}
+
+bool test_iop_dma6_ordering_table_clear() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    constexpr ps2::u32 madr = 0x0000100Cu;
+    constexpr ps2::u32 words = 4u;
+
+    ok = expect(
+             system.iop_bus().write32(
+                 0x1F8010F4u,
+                 (1u << 23) | (1u << (16u + 6u))),
+             "failed to enable IOP DMA6 interrupt") && ok;
+    ok = expect(
+             system.iop_bus().write32(0x1F8010E0u, madr) &&
+             system.iop_bus().write32(0x1F8010E4u, words) &&
+             system.iop_bus().write32(0x1F8010E8u, 0x11000002u),
+             "IOP DMA6 OTC programming failed") && ok;
+
+    ps2::u32 value = 0;
+    ok = expect(
+             system.iop_ram().read32(0x100Cu, value) &&
+             value == 0x00001008u,
+             "IOP DMA6 first OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1008u, value) &&
+             value == 0x00001004u,
+             "IOP DMA6 second OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1004u, value) &&
+             value == 0x00001000u,
+             "IOP DMA6 third OTC link mismatch") && ok;
+    ok = expect(
+             system.iop_ram().read32(0x1000u, value) &&
+             value == 0x00FFFFFFu,
+             "IOP DMA6 OTC terminator mismatch") && ok;
+
+    ok = expect(
+             system.iop_bus().read32(0x1F8010E8u, value) &&
+             (value & 0x01000000u) == 0u,
+             "IOP DMA6 start bit did not clear") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F8010E4u, value) &&
+             value == 0u,
+             "IOP DMA6 BCR did not complete") && ok;
+    ok = expect(
+             system.iop_bus().read32(0x1F8010F4u, value) &&
+             (value & (1u << 30)) != 0u &&
+             (value & 0x80000000u) != 0u,
+             "IOP DMA6 completion flag missing") && ok;
+    ok = expect(
+             system.iop_bus().read32(ps2::IopIntc::kIStat, value) &&
+             (value & (1u << 3)) != 0u,
+             "IOP DMA6 did not raise DMA interrupt") && ok;
 
     return ok;
 }
@@ -1308,13 +1887,16 @@ int main() {
     ok = test_iop_optional_extension_rom_windows() && ok;
     ok = test_ee_iop_startup_interleave() && ok;
     ok = test_ee_sbus_iop_commands() && ok;
+    ok = test_iop_gte_bootstrap_transfers() && ok;
     ok = test_iop_cache_isolation_blocks_ram_store() && ok;
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
     ok = test_iop_bus_repeating_timer_irq() && ok;
     ok = test_cdvd_reset_status() && ok;
+    ok = test_cdvd_iop_segment_mirror() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
     ok = test_cdvd_config_scommands() && ok;
+    ok = test_cdvd_mechacon_config_nvram() && ok;
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
@@ -1323,6 +1905,13 @@ int main() {
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
+    ok = test_iop_ohci_bootstrap_reset() && ok;
+    ok = test_iop_firewire_bootstrap_probes() && ok;
+    ok = test_iop_absent_dev9_aperture() && ok;
+    ok = test_iop_uninstalled_peripheral_open_bus() && ok;
+    ok = test_iop_dma6_ordering_table_clear() && ok;
+    ok = test_ee_scratchpad_dma_round_trip() && ok;
+    ok = test_ee_ipu_dma_bootstrap_paths() && ok;
     ok = test_ee_lq_sq_silent_alignment() && ok;
 
     if (!ok) {

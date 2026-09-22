@@ -33,8 +33,22 @@ constexpr u32 kTimerIrqs[6] = {4u, 5u, 6u, 14u, 15u, 16u};
 
 void IopHwWindow::reset() {
     data_.fill(0);
-    // SIO2 PORT_STAT reset value used by SIO2MAN during device probing.
-    data_[0x8270u] = 0x0Fu;
+
+    auto seed32 = [&](u32 offset, u32 value) {
+        for (u32 i = 0; i < 4u; ++i) {
+            data_[offset + i] =
+                static_cast<u8>(value >> (i * 8u));
+        }
+    };
+
+    // SIO2MAN-visible reset state.  The retail driver checks these before it
+    // queues its first pad/memory-card transaction.
+    seed32(0x8268u, 0x000003BCu); // CTRL
+    seed32(0x826Cu, 0x0001D100u); // CMD_STAT: disconnected
+    seed32(0x8270u, 0x0000000Fu); // PORT_STAT
+    seed32(0x8274u, 0x00000000u); // FIFO_STAT
+    seed32(0x8280u, 0x00000000u); // INTR
+
     timer_phase_.fill(0);
     timer_count_.fill(0);
     timer_target_.fill(0);

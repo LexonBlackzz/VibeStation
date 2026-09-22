@@ -119,6 +119,92 @@ bool test_vif0_mpg_unpack_and_completion() {
     return ok;
 }
 
+bool test_vif0_mscal_waits_for_vu0() {
+    ps2::Ps2System system;
+    ps2::Vif0Dma dma;
+    dma.reset();
+    dma.attach_vu0(system.vu0());
+
+    constexpr ps2::u32 stream = 0xA000u;
+    constexpr ps2::u32 mpg =
+        (0x4Au << 24) | (2u << 16);
+    constexpr ps2::u32 iaddu_vi1_5 =
+        (0x08u << 25) | (1u << 16) | 5u;
+    constexpr ps2::u32 iaddu_vi2_7 =
+        (0x08u << 25) | (2u << 16) | 7u;
+    constexpr ps2::u32 end_flag = 0x40000000u;
+    constexpr ps2::u32 mscal = 0x14u << 24;
+    constexpr ps2::u32 flush = 0x11u << 24;
+    constexpr ps2::u32 mark =
+        (0x07u << 24) | 0x1234u;
+
+    bool ok = true;
+    ok = expect(
+        write_words(
+            system.bus(),
+            stream,
+            mpg,
+            iaddu_vi1_5,
+            end_flag,
+            iaddu_vi2_7) &&
+        write_words(
+            system.bus(),
+            stream + 0x10u,
+            0u,
+            mscal,
+            flush,
+            mark),
+        "failed to build VIF0 MSCAL stream") && ok;
+
+    ok = expect(
+        system.bus().write32(0x1000E000u, 1u) &&
+        system.bus().write32(0x10008010u, stream) &&
+        system.bus().write32(0x10008020u, 2u) &&
+        system.bus().write32(0x10008000u, 0x101u),
+        "failed to arm VIF0 MSCAL DMA") && ok;
+
+    std::string error;
+    ok = expect(
+        dma.service(system.bus(), error),
+        "VIF0 MPG service failed") && ok;
+    ok = expect(
+        dma.service(system.bus(), error),
+        "VIF0 MSCAL/FLUSH service failed") && ok;
+
+    ps2::u32 stat = 0;
+    ok = expect(
+        system.vu0().running(),
+        "VIF0 MSCAL did not start VU0") && ok;
+    ok = expect(
+        system.bus().read32(0x10003800u, stat) &&
+            (stat & 0x3u) == 1u,
+        "VIF0 FLUSH did not enter VU wait state") && ok;
+
+    std::string vu_error;
+    system.vu0().run(8u, vu_error);
+    ok = expect(
+        vu_error.empty() && !system.vu0().running() &&
+            system.vu0().vi(1u) == 5u &&
+            system.vu0().vi(2u) == 7u,
+        "VIF0-started VU0 program did not retire") && ok;
+
+    error.clear();
+    ok = expect(
+        dma.service(system.bus(), error),
+        "VIF0 did not resume after VU0 completion") && ok;
+    ps2::u32 value = 0;
+    ok = expect(
+        system.bus().read32(0x10003830u, value) &&
+            value == 0x1234u,
+        "VIF0 deferred MARK did not execute after FLUSH") && ok;
+    ok = expect(
+        system.bus().read32(0x10008000u, value) &&
+            (value & 0x100u) == 0,
+        "VIF0 DMA did not complete after VU0 wait") && ok;
+
+    return ok;
+}
+
 bool test_vif0_chain_tte() {
     ps2::Ps2System system;
     ps2::Vif0Dma dma;
@@ -184,6 +270,7 @@ int main() {
     bool ok = true;
     ok = test_vif0_mpg_unpack_and_completion() && ok;
     ok = test_vif0_chain_tte() && ok;
+    ok = test_vif0_mscal_waits_for_vu0() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VIF0 tests passed.\n";
     return EXIT_SUCCESS;
