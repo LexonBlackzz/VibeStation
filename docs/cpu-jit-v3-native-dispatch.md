@@ -126,3 +126,108 @@ CPU comparison suite: CPU avg 4.619 ms, p50 4.673 ms, p95 5.434 ms, 14,552,064
 native instructions, 1,685,300 helper instructions, 8,002,108 block entries,
 1,520,967 chain entries, 3,620,702 linked transitions, 5,913,234 code bytes.
 The final timing lies within the host's observed run-to-run variation.
+
+
+## Checkpoint — 2026-09-22 V3 furnace session
+
+This section is intentionally a handoff/checkpoint so work can resume from Git
+alone. All experiments discussed here are committed on
+`perf/cpu-jit-v3-native-dispatch-1`; `main` was not modified or merged.
+
+Branch head before this checkpoint commit: `1900b99c`
+(`1900b99c82e3871f80eb2aa9098cd726d760a44d`).
+
+### Canonical correctness gate
+
+Spyro the Dragon (USA), 840 warmup + 60 measured frames, x64jitv3:
+
+- state: `CDEAA474CF09AF42`
+- PC: `80016488`
+- cycles: `510309192`
+
+Do not treat the CI CPU comparison suite as sufficient by itself. Several
+recent experimental commits pass that suite but diverge in the full Spyro run.
+
+### Last full-Spyro commits verified exact in this session
+
+- `9daf69e0` — native byte/halfword loads: exact gate.
+- `9cc201e2` — transactional native branch-delay refill: exact gate.
+- `c4b55467` — resident JR/JALR tail dispatch: exact gate.
+- `64ec449e` — transactional single-ALU entry I-cache miss: exact gate.
+
+A pinned Xeon run of `64ec449e` ended exactly at the canonical gate.
+Observed CPU avg was ~7.64 ms in that noisy cloud session; use same-session A/B
+rather than treating that absolute number as stable.
+
+### Current head is NOT full-Spyro exact
+
+The pre-checkpoint head `1900b99c` passes CI CPU compare and GPU self-test,
+but a pinned Xeon Platinum 8573C canonical Spyro run produced:
+
+- CPU avg: 5.702868 ms
+- final state: `B3BDF38C23898C0C`
+- final PC: `800163F4`
+- cycles: `510309598` (+406 versus canonical)
+
+So current HEAD is fast but architecturally wrong. Preserve it as an
+experiment; do not promote it as the correctness baseline.
+
+The regression is therefore after `64ec449e`. The next bisection target is
+`7d06edc3` (full-ALU transactional entry refill), followed by
+`557d9085`, `3ff2653e`, `a282ad35`, `229ea9ca`, then the later
+post-restore experiments as needed.
+
+### Current profile notes
+
+At `1900b99c`, the 840/60 run reported roughly:
+
+- native inline instructions: 14.119M
+- helper instructions: 432.7k
+- native chain entries: 1.062M
+- linked transitions: 5.198M
+- max chain length: 21
+- I-cache helpers: 24.7k
+- state helpers: 5.3k
+- budget helpers: 264.1k
+- memory helpers: 118.5k
+
+Crucially, the memory-fallback region counters show all ~118.5k remaining
+memory helpers are MMIO in this Spyro window:
+
+- RAM: 0
+- scratchpad: 0
+- BIOS: 0
+- unaligned: 0
+- unknown: 0
+- MMIO: ~118.5k
+
+Do not spend time on main-RAM mirror fast paths for those remaining load
+fallbacks. Current V3 already uses `jit_mapped_main_ram_size()` and aliases
+the active RAM window through the physical 2 MiB backing store for loads.
+
+### Architecture worth preserving / reusable for future PS2 work
+
+- stable PC-indexed resident successor cells
+- true tail-jump block linking
+- pending R3000A load state carried across native links
+- 16-byte guest I-cache-line block splitting
+- transactional I-cache refill experiments
+- resident JR/JALR dispatch infrastructure
+- generic `JitCodePageBitmap<AddressBits, PageShift>` from `c6d2d827`
+- V3 bitmap integration from `59fb7f93`
+- executable-page/write-path SMC tracking direction
+- generated fast-memory address normalization using the bus's active mapping
+- every failed experiment remains in branch history; fix forward, do not
+  rewrite/delete the history
+
+The generic bitmap, stable link-cell model, resident ABI, and write-side SMC
+tracking are intended to be reusable by future PS2 EE/IOP dynarecs.
+
+### Immediate resume plan
+
+1. Continue the full-Spyro bisection starting at `7d06edc3`.
+2. Restore/fix forward to the newest exact semantic combination.
+3. Reapply only the proven speedups after the first bad commit is identified.
+4. Once exact again, attack MMIO/helper exits or safe native stores with the
+   code-page bitmap/SMC path.
+5. Keep committing every experiment, including broken ones.
