@@ -1040,6 +1040,14 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
 
   code.L(stored);
 
+  // Account timing while the RAM/scratchpad penalty is still in r9d. The C++
+  // invalidation helper below may clobber all caller-saved registers.
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+      code.r9d);
+
   // Keep guest I-cache visibility and all JIT invalidation hooks identical to
   // System::write*. Diagnostics which need per-write callbacks disable the
   // memory fast path before we get here.
@@ -1080,12 +1088,6 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
       0u);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-  // store baseline is 2 cycles, plus one for main RAM.
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-      code.r9d);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.inc(code.dword[
