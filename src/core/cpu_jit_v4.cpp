@@ -181,6 +181,7 @@ struct V4DispatchPage;
 struct V4NativeState {
   u32 *gpr = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
+  const u32 *icache_generations = nullptr;
   u32 cache_epoch = 0;
   u32 pc = 0;
   u32 last_pc = 0;
@@ -275,9 +276,12 @@ struct V4Block {
   u32 instruction_count = 0;
   u32 max_cycles = 0;
   u32 code_size = 0;
+  u32 icache_generation = 0;
+  u16 icache_index = 0;
   V4NativeFn fn = nullptr;
   bool interpreter_only = false;
   bool has_control = false;
+  bool cacheable = false;
 };
 
 struct V4DispatchEntry {
@@ -743,6 +747,25 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
   code.test(code.r14, code.r14);
   code.jz(done);
 
+  {
+    Label cache_ok;
+    code.cmp(code.byte[
+        code.r14 + static_cast<int>(offsetof(V4Block, cacheable))], 0u);
+    code.je(cache_ok);
+    code.mov(code.rax, code.ptr[
+        code.rbx +
+        static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+    code.test(code.rax, code.rax);
+    code.jz(done);
+    code.movzx(code.ecx, code.word[
+        code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
+    code.mov(code.edx, code.dword[code.rax + code.rcx * 4]);
+    code.cmp(code.edx, code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
+    code.jne(done);
+    code.L(cache_ok);
+  }
+
   code.mov(code.eax, code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.add(code.eax, code.dword[
@@ -856,12 +879,20 @@ struct CpuJitV4Backend::Impl {
     return &page->entries[(pc >> 2u) & 0x3FFu];
   }
 
-  V4Block *lookup(u32 pc) {
+  V4Block *lookup(u32 pc, bool cacheable, u32 icache_generation) {
     V4DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry == nullptr || entry->cache_epoch != cache_epoch) {
+    if (entry == nullptr || entry->cache_epoch != cache_epoch ||
+        entry->block == nullptr) {
       return nullptr;
     }
-    return entry->block;
+    V4Block *block = entry->block;
+    if (block->cacheable != cacheable) {
+      return nullptr;
+    }
+    if (cacheable && block->icache_generation != icache_generation) {
+      return nullptr;
+    }
+    return block;
   }
 
   void install(u32 pc, V4Block *block) {
@@ -901,19 +932,38 @@ struct CpuJitV4Backend::Impl {
     return block;
   }
 
-  V4Block *compile_block(Cpu &cpu, CpuBackendStats &stats, u32 start_pc) {
+  V4Block *compile_block(Cpu &cpu, CpuBackendStats &stats, u32 start_pc,
+                         bool cacheable, u32 icache_generation) {
     V4Block *block = allocate_block();
     if (block == nullptr) {
       return nullptr;
     }
 
     block->start_pc = start_pc;
+    block->cacheable = cacheable;
+    block->icache_index = static_cast<u16>((start_pc >> 4) & 0xFFu);
+    block->icache_generation = cacheable ? icache_generation : 0u;
+
+    // A cached native block never crosses a 16-byte guest I-cache line.
+    // One generation tag therefore identifies the complete instruction snapshot
+    // used to compile it, and we never speculatively refill a future line.
+    const u32 line_instructions =
+        cacheable ? ((16u - (start_pc & 0x0Fu)) >> 2u)
+                  : kV4MaxBlockInstructions;
+    const u32 decode_limit =
+        std::min(kV4MaxBlockInstructions, line_instructions);
+
+    auto read_visible = [&](u32 addr, u32 &bits) {
+      return cpu.read_visible_instruction_for_backend(addr, bits);
+    };
+
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> decoded{};
     u32 count = 0u;
-    for (; count < kV4MaxBlockInstructions; ++count) {
+    for (; count < decode_limit; ++count) {
       V4DecodedInstruction inst{};
-      const u32 bits = cpu.read_instruction_for_backend(start_pc + count * 4u);
-      if (!decode_v4_alu(bits, inst)) {
+      u32 bits = 0u;
+      if (!read_visible(start_pc + count * 4u, bits) ||
+          !decode_v4_alu(bits, inst)) {
         break;
       }
       decoded[count] = inst;
@@ -921,10 +971,16 @@ struct CpuJitV4Backend::Impl {
 
     V4DecodedControl control{};
     V4DecodedInstruction delay{};
+    u32 control_bits = 0u;
+    u32 delay_bits = 0u;
+    const bool delay_in_same_cache_line =
+        !cacheable || (start_pc & 0x0Fu) <= 8u;
     const bool simple_control =
-        count == 0u &&
-        decode_v4_control(cpu.read_instruction_for_backend(start_pc), control) &&
-        decode_v4_alu(cpu.read_instruction_for_backend(start_pc + 4u), delay);
+        count == 0u && delay_in_same_cache_line &&
+        read_visible(start_pc, control_bits) &&
+        read_visible(start_pc + 4u, delay_bits) &&
+        decode_v4_control(control_bits, control) &&
+        decode_v4_alu(delay_bits, delay);
 
     if (count == 0u && !simple_control) {
       block->interpreter_only = true;
@@ -1067,22 +1123,29 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
       continue;
     }
 
-    // Guest I-cache visibility is deliberately a later V4 phase. For now,
-    // native compilation is restricted to uncached KSEG1 execution, including
-    // the BIOS, so raw backend instruction reads cannot observe bytes that the
-    // guest I-cache would still hide.
-    if (cpu_.instruction_cacheable(cpu_.pc_)) {
-      ++stats_.native_reject_icache;
-      fallback_one();
-      continue;
+    const bool cacheable = cpu_.instruction_cacheable(cpu_.pc_);
+    u32 icache_generation = 0u;
+    if (cacheable) {
+      // Refill only the line containing the instruction about to execute.
+      // The JIT compiler consumes that guest-visible snapshot rather than RAM.
+      if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
+        constexpr u32 kRefillCycles = 4u;
+        cpu_.cycles_ += kRefillCycles;
+        result.cycles += kRefillCycles;
+        stats_.executed_cycles += kRefillCycles;
+      }
+      icache_generation =
+          cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
     }
 
-    V4Block *block = impl_->lookup(cpu_.pc_);
+    V4Block *block =
+        impl_->lookup(cpu_.pc_, cacheable, icache_generation);
     if (block != nullptr) {
       ++stats_.cache_hits;
     } else {
       ++stats_.cache_misses;
-      block = impl_->compile_block(cpu_, stats_, cpu_.pc_);
+      block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
+                                   icache_generation);
       if (block == nullptr) {
         // A full arena/metadata slab is recycled in bulk; no per-block
         // executable allocations or frees are needed.
@@ -1091,7 +1154,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
         stats_.block_count = 0u;
         stats_.interpreter_only_blocks = 0u;
         ++stats_.flushes;
-        block = impl_->compile_block(cpu_, stats_, cpu_.pc_);
+        block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
+                                   icache_generation);
       }
     }
 
@@ -1108,6 +1172,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     V4NativeState native{};
     native.gpr = cpu_.gpr_;
     native.dispatch_top = impl_->dispatch_top.get();
+    native.icache_generations = cpu_.icache_generation_.data();
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
     native.pending_load_reg = cpu_.load_.reg;
