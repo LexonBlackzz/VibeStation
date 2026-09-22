@@ -54,8 +54,13 @@ namespace {
                   requested_mode == CpuExecutionMode::X64JitV3 ||
                   requested_mode == CpuExecutionMode::X64JitV4) &&
                  !stats.native_available) {
+            const char *fallback_name =
+                requested_mode == CpuExecutionMode::X64JitV4
+                    ? "Interpreter"
+                    : "Decoded blocks";
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
-                "Effective backend: Decoded blocks (native emitter unavailable)");
+                "Effective backend: %s (native emitter unavailable)",
+                fallback_name);
         }
         else {
             ImGui::Text("Effective backend: %s",
