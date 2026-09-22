@@ -100,15 +100,29 @@ struct V4DecodedControl {
   u32 imm26 = 0;
 };
 
+enum class V4LoadOp : u8 {
+  Lb,
+  Lh,
+  Lw,
+  Lbu,
+  Lhu,
+};
+
 struct V4DecodedLoad {
+  V4LoadOp op = V4LoadOp::Lw;
   u8 rs = 0;
   u8 rt = 0;
   s32 simm = 0;
 };
 
-bool decode_v4_lw(u32 bits, V4DecodedLoad &out) {
-  if (((bits >> 26) & 0x3Fu) != 0x23u) {
-    return false;
+bool decode_v4_load(u32 bits, V4DecodedLoad &out) {
+  switch ((bits >> 26) & 0x3Fu) {
+  case 0x20: out.op = V4LoadOp::Lb; break;
+  case 0x21: out.op = V4LoadOp::Lh; break;
+  case 0x23: out.op = V4LoadOp::Lw; break;
+  case 0x24: out.op = V4LoadOp::Lbu; break;
+  case 0x25: out.op = V4LoadOp::Lhu; break;
+  default: return false;
   }
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
   out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
@@ -760,8 +774,8 @@ V4NativeFn compile_v4_branch(
 }
 
 
-V4NativeFn compile_v4_lw(V4CodeArena &arena, const V4DecodedLoad &load,
-                         u32 start_pc, u32 &code_size) {
+V4NativeFn compile_v4_load(V4CodeArena &arena, const V4DecodedLoad &load,
+                           u32 start_pc, u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -783,8 +797,37 @@ V4NativeFn compile_v4_lw(V4CodeArena &arena, const V4DecodedLoad &load,
   // destination, R3000A semantics require this LW to see the old rs value.
   emit_read_guest(code, code.eax, load.rs);
   code.add(code.eax, static_cast<u32>(load.simm));
-  code.test(code.eax, 3u);
-  code.jnz(bail);
+  if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    code.test(code.eax, 1u);
+    code.jnz(bail);
+  } else if (load.op == V4LoadOp::Lw) {
+    code.test(code.eax, 3u);
+    code.jnz(bail);
+  }
+
+  auto emit_memory_read = [&]() {
+    switch (load.op) {
+    case V4LoadOp::Lb:
+      code.movzx(code.r8d, code.byte[code.rcx + code.rdx]);
+      code.shl(code.r8d, 24);
+      code.sar(code.r8d, 24);
+      break;
+    case V4LoadOp::Lh:
+      code.movzx(code.r8d, code.word[code.rcx + code.rdx]);
+      code.shl(code.r8d, 16);
+      code.sar(code.r8d, 16);
+      break;
+    case V4LoadOp::Lw:
+      code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+      break;
+    case V4LoadOp::Lbu:
+      code.movzx(code.r8d, code.byte[code.rcx + code.rdx]);
+      break;
+    case V4LoadOp::Lhu:
+      code.movzx(code.r8d, code.word[code.rcx + code.rdx]);
+      break;
+    }
+  };
 
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
@@ -802,7 +845,7 @@ V4NativeFn compile_v4_lw(V4CodeArena &arena, const V4DecodedLoad &load,
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
   code.jz(bail);
-  code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+  emit_memory_read();
   code.xor_(code.r9d, code.r9d);
   code.jmp(loaded);
 
@@ -812,7 +855,7 @@ V4NativeFn compile_v4_lw(V4CodeArena &arena, const V4DecodedLoad &load,
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
   code.jz(bail);
-  code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+  emit_memory_read();
   code.mov(code.r9d, 4u);
 
   code.L(loaded);
@@ -1180,7 +1223,7 @@ struct CpuJitV4Backend::Impl {
     u32 load_bits = 0u;
     const bool simple_load =
         count == 0u && read_visible(start_pc, load_bits) &&
-        decode_v4_lw(load_bits, load);
+        decode_v4_load(load_bits, load);
 
     if (count == 0u && !simple_control && !simple_load) {
       block->interpreter_only = true;
@@ -1198,7 +1241,7 @@ struct CpuJitV4Backend::Impl {
             arena, decoded, count, control, delay, branch_pc,
             block->code_size);
       } else if (simple_load) {
-        entry = compile_v4_lw(arena, load, start_pc, block->code_size);
+        entry = compile_v4_load(arena, load, start_pc, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, block->code_size);
