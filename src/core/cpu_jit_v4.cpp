@@ -827,7 +827,9 @@ V4NativeFn compile_v4_branch(
 V4NativeFn compile_v4_load(
     V4CodeArena &arena, const V4DecodedLoad &load,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
-    u32 tail_count, u32 start_pc, u32 &code_size) {
+    u32 tail_count, const V4DecodedControl *control,
+    const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
+    u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -929,25 +931,142 @@ V4NativeFn compile_v4_load(
     }
   }
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-      start_pc + tail_count * 4u);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
-      0u);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
-      0u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
-      (tail_count + 1u) * 4u);
-  code.add(code.r9d, tail_count + 2u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-      code.r9d);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-      tail_count + 1u);
+  if (control != nullptr && delay != nullptr) {
+    const V4DecodedControl &branch = *control;
+    const u32 fallthrough = branch_pc + 8u;
+    const u32 jump_target =
+        ((branch_pc + 4u) & 0xF0000000u) | (branch.imm26 << 2u);
+    const u32 branch_target =
+        branch_pc + 4u + static_cast<u32>(branch.simm * 4);
+
+    // The load and any ALU tail have consumed their cycles. Keep the RAM
+    // penalty in r9d until the branch direction selects its exact cost.
+    code.add(code.r9d, tail_count + 2u);
+
+    // Capture the branch operands before retiring the new load when the branch
+    // is the immediate load-delay instruction.
+    if (branch.op == V4ControlOp::Beq ||
+        branch.op == V4ControlOp::Bne) {
+      emit_read_guest(code, code.eax, branch.rs);
+      emit_read_guest(code, code.ecx, branch.rt);
+      code.cmp(code.eax, code.ecx);
+      if (branch.op == V4ControlOp::Beq) {
+        code.sete(code.dl);
+      } else {
+        code.setne(code.dl);
+      }
+      code.movzx(code.edx, code.dl);
+    } else if (branch.op == V4ControlOp::Blez ||
+               branch.op == V4ControlOp::Bgtz ||
+               branch.op == V4ControlOp::Bltz ||
+               branch.op == V4ControlOp::Bgez ||
+               branch.op == V4ControlOp::Bltzal ||
+               branch.op == V4ControlOp::Bgezal) {
+      emit_read_guest(code, code.eax, branch.rs);
+      code.cmp(code.eax, 0);
+      switch (branch.op) {
+      case V4ControlOp::Blez: code.setle(code.dl); break;
+      case V4ControlOp::Bgtz: code.setg(code.dl); break;
+      case V4ControlOp::Bltz:
+      case V4ControlOp::Bltzal: code.setl(code.dl); break;
+      case V4ControlOp::Bgez:
+      case V4ControlOp::Bgezal: code.setge(code.dl); break;
+      default: break;
+      }
+      code.movzx(code.edx, code.dl);
+      if (branch.op == V4ControlOp::Bltzal ||
+          branch.op == V4ControlOp::Bgezal) {
+        code.mov(code.eax, branch_pc + 8u);
+        emit_write_guest(code, 31u, code.eax);
+      }
+    } else if (branch.op == V4ControlOp::Jr ||
+               branch.op == V4ControlOp::Jalr) {
+      emit_read_guest(code, code.r8d, branch.rs);
+      if (branch.op == V4ControlOp::Jalr) {
+        code.mov(code.eax, branch_pc + 8u);
+        emit_write_guest(code, branch.rd, code.eax);
+      }
+    } else if (branch.op == V4ControlOp::Jal) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, 31u, code.eax);
+    }
+
+    if (tail_count == 0u) {
+      emit_retire_incoming_load(code, v4_control_write_reg(branch));
+    }
+
+    emit_v4_alu_instruction(code, *delay);
+
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        branch_pc + 4u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        1u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        branch_pc);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+        tail_count + 3u);
+
+    if (branch.op == V4ControlOp::J ||
+        branch.op == V4ControlOp::Jal) {
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+          jump_target);
+      code.add(code.r9d, 3u);
+    } else if (branch.op == V4ControlOp::Jr ||
+               branch.op == V4ControlOp::Jalr) {
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+          code.r8d);
+      code.add(code.r9d, 3u);
+    } else {
+      Label not_taken, selected;
+      code.test(code.edx, code.edx);
+      code.jz(not_taken);
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+          branch_target);
+      code.add(code.r9d, 3u);
+      code.jmp(selected);
+
+      code.L(not_taken);
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+          fallthrough);
+      code.add(code.r9d, 2u);
+      code.L(selected);
+    }
+
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        code.r9d);
+  } else {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        start_pc + tail_count * 4u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        0u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        (tail_count + 1u) * 4u);
+    code.add(code.r9d, tail_count + 2u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        code.r9d);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+        tail_count + 1u);
+  }
+
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
   emit_v4_block_return(code);
 
   code.L(bail);
@@ -1296,15 +1415,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.jne(done);
   code.inc(code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
-  {
-    Label not_memory;
-    code.cmp(code.byte[
-        code.r14 + static_cast<int>(offsetof(V4Block, has_memory))], 0u);
-    code.je(not_memory);
-    code.inc(code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
-    code.L(not_memory);
-  }
   code.jmp(loop);
 
   code.L(done);
@@ -1539,6 +1649,21 @@ struct CpuJitV4Backend::Impl {
       }
     }
 
+    V4DecodedControl load_control{};
+    V4DecodedInstruction load_delay{};
+    u32 load_control_bits = 0u;
+    u32 load_delay_bits = 0u;
+    const u32 load_branch_pc =
+        start_pc + (load_tail_count + 1u) * 4u;
+    const bool load_control_pair_within_decode_limit =
+        simple_load && load_tail_count + 3u <= decode_limit;
+    const bool load_has_control =
+        load_control_pair_within_decode_limit &&
+        read_visible(load_branch_pc, load_control_bits) &&
+        read_visible(load_branch_pc + 4u, load_delay_bits) &&
+        decode_v4_control(load_control_bits, load_control) &&
+        decode_v4_alu(load_delay_bits, load_delay);
+
     if (count == 0u && !simple_control && !simple_load && !simple_store) {
       block->interpreter_only = true;
       install(start_pc, block);
@@ -1555,8 +1680,11 @@ struct CpuJitV4Backend::Impl {
             arena, decoded, count, control, delay, branch_pc,
             block->code_size);
       } else if (simple_load) {
-        entry = compile_v4_load(arena, load, load_tail, load_tail_count,
-                                start_pc, block->code_size);
+        entry = compile_v4_load(
+            arena, load, load_tail, load_tail_count,
+            load_has_control ? &load_control : nullptr,
+            load_has_control ? &load_delay : nullptr,
+            load_branch_pc, start_pc, block->code_size);
       } else if (simple_store) {
         entry = compile_v4_store(arena, store, start_pc, block->code_size);
       } else {
@@ -1570,14 +1698,18 @@ struct CpuJitV4Backend::Impl {
       }
       block->fn = entry;
       block->instruction_count =
-          simple_control ? count + 2u
-                         : (simple_load ? load_tail_count + 1u
-                                        : (simple_store ? 1u : count));
+          simple_control
+              ? count + 2u
+              : (simple_load
+                     ? load_tail_count + (load_has_control ? 3u : 1u)
+                     : (simple_store ? 1u : count));
       block->max_cycles =
-          simple_control ? count + 3u
-                         : (simple_load ? load_tail_count + 6u
-                                        : (simple_store ? 3u : count));
-      block->has_control = simple_control;
+          simple_control
+              ? count + 3u
+              : (simple_load
+                     ? load_tail_count + (load_has_control ? 9u : 6u)
+                     : (simple_store ? 3u : count));
+      block->has_control = simple_control || load_has_control;
       block->has_memory = simple_load || simple_store;
     } catch (...) {
       --block_count;
@@ -1586,9 +1718,11 @@ struct CpuJitV4Backend::Impl {
     }
 
     const u32 translated_count =
-        simple_control ? count + 2u
-                       : (simple_load ? load_tail_count + 1u
-                                      : (simple_store ? 1u : count));
+        simple_control
+            ? count + 2u
+            : (simple_load
+                   ? load_tail_count + (load_has_control ? 3u : 1u)
+                   : (simple_store ? 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
       const u32 code_phys =
           v4_normalize_code_phys(psx::mask_address(start_pc + i * 4u));
@@ -1603,6 +1737,9 @@ struct CpuJitV4Backend::Impl {
       ++stats.native_branch_tail_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
+      if (load_has_control) {
+        ++stats.native_branch_tail_blocks_compiled;
+      }
     } else {
       ++stats.native_alu_blocks_compiled;
     }
