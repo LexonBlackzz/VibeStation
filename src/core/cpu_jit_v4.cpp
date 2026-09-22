@@ -1284,6 +1284,9 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
   code.mov(code.r13d, code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
+  code.mov(code.r15, code.ptr[
+      code.rbx +
+      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
 
   code.L(loop);
   code.mov(code.eax, code.dword[
@@ -1325,14 +1328,9 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.je(uncached);
 
     // Cached code: exact guest I-cache line generation is authoritative.
-    code.mov(code.rax, code.ptr[
-        code.rbx +
-        static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-    code.test(code.rax, code.rax);
-    code.jz(done);
     code.movzx(code.ecx, code.word[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
-    code.mov(code.edx, code.dword[code.rax + code.rcx * 4]);
+    code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
     code.cmp(code.edx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
     code.jne(done);
@@ -1344,8 +1342,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.mov(code.rax, code.ptr[
         code.rbx +
         static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
-    code.test(code.rax, code.rax);
-    code.jz(done);
     code.mov(code.ecx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, phys_page))]);
     code.mov(code.edx, code.dword[code.rax + code.rcx * 4]);
