@@ -3849,6 +3849,31 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_prefix_load_tail);
 
+  CpuCompareCase v4_uncached_prefix_load_branch{};
+  v4_uncached_prefix_load_branch.name =
+      "v4_uncached_native_alu_prefix_load_branch_delay";
+  v4_uncached_prefix_load_branch.start_pc = 0xA0010000u;
+  v4_uncached_prefix_load_branch.initial_gpr[1] = 0x800120A0u;
+  v4_uncached_prefix_load_branch.initial_gpr[2] = 0u;
+  v4_uncached_prefix_load_branch.memory.push_back({0x000120A4u, 1u});
+  v4_uncached_prefix_load_branch.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x23, 1, 2, 0),       // LW r2 <- 1
+      enc_i(0x05, 2, 0, 2),       // BNE must see old r2==0: not taken
+      enc_i(0x09, 0, 4, 0x0044),  // delay slot sees committed load
+      0xFFFFFFFFu,
+      enc_i(0x09, 0, 5, 0x0055),
+  };
+  v4_uncached_prefix_load_branch.instructions = 4u;
+  v4_uncached_prefix_load_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_load_branch.require_v4_native_load_entry_when_available =
+      true;
+  v4_uncached_prefix_load_branch.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_prefix_load_branch.require_v4_load_branch_fusion_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_load_branch);
+
   CpuCompareCase v4_uncached_load_tail{};
   v4_uncached_load_tail.name = "v4_uncached_native_load_alu_tail";
   v4_uncached_load_tail.start_pc = 0xA0010000u;
@@ -4008,6 +4033,32 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_prefix_store_tail.require_v4_store_tail_block_when_available =
       true;
   cases.push_back(v4_uncached_prefix_store_tail);
+
+  CpuCompareCase v4_uncached_prefix_store_branch{};
+  v4_uncached_prefix_store_branch.name =
+      "v4_uncached_native_alu_prefix_store_branch_delay";
+  v4_uncached_prefix_store_branch.start_pc = 0xA0010000u;
+  v4_uncached_prefix_store_branch.initial_gpr[1] = 0x800120C0u;
+  v4_uncached_prefix_store_branch.initial_gpr[2] = 0x0BADF00Du;
+  v4_uncached_prefix_store_branch.initial_gpr[3] = 1u;
+  v4_uncached_prefix_store_branch.memory.push_back({0x000120C4u, 0u});
+  v4_uncached_prefix_store_branch.compare_memory_addresses.push_back(0x000120C4u);
+  v4_uncached_prefix_store_branch.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x05, 3, 0, 1),       // BNE taken
+      enc_i(0x09, 0, 4, 0x0044),  // delay slot
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_store_branch.instructions = 4u;
+  v4_uncached_prefix_store_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_store_branch.require_v4_native_store_entry_when_available =
+      true;
+  v4_uncached_prefix_store_branch.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_prefix_store_branch.require_v4_store_branch_fusion_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_store_branch);
 
   CpuCompareCase v4_uncached_store_branch{};
   v4_uncached_store_branch.name = "v4_uncached_native_store_branch_delay";
