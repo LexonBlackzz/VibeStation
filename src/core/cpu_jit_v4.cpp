@@ -37,6 +37,8 @@ namespace {
 constexpr u32 kV4MaxBlockInstructions = 32u;
 constexpr size_t kV4CodeArenaBytes = 32u * 1024u * 1024u;
 constexpr size_t kV4MaxBlocks = 65536u;
+constexpr u32 kV4PhysPageShift = 12u;
+constexpr size_t kV4PhysPageCount = size_t{1} << (29u - kV4PhysPageShift);
 constexpr size_t kV4DispatchTopCount = size_t{1} << 20u;
 constexpr size_t kV4DispatchEntriesPerPage = size_t{1} << 10u;
 
@@ -218,6 +220,7 @@ struct V4NativeState {
   u32 *gpr = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
   const u32 *icache_generations = nullptr;
+  const u32 *code_page_generations = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
   u32 mapped_main_ram_size = 0;
@@ -319,6 +322,8 @@ struct V4Block {
   u32 max_cycles = 0;
   u32 code_size = 0;
   u32 icache_generation = 0;
+  u32 code_page_generation = 0;
+  u32 phys_page = 0;
   u16 icache_index = 0;
   V4NativeFn fn = nullptr;
   bool interpreter_only = false;
@@ -1065,6 +1070,7 @@ struct CpuJitV4Backend::Impl {
   size_t block_count = 0u;
   u32 cache_epoch = 1u;
   JitCodePageBitmap<29u, 12u> code_pages;
+  std::array<u32, kV4PhysPageCount> page_generations{};
   V4ResidentDispatchFn resident_dispatch = nullptr;
   size_t permanent_code_bytes = 0u;
   bool initialization_attempted = false;
@@ -1088,6 +1094,7 @@ struct CpuJitV4Backend::Impl {
     } catch (...) {
       return false;
     }
+    page_generations.fill(1u);
     resident_dispatch = install_v4_resident_dispatch(arena);
     if (resident_dispatch == nullptr) {
       return false;
@@ -1127,6 +1134,10 @@ struct CpuJitV4Backend::Impl {
       return nullptr;
     }
     if (cacheable && block->icache_generation != icache_generation) {
+      return nullptr;
+    }
+    if (block->phys_page >= kV4PhysPageCount ||
+        block->code_page_generation != page_generations[block->phys_page]) {
       return nullptr;
     }
     return block;
@@ -1180,6 +1191,9 @@ struct CpuJitV4Backend::Impl {
     block->cacheable = cacheable;
     block->icache_index = static_cast<u16>((start_pc >> 4) & 0xFFu);
     block->icache_generation = cacheable ? icache_generation : 0u;
+    const u32 start_phys = psx::mask_address(start_pc);
+    block->phys_page = start_phys >> kV4PhysPageShift;
+    block->code_page_generation = page_generations[block->phys_page];
 
     // A cached native block never crosses a 16-byte guest I-cache line.
     // One generation tag therefore identifies the complete instruction snapshot
@@ -1187,8 +1201,11 @@ struct CpuJitV4Backend::Impl {
     const u32 line_instructions =
         cacheable ? ((16u - (start_pc & 0x0Fu)) >> 2u)
                   : kV4MaxBlockInstructions;
+    const u32 page_instructions =
+        (0x1000u - (start_phys & 0x0FFFu)) >> 2u;
     const u32 decode_limit =
-        std::min(kV4MaxBlockInstructions, line_instructions);
+        std::min({kV4MaxBlockInstructions, line_instructions,
+                  page_instructions});
 
     auto read_visible = [&](u32 addr, u32 &bits) {
       return cpu.read_visible_instruction_for_backend(addr, bits);
@@ -1425,6 +1442,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.gpr = cpu_.gpr_;
     native.dispatch_top = impl_->dispatch_top.get();
     native.icache_generations = cpu_.icache_generation_.data();
+    native.code_page_generations = impl_->page_generations.data();
     native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
     native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
