@@ -782,6 +782,11 @@ static bool parse_cpu_execution_mode(const std::string &s,
     out = CpuExecutionMode::X64JitV3;
     return true;
   }
+  if (v == "x64jitv4" || v == "jitv4" || v == "dynarecv4" ||
+      v == "recompilerv4") {
+    out = CpuExecutionMode::X64JitV4;
+    return true;
+  }
   return false;
 }
 
@@ -1587,6 +1592,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "x64jitv2";
     case CpuExecutionMode::X64JitV3:
       return "x64jitv3";
+    case CpuExecutionMode::X64JitV4:
+      return "x64jitv4";
     }
     return "unknown";
   };
@@ -1597,7 +1604,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : requested_mode;
   if ((requested_mode == CpuExecutionMode::X64Jit ||
        requested_mode == CpuExecutionMode::X64JitV2 ||
-       requested_mode == CpuExecutionMode::X64JitV3) &&
+       requested_mode == CpuExecutionMode::X64JitV3 ||
+       requested_mode == CpuExecutionMode::X64JitV4) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
@@ -2752,7 +2760,7 @@ int main(int argc, char *argv[]) {
     if (a == "--cpu") {
       if ((i + 1) >= args.size()) {
         fprintf(stderr,
-                "WARN: --cpu requires interpreter, decoded, or x64jit\n");
+                "WARN: --cpu requires interpreter, decoded, x64jit, x64jitv2, x64jitv3, or x64jitv4\n");
         continue;
       }
       CpuExecutionMode parsed = CpuExecutionMode::Interpreter;
