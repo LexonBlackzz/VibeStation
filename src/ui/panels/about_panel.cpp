@@ -17,7 +17,8 @@ void App::panel_about() {
         const bool native_jit_requested =
             cpu_mode == CpuExecutionMode::X64Jit ||
             cpu_mode == CpuExecutionMode::X64JitV2 ||
-            cpu_mode == CpuExecutionMode::X64JitV3;
+            cpu_mode == CpuExecutionMode::X64JitV3 ||
+            cpu_mode == CpuExecutionMode::X64JitV4;
         const bool native_unavailable =
             native_jit_requested && system_ &&
             !system_->cpu().cpu_backend_stats().native_available;
