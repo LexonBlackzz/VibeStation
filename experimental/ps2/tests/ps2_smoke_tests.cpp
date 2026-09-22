@@ -53,6 +53,8 @@ bool test_ram_aliases() {
     ps2::u32 readback = 0;
     return expect(system.bus().read32(physical, readback) && readback == value,
                   "physical alias mismatch") &&
+           expect(system.bus().fetch32(kseg0, readback) && readback == value,
+                  "instruction fetch RAM alias mismatch") &&
            expect(system.bus().read32(uncached, readback) && readback == value,
                   "uncached RAM alias mismatch") &&
            expect(system.bus().read32(accelerated, readback) && readback == value,
@@ -74,6 +76,46 @@ bool test_ram_bounds() {
                    static_cast<ps2::u32>(ps2::EeRam::kSize - 2),
                    0xFFFFFFFFu),
                "cross-boundary write unexpectedly succeeded");
+}
+
+bool test_scanout_skips_unchanged_vram() {
+    ps2::GsPrivileged regs;
+    ps2::GsVram vram;
+    ps2::GsDisplay display;
+    regs.reset();
+    vram.reset();
+    display.reset();
+
+    constexpr ps2::u32 kPmode = 0x12000000u;
+    constexpr ps2::u32 kDispfb1 = 0x12000070u;
+    constexpr ps2::u32 kDisplay1 = 0x12000080u;
+    if (!expect(regs.write64(kPmode, 1u), "PMODE setup failed") ||
+        !expect(regs.write64(kDispfb1, 1u << 9), "DISPFB setup failed") ||
+        !expect(regs.write64(kDisplay1, (1ull << 32) | (1ull << 44)),
+                "DISPLAY setup failed")) {
+        return false;
+    }
+
+    display.update(regs, vram);
+    const ps2::u64 first = display.generation();
+    if (!expect(display.valid(), "scanout did not become valid")) return false;
+    display.update(regs, vram);
+    if (!expect(display.generation() == first,
+                "unchanged scanout was recomposed")) return false;
+
+    if (!expect(vram.write_pixel(0, 0, 0, 0, 1, 0xFF123456u),
+                "VRAM setup failed")) return false;
+    display.update(regs, vram);
+    if (!expect(display.generation() == first + 1 &&
+                display.has_visible_pixels(),
+                "VRAM write did not invalidate scanout")) return false;
+
+    const ps2::u64 second = display.generation();
+    if (!expect(regs.write64(kDisplay1, (2ull << 32) | (1ull << 44)),
+                "DISPLAY change failed")) return false;
+    display.update(regs, vram);
+    return expect(display.generation() == second + 1 && display.width() == 3,
+                  "display register write did not invalidate scanout");
 }
 
 bool test_dmac_running_mask() {
@@ -216,6 +258,18 @@ bool test_scheduler_ordering() {
                fired[2] == ps2::EventType::Gs,
                "later event fired out of order") &&
            expect(scheduler.now() == 20, "scheduler time mismatch");
+}
+
+bool test_scheduler_single_step() {
+    ps2::Scheduler scheduler;
+    scheduler.advance_one();
+    scheduler.advance_one();
+    if (!expect(scheduler.now() == 2 && scheduler.empty(),
+                "empty scheduler step mismatch")) return false;
+    scheduler.schedule(ps2::EventType::Gs, 1);
+    scheduler.advance_one();
+    return expect(scheduler.now() == 3 && scheduler.empty(),
+                  "queued scheduler step mismatch");
 }
 
 bool test_scheduler_cancel() {
@@ -1993,11 +2047,13 @@ bool test_ee_lq_sq_silent_alignment() {
 int main() {
     bool ok = true;
     ok = test_ram_little_endian() && ok;
+    ok = test_scanout_skips_unchanged_vram() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
     ok = test_dmac_running_mask() && ok;
     ok = test_ee_jit_matches_interpreter() && ok;
     ok = test_scheduler_ordering() && ok;
+    ok = test_scheduler_single_step() && ok;
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;
     ok = test_bios_mapping_and_startup() && ok;

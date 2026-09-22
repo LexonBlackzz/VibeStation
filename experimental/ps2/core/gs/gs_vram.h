@@ -63,9 +63,11 @@ public:
         return data_[offset & (kSize - 1u)];
     }
     [[nodiscard]] const std::vector<u8>& data() const { return data_; }
+    [[nodiscard]] u64 generation() const { return generation_; }
 
 private:
     std::vector<u8> data_;
+    u64 generation_ = 0;
 };
 
 } // namespace ps2

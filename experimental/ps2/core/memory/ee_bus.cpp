@@ -72,6 +72,15 @@ bool EeBus::read16(u32 address,u16& value) const {
     if(gs_.read16(physical,value)) return true;
     return bios_.read16_physical(physical,value);
 }
+bool EeBus::fetch32(u32 address, u32& value) const {
+    // Instruction fetches overwhelmingly target main RAM.  Bypass the
+    // generic peripheral dispatch for those addresses while retaining its
+    // exact behavior for BIOS, scratchpad, and other mappings.
+    const u32 physical = to_physical(address);
+    if (physical < EeRam::kSize) return ram_.read32(physical, value);
+    return read32(address, value);
+}
+
 bool EeBus::read32(u32 address,u32& value) const {
     if(scratchpad_.contains(address,4)) return scratchpad_.read32(address,value);
     const u32 physical=to_physical(address);

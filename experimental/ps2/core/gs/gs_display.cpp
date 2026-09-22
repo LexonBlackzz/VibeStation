@@ -42,11 +42,31 @@ void GsDisplay::reset() {
     circuit_ = 0;
     psm_ = 0;
     nonzero_pixel_count_ = 0;
+    scanout_cache_valid_ = false;
     ++generation_;
     rgba8_.clear();
 }
 
 void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
+    constexpr std::array<u32, 6> kScanoutRegisters = {
+        kPmode, kDispfb1, kDisplay1,
+        kDispfb1 + kCircuitStride, kDisplay1 + kCircuitStride, kBgcolor};
+    std::array<u64, 6> scanout_registers{};
+    for (std::size_t i = 0; i < kScanoutRegisters.size(); ++i) {
+        if (!regs.read64(kScanoutRegisters[i], scanout_registers[i])) {
+            reset();
+            return;
+        }
+    }
+    if (scanout_cache_valid_ &&
+        cached_vram_generation_ == vram.generation() &&
+        cached_scanout_registers_ == scanout_registers) {
+        return;
+    }
+    scanout_cache_valid_ = true;
+    cached_vram_generation_ = vram.generation();
+    cached_scanout_registers_ = scanout_registers;
+
     u64 pmode = 0;
     if (!regs.read64(kPmode, pmode)) {
         reset();

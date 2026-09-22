@@ -217,6 +217,7 @@ GsVram::GsVram() : data_(kSize, 0) {}
 
 void GsVram::reset() {
     std::fill(data_.begin(), data_.end(), 0);
+    ++generation_;
 }
 
 bool GsVram::supported_color_psm(u32 psm) {
@@ -281,6 +282,7 @@ u32 GsVram::depth_address_bytes(
 bool GsVram::write_pixel(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_color_psm(psm)) return false;
+    ++generation_;
 
     const u32 a = pixel_address_bytes(psm, x, y, bp, bw);
     if (psm == 0u) {
@@ -322,6 +324,7 @@ u32 GsVram::read_pixel(
 bool GsVram::write_depth(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_depth_psm(psm)) return false;
+    ++generation_;
     const u32 a = depth_address_bytes(psm, x, y, bp, bw);
 
     if (psm == 48u) {
@@ -366,6 +369,7 @@ bool GsVram::write_index(
     switch (psm) {
     case 19: { // PSMT8
         data_[address8(x, y, bp, bw)] = static_cast<u8>(value);
+        ++generation_;
         return true;
     }
     case 20: { // PSMT4
@@ -374,23 +378,27 @@ bool GsVram::write_index(
         const u32 shift = (nibble & 1u) * 4u;
         data_[a] = static_cast<u8>(
             (data_[a] & ~(0xFu << shift)) | ((value & 0xFu) << shift));
+        ++generation_;
         return true;
     }
     case 27: { // PSMT8H
         const u32 a = address32(x, y, bp, bw);
         data_[a + 3] = static_cast<u8>(value);
+        ++generation_;
         return true;
     }
     case 36: { // PSMT4HL
         const u32 a = address32(x, y, bp, bw);
         data_[a + 3] = static_cast<u8>(
             (data_[a + 3] & 0xF0u) | (value & 0xFu));
+        ++generation_;
         return true;
     }
     case 44: { // PSMT4HH
         const u32 a = address32(x, y, bp, bw);
         data_[a + 3] = static_cast<u8>(
             (data_[a + 3] & 0x0Fu) | ((value & 0xFu) << 4));
+        ++generation_;
         return true;
     }
     default:
@@ -441,6 +449,7 @@ u32 GsVram::read_transfer_pixel(
 }
 
 bool GsVram::write_linear32(u32 bp, u32 word_index, u32 value) {
+    ++generation_;
     const u32 a = ((bp << 8) + word_index * 4u) & (kSize - 1u);
     data_[a + 0] = static_cast<u8>(value);
     data_[a + 1] = static_cast<u8>(value >> 8);
@@ -450,6 +459,7 @@ bool GsVram::write_linear32(u32 bp, u32 word_index, u32 value) {
 }
 
 bool GsVram::write_linear16(u32 bp, u32 halfword_index, u16 value) {
+    ++generation_;
     const u32 a = ((bp << 8) + halfword_index * 2u) & (kSize - 1u);
     data_[a + 0] = static_cast<u8>(value);
     data_[a + 1] = static_cast<u8>(value >> 8);

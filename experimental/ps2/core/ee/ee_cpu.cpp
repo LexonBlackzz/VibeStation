@@ -2976,7 +2976,7 @@ bool EeCpu::step(std::string& error) {
         bus_.tick(1);
         return true;
     }
-    if (!bus_.read32(fetch_address, instruction)) {
+    if (!bus_.fetch32(fetch_address, instruction)) {
         return fail(
             pc,
             0,
@@ -2988,6 +2988,19 @@ bool EeCpu::step(std::string& error) {
     state_.last_instruction = instruction;
     state_.pc = old_next_pc;
     state_.next_pc = old_next_pc + 4u;
+
+    // Firmware spends long stretches in wait loops padded with real NOPs.
+    // Complete those instructions before building the memory-operation
+    // helpers and entering the full decoder.
+    if (instruction == 0u) {
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) {
+            state_.cop0[13] |= 0x00008000u;
+        }
+        bus_.tick(1);
+        return true;
+    }
 
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;

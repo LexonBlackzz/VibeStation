@@ -111,7 +111,7 @@ bool Ps2System::step_ee(std::string& error) {
             return false;
         }
     }
-    scheduler_.run_until(scheduler_.now() + 1, {});
+    scheduler_.advance_one();
     const u64 fields_before = video_timing_.fields_started();
     video_timing_.tick(1, hw_, iop_intc_);
     if (video_timing_.fields_started() != fields_before) {

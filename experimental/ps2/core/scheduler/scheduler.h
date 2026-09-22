@@ -44,6 +44,13 @@ public:
     EventId schedule(EventType type, Tick delay);
     void cancel(EventId id);
     void run_until(Tick target, const Handler& handler);
+    void advance_one() {
+        if (events_.empty()) {
+            ++now_;
+        } else {
+            run_until(now_ + 1, {});
+        }
+    }
 
 private:
     struct QueuedEvent {

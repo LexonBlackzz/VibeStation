@@ -34,6 +34,7 @@ public:
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
     [[nodiscard]] bool read32(u32 address, u32& value) const;
+    [[nodiscard]] bool fetch32(u32 address, u32& value) const;
     [[nodiscard]] bool read64(u32 address, u64& value) const;
 
     [[nodiscard]] bool write8(u32 address, u8 value);
