@@ -698,6 +698,10 @@ bool IopBus::write_sif32(u32 physical, u32 value) {
     }
 }
 
+u16 IopBus::sif_dma_ready_mask() const {
+    return hw_.sif_dma_ready_mask();
+}
+
 bool IopBus::read8(u32 address, u8& value) const {
     if (address >= kCacheControlBase && address < kCacheControlEnd) {
         value = cache_control_[address - kCacheControlBase];

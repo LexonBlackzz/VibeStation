@@ -22,6 +22,12 @@ public:
     [[nodiscard]] bool read16(u32 address, u16& value) const;
     [[nodiscard]] bool read32(u32 address, u32& value) const;
     [[nodiscard]] bool read64(u32 address, u64& value) const;
+    [[nodiscard]] u16 sif_dma_ready_mask() const {
+        // CHCR.START is bit 24. Align IOP DMA9/10 with EE SIF0/1 bits.
+        return static_cast<u16>(
+            ((data_[0x152Bu] & 1u) << 5) |
+            ((data_[0x153Bu] & 1u) << 6));
+    }
 
     [[nodiscard]] bool write8(u32 address, u8 value);
     [[nodiscard]] bool write16(u32 address, u16 value);

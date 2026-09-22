@@ -8,12 +8,14 @@
 namespace ps2 {
 
 class EeBus;
+class EeCpu;
 class Vu1;
 
 class Vif0Dma {
 public:
     void reset();
     void attach_vu0(Vu1& vu0) { vu0_ = &vu0; }
+    void attach_ee(EeCpu& ee) { ee_ = &ee; }
 
     [[nodiscard]] bool service(
         EeBus& bus,
@@ -90,6 +92,7 @@ private:
     u32 unpack_component_ = 0;
 
     Vu1* vu0_ = nullptr;
+    EeCpu* ee_ = nullptr;
 };
 
 } // namespace ps2

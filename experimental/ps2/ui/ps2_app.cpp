@@ -1410,7 +1410,7 @@ void Ps2App::update_emulation() {
     constexpr u64 kChunkInstructions = 8192;
     constexpr u64 kNormalMaxInstructionsPerFrame = 500000;
     constexpr u64 kBootstrapMaxInstructionsPerFrame = 5000000;
-    constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(8);
+    constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(14);
     constexpr auto kBootstrapCpuTimeSlice =
         std::chrono::milliseconds(50);
 

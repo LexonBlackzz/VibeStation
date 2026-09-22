@@ -1,4 +1,5 @@
 #include "core/dma/vif0_dma.h"
+#include "core/ee/ee_cpu.h"
 
 #include "core/memory/ee_bus.h"
 #include "core/vu/vu1.h"
@@ -232,12 +233,20 @@ bool Vif0Dma::begin_command(
     case 0x14: // MSCAL
     case 0x15: // MSCALF
         if (vu0_ != nullptr) {
+            // Macro registers need copying only when micro execution starts,
+            // not on every EE step while VIF0 DMA remains armed.
+            if (ee_ != nullptr && !vu0_->running()) {
+                ee_->sync_vu0_to_micro();
+            }
             vu0_->start(immediate & 0x1FFu);
         }
         return finish_command(bus);
 
     case 0x17: // MSCNT
         if (vu0_ != nullptr) {
+            if (ee_ != nullptr && !vu0_->running()) {
+                ee_->sync_vu0_to_micro();
+            }
             vu0_->continue_run();
         }
         return finish_command(bus);

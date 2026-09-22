@@ -124,6 +124,8 @@ bool test_vif0_mscal_waits_for_vu0() {
     ps2::Vif0Dma dma;
     dma.reset();
     dma.attach_vu0(system.vu0());
+    dma.attach_ee(system.ee());
+    system.ee().state().vu_vi[4] = 9u;
 
     constexpr ps2::u32 stream = 0xA000u;
     constexpr ps2::u32 mpg =
@@ -175,6 +177,9 @@ bool test_vif0_mscal_waits_for_vu0() {
     ok = expect(
         system.vu0().running(),
         "VIF0 MSCAL did not start VU0") && ok;
+    ok = expect(
+        system.vu0().vi(4u) == 9u,
+        "VIF0 MSCAL did not synchronize EE macro state") && ok;
     ok = expect(
         system.bus().read32(0x10003800u, stat) &&
             (stat & 0x3u) == 1u,

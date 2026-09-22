@@ -82,6 +82,10 @@ The Release UI boot path skips redundant EE-to-VU0 state copies while VIF0
 DMA is idle, and uses longer, unsynchronized host frames only until the first
 visible BIOS pixels. On the same Windows host, the 215-million-instruction
 window capture fell from about 58 to 37 seconds, with byte-identical output.
+Matching the EE/IOP SIF DMA channels before servicing them then cut that
+capture to about 18 seconds; a 225-million-instruction capture fell from
+about 40 to 22 seconds on the same host. The visible images remained
+byte-identical. These are host-specific measurements, not real-time speed.
 This is still an experimental, instruction-driven bootstrap rather than a
 full-speed PS2 emulator.
 

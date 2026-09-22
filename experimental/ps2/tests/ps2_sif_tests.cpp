@@ -261,6 +261,26 @@ bool test_sif0_iop_to_ee() {
     return ok;
 }
 
+bool test_iop_sif_start_tracking() {
+    ps2::Ps2System system;
+    bool ok = expect(
+        system.iop_bus().sif_dma_ready_mask() == 0u,
+        "SIF DMA started at reset");
+    ok = expect(
+        system.iop_bus().write32(0x1F801528u, 0x01000000u) &&
+        system.iop_bus().sif_dma_ready_mask() == (1u << 5),
+        "IOP DMA9 start was not tracked") && ok;
+    ok = expect(
+        system.iop_bus().write32(0x1F801528u, 0u) &&
+        system.iop_bus().sif_dma_ready_mask() == 0u,
+        "IOP DMA9 completion was not tracked") && ok;
+    ok = expect(
+        system.iop_bus().write32(0x1F801538u, 0x01000000u) &&
+        system.iop_bus().sif_dma_ready_mask() == (1u << 6),
+        "IOP DMA10 start was not tracked") && ok;
+    return ok;
+}
+
 bool test_sif0_completes_each_side_independently() {
     ps2::Ps2System system;
     ps2::SifDma dma;
@@ -395,6 +415,7 @@ bool test_sif0_completes_each_side_independently() {
 
 int main() {
     bool ok = true;
+    ok = test_iop_sif_start_tracking() && ok;
     ok = test_sif1_ee_to_iop() && ok;
     ok = test_sif0_iop_to_ee() && ok;
     ok = test_sif0_completes_each_side_independently() && ok;

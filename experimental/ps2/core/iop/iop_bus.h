@@ -40,6 +40,7 @@ public:
     }
 
     [[nodiscard]] bool interrupt_pending() const;
+    [[nodiscard]] u16 sif_dma_ready_mask() const;
     void raise_dma_irq(u32 channel);
 
 private:
