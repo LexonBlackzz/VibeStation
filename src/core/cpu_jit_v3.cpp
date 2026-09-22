@@ -1377,6 +1377,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 struct CpuJitV3Backend::Impl {
   struct Block {
     V3BlockKind kind = V3BlockKind::Inline;
+    V3HelperReason helper_reason = V3HelperReason::Unsupported;
     u32 start_pc = 0;
     u32 phys_start = 0;
     u32 phys_end = 0;
@@ -2043,6 +2044,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       std::array<s32, 8> store_simm{};
       std::array<u8, 8> store_instruction_index{};
       bool fetch_stopped_on_unsupported = false;
+      bool control_delay_requires_helper = false;
       u32 unsupported_bits = 0u;
 
       auto fetch_decoded = [&](u32 i, V3DecodedInstruction &inst,
@@ -2125,8 +2127,14 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           }
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
-          if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
-              !is_v3_alu_only(delay.op)) {
+          if (!fetch_control_delay(i + 1u, delay, delay_bits)) {
+            staged_delay_refill_pending = false;
+            break;
+          }
+          if (!is_v3_alu_only(delay.op)) {
+            if (decoded.empty()) {
+              control_delay_requires_helper = true;
+            }
             staged_delay_refill_pending = false;
             break;
           }
@@ -2156,8 +2164,14 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           }
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
-          if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
-              !is_v3_alu_only(delay.op)) {
+          if (!fetch_control_delay(i + 1u, delay, delay_bits)) {
+            staged_delay_refill_pending = false;
+            break;
+          }
+          if (!is_v3_alu_only(delay.op)) {
+            if (decoded.empty()) {
+              control_delay_requires_helper = true;
+            }
             staged_delay_refill_pending = false;
             break;
           }
@@ -2221,16 +2235,19 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
 
       if (decoded.empty()) {
-        if (!fetch_stopped_on_unsupported) {
+        if (!fetch_stopped_on_unsupported && !control_delay_requires_helper) {
           return helper_step(V3HelperReason::Icache);
         }
 
-        // Universal baseline: an instruction V3 does not lower yet still gets
-        // a compiled block identity. Its entry is the single shared generated
-        // Cpu::step() trampoline, so ordinary executable code can no longer
-        // fail compilation merely because an opcode is not inline-native yet.
+        // Static helper-only shapes still get a cached block identity. In
+        // particular, a branch/jump with a non-ALU delay slot must use the
+        // precise Cpu::step() path, but there is no value in rediscovering
+        // that immutable instruction shape on every execution.
         Impl::Block helper_block{};
         helper_block.kind = V3BlockKind::StepHelper;
+        helper_block.helper_reason = control_delay_requires_helper
+                                         ? V3HelperReason::Icache
+                                         : V3HelperReason::Unsupported;
         helper_block.start_pc = start_pc;
         helper_block.phys_start = psx::mask_address(start_pc);
         helper_block.phys_end = helper_block.phys_start + 3u;
@@ -2423,8 +2440,10 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       return helper_step(V3HelperReason::Internal);
     }
     if (block.kind == V3BlockKind::StepHelper) {
-      count_v3_unsupported_opcode(stats_, block.words[0]);
-      return helper_step(V3HelperReason::Unsupported);
+      if (block.helper_reason == V3HelperReason::Unsupported) {
+        count_v3_unsupported_opcode(stats_, block.words[0]);
+      }
+      return helper_step(block.helper_reason);
     }
     if (block.fn == nullptr) {
       return helper_step(V3HelperReason::Internal);
