@@ -221,6 +221,7 @@ struct V4NativeState {
   V4DispatchPage **dispatch_top = nullptr;
   const u32 *icache_generations = nullptr;
   const u32 *code_page_generations = nullptr;
+  void *block_return = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
   u32 mapped_main_ram_size = 0;
@@ -343,6 +344,11 @@ static_assert(sizeof(V4DispatchEntry) == 24u);
 struct V4DispatchPage {
   std::array<V4DispatchEntry, kV4DispatchEntriesPerPage> entries{};
 };
+
+void emit_v4_block_return(Xbyak::CodeGenerator &code) {
+  code.jmp(code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_return))]);
+}
 
 void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
                      u8 guest_reg) {
@@ -583,13 +589,6 @@ V4NativeFn compile_v4_alu(
     return nullptr;
   }
   CodeGenerator code(kReservation, buffer);
-#if defined(_WIN32)
-  code.mov(code.r11, code.rcx);
-#else
-  code.mov(code.r11, code.rdi);
-#endif
-  code.mov(code.r10, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   for (u32 i = 0; i < count; ++i) {
     emit_v4_alu_instruction(code, decoded[i]);
@@ -615,7 +614,7 @@ V4NativeFn compile_v4_alu(
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       count);
-  code.ret();
+  emit_v4_block_return(code);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
@@ -637,13 +636,6 @@ V4NativeFn compile_v4_branch(
     return nullptr;
   }
   CodeGenerator code(kReservation, buffer);
-#if defined(_WIN32)
-  code.mov(code.r11, code.rcx);
-#else
-  code.mov(code.r11, code.rdi);
-#endif
-  code.mov(code.r10, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   for (u32 i = 0; i < prefix_count; ++i) {
     emit_v4_alu_instruction(code, prefix[i]);
@@ -768,7 +760,7 @@ V4NativeFn compile_v4_branch(
     code.L(selected);
   }
 
-  code.ret();
+  emit_v4_block_return(code);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
@@ -792,13 +784,6 @@ V4NativeFn compile_v4_load(
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
   Label ram, scratch, loaded, bail;
-#if defined(_WIN32)
-  code.mov(code.r11, code.rcx);
-#else
-  code.mov(code.r11, code.rdi);
-#endif
-  code.mov(code.r10, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   // Form the address before retiring an incoming load. If rs is the delayed
   // destination, R3000A semantics require this LW to see the old rs value.
@@ -910,12 +895,12 @@ V4NativeFn compile_v4_load(
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       tail_count + 1u);
-  code.ret();
+  emit_v4_block_return(code);
 
   code.L(bail);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
-  code.ret();
+  emit_v4_block_return(code);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
@@ -925,7 +910,8 @@ V4NativeFn compile_v4_load(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
-V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
+V4ResidentDispatchFn install_v4_resident_dispatch(
+    V4CodeArena &arena, void *&block_return) {
   using namespace Xbyak;
   constexpr size_t kReservation = 1024u;
   void *buffer = arena.begin_emit(kReservation);
@@ -934,7 +920,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label loop, done;
+  Label loop, after_block, done;
 
   code.push(code.rbx);
   code.push(code.r12);
@@ -947,6 +933,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
 #else
   code.mov(code.rbx, code.rdi);
 #endif
+
+  // V4 blocks are internal fragments, not ABI-callable functions. Keep the
+  // resident state and GPR base pinned for the whole dispatcher lifetime.
+  code.mov(code.r11, code.rbx);
+  code.mov(code.r10, code.ptr[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   code.mov(code.r12, code.ptr[
       code.rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
@@ -1067,12 +1059,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
   code.test(code.rax, code.rax);
   code.jz(done);
 
-#if defined(_WIN32)
-  code.mov(code.rcx, code.rbx);
-#else
-  code.mov(code.rdi, code.rbx);
-#endif
-  code.call(code.rax);
+  // Tail-jump into translated code. The block returns here via the pointer
+  // pinned in V4NativeState, eliminating call/ret and per-block ABI setup.
+  code.jmp(code.rax);
+
+  code.L(after_block);
+  block_return = const_cast<u8 *>(code.getCurr());
   code.cmp(code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(done);
@@ -1122,6 +1114,7 @@ struct CpuJitV4Backend::Impl {
   JitCodePageBitmap<29u, 12u> code_pages;
   std::array<u32, kV4PhysPageCount> page_generations{};
   V4ResidentDispatchFn resident_dispatch = nullptr;
+  void *resident_block_return = nullptr;
   size_t permanent_code_bytes = 0u;
   bool initialization_attempted = false;
   bool initialized = false;
@@ -1145,8 +1138,9 @@ struct CpuJitV4Backend::Impl {
       return false;
     }
     page_generations.fill(1u);
-    resident_dispatch = install_v4_resident_dispatch(arena);
-    if (resident_dispatch == nullptr) {
+    resident_dispatch =
+        install_v4_resident_dispatch(arena, resident_block_return);
+    if (resident_dispatch == nullptr || resident_block_return == nullptr) {
       return false;
     }
     permanent_code_bytes = arena.bytes_used();
@@ -1510,6 +1504,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.dispatch_top = impl_->dispatch_top.get();
     native.icache_generations = cpu_.icache_generation_.data();
     native.code_page_generations = impl_->page_generations.data();
+    native.block_return = impl_->resident_block_return;
     native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
     native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
