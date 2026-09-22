@@ -84,6 +84,10 @@ enum class V3AluOp : u8 {
   Jal,
   Jr,
   Jalr,
+  Lb,
+  Lbu,
+  Lh,
+  Lhu,
   Lw,
   Sw,
   Beq,
@@ -160,9 +164,31 @@ bool decode_v3_alu(u32 bits, V3DecodedInstruction &out) {
   case 0x0D: out.op = V3AluOp::Ori; return true;
   case 0x0E: out.op = V3AluOp::Xori; return true;
   case 0x0F: out.op = V3AluOp::Lui; return true;
+  case 0x20: out.op = V3AluOp::Lb; return true;
+  case 0x21: out.op = V3AluOp::Lh; return true;
   case 0x23: out.op = V3AluOp::Lw; return true;
+  case 0x24: out.op = V3AluOp::Lbu; return true;
+  case 0x25: out.op = V3AluOp::Lhu; return true;
   case 0x2B: out.op = V3AluOp::Sw; return true;
   default: return false;
+  }
+}
+
+bool is_v3_load(V3AluOp op) {
+  return op == V3AluOp::Lb || op == V3AluOp::Lbu ||
+         op == V3AluOp::Lh || op == V3AluOp::Lhu ||
+         op == V3AluOp::Lw;
+}
+
+u32 v3_load_alignment_mask(V3AluOp op) {
+  switch (op) {
+  case V3AluOp::Lh:
+  case V3AluOp::Lhu:
+    return 1u;
+  case V3AluOp::Lw:
+    return 3u;
+  default:
+    return 0u;
   }
 }
 
@@ -191,6 +217,10 @@ u32 read_mask(const V3DecodedInstruction &inst) {
   case V3AluOp::Andi:
   case V3AluOp::Ori:
   case V3AluOp::Xori:
+  case V3AluOp::Lb:
+  case V3AluOp::Lbu:
+  case V3AluOp::Lh:
+  case V3AluOp::Lhu:
   case V3AluOp::Lw:
     return reg(inst.rs);
   case V3AluOp::Sw:
@@ -237,6 +267,10 @@ u8 write_reg(const V3DecodedInstruction &inst) {
   case V3AluOp::Nop:
   case V3AluOp::Jr:
   case V3AluOp::J:
+  case V3AluOp::Lb:
+  case V3AluOp::Lbu:
+  case V3AluOp::Lh:
+  case V3AluOp::Lhu:
   case V3AluOp::Lw:
   case V3AluOp::Sw:
   case V3AluOp::Beq:
@@ -302,7 +336,7 @@ bool is_v3_dynamic_jump(V3AluOp op) {
 }
 
 bool is_v3_alu_only(V3AluOp op) {
-  return op != V3AluOp::Lw && op != V3AluOp::Sw &&
+  return !is_v3_load(op) && op != V3AluOp::Sw &&
          !is_v3_branch(op) && !is_v3_fixed_jump(op) &&
          !is_v3_dynamic_jump(op);
 }
@@ -399,6 +433,7 @@ struct V3ResidentBlock {
   u32 load_rt = 0;
   u32 load_index = 0;
   s32 load_simm = 0;
+  u32 load_alignment_mask = 0;
   u32 icache_line_count = 0;
   std::array<u8, 5> icache_indices{};
   std::array<u32, 5> icache_tags{};
@@ -890,8 +925,10 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
         code->add(code->eax, static_cast<u32>(linked->load_simm));
       }
       code->mov(code->dword[code->r11 + offsetof(V3NativeRuntime, load_addr)], code->eax);
-      code->test(code->eax, 3);
-      code->jnz(linked_done);
+      if (linked->load_alignment_mask != 0u) {
+        code->test(code->eax, linked->load_alignment_mask);
+        code->jnz(linked_done);
+      }
       code->and_(code->eax, 0x1FFFFFFF);
       code->xor_(code->edx, code->edx);
       code->cmp(code->eax, psx::RAM_SIZE);
@@ -1083,10 +1120,32 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
       emit_write_guest(*code, cached, inst.rd, code->eax, dirty);
       break;
 
+    case V3AluOp::Lb:
+    case V3AluOp::Lbu:
+    case V3AluOp::Lh:
+    case V3AluOp::Lhu:
     case V3AluOp::Lw: {
       code->mov(code->rax, code->ptr[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, load_ptr))]);
-      code->mov(code->eax, code->dword[code->rax]);
+      switch (inst.op) {
+      case V3AluOp::Lb:
+        code->movsx(code->eax, code->byte[code->rax]);
+        break;
+      case V3AluOp::Lbu:
+        code->movzx(code->eax, code->byte[code->rax]);
+        break;
+      case V3AluOp::Lh:
+        code->movsx(code->eax, code->word[code->rax]);
+        break;
+      case V3AluOp::Lhu:
+        code->movzx(code->eax, code->word[code->rax]);
+        break;
+      case V3AluOp::Lw:
+        code->mov(code->eax, code->dword[code->rax]);
+        break;
+      default:
+        break;
+      }
       code->mov(code->dword[code->r11 +
           static_cast<int>(offsetof(V3NativeRuntime, load_value))], code->eax);
       break;
@@ -1116,7 +1175,7 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
 
     if (instruction_index == 0u) {
       u8 cancel_reg = dst;
-      if (inst.op == V3AluOp::Lw) {
+      if (is_v3_load(inst.op)) {
         cancel_reg = inst.rt;
       }
       emit_commit_incoming_load(*code, cached, cancel_reg);
@@ -1282,6 +1341,7 @@ struct CpuJitV3Backend::Impl {
     u8 load_rs = 0u;
     u8 load_rt = 0u;
     s32 load_simm = 0;
+    u32 load_alignment_mask = 0u;
     u32 load_index = 0u;
     u32 branch_index = 0;
     u32 branch_target = 0;
@@ -1722,6 +1782,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       u8 load_rs = 0u;
       u8 load_rt = 0u;
       s32 load_simm = 0;
+      u32 load_alignment_mask = 0u;
       u32 load_index = 0u;
       bool has_branch = false;
       u32 branch_index = 0u;
@@ -1823,9 +1884,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           break;
         }
 
-        if (inst.op == V3AluOp::Lw) {
+        if (is_v3_load(inst.op)) {
           // Only one load is preflighted per block. The following instruction
-          // may now execute in the same block with the old register value.
+          // may execute in the same block with the old register value.
           if (has_load) {
             break;
           }
@@ -1836,13 +1897,14 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           load_rs = inst.rs;
           load_rt = inst.rt;
           load_simm = inst.simm;
+          load_alignment_mask = v3_load_alignment_mask(inst.op);
           load_index = static_cast<u32>(decoded.size());
           decoded.push_back(inst);
           words[decoded.size() - 1u] = bits;
           continue;
         }
 
-        if (inst.op == V3AluOp::Sw || inst.op == V3AluOp::Lw) {
+        if (inst.op == V3AluOp::Sw) {
           if (has_load) {
             break;
           }
@@ -1935,6 +1997,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       block.load_rs = load_rs;
       block.load_rt = load_rt;
       block.load_simm = load_simm;
+      block.load_alignment_mask = load_alignment_mask;
       block.load_index = load_index;
       block.store_rs = store_rs;
       block.store_simm = store_simm;
@@ -1949,7 +2012,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             branch_pc + 4u + (static_cast<u32>(branch_simm) << 2u);
       }
       for (const auto &inst : decoded) {
-        if (inst.op == V3AluOp::Sw || inst.op == V3AluOp::Lw ||
+        if (inst.op == V3AluOp::Sw || is_v3_load(inst.op) ||
             inst.op == V3AluOp::J || inst.op == V3AluOp::Jal ||
             inst.op == V3AluOp::Jr || inst.op == V3AluOp::Jalr) {
           block.base_cycles += 2u;
@@ -1994,6 +2057,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         resident.load_rt = block.load_rt;
         resident.load_index = block.load_index;
         resident.load_simm = block.load_simm;
+        resident.load_alignment_mask = block.load_alignment_mask;
         resident.icache_line_count = block.icache_line_count;
         resident.icache_indices = block.icache_indices;
         resident.icache_tags = block.icache_tags;
@@ -2096,7 +2160,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
       const u32 base = block.load_rs == 0u ? 0u : cpu_.gpr_[block.load_rs];
       load_addr = base + static_cast<u32>(block.load_simm);
-      if ((load_addr & 3u) != 0u) {
+      if ((load_addr & block.load_alignment_mask) != 0u) {
         return helper_step(V3HelperReason::Memory);
       }
       const u32 phys = psx::mask_address(load_addr);
