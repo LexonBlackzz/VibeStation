@@ -133,6 +133,8 @@ struct CpuCompareCase {
   std::vector<u32> segment_instructions;
   std::vector<CpuCompareNativeTierMode> segment_native_tiers;
   std::array<u32, 32> initial_gpr{};
+  u32 initial_load_reg = 0;
+  u32 initial_load_value = 0;
   u32 initial_cop0_sr_bits = 0;
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
@@ -558,8 +560,8 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   initial.next_pc = test_case.start_pc + 4u;
   initial.current_pc = 0;
   initial.cycles = 0;
-  initial.load_reg = 0;
-  initial.load_value = 0;
+  initial.load_reg = test_case.initial_load_reg;
+  initial.load_value = test_case.initial_load_value;
   initial.next_load_reg = 0;
   initial.next_load_value = 0;
   initial.in_delay_slot = false;
@@ -3567,6 +3569,85 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_jal.require_v4_native_entry_when_available = true;
   v4_uncached_jal.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_jal);
+
+  CpuCompareCase v4_uncached_jr_load_capture{};
+  v4_uncached_jr_load_capture.name =
+      "v4_uncached_native_jr_pending_load_capture";
+  v4_uncached_jr_load_capture.start_pc = 0xA0010000u;
+  // JR must capture the old r8 target before the pending load retires.
+  // The delay slot, however, must observe the newly committed r8 value.
+  v4_uncached_jr_load_capture.initial_gpr[8] =
+      v4_uncached_jr_load_capture.start_pc + 0x10u;
+  v4_uncached_jr_load_capture.initial_load_reg = 8u;
+  v4_uncached_jr_load_capture.initial_load_value =
+      v4_uncached_jr_load_capture.start_pc + 0x20u;
+  v4_uncached_jr_load_capture.program = {
+      enc_r(8, 0, 0, 0, 0x08),
+      enc_r(8, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jr_load_capture.instructions = 2u;
+  v4_uncached_jr_load_capture.require_v4_native_entry_when_available = true;
+  v4_uncached_jr_load_capture.require_v4_native_branch_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_jr_load_capture);
+
+  CpuCompareCase v4_uncached_jalr_same_reg{};
+  v4_uncached_jalr_same_reg.name =
+      "v4_uncached_native_jalr_same_reg_capture";
+  v4_uncached_jalr_same_reg.start_pc = 0xA0010000u;
+  v4_uncached_jalr_same_reg.initial_gpr[8] =
+      v4_uncached_jalr_same_reg.start_pc + 0x10u;
+  v4_uncached_jalr_same_reg.program = {
+      // rs == rd: target must be captured before r8 receives the link.
+      enc_r(8, 0, 8, 0, 0x09),
+      // The delay slot must see the freshly written link value.
+      enc_r(8, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jalr_same_reg.instructions = 2u;
+  v4_uncached_jalr_same_reg.require_v4_native_entry_when_available = true;
+  v4_uncached_jalr_same_reg.require_v4_native_branch_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_jalr_same_reg);
+
+  CpuCompareCase v4_uncached_incoming_load{};
+  v4_uncached_incoming_load.name =
+      "v4_uncached_native_incoming_load_delay";
+  v4_uncached_incoming_load.start_pc = 0xA0010000u;
+  v4_uncached_incoming_load.initial_gpr[2] = 0x11111111u;
+  v4_uncached_incoming_load.initial_load_reg = 2u;
+  v4_uncached_incoming_load.initial_load_value = 0x12345678u;
+  v4_uncached_incoming_load.program = {
+      // First instruction sees old r2; load retires after operand capture.
+      enc_r(2, 0, 3, 0, 0x21),
+      // Second instruction sees the committed load.
+      enc_r(2, 0, 4, 0, 0x21),
+  };
+  pad_cpu_compare_program(v4_uncached_incoming_load, 32u);
+  v4_uncached_incoming_load.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_incoming_load);
+
+  CpuCompareCase v4_uncached_incoming_load_cancel{};
+  v4_uncached_incoming_load_cancel.name =
+      "v4_uncached_native_incoming_load_cancel";
+  v4_uncached_incoming_load_cancel.start_pc = 0xA0010000u;
+  v4_uncached_incoming_load_cancel.initial_gpr[2] = 0x11111111u;
+  v4_uncached_incoming_load_cancel.initial_load_reg = 2u;
+  v4_uncached_incoming_load_cancel.initial_load_value = 0x12345678u;
+  v4_uncached_incoming_load_cancel.program = {
+      // A same-register ALU write cancels the pending load.
+      enc_i(0x09, 0, 2, 5),
+      enc_r(2, 0, 3, 0, 0x21),
+  };
+  pad_cpu_compare_program(v4_uncached_incoming_load_cancel, 32u);
+  v4_uncached_incoming_load_cancel.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_incoming_load_cancel);
 
   CpuCompareCase v4_uncached_resident_chain{};
   v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
