@@ -1399,6 +1399,7 @@ struct CpuJitV3Backend::Impl {
     bool load_retired = false;
     bool has_branch = false;
     bool has_jump = false;
+    u32 last_invalidation_query = 0u;
     std::array<u32, 16> words{};
     u8 icache_line_count = 0u;
     std::array<u8, 5> icache_indices{};
@@ -1502,6 +1503,23 @@ struct CpuJitV3Backend::Impl {
   }
 #endif
   std::unordered_map<u32, Block> blocks;
+
+  // Reverse index from physical 4 KiB code page to translated guest PCs.
+  // Native stores hit invalidation extremely often. Scanning the entire block
+  // map for every write to a page that has ever contained code turns loading
+  // and overlay-heavy games into O(writes * translations). Keep invalidation
+  // local to the touched code pages instead.
+  std::unordered_map<u32, std::vector<u32>> blocks_by_page;
+  u32 invalidation_query_stamp = 0u;
+
+  void track_block_pages(const Block &block) {
+    const u32 first_page = block.phys_start >> 12u;
+    const u32 last_page = block.phys_end >> 12u;
+    for (u32 page = first_page; page <= last_page; ++page) {
+      blocks_by_page[page].push_back(block.start_pc);
+    }
+  }
+
   // PCs which cannot currently form even the minimum V3 native block.
   // These are invalidated with code writes instead of being recompiled on
   // every execution.
@@ -2417,6 +2435,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         auto inserted =
             impl_->blocks.emplace(start_pc, std::move(helper_block));
         block_ptr = &inserted.first->second;
+        impl_->track_block_pages(*block_ptr);
         impl_->remember_dispatch(*block_ptr);
         ++stats_.native_compile_successes;
         ++stats_.native_blocks_compiled;
@@ -2554,6 +2573,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       }
       auto inserted = impl_->blocks.emplace(start_pc, std::move(block));
       block_ptr = &inserted.first->second;
+      impl_->track_block_pages(*block_ptr);
       impl_->remember_dispatch(*block_ptr);
       if (block_ptr->resident.fn != nullptr) {
         if (impl_->linked_dispatch.exit != nullptr) {
@@ -3121,20 +3141,61 @@ void CpuJitV3Backend::invalidate_range(u32 phys_or_normalized_addr,
     return;
   }
 
-  for (auto it = impl_->blocks.begin(); it != impl_->blocks.end();) {
-    const u32 block_first = it->second.phys_start & ~0x0Fu;
-    const u32 block_last = it->second.phys_end & ~0x0Fu;
-    const bool overlaps = block_first <= last_line && block_last >= first_line;
-    if (overlaps) {
-      impl_->forget_dispatch(it->second.start_pc);
+  u32 query_stamp = ++impl_->invalidation_query_stamp;
+  if (query_stamp == 0u) {
+    for (auto &entry : impl_->blocks) {
+      entry.second.last_invalidation_query = 0u;
+    }
+    query_stamp = ++impl_->invalidation_query_stamp;
+  }
+
+  for (u32 page = first_page; page <= last_page; ++page) {
+    auto page_blocks = impl_->blocks_by_page.find(page);
+    if (page_blocks == impl_->blocks_by_page.end()) {
+      continue;
+    }
+
+    auto &candidate_pcs = page_blocks->second;
+    for (u32 start_pc : candidate_pcs) {
+      auto found = impl_->blocks.find(start_pc);
+      if (found == impl_->blocks.end()) {
+        continue;
+      }
+      Impl::Block &block = found->second;
+      if (block.last_invalidation_query == query_stamp) {
+        continue;
+      }
+      block.last_invalidation_query = query_stamp;
+      ++stats_.invalidation_blocks_examined;
+
+      const u32 block_first = block.phys_start & ~0x0Fu;
+      const u32 block_last = block.phys_end & ~0x0Fu;
+      const bool overlaps =
+          block_first <= last_line && block_last >= first_line;
+      if (!overlaps) {
+        continue;
+      }
+
+      impl_->forget_dispatch(block.start_pc);
 #if VIBESTATION_JIT_V3_X64
-      impl_->unlink_resident(it->second.start_pc);
+      impl_->unlink_resident(block.start_pc);
 #endif
-      it = impl_->blocks.erase(it);
+      impl_->blocks.erase(found);
       ++stats_.invalidations;
       ++stats_.invalidation_blocks_invalidated;
-    } else {
-      ++it;
+    }
+
+    // Repeated overlay writes can compile and invalidate the same PC many
+    // times. Drop stale reverse-index entries while this page is already hot
+    // so the page-local candidate list stays bounded.
+    candidate_pcs.erase(
+        std::remove_if(candidate_pcs.begin(), candidate_pcs.end(),
+                       [&](u32 pc) {
+                         return impl_->blocks.find(pc) == impl_->blocks.end();
+                       }),
+        candidate_pcs.end());
+    if (candidate_pcs.empty()) {
+      impl_->blocks_by_page.erase(page_blocks);
     }
   }
 }
@@ -3148,6 +3209,8 @@ void CpuJitV3Backend::begin_frame(u32 frame_index) {
 void CpuJitV3Backend::flush() {
   impl_->clear_dispatch();
   impl_->blocks.clear();
+  impl_->blocks_by_page.clear();
+  impl_->invalidation_query_stamp = 0u;
 #if VIBESTATION_JIT_V3_X64
   impl_->delay_slot_code.clear();
 #endif
