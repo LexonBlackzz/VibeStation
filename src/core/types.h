@@ -128,6 +128,7 @@ enum class CpuExecutionMode : u8 {
   X64Jit = 2,
   X64JitV2 = 3,
   X64JitV3 = 4,
+  X64JitV4 = 5,
 };
 enum class CpuForcedInterpreterReason : u8 {
   None = 0,
@@ -308,6 +309,8 @@ inline const char *cpu_execution_mode_name(CpuExecutionMode mode) {
     return "x64 JIT V2";
   case CpuExecutionMode::X64JitV3:
     return "x64 JIT V3";
+  case CpuExecutionMode::X64JitV4:
+    return "x64 JIT V4 (Experimental)";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -343,6 +346,8 @@ inline int cpu_execution_mode_to_config_value(CpuExecutionMode mode) {
     return 3;
   case CpuExecutionMode::X64JitV3:
     return 4;
+  case CpuExecutionMode::X64JitV4:
+    return 5;
   case CpuExecutionMode::Interpreter:
   default:
     return 0;
@@ -361,6 +366,9 @@ inline CpuExecutionMode cpu_execution_mode_from_config_value(int value) {
   }
   if (value == 4) {
     return CpuExecutionMode::X64JitV3;
+  }
+  if (value == 5) {
+    return CpuExecutionMode::X64JitV4;
   }
   return CpuExecutionMode::Interpreter;
 }
