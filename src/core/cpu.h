@@ -374,6 +374,12 @@ struct CpuBackendStats {
   u64 jit_v2_state_load_delay = 0;
   u64 jit_v2_state_pc = 0;
   u64 jit_v2_state_diagnostics = 0;
+  // V3 profiling: shapes which force an architectural branch delay slot back
+  // through Cpu::step() instead of the native single-slot trampoline.
+  u64 jit_v3_delay_slot_load = 0;
+  u64 jit_v3_delay_slot_store = 0;
+  u64 jit_v3_delay_slot_control = 0;
+  u64 jit_v3_delay_slot_other = 0;
   u64 jit_v2_unsupported_lw = 0;
   u64 jit_v2_unsupported_other_load = 0;
   u64 jit_v2_unsupported_cop2 = 0;

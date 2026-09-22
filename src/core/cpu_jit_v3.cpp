@@ -1665,6 +1665,20 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         needs_refill ? staged_refill[word_index] : line.words[word_index];
     V3DecodedInstruction inst{};
     if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
+      const u32 primary = bits >> 26u;
+      if (primary >= 0x20u && primary <= 0x26u) {
+        ++stats_.jit_v3_delay_slot_load;
+      } else if (primary >= 0x28u && primary <= 0x2Eu) {
+        ++stats_.jit_v3_delay_slot_store;
+      } else if (primary == 0x01u || primary == 0x02u ||
+                 primary == 0x03u || (primary >= 0x04u && primary <= 0x07u) ||
+                 (primary >= 0x14u && primary <= 0x17u) ||
+                 (primary == 0u &&
+                  ((bits & 0x3Fu) == 0x08u || (bits & 0x3Fu) == 0x09u))) {
+        ++stats_.jit_v3_delay_slot_control;
+      } else {
+        ++stats_.jit_v3_delay_slot_other;
+      }
       return false;
     }
 
