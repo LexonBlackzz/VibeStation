@@ -1709,6 +1709,12 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       std::vector<V3DecodedInstruction> decoded;
       std::array<u32, 16> words{};
       constexpr u32 kMaxV3Instructions = 16u;
+      // Keep ordinary translated blocks within one architectural 16-byte
+      // R3000A I-cache line. Tail linking makes these extra host block
+      // boundaries cheap, while a future cache-miss refill can now happen at
+      // exactly the guest fetch boundary instead of prefetching later lines.
+      const u32 line_instruction_limit =
+          std::min<u32>(kMaxV3Instructions, 4u - word_index);
       u32 written_mask = 0u;
       u32 store_count = 0u;
       bool has_store = false;
@@ -1752,7 +1758,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         return true;
       };
 
-      for (u32 i = 0; i < kMaxV3Instructions; ++i) {
+      for (u32 i = 0; i < line_instruction_limit; ++i) {
         V3DecodedInstruction inst{};
         u32 bits = 0u;
         if (!fetch_decoded(i, inst, bits)) {
@@ -1763,7 +1769,11 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           // J/JAL/JR/JALR are always taken and include the architectural delay
           // slot. Link instructions write their destination before the delay
           // slot, while JR/JALR capture the dynamic target before that slot.
-          if (i + 1u >= kMaxV3Instructions) {
+          // If a control instruction is itself the last word in an I-cache
+          // line, it still owns the architectural delay slot in the next line.
+          // Otherwise stop before a cross-line control op and let the next
+          // tail-linked block begin at that instruction.
+          if (i + 1u >= line_instruction_limit && !decoded.empty()) {
             break;
           }
           V3DecodedInstruction delay{};
@@ -1793,7 +1803,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           // V3 branch blocks always include the architectural delay slot and
           // end immediately after it. Keep the delay slot ALU-only for the
           // first branch tier; memory delay slots remain interpreter territory.
-          if (i + 1u >= kMaxV3Instructions) {
+          if (i + 1u >= line_instruction_limit && !decoded.empty()) {
             break;
           }
           V3DecodedInstruction delay{};
