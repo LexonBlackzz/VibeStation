@@ -1580,12 +1580,28 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 index = (delay_pc >> 4u) & 0xFFu;
     const u32 word_index = (delay_pc >> 2u) & 0x03u;
     const u32 expected_tag = psx::mask_address(delay_pc) & ~0x0Fu;
-    const auto &line = cpu_.icache_[index];
-    if (!line.valid || line.tag != expected_tag) {
-      return false;
+    auto &line = cpu_.icache_[index];
+
+    // Stage a missing architectural I-cache line without making it visible.
+    // Only commit the refill after this delay-slot instruction has been
+    // decoded, lowered and proven able to retire natively. That keeps the
+    // fallback path bit-for-bit equivalent to Cpu::step(): a failed native
+    // attempt cannot leave behind a speculative fetch or its four-cycle cost.
+    std::array<u32, 4> staged_refill{};
+    const bool needs_refill = !line.valid || line.tag != expected_tag;
+    if (needs_refill) {
+      if (g_trace_ram) {
+        return false;
+      }
+      const u32 base = delay_pc & ~0x0Fu;
+      for (u32 word = 0; word < staged_refill.size(); ++word) {
+        staged_refill[word] =
+            cpu_.sys_->read32_instruction(base + word * 4u);
+      }
     }
 
-    const u32 bits = line.words[word_index];
+    const u32 bits =
+        needs_refill ? staged_refill[word_index] : line.words[word_index];
     V3DecodedInstruction inst{};
     if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
       return false;
@@ -1627,6 +1643,14 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       cpu_.cop0_cause_ &= ~(1u << 10);
     }
 
+    // Fetch occurs after IRQ sampling in Cpu::step(). Commit the staged line at
+    // that same architectural point, now that native retirement is guaranteed.
+    if (needs_refill) {
+      line.tag = expected_tag;
+      line.words = staged_refill;
+      line.valid = true;
+    }
+
     cpu_.executing_step_ = true;
     cpu_.exception_raised_ = false;
     cpu_.cycle_penalty_ = 0u;
@@ -1643,19 +1667,20 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     cpu_.pending_branch_pc_ = 0u;
     cpu_.load_ = {};
     cpu_.next_load_ = {};
-    cpu_.cycles_ += 1u;
+    const u32 consumed_cycles = 1u + (needs_refill ? 4u : 0u);
+    cpu_.cycles_ += consumed_cycles;
     g_diag_current_pc = cpu_.current_pc_;
     cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
 
-    ++result.cycles;
+    result.cycles += consumed_cycles;
     ++result.instructions;
     ++stats_.native_block_entries;
     ++stats_.native_alu_block_entries;
     ++stats_.native_instructions;
     ++stats_.jit_v2_inline_instructions;
     ++stats_.optimized_instructions;
-    ++stats_.native_cycles;
-    ++stats_.executed_cycles;
+    stats_.native_cycles += consumed_cycles;
+    stats_.executed_cycles += consumed_cycles;
 
     // The next architectural boundary must resample IRQs. Cpu::step() defers
     // them for the delay slot itself, but not for the target/fallthrough.
