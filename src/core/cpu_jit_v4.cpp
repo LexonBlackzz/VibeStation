@@ -855,6 +855,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
     return nullptr;
   }
   CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
   Label loop, done;
 
   code.push(code.rbx);
