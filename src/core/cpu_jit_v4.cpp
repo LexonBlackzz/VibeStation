@@ -80,6 +80,12 @@ enum class V4ControlOp : u8 {
   Jalr,
   Beq,
   Bne,
+  Blez,
+  Bgtz,
+  Bltz,
+  Bgez,
+  Bltzal,
+  Bgezal,
 };
 
 struct V4DecodedControl {
@@ -107,10 +113,20 @@ bool decode_v4_control(u32 bits, V4DecodedControl &out) {
     }
   }
   switch (primary) {
+  case 0x01:
+    switch (out.rt) {
+    case 0x00: out.op = V4ControlOp::Bltz; return true;
+    case 0x01: out.op = V4ControlOp::Bgez; return true;
+    case 0x10: out.op = V4ControlOp::Bltzal; return true;
+    case 0x11: out.op = V4ControlOp::Bgezal; return true;
+    default: return false; // branch-likely/legacy REGIMM stays on the oracle
+    }
   case 0x02: out.op = V4ControlOp::J; return true;
   case 0x03: out.op = V4ControlOp::Jal; return true;
   case 0x04: out.op = V4ControlOp::Beq; return true;
   case 0x05: out.op = V4ControlOp::Bne; return true;
+  case 0x06: out.op = V4ControlOp::Blez; return true;
+  case 0x07: out.op = V4ControlOp::Bgtz; return true;
   default: return false;
   }
 }
@@ -327,6 +343,10 @@ u8 v4_control_write_reg(const V4DecodedControl &control) {
   }
   if (control.op == V4ControlOp::Jalr) {
     return control.rd;
+  }
+  if (control.op == V4ControlOp::Bltzal ||
+      control.op == V4ControlOp::Bgezal) {
+    return 31u;
   }
   return 0u;
 }
@@ -564,6 +584,31 @@ V4NativeFn compile_v4_branch(
       code.setne(code.dl);
     }
     code.movzx(code.edx, code.dl);
+  } else if (control.op == V4ControlOp::Blez ||
+             control.op == V4ControlOp::Bgtz ||
+             control.op == V4ControlOp::Bltz ||
+             control.op == V4ControlOp::Bgez ||
+             control.op == V4ControlOp::Bltzal ||
+             control.op == V4ControlOp::Bgezal) {
+    emit_read_guest(code, code.eax, control.rs);
+    code.cmp(code.eax, 0);
+    switch (control.op) {
+    case V4ControlOp::Blez: code.setle(code.dl); break;
+    case V4ControlOp::Bgtz: code.setg(code.dl); break;
+    case V4ControlOp::Bltz:
+    case V4ControlOp::Bltzal: code.setl(code.dl); break;
+    case V4ControlOp::Bgez:
+    case V4ControlOp::Bgezal: code.setge(code.dl); break;
+    default: break;
+    }
+    code.movzx(code.edx, code.dl);
+    // Match the interpreter's broad REGIMM behavior: link variants write RA
+    // regardless of whether the branch is taken, before the delay slot.
+    if (control.op == V4ControlOp::Bltzal ||
+        control.op == V4ControlOp::Bgezal) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, 31u, code.eax);
+    }
   } else if (control.op == V4ControlOp::Jr ||
              control.op == V4ControlOp::Jalr) {
     // Capture the dynamic target before either the link write or the delay slot.
