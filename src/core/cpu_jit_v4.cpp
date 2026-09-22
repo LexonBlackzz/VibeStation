@@ -985,10 +985,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   }
 
   {
-    Label cache_ok;
+    Label uncached, validity_ok;
     code.cmp(code.byte[
         code.r14 + static_cast<int>(offsetof(V4Block, cacheable))], 0u);
-    code.je(cache_ok);
+    code.je(uncached);
+
+    // Cached code: exact guest I-cache line generation is authoritative.
     code.mov(code.rax, code.ptr[
         code.rbx +
         static_cast<int>(offsetof(V4NativeState, icache_generations))]);
@@ -1000,10 +1002,11 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.cmp(code.edx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
     code.jne(done);
-    code.L(cache_ok);
-  }
+    code.jmp(validity_ok);
 
-  {
+    // Uncached code: RAM writes are observed immediately, so retain the
+    // physical-page generation guard.
+    code.L(uncached);
     code.mov(code.rax, code.ptr[
         code.rbx +
         static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
@@ -1016,6 +1019,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r14 +
         static_cast<int>(offsetof(V4Block, code_page_generation))]);
     code.jne(done);
+    code.L(validity_ok);
   }
 
   code.mov(code.eax, code.dword[
@@ -1177,11 +1181,17 @@ struct CpuJitV4Backend::Impl {
     if (block->cacheable != cacheable) {
       return nullptr;
     }
-    if (cacheable && block->icache_generation != icache_generation) {
-      return nullptr;
-    }
-    if (block->phys_page >= kV4PhysPageCount ||
-        block->code_page_generation != page_generations[block->phys_page]) {
+    if (cacheable) {
+      // Cached translations are tied to the exact 16-byte guest-visible
+      // I-cache snapshot. A write elsewhere in the same 4 KiB RAM page must
+      // not evict them.
+      if (block->icache_generation != icache_generation) {
+        return nullptr;
+      }
+    } else if (block->phys_page >= kV4PhysPageCount ||
+               block->code_page_generation != page_generations[block->phys_page]) {
+      // Uncached/KSEG1 execution observes RAM directly, so page generations
+      // remain the conservative SMC guard for those blocks.
       return nullptr;
     }
     return block;
