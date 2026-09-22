@@ -1034,13 +1034,33 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
       code.rbx + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
   code.ja(done);
 
-  code.mov(code.eax, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
-  code.add(code.eax, code.dword[
-      code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
-  code.cmp(code.eax, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-  code.ja(done);
+  {
+    Label cycle_ok, strict_cycle_budget;
+    code.cmp(code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))], 1u);
+    code.jne(strict_cycle_budget);
+
+    // Cpu::run_slice() / Cpu::step() already allow one architectural
+    // instruction to overshoot the remaining cycle budget. Preserve that
+    // contract for a one-instruction native block instead of rejecting it only
+    // to execute the same instruction through the interpreter.
+    code.mov(code.eax, code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+    code.cmp(code.eax, code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jb(cycle_ok);
+    code.jmp(done);
+
+    code.L(strict_cycle_budget);
+    code.mov(code.eax, code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+    code.add(code.eax, code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
+    code.cmp(code.eax, code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.ja(done);
+    code.L(cycle_ok);
+  }
 
   code.mov(code.rax, code.ptr[
       code.r15 + static_cast<int>(offsetof(V4DispatchEntry, code))]);
