@@ -1657,6 +1657,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 word_index = (start_pc >> 2u) & 0x03u;
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
+    if (!line.valid || line.tag != expected_tag) {
+      return helper_step(V3HelperReason::Icache);
+    }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
       ++stats_.cache_hits;
@@ -1664,59 +1667,6 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     }
 
     Impl::Block *block_ptr = impl_->lookup_dispatch(start_pc);
-    auto linked_refillable = [&](const Impl::Block &candidate) {
-      if (!impl_->use_linked || candidate.resident.linked_fn == nullptr) {
-        return false;
-      }
-      // The generated refill must not mutate architectural I-cache state and
-      // then discover that the block cannot execute. Load blocks still have
-      // address/load-delay preflight after the cache check, so keep them on
-      // the old precise entry path until that preflight is moved ahead of the
-      // refill. ALU/control blocks only have guards already covered by the
-      // cold-path worst-case budget check (and the compare-only branch IRQ
-      // gate below).
-      if (candidate.has_load || candidate.resident.kind != 0u) {
-        return false;
-      }
-      for (u32 i = 0; i < candidate.icache_line_count; ++i) {
-        const u32 tag = candidate.icache_tags[i];
-        const bool ram = tag < 0x00800000u;
-        const bool scratch =
-            tag >= 0x1F800000u && tag < 0x1F801000u;
-        if (!ram && !scratch) {
-          return false;
-        }
-      }
-
-      // A cache alias miss is safe to refill into an existing translation only
-      // when the words that will be fetched from backing memory still match
-      // what that translation lowered. Hit lines may intentionally contain
-      // stale self-modified code, so validate *only* lines that actually miss.
-      for (u32 i = 0; i < candidate.instruction_count; ++i) {
-        const u32 inst_pc = candidate.start_pc + i * 4u;
-        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
-        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
-        const auto &inst_line = cpu_.icache_[inst_index];
-        if (inst_line.valid && inst_line.tag == inst_tag) {
-          continue;
-        }
-        if (cpu_.sys_->read32_instruction(inst_pc) != candidate.words[i]) {
-          return false;
-        }
-      }
-      return true;
-    };
-
-    // A direct-mapped I-cache alias miss does not invalidate translated code.
-    // Actual code writes already erase overlapping V3 blocks through
-    // invalidate_range(). If a resident block exists, enter it and let its
-    // generated cold path perform the architectural refill and +4 cycle
-    // charge atomically with native execution.
-    const bool entry_icache_hit = line.valid && line.tag == expected_tag;
-    if (!entry_icache_hit &&
-        (block_ptr == nullptr || !linked_refillable(*block_ptr))) {
-      return helper_step(V3HelperReason::Icache);
-    }
     if (block_ptr != nullptr) {
       ++stats_.cache_hits;
     } else {
@@ -1741,7 +1691,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           break;
         }
       }
-      if (!coherent && !linked_refillable(*block_ptr)) {
+      if (!coherent) {
         impl_->forget_dispatch(start_pc);
         impl_->unlink_resident(start_pc);
         impl_->blocks.erase(start_pc);
