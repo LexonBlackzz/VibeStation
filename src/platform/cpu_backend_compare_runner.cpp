@@ -3938,6 +3938,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0x00012020u);
   v4_uncached_store_pending_load.program = {
       enc_i(0x2B, 1, 2, 0), // must store old r2, then delayed load commits
+      0xFFFFFFFFu,           // stop V4 tail formation after the tested store
   };
   v4_uncached_store_pending_load.instructions = 1u;
   v4_uncached_store_pending_load.require_v4_native_entry_when_available = true;
@@ -3956,6 +3957,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x2B, 1, 2, 0),       // SW
       enc_i(0x09, 2, 3, 1),       // ADDIU
       enc_i(0x0D, 3, 4, 0x0040),  // ORI
+      0xFFFFFFFFu,                 // stop after the intended fused tail
   };
   v4_uncached_store_alu_tail.instructions = 3u;
   v4_uncached_store_alu_tail.require_v4_native_entry_when_available = true;
@@ -3991,6 +3993,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0x00010040u);
   v4_uncached_store_same_page_other_line.program = {
       enc_i(0x2B, 1, 2, 0),
+      0xFFFFFFFFu,
   };
   v4_uncached_store_same_page_other_line.instructions = 1u;
   v4_uncached_store_same_page_other_line.require_v4_native_entry_when_available =
