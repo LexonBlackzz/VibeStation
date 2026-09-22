@@ -3,6 +3,7 @@
 #include "core/ps2_system.h"
 
 #include <array>
+#include <chrono>
 #include <string>
 
 struct SDL_Window;
@@ -62,6 +63,9 @@ private:
     bool show_settings_ = false;
     bool show_about_ = false;
     bool emulation_running_ = false;
+    std::chrono::steady_clock::time_point speed_sample_time_{};
+    u64 speed_sample_instructions_ = 0;
+    double ee_instructions_per_second_ = 0.0;
     std::string visible_capture_path_{};
     unsigned long long visible_capture_minimum_ee_ = 0;
 

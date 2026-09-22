@@ -532,6 +532,25 @@ void Ps2App::panel_main() {
     const float center_y = start.y + (available.y * 0.5f);
 
     const auto& display = system_.gs_display();
+    const auto show_boot_progress = [&]() {
+        if (!emulation_running_ || display.has_visible_pixels()) {
+            return;
+        }
+        ImGui::SetCursorPos(ImVec2(start.x + 16.0f, start.y + 16.0f));
+        ImGui::TextColored(
+            ImVec4(0.70f, 0.80f, 1.0f, 1.0f),
+            "Booting BIOS - waiting for first GS image");
+        ImGui::Text(
+            "EE instructions: %.1f million",
+            static_cast<double>(system_.ee().state().instructions_executed) /
+                1'000'000.0);
+        if (ee_instructions_per_second_ > 0.0) {
+            ImGui::Text(
+                "Host throughput: %.1f million EE instructions/s",
+                ee_instructions_per_second_ / 1'000'000.0);
+        }
+        ImGui::TextDisabled("This is not the PS2 hardware clock.");
+    };
     if (display.valid() && display_texture_ != 0 &&
         display.width() != 0 && display.height() != 0) {
         const float aspect =
@@ -562,6 +581,7 @@ void Ps2App::panel_main() {
             display.width(),
             display.height(),
             display.psm());
+        show_boot_progress();
         return;
     }
 
@@ -719,6 +739,7 @@ void Ps2App::panel_main() {
         ImGui::Text("running");
     }
     ImGui::EndChild();
+    show_boot_progress();
 }
 
 void Ps2App::panel_system() {
@@ -1299,6 +1320,9 @@ bool Ps2App::start_bios() {
     }
 
     emulation_running_ = true;
+    speed_sample_time_ = std::chrono::steady_clock::now();
+    speed_sample_instructions_ = system_.ee().state().instructions_executed;
+    ee_instructions_per_second_ = 0.0;
 
     char message[160]{};
     std::snprintf(
@@ -1417,6 +1441,18 @@ void Ps2App::update_emulation() {
     // first BIOS pixels appear as soon as VRAM and DISPLAY/DISPFB are valid.
     system_.refresh_display();
 
+    const auto sample_time = std::chrono::steady_clock::now();
+    const auto sample_seconds =
+        std::chrono::duration<double>(sample_time - speed_sample_time_).count();
+    if (sample_seconds >= 0.5) {
+        const u64 instructions = system_.ee().state().instructions_executed;
+        ee_instructions_per_second_ =
+            static_cast<double>(instructions - speed_sample_instructions_) /
+            sample_seconds;
+        speed_sample_instructions_ = instructions;
+        speed_sample_time_ = sample_time;
+    }
+
     if (system_.halted()) {
         emulation_running_ = false;
         status_message_ = "Execution halted: " + system_.halt_reason();
@@ -1431,6 +1467,7 @@ void Ps2App::update_emulation() {
 
 void Ps2App::reset_core() {
     emulation_running_ = false;
+    ee_instructions_per_second_ = 0.0;
     system_.reset(0);
     status_message_ =
         system_.bios().loaded()

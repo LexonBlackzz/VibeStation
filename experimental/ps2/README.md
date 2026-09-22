@@ -19,6 +19,15 @@ The standalone graphical executable is `VibeStationPS2Lab`. A headless
 and an optional EE instruction budget to print the exact EE/IOP boundary
 without starting the UI.
 
+On Windows, opening `VibeStationPS2Lab.exe` normally creates a persistent
+graphical window. If `scph39001.bin` is present in the current user's
+Downloads folder, the app loads and starts it automatically. Otherwise use
+the window's **Load BIOS** and **Start BIOS** buttons, or launch with
+`--bios <path>`. A progress readout is displayed until the first GS pixels
+appear. The reported EE instructions per second measure host interpreter
+throughput, not the PS2's 294.912 MHz EE clock; hardware-accurate cycle
+accounting and real-time pacing are not implemented yet.
+
 ## Verified retail BIOS startup visual
 
 On September 22, 2026, a legally dumped SCPH-39001 ROM0 produced the
