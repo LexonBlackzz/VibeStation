@@ -1874,26 +1874,102 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           !block_ptr->has_load && !block_ptr->has_store &&
           !block_ptr->has_branch && !block_ptr->has_jump &&
           block_ptr->resident.kind == 0u;
-      if (!refillable) {
-        return helper_step(V3HelperReason::Icache);
-      }
-
-      bool words_match = true;
-      for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
-        const u32 wi = word_index + i;
-        if (wi >= staged_entry_refill.size() ||
-            staged_entry_refill[wi] != block_ptr->words[i]) {
-          words_match = false;
-          break;
+      bool words_match = refillable;
+      if (refillable) {
+        for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
+          const u32 wi = word_index + i;
+          if (wi >= staged_entry_refill.size() ||
+              staged_entry_refill[wi] != block_ptr->words[i]) {
+            words_match = false;
+            break;
+          }
         }
       }
+
       const u32 remaining_cycles_now = max_cycles - result.cycles;
       const u32 remaining_instructions_now =
           max_instructions - result.instructions;
-      if (!words_match ||
-          block_ptr->instruction_count > remaining_instructions_now ||
-          block_ptr->base_cycles + 4u > remaining_cycles_now) {
-        return helper_step(V3HelperReason::Icache);
+      const bool whole_block_fits =
+          refillable && words_match &&
+          block_ptr->instruction_count <= remaining_instructions_now &&
+          block_ptr->base_cycles + 4u <= remaining_cycles_now;
+
+      if (!whole_block_fits) {
+        // Preserve the earlier exact single-instruction transaction as the
+        // fallback for first-time misses, stale/missing translations, or a
+        // slice too small for the whole resident block.
+        if (remaining_instructions_now == 0u || remaining_cycles_now < 5u) {
+          return helper_step(V3HelperReason::Icache);
+        }
+
+        const u32 bits = staged_entry_refill[word_index];
+        V3DecodedInstruction inst{};
+        if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
+          return helper_step(V3HelperReason::Icache);
+        }
+
+        auto &entry = impl_->delay_slot_code[start_pc];
+        if (entry.fn == nullptr || entry.word != bits) {
+          std::vector<V3DecodedInstruction> one{inst};
+          try {
+            auto generated = compile_native_alu(one, {}, false, 0u, 0u);
+            entry.fn = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
+                generated->getCode(), generated->getSize()));
+            entry.word = bits;
+          } catch (const std::exception &e) {
+            std::fprintf(stderr,
+                         "V3 native entry-refill fallback codegen: %s\n",
+                         e.what());
+            entry.fn = nullptr;
+          }
+        }
+        if (entry.fn == nullptr) {
+          return helper_step(V3HelperReason::Icache);
+        }
+
+        V3NativeRuntime one_runtime{};
+        one_runtime.incoming_load_reg = cpu_.load_.reg;
+        one_runtime.incoming_load_value = cpu_.load_.value;
+        one_runtime.incoming_load_pc = cpu_.load_.source_pc;
+        one_runtime.incoming_load_addr = cpu_.load_.source_addr;
+
+        line.tag = expected_tag;
+        line.words = staged_entry_refill;
+        line.valid = true;
+
+        cpu_.executing_step_ = true;
+        cpu_.exception_raised_ = false;
+        cpu_.cycle_penalty_ = 0u;
+        entry.fn(cpu_.gpr_, &one_runtime);
+        cpu_.executing_step_ = false;
+
+        cpu_.current_pc_ = start_pc;
+        cpu_.pc_ = start_pc + 4u;
+        cpu_.next_pc_ = start_pc + 8u;
+        cpu_.in_delay_slot_ = false;
+        cpu_.active_branch_pc_ = 0u;
+        cpu_.pending_delay_slot_ = false;
+        cpu_.pending_branch_taken_ = false;
+        cpu_.pending_branch_pc_ = 0u;
+        cpu_.load_ = {};
+        cpu_.next_load_ = {};
+
+        constexpr u32 consumed_cycles = 5u;
+        cpu_.cycles_ += consumed_cycles;
+        g_diag_current_pc = cpu_.current_pc_;
+        cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+
+        result.cycles += consumed_cycles;
+        ++result.instructions;
+        ++stats_.native_block_entries;
+        ++stats_.native_alu_block_entries;
+        ++stats_.native_instructions;
+        ++stats_.jit_v2_inline_instructions;
+        ++stats_.optimized_instructions;
+        stats_.native_cycles += consumed_cycles;
+        stats_.executed_cycles += consumed_cycles;
+        native_streak = true;
+        return true;
       }
 
       line.tag = expected_tag;
