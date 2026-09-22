@@ -76,6 +76,8 @@ enum class V4ControlOp : u8 {
   None,
   J,
   Jal,
+  Jr,
+  Jalr,
   Beq,
   Bne,
 };
@@ -84,6 +86,7 @@ struct V4DecodedControl {
   V4ControlOp op = V4ControlOp::None;
   u8 rs = 0;
   u8 rt = 0;
+  u8 rd = 0;
   s32 simm = 0;
   u32 imm26 = 0;
 };
@@ -92,9 +95,18 @@ bool decode_v4_control(u32 bits, V4DecodedControl &out) {
   out = {};
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
   out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
   out.simm = static_cast<s32>(static_cast<s16>(bits & 0xFFFFu));
   out.imm26 = bits & 0x03FFFFFFu;
-  switch ((bits >> 26) & 0x3Fu) {
+  const u32 primary = (bits >> 26) & 0x3Fu;
+  if (primary == 0u) {
+    switch (bits & 0x3Fu) {
+    case 0x08: out.op = V4ControlOp::Jr; return true;
+    case 0x09: out.op = V4ControlOp::Jalr; return true;
+    default: return false;
+    }
+  }
+  switch (primary) {
   case 0x02: out.op = V4ControlOp::J; return true;
   case 0x03: out.op = V4ControlOp::Jal; return true;
   case 0x04: out.op = V4ControlOp::Beq; return true;
@@ -158,6 +170,8 @@ struct V4NativeState {
   u32 last_pc = 0;
   u32 last_in_delay_slot = 0;
   u32 active_branch_pc = 0;
+  u32 pending_load_reg = 0;
+  u32 pending_load_value = 0;
   u32 cycles = 0;
   u32 instructions = 0;
   u32 cycle_budget = 0;
@@ -277,6 +291,72 @@ void emit_write_guest(Xbyak::CodeGenerator &code, u8 guest_reg,
     return;
   }
   code.mov(code.dword[code.r10 + static_cast<int>(guest_reg) * 4], src);
+}
+
+u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
+  switch (inst.op) {
+  case V4AluOp::Nop:
+    return 0u;
+  case V4AluOp::Sll:
+  case V4AluOp::Srl:
+  case V4AluOp::Sra:
+  case V4AluOp::Addu:
+  case V4AluOp::Subu:
+  case V4AluOp::And:
+  case V4AluOp::Or:
+  case V4AluOp::Xor:
+  case V4AluOp::Nor:
+  case V4AluOp::Slt:
+  case V4AluOp::Sltu:
+    return inst.rd;
+  case V4AluOp::Addiu:
+  case V4AluOp::Slti:
+  case V4AluOp::Sltiu:
+  case V4AluOp::Andi:
+  case V4AluOp::Ori:
+  case V4AluOp::Xori:
+  case V4AluOp::Lui:
+    return inst.rt;
+  }
+  return 0u;
+}
+
+u8 v4_control_write_reg(const V4DecodedControl &control) {
+  if (control.op == V4ControlOp::Jal) {
+    return 31u;
+  }
+  if (control.op == V4ControlOp::Jalr) {
+    return control.rd;
+  }
+  return 0u;
+}
+
+// R3000A load delay ordering:
+//   1. the current instruction captures operands from the old GPR value;
+//   2. a current write to the same GPR cancels the pending load;
+//   3. otherwise the previous load commits before the next instruction.
+//
+// V4 keeps this tiny state in its native context so linked blocks do not need to
+// bounce through Cpu::advance_load_delay().
+void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
+  using namespace Xbyak;
+  Label clear, done;
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_reg))]);
+  code.test(code.eax, code.eax);
+  code.jz(done);
+  if (cancel_reg != 0u) {
+    code.cmp(code.eax, static_cast<u32>(cancel_reg));
+    code.je(clear);
+  }
+  code.mov(code.ecx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_value))]);
+  code.mov(code.dword[code.r10 + code.rax * 4], code.ecx);
+  code.L(clear);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+      0u);
+  code.L(done);
 }
 
 void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
@@ -417,6 +497,9 @@ V4NativeFn compile_v4_alu(
 
   for (u32 i = 0; i < count; ++i) {
     emit_v4_alu_instruction(code, decoded[i]);
+    if (i == 0u) {
+      emit_retire_incoming_load(code, v4_alu_write_reg(decoded[i]));
+    }
   }
 
   code.mov(code.dword[
@@ -481,13 +564,25 @@ V4NativeFn compile_v4_branch(
       code.setne(code.dl);
     }
     code.movzx(code.edx, code.dl);
+  } else if (control.op == V4ControlOp::Jr ||
+             control.op == V4ControlOp::Jalr) {
+    // Capture the dynamic target before either the link write or the delay slot.
+    // This is observable when rs == rd or the delay slot rewrites rs.
+    emit_read_guest(code, code.r8d, control.rs);
+    if (control.op == V4ControlOp::Jalr) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, control.rd, code.eax);
+    }
   } else if (control.op == V4ControlOp::Jal) {
     code.mov(code.eax, branch_pc + 8u);
     emit_write_guest(code, 31u, code.eax);
   }
 
-  // The branch decision/target is captured before the architectural delay slot.
-  // JAL's link is also visible to the delay slot, matching R3000A behavior.
+  // The branch instruction has captured its operands and performed any link
+  // write. Retire/cancel the incoming load before the architectural delay slot.
+  emit_retire_incoming_load(code, v4_control_write_reg(control));
+
+  // JAL/JALR's link is visible to the delay slot.
   emit_v4_alu_instruction(code, delay);
 
   code.mov(code.dword[
@@ -508,6 +603,13 @@ V4NativeFn compile_v4_branch(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         jump_target);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+  } else if (control.op == V4ControlOp::Jr ||
+             control.op == V4ControlOp::Jalr) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        code.r8d);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
   } else {
@@ -897,7 +999,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     if ((cpu_.pc_ & 3u) != 0u ||
         cpu_.pending_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u ||
-        cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u ||
+        cpu_.next_load_.reg != 0u ||
         cpu_.next_pc_ != cpu_.pc_ + 4u) {
       ++stats_.native_reject_unsafe_state;
       fallback_one();
@@ -960,6 +1062,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.dispatch_top = impl_->dispatch_top.get();
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
+    native.pending_load_reg = cpu_.load_.reg;
+    native.pending_load_value = cpu_.load_.value;
     native.cycle_budget = remaining_cycles;
     native.instruction_budget = remaining_instructions;
     impl_->resident_dispatch(&native);
@@ -979,6 +1083,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     cpu_.pending_delay_slot_ = false;
     cpu_.pending_branch_taken_ = false;
     cpu_.pending_branch_pc_ = 0u;
+    cpu_.load_ = {native.pending_load_reg, native.pending_load_value};
+    cpu_.next_load_ = {0u, 0u};
     cpu_.exception_raised_ = false;
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = false;
