@@ -279,119 +279,119 @@ void emit_write_guest(Xbyak::CodeGenerator &code, u8 guest_reg,
   code.mov(code.dword[code.r10 + static_cast<int>(guest_reg) * 4], src);
 }
 
-void emit_v4_alu_instruction(Xbyak::CodeGenerator *code,
+void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
                              const V4DecodedInstruction &inst) {
   switch (inst.op) {
     case V4AluOp::Nop:
       break;
 
     case V4AluOp::Sll:
-      emit_read_guest(*code, code.eax, inst.rt);
+      emit_read_guest(code, code.eax, inst.rt);
       code.shl(code.eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Srl:
-      emit_read_guest(*code, code.eax, inst.rt);
+      emit_read_guest(code, code.eax, inst.rt);
       code.shr(code.eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Sra:
-      emit_read_guest(*code, code.eax, inst.rt);
+      emit_read_guest(code, code.eax, inst.rt);
       code.sar(code.eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addu:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.add(code.eax, code.ecx);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Subu:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.sub(code.eax, code.ecx);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::And:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.and_(code.eax, code.ecx);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Or:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.or_(code.eax, code.ecx);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Xor:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.xor_(code.eax, code.ecx);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Nor:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.or_(code.eax, code.ecx);
       code.not_(code.eax);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Slt:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.cmp(code.eax, code.ecx);
       code.setl(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Sltu:
-      emit_read_guest(*code, code.eax, inst.rs);
-      emit_read_guest(*code, code.ecx, inst.rt);
+      emit_read_guest(code, code.eax, inst.rs);
+      emit_read_guest(code, code.ecx, inst.rt);
       code.cmp(code.eax, code.ecx);
       code.setb(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(*code, inst.rd, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addiu:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.add(code.eax, static_cast<u32>(inst.simm));
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Slti:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.cmp(code.eax, static_cast<u32>(inst.simm));
       code.setl(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Sltiu:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.cmp(code.eax, static_cast<u32>(inst.simm));
       code.setb(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Andi:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.and_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Ori:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.or_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Xori:
-      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(code, code.eax, inst.rs);
       code.xor_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Lui:
       code.mov(code.eax, static_cast<u32>(inst.imm) << 16u);
-      emit_write_guest(*code, inst.rt, code.eax);
+      emit_write_guest(code, inst.rt, code.eax);
       break;
     }
 }
@@ -416,7 +416,7 @@ V4NativeFn compile_v4_alu(
       code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   for (u32 i = 0; i < count; ++i) {
-    emit_v4_alu_instruction(&code, decoded[i]);
+    emit_v4_alu_instruction(code, decoded[i]);
   }
 
   code.mov(code.dword[
@@ -488,7 +488,7 @@ V4NativeFn compile_v4_branch(
 
   // The branch decision/target is captured before the architectural delay slot.
   // JAL's link is also visible to the delay slot, matching R3000A behavior.
-  emit_v4_alu_instruction(&code, delay);
+  emit_v4_alu_instruction(code, delay);
 
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
