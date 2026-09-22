@@ -149,6 +149,7 @@ struct CpuCompareCase {
   bool require_v2_native_entry_when_available = false;
   bool require_v4_native_entry_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
+  bool require_v4_native_chain_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -3548,6 +3549,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_jal.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_jal);
 
+  CpuCompareCase v4_uncached_resident_chain{};
+  v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
+  v4_uncached_resident_chain.start_pc = 0xA0010000u;
+  // 32 baseline-native NOPs form block A. The J + delay-slot NOP form block B.
+  // On the first trip A and B are compiled separately; once B jumps back to A,
+  // the resident x64 dispatcher must execute A->B->A without returning to C++.
+  v4_uncached_resident_chain.program.assign(32u, 0u);
+  v4_uncached_resident_chain.program.push_back(
+      enc_j(0x02, v4_uncached_resident_chain.start_pc));
+  v4_uncached_resident_chain.program.push_back(0u);
+  v4_uncached_resident_chain.instructions = 100u;
+  v4_uncached_resident_chain.require_v4_native_entry_when_available = true;
+  v4_uncached_resident_chain.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_resident_chain.require_v4_native_chain_when_available = true;
+  cases.push_back(v4_uncached_resident_chain);
+
   append_deterministic_random_compare_cases(cases);
   return cases;
 }
@@ -3740,7 +3758,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
 
       if (mode == CpuExecutionMode::X64JitV4 &&
           (test_case.require_v4_native_entry_when_available ||
-           test_case.require_v4_native_branch_entry_when_available)) {
+           test_case.require_v4_native_branch_entry_when_available ||
+           test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
         } else {
@@ -3752,11 +3771,19 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool branch_entered =
               !test_case.require_v4_native_branch_entry_when_available ||
               result.stats.native_branch_tail_entries != 0;
+          const bool chain_entered =
+              !test_case.require_v4_native_chain_when_available ||
+              (result.stats.native_chain_entries != 0 &&
+               result.stats.native_linked_transitions != 0 &&
+               result.stats.native_chain_max_blocks > 1u);
           native_check =
               !native_entered ? "v4_native_missing"
                               : (!branch_entered ? "v4_branch_missing"
-                                                 : "v4_native_entered");
-          native_check_pass = native_entered && branch_entered;
+                                                 : (!chain_entered
+                                                        ? "v4_chain_missing"
+                                                        : "v4_native_entered"));
+          native_check_pass =
+              native_entered && branch_entered && chain_entered;
         }
       }
 
