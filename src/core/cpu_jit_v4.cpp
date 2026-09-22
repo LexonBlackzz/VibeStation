@@ -392,9 +392,14 @@ void emit_v4_block_return(Xbyak::CodeGenerator &code) {
 }
 
 void v4_notify_direct_store(Cpu *cpu, u32 addr, u32 size_bytes) {
-  if (cpu != nullptr) {
-    cpu->notify_code_write(addr, size_bytes);
+  if (cpu == nullptr) {
+    return;
   }
+  u32 phys = psx::mask_address(addr);
+  if (phys < psx::RAM_MAX_SIZE) {
+    phys &= psx::RAM_SIZE - 1u;
+  }
+  cpu->notify_code_write(phys, size_bytes);
 }
 
 void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
@@ -995,10 +1000,18 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
 
-  // Never directly write a physical page which has translated code. That path
-  // must go through System/Cpu so SMC invalidation and cache semantics remain
-  // centralized and exact.
+  // Never directly write a backing page which has translated code. Normalize
+  // main-RAM mirrors to the same 2 MiB backing address used by code tracking.
   code.mov(code.r9d, code.edx);
+  {
+    Label page_key_ready;
+    code.cmp(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jae(page_key_ready);
+    code.and_(code.r9d, psx::RAM_SIZE - 1u);
+    code.L(page_key_ready);
+  }
   code.shr(code.r9d, kV4PhysPageShift);
   code.mov(code.ecx, code.r9d);
   code.shr(code.r9d, 6u);
