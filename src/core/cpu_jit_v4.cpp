@@ -7,7 +7,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -211,21 +210,29 @@ public:
     used_ = std::min(offset, kV4CodeArenaBytes);
   }
 
-  void *copy_code(const void *source, size_t size) {
-    if (base_ == nullptr || source == nullptr || size == 0u) {
+  void *begin_emit(size_t capacity) {
+    if (base_ == nullptr || capacity == 0u) {
       return nullptr;
     }
     const size_t offset = (used_ + 15u) & ~size_t{15u};
-    if (offset > kV4CodeArenaBytes || size > kV4CodeArenaBytes - offset) {
+    if (offset > kV4CodeArenaBytes ||
+        capacity > kV4CodeArenaBytes - offset) {
       return nullptr;
     }
-    u8 *dst = base_ + offset;
-    std::memcpy(dst, source, size);
-    used_ = offset + size;
+    return base_ + offset;
+  }
 
-    // x86/x64 has coherent I/D caches; no FlushInstructionCache syscall is
-    // needed for freshly written code in this RWX bring-up arena.
-    return dst;
+  bool commit_emit(void *code, size_t size) {
+    if (base_ == nullptr || code == nullptr || size == 0u) {
+      return false;
+    }
+    const size_t offset = (used_ + 15u) & ~size_t{15u};
+    if (code != base_ + offset || offset > kV4CodeArenaBytes ||
+        size > kV4CodeArenaBytes - offset) {
+      return false;
+    }
+    used_ = offset + size;
+    return true;
   }
 
 private:
@@ -279,167 +286,183 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator *code,
       break;
 
     case V4AluOp::Sll:
-      emit_read_guest(*code, code->eax, inst.rt);
-      code->shl(code->eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rt);
+      code.shl(code.eax, inst.shamt);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Srl:
-      emit_read_guest(*code, code->eax, inst.rt);
-      code->shr(code->eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rt);
+      code.shr(code.eax, inst.shamt);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Sra:
-      emit_read_guest(*code, code->eax, inst.rt);
-      code->sar(code->eax, inst.shamt);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rt);
+      code.sar(code.eax, inst.shamt);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addu:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->add(code->eax, code->ecx);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.add(code.eax, code.ecx);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Subu:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->sub(code->eax, code->ecx);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.sub(code.eax, code.ecx);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::And:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->and_(code->eax, code->ecx);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.and_(code.eax, code.ecx);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Or:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->or_(code->eax, code->ecx);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.or_(code.eax, code.ecx);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Xor:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->xor_(code->eax, code->ecx);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.xor_(code.eax, code.ecx);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Nor:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->or_(code->eax, code->ecx);
-      code->not_(code->eax);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.or_(code.eax, code.ecx);
+      code.not_(code.eax);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Slt:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->cmp(code->eax, code->ecx);
-      code->setl(code->al);
-      code->movzx(code->eax, code->al);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.cmp(code.eax, code.ecx);
+      code.setl(code.al);
+      code.movzx(code.eax, code.al);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
     case V4AluOp::Sltu:
-      emit_read_guest(*code, code->eax, inst.rs);
-      emit_read_guest(*code, code->ecx, inst.rt);
-      code->cmp(code->eax, code->ecx);
-      code->setb(code->al);
-      code->movzx(code->eax, code->al);
-      emit_write_guest(*code, inst.rd, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      emit_read_guest(*code, code.ecx, inst.rt);
+      code.cmp(code.eax, code.ecx);
+      code.setb(code.al);
+      code.movzx(code.eax, code.al);
+      emit_write_guest(*code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addiu:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->add(code->eax, static_cast<u32>(inst.simm));
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.add(code.eax, static_cast<u32>(inst.simm));
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Slti:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->cmp(code->eax, static_cast<u32>(inst.simm));
-      code->setl(code->al);
-      code->movzx(code->eax, code->al);
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.cmp(code.eax, static_cast<u32>(inst.simm));
+      code.setl(code.al);
+      code.movzx(code.eax, code.al);
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Sltiu:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->cmp(code->eax, static_cast<u32>(inst.simm));
-      code->setb(code->al);
-      code->movzx(code->eax, code->al);
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.cmp(code.eax, static_cast<u32>(inst.simm));
+      code.setb(code.al);
+      code.movzx(code.eax, code.al);
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Andi:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->and_(code->eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.and_(code.eax, static_cast<u32>(inst.imm));
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Ori:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->or_(code->eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.or_(code.eax, static_cast<u32>(inst.imm));
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Xori:
-      emit_read_guest(*code, code->eax, inst.rs);
-      code->xor_(code->eax, static_cast<u32>(inst.imm));
-      emit_write_guest(*code, inst.rt, code->eax);
+      emit_read_guest(*code, code.eax, inst.rs);
+      code.xor_(code.eax, static_cast<u32>(inst.imm));
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     case V4AluOp::Lui:
-      code->mov(code->eax, static_cast<u32>(inst.imm) << 16u);
-      emit_write_guest(*code, inst.rt, code->eax);
+      code.mov(code.eax, static_cast<u32>(inst.imm) << 16u);
+      emit_write_guest(*code, inst.rt, code.eax);
       break;
     }
 }
 
-std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
+V4NativeFn compile_v4_alu(
+    V4CodeArena &arena,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &decoded,
-    u32 count, u32 start_pc) {
+    u32 count, u32 start_pc, u32 &code_size) {
   using namespace Xbyak;
-  auto code = std::make_unique<CodeGenerator>(4096);
+  constexpr size_t kReservation = 4096u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
 #if defined(_WIN32)
-  code->mov(code->r11, code->rcx);
+  code.mov(code.r11, code.rcx);
 #else
-  code->mov(code->r11, code->rdi);
+  code.mov(code.r11, code.rdi);
 #endif
-  code->mov(code->r10, code->ptr[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+  code.mov(code.r10, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   for (u32 i = 0; i < count; ++i) {
-    emit_v4_alu_instruction(code.get(), decoded[i]);
+    emit_v4_alu_instruction(&code, decoded[i]);
   }
 
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
       start_pc + (count - 1u) * 4u);
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       0u);
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       0u);
-  code->add(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       count * 4u);
-  code->add(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], count);
-  code->add(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], count);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       count);
-  code->ret();
-  code->ready();
-  return code;
+  code.ret();
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
 }
 
-std::unique_ptr<Xbyak::CodeGenerator> compile_v4_branch(
-    const V4DecodedControl &control, const V4DecodedInstruction &delay,
-    u32 branch_pc) {
+V4NativeFn compile_v4_branch(
+    V4CodeArena &arena, const V4DecodedControl &control,
+    const V4DecodedInstruction &delay, u32 branch_pc, u32 &code_size) {
   using namespace Xbyak;
-  auto code = std::make_unique<CodeGenerator>(2048);
+  constexpr size_t kReservation = 2048u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
 #if defined(_WIN32)
-  code->mov(code->r11, code->rcx);
+  code.mov(code.r11, code.rcx);
 #else
-  code->mov(code->r11, code->rdi);
+  code.mov(code.r11, code.rdi);
 #endif
-  code->mov(code->r10, code->ptr[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+  code.mov(code.r10, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   const u32 fallthrough = branch_pc + 8u;
   const u32 jump_target =
@@ -449,162 +472,174 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_branch(
 
   if (control.op == V4ControlOp::Beq ||
       control.op == V4ControlOp::Bne) {
-    emit_read_guest(*code, code->eax, control.rs);
-    emit_read_guest(*code, code->ecx, control.rt);
-    code->cmp(code->eax, code->ecx);
+    emit_read_guest(code, code.eax, control.rs);
+    emit_read_guest(code, code.ecx, control.rt);
+    code.cmp(code.eax, code.ecx);
     if (control.op == V4ControlOp::Beq) {
-      code->sete(code->dl);
+      code.sete(code.dl);
     } else {
-      code->setne(code->dl);
+      code.setne(code.dl);
     }
-    code->movzx(code->edx, code->dl);
+    code.movzx(code.edx, code.dl);
   } else if (control.op == V4ControlOp::Jal) {
-    code->mov(code->eax, branch_pc + 8u);
-    emit_write_guest(*code, 31u, code->eax);
+    code.mov(code.eax, branch_pc + 8u);
+    emit_write_guest(code, 31u, code.eax);
   }
 
   // The branch decision/target is captured before the architectural delay slot.
   // JAL's link is also visible to the delay slot, matching R3000A behavior.
-  emit_v4_alu_instruction(code.get(), delay);
+  emit_v4_alu_instruction(&code, delay);
 
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
       branch_pc + 4u);
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       1u);
-  code->mov(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       branch_pc);
-  code->add(code->dword[
-      code->r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       2u);
 
   if (control.op == V4ControlOp::J ||
       control.op == V4ControlOp::Jal) {
-    code->mov(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         jump_target);
-    code->add(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
   } else {
     Label not_taken, selected;
-    code->test(code->edx, code->edx);
-    code->jz(not_taken);
-    code->mov(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+    code.test(code.edx, code.edx);
+    code.jz(not_taken);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         branch_target);
-    code->add(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
-    code->jmp(selected);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+    code.jmp(selected);
 
-    code->L(not_taken);
-    code->mov(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+    code.L(not_taken);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         fallthrough);
-    code->add(code->dword[
-        code->r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
-    code->L(selected);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code.L(selected);
   }
 
-  code->ret();
-  code->ready();
-  return code;
+  code.ret();
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
 }
 
 V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
   using namespace Xbyak;
-  auto code = std::make_unique<CodeGenerator>(1024);
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
   Label loop, done;
 
-  code->push(code->rbx);
-  code->push(code->r12);
-  code->push(code->r13);
-  code->push(code->r14);
-  code->push(code->r15);
+  code.push(code.rbx);
+  code.push(code.r12);
+  code.push(code.r13);
+  code.push(code.r14);
+  code.push(code.r15);
 #if defined(_WIN32)
-  code->sub(code->rsp, 32);
-  code->mov(code->rbx, code->rcx);
+  code.sub(code.rsp, 32);
+  code.mov(code.rbx, code.rcx);
 #else
-  code->mov(code->rbx, code->rdi);
+  code.mov(code.rbx, code.rdi);
 #endif
 
-  code->mov(code->r12, code->ptr[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
-  code->mov(code->r13d, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
+  code.mov(code.r12, code.ptr[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
+  code.mov(code.r13d, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
 
-  code->L(loop);
-  code->mov(code->eax, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, pc))]);
-  code->mov(code->edx, code->eax);
-  code->shr(code->eax, 12);
-  code->mov(code->r14, code->ptr[code->r12 + code->rax * 8]);
-  code->test(code->r14, code->r14);
-  code->jz(done);
+  code.L(loop);
+  code.mov(code.eax, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.edx, code.eax);
+  code.shr(code.eax, 12);
+  code.mov(code.r14, code.ptr[code.r12 + code.rax * 8]);
+  code.test(code.r14, code.r14);
+  code.jz(done);
 
-  code->mov(code->eax, code->edx);
-  code->shr(code->eax, 2);
-  code->and_(code->eax, 0x3FFu);
-  code->imul(code->eax, code->eax,
+  code.mov(code.eax, code.edx);
+  code.shr(code.eax, 2);
+  code.and_(code.eax, 0x3FFu);
+  code.imul(code.eax, code.eax,
              static_cast<int>(sizeof(V4DispatchEntry)));
-  code->lea(code->r15, code->ptr[code->r14 + code->rax]);
-  code->cmp(code->dword[
-                code->r15 +
+  code.lea(code.r15, code.ptr[code.r14 + code.rax]);
+  code.cmp(code.dword[
+                code.r15 +
                 static_cast<int>(offsetof(V4DispatchEntry, cache_epoch))],
-            code->r13d);
-  code->jne(done);
+            code.r13d);
+  code.jne(done);
 
-  code->mov(code->r14, code->ptr[
-      code->r15 + static_cast<int>(offsetof(V4DispatchEntry, block))]);
-  code->test(code->r14, code->r14);
-  code->jz(done);
+  code.mov(code.r14, code.ptr[
+      code.r15 + static_cast<int>(offsetof(V4DispatchEntry, block))]);
+  code.test(code.r14, code.r14);
+  code.jz(done);
 
-  code->mov(code->eax, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, instructions))]);
-  code->add(code->eax, code->dword[
-      code->r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
-  code->cmp(code->eax, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
-  code->ja(done);
+  code.mov(code.eax, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code.add(code.eax, code.dword[
+      code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
+  code.cmp(code.eax, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+  code.ja(done);
 
-  code->mov(code->eax, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
-  code->add(code->eax, code->dword[
-      code->r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
-  code->cmp(code->eax, code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-  code->ja(done);
+  code.mov(code.eax, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code.add(code.eax, code.dword[
+      code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
+  code.cmp(code.eax, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+  code.ja(done);
 
-  code->mov(code->rax, code->ptr[
-      code->r15 + static_cast<int>(offsetof(V4DispatchEntry, code))]);
-  code->test(code->rax, code->rax);
-  code->jz(done);
+  code.mov(code.rax, code.ptr[
+      code.r15 + static_cast<int>(offsetof(V4DispatchEntry, code))]);
+  code.test(code.rax, code.rax);
+  code.jz(done);
 
 #if defined(_WIN32)
-  code->mov(code->rcx, code->rbx);
+  code.mov(code.rcx, code.rbx);
 #else
-  code->mov(code->rdi, code->rbx);
+  code.mov(code.rdi, code.rbx);
 #endif
-  code->call(code->rax);
-  code->inc(code->dword[
-      code->rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
-  code->jmp(loop);
+  code.call(code.rax);
+  code.inc(code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  code.jmp(loop);
 
-  code->L(done);
+  code.L(done);
 #if defined(_WIN32)
-  code->add(code->rsp, 32);
+  code.add(code.rsp, 32);
 #endif
-  code->pop(code->r15);
-  code->pop(code->r14);
-  code->pop(code->r13);
-  code->pop(code->r12);
-  code->pop(code->rbx);
-  code->ret();
-  code->ready();
-
-  return reinterpret_cast<V4ResidentDispatchFn>(
-      arena.copy_code(code->getCode(), code->getSize()));
+  code.pop(code.r15);
+  code.pop(code.r14);
+  code.pop(code.r13);
+  code.pop(code.r12);
+  code.pop(code.rbx);
+  code.ret();
+  code.ready();
+  const size_t code_size = code.getSize();
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4ResidentDispatchFn>(buffer);
 }
 
 #endif // VIBESTATION_JIT_V4_X64
@@ -751,20 +786,20 @@ struct CpuJitV4Backend::Impl {
 
     ++stats.native_compile_attempts;
     try {
-      std::unique_ptr<Xbyak::CodeGenerator> generated;
+      V4NativeFn entry = nullptr;
       if (simple_control) {
-        generated = compile_v4_branch(control, delay, start_pc);
+        entry = compile_v4_branch(
+            arena, control, delay, start_pc, block->code_size);
       } else {
-        generated = compile_v4_alu(decoded, count, start_pc);
+        entry = compile_v4_alu(
+            arena, decoded, count, start_pc, block->code_size);
       }
-      block->code_size = static_cast<u32>(generated->getSize());
-      void *entry = arena.copy_code(generated->getCode(), block->code_size);
       if (entry == nullptr) {
         --block_count;
         ++stats.native_compile_failures;
         return nullptr;
       }
-      block->fn = reinterpret_cast<V4NativeFn>(entry);
+      block->fn = entry;
       block->instruction_count = simple_control ? 2u : count;
       block->max_cycles = simple_control ? 3u : count;
       block->has_control = simple_control;
