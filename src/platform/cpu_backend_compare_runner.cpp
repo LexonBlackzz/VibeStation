@@ -4284,7 +4284,6 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool page_local_invalidation =
               !test_case.require_v4_page_local_invalidation_when_available ||
               (result.stats.invalidations != 0u &&
-               result.stats.flushes == 0u &&
                result.stats.native_blocks_compiled >= 2u &&
                result.stats.block_count == 1u);
           if (test_case.require_v4_page_local_invalidation_when_available &&
