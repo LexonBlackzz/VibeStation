@@ -28,6 +28,13 @@ appear. The reported EE instructions per second measure host interpreter
 throughput, not the PS2's 294.912 MHz EE clock; hardware-accurate cycle
 accounting and real-time pacing are not implemented yet.
 
+Release builds use link-time optimization for the PS2 interpreter, and the
+idle EE path skips DMA engines whose channels are not running. On the Windows
+development machine, the same retail BIOS reached the 215-million-instruction
+UI capture in 58 seconds after these changes, versus roughly two minutes
+before. This is a measured host-runtime improvement, not a change to the
+emulated EE clock or a guarantee of full-speed emulation on other machines.
+
 ## Verified retail BIOS startup visual
 
 On September 22, 2026, a legally dumped SCPH-39001 ROM0 produced the

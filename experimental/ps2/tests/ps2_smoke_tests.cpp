@@ -76,6 +76,37 @@ bool test_ram_bounds() {
                "cross-boundary write unexpectedly succeeded");
 }
 
+bool test_dmac_running_mask() {
+    ps2::EeHw hw;
+    hw.reset();
+    bool ok = expect(!hw.dmac_enabled() && hw.dmac_running_mask() == 0,
+                     "DMAC should reset idle");
+    constexpr std::array<ps2::u32, 10> chcr_addresses = {
+        0x10008000u, 0x10009000u, 0x1000A000u, 0x1000B000u,
+        0x1000B400u, 0x1000C000u, 0x1000C400u, 0x1000C800u,
+        0x1000D000u, 0x1000D400u,
+    };
+    for (ps2::u32 channel = 0; channel < chcr_addresses.size(); ++channel) {
+        ok = expect(hw.write32(chcr_addresses[channel], 1u << 8),
+                    "DMAC CHCR start write failed") && ok;
+        ok = expect((hw.dmac_running_mask() & (1u << channel)) != 0,
+                    "DMAC running channel was not tracked") && ok;
+    }
+    ok = expect(hw.dmac_running_mask() == 0x3FFu,
+                "DMAC running mask lost a channel") && ok;
+    ok = expect(hw.write32(0x1000E000u, 1u) && hw.dmac_enabled(),
+                "DMAC CTRL enable was not tracked") && ok;
+    for (ps2::u32 channel = 0; channel < chcr_addresses.size(); ++channel) {
+        ok = expect(hw.write32(chcr_addresses[channel], 0),
+                    "DMAC CHCR completion write failed") && ok;
+    }
+    ok = expect(hw.dmac_running_mask() == 0,
+                "DMAC completion left a channel active") && ok;
+    hw.reset();
+    return expect(!hw.dmac_enabled() && hw.dmac_running_mask() == 0,
+                  "DMAC reset left the fast-path mask active") && ok;
+}
+
 bool test_scheduler_ordering() {
     ps2::Scheduler scheduler;
     std::vector<ps2::EventType> fired;
@@ -1878,6 +1909,7 @@ int main() {
     ok = test_ram_little_endian() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
+    ok = test_dmac_running_mask() && ok;
     ok = test_scheduler_ordering() && ok;
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;

@@ -51,29 +51,37 @@ bool Ps2System::step_ee(std::string& error) {
     }
     if (hw_.take_iop_interrupt_request()) iop_intc_.raise(1);
     if (hw_.take_iop_reset_request()) reset_iop_subsystem();
-    if (!gif_dma_.service(bus_, gs_core_, error)) {
+    const u16 active_dma =
+        hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0;
+    if ((active_dma & (1u << 2)) != 0 &&
+        !gif_dma_.service(bus_, gs_core_, error)) {
         error = "GIF DMA: " + error;
         return false;
     }
     if (!vu0_.running()) ee_.sync_vu0_to_micro();
-    if (!vif0_dma_.service(bus_, error)) {
+    if ((active_dma & (1u << 0)) != 0 &&
+        !vif0_dma_.service(bus_, error)) {
         error = "VIF0 DMA: " + error;
         return false;
     }
-    if (!vif1_dma_.service(bus_, gs_core_, gs_, error)) {
+    if ((active_dma & (1u << 1)) != 0 &&
+        !vif1_dma_.service(bus_, gs_core_, gs_, error)) {
         error = "VIF1 DMA: " + error;
         return false;
     }
-    if (!sif_dma_.service(bus_, iop_bus_, iop_intc_, error)) {
+    if ((active_dma & ((1u << 5) | (1u << 6))) != 0 &&
+        !sif_dma_.service(bus_, iop_bus_, iop_intc_, error)) {
         error = "SIF DMA: " + error;
         return false;
     }
     sif_dma_.tick_ee(bus_);
-    if (!spr_dma_.service(bus_, error)) {
+    if ((active_dma & ((1u << 8) | (1u << 9))) != 0 &&
+        !spr_dma_.service(bus_, error)) {
         error = "SPR DMA: " + error;
         return false;
     }
-    if (!ipu_dma_.service(bus_, error)) {
+    if ((active_dma & ((1u << 3) | (1u << 4))) != 0 &&
+        !ipu_dma_.service(bus_, error)) {
         error = "IPU DMA: " + error;
         return false;
     }

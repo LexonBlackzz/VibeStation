@@ -171,3 +171,19 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:vibestation_ps2_sif_tests>
     )
 endif()
+
+# The interpreter crosses several small EE/IOP/bus translation units for
+# each emulated instruction. Release LTO lets the compiler inline those hot
+# calls without changing the emulated instruction or device cadence.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT VIBESTATION_PS2_IPO_SUPPORTED LANGUAGES CXX)
+if(VIBESTATION_PS2_IPO_SUPPORTED)
+    set_property(TARGET vibestation_ps2_core PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET vibestation_ps2_bios_trace PROPERTY
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    if(VIBESTATION_PS2_ENABLE_UI)
+        set_property(TARGET VibeStationPS2Lab PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+endif()

@@ -17,6 +17,12 @@ public:
     [[nodiscard]] u32 vif1_stat() const;
     [[nodiscard]] bool intc_pending() const;
     [[nodiscard]] bool dmac_pending() const;
+    [[nodiscard]] bool dmac_enabled() const {
+        return (dmac_regs_[0x6000u] & 1u) != 0;
+    }
+    [[nodiscard]] u16 dmac_running_mask() const {
+        return dmac_running_mask_;
+    }
     [[nodiscard]] bool take_iop_interrupt_request();
     [[nodiscard]] bool take_iop_reset_request();
 
@@ -52,6 +58,7 @@ private:
     static constexpr u32 kDmacBase = 0x10008000u;
     static constexpr std::size_t kDmacSize = 0x6200u;
     std::array<u8, kDmacSize> dmac_regs_{};
+    u16 dmac_running_mask_ = 0;
 
     u32 ipu_cmd_ = 0;
     u32 ipu_ctrl_ = 0;

@@ -36,6 +36,7 @@ void EeHw::reset() {
     timer_hold_.fill(0);
     regs_.fill(0);
     dmac_regs_.fill(0);
+    dmac_running_mask_ = 0;
     ipu_cmd_ = ipu_ctrl_ = ipu_bp_ = ipu_top_ = 0;
     ipu_in_fifo_.fill(0);
     ipu_out_fifo_.fill(0);
@@ -488,6 +489,34 @@ bool EeHw::write32(u32 address, u32 value) {
         if (lane == 0x80u && address < 0x1000E000u) value &= 0x3FF0u; // SADR
         (void)local;
         store_dmac(address, value);
+        // All EE DMA CHCR updates pass through this register window,
+        // including completion writes from the DMA engines themselves.
+        // Track STR here so the idle interpreter path need not probe every
+        // engine's MMIO registers after each EE instruction.
+        if (lane == 0x00u && address < 0x1000E000u) {
+            u32 channel = 10u;
+            switch (address) {
+            case 0x10008000u: channel = 0u; break;
+            case 0x10009000u: channel = 1u; break;
+            case 0x1000A000u: channel = 2u; break;
+            case 0x1000B000u: channel = 3u; break;
+            case 0x1000B400u: channel = 4u; break;
+            case 0x1000C000u: channel = 5u; break;
+            case 0x1000C400u: channel = 6u; break;
+            case 0x1000C800u: channel = 7u; break;
+            case 0x1000D000u: channel = 8u; break;
+            case 0x1000D400u: channel = 9u; break;
+            default: break;
+            }
+            if (channel < 10u) {
+                const u16 bit = static_cast<u16>(1u << channel);
+                if ((value & (1u << 8)) != 0) {
+                    dmac_running_mask_ |= bit;
+                } else {
+                    dmac_running_mask_ &= static_cast<u16>(~bit);
+                }
+            }
+        }
         return true;
     }
     switch (address) {
