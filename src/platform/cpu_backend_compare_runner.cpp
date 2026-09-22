@@ -3828,6 +3828,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_incoming_load_cancel);
 
+  CpuCompareCase v4_uncached_prefix_load_tail{};
+  v4_uncached_prefix_load_tail.name =
+      "v4_uncached_native_alu_prefix_load_delay_tail";
+  v4_uncached_prefix_load_tail.start_pc = 0xA0010000u;
+  v4_uncached_prefix_load_tail.initial_gpr[1] = 0x80012000u;
+  v4_uncached_prefix_load_tail.initial_gpr[2] = 0x00000010u;
+  v4_uncached_prefix_load_tail.memory.push_back({0x00012004u, 0x12345678u});
+  v4_uncached_prefix_load_tail.program = {
+      enc_i(0x09, 1, 1, 4),  // ADDIU prefix: point at the load word
+      enc_i(0x23, 1, 2, 0),  // LW r2
+      enc_i(0x09, 2, 3, 1),  // load-delay slot must see old r2 => r3=0x11
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_load_tail.instructions = 3u;
+  v4_uncached_prefix_load_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_load_tail.require_v4_native_load_entry_when_available =
+      true;
+  v4_uncached_prefix_load_tail.require_v4_load_tail_block_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_load_tail);
+
   CpuCompareCase v4_uncached_load_tail{};
   v4_uncached_load_tail.name = "v4_uncached_native_load_alu_tail";
   v4_uncached_load_tail.start_pc = 0xA0010000u;
