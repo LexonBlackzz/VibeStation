@@ -3534,6 +3534,25 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_beq.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_beq);
 
+  CpuCompareCase v4_uncached_bne_not_taken{};
+  v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
+  v4_uncached_bne_not_taken.start_pc = 0xA0010000u;
+  v4_uncached_bne_not_taken.initial_gpr[1] = 0x1234u;
+  v4_uncached_bne_not_taken.initial_gpr[2] = 0x1234u;
+  v4_uncached_bne_not_taken.program = {
+      enc_i(0x05, 1, 2, 2),
+      // Mutate an input in the delay slot: BNE must have captured "not taken"
+      // before this executes.
+      enc_i(0x09, 2, 2, 1),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bne_not_taken.instructions = 2u;
+  v4_uncached_bne_not_taken.require_v4_native_entry_when_available = true;
+  v4_uncached_bne_not_taken.require_v4_native_branch_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_bne_not_taken);
+
   CpuCompareCase v4_uncached_jal{};
   v4_uncached_jal.name = "v4_uncached_native_jal_link_delay";
   v4_uncached_jal.start_pc = 0xA0010000u;
