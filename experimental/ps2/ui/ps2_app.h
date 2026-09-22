@@ -13,8 +13,12 @@ namespace ps2::ui {
 class Ps2App {
 public:
     bool init();
-    void run();
+    int run();
     void shutdown();
+    bool launch_bios(const std::string& path);
+    void capture_visible_window(
+        const std::string& path,
+        unsigned long long minimum_ee_instructions = 0);
 
 private:
     void process_events(bool& quit);
@@ -37,6 +41,7 @@ private:
     bool step_iop_once();
     void update_emulation();
     void reset_core();
+    bool write_window_ppm(const std::string& path, int width, int height);
 
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_context_ = nullptr;
@@ -57,6 +62,8 @@ private:
     bool show_settings_ = false;
     bool show_about_ = false;
     bool emulation_running_ = false;
+    std::string visible_capture_path_{};
+    unsigned long long visible_capture_minimum_ee_ = 0;
 
     std::array<char, 1024> bios_path_input_{};
     std::string status_message_ = "PS2 experimental core ready";

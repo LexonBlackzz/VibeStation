@@ -19,6 +19,36 @@ The standalone graphical executable is `VibeStationPS2Lab`. A headless
 and an optional EE instruction budget to print the exact EE/IOP boundary
 without starting the UI.
 
+## Verified retail BIOS startup visual
+
+On September 22, 2026, a legally dumped SCPH-39001 ROM0 produced the
+recognizable PS2 startup cloud and floating-block scene in both the headless
+trace and the `VibeStationPS2Lab` window. The first faint display pixels
+appear around 211 million EE instructions; the scene is recognizable by
+215 million. The VU0 macro/Q instruction correction in commit `9be2abd`
+made the first frame possible. The later scanout fix presents the BIOS
+framebuffer as opaque in the UI while retaining GS alpha for circuit merging.
+
+To reproduce the UI verification with your own legally dumped BIOS:
+
+```text
+VibeStationPS2Lab --bios <bios-path> --capture-visible <window.ppm> --capture-after-ee 215000000
+```
+
+This runs the real graphical executable, captures its composed OpenGL window
+as a PPM image, and exits after a visible frame at or beyond the requested
+EE instruction count. For a headless framebuffer dump, pass an optional
+PPM path after the trace budget:
+
+```text
+vibestation_ps2_bios_trace <bios-path> 215000000 <frame.ppm>
+```
+
+The startup scene is still dark and approximate; this is an experimental GS
+renderer, not a fully accurate PS2. The later Sony/PlayStation 2 logo sequence
+and BIOS chime have not been verified. SPU2 audio synthesis/output is not yet
+implemented.
+
 To build only the headless core/tests without SDL/ImGui dependencies:
 
 ```bash

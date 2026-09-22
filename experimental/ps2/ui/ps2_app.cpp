@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -119,12 +120,23 @@ bool Ps2App::init() {
     return true;
 }
 
-void Ps2App::run() {
+int Ps2App::run() {
     bool quit = false;
+    int result = 0;
 
     while (!quit) {
         process_events(quit);
         update_emulation();
+
+        if (!visible_capture_path_.empty() &&
+            (!emulation_running_ || system_.halted())) {
+            std::fprintf(
+                stderr,
+                "UI capture stopped before reaching a visible BIOS frame: %s\n",
+                status_message_.c_str());
+            result = 4;
+            break;
+        }
 
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_NewFrame();
@@ -154,8 +166,92 @@ void Ps2App::run() {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
 
+        if (!visible_capture_path_.empty() &&
+            system_.gs_display().has_visible_pixels() &&
+            system_.ee().state().instructions_executed >=
+                visible_capture_minimum_ee_) {
+            if (!write_window_ppm(
+                    visible_capture_path_, display_width, display_height)) {
+                result = 3;
+            }
+            visible_capture_path_.clear();
+            quit = true;
+        }
+
         SDL_GL_SwapWindow(window_);
     }
+
+    return result;
+}
+
+bool Ps2App::launch_bios(const std::string& path) {
+    return load_bios_from_path(path) && start_bios();
+}
+
+void Ps2App::capture_visible_window(
+    const std::string& path,
+    unsigned long long minimum_ee_instructions) {
+    visible_capture_path_ = path;
+    visible_capture_minimum_ee_ = minimum_ee_instructions;
+}
+
+bool Ps2App::write_window_ppm(
+    const std::string& path,
+    int width,
+    int height) {
+    if (width <= 0 || height <= 0) {
+        std::fprintf(stderr, "UI capture failed: invalid drawable size.\n");
+        return false;
+    }
+
+    std::vector<std::uint8_t> rgb(
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) * 3u);
+
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    if (glGetError() != GL_NO_ERROR) {
+        std::fprintf(stderr, "UI capture failed: glReadPixels error.\n");
+        return false;
+    }
+
+    std::FILE* output = std::fopen(path.c_str(), "wb");
+    if (!output) {
+        std::fprintf(stderr, "UI capture failed: cannot open %s.\n", path.c_str());
+        return false;
+    }
+
+    std::fprintf(output, "P6\n%d %d\n255\n", width, height);
+    const std::size_t row_bytes = static_cast<std::size_t>(width) * 3u;
+    bool ok = true;
+    for (int y = height - 1; y >= 0; --y) {
+        const std::uint8_t* row =
+            rgb.data() + static_cast<std::size_t>(y) * row_bytes;
+        if (std::fwrite(row, 1, row_bytes, output) != row_bytes) {
+            ok = false;
+            break;
+        }
+    }
+    if (std::fclose(output) != 0) {
+        ok = false;
+    }
+
+    if (ok) {
+        std::fprintf(
+            stdout,
+            "UI_VISIBLE_CAPTURE=%s WIDTH=%d HEIGHT=%d EE=%llu\n",
+            path.c_str(),
+            width,
+            height,
+            static_cast<unsigned long long>(
+                system_.ee().state().instructions_executed));
+    } else {
+        std::fprintf(stderr, "UI capture failed while writing %s.\n", path.c_str());
+    }
+    return ok;
 }
 
 void Ps2App::shutdown() {
