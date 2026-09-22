@@ -376,6 +376,9 @@ void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
       0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+      0u);
   code.L(done);
 }
 
