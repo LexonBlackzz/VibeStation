@@ -267,7 +267,6 @@ struct V4NativeState {
   u32 mapped_main_ram_size = 0;
   u32 memory_fastpath_allowed = 0;
   u32 block_bail = 0;
-  u32 block_bail_reason = 0;
   u32 memory_entries = 0;
   u32 store_entries = 0;
   u32 store_phys = 0;
@@ -1185,9 +1184,6 @@ V4NativeFn compile_v4_store(
         prefix_count);
   }
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      1u);
 
   // Cache-isolated stores target the guest I-cache rather than RAM.
   code.test(code.dword[
@@ -1195,9 +1191,6 @@ V4NativeFn compile_v4_store(
       1u << 16);
   code.jnz(guard_exit);
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      2u);
 
   // Capture both operands before retiring an incoming delayed load.
   emit_read_guest(code, code.eax, store.rs);
@@ -1218,9 +1211,6 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      3u);
 
   // Never directly write a translated 16-byte code line. A different line on
   // the same 4 KiB page is safe for cached code and should stay on fastmem.
@@ -1248,9 +1238,6 @@ V4NativeFn compile_v4_store(
   code.test(code.al, 1u);
   code.jnz(guard_exit);
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      4u);
   code.cmp(code.edx, code.dword[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
@@ -1291,9 +1278,6 @@ V4NativeFn compile_v4_store(
   code.mov(code.r9d, 1u);
 
   code.L(stored);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      5u);
 
   // Account timing while the RAM/scratchpad penalty is still in r9d. The C++
   // invalidation helper below may clobber all caller-saved registers.
@@ -1341,9 +1325,6 @@ V4NativeFn compile_v4_store(
     code.je(stop_after_store);
   }
 
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      6u);
 
   // The store retires the incoming delayed load. Any fused ALU tail therefore
   // observes the committed value, exactly like successive Cpu::step() calls.
@@ -1482,9 +1463,6 @@ V4NativeFn compile_v4_store(
   }
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      0u);
   emit_v4_block_return(code);
 
   code.L(stop_after_store);
@@ -1505,9 +1483,6 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
-      0u);
   emit_v4_block_return(code);
 
   code.L(slow_after_prefix);
@@ -2323,9 +2298,6 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     if (native.instructions == 0u || native.block_entries == 0u) {
       ++stats_.native_reject_budget;
       ++stats_.budget_exits;
-      if (native.block_bail != 0u) {
-        stats_.native_reject_other_state = native.block_bail_reason;
-      }
       fallback_one();
       continue;
     }
