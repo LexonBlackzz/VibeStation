@@ -22,9 +22,13 @@ void App::panel_about() {
         const bool native_unavailable =
             native_jit_requested && system_ &&
             !system_->cpu().cpu_backend_stats().native_available;
-        ImGui::Text("CPU: MIPS R3000A %s",
-            native_unavailable ? "decoded blocks (native JIT unavailable)"
-                               : cpu_execution_mode_name(cpu_mode));
+        const char *cpu_backend_status =
+            native_unavailable
+                ? (cpu_mode == CpuExecutionMode::X64JitV4
+                       ? "Interpreter (V4 native emitter unavailable)"
+                       : "decoded blocks (native JIT unavailable)")
+                : cpu_execution_mode_name(cpu_mode);
+        ImGui::Text("CPU: MIPS R3000A %s", cpu_backend_status);
         ImGui::Text("GPU: Software rasterizer");
         ImGui::Text("GTE: Fixed-point geometry engine");
         ImGui::Text("SPU: Gaussian + reverb core (stage 2)");
