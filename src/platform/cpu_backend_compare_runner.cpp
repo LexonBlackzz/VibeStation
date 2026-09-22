@@ -3850,7 +3850,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_cached_load_alu_branch.program = {
       enc_i(0x23, 1, 2, 0),
       enc_i(0x09, 2, 3, 1),
-      enc_i(0x05, 2, 0, 1),
+      enc_i(0x05, 2, 0, 2),
       enc_i(0x09, 0, 5, 0x55),
       0u,
   };
@@ -3870,7 +3870,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_load_branch_delay.memory.push_back({0x00012000u, 1u});
   v4_uncached_load_branch_delay.program = {
       enc_i(0x23, 1, 2, 0),
-      enc_i(0x04, 2, 0, 1),
+      enc_i(0x04, 2, 0, 2),
       enc_r(2, 0, 5, 0, 0x21),
       0u,
   };
