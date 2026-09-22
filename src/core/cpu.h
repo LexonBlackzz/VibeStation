@@ -250,6 +250,7 @@ struct CpuBackendStats {
   u64 native_linked_transitions = 0;
   u64 native_chain_max_blocks = 0;
   u64 native_branch_tail_entries = 0;
+  u64 native_dynamic_jump_entries = 0;
   u64 native_branch_taken = 0;
   u64 native_branch_not_taken = 0;
   u64 native_branch_tail_to_decoded_fallbacks = 0;
