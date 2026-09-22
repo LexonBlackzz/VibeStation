@@ -3874,6 +3874,21 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_prefix_load_branch);
 
+  CpuCompareCase v4_uncached_prefix_unaligned_load{};
+  v4_uncached_prefix_unaligned_load.name =
+      "v4_uncached_native_alu_prefix_unaligned_load_exit";
+  v4_uncached_prefix_unaligned_load.start_pc = 0xA0010000u;
+  v4_uncached_prefix_unaligned_load.initial_gpr[1] = 0x80012100u;
+  v4_uncached_prefix_unaligned_load.program = {
+      enc_i(0x09, 1, 1, 1),  // prefix commits r1=...101
+      enc_i(0x23, 1, 2, 0),  // unaligned LW -> interpreter exception exit
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_unaligned_load.instructions = 2u;
+  v4_uncached_prefix_unaligned_load.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_unaligned_load);
+
   CpuCompareCase v4_uncached_load_tail{};
   v4_uncached_load_tail.name = "v4_uncached_native_load_alu_tail";
   v4_uncached_load_tail.start_pc = 0xA0010000u;
@@ -4059,6 +4074,22 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_prefix_store_branch.require_v4_store_branch_fusion_when_available =
       true;
   cases.push_back(v4_uncached_prefix_store_branch);
+
+  CpuCompareCase v4_uncached_prefix_unaligned_store{};
+  v4_uncached_prefix_unaligned_store.name =
+      "v4_uncached_native_alu_prefix_unaligned_store_exit";
+  v4_uncached_prefix_unaligned_store.start_pc = 0xA0010000u;
+  v4_uncached_prefix_unaligned_store.initial_gpr[1] = 0x80012120u;
+  v4_uncached_prefix_unaligned_store.initial_gpr[2] = 0x12345678u;
+  v4_uncached_prefix_unaligned_store.program = {
+      enc_i(0x09, 1, 1, 1),  // prefix commits r1=...121
+      enc_i(0x2B, 1, 2, 0),  // unaligned SW -> interpreter exception exit
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_unaligned_store.instructions = 2u;
+  v4_uncached_prefix_unaligned_store.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_unaligned_store);
 
   CpuCompareCase v4_uncached_store_branch{};
   v4_uncached_store_branch.name = "v4_uncached_native_store_branch_delay";
