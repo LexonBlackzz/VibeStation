@@ -1121,7 +1121,7 @@ V4NativeFn compile_v4_store(
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
     u32 tail_count, const V4DecodedControl *control,
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
-    u32 &code_size) {
+    bool cacheable, u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -1130,7 +1130,7 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, stored, bail;
+  Label ram, scratch, stored, stop_after_store, bail;
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
       1u);
@@ -1281,6 +1281,16 @@ V4NativeFn compile_v4_store(
     code.L(generation_ok);
   }
 
+  // Cached execution is direct-mapped. If this store invalidated the exact
+  // I-cache slot containing the fused code, the architectural next instruction
+  // must refetch/refill before it executes. End this native fragment after the
+  // store and let the normal dispatcher path perform that refill. Uncached code
+  // has no guest I-cache dependency and can keep running through the tail.
+  if (cacheable && (tail_count != 0u || control != nullptr)) {
+    code.cmp(code.eax, (start_pc >> 4u) & 0xFFu);
+    code.je(stop_after_store);
+  }
+
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
       6u);
@@ -1420,6 +1430,29 @@ V4NativeFn compile_v4_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
         tail_count + 1u);
   }
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
+      0u);
+  emit_v4_block_return(code);
+
+  code.L(stop_after_store);
+  emit_retire_incoming_load(code, 0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      start_pc + 4u);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
   code.mov(code.dword[
@@ -1947,7 +1980,7 @@ struct CpuJitV4Backend::Impl {
             arena, store, store_tail, store_tail_count,
             store_has_control ? &store_control : nullptr,
             store_has_control ? &store_delay : nullptr,
-            store_branch_pc, start_pc, block->code_size);
+            store_branch_pc, start_pc, cacheable, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, block->code_size);
