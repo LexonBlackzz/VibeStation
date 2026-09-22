@@ -1774,6 +1774,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "v2_unsupported_jump=%llu v2_unsupported_other_branch=%llu "
       "v2_unsupported_special_control=%llu v2_unsupported_muldiv=%llu "
       "v2_unsupported_store=%llu v2_unsupported_other=%llu "
+      "memfb_ram=%llu memfb_scratch=%llu memfb_bios=%llu "
+      "memfb_mmio=%llu memfb_unknown=%llu memfb_unaligned=%llu "
       "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
       "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
       "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
@@ -1873,6 +1875,24 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.jit_v2_unsupported_store, before.jit_v2_unsupported_store)),
       static_cast<unsigned long long>(
           delta(after.jit_v2_unsupported_other, before.jit_v2_unsupported_other)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_ram_calls,
+                before.native_memory_helper_ram_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_scratchpad_calls,
+                before.native_memory_helper_scratchpad_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_bios_calls,
+                before.native_memory_helper_bios_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_mmio_calls,
+                before.native_memory_helper_mmio_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_unknown_calls,
+                before.native_memory_helper_unknown_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_unaligned_calls,
+                before.native_memory_helper_unaligned_calls)),
       static_cast<unsigned long long>(hashes.state),
       static_cast<unsigned long long>(hashes.cpu_state),
       static_cast<unsigned long long>(hashes.ram),
