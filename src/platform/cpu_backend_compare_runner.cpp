@@ -150,6 +150,7 @@ struct CpuCompareCase {
   bool require_native_entry_when_available = false;
   bool require_v2_native_entry_when_available = false;
   bool require_v4_native_entry_when_available = false;
+  bool require_v4_native_load_entry_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
@@ -3025,6 +3026,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   load_delay.memory.push_back({0x00011000u, 0x12345678u});
   load_delay.require_full_native_when_available = true;
   load_delay.require_native_memory_helper_when_available = true;
+  load_delay.require_v4_native_entry_when_available = true;
+  load_delay.require_v4_native_load_entry_when_available = true;
   pad_cpu_compare_program(load_delay);
   cases.push_back(load_delay);
 
@@ -3946,6 +3949,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         }
       } else if (mode == CpuExecutionMode::X64JitV4 &&
           (test_case.require_v4_native_entry_when_available ||
+           test_case.require_v4_native_load_entry_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
@@ -3956,6 +3960,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               result.stats.native_block_entries != 0 &&
               result.stats.native_instructions != 0 &&
               result.stats.native_code_bytes != 0;
+          const bool load_entered =
+              !test_case.require_v4_native_load_entry_when_available ||
+              result.stats.native_memory_fastpath_loads != 0;
           const bool branch_entered =
               !test_case.require_v4_native_branch_entry_when_available ||
               result.stats.native_branch_tail_entries != 0;
@@ -3966,12 +3973,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                result.stats.native_chain_max_blocks > 1u);
           native_check =
               !native_entered ? "v4_native_missing"
-                              : (!branch_entered ? "v4_branch_missing"
-                                                 : (!chain_entered
-                                                        ? "v4_chain_missing"
-                                                        : "v4_native_entered"));
+                              : (!load_entered
+                                     ? "v4_load_missing"
+                                     : (!branch_entered
+                                            ? "v4_branch_missing"
+                                            : (!chain_entered
+                                                   ? "v4_chain_missing"
+                                                   : "v4_native_entered")));
           native_check_pass =
-              native_entered && branch_entered && chain_entered;
+              native_entered && load_entered && branch_entered && chain_entered;
         }
       }
 
