@@ -779,8 +779,10 @@ V4NativeFn compile_v4_branch(
 }
 
 
-V4NativeFn compile_v4_load(V4CodeArena &arena, const V4DecodedLoad &load,
-                           u32 start_pc, u32 &code_size) {
+V4NativeFn compile_v4_load(
+    V4CodeArena &arena, const V4DecodedLoad &load,
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
+    u32 tail_count, u32 start_pc, u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -878,9 +880,20 @@ V4NativeFn compile_v4_load(V4CodeArena &arena, const V4DecodedLoad &load,
         code.r8d);
   }
 
+  // Keep executing through a safe ALU tail instead of turning every load into
+  // a one-instruction native island. The first following instruction captures
+  // operands before the newly scheduled load retires, matching R3000A delay
+  // semantics; a write to the same register cancels that load.
+  for (u32 i = 0; i < tail_count; ++i) {
+    emit_v4_alu_instruction(code, tail[i]);
+    if (i == 0u) {
+      emit_retire_incoming_load(code, v4_alu_write_reg(tail[i]));
+    }
+  }
+
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-      start_pc);
+      start_pc + tail_count * 4u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       0u);
@@ -888,13 +901,15 @@ V4NativeFn compile_v4_load(V4CodeArena &arena, const V4DecodedLoad &load,
       code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       0u);
   code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-  code.add(code.r9d, 2u);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      (tail_count + 1u) * 4u);
+  code.add(code.r9d, tail_count + 2u);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
       code.r9d);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+      tail_count + 1u);
   code.ret();
 
   code.L(bail);
@@ -1256,6 +1271,19 @@ struct CpuJitV4Backend::Impl {
     const bool simple_load =
         count == 0u && read_visible(start_pc, load_bits) &&
         decode_v4_load(load_bits, load);
+    std::array<V4DecodedInstruction, kV4MaxBlockInstructions> load_tail{};
+    u32 load_tail_count = 0u;
+    if (simple_load) {
+      for (u32 i = 1u; i < decode_limit; ++i) {
+        V4DecodedInstruction inst{};
+        u32 bits = 0u;
+        if (!read_visible(start_pc + i * 4u, bits) ||
+            !decode_v4_alu(bits, inst)) {
+          break;
+        }
+        load_tail[load_tail_count++] = inst;
+      }
+    }
 
     if (count == 0u && !simple_control && !simple_load) {
       block->interpreter_only = true;
@@ -1273,7 +1301,8 @@ struct CpuJitV4Backend::Impl {
             arena, decoded, count, control, delay, branch_pc,
             block->code_size);
       } else if (simple_load) {
-        entry = compile_v4_load(arena, load, start_pc, block->code_size);
+        entry = compile_v4_load(arena, load, load_tail, load_tail_count,
+                                start_pc, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, block->code_size);
@@ -1285,9 +1314,11 @@ struct CpuJitV4Backend::Impl {
       }
       block->fn = entry;
       block->instruction_count =
-          simple_control ? count + 2u : (simple_load ? 1u : count);
+          simple_control ? count + 2u
+                         : (simple_load ? load_tail_count + 1u : count);
       block->max_cycles =
-          simple_control ? count + 3u : (simple_load ? 6u : count);
+          simple_control ? count + 3u
+                         : (simple_load ? load_tail_count + 6u : count);
       block->has_control = simple_control;
       block->has_memory = simple_load;
     } catch (...) {
@@ -1297,7 +1328,8 @@ struct CpuJitV4Backend::Impl {
     }
 
     const u32 translated_count =
-        simple_control ? count + 2u : (simple_load ? 1u : count);
+        simple_control ? count + 2u
+                       : (simple_load ? load_tail_count + 1u : count);
     for (u32 i = 0; i < translated_count; ++i) {
       code_pages.mark_address(psx::mask_address(start_pc + i * 4u));
     }
