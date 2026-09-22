@@ -1624,7 +1624,18 @@ struct CpuJitV4Backend::Impl {
     }
   }
 
-  V4Block *allocate_block() {
+  V4Block *acquire_block(u32 pc, bool &reused) {
+    V4DispatchEntry *entry = dispatch_entry(pc, false);
+    if (entry != nullptr && entry->block != nullptr &&
+        entry->block->cache_epoch == cache_epoch &&
+        entry->block->start_pc == pc) {
+      reused = true;
+      V4Block *block = entry->block;
+      *block = {};
+      return block;
+    }
+
+    reused = false;
     if (block_count >= kV4MaxBlocks) {
       return nullptr;
     }
@@ -1635,7 +1646,8 @@ struct CpuJitV4Backend::Impl {
 
   V4Block *compile_block(Cpu &cpu, CpuBackendStats &stats, u32 start_pc,
                          bool cacheable, u32 icache_generation) {
-    V4Block *block = allocate_block();
+    bool reused_block = false;
+    V4Block *block = acquire_block(start_pc, reused_block);
     if (block == nullptr) {
       return nullptr;
     }
@@ -1763,7 +1775,9 @@ struct CpuJitV4Backend::Impl {
             arena, decoded, count, start_pc, block->code_size);
       }
       if (entry == nullptr) {
-        --block_count;
+        if (!reused_block) {
+          --block_count;
+        }
         ++stats.native_compile_failures;
         return nullptr;
       }
@@ -1783,7 +1797,9 @@ struct CpuJitV4Backend::Impl {
       block->has_control = simple_control || load_has_control;
       block->has_memory = simple_load || simple_store;
     } catch (...) {
-      --block_count;
+      if (!reused_block) {
+        --block_count;
+      }
       ++stats.native_compile_failures;
       return nullptr;
     }
