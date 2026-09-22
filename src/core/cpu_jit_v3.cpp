@@ -2351,33 +2351,12 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             staged_delay_refill_pending = false;
             break;
           }
-          const bool delay_is_sw = delay.op == V3AluOp::Sw;
-          if (!is_v3_alu_only(delay.op) && !delay_is_sw) {
+          if (!is_v3_alu_only(delay.op)) {
             if (decoded.empty()) {
               control_delay_requires_helper = true;
             }
             staged_delay_refill_pending = false;
             break;
-          }
-
-          if (delay_is_sw) {
-            const bool unsafe_store_base =
-                delay.rs != 0u &&
-                (written_mask & (1u << delay.rs)) != 0u;
-            if (has_load || store_count >= store_rs.size() ||
-                unsafe_store_base) {
-              if (decoded.empty()) {
-                control_delay_requires_helper = true;
-              }
-              staged_delay_refill_pending = false;
-              break;
-            }
-            has_store = true;
-            store_rs[store_count] = delay.rs;
-            store_simm[store_count] = delay.simm;
-            store_instruction_index[store_count] =
-                static_cast<u8>(decoded.size() + 1u);
-            ++store_count;
           }
 
           has_branch = true;
