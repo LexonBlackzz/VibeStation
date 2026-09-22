@@ -364,6 +364,7 @@ struct V4Block {
   u32 instruction_count = 0;
   u32 max_cycles = 0;
   u32 code_size = 0;
+  u32 cache_epoch = 0;
   u32 icache_generation = 0;
   u32 code_page_generation = 0;
   u32 phys_page = 0;
@@ -376,12 +377,10 @@ struct V4Block {
 };
 
 struct V4DispatchEntry {
-  void *code = nullptr;
   V4Block *block = nullptr;
-  u32 cache_epoch = 0;
 };
 
-static_assert(sizeof(V4DispatchEntry) == 24u);
+static_assert(sizeof(V4DispatchEntry) == 8u);
 
 struct V4DispatchPage {
   std::array<V4DispatchEntry, kV4DispatchEntriesPerPage> entries{};
@@ -1298,19 +1297,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.mov(code.eax, code.edx);
   code.shr(code.eax, 2);
   code.and_(code.eax, 0x3FFu);
-  code.imul(code.eax, code.eax,
-             static_cast<int>(sizeof(V4DispatchEntry)));
-  code.lea(code.r15, code.ptr[code.r14 + code.rax]);
-  code.cmp(code.dword[
-                code.r15 +
-                static_cast<int>(offsetof(V4DispatchEntry, cache_epoch))],
-            code.r13d);
-  code.jne(done);
-
-  code.mov(code.r14, code.ptr[
-      code.r15 + static_cast<int>(offsetof(V4DispatchEntry, block))]);
+  code.mov(code.r14, code.ptr[code.r14 + code.rax * 8]);
   code.test(code.r14, code.r14);
   code.jz(done);
+  code.cmp(code.dword[
+               code.r14 + static_cast<int>(offsetof(V4Block, cache_epoch))],
+           code.r13d);
+  code.jne(done);
 
   {
     Label memory_ok;
@@ -1400,7 +1393,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   }
 
   code.mov(code.rax, code.ptr[
-      code.r15 + static_cast<int>(offsetof(V4DispatchEntry, code))]);
+      code.r14 + static_cast<int>(offsetof(V4Block, fn))]);
   code.test(code.rax, code.rax);
   code.jz(done);
 
@@ -1506,11 +1499,13 @@ struct CpuJitV4Backend::Impl {
 
   V4Block *lookup(u32 pc, bool cacheable, u32 icache_generation) {
     V4DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry == nullptr || entry->cache_epoch != cache_epoch ||
-        entry->block == nullptr) {
+    if (entry == nullptr || entry->block == nullptr) {
       return nullptr;
     }
     V4Block *block = entry->block;
+    if (block->cache_epoch != cache_epoch) {
+      return nullptr;
+    }
     if (block->cacheable != cacheable) {
       return nullptr;
     }
@@ -1535,9 +1530,7 @@ struct CpuJitV4Backend::Impl {
     if (entry == nullptr) {
       return;
     }
-    entry->code = block != nullptr ? reinterpret_cast<void *>(block->fn) : nullptr;
     entry->block = block;
-    entry->cache_epoch = cache_epoch;
   }
 
   void reset_translations() {
@@ -1576,6 +1569,7 @@ struct CpuJitV4Backend::Impl {
     }
 
     block->start_pc = start_pc;
+    block->cache_epoch = cache_epoch;
     block->cacheable = cacheable;
     block->icache_index = static_cast<u16>((start_pc >> 4) & 0xFFu);
     block->icache_generation = cacheable ? icache_generation : 0u;
