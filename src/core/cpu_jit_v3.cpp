@@ -1832,6 +1832,10 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const bool entry_needs_refill = !line.valid || line.tag != expected_tag;
     std::array<u32, 4> staged_entry_refill{};
     u32 entry_refill_cycles = 0u;
+    bool staged_delay_refill_pending = false;
+    u32 staged_delay_refill_index = 0u;
+    u32 staged_delay_refill_tag = 0u;
+    std::array<u32, 4> staged_delay_refill{};
     if (entry_needs_refill) {
       if (g_trace_ram) {
         return helper_step(V3HelperReason::Icache);
@@ -2061,6 +2065,44 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         return true;
       };
 
+      auto fetch_control_delay = [&](u32 i, V3DecodedInstruction &inst,
+                                     u32 &bits) -> bool {
+        const u32 inst_pc = start_pc + i * 4u;
+        if (!cpu_.instruction_cacheable(inst_pc)) {
+          return false;
+        }
+        const u32 inst_index = (inst_pc >> 4u) & 0xFFu;
+        const u32 inst_word = (inst_pc >> 2u) & 0x03u;
+        const u32 inst_tag = psx::mask_address(inst_pc) & ~0x0Fu;
+        const auto &inst_line = cpu_.icache_[inst_index];
+
+        if (inst_line.valid && inst_line.tag == inst_tag) {
+          bits = inst_line.words[inst_word];
+          return decode_v3_alu(bits, inst);
+        }
+
+        // A control instruction owns its architectural delay slot even when
+        // that slot starts the next 16-byte I-cache line. Stage that one line
+        // without exposing it yet. The caller only commits it after the whole
+        // branch+delay block is compiled, preflighted and proven to fit.
+        if (g_trace_ram || staged_delay_refill_pending) {
+          return false;
+        }
+        const u32 refill_base = inst_pc & ~0x0Fu;
+        for (u32 word = 0; word < staged_delay_refill.size(); ++word) {
+          staged_delay_refill[word] =
+              cpu_.sys_->read32_instruction(refill_base + word * 4u);
+        }
+        bits = staged_delay_refill[inst_word];
+        if (!decode_v3_alu(bits, inst)) {
+          return false;
+        }
+        staged_delay_refill_pending = true;
+        staged_delay_refill_index = inst_index;
+        staged_delay_refill_tag = inst_tag;
+        return true;
+      };
+
       for (u32 i = 0; i < line_instruction_limit; ++i) {
         V3DecodedInstruction inst{};
         u32 bits = 0u;
@@ -2081,8 +2123,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           }
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
-          if (!fetch_decoded(i + 1u, delay, delay_bits) ||
+          if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
               !is_v3_alu_only(delay.op)) {
+            staged_delay_refill_pending = false;
             break;
           }
 
@@ -2111,8 +2154,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           }
           V3DecodedInstruction delay{};
           u32 delay_bits = 0u;
-          if (!fetch_decoded(i + 1u, delay, delay_bits) ||
+          if (!fetch_control_delay(i + 1u, delay, delay_bits) ||
               !is_v3_alu_only(delay.op)) {
+            staged_delay_refill_pending = false;
             break;
           }
 
@@ -2541,8 +2585,11 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
+    const u32 staged_delay_refill_cycles =
+        staged_delay_refill_pending ? 4u : 0u;
     const u32 worst_cycles =
-        entry_refill_cycles + block.base_cycles + main_ram_store_count +
+        entry_refill_cycles + staged_delay_refill_cycles +
+        block.base_cycles + main_ram_store_count +
         main_ram_load_count * 4u + fetch_penalty +
         (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
@@ -2607,6 +2654,15 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         }
       }
       return helper_step(V3HelperReason::Budget);
+    }
+
+    if (staged_delay_refill_pending) {
+      auto &delay_line = cpu_.icache_[staged_delay_refill_index];
+      delay_line.tag = staged_delay_refill_tag;
+      delay_line.words = staged_delay_refill;
+      delay_line.valid = true;
+      entry_refill_cycles += 4u;
+      staged_delay_refill_pending = false;
     }
 
     if (block.resident.fn != nullptr && impl_->resident_fn != nullptr) {
@@ -2709,8 +2765,8 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
     const u32 count = block.instruction_count;
     const u32 consumed_cycles =
-        block.base_cycles + main_ram_store_count + main_ram_load_count * 4u +
-        fetch_penalty +
+        entry_refill_cycles + block.base_cycles + main_ram_store_count +
+        main_ram_load_count * 4u + fetch_penalty +
         ((block.has_branch && branch_taken) ? 1u : 0u);
 
     if (block.has_jump) {
