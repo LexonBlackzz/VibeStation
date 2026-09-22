@@ -1507,6 +1507,26 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
 
 
 #if VIBESTATION_JIT_V3_X64
+  auto count_memory_fallback = [&](u32 addr, bool unaligned) {
+    if (unaligned) {
+      ++stats_.native_memory_helper_unaligned_calls;
+      return;
+    }
+    const u32 phys = psx::mask_address(addr);
+    const u32 mapped_ram = cpu_.sys_->jit_mapped_main_ram_size();
+    if (phys < mapped_ram) {
+      ++stats_.native_memory_helper_ram_calls;
+    } else if (phys >= 0x1F800000u && phys < 0x1F801000u) {
+      ++stats_.native_memory_helper_scratchpad_calls;
+    } else if (phys >= 0x1FC00000u && phys < 0x1FC80000u) {
+      ++stats_.native_memory_helper_bios_calls;
+    } else if (phys >= 0x1F801000u && phys < 0x1F803000u) {
+      ++stats_.native_memory_helper_mmio_calls;
+    } else {
+      ++stats_.native_memory_helper_unknown_calls;
+    }
+  };
+
   auto helper_step = [&](V3HelperReason reason) -> bool {
     native_streak = false;
     if (impl_->step_helper_fn == nullptr ||
@@ -2165,6 +2185,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       const u32 base = block.load_rs == 0u ? 0u : cpu_.gpr_[block.load_rs];
       load_addr = base + static_cast<u32>(block.load_simm);
       if ((load_addr & block.load_alignment_mask) != 0u) {
+        count_memory_fallback(load_addr, true);
         return helper_step(V3HelperReason::Memory);
       }
       const u32 phys = psx::mask_address(load_addr);
@@ -2179,6 +2200,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         runtime.load_ptr = scratchpad +
             ((phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u));
       } else {
+        count_memory_fallback(load_addr, false);
         return helper_step(V3HelperReason::Memory);
       }
     }
@@ -2210,6 +2232,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         store_addrs[i] = addr;
 
         if ((addr & 3u) != 0u) {
+          count_memory_fallback(addr, true);
           return helper_step(V3HelperReason::Memory);
         }
 
@@ -2235,6 +2258,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           continue;
         }
 
+        count_memory_fallback(addr, false);
         return helper_step(V3HelperReason::Memory);
       }
     }
