@@ -858,7 +858,9 @@ V4NativeFn compile_v4_branch(
 
 
 V4NativeFn compile_v4_load(
-    V4CodeArena &arena, const V4DecodedLoad &load,
+    V4CodeArena &arena,
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &prefix,
+    u32 prefix_count, const V4DecodedLoad &load,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
     u32 tail_count, const V4DecodedControl *control,
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
@@ -871,18 +873,26 @@ V4NativeFn compile_v4_load(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, loaded, bail;
+  Label ram, scratch, loaded, slow_after_prefix, bail;
+  Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
-  // Form the address before retiring an incoming load. If rs is the delayed
-  // destination, R3000A semantics require this LW to see the old rs value.
+  for (u32 i = 0; i < prefix_count; ++i) {
+    emit_v4_alu_instruction(code, prefix[i]);
+    if (i == 0u) {
+      emit_retire_incoming_load(code, v4_alu_write_reg(prefix[i]));
+    }
+  }
+
+  // Without a prefix the load itself is the load-delay instruction and must
+  // capture its source before the incoming delayed load retires.
   emit_read_guest(code, code.eax, load.rs);
   code.add(code.eax, static_cast<u32>(load.simm));
   if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     code.test(code.eax, 1u);
-    code.jnz(bail);
+    code.jnz(slow_exit);
   } else if (load.op == V4LoadOp::Lw) {
     code.test(code.eax, 3u);
-    code.jnz(bail);
+    code.jnz(slow_exit);
   }
 
   auto emit_memory_read = [&]() {
@@ -916,15 +926,15 @@ V4NativeFn compile_v4_load(
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
   code.jb(ram);
   code.cmp(code.edx, 0x1F800000u);
-  code.jb(bail);
+  code.jb(slow_exit);
   code.cmp(code.edx, 0x1F801000u);
-  code.jae(bail);
+  code.jae(slow_exit);
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
-  code.jz(bail);
+  code.jz(slow_exit);
   emit_memory_read();
   code.xor_(code.r9d, code.r9d);
   code.jmp(loaded);
@@ -934,14 +944,16 @@ V4NativeFn compile_v4_load(
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
-  code.jz(bail);
+  code.jz(slow_exit);
   emit_memory_read();
   code.mov(code.r9d, 4u);
 
   code.L(loaded);
-  // schedule_load(rt, value) cancels an older delayed write to the same
-  // register, then advance_load_delay() retires the older load.
-  emit_retire_incoming_load(code, load.rt);
+  // A prefix already retired the incoming load. Otherwise the load retires or
+  // cancels it now, after address operands were captured.
+  if (prefix_count == 0u) {
+    emit_retire_incoming_load(code, load.rt);
+  }
   if (load.rt != 0u) {
     code.mov(code.dword[
         code.r11 +
@@ -974,7 +986,7 @@ V4NativeFn compile_v4_load(
 
     // The load and any ALU tail have consumed their cycles. Keep the RAM
     // penalty in r9d until the branch direction selects its exact cost.
-    code.add(code.r9d, tail_count + 2u);
+    code.add(code.r9d, prefix_count + tail_count + 2u);
 
     // Capture the branch operands before retiring the new load when the branch
     // is the immediate load-delay instruction.
@@ -1041,7 +1053,7 @@ V4NativeFn compile_v4_load(
         branch_pc);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        tail_count + 3u);
+        prefix_count + tail_count + 3u);
 
     if (branch.op == V4ControlOp::J ||
         branch.op == V4ControlOp::Jal) {
@@ -1079,7 +1091,7 @@ V4NativeFn compile_v4_load(
   } else {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-        start_pc + tail_count * 4u);
+        start_pc + (prefix_count + tail_count) * 4u);
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
         0u);
@@ -1088,19 +1100,42 @@ V4NativeFn compile_v4_load(
         0u);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
-        (tail_count + 1u) * 4u);
-    code.add(code.r9d, tail_count + 2u);
+        (prefix_count + tail_count + 1u) * 4u);
+    code.add(code.r9d, prefix_count + tail_count + 2u);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
         code.r9d);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        tail_count + 1u);
+        prefix_count + tail_count + 1u);
   }
 
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
   emit_v4_block_return(code);
+
+  code.L(slow_after_prefix);
+  if (prefix_count != 0u) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        start_pc + (prefix_count - 1u) * 4u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        start_pc + prefix_count * 4u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+        prefix_count);
+    emit_v4_block_return(code);
+  }
 
   code.L(bail);
   code.mov(code.dword[
@@ -1882,10 +1917,11 @@ struct CpuJitV4Backend::Impl {
         decode_v4_control(control_bits, control) &&
         decode_v4_alu(delay_bits, delay);
 
+    const u32 memory_pc = start_pc + count * 4u;
     V4DecodedLoad load{};
     u32 load_bits = 0u;
     const bool simple_load =
-        count == 0u && read_visible(start_pc, load_bits) &&
+        count < decode_limit && read_visible(memory_pc, load_bits) &&
         decode_v4_load(load_bits, load);
     V4DecodedStore store{};
     u32 store_bits = 0u;
@@ -1923,7 +1959,7 @@ struct CpuJitV4Backend::Impl {
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> load_tail{};
     u32 load_tail_count = 0u;
     if (simple_load) {
-      for (u32 i = 1u; i < decode_limit; ++i) {
+      for (u32 i = count + 1u; i < decode_limit; ++i) {
         V4DecodedInstruction inst{};
         u32 bits = 0u;
         if (!read_visible(start_pc + i * 4u, bits) ||
@@ -1939,9 +1975,9 @@ struct CpuJitV4Backend::Impl {
     u32 load_control_bits = 0u;
     u32 load_delay_bits = 0u;
     const u32 load_branch_pc =
-        start_pc + (load_tail_count + 1u) * 4u;
+        start_pc + (count + load_tail_count + 1u) * 4u;
     const bool load_control_pair_within_decode_limit =
-        simple_load && load_tail_count + 3u <= decode_limit;
+        simple_load && count + load_tail_count + 3u <= decode_limit;
     const bool load_has_control =
         load_control_pair_within_decode_limit &&
         read_visible(load_branch_pc, load_control_bits) &&
@@ -1971,7 +2007,7 @@ struct CpuJitV4Backend::Impl {
             block->code_size);
       } else if (simple_load) {
         entry = compile_v4_load(
-            arena, load, load_tail, load_tail_count,
+            arena, decoded, count, load, load_tail, load_tail_count,
             load_has_control ? &load_control : nullptr,
             load_has_control ? &load_delay : nullptr,
             load_branch_pc, start_pc, block->code_size);
@@ -1997,7 +2033,8 @@ struct CpuJitV4Backend::Impl {
           simple_control
               ? count + 2u
               : (simple_load
-                     ? load_tail_count + (load_has_control ? 3u : 1u)
+                     ? count + load_tail_count +
+                           (load_has_control ? 3u : 1u)
                      : (simple_store
                             ? store_tail_count + (store_has_control ? 3u : 1u)
                             : count));
@@ -2005,7 +2042,8 @@ struct CpuJitV4Backend::Impl {
           simple_control
               ? count + 3u
               : (simple_load
-                     ? load_tail_count + (load_has_control ? 9u : 6u)
+                     ? count + load_tail_count +
+                           (load_has_control ? 9u : 6u)
                      : (simple_store
                             ? store_tail_count + (store_has_control ? 6u : 3u)
                             : count));
@@ -2024,7 +2062,8 @@ struct CpuJitV4Backend::Impl {
         simple_control
             ? count + 2u
             : (simple_load
-                   ? load_tail_count + (load_has_control ? 3u : 1u)
+                   ? count + load_tail_count +
+                         (load_has_control ? 3u : 1u)
                    : (simple_store
                           ? store_tail_count + (store_has_control ? 3u : 1u)
                           : count));
