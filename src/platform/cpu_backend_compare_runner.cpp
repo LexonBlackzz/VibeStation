@@ -794,6 +794,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_control.expected_current_pc = kCpuComparePc + 15u * 4u;
   native_control.expected_cycles = 32u;
   native_control.require_full_native_when_available = true;
+  native_control.require_v4_native_entry_when_available = true;
   cases.push_back(native_control);
 
   CpuCompareCase all_native_disabled{};
@@ -3506,8 +3507,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   ram_invalidation.instructions = 3;
   cases.push_back(ram_invalidation);
 
-  // V4 Phase-1 smoke gates use uncached KSEG1 addresses so they exercise the
-  // new native path without bypassing the still-pending guest I-cache model.
+  // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
+  // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
   v4_uncached_alu.name = "v4_uncached_native_alu";
   v4_uncached_alu.start_pc = 0xA0010000u;
