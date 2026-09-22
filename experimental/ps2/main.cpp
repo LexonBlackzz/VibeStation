@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     std::string bios_path;
     std::string capture_path;
     unsigned long long capture_after_ee = 0;
+    bool ee_jit = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -49,10 +50,13 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Invalid --capture-after-ee value.\n");
                 return 2;
             }
+        } else if (argument == "--ee-jit") {
+            ee_jit = true;
         } else {
             std::fprintf(
                 stderr,
                 "Usage: VibeStationPS2Lab [--bios <path>] "
+                "[--ee-jit] "
                 "[--capture-visible <window.ppm>] "
                 "[--capture-after-ee <instructions>]\n");
             return 2;
@@ -67,7 +71,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (bios_path.empty() && argc == 1) {
+    if (bios_path.empty() && capture_path.empty()) {
         bios_path = find_downloads_bios();
     }
 
@@ -75,6 +79,7 @@ int main(int argc, char** argv) {
     if (!app.init()) {
         return 1;
     }
+    app.set_ee_jit_enabled(ee_jit);
 
     if (!bios_path.empty() && !app.launch_bios(bios_path)) {
         app.shutdown();

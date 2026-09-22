@@ -17,6 +17,7 @@ add_library(vibestation_ps2_core STATIC
     core/dma/vif1_dma.cpp
     core/ps2_system.cpp
     core/ee/ee_cpu.cpp
+    core/ee/ee_jit.cpp
     core/gs/gs_core.cpp
     core/gs/gs_display.cpp
     core/gs/gs_rasterizer.cpp

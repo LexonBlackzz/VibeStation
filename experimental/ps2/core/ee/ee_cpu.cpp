@@ -3056,6 +3056,7 @@ bool EeCpu::step(std::string& error) {
 
     bool ok = true;
 
+    if (!jit_enabled_ || !jit_.execute(state_, instruction)) {
     switch (opcode) {
     case 0x00:
         ok = execute_special(pc, instruction, error);
@@ -3528,6 +3529,7 @@ bool EeCpu::step(std::string& error) {
             "Unsupported opcode " + hex32(opcode),
             error);
         break;
+    }
     }
 
     if (!ok) {

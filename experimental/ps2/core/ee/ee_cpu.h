@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/ee/ee_jit.h"
 
 #include <array>
 #include <string>
@@ -69,6 +70,9 @@ public:
     [[nodiscard]] bool halted() const { return halted_; }
     [[nodiscard]] const std::string& halt_reason() const { return halt_reason_; }
     void clear_halt();
+    void set_jit_enabled(bool enabled) { jit_enabled_ = enabled; }
+    [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
+    [[nodiscard]] const EeJit& jit() const { return jit_; }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -119,6 +123,8 @@ private:
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
     std::string halt_reason_;
+    EeJit jit_{};
+    bool jit_enabled_ = false;
 };
 
 } // namespace ps2

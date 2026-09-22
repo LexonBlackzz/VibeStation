@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
-               "[ee-instruction-budget] [display.ppm]\n";
+               "[ee-instruction-budget] [display.ppm] [--ee-jit]\n";
         return 64;
     }
 
@@ -892,8 +892,15 @@ int main(int argc, char** argv) {
 
     const ps2::u64 budget =
         parse_budget(argc >= 3 ? argv[2] : nullptr, kDefaultBudget);
+    const bool ee_jit =
+        (argc >= 4 && std::string_view(argv[3]) == "--ee-jit") ||
+        (argc >= 5 && std::string_view(argv[4]) == "--ee-jit");
+    const char* display_path =
+        argc >= 4 && std::string_view(argv[3]) != "--ee-jit"
+            ? argv[3] : nullptr;
 
     ps2::Ps2System system;
+    system.ee().set_jit_enabled(ee_jit);
     std::string error;
 
     if (!system.load_bios(argv[1], error)) {
@@ -961,11 +968,17 @@ int main(int argc, char** argv) {
 
     print_state(system);
 
-    if (argc >= 4) {
-        if (!write_display_ppm(argv[3], system.gs_display())) {
-            std::cerr << "DISPLAY_DUMP_ERROR=" << argv[3] << '\n';
+    if (ee_jit) {
+        std::cout << "EE_JIT_COMPILED=" << system.ee().jit().compiled_count()
+                  << " EE_JIT_EXECUTED="
+                  << system.ee().jit().executed_count() << '\n';
+    }
+
+    if (display_path != nullptr) {
+        if (!write_display_ppm(display_path, system.gs_display())) {
+            std::cerr << "DISPLAY_DUMP_ERROR=" << display_path << '\n';
         } else {
-            std::cout << "DISPLAY_DUMP=" << argv[3] << '\n';
+            std::cout << "DISPLAY_DUMP=" << display_path << '\n';
         }
     }
 

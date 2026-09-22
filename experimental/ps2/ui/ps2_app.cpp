@@ -188,6 +188,10 @@ bool Ps2App::launch_bios(const std::string& path) {
     return load_bios_from_path(path) && start_bios();
 }
 
+void Ps2App::set_ee_jit_enabled(bool enabled) {
+    system_.ee().set_jit_enabled(enabled);
+}
+
 void Ps2App::capture_visible_window(
     const std::string& path,
     unsigned long long minimum_ee_instructions) {
@@ -690,6 +694,11 @@ void Ps2App::panel_main() {
     } else {
         ImGui::Text("paused");
     }
+
+    ImGui::Text("EE backend");
+    ImGui::SameLine(190.0f);
+    ImGui::TextUnformatted(
+        system_.ee().jit_enabled() ? "experimental x64 JIT" : "interpreter");
 
     ImGui::Text("EE instructions");
     ImGui::SameLine(190.0f);

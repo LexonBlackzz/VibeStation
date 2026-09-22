@@ -107,6 +107,92 @@ bool test_dmac_running_mask() {
                   "DMAC reset left the fast-path mask active") && ok;
 }
 
+bool test_ee_jit_matches_interpreter() {
+    ps2::Ps2System jit_system;
+    ps2::Ps2System interpreter_system;
+    jit_system.ee().set_jit_enabled(true);
+    interpreter_system.ee().set_jit_enabled(false);
+
+    const auto i_type = [](ps2::u32 opcode, ps2::u32 rs,
+                           ps2::u32 rt, ps2::u32 imm) {
+        return (opcode << 26) | (rs << 21) | (rt << 16) | imm;
+    };
+    const auto r_type = [](ps2::u32 rs, ps2::u32 rt, ps2::u32 rd,
+                           ps2::u32 sa, ps2::u32 funct) {
+        return (rs << 21) | (rt << 16) | (rd << 11) |
+               (sa << 6) | funct;
+    };
+    const std::array<ps2::u32, 18> instructions = {
+        i_type(0x09, 1, 3, 0xFFFF), // ADDIU
+        i_type(0x0C, 1, 3, 0x00FF), // ANDI
+        i_type(0x0D, 1, 3, 0x8001), // ORI
+        i_type(0x0E, 1, 3, 0x8001), // XORI
+        i_type(0x0F, 0, 3, 0x8000), // LUI
+        i_type(0x19, 1, 3, 0xFFFE), // DADDIU
+        i_type(0x09, 3, 3, 1),      // source/destination alias
+        r_type(1, 2, 3, 0, 0x21),   // ADDU
+        r_type(1, 2, 3, 0, 0x23),   // SUBU
+        r_type(1, 2, 3, 0, 0x24),   // AND
+        r_type(1, 2, 3, 0, 0x25),   // OR
+        r_type(1, 2, 3, 0, 0x26),   // XOR
+        r_type(1, 2, 3, 0, 0x2D),   // DADDU
+        r_type(0, 2, 3, 3, 0x00),   // SLL
+        r_type(0, 2, 3, 4, 0x02),   // SRL
+        r_type(0, 2, 3, 5, 0x03),   // SRA
+        r_type(1, 2, 1, 0, 0x25),   // destination/source alias
+        0u,                          // NOP
+    };
+
+    constexpr ps2::u32 code = 0x00001000u;
+    bool ok = true;
+    for (ps2::u32 round = 0; round < 4u; ++round) {
+        for (const ps2::u32 instruction : instructions) {
+            jit_system.ee().reset(code);
+            interpreter_system.ee().reset(code);
+            ok = expect(jit_system.bus().write32(code, instruction) &&
+                            interpreter_system.bus().write32(code, instruction),
+                        "failed to install EE JIT differential instruction") && ok;
+            for (ps2::u32 reg = 1; reg < 32u; ++reg) {
+                const ps2::u64 lo =
+                    (static_cast<ps2::u64>(round) << 48) |
+                    (0x80000000ull + reg * 0x01010101ull);
+                const ps2::u64 hi = 0xA5A5A5A500000000ull | reg;
+                jit_system.ee().state().gpr[reg] = {lo, hi};
+                interpreter_system.ee().state().gpr[reg] = {lo, hi};
+            }
+            std::string jit_error;
+            std::string interpreter_error;
+            const bool jit_ok = jit_system.ee().step(jit_error);
+            const bool interpreter_ok =
+                interpreter_system.ee().step(interpreter_error);
+            ok = expect(jit_ok == interpreter_ok &&
+                            jit_error == interpreter_error,
+                        "EE JIT and interpreter step results differ") && ok;
+            const auto& jit_state = jit_system.ee().state();
+            const auto& interpreter_state = interpreter_system.ee().state();
+            ok = expect(jit_state.pc == interpreter_state.pc &&
+                            jit_state.next_pc == interpreter_state.next_pc &&
+                            jit_state.instructions_executed ==
+                                interpreter_state.instructions_executed &&
+                            jit_state.cop0 == interpreter_state.cop0,
+                        "EE JIT and interpreter control state differ") && ok;
+            for (ps2::u32 reg = 0; reg < 32u; ++reg) {
+                ok = expect(jit_state.gpr[reg].lo ==
+                                interpreter_state.gpr[reg].lo &&
+                                jit_state.gpr[reg].hi ==
+                                interpreter_state.gpr[reg].hi,
+                            "EE JIT and interpreter registers differ") && ok;
+            }
+        }
+    }
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(jit_system.ee().jit().compiled_count() != 0 &&
+                    jit_system.ee().jit().executed_count() != 0,
+                "EE JIT did not execute native code") && ok;
+#endif
+    return ok;
+}
+
 bool test_scheduler_ordering() {
     ps2::Scheduler scheduler;
     std::vector<ps2::EventType> fired;
@@ -1910,6 +1996,7 @@ int main() {
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
     ok = test_dmac_running_mask() && ok;
+    ok = test_ee_jit_matches_interpreter() && ok;
     ok = test_scheduler_ordering() && ok;
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;

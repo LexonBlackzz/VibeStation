@@ -35,6 +35,19 @@ UI capture in 58 seconds after these changes, versus roughly two minutes
 before. This is a measured host-runtime improvement, not a change to the
 emulated EE clock or a guarantee of full-speed emulation on other machines.
 
+## Experimental EE recompiler
+
+An opt-in x64 EE JIT now emits native code for a first set of side-effect-free
+register instructions. Run `VibeStationPS2Lab --ee-jit` or add `--ee-jit` to
+the headless trace command to try it. The normal graphical launch still uses
+the interpreter. All memory, branch, COP, VU, and device operations fall back
+to the interpreter, which also continues to own fetch, interrupts, PC, and
+timing. On the Windows development machine, the first 20 million BIOS
+instructions included 10.9 million JIT-executed register instructions; a
+warm headless trace took 2.97 seconds with JIT versus 3.48 seconds without.
+The full UI startup improved only from 57.9 to 56.9 seconds, with identical
+captured pixels. Larger gains require multi-instruction block compilation.
+
 ## Verified retail BIOS startup visual
 
 On September 22, 2026, a legally dumped SCPH-39001 ROM0 produced the
