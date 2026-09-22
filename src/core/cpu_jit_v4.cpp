@@ -410,6 +410,7 @@ struct V4Block {
   u32 code_page_generation = 0;
   u32 phys_page = 0;
   u16 icache_index = 0;
+  std::array<u32, kV4MaxBlockInstructions> guest_bits{};
   V4NativeFn fn = nullptr;
   V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
@@ -1563,6 +1564,39 @@ struct CpuJitV4Backend::Impl {
     return block;
   }
 
+  V4Block *try_revalidate(Cpu &cpu, u32 pc, bool cacheable,
+                          u32 icache_generation) {
+    V4DispatchEntry *entry = dispatch_entry(pc, false);
+    if (entry == nullptr || entry->block == nullptr) {
+      return nullptr;
+    }
+    V4Block *block = entry->block;
+    if (block->cache_epoch != cache_epoch || block->cacheable != cacheable ||
+        block->interpreter_only || block->fn == nullptr ||
+        block->instruction_count == 0u ||
+        block->instruction_count > kV4MaxBlockInstructions) {
+      return nullptr;
+    }
+
+    for (u32 i = 0; i < block->instruction_count; ++i) {
+      u32 visible = 0u;
+      if (!cpu.read_visible_instruction_for_backend(pc + i * 4u, visible) ||
+          visible != block->guest_bits[i]) {
+        return nullptr;
+      }
+    }
+
+    if (cacheable) {
+      block->icache_generation = icache_generation;
+    } else {
+      if (block->phys_page >= kV4PhysPageCount) {
+        return nullptr;
+      }
+      block->code_page_generation = page_generations[block->phys_page];
+    }
+    return block;
+  }
+
   void install(u32 pc, V4Block *block) {
     V4DispatchEntry *entry = dispatch_entry(pc, true);
     if (entry == nullptr) {
@@ -1700,6 +1734,8 @@ struct CpuJitV4Backend::Impl {
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
       block->reject_kind = classify_v4_reject(rejected_bits);
+      block->instruction_count = 1u;
+      block->guest_bits[0] = rejected_bits;
       block->interpreter_only = true;
       install(start_pc, block);
       ++stats.interpreter_only_blocks;
@@ -1759,6 +1795,11 @@ struct CpuJitV4Backend::Impl {
                    ? load_tail_count + (load_has_control ? 3u : 1u)
                    : (simple_store ? 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
+      u32 translated_bits = 0u;
+      if (!read_visible(start_pc + i * 4u, translated_bits)) {
+        translated_bits = cpu.read_instruction_for_backend(start_pc + i * 4u);
+      }
+      block->guest_bits[i] = translated_bits;
       const u32 code_phys =
           v4_normalize_code_phys(psx::mask_address(start_pc + i * 4u));
       code_pages.mark_address(code_phys);
@@ -1904,8 +1945,14 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
       ++stats_.cache_hits;
     } else {
       ++stats_.cache_misses;
-      block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
-                                   icache_generation);
+      block = impl_->try_revalidate(
+          cpu_, cpu_.pc_, cacheable, icache_generation);
+      if (block != nullptr) {
+        ++stats_.cache_hits;
+      } else {
+        block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
+                                     icache_generation);
+      }
       if (block == nullptr) {
         // A full arena/metadata slab is recycled in bulk; no per-block
         // executable allocations or frees are needed.
