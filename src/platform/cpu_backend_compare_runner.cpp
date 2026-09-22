@@ -3615,6 +3615,67 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_jalr_same_reg);
 
+  CpuCompareCase v4_uncached_blez{};
+  v4_uncached_blez.name = "v4_uncached_native_blez_taken";
+  v4_uncached_blez.start_pc = 0xA0010000u;
+  v4_uncached_blez.initial_gpr[8] = 0u;
+  v4_uncached_blez.program = {
+      enc_i(0x06, 8, 0, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_blez.instructions = 2u;
+  v4_uncached_blez.require_v4_native_entry_when_available = true;
+  v4_uncached_blez.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_blez);
+
+  CpuCompareCase v4_uncached_bgtz{};
+  v4_uncached_bgtz.name = "v4_uncached_native_bgtz_not_taken";
+  v4_uncached_bgtz.start_pc = 0xA0010000u;
+  v4_uncached_bgtz.initial_gpr[8] = 0u;
+  v4_uncached_bgtz.program = {
+      enc_i(0x07, 8, 0, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bgtz.instructions = 2u;
+  v4_uncached_bgtz.require_v4_native_entry_when_available = true;
+  v4_uncached_bgtz.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bgtz);
+
+  CpuCompareCase v4_uncached_bltzal{};
+  v4_uncached_bltzal.name = "v4_uncached_native_bltzal_not_taken_link";
+  v4_uncached_bltzal.start_pc = 0xA0010000u;
+  v4_uncached_bltzal.initial_gpr[8] = 1u;
+  v4_uncached_bltzal.program = {
+      // REGIMM link variants write RA even when the condition is false.
+      enc_i(0x01, 8, 0x10, 2),
+      enc_r(31, 0, 5, 0, 0x21),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bltzal.instructions = 2u;
+  v4_uncached_bltzal.require_v4_native_entry_when_available = true;
+  v4_uncached_bltzal.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bltzal);
+
+  CpuCompareCase v4_uncached_bgez{};
+  v4_uncached_bgez.name = "v4_uncached_native_bgez_taken";
+  v4_uncached_bgez.start_pc = 0xA0010000u;
+  v4_uncached_bgez.initial_gpr[8] = 0u;
+  v4_uncached_bgez.program = {
+      enc_i(0x01, 8, 0x01, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bgez.instructions = 2u;
+  v4_uncached_bgez.require_v4_native_entry_when_available = true;
+  v4_uncached_bgez.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bgez);
+
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
       "v4_uncached_native_incoming_load_delay";
