@@ -2488,6 +2488,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         ((block.has_branch && branch_taken) ? 1u : 0u);
 
     if (block.has_jump) {
+      if (block.jump_dynamic) {
+        ++stats_.native_dynamic_jump_entries;
+      }
       const u32 jump_pc = start_pc + block.jump_index * 4u;
       const u32 delay_pc = jump_pc + 4u;
       cpu_.current_pc_ = delay_pc;
