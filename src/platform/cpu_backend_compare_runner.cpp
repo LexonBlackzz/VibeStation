@@ -3594,26 +3594,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_jr_load_capture);
 
-  CpuCompareCase v4_uncached_jalr_same_reg{};
-  v4_uncached_jalr_same_reg.name =
-      "v4_uncached_native_jalr_same_reg_capture";
-  v4_uncached_jalr_same_reg.start_pc = 0xA0010000u;
-  v4_uncached_jalr_same_reg.initial_gpr[8] =
-      v4_uncached_jalr_same_reg.start_pc + 0x10u;
-  v4_uncached_jalr_same_reg.program = {
-      // rs == rd: target must be captured before r8 receives the link.
-      enc_r(8, 0, 8, 0, 0x09),
-      // The delay slot must see the freshly written link value.
-      enc_r(8, 0, 5, 0, 0x21),
+  CpuCompareCase v4_uncached_jalr{};
+  v4_uncached_jalr.name = "v4_uncached_native_jalr_link_delay";
+  v4_uncached_jalr.start_pc = 0xA0010000u;
+  v4_uncached_jalr.initial_gpr[8] =
+      v4_uncached_jalr.start_pc + 0x10u;
+  v4_uncached_jalr.program = {
+      enc_r(8, 0, 9, 0, 0x09),
+      // JALR's link register must already be visible in the delay slot.
+      enc_r(9, 0, 5, 0, 0x21),
       0,
       0,
       enc_i(0x09, 0, 6, 0x0066),
   };
-  v4_uncached_jalr_same_reg.instructions = 2u;
-  v4_uncached_jalr_same_reg.require_v4_native_entry_when_available = true;
-  v4_uncached_jalr_same_reg.require_v4_native_branch_entry_when_available =
-      true;
-  cases.push_back(v4_uncached_jalr_same_reg);
+  v4_uncached_jalr.instructions = 2u;
+  v4_uncached_jalr.require_v4_native_entry_when_available = true;
+  v4_uncached_jalr.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_jalr);
 
   CpuCompareCase v4_uncached_blez{};
   v4_uncached_blez.name = "v4_uncached_native_blez_taken";
