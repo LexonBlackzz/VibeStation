@@ -42,6 +42,16 @@ constexpr size_t kV4PhysPageCount = size_t{1} << (29u - kV4PhysPageShift);
 constexpr size_t kV4DispatchTopCount = size_t{1} << 20u;
 constexpr size_t kV4DispatchEntriesPerPage = size_t{1} << 10u;
 
+u32 v4_normalize_code_phys(u32 phys) {
+  // The RAM_SIZE register can expose an 8 MiB window, but the machine still
+  // has 2 MiB of backing RAM. Code-page ownership must follow the backing
+  // bytes so writes through one mirror invalidate translations through another.
+  if (phys < psx::RAM_MAX_SIZE) {
+    return phys & (psx::RAM_SIZE - 1u);
+  }
+  return phys;
+}
+
 enum class V4AluOp : u8 {
   Nop,
   Sll,
@@ -1442,7 +1452,8 @@ struct CpuJitV4Backend::Impl {
     block->cacheable = cacheable;
     block->icache_index = static_cast<u16>((start_pc >> 4) & 0xFFu);
     block->icache_generation = cacheable ? icache_generation : 0u;
-    const u32 start_phys = psx::mask_address(start_pc);
+    const u32 start_phys =
+        v4_normalize_code_phys(psx::mask_address(start_pc));
     block->phys_page = start_phys >> kV4PhysPageShift;
     block->code_page_generation = page_generations[block->phys_page];
 
@@ -1562,7 +1573,8 @@ struct CpuJitV4Backend::Impl {
                        : (simple_load ? load_tail_count + 1u
                                       : (simple_store ? 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
-      code_pages.mark_address(psx::mask_address(start_pc + i * 4u));
+      code_pages.mark_address(
+          v4_normalize_code_phys(psx::mask_address(start_pc + i * 4u)));
     }
     install(start_pc, block);
 
@@ -1814,7 +1826,8 @@ void CpuJitV4Backend::invalidate_range(u32 phys_or_normalized_addr,
   u32 address = phys_or_normalized_addr;
   bool touches_code = false;
   while (remaining != 0u) {
-    const u32 phys = psx::mask_address(address);
+    const u32 phys =
+        v4_normalize_code_phys(psx::mask_address(address));
     const u32 page = phys >> kV4PhysPageShift;
     if (impl_->code_pages.test_page(page)) {
       touches_code = true;
