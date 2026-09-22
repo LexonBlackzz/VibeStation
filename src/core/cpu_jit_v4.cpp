@@ -258,6 +258,7 @@ struct V4NativeState {
   const u32 *icache_generations = nullptr;
   const u32 *code_page_generations = nullptr;
   const u64 *code_page_bits = nullptr;
+  const u64 *code_line_bits = nullptr;
   void *block_return = nullptr;
   Cpu *cpu = nullptr;
   u8 *main_ram = nullptr;
@@ -1000,24 +1001,25 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
 
-  // Never directly write a backing page which has translated code. Normalize
-  // main-RAM mirrors to the same 2 MiB backing address used by code tracking.
+  // Never directly write a translated 16-byte code line. A different line on
+  // the same 4 KiB page is safe for cached code and should stay on fastmem.
+  // Normalize RAM mirrors to the same 2 MiB backing address first.
   code.mov(code.r9d, code.edx);
   {
-    Label page_key_ready;
+    Label line_key_ready;
     code.cmp(code.r9d, code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
-    code.jae(page_key_ready);
+    code.jae(line_key_ready);
     code.and_(code.r9d, psx::RAM_SIZE - 1u);
-    code.L(page_key_ready);
+    code.L(line_key_ready);
   }
-  code.shr(code.r9d, kV4PhysPageShift);
+  code.shr(code.r9d, 4u);
   code.mov(code.ecx, code.r9d);
   code.shr(code.r9d, 6u);
   code.and_(code.ecx, 63u);
   code.mov(code.rax, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
   code.test(code.rax, code.rax);
   code.jz(bail);
   code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
@@ -1336,6 +1338,7 @@ struct CpuJitV4Backend::Impl {
   size_t block_count = 0u;
   u32 cache_epoch = 1u;
   JitCodePageBitmap<29u, 12u> code_pages;
+  JitCodePageBitmap<29u, 4u> code_lines;
   std::array<u32, kV4PhysPageCount> page_generations{};
   V4ResidentDispatchFn resident_dispatch = nullptr;
   void *resident_block_return = nullptr;
@@ -1434,6 +1437,7 @@ struct CpuJitV4Backend::Impl {
     arena.reset_to(permanent_code_bytes);
     block_count = 0u;
     code_pages.clear();
+    code_lines.clear();
     ++cache_epoch;
     if (cache_epoch == 0u) {
       // Epoch wrap is practically unreachable. If it ever happens, clear only
@@ -1586,8 +1590,10 @@ struct CpuJitV4Backend::Impl {
                        : (simple_load ? load_tail_count + 1u
                                       : (simple_store ? 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
-      code_pages.mark_address(
-          v4_normalize_code_phys(psx::mask_address(start_pc + i * 4u)));
+      const u32 code_phys =
+          v4_normalize_code_phys(psx::mask_address(start_pc + i * 4u));
+      code_pages.mark_address(code_phys);
+      code_lines.mark_address(code_phys);
     }
     install(start_pc, block);
 
@@ -1757,6 +1763,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.icache_generations = cpu_.icache_generation_.data();
     native.code_page_generations = impl_->page_generations.data();
     native.code_page_bits = impl_->code_pages.data();
+    native.code_line_bits = impl_->code_lines.data();
     native.block_return = impl_->resident_block_return;
     native.cpu = &cpu_;
     native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
