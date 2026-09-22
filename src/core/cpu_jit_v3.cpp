@@ -446,6 +446,7 @@ struct V3ResidentContext {
   const u8 *icache = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
+  V3ResidentSlot **resident_pages = nullptr;
   u32 mapped_main_ram_size = psx::RAM_SIZE;
   u32 direct_icache_refill = 1u;
   u32 cycle_budget = 0;
@@ -1236,12 +1237,51 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_native_alu(
     } else if (linked->kind == 2u) {
       code->inc(code->ebp);
       code->inc(code->r9d);
+    } else if (linked->kind == 3u) {
+      // Dynamic JR/JALR: the target was captured before its architectural
+      // delay slot into runtime.dynamic_target. Resolve the full guest PC
+      // through the stable two-level resident-slot table and tail-jump without
+      // returning to C++. Missing/misaligned targets use the ordinary chain
+      // exit, which preserves r8d as the next architectural PC.
+      code->inc(code->ebp);
+      code->inc(code->r9d);
+      code->mov(code->r8d,
+                code->dword[code->r11 +
+                    offsetof(V3NativeRuntime, dynamic_target)]);
+      code->test(code->r8d, 3u);
+      code->jnz(linked_done);
+
+      code->mov(code->rax,
+                code->ptr[code->rbx +
+                    offsetof(V3ResidentContext, resident_pages)]);
+      code->test(code->rax, code->rax);
+      code->jz(linked_done);
+      code->mov(code->ecx, code->r8d);
+      code->shr(code->ecx, 16u);
+      code->mov(code->rax, code->ptr[code->rax + code->rcx * 8]);
+      code->test(code->rax, code->rax);
+      code->jz(linked_done);
+
+      code->mov(code->ecx, code->r8d);
+      code->shr(code->ecx, 2u);
+      code->and_(code->ecx, 0x3FFFu);
+      static_assert(sizeof(V3ResidentSlot) == 16u,
+                    "dynamic resident slot stride");
+      code->shl(code->rcx, 4u);
+      code->add(code->rax, code->rcx);
+      code->mov(code->rax,
+                code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
+      code->test(code->rax, code->rax);
+      code->jz(linked_done);
+      code->jmp(code->rax);
     } else if (linked->has_load != 0u) {
       code->inc(code->dword[code->rbx + offsetof(V3ResidentContext, memory_entries)]);
     }
-    code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
-    code->L(next);
-    code->jmp(code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
+    if (linked->kind != 3u) {
+      code->mov(code->rax, reinterpret_cast<size_t>(linked->successor));
+      code->L(next);
+      code->jmp(code->ptr[code->rax + offsetof(V3ResidentSlot, entry)]);
+    }
 
     // Cold path for a normal direct-mapped R3000A I-cache alias/eviction.
     // Code writes separately invalidate the compiled block/link cell, so a
@@ -2112,8 +2152,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       block.fn = reinterpret_cast<V3NativeFn>(entry);
       if (!has_store &&
           (!has_load || (impl_->use_linked &&
-                         (block.load_retired || impl_->link_pending_lw))) &&
-          !jump_dynamic) {
+                         (block.load_retired || impl_->link_pending_lw)))) {
         auto &resident = block.resident;
         resident.fn = block.fn;
         resident.start_pc = start_pc;
@@ -2138,10 +2177,16 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           resident.successor = impl_->resident_slot(resident.next_pc);
           resident.taken_successor = impl_->resident_slot(resident.taken_pc);
         } else if (has_jump) {
-          resident.kind = 2u;
           resident.tail_index = block.jump_index;
-          resident.next_pc = block.jump_target;
-          resident.successor = impl_->resident_slot(resident.next_pc);
+          if (jump_dynamic) {
+            resident.kind = 3u;
+            resident.next_pc = 0u;
+            resident.successor = nullptr;
+          } else {
+            resident.kind = 2u;
+            resident.next_pc = block.jump_target;
+            resident.successor = impl_->resident_slot(resident.next_pc);
+          }
         } else {
           resident.next_pc = start_pc + block.instruction_count * 4u;
           resident.successor = impl_->resident_slot(resident.next_pc);
@@ -2437,6 +2482,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       resident.icache = reinterpret_cast<const u8 *>(cpu_.icache_.data());
       resident.main_ram = cpu_.sys_->jit_main_ram_data_mut();
       resident.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      resident.resident_pages = impl_->resident_page_ptrs.data();
       resident.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
       // read32_instruction() only takes the slower observable RAM path when
       // RAM tracing is enabled. Preserve that behavior by leaving refills on
