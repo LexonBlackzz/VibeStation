@@ -2001,10 +2001,12 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         }
       }
       if (!coherent) {
-        impl_->forget_dispatch(start_pc);
-        impl_->unlink_resident(start_pc);
-        impl_->blocks.erase(start_pc);
-        block_ptr = nullptr;
+        // Guest I-cache residency is independent from host translation
+        // validity. Actual RAM/code writes invalidate overlapping translated
+        // blocks through invalidate_range(); an ordinary direct-mapped cache
+        // alias/eviction should only force the precise architectural fetch
+        // path, not destroy and later recompile the host block.
+        return helper_step(V3HelperReason::Icache);
       }
     }
 
