@@ -1829,7 +1829,90 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
     if (!line.valid || line.tag != expected_tag) {
-      return helper_step(V3HelperReason::Icache);
+      // Transactional entry refill for a single non-trapping ALU/NOP.
+      // IRQ/state checks already happened above, matching Cpu::step() before
+      // fetch. Stage the entire architectural line, lower the current word,
+      // and only then make the refill visible. If anything is unsuitable, the
+      // untouched cache falls back to Cpu::step() and observes the original
+      // miss normally.
+      if (g_trace_ram) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      std::array<u32, 4> staged_refill{};
+      const u32 refill_base = start_pc & ~0x0Fu;
+      for (u32 word = 0; word < staged_refill.size(); ++word) {
+        staged_refill[word] =
+            cpu_.sys_->read32_instruction(refill_base + word * 4u);
+      }
+
+      const u32 bits = staged_refill[word_index];
+      V3DecodedInstruction inst{};
+      if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      auto &entry = impl_->delay_slot_code[start_pc];
+      if (entry.fn == nullptr || entry.word != bits) {
+        std::vector<V3DecodedInstruction> one{inst};
+        try {
+          auto generated = compile_native_alu(one, {}, false, 0u, 0u);
+          entry.fn = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
+              generated->getCode(), generated->getSize()));
+          entry.word = bits;
+        } catch (const std::exception &e) {
+          std::fprintf(stderr, "V3 native entry-refill codegen: %s\n", e.what());
+          entry.fn = nullptr;
+        }
+      }
+      if (entry.fn == nullptr) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      V3NativeRuntime runtime{};
+      runtime.incoming_load_reg = cpu_.load_.reg;
+      runtime.incoming_load_value = cpu_.load_.value;
+      runtime.incoming_load_pc = cpu_.load_.source_pc;
+      runtime.incoming_load_addr = cpu_.load_.source_addr;
+
+      // Fetch becomes architectural only once retirement is guaranteed.
+      line.tag = expected_tag;
+      line.words = staged_refill;
+      line.valid = true;
+
+      cpu_.executing_step_ = true;
+      cpu_.exception_raised_ = false;
+      cpu_.cycle_penalty_ = 0u;
+      entry.fn(cpu_.gpr_, &runtime);
+      cpu_.executing_step_ = false;
+
+      cpu_.current_pc_ = start_pc;
+      cpu_.pc_ = start_pc + 4u;
+      cpu_.next_pc_ = start_pc + 8u;
+      cpu_.in_delay_slot_ = false;
+      cpu_.active_branch_pc_ = 0u;
+      cpu_.pending_delay_slot_ = false;
+      cpu_.pending_branch_taken_ = false;
+      cpu_.pending_branch_pc_ = 0u;
+      cpu_.load_ = {};
+      cpu_.next_load_ = {};
+
+      constexpr u32 consumed_cycles = 5u; // 1 ALU + 4 I-cache refill
+      cpu_.cycles_ += consumed_cycles;
+      g_diag_current_pc = cpu_.current_pc_;
+      cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+
+      result.cycles += consumed_cycles;
+      ++result.instructions;
+      ++stats_.native_block_entries;
+      ++stats_.native_alu_block_entries;
+      ++stats_.native_instructions;
+      ++stats_.jit_v2_inline_instructions;
+      ++stats_.optimized_instructions;
+      stats_.native_cycles += consumed_cycles;
+      stats_.executed_cycles += consumed_cycles;
+      native_streak = true;
+      return true;
     }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
