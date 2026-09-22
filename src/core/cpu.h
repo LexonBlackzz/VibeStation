@@ -511,6 +511,11 @@ public:
   u32 step();
   CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
   u32 read_instruction_for_backend(u32 addr) const;
+  // V4 JIT helpers: expose the guest-visible I-cache snapshot without letting
+  // the compiler silently read newer RAM bytes behind the emulated cache.
+  bool prepare_instruction_cache_line_for_backend(u32 addr);
+  bool read_visible_instruction_for_backend(u32 addr, u32 &value) const;
+  u32 instruction_cache_generation_for_backend(u32 addr) const;
   void notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes);
   void notify_jit_code_write_only(u32 phys_or_normalized_addr,
                                   u32 size_bytes);
@@ -589,6 +594,9 @@ private:
     bool valid = false;
   };
   std::array<ICacheLine, 256> icache_ = {};
+  // Host-side translation validity only. Incremented whenever the guest-visible
+  // cache line is refilled or invalidated; not architectural guest state.
+  std::array<u32, 256> icache_generation_ = {};
 
   u64 cycles_ = 0;
   u64 gte_input_ready_cycle_ = 0;
