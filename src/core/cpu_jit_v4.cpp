@@ -45,6 +45,9 @@ enum class V4AluOp : u8 {
   Sll,
   Srl,
   Sra,
+  Sllv,
+  Srlv,
+  Srav,
   Addu,
   Subu,
   And,
@@ -166,6 +169,9 @@ bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
     case 0x00: out.op = V4AluOp::Sll; return true;
     case 0x02: out.op = V4AluOp::Srl; return true;
     case 0x03: out.op = V4AluOp::Sra; return true;
+    case 0x04: out.op = V4AluOp::Sllv; return true;
+    case 0x06: out.op = V4AluOp::Srlv; return true;
+    case 0x07: out.op = V4AluOp::Srav; return true;
     case 0x21: out.op = V4AluOp::Addu; return true;
     case 0x23: out.op = V4AluOp::Subu; return true;
     case 0x24: out.op = V4AluOp::And; return true;
@@ -343,6 +349,9 @@ u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
   case V4AluOp::Sll:
   case V4AluOp::Srl:
   case V4AluOp::Sra:
+  case V4AluOp::Sllv:
+  case V4AluOp::Srlv:
+  case V4AluOp::Srav:
   case V4AluOp::Addu:
   case V4AluOp::Subu:
   case V4AluOp::And:
@@ -428,6 +437,24 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
     case V4AluOp::Sra:
       emit_read_guest(code, code.eax, inst.rt);
       code.sar(code.eax, inst.shamt);
+      emit_write_guest(code, inst.rd, code.eax);
+      break;
+    case V4AluOp::Sllv:
+      emit_read_guest(code, code.eax, inst.rt);
+      emit_read_guest(code, code.ecx, inst.rs);
+      code.shl(code.eax, code.cl);
+      emit_write_guest(code, inst.rd, code.eax);
+      break;
+    case V4AluOp::Srlv:
+      emit_read_guest(code, code.eax, inst.rt);
+      emit_read_guest(code, code.ecx, inst.rs);
+      code.shr(code.eax, code.cl);
+      emit_write_guest(code, inst.rd, code.eax);
+      break;
+    case V4AluOp::Srav:
+      emit_read_guest(code, code.eax, inst.rt);
+      emit_read_guest(code, code.ecx, inst.rs);
+      code.sar(code.eax, code.cl);
       emit_write_guest(code, inst.rd, code.eax);
       break;
 
