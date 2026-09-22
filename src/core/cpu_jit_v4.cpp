@@ -118,14 +118,23 @@ bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
 
 #if VIBESTATION_JIT_V4_X64
 
+struct V4DispatchPage;
+
 struct V4NativeState {
   u32 *gpr = nullptr;
+  V4DispatchPage **dispatch_top = nullptr;
+  u32 cache_epoch = 0;
   u32 pc = 0;
+  u32 last_pc = 0;
   u32 cycles = 0;
   u32 instructions = 0;
+  u32 cycle_budget = 0;
+  u32 instruction_budget = 0;
+  u32 block_entries = 0;
 };
 
 using V4NativeFn = void (*)(V4NativeState *);
+using V4ResidentDispatchFn = void (*)(V4NativeState *);
 
 class V4CodeArena {
 public:
@@ -165,7 +174,9 @@ public:
   bool available() const { return base_ != nullptr; }
   size_t bytes_used() const { return used_; }
 
-  void reset() { used_ = 0u; }
+  void reset_to(size_t offset) {
+    used_ = std::min(offset, kV4CodeArenaBytes);
+  }
 
   void *copy_code(const void *source, size_t size) {
     if (base_ == nullptr || source == nullptr || size == 0u) {
@@ -192,15 +203,19 @@ private:
 struct V4Block {
   u32 start_pc = 0;
   u32 instruction_count = 0;
+  u32 max_cycles = 0;
   u32 code_size = 0;
   V4NativeFn fn = nullptr;
   bool interpreter_only = false;
 };
 
 struct V4DispatchEntry {
+  void *code = nullptr;
   V4Block *block = nullptr;
   u32 cache_epoch = 0;
 };
+
+static_assert(sizeof(V4DispatchEntry) == 24u);
 
 struct V4DispatchPage {
   std::array<V4DispatchEntry, kV4DispatchEntriesPerPage> entries{};
@@ -225,7 +240,7 @@ void emit_write_guest(Xbyak::CodeGenerator &code, u8 guest_reg,
 
 std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &decoded,
-    u32 count) {
+    u32 count, u32 start_pc) {
   using namespace Xbyak;
   auto code = std::make_unique<CodeGenerator>(4096);
 #if defined(_WIN32)
@@ -353,6 +368,9 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
     }
   }
 
+  code->mov(code->dword[
+      code->r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc + (count - 1u) * 4u);
   code->add(code->dword[
       code->r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       count * 4u);
@@ -364,6 +382,101 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
   code->ret();
   code->ready();
   return code;
+}
+
+V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
+  using namespace Xbyak;
+  auto code = std::make_unique<CodeGenerator>(1024);
+  Label loop, done;
+
+  code->push(code->rbx);
+  code->push(code->r12);
+  code->push(code->r13);
+  code->push(code->r14);
+  code->push(code->r15);
+#if defined(_WIN32)
+  code->sub(code->rsp, 32);
+  code->mov(code->rbx, code->rcx);
+#else
+  code->mov(code->rbx, code->rdi);
+#endif
+
+  code->mov(code->r12, code->ptr[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
+  code->mov(code->r13d, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
+
+  code->L(loop);
+  code->mov(code->eax, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code->mov(code->edx, code->eax);
+  code->shr(code->eax, 12);
+  code->mov(code->r14, code->ptr[code->r12 + code->rax * 8]);
+  code->test(code->r14, code->r14);
+  code->jz(done);
+
+  code->mov(code->eax, code->edx);
+  code->shr(code->eax, 2);
+  code->and_(code->eax, 0x3FFu);
+  code->imul(code->eax, code->eax,
+             static_cast<int>(sizeof(V4DispatchEntry)));
+  code->lea(code->r15, code->ptr[code->r14 + code->rax]);
+  code->cmp(code->dword[
+                code->r15 +
+                static_cast<int>(offsetof(V4DispatchEntry, cache_epoch))],
+            code->r13d);
+  code->jne(done);
+
+  code->mov(code->r14, code->ptr[
+      code->r15 + static_cast<int>(offsetof(V4DispatchEntry, block))]);
+  code->test(code->r14, code->r14);
+  code->jz(done);
+
+  code->mov(code->eax, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code->add(code->eax, code->dword[
+      code->r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
+  code->cmp(code->eax, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+  code->ja(done);
+
+  code->mov(code->eax, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code->add(code->eax, code->dword[
+      code->r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
+  code->cmp(code->eax, code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+  code->ja(done);
+
+  code->mov(code->rax, code->ptr[
+      code->r15 + static_cast<int>(offsetof(V4DispatchEntry, code))]);
+  code->test(code->rax, code->rax);
+  code->jz(done);
+
+#if defined(_WIN32)
+  code->mov(code->rcx, code->rbx);
+#else
+  code->mov(code->rdi, code->rbx);
+#endif
+  code->call(code->rax);
+  code->inc(code->dword[
+      code->rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  code->jmp(loop);
+
+  code->L(done);
+#if defined(_WIN32)
+  code->add(code->rsp, 32);
+#endif
+  code->pop(code->r15);
+  code->pop(code->r14);
+  code->pop(code->r13);
+  code->pop(code->r12);
+  code->pop(code->rbx);
+  code->ret();
+  code->ready();
+
+  return reinterpret_cast<V4ResidentDispatchFn>(
+      arena.copy_code(code->getCode(), code->getSize()));
 }
 
 #endif // VIBESTATION_JIT_V4_X64
@@ -379,6 +492,8 @@ struct CpuJitV4Backend::Impl {
   size_t block_count = 0u;
   u32 cache_epoch = 1u;
   JitCodePageBitmap<29u, 12u> code_pages;
+  V4ResidentDispatchFn resident_dispatch = nullptr;
+  size_t permanent_code_bytes = 0u;
   bool initialization_attempted = false;
   bool initialized = false;
 
@@ -400,6 +515,11 @@ struct CpuJitV4Backend::Impl {
     } catch (...) {
       return false;
     }
+    resident_dispatch = install_v4_resident_dispatch(arena);
+    if (resident_dispatch == nullptr) {
+      return false;
+    }
+    permanent_code_bytes = arena.bytes_used();
     initialized = true;
     return true;
   }
@@ -436,6 +556,7 @@ struct CpuJitV4Backend::Impl {
     if (entry == nullptr) {
       return;
     }
+    entry->code = block != nullptr ? reinterpret_cast<void *>(block->fn) : nullptr;
     entry->block = block;
     entry->cache_epoch = cache_epoch;
   }
@@ -444,7 +565,7 @@ struct CpuJitV4Backend::Impl {
     if (!initialized) {
       return;
     }
-    arena.reset();
+    arena.reset_to(permanent_code_bytes);
     block_count = 0u;
     code_pages.clear();
     ++cache_epoch;
@@ -496,7 +617,7 @@ struct CpuJitV4Backend::Impl {
     ++stats.native_compile_attempts;
     try {
       std::unique_ptr<Xbyak::CodeGenerator> generated =
-          compile_v4_alu(decoded, count);
+          compile_v4_alu(decoded, count, start_pc);
       block->code_size = static_cast<u32>(generated->getSize());
       void *entry = arena.copy_code(generated->getCode(), block->code_size);
       if (entry == nullptr) {
@@ -506,6 +627,7 @@ struct CpuJitV4Backend::Impl {
       }
       block->fn = reinterpret_cast<V4NativeFn>(entry);
       block->instruction_count = count;
+      block->max_cycles = count;
     } catch (...) {
       --block_count;
       ++stats.native_compile_failures;
@@ -592,7 +714,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
     if ((cpu_.pc_ & 3u) != 0u ||
-        cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
+        cpu_.pending_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u ||
         cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u ||
         cpu_.next_pc_ != cpu_.pc_ + 4u) {
@@ -650,30 +772,25 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
 
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
-    if (block->instruction_count > remaining_cycles ||
-        block->instruction_count > remaining_instructions) {
+
+    const u32 start_pc = cpu_.pc_;
+    V4NativeState native{};
+    native.gpr = cpu_.gpr_;
+    native.dispatch_top = impl_->dispatch_top.get();
+    native.cache_epoch = impl_->cache_epoch;
+    native.pc = start_pc;
+    native.cycle_budget = remaining_cycles;
+    native.instruction_budget = remaining_instructions;
+    impl_->resident_dispatch(&native);
+
+    if (native.instructions == 0u || native.block_entries == 0u) {
       ++stats_.native_reject_budget;
       ++stats_.budget_exits;
       fallback_one();
       continue;
     }
 
-    const u32 start_pc = cpu_.pc_;
-    V4NativeState native{};
-    native.gpr = cpu_.gpr_;
-    native.pc = start_pc;
-    block->fn(&native);
-
-    if (native.instructions != block->instruction_count ||
-        native.cycles != block->instruction_count ||
-        native.pc != start_pc + block->instruction_count * 4u) {
-      ++stats_.pc_mismatch_exits;
-      fallback_one();
-      continue;
-    }
-
-    cpu_.current_pc_ =
-        start_pc + (block->instruction_count - 1u) * 4u;
+    cpu_.current_pc_ = native.last_pc;
     cpu_.pc_ = native.pc;
     cpu_.next_pc_ = native.pc + 4u;
     cpu_.in_delay_slot_ = false;
@@ -689,8 +806,14 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
 
     result.cycles += native.cycles;
     result.instructions += native.instructions;
-    ++stats_.native_block_entries;
-    ++stats_.native_alu_block_entries;
+    stats_.native_block_entries += native.block_entries;
+    stats_.native_alu_block_entries += native.block_entries;
+    if (native.block_entries > 1u) {
+      ++stats_.native_chain_entries;
+      stats_.native_linked_transitions += native.block_entries - 1u;
+      stats_.native_chain_max_blocks =
+          std::max<u64>(stats_.native_chain_max_blocks, native.block_entries);
+    }
     stats_.native_instructions += native.instructions;
     stats_.native_cycles += native.cycles;
     stats_.optimized_instructions += native.instructions;
