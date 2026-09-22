@@ -511,6 +511,12 @@ public:
   const u8 *jit_main_ram_data() const { return ram_.data(); }
   u8 *jit_main_ram_data_mut() { return ram_.data(); }
   u8 *jit_scratchpad_data_mut() { return ram_.scratch_data(); }
+  u32 jit_mapped_main_ram_size() const {
+    const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
+    return (memory_window == 5u || memory_window == 7u)
+               ? psx::RAM_MAX_SIZE
+               : psx::RAM_SIZE;
+  }
 
   // Component access (for DMA)
   bool irq_pending() { return irq_.pending(); }
