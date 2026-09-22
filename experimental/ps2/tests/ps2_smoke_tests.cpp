@@ -1,4 +1,5 @@
 #include "core/ps2_system.h"
+#include "core/gs/gs_rasterizer.h"
 
 #include <array>
 #include <cstdlib>
@@ -116,6 +117,62 @@ bool test_scanout_skips_unchanged_vram() {
     display.update(regs, vram);
     return expect(display.generation() == second + 1 && display.width() == 3,
                   "display register write did not invalidate scanout");
+}
+
+bool test_gs_sprite_blend_reuses_destination() {
+    ps2::GsVram vram;
+    ps2::GsRasterContext ctx{};
+    ctx.fbw = 1;
+    ctx.scax1 = 3;
+    ctx.scay1 = 3;
+    ctx.alpha_blend = true;
+    ctx.alpha_a = 0; // Source
+    ctx.alpha_b = 1; // Destination
+    ctx.alpha_c = 2; // FIX
+    ctx.alpha_d = 1; // Destination
+    ctx.alpha_fix = 64;
+    ctx.fbmask = 0x00FF0000u; // Preserve destination blue.
+
+    ps2::GsRasterVertex a{};
+    ps2::GsRasterVertex b{};
+    b.x = 32;
+    b.y = 32;
+    b.rgba = 0x80406080u;
+
+    for (ps2::u32 psm : {0u, 1u}) {
+        vram.reset();
+        ctx.psm = psm;
+        if (!expect(vram.write_pixel(psm, 0, 0, 0, 1, 0x80102030u),
+                    "GS destination setup failed")) return false;
+        if (!expect(ps2::GsRasterizer::draw_sprite(vram, ctx, a, b) == 4,
+                    "GS sprite pixel count mismatch")) return false;
+        const ps2::u32 expected = 0x00104058u;
+        if (!expect(vram.read_pixel(psm, 0, 0, 0, 1) ==
+                    (psm == 0u ? expected | 0x80000000u : expected),
+                    "GS blended framebuffer mismatch")) return false;
+    }
+    return true;
+}
+
+bool test_gs_untextured_triangle_without_depth() {
+    ps2::GsVram vram;
+    ps2::GsRasterContext ctx{};
+    ctx.fbw = 1;
+    ctx.scax1 = 3;
+    ctx.scay1 = 3;
+    ps2::GsRasterVertex a{};
+    ps2::GsRasterVertex b{};
+    ps2::GsRasterVertex c{};
+    b.x = 64;
+    c.y = 64;
+    c.rgba = 0x80406080u;
+    a.z = 0xFFFFFFFFu;
+    b.z = 0xFFFFFFFFu;
+    c.z = 0xFFFFFFFFu;
+    return expect(ps2::GsRasterizer::draw_triangle(vram, ctx, a, b, c) != 0,
+                  "untextured triangle drew no pixels") &&
+           expect(vram.read_pixel(0, 0, 0, 0, 1) == c.rgba,
+                  "untextured triangle color mismatch");
 }
 
 bool test_dmac_running_mask() {
@@ -2048,6 +2105,8 @@ int main() {
     bool ok = true;
     ok = test_ram_little_endian() && ok;
     ok = test_scanout_skips_unchanged_vram() && ok;
+    ok = test_gs_sprite_blend_reuses_destination() && ok;
+    ok = test_gs_untextured_triangle_without_depth() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
     ok = test_dmac_running_mask() && ok;
