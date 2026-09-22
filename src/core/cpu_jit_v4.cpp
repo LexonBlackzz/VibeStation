@@ -607,7 +607,9 @@ V4NativeFn compile_v4_alu(
 }
 
 V4NativeFn compile_v4_branch(
-    V4CodeArena &arena, const V4DecodedControl &control,
+    V4CodeArena &arena,
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &prefix,
+    u32 prefix_count, const V4DecodedControl &control,
     const V4DecodedInstruction &delay, u32 branch_pc, u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
@@ -623,6 +625,13 @@ V4NativeFn compile_v4_branch(
 #endif
   code.mov(code.r10, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+
+  for (u32 i = 0; i < prefix_count; ++i) {
+    emit_v4_alu_instruction(code, prefix[i]);
+    if (i == 0u) {
+      emit_retire_incoming_load(code, v4_alu_write_reg(prefix[i]));
+    }
+  }
 
   const u32 fallthrough = branch_pc + 8u;
   const u32 jump_target =
@@ -680,9 +689,11 @@ V4NativeFn compile_v4_branch(
     emit_write_guest(code, 31u, code.eax);
   }
 
-  // The branch instruction has captured its operands and performed any link
-  // write. Retire/cancel the incoming load before the architectural delay slot.
-  emit_retire_incoming_load(code, v4_control_write_reg(control));
+  // If the branch starts the block, it captured operands before the incoming
+  // load retires. With a prefix, the first ALU instruction already retired it.
+  if (prefix_count == 0u) {
+    emit_retire_incoming_load(code, v4_control_write_reg(control));
+  }
 
   // JAL/JALR's link is visible to the delay slot.
   emit_v4_alu_instruction(code, delay);
@@ -698,7 +709,7 @@ V4NativeFn compile_v4_branch(
       branch_pc);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-      2u);
+      prefix_count + 2u);
 
   if (control.op == V4ControlOp::J ||
       control.op == V4ControlOp::Jal) {
@@ -706,14 +717,16 @@ V4NativeFn compile_v4_branch(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         jump_target);
     code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count + 3u);
   } else if (control.op == V4ControlOp::Jr ||
              control.op == V4ControlOp::Jalr) {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         code.r8d);
     code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count + 3u);
   } else {
     Label not_taken, selected;
     code.test(code.edx, code.edx);
@@ -722,7 +735,8 @@ V4NativeFn compile_v4_branch(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         branch_target);
     code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count + 3u);
     code.jmp(selected);
 
     code.L(not_taken);
@@ -730,7 +744,8 @@ V4NativeFn compile_v4_branch(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         fallthrough);
     code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count + 2u);
     code.L(selected);
   }
 
@@ -1152,12 +1167,12 @@ struct CpuJitV4Backend::Impl {
     V4DecodedInstruction delay{};
     u32 control_bits = 0u;
     u32 delay_bits = 0u;
-    const bool delay_in_same_cache_line =
-        !cacheable || (start_pc & 0x0Fu) <= 8u;
+    const u32 branch_pc = start_pc + count * 4u;
+    const bool control_pair_within_decode_limit = count + 2u <= decode_limit;
     const bool simple_control =
-        count == 0u && delay_in_same_cache_line &&
-        read_visible(start_pc, control_bits) &&
-        read_visible(start_pc + 4u, delay_bits) &&
+        control_pair_within_decode_limit &&
+        read_visible(branch_pc, control_bits) &&
+        read_visible(branch_pc + 4u, delay_bits) &&
         decode_v4_control(control_bits, control) &&
         decode_v4_alu(delay_bits, delay);
 
@@ -1180,7 +1195,8 @@ struct CpuJitV4Backend::Impl {
       V4NativeFn entry = nullptr;
       if (simple_control) {
         entry = compile_v4_branch(
-            arena, control, delay, start_pc, block->code_size);
+            arena, decoded, count, control, delay, branch_pc,
+            block->code_size);
       } else if (simple_load) {
         entry = compile_v4_lw(arena, load, start_pc, block->code_size);
       } else {
@@ -1193,8 +1209,10 @@ struct CpuJitV4Backend::Impl {
         return nullptr;
       }
       block->fn = entry;
-      block->instruction_count = simple_control ? 2u : (simple_load ? 1u : count);
-      block->max_cycles = simple_control ? 3u : (simple_load ? 6u : count);
+      block->instruction_count =
+          simple_control ? count + 2u : (simple_load ? 1u : count);
+      block->max_cycles =
+          simple_control ? count + 3u : (simple_load ? 6u : count);
       block->has_control = simple_control;
       block->has_memory = simple_load;
     } catch (...) {
@@ -1204,7 +1222,7 @@ struct CpuJitV4Backend::Impl {
     }
 
     const u32 translated_count =
-        simple_control ? 2u : (simple_load ? 1u : count);
+        simple_control ? count + 2u : (simple_load ? 1u : count);
     for (u32 i = 0; i < translated_count; ++i) {
       code_pages.mark_address(psx::mask_address(start_pc + i * 4u));
     }
