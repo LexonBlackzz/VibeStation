@@ -839,6 +839,7 @@ void Cpu::reset() {
   for (auto &line : icache_) {
     line = {};
   }
+  icache_generation_.fill(1u);
   if (optimized_backend_) {
     optimized_backend_->flush();
   }
@@ -1251,7 +1252,11 @@ bool Cpu::instruction_cacheable(u32 addr) const {
 }
 
 void Cpu::invalidate_icache_line(u32 addr) {
-  icache_[(addr >> 4) & 0xFFu].valid = false;
+  const u32 index = (addr >> 4) & 0xFFu;
+  icache_[index].valid = false;
+  if (++icache_generation_[index] == 0u) {
+    icache_generation_[index] = 1u;
+  }
   if (optimized_backend_) {
     optimized_backend_->invalidate_range(addr & ~0x0Fu, 16u);
   }
@@ -1324,6 +1329,9 @@ u32 Cpu::fetch32(u32 addr) {
       line.words[word] = sys_->read32_instruction(base + word * 4u);
     }
     line.valid = true;
+    if (++icache_generation_[index] == 0u) {
+      icache_generation_[index] = 1u;
+    }
     add_cycle_penalty(4u);
   }
   return line.words[word_index];
@@ -2457,6 +2465,49 @@ u32 Cpu::read_instruction_for_backend(u32 addr) const {
   return sys_->read32_instruction(addr);
 }
 
+bool Cpu::prepare_instruction_cache_line_for_backend(u32 addr) {
+  if (!instruction_cacheable(addr)) {
+    return false;
+  }
+  const u32 index = (addr >> 4) & 0xFFu;
+  const u32 tag = psx::mask_address(addr) & ~0x0Fu;
+  auto &line = icache_[index];
+  if (line.valid && line.tag == tag) {
+    return false;
+  }
+
+  const u32 base = addr & ~0x0Fu;
+  line.tag = tag;
+  for (u32 word = 0; word < 4u; ++word) {
+    line.words[word] = sys_->read32_instruction(base + word * 4u);
+  }
+  line.valid = true;
+  if (++icache_generation_[index] == 0u) {
+    icache_generation_[index] = 1u;
+  }
+  return true;
+}
+
+bool Cpu::read_visible_instruction_for_backend(u32 addr, u32 &value) const {
+  if (!instruction_cacheable(addr)) {
+    value = sys_->read32_instruction(addr);
+    return true;
+  }
+
+  const u32 index = (addr >> 4) & 0xFFu;
+  const u32 tag = psx::mask_address(addr) & ~0x0Fu;
+  const auto &line = icache_[index];
+  if (!line.valid || line.tag != tag) {
+    return false;
+  }
+  value = line.words[(addr >> 2) & 0x03u];
+  return true;
+}
+
+u32 Cpu::instruction_cache_generation_for_backend(u32 addr) const {
+  return icache_generation_[(addr >> 4) & 0xFFu];
+}
+
 void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
   // DMA and bus writes can replace executable overlays.  The interpreter uses
   // its own I-cache, so invalidating only the optimized backend leaves it
@@ -2467,7 +2518,11 @@ void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
                          phys_or_normalized_addr + size_bytes - 1u) &
                      ~0x0Fu;
     for (u32 line = first;; line += 0x10u) {
-      icache_[(line >> 4) & 0xFFu].valid = false;
+      const u32 index = (line >> 4) & 0xFFu;
+      icache_[index].valid = false;
+      if (++icache_generation_[index] == 0u) {
+        icache_generation_[index] = 1u;
+      }
       if (line == last) {
         break;
       }
