@@ -151,8 +151,10 @@ struct CpuCompareCase {
   bool require_v2_native_entry_when_available = false;
   bool require_v4_native_entry_when_available = false;
   bool require_v4_native_load_entry_when_available = false;
+  bool require_v4_load_tail_block_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
+  bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
@@ -3511,6 +3513,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   ram_invalidation.instructions = 3;
   cases.push_back(ram_invalidation);
 
+  CpuCompareCase v4_page_local_invalidation{};
+  v4_page_local_invalidation.name = "v4_page_local_code_invalidation";
+  v4_page_local_invalidation.start_pc = 0xA0010000u;
+  v4_page_local_invalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_page_local_invalidation.start_pc),
+      0u,
+  };
+  v4_page_local_invalidation.mutations.push_back(
+      {3u, v4_page_local_invalidation.start_pc,
+       enc_i(0x09, 1, 1, 2)});
+  v4_page_local_invalidation.instructions = 6u;
+  v4_page_local_invalidation.require_v4_native_entry_when_available = true;
+  v4_page_local_invalidation
+      .require_v4_page_local_invalidation_when_available = true;
+  cases.push_back(v4_page_local_invalidation);
+
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
@@ -3762,6 +3781,24 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_incoming_load_cancel);
 
+  CpuCompareCase v4_uncached_load_tail{};
+  v4_uncached_load_tail.name = "v4_uncached_native_load_alu_tail";
+  v4_uncached_load_tail.start_pc = 0xA0010000u;
+  v4_uncached_load_tail.initial_gpr[1] = 0x80012000u;
+  v4_uncached_load_tail.initial_gpr[2] = 0x11111111u;
+  v4_uncached_load_tail.memory.push_back({0x00012000u, 0x12345678u});
+  v4_uncached_load_tail.program = {
+      enc_i(0x23, 1, 2, 0),       // LW schedules r2
+      enc_r(2, 0, 3, 0, 0x21),    // sees old r2
+      enc_r(2, 0, 4, 0, 0x21),    // sees loaded r2
+      0x0000000Cu,                 // SYSCALL terminates native decode
+  };
+  v4_uncached_load_tail.instructions = 3u;
+  v4_uncached_load_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_load_tail.require_v4_native_load_entry_when_available = true;
+  v4_uncached_load_tail.require_v4_load_tail_block_when_available = true;
+  cases.push_back(v4_uncached_load_tail);
+
   CpuCompareCase v4_uncached_load_widths{};
   v4_uncached_load_widths.name = "v4_uncached_native_load_widths";
   v4_uncached_load_widths.start_pc = 0xA0010000u;
@@ -4002,8 +4039,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       } else if (mode == CpuExecutionMode::X64JitV4 &&
           (test_case.require_v4_native_entry_when_available ||
            test_case.require_v4_native_load_entry_when_available ||
+           test_case.require_v4_load_tail_block_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
+           test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4016,6 +4055,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool load_entered =
               !test_case.require_v4_native_load_entry_when_available ||
               result.stats.native_memory_fastpath_loads != 0;
+          const bool load_tail_folded =
+              !test_case.require_v4_load_tail_block_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
           const bool branch_entered =
               !test_case.require_v4_native_branch_entry_when_available ||
               result.stats.native_branch_tail_entries != 0;
@@ -4023,25 +4067,36 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
                result.stats.native_alu_blocks_compiled == 0);
+          const bool page_local_invalidation =
+              !test_case.require_v4_page_local_invalidation_when_available ||
+              (result.stats.invalidations != 0u &&
+               result.stats.flushes == 0u &&
+               result.stats.native_blocks_compiled >= 2u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
                result.stats.native_linked_transitions != 0 &&
                result.stats.native_chain_max_blocks > 1u);
           native_check =
-              !native_entered ? "v4_native_missing"
-                              : (!load_entered
-                                     ? "v4_load_missing"
-                                     : (!branch_entered
-                                            ? "v4_branch_missing"
-                                            : (!folded_branch
-                                                   ? "v4_branch_not_folded"
-                                                   : (!chain_entered
-                                                          ? "v4_chain_missing"
-                                                          : "v4_native_entered"))));
+              !native_entered
+                  ? "v4_native_missing"
+                  : (!load_entered
+                         ? "v4_load_missing"
+                         : (!load_tail_folded
+                                ? "v4_load_tail_not_folded"
+                                : (!branch_entered
+                                       ? "v4_branch_missing"
+                                       : (!folded_branch
+                                              ? "v4_branch_not_folded"
+                                              : (!page_local_invalidation
+                                                     ? "v4_global_invalidation"
+                                                     : (!chain_entered
+                                                            ? "v4_chain_missing"
+                                                            : "v4_native_entered"))))));
           native_check_pass =
-              native_entered && load_entered && branch_entered &&
-              folded_branch && chain_entered;
+              native_entered && load_entered && load_tail_folded &&
+              branch_entered && folded_branch && page_local_invalidation &&
+              chain_entered;
         }
       }
 
