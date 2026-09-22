@@ -1664,7 +1664,133 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 bits =
         needs_refill ? staged_refill[word_index] : line.words[word_index];
     V3DecodedInstruction inst{};
-    if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
+    const bool decoded = decode_v3_alu(bits, inst);
+
+    // The overwhelmingly common helper-created delay slot in Spyro is SW.
+    // Retire aligned RAM/scratchpad SW directly through the existing generated
+    // store emitter. MMIO, isolated-cache, tracing and exception-prone cases
+    // intentionally stay on Cpu::step().
+    if (decoded && inst.op == V3AluOp::Sw) {
+      ++stats_.jit_v3_delay_slot_store;
+      if (g_trace_ram || g_trace_bus || g_ram_watch_diagnostics ||
+          (cpu_.cop0_sr_ & (1u << 16)) != 0u) {
+        return false;
+      }
+
+      const u32 base = inst.rs == 0u ? 0u : cpu_.gpr_[inst.rs];
+      const u32 store_addr = base + static_cast<u32>(inst.simm);
+      if ((store_addr & 3u) != 0u) {
+        return false;
+      }
+
+      const u32 phys = psx::mask_address(store_addr);
+      u8 *store_ptr = nullptr;
+      u32 notify_addr = phys;
+      u32 store_penalty = 0u;
+      u8 *const main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      u8 *const scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      const u32 mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
+      if (phys < mapped_main_ram_size && main_ram != nullptr) {
+        const u32 ram_addr = phys & (psx::RAM_SIZE - 1u);
+        store_ptr = main_ram + ram_addr;
+        notify_addr = ram_addr;
+        store_penalty = 1u;
+      } else if (phys >= 0x1F800000u && phys < 0x1F801000u &&
+                 scratchpad != nullptr) {
+        const u32 scratch_addr =
+            (phys - 0x1F800000u) & (psx::SCRATCHPAD_SIZE - 1u);
+        store_ptr = scratchpad + scratch_addr;
+        notify_addr = phys;
+      } else {
+        return false;
+      }
+
+      auto &store_entry = impl_->delay_slot_code[delay_pc];
+      if (store_entry.fn == nullptr || store_entry.word != bits) {
+        std::vector<V3DecodedInstruction> one{inst};
+        try {
+          auto generated = compile_native_alu(one, {}, false, 0u, 0u);
+          store_entry.fn = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
+              generated->getCode(), generated->getSize()));
+          store_entry.word = bits;
+        } catch (const std::exception &e) {
+          std::fprintf(stderr, "V3 native delay-slot SW codegen: %s\n",
+                       e.what());
+          store_entry.fn = nullptr;
+        }
+      }
+      if (store_entry.fn == nullptr) {
+        return false;
+      }
+
+      V3NativeRuntime store_runtime{};
+      store_runtime.store_ptrs[0] = store_ptr;
+      store_runtime.incoming_load_reg = cpu_.load_.reg;
+      store_runtime.incoming_load_value = cpu_.load_.value;
+      store_runtime.incoming_load_pc = cpu_.load_.source_pc;
+      store_runtime.incoming_load_addr = cpu_.load_.source_addr;
+
+      const u32 resume_pc = cpu_.next_pc_;
+      const u32 branch_pc = cpu_.pending_branch_pc_;
+
+      // Match Cpu::step(): sample IRQ before the delay-slot fetch, but defer
+      // interrupt entry until after the architectural delay slot retires.
+      if (cpu_.sys_->irq_pending()) {
+        cpu_.cop0_cause_ |= (1u << 10);
+      } else {
+        cpu_.cop0_cause_ &= ~(1u << 10);
+      }
+
+      if (needs_refill) {
+        line.tag = expected_tag;
+        line.words = staged_refill;
+        line.valid = true;
+      }
+
+      cpu_.executing_step_ = true;
+      cpu_.exception_raised_ = false;
+      cpu_.cycle_penalty_ = 0u;
+      store_entry.fn(cpu_.gpr_, &store_runtime);
+      cpu_.executing_step_ = false;
+
+      // System::write32() performs this immediately after a normal RAM or
+      // scratchpad write. The raw generated store above deliberately bypasses
+      // the bus, so reproduce the architectural I-cache and JIT invalidation
+      // here after the write has become visible.
+      cpu_.notify_code_write(notify_addr, 4u);
+
+      cpu_.current_pc_ = delay_pc;
+      cpu_.pc_ = resume_pc;
+      cpu_.next_pc_ = resume_pc + 4u;
+      cpu_.in_delay_slot_ = true;
+      cpu_.active_branch_pc_ = branch_pc;
+      cpu_.pending_delay_slot_ = false;
+      cpu_.pending_branch_taken_ = false;
+      cpu_.pending_branch_pc_ = 0u;
+      cpu_.load_ = {};
+      cpu_.next_load_ = {};
+
+      const u32 consumed_cycles =
+          2u + store_penalty + (needs_refill ? 4u : 0u);
+      cpu_.cycles_ += consumed_cycles;
+      g_diag_current_pc = cpu_.current_pc_;
+      cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
+
+      result.cycles += consumed_cycles;
+      ++result.instructions;
+      ++stats_.native_block_entries;
+      ++stats_.native_memory_block_entries;
+      ++stats_.native_memory_fastpath_stores;
+      ++stats_.native_instructions;
+      ++stats_.jit_v2_inline_instructions;
+      ++stats_.optimized_instructions;
+      stats_.native_cycles += consumed_cycles;
+      stats_.executed_cycles += consumed_cycles;
+      native_streak = false;
+      return true;
+    }
+
+    if (!decoded || !is_v3_alu_only(inst.op)) {
       const u32 primary = bits >> 26u;
       if (primary >= 0x20u && primary <= 0x26u) {
         ++stats_.jit_v3_delay_slot_load;
