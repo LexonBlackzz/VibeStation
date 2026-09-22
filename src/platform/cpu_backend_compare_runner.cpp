@@ -4248,28 +4248,29 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               (result.stats.native_chain_entries != 0 &&
                result.stats.native_linked_transitions != 0 &&
                result.stats.native_chain_max_blocks > 1u);
-          native_check =
-              !native_entered
-                  ? "v4_native_missing"
-                  : (!load_entered
-                         ? "v4_load_missing"
-                         : (!store_entered
-                                ? "v4_store_missing"
-                                : (!load_tail_folded
-                                       ? "v4_load_tail_not_folded"
-                                       : (!load_branch_fused
-                                              ? "v4_load_branch_not_fused"
-                                              : (!branch_entered
-                                                     ? "v4_branch_missing"
-                                                     : (!folded_branch
-                                                            ? "v4_branch_not_folded"
-                                                            : (!page_local_invalidation
-                                                                   ? "v4_global_invalidation"
-                                                                   : (!cached_same_page_retained
-                                                                          ? "v4_cached_same_page_recompiled"
-                                                                          : (!chain_entered
-                                                                                 ? "v4_chain_missing"
-                                                                                 : "v4_native_entered"))))))));
+          if (!native_entered) {
+            native_check = "v4_native_missing";
+          } else if (!load_entered) {
+            native_check = "v4_load_missing";
+          } else if (!store_entered) {
+            native_check = "v4_store_missing";
+          } else if (!load_tail_folded) {
+            native_check = "v4_load_tail_not_folded";
+          } else if (!load_branch_fused) {
+            native_check = "v4_load_branch_not_fused";
+          } else if (!branch_entered) {
+            native_check = "v4_branch_missing";
+          } else if (!folded_branch) {
+            native_check = "v4_branch_not_folded";
+          } else if (!page_local_invalidation) {
+            native_check = "v4_global_invalidation";
+          } else if (!cached_same_page_retained) {
+            native_check = "v4_cached_same_page_recompiled";
+          } else if (!chain_entered) {
+            native_check = "v4_chain_missing";
+          } else {
+            native_check = "v4_native_entered";
+          }
           native_check_pass =
               native_entered && load_entered && store_entered &&
               load_tail_folded && load_branch_fused &&
