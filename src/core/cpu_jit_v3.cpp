@@ -1377,9 +1377,6 @@ struct CpuJitV3Backend::Impl {
   // KUSEG/KSEG0/KSEG1 aliases distinct without allocating a 4 GB flat map.
   struct DispatchEntry {
     Block *block = nullptr;
-#if VIBESTATION_JIT_V3_X64
-    V3ResidentSlot resident;
-#endif
   };
   struct DispatchPage {
     std::array<DispatchEntry, 1u << 14u> entries{};
@@ -1410,11 +1407,38 @@ struct CpuJitV3Backend::Impl {
 
   void clear_dispatch() {
     for (auto &page : dispatch_pages) page.reset();
+#if VIBESTATION_JIT_V3_X64
+    for (auto &page : resident_pages) page.reset();
+    resident_page_ptrs.fill(nullptr);
+#endif
   }
 
   std::array<std::unique_ptr<DispatchPage>, 1u << 16u> dispatch_pages{};
 
 #if VIBESTATION_JIT_V3_X64
+  struct ResidentPage {
+    std::array<V3ResidentSlot, 1u << 14u> slots{};
+  };
+  std::array<std::unique_ptr<ResidentPage>, 1u << 16u> resident_pages{};
+  // Plain raw page bases are deliberately separate from the owning
+  // unique_ptrs. Generated JR/JALR dispatch can index this table directly
+  // without depending on std::unique_ptr or DispatchEntry object layout.
+  std::array<V3ResidentSlot *, 1u << 16u> resident_page_ptrs{};
+
+  V3ResidentSlot *resident_slot(u32 pc, bool create = true) {
+    const u32 page_index = pc >> 16u;
+    auto &page = resident_pages[page_index];
+    if (!page) {
+      if (!create) return nullptr;
+      page = std::make_unique<ResidentPage>();
+      resident_page_ptrs[page_index] = page->slots.data();
+    }
+    V3ResidentSlot *slot =
+        &page->slots[(pc >> 2u) & 0x3FFFu];
+    if (slot->entry == nullptr) slot->entry = linked_dispatch.exit;
+    return slot;
+  }
+
   struct DelaySlotCode {
     u32 word = 0u;
     V3NativeFn fn = nullptr;
@@ -1426,17 +1450,12 @@ struct CpuJitV3Backend::Impl {
   V3LinkedDispatch linked_dispatch{};
   bool use_linked = true;
   bool link_pending_lw = true;
-  V3ResidentSlot *resident_slot(u32 pc) {
-    V3ResidentSlot *slot = &dispatch_entry(pc, true)->resident;
-    if (slot->entry == nullptr) slot->entry = linked_dispatch.exit;
-    return slot;
-  }
 
   void unlink_resident(u32 pc) {
-    DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry != nullptr) {
-      entry->resident.entry = linked_dispatch.exit;
-      entry->resident.block = nullptr;
+    V3ResidentSlot *slot = resident_slot(pc, false);
+    if (slot != nullptr) {
+      slot->entry = linked_dispatch.exit;
+      slot->block = nullptr;
     }
   }
 #endif
