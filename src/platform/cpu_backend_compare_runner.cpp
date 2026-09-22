@@ -3987,6 +3987,28 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_store_alu_tail.require_v4_store_tail_block_when_available = true;
   cases.push_back(v4_uncached_store_alu_tail);
 
+  CpuCompareCase v4_uncached_prefix_store_tail{};
+  v4_uncached_prefix_store_tail.name =
+      "v4_uncached_native_alu_prefix_store_tail";
+  v4_uncached_prefix_store_tail.start_pc = 0xA0010000u;
+  v4_uncached_prefix_store_tail.initial_gpr[1] = 0x80012080u;
+  v4_uncached_prefix_store_tail.initial_gpr[2] = 0xCAFEBABEu;
+  v4_uncached_prefix_store_tail.memory.push_back({0x00012084u, 0u});
+  v4_uncached_prefix_store_tail.compare_memory_addresses.push_back(0x00012084u);
+  v4_uncached_prefix_store_tail.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x09, 2, 3, 1),       // ALU tail
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_store_tail.instructions = 3u;
+  v4_uncached_prefix_store_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_store_tail.require_v4_native_store_entry_when_available =
+      true;
+  v4_uncached_prefix_store_tail.require_v4_store_tail_block_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_store_tail);
+
   CpuCompareCase v4_uncached_store_branch{};
   v4_uncached_store_branch.name = "v4_uncached_native_store_branch_delay";
   v4_uncached_store_branch.start_pc = 0xA0010000u;
