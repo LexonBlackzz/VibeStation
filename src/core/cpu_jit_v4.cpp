@@ -1572,7 +1572,6 @@ struct CpuJitV4Backend::Impl {
     }
     V4Block *block = entry->block;
     if (block->cache_epoch != cache_epoch || block->cacheable != cacheable ||
-        block->interpreter_only || block->fn == nullptr ||
         block->instruction_count == 0u ||
         block->instruction_count > kV4MaxBlockInstructions) {
       return nullptr;
