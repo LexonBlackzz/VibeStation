@@ -2069,7 +2069,7 @@ bool test_gs_display_extraction() {
         "GS circuit-2 fallback register setup failed") && ok;
     ok = expect(
         system.gs_core().vram().write_pixel(
-            0, 0u, 0u, 0u, 1u, 0xFFAABBCCu),
+            0, 0u, 0u, 0u, 1u, 0x00AABBCCu),
         "GS circuit-2 fallback VRAM setup failed") && ok;
 
     system.gs_display().update(
@@ -2108,7 +2108,7 @@ bool test_gs_display_extraction() {
         system.gs_core().vram().write_pixel(
             0u, 0u, 1u, 0u, 1u, 0x000000FFu) &&
         system.gs_core().vram().write_pixel(
-            0u, 0u, 0u, 0u, 1u, 0xFFFF0000u),
+            0u, 0u, 0u, 0u, 1u, 0x00FF0000u),
         "GS dual-circuit VRAM setup failed") && ok;
 
     system.gs_display().update(

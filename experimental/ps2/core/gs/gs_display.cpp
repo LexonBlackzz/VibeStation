@@ -169,6 +169,9 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
 
     const bool slbg = ((pmode >> 7) & 1u) != 0;
     if (!slbg && frames[1].valid) {
+        // The GS framebuffer alpha is available to PCRTC blending, but
+        // scanout itself is opaque. Do not let the UI blend circuit 2 into
+        // its own background when BIOS artwork stores zero alpha in VRAM.
         const u32 copy_width = std::min(width, frames[1].width);
         const u32 copy_height = std::min(height, frames[1].height);
         for (u32 y = 0; y < copy_height; ++y) {
@@ -177,7 +180,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
                     frames[1].pixels[
                         static_cast<std::size_t>(y) *
                             frames[1].width +
-                        x];
+                        x] | 0xFF000000u;
             }
         }
     }
