@@ -1440,11 +1440,21 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
          result.instructions < max_instructions) {
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
-    if ((cpu_.pc_ & 3u) != 0u ||
-        cpu_.pending_delay_slot_ ||
-        cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u ||
-        cpu_.next_load_.reg != 0u ||
-        cpu_.next_pc_ != cpu_.pc_ + 4u) {
+    bool unsafe_state = false;
+    if ((cpu_.pc_ & 3u) != 0u || cpu_.next_pc_ != cpu_.pc_ + 4u) {
+      ++stats_.native_reject_pc_state;
+      unsafe_state = true;
+    }
+    if (cpu_.pending_delay_slot_ || cpu_.pending_branch_taken_ ||
+        cpu_.pending_branch_pc_ != 0u) {
+      ++stats_.native_reject_branch_delay_state;
+      unsafe_state = true;
+    }
+    if (cpu_.next_load_.reg != 0u) {
+      ++stats_.native_reject_load_delay_state;
+      unsafe_state = true;
+    }
+    if (unsafe_state) {
       ++stats_.native_reject_unsafe_state;
       fallback_one();
       continue;
