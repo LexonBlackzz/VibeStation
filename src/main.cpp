@@ -1771,6 +1771,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "v2_state_pc=%llu v2_state_diagnostics=%llu "
       "v3_delay_load=%llu v3_delay_store=%llu "
       "v3_delay_control=%llu v3_delay_other=%llu "
+      "v3_icache_load=%llu v3_icache_store=%llu "
+      "v3_icache_control=%llu v3_icache_other=%llu "
+      "v3_icache_budget=%llu "
       "v2_unsupported_lw=%llu v2_unsupported_other_load=%llu "
       "v2_unsupported_cop2=%llu v2_unsupported_cop0=%llu "
       "v2_unsupported_jump=%llu v2_unsupported_other_branch=%llu "
@@ -1868,6 +1871,16 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.jit_v3_delay_slot_control, before.jit_v3_delay_slot_control)),
       static_cast<unsigned long long>(
           delta(after.jit_v3_delay_slot_other, before.jit_v3_delay_slot_other)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_load, before.jit_v3_icache_refill_load)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_store, before.jit_v3_icache_refill_store)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_control, before.jit_v3_icache_refill_control)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_other, before.jit_v3_icache_refill_other)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_budget, before.jit_v3_icache_refill_budget)),
       static_cast<unsigned long long>(
           delta(after.jit_v2_unsupported_lw, before.jit_v2_unsupported_lw)),
       static_cast<unsigned long long>(

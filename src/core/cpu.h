@@ -380,6 +380,11 @@ struct CpuBackendStats {
   u64 jit_v3_delay_slot_store = 0;
   u64 jit_v3_delay_slot_control = 0;
   u64 jit_v3_delay_slot_other = 0;
+  u64 jit_v3_icache_refill_load = 0;
+  u64 jit_v3_icache_refill_store = 0;
+  u64 jit_v3_icache_refill_control = 0;
+  u64 jit_v3_icache_refill_other = 0;
+  u64 jit_v3_icache_refill_budget = 0;
   u64 jit_v2_unsupported_lw = 0;
   u64 jit_v2_unsupported_other_load = 0;
   u64 jit_v2_unsupported_cop2 = 0;
