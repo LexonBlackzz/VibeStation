@@ -159,6 +159,7 @@ struct CpuCompareCase {
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
+  bool require_v4_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
@@ -3553,6 +3554,26 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_cached_same_page_retention_when_available = true;
   cases.push_back(v4_cached_same_page_retention);
 
+  CpuCompareCase v4_cached_icache_revalidation{};
+  v4_cached_icache_revalidation.name =
+      "v4_cached_icache_alias_revalidates_without_recompile";
+  v4_cached_icache_revalidation.start_pc = 0x80010000u;
+  v4_cached_icache_revalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_cached_icache_revalidation.start_pc),
+      0u,
+  };
+  // +0x1000 maps to the same direct-mapped I-cache index but is a different
+  // physical code page. It invalidates/refills the guest line without changing
+  // the loop's instruction words.
+  v4_cached_icache_revalidation.mutations.push_back(
+      {3u, v4_cached_icache_revalidation.start_pc + 0x1000u, 0xDEADBEEFu});
+  v4_cached_icache_revalidation.instructions = 6u;
+  v4_cached_icache_revalidation.require_v4_native_entry_when_available = true;
+  v4_cached_icache_revalidation.require_v4_icache_revalidation_when_available =
+      true;
+  cases.push_back(v4_cached_icache_revalidation);
+
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
@@ -4200,6 +4221,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
+           test_case.require_v4_icache_revalidation_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4243,6 +4265,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               (result.stats.invalidations != 0u &&
                result.stats.native_blocks_compiled == 1u &&
                result.stats.block_count == 1u);
+          const bool icache_revalidated =
+              !test_case.require_v4_icache_revalidation_when_available ||
+              (result.stats.native_blocks_compiled == 1u &&
+               result.stats.block_count == 1u &&
+               result.stats.cache_misses != 0u &&
+               result.stats.cache_hits != 0u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
@@ -4266,6 +4294,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_global_invalidation";
           } else if (!cached_same_page_retained) {
             native_check = "v4_cached_same_page_recompiled";
+          } else if (!icache_revalidated) {
+            native_check = "v4_icache_revalidation_missing";
           } else if (!chain_entered) {
             native_check = "v4_chain_missing";
           } else {
@@ -4275,7 +4305,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               native_entered && load_entered && store_entered &&
               load_tail_folded && load_branch_fused &&
               branch_entered && folded_branch && page_local_invalidation &&
-              cached_same_page_retained && chain_entered;
+              cached_same_page_retained && icache_revalidated &&
+              chain_entered;
         }
       }
 
