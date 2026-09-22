@@ -3525,6 +3525,20 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_alu.require_v4_native_entry_when_available = true;
   cases.push_back(v4_uncached_alu);
 
+  CpuCompareCase v4_uncached_variable_shifts{};
+  v4_uncached_variable_shifts.name = "v4_uncached_native_variable_shifts";
+  v4_uncached_variable_shifts.start_pc = 0xA0010000u;
+  v4_uncached_variable_shifts.initial_gpr[1] = 0x81234567u;
+  v4_uncached_variable_shifts.initial_gpr[2] = 5u;
+  v4_uncached_variable_shifts.program = {
+      enc_r(2, 1, 3, 0, 0x04), // SLLV
+      enc_r(2, 1, 4, 0, 0x06), // SRLV
+      enc_r(2, 1, 5, 0, 0x07), // SRAV
+  };
+  pad_cpu_compare_program(v4_uncached_variable_shifts, 32u);
+  v4_uncached_variable_shifts.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_variable_shifts);
+
   CpuCompareCase v4_uncached_beq{};
   v4_uncached_beq.name = "v4_uncached_native_beq_delay";
   v4_uncached_beq.start_pc = 0xA0010000u;
