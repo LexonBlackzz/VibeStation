@@ -11,7 +11,8 @@ void App::draw_system_panel() {
                     "Decoded Block",
                     "x64 JIT",
                     "x64 JIT V2",
-                    "x64 JIT V3"
+                    "x64 JIT V3",
+                    "x64 JIT V4 (Experimental)"
                 };
                 int cpu_backend_index =
                     cpu_execution_mode_to_config_value(g_cpu_execution_mode);
