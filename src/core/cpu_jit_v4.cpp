@@ -359,6 +359,47 @@ private:
   size_t used_ = 0u;
 };
 
+enum class V4RejectKind : u8 {
+  Other,
+  Branch,
+  Memory,
+  Cop0,
+  Cop2,
+  Exception,
+};
+
+V4RejectKind classify_v4_reject(u32 bits) {
+  const u32 primary = (bits >> 26) & 0x3Fu;
+  if (primary == 0u) {
+    switch (bits & 0x3Fu) {
+    case 0x0C: // SYSCALL
+    case 0x0D: // BREAK
+    case 0x20: // ADD
+    case 0x22: // SUB
+      return V4RejectKind::Exception;
+    default:
+      return V4RejectKind::Other;
+    }
+  }
+  if (primary == 0x01u || (primary >= 0x14u && primary <= 0x17u)) {
+    return V4RejectKind::Branch;
+  }
+  if (primary == 0x10u) {
+    return V4RejectKind::Cop0;
+  }
+  if (primary == 0x12u || primary == 0x32u || primary == 0x3Au) {
+    return V4RejectKind::Cop2;
+  }
+  if ((primary >= 0x20u && primary <= 0x2Eu) ||
+      (primary >= 0x30u && primary <= 0x3Bu)) {
+    return V4RejectKind::Memory;
+  }
+  if (primary == 0x08u) { // ADDI can overflow.
+    return V4RejectKind::Exception;
+  }
+  return V4RejectKind::Other;
+}
+
 struct V4Block {
   u32 start_pc = 0;
   u32 instruction_count = 0;
@@ -370,6 +411,7 @@ struct V4Block {
   u32 phys_page = 0;
   u16 icache_index = 0;
   V4NativeFn fn = nullptr;
+  V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
   bool has_control = false;
   bool has_memory = false;
@@ -1655,6 +1697,9 @@ struct CpuJitV4Backend::Impl {
         decode_v4_alu(load_delay_bits, load_delay);
 
     if (count == 0u && !simple_control && !simple_load && !simple_store) {
+      u32 rejected_bits = 0u;
+      (void)read_visible(start_pc, rejected_bits);
+      block->reject_kind = classify_v4_reject(rejected_bits);
       block->interpreter_only = true;
       install(start_pc, block);
       ++stats.interpreter_only_blocks;
@@ -1876,6 +1921,18 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
 
     if (block == nullptr || block->interpreter_only || block->fn == nullptr) {
       ++stats_.native_reject_unsupported_instruction;
+      if (block != nullptr && block->interpreter_only) {
+        switch (block->reject_kind) {
+        case V4RejectKind::Branch: ++stats_.native_reject_branch; break;
+        case V4RejectKind::Memory: ++stats_.native_reject_memory; break;
+        case V4RejectKind::Cop0: ++stats_.native_reject_cop0; break;
+        case V4RejectKind::Cop2: ++stats_.native_reject_cop2; break;
+        case V4RejectKind::Exception:
+          ++stats_.native_reject_exception_unknown;
+          break;
+        case V4RejectKind::Other: break;
+        }
+      }
       fallback_one();
       continue;
     }
