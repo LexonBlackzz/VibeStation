@@ -996,6 +996,21 @@ V4ResidentDispatchFn install_v4_resident_dispatch(V4CodeArena &arena) {
     code.L(cache_ok);
   }
 
+  {
+    code.mov(code.rax, code.ptr[
+        code.rbx +
+        static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
+    code.test(code.rax, code.rax);
+    code.jz(done);
+    code.mov(code.ecx, code.dword[
+        code.r14 + static_cast<int>(offsetof(V4Block, phys_page))]);
+    code.mov(code.edx, code.dword[code.rax + code.rcx * 4]);
+    code.cmp(code.edx, code.dword[
+        code.r14 +
+        static_cast<int>(offsetof(V4Block, code_page_generation))]);
+    code.jne(done);
+  }
+
   code.mov(code.eax, code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.add(code.eax, code.dword[
@@ -1522,9 +1537,13 @@ void CpuJitV4Backend::invalidate_range(u32 phys_or_normalized_addr,
   bool touches_code = false;
   while (remaining != 0u) {
     const u32 phys = psx::mask_address(address);
-    if (impl_->code_pages.test_address(phys)) {
+    const u32 page = phys >> kV4PhysPageShift;
+    if (impl_->code_pages.test_page(page)) {
       touches_code = true;
-      break;
+      u32 &generation = impl_->page_generations[page];
+      if (++generation == 0u) {
+        generation = 1u;
+      }
     }
     const u32 bytes_to_page = 0x1000u - (phys & 0xFFFu);
     const u32 advance = std::min(remaining, bytes_to_page);
@@ -1537,17 +1556,10 @@ void CpuJitV4Backend::invalidate_range(u32 phys_or_normalized_addr,
     return;
   }
 
-  // Phase 4 will replace this conservative whole-arena epoch bump with
-  // per-physical-page generations. Even this bring-up path is O(touched pages)
-  // and never scans all translated blocks.
-  impl_->reset_translations();
+  // Keep the arena and every unrelated translation alive. Stale blocks on the
+  // written physical page fail their generation guard and are lazily replaced
+  // only if execution returns to them.
   ++stats_.invalidations;
-  ++stats_.flushes;
-  stats_.native_blocks = 0u;
-  stats_.block_count = 0u;
-  stats_.interpreter_only_blocks = 0u;
-  stats_.native_code_bytes = 0u;
-  stats_.code_bytes = 0u;
 #else
   (void)phys_or_normalized_addr;
 #endif
