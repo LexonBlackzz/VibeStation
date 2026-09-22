@@ -1152,7 +1152,9 @@ V4NativeFn compile_v4_load(
 
 
 V4NativeFn compile_v4_store(
-    V4CodeArena &arena, const V4DecodedStore &store,
+    V4CodeArena &arena,
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &prefix,
+    u32 prefix_count, const V4DecodedStore &store,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
     u32 tail_count, const V4DecodedControl *control,
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
@@ -1165,7 +1167,24 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, stored, stop_after_store, bail;
+  Label ram, scratch, stored, stop_after_store, slow_after_prefix, bail;
+  Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
+
+  for (u32 i = 0; i < prefix_count; ++i) {
+    emit_v4_alu_instruction(code, prefix[i]);
+    if (i == 0u) {
+      emit_retire_incoming_load(code, v4_alu_write_reg(prefix[i]));
+    }
+  }
+  if (prefix_count != 0u) {
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        prefix_count);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+        prefix_count);
+  }
+
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
       1u);
@@ -1174,7 +1193,7 @@ V4NativeFn compile_v4_store(
   code.test(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
       1u << 16);
-  code.jnz(bail);
+  code.jnz(guard_exit);
 
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
@@ -1187,10 +1206,10 @@ V4NativeFn compile_v4_store(
 
   if (store.op == V4StoreOp::Sh) {
     code.test(code.eax, 1u);
-    code.jnz(bail);
+    code.jnz(guard_exit);
   } else if (store.op == V4StoreOp::Sw) {
     code.test(code.eax, 3u);
-    code.jnz(bail);
+    code.jnz(guard_exit);
   }
 
   code.mov(code.edx, code.eax);
@@ -1223,11 +1242,11 @@ V4NativeFn compile_v4_store(
   code.mov(code.rax, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
   code.test(code.rax, code.rax);
-  code.jz(bail);
+  code.jz(guard_exit);
   code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
   code.shr(code.rax, code.cl);
   code.test(code.al, 1u);
-  code.jnz(bail);
+  code.jnz(guard_exit);
 
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
@@ -1237,16 +1256,16 @@ V4NativeFn compile_v4_store(
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
   code.jb(ram);
   code.cmp(code.edx, 0x1F800000u);
-  code.jb(bail);
+  code.jb(guard_exit);
   code.cmp(code.edx, 0x1F801000u);
-  code.jae(bail);
+  code.jae(guard_exit);
 
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
-  code.jz(bail);
+  code.jz(guard_exit);
   switch (store.op) {
   case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
   case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
@@ -1263,7 +1282,7 @@ V4NativeFn compile_v4_store(
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
-  code.jz(bail);
+  code.jz(guard_exit);
   switch (store.op) {
   case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
   case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
@@ -1294,8 +1313,6 @@ V4NativeFn compile_v4_store(
 
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-  code.test(code.rcx, code.rcx);
-  code.jz(bail);
   code.mov(code.edx, code.eax);
   code.imul(code.edx, code.dword[
       code.r11 +
@@ -1305,8 +1322,6 @@ V4NativeFn compile_v4_store(
   code.mov(code.rcx, code.ptr[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-  code.test(code.rcx, code.rcx);
-  code.jz(bail);
   code.inc(code.dword[code.rcx + code.rax * 4]);
   {
     Label generation_ok;
@@ -1446,7 +1461,7 @@ V4NativeFn compile_v4_store(
   } else {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-        start_pc + tail_count * 4u);
+        start_pc + (prefix_count + tail_count) * 4u);
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
         0u);
@@ -1455,7 +1470,7 @@ V4NativeFn compile_v4_store(
         0u);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
-        (tail_count + 1u) * 4u);
+        (prefix_count + tail_count + 1u) * 4u);
     if (tail_count != 0u) {
       code.add(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
@@ -1476,7 +1491,7 @@ V4NativeFn compile_v4_store(
   emit_retire_incoming_load(code, 0u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-      start_pc);
+      start_pc + prefix_count * 4u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       0u);
@@ -1485,7 +1500,7 @@ V4NativeFn compile_v4_store(
       0u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
-      start_pc + 4u);
+      start_pc + (prefix_count + 1u) * 4u);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.inc(code.dword[
@@ -1494,6 +1509,23 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail_reason))],
       0u);
   emit_v4_block_return(code);
+
+  code.L(slow_after_prefix);
+  if (prefix_count != 0u) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        start_pc + (prefix_count - 1u) * 4u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+        start_pc + prefix_count * 4u);
+    emit_v4_block_return(code);
+  }
 
   code.L(bail);
   code.mov(code.dword[
@@ -1926,12 +1958,12 @@ struct CpuJitV4Backend::Impl {
     V4DecodedStore store{};
     u32 store_bits = 0u;
     const bool simple_store =
-        count == 0u && read_visible(start_pc, store_bits) &&
+        count < decode_limit && read_visible(memory_pc, store_bits) &&
         decode_v4_store(store_bits, store);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
-      for (u32 i = 1u; i < decode_limit; ++i) {
+      for (u32 i = count + 1u; i < decode_limit; ++i) {
         V4DecodedInstruction inst{};
         u32 bits = 0u;
         if (!read_visible(start_pc + i * 4u, bits) ||
@@ -1946,9 +1978,9 @@ struct CpuJitV4Backend::Impl {
     u32 store_control_bits = 0u;
     u32 store_delay_bits = 0u;
     const u32 store_branch_pc =
-        start_pc + (store_tail_count + 1u) * 4u;
+        start_pc + (count + store_tail_count + 1u) * 4u;
     const bool store_control_pair_within_decode_limit =
-        simple_store && store_tail_count + 3u <= decode_limit;
+        simple_store && count + store_tail_count + 3u <= decode_limit;
     const bool store_has_control =
         store_control_pair_within_decode_limit &&
         read_visible(store_branch_pc, store_control_bits) &&
@@ -2013,7 +2045,7 @@ struct CpuJitV4Backend::Impl {
             load_branch_pc, start_pc, block->code_size);
       } else if (simple_store) {
         entry = compile_v4_store(
-            arena, store, store_tail, store_tail_count,
+            arena, decoded, count, store, store_tail, store_tail_count,
             store_has_control ? &store_control : nullptr,
             store_has_control ? &store_delay : nullptr,
             store_branch_pc, start_pc, cacheable, block->code_size);
@@ -2036,7 +2068,8 @@ struct CpuJitV4Backend::Impl {
                      ? count + load_tail_count +
                            (load_has_control ? 3u : 1u)
                      : (simple_store
-                            ? store_tail_count + (store_has_control ? 3u : 1u)
+                            ? count + store_tail_count +
+                                  (store_has_control ? 3u : 1u)
                             : count));
       block->max_cycles =
           simple_control
@@ -2045,7 +2078,8 @@ struct CpuJitV4Backend::Impl {
                      ? count + load_tail_count +
                            (load_has_control ? 9u : 6u)
                      : (simple_store
-                            ? store_tail_count + (store_has_control ? 6u : 3u)
+                            ? count + store_tail_count +
+                                  (store_has_control ? 6u : 3u)
                             : count));
       block->has_control =
           simple_control || load_has_control || store_has_control;
@@ -2065,7 +2099,8 @@ struct CpuJitV4Backend::Impl {
                    ? count + load_tail_count +
                          (load_has_control ? 3u : 1u)
                    : (simple_store
-                          ? store_tail_count + (store_has_control ? 3u : 1u)
+                          ? count + store_tail_count +
+                                (store_has_control ? 3u : 1u)
                           : count));
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
