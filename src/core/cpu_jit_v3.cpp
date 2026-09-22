@@ -759,7 +759,8 @@ V3LinkedDispatch install_linked_dispatch(V3CodeArena &arena) {
   code->mov(code->r10, code->ptr[code->rbx + offsetof(V3ResidentContext, gpr)]);
   code->mov(code->r11, code->ptr[code->rbx + offsetof(V3ResidentContext, runtime)]);
   code->mov(code->r15, code->ptr[code->rbx + offsetof(V3ResidentContext, icache)]);
-  code->xor_(code->r12d, code->r12d);
+  code->mov(code->r12d,
+            code->dword[code->rbx + offsetof(V3ResidentContext, cycles)]);
   code->xor_(code->r13d, code->r13d);
   code->xor_(code->r14d, code->r14d);
   code->xor_(code->r8d, code->r8d);
@@ -1828,91 +1829,18 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 word_index = (start_pc >> 2u) & 0x03u;
     const u32 expected_tag = psx::mask_address(start_pc) & ~0x0Fu;
     auto &line = cpu_.icache_[index];
-    if (!line.valid || line.tag != expected_tag) {
-      // Transactional entry refill for a single non-trapping ALU/NOP.
-      // IRQ/state checks already happened above, matching Cpu::step() before
-      // fetch. Stage the entire architectural line, lower the current word,
-      // and only then make the refill visible. If anything is unsuitable, the
-      // untouched cache falls back to Cpu::step() and observes the original
-      // miss normally.
+    const bool entry_needs_refill = !line.valid || line.tag != expected_tag;
+    std::array<u32, 4> staged_entry_refill{};
+    u32 entry_refill_cycles = 0u;
+    if (entry_needs_refill) {
       if (g_trace_ram) {
         return helper_step(V3HelperReason::Icache);
       }
-
-      std::array<u32, 4> staged_refill{};
       const u32 refill_base = start_pc & ~0x0Fu;
-      for (u32 word = 0; word < staged_refill.size(); ++word) {
-        staged_refill[word] =
+      for (u32 word = 0; word < staged_entry_refill.size(); ++word) {
+        staged_entry_refill[word] =
             cpu_.sys_->read32_instruction(refill_base + word * 4u);
       }
-
-      const u32 bits = staged_refill[word_index];
-      V3DecodedInstruction inst{};
-      if (!decode_v3_alu(bits, inst) || !is_v3_alu_only(inst.op)) {
-        return helper_step(V3HelperReason::Icache);
-      }
-
-      auto &entry = impl_->delay_slot_code[start_pc];
-      if (entry.fn == nullptr || entry.word != bits) {
-        std::vector<V3DecodedInstruction> one{inst};
-        try {
-          auto generated = compile_native_alu(one, {}, false, 0u, 0u);
-          entry.fn = reinterpret_cast<V3NativeFn>(impl_->arena.copy_code(
-              generated->getCode(), generated->getSize()));
-          entry.word = bits;
-        } catch (const std::exception &e) {
-          std::fprintf(stderr, "V3 native entry-refill codegen: %s\n", e.what());
-          entry.fn = nullptr;
-        }
-      }
-      if (entry.fn == nullptr) {
-        return helper_step(V3HelperReason::Icache);
-      }
-
-      V3NativeRuntime runtime{};
-      runtime.incoming_load_reg = cpu_.load_.reg;
-      runtime.incoming_load_value = cpu_.load_.value;
-      runtime.incoming_load_pc = cpu_.load_.source_pc;
-      runtime.incoming_load_addr = cpu_.load_.source_addr;
-
-      // Fetch becomes architectural only once retirement is guaranteed.
-      line.tag = expected_tag;
-      line.words = staged_refill;
-      line.valid = true;
-
-      cpu_.executing_step_ = true;
-      cpu_.exception_raised_ = false;
-      cpu_.cycle_penalty_ = 0u;
-      entry.fn(cpu_.gpr_, &runtime);
-      cpu_.executing_step_ = false;
-
-      cpu_.current_pc_ = start_pc;
-      cpu_.pc_ = start_pc + 4u;
-      cpu_.next_pc_ = start_pc + 8u;
-      cpu_.in_delay_slot_ = false;
-      cpu_.active_branch_pc_ = 0u;
-      cpu_.pending_delay_slot_ = false;
-      cpu_.pending_branch_taken_ = false;
-      cpu_.pending_branch_pc_ = 0u;
-      cpu_.load_ = {};
-      cpu_.next_load_ = {};
-
-      constexpr u32 consumed_cycles = 5u; // 1 ALU + 4 I-cache refill
-      cpu_.cycles_ += consumed_cycles;
-      g_diag_current_pc = cpu_.current_pc_;
-      cpu_.rr4_diag_state_.prev_pc_for_diag = cpu_.current_pc_;
-
-      result.cycles += consumed_cycles;
-      ++result.instructions;
-      ++stats_.native_block_entries;
-      ++stats_.native_alu_block_entries;
-      ++stats_.native_instructions;
-      ++stats_.jit_v2_inline_instructions;
-      ++stats_.optimized_instructions;
-      stats_.native_cycles += consumed_cycles;
-      stats_.executed_cycles += consumed_cycles;
-      native_streak = true;
-      return true;
     }
 
     if (impl_->rejected_pcs.find(start_pc) != impl_->rejected_pcs.end()) {
@@ -1930,6 +1858,48 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
         impl_->remember_dispatch(*block_ptr);
         ++stats_.cache_hits;
       }
+    }
+
+    if (entry_needs_refill) {
+      // Reuse only an already-compiled, single-line, pure sequential ALU block.
+      // This guarantees there are no memory/control preflights after the
+      // architectural refill becomes visible. The first block's full budget is
+      // proven here; the linked chain then starts with four cycles already
+      // charged, so refill + retirement are one transaction.
+      const bool refillable =
+          block_ptr != nullptr &&
+          block_ptr->kind == V3BlockKind::Inline &&
+          block_ptr->resident.linked_fn != nullptr &&
+          block_ptr->icache_line_count == 1u &&
+          !block_ptr->has_load && !block_ptr->has_store &&
+          !block_ptr->has_branch && !block_ptr->has_jump &&
+          block_ptr->resident.kind == 0u;
+      if (!refillable) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      bool words_match = true;
+      for (u32 i = 0; i < block_ptr->instruction_count; ++i) {
+        const u32 wi = word_index + i;
+        if (wi >= staged_entry_refill.size() ||
+            staged_entry_refill[wi] != block_ptr->words[i]) {
+          words_match = false;
+          break;
+        }
+      }
+      const u32 remaining_cycles_now = max_cycles - result.cycles;
+      const u32 remaining_instructions_now =
+          max_instructions - result.instructions;
+      if (!words_match ||
+          block_ptr->instruction_count > remaining_instructions_now ||
+          block_ptr->base_cycles + 4u > remaining_cycles_now) {
+        return helper_step(V3HelperReason::Icache);
+      }
+
+      line.tag = expected_tag;
+      line.words = staged_entry_refill;
+      line.valid = true;
+      entry_refill_cycles = 4u;
     }
 
     if (block_ptr != nullptr) {
@@ -2491,8 +2461,9 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
     const u32 remaining_cycles = max_cycles - result.cycles;
     const u32 remaining_instructions = max_instructions - result.instructions;
     const u32 worst_cycles =
-        block.base_cycles + main_ram_store_count + main_ram_load_count * 4u +
-        fetch_penalty + (block.has_branch ? 1u : 0u);
+        entry_refill_cycles + block.base_cycles + main_ram_store_count +
+        main_ram_load_count * 4u + fetch_penalty +
+        (block.has_branch ? 1u : 0u);
     if (block.instruction_count > remaining_instructions ||
         worst_cycles > remaining_cycles) {
       // A slice may end inside a longer native block. Execute its safe ALU
@@ -2574,6 +2545,7 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
       resident.cycle_budget = remaining_cycles;
       resident.instruction_budget = remaining_instructions;
       resident.branch_allowed = g_cpu_backend_compare_irq_on_branch ? 0u : 1u;
+      resident.cycles = entry_refill_cycles;
       cpu_.executing_step_ = true;
       cpu_.exception_raised_ = false;
       cpu_.cycle_penalty_ = 0u;
