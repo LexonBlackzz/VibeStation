@@ -152,6 +152,7 @@ struct CpuCompareCase {
   bool require_v4_native_entry_when_available = false;
   bool require_v4_native_load_entry_when_available = false;
   bool require_v4_native_store_entry_when_available = false;
+  bool require_v4_store_tail_block_when_available = false;
   bool require_v4_store_smc_fallback_when_available = false;
   bool require_v4_load_tail_block_when_available = false;
   bool require_v4_load_branch_fusion_when_available = false;
@@ -3943,6 +3944,24 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_store_pending_load);
 
+  CpuCompareCase v4_uncached_store_alu_tail{};
+  v4_uncached_store_alu_tail.name = "v4_uncached_native_store_alu_tail";
+  v4_uncached_store_alu_tail.start_pc = 0xA0010000u;
+  v4_uncached_store_alu_tail.initial_gpr[1] = 0x80012040u;
+  v4_uncached_store_alu_tail.initial_gpr[2] = 0x12345678u;
+  v4_uncached_store_alu_tail.memory.push_back({0x00012040u, 0u});
+  v4_uncached_store_alu_tail.compare_memory_addresses.push_back(0x00012040u);
+  v4_uncached_store_alu_tail.program = {
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x09, 2, 3, 1),       // ADDIU
+      enc_i(0x0D, 3, 4, 0x0040),  // ORI
+  };
+  v4_uncached_store_alu_tail.instructions = 3u;
+  v4_uncached_store_alu_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_store_alu_tail.require_v4_native_store_entry_when_available = true;
+  v4_uncached_store_alu_tail.require_v4_store_tail_block_when_available = true;
+  cases.push_back(v4_uncached_store_alu_tail);
+
   CpuCompareCase v4_uncached_store_smc{};
   v4_uncached_store_smc.name = "v4_uncached_store_code_page_fallback";
   v4_uncached_store_smc.start_pc = 0xA0010000u;
@@ -4215,6 +4234,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           (test_case.require_v4_native_entry_when_available ||
            test_case.require_v4_native_load_entry_when_available ||
            test_case.require_v4_native_store_entry_when_available ||
+           test_case.require_v4_store_tail_block_when_available ||
            test_case.require_v4_load_tail_block_when_available ||
            test_case.require_v4_load_branch_fusion_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
@@ -4237,6 +4257,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool store_entered =
               !test_case.require_v4_native_store_entry_when_available ||
               result.stats.native_memory_fastpath_stores != 0;
+          const bool store_tail_folded =
+              !test_case.require_v4_store_tail_block_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
           const bool load_tail_folded =
               !test_case.require_v4_load_tail_block_when_available ||
               (result.stats.native_memory_blocks_compiled == 1u &&
@@ -4295,6 +4320,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_load_missing";
           } else if (!store_entered) {
             native_check = "v4_store_missing";
+          } else if (!store_tail_folded) {
+            native_check = "v4_store_tail_not_folded";
           } else if (!load_tail_folded) {
             native_check = "v4_load_tail_not_folded";
           } else if (!load_branch_fused) {
@@ -4316,7 +4343,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           }
           native_check_pass =
               native_entered && load_entered && store_entered &&
-              load_tail_folded && load_branch_fused &&
+              store_tail_folded && load_tail_folded && load_branch_fused &&
               branch_entered && folded_branch && page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               chain_entered;
