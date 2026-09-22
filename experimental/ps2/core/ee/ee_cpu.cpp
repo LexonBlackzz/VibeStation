@@ -977,6 +977,26 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
                 op(vu_float(fs, lane), scalar));
         }
     };
+    auto scalar_binary = [&](u32 scalar_bits, auto op) {
+        const float scalar = ps2_fpu_input(scalar_bits);
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            vu_write_float(fd, lane, op(vu_float(fs, lane), scalar));
+        }
+    };
+    auto accumulated_binary = [&](bool broadcast, u32 scalar_bits, bool subtract) {
+        const float scalar = ps2_fpu_input(scalar_bits);
+        for (u32 lane = 0; lane < 4u; ++lane) {
+            if (!selected(lane)) continue;
+            const float rhs = broadcast ? scalar : vu_float(ft, lane);
+            const float product = vu_float(fs, lane) * rhs;
+            const float acc = ps2_fpu_input(state_.vu_acc[lane]);
+            vu_write_float(
+                fd,
+                lane,
+                subtract ? acc - product : acc + product);
+        }
+    };
 
     const auto add = [](float x, float y) { return x + y; };
     const auto sub = [](float x, float y) { return x - y; };
@@ -990,6 +1010,13 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     }
     if (funct >= 0x04u && funct <= 0x07u) { // VSUBx/y/z/w
         broadcast_binary(funct & 3u, sub);
+        return true;
+    }
+    if (funct >= 0x08u && funct <= 0x0Fu) { // VMADD/ VMSUB x/y/z/w
+        accumulated_binary(
+            true,
+            lane_read(ft, funct & 3u),
+            funct >= 0x0Cu);
         return true;
     }
     if (funct >= 0x10u && funct <= 0x13u) { // VMAXx/y/z/w
@@ -1006,8 +1033,47 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     }
 
     switch (funct) {
+    case 0x1C: // VMULq
+        scalar_binary(state_.vu_vi[22], mul);
+        return true;
+    case 0x1D: // VMAXi
+        scalar_binary(state_.vu_vi[21], vmax);
+        return true;
+    case 0x1E: // VMULi
+        scalar_binary(state_.vu_vi[21], mul);
+        return true;
+    case 0x1F: // VMINIi
+        scalar_binary(state_.vu_vi[21], vmin);
+        return true;
+    case 0x20: // VADDq
+        scalar_binary(state_.vu_vi[22], add);
+        return true;
+    case 0x21: // VMADDq
+        accumulated_binary(true, state_.vu_vi[22], false);
+        return true;
+    case 0x22: // VADDi
+        scalar_binary(state_.vu_vi[21], add);
+        return true;
+    case 0x23: // VMADDi
+        accumulated_binary(true, state_.vu_vi[21], false);
+        return true;
+    case 0x24: // VSUBq
+        scalar_binary(state_.vu_vi[22], sub);
+        return true;
+    case 0x25: // VMSUBq
+        accumulated_binary(true, state_.vu_vi[22], true);
+        return true;
+    case 0x26: // VSUBi
+        scalar_binary(state_.vu_vi[21], sub);
+        return true;
+    case 0x27: // VMSUBi
+        accumulated_binary(true, state_.vu_vi[21], true);
+        return true;
     case 0x28: // VADD
         vector_binary(add);
+        return true;
+    case 0x29: // VMADD
+        accumulated_binary(false, 0u, false);
         return true;
     case 0x2A: // VMUL
         vector_binary(mul);
@@ -1018,6 +1084,25 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
     case 0x2C: // VSUB
         vector_binary(sub);
         return true;
+    case 0x2D: // VMSUB
+        accumulated_binary(false, 0u, true);
+        return true;
+    case 0x2E: { // VOPMSUB: finish the xyz outer product from ACC.
+        const float left[3] = {
+            vu_float(fs, 0u), vu_float(fs, 1u), vu_float(fs, 2u)};
+        const float right[3] = {
+            vu_float(ft, 0u), vu_float(ft, 1u), vu_float(ft, 2u)};
+        for (u32 lane = 0; lane < 3u; ++lane) {
+            const u32 next = (lane + 1u) % 3u;
+            const u32 last = (lane + 2u) % 3u;
+            vu_write_float(
+                fd,
+                lane,
+                ps2_fpu_input(state_.vu_acc[lane]) -
+                    left[next] * right[last]);
+        }
+        return true;
+    }
     case 0x2F: // VMINI
         vector_binary(vmin);
         return true;
@@ -1039,7 +1124,161 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             (instruction & 3u) | ((instruction >> 4) & 0x7Cu);
         const u32 it = ft & 0xFu;
         const u32 is = fs & 0xFu;
-        if (special2 == 0x3Bu) { // VISWR
+        // VU0 macro accumulator operations share the same lane selection and
+        // differ only in their second operand and arithmetic operation.
+        u32 acc_op = 5u; // ADD, SUB, MUL, MADD, MSUB, or none.
+        bool acc_broadcast = false;
+        u32 acc_scalar_bits = 0;
+        if (special2 <= 0x0Fu) {
+            const u32 group = special2 >> 2;
+            acc_op = group == 0u ? 0u :
+                group == 1u ? 1u :
+                group == 2u ? 3u : 4u;
+            acc_broadcast = true;
+            acc_scalar_bits = lane_read(ft, special2 & 3u);
+        } else if (special2 >= 0x18u && special2 <= 0x1Bu) {
+            acc_op = 2u;
+            acc_broadcast = true;
+            acc_scalar_bits = lane_read(ft, special2 & 3u);
+        } else if (special2 >= 0x20u && special2 <= 0x27u) {
+            const u32 pair = (special2 - 0x20u) >> 1;
+            acc_op = pair == 0u ? (special2 & 1u ? 3u : 0u) :
+                pair == 1u ? (special2 & 1u ? 3u : 0u) :
+                pair == 2u ? (special2 & 1u ? 4u : 1u) :
+                             (special2 & 1u ? 4u : 1u);
+            acc_broadcast = true;
+            acc_scalar_bits = state_.vu_vi[
+                (special2 & 2u) != 0u ? 21u : 22u];
+        } else {
+            switch (special2) {
+            case 0x1Cu: acc_op = 2u; acc_broadcast = true;
+                acc_scalar_bits = state_.vu_vi[22]; break;
+            case 0x1Eu: acc_op = 2u; acc_broadcast = true;
+                acc_scalar_bits = state_.vu_vi[21]; break;
+            case 0x28u: acc_op = 0u; break;
+            case 0x29u: acc_op = 3u; break;
+            case 0x2Au: acc_op = 2u; break;
+            case 0x2Cu: acc_op = 1u; break;
+            case 0x2Du: acc_op = 4u; break;
+            default: break;
+            }
+        }
+        if (acc_op != 5u) {
+            const float scalar = ps2_fpu_input(acc_scalar_bits);
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const float lhs = vu_float(fs, lane);
+                const float rhs = acc_broadcast
+                    ? scalar : vu_float(ft, lane);
+                const float old = ps2_fpu_input(state_.vu_acc[lane]);
+                const float value =
+                    acc_op == 0u ? lhs + rhs :
+                    acc_op == 1u ? lhs - rhs :
+                    acc_op == 2u ? lhs * rhs :
+                    acc_op == 3u ? old + lhs * rhs :
+                                   old - lhs * rhs;
+                state_.vu_acc[lane] = ps2_fpu_result(value);
+            }
+            return true;
+        }
+        if (special2 >= 0x10u && special2 <= 0x17u) {
+            const u32 shifts[4] = {0u, 4u, 12u, 15u};
+            const u32 shift = shifts[special2 & 3u];
+            const bool to_integer = special2 >= 0x14u;
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const u32 source = lane_read(fs, lane);
+                if (to_integer) { // VFTOI0/4/12/15
+                    const double scaled = std::ldexp(
+                        static_cast<double>(ps2_fpu_input(source)),
+                        static_cast<int>(shift));
+                    const s32 integer = scaled >= 2147483648.0
+                        ? std::numeric_limits<s32>::max()
+                        : scaled <= -2147483648.0
+                            ? std::numeric_limits<s32>::min()
+                            : static_cast<s32>(scaled);
+                    lane_write(ft, lane, static_cast<u32>(integer));
+                } else { // VITOF0/4/12/15
+                    const float value = std::ldexp(
+                        static_cast<float>(static_cast<s32>(source)),
+                        -static_cast<int>(shift));
+                    lane_write(ft, lane, ps2_fpu_result(value));
+                }
+            }
+            return true;
+        }
+        if (special2 == 0x2Fu) return true; // VNOP
+        if (special2 == 0x2Eu) { // VOPMULA: first half of xyz outer product.
+            const float left[3] = {
+                vu_float(fs, 0u), vu_float(fs, 1u), vu_float(fs, 2u)};
+            const float right[3] = {
+                vu_float(ft, 0u), vu_float(ft, 1u), vu_float(ft, 2u)};
+            for (u32 lane = 0; lane < 3u; ++lane) {
+                const u32 next = (lane + 1u) % 3u;
+                const u32 last = (lane + 2u) % 3u;
+                state_.vu_acc[lane] =
+                    ps2_fpu_result(left[next] * right[last]);
+            }
+            return true;
+        }
+        if (special2 == 0x38u) { // VDIV
+            const u32 fsf = (instruction >> 21) & 3u;
+            const u32 ftf = (instruction >> 23) & 3u;
+            state_.vu_vi[22] = ps2_fpu_result(
+                vu_float(fs, fsf) / vu_float(ft, ftf));
+            return true;
+        }
+        if (special2 == 0x39u) { // VSQRT
+            const u32 ftf = (instruction >> 23) & 3u;
+            state_.vu_vi[22] = ps2_fpu_result(
+                std::sqrt(std::fabs(vu_float(ft, ftf))));
+            return true;
+        }
+        if (special2 == 0x3Au) { // VRSQRT
+            const u32 fsf = (instruction >> 21) & 3u;
+            const u32 ftf = (instruction >> 23) & 3u;
+            state_.vu_vi[22] = ps2_fpu_result(
+                vu_float(fs, fsf) /
+                std::sqrt(std::fabs(vu_float(ft, ftf))));
+            return true;
+        }
+        if (special2 == 0x3Bu) return true; // VWAITQ (synchronous interpreter)
+        if (special2 == 0x3Cu) { // VMTIR
+            if (it != 0u) {
+                const u32 source_lane = (instruction >> 21) & 3u;
+                state_.vu_vi[it] = static_cast<u16>(
+                    lane_read(fs, source_lane));
+            }
+            return true;
+        }
+        if (special2 == 0x30u) { // VMOVE
+            if (ft == 0u) return true;
+            const EeGpr source = state_.vu_vf[fs];
+            for (u32 lane = 0; lane < 4u; ++lane) {
+                if (!selected(lane)) continue;
+                const u64 half = lane < 2u ? source.lo : source.hi;
+                lane_write(
+                    ft,
+                    lane,
+                    static_cast<u32>(half >> ((lane & 1u) * 32u)));
+            }
+            return true;
+        }
+        if (special2 == 0x3Eu) { // VILWR
+            if (it == 0u) return true;
+            u32 lane = 0u;
+            while (lane < 4u && !selected(lane)) ++lane;
+            if (lane == 4u) return true;
+            const u32 base = 0x11004000u +
+                (((state_.vu_vi[is] & 0xFFFFu) * 16u) & 0xFFFu);
+            u32 value = 0;
+            if (!bus_.read32(base + lane * 4u, value)) {
+                return fail(pc, instruction, "VILWR VU0 memory fault", error);
+            }
+            state_.vu_vi[it] = static_cast<u16>(value);
+            return true;
+        }
+        if (special2 == 0x3Fu) { // VISWR
             const u32 base = 0x11004000u + ((state_.vu_vi[is] & 0xFFFFu) * 16u & 0xFFFu);
             for (u32 lane = 0; lane < 4; ++lane) {
                 if (selected(lane) && !bus_.write32(base + lane * 4u, state_.vu_vi[it] & 0xFFFFu))
@@ -1070,7 +1309,7 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             }
             return true;
         }
-        if (special2 == 0x39u) { // VMFIR: sign-extend VI[is] into selected VF[ft] lanes.
+        if (special2 == 0x3Du) { // VMFIR: sign-extend VI[is] into selected VF[ft] lanes.
             const u32 value = static_cast<u32>(
                 static_cast<s32>(static_cast<s16>(state_.vu_vi[is])));
             for (u32 lane = 0; lane < 4u; ++lane) {
@@ -1078,10 +1317,6 @@ bool EeCpu::execute_cop2(u32 pc, u32 instruction, std::string& error) {
             }
             return true;
         }
-        // The retail BIOS executes this reserved COP2 encoding as padding.
-        // PCSX2 classifies SPECIAL2 0x3F as unknown; it has no architectural
-        // register effect, and must not be misdecoded as VISWR.
-        if (instruction == 0x4B000BFFu) return true;
         return fail(
             pc,
             instruction,

@@ -742,7 +742,7 @@ bool test_vu_mapping_and_cop2() {
         (0x1Au << 21) |
         (4u << 16) |
         (5u << 11) |
-        (0x0Eu << 6) |
+        (0x0Fu << 6) |
         0x3Du;
     ok = expect(system.bus().write32(pc, vmfir_xz),
                 "VU0 VMFIR test write failed") && ok;
@@ -762,13 +762,269 @@ bool test_vu_mapping_and_cop2() {
                  0x44444444FFFF8001ull,
              "VU0 VMFIR sign extension or destination mask mismatch") && ok;
 
+    // VSQRT/VDIV feed Q; WAITQ is synchronous in the interpreter.
+    ok = expect(
+             system.bus().write32(pc, 0x4A2503BDu) &&
+                 system.bus().write32(pc + 4u, 0x4A0003BFu) &&
+                 system.bus().write32(pc + 8u, 0x4A6503BCu),
+             "VU0 Q arithmetic instructions write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[5].lo = pack2(16.0f, 0.0f);
+    ok = expect(system.ee().step(error),
+                "VU0 VSQRT macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vi[22] ==
+                 std::bit_cast<ps2::u32>(4.0f),
+             "VU0 VSQRT Q result mismatch") && ok;
+    ok = expect(system.ee().step(error),
+                "VU0 VWAITQ macro execution failed") && ok;
+    ok = expect(system.ee().step(error),
+                "VU0 VDIV macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vi[22] ==
+                 std::bit_cast<ps2::u32>(0.0625f),
+             "VU0 VDIV Q result mismatch") && ok;
+
+    // VADDq.xz uses the Q scalar, leaving Y/W untouched.
+    const ps2::u32 vaddq_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (1u << 11) |
+        (3u << 6) |
+        0x20u;
+    ok = expect(system.bus().write32(pc, vaddq_xz),
+                "VU0 VADDq test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vi[22] = std::bit_cast<ps2::u32>(2.5f);
+    system.ee().state().vu_vf[1] = {
+        pack2(1.0f, 2.0f),
+        pack2(3.0f, 4.0f),
+    };
+    system.ee().state().vu_vf[3] = {
+        pack2(90.0f, 91.0f),
+        pack2(92.0f, 93.0f),
+    };
+    ok = expect(system.ee().step(error),
+                "VU0 VADDq macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 pack2(3.5f, 91.0f) &&
+             system.ee().state().vu_vf[3].hi ==
+                 pack2(5.5f, 93.0f),
+             "VU0 VADDq scalar or destination mask mismatch") && ok;
+
+    // VMTIR vi5, vf4.z copies only the low 16 bits of the selected lane.
+    const ps2::u32 vmtir_z =
+        (0x12u << 26) |
+        (0x12u << 21) |
+        (5u << 16) |
+        (4u << 11) |
+        (0x0Fu << 6) |
+        0x3Cu;
+    ok = expect(system.bus().write32(pc, vmtir_z),
+                "VU0 VMTIR test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[4].hi =
+        0x11111111DEADBEEFull;
+    ok = expect(system.ee().step(error),
+                "VU0 VMTIR macro execution failed") && ok;
+    ok = expect(system.ee().state().vu_vi[5] == 0xBEEFu,
+                "VU0 VMTIR source lane or halfword mismatch") && ok;
+
+    // VMOVE.yw vf6, vf4 copies only the selected lanes.
+    const ps2::u32 vmove_yw =
+        (0x12u << 26) |
+        (0x15u << 21) |
+        (6u << 16) |
+        (4u << 11) |
+        (0x0Cu << 6) |
+        0x3Cu;
+    ok = expect(system.bus().write32(pc, vmove_yw),
+                "VU0 VMOVE test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[4] = {
+        0x2222222211111111ull,
+        0x4444444433333333ull};
+    system.ee().state().vu_vf[6] = {
+        0xBBBBBBBBAAAAAAAAull,
+        0xDDDDDDDDCCCCCCCCull};
+    ok = expect(system.ee().step(error),
+                "VU0 VMOVE macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[6].lo ==
+                 0x22222222AAAAAAAAull &&
+             system.ee().state().vu_vf[6].hi ==
+                 0x44444444CCCCCCCCull,
+             "VU0 VMOVE destination mask mismatch") && ok;
+
+    // OPMULA followed by OPMSUB with exchanged operands forms a cross product.
+    const ps2::u32 vopmula =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (0x0Bu << 6) |
+        0x3Eu;
+    const ps2::u32 vopmsub =
+        (0x12u << 26) |
+        (0x1Fu << 21) |
+        (1u << 16) |
+        (2u << 11) |
+        (3u << 6) |
+        0x2Eu;
+    ok = expect(
+             system.bus().write32(pc, vopmula) &&
+                 system.bus().write32(pc + 4u, vopmsub),
+             "VU0 outer-product instructions write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[1] = {
+        pack2(1.0f, 2.0f), pack2(3.0f, 4.0f)};
+    system.ee().state().vu_vf[2] = {
+        pack2(4.0f, 5.0f), pack2(6.0f, 7.0f)};
+    system.ee().state().vu_vf[3] = {
+        pack2(90.0f, 91.0f), pack2(92.0f, 93.0f)};
+    ok = expect(
+             system.ee().step(error) && system.ee().step(error),
+             "VU0 outer-product execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_acc[0] ==
+                 std::bit_cast<ps2::u32>(12.0f) &&
+             system.ee().state().vu_acc[1] ==
+                 std::bit_cast<ps2::u32>(12.0f) &&
+             system.ee().state().vu_acc[2] ==
+                 std::bit_cast<ps2::u32>(5.0f) &&
+             system.ee().state().vu_vf[3].lo ==
+                 pack2(-3.0f, 6.0f) &&
+             system.ee().state().vu_vf[3].hi ==
+                 pack2(-3.0f, 93.0f),
+             "VU0 outer-product accumulator or result mismatch") && ok;
+
+    // VMULAx.xz and VMADDA.xz update only selected ACC lanes.
+    const ps2::u32 vmulax_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (0x06u << 6) |
+        0x3Cu;
+    const ps2::u32 vmadda_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (0x0Au << 6) |
+        0x3Du;
+    ok = expect(
+             system.bus().write32(pc, vmulax_xz) &&
+                 system.bus().write32(pc + 4u, vmadda_xz),
+             "VU0 accumulator macro instructions write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[1] = {
+        pack2(1.0f, 2.0f), pack2(3.0f, 4.0f)};
+    system.ee().state().vu_vf[2] = {
+        pack2(4.0f, 5.0f), pack2(6.0f, 7.0f)};
+    system.ee().state().vu_acc = {
+        std::bit_cast<ps2::u32>(90.0f),
+        std::bit_cast<ps2::u32>(91.0f),
+        std::bit_cast<ps2::u32>(92.0f),
+        std::bit_cast<ps2::u32>(93.0f)};
+    ok = expect(
+             system.ee().step(error) && system.ee().step(error),
+             "VU0 accumulator macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_acc[0] ==
+                 std::bit_cast<ps2::u32>(8.0f) &&
+             system.ee().state().vu_acc[1] ==
+                 std::bit_cast<ps2::u32>(91.0f) &&
+             system.ee().state().vu_acc[2] ==
+                 std::bit_cast<ps2::u32>(30.0f) &&
+             system.ee().state().vu_acc[3] ==
+                 std::bit_cast<ps2::u32>(93.0f),
+             "VU0 accumulator arithmetic or mask mismatch") && ok;
+
+    // VMADDz.xz reads ACC and broadcasts VF[ft].z into selected lanes.
+    const ps2::u32 vmaddz_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (2u << 16) |
+        (1u << 11) |
+        (3u << 6) |
+        0x0Au;
+    ok = expect(system.bus().write32(pc, vmaddz_xz),
+                "VU0 VMADDz test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[3] = {
+        pack2(90.0f, 91.0f), pack2(92.0f, 93.0f)};
+    ok = expect(system.ee().step(error),
+                "VU0 VMADDz macro execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[3].lo ==
+                 pack2(14.0f, 91.0f) &&
+             system.ee().state().vu_vf[3].hi ==
+                 pack2(48.0f, 93.0f),
+             "VU0 VMADDz scalar, accumulator, or mask mismatch") && ok;
+
+    ok = expect(system.bus().write32(pc, 0x4A0002FFu),
+                "VU0 VNOP test write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    ok = expect(system.ee().step(error),
+                "VU0 VNOP macro execution failed") && ok;
+
+    // VFTOI4.xz and VITOF4.xz convert between float and signed 12:4.
+    const ps2::u32 vftoi4_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (6u << 16) |
+        (4u << 11) |
+        (0x05u << 6) |
+        0x3Du;
+    const ps2::u32 vitof4_xz =
+        (0x12u << 26) |
+        (0x1Au << 21) |
+        (7u << 16) |
+        (6u << 11) |
+        (0x04u << 6) |
+        0x3Du;
+    ok = expect(
+             system.bus().write32(pc, vftoi4_xz) &&
+                 system.bus().write32(pc + 4u, vitof4_xz),
+             "VU0 fixed-point conversion instructions write failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vf[4] = {
+        pack2(12.5f, 20.0f), pack2(-1.5f, 30.0f)};
+    system.ee().state().vu_vf[6] = {
+        0xAAAAAAAAAAAAAAAAull, 0xBBBBBBBBBBBBBBBBull};
+    ok = expect(
+             system.ee().step(error) && system.ee().step(error),
+             "VU0 fixed-point conversion execution failed") && ok;
+    ok = expect(
+             system.ee().state().vu_vf[6].lo ==
+                 0xAAAAAAAA000000C8ull &&
+             system.ee().state().vu_vf[6].hi ==
+                 0xBBBBBBBBFFFFFFE8ull &&
+             system.ee().state().vu_vf[7].lo ==
+                 pack2(12.5f, 0.0f) &&
+             static_cast<ps2::u32>(
+                 system.ee().state().vu_vf[7].hi) ==
+                 std::bit_cast<ps2::u32>(-1.5f),
+             "VU0 fixed-point conversion or mask mismatch") && ok;
+
     // VISWR.x vi3, (vi2) stores the low integer register halfword.
     const ps2::u32 viswr_x =
         (0x12u << 26) |
         (0x18u << 21) |
         (3u << 16) |
         (2u << 11) |
-        (0x0Eu << 6) |
+        (0x0Fu << 6) |
         0x3Fu;
     ok = expect(system.bus().write32(pc, viswr_x),
                 "VU0 VISWR test write failed") && ok;
@@ -781,14 +1037,36 @@ bool test_vu_mapping_and_cop2() {
     ok = expect(system.bus().read32(0x11004010u, value) && value == 0x1234u,
                 "VU0 VISWR integer memory store mismatch") && ok;
 
+    // This exact retail-BIOS encoding is VISWR.x vi0,(vi1), not padding.
+    system.ee().state().vu_vi[1] = 1u;
     ok = expect(system.bus().write32(pc, 0x4B000BFFu),
-                "VU0 reserved BIOS padding write failed") && ok;
+                "VU0 BIOS VISWR test write failed") && ok;
     system.ee().state().pc = pc;
     system.ee().state().next_pc = pc + 4u;
     ok = expect(system.ee().step(error),
-                "VU0 reserved BIOS padding did not advance") && ok;
-    ok = expect(system.bus().read32(0x11004010u, value) && value == 0x1234u,
-                "VU0 reserved BIOS padding changed VU memory") && ok;
+                "VU0 BIOS VISWR macro execution failed") && ok;
+    ok = expect(system.bus().read32(0x11004010u, value) && value == 0u,
+                "VU0 BIOS VISWR did not clear VU memory") && ok;
+
+    // VILWR.x vi4,(vi2) loads the low halfword from a selected VU lane.
+    const ps2::u32 vilwr_x =
+        (0x12u << 26) |
+        (0x18u << 21) |
+        (4u << 16) |
+        (2u << 11) |
+        (0x0Fu << 6) |
+        0x3Eu;
+    ok = expect(
+             system.bus().write32(0x11004020u, 0xDEADBEEFu) &&
+                 system.bus().write32(pc, vilwr_x),
+             "VU0 VILWR test setup failed") && ok;
+    system.ee().state().pc = pc;
+    system.ee().state().next_pc = pc + 4u;
+    system.ee().state().vu_vi[2] = 2u;
+    ok = expect(system.ee().step(error),
+                "VU0 VILWR macro execution failed") && ok;
+    ok = expect(system.ee().state().vu_vi[4] == 0xBEEFu,
+                "VU0 VILWR integer load mismatch") && ok;
 
     // SQC2/LQC2 round-trip a vector through EE memory.
     const ps2::u32 sqc2 =
