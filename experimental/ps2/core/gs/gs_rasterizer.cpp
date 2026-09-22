@@ -340,11 +340,33 @@ u32 GsRasterizer::shade_pixel(
         }
     }
 
+    if (texture.nonzero_samples != nullptr &&
+        (texture_rgba & 0x00FFFFFFu) != 0u) {
+        ++*texture.nonzero_samples;
+        if (texture.first_sample_x != nullptr &&
+            *texture.first_sample_x == 0xFFFFFFFFu) {
+            *texture.first_sample_x = x;
+            *texture.first_sample_y = y;
+            *texture.first_sample_rgba = texture_rgba;
+        }
+    }
+    if (texture.alpha_samples != nullptr &&
+        (texture_rgba & 0xFF000000u) != 0u) {
+        ++*texture.alpha_samples;
+    }
+    auto record_shaded = [&](u32 result) {
+        if (texture.nonzero_shaded != nullptr &&
+            (result & 0x00FFFFFFu) != 0u) {
+            ++*texture.nonzero_shaded;
+        }
+        return result;
+    };
+
     if (texture.tfx == 1u) { // DECAL
         const u32 alpha = texture.tcc
             ? (texture_rgba & 0xFF000000u)
             : (vertex_rgba & 0xFF000000u);
-        return (texture_rgba & 0x00FFFFFFu) | alpha;
+        return record_shaded((texture_rgba & 0x00FFFFFFu) | alpha);
     }
 
     const u32 vertex_alpha = channel(vertex_rgba, 24);
@@ -373,7 +395,7 @@ u32 GsRasterizer::shade_pixel(
                 : texture_alpha;
         }
         out |= alpha << 24;
-        return out;
+        return record_shaded(out);
     }
 
     // MODULATE uses GS 1.7 fixed-point color math: component*component >> 7.
@@ -385,7 +407,7 @@ u32 GsRasterizer::shade_pixel(
         ? modulate_channel(channel(texture_rgba, 24), vertex_alpha)
         : vertex_alpha;
     out |= alpha << 24;
-    return out;
+    return record_shaded(out);
 }
 
 u32 GsRasterizer::apply_fog(u32 rgba, u32 fog_color, u32 fog) {
@@ -439,6 +461,22 @@ bool GsRasterizer::draw_pixel(
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
     const u32 destination = read_frame_rgba(vram, ctx, ux, uy);
+    if (ctx.nonzero_inputs != nullptr &&
+        (rgba & 0x00FFFFFFu) != 0u) {
+        ++*ctx.nonzero_inputs;
+        if (ctx.nonzero_input_alpha != nullptr &&
+            (rgba & 0xFF000000u) != 0u) {
+            ++*ctx.nonzero_input_alpha;
+            if (ctx.first_alpha_input_rgba != nullptr &&
+                *ctx.first_alpha_input_rgba == 0u) {
+                *ctx.first_alpha_input_rgba = rgba;
+            }
+        }
+        if (ctx.first_input_rgba != nullptr &&
+            *ctx.first_input_rgba == 0u) {
+            *ctx.first_input_rgba = rgba;
+        }
+    }
 
     bool write_frame = true;
     bool write_depth = ctx.zte && !ctx.zmask;
@@ -493,17 +531,20 @@ bool GsRasterizer::draw_pixel(
 
         if (ctx.fba && !rgb_only) output |= 0x80000000u;
 
+        u32 written_color = 0;
         if (ctx.psm == 0u) {
             u32 mask = ctx.fbmask;
             if (rgb_only) mask |= 0xFF000000u;
             const u32 old = vram.read_pixel(0, ux, uy, ctx.fbp, ctx.fbw);
             output = (old & mask) | (output & ~mask);
+            written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(0, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else if (ctx.psm == 1u) {
             const u32 old = vram.read_pixel(1, ux, uy, ctx.fbp, ctx.fbw);
             const u32 mask = ctx.fbmask & 0x00FFFFFFu;
             output = (old & mask) | (output & ~mask & 0x00FFFFFFu);
+            written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(1, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else {
@@ -523,8 +564,12 @@ bool GsRasterizer::draw_pixel(
 
             packed = static_cast<u16>(
                 (old & mask) | (packed & static_cast<u16>(~mask)));
+            written_color = packed & 0x7FFFu;
             if (!vram.write_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
                 return false;
+        }
+        if (ctx.nonzero_colors != nullptr && written_color != 0u) {
+            ++*ctx.nonzero_colors;
         }
     }
 

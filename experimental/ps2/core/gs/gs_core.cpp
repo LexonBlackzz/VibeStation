@@ -261,6 +261,21 @@ void GsCore::write_register(u32 address, u64 value) {
 }
 
 
+void GsCore::record_unsupported_transfer(u32 reason) {
+    ++stats_.unsupported_transfers;
+    if (stats_.first_unsupported_transfer_count >=
+        stats_.first_unsupported_transfers.size()) {
+        return;
+    }
+    stats_.first_unsupported_transfers[
+        stats_.first_unsupported_transfer_count++] = {
+        reason,
+        registers_[kRegBitbltbuf],
+        registers_[kRegTrxpos],
+        registers_[kRegTrxreg],
+        registers_[kRegTrxdir]};
+}
+
 void GsCore::begin_host_to_local() {
     transfer_ = {};
 
@@ -281,7 +296,7 @@ void GsCore::begin_host_to_local() {
 
     if (transfer_.bw == 0 || transfer_.total_pixels == 0 ||
         !GsVram::supported_transfer_psm(transfer_.psm)) {
-        ++stats_.unsupported_transfers;
+        record_unsupported_transfer(1u);
         transfer_.active = false;
         return;
     }
@@ -312,7 +327,7 @@ void GsCore::begin_local_to_host() {
 
     if (transfer_.bw == 0 || transfer_.total_pixels == 0 ||
         !GsVram::supported_transfer_psm(transfer_.psm)) {
-        ++stats_.unsupported_transfers;
+        record_unsupported_transfer(2u);
         transfer_.active = false;
         registers_[kRegTrxdir] =
             (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
@@ -385,7 +400,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
             break;
         default:
             transfer_.active = false;
-            ++stats_.unsupported_transfers;
+            record_unsupported_transfer(3u);
             return false;
         }
 
@@ -462,7 +477,7 @@ void GsCore::execute_local_to_local() {
         !GsVram::supported_transfer_psm(spsm) ||
         !GsVram::supported_transfer_psm(dpsm) ||
         src_bpp == 0 || src_bpp != dst_bpp) {
-        ++stats_.unsupported_transfers;
+        record_unsupported_transfer(4u);
         registers_[kRegTrxdir] =
             (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
         return;
@@ -483,7 +498,7 @@ void GsCore::execute_local_to_local() {
                 spsm, sx, sy, sbp, sbw);
             if (!vram_.write_transfer_pixel(
                     dpsm, dx, dy, dbp, dbw, value)) {
-                ++stats_.unsupported_transfers;
+                record_unsupported_transfer(5u);
                 registers_[kRegTrxdir] =
                     (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
                 return;
@@ -535,7 +550,7 @@ void GsCore::consume_pending_pixels() {
             transfer_.psm, x, y, transfer_.bp, transfer_.bw, value);
         if (!stored) {
             transfer_.active = false;
-            ++stats_.unsupported_transfers;
+            record_unsupported_transfer(6u);
             return;
         }
 
@@ -724,7 +739,20 @@ void GsCore::emit_primitive(
         return;
     }
 
-    const GsRasterContext ctx = raster_context();
+    GsRasterContext ctx = raster_context();
+    ctx.texture.nonzero_samples = &stats_.nonzero_texture_samples;
+    ctx.texture.alpha_samples = &stats_.texture_alpha_samples;
+    ctx.texture.first_sample_x = &stats_.first_texture_sample_x;
+    ctx.texture.first_sample_y = &stats_.first_texture_sample_y;
+    ctx.texture.first_sample_rgba = &stats_.first_texture_sample_rgba;
+    ctx.texture.nonzero_shaded = &stats_.nonzero_shaded_samples;
+    ctx.nonzero_colors = &stats_.nonzero_raster_colors;
+    ctx.nonzero_inputs = &stats_.nonzero_raster_inputs;
+    ctx.nonzero_input_alpha = &stats_.nonzero_inputs_with_alpha;
+    ctx.first_input_rgba = &stats_.first_nonzero_input_rgba;
+    ctx.first_alpha_input_rgba = &stats_.first_alpha_input_rgba;
+    const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
+    const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
     u64 pixels = 0;
     if (prim == 0u && vertex_count >= 1u) {
         pixels = GsRasterizer::draw_point(vram_, ctx, a);
@@ -741,6 +769,43 @@ void GsCore::emit_primitive(
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
+    const u64 new_nonzero_inputs =
+        stats_.nonzero_raster_inputs - nonzero_inputs_before;
+    if (new_nonzero_inputs != 0u) {
+        if (ctx.alpha_blend) {
+            stats_.nonzero_inputs_with_blend += new_nonzero_inputs;
+        } else {
+            stats_.nonzero_inputs_without_blend += new_nonzero_inputs;
+        }
+        if (!stats_.first_nonzero_input_valid) {
+            stats_.first_nonzero_input_valid = true;
+            const u32 context =
+                static_cast<u32>((effective_prim() >> 9) & 1u);
+            stats_.first_nonzero_input_alpha =
+                registers_[kRegAlpha1 + context];
+            stats_.first_nonzero_input_test =
+                registers_[kRegTest1 + context];
+            stats_.first_nonzero_input_frame =
+                registers_[kRegFrame1 + context];
+            stats_.first_nonzero_input_prim = effective_prim();
+            stats_.first_nonzero_input_rgbaq = registers_[kRegRgbaq];
+            stats_.first_nonzero_input_tex0 =
+                registers_[kRegTex0_1 + context];
+            stats_.first_nonzero_input_texa = registers_[kRegTexa];
+            stats_.first_nonzero_input_st = registers_[kRegSt];
+            stats_.first_nonzero_input_uv = registers_[kRegUv];
+        }
+    }
+    if (!stats_.first_alpha_input_valid &&
+        stats_.nonzero_inputs_with_alpha != alpha_inputs_before) {
+        stats_.first_alpha_input_valid = true;
+        const u32 context =
+            static_cast<u32>((effective_prim() >> 9) & 1u);
+        stats_.first_alpha_input_alpha = registers_[kRegAlpha1 + context];
+        stats_.first_alpha_input_prim = effective_prim();
+        stats_.first_alpha_input_tex0 = registers_[kRegTex0_1 + context];
+        stats_.first_alpha_input_rgbaq = registers_[kRegRgbaq];
+    }
     if (ctx.texture.enabled) {
         ++stats_.textured_raster_draws;
         stats_.texture_samples += pixels;

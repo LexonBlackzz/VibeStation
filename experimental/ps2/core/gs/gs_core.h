@@ -10,6 +10,14 @@ namespace ps2 {
 
 class GsPrivileged;
 
+struct GsUnsupportedTransfer {
+    u32 reason = 0;
+    u64 bitbltbuf = 0;
+    u64 trxpos = 0;
+    u64 trxreg = 0;
+    u64 trxdir = 0;
+};
+
 struct GsStats {
     u64 gif_tags = 0;
     u64 gif_qwords = 0;
@@ -28,6 +36,8 @@ struct GsStats {
     u64 local_to_local_transfers = 0;
     u64 local_to_local_pixels = 0;
     u64 unsupported_transfers = 0;
+    std::array<GsUnsupportedTransfer, 8> first_unsupported_transfers{};
+    u32 first_unsupported_transfer_count = 0;
     u64 unsupported_packed = 0;
     u64 vertices = 0;
     u64 primitives = 0;
@@ -35,6 +45,34 @@ struct GsStats {
     u64 raster_pixels = 0;
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
+    u64 nonzero_texture_samples = 0;
+    u64 texture_alpha_samples = 0;
+    u32 first_texture_sample_x = 0xFFFFFFFFu;
+    u32 first_texture_sample_y = 0;
+    u32 first_texture_sample_rgba = 0;
+    u64 nonzero_shaded_samples = 0;
+    u64 nonzero_raster_inputs = 0;
+    u64 nonzero_inputs_with_alpha = 0;
+    u64 nonzero_raster_colors = 0;
+    u64 nonzero_inputs_with_blend = 0;
+    u64 nonzero_inputs_without_blend = 0;
+    bool first_nonzero_input_valid = false;
+    u64 first_nonzero_input_alpha = 0;
+    u64 first_nonzero_input_test = 0;
+    u64 first_nonzero_input_frame = 0;
+    u64 first_nonzero_input_prim = 0;
+    u64 first_nonzero_input_rgbaq = 0;
+    u32 first_nonzero_input_rgba = 0;
+    u64 first_nonzero_input_tex0 = 0;
+    u64 first_nonzero_input_texa = 0;
+    u64 first_nonzero_input_st = 0;
+    u64 first_nonzero_input_uv = 0;
+    bool first_alpha_input_valid = false;
+    u32 first_alpha_input_rgba = 0;
+    u64 first_alpha_input_alpha = 0;
+    u64 first_alpha_input_prim = 0;
+    u64 first_alpha_input_tex0 = 0;
+    u64 first_alpha_input_rgbaq = 0;
     u64 skipped_raster_draws = 0;
     u64 signal_events = 0;
     u64 finish_events = 0;
@@ -110,6 +148,7 @@ private:
     void execute_local_to_local();
     void consume_image_qword(u64 lo, u64 hi);
     void consume_pending_pixels();
+    void record_unsupported_transfer(u32 reason);
     void submit_vertex(u64 xyz, bool xyzf);
     void emit_primitive(
         const GsRasterVertex& a,

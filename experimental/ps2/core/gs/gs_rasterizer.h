@@ -47,6 +47,12 @@ struct GsTextureState {
     u32 ta0 = 0;
     u32 ta1 = 0;
     bool aem = false;
+    u64* nonzero_samples = nullptr; // Optional trace counter.
+    u64* alpha_samples = nullptr; // Optional trace counter.
+    u32* first_sample_x = nullptr;
+    u32* first_sample_y = nullptr;
+    u32* first_sample_rgba = nullptr;
+    u64* nonzero_shaded = nullptr; // Optional trace counter.
 };
 
 struct GsRasterContext {
@@ -91,6 +97,11 @@ struct GsRasterContext {
     u64 dimx = 0;
 
     GsTextureState texture{};
+    u64* nonzero_colors = nullptr; // Optional trace counter.
+    u64* nonzero_inputs = nullptr; // Optional trace counter.
+    u64* nonzero_input_alpha = nullptr; // Optional trace counter.
+    u32* first_input_rgba = nullptr; // Optional trace sample.
+    u32* first_alpha_input_rgba = nullptr; // Optional trace sample.
 };
 
 class GsRasterizer {

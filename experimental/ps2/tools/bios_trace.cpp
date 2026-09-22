@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -597,6 +598,26 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_PRIMITIVES=" << gs_stats.primitives
         << " GS_RASTER_DRAWS=" << gs_stats.raster_draws
         << " GS_RASTER_PIXELS=" << gs_stats.raster_pixels
+        << " GS_TEXTURED_DRAWS=" << gs_stats.textured_raster_draws
+        << " GS_TEXTURE_SAMPLES=" << gs_stats.texture_samples
+        << " GS_NONZERO_TEXTURE_SAMPLES="
+        << gs_stats.nonzero_texture_samples
+        << " GS_TEXTURE_ALPHA_SAMPLES="
+        << gs_stats.texture_alpha_samples
+        << " GS_NONZERO_SHADED_SAMPLES="
+        << gs_stats.nonzero_shaded_samples
+        << " GS_NONZERO_RASTER_INPUTS="
+        << gs_stats.nonzero_raster_inputs
+        << " GS_NONZERO_INPUTS_WITH_ALPHA="
+        << gs_stats.nonzero_inputs_with_alpha
+        << " GS_NONZERO_RASTER_COLORS="
+        << gs_stats.nonzero_raster_colors
+        << " GS_NONZERO_INPUTS_BLEND="
+        << gs_stats.nonzero_inputs_with_blend
+        << " GS_NONZERO_INPUTS_NO_BLEND="
+        << gs_stats.nonzero_inputs_without_blend
+        << " GS_HOST_TO_LOCAL_PIXELS=" << gs_stats.host_to_local_pixels
+        << " GS_LOCAL_TO_LOCAL_PIXELS=" << gs_stats.local_to_local_pixels
         << " GS_UNSUPPORTED_TRANSFERS=" << gs_stats.unsupported_transfers
         << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
         << '\n';
@@ -613,6 +634,21 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_TRANSFER_PSM=0x" << std::hex << std::uppercase
         << gs.transfer_psm() << std::dec
         << '\n';
+
+    for (ps2::u32 i = 0;
+         i < gs_stats.first_unsupported_transfer_count;
+         ++i) {
+        const auto& failed = gs_stats.first_unsupported_transfers[i];
+        std::cout
+            << "GS_UNSUPPORTED_TRANSFER[" << i << "] REASON="
+            << failed.reason
+            << " BITBLTBUF=0x" << std::hex << std::uppercase
+            << failed.bitbltbuf
+            << " TRXPOS=0x" << failed.trxpos
+            << " TRXREG=0x" << failed.trxreg
+            << " TRXDIR=0x" << failed.trxdir
+            << std::dec << '\n';
+    }
 
     std::cout
         << "GS_DRAW_REGS"
@@ -631,7 +667,72 @@ void print_state(const ps2::Ps2System& system) {
         << " SCISSOR_2=0x" << gs.register_value(0x41u)
         << " FRAME_1=0x" << gs.register_value(0x4Cu)
         << " FRAME_2=0x" << gs.register_value(0x4Du)
+        << " ALPHA_1=0x" << gs.register_value(0x42u)
+        << " TEST_1=0x" << gs.register_value(0x47u)
+        << " PRMODECONT=0x" << gs.register_value(0x1Au)
+        << " PRMODE=0x" << gs.register_value(0x1Bu)
+        << " COLCLAMP=0x" << gs.register_value(0x46u)
         << std::dec << '\n';
+
+    if (gs_stats.first_nonzero_input_valid) {
+        std::cout
+            << "GS_FIRST_COLOR_INPUT ALPHA=0x" << std::hex
+            << std::uppercase << gs_stats.first_nonzero_input_alpha
+            << " TEST=0x" << gs_stats.first_nonzero_input_test
+            << " FRAME=0x" << gs_stats.first_nonzero_input_frame
+            << " PRIM=0x" << gs_stats.first_nonzero_input_prim
+            << " RGBAQ=0x" << gs_stats.first_nonzero_input_rgbaq
+            << " INPUT_RGBA=0x" << gs_stats.first_nonzero_input_rgba
+            << " TEX0=0x" << gs_stats.first_nonzero_input_tex0
+            << " TEXA=0x" << gs_stats.first_nonzero_input_texa
+            << " ST=0x" << gs_stats.first_nonzero_input_st
+            << " UV=0x" << gs_stats.first_nonzero_input_uv
+            << std::dec << '\n';
+
+        std::cout
+            << "GS_FIRST_TEXTURE_SAMPLE X="
+            << gs_stats.first_texture_sample_x
+            << " Y=" << gs_stats.first_texture_sample_y
+            << " RGBA=0x" << std::hex << std::uppercase
+            << gs_stats.first_texture_sample_rgba
+            << std::dec << '\n';
+
+        const ps2::u64 tex0 = gs_stats.first_nonzero_input_tex0;
+        const ps2::u32 bp = static_cast<ps2::u32>(tex0 & 0x3FFFu);
+        const ps2::u32 bw = static_cast<ps2::u32>((tex0 >> 14) & 0x3Fu);
+        const ps2::u32 psm = static_cast<ps2::u32>((tex0 >> 20) & 0x3Fu);
+        const ps2::u32 width = 1u << ((tex0 >> 26) & 0xFu);
+        const ps2::u32 height = 1u << ((tex0 >> 30) & 0xFu);
+        if (bw != 0u && width <= 1024u && height <= 1024u &&
+            ps2::GsVram::supported_color_psm(psm)) {
+            ps2::u64 color_pixels = 0;
+            ps2::u64 alpha_pixels = 0;
+            for (ps2::u32 y = 0; y < height; ++y) {
+                for (ps2::u32 x = 0; x < width; ++x) {
+                    const ps2::u32 raw = gs.vram().read_pixel(
+                        psm, x, y, bp, bw);
+                    if ((raw & 0x00FFFFFFu) != 0u) ++color_pixels;
+                    if ((raw & 0xFF000000u) != 0u) ++alpha_pixels;
+                }
+            }
+            std::cout
+                << "GS_FIRST_TEXTURE COLOR_PIXELS=" << color_pixels
+                << " ALPHA_PIXELS=" << alpha_pixels
+                << " WIDTH=" << width
+                << " HEIGHT=" << height
+                << '\n';
+        }
+    }
+    if (gs_stats.first_alpha_input_valid) {
+        std::cout
+            << "GS_FIRST_ALPHA_INPUT ALPHA=0x" << std::hex
+            << std::uppercase << gs_stats.first_alpha_input_alpha
+            << " PRIM=0x" << gs_stats.first_alpha_input_prim
+            << " TEX0=0x" << gs_stats.first_alpha_input_tex0
+            << " RGBAQ=0x" << gs_stats.first_alpha_input_rgbaq
+            << " INPUT_RGBA=0x" << gs_stats.first_alpha_input_rgba
+            << std::dec << '\n';
+    }
 
     const auto& display = system.gs_display();
     ps2::u64 framebuffer_hash = 1469598103934665603ull;
@@ -676,6 +777,58 @@ void print_state(const ps2::Ps2System& system) {
         << " PCRTC_DISPLAY2=0x" << display2
         << " PCRTC_BGCOLOR=0x" << bgcolor
         << std::dec << '\n';
+
+    if (display.valid()) {
+        ps2::u64 nonzero_vram_bytes = 0;
+        for (const ps2::u8 byte : gs.vram().data()) {
+            if (byte != 0u) ++nonzero_vram_bytes;
+        }
+        auto count_nonzero = [&](ps2::u32 bp, ps2::u32 bw, ps2::u32 psm) {
+            ps2::u64 count = 0;
+            for (ps2::u32 y = 0; y < display.height(); ++y) {
+                for (ps2::u32 x = 0; x < display.width(); ++x) {
+                    if ((gs.vram().read_pixel(psm, x, y, bp, bw) &
+                         0x00FFFFFFu) != 0u) {
+                        ++count;
+                    }
+                }
+            }
+            return count;
+        };
+        const ps2::u64 frame1 = gs.register_value(0x4Cu);
+        const ps2::u32 draw_bp = static_cast<ps2::u32>(frame1 & 0x1FFu) << 5;
+        const ps2::u32 draw_bw = static_cast<ps2::u32>((frame1 >> 16) & 0x3Fu);
+        const ps2::u32 draw_psm = static_cast<ps2::u32>((frame1 >> 24) & 0x3Fu);
+        const ps2::u32 display_bp = static_cast<ps2::u32>(dispfb2 & 0x1FFu) << 5;
+        const ps2::u32 display_bw = static_cast<ps2::u32>((dispfb2 >> 9) & 0x3Fu);
+        const ps2::u32 display_psm = static_cast<ps2::u32>((dispfb2 >> 15) & 0x1Fu);
+        std::cout
+            << "GS_DRAW_FRAME_NONZERO="
+            << count_nonzero(draw_bp, draw_bw, draw_psm)
+            << " GS_DISPLAY_FRAME_NONZERO="
+            << count_nonzero(display_bp, display_bw, display_psm)
+            << " GS_VRAM_NONZERO_BYTES=" << nonzero_vram_bytes
+            << '\n';
+    }
+}
+
+bool write_display_ppm(
+    const char* path,
+    const ps2::GsDisplay& display) {
+    if (path == nullptr || !display.valid()) return false;
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    out << "P6\n" << display.width() << ' ' << display.height()
+        << "\n255\n";
+    for (const ps2::u32 pixel : display.rgba8()) {
+        const char rgb[3] = {
+            static_cast<char>(pixel),
+            static_cast<char>(pixel >> 8),
+            static_cast<char>(pixel >> 16),
+        };
+        out.write(rgb, sizeof(rgb));
+    }
+    return static_cast<bool>(out);
 }
 
 } // namespace
@@ -684,12 +837,14 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
-               "[ee-instruction-budget]\n";
+               "[ee-instruction-budget] [display.ppm]\n";
         return 64;
     }
 
     constexpr ps2::u64 kDefaultBudget = 20'000'000;
-    constexpr ps2::u64 kChunk = 100'000;
+    // A million EE instructions is well under one emulated video frame, and
+    // avoids repeatedly decoding a full 640x448 display for tiny chunks.
+    constexpr ps2::u64 kChunk = 1'000'000;
 
     const ps2::u64 budget =
         parse_budget(argc >= 3 ? argv[2] : nullptr, kDefaultBudget);
@@ -707,6 +862,7 @@ int main(int argc, char** argv) {
     }
 
     ps2::u64 remaining = budget;
+    bool first_visible_reported = false;
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
             remaining < kChunk ? remaining : kChunk;
@@ -717,6 +873,16 @@ int main(int argc, char** argv) {
         remaining -= ran;
         system.refresh_display();
 
+        if (!first_visible_reported &&
+            system.gs_display().nonzero_pixel_count() != 0u) {
+            first_visible_reported = true;
+            std::cerr
+                << "TRACE_FIRST_VISIBLE EE=" << (budget - remaining)
+                << " NONZERO="
+                << system.gs_display().nonzero_pixel_count()
+                << '\n';
+        }
+
         if (!error.empty()) {
             std::cerr << "TRACE_ERROR=" << error << '\n';
             print_state(system);
@@ -725,7 +891,7 @@ int main(int argc, char** argv) {
 
         const ps2::u64 executed = budget - remaining;
         if (executed >= 200'000'000u &&
-            (executed % 100'000u) == 0u) {
+            (executed % 10'000'000u) == 0u) {
             const auto& stats = system.gs_core().stats();
             std::cerr
                 << "TRACE_PROGRESS EE=" << executed
@@ -750,6 +916,14 @@ int main(int argc, char** argv) {
     }
 
     print_state(system);
+
+    if (argc >= 4) {
+        if (!write_display_ppm(argv[3], system.gs_display())) {
+            std::cerr << "DISPLAY_DUMP_ERROR=" << argv[3] << '\n';
+        } else {
+            std::cout << "DISPLAY_DUMP=" << argv[3] << '\n';
+        }
+    }
 
     if (system.halted()) {
         std::cout << "HALT_REASON=" << system.halt_reason() << '\n';
