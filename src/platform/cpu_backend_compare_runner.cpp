@@ -152,6 +152,7 @@ struct CpuCompareCase {
   bool require_v4_native_entry_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_native_chain_when_available = false;
+  bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -3673,6 +3674,22 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_bgez.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_bgez);
 
+  CpuCompareCase v4_uncached_delay_exception_fallback{};
+  v4_uncached_delay_exception_fallback.name =
+      "v4_uncached_branch_delay_overflow_fallback";
+  v4_uncached_delay_exception_fallback.start_pc = 0xA0010000u;
+  v4_uncached_delay_exception_fallback.initial_gpr[1] = 1u;
+  v4_uncached_delay_exception_fallback.initial_gpr[2] = 0x7FFFFFFFu;
+  v4_uncached_delay_exception_fallback.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken
+      enc_i(0x08, 2, 2, 1), // ADDI overflow in the delay slot
+      0,
+  };
+  v4_uncached_delay_exception_fallback.instructions = 2u;
+  v4_uncached_delay_exception_fallback.require_v4_clean_fallback_when_available =
+      true;
+  cases.push_back(v4_uncached_delay_exception_fallback);
+
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
       "v4_uncached_native_incoming_load_delay";
@@ -3915,6 +3932,18 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       const char *native_check = "not_required";
 
       if (mode == CpuExecutionMode::X64JitV4 &&
+          test_case.require_v4_clean_fallback_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool clean_fallback =
+              result.stats.native_block_entries == 0 &&
+              result.stats.native_instructions == 0;
+          native_check = clean_fallback ? "v4_clean_fallback"
+                                        : "v4_unexpected_native";
+          native_check_pass = clean_fallback;
+        }
+      } else if (mode == CpuExecutionMode::X64JitV4 &&
           (test_case.require_v4_native_entry_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_native_chain_when_available)) {
