@@ -117,6 +117,32 @@ struct V4DecodedLoad {
   s32 simm = 0;
 };
 
+enum class V4StoreOp : u8 {
+  Sb,
+  Sh,
+  Sw,
+};
+
+struct V4DecodedStore {
+  V4StoreOp op = V4StoreOp::Sw;
+  u8 rs = 0;
+  u8 rt = 0;
+  s32 simm = 0;
+};
+
+bool decode_v4_store(u32 bits, V4DecodedStore &out) {
+  switch ((bits >> 26) & 0x3Fu) {
+  case 0x28: out.op = V4StoreOp::Sb; break;
+  case 0x29: out.op = V4StoreOp::Sh; break;
+  case 0x2B: out.op = V4StoreOp::Sw; break;
+  default: return false;
+  }
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.simm = static_cast<s32>(static_cast<s16>(bits & 0xFFFFu));
+  return true;
+}
+
 bool decode_v4_load(u32 bits, V4DecodedLoad &out) {
   switch ((bits >> 26) & 0x3Fu) {
   case 0x20: out.op = V4LoadOp::Lb; break;
@@ -221,13 +247,18 @@ struct V4NativeState {
   V4DispatchPage **dispatch_top = nullptr;
   const u32 *icache_generations = nullptr;
   const u32 *code_page_generations = nullptr;
+  const u64 *code_page_bits = nullptr;
   void *block_return = nullptr;
+  Cpu *cpu = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
   u32 mapped_main_ram_size = 0;
   u32 memory_fastpath_allowed = 0;
   u32 block_bail = 0;
   u32 memory_entries = 0;
+  u32 store_entries = 0;
+  u32 store_addr = 0;
+  u32 cop0_sr = 0;
   u32 cache_epoch = 0;
   u32 pc = 0;
   u32 last_pc = 0;
@@ -348,6 +379,12 @@ struct V4DispatchPage {
 void emit_v4_block_return(Xbyak::CodeGenerator &code) {
   code.jmp(code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_return))]);
+}
+
+void v4_notify_direct_store(Cpu *cpu, u32 addr, u32 size_bytes) {
+  if (cpu != nullptr) {
+    cpu->notify_code_write(addr, size_bytes);
+  }
 }
 
 void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
@@ -910,6 +947,164 @@ V4NativeFn compile_v4_load(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+
+V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
+                            u32 start_pc, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 2048u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label ram, scratch, stored, bail;
+
+  // Cache-isolated stores target the guest I-cache rather than RAM.
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 16);
+  code.jnz(bail);
+
+  // Capture both operands before retiring an incoming delayed load.
+  emit_read_guest(code, code.eax, store.rs);
+  code.add(code.eax, static_cast<u32>(store.simm));
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))],
+      code.eax);
+  emit_read_guest(code, code.r8d, store.rt);
+
+  if (store.op == V4StoreOp::Sh) {
+    code.test(code.eax, 1u);
+    code.jnz(bail);
+  } else if (store.op == V4StoreOp::Sw) {
+    code.test(code.eax, 3u);
+    code.jnz(bail);
+  }
+
+  code.mov(code.edx, code.eax);
+  code.and_(code.edx, 0x1FFFFFFFu);
+
+  // Never directly write a physical page which has translated code. That path
+  // must go through System/Cpu so SMC invalidation and cache semantics remain
+  // centralized and exact.
+  code.mov(code.r9d, code.edx);
+  code.shr(code.r9d, kV4PhysPageShift);
+  code.mov(code.ecx, code.r9d);
+  code.shr(code.r9d, 6u);
+  code.and_(code.ecx, 63u);
+  code.mov(code.rax, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
+  code.test(code.rax, code.rax);
+  code.jz(bail);
+  code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+  code.shr(code.rax, code.cl);
+  code.test(code.al, 1u);
+  code.jnz(bail);
+
+  code.cmp(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+  code.jb(ram);
+  code.cmp(code.edx, 0x1F800000u);
+  code.jb(bail);
+  code.cmp(code.edx, 0x1F801000u);
+  code.jae(bail);
+
+  code.L(scratch);
+  code.sub(code.edx, 0x1F800000u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  switch (store.op) {
+  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
+  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  }
+  code.xor_(code.r9d, code.r9d);
+  code.jmp(stored);
+
+  code.L(ram);
+  code.and_(code.edx, psx::RAM_SIZE - 1u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  switch (store.op) {
+  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
+  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  }
+  code.mov(code.r9d, 1u);
+
+  code.L(stored);
+
+  // Keep guest I-cache visibility and all JIT invalidation hooks identical to
+  // System::write*. Diagnostics which need per-write callbacks disable the
+  // memory fast path before we get here.
+#if defined(_WIN32)
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu))]);
+  code.mov(code.edx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))]);
+  code.mov(code.r8d, store.op == V4StoreOp::Sb ? 1u
+                     : (store.op == V4StoreOp::Sh ? 2u : 4u));
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu))]);
+  code.mov(code.esi, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))]);
+  code.mov(code.edx, store.op == V4StoreOp::Sb ? 1u
+                     : (store.op == V4StoreOp::Sh ? 2u : 4u));
+#endif
+  code.mov(code.rax,
+           reinterpret_cast<size_t>(&v4_notify_direct_store));
+  code.call(code.rax);
+
+  // C++ may clobber caller-saved registers used by translated fragments.
+  code.mov(code.r11, code.rbx);
+  code.mov(code.r10, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+
+  emit_retire_incoming_load(code, 0u);
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  // store baseline is 2 cycles, plus one for main RAM.
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+      code.r9d);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  emit_v4_block_return(code);
+
+  code.L(bail);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4ResidentDispatchFn install_v4_resident_dispatch(
     V4CodeArena &arena, void *&block_return) {
   using namespace Xbyak;
@@ -1295,6 +1490,11 @@ struct CpuJitV4Backend::Impl {
     const bool simple_load =
         count == 0u && read_visible(start_pc, load_bits) &&
         decode_v4_load(load_bits, load);
+    V4DecodedStore store{};
+    u32 store_bits = 0u;
+    const bool simple_store =
+        count == 0u && read_visible(start_pc, store_bits) &&
+        decode_v4_store(store_bits, store);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> load_tail{};
     u32 load_tail_count = 0u;
     if (simple_load) {
@@ -1309,7 +1509,7 @@ struct CpuJitV4Backend::Impl {
       }
     }
 
-    if (count == 0u && !simple_control && !simple_load) {
+    if (count == 0u && !simple_control && !simple_load && !simple_store) {
       block->interpreter_only = true;
       install(start_pc, block);
       ++stats.interpreter_only_blocks;
@@ -1327,6 +1527,8 @@ struct CpuJitV4Backend::Impl {
       } else if (simple_load) {
         entry = compile_v4_load(arena, load, load_tail, load_tail_count,
                                 start_pc, block->code_size);
+      } else if (simple_store) {
+        entry = compile_v4_store(arena, store, start_pc, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, block->code_size);
@@ -1339,12 +1541,14 @@ struct CpuJitV4Backend::Impl {
       block->fn = entry;
       block->instruction_count =
           simple_control ? count + 2u
-                         : (simple_load ? load_tail_count + 1u : count);
+                         : (simple_load ? load_tail_count + 1u
+                                        : (simple_store ? 1u : count));
       block->max_cycles =
           simple_control ? count + 3u
-                         : (simple_load ? load_tail_count + 6u : count);
+                         : (simple_load ? load_tail_count + 6u
+                                        : (simple_store ? 3u : count));
       block->has_control = simple_control;
-      block->has_memory = simple_load;
+      block->has_memory = simple_load || simple_store;
     } catch (...) {
       --block_count;
       ++stats.native_compile_failures;
@@ -1353,7 +1557,8 @@ struct CpuJitV4Backend::Impl {
 
     const u32 translated_count =
         simple_control ? count + 2u
-                       : (simple_load ? load_tail_count + 1u : count);
+                       : (simple_load ? load_tail_count + 1u
+                                      : (simple_store ? 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
       code_pages.mark_address(psx::mask_address(start_pc + i * 4u));
     }
@@ -1363,7 +1568,7 @@ struct CpuJitV4Backend::Impl {
     ++stats.native_blocks_compiled;
     if (simple_control) {
       ++stats.native_branch_tail_blocks_compiled;
-    } else if (simple_load) {
+    } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
     } else {
       ++stats.native_alu_blocks_compiled;
@@ -1524,12 +1729,15 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.dispatch_top = impl_->dispatch_top.get();
     native.icache_generations = cpu_.icache_generation_.data();
     native.code_page_generations = impl_->page_generations.data();
+    native.code_page_bits = impl_->code_pages.data();
     native.block_return = impl_->resident_block_return;
+    native.cpu = &cpu_;
     native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
     native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
         (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
+    native.cop0_sr = cpu_.cop0_sr_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
     native.pending_load_reg = cpu_.load_.reg;
@@ -1565,6 +1773,7 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     result.instructions += native.instructions;
     stats_.native_block_entries += native.block_entries;
     stats_.native_memory_fastpath_loads += native.memory_entries;
+    stats_.native_memory_fastpath_stores += native.store_entries;
     if (block->has_control) {
       ++stats_.native_branch_tail_entries;
     } else {
