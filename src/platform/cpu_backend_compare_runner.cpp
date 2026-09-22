@@ -3881,10 +3881,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_store_smc.name = "v4_uncached_store_code_page_fallback";
   v4_uncached_store_smc.start_pc = 0xA0010000u;
   v4_uncached_store_smc.initial_gpr[1] =
-      v4_uncached_store_smc.start_pc + 0x40u;
+      v4_uncached_store_smc.start_pc + 0x0Cu;
   v4_uncached_store_smc.initial_gpr[2] = 0xCAFEBABEu;
-  v4_uncached_store_smc.memory.push_back({0x00010040u, 0u});
-  v4_uncached_store_smc.compare_memory_addresses.push_back(0x00010040u);
+  v4_uncached_store_smc.memory.push_back({0x0001000Cu, 0u});
+  v4_uncached_store_smc.compare_memory_addresses.push_back(0x0001000Cu);
   v4_uncached_store_smc.program = {
       enc_i(0x2B, 1, 2, 0),
   };
