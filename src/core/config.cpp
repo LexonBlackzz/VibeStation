@@ -66,6 +66,10 @@ CpuExecutionMode parse_cpu_mode(const std::string& v, CpuExecutionMode fallback)
         lower == "dynarecv3" || lower == "recompilerv3") {
         return CpuExecutionMode::X64JitV3;
     }
+    if (lower == "5" || lower == "x64jitv4" || lower == "jitv4" ||
+        lower == "dynarecv4" || lower == "recompilerv4") {
+        return CpuExecutionMode::X64JitV4;
+    }
     if (lower == "0" || lower == "interpreter" || lower == "interp") {
         return CpuExecutionMode::Interpreter;
     }
@@ -78,6 +82,7 @@ int cpu_mode_to_int(CpuExecutionMode mode) {
     case CpuExecutionMode::X64Jit: return 2;
     case CpuExecutionMode::X64JitV2: return 3;
     case CpuExecutionMode::X64JitV3: return 4;
+    case CpuExecutionMode::X64JitV4: return 5;
     case CpuExecutionMode::Interpreter:
     default: return 0;
     }
