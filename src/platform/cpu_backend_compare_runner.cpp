@@ -125,6 +125,7 @@ struct CpuCompareNativeTierMode {
 
 struct CpuCompareCase {
   const char *name = "";
+  u32 start_pc = kCpuComparePc;
   std::vector<u32> program;
   std::vector<CpuCompareMemoryWord> memory;
   std::vector<u32> compare_memory_addresses;
@@ -146,6 +147,8 @@ struct CpuCompareCase {
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
   bool require_v2_native_entry_when_available = false;
+  bool require_v4_native_entry_when_available = false;
+  bool require_v4_native_branch_entry_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -324,6 +327,8 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "X64JitV2";
   case CpuExecutionMode::X64JitV3:
     return "X64JitV3";
+  case CpuExecutionMode::X64JitV4:
+    return "X64JitV4";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -378,7 +383,7 @@ static void log_cpu_compare_program(const CpuCompareCase &test_case) {
   for (size_t i = 0; i < test_case.program.size(); ++i) {
     LOG_ERROR("CPU_COMPARE_PROGRAM name=%s index=%u pc=0x%08X opcode=0x%08X",
               test_case.name, static_cast<unsigned>(i),
-              kCpuComparePc + static_cast<u32>(i * 4u),
+              test_case.start_pc + static_cast<u32>(i * 4u),
               test_case.program[i]);
   }
 }
@@ -532,7 +537,8 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   sys->reset();
 
   for (size_t i = 0; i < test_case.program.size(); ++i) {
-    sys->write32((kCpuComparePc & 0x1FFFFFFFu) + static_cast<u32>(i * 4u),
+    sys->write32((test_case.start_pc & 0x1FFFFFFFu) +
+                     static_cast<u32>(i * 4u),
                  test_case.program[i]);
   }
   for (const CpuCompareMemoryWord &word : test_case.memory) {
@@ -547,8 +553,8 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   }
 
   CpuDebugState initial = sys->cpu().debug_state();
-  initial.pc = kCpuComparePc;
-  initial.next_pc = kCpuComparePc + 4u;
+  initial.pc = test_case.start_pc;
+  initial.next_pc = test_case.start_pc + 4u;
   initial.current_pc = 0;
   initial.cycles = 0;
   initial.load_reg = 0;
@@ -586,7 +592,7 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_x64_jit_branch_tail_blacklist.clear();
   if (mode == CpuExecutionMode::X64Jit &&
       test_case.blacklist_branch_tail_for_x64) {
-    g_cpu_x64_jit_branch_tail_blacklist.push_back(kCpuComparePc);
+    g_cpu_x64_jit_branch_tail_blacklist.push_back(test_case.start_pc);
   }
   g_cpu_x64_jit_all_native_cli_override = true;
   g_cpu_x64_jit_all_native_cli_value =
@@ -3496,6 +3502,52 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   ram_invalidation.instructions = 3;
   cases.push_back(ram_invalidation);
 
+  // V4 Phase-1 smoke gates use uncached KSEG1 addresses so they exercise the
+  // new native path without bypassing the still-pending guest I-cache model.
+  CpuCompareCase v4_uncached_alu{};
+  v4_uncached_alu.name = "v4_uncached_native_alu";
+  v4_uncached_alu.start_pc = 0xA0010000u;
+  v4_uncached_alu.initial_gpr[1] = 7u;
+  v4_uncached_alu.program = {
+      enc_i(0x09, 1, 2, 5),
+      enc_i(0x0D, 2, 3, 0x0030),
+      enc_r(0, 3, 4, 1, 0x00),
+  };
+  pad_cpu_compare_program(v4_uncached_alu, 32u);
+  v4_uncached_alu.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_alu);
+
+  CpuCompareCase v4_uncached_beq{};
+  v4_uncached_beq.name = "v4_uncached_native_beq_delay";
+  v4_uncached_beq.start_pc = 0xA0010000u;
+  v4_uncached_beq.initial_gpr[1] = 0x1234u;
+  v4_uncached_beq.initial_gpr[2] = 0x1234u;
+  v4_uncached_beq.program = {
+      enc_i(0x04, 1, 2, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_beq.instructions = 2u;
+  v4_uncached_beq.require_v4_native_entry_when_available = true;
+  v4_uncached_beq.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_beq);
+
+  CpuCompareCase v4_uncached_jal{};
+  v4_uncached_jal.name = "v4_uncached_native_jal_link_delay";
+  v4_uncached_jal.start_pc = 0xA0010000u;
+  v4_uncached_jal.program = {
+      enc_j(0x03, v4_uncached_jal.start_pc + 0x10u),
+      enc_r(31, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jal.instructions = 2u;
+  v4_uncached_jal.require_v4_native_entry_when_available = true;
+  v4_uncached_jal.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_jal);
+
   append_deterministic_random_compare_cases(cases);
   return cases;
 }
@@ -3551,7 +3603,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   LOG_INFO(
-      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3%s",
+      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3,X64JitV4%s",
       memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
@@ -3563,12 +3615,13 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 5> modes = {
+  const std::array<CpuExecutionMode, 6> modes = {
       CpuExecutionMode::Interpreter,
       CpuExecutionMode::DecodedBlockInterpreter,
       CpuExecutionMode::X64Jit,
       CpuExecutionMode::X64JitV2,
       CpuExecutionMode::X64JitV3,
+      CpuExecutionMode::X64JitV4,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
@@ -3684,6 +3737,28 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           cpu_compare_expected_state_pass(test_case, mode, result.state);
       bool native_check_pass = true;
       const char *native_check = "not_required";
+
+      if (mode == CpuExecutionMode::X64JitV4 &&
+          (test_case.require_v4_native_entry_when_available ||
+           test_case.require_v4_native_branch_entry_when_available)) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool native_entered =
+              result.stats.native_blocks_compiled != 0 &&
+              result.stats.native_block_entries != 0 &&
+              result.stats.native_instructions != 0 &&
+              result.stats.native_code_bytes != 0;
+          const bool branch_entered =
+              !test_case.require_v4_native_branch_entry_when_available ||
+              result.stats.native_branch_tail_entries != 0;
+          native_check =
+              !native_entered ? "v4_native_missing"
+                              : (!branch_entered ? "v4_branch_missing"
+                                                 : "v4_native_entered");
+          native_check_pass = native_entered && branch_entered;
+        }
+      }
 
       if (mode == CpuExecutionMode::X64JitV2 &&
           test_case.require_v2_native_entry_when_available) {
@@ -4267,7 +4342,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
     return 1;
   }
   LOG_INFO(
-      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3");
+      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3,X64JitV4");
   return 0;
 }
 } // namespace
