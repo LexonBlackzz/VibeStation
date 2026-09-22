@@ -3762,6 +3762,24 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_incoming_load_cancel);
 
+  CpuCompareCase v4_uncached_load_widths{};
+  v4_uncached_load_widths.name = "v4_uncached_native_load_widths";
+  v4_uncached_load_widths.start_pc = 0xA0010000u;
+  v4_uncached_load_widths.initial_gpr[1] = 0x80012000u;
+  // Little-endian bytes: 01 7F FF 80.
+  v4_uncached_load_widths.memory.push_back({0x00012000u, 0x80FF7F01u});
+  v4_uncached_load_widths.program = {
+      enc_i(0x20, 1, 2, 2), // LB   -> FFFFFFFF
+      enc_i(0x24, 1, 3, 3), // LBU  -> 00000080
+      enc_i(0x21, 1, 4, 2), // LH   -> FFFF80FF
+      enc_i(0x25, 1, 5, 2), // LHU  -> 000080FF
+      0,
+  };
+  v4_uncached_load_widths.instructions = 5u;
+  v4_uncached_load_widths.require_v4_native_entry_when_available = true;
+  v4_uncached_load_widths.require_v4_native_load_entry_when_available = true;
+  cases.push_back(v4_uncached_load_widths);
+
   CpuCompareCase v4_uncached_resident_chain{};
   v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
   v4_uncached_resident_chain.start_pc = 0xA0010000u;
