@@ -64,6 +64,7 @@ private:
     bool show_settings_ = false;
     bool show_about_ = false;
     bool emulation_running_ = false;
+    bool bootstrap_swap_interval_disabled_ = false;
     std::chrono::steady_clock::time_point speed_sample_time_{};
     u64 speed_sample_instructions_ = 0;
     double ee_instructions_per_second_ = 0.0;

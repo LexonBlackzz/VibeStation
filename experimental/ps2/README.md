@@ -78,6 +78,13 @@ renderer, not a fully accurate PS2. The later Sony/PlayStation 2 logo sequence
 and BIOS chime have not been verified. SPU2 audio synthesis/output is not yet
 implemented.
 
+The Release UI boot path skips redundant EE-to-VU0 state copies while VIF0
+DMA is idle, and uses longer, unsynchronized host frames only until the first
+visible BIOS pixels. On the same Windows host, the 215-million-instruction
+window capture fell from about 58 to 37 seconds, with byte-identical output.
+This is still an experimental, instruction-driven bootstrap rather than a
+full-speed PS2 emulator.
+
 To build only the headless core/tests without SDL/ImGui dependencies:
 
 ```bash

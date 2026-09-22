@@ -1397,25 +1397,32 @@ void Ps2App::update_emulation() {
     if (!emulation_running_ ||
         !system_.bios_started() ||
         system_.halted()) {
+        if (bootstrap_swap_interval_disabled_ &&
+            SDL_GL_SetSwapInterval(1) == 0) {
+            bootstrap_swap_interval_disabled_ = false;
+        }
         return;
     }
 
-    // Keep the desktop UI responsive while giving the interpreter enough
-    // runway to get through the retail BIOS boot sequence.  The old fixed
-    // 20k-instruction slice made one emulated NTSC field take hundreds of
-    // host frames before the display could even be sampled.
+    // During blank-screen bootstrap, run longer slices and avoid waiting for
+    // VSync on frames that cannot yet show BIOS pixels. Restore normal frame
+    // pacing as soon as the composed display becomes visible.
     constexpr u64 kChunkInstructions = 8192;
     constexpr u64 kNormalMaxInstructionsPerFrame = 500000;
-    constexpr u64 kBootstrapMaxInstructionsPerFrame = 1500000;
+    constexpr u64 kBootstrapMaxInstructionsPerFrame = 5000000;
     constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(8);
     constexpr auto kBootstrapCpuTimeSlice =
-        std::chrono::milliseconds(14);
+        std::chrono::milliseconds(50);
 
     // PCRTC can become valid while it still scans an untouched black buffer.
     // Keep the larger bootstrap slice until the composed display actually
     // contains visible RGB data; validity alone is not a first-frame signal.
     const bool bootstrap_turbo =
         !system_.gs_display().has_visible_pixels();
+    if (bootstrap_turbo != bootstrap_swap_interval_disabled_ &&
+        SDL_GL_SetSwapInterval(bootstrap_turbo ? 0 : 1) == 0) {
+        bootstrap_swap_interval_disabled_ = bootstrap_turbo;
+    }
     const u64 max_instructions =
         bootstrap_turbo
             ? kBootstrapMaxInstructionsPerFrame

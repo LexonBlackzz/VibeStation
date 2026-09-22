@@ -58,7 +58,10 @@ bool Ps2System::step_ee(std::string& error) {
         error = "GIF DMA: " + error;
         return false;
     }
-    if (!vu0_.running()) ee_.sync_vu0_to_micro();
+    // EE COP2 micro launches synchronize their own state. VIF0 can also
+    // launch VU0, so synchronize before servicing that DMA channel only.
+    if ((active_dma & (1u << 0)) != 0 && !vu0_.running())
+        ee_.sync_vu0_to_micro();
     if ((active_dma & (1u << 0)) != 0 &&
         !vif0_dma_.service(bus_, error)) {
         error = "VIF0 DMA: " + error;
