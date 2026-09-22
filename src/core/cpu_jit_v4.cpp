@@ -262,7 +262,6 @@ struct V4NativeState {
   const u64 *code_page_bits = nullptr;
   const u64 *code_line_bits = nullptr;
   void *block_return = nullptr;
-  Cpu *cpu = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
   u32 mapped_main_ram_size = 0;
@@ -270,7 +269,6 @@ struct V4NativeState {
   u32 block_bail = 0;
   u32 memory_entries = 0;
   u32 store_entries = 0;
-  u32 store_addr = 0;
   u32 store_phys = 0;
   u32 cop0_sr = 0;
   u32 cache_epoch = 0;
@@ -435,17 +433,6 @@ struct V4DispatchPage {
 void emit_v4_block_return(Xbyak::CodeGenerator &code) {
   code.jmp(code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_return))]);
-}
-
-void v4_notify_direct_store(Cpu *cpu, u32 addr, u32 size_bytes) {
-  if (cpu == nullptr) {
-    return;
-  }
-  u32 phys = psx::mask_address(addr);
-  if (phys < psx::RAM_MAX_SIZE) {
-    phys &= psx::RAM_SIZE - 1u;
-  }
-  cpu->notify_code_write(phys, size_bytes);
 }
 
 void emit_read_guest(Xbyak::CodeGenerator &code, const Xbyak::Reg32 &dst,
@@ -1151,9 +1138,6 @@ V4NativeFn compile_v4_store(
   // Capture both operands before retiring an incoming delayed load.
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))],
-      code.eax);
   emit_read_guest(code, code.r8d, store.rt);
 
   if (store.op == V4StoreOp::Sh) {
@@ -2055,7 +2039,6 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.code_page_bits = impl_->code_pages.data();
     native.code_line_bits = impl_->code_lines.data();
     native.block_return = impl_->resident_block_return;
-    native.cpu = &cpu_;
     native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
     native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
