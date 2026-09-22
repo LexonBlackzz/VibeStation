@@ -727,6 +727,7 @@ V4NativeFn compile_v4_lw(V4CodeArena &arena, const V4DecodedLoad &load,
     return nullptr;
   }
   CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
   Label ram, scratch, loaded, bail;
 #if defined(_WIN32)
   code.mov(code.r11, code.rcx);
