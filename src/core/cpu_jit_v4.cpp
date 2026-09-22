@@ -129,18 +129,7 @@ using V4NativeFn = void (*)(V4NativeState *);
 
 class V4CodeArena {
 public:
-  V4CodeArena() {
-#if defined(_WIN32)
-    base_ = static_cast<u8 *>(VirtualAlloc(nullptr, kV4CodeArenaBytes,
-                                           MEM_RESERVE | MEM_COMMIT,
-                                           PAGE_EXECUTE_READWRITE));
-#else
-    void *ptr = mmap(nullptr, kV4CodeArenaBytes,
-                     PROT_READ | PROT_WRITE | PROT_EXEC,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    base_ = ptr == MAP_FAILED ? nullptr : static_cast<u8 *>(ptr);
-#endif
-  }
+  V4CodeArena() = default;
 
   ~V4CodeArena() {
     if (base_ == nullptr) {
@@ -155,6 +144,23 @@ public:
 
   V4CodeArena(const V4CodeArena &) = delete;
   V4CodeArena &operator=(const V4CodeArena &) = delete;
+
+  bool ensure_available() {
+    if (base_ != nullptr) {
+      return true;
+    }
+#if defined(_WIN32)
+    base_ = static_cast<u8 *>(VirtualAlloc(nullptr, kV4CodeArenaBytes,
+                                           MEM_RESERVE | MEM_COMMIT,
+                                           PAGE_EXECUTE_READWRITE));
+#else
+    void *ptr = mmap(nullptr, kV4CodeArenaBytes,
+                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    base_ = ptr == MAP_FAILED ? nullptr : static_cast<u8 *>(ptr);
+#endif
+    return base_ != nullptr;
+  }
 
   bool available() const { return base_ != nullptr; }
   size_t bytes_used() const { return used_; }
@@ -367,15 +373,40 @@ std::unique_ptr<Xbyak::CodeGenerator> compile_v4_alu(
 struct CpuJitV4Backend::Impl {
 #if VIBESTATION_JIT_V4_X64
   V4CodeArena arena;
-  std::unique_ptr<V4DispatchPage *[]> dispatch_top =
-      std::make_unique<V4DispatchPage *[]>(kV4DispatchTopCount);
+  std::unique_ptr<V4DispatchPage *[]> dispatch_top;
   std::vector<std::unique_ptr<V4DispatchPage>> dispatch_pages;
-  std::unique_ptr<V4Block[]> blocks = std::make_unique<V4Block[]>(kV4MaxBlocks);
+  std::unique_ptr<V4Block[]> blocks;
   size_t block_count = 0u;
   u32 cache_epoch = 1u;
   JitCodePageBitmap<29u, 12u> code_pages;
+  bool initialization_attempted = false;
+  bool initialized = false;
 
-  bool native_available() const { return arena.available(); }
+  bool ensure_initialized() {
+    if (initialized) {
+      return true;
+    }
+    if (initialization_attempted) {
+      return false;
+    }
+    initialization_attempted = true;
+    if (!arena.ensure_available()) {
+      return false;
+    }
+    try {
+      dispatch_top =
+          std::make_unique<V4DispatchPage *[]>(kV4DispatchTopCount);
+      blocks = std::make_unique<V4Block[]>(kV4MaxBlocks);
+    } catch (...) {
+      return false;
+    }
+    initialized = true;
+    return true;
+  }
+
+  bool native_available() const {
+    return !initialization_attempted || initialized;
+  }
 
   V4DispatchEntry *dispatch_entry(u32 pc, bool create) {
     const size_t top_index = static_cast<size_t>(pc >> 12u);
@@ -410,6 +441,9 @@ struct CpuJitV4Backend::Impl {
   }
 
   void reset_translations() {
+    if (!initialized) {
+      return;
+    }
     arena.reset();
     block_count = 0u;
     code_pages.clear();
@@ -532,7 +566,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
   }
   return result;
 #else
-  if (!impl_->native_available()) {
+  if (!impl_->ensure_initialized()) {
+    stats_.native_available = false;
     while (result.cycles < max_cycles &&
            result.instructions < max_instructions) {
       fallback_one();
@@ -556,7 +591,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
          result.instructions < max_instructions) {
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
-    if (cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
+    if ((cpu_.pc_ & 3u) != 0u ||
+        cpu_.pending_delay_slot_ || cpu_.in_delay_slot_ ||
         cpu_.pending_branch_taken_ || cpu_.pending_branch_pc_ != 0u ||
         cpu_.load_.reg != 0u || cpu_.next_load_.reg != 0u ||
         cpu_.next_pc_ != cpu_.pc_ + 4u) {
@@ -673,6 +709,11 @@ void CpuJitV4Backend::invalidate_range(u32 phys_or_normalized_addr,
   }
 
 #if VIBESTATION_JIT_V4_X64
+  if (!impl_->initialized || impl_->block_count == 0u) {
+    ++stats_.invalidation_fast_no_code_page_exits;
+    return;
+  }
+
   u32 remaining = size_bytes;
   u32 address = phys_or_normalized_addr;
   bool touches_code = false;
