@@ -3892,6 +3892,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_store_smc.require_v4_store_smc_fallback_when_available = true;
   cases.push_back(v4_uncached_store_smc);
 
+  CpuCompareCase v4_uncached_store_same_page_other_line{};
+  v4_uncached_store_same_page_other_line.name =
+      "v4_uncached_store_same_page_other_line_fast";
+  v4_uncached_store_same_page_other_line.start_pc = 0xA0010000u;
+  v4_uncached_store_same_page_other_line.initial_gpr[1] =
+      v4_uncached_store_same_page_other_line.start_pc + 0x40u;
+  v4_uncached_store_same_page_other_line.initial_gpr[2] = 0x13579BDFu;
+  v4_uncached_store_same_page_other_line.memory.push_back(
+      {0x00010040u, 0u});
+  v4_uncached_store_same_page_other_line.compare_memory_addresses.push_back(
+      0x00010040u);
+  v4_uncached_store_same_page_other_line.program = {
+      enc_i(0x2B, 1, 2, 0),
+  };
+  v4_uncached_store_same_page_other_line.instructions = 1u;
+  v4_uncached_store_same_page_other_line.require_v4_native_entry_when_available =
+      true;
+  v4_uncached_store_same_page_other_line
+      .require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_uncached_store_same_page_other_line);
+
   CpuCompareCase v4_uncached_resident_chain{};
   v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
   v4_uncached_resident_chain.start_pc = 0xA0010000u;
