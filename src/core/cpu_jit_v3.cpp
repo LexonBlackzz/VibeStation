@@ -2288,7 +2288,8 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             staged_delay_refill_pending = false;
             break;
           }
-          if (!is_v3_alu_only(delay.op)) {
+          const bool delay_is_sw = delay.op == V3AluOp::Sw;
+          if (!is_v3_alu_only(delay.op) && !delay_is_sw) {
             if (decoded.empty()) {
               control_delay_requires_helper = true;
             }
@@ -2297,6 +2298,31 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
           }
 
           const u32 jump_pc = start_pc + i * 4u;
+          const u8 jump_link_reg =
+              inst.op == V3AluOp::Jal
+                  ? 31u
+                  : (inst.op == V3AluOp::Jalr ? inst.rd : 0u);
+          if (delay_is_sw) {
+            const bool unsafe_store_base =
+                delay.rs != 0u &&
+                ((written_mask & (1u << delay.rs)) != 0u ||
+                 delay.rs == jump_link_reg);
+            if (has_load || store_count >= store_rs.size() ||
+                unsafe_store_base) {
+              if (decoded.empty()) {
+                control_delay_requires_helper = true;
+              }
+              staged_delay_refill_pending = false;
+              break;
+            }
+            has_store = true;
+            store_rs[store_count] = delay.rs;
+            store_simm[store_count] = delay.simm;
+            store_instruction_index[store_count] =
+                static_cast<u8>(decoded.size() + 1u);
+            ++store_count;
+          }
+
           inst.link_value = jump_pc + 8u;
           has_jump = true;
           jump_dynamic = is_v3_dynamic_jump(inst.op);
@@ -2325,12 +2351,33 @@ CpuRunSliceResult CpuJitV3Backend::run_slice(u32 max_cycles,
             staged_delay_refill_pending = false;
             break;
           }
-          if (!is_v3_alu_only(delay.op)) {
+          const bool delay_is_sw = delay.op == V3AluOp::Sw;
+          if (!is_v3_alu_only(delay.op) && !delay_is_sw) {
             if (decoded.empty()) {
               control_delay_requires_helper = true;
             }
             staged_delay_refill_pending = false;
             break;
+          }
+
+          if (delay_is_sw) {
+            const bool unsafe_store_base =
+                delay.rs != 0u &&
+                (written_mask & (1u << delay.rs)) != 0u;
+            if (has_load || store_count >= store_rs.size() ||
+                unsafe_store_base) {
+              if (decoded.empty()) {
+                control_delay_requires_helper = true;
+              }
+              staged_delay_refill_pending = false;
+              break;
+            }
+            has_store = true;
+            store_rs[store_count] = delay.rs;
+            store_simm[store_count] = delay.simm;
+            store_instruction_index[store_count] =
+                static_cast<u8>(decoded.size() + 1u);
+            ++store_count;
           }
 
           has_branch = true;
