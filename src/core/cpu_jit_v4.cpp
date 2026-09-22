@@ -255,7 +255,9 @@ struct V4DispatchPage;
 struct V4NativeState {
   u32 *gpr = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
-  const u32 *icache_generations = nullptr;
+  u32 *icache_generations = nullptr;
+  bool *icache_valid = nullptr;
+  u32 icache_line_stride = 0;
   const u32 *code_page_generations = nullptr;
   const u64 *code_page_bits = nullptr;
   const u64 *code_line_bits = nullptr;
@@ -269,6 +271,7 @@ struct V4NativeState {
   u32 memory_entries = 0;
   u32 store_entries = 0;
   u32 store_addr = 0;
+  u32 store_phys = 0;
   u32 cop0_sr = 0;
   u32 cache_epoch = 0;
   u32 pc = 0;
@@ -1125,8 +1128,10 @@ V4NativeFn compile_v4_load(
 }
 
 
-V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
-                            u32 start_pc, u32 &code_size) {
+V4NativeFn compile_v4_store(
+    V4CodeArena &arena, const V4DecodedStore &store,
+    const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
+    u32 tail_count, u32 start_pc, u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -1161,6 +1166,9 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
 
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+      code.edx);
 
   // Never directly write a translated 16-byte code line. A different line on
   // the same 4 KiB page is safe for cached code and should stay on fastmem.
@@ -1213,6 +1221,9 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
 
   code.L(ram);
   code.and_(code.edx, psx::RAM_SIZE - 1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+      code.edx);
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
@@ -1234,38 +1245,48 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
       code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
       code.r9d);
 
-  // Keep guest I-cache visibility and all JIT invalidation hooks identical to
-  // System::write*. Diagnostics which need per-write callbacks disable the
-  // memory fast path before we get here.
-#if defined(_WIN32)
+  // The translated-line guard above proves this store cannot modify any
+  // currently translated instruction bytes. Preserve the emulator's guest
+  // I-cache side effect in native code, avoiding a C++ helper on every store.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.shr(code.eax, 4u);
+  code.and_(code.eax, 0xFFu);
+
   code.mov(code.rcx, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu))]);
-  code.mov(code.edx, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))]);
-  code.mov(code.r8d, store.op == V4StoreOp::Sb ? 1u
-                     : (store.op == V4StoreOp::Sh ? 2u : 4u));
-#else
-  code.mov(code.rdi, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu))]);
-  code.mov(code.esi, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_addr))]);
-  code.mov(code.edx, store.op == V4StoreOp::Sb ? 1u
-                     : (store.op == V4StoreOp::Sh ? 2u : 4u));
-#endif
-  code.mov(code.rax,
-           reinterpret_cast<size_t>(&v4_notify_direct_store));
-  code.call(code.rax);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  code.mov(code.edx, code.eax);
+  code.imul(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+  code.mov(code.byte[code.rcx + code.rdx], 0u);
 
-  // C++ may clobber caller-saved registers used by translated fragments.
-  code.mov(code.r11, code.rbx);
-  code.mov(code.r10, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+  code.mov(code.rcx, code.ptr[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  code.inc(code.dword[code.rcx + code.rax * 4]);
+  {
+    Label generation_ok;
+    code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
+    code.jne(generation_ok);
+    code.mov(code.dword[code.rcx + code.rax * 4], 1u);
+    code.L(generation_ok);
+  }
 
+  // The store retires the incoming delayed load. Any fused ALU tail therefore
+  // observes the committed value, exactly like successive Cpu::step() calls.
   emit_retire_incoming_load(code, 0u);
+  for (u32 i = 0; i < tail_count; ++i) {
+    emit_v4_alu_instruction(code, tail[i]);
+  }
 
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
-      start_pc);
+      start_pc + tail_count * 4u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
       0u);
@@ -1273,9 +1294,16 @@ V4NativeFn compile_v4_store(V4CodeArena &arena, const V4DecodedStore &store,
       code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       0u);
   code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      (tail_count + 1u) * 4u);
+  if (tail_count != 0u) {
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
+        tail_count);
+  }
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+      tail_count + 1u);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
   emit_v4_block_return(code);
@@ -1712,6 +1740,19 @@ struct CpuJitV4Backend::Impl {
     const bool simple_store =
         count == 0u && read_visible(start_pc, store_bits) &&
         decode_v4_store(store_bits, store);
+    std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
+    u32 store_tail_count = 0u;
+    if (simple_store) {
+      for (u32 i = 1u; i < decode_limit; ++i) {
+        V4DecodedInstruction inst{};
+        u32 bits = 0u;
+        if (!read_visible(start_pc + i * 4u, bits) ||
+            !decode_v4_alu(bits, inst)) {
+          break;
+        }
+        store_tail[store_tail_count++] = inst;
+      }
+    }
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> load_tail{};
     u32 load_tail_count = 0u;
     if (simple_load) {
@@ -1768,7 +1809,8 @@ struct CpuJitV4Backend::Impl {
             load_has_control ? &load_delay : nullptr,
             load_branch_pc, start_pc, block->code_size);
       } else if (simple_store) {
-        entry = compile_v4_store(arena, store, start_pc, block->code_size);
+        entry = compile_v4_store(arena, store, store_tail, store_tail_count,
+                                 start_pc, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, block->code_size);
@@ -1786,13 +1828,13 @@ struct CpuJitV4Backend::Impl {
               ? count + 2u
               : (simple_load
                      ? load_tail_count + (load_has_control ? 3u : 1u)
-                     : (simple_store ? 1u : count));
+                     : (simple_store ? store_tail_count + 1u : count));
       block->max_cycles =
           simple_control
               ? count + 3u
               : (simple_load
                      ? load_tail_count + (load_has_control ? 9u : 6u)
-                     : (simple_store ? 3u : count));
+                     : (simple_store ? store_tail_count + 3u : count));
       block->has_control = simple_control || load_has_control;
       block->has_memory = simple_load || simple_store;
     } catch (...) {
@@ -1808,7 +1850,7 @@ struct CpuJitV4Backend::Impl {
             ? count + 2u
             : (simple_load
                    ? load_tail_count + (load_has_control ? 3u : 1u)
-                   : (simple_store ? 1u : count));
+                   : (simple_store ? store_tail_count + 1u : count));
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
       if (!read_visible(start_pc + i * 4u, translated_bits)) {
@@ -2007,6 +2049,8 @@ CpuRunSliceResult CpuJitV4Backend::run_slice(u32 max_cycles,
     native.gpr = cpu_.gpr_;
     native.dispatch_top = impl_->dispatch_top.get();
     native.icache_generations = cpu_.icache_generation_.data();
+    native.icache_valid = &cpu_.icache_[0].valid;
+    native.icache_line_stride = sizeof(cpu_.icache_[0]);
     native.code_page_generations = impl_->page_generations.data();
     native.code_page_bits = impl_->code_pages.data();
     native.code_line_bits = impl_->code_lines.data();
