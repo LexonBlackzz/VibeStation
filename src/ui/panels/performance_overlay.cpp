@@ -867,7 +867,7 @@ void App::panel_performance() {
                 bool detailed_timing = false;
             };
             static SpikeCapture worst_spike{};
-            static u64 last_spike_frame_seen = ~u64{0};
+            static u64 last_spike_frame_seen = ~static_cast<u64>(0);
 
             if (runtime_snapshot_.frame_id != last_spike_frame_seen) {
                 last_spike_frame_seen = runtime_snapshot_.frame_id;
