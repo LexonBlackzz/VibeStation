@@ -171,12 +171,10 @@ void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
         u1 = u0 + visible_u;
     }
 
-    // stb_image returns the source image top-to-bottom while OpenGL's
-    // conventional texture V axis runs bottom-to-top, so flip V here.
     draw->AddImage(
         (ImTextureID)(intptr_t)g_background_texture,
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
-        ImVec2(u0, v1), ImVec2(u1, v0));
+        ImVec2(u0, v0), ImVec2(u1, v1));
 }
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
