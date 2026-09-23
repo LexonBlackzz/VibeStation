@@ -67,9 +67,10 @@ void Spu2::reset() {
     cycle_phase_ = 0;
     pcm_queue_.clear();
 
-    // Transfer-ready status used by libsd during bring-up.
-    set_raw16(kStatx, 0x0080u);
-    set_raw16(kCoreStride + kStatx, 0x0080u);
+    // Keep the bootstrap-visible reset value at zero. DMA completion will
+    // raise the transfer-ready bit just like the earlier compatibility path.
+    set_raw16(kStatx, 0u);
+    set_raw16(kCoreStride + kStatx, 0u);
 }
 
 u16 Spu2::raw16(u32 offset) const {
