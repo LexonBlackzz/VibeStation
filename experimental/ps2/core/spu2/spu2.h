@@ -13,6 +13,18 @@ class IopRam;
 
 class Spu2 {
 public:
+    struct DebugStats {
+        u64 mixed_frames = 0;
+        u64 nonzero_output_frames = 0;
+        u64 keyed_on_voices = 0;
+        u64 keyed_off_voices = 0;
+        u64 decoded_blocks = 0;
+        u64 decoded_nonzero_samples = 0;
+        u64 dma_write_halfwords = 0;
+        u64 dma_read_halfwords = 0;
+        u32 max_active_voices = 0;
+    };
+
     static constexpr u32 kSampleRate = 48000u;
     static constexpr u32 kIopCyclesPerSample = 768u;
     static constexpr u32 kRamHalfwords = 0x100000u;
@@ -45,6 +57,10 @@ public:
     [[nodiscard]] std::size_t queued_frames() const {
         return pcm_queue_.size() / 2u;
     }
+    [[nodiscard]] const DebugStats& debug_stats() const {
+        return debug_stats_;
+    }
+    [[nodiscard]] u32 active_voice_count() const;
 
 private:
     enum class EnvelopePhase : u8 {
@@ -111,6 +127,7 @@ private:
     std::array<Core, 2> cores_{};
     u64 cycle_phase_ = 0;
     std::deque<s16> pcm_queue_;
+    DebugStats debug_stats_{};
 };
 
 } // namespace ps2
