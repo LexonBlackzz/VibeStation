@@ -22,7 +22,7 @@ android {
             cmake {
                 arguments '-DVIBESTATION_ENABLE_X64_JIT=OFF',
                           '-DVIBESTATION_ENABLE_DISCORD_RPC=OFF',
-                          '-DVIBESTATION_ENABLE_IPO=ON',
+                          '-DVIBESTATION_ENABLE_IPO=OFF',
                           '-DBUILD_TESTING=OFF'
             }
         }
