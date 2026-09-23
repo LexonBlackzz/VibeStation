@@ -1734,6 +1734,65 @@ bool test_iop_spu2_adpcm_voice() {
     return ok;
 }
 
+bool test_iop_osdsnd_hline_timer_rearm() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 timer1 = 0x1F801110u;
+    constexpr ps2::u32 timer1_irq = 1u << 5;
+    constexpr ps2::u16 osdsnd_mode = 0x0158u;
+    constexpr ps2::u16 osdsnd_compare = 0x0100u;
+    constexpr ps2::u64 hblank_iop_cycles = 2344u;
+
+    bool ok = true;
+
+    // Retail SCPH-39001 OSDSND SetTimer() does:
+    // AllocHardTimer(HLINE,16,1), SetTimerCompare(0x100), SetTimerMode(0x158).
+    // The compare can be reached while mode is still zero. Hardware keeps the
+    // compare register intact and rearms it when MODE resets the counter.
+    ok = expect(
+        system.iop_bus().write16(timer1 + 4u, 0u),
+        "OSDSND Timer1 initial mode write failed") && ok;
+    ok = expect(
+        system.iop_bus().write16(timer1 + 8u, osdsnd_compare),
+        "OSDSND Timer1 compare write failed") && ok;
+
+    // Let the free-running counter pass the compare before MODE is installed.
+    system.iop_bus().tick(0x120u);
+    ps2::u16 target = 0;
+    ok = expect(
+        system.iop_bus().read16(timer1 + 8u, target) &&
+            target == osdsnd_compare,
+        "Timer1 early target hit destroyed compare register") && ok;
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) == 0u,
+        "Timer1 raised IRQ before OSDSND enabled target IRQ") && ok;
+
+    ok = expect(
+        system.iop_bus().write16(timer1 + 4u, osdsnd_mode),
+        "OSDSND Timer1 active mode write failed") && ok;
+
+    // HLINE source: one counter tick per ~2344 IOP cycles. At 0x100 ticks
+    // OSDSND expects its sequencer callback IRQ.
+    system.iop_bus().tick(
+        hblank_iop_cycles * osdsnd_compare);
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) != 0u,
+        "OSDSND H-Line sequencer IRQ missing") && ok;
+    ok = expect(
+        system.iop_bus().read16(timer1 + 8u, target) &&
+            target == osdsnd_compare,
+        "Timer1 compare changed after active target hit") && ok;
+
+    // 0x158 is repeat + zero-return, so the next 0x100 H-Lines must fire too.
+    system.iop_intc().reset();
+    system.iop_bus().tick(
+        hblank_iop_cycles * osdsnd_compare);
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) != 0u,
+        "OSDSND H-Line repeat IRQ missing") && ok;
+
+    return ok;
+}
+
 bool test_iop_bus_repeating_timer_irq() {
     ps2::Ps2System system;
 
@@ -2511,6 +2570,7 @@ int main() {
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
     ok = test_iop_bus_repeating_timer_irq() && ok;
+    ok = test_iop_osdsnd_hline_timer_rearm() && ok;
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_iop_segment_mirror() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
