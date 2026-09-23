@@ -1644,6 +1644,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     u32 extra_cycle_error = 0;
     u32 dma_tick_budget = 0;
     u32 timer_tick_budget = 0;
+    static const bool idle_device_fastpath =
+        scheduler_env_u32("VIBESTATION_IDLE_DEVICE_FASTPATH") != 0u;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -1684,8 +1686,14 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             ++profiling_stats_.scheduler_dma_work_calls;
             frame_cycles_ += dma_cycles;
             sync_sio_to_cpu();
-            mdec_.tick(dma_cycles);
-            cdrom_.tick(dma_cycles);
+            if (!idle_device_fastpath || mdec_.needs_tick()) {
+                ++profiling_stats_.scheduler_mdec_tick_calls;
+                mdec_.tick(dma_cycles);
+            }
+            if (!idle_device_fastpath || cdrom_.needs_tick()) {
+                ++profiling_stats_.scheduler_cdrom_tick_calls;
+                cdrom_.tick(dma_cycles);
+            }
             ++profiling_stats_.scheduler_timer_tick_calls;
             profiling_stats_.scheduler_timer_tick_cycles += dma_cycles;
             timers_.tick(dma_cycles);
@@ -1751,8 +1759,14 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 }
             }
             if (spent_in_slice > 0) {
-                mdec_.tick(spent_in_slice);
-                cdrom_.tick(spent_in_slice);
+                if (!idle_device_fastpath || mdec_.needs_tick()) {
+                    ++profiling_stats_.scheduler_mdec_tick_calls;
+                    mdec_.tick(spent_in_slice);
+                }
+                if (!idle_device_fastpath || cdrom_.needs_tick()) {
+                    ++profiling_stats_.scheduler_cdrom_tick_calls;
+                    cdrom_.tick(spent_in_slice);
+                }
             }
 
             dma_tick_budget += spent_in_slice;
