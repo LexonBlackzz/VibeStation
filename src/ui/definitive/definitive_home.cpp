@@ -1001,7 +1001,7 @@ void App::panel_definitive_home() {
     if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
         const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
         ImDrawList* fade_draw =
-            ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+            ImGui::GetForegroundDrawList();
         fade_draw->AddRectFilled(
             window_pos,
             ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
