@@ -80,6 +80,12 @@ public:
   void restore_state(const u8*& pos, size_t& remaining);
 
   void tick(u32 cycles);
+  bool needs_tick() const {
+    return irq_line_request_pending_ || sector_redelivery_pending_ ||
+           command_busy_ || adpcm_busy_cycles_ > 0 || pending_second_.active ||
+           pending_async_irq_.active || insert_probe_active_ ||
+           state_ != State::Idle || !pending_irqs_.empty();
+  }
 
   // DMA reads a word from the data buffer
   u32 dma_read();
