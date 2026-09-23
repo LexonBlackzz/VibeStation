@@ -29,6 +29,18 @@ bool g_background_load_attempted = false;
 
 std::array<float, 5> g_menu_highlight_mix = {};
 
+enum class LauncherStartTransition {
+    None,
+    Bios,
+    Disc
+};
+
+LauncherStartTransition g_launcher_start_transition =
+    LauncherStartTransition::None;
+float g_launcher_start_transition_elapsed = 0.0f;
+constexpr float kLauncherStartFadeSeconds = 0.42f;
+
+
 ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
 }
@@ -44,6 +56,11 @@ float animate_towards(float current, float target, float response = 13.0f) {
 
 int glow_alpha(float value) {
     return std::clamp(static_cast<int>(std::round(value)), 0, 255);
+}
+
+float smoothstep01(float value) {
+    const float t = std::clamp(value, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 
 
@@ -316,33 +333,42 @@ void draw_soft_backdrops(ImDrawList* draw,
         return;
     }
 
-    // Stronger blur directly behind the branding/menu.
-    const float solid_right = pos.x + size.x * 0.37f;
-    draw_cover_region(draw, g_background_blur_texture, pos, size,
-        pos, ImVec2(solid_right, pos.y + size.y),
-        rgba(255, 255, 255, 190));
+    // Keep the photograph sharp behind the actual text. The blur is only used
+    // at the far-right edge of the dark readability zone so that edge dissolves
+    // into the untouched background instead of looking like a hard overlay.
+    constexpr int kEdgeSteps = 14;
+    const float edge_start = pos.x + size.x * 0.43f;
+    const float edge_peak = pos.x + size.x * 0.51f;
+    const float edge_end = pos.x + size.x * 0.60f;
 
-    // Feather the blurred image back into the sharp background instead of
-    // ending it on a visible vertical seam.
-    constexpr int kFeatherSteps = 10;
-    const float feather_end = pos.x + size.x * 0.58f;
-    const float feather_width = feather_end - solid_right;
-    for (int i = 0; i < kFeatherSteps; ++i) {
-        const float t0 = static_cast<float>(i) / kFeatherSteps;
-        const float t1 = static_cast<float>(i + 1) / kFeatherSteps;
-        const float alpha_t = 1.0f - (t0 + t1) * 0.5f;
-        const ImVec2 r0(solid_right + feather_width * t0, pos.y);
-        const ImVec2 r1(solid_right + feather_width * t1, pos.y + size.y);
-        draw_cover_region(draw, g_background_blur_texture, pos, size, r0, r1,
-            rgba(255, 255, 255, glow_alpha(185.0f * alpha_t)));
+    for (int i = 0; i < kEdgeSteps; ++i) {
+        const float t0 = static_cast<float>(i) / kEdgeSteps;
+        const float t1 = static_cast<float>(i + 1) / kEdgeSteps;
+        const float x0 = edge_start + (edge_end - edge_start) * t0;
+        const float x1 = edge_start + (edge_end - edge_start) * t1;
+        const float center = (x0 + x1) * 0.5f;
+
+        float strength = 0.0f;
+        if (center <= edge_peak) {
+            strength = (center - edge_start) /
+                std::max(1.0f, edge_peak - edge_start);
+        }
+        else {
+            strength = 1.0f - ((center - edge_peak) /
+                std::max(1.0f, edge_end - edge_peak));
+        }
+        strength = smoothstep01(strength);
+
+        draw_cover_region(draw, g_background_blur_texture, pos, size,
+            ImVec2(x0, pos.y), ImVec2(x1, pos.y + size.y),
+            rgba(255, 255, 255, glow_alpha(175.0f * strength)));
     }
 
-    // A much lighter blur under the lower information band keeps the panels
-    // readable while preserving the photograph through their translucent fill.
-    const float band_top = pos.y + size.y * 0.70f;
+    // Keep only a restrained blur beneath the lower information glass.
+    const float band_top = pos.y + size.y * 0.72f;
     draw_cover_region(draw, g_background_blur_texture, pos, size,
         ImVec2(pos.x, band_top), ImVec2(pos.x + size.x, pos.y + size.y),
-        rgba(255, 255, 255, 92));
+        rgba(255, 255, 255, 70));
 }
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
@@ -623,6 +649,9 @@ void App::release_definitive_ui_assets() {
     g_background_width = 0;
     g_background_height = 0;
     g_background_load_attempted = false;
+    g_launcher_start_transition = LauncherStartTransition::None;
+    g_launcher_start_transition_elapsed = 0.0f;
+    g_menu_highlight_mix.fill(0.0f);
 }
 
 void App::panel_definitive_home() {
@@ -729,19 +758,28 @@ void App::panel_definitive_home() {
         return true;
     };
 
-    if (start_pressed) {
+    if (start_pressed &&
+        g_launcher_start_transition == LauncherStartTransition::None) {
         if (!system_->bios_loaded() && !choose_bios()) {
             // File picker cancelled or BIOS failed to load.
         }
-        else if (!game_bin_path_.empty() || system_->disc_loaded()) {
-            boot_disc_from_ui();
-        }
         else {
-            start_bios_from_ui();
+            const bool has_selected_game =
+                !game_bin_path_.empty() || system_->disc_loaded();
+            g_launcher_start_transition = has_selected_game
+                ? LauncherStartTransition::Disc
+                : LauncherStartTransition::Bios;
+            g_launcher_start_transition_elapsed = 0.0f;
+            status_message_ = has_selected_game
+                ? "Starting selected game..."
+                : "Starting emulation...";
         }
     }
 
-    if (load_game_pressed) {
+    const bool launcher_transitioning =
+        g_launcher_start_transition != LauncherStartTransition::None;
+
+    if (load_game_pressed && !launcher_transitioning) {
         std::string path = open_file_dialog(
             "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
             "Select PS1 Game");
@@ -758,16 +796,50 @@ void App::panel_definitive_home() {
         }
     }
 
-    if (change_bios_pressed) {
+    if (change_bios_pressed && !launcher_transitioning) {
         choose_bios();
     }
-    if (settings_pressed) {
+    if (settings_pressed && !launcher_transitioning) {
         show_settings_ = true;
     }
-    if (exit_pressed) {
+    if (exit_pressed && !launcher_transitioning) {
         SDL_Event quit_event{};
         quit_event.type = SDL_QUIT;
         SDL_PushEvent(&quit_event);
+    }
+
+    float launcher_fade_alpha = 0.0f;
+    bool launcher_started_this_frame = false;
+    if (g_launcher_start_transition != LauncherStartTransition::None) {
+        const float dt =
+            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+        g_launcher_start_transition_elapsed += dt;
+
+        const float fade_progress = std::clamp(
+            g_launcher_start_transition_elapsed /
+                kLauncherStartFadeSeconds,
+            0.0f, 1.0f);
+        launcher_fade_alpha = smoothstep01(fade_progress);
+
+        if (fade_progress >= 1.0f) {
+            const LauncherStartTransition requested =
+                g_launcher_start_transition;
+            g_launcher_start_transition = LauncherStartTransition::None;
+            g_launcher_start_transition_elapsed = 0.0f;
+
+            launcher_started_this_frame =
+                requested == LauncherStartTransition::Disc
+                    ? boot_disc_from_ui()
+                    : start_bios_from_ui();
+
+            // Keep this final launcher frame fully black. The next frame is
+            // owned by the emulator screen if startup succeeded.
+            launcher_fade_alpha = 1.0f;
+            if (!launcher_started_this_frame) {
+                // The boot helper has already supplied the useful error text.
+                launcher_fade_alpha = 0.0f;
+            }
+        }
     }
 
     if (game_library_dirty_ ||
@@ -921,4 +993,14 @@ void App::panel_definitive_home() {
         rgba(91, 101, 111, 145), layout.px(1.0f));
     add_text(draw, layout, 875.0f, panel_y + 164.0f, 8.8f,
         rgba(145, 150, 158, 205), "Same console. Different vibes.");
+
+    // Launcher-to-emulator transition. Fade the completed launcher frame to
+    // black before handing the viewport to the emulation presentation.
+    if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
+        const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
+        draw->AddRectFilled(
+            window_pos,
+            ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
+            rgba(0, 0, 0, fade_alpha));
+    }
 }
