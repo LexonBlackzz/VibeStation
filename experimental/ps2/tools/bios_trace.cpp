@@ -371,12 +371,12 @@ void print_state(const ps2::Ps2System& system) {
         << " DMA_READ_HALFWORDS=" << spu2_stats.dma_read_halfwords
         << " KON_WRITES=" << spu2_stats.key_on_writes
         << " KOFF_WRITES=" << spu2_stats.key_off_writes
-        << " VOICES_KON=" << spu2_stats.voices_keyed_on
-        << " VOICES_KOFF=" << spu2_stats.voices_keyed_off
+        << " VOICES_KON=" << spu2_stats.keyed_on_voices
+        << " VOICES_KOFF=" << spu2_stats.keyed_off_voices
         << " DECODED_BLOCKS=" << spu2_stats.decoded_blocks
         << " DECODED_NONZERO=" << spu2_stats.decoded_nonzero_samples
         << " DECODED_PEAK=" << spu2_stats.decoded_peak
-        << " MIX_FRAMES=" << spu2_stats.mixer_frames
+        << " MIX_FRAMES=" << spu2_stats.mixed_frames
         << " MIX_ACTIVE_FRAMES="
         << spu2_stats.mixer_frames_with_active_voice
         << " MAX_ACTIVE=" << spu2_stats.max_active_voices
