@@ -6,6 +6,7 @@ on:
       - main
       - perf/cpu-jit-v4
       - integration/recompiler-promotion
+      - perf/recompiler-spike-profiling
   workflow_dispatch:
 
 jobs:

@@ -554,6 +554,11 @@ void App::panel_performance() {
         }
 
         const auto& stats = runtime_snapshot_.profiling;
+        ImGui::Checkbox("Detailed hot-path timing", &g_profile_detailed_timing);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(adds profiler overhead)");
+        ImGui::TextDisabled(
+            "Leave this off when investigating recompiler spikes; the spike probe below remains active.");
         ImGui::Text("Frame Time Breakdown:");
         ImGui::Separator();
 
@@ -828,6 +833,226 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_linked_transitions),
             static_cast<unsigned long long>(backend.native_chain_max_blocks));
         if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            const double frame_compile_ms =
+                static_cast<double>(backend.recompiler_frame_compile_ns) / 1000000.0;
+            const double frame_compile_max_ms =
+                static_cast<double>(backend.recompiler_frame_compile_max_ns) / 1000000.0;
+            const double frame_revalidate_ms =
+                static_cast<double>(backend.recompiler_frame_revalidate_ns) / 1000000.0;
+
+            struct SpikeCapture {
+                u64 frame_id = 0;
+                double core_ms = 0.0;
+                double compile_ms = 0.0;
+                double compile_max_ms = 0.0;
+                double revalidate_ms = 0.0;
+                u64 compile_blocks = 0;
+                u64 compile_failures = 0;
+                u64 revalidate_attempts = 0;
+                u64 revalidate_successes = 0;
+                u64 cache_misses = 0;
+                u64 icache_refills = 0;
+                u64 helper_instructions = 0;
+                std::array<u64, 6> helper_reasons{};
+                u64 invalidations = 0;
+                u64 flushes = 0;
+                u64 run_slice_calls = 0;
+                u64 native_dispatches = 0;
+                u64 direct_links = 0;
+                u64 missing_exits = 0;
+                u64 epoch_exits = 0;
+                u64 memory_exits = 0;
+                u64 generation_exits = 0;
+                u64 budget_exits = 0;
+                u64 bail_exits = 0;
+                bool detailed_timing = false;
+            };
+            static SpikeCapture worst_spike{};
+            static u64 last_spike_frame_seen = ~static_cast<u64>(0);
+
+            if (runtime_snapshot_.frame_id != last_spike_frame_seen) {
+                last_spike_frame_seen = runtime_snapshot_.frame_id;
+                if (runtime_snapshot_.core_frame_ms >= worst_spike.core_ms) {
+                    worst_spike.frame_id = runtime_snapshot_.frame_id;
+                    worst_spike.core_ms = runtime_snapshot_.core_frame_ms;
+                    worst_spike.compile_ms = frame_compile_ms;
+                    worst_spike.compile_max_ms = frame_compile_max_ms;
+                    worst_spike.revalidate_ms = frame_revalidate_ms;
+                    worst_spike.compile_blocks =
+                        backend.recompiler_frame_compile_blocks;
+                    worst_spike.compile_failures =
+                        backend.recompiler_frame_compile_failures;
+                    worst_spike.revalidate_attempts =
+                        backend.recompiler_frame_revalidate_attempts;
+                    worst_spike.revalidate_successes =
+                        backend.recompiler_frame_revalidate_successes;
+                    worst_spike.cache_misses =
+                        backend.recompiler_frame_cache_misses;
+                    worst_spike.icache_refills =
+                        backend.recompiler_frame_icache_refills;
+                    worst_spike.helper_instructions =
+                        backend.recompiler_frame_helper_instructions;
+                    worst_spike.helper_reasons =
+                        backend.recompiler_frame_helper_reasons;
+                    worst_spike.invalidations =
+                        backend.recompiler_frame_invalidations;
+                    worst_spike.flushes = backend.recompiler_frame_flushes;
+                    worst_spike.run_slice_calls =
+                        backend.recompiler_frame_run_slice_calls;
+                    worst_spike.native_dispatches =
+                        backend.recompiler_frame_native_dispatches;
+                    worst_spike.direct_links =
+                        backend.recompiler_frame_direct_links;
+                    worst_spike.missing_exits =
+                        backend.recompiler_frame_dispatch_missing_exits;
+                    worst_spike.epoch_exits =
+                        backend.recompiler_frame_dispatch_epoch_exits;
+                    worst_spike.memory_exits =
+                        backend.recompiler_frame_dispatch_memory_exits;
+                    worst_spike.generation_exits =
+                        backend.recompiler_frame_dispatch_generation_exits;
+                    worst_spike.budget_exits =
+                        backend.recompiler_frame_dispatch_budget_exits;
+                    worst_spike.bail_exits =
+                        backend.recompiler_frame_dispatch_bail_exits;
+                    worst_spike.detailed_timing = g_profile_detailed_timing;
+                }
+            }
+
+            if (ImGui::Button("Reset Spike Capture")) {
+                worst_spike = {};
+                last_spike_frame_seen = runtime_snapshot_.frame_id;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy Spike Capture")) {
+                char spike_text[1024];
+                std::snprintf(
+                    spike_text, sizeof(spike_text),
+                    "frame=%llu core_ms=%.3f detailed=%u "
+                    "compile_ms=%.3f compile_max_ms=%.3f compile_blocks=%llu compile_fail=%llu "
+                    "revalidate_ms=%.3f revalidate=%llu/%llu "
+                    "misses=%llu icache_refills=%llu helpers=%llu "
+                    "helper_irq=%llu helper_unaligned=%llu helper_unsafe=%llu helper_opcode=%llu helper_compilefail=%llu helper_budget=%llu "
+                    "invalidations=%llu flushes=%llu "
+                    "run_slice=%llu native_dispatch=%llu direct_links=%llu "
+                    "exits_missing=%llu exits_epoch=%llu exits_memory=%llu exits_generation=%llu "
+                    "exits_budget=%llu exits_bail=%llu",
+                    static_cast<unsigned long long>(worst_spike.frame_id),
+                    worst_spike.core_ms,
+                    worst_spike.detailed_timing ? 1u : 0u,
+                    worst_spike.compile_ms,
+                    worst_spike.compile_max_ms,
+                    static_cast<unsigned long long>(worst_spike.compile_blocks),
+                    static_cast<unsigned long long>(worst_spike.compile_failures),
+                    worst_spike.revalidate_ms,
+                    static_cast<unsigned long long>(worst_spike.revalidate_successes),
+                    static_cast<unsigned long long>(worst_spike.revalidate_attempts),
+                    static_cast<unsigned long long>(worst_spike.cache_misses),
+                    static_cast<unsigned long long>(worst_spike.icache_refills),
+                    static_cast<unsigned long long>(worst_spike.helper_instructions),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[5]),
+                    static_cast<unsigned long long>(worst_spike.invalidations),
+                    static_cast<unsigned long long>(worst_spike.flushes),
+                    static_cast<unsigned long long>(worst_spike.run_slice_calls),
+                    static_cast<unsigned long long>(worst_spike.native_dispatches),
+                    static_cast<unsigned long long>(worst_spike.direct_links),
+                    static_cast<unsigned long long>(worst_spike.missing_exits),
+                    static_cast<unsigned long long>(worst_spike.epoch_exits),
+                    static_cast<unsigned long long>(worst_spike.memory_exits),
+                    static_cast<unsigned long long>(worst_spike.generation_exits),
+                    static_cast<unsigned long long>(worst_spike.budget_exits),
+                    static_cast<unsigned long long>(worst_spike.bail_exits));
+                ImGui::SetClipboardText(spike_text);
+            }
+            ImGui::Text(
+                "Worst captured: frame %llu  core %.3f ms  compile %.3f ms  revalidate %.3f ms%s",
+                static_cast<unsigned long long>(worst_spike.frame_id),
+                worst_spike.core_ms, worst_spike.compile_ms,
+                worst_spike.revalidate_ms,
+                worst_spike.detailed_timing ? "  [detailed timing ON]" : "");
+            ImGui::Text(
+                "Worst activity: misses %llu  refills %llu  helpers %llu  invalidations %llu  flushes %llu  slices %llu",
+                static_cast<unsigned long long>(worst_spike.cache_misses),
+                static_cast<unsigned long long>(worst_spike.icache_refills),
+                static_cast<unsigned long long>(worst_spike.helper_instructions),
+                static_cast<unsigned long long>(worst_spike.invalidations),
+                static_cast<unsigned long long>(worst_spike.flushes),
+                static_cast<unsigned long long>(worst_spike.run_slice_calls));
+            ImGui::Text(
+                "Worst helpers: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[5]));
+
+            ImGui::Text(
+                "Spike probe: compile %.3f ms (%llu blocks, max %.3f, fail %llu)  revalidate %.3f ms (%llu/%llu)",
+                frame_compile_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_blocks),
+                frame_compile_max_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_failures),
+                frame_revalidate_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_successes),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_attempts));
+            ImGui::Text(
+                "Spike activity: misses %llu  I-cache refills %llu  helpers %llu  invalidations %llu  flushes %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_cache_misses),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_icache_refills),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_instructions),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_invalidations),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_flushes));
+            ImGui::Text(
+                "Spike helper reasons: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[0]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[1]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[2]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[3]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[4]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[5]));
+            ImGui::Text(
+                "Spike scheduling: run_slice %llu  native dispatch %llu  direct links %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_run_slice_calls),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_native_dispatches),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_direct_links));
+            ImGui::Text(
+                "Spike dispatch: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_missing_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_epoch_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_memory_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_generation_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_budget_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_bail_exits));
             ImGui::Text("Recompiler chains: %.2f blocks/entry  direct links %llu",
                 backend.native_chain_invocations == 0 ? 0.0 :
                     static_cast<double>(backend.native_block_entries) /
@@ -923,7 +1148,7 @@ void App::panel_performance() {
         ImGui::Text("CPU Hot Blocks:");
         if (!g_profile_detailed_timing) {
             ImGui::TextDisabled(
-                "Open the full profiler with F12 to collect hot-block data.");
+                "Enable Detailed hot-path timing above to collect hot-block data.");
         }
         else if (backend.hot_block_count == 0) {
             ImGui::TextDisabled("No decoded block executions collected yet.");
