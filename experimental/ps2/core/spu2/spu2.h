@@ -19,6 +19,11 @@ public:
         u64 dma_read_halfwords = 0;
         u64 key_on_writes = 0;
         u64 key_off_writes = 0;
+        u64 partial_key_on_writes = 0;
+        u64 voice_param_writes = 0;
+        u64 nonzero_volume_writes = 0;
+        u64 nonzero_adsr_writes = 0;
+        u64 nondefault_pitch_writes = 0;
         u64 keyed_on_voices = 0;
         u64 keyed_off_voices = 0;
         u64 decoded_blocks = 0;
@@ -30,6 +35,9 @@ public:
         u32 max_active_voices = 0;
         u32 pre_master_peak = 0;
         u32 output_peak = 0;
+        u32 max_written_volume = 0;
+        u64 first_nonzero_voice_param_frame = 0;
+        u64 first_partial_key_on_frame = 0;
     };
 
     static constexpr u32 kSampleRate = 48000u;
