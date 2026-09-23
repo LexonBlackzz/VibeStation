@@ -11,7 +11,8 @@ android {
         applicationId 'com.lexonblackzz.vibestation'
         minSdk 24
         targetSdk 35
-        versionCode (System.getenv('VIBESTATION_VERSION_CODE') ?: '1').toInteger()
+        versionCode = Integer.parseInt(
+                System.getenv('VIBESTATION_VERSION_CODE') ?: '1')
         versionName '0.6.0-dev-android'
 
         ndk {
