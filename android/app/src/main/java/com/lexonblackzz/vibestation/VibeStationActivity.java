@@ -70,6 +70,29 @@ public final class VibeStationActivity extends SDLActivity {
         }
 
         try {
+            final String displayName = queryDisplayName(uri);
+            if (kind == PICK_BIOS) {
+                final File biosDir = new File(getFilesDir(), "bios");
+                if (!biosDir.exists() && !biosDir.mkdirs()) {
+                    throw new IllegalStateException("Could not create BIOS directory");
+                }
+                final File output = new File(biosDir, safeName(displayName));
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     FileOutputStream out = new FileOutputStream(output)) {
+                    if (in == null) {
+                        throw new IllegalStateException("Could not open BIOS");
+                    }
+                    final byte[] buffer = new byte[1024 * 1024];
+                    int read;
+                    while ((read = in.read(buffer)) > 0) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+                nativeOnPickerResult(kind, false,
+                        output.getAbsolutePath(), displayName);
+                return;
+            }
+
             final android.os.ParcelFileDescriptor pfd =
                     getContentResolver().openFileDescriptor(uri, "r");
             if (pfd == null) {
@@ -78,7 +101,7 @@ public final class VibeStationActivity extends SDLActivity {
             }
             final int fd = pfd.detachFd();
             final String path = "/proc/self/fd/" + fd;
-            nativeOnPickerResult(kind, false, path, queryDisplayName(uri));
+            nativeOnPickerResult(kind, false, path, displayName);
         } catch (Exception e) {
             nativeOnPickerResult(kind, true, "", "");
         }
