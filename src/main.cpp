@@ -1559,8 +1559,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                              const std::string &bin_path,
                              const std::string &cue_path) {
   const CpuExecutionMode requested_mode = effective_cpu_execution_mode();
-  g_profile_detailed_timing = true;
-
+  // Respect the normal --detailed-profiling switch. The benchmark's frame
+  // wall/core timing and low-overhead cadence counters work without hot-path
+  // clock reads, so default runs now measure the emulator rather than the
+  // profiler itself.
   auto sys = std::make_unique<System>();
   if (!sys->load_bios(bios_path)) {
     std::printf("CPU_BENCHMARK_RESULT status=error reason=bios_load\n");
