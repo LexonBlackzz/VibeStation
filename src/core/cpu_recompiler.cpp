@@ -2820,7 +2820,7 @@ void CpuRecompilerBackend::invalidate_range(u32 phys_or_normalized_addr,
 void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   current_frame_ = frame_index;
   stats_.active =
-      effective_cpu_execution_mode() == CpuExecutionMode::X64JitV4;
+      effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
 }
 
 void CpuRecompilerBackend::flush() {
@@ -2837,7 +2837,7 @@ CpuBackendStats CpuRecompilerBackend::stats() const {
   CpuBackendStats out = stats_;
   out.available = true;
   out.active =
-      effective_cpu_execution_mode() == CpuExecutionMode::X64JitV4;
+      effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
   out.native_available = impl_->native_available();
   return out;
 }
