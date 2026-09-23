@@ -455,26 +455,6 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
-    const auto& spu_stats = system.spu2().debug_stats();
-    std::cout
-        << "SPU2_DEBUG"
-        << " MIXED_FRAMES=" << spu_stats.mixed_frames
-        << " NONZERO_OUTPUT_FRAMES=" << spu_stats.nonzero_output_frames
-        << " KEYED_ON_VOICES=" << spu_stats.keyed_on_voices
-        << " KEYED_OFF_VOICES=" << spu_stats.keyed_off_voices
-        << " DECODED_BLOCKS=" << spu_stats.decoded_blocks
-        << " DECODED_NONZERO_SAMPLES="
-        << spu_stats.decoded_nonzero_samples
-        << " DMA_WRITE_HALFWORDS="
-        << spu_stats.dma_write_halfwords
-        << " DMA_READ_HALFWORDS="
-        << spu_stats.dma_read_halfwords
-        << " ACTIVE_VOICES="
-        << system.spu2().active_voice_count()
-        << " MAX_ACTIVE_VOICES="
-        << spu_stats.max_active_voices
-        << '\n';
-
     std::cout << "SPU2_MIX_REGS";
     for (const ps2::u32 address : {
              0x1F900188u, 0x1F90018Au,
