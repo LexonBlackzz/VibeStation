@@ -352,6 +352,64 @@ bool SifDma::service_sif1(
         }
 
         ++stats_.sif1_packets;
+
+        // SIF RPC call packet (command 0x8000000A). The IOP-side server
+        // object is already resident, so resolving sd->sid here lets traces
+        // identify which service received each call without changing guest
+        // execution.
+        if (words >= 14u &&
+            stream[pos + 2u] == 0x8000000Au) {
+            const u32 rpc_number = stream[pos + 8u];
+            const u32 send_size = stream[pos + 9u];
+            const u32 server = stream[pos + 13u] & 0x00FFFFFFu;
+            u32 sid = 0;
+            u32 server_buffer = 0;
+            (void)iop_bus.read32(server + 0u, sid);
+            (void)iop_bus.read32(server + 8u, server_buffer);
+
+            ++stats_.rpc_calls;
+            auto& rpc = stats_.recent_rpc_calls[
+                stats_.recent_rpc_next];
+            rpc.sid = sid;
+            rpc.rpc_number = rpc_number;
+            rpc.send_size = send_size;
+            rpc.server = server;
+            rpc.server_buffer = server_buffer;
+            stats_.recent_rpc_next =
+                (stats_.recent_rpc_next + 1u) %
+                static_cast<u32>(stats_.recent_rpc_calls.size());
+            stats_.recent_rpc_count = std::min(
+                stats_.recent_rpc_count + 1u,
+                static_cast<u32>(stats_.recent_rpc_calls.size()));
+
+            constexpr u32 kSdrSid = 0x80000701u;
+            if (sid == kSdrSid) {
+                ++stats_.sound_rpc_calls;
+                switch (rpc_number) {
+                case 0x6090u:
+                    ++stats_.sound_bgm_open_calls;
+                    break;
+                case 0x6140u:
+                    ++stats_.sound_bgm_play_calls;
+                    break;
+                case 0x6200u:
+                    ++stats_.sound_timer_start_calls;
+                    break;
+                case 0x8010u:
+                    ++stats_.sound_set_param_calls;
+                    break;
+                case 0x8030u:
+                    ++stats_.sound_set_switch_calls;
+                    break;
+                case 0x8050u:
+                    ++stats_.sound_set_addr_calls;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+
         auto& record = stats_.recent_sif1_packets[
             stats_.recent_sif1_next];
         record = {};
