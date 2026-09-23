@@ -999,6 +999,20 @@ void App::panel_performance() {
                 static_cast<unsigned long long>(
                     backend.recompiler_frame_flushes));
             ImGui::Text(
+                "Spike helper reasons: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[0]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[1]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[2]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[3]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[4]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[5]));
+            ImGui::Text(
                 "Spike scheduling: run_slice %llu  native dispatch %llu  direct links %llu",
                 static_cast<unsigned long long>(
                     backend.recompiler_frame_run_slice_calls),
