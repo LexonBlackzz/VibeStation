@@ -34,11 +34,23 @@ FetchContent_Declare(SDL2
     URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON  CACHE BOOL "" FORCE)
-set(SDL_TEST   OFF CACHE BOOL "" FORCE)
+if(ANDROID)
+    # SDLActivity loads libSDL2.so and then libmain.so.
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+else()
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+endif()
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL2)
+
+if(ANDROID)
+    set(VIBESTATION_SDL_TARGET SDL2::SDL2)
+else()
+    set(VIBESTATION_SDL_TARGET SDL2::SDL2-static)
+endif()
 
 # Dear ImGui
 FetchContent_Declare(imgui
@@ -56,25 +68,37 @@ FetchContent_Declare(nlohmann_json
 FetchContent_MakeAvailable(nlohmann_json)
 
 # ── ImGui static library ────────────────────────────────────────────
-add_library(imgui_lib STATIC
+set(VIBESTATION_IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
+if(NOT ANDROID)
+    list(APPEND VIBESTATION_IMGUI_SOURCES
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+endif()
+add_library(imgui_lib STATIC ${VIBESTATION_IMGUI_SOURCES})
 target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
-if(WIN32)
-    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
+if(ANDROID)
+    find_library(VIBESTATION_GLES3_LIBRARY GLESv3)
+    if(NOT VIBESTATION_GLES3_LIBRARY)
+        message(FATAL_ERROR "Android OpenGL ES 3 library was not found")
+    endif()
+    target_link_libraries(imgui_lib PUBLIC
+        ${VIBESTATION_SDL_TARGET}
+        ${VIBESTATION_GLES3_LIBRARY})
+elseif(WIN32)
+    target_link_libraries(imgui_lib PUBLIC ${VIBESTATION_SDL_TARGET} opengl32)
 else()
     find_package(OpenGL REQUIRED)
-    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static OpenGL::GL)
+    target_link_libraries(imgui_lib PUBLIC ${VIBESTATION_SDL_TARGET} OpenGL::GL)
 endif()
 
 # ── VibeStation Executable ──────────────────────────────────────────
@@ -166,11 +190,28 @@ set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
     GENERATED TRUE
     SKIP_PRECOMPILE_HEADERS ON)
 
-add_executable(VibeStation ${VIBESTATION_SOURCES})
+if(ANDROID)
+    add_library(VibeStation SHARED ${VIBESTATION_SOURCES})
+    # SDLActivity expects the application's native entry point in libmain.so.
+    set_target_properties(VibeStation PROPERTIES OUTPUT_NAME main)
+else()
+    add_executable(VibeStation ${VIBESTATION_SOURCES})
+endif()
 
 target_include_directories(VibeStation PRIVATE
     src)
-target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
+target_link_libraries(VibeStation PRIVATE
+    imgui_lib
+    ${VIBESTATION_SDL_TARGET}
+    nlohmann_json::nlohmann_json)
+
+if(ANDROID)
+    find_library(VIBESTATION_ANDROID_LOG_LIBRARY log)
+    target_link_libraries(VibeStation PRIVATE
+        ${VIBESTATION_GLES3_LIBRARY}
+        ${VIBESTATION_ANDROID_LOG_LIBRARY})
+    target_compile_definitions(VibeStation PRIVATE VIBESTATION_ANDROID=1)
+endif()
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
