@@ -1,7 +1,9 @@
 // ── VibeStation — PS1 Emulator ──────────────────────────────────────
 // Entry point
 
-#define SDL_MAIN_HANDLED // Prevent SDL from redefining main()
+#if !defined(__ANDROID__)
+#define SDL_MAIN_HANDLED // Desktop builds own the process entry point.
+#endif
 #include "core/system.h"
 #include "core/input_recorder.h"
 #include "input/controller.h"
@@ -2638,7 +2640,11 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   return pass ? 0 : 2;
 }
 
+#if defined(__ANDROID__)
+extern "C" __attribute__((visibility("default"))) int SDL_main(int argc, char *argv[]) {
+#else
 int main(int argc, char *argv[]) {
+#endif
   std::vector<std::string> args;
   args.reserve(static_cast<size_t>(std::max(argc - 1, 0)));
   for (int i = 1; i < argc; ++i) {
