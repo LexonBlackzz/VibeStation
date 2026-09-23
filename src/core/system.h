@@ -150,6 +150,16 @@ public:
     u32 gpu_transfer_commands = 0;
     u32 gpu_other_commands = 0;
 
+    // Low-overhead scheduler cadence counters. These intentionally avoid
+    // clock reads so they can stay enabled while measuring the ~2 ms floor.
+    u32 scheduler_run_slice_calls = 0;
+    u32 scheduler_sio_sync_calls = 0;
+    u32 scheduler_sio_tick_calls = 0;
+    u32 scheduler_dma_service_calls = 0;
+    u32 scheduler_dma_work_calls = 0;
+    u32 scheduler_timer_tick_calls = 0;
+    u64 scheduler_timer_tick_cycles = 0;
+
     // Raster work counters. candidate_pixels is bounding-box work visited by
     // triangle rasterizers; covered_pixels passed the edge tests.
     u64 gpu_candidate_pixels = 0;
