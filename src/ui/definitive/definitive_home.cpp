@@ -25,8 +25,23 @@ int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
 
+std::array<float, 5> g_menu_highlight_mix = {};
+
 ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
+}
+
+float animate_towards(float current, float target, float response = 13.0f) {
+    const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+    if (dt <= 0.0f) {
+        return target;
+    }
+    const float alpha = 1.0f - std::exp(-response * dt);
+    return current + (target - current) * alpha;
+}
+
+int glow_alpha(float value) {
+    return std::clamp(static_cast<int>(std::round(value)), 0, 255);
 }
 
 std::filesystem::path find_background_path() {
@@ -285,35 +300,78 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
 
     const bool hovered = ImGui::IsItemHovered();
     const bool focused = ImGui::IsItemFocused();
-    if (hovered || focused) {
+    const bool active = ImGui::IsItemActive();
+    if (hovered || focused || pressed) {
         selected_index = index;
     }
 
     const bool selected = selected_index == index;
-    if (selected) {
+    const float target_mix = selected ? (hovered || focused ? 1.0f : 0.78f)
+                                      : (hovered ? 0.42f : 0.0f);
+    float& highlight_mix = g_menu_highlight_mix[static_cast<size_t>(index)];
+    highlight_mix = animate_towards(highlight_mix, target_mix, selected ? 15.0f : 11.0f);
+
+    const float pulse =
+        selected ? (0.88f + 0.12f * std::sin(static_cast<float>(ImGui::GetTime()) * 2.15f))
+                 : 1.0f;
+    const float glow = std::clamp(highlight_mix * pulse + (active ? 0.18f : 0.0f),
+        0.0f, 1.15f);
+
+    if (glow > 0.01f) {
+        const float glow_outer = layout.px(7.0f + glow * 2.0f);
+        const float glow_mid = layout.px(3.5f + glow);
+        const ImVec2 outer0(p.x - glow_outer, p.y - glow_outer);
+        const ImVec2 outer1(p.x + size.x + glow_outer, p.y + size.y + glow_outer);
+        const ImVec2 mid0(p.x - glow_mid, p.y - glow_mid);
+        const ImVec2 mid1(p.x + size.x + glow_mid, p.y + size.y + glow_mid);
+
+        draw->AddRect(outer0, outer1,
+            rgba(90, 154, 216, glow_alpha(18.0f * glow)),
+            0.0f, 0, layout.px(1.0f));
+        draw->AddRect(mid0, mid1,
+            rgba(126, 184, 236, glow_alpha(34.0f * glow)),
+            0.0f, 0, layout.px(1.2f));
+    }
+
+    if (selected || highlight_mix > 0.02f) {
+        const int fill_alpha = glow_alpha(
+            42.0f + 76.0f * highlight_mix + (hovered ? 16.0f : 0.0f));
         draw->AddRectFilled(
             p, ImVec2(p.x + size.x, p.y + size.y),
-            rgba(12, 17, 23, hovered ? 128 : 92));
+            rgba(12, 17, 23, fill_alpha));
+
+        const int border_alpha = glow_alpha(155.0f + 90.0f * highlight_mix);
         draw->AddRect(
             p, ImVec2(p.x + size.x, p.y + size.y),
-            rgba(208, 226, 244, 245), 0.0f, 0, layout.px(1.4f));
+            rgba(211, 229, 246, border_alpha), 0.0f, 0, layout.px(1.35f));
         draw->AddRect(
             ImVec2(p.x + layout.px(2.0f), p.y + layout.px(2.0f)),
             ImVec2(p.x + size.x - layout.px(2.0f),
                 p.y + size.y - layout.px(2.0f)),
-            rgba(111, 153, 197, 120), 0.0f, 0, layout.px(0.8f));
+            rgba(103, 154, 205, glow_alpha(62.0f + 78.0f * highlight_mix)),
+            0.0f, 0, layout.px(0.8f));
+
+        const float rail_half = layout.px(16.0f + 5.0f * highlight_mix);
+        const float center_y = p.y + size.y * 0.5f;
+        draw->AddRectFilled(
+            ImVec2(p.x - layout.px(2.0f), center_y - rail_half),
+            ImVec2(p.x, center_y + rail_half),
+            rgba(205, 231, 255, glow_alpha(95.0f + 150.0f * highlight_mix)));
     }
 
     const ImU32 main_color = selected
-        ? rgba(240, 244, 248, 255)
+        ? rgba(242, 246, 250, 255)
         : rgba(206, 208, 211, 228);
     const ImU32 sub_color = selected
-        ? rgba(181, 188, 197, 235)
+        ? rgba(184, 192, 201, 238)
         : rgba(150, 154, 161, 210);
 
-    draw_icon(draw, layout, icon, kX + 24.0f, y + 18.0f, main_color);
-    add_text(draw, layout, kX + 72.0f, y + 13.0f, 18.0f, main_color, title);
-    add_text(draw, layout, kX + 72.0f, y + 38.0f, 10.5f, sub_color, subtitle);
+    const float content_shift = 2.0f * highlight_mix;
+    draw_icon(draw, layout, icon, kX + 24.0f + content_shift, y + 18.0f, main_color);
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 13.0f, 18.0f,
+        main_color, title);
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 10.5f,
+        sub_color, subtitle);
 
     ImGui::PopID();
     return pressed;
@@ -415,9 +473,23 @@ void App::panel_definitive_home() {
         IM_COL32(177, 145, 72, 255),
         IM_COL32(52, 93, 157, 255),
     };
+    constexpr std::array<ImU32, 4> accent_glow_colors = {
+        IM_COL32(194, 44, 56, 40),
+        IM_COL32(52, 128, 125, 40),
+        IM_COL32(177, 145, 72, 40),
+        IM_COL32(52, 93, 157, 40),
+    };
+    const float accent_time = static_cast<float>(ImGui::GetTime());
     for (int i = 0; i < 4; ++i) {
+        const float pulse = 0.55f +
+            0.45f * std::sin(accent_time * 1.35f + static_cast<float>(i) * 0.78f);
         const ImVec2 p0 = layout.point(50.0f + i * 32.0f, 116.0f);
         const ImVec2 p1 = layout.point(76.0f + i * 32.0f, 126.0f);
+        const float spread = layout.px(1.5f + pulse * 1.25f);
+        draw->AddRectFilled(
+            ImVec2(p0.x - spread, p0.y - spread),
+            ImVec2(p1.x + spread, p1.y + spread),
+            accent_glow_colors[static_cast<size_t>(i)]);
         draw->AddRectFilled(p0, p1, accent_colors[static_cast<size_t>(i)]);
     }
     add_text(draw, layout, 185.0f, 112.0f, 14.0f,
