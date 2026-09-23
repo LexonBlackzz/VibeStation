@@ -65,7 +65,7 @@ public:
         u64 sound_set_param_calls = 0;
         u64 sound_set_switch_calls = 0;
         u64 sound_set_addr_calls = 0;
-        std::array<RpcCallRecord, 64> recent_rpc_calls{};
+        std::array<RpcCallRecord, 256> recent_rpc_calls{};
         u32 recent_rpc_count = 0;
         u32 recent_rpc_next = 0;
     };
