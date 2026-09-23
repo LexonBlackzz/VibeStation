@@ -7,10 +7,16 @@
 #include "ui/theme_settings.h"
 #include "version.h"
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include <SDL_opengles2.h>
+#else
 #include <SDL_opengl.h>
+#endif
 #include <imgui.h>
 #include <imgui_internal.h>
+#if !defined(__ANDROID__)
 #include <imgui_impl_opengl2.h>
+#endif
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <algorithm>
@@ -167,6 +173,12 @@ bool App::init() {
         bool use_imgui_opengl2_backend;
     };
 
+#if defined(__ANDROID__)
+    const GlContextAttempt attempts[] = {
+        {3, 0, SDL_GL_CONTEXT_PROFILE_ES, "#version 300 es",
+         "OpenGL ES 3.0", false},
+    };
+#else
     const GlContextAttempt attempts[] = {
         {3, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 330", "OpenGL 3.3 Core",
          false},
@@ -175,6 +187,7 @@ bool App::init() {
         {2, 1, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY, "#version 120",
          "OpenGL 2.1 Compatibility", true},
     };
+#endif
 
     bool context_ready = false;
     for (const GlContextAttempt& attempt : attempts) {
@@ -256,6 +269,7 @@ bool App::init() {
         fflush(stdout);
         return false;
     }
+#if !defined(__ANDROID__)
     if (use_imgui_opengl2_backend_) {
         if (!ImGui_ImplOpenGL2_Init()) {
             printf("[App::init] ImGui OpenGL2 backend FAILED\n");
@@ -263,7 +277,9 @@ bool App::init() {
             return false;
         }
     }
-    else {
+    else
+#endif
+    {
         if (!ImGui_ImplOpenGL3_Init(imgui_glsl_version_)) {
             printf("[App::init] ImGui OpenGL3 backend FAILED (GLSL=%s)\n",
                 imgui_glsl_version_);
@@ -541,10 +557,13 @@ void App::run() {
         }
 
         // Start ImGui frame
+#if !defined(__ANDROID__)
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_NewFrame();
         }
-        else {
+        else
+#endif
+        {
             ImGui_ImplOpenGL3_NewFrame();
         }
         ImGui_ImplSDL2_NewFrame();
@@ -563,10 +582,13 @@ void App::run() {
         glClear(GL_COLOR_BUFFER_BIT);
 
         const auto render_start = std::chrono::high_resolution_clock::now();
+#if !defined(__ANDROID__)
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
         }
-        else {
+        else
+#endif
+        {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
         const auto swap_start = std::chrono::high_resolution_clock::now();
@@ -1961,10 +1983,13 @@ void App::shutdown() {
         vram_debug_texture_ = 0;
     }
 
+#if !defined(__ANDROID__)
     if (use_imgui_opengl2_backend_) {
         ImGui_ImplOpenGL2_Shutdown();
     }
-    else {
+    else
+#endif
+    {
         ImGui_ImplOpenGL3_Shutdown();
     }
     ImGui_ImplSDL2_Shutdown();
