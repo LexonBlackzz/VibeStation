@@ -109,6 +109,7 @@ void IopBus::reset() {
     firewire_regs_[(0x10u) >> 2] = 0x8u; // SCLK ready.
     root_counters_.fill({});
     root_counter_rate_cache_.fill(1u);
+    root_counter_debug_ = {};
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
         root_counters_[i].target =
@@ -475,12 +476,16 @@ bool IopBus::write_root_counter(
         index < 3u ? 0xFFFFull : 0xFFFFFFFFull;
 
     if (reg == 0u) {
+        ++root_counter_debug_.count_writes[index];
         counter.count = merged & counter_mask;
         counter.phase = 0;
         return true;
     }
 
     if (reg == 4u) {
+        ++root_counter_debug_.mode_writes[index];
+        root_counter_debug_.last_mode_write[index] =
+            merged & 0xFFFFu;
         // Writable control bits plus hardware-owned IRQ/target/overflow flags.
         counter.mode =
             (merged & 0x63FFu) |
@@ -492,6 +497,14 @@ bool IopBus::write_root_counter(
         return true;
     }
 
+    ++root_counter_debug_.target_writes[index];
+    root_counter_debug_.last_target_write[index] =
+        static_cast<u32>(merged & counter_mask);
+    if (root_counter_debug_.first_nonzero_target[index] == 0u &&
+        (merged & counter_mask) != 0u) {
+        root_counter_debug_.first_nonzero_target[index] =
+            static_cast<u32>(merged & counter_mask);
+    }
     counter.target = merged & counter_mask;
     return true;
 }
@@ -534,6 +547,7 @@ void IopBus::tick(u64 cycles) {
 
             if (counter.target <= maximum &&
                 counter.count >= counter.target) {
+                ++root_counter_debug_.target_events[i];
                 const bool first = (counter.mode & (1u << 11)) == 0;
                 const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 11;
@@ -543,6 +557,7 @@ void IopBus::tick(u64 cycles) {
                 // for DelayThread and alarm deadlines.
                 if ((first || repeat) &&
                     (counter.mode & (1u << 4)) != 0) {
+                    ++root_counter_debug_.irq_events[i];
                     intc_.raise(irq_sources[i]);
                 }
                 if ((counter.mode & (1u << 3)) != 0) {
@@ -556,11 +571,13 @@ void IopBus::tick(u64 cycles) {
             }
 
             if (counter.count > maximum) {
+                ++root_counter_debug_.overflow_events[i];
                 const bool first = (counter.mode & (1u << 12)) == 0;
                 const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 12;
                 if ((first || repeat) &&
                     (counter.mode & (1u << 5)) != 0) {
+                    ++root_counter_debug_.irq_events[i];
                     intc_.raise(irq_sources[i]);
                 }
                 counter.count &= maximum;
