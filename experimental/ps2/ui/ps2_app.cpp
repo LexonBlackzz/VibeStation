@@ -1401,6 +1401,23 @@ void Ps2App::panel_settings() {
     }
 
     ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("PS2 devices");
+    ImGui::Text(
+        "Controller: %s",
+        controller_ != nullptr
+            ? SDL_GameControllerName(controller_)
+            : "keyboard fallback");
+    ImGui::Text(
+        "Audio: %s",
+        audio_device_ != 0
+            ? "48 kHz stereo active"
+            : "unavailable");
+    ImGui::TextDisabled(
+        "Keyboard: arrows D-pad, Z/X/A/S face, Enter/Backspace Start/Select, "
+        "Q/E L1/R1, W/R L2/R2.");
+
+    ImGui::Spacing();
     ImGui::TextDisabled(
         "PS2 UI settings are stored separately in "
         "vibestation_ps2_imgui.ini.");
