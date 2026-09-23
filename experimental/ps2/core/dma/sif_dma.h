@@ -35,6 +35,8 @@ public:
         u32 send_size = 0;
         u32 server = 0;
         u32 server_buffer = 0;
+        std::array<u32, 16> payload{};
+        u32 payload_words = 0;
     };
 
     struct Stats {
