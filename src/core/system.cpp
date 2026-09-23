@@ -1775,11 +1775,14 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 // state is guest-visible at this scheduling boundary. Collapse
                 // the old series of 16-cycle updates into one equivalent tick.
                 if (timer_tick_budget >= timer_tick_stride) {
+                    const u32 batch_cycles =
+                        timer_tick_budget -
+                        (timer_tick_budget % timer_tick_stride);
                     ++profiling_stats_.scheduler_timer_tick_calls;
                     profiling_stats_.scheduler_timer_tick_cycles +=
-                        timer_tick_budget;
-                    timers_.tick(timer_tick_budget);
-                    timer_tick_budget = 0;
+                        batch_cycles;
+                    timers_.tick(batch_cycles);
+                    timer_tick_budget -= batch_cycles;
                 }
             } else {
                 while (timer_tick_budget >= timer_tick_stride) {
