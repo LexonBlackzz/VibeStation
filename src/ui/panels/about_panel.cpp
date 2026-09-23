@@ -33,12 +33,13 @@ void App::panel_about() {
         ImGui::Text("GTE: Fixed-point geometry engine");
         ImGui::Text("SPU: Gaussian + reverb core (stage 2)");
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f),
-            #if defined(__ANDROID__)
-            "Built with SDL2 + Dear ImGui + OpenGL ES 3"
+#if defined(__ANDROID__)
+        const char* graphics_backend = "SDL2 + Dear ImGui + OpenGL ES 3";
 #else
-            "Built with SDL2 + Dear ImGui + OpenGL 3.3"
-#endif);
+        const char* graphics_backend = "SDL2 + Dear ImGui + OpenGL 3.3";
+#endif
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f),
+            "Built with %s", graphics_backend);
     }
     ImGui::End();
 }
