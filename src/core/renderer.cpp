@@ -6,7 +6,11 @@
 #include <Windows.h>
 #endif
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include <SDL_opengles2.h>
+#else
 #include <SDL_opengl.h>
+#endif
 
 bool Renderer::init(SDL_Window *window) {
   window_ = window;
