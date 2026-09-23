@@ -980,7 +980,12 @@ void App::update() {
 }
 
 void App::render_ui() {
-    menu_bar();
+    // The definitive launcher owns the full viewport while the emulator is idle.
+    // Keep the legacy menu bar available once emulation starts so existing
+    // diagnostics and advanced tools remain reachable during the transition.
+    if (has_started_emulation_) {
+        menu_bar();
+    }
 
     // Main dockspace
     ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -999,7 +1004,12 @@ void App::render_ui() {
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
-    panel_emulator_screen();
+    if (has_started_emulation_) {
+        panel_emulator_screen();
+    }
+    else {
+        panel_definitive_home();
+    }
     ImGui::End();
 
     // Optional panels
@@ -1955,6 +1965,8 @@ void App::shutdown() {
     }
     system_.reset();
     runtime_ready_ = false;
+
+    release_definitive_ui_assets();
 
     if (vram_debug_texture_ != 0) {
         glDeleteTextures(1, &vram_debug_texture_);
