@@ -1768,7 +1768,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             timer_tick_budget += spent_in_slice;
-            if (timers_.can_batch_cpu_ticks()) {
+            static const bool batch_timer_ticks =
+                scheduler_env_u32("VIBESTATION_BATCH_TIMER_TICKS") != 0u;
+            if (batch_timer_ticks && timers_.can_batch_cpu_ticks()) {
                 // With no CPU-clock timer IRQs armed, only the final counter
                 // state is guest-visible at this scheduling boundary. Collapse
                 // the old series of 16-cycle updates into one equivalent tick.
