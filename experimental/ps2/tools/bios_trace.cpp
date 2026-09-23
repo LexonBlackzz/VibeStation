@@ -363,6 +363,81 @@ void print_state(const ps2::Ps2System& system) {
     print_iop_words("IOP_RPC_BUFFER", 0x000467B8u);
     print_iop_words("IOP_RPC_SERVER", 0x00046770u);
 
+    const auto& spu2_stats = system.spu2().debug_stats();
+    std::cout
+        << "SPU2_DEBUG"
+        << " REG_WRITES=" << spu2_stats.register_writes
+        << " DMA_WRITE_HALFWORDS=" << spu2_stats.dma_write_halfwords
+        << " DMA_READ_HALFWORDS=" << spu2_stats.dma_read_halfwords
+        << " KON_WRITES=" << spu2_stats.key_on_writes
+        << " KOFF_WRITES=" << spu2_stats.key_off_writes
+        << " VOICES_KON=" << spu2_stats.voices_keyed_on
+        << " VOICES_KOFF=" << spu2_stats.voices_keyed_off
+        << " DECODED_BLOCKS=" << spu2_stats.decoded_blocks
+        << " DECODED_NONZERO=" << spu2_stats.decoded_nonzero_samples
+        << " DECODED_PEAK=" << spu2_stats.decoded_peak
+        << " MIX_FRAMES=" << spu2_stats.mixer_frames
+        << " MIX_ACTIVE_FRAMES="
+        << spu2_stats.mixer_frames_with_active_voice
+        << " MAX_ACTIVE=" << spu2_stats.max_active_voices
+        << " PRE_MASTER_PEAK=" << spu2_stats.pre_master_peak
+        << " OUTPUT_PEAK=" << spu2_stats.output_peak
+        << '\n';
+
+    for (ps2::u32 core = 0; core < 2u; ++core) {
+        const ps2::u32 base = core * 0x400u;
+        ps2::u16 kon_lo = 0, kon_hi = 0;
+        ps2::u16 koff_lo = 0, koff_hi = 0;
+        ps2::u16 vmixl_lo = 0, vmixl_hi = 0;
+        ps2::u16 vmixr_lo = 0, vmixr_hi = 0;
+        ps2::u16 mmix = 0;
+        (void)system.spu2().read16(base + 0x1A0u, kon_lo);
+        (void)system.spu2().read16(base + 0x1A2u, kon_hi);
+        (void)system.spu2().read16(base + 0x1A4u, koff_lo);
+        (void)system.spu2().read16(base + 0x1A6u, koff_hi);
+        (void)system.spu2().read16(base + 0x188u, vmixl_lo);
+        (void)system.spu2().read16(base + 0x18Au, vmixl_hi);
+        (void)system.spu2().read16(base + 0x190u, vmixr_lo);
+        (void)system.spu2().read16(base + 0x192u, vmixr_hi);
+        (void)system.spu2().read16(base + 0x198u, mmix);
+        std::cout
+            << "SPU2_CORE" << core
+            << " KON=0x" << std::hex << std::uppercase
+            << kon_lo << ":" << kon_hi
+            << " KOFF=0x" << koff_lo << ":" << koff_hi
+            << " VMIXL=0x" << vmixl_lo << ":" << vmixl_hi
+            << " VMIXR=0x" << vmixr_lo << ":" << vmixr_hi
+            << " MMIX=0x" << mmix
+            << std::dec << '\n';
+    }
+
+    for (ps2::u32 core = 0; core < 2u; ++core) {
+        const ps2::u32 base = core * 0x400u;
+        for (ps2::u32 voice = 0; voice < 24u; ++voice) {
+            const ps2::u32 vbase = base + voice * 0x10u;
+            ps2::u16 voll = 0, volr = 0, pitch = 0;
+            ps2::u16 adsr1 = 0, adsr2 = 0, envx = 0;
+            (void)system.spu2().read16(vbase + 0x0u, voll);
+            (void)system.spu2().read16(vbase + 0x2u, volr);
+            (void)system.spu2().read16(vbase + 0x4u, pitch);
+            (void)system.spu2().read16(vbase + 0x6u, adsr1);
+            (void)system.spu2().read16(vbase + 0x8u, adsr2);
+            (void)system.spu2().read16(vbase + 0xAu, envx);
+            if ((voll | volr | pitch | adsr1 | adsr2 | envx) == 0u)
+                continue;
+            std::cout
+                << "SPU2_VOICE C=" << core
+                << " V=" << voice
+                << " VOLL=0x" << std::hex << std::uppercase << voll
+                << " VOLR=0x" << volr
+                << " PITCH=0x" << pitch
+                << " ADSR1=0x" << adsr1
+                << " ADSR2=0x" << adsr2
+                << " ENVX=0x" << envx
+                << std::dec << '\n';
+        }
+    }
+
     std::cout << "SPU2_REGS";
     for (const ps2::u32 address : {
              0x1F90019Au, 0x1F90019Cu, 0x1F90019Eu,
