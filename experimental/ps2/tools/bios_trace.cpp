@@ -879,7 +879,46 @@ void print_state(const ps2::Ps2System& system) {
             << " SIZE=0x" << rpc.send_size
             << " SERVER=0x" << rpc.server
             << " BUF=0x" << rpc.server_buffer
-            << std::dec << '\n';
+            << std::dec;
+        if (rpc.payload_words != 0u) {
+            std::cout << " ARGS";
+            for (ps2::u32 word = 0;
+                 word < rpc.payload_words;
+                 ++word) {
+                std::cout
+                    << " [" << word << "]=0x"
+                    << std::hex << std::uppercase
+                    << rpc.payload[word]
+                    << std::dec;
+            }
+        }
+        if (rpc.sid == 0x80000601u &&
+            rpc.rpc_number == 0x5009u &&
+            rpc.payload_words >= 3u) {
+            const ps2::u32 sequence =
+                rpc.payload[2] & 0x001FFFFFu;
+            std::cout
+                << " BGM_SLOT="
+                << (rpc.payload[1] & 0xFFFFu)
+                << " BGM_PTR=0x"
+                << std::hex << std::uppercase
+                << sequence << std::dec;
+            if (sequence != 0u) {
+                std::cout << " BGM_HEAD";
+                for (ps2::u32 word = 0; word < 8u; ++word) {
+                    ps2::u32 value = 0;
+                    if (system.iop_bus().read32(
+                            sequence + word * 4u,
+                            value)) {
+                        std::cout
+                            << " [" << word << "]=0x"
+                            << std::hex << std::uppercase
+                            << value << std::dec;
+                    }
+                }
+            }
+        }
+        std::cout << '\n';
     }
 
     const auto& vu0 = system.vu0();
