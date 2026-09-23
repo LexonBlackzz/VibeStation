@@ -48,6 +48,11 @@ namespace {
         double reuse_cpu_ms = 0.0;
         double reuse_gpu_ms = 0.0;
         double reuse_core_ms = 0.0;
+        double render_draws = 0.0;
+        double reuse_draws = 0.0;
+        double alternation_percent = 0.0;
+        std::array<double, 8> render_buckets{};
+        std::array<double, 8> reuse_buckets{};
     };
 
     template <size_t N>
@@ -56,6 +61,7 @@ namespace {
         const std::array<float, N>& gpu_history,
         const std::array<float, N>& core_history,
         const std::array<u32, N>& draw_history,
+        const std::array<std::array<u32, 8>, N>& bucket_history,
         int count,
         int write_index) {
         FramePhaseDiagnostics out{};
@@ -75,22 +81,49 @@ namespace {
         }
 
         out.draw_threshold = std::max<u32>(8u, max_draws / 8u);
+        bool have_previous_phase = false;
+        bool previous_render_phase = false;
+        u32 phase_transitions = 0;
+        u32 alternating_transitions = 0;
         for (int i = 0; i < count; ++i) {
             const int idx =
                 (write_index - count + i + static_cast<int>(N)) %
                 static_cast<int>(N);
-            if (draw_history[idx] >= out.draw_threshold) {
+            const bool render_phase = draw_history[idx] >= out.draw_threshold;
+            if (have_previous_phase) {
+                ++phase_transitions;
+                if (render_phase != previous_render_phase) {
+                    ++alternating_transitions;
+                }
+            }
+            previous_render_phase = render_phase;
+            have_previous_phase = true;
+
+            if (render_phase) {
                 ++out.render_frames;
                 out.render_cpu_ms += cpu_history[idx];
                 out.render_gpu_ms += gpu_history[idx];
                 out.render_core_ms += core_history[idx];
+                out.render_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+                    out.render_buckets[bucket] += bucket_history[idx][bucket];
+                }
             }
             else {
                 ++out.reuse_frames;
                 out.reuse_cpu_ms += cpu_history[idx];
                 out.reuse_gpu_ms += gpu_history[idx];
                 out.reuse_core_ms += core_history[idx];
+                out.reuse_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.reuse_buckets.size(); ++bucket) {
+                    out.reuse_buckets[bucket] += bucket_history[idx][bucket];
+                }
             }
+        }
+        if (phase_transitions != 0u) {
+            out.alternation_percent =
+                100.0 * static_cast<double>(alternating_transitions) /
+                static_cast<double>(phase_transitions);
         }
 
         if (out.render_frames == 0 || out.reuse_frames == 0) {
@@ -102,8 +135,36 @@ namespace {
         out.reuse_cpu_ms /= static_cast<double>(out.reuse_frames);
         out.reuse_gpu_ms /= static_cast<double>(out.reuse_frames);
         out.reuse_core_ms /= static_cast<double>(out.reuse_frames);
+        out.render_draws /= static_cast<double>(out.render_frames);
+        out.reuse_draws /= static_cast<double>(out.reuse_frames);
+        for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+            out.render_buckets[bucket] /= static_cast<double>(out.render_frames);
+            out.reuse_buckets[bucket] /= static_cast<double>(out.reuse_frames);
+        }
         out.valid = true;
         return out;
+    }
+
+    const char* gpu_bucket_name(size_t bucket) {
+        static constexpr std::array<const char*, 8> kNames = {
+            "flat", "gouraud", "textured", "gouraud+texture",
+            "rect", "line", "transfer", "other"
+        };
+        return bucket < kNames.size() ? kNames[bucket] : "unknown";
+    }
+
+    size_t dominant_render_bucket(const FramePhaseDiagnostics& phase) {
+        size_t best_bucket = 0;
+        double best_delta = 0.0;
+        for (size_t bucket = 0; bucket < phase.render_buckets.size(); ++bucket) {
+            const double delta =
+                phase.render_buckets[bucket] - phase.reuse_buckets[bucket];
+            if (delta > best_delta) {
+                best_delta = delta;
+                best_bucket = bucket;
+            }
+        }
+        return best_bucket;
     }
 
     struct GpuDipDiagnostics {
@@ -314,23 +375,28 @@ void App::push_performance_history_sample() {
     perf_core_ms_history_[idx] =
         static_cast<float>(std::max(0.0, runtime_snapshot_.core_frame_ms));
     perf_frame_id_history_[idx] = frame_id;
-    if (g_profile_detailed_timing) {
-        perf_gpu_words_history_[idx] = runtime_snapshot_.profiling.gpu_gp0_words;
-        perf_gpu_draw_commands_history_[idx] =
-            runtime_snapshot_.profiling.gpu_draw_commands;
-        perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
-        perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
-        perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
-        perf_display_hash_history_[idx] = runtime_snapshot_.boot_diag.display_hash;
-    }
-    else {
-        perf_gpu_words_history_[idx] = 0;
-        perf_gpu_draw_commands_history_[idx] = 0;
-        perf_cpu_pc_history_[idx] = 0;
-        perf_dma2_words_history_[idx] = 0;
-        perf_dma2_base_history_[idx] = 0;
-        perf_display_hash_history_[idx] = 0;
-    }
+
+    // These are integer-only bookkeeping counters and are intentionally kept
+    // live with detailed timing disabled. That lets the Spyro cadence probe
+    // correlate real frame time with GPU work without clock-sampling overhead.
+    const auto& gpu_stats = runtime_snapshot_.profiling;
+    perf_gpu_words_history_[idx] = gpu_stats.gpu_gp0_words;
+    perf_gpu_draw_commands_history_[idx] = gpu_stats.gpu_draw_commands;
+    perf_gpu_bucket_commands_history_[idx] = {
+        gpu_stats.gpu_flat_commands,
+        gpu_stats.gpu_gouraud_commands,
+        gpu_stats.gpu_textured_commands,
+        gpu_stats.gpu_gouraud_textured_commands,
+        gpu_stats.gpu_rect_commands,
+        gpu_stats.gpu_line_commands,
+        gpu_stats.gpu_transfer_commands,
+        gpu_stats.gpu_other_commands,
+    };
+    perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
+    perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
+    perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
+    perf_display_hash_history_[idx] =
+        g_profile_detailed_timing ? runtime_snapshot_.boot_diag.display_hash : 0;
 
     perf_history_write_index_ = (perf_history_write_index_ + 1) % kPerfHistorySamples;
     if (perf_history_count_ < kPerfHistorySamples) {
@@ -425,6 +491,11 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
             perf_history_count_,
             perf_history_write_index_)
         : GpuDipDiagnostics{};
+    const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+        perf_cpu_ms_history_, perf_gpu_ms_history_,
+        perf_core_ms_history_, perf_gpu_draw_commands_history_,
+        perf_gpu_bucket_commands_history_,
+        perf_history_count_, perf_history_write_index_);
     char header[160];
     std::snprintf(header, sizeof(header),
         "CPU %.2f ms  GPU %.2f ms  Core %.2f ms  Game %.1f  Video %.1f",
@@ -449,45 +520,37 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     }
     dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 23.0f), status_color, status_text);
 
-    if (g_profile_detailed_timing && dip_diag.valid) {
+    if (phase_diag.valid) {
+        char cadence_text[96];
+        std::snprintf(cadence_text, sizeof(cadence_text),
+            "GPU cadence alt %.0f%%", phase_diag.alternation_percent);
+        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
+            IM_COL32(180, 180, 200, 255), cadence_text);
+
+        char phase_text[128];
+        std::snprintf(phase_text, sizeof(phase_text),
+            "Draws %.0f/%.0f  Core %.2f/%.2f ms",
+            phase_diag.render_draws, phase_diag.reuse_draws,
+            phase_diag.render_core_ms, phase_diag.reuse_core_ms);
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 36.0f),
+            IM_COL32(170, 170, 185, 255), phase_text);
+
+        const size_t dominant_bucket = dominant_render_bucket(phase_diag);
+        char bucket_text[128];
+        std::snprintf(bucket_text, sizeof(bucket_text),
+            "Main GPU delta: %s %.0f/%.0f cmds",
+            gpu_bucket_name(dominant_bucket),
+            phase_diag.render_buckets[dominant_bucket],
+            phase_diag.reuse_buckets[dominant_bucket]);
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 48.0f),
+            IM_COL32(170, 170, 185, 255), bucket_text);
+    }
+    else if (g_profile_detailed_timing && dip_diag.valid) {
         char dip_text[64];
         std::snprintf(dip_text, sizeof(dip_text), "GPU dips ~%.1f frames",
             dip_diag.avg_interval_frames);
         dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
             IM_COL32(180, 180, 200, 255), dip_text);
-    }
-    else if (g_profile_detailed_timing && dip_diag.dip_count > 0) {
-        char dip_text[48];
-        std::snprintf(dip_text, sizeof(dip_text), "GPU dips %d",
-            dip_diag.dip_count);
-        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
-            IM_COL32(180, 180, 200, 255), dip_text);
-    }
-
-    if (g_profile_detailed_timing &&
-        (dip_diag.valid || dip_diag.dip_count > 0) &&
-        dip_diag.avg_non_dip_words > 0.0) {
-        char dip_work_text[80];
-        std::snprintf(dip_work_text, sizeof(dip_work_text),
-            "GP0@dip %.0fw/%.0fd vs %.0fw/%.0fd",
-            dip_diag.avg_dip_words,
-            dip_diag.avg_dip_draws,
-            dip_diag.avg_non_dip_words,
-            dip_diag.avg_non_dip_draws);
-        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 36.0f),
-            IM_COL32(170, 170, 185, 255), dip_work_text);
-    }
-    if (g_profile_detailed_timing && dip_diag.latest_dip_frame != 0) {
-        char dip_state_text[128];
-        std::snprintf(dip_state_text, sizeof(dip_state_text),
-            "Last dip f%llu pc=%08X dma2=%uw @%08X disp=%s",
-            static_cast<unsigned long long>(dip_diag.latest_dip_frame),
-            dip_diag.latest_dip_pc,
-            dip_diag.latest_dip_dma2_words,
-            dip_diag.latest_dip_dma2_base,
-            dip_diag.latest_dip_display_reused ? "reused" : "changed");
-        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 48.0f),
-            IM_COL32(170, 170, 185, 255), dip_state_text);
     }
 
     const float gx0 = p0.x + 10.0f;
@@ -567,6 +630,75 @@ void App::panel_performance() {
             ImGui::SameLine(100);
             ImGui::TextColored(color, "%.3f ms", ms);
             };
+
+        const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+            perf_cpu_ms_history_, perf_gpu_ms_history_,
+            perf_core_ms_history_, perf_gpu_draw_commands_history_,
+            perf_gpu_bucket_commands_history_,
+            perf_history_count_, perf_history_write_index_);
+
+        ImGui::Text("GPU workload (low-overhead, always on):");
+        ImGui::Text(
+            "GP0 %u words / %u commands / %u draws",
+            stats.gpu_gp0_words, stats.gpu_gp0_commands,
+            stats.gpu_draw_commands);
+        ImGui::Text(
+            "Cmds: flat %u  gouraud %u  tex %u  g+tex %u  rect %u  line %u  xfer %u  other %u",
+            stats.gpu_flat_commands, stats.gpu_gouraud_commands,
+            stats.gpu_textured_commands, stats.gpu_gouraud_textured_commands,
+            stats.gpu_rect_commands, stats.gpu_line_commands,
+            stats.gpu_transfer_commands, stats.gpu_other_commands);
+        if (phase_diag.valid) {
+            const size_t dominant_bucket = dominant_render_bucket(phase_diag);
+            ImGui::Text(
+                "Cadence: %.0f%% alternating  active/light frames %u/%u  threshold %u draws",
+                phase_diag.alternation_percent, phase_diag.render_frames,
+                phase_diag.reuse_frames, phase_diag.draw_threshold);
+            ImGui::Text(
+                "Active avg: %.0f draws  Core %.3f ms   Light avg: %.0f draws  Core %.3f ms",
+                phase_diag.render_draws, phase_diag.render_core_ms,
+                phase_diag.reuse_draws, phase_diag.reuse_core_ms);
+            ImGui::Text(
+                "Largest command delta: %s %.1f active vs %.1f light",
+                gpu_bucket_name(dominant_bucket),
+                phase_diag.render_buckets[dominant_bucket],
+                phase_diag.reuse_buckets[dominant_bucket]);
+            if (phase_diag.alternation_percent >= 80.0 &&
+                phase_diag.render_core_ms > phase_diag.reuse_core_ms * 1.15) {
+                ImGui::TextDisabled(
+                    "Strong alternating GPU workload: frame-time oscillation follows draw cadence.");
+            }
+            if (ImGui::Button("Copy GPU cadence snapshot")) {
+                char cadence_snapshot[1024];
+                std::snprintf(
+                    cadence_snapshot, sizeof(cadence_snapshot),
+                    "frame=%llu core_ms=%.3f gp0_words=%u gp0_commands=%u draws=%u "
+                    "flat=%u gouraud=%u textured=%u gouraud_textured=%u rect=%u line=%u transfer=%u other=%u "
+                    "cadence_alt=%.1f active_frames=%u light_frames=%u threshold=%u "
+                    "active_draws=%.1f light_draws=%.1f active_core_ms=%.3f light_core_ms=%.3f "
+                    "dominant=%s dominant_active=%.1f dominant_light=%.1f detailed=%u",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms,
+                    stats.gpu_gp0_words, stats.gpu_gp0_commands,
+                    stats.gpu_draw_commands,
+                    stats.gpu_flat_commands, stats.gpu_gouraud_commands,
+                    stats.gpu_textured_commands,
+                    stats.gpu_gouraud_textured_commands,
+                    stats.gpu_rect_commands, stats.gpu_line_commands,
+                    stats.gpu_transfer_commands, stats.gpu_other_commands,
+                    phase_diag.alternation_percent,
+                    phase_diag.render_frames, phase_diag.reuse_frames,
+                    phase_diag.draw_threshold,
+                    phase_diag.render_draws, phase_diag.reuse_draws,
+                    phase_diag.render_core_ms, phase_diag.reuse_core_ms,
+                    gpu_bucket_name(dominant_bucket),
+                    phase_diag.render_buckets[dominant_bucket],
+                    phase_diag.reuse_buckets[dominant_bucket],
+                    g_profile_detailed_timing ? 1u : 0u);
+                ImGui::SetClipboardText(cadence_snapshot);
+            }
+        }
+        ImGui::Separator();
 
         if (g_profile_detailed_timing) {
             row("CPU*", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
@@ -678,26 +810,6 @@ void App::panel_performance() {
             }
 
             draw_performance_gpu_dip_diagnostics();
-
-            const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
-                perf_cpu_ms_history_, perf_gpu_ms_history_,
-                perf_core_ms_history_, perf_gpu_draw_commands_history_,
-                perf_history_count_, perf_history_write_index_);
-            if (phase_diag.valid) {
-                ImGui::Separator();
-                ImGui::Text(
-                    "Render/reuse phases (draw threshold %u, history %u/%u):",
-                    phase_diag.draw_threshold, phase_diag.render_frames,
-                    phase_diag.reuse_frames);
-                ImGui::Text(
-                    "Render-active avg: CPU %.3f  GPU %.3f  Core %.3f ms",
-                    phase_diag.render_cpu_ms, phase_diag.render_gpu_ms,
-                    phase_diag.render_core_ms);
-                ImGui::Text(
-                    "Reuse/light avg:  CPU %.3f  GPU %.3f  Core %.3f ms",
-                    phase_diag.reuse_cpu_ms, phase_diag.reuse_gpu_ms,
-                    phase_diag.reuse_core_ms);
-            }
 
             ImGui::Separator();
             ImGui::Text("GTE Command Detail:");

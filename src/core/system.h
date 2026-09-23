@@ -338,39 +338,59 @@ public:
   void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
   void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
   void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
+  void add_gpu_command_bucket(GpuProfileBucket bucket) {
+    switch (bucket) {
+    case GpuProfileBucket::Flat:
+      ++profiling_stats_.gpu_flat_commands;
+      break;
+    case GpuProfileBucket::Gouraud:
+      ++profiling_stats_.gpu_gouraud_commands;
+      break;
+    case GpuProfileBucket::Textured:
+      ++profiling_stats_.gpu_textured_commands;
+      break;
+    case GpuProfileBucket::GouraudTextured:
+      ++profiling_stats_.gpu_gouraud_textured_commands;
+      break;
+    case GpuProfileBucket::Rect:
+      ++profiling_stats_.gpu_rect_commands;
+      break;
+    case GpuProfileBucket::Line:
+      ++profiling_stats_.gpu_line_commands;
+      break;
+    case GpuProfileBucket::Transfer:
+      ++profiling_stats_.gpu_transfer_commands;
+      break;
+    case GpuProfileBucket::Other:
+      ++profiling_stats_.gpu_other_commands;
+      break;
+    }
+  }
   void add_gpu_profile_bucket(GpuProfileBucket bucket, double ms) {
     switch (bucket) {
     case GpuProfileBucket::Flat:
       profiling_stats_.gpu_flat_ms += ms;
-      ++profiling_stats_.gpu_flat_commands;
       break;
     case GpuProfileBucket::Gouraud:
       profiling_stats_.gpu_gouraud_ms += ms;
-      ++profiling_stats_.gpu_gouraud_commands;
       break;
     case GpuProfileBucket::Textured:
       profiling_stats_.gpu_textured_ms += ms;
-      ++profiling_stats_.gpu_textured_commands;
       break;
     case GpuProfileBucket::GouraudTextured:
       profiling_stats_.gpu_gouraud_textured_ms += ms;
-      ++profiling_stats_.gpu_gouraud_textured_commands;
       break;
     case GpuProfileBucket::Rect:
       profiling_stats_.gpu_rect_ms += ms;
-      ++profiling_stats_.gpu_rect_commands;
       break;
     case GpuProfileBucket::Line:
       profiling_stats_.gpu_line_ms += ms;
-      ++profiling_stats_.gpu_line_commands;
       break;
     case GpuProfileBucket::Transfer:
       profiling_stats_.gpu_transfer_ms += ms;
-      ++profiling_stats_.gpu_transfer_commands;
       break;
     case GpuProfileBucket::Other:
       profiling_stats_.gpu_other_ms += ms;
-      ++profiling_stats_.gpu_other_commands;
       break;
     }
   }
