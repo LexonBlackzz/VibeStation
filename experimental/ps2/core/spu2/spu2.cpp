@@ -93,6 +93,7 @@ void Spu2::reset() {
     cores_ = {};
     cycle_phase_ = 0;
     pcm_queue_.clear();
+    debug_stats_ = {};
 
     // Keep the bootstrap-visible STATX reset value at zero. DMA completion
     // raises the transfer-ready bit just like the earlier compatibility path.
@@ -233,6 +234,7 @@ void Spu2::key_on(u32 core, u32 mask, u32 first_voice) {
     if (core >= cores_.size()) return;
     for (u32 bit = 0; bit < 16u && first_voice + bit < 24u; ++bit) {
         if ((mask & (1u << bit)) == 0u) continue;
+        ++debug_stats_.keyed_on_voices;
         Voice& v = cores_[core].voices[first_voice + bit];
         v = {};
         v.active = true;
@@ -256,6 +258,7 @@ void Spu2::key_off(u32 core, u32 mask, u32 first_voice) {
     if (core >= cores_.size()) return;
     for (u32 bit = 0; bit < 16u && first_voice + bit < 24u; ++bit) {
         if ((mask & (1u << bit)) != 0u) {
+            ++debug_stats_.keyed_off_voices;
             Voice& v = cores_[core].voices[first_voice + bit];
             if (v.active &&
                 v.envelope_phase != EnvelopePhase::Stopped) {
@@ -307,6 +310,11 @@ bool Spu2::decode_block(u32 core, u32 voice_index) {
     }
 
     voice.decoded_pos = 0;
+    ++debug_stats_.decoded_blocks;
+    for (const s16 sample : voice.decoded) {
+        if (sample != 0)
+            ++debug_stats_.decoded_nonzero_samples;
+    }
     const u32 addr_reg =
         core * kCoreStride +
         kVoiceNextAddr +
@@ -644,11 +652,21 @@ void Spu2::mix_one_sample() {
             raw16(kExtVolR1));
     }
 
-    push_sample(
+    const s16 final_left =
         clamp16(apply_master_volume(
-            1u, core1_left, false)),
+            1u, core1_left, false));
+    const s16 final_right =
         clamp16(apply_master_volume(
-            1u, core1_right, true)));
+            1u, core1_right, true));
+    ++debug_stats_.mixed_frames;
+    if (final_left != 0 || final_right != 0)
+        ++debug_stats_.nonzero_output_frames;
+
+    const u32 active = active_voice_count();
+    debug_stats_.max_active_voices =
+        std::max(debug_stats_.max_active_voices, active);
+
+    push_sample(final_left, final_right);
 }
 
 void Spu2::push_sample(s16 left, s16 right) {
@@ -676,6 +694,7 @@ bool Spu2::dma_write(
     u32 halfwords) {
     if (core >= cores_.size()) return false;
     Core& c = cores_[core];
+    debug_stats_.dma_write_halfwords += halfwords;
 
     const u32 ram_mask =
         static_cast<u32>(IopRam::kSize - 1u);
@@ -705,6 +724,7 @@ bool Spu2::dma_read(
     u32 halfwords) {
     if (core >= cores_.size()) return false;
     Core& c = cores_[core];
+    debug_stats_.dma_read_halfwords += halfwords;
 
     const u32 ram_mask =
         static_cast<u32>(IopRam::kSize - 1u);
@@ -727,6 +747,16 @@ bool Spu2::dma_read(
         core * kCoreStride + kTransferAddr + 2u,
         static_cast<u16>(c.transfer_addr));
     return true;
+}
+
+u32 Spu2::active_voice_count() const {
+    u32 count = 0;
+    for (const Core& core : cores_) {
+        for (const Voice& voice : core.voices) {
+            if (voice.active) ++count;
+        }
+    }
+    return count;
 }
 
 std::vector<s16> Spu2::take_samples(std::size_t max_frames) {
