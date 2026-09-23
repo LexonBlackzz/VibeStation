@@ -197,6 +197,183 @@ void App::panel_emulator_screen_mobile() {
     const bool disc_loaded = system_ != nullptr && system_->disc_loaded();
 
     if (!has_started_emulation_) {
+        const ImVec2 viewport_size = ImGui::GetMainViewport()->Size;
+        const bool landscape = viewport_size.x > viewport_size.y;
+        const bool selected_game = !game_bin_path_.empty() || disc_loaded;
+
+        if (game_library_dirty_ ||
+            (rom_directory_valid_ &&
+                (SDL_GetTicks() - game_library_last_scan_ms_ > 15000u))) {
+            refresh_game_library();
+        }
+
+        if (landscape) {
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const ImVec2 origin = ImGui::GetCursorPos();
+            const float center_x = origin.x + avail.x * 0.5f;
+            const ImVec4 title_color =
+                ui_theme::current_startup_title_color(ui_theme::g_theme_settings);
+            const ImVec4 text_color =
+                ui_theme::current_startup_text_color(ui_theme::g_theme_settings);
+
+            const char* logo = "VibeStation";
+            ImGui::SetWindowFontScale(1.55f);
+            const ImVec2 logo_size = ImGui::CalcTextSize(logo);
+            ImGui::SetCursorPos(ImVec2(
+                center_x - logo_size.x * 0.5f,
+                origin.y + avail.y * 0.075f));
+            ImGui::TextColored(title_color, "%s", logo);
+            ImGui::SetWindowFontScale(1.0f);
+
+            const char* helper = bios_loaded
+                ? (selected_game
+                    ? "Ready to boot the selected game."
+                    : "Load a game, or start the PlayStation BIOS.")
+                : "Load a PlayStation BIOS to get started.";
+            const ImVec2 helper_size = ImGui::CalcTextSize(helper);
+            ImGui::SetCursorPos(ImVec2(
+                center_x - helper_size.x * 0.5f,
+                origin.y + avail.y * 0.18f));
+            ImGui::TextColored(text_color, "%s", helper);
+
+            const std::string bios_line = bios_loaded
+                ? std::string("BIOS: ") + system_->bios().get_info()
+                : "BIOS: Not loaded";
+            const char* disc_line = selected_game ? "Disc: Selected" : "Disc: None";
+            const float status_gap = 30.0f * mobile_ui_scale_;
+            const float bios_w = ImGui::CalcTextSize(bios_line.c_str()).x;
+            const float disc_w = ImGui::CalcTextSize(disc_line).x;
+            const float status_x =
+                center_x - (bios_w + status_gap + disc_w) * 0.5f;
+            ImGui::SetCursorPos(ImVec2(status_x, origin.y + avail.y * 0.235f));
+            ImGui::TextColored(
+                bios_loaded ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
+                            : ImVec4(0.90f, 0.48f, 0.48f, 1.0f),
+                "%s", bios_line.c_str());
+            ImGui::SameLine(0.0f, status_gap);
+            ImGui::TextColored(
+                selected_game ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
+                              : ImVec4(0.70f, 0.70f, 0.76f, 1.0f),
+                "%s", disc_line);
+
+            const float row_w = std::min(avail.x * 0.78f, 1120.0f);
+            const int visible_buttons = selected_game && bios_loaded ? 4 : 3;
+            const float gap = 12.0f * mobile_ui_scale_;
+            const float button_w =
+                (row_w - gap * static_cast<float>(visible_buttons - 1)) /
+                static_cast<float>(visible_buttons);
+            const float button_h = ImGui::GetFrameHeight() * 1.38f;
+            ImGui::SetCursorPos(ImVec2(
+                center_x - row_w * 0.5f,
+                origin.y + avail.y * 0.31f));
+
+            const char* bios_label = bios_loaded ? "Change BIOS" : "Load BIOS";
+            if (ImGui::Button(bios_label, ImVec2(button_w, button_h))) {
+                open_file_dialog(
+                    "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0",
+                    "Select PS1 BIOS");
+            }
+            ImGui::SameLine(0.0f, gap);
+            if (ImGui::Button("Load Game", ImVec2(button_w, button_h))) {
+                open_file_dialog(
+                    "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
+                    "Select PS1 Game");
+            }
+            ImGui::SameLine(0.0f, gap);
+            ImGui::BeginDisabled(!bios_loaded);
+            const char* start_label =
+                selected_game ? "Boot Game" : "Start BIOS";
+            if (ImGui::Button(start_label, ImVec2(button_w, button_h))) {
+                if (selected_game) {
+                    boot_disc_from_ui();
+                }
+                else {
+                    start_bios_from_ui();
+                }
+            }
+            ImGui::EndDisabled();
+
+            if (selected_game && bios_loaded) {
+                ImGui::SameLine(0.0f, gap);
+                if (ImGui::Button("Eject Disc", ImVec2(button_w, button_h))) {
+                    game_bin_path_.clear();
+                    game_cue_path_.clear();
+                    if (system_->disc_loaded()) {
+                        system_->unload_disc();
+                    }
+                    status_message_ = "Disc selection cleared";
+                }
+            }
+
+            const float library_w = std::min(avail.x * 0.74f, 1180.0f);
+            const float library_h = std::max(
+                ImGui::GetFrameHeight() * 6.0f,
+                avail.y * 0.37f);
+            ImGui::SetCursorPos(ImVec2(
+                center_x - library_w * 0.5f,
+                origin.y + avail.y * 0.45f));
+            ImGui::BeginChild("LandscapeGameLibrary",
+                ImVec2(library_w, library_h), true);
+
+            ImGui::TextColored(ImVec4(0.78f, 0.72f, 0.98f, 1.0f),
+                "Game Library");
+            ImGui::SameLine();
+            if (rom_directory_valid_) {
+                ImGui::TextDisabled("%zu game%s",
+                    game_library_.size(),
+                    game_library_.size() == 1 ? "" : "s");
+            }
+            else {
+                ImGui::TextDisabled("No ROM folder imported");
+            }
+
+            const float import_w = 210.0f * mobile_ui_scale_;
+            if (ImGui::Button(
+                rom_directory_valid_ ? "Import Another Folder" : "Import ROM Folder",
+                ImVec2(import_w, 0.0f))) {
+                open_folder_dialog("Import ROM Folder");
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!rom_directory_valid_);
+            if (ImGui::Button("Refresh")) {
+                game_library_dirty_ = true;
+                refresh_game_library();
+            }
+            ImGui::EndDisabled();
+            ImGui::Separator();
+
+            if (!rom_directory_valid_) {
+                ImGui::TextDisabled(
+                    "Import a folder containing .bin/.cue images to populate the library.");
+            }
+            else if (game_library_.empty()) {
+                ImGui::TextDisabled("No playable disc images found.");
+            }
+            else {
+                for (size_t i = 0; i < game_library_.size(); ++i) {
+                    const auto& entry = game_library_[i];
+                    const std::string label =
+                        entry.title + "##landscape_game_" + std::to_string(i);
+                    if (ImGui::Selectable(label.c_str(), false,
+                        ImGuiSelectableFlags_None,
+                        ImVec2(0.0f, ImGui::GetFrameHeight() * 1.18f))) {
+                        load_disc_from_ui(entry.bin_path, entry.cue_path);
+                    }
+                }
+            }
+            ImGui::EndChild();
+
+            const ImVec2 message_size =
+                ImGui::CalcTextSize(status_message_.c_str());
+            ImGui::SetCursorPos(ImVec2(
+                center_x - message_size.x * 0.5f,
+                origin.y + avail.y * 0.88f));
+            ImGui::TextColored(ImVec4(0.62f, 0.52f, 0.88f, 1.0f),
+                "%s", status_message_.c_str());
+            return;
+        }
+
+        // Portrait keeps the stacked, finger-friendly mobile layout.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const float margin = std::max(18.0f * mobile_ui_scale_, avail.x * 0.045f);
         const float content_w = std::max(1.0f, avail.x - margin * 2.0f);
@@ -223,7 +400,6 @@ void App::panel_emulator_screen_mobile() {
                         : ImVec4(0.95f, 0.55f, 0.50f, 1.0f),
             "%s", bios_loaded ? system_->bios().get_info().c_str() : "Not loaded");
 
-        const bool selected_game = !game_bin_path_.empty() || disc_loaded;
         ImGui::Text("Game");
         ImGui::SameLine();
         ImGui::TextColored(
@@ -263,21 +439,18 @@ void App::panel_emulator_screen_mobile() {
         if (selected_game && bios_loaded) {
             if (ImGui::Button("Eject / Clear Selected Game",
                 ImVec2(-1.0f, button_h * 0.88f))) {
-                unload_disc_from_ui();
-                has_started_emulation_ = false;
-                emu_runner_.pause_and_wait_idle();
+                game_bin_path_.clear();
+                game_cue_path_.clear();
+                if (system_->disc_loaded()) {
+                    system_->unload_disc();
+                }
+                status_message_ = "Disc selection cleared";
             }
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-
-        if (game_library_dirty_ ||
-            (rom_directory_valid_ &&
-                (SDL_GetTicks() - game_library_last_scan_ms_ > 15000u))) {
-            refresh_game_library();
-        }
 
         ImGui::TextColored(ImVec4(0.78f, 0.72f, 0.98f, 1.0f),
             "Game Library");
