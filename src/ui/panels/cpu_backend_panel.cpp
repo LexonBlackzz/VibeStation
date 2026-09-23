@@ -54,10 +54,10 @@ namespace {
         else if ((requested_mode == CpuExecutionMode::X64Jit ||
                   requested_mode == CpuExecutionMode::X64JitV2 ||
                   requested_mode == CpuExecutionMode::X64JitV3 ||
-                  requested_mode == CpuExecutionMode::X64JitV4) &&
+                  requested_mode == CpuExecutionMode::Recompiler) &&
                  !stats.native_available) {
             const char *fallback_name =
-                requested_mode == CpuExecutionMode::X64JitV4
+                requested_mode == CpuExecutionMode::Recompiler
                     ? "Interpreter"
                     : "Decoded blocks";
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
