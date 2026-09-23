@@ -3,14 +3,119 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
+
+void write_le16(std::ofstream& out, std::uint16_t value) {
+    const char bytes[2] = {
+        static_cast<char>(value),
+        static_cast<char>(value >> 8),
+    };
+    out.write(bytes, sizeof(bytes));
+}
+
+void write_le32(std::ofstream& out, std::uint32_t value) {
+    const char bytes[4] = {
+        static_cast<char>(value),
+        static_cast<char>(value >> 8),
+        static_cast<char>(value >> 16),
+        static_cast<char>(value >> 24),
+    };
+    out.write(bytes, sizeof(bytes));
+}
+
+bool write_pcm16_wav(
+    const char* path,
+    const std::vector<ps2::s16>& interleaved_stereo) {
+    if (path == nullptr) return false;
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+
+    constexpr std::uint16_t channels = 2;
+    constexpr std::uint16_t bits_per_sample = 16;
+    constexpr std::uint32_t sample_rate = ps2::Spu2::kSampleRate;
+    constexpr std::uint16_t block_align =
+        channels * (bits_per_sample / 8u);
+    constexpr std::uint32_t byte_rate =
+        sample_rate * block_align;
+
+    const std::uint32_t data_bytes =
+        static_cast<std::uint32_t>(
+            interleaved_stereo.size() * sizeof(ps2::s16));
+
+    out.write("RIFF", 4);
+    write_le32(out, 36u + data_bytes);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    write_le32(out, 16u);
+    write_le16(out, 1u);
+    write_le16(out, channels);
+    write_le32(out, sample_rate);
+    write_le32(out, byte_rate);
+    write_le16(out, block_align);
+    write_le16(out, bits_per_sample);
+    out.write("data", 4);
+    write_le32(out, data_bytes);
+
+    for (const ps2::s16 sample : interleaved_stereo)
+        write_le16(out, static_cast<std::uint16_t>(sample));
+
+    return static_cast<bool>(out);
+}
+
+void print_audio_stats(
+    const std::vector<ps2::s16>& pcm) {
+    std::uint64_t nonzero = 0;
+    std::uint32_t peak = 0;
+    long double square_sum = 0.0L;
+
+    for (const ps2::s16 sample : pcm) {
+        const std::int32_t signed_sample = sample;
+        const std::uint32_t magnitude =
+            static_cast<std::uint32_t>(
+                signed_sample < 0 ? -signed_sample : signed_sample);
+        if (magnitude != 0u) ++nonzero;
+        peak = std::max(peak, magnitude);
+        const long double normalized =
+            static_cast<long double>(signed_sample) / 32768.0L;
+        square_sum += normalized * normalized;
+    }
+
+    const long double rms =
+        pcm.empty()
+            ? 0.0L
+            : std::sqrt(
+                square_sum /
+                static_cast<long double>(pcm.size()));
+    const long double rms_dbfs =
+        rms > 0.0L
+            ? 20.0L * std::log10(rms)
+            : -INFINITY;
+    const long double peak_dbfs =
+        peak != 0u
+            ? 20.0L * std::log10(
+                static_cast<long double>(peak) / 32768.0L)
+            : -INFINITY;
+
+    std::cout
+        << "SPU2_CAPTURE_FRAMES=" << (pcm.size() / 2u)
+        << " SPU2_CAPTURE_NONZERO_SAMPLES=" << nonzero
+        << " SPU2_CAPTURE_PEAK=" << peak
+        << " SPU2_CAPTURE_PEAK_DBFS="
+        << static_cast<double>(peak_dbfs)
+        << " SPU2_CAPTURE_RMS_DBFS="
+        << static_cast<double>(rms_dbfs)
+        << '\n';
+}
 
 ps2::u64 parse_budget(const char* text, ps2::u64 fallback) {
     if (text == nullptr) {
@@ -922,7 +1027,7 @@ int main(int argc, char** argv) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
-               "[--ee-jit|--profile|--gs-thread]\n";
+               "[--ee-jit|--profile|--gs-thread] [--wav=audio.wav]\n";
         return 64;
     }
 
@@ -938,12 +1043,16 @@ int main(int argc, char** argv) {
     bool profile = false;
     bool gs_thread = false;
     const char* display_path = nullptr;
+    std::string wav_path;
     for (int index = 3; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--ee-jit") ee_jit = true;
         else if (option == "--pc-samples") pc_samples = true;
         else if (option == "--profile") profile = true;
         else if (option == "--gs-thread") gs_thread = true;
+        else if (option.starts_with("--wav=") && option.size() > 6u) {
+            wav_path = std::string(option.substr(6));
+        }
         else if (display_path == nullptr && !option.starts_with("--")) {
             display_path = argv[index];
         } else {
@@ -973,6 +1082,7 @@ int main(int argc, char** argv) {
     ps2::u64 first_visible_field = 0;
     std::chrono::nanoseconds run_time{};
     std::chrono::nanoseconds display_time{};
+    std::vector<ps2::s16> captured_pcm;
     const auto wall_start = std::chrono::steady_clock::now();
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
@@ -987,6 +1097,19 @@ int main(int argc, char** argv) {
         const auto display_begin = std::chrono::steady_clock::now();
         system.refresh_display();
         if (profile) display_time += std::chrono::steady_clock::now() - display_begin;
+
+        if (!wav_path.empty()) {
+            const std::size_t queued =
+                system.spu2().queued_frames();
+            if (queued != 0u) {
+                auto pcm =
+                    system.spu2().take_samples(queued);
+                captured_pcm.insert(
+                    captured_pcm.end(),
+                    pcm.begin(),
+                    pcm.end());
+            }
+        }
 
         if (!first_visible_reported &&
             system.gs_display().nonzero_pixel_count() != 0u) {
@@ -1107,6 +1230,31 @@ int main(int argc, char** argv) {
             std::cerr << "DISPLAY_DUMP_ERROR=" << display_path << '\n';
         } else {
             std::cout << "DISPLAY_DUMP=" << display_path << '\n';
+        }
+    }
+
+    if (!wav_path.empty()) {
+        const std::size_t queued =
+            system.spu2().queued_frames();
+        if (queued != 0u) {
+            auto pcm = system.spu2().take_samples(queued);
+            captured_pcm.insert(
+                captured_pcm.end(),
+                pcm.begin(),
+                pcm.end());
+        }
+
+        print_audio_stats(captured_pcm);
+        if (!write_pcm16_wav(
+                wav_path.c_str(),
+                captured_pcm)) {
+            std::cerr
+                << "SPU2_WAV_DUMP_ERROR="
+                << wav_path << '\n';
+        } else {
+            std::cout
+                << "SPU2_WAV_DUMP="
+                << wav_path << '\n';
         }
     }
 
