@@ -962,7 +962,8 @@ V4NativeFn compile_v4_load(
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
     u32 tail_count, const V4DecodedControl *control,
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
-    const V4LinkTargets &links, u32 &code_size) {
+    const V4LinkTargets &links, bool collect_profile_stats,
+    u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -1213,8 +1214,10 @@ V4NativeFn compile_v4_load(
     code.sub(code.r12d, prefix_count + tail_count + 1u);
   }
 
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+  if (collect_profile_stats) {
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+  }
   if (control == nullptr) {
     emit_v4_link(code, links.fallthrough, links);
   } else if (control->op == V4ControlOp::Jr ||
@@ -1269,7 +1272,8 @@ V4NativeFn compile_v4_store(
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &tail,
     u32 tail_count, const V4DecodedControl *control,
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
-    bool cacheable, const V4LinkTargets &links, u32 &code_size) {
+    bool cacheable, const V4LinkTargets &links, bool collect_profile_stats,
+    u32 &code_size) {
   using namespace Xbyak;
   constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
@@ -1579,8 +1583,10 @@ V4NativeFn compile_v4_store(
         tail_count + 1u);
     code.sub(code.r12d, tail_count + 1u);
   }
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  if (collect_profile_stats) {
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  }
   if (control == nullptr) {
     emit_v4_link(code, links.fallthrough, links);
   } else if (control->op == V4ControlOp::Jr ||
@@ -1607,8 +1613,10 @@ V4NativeFn compile_v4_store(
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.dec(code.r12d);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  if (collect_profile_stats) {
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  }
   emit_v4_link(code, links.after_store, links);
 
   code.L(slow_after_prefix);
@@ -2380,14 +2388,15 @@ struct CpuRecompilerBackend::Impl {
             arena, decoded, count, load, load_tail, load_tail_count,
             load_has_control ? &load_control : nullptr,
             load_has_control ? &load_delay : nullptr,
-            load_branch_pc, start_pc, links, block->code_size);
+            load_branch_pc, start_pc, links, collect_transition_stats,
+            block->code_size);
       } else if (simple_store) {
         entry = compile_v4_store(
             arena, decoded, count, store, store_tail, store_tail_count,
             store_has_control ? &store_control : nullptr,
             store_has_control ? &store_delay : nullptr,
             store_branch_pc, start_pc, cacheable, links,
-            block->code_size);
+            collect_transition_stats, block->code_size);
       } else {
         entry = compile_v4_alu(
             arena, decoded, count, start_pc, links, block->code_size);
