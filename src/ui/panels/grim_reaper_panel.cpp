@@ -347,15 +347,26 @@ namespace {
 }
 
 void App::panel_grim_reaper() {
+#if defined(__ANDROID__)
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Always);
+    const ImGuiWindowFlags grim_flags =
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoCollapse;
+#else
     ImGui::SetNextWindowSize(ImVec2(640, 460), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Grim Reaper", &show_grim_reaper_)) {
+    const ImGuiWindowFlags grim_flags = ImGuiWindowFlags_None;
+#endif
+    if (!ImGui::Begin("Grim Reaper", &show_grim_reaper_, grim_flags)) {
         ImGui::End();
         return;
     }
 
     ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f),
         "Experimental BIOS corruption. Original BIOS is never modified.");
-    if (ImGui::BeginTabBar("GrimReaperTabs")) {
+    if (ImGui::BeginTabBar("GrimReaperTabs",
+        ImGuiTabBarFlags_FittingPolicyScroll)) {
         if (ImGui::BeginTabItem("Single BIOS")) {
 
             grim_reaper_area_index_ =
