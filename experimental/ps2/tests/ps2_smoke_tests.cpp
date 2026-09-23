@@ -1708,6 +1708,8 @@ bool test_iop_spu2_adpcm_voice() {
     ok = expect(
         system.iop_bus().write16(0x1F900760u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900762u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900788u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F90078Au, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900000u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900002u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900004u, 0x1000u) &&
