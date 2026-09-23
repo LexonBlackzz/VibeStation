@@ -4,9 +4,24 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 
 namespace {
+    u32 scheduler_env_u32(const char* name) {
+        const char* text = std::getenv(name);
+        if (text == nullptr || text[0] == '\0') {
+            return 0u;
+        }
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(text, &end, 10);
+        if (end == text || parsed == 0ul) {
+            return 0u;
+        }
+        return static_cast<u32>((std::min)(parsed, 4096ul));
+    }
+
+
     constexpr u32 kMainRamMirrorWindow = 0x00800000u;
     constexpr u32 kExpansion1Base = 0x1F000000u;
     constexpr u32 kUnmappedHighPhysicalBase = 0x20000000u;
@@ -1603,8 +1618,23 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
     const bool optimized_cpu_mode =
         effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
-    const u32 cpu_instruction_slice =
+    const u32 default_cpu_instruction_slice =
         aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
+    const u32 default_cpu_cycle_slice = default_cpu_instruction_slice * 4u;
+    // Perf-lab overrides let the headless Spyro benchmark sweep host scheduling
+    // granularity without rebuilding. Zero/unset keeps production behavior.
+    static const u32 instruction_slice_override =
+        scheduler_env_u32("VIBESTATION_CPU_SLICE_INSTRUCTIONS");
+    static const u32 cycle_slice_override =
+        scheduler_env_u32("VIBESTATION_CPU_SLICE_CYCLES");
+    const u32 cpu_instruction_slice =
+        instruction_slice_override != 0u
+            ? instruction_slice_override
+            : default_cpu_instruction_slice;
+    const u32 cpu_cycle_slice =
+        cycle_slice_override != 0u
+            ? cycle_slice_override
+            : default_cpu_cycle_slice;
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
     // Keep those devices at near-baseline cadence even in fast mode.
     const u32 dma_tick_stride = 16u;
@@ -1664,7 +1694,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         };
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
-                std::min(cycles_remaining, cpu_instruction_slice * 4u);
+                std::min(cycles_remaining, cpu_cycle_slice);
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
             if (optimized_cpu_mode) {
