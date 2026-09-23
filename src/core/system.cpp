@@ -346,6 +346,7 @@ void System::sync_spu_to_cpu() {
 }
 
 void System::sync_sio_to_cpu() {
+    ++profiling_stats_.scheduler_sio_sync_calls;
     const u64 target_cycle = cpu_.cycle_count();
     if (target_cycle <= sio_synced_cpu_cycle_) {
         return;
@@ -357,6 +358,7 @@ void System::sync_sio_to_cpu() {
             (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
             ? std::numeric_limits<u32>::max()
             : static_cast<u32>(delta);
+        ++profiling_stats_.scheduler_sio_tick_calls;
         sio_.tick(step);
         delta -= step;
     }
@@ -1629,6 +1631,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         }
         u32 cycles_remaining = cycles_this_scanline;
         auto service_dma = [&]() {
+            ++profiling_stats_.scheduler_dma_service_calls;
             const u64 before_dma_cycles = cpu_.cycle_count();
             dma_.tick();
             const u64 after_dma_cycles = cpu_.cycle_count();
@@ -1639,10 +1642,13 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 return;
             }
 
+            ++profiling_stats_.scheduler_dma_work_calls;
             frame_cycles_ += dma_cycles;
             sync_sio_to_cpu();
             mdec_.tick(dma_cycles);
             cdrom_.tick(dma_cycles);
+            ++profiling_stats_.scheduler_timer_tick_calls;
+            profiling_stats_.scheduler_timer_tick_cycles += dma_cycles;
             timers_.tick(dma_cycles);
             cycles_remaining =
                 (dma_cycles >= cycles_remaining) ? 0 : (cycles_remaining - dma_cycles);
@@ -1663,6 +1669,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         sio_event_cycles == 0u
                         ? remaining_slice_cycles
                         : std::min(remaining_slice_cycles, sio_event_cycles);
+                    ++profiling_stats_.scheduler_run_slice_calls;
                     CpuRunSliceResult run = cpu_.run_slice(
                         run_cycles,
                         cpu_instruction_slice - instructions_executed);
@@ -1686,6 +1693,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             } else {
                 while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
                        instructions_executed < cpu_instruction_slice) {
+                    ++profiling_stats_.scheduler_run_slice_calls;
                     const CpuRunSliceResult run =
                         cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
                     const u32 consumed = run.cycles;
@@ -1716,6 +1724,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
 
             timer_tick_budget += spent_in_slice;
             while (timer_tick_budget >= timer_tick_stride) {
+                ++profiling_stats_.scheduler_timer_tick_calls;
+                profiling_stats_.scheduler_timer_tick_cycles += timer_tick_stride;
                 timers_.tick(timer_tick_stride);
                 timer_tick_budget -= timer_tick_stride;
             }
@@ -1737,6 +1747,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         }
         // Flush any fractional timer ticks remaining from the CPU loop.
         if (timer_tick_budget > 0) {
+            ++profiling_stats_.scheduler_timer_tick_calls;
+            profiling_stats_.scheduler_timer_tick_cycles += timer_tick_budget;
             timers_.tick(timer_tick_budget);
             timer_tick_budget = 0;
         }
