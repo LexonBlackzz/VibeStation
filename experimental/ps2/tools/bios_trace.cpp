@@ -654,6 +654,27 @@ void print_state(const ps2::Ps2System& system) {
         << " SCHEDULER_TICK=" << system.scheduler().now()
         << '\n';
 
+    const auto& rc_debug =
+        system.iop_bus().root_counter_debug();
+    for (ps2::u32 index = 0; index < 6u; ++index) {
+        std::cout
+            << "IOP_TIMER_DEBUG" << index
+            << " COUNT_WRITES=" << rc_debug.count_writes[index]
+            << " MODE_WRITES=" << rc_debug.mode_writes[index]
+            << " TARGET_WRITES=" << rc_debug.target_writes[index]
+            << " TARGET_EVENTS=" << rc_debug.target_events[index]
+            << " OVERFLOW_EVENTS=" << rc_debug.overflow_events[index]
+            << " IRQ_EVENTS=" << rc_debug.irq_events[index]
+            << " LAST_MODE_WRITE=0x"
+            << std::hex << std::uppercase
+            << rc_debug.last_mode_write[index]
+            << " LAST_TARGET_WRITE=0x"
+            << rc_debug.last_target_write[index]
+            << " FIRST_NONZERO_TARGET=0x"
+            << rc_debug.first_nonzero_target[index]
+            << std::dec << '\n';
+    }
+
     constexpr ps2::u32 kIopTimerBases[] = {
         0x1F801100u, 0x1F801110u, 0x1F801120u,
         0x1F801480u, 0x1F801490u, 0x1F8014A0u,
