@@ -48,6 +48,11 @@ namespace {
         double reuse_cpu_ms = 0.0;
         double reuse_gpu_ms = 0.0;
         double reuse_core_ms = 0.0;
+        double render_draws = 0.0;
+        double reuse_draws = 0.0;
+        double alternation_percent = 0.0;
+        std::array<double, 8> render_buckets{};
+        std::array<double, 8> reuse_buckets{};
     };
 
     template <size_t N>
@@ -56,6 +61,7 @@ namespace {
         const std::array<float, N>& gpu_history,
         const std::array<float, N>& core_history,
         const std::array<u32, N>& draw_history,
+        const std::array<std::array<u32, 8>, N>& bucket_history,
         int count,
         int write_index) {
         FramePhaseDiagnostics out{};
@@ -75,22 +81,49 @@ namespace {
         }
 
         out.draw_threshold = std::max<u32>(8u, max_draws / 8u);
+        bool have_previous_phase = false;
+        bool previous_render_phase = false;
+        u32 phase_transitions = 0;
+        u32 alternating_transitions = 0;
         for (int i = 0; i < count; ++i) {
             const int idx =
                 (write_index - count + i + static_cast<int>(N)) %
                 static_cast<int>(N);
-            if (draw_history[idx] >= out.draw_threshold) {
+            const bool render_phase = draw_history[idx] >= out.draw_threshold;
+            if (have_previous_phase) {
+                ++phase_transitions;
+                if (render_phase != previous_render_phase) {
+                    ++alternating_transitions;
+                }
+            }
+            previous_render_phase = render_phase;
+            have_previous_phase = true;
+
+            if (render_phase) {
                 ++out.render_frames;
                 out.render_cpu_ms += cpu_history[idx];
                 out.render_gpu_ms += gpu_history[idx];
                 out.render_core_ms += core_history[idx];
+                out.render_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+                    out.render_buckets[bucket] += bucket_history[idx][bucket];
+                }
             }
             else {
                 ++out.reuse_frames;
                 out.reuse_cpu_ms += cpu_history[idx];
                 out.reuse_gpu_ms += gpu_history[idx];
                 out.reuse_core_ms += core_history[idx];
+                out.reuse_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.reuse_buckets.size(); ++bucket) {
+                    out.reuse_buckets[bucket] += bucket_history[idx][bucket];
+                }
             }
+        }
+        if (phase_transitions != 0u) {
+            out.alternation_percent =
+                100.0 * static_cast<double>(alternating_transitions) /
+                static_cast<double>(phase_transitions);
         }
 
         if (out.render_frames == 0 || out.reuse_frames == 0) {
@@ -102,6 +135,12 @@ namespace {
         out.reuse_cpu_ms /= static_cast<double>(out.reuse_frames);
         out.reuse_gpu_ms /= static_cast<double>(out.reuse_frames);
         out.reuse_core_ms /= static_cast<double>(out.reuse_frames);
+        out.render_draws /= static_cast<double>(out.render_frames);
+        out.reuse_draws /= static_cast<double>(out.reuse_frames);
+        for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+            out.render_buckets[bucket] /= static_cast<double>(out.render_frames);
+            out.reuse_buckets[bucket] /= static_cast<double>(out.reuse_frames);
+        }
         out.valid = true;
         return out;
     }
