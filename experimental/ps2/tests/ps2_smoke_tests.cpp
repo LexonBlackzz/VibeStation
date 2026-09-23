@@ -1879,13 +1879,42 @@ bool test_iop_sio2_minimal_transfer_status() {
             value == 0u,
         "SIO2 FIFO_STAT reset value mismatch") && ok;
 
+    // Attach the emulated port-1 DualShock 2 and perform a real digital
+    // poll over SIO2. Cross is active-low bit 6 in the returned button word.
+    system.pad().set_button(ps2::Sio2Pad::Button::Cross, true);
+    ok = expect(
+        system.iop_bus().write32(0x1F808200u, 9u << 8),
+        "SIO2 pad command descriptor write failed") && ok;
+    const ps2::u8 poll[9] = {
+        0x01u, 0x42u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+    };
+    for (ps2::u8 byte : poll) {
+        ok = expect(
+            system.iop_bus().write8(0x1F808260u, byte),
+            "SIO2 pad TX byte write failed") && ok;
+    }
+
     ok = expect(
         system.iop_bus().write32(0x1F808268u, 1u),
         "SIO2 CTRL start write failed") && ok;
     ok = expect(
         system.iop_bus().read32(0x1F80826Cu, value) &&
-            value == 0x0003D000u,
-        "SIO2 no-device CMD_STAT mismatch") && ok;
+            value == 0x00001100u,
+        "SIO2 connected-pad CMD_STAT mismatch") && ok;
+
+    ps2::u8 response[5]{};
+    for (ps2::u8& byte : response) {
+        ok = expect(
+            system.iop_bus().read8(0x1F808264u, byte),
+            "SIO2 pad RX byte read failed") && ok;
+    }
+    ok = expect(
+        response[0] == 0xFFu &&
+        response[1] == 0x41u &&
+        response[2] == 0x5Au &&
+        response[3] == 0xFFu &&
+        response[4] == 0xBFu,
+        "SIO2 DualShock 2 digital poll response mismatch") && ok;
     ok = expect(
         system.iop_bus().read32(0x1F808280u, value) &&
             (value & 1u) != 0,
