@@ -50,7 +50,7 @@ public:
     [[nodiscard]] u32 command(u32 index) const;
 
     void write_byte(u8 value);
-    [[nodiscard]] u8 read_byte();
+    [[nodiscard]] u8 read_byte() const;
     void start_transfer();
 
     void set_dma_block_size(std::size_t bytes) { dma_block_size_ = bytes; }
@@ -84,13 +84,13 @@ private:
     State state_{};
     std::array<u32, 16> commands_{};
     std::vector<u8> packet_{};
-    std::deque<u8> output_{};
+    mutable std::deque<u8> output_{};
 
     std::size_t queue_position_ = 0;
     std::size_t command_length_ = 0;
     std::size_t dma_block_size_ = 0;
     std::size_t tx_count_ = 0;
-    std::size_t rx_count_ = 0;
+    mutable std::size_t rx_count_ = 0;
     bool queue_loaded_ = false;
 
     Mode mode_ = Mode::Digital;
