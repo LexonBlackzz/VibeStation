@@ -1,6 +1,8 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/input/sio2_pad.h"
+#include "core/spu2/spu2.h"
 
 #include <array>
 
@@ -47,6 +49,11 @@ public:
     [[nodiscard]] u16 sif_dma_ready_mask() const;
     void raise_dma_irq(u32 channel);
 
+    Sio2Pad& sio2() { return sio2_; }
+    const Sio2Pad& sio2() const { return sio2_; }
+    Spu2& spu2() { return spu2_; }
+    const Spu2& spu2() const { return spu2_; }
+
 private:
     struct RootCounter {
         u64 count = 0;
@@ -79,7 +86,8 @@ private:
     CdvdHw& cdvd_;
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};
-    std::array<u8, 0x10000> spu2_regs_{};
+    Sio2Pad sio2_{};
+    Spu2 spu2_{};
     std::array<u32, 0x40> ohci_regs_{};
     u64 ohci_frame_phase_ = 0;
     std::array<u32, 0x60> firewire_regs_{};
