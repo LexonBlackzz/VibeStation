@@ -342,8 +342,8 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "X64JitV2";
   case CpuExecutionMode::X64JitV3:
     return "X64JitV3";
-  case CpuExecutionMode::X64JitV4:
-    return "X64JitV4";
+  case CpuExecutionMode::Recompiler:
+    return "Recompiler";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -4221,7 +4221,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   LOG_INFO(
-      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3,X64JitV4%s",
+      "CPU backend compare: reference=Interpreter targets=Recompiler%s",
       memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
@@ -4233,13 +4233,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 6> modes = {
+  const std::array<CpuExecutionMode, 2> modes = {
       CpuExecutionMode::Interpreter,
-      CpuExecutionMode::DecodedBlockInterpreter,
-      CpuExecutionMode::X64Jit,
-      CpuExecutionMode::X64JitV2,
-      CpuExecutionMode::X64JitV3,
-      CpuExecutionMode::X64JitV4,
+      CpuExecutionMode::Recompiler,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
@@ -4356,7 +4352,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       bool native_check_pass = true;
       const char *native_check = "not_required";
 
-      if (mode == CpuExecutionMode::X64JitV4 &&
+      if (mode == CpuExecutionMode::Recompiler &&
           test_case.require_v4_clean_fallback_when_available) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4371,7 +4367,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                                         : "v4_helper_missing";
           native_check_pass = clean_fallback;
         }
-      } else if (mode == CpuExecutionMode::X64JitV4 &&
+      } else if (mode == CpuExecutionMode::Recompiler &&
                  test_case.require_v4_store_smc_fallback_when_available) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4386,7 +4382,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                                  : "v4_store_smc_not_guarded";
           native_check_pass = guarded;
         }
-      } else if (mode == CpuExecutionMode::X64JitV4 &&
+      } else if (mode == CpuExecutionMode::Recompiler &&
           (test_case.require_v4_native_entry_when_available ||
            test_case.require_v4_native_load_entry_when_available ||
            test_case.require_v4_native_store_entry_when_available ||
@@ -4504,7 +4500,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         }
       }
 
-      if (mode == CpuExecutionMode::X64JitV4 &&
+      if (mode == CpuExecutionMode::Recompiler &&
           result.stats.native_available &&
           !test_case.request_irq_on_branch &&
           (result.stats.fallback_instructions != 0u ||
@@ -5095,7 +5091,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
     return 1;
   }
   LOG_INFO(
-      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2,X64JitV3,X64JitV4");
+      "CPU backend compare test passed: reference=Interpreter targets=Recompiler");
   return 0;
 }
 } // namespace
