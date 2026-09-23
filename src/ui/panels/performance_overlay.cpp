@@ -828,6 +828,51 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_linked_transitions),
             static_cast<unsigned long long>(backend.native_chain_max_blocks));
         if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            const double frame_compile_ms =
+                static_cast<double>(backend.recompiler_frame_compile_ns) / 1000000.0;
+            const double frame_compile_max_ms =
+                static_cast<double>(backend.recompiler_frame_compile_max_ns) / 1000000.0;
+            const double frame_revalidate_ms =
+                static_cast<double>(backend.recompiler_frame_revalidate_ns) / 1000000.0;
+            ImGui::Text(
+                "Spike probe: compile %.3f ms (%llu blocks, max %.3f, fail %llu)  revalidate %.3f ms (%llu/%llu)",
+                frame_compile_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_blocks),
+                frame_compile_max_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_failures),
+                frame_revalidate_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_successes),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_attempts));
+            ImGui::Text(
+                "Spike activity: misses %llu  I-cache refills %llu  helpers %llu  invalidations %llu  flushes %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_cache_misses),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_icache_refills),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_instructions),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_invalidations),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_flushes));
+            ImGui::Text(
+                "Spike dispatch: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_missing_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_epoch_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_memory_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_generation_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_budget_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_bail_exits));
             ImGui::Text("Recompiler chains: %.2f blocks/entry  direct links %llu",
                 backend.native_chain_invocations == 0 ? 0.0 :
                     static_cast<double>(backend.native_block_entries) /
