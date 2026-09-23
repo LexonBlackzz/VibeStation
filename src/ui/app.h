@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 struct SDL_Window;
 union SDL_Event;
@@ -74,6 +75,11 @@ private:
 	bool emu_input_focused_ = false;
 	u16 last_button_state_ = 0xFFFF;
 	bool show_fast_mode_notice_ = false;
+	float mobile_ui_scale_ = 1.0f;
+	bool mobile_touch_controls_enabled_ = true;
+	u16 mobile_touch_buttons_ = 0xFFFF;
+	std::unordered_map<long long, u16> mobile_touch_fingers_;
+	bool mobile_picker_busy_ = false;
 	std::array<u32, 5> underrun_notice_buckets_ = {};
 	u32 underrun_notice_bucket_index_ = 0;
 	u32 underrun_notice_bucket_count_ = 0;
@@ -232,6 +238,11 @@ private:
 		const ImGuiIO& io) const;
 	void update();
 	void render_ui();
+	void mobile_top_bar();
+	void panel_emulator_screen_mobile();
+	void draw_mobile_touch_overlay();
+	void handle_mobile_touch_event(const SDL_Event& event);
+	void handle_android_picker_results();
 	void push_performance_history_sample();
 	void draw_performance_gpu_dip_diagnostics();
 	void draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_size);
