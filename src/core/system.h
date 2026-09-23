@@ -158,6 +158,8 @@ public:
     u32 scheduler_dma_service_calls = 0;
     u32 scheduler_dma_work_calls = 0;
     u32 scheduler_timer_tick_calls = 0;
+    u32 scheduler_mdec_tick_calls = 0;
+    u32 scheduler_cdrom_tick_calls = 0;
     u64 scheduler_timer_tick_cycles = 0;
 
     // Raster work counters. candidate_pixels is bounding-box work visited by
