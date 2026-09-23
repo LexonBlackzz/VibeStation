@@ -14,19 +14,14 @@ void App::panel_about() {
         ImGui::Text("A PlayStation 1 emulator");
         ImGui::Spacing();
         const CpuExecutionMode cpu_mode = effective_cpu_execution_mode();
-        const bool native_jit_requested =
-            cpu_mode == CpuExecutionMode::X64Jit ||
-            cpu_mode == CpuExecutionMode::X64JitV2 ||
-            cpu_mode == CpuExecutionMode::X64JitV3 ||
-            cpu_mode == CpuExecutionMode::X64JitV4;
+        const bool recompiler_requested =
+            cpu_mode == CpuExecutionMode::Recompiler;
         const bool native_unavailable =
-            native_jit_requested && system_ &&
+            recompiler_requested && system_ &&
             !system_->cpu().cpu_backend_stats().native_available;
         const char *cpu_backend_status =
             native_unavailable
-                ? (cpu_mode == CpuExecutionMode::X64JitV4
-                       ? "Interpreter (V4 native emitter unavailable)"
-                       : "decoded blocks (native JIT unavailable)")
+                ? "Interpreter (recompiler unavailable)"
                 : cpu_execution_mode_name(cpu_mode);
         ImGui::Text("CPU: MIPS R3000A %s", cpu_backend_status);
         ImGui::Text("GPU: Software rasterizer");
