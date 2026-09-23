@@ -17,6 +17,17 @@ class IopRam;
 
 class IopBus {
 public:
+    struct RootCounterDebug {
+        std::array<u64, 6> count_writes{};
+        std::array<u64, 6> mode_writes{};
+        std::array<u64, 6> target_writes{};
+        std::array<u64, 6> target_events{};
+        std::array<u64, 6> overflow_events{};
+        std::array<u64, 6> irq_events{};
+        std::array<u32, 6> last_mode_write{};
+        std::array<u32, 6> last_target_write{};
+        std::array<u32, 6> first_nonzero_target{};
+    };
     IopBus(
         IopRam& ram,
         IopHwWindow& hw,
@@ -53,6 +64,9 @@ public:
     const Sio2Pad& sio2() const { return sio2_; }
     Spu2& spu2() { return spu2_; }
     const Spu2& spu2() const { return spu2_; }
+    const RootCounterDebug& root_counter_debug() const {
+        return root_counter_debug_;
+    }
 
 private:
     struct RootCounter {
@@ -93,6 +107,7 @@ private:
     std::array<u32, 0x60> firewire_regs_{};
     std::array<RootCounter, 6> root_counters_{};
     std::array<u32, 6> root_counter_rate_cache_{};
+    RootCounterDebug root_counter_debug_{};
     u64 spu2_dma4_irq_cycles_ = 0;
 };
 
