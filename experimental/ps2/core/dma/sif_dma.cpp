@@ -370,11 +370,20 @@ bool SifDma::service_sif1(
             ++stats_.rpc_calls;
             auto& rpc = stats_.recent_rpc_calls[
                 stats_.recent_rpc_next];
+            rpc = {};
             rpc.sid = sid;
             rpc.rpc_number = rpc_number;
             rpc.send_size = send_size;
             rpc.server = server;
             rpc.server_buffer = server_buffer;
+            rpc.payload_words = std::min<u32>(
+                static_cast<u32>(rpc.payload.size()),
+                (send_size + 3u) / 4u);
+            for (u32 i = 0; i < rpc.payload_words; ++i) {
+                (void)iop_bus.read32(
+                    server_buffer + i * 4u,
+                    rpc.payload[i]);
+            }
             stats_.recent_rpc_next =
                 (stats_.recent_rpc_next + 1u) %
                 static_cast<u32>(stats_.recent_rpc_calls.size());
