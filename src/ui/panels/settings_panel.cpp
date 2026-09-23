@@ -6,12 +6,31 @@
 #include <imgui.h>
 #include <algorithm>
 void App::panel_settings() {
+#if defined(__ANDROID__)
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Always);
+    const ImGuiWindowFlags settings_flags =
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoCollapse;
+#else
     ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Settings", &show_settings_)) {
-        if (ImGui::BeginTabBar("SettingsTabs")) {
+    const ImGuiWindowFlags settings_flags = ImGuiWindowFlags_None;
+#endif
+    if (ImGui::Begin("Settings", &show_settings_, settings_flags)) {
+        if (ImGui::BeginTabBar("SettingsTabs",
+            ImGuiTabBarFlags_FittingPolicyScroll)) {
             if (ImGui::BeginTabItem("Input")) {
+#if defined(__ANDROID__)
+                ImGui::Checkbox("On-screen touch controls",
+                    &mobile_touch_controls_enabled_);
+                ImGui::TextWrapped(
+                    "Touch controls support multiple fingers and merge with connected gamepads.");
+                ImGui::Spacing();
+#else
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
                     "Q/W/E/R=Shoulders, Enter=Start, Backspace=Select");
+#endif
                 ImGui::Spacing();
                 if (pending_bind_index_ >= 0) {
                     ImGui::TextColored(ImVec4(0.95f, 0.8f, 0.3f, 1.0f),
