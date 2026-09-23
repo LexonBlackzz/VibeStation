@@ -168,6 +168,52 @@ bool Spu2::write8(u32 offset, u8 value) {
 bool Spu2::write16(u32 offset, u16 value) {
     if (offset + 2u > regs_.size()) return false;
     ++debug_stats_.register_writes;
+
+    // Track whether the guest ever programs an actually audible voice rather
+    // than only doing the all-voice libsd initialization sweep.
+    if (offset < 0x800u) {
+        const u32 core = offset >= kCoreStride ? 1u : 0u;
+        const u32 local = offset - core * kCoreStride;
+        if (local < 24u * kVoiceParamStride) {
+            const u32 reg = local % kVoiceParamStride;
+            if (reg == kVoiceVolL || reg == kVoiceVolR ||
+                reg == kVoicePitch || reg == kVoiceAdsr1 ||
+                reg == kVoiceAdsr2) {
+                ++debug_stats_.voice_param_writes;
+
+                bool interesting = false;
+                if (reg == kVoiceVolL || reg == kVoiceVolR) {
+                    if (value != 0u) {
+                        ++debug_stats_.nonzero_volume_writes;
+                        debug_stats_.max_written_volume =
+                            std::max<u32>(
+                                debug_stats_.max_written_volume,
+                                static_cast<u32>(
+                                    value & 0x7FFFu));
+                        interesting = true;
+                    }
+                } else if (reg == kVoiceAdsr1 ||
+                           reg == kVoiceAdsr2) {
+                    if (value != 0u) {
+                        ++debug_stats_.nonzero_adsr_writes;
+                        interesting = true;
+                    }
+                } else if (reg == kVoicePitch) {
+                    if (value != 0u && value != 0x3FFFu) {
+                        ++debug_stats_.nondefault_pitch_writes;
+                        interesting = true;
+                    }
+                }
+
+                if (interesting &&
+                    debug_stats_.first_nonzero_voice_param_frame == 0u) {
+                    debug_stats_.first_nonzero_voice_param_frame =
+                        debug_stats_.mixed_frames + 1u;
+                }
+            }
+        }
+    }
+
     set_raw16(offset, value);
     handle_register_write(offset, value);
     return true;
@@ -222,10 +268,23 @@ void Spu2::handle_register_write(u32 offset, u16 value) {
 
     if (local == kKeyOn) {
         ++debug_stats_.key_on_writes;
+        if (value != 0u && value != 0xFFFFu) {
+            ++debug_stats_.partial_key_on_writes;
+            if (debug_stats_.first_partial_key_on_frame == 0u)
+                debug_stats_.first_partial_key_on_frame =
+                    debug_stats_.mixed_frames + 1u;
+        }
         key_on(core, value, 0u);
     } else if (local == kKeyOn + 2u) {
         ++debug_stats_.key_on_writes;
-        key_on(core, value & 0xFFu, 16u);
+        const u32 mask = value & 0xFFu;
+        if (mask != 0u && mask != 0xFFu) {
+            ++debug_stats_.partial_key_on_writes;
+            if (debug_stats_.first_partial_key_on_frame == 0u)
+                debug_stats_.first_partial_key_on_frame =
+                    debug_stats_.mixed_frames + 1u;
+        }
+        key_on(core, mask, 16u);
     } else if (local == kKeyOff) {
         ++debug_stats_.key_off_writes;
         key_off(core, value, 0u);
