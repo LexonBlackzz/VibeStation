@@ -2501,6 +2501,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
   }
 
   const auto run_helper = [&](u32 instruction, V4HelperReason reason) {
+    ++stats_.recompiler_frame_helper_reasons[static_cast<size_t>(reason)];
     V4HelperFn fn = impl_->helper_for(instruction);
     if (fn == nullptr) {
       impl_->reset_translations();
@@ -2884,6 +2885,7 @@ void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   stats_.recompiler_frame_cache_misses = 0;
   stats_.recompiler_frame_icache_refills = 0;
   stats_.recompiler_frame_helper_instructions = 0;
+  stats_.recompiler_frame_helper_reasons.fill(0);
   stats_.recompiler_frame_run_slice_calls = 0;
   stats_.recompiler_frame_native_dispatches = 0;
   stats_.recompiler_frame_direct_links = 0;
