@@ -649,11 +649,12 @@ void App::panel_performance() {
             stats.gpu_rect_commands, stats.gpu_line_commands,
             stats.gpu_transfer_commands, stats.gpu_other_commands);
         ImGui::Text(
-            "Scheduler: slices %u  SIO sync/tick %u/%u  DMA service/work %u/%u  timer ticks %u",
+            "Scheduler: slices %u  SIO %u/%u  DMA %u/%u  timers %u  MDEC/CD %u/%u",
             stats.scheduler_run_slice_calls,
             stats.scheduler_sio_sync_calls, stats.scheduler_sio_tick_calls,
             stats.scheduler_dma_service_calls, stats.scheduler_dma_work_calls,
-            stats.scheduler_timer_tick_calls);
+            stats.scheduler_timer_tick_calls,
+            stats.scheduler_mdec_tick_calls, stats.scheduler_cdrom_tick_calls);
         ImGui::TextDisabled(
             "Timer cadence covered %llu CPU cycles this frame.",
             static_cast<unsigned long long>(
