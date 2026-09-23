@@ -899,62 +899,84 @@ u64 GsRasterizer::draw_triangle(
     const bool constant_q = a.q == b.q && b.q == c.q;
     const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
     const bool constant_z = a.z == b.z && b.z == c.z;
+    const bool positive_area = area > 0;
+    const long double inv_area =
+        1.0L / static_cast<long double>(area);
+
+    // Edge functions are affine in screen space.  Evaluate them once at the
+    // top-left pixel centre, then advance by their exact 16.4 fixed-point
+    // deltas instead of recomputing three 64-bit cross products per pixel.
+    const s32 start_px = left * 16 + 8;
+    const s32 start_py = top * 16 + 8;
+    s64 row_w0 = edge(b, c, start_px, start_py);
+    s64 row_w1 = edge(c, a, start_px, start_py);
+    s64 row_w2 = edge(a, b, start_px, start_py);
+
+    const s64 w0_dx = 16ll * static_cast<s64>(c.y - b.y);
+    const s64 w1_dx = 16ll * static_cast<s64>(a.y - c.y);
+    const s64 w2_dx = 16ll * static_cast<s64>(b.y - a.y);
+    const s64 w0_dy = -16ll * static_cast<s64>(c.x - b.x);
+    const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
+    const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
+        s64 w0 = row_w0;
+        s64 w1 = row_w1;
+        s64 w2 = row_w2;
         for (s32 x = left; x < right; ++x) {
-            const s32 px = x * 16 + 8;
-            const s32 py = y * 16 + 8;
-            const s64 w0 = edge(b, c, px, py);
-            const s64 w1 = edge(c, a, px, py);
-            const s64 w2 = edge(a, b, px, py);
             const bool inside =
-                area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                         : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-            if (!inside) continue;
-
-            s32 u = 0;
-            s32 v = 0;
-            if (ctx.texture.enabled) {
-                if (ctx.texture.fst) {
-                    u = static_cast<s32>(
-                        (w0 * a.u + w1 * b.u + w2 * c.u) / area);
-                    v = static_cast<s32>(
-                        (w0 * a.v + w1 * b.v + w2 * c.v) / area);
-                } else {
-                    const long double inv_area =
-                        1.0L / static_cast<long double>(area);
-                    const float s = static_cast<float>(
-                        (static_cast<long double>(w0) * a.s +
-                         static_cast<long double>(w1) * b.s +
-                         static_cast<long double>(w2) * c.s) * inv_area);
-                    const float t = static_cast<float>(
-                        (static_cast<long double>(w0) * a.t +
-                         static_cast<long double>(w1) * b.t +
-                         static_cast<long double>(w2) * c.t) * inv_area);
-                    const float q = constant_q ? a.q : static_cast<float>(
-                        (static_cast<long double>(w0) * a.q +
-                         static_cast<long double>(w1) * b.q +
-                         static_cast<long double>(w2) * c.q) * inv_area);
-                    u = stq_to_fixed(s, q, ctx.texture.width);
-                    v = stq_to_fixed(t, q, ctx.texture.height);
+                positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                              : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if (inside) {
+                s32 u = 0;
+                s32 v = 0;
+                if (ctx.texture.enabled) {
+                    if (ctx.texture.fst) {
+                        u = static_cast<s32>(
+                            (w0 * a.u + w1 * b.u + w2 * c.u) / area);
+                        v = static_cast<s32>(
+                            (w0 * a.v + w1 * b.v + w2 * c.v) / area);
+                    } else {
+                        const float s = static_cast<float>(
+                            (static_cast<long double>(w0) * a.s +
+                             static_cast<long double>(w1) * b.s +
+                             static_cast<long double>(w2) * c.s) * inv_area);
+                        const float t = static_cast<float>(
+                            (static_cast<long double>(w0) * a.t +
+                             static_cast<long double>(w1) * b.t +
+                             static_cast<long double>(w2) * c.t) * inv_area);
+                        const float q = constant_q ? a.q : static_cast<float>(
+                            (static_cast<long double>(w0) * a.q +
+                             static_cast<long double>(w1) * b.q +
+                             static_cast<long double>(w2) * c.q) * inv_area);
+                        u = stq_to_fixed(s, q, ctx.texture.width);
+                        v = stq_to_fixed(t, q, ctx.texture.height);
+                    }
                 }
+                const u32 vertex_rgba = ctx.gouraud && !constant_rgba
+                    ? interpolate_rgba(
+                        w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
+                    : c.rgba;
+                u32 rgba = shade_pixel(
+                    vram, ctx.texture, u, v, vertex_rgba);
+                if (ctx.fog_enabled) {
+                    const u32 fog = interpolate_scalar(
+                        w0, w1, w2, area, a.fog, b.fog, c.fog);
+                    rgba = apply_fog(rgba, ctx.fog_color, fog);
+                }
+                const u32 z = !ctx.zte ? 0u : constant_z ? a.z
+                    : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
+                if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
             }
-            const u32 vertex_rgba = ctx.gouraud && !constant_rgba
-                ? interpolate_rgba(
-                    w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
-                : c.rgba;
-            u32 rgba = shade_pixel(
-                vram, ctx.texture, u, v, vertex_rgba);
-            if (ctx.fog_enabled) {
-                const u32 fog = interpolate_scalar(
-                    w0, w1, w2, area, a.fog, b.fog, c.fog);
-                rgba = apply_fog(rgba, ctx.fog_color, fog);
-            }
-            const u32 z = !ctx.zte ? 0u : constant_z ? a.z
-                : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-            if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
+
+            w0 += w0_dx;
+            w1 += w1_dx;
+            w2 += w2_dx;
         }
+        row_w0 += w0_dy;
+        row_w1 += w1_dy;
+        row_w2 += w2_dy;
     }
     return pixels;
 }
