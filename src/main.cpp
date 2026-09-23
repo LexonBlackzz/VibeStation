@@ -1668,6 +1668,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   u64 scheduler_dma_service_calls = 0;
   u64 scheduler_dma_work_calls = 0;
   u64 scheduler_timer_tick_calls = 0;
+  u64 scheduler_mdec_tick_calls = 0;
+  u64 scheduler_cdrom_tick_calls = 0;
   u64 scheduler_timer_tick_cycles = 0;
   std::vector<double> cpu_samples;
   std::vector<double> core_samples;
@@ -1695,6 +1697,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     scheduler_dma_service_calls += profile.scheduler_dma_service_calls;
     scheduler_dma_work_calls += profile.scheduler_dma_work_calls;
     scheduler_timer_tick_calls += profile.scheduler_timer_tick_calls;
+    scheduler_mdec_tick_calls += profile.scheduler_mdec_tick_calls;
+    scheduler_cdrom_tick_calls += profile.scheduler_cdrom_tick_calls;
     scheduler_timer_tick_cycles += profile.scheduler_timer_tick_cycles;
     cpu_samples.push_back(profile.cpu_ms);
     core_samples.push_back(sys->profiling_stats().total_ms);
@@ -1776,7 +1780,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "CPU_BENCHMARK_SCHED frames=%d "
       "run_slice_avg=%.3f sio_sync_avg=%.3f sio_tick_avg=%.3f "
       "dma_service_avg=%.3f dma_work_avg=%.3f "
-      "timer_tick_avg=%.3f timer_cycles_avg=%.3f\n",
+      "timer_tick_avg=%.3f mdec_tick_avg=%.3f cdrom_tick_avg=%.3f "
+      "timer_cycles_avg=%.3f\n",
       measured_frames,
       static_cast<double>(scheduler_run_slice_calls) / measured_divisor,
       static_cast<double>(scheduler_sio_sync_calls) / measured_divisor,
@@ -1784,6 +1789,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       static_cast<double>(scheduler_dma_service_calls) / measured_divisor,
       static_cast<double>(scheduler_dma_work_calls) / measured_divisor,
       static_cast<double>(scheduler_timer_tick_calls) / measured_divisor,
+      static_cast<double>(scheduler_mdec_tick_calls) / measured_divisor,
+      static_cast<double>(scheduler_cdrom_tick_calls) / measured_divisor,
       static_cast<double>(scheduler_timer_tick_cycles) / measured_divisor);
 
   std::printf(
