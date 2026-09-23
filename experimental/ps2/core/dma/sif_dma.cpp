@@ -340,6 +340,7 @@ bool SifDma::service_sif1(
     std::size_t pos = 0;
     bool saw_end = false;
     u32 payload_words = 0;
+    int last_rpc_record = -1;
     while (pos + 4u <= stream.size()) {
         const u32 data = stream[pos + 0u];
         const u32 words = stream[pos + 1u] & 0x000FFFFCu;
@@ -379,11 +380,13 @@ bool SifDma::service_sif1(
             rpc.payload_words = std::min<u32>(
                 static_cast<u32>(rpc.payload.size()),
                 (send_size + 3u) / 4u);
-            for (u32 i = 0; i < rpc.payload_words; ++i) {
-                (void)iop_bus.read32(
-                    server_buffer + i * 4u,
-                    rpc.payload[i]);
-            }
+            // The SIF RPC command packet normally precedes the extra-data
+            // packet that fills sd->buf. Snapshotting the server buffer here
+            // reads the *previous* call's arguments. Remember this record and
+            // capture it only after the whole SIF1 stream has landed in IOP
+            // RAM.
+            last_rpc_record =
+                static_cast<int>(stats_.recent_rpc_next);
             stats_.recent_rpc_next =
                 (stats_.recent_rpc_next + 1u) %
                 static_cast<u32>(stats_.recent_rpc_calls.size());
@@ -474,6 +477,16 @@ bool SifDma::service_sif1(
 
         saw_end = tag_ends(data);
         if (saw_end) break;
+    }
+
+    if (last_rpc_record >= 0) {
+        auto& rpc = stats_.recent_rpc_calls[
+            static_cast<u32>(last_rpc_record)];
+        for (u32 i = 0; i < rpc.payload_words; ++i) {
+            (void)iop_bus.read32(
+                rpc.server_buffer + i * 4u,
+                rpc.payload[i]);
+        }
     }
 
     if (!stream.empty() && pos == 0u) {
