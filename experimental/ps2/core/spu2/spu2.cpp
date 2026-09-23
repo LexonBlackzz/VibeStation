@@ -673,6 +673,14 @@ void Spu2::mix_one_sample() {
             raw16(kExtVolR1));
     }
 
+    const auto magnitude32 = [](s32 value) -> u32 {
+        const s64 wide = value;
+        return static_cast<u32>(wide < 0 ? -wide : wide);
+    };
+    debug_stats_.pre_master_peak = std::max(
+        debug_stats_.pre_master_peak,
+        std::max(magnitude32(core1_left), magnitude32(core1_right)));
+
     const s16 final_left =
         clamp16(apply_master_volume(
             1u, core1_left, false));
@@ -682,10 +690,11 @@ void Spu2::mix_one_sample() {
     ++debug_stats_.mixed_frames;
     if (final_left != 0 || final_right != 0)
         ++debug_stats_.nonzero_output_frames;
-
-    const u32 active = active_voice_count();
-    debug_stats_.max_active_voices =
-        std::max(debug_stats_.max_active_voices, active);
+    debug_stats_.output_peak = std::max(
+        debug_stats_.output_peak,
+        std::max(
+            magnitude32(final_left),
+            magnitude32(final_right)));
 
     push_sample(final_left, final_right);
 }
