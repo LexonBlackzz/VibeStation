@@ -860,6 +860,14 @@ void App::panel_performance() {
                 static_cast<unsigned long long>(
                     backend.recompiler_frame_flushes));
             ImGui::Text(
+                "Spike scheduling: run_slice %llu  native dispatch %llu  direct links %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_run_slice_calls),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_native_dispatches),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_direct_links));
+            ImGui::Text(
                 "Spike dispatch: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
                 static_cast<unsigned long long>(
                     backend.recompiler_frame_dispatch_missing_exits),
