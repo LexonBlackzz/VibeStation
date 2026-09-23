@@ -380,6 +380,56 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
+    const auto& spu_stats = system.spu2().debug_stats();
+    std::cout
+        << "SPU2_DEBUG"
+        << " MIXED_FRAMES=" << spu_stats.mixed_frames
+        << " NONZERO_OUTPUT_FRAMES=" << spu_stats.nonzero_output_frames
+        << " KEYED_ON_VOICES=" << spu_stats.keyed_on_voices
+        << " KEYED_OFF_VOICES=" << spu_stats.keyed_off_voices
+        << " DECODED_BLOCKS=" << spu_stats.decoded_blocks
+        << " DECODED_NONZERO_SAMPLES="
+        << spu_stats.decoded_nonzero_samples
+        << " DMA_WRITE_HALFWORDS="
+        << spu_stats.dma_write_halfwords
+        << " DMA_READ_HALFWORDS="
+        << spu_stats.dma_read_halfwords
+        << " ACTIVE_VOICES="
+        << system.spu2().active_voice_count()
+        << " MAX_ACTIVE_VOICES="
+        << spu_stats.max_active_voices
+        << '\n';
+
+    std::cout << "SPU2_MIX_REGS";
+    for (const ps2::u32 address : {
+             0x1F900188u, 0x1F90018Au,
+             0x1F90018Cu, 0x1F90018Eu,
+             0x1F900190u, 0x1F900192u,
+             0x1F900194u, 0x1F900196u,
+             0x1F900198u, 0x1F90019Au,
+             0x1F9001A0u, 0x1F9001A2u,
+             0x1F9001A4u, 0x1F9001A6u,
+             0x1F900340u, 0x1F900342u,
+             0x1F900588u, 0x1F90058Au,
+             0x1F90058Cu, 0x1F90058Eu,
+             0x1F900590u, 0x1F900592u,
+             0x1F900594u, 0x1F900596u,
+             0x1F900598u, 0x1F90059Au,
+             0x1F9005A0u, 0x1F9005A2u,
+             0x1F9005A4u, 0x1F9005A6u,
+             0x1F900740u, 0x1F900742u,
+             0x1F900760u, 0x1F900762u,
+             0x1F900788u, 0x1F90078Au,
+             0x1F900790u, 0x1F900792u}) {
+        ps2::u16 value = 0;
+        if (system.iop_bus().read16(address, value)) {
+            std::cout
+                << " [0x" << std::hex << std::uppercase
+                << address << "]=0x" << value;
+        }
+    }
+    std::cout << std::dec << '\n';
+
     std::cout << "IOP_EXCEPTIONS";
     for (ps2::u32 code = 0; code < iop.exception_counts.size(); ++code) {
         if (iop.exception_counts[code] != 0) {
