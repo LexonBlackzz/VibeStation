@@ -4,31 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
-#include <filesystem>
 #include <string>
-
-namespace {
-
-std::string find_downloads_bios() {
-#ifdef _WIN32
-    // A no-argument launch should be useful on the user's machine, while an
-    // explicit --bios path always takes precedence. Do not scan or bundle ROMs.
-    const char* profile = std::getenv("USERPROFILE");
-    if (profile == nullptr || *profile == '\0') {
-        return {};
-    }
-    const auto candidate =
-        std::filesystem::path(profile) / "Downloads" / "scph39001.bin";
-    std::error_code error;
-    if (std::filesystem::is_regular_file(candidate, error) &&
-        std::filesystem::file_size(candidate, error) == 4u * 1024u * 1024u) {
-        return candidate.string();
-    }
-#endif
-    return {};
-}
-
-} // namespace
 
 int main(int argc, char** argv) {
     const auto startup_clock = std::chrono::steady_clock::now();
@@ -71,10 +47,6 @@ int main(int argc, char** argv) {
             stderr,
             "Capture requires --bios and --capture-visible.\n");
         return 2;
-    }
-
-    if (bios_path.empty() && capture_path.empty()) {
-        bios_path = find_downloads_bios();
     }
 
     ps2::ui::Ps2App app;

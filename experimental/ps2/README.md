@@ -40,12 +40,12 @@ frame took about 4.7 seconds, and the graphical capture reached it in about
 load. While the screen is blank, the UI prioritizes uninterrupted emulation
 and may not respond to input until the first visible frame.
 
-On Windows, opening `VibeStationPS2Lab.exe` normally creates a persistent
-graphical window. If `scph39001.bin` is present in the current user's
-Downloads folder, the app loads and starts it automatically. Otherwise use
-the window's **Load BIOS** and **Start BIOS** buttons, or launch with
-`--bios <path>`. A progress readout is displayed until the first GS pixels
-appear. The reported EE instructions per second measure host interpreter
+On Windows, opening `VibeStationPS2Lab.exe` without arguments creates a
+persistent graphical window and does not load or start a BIOS automatically.
+Use the window's **Load BIOS** and **Start BIOS** buttons to boot manually,
+or launch with `--bios <path>` to explicitly boot on startup. A progress
+readout is displayed until the first GS pixels appear. The reported EE
+instructions per second measure host interpreter
 throughput, not the PS2's 294.912 MHz EE clock; hardware-accurate cycle
 accounting and real-time pacing are not implemented yet.
 
