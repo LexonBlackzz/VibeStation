@@ -25,6 +25,7 @@ add_library(vibestation_ps2_core STATIC
     core/gs/gs_privileged.cpp
     core/hw/ee_hw.cpp
     core/hw/iop_hw_window.cpp
+    core/input/sio2_pad.cpp
     core/iop/iop_bus.cpp
     core/iop/iop_cpu.cpp
     core/iop/iop_intc.cpp
@@ -33,6 +34,7 @@ add_library(vibestation_ps2_core STATIC
     core/memory/ee_ram.cpp
     core/memory/ee_scratchpad.cpp
     core/scheduler/scheduler.cpp
+    core/spu2/spu2.cpp
     core/video/video_timing.cpp
     core/vu/vu1.cpp
 )
