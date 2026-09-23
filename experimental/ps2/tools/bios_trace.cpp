@@ -3,14 +3,119 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
+
+void write_le16(std::ofstream& out, std::uint16_t value) {
+    const char bytes[2] = {
+        static_cast<char>(value),
+        static_cast<char>(value >> 8),
+    };
+    out.write(bytes, sizeof(bytes));
+}
+
+void write_le32(std::ofstream& out, std::uint32_t value) {
+    const char bytes[4] = {
+        static_cast<char>(value),
+        static_cast<char>(value >> 8),
+        static_cast<char>(value >> 16),
+        static_cast<char>(value >> 24),
+    };
+    out.write(bytes, sizeof(bytes));
+}
+
+bool write_pcm16_wav(
+    const char* path,
+    const std::vector<ps2::s16>& interleaved_stereo) {
+    if (path == nullptr) return false;
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+
+    constexpr std::uint16_t channels = 2;
+    constexpr std::uint16_t bits_per_sample = 16;
+    constexpr std::uint32_t sample_rate = ps2::Spu2::kSampleRate;
+    constexpr std::uint16_t block_align =
+        channels * (bits_per_sample / 8u);
+    constexpr std::uint32_t byte_rate =
+        sample_rate * block_align;
+
+    const std::uint32_t data_bytes =
+        static_cast<std::uint32_t>(
+            interleaved_stereo.size() * sizeof(ps2::s16));
+
+    out.write("RIFF", 4);
+    write_le32(out, 36u + data_bytes);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    write_le32(out, 16u);
+    write_le16(out, 1u);
+    write_le16(out, channels);
+    write_le32(out, sample_rate);
+    write_le32(out, byte_rate);
+    write_le16(out, block_align);
+    write_le16(out, bits_per_sample);
+    out.write("data", 4);
+    write_le32(out, data_bytes);
+
+    for (const ps2::s16 sample : interleaved_stereo)
+        write_le16(out, static_cast<std::uint16_t>(sample));
+
+    return static_cast<bool>(out);
+}
+
+void print_audio_stats(
+    const std::vector<ps2::s16>& pcm) {
+    std::uint64_t nonzero = 0;
+    std::uint32_t peak = 0;
+    long double square_sum = 0.0L;
+
+    for (const ps2::s16 sample : pcm) {
+        const std::int32_t signed_sample = sample;
+        const std::uint32_t magnitude =
+            static_cast<std::uint32_t>(
+                signed_sample < 0 ? -signed_sample : signed_sample);
+        if (magnitude != 0u) ++nonzero;
+        peak = std::max(peak, magnitude);
+        const long double normalized =
+            static_cast<long double>(signed_sample) / 32768.0L;
+        square_sum += normalized * normalized;
+    }
+
+    const long double rms =
+        pcm.empty()
+            ? 0.0L
+            : std::sqrt(
+                square_sum /
+                static_cast<long double>(pcm.size()));
+    const long double rms_dbfs =
+        rms > 0.0L
+            ? 20.0L * std::log10(rms)
+            : -INFINITY;
+    const long double peak_dbfs =
+        peak != 0u
+            ? 20.0L * std::log10(
+                static_cast<long double>(peak) / 32768.0L)
+            : -INFINITY;
+
+    std::cout
+        << "SPU2_CAPTURE_FRAMES=" << (pcm.size() / 2u)
+        << " SPU2_CAPTURE_NONZERO_SAMPLES=" << nonzero
+        << " SPU2_CAPTURE_PEAK=" << peak
+        << " SPU2_CAPTURE_PEAK_DBFS="
+        << static_cast<double>(peak_dbfs)
+        << " SPU2_CAPTURE_RMS_DBFS="
+        << static_cast<double>(rms_dbfs)
+        << '\n';
+}
 
 ps2::u64 parse_budget(const char* text, ps2::u64 fallback) {
     if (text == nullptr) {
@@ -258,6 +363,141 @@ void print_state(const ps2::Ps2System& system) {
     print_iop_words("IOP_RPC_BUFFER", 0x000467B8u);
     print_iop_words("IOP_RPC_SERVER", 0x00046770u);
 
+    const auto& spu2_stats = system.spu2().debug_stats();
+    std::cout
+        << "SPU2_DEBUG"
+        << " REG_WRITES=" << spu2_stats.register_writes
+        << " DMA_WRITE_HALFWORDS=" << spu2_stats.dma_write_halfwords
+        << " DMA_READ_HALFWORDS=" << spu2_stats.dma_read_halfwords
+        << " KON_WRITES=" << spu2_stats.key_on_writes
+        << " KOFF_WRITES=" << spu2_stats.key_off_writes
+        << " PARTIAL_KON=" << spu2_stats.partial_key_on_writes
+        << " VOICE_PARAM_WRITES=" << spu2_stats.voice_param_writes
+        << " NONZERO_VOL_WRITES=" << spu2_stats.nonzero_volume_writes
+        << " NONZERO_ADSR_WRITES=" << spu2_stats.nonzero_adsr_writes
+        << " NONDEFAULT_PITCH_WRITES="
+        << spu2_stats.nondefault_pitch_writes
+        << " MAX_WRITTEN_VOL=" << spu2_stats.max_written_volume
+        << " FIRST_AUDIBLE_PARAM_FRAME="
+        << spu2_stats.first_nonzero_voice_param_frame
+        << " FIRST_PARTIAL_KON_FRAME="
+        << spu2_stats.first_partial_key_on_frame
+        << " VOICES_KON=" << spu2_stats.keyed_on_voices
+        << " VOICES_KOFF=" << spu2_stats.keyed_off_voices
+        << " DECODED_BLOCKS=" << spu2_stats.decoded_blocks
+        << " DECODED_NONZERO=" << spu2_stats.decoded_nonzero_samples
+        << " DECODED_PEAK=" << spu2_stats.decoded_peak
+        << " MIX_FRAMES=" << spu2_stats.mixed_frames
+        << " MIX_ACTIVE_FRAMES="
+        << spu2_stats.mixer_frames_with_active_voice
+        << " MAX_ACTIVE=" << spu2_stats.max_active_voices
+        << " PRE_MASTER_PEAK=" << spu2_stats.pre_master_peak
+        << " OUTPUT_PEAK=" << spu2_stats.output_peak
+        << '\n';
+
+    for (ps2::u32 core = 0; core < 2u; ++core) {
+        const ps2::u32 base = core * 0x400u;
+        ps2::u16 kon_lo = 0, kon_hi = 0;
+        ps2::u16 koff_lo = 0, koff_hi = 0;
+        ps2::u16 vmixl_lo = 0, vmixl_hi = 0;
+        ps2::u16 vmixr_lo = 0, vmixr_hi = 0;
+        ps2::u16 mmix = 0;
+        (void)system.spu2().read16(base + 0x1A0u, kon_lo);
+        (void)system.spu2().read16(base + 0x1A2u, kon_hi);
+        (void)system.spu2().read16(base + 0x1A4u, koff_lo);
+        (void)system.spu2().read16(base + 0x1A6u, koff_hi);
+        (void)system.spu2().read16(base + 0x188u, vmixl_lo);
+        (void)system.spu2().read16(base + 0x18Au, vmixl_hi);
+        (void)system.spu2().read16(base + 0x190u, vmixr_lo);
+        (void)system.spu2().read16(base + 0x192u, vmixr_hi);
+        (void)system.spu2().read16(base + 0x198u, mmix);
+        std::cout
+            << "SPU2_CORE" << core
+            << " KON=0x" << std::hex << std::uppercase
+            << kon_lo << ":" << kon_hi
+            << " KOFF=0x" << koff_lo << ":" << koff_hi
+            << " VMIXL=0x" << vmixl_lo << ":" << vmixl_hi
+            << " VMIXR=0x" << vmixr_lo << ":" << vmixr_hi
+            << " MMIX=0x" << mmix
+            << std::dec << '\n';
+    }
+
+    for (ps2::u32 core = 0; core < 2u; ++core) {
+        const ps2::u32 base = core * 0x400u;
+        for (ps2::u32 voice = 0; voice < 24u; ++voice) {
+            const ps2::u32 vbase = base + voice * 0x10u;
+            ps2::u16 voll = 0, volr = 0, pitch = 0;
+            ps2::u16 adsr1 = 0, adsr2 = 0, envx = 0;
+            (void)system.spu2().read16(vbase + 0x0u, voll);
+            (void)system.spu2().read16(vbase + 0x2u, volr);
+            (void)system.spu2().read16(vbase + 0x4u, pitch);
+            (void)system.spu2().read16(vbase + 0x6u, adsr1);
+            (void)system.spu2().read16(vbase + 0x8u, adsr2);
+            (void)system.spu2().read16(vbase + 0xAu, envx);
+            if ((voll | volr | pitch | adsr1 | adsr2 | envx) == 0u)
+                continue;
+            std::cout
+                << "SPU2_VOICE C=" << core
+                << " V=" << voice
+                << " VOLL=0x" << std::hex << std::uppercase << voll
+                << " VOLR=0x" << volr
+                << " PITCH=0x" << pitch
+                << " ADSR1=0x" << adsr1
+                << " ADSR2=0x" << adsr2
+                << " ENVX=0x" << envx
+                << std::dec << '\n';
+        }
+    }
+
+    // Retail SCPH-39001 OSDSND (rspu2_driver) SIF RPC server. Dump
+    // the live server/queue objects so we can distinguish "packet arrived"
+    // from "RPC thread actually consumed it".
+    constexpr ps2::u32 kOsdSndServer = 0x001EC190u;
+    std::array<ps2::u32, 17> osdsnd_server{};
+    bool osdsnd_server_ok = true;
+    for (ps2::u32 word = 0; word < osdsnd_server.size(); ++word) {
+        osdsnd_server_ok =
+            system.iop_bus().read32(
+                kOsdSndServer + word * 4u,
+                osdsnd_server[word]) &&
+            osdsnd_server_ok;
+    }
+    if (osdsnd_server_ok) {
+        std::cout << "OSDSND_RPC_SERVER";
+        for (ps2::u32 word = 0; word < osdsnd_server.size(); ++word) {
+            std::cout
+                << " [" << word << "]=0x"
+                << std::hex << std::uppercase
+                << osdsnd_server[word] << std::dec;
+        }
+        std::cout << '\n';
+
+        const ps2::u32 queue =
+            osdsnd_server[16] & 0x001FFFFFu;
+        if (queue != 0u) {
+            std::array<ps2::u32, 6> q{};
+            bool queue_ok = true;
+            for (ps2::u32 word = 0; word < q.size(); ++word) {
+                queue_ok =
+                    system.iop_bus().read32(
+                        queue + word * 4u, q[word]) &&
+                    queue_ok;
+            }
+            if (queue_ok) {
+                std::cout
+                    << "OSDSND_RPC_QUEUE ADDR=0x"
+                    << std::hex << std::uppercase << queue
+                    << " THREAD=0x" << q[0]
+                    << " ACTIVE=0x" << q[1]
+                    << " LINK=0x" << q[2]
+                    << " START=0x" << q[3]
+                    << " END=0x" << q[4]
+                    << " NEXT=0x" << q[5]
+                    << std::dec << '\n';
+            }
+        }
+    }
+
     std::cout << "SPU2_REGS";
     for (const ps2::u32 address : {
              0x1F90019Au, 0x1F90019Cu, 0x1F90019Eu,
@@ -271,6 +511,36 @@ void print_state(const ps2::Ps2System& system) {
             std::cout
                 << " [0x" << std::hex << std::uppercase << address
                 << "]=0x" << value;
+        }
+    }
+    std::cout << std::dec << '\n';
+
+    std::cout << "SPU2_MIX_REGS";
+    for (const ps2::u32 address : {
+             0x1F900188u, 0x1F90018Au,
+             0x1F90018Cu, 0x1F90018Eu,
+             0x1F900190u, 0x1F900192u,
+             0x1F900194u, 0x1F900196u,
+             0x1F900198u, 0x1F90019Au,
+             0x1F9001A0u, 0x1F9001A2u,
+             0x1F9001A4u, 0x1F9001A6u,
+             0x1F900340u, 0x1F900342u,
+             0x1F900588u, 0x1F90058Au,
+             0x1F90058Cu, 0x1F90058Eu,
+             0x1F900590u, 0x1F900592u,
+             0x1F900594u, 0x1F900596u,
+             0x1F900598u, 0x1F90059Au,
+             0x1F9005A0u, 0x1F9005A2u,
+             0x1F9005A4u, 0x1F9005A6u,
+             0x1F900740u, 0x1F900742u,
+             0x1F900760u, 0x1F900762u,
+             0x1F900788u, 0x1F90078Au,
+             0x1F900790u, 0x1F900792u}) {
+        ps2::u16 value = 0;
+        if (system.iop_bus().read16(address, value)) {
+            std::cout
+                << " [0x" << std::hex << std::uppercase
+                << address << "]=0x" << value;
         }
     }
     std::cout << std::dec << '\n';
@@ -383,6 +653,27 @@ void print_state(const ps2::Ps2System& system) {
         << std::dec
         << " SCHEDULER_TICK=" << system.scheduler().now()
         << '\n';
+
+    const auto& rc_debug =
+        system.iop_bus().root_counter_debug();
+    for (ps2::u32 index = 0; index < 6u; ++index) {
+        std::cout
+            << "IOP_TIMER_DEBUG" << index
+            << " COUNT_WRITES=" << rc_debug.count_writes[index]
+            << " MODE_WRITES=" << rc_debug.mode_writes[index]
+            << " TARGET_WRITES=" << rc_debug.target_writes[index]
+            << " TARGET_EVENTS=" << rc_debug.target_events[index]
+            << " OVERFLOW_EVENTS=" << rc_debug.overflow_events[index]
+            << " IRQ_EVENTS=" << rc_debug.irq_events[index]
+            << " LAST_MODE_WRITE=0x"
+            << std::hex << std::uppercase
+            << rc_debug.last_mode_write[index]
+            << " LAST_TARGET_WRITE=0x"
+            << rc_debug.last_target_write[index]
+            << " FIRST_NONZERO_TARGET=0x"
+            << rc_debug.first_nonzero_target[index]
+            << std::dec << '\n';
+    }
 
     constexpr ps2::u32 kIopTimerBases[] = {
         0x1F801100u, 0x1F801110u, 0x1F801120u,
@@ -599,7 +890,22 @@ void print_state(const ps2::Ps2System& system) {
             << ",0x" << packet.payload[3]
             << std::dec << '\n';
     }
-    std::cout << "SIF1_PACKETS=" << sif_stats.sif1_packets << '\n';
+    std::cout
+        << "SIF1_PACKETS=" << sif_stats.sif1_packets
+        << " RPC_CALLS=" << sif_stats.rpc_calls
+        << " SOUND_RPC_CALLS=" << sif_stats.sound_rpc_calls
+        << " SOUND_ST_INIT=" << sif_stats.sound_st_init_calls
+        << " SOUND_BGM_OPEN=" << sif_stats.sound_bgm_open_calls
+        << " SOUND_TICK_MODE=" << sif_stats.sound_tick_mode_calls
+        << " SOUND_MASTER_VOL=" << sif_stats.sound_master_volume_calls
+        << " SOUND_BGM_PLAY=" << sif_stats.sound_bgm_play_calls
+        << " SOUND_BGM_STOP=" << sif_stats.sound_bgm_stop_calls
+        << " SOUND_TIMER_START=" << sif_stats.sound_timer_start_calls
+        << " SOUND_SE_PLAY=" << sif_stats.sound_se_play_calls
+        << " SOUND_SETPARAM=" << sif_stats.sound_set_param_calls
+        << " SOUND_SETSWITCH=" << sif_stats.sound_set_switch_calls
+        << " SOUND_SETADDR=" << sif_stats.sound_set_addr_calls
+        << '\n';
     for (ps2::u32 offset = 0;
          offset < sif_stats.recent_sif1_count;
          ++offset) {
@@ -622,6 +928,67 @@ void print_state(const ps2::Ps2System& system) {
             << ",0x" << packet.payload[2]
             << ",0x" << packet.payload[3]
             << std::dec << '\n';
+    }
+
+    for (ps2::u32 offset = 0;
+         offset < sif_stats.recent_rpc_count;
+         ++offset) {
+        const ps2::u32 index =
+            (sif_stats.recent_rpc_next +
+             static_cast<ps2::u32>(
+                 sif_stats.recent_rpc_calls.size()) -
+             sif_stats.recent_rpc_count + offset) %
+            static_cast<ps2::u32>(
+                sif_stats.recent_rpc_calls.size());
+        const auto& rpc = sif_stats.recent_rpc_calls[index];
+        std::cout
+            << "RPC_RECENT[" << offset << "]"
+            << " SID=0x" << std::hex << std::uppercase
+            << rpc.sid
+            << " FNO=0x" << rpc.rpc_number
+            << " SIZE=0x" << rpc.send_size
+            << " SERVER=0x" << rpc.server
+            << " BUF=0x" << rpc.server_buffer
+            << std::dec;
+        if (rpc.payload_words != 0u) {
+            std::cout << " ARGS";
+            for (ps2::u32 word = 0;
+                 word < rpc.payload_words;
+                 ++word) {
+                std::cout
+                    << " [" << word << "]=0x"
+                    << std::hex << std::uppercase
+                    << rpc.payload[word]
+                    << std::dec;
+            }
+        }
+        if (rpc.sid == 0x80000601u &&
+            rpc.rpc_number == 0x5009u &&
+            rpc.payload_words >= 3u) {
+            const ps2::u32 sequence =
+                rpc.payload[2] & 0x001FFFFFu;
+            std::cout
+                << " BGM_SLOT="
+                << (rpc.payload[1] & 0xFFFFu)
+                << " BGM_PTR=0x"
+                << std::hex << std::uppercase
+                << sequence << std::dec;
+            if (sequence != 0u) {
+                std::cout << " BGM_HEAD";
+                for (ps2::u32 word = 0; word < 8u; ++word) {
+                    ps2::u32 value = 0;
+                    if (system.iop_bus().read32(
+                            sequence + word * 4u,
+                            value)) {
+                        std::cout
+                            << " [" << word << "]=0x"
+                            << std::hex << std::uppercase
+                            << value << std::dec;
+                    }
+                }
+            }
+        }
+        std::cout << '\n';
     }
 
     const auto& vu0 = system.vu0();
@@ -922,7 +1289,8 @@ int main(int argc, char** argv) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
-               "[--ee-jit|--profile|--gs-thread]\n";
+               "[--ee-jit|--profile|--gs-thread|--audio-only] "
+               "[--wav=audio.wav]\n";
         return 64;
     }
 
@@ -937,13 +1305,19 @@ int main(int argc, char** argv) {
     bool pc_samples = false;
     bool profile = false;
     bool gs_thread = false;
+    bool audio_only = false;
     const char* display_path = nullptr;
+    std::string wav_path;
     for (int index = 3; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--ee-jit") ee_jit = true;
         else if (option == "--pc-samples") pc_samples = true;
         else if (option == "--profile") profile = true;
         else if (option == "--gs-thread") gs_thread = true;
+        else if (option == "--audio-only") audio_only = true;
+        else if (option.starts_with("--wav=") && option.size() > 6u) {
+            wav_path = std::string(option.substr(6));
+        }
         else if (display_path == nullptr && !option.starts_with("--")) {
             display_path = argv[index];
         } else {
@@ -955,6 +1329,7 @@ int main(int argc, char** argv) {
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
     system.gs_core().set_async_rasterization(gs_thread);
+    system.gs_core().set_rasterization_enabled(!audio_only);
     std::string error;
 
     if (!system.load_bios(argv[1], error)) {
@@ -973,6 +1348,7 @@ int main(int argc, char** argv) {
     ps2::u64 first_visible_field = 0;
     std::chrono::nanoseconds run_time{};
     std::chrono::nanoseconds display_time{};
+    std::vector<ps2::s16> captured_pcm;
     const auto wall_start = std::chrono::steady_clock::now();
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
@@ -984,11 +1360,30 @@ int main(int argc, char** argv) {
             break;
         }
         remaining -= ran;
-        const auto display_begin = std::chrono::steady_clock::now();
-        system.refresh_display();
-        if (profile) display_time += std::chrono::steady_clock::now() - display_begin;
+        if (!audio_only) {
+            const auto display_begin = std::chrono::steady_clock::now();
+            system.refresh_display();
+            if (profile) {
+                display_time +=
+                    std::chrono::steady_clock::now() - display_begin;
+            }
+        }
 
-        if (!first_visible_reported &&
+        if (!wav_path.empty()) {
+            const std::size_t queued =
+                system.spu2().queued_frames();
+            if (queued != 0u) {
+                auto pcm =
+                    system.spu2().take_samples(queued);
+                captured_pcm.insert(
+                    captured_pcm.end(),
+                    pcm.begin(),
+                    pcm.end());
+            }
+        }
+
+        if (!audio_only &&
+            !first_visible_reported &&
             system.gs_display().nonzero_pixel_count() != 0u) {
             first_visible_reported = true;
             first_visible_time = std::chrono::steady_clock::now();
@@ -1107,6 +1502,31 @@ int main(int argc, char** argv) {
             std::cerr << "DISPLAY_DUMP_ERROR=" << display_path << '\n';
         } else {
             std::cout << "DISPLAY_DUMP=" << display_path << '\n';
+        }
+    }
+
+    if (!wav_path.empty()) {
+        const std::size_t queued =
+            system.spu2().queued_frames();
+        if (queued != 0u) {
+            auto pcm = system.spu2().take_samples(queued);
+            captured_pcm.insert(
+                captured_pcm.end(),
+                pcm.begin(),
+                pcm.end());
+        }
+
+        print_audio_stats(captured_pcm);
+        if (!write_pcm16_wav(
+                wav_path.c_str(),
+                captured_pcm)) {
+            std::cerr
+                << "SPU2_WAV_DUMP_ERROR="
+                << wav_path << '\n';
+        } else {
+            std::cout
+                << "SPU2_WAV_DUMP="
+                << wav_path << '\n';
         }
     }
 

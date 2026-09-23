@@ -340,6 +340,7 @@ bool SifDma::service_sif1(
     std::size_t pos = 0;
     bool saw_end = false;
     u32 payload_words = 0;
+    int last_rpc_record = -1;
     while (pos + 4u <= stream.size()) {
         const u32 data = stream[pos + 0u];
         const u32 words = stream[pos + 1u] & 0x000FFFFCu;
@@ -352,6 +353,93 @@ bool SifDma::service_sif1(
         }
 
         ++stats_.sif1_packets;
+
+        // SIF RPC call packet (command 0x8000000A). The IOP-side server
+        // object is already resident, so resolving sd->sid here lets traces
+        // identify which service received each call without changing guest
+        // execution.
+        if (words >= 14u &&
+            stream[pos + 2u] == 0x8000000Au) {
+            const u32 rpc_number = stream[pos + 8u];
+            const u32 send_size = stream[pos + 9u];
+            const u32 server = stream[pos + 13u] & 0x00FFFFFFu;
+            u32 sid = 0;
+            u32 server_buffer = 0;
+            (void)iop_bus.read32(server + 0u, sid);
+            (void)iop_bus.read32(server + 8u, server_buffer);
+
+            ++stats_.rpc_calls;
+            auto& rpc = stats_.recent_rpc_calls[
+                stats_.recent_rpc_next];
+            rpc = {};
+            rpc.sid = sid;
+            rpc.rpc_number = rpc_number;
+            rpc.send_size = send_size;
+            rpc.server = server;
+            rpc.server_buffer = server_buffer;
+            rpc.payload_words = std::min<u32>(
+                static_cast<u32>(rpc.payload.size()),
+                (send_size + 3u) / 4u);
+            // The SIF RPC command packet normally precedes the extra-data
+            // packet that fills sd->buf. Snapshotting the server buffer here
+            // reads the *previous* call's arguments. Remember this record and
+            // capture it only after the whole SIF1 stream has landed in IOP
+            // RAM.
+            last_rpc_record =
+                static_cast<int>(stats_.recent_rpc_next);
+            stats_.recent_rpc_next =
+                (stats_.recent_rpc_next + 1u) %
+                static_cast<u32>(stats_.recent_rpc_calls.size());
+            stats_.recent_rpc_count = std::min(
+                stats_.recent_rpc_count + 1u,
+                static_cast<u32>(stats_.recent_rpc_calls.size()));
+
+            // Retail SCPH-39001 OSDSYS talks to rom0:OSDSND, Sony's
+            // rspu2_driver 1.03, on server 0x80000601. Its libsnd2
+            // sequencer command block uses the older 0x50xx vocabulary.
+            constexpr u32 kOsdSndSid = 0x80000601u;
+            if (sid == kOsdSndSid) {
+                ++stats_.sound_rpc_calls;
+                switch (rpc_number) {
+                case 0x5001u:
+                    ++stats_.sound_st_init_calls;
+                    break;
+                case 0x5009u:
+                    ++stats_.sound_bgm_open_calls;
+                    break;
+                case 0x500Au:
+                    ++stats_.sound_tick_mode_calls;
+                    break;
+                case 0x5012u:
+                    ++stats_.sound_master_volume_calls;
+                    break;
+                case 0x5014u:
+                    ++stats_.sound_bgm_play_calls;
+                    break;
+                case 0x5015u:
+                    ++stats_.sound_bgm_stop_calls;
+                    break;
+                case 0x5100u:
+                    ++stats_.sound_timer_start_calls;
+                    break;
+                case 0x5200u:
+                    ++stats_.sound_se_play_calls;
+                    break;
+                case 0x8010u:
+                    ++stats_.sound_set_param_calls;
+                    break;
+                case 0x8030u:
+                    ++stats_.sound_set_switch_calls;
+                    break;
+                case 0x8050u:
+                    ++stats_.sound_set_addr_calls;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+
         auto& record = stats_.recent_sif1_packets[
             stats_.recent_sif1_next];
         record = {};
@@ -389,6 +477,16 @@ bool SifDma::service_sif1(
 
         saw_end = tag_ends(data);
         if (saw_end) break;
+    }
+
+    if (last_rpc_record >= 0) {
+        auto& rpc = stats_.recent_rpc_calls[
+            static_cast<u32>(last_rpc_record)];
+        for (u32 i = 0; i < rpc.payload_words; ++i) {
+            (void)iop_bus.read32(
+                rpc.server_buffer + i * 4u,
+                rpc.payload[i]);
+        }
     }
 
     if (!stream.empty() && pos == 0u) {

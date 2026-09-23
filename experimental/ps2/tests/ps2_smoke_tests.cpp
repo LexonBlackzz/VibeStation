@@ -1684,6 +1684,115 @@ bool test_iop_spu2_register_window() {
     return ok;
 }
 
+bool test_iop_spu2_adpcm_voice() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // One 16-byte PS2 ADPCM block: filter 0, shift 0, end flag set.
+    // 0x11 payload nibbles decode to a stable positive waveform.
+    ok = expect(
+        system.iop_bus().write16(0x1F9001A8u, 0u) &&
+        system.iop_bus().write16(0x1F9001AAu, 0u),
+        "SPU2 transfer address setup failed") && ok;
+    ok = expect(
+        system.iop_bus().write16(0x1F9001ACu, 0x0100u),
+        "SPU2 ADPCM header write failed") && ok;
+    for (int i = 0; i < 7; ++i) {
+        ok = expect(
+            system.iop_bus().write16(0x1F9001ACu, 0x1111u),
+            "SPU2 ADPCM payload write failed") && ok;
+    }
+
+    // Voice 0: unity-ish stereo volume, native 48 kHz pitch, fast
+    // attack/sustain, SSA=0. Core 0 master volume must also be open.
+    ok = expect(
+        system.iop_bus().write16(0x1F900760u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900762u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900788u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F90078Au, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900000u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900002u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900004u, 0x1000u) &&
+        system.iop_bus().write16(0x1F900006u, 0x000Fu) &&
+        system.iop_bus().write16(0x1F900008u, 0x0000u) &&
+        system.iop_bus().write16(0x1F9001C0u, 0u) &&
+        system.iop_bus().write16(0x1F9001C2u, 0u) &&
+        system.iop_bus().write16(0x1F9001A0u, 1u),
+        "SPU2 voice-0 key-on setup failed") && ok;
+
+    system.iop_bus().tick(
+        static_cast<ps2::u64>(ps2::Spu2::kIopCyclesPerSample) * 8u);
+    const auto pcm = system.spu2().take_samples(8u);
+    bool nonzero = false;
+    for (ps2::s16 sample : pcm) {
+        nonzero = nonzero || sample != 0;
+    }
+    ok = expect(
+        pcm.size() == 16u && nonzero,
+        "SPU2 ADPCM voice did not emit stereo PCM") && ok;
+
+    return ok;
+}
+
+bool test_iop_osdsnd_hline_timer_rearm() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 timer1 = 0x1F801110u;
+    constexpr ps2::u32 timer1_irq = 1u << 5;
+    constexpr ps2::u16 osdsnd_mode = 0x0158u;
+    constexpr ps2::u16 osdsnd_compare = 0x0100u;
+    constexpr ps2::u64 hblank_iop_cycles = 2344u;
+
+    bool ok = true;
+
+    // Retail SCPH-39001 OSDSND SetTimer() does:
+    // AllocHardTimer(HLINE,16,1), SetTimerCompare(0x100), SetTimerMode(0x158).
+    // The compare can be reached while mode is still zero. Hardware keeps the
+    // compare register intact and rearms it when MODE resets the counter.
+    ok = expect(
+        system.iop_bus().write16(timer1 + 4u, 0u),
+        "OSDSND Timer1 initial mode write failed") && ok;
+    ok = expect(
+        system.iop_bus().write16(timer1 + 8u, osdsnd_compare),
+        "OSDSND Timer1 compare write failed") && ok;
+
+    // Let the free-running counter pass the compare before MODE is installed.
+    system.iop_bus().tick(0x120u);
+    ps2::u16 target = 0;
+    ok = expect(
+        system.iop_bus().read16(timer1 + 8u, target) &&
+            target == osdsnd_compare,
+        "Timer1 early target hit destroyed compare register") && ok;
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) == 0u,
+        "Timer1 raised IRQ before OSDSND enabled target IRQ") && ok;
+
+    ok = expect(
+        system.iop_bus().write16(timer1 + 4u, osdsnd_mode),
+        "OSDSND Timer1 active mode write failed") && ok;
+
+    // HLINE source: one counter tick per ~2344 IOP cycles. At 0x100 ticks
+    // OSDSND expects its sequencer callback IRQ.
+    system.iop_bus().tick(
+        hblank_iop_cycles * osdsnd_compare);
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) != 0u,
+        "OSDSND H-Line sequencer IRQ missing") && ok;
+    ok = expect(
+        system.iop_bus().read16(timer1 + 8u, target) &&
+            target == osdsnd_compare,
+        "Timer1 compare changed after active target hit") && ok;
+
+    // 0x158 is repeat + zero-return, so the next 0x100 H-Lines must fire too.
+    system.iop_intc().reset();
+    system.iop_bus().tick(
+        hblank_iop_cycles * osdsnd_compare);
+    ok = expect(
+        (system.iop_intc().status() & timer1_irq) != 0u,
+        "OSDSND H-Line repeat IRQ missing") && ok;
+
+    return ok;
+}
+
 bool test_iop_bus_repeating_timer_irq() {
     ps2::Ps2System system;
 
@@ -1879,13 +1988,42 @@ bool test_iop_sio2_minimal_transfer_status() {
             value == 0u,
         "SIO2 FIFO_STAT reset value mismatch") && ok;
 
+    // Attach the emulated port-1 DualShock 2 and perform a real digital
+    // poll over SIO2. Cross is active-low bit 6 in the returned button word.
+    system.pad().set_button(ps2::Sio2Pad::Button::Cross, true);
+    ok = expect(
+        system.iop_bus().write32(0x1F808200u, 9u << 8),
+        "SIO2 pad command descriptor write failed") && ok;
+    const ps2::u8 poll[9] = {
+        0x01u, 0x42u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+    };
+    for (ps2::u8 byte : poll) {
+        ok = expect(
+            system.iop_bus().write8(0x1F808260u, byte),
+            "SIO2 pad TX byte write failed") && ok;
+    }
+
     ok = expect(
         system.iop_bus().write32(0x1F808268u, 1u),
         "SIO2 CTRL start write failed") && ok;
     ok = expect(
         system.iop_bus().read32(0x1F80826Cu, value) &&
-            value == 0x0003D000u,
-        "SIO2 no-device CMD_STAT mismatch") && ok;
+            value == 0x00001100u,
+        "SIO2 connected-pad CMD_STAT mismatch") && ok;
+
+    ps2::u8 response[5]{};
+    for (ps2::u8& byte : response) {
+        ok = expect(
+            system.iop_bus().read8(0x1F808264u, byte),
+            "SIO2 pad RX byte read failed") && ok;
+    }
+    ok = expect(
+        response[0] == 0xFFu &&
+        response[1] == 0x41u &&
+        response[2] == 0x5Au &&
+        response[3] == 0xFFu &&
+        response[4] == 0xBFu,
+        "SIO2 DualShock 2 digital poll response mismatch") && ok;
     ok = expect(
         system.iop_bus().read32(0x1F808280u, value) &&
             (value & 1u) != 0,
@@ -2432,6 +2570,7 @@ int main() {
     ok = test_ee_timer0_clock_sources() && ok;
     ok = test_iop_timer_progress_and_irq() && ok;
     ok = test_iop_bus_repeating_timer_irq() && ok;
+    ok = test_iop_osdsnd_hline_timer_rearm() && ok;
     ok = test_cdvd_reset_status() && ok;
     ok = test_cdvd_iop_segment_mirror() && ok;
     ok = test_cdvd_scommand_result_fifo() && ok;
@@ -2443,6 +2582,7 @@ int main() {
     ok = test_iop_root_counters() && ok;
     ok = test_iop_event_free_tick_matches_regular_tick() && ok;
     ok = test_iop_spu2_register_window() && ok;
+    ok = test_iop_spu2_adpcm_voice() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;

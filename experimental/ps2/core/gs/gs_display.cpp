@@ -9,6 +9,7 @@ namespace ps2 {
 namespace {
 
 constexpr u32 kPmode = 0x12000000u;
+constexpr u32 kSmode2 = 0x12000020u;
 constexpr u32 kDispfb1 = 0x12000070u;
 constexpr u32 kDisplay1 = 0x12000080u;
 constexpr u32 kBgcolor = 0x120000E0u;
@@ -48,10 +49,10 @@ void GsDisplay::reset() {
 }
 
 void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
-    constexpr std::array<u32, 6> kScanoutRegisters = {
-        kPmode, kDispfb1, kDisplay1,
+    constexpr std::array<u32, 7> kScanoutRegisters = {
+        kPmode, kSmode2, kDispfb1, kDisplay1,
         kDispfb1 + kCircuitStride, kDisplay1 + kCircuitStride, kBgcolor};
-    std::array<u64, 6> scanout_registers{};
+    std::array<u64, 7> scanout_registers{};
     for (std::size_t i = 0; i < kScanoutRegisters.size(); ++i) {
         if (!regs.read64(kScanoutRegisters[i], scanout_registers[i])) {
             reset();
@@ -68,7 +69,9 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     cached_scanout_registers_ = scanout_registers;
 
     u64 pmode = 0;
-    if (!regs.read64(kPmode, pmode)) {
+    u64 smode2 = 0;
+    if (!regs.read64(kPmode, pmode) ||
+        !regs.read64(kSmode2, smode2)) {
         reset();
         return;
     }
@@ -77,6 +80,8 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
         (pmode & 1u) != 0,
         (pmode & 2u) != 0,
     };
+    const bool interlaced = (smode2 & 1u) != 0;
+    const bool field_mode = (smode2 & 2u) != 0;
     if (!enabled[0] && !enabled[1]) {
         if (valid_) reset();
         return;
@@ -125,16 +130,30 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
             static_cast<u32>((display >> 44) & 0x7FFu) + 1u;
 
         const u32 width = dw / magh;
-        const u32 height = dh / magv;
-        if (fbw == 0u || width == 0u || height == 0u ||
-            width > 2048u || height > 2048u ||
+        const u32 display_height = dh / magv;
+
+        // In interlaced field mode the GS scans only one field's worth of
+        // framebuffer lines for each displayed field.  DISPLAY still
+        // describes the full output height.  Reading display_height lines
+        // here incorrectly walks into the next field/image in VRAM, which
+        // presents as a vertically duplicated picture and field-to-field
+        // jumping.  Read the half-height field and bob it to a stable host
+        // frame instead.
+        const bool half_height_field = interlaced && field_mode;
+        const u32 source_height = half_height_field
+            ? (display_height + 1u) / 2u
+            : display_height;
+
+        if (fbw == 0u || width == 0u || display_height == 0u ||
+            source_height == 0u ||
+            width > 2048u || display_height > 2048u ||
             !GsVram::supported_color_psm(psm)) {
             return frame;
         }
 
         frame.pixels.resize(
-            static_cast<std::size_t>(width) * height);
-        for (u32 y = 0; y < height; ++y) {
+            static_cast<std::size_t>(width) * display_height);
+        for (u32 y = 0; y < source_height; ++y) {
             for (u32 x = 0; x < width; ++x) {
                 const u32 raw =
                     vram.read_pixel(
@@ -143,15 +162,30 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
                         dby + y,
                         fbp,
                         fbw);
-                frame.pixels[
-                    static_cast<std::size_t>(y) * width + x] =
-                    to_rgba8(psm, raw);
+                const u32 rgba = to_rgba8(psm, raw);
+
+                if (half_height_field) {
+                    const u32 out_y0 = y * 2u;
+                    const u32 out_y1 = out_y0 + 1u;
+                    frame.pixels[
+                        static_cast<std::size_t>(out_y0) * width + x] =
+                        rgba;
+                    if (out_y1 < display_height) {
+                        frame.pixels[
+                            static_cast<std::size_t>(out_y1) * width + x] =
+                            rgba;
+                    }
+                } else {
+                    frame.pixels[
+                        static_cast<std::size_t>(y) * width + x] =
+                        rgba;
+                }
             }
         }
 
         frame.valid = true;
         frame.width = width;
-        frame.height = height;
+        frame.height = display_height;
         frame.psm = psm;
         return frame;
     };

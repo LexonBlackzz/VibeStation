@@ -1,6 +1,8 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/input/sio2_pad.h"
+#include "core/spu2/spu2.h"
 
 #include <array>
 
@@ -15,6 +17,17 @@ class IopRam;
 
 class IopBus {
 public:
+    struct RootCounterDebug {
+        std::array<u64, 6> count_writes{};
+        std::array<u64, 6> mode_writes{};
+        std::array<u64, 6> target_writes{};
+        std::array<u64, 6> target_events{};
+        std::array<u64, 6> overflow_events{};
+        std::array<u64, 6> irq_events{};
+        std::array<u32, 6> last_mode_write{};
+        std::array<u32, 6> last_target_write{};
+        std::array<u32, 6> first_nonzero_target{};
+    };
     IopBus(
         IopRam& ram,
         IopHwWindow& hw,
@@ -47,12 +60,21 @@ public:
     [[nodiscard]] u16 sif_dma_ready_mask() const;
     void raise_dma_irq(u32 channel);
 
+    Sio2Pad& sio2() { return sio2_; }
+    const Sio2Pad& sio2() const { return sio2_; }
+    Spu2& spu2() { return spu2_; }
+    const Spu2& spu2() const { return spu2_; }
+    const RootCounterDebug& root_counter_debug() const {
+        return root_counter_debug_;
+    }
+
 private:
     struct RootCounter {
         u64 count = 0;
         u32 mode = 0;
         u64 target = 0;
         u64 phase = 0;
+        bool target_deferred = false;
     };
 
     [[nodiscard]] static bool decode_root_counter(
@@ -79,12 +101,14 @@ private:
     CdvdHw& cdvd_;
     const Bios& bios_;
     std::array<u8, 0x100> cache_control_{};
-    std::array<u8, 0x10000> spu2_regs_{};
+    Sio2Pad sio2_{};
+    Spu2 spu2_{};
     std::array<u32, 0x40> ohci_regs_{};
     u64 ohci_frame_phase_ = 0;
     std::array<u32, 0x60> firewire_regs_{};
     std::array<RootCounter, 6> root_counters_{};
     std::array<u32, 6> root_counter_rate_cache_{};
+    RootCounterDebug root_counter_debug_{};
     u64 spu2_dma4_irq_cycles_ = 0;
 };
 

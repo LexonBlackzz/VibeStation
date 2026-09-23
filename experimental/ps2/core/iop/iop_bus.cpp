@@ -18,23 +18,38 @@ constexpr u32 kExtensionRomEnd = 0x1E800000u;
 constexpr u32 kSifBase = 0x1D000000u;
 constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
+constexpr u32 kDma4Madr = 0x1F8010C0u;
+constexpr u32 kDma4Bcr = 0x1F8010C4u;
 constexpr u32 kDma4Chcr = 0x1F8010C8u;
+constexpr u32 kDma7Madr = 0x1F801500u;
+constexpr u32 kDma7Bcr = 0x1F801504u;
 constexpr u32 kDma7Chcr = 0x1F801508u;
 constexpr u32 kDma6Madr = 0x1F8010E0u;
 constexpr u32 kDma6Bcr = 0x1F8010E4u;
 constexpr u32 kDma6Chcr = 0x1F8010E8u;
+constexpr u32 kDma11Madr = 0x1F801540u;
+constexpr u32 kDma11Bcr = 0x1F801544u;
 constexpr u32 kDma11Chcr = 0x1F801548u;
+constexpr u32 kDma12Madr = 0x1F801550u;
+constexpr u32 kDma12Bcr = 0x1F801554u;
 constexpr u32 kDma12Chcr = 0x1F801558u;
 constexpr u32 kDmaStart = 1u << 24;
 constexpr u32 kSpu2Base = 0x1F900000u;
 constexpr u32 kSpu2Statx0 = 0x344u;
 constexpr u32 kSpu2Statx1 = 0x744u;
 constexpr u32 kSpu2Size = 0x10000u;
+constexpr u32 kSio2CmdBase = 0x1F808200u;
+constexpr u32 kSio2CmdEnd = 0x1F808240u;
+constexpr u32 kSio2Tx = 0x1F808260u;
+constexpr u32 kSio2Rx = 0x1F808264u;
 constexpr u32 kSio2Ctrl = 0x1F808268u;
 constexpr u32 kSio2CmdStat = 0x1F80826Cu;
+constexpr u32 kSio2PortStat = 0x1F808270u;
+constexpr u32 kSio2FifoStat = 0x1F808274u;
+constexpr u32 kSio2TxPos = 0x1F808278u;
+constexpr u32 kSio2RxPos = 0x1F80827Cu;
 constexpr u32 kSio2Intr = 0x1F808280u;
 constexpr u32 kSio2Start = 1u;
-constexpr u32 kSio2NoDevices = 0x0003D000u;
 constexpr u32 kOhciBase = 0x1F801600u;
 constexpr u32 kOhciSize = 0x100u;
 constexpr u32 kOhciFrameCycles = 36864u;
@@ -86,13 +101,15 @@ IopBus::IopBus(
 
 void IopBus::reset() {
     cache_control_.fill(0);
-    spu2_regs_.fill(0);
+    sio2_.reset();
+    spu2_.reset();
     spu2_dma4_irq_cycles_ = 0;
     reset_ohci(true);
     firewire_regs_.fill(0);
     firewire_regs_[(0x10u) >> 2] = 0x8u; // SCLK ready.
     root_counters_.fill({});
     root_counter_rate_cache_.fill(1u);
+    root_counter_debug_ = {};
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
         root_counters_[i].target =
@@ -459,28 +476,56 @@ bool IopBus::write_root_counter(
         index < 3u ? 0xFFFFull : 0xFFFFFFFFull;
 
     if (reg == 0u) {
+        ++root_counter_debug_.count_writes[index];
         counter.count = merged & counter_mask;
         counter.phase = 0;
         return true;
     }
 
     if (reg == 4u) {
-        // Writable control bits plus hardware-owned IRQ/target/overflow flags.
+        ++root_counter_debug_.mode_writes[index];
+        root_counter_debug_.last_mode_write[index] =
+            merged & 0xFFFFu;
+
+        const u32 old_mode = counter.mode;
+        const bool old_flag_had_irq =
+            (((old_mode & (1u << 11)) != 0u) &&
+             ((old_mode & (1u << 4)) != 0u)) ||
+            (((old_mode & (1u << 12)) != 0u) &&
+             ((old_mode & (1u << 5)) != 0u));
+
+        // Preserve hardware-owned status/IRQ state. If the old target/overflow
+        // flag was raised while its IRQ source was disabled, TIMRMAN's mode
+        // write rearms the timer and clears those stale event flags.
+        u32 flags = old_mode & 0x1C00u;
+        if (!old_flag_had_irq) {
+            flags &= ~0x1800u;
+        }
         counter.mode =
-            (merged & 0x63FFu) |
-            (counter.mode & 0x1C00u);
+            (merged & 0x63FFu) | flags | (1u << 10);
         root_counter_rate_cache_[index] =
             static_cast<u32>(root_counter_rate(index));
         counter.count = 0;
         counter.phase = 0;
+        counter.target_deferred = false;
         return true;
     }
 
+    ++root_counter_debug_.target_writes[index];
+    root_counter_debug_.last_target_write[index] =
+        static_cast<u32>(merged & counter_mask);
+    if (root_counter_debug_.first_nonzero_target[index] == 0u &&
+        (merged & counter_mask) != 0u) {
+        root_counter_debug_.first_nonzero_target[index] =
+            static_cast<u32>(merged & counter_mask);
+    }
     counter.target = merged & counter_mask;
+    counter.target_deferred = counter.target <= counter.count;
     return true;
 }
 
 void IopBus::tick(u64 cycles) {
+    spu2_.tick(cycles);
     ohci_frame_phase_ += cycles;
     while (ohci_frame_phase_ >= kOhciFrameCycles) {
         ohci_frame_phase_ -= kOhciFrameCycles;
@@ -515,38 +560,43 @@ void IopBus::tick(u64 cycles) {
         for (u64 step = 0; step < increments; ++step) {
             ++counter.count;
 
-            if (counter.target <= maximum &&
+            if (!counter.target_deferred &&
+                counter.target <= maximum &&
                 counter.count >= counter.target) {
+                ++root_counter_debug_.target_events[i];
                 const bool first = (counter.mode & (1u << 11)) == 0;
                 const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 11;
-                // The reached-target flag is sticky, but it does not suppress
-                // later interrupts in repeat mode.  THREADMAN relies on this
-                // distinction when it repeatedly reprograms the system timer
-                // for DelayThread and alarm deadlines.
+                // The reached-target flag is sticky, but repeat mode can still
+                // pulse the interrupt on each real target crossing.
                 if ((first || repeat) &&
                     (counter.mode & (1u << 4)) != 0) {
+                    ++root_counter_debug_.irq_events[i];
                     intc_.raise(irq_sources[i]);
                 }
                 if ((counter.mode & (1u << 3)) != 0) {
                     counter.count =
                         counter.target == 0 ? 0 : counter.count - counter.target;
                 } else {
-                    // A non-resetting target fires once until the next wrap or
-                    // target write, matching the bootstrap-visible behavior.
-                    counter.target = maximum + 1u;
+                    // Hardware keeps the compare register intact. Internally
+                    // defer it until counter wrap, rather than replacing the
+                    // guest-visible target with an impossible sentinel value.
+                    counter.target_deferred = true;
                 }
             }
 
             if (counter.count > maximum) {
+                ++root_counter_debug_.overflow_events[i];
                 const bool first = (counter.mode & (1u << 12)) == 0;
                 const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 12;
                 if ((first || repeat) &&
                     (counter.mode & (1u << 5)) != 0) {
+                    ++root_counter_debug_.irq_events[i];
                     intc_.raise(irq_sources[i]);
                 }
                 counter.count &= maximum;
+                counter.target_deferred = false;
             }
         }
     }
@@ -732,6 +782,7 @@ bool IopBus::can_tick_event_free(u64 cycles) const {
 bool IopBus::tick_event_free(u64 cycles) {
     if (!can_tick_event_free(cycles)) return false;
 
+    spu2_.tick(cycles);
     const u64 frame_total = ohci_frame_phase_ + cycles;
     ohci_regs_[15] = (ohci_regs_[15] +
         static_cast<u32>(frame_total / kOhciFrameCycles)) & 0xFFFFu;
@@ -780,11 +831,14 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
-        value = spu2_regs_[physical - kSpu2Base];
-        return true;
+        return spu2_.read8(physical - kSpu2Base, value);
     }
     if (is_extension_rom(physical, 1u)) {
         value = 0;
+        return true;
+    }
+    if (physical == kSio2Rx) {
+        value = sio2_.read_byte();
         return true;
     }
     if (intc_.read8(physical, value)) return true;
@@ -832,10 +886,7 @@ bool IopBus::read16(u32 address, u16& value) const {
         return true;
     }
     if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
-        const u32 offset = physical - kSpu2Base;
-        value = static_cast<u16>(spu2_regs_[offset]) |
-                (static_cast<u16>(spu2_regs_[offset + 1u]) << 8);
-        return true;
+        return spu2_.read16(physical - kSpu2Base, value);
     }
     if (intc_.read16(physical, value)) return true;
     if (is_extension_rom(physical, 2u)) {
@@ -884,13 +935,26 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
-        const u32 offset = physical - kSpu2Base;
-        value = static_cast<u32>(spu2_regs_[offset]) |
-                (static_cast<u32>(spu2_regs_[offset + 1u]) << 8) |
-                (static_cast<u32>(spu2_regs_[offset + 2u]) << 16) |
-                (static_cast<u32>(spu2_regs_[offset + 3u]) << 24);
+        return spu2_.read32(physical - kSpu2Base, value);
+    }
+    if (physical >= kSio2CmdBase && physical < kSio2CmdEnd &&
+        (physical & 3u) == 0u) {
+        value = sio2_.command((physical - kSio2CmdBase) >> 2);
         return true;
     }
+    if (physical == kSio2Rx) {
+        value = static_cast<u32>(sio2_.read_byte()) |
+                (static_cast<u32>(sio2_.read_byte()) << 8) |
+                (static_cast<u32>(sio2_.read_byte()) << 16) |
+                (static_cast<u32>(sio2_.read_byte()) << 24);
+        return true;
+    }
+    if (physical == kSio2CmdStat) { value = sio2_.cmd_stat(); return true; }
+    if (physical == kSio2PortStat) { value = sio2_.port_stat(); return true; }
+    if (physical == kSio2FifoStat) { value = sio2_.fifo_stat(); return true; }
+    if (physical == kSio2TxPos) { value = sio2_.tx_pos(); return true; }
+    if (physical == kSio2RxPos) { value = sio2_.rx_pos(); return true; }
+    if (physical == kSio2Intr) { value = sio2_.intr(); return true; }
     if (intc_.read32(physical, value)) return true;
     if (physical >= kSifBase && physical < kSifBase + 0x100u) return read_sif32(physical, value);
     if (physical < kRamMirrorEnd) {
@@ -942,7 +1006,10 @@ bool IopBus::write8(u32 address, u8 value) {
         return write_root_counter(physical, 1u, value);
     }
     if (physical >= kSpu2Base && physical < kSpu2Base + kSpu2Size) {
-        spu2_regs_[physical - kSpu2Base] = value;
+        return spu2_.write8(physical - kSpu2Base, value);
+    }
+    if (physical == kSio2Tx) {
+        sio2_.write_byte(value);
         return true;
     }
     if (is_extension_rom(physical, 1u)) return true;
@@ -984,10 +1051,7 @@ bool IopBus::write16(u32 address, u16 value) {
         return write_root_counter(physical, 2u, value);
     }
     if (physical >= kSpu2Base && physical + 2u <= kSpu2Base + kSpu2Size) {
-        const u32 offset = physical - kSpu2Base;
-        spu2_regs_[offset] = static_cast<u8>(value);
-        spu2_regs_[offset + 1u] = static_cast<u8>(value >> 8);
-        return true;
+        return spu2_.write16(physical - kSpu2Base, value);
     }
     if (physical == 0x1F801450u) {
         if (!hw_.write16(physical, value)) return false;
@@ -1077,89 +1141,128 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
 
+    if (physical >= kSio2CmdBase && physical < kSio2CmdEnd &&
+        (physical & 3u) == 0u) {
+        sio2_.set_command(
+            (physical - kSio2CmdBase) >> 2,
+            value);
+        return hw_.write32(physical, value);
+    }
+    if (physical == kSio2Tx) {
+        sio2_.write_byte(static_cast<u8>(value));
+        sio2_.write_byte(static_cast<u8>(value >> 8));
+        sio2_.write_byte(static_cast<u8>(value >> 16));
+        sio2_.write_byte(static_cast<u8>(value >> 24));
+        return true;
+    }
     if (physical == kSio2Ctrl) {
         if (!hw_.write32(physical, value)) return false;
-        if ((value & kSio2Start) != 0) {
-            // No controllers/cards are attached in the bootstrap core. Finish
-            // the transaction immediately and expose the same interrupt/status
-            // path SIO2MAN waits on.
-            if (!hw_.write32(kSio2CmdStat, kSio2NoDevices) ||
-                !hw_.write32(kSio2Intr, 1u)) {
-                return false;
-            }
+        if ((value & kSio2Start) != 0u) {
+            sio2_.start_transfer();
+            (void)hw_.write32(kSio2CmdStat, sio2_.cmd_stat());
+            (void)hw_.write32(kSio2Intr, sio2_.intr());
             intc_.raise(17u);
         }
         return true;
     }
     if (physical == kSio2Intr) {
-        u32 current = 0;
-        if (!hw_.read32(kSio2Intr, current)) return false;
-        return hw_.write32(kSio2Intr, current & ~value);
+        sio2_.acknowledge_intr(value);
+        return hw_.write32(kSio2Intr, sio2_.intr());
     }
-    if (physical == kDma4Chcr ||
-        physical == kDma7Chcr ||
-        physical == kDma11Chcr ||
-        physical == kDma12Chcr) {
+
+    if (physical == kDma4Chcr || physical == kDma7Chcr) {
+        const u32 core = physical == kDma4Chcr ? 0u : 1u;
+        const u32 channel = core == 0u ? 4u : 7u;
+        const u32 madr_reg = core == 0u ? kDma4Madr : kDma7Madr;
+        const u32 bcr_reg = core == 0u ? kDma4Bcr : kDma7Bcr;
+
         u32 stored = value;
-        if ((value & kDmaStart) != 0) {
-            // Peripheral payload engines are outside the BIOS-video
-            // milestone. Complete SPU2 and SIO2 DMA immediately so firmware
-            // can finish sound/pad initialization without hanging. SIF9/10
-            // remain fully serviced by SifDma and are intentionally excluded.
+        if ((value & kDmaStart) != 0u) {
+            u32 madr = 0;
+            u32 bcr = 0;
+            if (!hw_.read32(madr_reg, madr) ||
+                !hw_.read32(bcr_reg, bcr)) {
+                return false;
+            }
+            const u32 words =
+                (bcr & 0xFFFFu) * (bcr >> 16);
+            const u32 halfwords = words * 2u;
+
+            const bool ok = (value & 1u) != 0u
+                ? spu2_.dma_write(core, ram_, madr, halfwords)
+                : spu2_.dma_read(core, ram_, madr, halfwords);
+            if (!ok) return false;
+
+            (void)hw_.write32(
+                madr_reg,
+                madr + words * 4u);
+
+            u16 stat = 0;
+            const u32 stat_offset =
+                core == 0u ? kSpu2Statx0 : kSpu2Statx1;
+            (void)spu2_.read16(stat_offset, stat);
+            stat = static_cast<u16>((stat | 0x0080u) & ~0x0400u);
+            (void)spu2_.write16(stat_offset, stat);
+            (void)spu2_.write16(
+                core == 0u ? 0x1B0u : 0x5B0u,
+                0u);
+
             stored &= ~kDmaStart;
-        }
-        if (!hw_.write32(physical, stored)) return false;
-
-        if ((value & kDmaStart) != 0) {
-            u32 channel = 0;
-            if (physical == kDma4Chcr) channel = 4u;
-            else if (physical == kDma7Chcr) channel = 7u;
-            else if (physical == kDma11Chcr) channel = 11u;
-            else channel = 12u;
-
-            if (channel == 4u || channel == 7u) {
-                const u32 stat_offset =
-                    channel == 4u ? kSpu2Statx0 : kSpu2Statx1;
-                const u32 dma_status_offset =
-                    channel == 4u ? 0x1B0u : 0x5B0u;
-                u16 stat =
-                    static_cast<u16>(spu2_regs_[stat_offset]) |
-                    (static_cast<u16>(
-                        spu2_regs_[stat_offset + 1u]) << 8);
-                stat =
-                    static_cast<u16>((stat | 0x0080u) & ~0x0400u);
-                spu2_regs_[stat_offset] = static_cast<u8>(stat);
-                spu2_regs_[stat_offset + 1u] =
-                    static_cast<u8>(stat >> 8);
-                // libsd writes a per-core DMA-busy token here and waits for
-                // the SPU2 to clear it once the IOP DMA channel completes.
-                spu2_regs_[dma_status_offset] = 0;
-                spu2_regs_[dma_status_offset + 1u] = 0;
-            }
-
             raise_dma_irq(channel);
-            if (channel == 4u) {
-                // SPU2 core 0 completion also asserts the dedicated SPU
-                // interrupt. Delay it by the transfer length so libsd can
-                // install its waiter before the completion callback runs.
-                u32 bcr = 0;
-                (void)hw_.read32(physical - 4u, bcr);
-                const u64 words =
-                    static_cast<u64>(bcr & 0xFFFFu) *
-                    static_cast<u64>(bcr >> 16);
-                // The SPU2 engine accounts for two halfwords per IOP DMA
-                // word and 24 IOP cycles per halfword.
-                spu2_dma4_irq_cycles_ = words == 0u ? 48u : words * 48u;
+            if (core == 0u) {
+                spu2_dma4_irq_cycles_ =
+                    words == 0u ? 48u :
+                    static_cast<u64>(words) * 48u;
             }
         }
-        return true;
+        return hw_.write32(physical, stored);
+    }
+
+    if (physical == kDma11Chcr || physical == kDma12Chcr) {
+        const bool tx = physical == kDma11Chcr;
+        const u32 channel = tx ? 11u : 12u;
+        const u32 madr_reg = tx ? kDma11Madr : kDma12Madr;
+        const u32 bcr_reg = tx ? kDma11Bcr : kDma12Bcr;
+
+        u32 stored = value;
+        if ((value & kDmaStart) != 0u) {
+            u32 madr = 0;
+            u32 bcr = 0;
+            if (!hw_.read32(madr_reg, madr) ||
+                !hw_.read32(bcr_reg, bcr)) {
+                return false;
+            }
+
+            const u32 block_words = bcr & 0xFFFFu;
+            const u32 blocks = bcr >> 16;
+            const u32 words = block_words * blocks;
+            const u32 bytes = words * 4u;
+            sio2_.set_dma_block_size(
+                static_cast<std::size_t>(block_words) * 4u);
+
+            for (u32 i = 0; i < bytes; ++i) {
+                const u32 ram_addr =
+                    (madr + i) &
+                    static_cast<u32>(IopRam::kSize - 1u);
+                if (tx) {
+                    u8 byte = 0;
+                    if (!ram_.read8(ram_addr, byte)) return false;
+                    sio2_.write_byte(byte);
+                } else {
+                    if (!ram_.write8(ram_addr, sio2_.read_byte()))
+                        return false;
+                }
+            }
+
+            sio2_.clear_dma_block_size();
+            (void)hw_.write32(madr_reg, madr + bytes);
+            stored &= ~kDmaStart;
+            raise_dma_irq(channel);
+        }
+        return hw_.write32(physical, stored);
     }
     if (physical >= kSpu2Base && physical + 4u <= kSpu2Base + kSpu2Size) {
-        const u32 offset = physical - kSpu2Base;
-        for (u32 i = 0; i < 4u; ++i) {
-            spu2_regs_[offset + i] = static_cast<u8>(value >> (i * 8));
-        }
-        return true;
+        return spu2_.write32(physical - kSpu2Base, value);
     }
     if (physical == 0x1F801450u) {
         if (!hw_.write32(physical, value)) return false;

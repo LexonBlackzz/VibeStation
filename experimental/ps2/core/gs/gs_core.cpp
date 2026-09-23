@@ -775,6 +775,11 @@ void GsCore::emit_primitive(
     u32 vertex_count) {
     ++stats_.primitives;
 
+    if (!rasterization_enabled_) {
+        ++stats_.skipped_raster_draws;
+        return;
+    }
+
     const u32 prim = static_cast<u32>(effective_prim() & 0x7u);
     GsRasterContext ctx = raster_context();
     const bool target_supported = GsRasterizer::supported_target(ctx);

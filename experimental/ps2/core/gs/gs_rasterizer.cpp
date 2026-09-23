@@ -460,7 +460,8 @@ bool GsRasterizer::draw_pixel(
 
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
-    const u32 destination = read_frame_rgba(vram, ctx, ux, uy);
+    u32 destination = 0;
+    bool destination_valid = false;
     if (ctx.nonzero_inputs != nullptr &&
         (rgba & 0x00FFFFFFu) != 0u) {
         ++*ctx.nonzero_inputs;
@@ -504,12 +505,20 @@ bool GsRasterizer::draw_pixel(
 
     if (!write_frame && !write_depth) return false;
 
+    const auto load_destination = [&]() -> u32 {
+        if (!destination_valid) {
+            destination = read_frame_rgba(vram, ctx, ux, uy);
+            destination_valid = true;
+        }
+        return destination;
+    };
+
     // DATE has no effect on a 24-bit framebuffer. Otherwise DATM selects the
     // destination-alpha MSB that is allowed to pass.
     if (ctx.date && ctx.psm != 1u) {
         const bool destination_alpha =
             ctx.psm == 0u
-                ? ((destination >> 31) & 1u) != 0
+                ? ((load_destination() >> 31) & 1u) != 0
                 : ((vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw) >> 15) & 1u) != 0;
         if (destination_alpha != ctx.datm) return false;
     }
@@ -527,7 +536,9 @@ bool GsRasterizer::draw_pixel(
         const bool blend_enabled =
             ctx.alpha_blend &&
             (!ctx.pabe || ((rgba & 0x80000000u) != 0));
-        u32 output = blend_enabled ? blend_color(rgba, destination, ctx) : rgba;
+        u32 output = blend_enabled
+            ? blend_color(rgba, load_destination(), ctx)
+            : rgba;
 
         if (ctx.fba && !rgb_only) output |= 0x80000000u;
 
@@ -535,22 +546,26 @@ bool GsRasterizer::draw_pixel(
         if (ctx.psm == 0u) {
             u32 mask = ctx.fbmask;
             if (rgb_only) mask |= 0xFF000000u;
-            // The destination was already fetched for DATE/blending.
-            const u32 old = destination;
-            output = (old & mask) | (output & ~mask);
+            if (mask != 0u) {
+                const u32 old = load_destination();
+                output = (old & mask) | (output & ~mask);
+            }
             written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(0, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else if (ctx.psm == 1u) {
-            const u32 old = destination & 0x00FFFFFFu;
             const u32 mask = ctx.fbmask & 0x00FFFFFFu;
-            output = (old & mask) | (output & ~mask & 0x00FFFFFFu);
+            if (mask != 0u) {
+                const u32 old = load_destination() & 0x00FFFFFFu;
+                output = (old & mask) |
+                         (output & ~mask & 0x00FFFFFFu);
+            } else {
+                output &= 0x00FFFFFFu;
+            }
             written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(1, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else {
-            const u16 old = static_cast<u16>(
-                vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
             output = apply_dither(output, ctx, x, y);
             u16 packed = rgba32_to_16(output);
 
@@ -563,8 +578,12 @@ bool GsRasterizer::draw_pixel(
                 (ga >> 16) | (rb >> 9) | (ga >> 6) | (rb >> 3));
             if (rgb_only) mask = static_cast<u16>(mask | 0x8000u);
 
-            packed = static_cast<u16>(
-                (old & mask) | (packed & static_cast<u16>(~mask)));
+            if (mask != 0u) {
+                const u16 old = static_cast<u16>(
+                    vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
+                packed = static_cast<u16>(
+                    (old & mask) | (packed & static_cast<u16>(~mask)));
+            }
             written_color = packed & 0x7FFFu;
             if (!vram.write_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
                 return false;
@@ -899,62 +918,84 @@ u64 GsRasterizer::draw_triangle(
     const bool constant_q = a.q == b.q && b.q == c.q;
     const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
     const bool constant_z = a.z == b.z && b.z == c.z;
+    const bool positive_area = area > 0;
+    const long double inv_area =
+        1.0L / static_cast<long double>(area);
+
+    // Edge functions are affine in screen space.  Evaluate them once at the
+    // top-left pixel centre, then advance by their exact 16.4 fixed-point
+    // deltas instead of recomputing three 64-bit cross products per pixel.
+    const s32 start_px = left * 16 + 8;
+    const s32 start_py = top * 16 + 8;
+    s64 row_w0 = edge(b, c, start_px, start_py);
+    s64 row_w1 = edge(c, a, start_px, start_py);
+    s64 row_w2 = edge(a, b, start_px, start_py);
+
+    const s64 w0_dx = 16ll * static_cast<s64>(c.y - b.y);
+    const s64 w1_dx = 16ll * static_cast<s64>(a.y - c.y);
+    const s64 w2_dx = 16ll * static_cast<s64>(b.y - a.y);
+    const s64 w0_dy = -16ll * static_cast<s64>(c.x - b.x);
+    const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
+    const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
+        s64 w0 = row_w0;
+        s64 w1 = row_w1;
+        s64 w2 = row_w2;
         for (s32 x = left; x < right; ++x) {
-            const s32 px = x * 16 + 8;
-            const s32 py = y * 16 + 8;
-            const s64 w0 = edge(b, c, px, py);
-            const s64 w1 = edge(c, a, px, py);
-            const s64 w2 = edge(a, b, px, py);
             const bool inside =
-                area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                         : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-            if (!inside) continue;
-
-            s32 u = 0;
-            s32 v = 0;
-            if (ctx.texture.enabled) {
-                if (ctx.texture.fst) {
-                    u = static_cast<s32>(
-                        (w0 * a.u + w1 * b.u + w2 * c.u) / area);
-                    v = static_cast<s32>(
-                        (w0 * a.v + w1 * b.v + w2 * c.v) / area);
-                } else {
-                    const long double inv_area =
-                        1.0L / static_cast<long double>(area);
-                    const float s = static_cast<float>(
-                        (static_cast<long double>(w0) * a.s +
-                         static_cast<long double>(w1) * b.s +
-                         static_cast<long double>(w2) * c.s) * inv_area);
-                    const float t = static_cast<float>(
-                        (static_cast<long double>(w0) * a.t +
-                         static_cast<long double>(w1) * b.t +
-                         static_cast<long double>(w2) * c.t) * inv_area);
-                    const float q = constant_q ? a.q : static_cast<float>(
-                        (static_cast<long double>(w0) * a.q +
-                         static_cast<long double>(w1) * b.q +
-                         static_cast<long double>(w2) * c.q) * inv_area);
-                    u = stq_to_fixed(s, q, ctx.texture.width);
-                    v = stq_to_fixed(t, q, ctx.texture.height);
+                positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                              : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if (inside) {
+                s32 u = 0;
+                s32 v = 0;
+                if (ctx.texture.enabled) {
+                    if (ctx.texture.fst) {
+                        u = static_cast<s32>(
+                            (w0 * a.u + w1 * b.u + w2 * c.u) / area);
+                        v = static_cast<s32>(
+                            (w0 * a.v + w1 * b.v + w2 * c.v) / area);
+                    } else {
+                        const float s = static_cast<float>(
+                            (static_cast<long double>(w0) * a.s +
+                             static_cast<long double>(w1) * b.s +
+                             static_cast<long double>(w2) * c.s) * inv_area);
+                        const float t = static_cast<float>(
+                            (static_cast<long double>(w0) * a.t +
+                             static_cast<long double>(w1) * b.t +
+                             static_cast<long double>(w2) * c.t) * inv_area);
+                        const float q = constant_q ? a.q : static_cast<float>(
+                            (static_cast<long double>(w0) * a.q +
+                             static_cast<long double>(w1) * b.q +
+                             static_cast<long double>(w2) * c.q) * inv_area);
+                        u = stq_to_fixed(s, q, ctx.texture.width);
+                        v = stq_to_fixed(t, q, ctx.texture.height);
+                    }
                 }
+                const u32 vertex_rgba = ctx.gouraud && !constant_rgba
+                    ? interpolate_rgba(
+                        w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
+                    : c.rgba;
+                u32 rgba = shade_pixel(
+                    vram, ctx.texture, u, v, vertex_rgba);
+                if (ctx.fog_enabled) {
+                    const u32 fog = interpolate_scalar(
+                        w0, w1, w2, area, a.fog, b.fog, c.fog);
+                    rgba = apply_fog(rgba, ctx.fog_color, fog);
+                }
+                const u32 z = !ctx.zte ? 0u : constant_z ? a.z
+                    : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
+                if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
             }
-            const u32 vertex_rgba = ctx.gouraud && !constant_rgba
-                ? interpolate_rgba(
-                    w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
-                : c.rgba;
-            u32 rgba = shade_pixel(
-                vram, ctx.texture, u, v, vertex_rgba);
-            if (ctx.fog_enabled) {
-                const u32 fog = interpolate_scalar(
-                    w0, w1, w2, area, a.fog, b.fog, c.fog);
-                rgba = apply_fog(rgba, ctx.fog_color, fog);
-            }
-            const u32 z = !ctx.zte ? 0u : constant_z ? a.z
-                : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-            if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
+
+            w0 += w0_dx;
+            w1 += w1_dx;
+            w2 += w2_dx;
         }
+        row_w0 += w0_dy;
+        row_w1 += w1_dy;
+        row_w2 += w2_dy;
     }
     return pixels;
 }

@@ -39,7 +39,7 @@ private:
     u64 nonzero_pixel_count_ = 0;
     bool scanout_cache_valid_ = false;
     u64 cached_vram_generation_ = 0;
-    std::array<u64, 6> cached_scanout_registers_{};
+    std::array<u64, 7> cached_scanout_registers_{};
     std::vector<u32> rgba8_;
 };
 

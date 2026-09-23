@@ -98,6 +98,9 @@ public:
 
     void reset();
     void set_async_rasterization(bool enabled);
+    void set_rasterization_enabled(bool enabled) {
+        rasterization_enabled_ = enabled;
+    }
     void flush_pending_draws() const;
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
@@ -213,6 +216,7 @@ private:
     u32 draw_vertex_count_ = 0;
     GsPrivileged* privileged_ = nullptr;
     bool async_rasterization_ = false;
+    bool rasterization_enabled_ = true;
     mutable std::mutex raster_mutex_{};
     mutable std::condition_variable raster_condition_{};
     mutable std::condition_variable raster_completed_condition_{};

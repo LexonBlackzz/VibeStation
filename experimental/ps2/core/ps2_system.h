@@ -40,6 +40,8 @@ public:
     IopRam& iop_ram(){return iop_ram_;} const IopRam& iop_ram()const{return iop_ram_;}
     EeBus& bus(){return bus_;} const EeBus& bus()const{return bus_;}
     IopBus& iop_bus(){return iop_bus_;} const IopBus& iop_bus()const{return iop_bus_;}
+    Sio2Pad& pad(){return iop_bus_.sio2();} const Sio2Pad& pad()const{return iop_bus_.sio2();}
+    Spu2& spu2(){return iop_bus_.spu2();} const Spu2& spu2()const{return iop_bus_.spu2();}
     Scheduler& scheduler(){return scheduler_;} const Scheduler& scheduler()const{return scheduler_;}
     const SifDma& sif_dma() const { return sif_dma_; }
     const Vif1Dma& vif1_dma() const { return vif1_dma_; }

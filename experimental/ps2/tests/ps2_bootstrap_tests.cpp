@@ -2650,6 +2650,64 @@ bool test_gs_display_extraction() {
         system.gs_display().rgba8()[0] == 0xFF800080u,
         "GS constant-alpha dual-circuit merge mismatch") && ok;
 
+    // Interlaced field mode (SMODE2.INT + FFMD) scans half as many
+    // framebuffer lines as the full DISPLAY height. The presenter should
+    // bob those field lines to the full host surface rather than reading
+    // into the following field/image and showing two vertically stacked
+    // pictures.
+    system.gs_privileged().reset();
+    system.gs_display().reset();
+    constexpr ps2::u64 interlaced_pmode = 1u;
+    constexpr ps2::u64 interlaced_smode2 = 3u; // INT=1, FFMD=1
+    constexpr ps2::u64 interlaced_dispfb =
+        static_cast<ps2::u64>(1u) << 9; // FBW=1
+    constexpr ps2::u64 interlaced_display =
+        (static_cast<ps2::u64>(1u) << 32) | // width 2
+        (static_cast<ps2::u64>(3u) << 44);  // display height 4
+    ok = expect(
+        system.gs_privileged().write64(0x12000000u, interlaced_pmode) &&
+        system.gs_privileged().write64(0x12000020u, interlaced_smode2) &&
+        system.gs_privileged().write64(0x12000070u, interlaced_dispfb) &&
+        system.gs_privileged().write64(0x12000080u, interlaced_display),
+        "GS interlaced field-mode register setup failed") && ok;
+
+    constexpr ps2::u32 field_row0 = 0xFF112233u;
+    constexpr ps2::u32 field_row1 = 0xFF445566u;
+    constexpr ps2::u32 bogus_row2 = 0xFFAA0000u;
+    constexpr ps2::u32 bogus_row3 = 0xFF00AA00u;
+    for (ps2::u32 x = 0; x < 2u; ++x) {
+        ok = expect(
+            system.gs_core().vram().write_pixel(
+                0u, x, 0u, 0u, 1u, field_row0) &&
+            system.gs_core().vram().write_pixel(
+                0u, x, 1u, 0u, 1u, field_row1) &&
+            system.gs_core().vram().write_pixel(
+                0u, x, 2u, 0u, 1u, bogus_row2) &&
+            system.gs_core().vram().write_pixel(
+                0u, x, 3u, 0u, 1u, bogus_row3),
+            "GS interlaced field-mode VRAM setup failed") && ok;
+    }
+
+    system.gs_display().update(
+        system.gs_privileged(), system.gs_core().vram());
+    const auto& interlaced_out = system.gs_display();
+    ok = expect(
+        interlaced_out.valid() &&
+        interlaced_out.width() == 2u &&
+        interlaced_out.height() == 4u &&
+        interlaced_out.rgba8().size() == 8u,
+        "GS interlaced field-mode dimensions mismatch") && ok;
+    if (interlaced_out.rgba8().size() == 8u) {
+        for (ps2::u32 x = 0; x < 2u; ++x) {
+            ok = expect(
+                interlaced_out.rgba8()[x] == field_row0 &&
+                interlaced_out.rgba8()[2u + x] == field_row0 &&
+                interlaced_out.rgba8()[4u + x] == field_row1 &&
+                interlaced_out.rgba8()[6u + x] == field_row1,
+                "GS interlaced field-mode bob scanout mismatch") && ok;
+        }
+    }
+
     return ok;
 }
 
