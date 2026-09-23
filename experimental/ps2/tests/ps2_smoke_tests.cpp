@@ -1703,11 +1703,16 @@ bool test_iop_spu2_adpcm_voice() {
             "SPU2 ADPCM payload write failed") && ok;
     }
 
-    // Voice 0: unity-ish stereo volume, native 48 kHz pitch, SSA=0.
+    // Voice 0: unity-ish stereo volume, native 48 kHz pitch, fast
+    // attack/sustain, SSA=0. Core 0 master volume must also be open.
     ok = expect(
+        system.iop_bus().write16(0x1F900760u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900762u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900000u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900002u, 0x3FFFu) &&
         system.iop_bus().write16(0x1F900004u, 0x1000u) &&
+        system.iop_bus().write16(0x1F900006u, 0x000Fu) &&
+        system.iop_bus().write16(0x1F900008u, 0x0000u) &&
         system.iop_bus().write16(0x1F9001C0u, 0u) &&
         system.iop_bus().write16(0x1F9001C2u, 0u) &&
         system.iop_bus().write16(0x1F9001A0u, 1u),
