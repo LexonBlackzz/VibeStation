@@ -364,6 +364,29 @@ struct CpuBackendStats {
   u64 native_instructions = 0;
   u64 native_cycles = 0;
   u64 jit_v4_helper_instructions = 0;
+
+  // Per-frame recompiler spike probe. These counters are reset at the start of
+  // every emulated frame. Timing is collected only on cold paths so the normal
+  // resident-dispatch hot path stays free of clock reads.
+  u64 recompiler_frame_compile_ns = 0;
+  u64 recompiler_frame_compile_max_ns = 0;
+  u64 recompiler_frame_compile_blocks = 0;
+  u64 recompiler_frame_compile_failures = 0;
+  u64 recompiler_frame_revalidate_ns = 0;
+  u64 recompiler_frame_revalidate_attempts = 0;
+  u64 recompiler_frame_revalidate_successes = 0;
+  u64 recompiler_frame_cache_misses = 0;
+  u64 recompiler_frame_icache_refills = 0;
+  u64 recompiler_frame_helper_instructions = 0;
+  u64 recompiler_frame_invalidations = 0;
+  u64 recompiler_frame_flushes = 0;
+  u64 recompiler_frame_dispatch_missing_exits = 0;
+  u64 recompiler_frame_dispatch_epoch_exits = 0;
+  u64 recompiler_frame_dispatch_memory_exits = 0;
+  u64 recompiler_frame_dispatch_generation_exits = 0;
+  u64 recompiler_frame_dispatch_budget_exits = 0;
+  u64 recompiler_frame_dispatch_bail_exits = 0;
+
   // Compiled helper profiling. Timings sample the opcode handler and its
   // instruction lifecycle, excluding translation and dispatch overhead.
   std::array<u64, 6> jit_v4_helper_reasons{};
