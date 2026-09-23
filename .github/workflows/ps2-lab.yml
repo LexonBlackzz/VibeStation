@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - ps2-lab
+      - ps2-lab-perf-experiment
     paths:
       - "experimental/ps2/**"
       - ".github/workflows/ps2-lab.yml"
