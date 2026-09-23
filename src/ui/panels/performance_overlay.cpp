@@ -668,6 +668,35 @@ void App::panel_performance() {
                 ImGui::TextDisabled(
                     "Strong alternating GPU workload: frame-time oscillation follows draw cadence.");
             }
+            if (ImGui::Button("Copy GPU cadence snapshot")) {
+                char cadence_snapshot[1024];
+                std::snprintf(
+                    cadence_snapshot, sizeof(cadence_snapshot),
+                    "frame=%llu core_ms=%.3f gp0_words=%u gp0_commands=%u draws=%u "
+                    "flat=%u gouraud=%u textured=%u gouraud_textured=%u rect=%u line=%u transfer=%u other=%u "
+                    "cadence_alt=%.1f active_frames=%u light_frames=%u threshold=%u "
+                    "active_draws=%.1f light_draws=%.1f active_core_ms=%.3f light_core_ms=%.3f "
+                    "dominant=%s dominant_active=%.1f dominant_light=%.1f detailed=%u",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms,
+                    stats.gpu_gp0_words, stats.gpu_gp0_commands,
+                    stats.gpu_draw_commands,
+                    stats.gpu_flat_commands, stats.gpu_gouraud_commands,
+                    stats.gpu_textured_commands,
+                    stats.gpu_gouraud_textured_commands,
+                    stats.gpu_rect_commands, stats.gpu_line_commands,
+                    stats.gpu_transfer_commands, stats.gpu_other_commands,
+                    phase_diag.alternation_percent,
+                    phase_diag.render_frames, phase_diag.reuse_frames,
+                    phase_diag.draw_threshold,
+                    phase_diag.render_draws, phase_diag.reuse_draws,
+                    phase_diag.render_core_ms, phase_diag.reuse_core_ms,
+                    gpu_bucket_name(dominant_bucket),
+                    phase_diag.render_buckets[dominant_bucket],
+                    phase_diag.reuse_buckets[dominant_bucket],
+                    g_profile_detailed_timing ? 1u : 0u);
+                ImGui::SetClipboardText(cadence_snapshot);
+            }
         }
         ImGui::Separator();
 
