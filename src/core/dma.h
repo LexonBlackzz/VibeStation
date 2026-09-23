@@ -115,6 +115,7 @@ private:
   std::array<u32, 7> active_transfer_debug_id_{};
   u32 next_transfer_debug_id_ = 0;
   RegisterWriteDebug register_write_debug_[7];
+  u8 active_channel_mask_ = 0;
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register
@@ -124,6 +125,8 @@ private:
   void dma_block(int channel, u32 max_words = 0xFFFFFFFFu);
   void dma_linked_list(int channel);
   void transfer_complete(int channel);
+  void refresh_active_channel(int channel);
+  void rebuild_active_channel_mask();
   bool request_active(int channel) const;
   u32 dma_ram_tick_cost(u32 word_count) const;
   u32 slice_words_for_channel(int channel) const;
