@@ -47,6 +47,14 @@ public:
     }
 
 private:
+    enum class EnvelopePhase : u8 {
+        Stopped = 0,
+        Attack = 1,
+        Decay = 2,
+        Sustain = 3,
+        Release = 4,
+    };
+
     struct Voice {
         bool active = false;
         s32 prev1 = 0;
@@ -56,12 +64,18 @@ private:
         u32 phase = 0;
         u32 decoded_pos = 28;
         u8 block_flags = 0;
+
+        EnvelopePhase envelope_phase = EnvelopePhase::Stopped;
+        u32 envelope_counter = 0;
+        s32 envelope_value = 0;
+
         std::array<s16, 28> decoded{};
     };
 
     struct Core {
         std::array<Voice, 24> voices{};
         u32 transfer_addr = 0;
+        u32 endx = 0x00FFFFFFu;
     };
 
     [[nodiscard]] u16 raw16(u32 offset) const;
@@ -77,7 +91,18 @@ private:
 
     [[nodiscard]] bool decode_block(u32 core, u32 voice);
     [[nodiscard]] s16 voice_sample(u32 core, u32 voice);
+    [[nodiscard]] s16 interpolated_voice_sample(u32 core, u32 voice);
     void advance_voice(u32 core, u32 voice);
+    void update_envelope(u32 core, u32 voice);
+    [[nodiscard]] bool voice_gate_enabled(
+        u32 core,
+        u32 voice,
+        bool right) const;
+    [[nodiscard]] s32 apply_master_volume(
+        u32 core,
+        s32 sample,
+        bool right) const;
+    void write_endx(u32 core);
     void mix_one_sample();
     void push_sample(s16 left, s16 right);
 
