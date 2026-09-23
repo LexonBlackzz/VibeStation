@@ -883,11 +883,14 @@ void Gpu::consume_vram_write_word(u32 word) {
 void Gpu::gp0(u32 command) {
     const bool profile_detailed = g_profile_detailed_timing;
     std::chrono::high_resolution_clock::time_point start{};
+    if (sys_) {
+        // Cheap frame-work counters stay enabled even when detailed timing is
+        // off. Spyro's oscillation probe needs the real command cadence without
+        // injecting clock reads into the GP0 hot path.
+        sys_->add_gpu_gp0_word();
+    }
     if (profile_detailed) {
         start = std::chrono::high_resolution_clock::now();
-        if (sys_) {
-            sys_->add_gpu_gp0_word();
-        }
     }
     static u64 gp0_count = 0;
     if (g_trace_gpu &&
@@ -934,8 +937,9 @@ void Gpu::gp0(u32 command) {
 
     // Full command received — dispatch
     u8 op = gp0_command_;
-    if (profile_detailed && sys_) {
+    if (sys_) {
         sys_->add_gpu_gp0_command();
+        sys_->add_gpu_command_bucket(gpu_profile_bucket_for_opcode(op));
         if (op >= 0x20 && op <= 0x7Fu) {
             sys_->add_gpu_draw_command();
         }
