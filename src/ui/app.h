@@ -107,6 +107,8 @@ private:
 	std::array<u64, kPerfHistorySamples> perf_frame_id_history_ = {};
 	std::array<u32, kPerfHistorySamples> perf_gpu_words_history_ = {};
 	std::array<u32, kPerfHistorySamples> perf_gpu_draw_commands_history_ = {};
+	std::array<std::array<u32, 8>, kPerfHistorySamples>
+		perf_gpu_bucket_commands_history_ = {};
 	std::array<u32, kPerfHistorySamples> perf_cpu_pc_history_ = {};
 	std::array<u32, kPerfHistorySamples> perf_dma2_words_history_ = {};
 	std::array<u32, kPerfHistorySamples> perf_dma2_base_history_ = {};
