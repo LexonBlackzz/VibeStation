@@ -22,7 +22,7 @@ constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
 GLuint g_background_texture = 0;
-GLuint g_background_blur_texture = 0;
+GLuint g_background_soft_texture = 0;
 int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
@@ -127,6 +127,57 @@ std::vector<unsigned char> make_blurred_rgba(
     return output;
 }
 
+
+std::vector<unsigned char> make_softened_background(
+    const unsigned char* source,
+    const std::vector<unsigned char>& blurred,
+    int width, int height) {
+    const size_t pixel_count =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<unsigned char> output(pixel_count * 4u);
+    if (source == nullptr || blurred.size() != output.size() ||
+        width <= 0 || height <= 0) {
+        return output;
+    }
+
+    // Keep the left side softly blurred, then blend continuously back into
+    // the untouched photograph. Doing this once on the CPU avoids visible
+    // strip/seam artifacts from drawing many translucent texture slices.
+    constexpr float kBlurStrength = 0.76f;
+    constexpr float kBlurSolidEnd = 0.34f;
+    constexpr float kBlurFadeEnd = 0.60f;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float nx = width > 1
+                ? static_cast<float>(x) / static_cast<float>(width - 1)
+                : 0.0f;
+
+            float blur_mix = kBlurStrength;
+            if (nx > kBlurSolidEnd) {
+                const float fade_t = (nx - kBlurSolidEnd) /
+                    (kBlurFadeEnd - kBlurSolidEnd);
+                blur_mix = kBlurStrength * (1.0f - smoothstep01(fade_t));
+            }
+            if (nx >= kBlurFadeEnd) {
+                blur_mix = 0.0f;
+            }
+
+            const size_t base =
+                (static_cast<size_t>(y) * width + x) * 4u;
+            for (int channel = 0; channel < 3; ++channel) {
+                const float sharp = static_cast<float>(source[base + channel]);
+                const float soft = static_cast<float>(blurred[base + channel]);
+                output[base + channel] = static_cast<unsigned char>(
+                    std::clamp(std::round(
+                        sharp + (soft - sharp) * blur_mix), 0.0f, 255.0f));
+            }
+            output[base + 3] = source[base + 3];
+        }
+    }
+    return output;
+}
+
 bool upload_rgba_texture(
     GLuint& texture, const unsigned char* pixels, int width, int height) {
     if (pixels == nullptr || width <= 0 || height <= 0) {
@@ -214,9 +265,14 @@ bool ensure_background_texture_loaded() {
     const std::vector<unsigned char> blurred =
         make_blurred_rgba(pixels, g_background_width, g_background_height, 7);
     if (!blurred.empty()) {
-        upload_rgba_texture(
-            g_background_blur_texture, blurred.data(),
-            g_background_width, g_background_height);
+        const std::vector<unsigned char> softened =
+            make_softened_background(
+                pixels, blurred, g_background_width, g_background_height);
+        if (!softened.empty()) {
+            upload_rgba_texture(
+                g_background_soft_texture, softened.data(),
+                g_background_width, g_background_height);
+        }
     }
 
     stbi_image_free(pixels);
@@ -321,49 +377,54 @@ void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
     }
 
     const CoverUv uv = cover_uv_for_size(size);
+    const GLuint display_texture =
+        g_background_soft_texture != 0
+            ? g_background_soft_texture
+            : g_background_texture;
     draw->AddImage(
-        (ImTextureID)(intptr_t)g_background_texture,
+        (ImTextureID)(intptr_t)display_texture,
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
         ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1));
 }
 
-void draw_soft_backdrops(ImDrawList* draw,
+void draw_readability_shade(ImDrawList* draw,
     const ImVec2& pos, const ImVec2& size) {
-    if (g_background_blur_texture == 0) {
-        return;
+    constexpr int kSegments = 32;
+    constexpr float kSolidEnd = 0.31f;
+    constexpr float kFadeEnd = 0.66f;
+    constexpr float kTopAlpha = 208.0f;
+    constexpr float kBottomAlpha = 216.0f;
+
+    const auto strength_at = [](float nx) {
+        if (nx <= kSolidEnd) {
+            return 1.0f;
+        }
+        if (nx >= kFadeEnd) {
+            return 0.0f;
+        }
+        const float t = (nx - kSolidEnd) / (kFadeEnd - kSolidEnd);
+        return 1.0f - smoothstep01(t);
+    };
+
+    // Adjacent segments share identical edge alpha values, so this behaves as
+    // one continuous nonlinear fade rather than several stacked dark panels.
+    for (int i = 0; i < kSegments; ++i) {
+        const float n0 = kFadeEnd *
+            (static_cast<float>(i) / kSegments);
+        const float n1 = kFadeEnd *
+            (static_cast<float>(i + 1) / kSegments);
+        const float s0 = strength_at(n0);
+        const float s1 = strength_at(n1);
+
+        const ImVec2 r0(pos.x + size.x * n0, pos.y);
+        const ImVec2 r1(pos.x + size.x * n1, pos.y + size.y);
+        draw->AddRectFilledMultiColor(
+            r0, r1,
+            rgba(0, 2, 5, glow_alpha(kTopAlpha * s0)),
+            rgba(0, 2, 5, glow_alpha(kTopAlpha * s1)),
+            rgba(0, 2, 5, glow_alpha(kBottomAlpha * s1)),
+            rgba(0, 2, 5, glow_alpha(kBottomAlpha * s0)));
     }
-
-    // Blur the left presentation zone behind the branding and primary menu.
-    // The photograph stays increasingly sharp as we approach the console.
-    const float blur_solid_end = pos.x + size.x * 0.39f;
-    const float blur_fade_end = pos.x + size.x * 0.57f;
-
-    draw_cover_region(draw, g_background_blur_texture, pos, size,
-        pos, ImVec2(blur_solid_end, pos.y + size.y),
-        rgba(255, 255, 255, 178));
-
-    constexpr int kBlurFadeSteps = 14;
-    const float fade_width = blur_fade_end - blur_solid_end;
-    for (int i = 0; i < kBlurFadeSteps; ++i) {
-        const float t0 = static_cast<float>(i) / kBlurFadeSteps;
-        const float t1 = static_cast<float>(i + 1) / kBlurFadeSteps;
-        const float center_t = (t0 + t1) * 0.5f;
-        const float strength = 1.0f - smoothstep01(center_t);
-
-        const ImVec2 r0(
-            blur_solid_end + fade_width * t0, pos.y);
-        const ImVec2 r1(
-            blur_solid_end + fade_width * t1, pos.y + size.y);
-        draw_cover_region(draw, g_background_blur_texture, pos, size, r0, r1,
-            rgba(255, 255, 255, glow_alpha(178.0f * strength)));
-    }
-
-    // A light backdrop under the lower information glass keeps small text
-    // legible without making the entire lower photograph visibly blurred.
-    const float band_top = pos.y + size.y * 0.74f;
-    draw_cover_region(draw, g_background_blur_texture, pos, size,
-        ImVec2(pos.x, band_top), ImVec2(pos.x + size.x, pos.y + size.y),
-        rgba(255, 255, 255, 58));
 }
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
@@ -637,9 +698,9 @@ void App::release_definitive_ui_assets() {
         glDeleteTextures(1, &g_background_texture);
         g_background_texture = 0;
     }
-    if (g_background_blur_texture != 0) {
-        glDeleteTextures(1, &g_background_blur_texture);
-        g_background_blur_texture = 0;
+    if (g_background_soft_texture != 0) {
+        glDeleteTextures(1, &g_background_soft_texture);
+        g_background_soft_texture = 0;
     }
     g_background_width = 0;
     g_background_height = 0;
@@ -656,20 +717,7 @@ void App::panel_definitive_home() {
     const Layout layout = make_layout(window_pos, window_size);
 
     draw_background(draw, window_pos, window_size);
-    draw_soft_backdrops(draw, window_pos, window_size);
-
-    const float dark_solid_end = window_pos.x + window_size.x * 0.41f;
-    const float dark_fade_end = window_pos.x + window_size.x * 0.63f;
-    draw->AddRectFilled(
-        window_pos,
-        ImVec2(dark_solid_end, window_pos.y + window_size.y),
-        rgba(0, 2, 5, 206));
-
-    draw->AddRectFilledMultiColor(
-        ImVec2(dark_solid_end, window_pos.y),
-        ImVec2(dark_fade_end, window_pos.y + window_size.y),
-        rgba(0, 2, 5, 206), rgba(0, 2, 5, 0),
-        rgba(0, 2, 5, 216), rgba(0, 2, 5, 0));
+    draw_readability_shade(draw, window_pos, window_size);
 
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
     const ImVec2 bottom1(window_pos.x + window_size.x, window_pos.y + window_size.y);
