@@ -65,6 +65,9 @@ public:
   void write_command(u32 value);
   void write_control(u32 value);
   void tick(u32 cycles);
+  bool needs_tick() const {
+    return output_ready_delay_cycles_ != 0u || !pending_out_fifo_.empty();
+  }
   u32 read_data();
   u32 read_status() const;
   u8 dma_out_block() const;
