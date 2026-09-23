@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.lexonblackzz.vibestation'
+    compileSdk 35
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'com.lexonblackzz.vibestation'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.6.0-dev-android'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DVIBESTATION_ENABLE_X64_JIT=OFF',
+                          '-DVIBESTATION_ENABLE_DISCORD_RPC=OFF',
+                          '-DVIBESTATION_ENABLE_IPO=ON',
+                          '-DBUILD_TESTING=OFF'
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../../CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+}
