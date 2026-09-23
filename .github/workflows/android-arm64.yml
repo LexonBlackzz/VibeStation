@@ -42,7 +42,7 @@ jobs:
           rm -rf /tmp/SDL2-src
           mkdir -p /tmp/SDL2-src
           unzip -q /tmp/SDL2.zip -d /tmp/SDL2-src
-          SDL_DIR="$(find /tmp/SDL2-src -maxdepth 1 -type d -name 'SDL2-*' | head -n 1)"
+          SDL_DIR="$(find /tmp/SDL2-src -mindepth 1 -maxdepth 1 -type d -name 'SDL2-*' | head -n 1)"
           test -n "$SDL_DIR"
           mkdir -p android/app/src/main/java/org/libsdl
           cp -a "$SDL_DIR/android-project/app/src/main/java/org/libsdl/app" android/app/src/main/java/org/libsdl/
