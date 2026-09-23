@@ -92,6 +92,7 @@ public:
   void write(u32 offset, u32 value);
 
   void tick();
+  bool has_active_channels() const { return active_channel_mask_ != 0u; }
   const TransferDebug &last_debug(int channel) const {
     return last_debug_[channel & 0x7];
   }
