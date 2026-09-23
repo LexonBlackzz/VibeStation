@@ -486,14 +486,28 @@ bool IopBus::write_root_counter(
         ++root_counter_debug_.mode_writes[index];
         root_counter_debug_.last_mode_write[index] =
             merged & 0xFFFFu;
-        // Writable control bits plus hardware-owned IRQ/target/overflow flags.
+
+        const u32 old_mode = counter.mode;
+        const bool old_flag_had_irq =
+            (((old_mode & (1u << 11)) != 0u) &&
+             ((old_mode & (1u << 4)) != 0u)) ||
+            (((old_mode & (1u << 12)) != 0u) &&
+             ((old_mode & (1u << 5)) != 0u));
+
+        // Preserve hardware-owned status/IRQ state. If the old target/overflow
+        // flag was raised while its IRQ source was disabled, TIMRMAN's mode
+        // write rearms the timer and clears those stale event flags.
+        u32 flags = old_mode & 0x1C00u;
+        if (!old_flag_had_irq) {
+            flags &= ~0x1800u;
+        }
         counter.mode =
-            (merged & 0x63FFu) |
-            (counter.mode & 0x1C00u);
+            (merged & 0x63FFu) | flags | (1u << 10);
         root_counter_rate_cache_[index] =
             static_cast<u32>(root_counter_rate(index));
         counter.count = 0;
         counter.phase = 0;
+        counter.target_deferred = false;
         return true;
     }
 
@@ -506,6 +520,7 @@ bool IopBus::write_root_counter(
             static_cast<u32>(merged & counter_mask);
     }
     counter.target = merged & counter_mask;
+    counter.target_deferred = counter.target <= counter.count;
     return true;
 }
 
@@ -545,16 +560,15 @@ void IopBus::tick(u64 cycles) {
         for (u64 step = 0; step < increments; ++step) {
             ++counter.count;
 
-            if (counter.target <= maximum &&
+            if (!counter.target_deferred &&
+                counter.target <= maximum &&
                 counter.count >= counter.target) {
                 ++root_counter_debug_.target_events[i];
                 const bool first = (counter.mode & (1u << 11)) == 0;
                 const bool repeat = (counter.mode & (1u << 6)) != 0;
                 counter.mode |= 1u << 11;
-                // The reached-target flag is sticky, but it does not suppress
-                // later interrupts in repeat mode.  THREADMAN relies on this
-                // distinction when it repeatedly reprograms the system timer
-                // for DelayThread and alarm deadlines.
+                // The reached-target flag is sticky, but repeat mode can still
+                // pulse the interrupt on each real target crossing.
                 if ((first || repeat) &&
                     (counter.mode & (1u << 4)) != 0) {
                     ++root_counter_debug_.irq_events[i];
@@ -564,9 +578,10 @@ void IopBus::tick(u64 cycles) {
                     counter.count =
                         counter.target == 0 ? 0 : counter.count - counter.target;
                 } else {
-                    // A non-resetting target fires once until the next wrap or
-                    // target write, matching the bootstrap-visible behavior.
-                    counter.target = maximum + 1u;
+                    // Hardware keeps the compare register intact. Internally
+                    // defer it until counter wrap, rather than replacing the
+                    // guest-visible target with an impossible sentinel value.
+                    counter.target_deferred = true;
                 }
             }
 
@@ -581,6 +596,7 @@ void IopBus::tick(u64 cycles) {
                     intc_.raise(irq_sources[i]);
                 }
                 counter.count &= maximum;
+                counter.target_deferred = false;
             }
         }
     }
