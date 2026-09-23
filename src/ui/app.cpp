@@ -1,5 +1,6 @@
 #include "app.h"
 #include "platform/disc_path_utils.h"
+#include "platform/android_bridge.h"
 #include "platform/memory_card_utils.h"
 #include "ui/input_bindings.h"
 #include "ui/output_resolution_utils.h"
@@ -35,6 +36,7 @@
 #include <sstream>
 #include <ctime>
 #include <vector>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -155,6 +157,17 @@ bool App::init() {
     printf("[App::init] SDL OK\n");
     fflush(stdout);
 
+#if defined(__ANDROID__)
+    if (char* pref_path = SDL_GetPrefPath("LexonBlackzz", "VibeStation")) {
+        std::error_code path_ec;
+        std::filesystem::create_directories(pref_path, path_ec);
+        if (!path_ec) {
+            std::filesystem::current_path(pref_path, path_ec);
+        }
+        SDL_free(pref_path);
+    }
+#endif
+
     if (!input_) {
         input_ = std::make_unique<InputManager>();
     }
@@ -255,6 +268,23 @@ bool App::init() {
     ImGui::StyleColorsDark();
     ui_theme::ensure_theme_settings_initialized();
     ui_theme::apply_theme_style(ImGui::GetStyle());
+#if defined(__ANDROID__)
+    int drawable_w = 0;
+    int drawable_h = 0;
+    SDL_GL_GetDrawableSize(window_, &drawable_w, &drawable_h);
+    const float short_side = static_cast<float>(
+        std::max(1, std::min(drawable_w, drawable_h)));
+    mobile_ui_scale_ = std::clamp(short_side / 540.0f, 1.65f, 2.20f);
+    io.FontGlobalScale = mobile_ui_scale_;
+    ImGuiStyle& mobile_style = ImGui::GetStyle();
+    mobile_style.ScaleAllSizes(mobile_ui_scale_);
+    mobile_style.TouchExtraPadding =
+        ImVec2(4.0f * mobile_ui_scale_, 4.0f * mobile_ui_scale_);
+    mobile_style.ScrollbarSize =
+        std::max(mobile_style.ScrollbarSize, 20.0f * mobile_ui_scale_);
+    mobile_style.GrabMinSize =
+        std::max(mobile_style.GrabMinSize, 18.0f * mobile_ui_scale_);
+#endif
     ui_theme::register_theme_settings_handler();
     if (io.IniFilename != nullptr && io.IniFilename[0] != '\0') {
         ImGui::LoadIniSettingsFromDisk(io.IniFilename);
@@ -653,6 +683,9 @@ void App::process_events(bool& quit) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         ImGui_ImplSDL2_ProcessEvent(&event);
+#if defined(__ANDROID__)
+        handle_mobile_touch_event(event);
+#endif
 
         if (event.type == SDL_QUIT) {
             quit = true;
@@ -858,6 +891,7 @@ void App::process_events(bool& quit) {
 }
 
 void App::update() {
+    handle_android_picker_results();
     input_->update();
     if (system_) {
         const double reverb_mix =
@@ -871,7 +905,10 @@ void App::update() {
     sync_sound_reaper_config();
 
     // Push controller state into lock-free mailbox consumed by the emu thread.
-    const u16 buttons = input_->controller().button_state();
+    u16 buttons = input_->controller().button_state();
+#if defined(__ANDROID__)
+    buttons = static_cast<u16>(buttons & mobile_touch_buttons_);
+#endif
     const u8 lx = input_->controller().lx();
     const u8 ly = input_->controller().ly();
     const u8 rx = input_->controller().rx();
@@ -1002,7 +1039,9 @@ void App::update() {
 }
 
 void App::render_ui() {
+#if !defined(__ANDROID__)
     menu_bar();
+#endif
 
     // Main dockspace
     ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1021,6 +1060,10 @@ void App::render_ui() {
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
+#if defined(__ANDROID__)
+    mobile_top_bar();
+    ImGui::Separator();
+#endif
     panel_emulator_screen();
     ImGui::End();
 
@@ -1669,7 +1712,27 @@ bool App::start_input_playback_from_ui() {
 }
 
 std::string App::open_file_dialog(const char* filter, const char* title) {
-#ifdef _WIN32
+#if defined(__ANDROID__)
+    (void)filter;
+    if (mobile_picker_busy_) {
+        return "";
+    }
+    const std::string title_text = title != nullptr ? title : "";
+    const AndroidPickerKind kind =
+        title_text.find("BIOS") != std::string::npos
+        ? AndroidPickerKind::Bios
+        : AndroidPickerKind::Game;
+    if (android_request_picker(kind)) {
+        mobile_picker_busy_ = true;
+        status_message_ = kind == AndroidPickerKind::Bios
+            ? "Choose a PS1 BIOS file..."
+            : "Choose a PS1 .bin disc image...";
+    }
+    else {
+        status_message_ = "Android file picker could not be opened.";
+    }
+    return "";
+#elif defined(_WIN32)
     OPENFILENAMEA ofn = {};
     char filename[MAX_PATH] = "";
     ofn.lStructSize = sizeof(ofn);
@@ -1688,7 +1751,20 @@ std::string App::open_file_dialog(const char* filter, const char* title) {
 }
 
 std::string App::open_folder_dialog(const char* title) {
-#ifdef _WIN32
+#if defined(__ANDROID__)
+    (void)title;
+    if (mobile_picker_busy_) {
+        return "";
+    }
+    if (android_request_picker(AndroidPickerKind::RomDirectory)) {
+        mobile_picker_busy_ = true;
+        status_message_ = "Choose a ROM folder. VibeStation will import .bin/.cue files...";
+    }
+    else {
+        status_message_ = "Android folder picker could not be opened.";
+    }
+    return "";
+#elif defined(_WIN32)
     BROWSEINFOA bi = {};
     bi.hwndOwner = nullptr;
     bi.lpszTitle = title;
@@ -1730,6 +1806,7 @@ void App::refresh_game_library() {
     rom_directory_valid_ = true;
 
     std::vector<std::filesystem::path> cue_paths;
+    std::vector<std::filesystem::path> bin_paths;
     std::filesystem::recursive_directory_iterator it(
         rom_directory_, std::filesystem::directory_options::skip_permission_denied, ec);
     std::filesystem::recursive_directory_iterator end;
@@ -1750,20 +1827,25 @@ void App::refresh_game_library() {
         std::string ext = file.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
-            });
+        });
 
         if (ext == ".cue") {
             cue_paths.push_back(file);
         }
+        else if (ext == ".bin") {
+            bin_paths.push_back(file);
+        }
     }
 
+    std::unordered_set<std::string> cue_bins;
     for (const auto& cue : cue_paths) {
         std::string bin;
         std::string cue_path;
         std::string error;
-        if (!resolve_disc_paths(cue.string(), bin, cue_path, error)) {
+        if (!resolve_disc_paths(cue.string(), bin, cue_path, error) || bin.empty()) {
             continue;
         }
+        cue_bins.insert(std::filesystem::path(bin).lexically_normal().string());
         GameLibraryEntry entry{};
         entry.title = cue.stem().string();
         entry.bin_path = bin;
@@ -1771,12 +1853,23 @@ void App::refresh_game_library() {
         game_library_.push_back(std::move(entry));
     }
 
+    for (const auto& bin : bin_paths) {
+        const std::string key = bin.lexically_normal().string();
+        if (cue_bins.find(key) != cue_bins.end()) {
+            continue;
+        }
+        GameLibraryEntry entry{};
+        entry.title = bin.stem().string();
+        entry.bin_path = bin.string();
+        game_library_.push_back(std::move(entry));
+    }
+
     std::sort(game_library_.begin(), game_library_.end(),
-        [](const GameLibraryEntry& a, const GameLibraryEntry& b) {
-            if (a.title == b.title) {
-                return a.cue_path < b.cue_path;
+        [](const GameLibraryEntry& lhs, const GameLibraryEntry& rhs) {
+            if (lhs.title == rhs.title) {
+                return lhs.bin_path < rhs.bin_path;
             }
-            return a.title < b.title;
+            return lhs.title < rhs.title;
         });
 }
 
