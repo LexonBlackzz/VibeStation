@@ -652,7 +652,10 @@ GsRasterContext GsCore::raster_context() const {
     ctx.ztst = static_cast<u32>((test >> 17) & 0x3u);
 
     ctx.zbp = static_cast<u32>(zbuf & 0x1FFu) << 5;
-    ctx.zpsm = static_cast<u32>((zbuf >> 24) & 0x3Fu);
+    // ZBUF uses the short depth-format codes (0,1,2,A). The VRAM address
+    // helpers use the corresponding PSMZ codes (30,31,32,3A). BIOS OSDSYS
+    // writes ZBUF.PSM=0 for a 32-bit depth target.
+    ctx.zpsm = 0x30u | static_cast<u32>((zbuf >> 24) & 0x3Fu);
     ctx.zmask = ((zbuf >> 32) & 1u) != 0;
 
     ctx.alpha_a = static_cast<u32>(alpha & 0x3u);
@@ -711,21 +714,6 @@ GsRasterContext GsCore::raster_context() const {
     return ctx;
 }
 
-bool GsCore::raster_state_supported() const {
-    // Bootstrap renderer policy: AA1 is accepted and rendered without edge
-    // coverage rather than dropping the whole primitive. Fog, Gouraud, alpha
-    // blending, alpha/destination tests and Z buffering are handled by the
-    // software pixel pipeline.
-    const GsRasterContext ctx = raster_context();
-    if (!GsRasterizer::supported_target(ctx)) return false;
-
-    if (ctx.texture.enabled) {
-        if (!GsRasterizer::supported_texture(ctx.texture)) return false;
-    }
-
-    return true;
-}
-
 void GsCore::emit_primitive(
     const GsRasterVertex& a,
     const GsRasterVertex& b,
@@ -734,12 +722,22 @@ void GsCore::emit_primitive(
     ++stats_.primitives;
 
     const u32 prim = static_cast<u32>(effective_prim() & 0x7u);
-    if (!raster_state_supported()) {
+    GsRasterContext ctx = raster_context();
+    const bool target_supported = GsRasterizer::supported_target(ctx);
+    const bool texture_supported = GsRasterizer::supported_texture(ctx.texture);
+    if (!target_supported || !texture_supported) {
         ++stats_.skipped_raster_draws;
+        stats_.unsupported_target_draws += !target_supported;
+        stats_.unsupported_texture_draws += !texture_supported;
+        stats_.last_unsupported_prim = effective_prim();
+        const u32 context = static_cast<u32>((effective_prim() >> 9) & 1u);
+        stats_.last_unsupported_frame = registers_[kRegFrame1 + context];
+        stats_.last_unsupported_zbuf = registers_[kRegZbuf1 + context];
+        stats_.last_unsupported_test = registers_[kRegTest1 + context];
+        stats_.last_unsupported_tex0 = registers_[kRegTex0_1 + context];
         return;
     }
 
-    GsRasterContext ctx = raster_context();
     ctx.texture.nonzero_samples = &stats_.nonzero_texture_samples;
     ctx.texture.alpha_samples = &stats_.texture_alpha_samples;
     ctx.texture.first_sample_x = &stats_.first_texture_sample_x;

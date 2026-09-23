@@ -74,6 +74,13 @@ struct GsStats {
     u64 first_alpha_input_tex0 = 0;
     u64 first_alpha_input_rgbaq = 0;
     u64 skipped_raster_draws = 0;
+    u64 unsupported_target_draws = 0;
+    u64 unsupported_texture_draws = 0;
+    u64 last_unsupported_prim = 0;
+    u64 last_unsupported_frame = 0;
+    u64 last_unsupported_zbuf = 0;
+    u64 last_unsupported_test = 0;
+    u64 last_unsupported_tex0 = 0;
     u64 signal_events = 0;
     u64 finish_events = 0;
     u64 label_events = 0;
@@ -157,7 +164,6 @@ private:
         u32 vertex_count);
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
-    [[nodiscard]] bool raster_state_supported() const;
 
     std::array<u64, 0x80> registers_{};
     std::array<u32, 4> fifo_words_{};

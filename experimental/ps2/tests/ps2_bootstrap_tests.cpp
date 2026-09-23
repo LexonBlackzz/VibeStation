@@ -2983,6 +2983,17 @@ bool test_gs_depth_layout_and_pixel_pipeline() {
         ad(gs, 0x05, xyz(16, 16, 200u));
         ok = expect(gs.vram().read_depth(48, 0, 0, zbp_blocks, 1) == 150u,
                     "GS ZMSK did not block depth write") && ok;
+
+        // ZBUF.PSM=0 is the BIOS's short encoding for PSMZ32, distinct
+        // from the 0x30 format code used by GS local-memory transfers.
+        ad(gs, 0x4E, static_cast<ps2::u64>(zbp_blocks >> 5));
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0xFF90A0B0u);
+        ad(gs, 0x05, xyz(0, 0, 250u));
+        ad(gs, 0x05, xyz(16, 16, 250u));
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0xFF90A0B0u &&
+                    gs.vram().read_depth(48, 0, 0, zbp_blocks, 1) == 250u,
+                    "GS short ZBUF.PSM encoding did not render/write Z32") && ok;
     }
 
     // Alpha blend equation, PABE bypass, and FBA.
