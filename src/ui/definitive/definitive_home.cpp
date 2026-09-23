@@ -168,9 +168,10 @@ std::vector<unsigned char> make_softened_background(
             for (int channel = 0; channel < 3; ++channel) {
                 const float sharp = static_cast<float>(source[base + channel]);
                 const float soft = static_cast<float>(blurred[base + channel]);
+                const float blended =
+                    sharp + (soft - sharp) * blur_mix;
                 output[base + channel] = static_cast<unsigned char>(
-                    std::clamp(std::round(
-                        sharp + (soft - sharp) * blur_mix), 0.0, 255.0));
+                    std::clamp(blended, 0.0f, 255.0f) + 0.5f);
             }
             output[base + 3] = source[base + 3];
         }
