@@ -94,6 +94,7 @@ void Spu2::reset() {
     cycle_phase_ = 0;
     pcm_queue_.clear();
     debug_stats_ = {};
+    debug_stats_ = {};
 
     // Keep the bootstrap-visible STATX reset value at zero. DMA completion
     // raises the transfer-ready bit just like the earlier compatibility path.
@@ -167,6 +168,7 @@ bool Spu2::write8(u32 offset, u8 value) {
 
 bool Spu2::write16(u32 offset, u16 value) {
     if (offset + 2u > regs_.size()) return false;
+    ++debug_stats_.register_writes;
     set_raw16(offset, value);
     handle_register_write(offset, value);
     return true;
@@ -220,12 +222,16 @@ void Spu2::handle_register_write(u32 offset, u16 value) {
     }
 
     if (local == kKeyOn) {
+        ++debug_stats_.key_on_writes;
         key_on(core, value, 0u);
     } else if (local == kKeyOn + 2u) {
+        ++debug_stats_.key_on_writes;
         key_on(core, value & 0xFFu, 16u);
     } else if (local == kKeyOff) {
+        ++debug_stats_.key_off_writes;
         key_off(core, value, 0u);
     } else if (local == kKeyOff + 2u) {
+        ++debug_stats_.key_off_writes;
         key_off(core, value & 0xFFu, 16u);
     }
 }
@@ -307,6 +313,16 @@ bool Spu2::decode_block(u32 core, u32 voice_index) {
             voice.prev2 = voice.prev1;
             voice.prev1 = sample;
         }
+    }
+
+    ++debug_stats_.decoded_blocks;
+    for (const s16 sample : voice.decoded) {
+        const s32 signed_sample = sample;
+        const u32 magnitude = static_cast<u32>(
+            signed_sample < 0 ? -signed_sample : signed_sample);
+        if (magnitude != 0u) ++debug_stats_.decoded_nonzero_samples;
+        debug_stats_.decoded_peak =
+            std::max(debug_stats_.decoded_peak, magnitude);
     }
 
     voice.decoded_pos = 0;
@@ -553,6 +569,18 @@ void Spu2::write_endx(u32 core) {
 }
 
 void Spu2::mix_one_sample() {
+    ++debug_stats_.mixer_frames;
+    u32 active_voices = 0;
+    for (u32 core = 0; core < 2u; ++core) {
+        for (const Voice& voice : cores_[core].voices) {
+            if (voice.active) ++active_voices;
+        }
+    }
+    if (active_voices != 0u)
+        ++debug_stats_.mixer_frames_with_active_voice;
+    debug_stats_.max_active_voices =
+        std::max(debug_stats_.max_active_voices, active_voices);
+
     const auto mix_voices = [&](u32 core, s32& left, s32& right) {
         left = 0;
         right = 0;
