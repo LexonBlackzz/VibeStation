@@ -820,7 +820,17 @@ void print_state(const ps2::Ps2System& system) {
             << ",0x" << packet.payload[3]
             << std::dec << '\n';
     }
-    std::cout << "SIF1_PACKETS=" << sif_stats.sif1_packets << '\n';
+    std::cout
+        << "SIF1_PACKETS=" << sif_stats.sif1_packets
+        << " RPC_CALLS=" << sif_stats.rpc_calls
+        << " SOUND_RPC_CALLS=" << sif_stats.sound_rpc_calls
+        << " SOUND_BGM_OPEN=" << sif_stats.sound_bgm_open_calls
+        << " SOUND_BGM_PLAY=" << sif_stats.sound_bgm_play_calls
+        << " SOUND_TIMER_START=" << sif_stats.sound_timer_start_calls
+        << " SOUND_SETPARAM=" << sif_stats.sound_set_param_calls
+        << " SOUND_SETSWITCH=" << sif_stats.sound_set_switch_calls
+        << " SOUND_SETADDR=" << sif_stats.sound_set_addr_calls
+        << '\n';
     for (ps2::u32 offset = 0;
          offset < sif_stats.recent_sif1_count;
          ++offset) {
@@ -842,6 +852,28 @@ void print_state(const ps2::Ps2System& system) {
             << ",0x" << packet.payload[1]
             << ",0x" << packet.payload[2]
             << ",0x" << packet.payload[3]
+            << std::dec << '\n';
+    }
+
+    for (ps2::u32 offset = 0;
+         offset < sif_stats.recent_rpc_count;
+         ++offset) {
+        const ps2::u32 index =
+            (sif_stats.recent_rpc_next +
+             static_cast<ps2::u32>(
+                 sif_stats.recent_rpc_calls.size()) -
+             sif_stats.recent_rpc_count + offset) %
+            static_cast<ps2::u32>(
+                sif_stats.recent_rpc_calls.size());
+        const auto& rpc = sif_stats.recent_rpc_calls[index];
+        std::cout
+            << "RPC_RECENT[" << offset << "]"
+            << " SID=0x" << std::hex << std::uppercase
+            << rpc.sid
+            << " FNO=0x" << rpc.rpc_number
+            << " SIZE=0x" << rpc.send_size
+            << " SERVER=0x" << rpc.server
+            << " BUF=0x" << rpc.server_buffer
             << std::dec << '\n';
     }
 
