@@ -55,6 +55,7 @@ public:
 
   // Advance timers by the given number of CPU cycles
   void tick(u32 cycles);
+  bool can_batch_cpu_ticks() const;
   void hblank_pulse();
   void set_vblank(bool active);
 
