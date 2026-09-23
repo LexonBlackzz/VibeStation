@@ -56,6 +56,14 @@ FetchContent_Declare(nlohmann_json
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# stb_image (launcher background texture decoding)
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 # ── ImGui static library ────────────────────────────────────────────
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -115,6 +123,7 @@ set(VIBESTATION_SOURCES
     src/ui/output_resolution_utils.cpp
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
+    src/ui/definitive/definitive_home.cpp
     src/ui/panels/grim_reaper_actions.cpp
     src/ui/panels/grim_reaper_runtime.cpp
     src/ui/panels/cpu_backend_panel.cpp
@@ -135,7 +144,7 @@ set(VIBESTATION_SOURCES
     src/ui/panels/vram_panel.cpp
 )
 
-set(VIBESTATION_VERSION_STRING "v0.6.0-dev")
+set(VIBESTATION_VERSION_STRING "v0.5.2-definitive")
 set(VIBESTATION_BUILD_NUMBER_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
 set(VIBESTATION_VERSION_HEADER
@@ -166,8 +175,18 @@ add_dependencies(VibeStation vibestation_version_header)
 
 target_include_directories(VibeStation PRIVATE
     src
-    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    "${stb_SOURCE_DIR}")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
+
+add_custom_command(TARGET VibeStation POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/background.jpg"
+    COMMENT "Copying definitive launcher background"
+    VERBATIM)
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
