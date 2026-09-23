@@ -14,6 +14,10 @@ namespace {
 }
 
 void App::panel_emulator_screen() {
+#if defined(__ANDROID__)
+    panel_emulator_screen_mobile();
+    return;
+#endif
     if (!has_started_emulation_) {
         const bool bios_loaded = system_->bios_loaded();
         const bool disc_loaded = system_->disc_loaded();
