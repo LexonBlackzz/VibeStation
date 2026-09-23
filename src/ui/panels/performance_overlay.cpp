@@ -554,6 +554,11 @@ void App::panel_performance() {
         }
 
         const auto& stats = runtime_snapshot_.profiling;
+        ImGui::Checkbox("Detailed hot-path timing", &g_profile_detailed_timing);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(adds profiler overhead)");
+        ImGui::TextDisabled(
+            "Leave this off when investigating recompiler spikes; the spike probe below remains active.");
         ImGui::Text("Frame Time Breakdown:");
         ImGui::Separator();
 
@@ -976,7 +981,7 @@ void App::panel_performance() {
         ImGui::Text("CPU Hot Blocks:");
         if (!g_profile_detailed_timing) {
             ImGui::TextDisabled(
-                "Open the full profiler with F12 to collect hot-block data.");
+                "Enable Detailed hot-path timing above to collect hot-block data.");
         }
         else if (backend.hot_block_count == 0) {
             ImGui::TextDisabled("No decoded block executions collected yet.");
