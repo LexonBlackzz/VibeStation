@@ -15,19 +15,19 @@ class Spu2 {
 public:
     struct DebugStats {
         u64 register_writes = 0;
+        u64 dma_write_halfwords = 0;
+        u64 dma_read_halfwords = 0;
         u64 key_on_writes = 0;
         u64 key_off_writes = 0;
-        u64 mixed_frames = 0;
-        u64 mixer_frames_with_active_voice = 0;
-        u64 nonzero_output_frames = 0;
         u64 keyed_on_voices = 0;
         u64 keyed_off_voices = 0;
         u64 decoded_blocks = 0;
         u64 decoded_nonzero_samples = 0;
-        u64 dma_write_halfwords = 0;
-        u64 dma_read_halfwords = 0;
-        u32 max_active_voices = 0;
+        u64 mixed_frames = 0;
+        u64 mixer_frames_with_active_voice = 0;
+        u64 nonzero_output_frames = 0;
         u32 decoded_peak = 0;
+        u32 max_active_voices = 0;
         u32 pre_master_peak = 0;
         u32 output_peak = 0;
     };
