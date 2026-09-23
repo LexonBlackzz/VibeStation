@@ -74,6 +74,7 @@ private:
         u32 mode = 0;
         u64 target = 0;
         u64 phase = 0;
+        bool target_deferred = false;
     };
 
     [[nodiscard]] static bool decode_root_counter(
