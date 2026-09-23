@@ -460,7 +460,8 @@ bool GsRasterizer::draw_pixel(
 
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
-    const u32 destination = read_frame_rgba(vram, ctx, ux, uy);
+    u32 destination = 0;
+    bool destination_valid = false;
     if (ctx.nonzero_inputs != nullptr &&
         (rgba & 0x00FFFFFFu) != 0u) {
         ++*ctx.nonzero_inputs;
@@ -504,12 +505,20 @@ bool GsRasterizer::draw_pixel(
 
     if (!write_frame && !write_depth) return false;
 
+    const auto load_destination = [&]() -> u32 {
+        if (!destination_valid) {
+            destination = read_frame_rgba(vram, ctx, ux, uy);
+            destination_valid = true;
+        }
+        return destination;
+    };
+
     // DATE has no effect on a 24-bit framebuffer. Otherwise DATM selects the
     // destination-alpha MSB that is allowed to pass.
     if (ctx.date && ctx.psm != 1u) {
         const bool destination_alpha =
             ctx.psm == 0u
-                ? ((destination >> 31) & 1u) != 0
+                ? ((load_destination() >> 31) & 1u) != 0
                 : ((vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw) >> 15) & 1u) != 0;
         if (destination_alpha != ctx.datm) return false;
     }
@@ -527,7 +536,9 @@ bool GsRasterizer::draw_pixel(
         const bool blend_enabled =
             ctx.alpha_blend &&
             (!ctx.pabe || ((rgba & 0x80000000u) != 0));
-        u32 output = blend_enabled ? blend_color(rgba, destination, ctx) : rgba;
+        u32 output = blend_enabled
+            ? blend_color(rgba, load_destination(), ctx)
+            : rgba;
 
         if (ctx.fba && !rgb_only) output |= 0x80000000u;
 
@@ -535,22 +546,26 @@ bool GsRasterizer::draw_pixel(
         if (ctx.psm == 0u) {
             u32 mask = ctx.fbmask;
             if (rgb_only) mask |= 0xFF000000u;
-            // The destination was already fetched for DATE/blending.
-            const u32 old = destination;
-            output = (old & mask) | (output & ~mask);
+            if (mask != 0u) {
+                const u32 old = load_destination();
+                output = (old & mask) | (output & ~mask);
+            }
             written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(0, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else if (ctx.psm == 1u) {
-            const u32 old = destination & 0x00FFFFFFu;
             const u32 mask = ctx.fbmask & 0x00FFFFFFu;
-            output = (old & mask) | (output & ~mask & 0x00FFFFFFu);
+            if (mask != 0u) {
+                const u32 old = load_destination() & 0x00FFFFFFu;
+                output = (old & mask) |
+                         (output & ~mask & 0x00FFFFFFu);
+            } else {
+                output &= 0x00FFFFFFu;
+            }
             written_color = output & 0x00FFFFFFu;
             if (!vram.write_pixel(1, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else {
-            const u16 old = static_cast<u16>(
-                vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
             output = apply_dither(output, ctx, x, y);
             u16 packed = rgba32_to_16(output);
 
@@ -563,8 +578,12 @@ bool GsRasterizer::draw_pixel(
                 (ga >> 16) | (rb >> 9) | (ga >> 6) | (rb >> 3));
             if (rgb_only) mask = static_cast<u16>(mask | 0x8000u);
 
-            packed = static_cast<u16>(
-                (old & mask) | (packed & static_cast<u16>(~mask)));
+            if (mask != 0u) {
+                const u16 old = static_cast<u16>(
+                    vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
+                packed = static_cast<u16>(
+                    (old & mask) | (packed & static_cast<u16>(~mask)));
+            }
             written_color = packed & 0x7FFFu;
             if (!vram.write_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
                 return false;
