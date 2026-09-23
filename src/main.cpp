@@ -765,26 +765,26 @@ static bool parse_cpu_execution_mode(const std::string &s,
   }
   if (v == "decoded" || v == "decodedblock" || v == "blockinterpreter" ||
       v == "blockinterp" || v == "block") {
-    out = CpuExecutionMode::DecodedBlockInterpreter;
+    out = CpuExecutionMode::Interpreter;
     return true;
   }
   if (v == "x64jit" || v == "jit" || v == "dynarec" || v == "recompiler") {
-    out = CpuExecutionMode::X64Jit;
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   if (v == "x64jitv2" || v == "jitv2" || v == "dynarecv2" ||
       v == "recompilerv2") {
-    out = CpuExecutionMode::X64JitV2;
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   if (v == "x64jitv3" || v == "jitv3" || v == "dynarecv3" ||
       v == "recompilerv3") {
-    out = CpuExecutionMode::X64JitV3;
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   if (v == "x64jitv4" || v == "jitv4" || v == "dynarecv4" ||
       v == "recompilerv4") {
-    out = CpuExecutionMode::X64JitV4;
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   return false;
@@ -1592,8 +1592,8 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "x64jitv2";
     case CpuExecutionMode::X64JitV3:
       return "x64jitv3";
-    case CpuExecutionMode::X64JitV4:
-      return "x64jitv4";
+    case CpuExecutionMode::Recompiler:
+      return "recompiler";
     }
     return "unknown";
   };
@@ -1605,7 +1605,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   if ((requested_mode == CpuExecutionMode::X64Jit ||
        requested_mode == CpuExecutionMode::X64JitV2 ||
        requested_mode == CpuExecutionMode::X64JitV3 ||
-       requested_mode == CpuExecutionMode::X64JitV4) &&
+       requested_mode == CpuExecutionMode::Recompiler) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
@@ -1713,7 +1713,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       (requested_mode == CpuExecutionMode::X64JitV2 ||
        requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
-          : requested_mode == CpuExecutionMode::X64JitV4
+          : requested_mode == CpuExecutionMode::Recompiler
                 ? delta(after.jit_v4_helper_instructions,
                         before.jit_v4_helper_instructions)
           : delta(after.native_memory_helper_calls,
@@ -1729,7 +1729,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
        requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_instructions,
                   before.jit_v2_helper_instructions)
-          : requested_mode == CpuExecutionMode::X64JitV4
+          : requested_mode == CpuExecutionMode::Recompiler
                 ? delta(after.jit_v4_helper_instructions,
                         before.jit_v4_helper_instructions)
           : std::min(native_instructions,
@@ -1942,7 +1942,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       static_cast<unsigned long long>(hashes.cop0_timing),
       static_cast<unsigned long long>(hashes.cpu_cycles), hashes.display,
       hashes.pc);
-  if (requested_mode == CpuExecutionMode::X64JitV4) {
+  if (requested_mode == CpuExecutionMode::Recompiler) {
     const u64 block_entries =
         delta(after.native_block_entries, before.native_block_entries);
     const u64 chain_invocations =
@@ -1957,7 +1957,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                 before.native_compiled_block_size_histogram[size]);
     }
     std::printf(
-        "V4_LINK_PROFILE direct=%llu blocks=%llu avg_instr=%.3f "
+        "RECOMPILER_LINK_PROFILE direct=%llu blocks=%llu avg_instr=%.3f "
         "avg_chain=%.3f sizes_1_2_3_4_5plus=%llu,%llu,%llu,%llu,%llu "
         "exit_missing=%llu exit_epoch=%llu exit_memory=%llu "
         "exit_generation=%llu exit_budget=%llu exit_bail=%llu\n",
@@ -2008,7 +2008,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
               [&](u32 a, u32 b) { return primary_calls(a) > primary_calls(b); });
     std::sort(special_rank.begin(), special_rank.end(),
               [&](u32 a, u32 b) { return special_calls(a) > special_calls(b); });
-    std::printf("V4_HELPER_PROFILE reasons_irq_pc_state_opcode_compile_budget=");
+    std::printf("RECOMPILER_HELPER_PROFILE reasons_irq_pc_state_opcode_compile_budget=");
     for (size_t reason = 0; reason < after.jit_v4_helper_reasons.size();
          ++reason) {
       std::printf("%s%llu", reason == 0u ? "" : ",",
@@ -2882,7 +2882,7 @@ int main(int argc, char *argv[]) {
     if (a == "--cpu") {
       if ((i + 1) >= args.size()) {
         fprintf(stderr,
-                "WARN: --cpu requires interpreter, decoded, x64jit, x64jitv2, x64jitv3, or x64jitv4\n");
+                "WARN: --cpu requires interpreter or recompiler (legacy JIT aliases are accepted)\n");
         continue;
       }
       CpuExecutionMode parsed = CpuExecutionMode::Interpreter;
@@ -2903,12 +2903,12 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--jit" || a == "--x64-jit" || a == "--recompiler") {
       g_cpu_execution_mode_cli_override = true;
-      g_cpu_execution_mode_cli_value = CpuExecutionMode::X64Jit;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::Recompiler;
       continue;
     }
     if (a == "--decoded" || a == "--block-interpreter") {
       g_cpu_execution_mode_cli_override = true;
-      g_cpu_execution_mode_cli_value = CpuExecutionMode::DecodedBlockInterpreter;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::Interpreter;
       continue;
     }
     const int obsolete_cpu_args = obsolete_cpu_flag_arity(a);
@@ -2917,7 +2917,7 @@ int main(int argc, char *argv[]) {
         std::fprintf(
             stderr,
             "WARN: Obsolete dynarec tuning flags are ignored; select only "
-            "Interpreter, Decoded, or x64 JIT.\n");
+            "Interpreter or Recompiler.\n");
         warned_obsolete_cpu_flag = true;
       }
       if (obsolete_cpu_args == 1 && (i + 1) < args.size()) {
