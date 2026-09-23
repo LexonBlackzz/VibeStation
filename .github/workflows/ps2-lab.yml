@@ -30,3 +30,20 @@ jobs:
           name: ps2-bios-trace-linux
           path: build-ps2-headless/vibestation_ps2_bios_trace
           if-no-files-found: error
+
+
+  windows-ui:
+    if: github.ref == 'refs/heads/ps2-lab-perf-experiment'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Release UI
+        run: cmake -S experimental/ps2 -B build-ps2
+      - name: Build Release UI
+        run: cmake --build build-ps2 --config Release --target VibeStationPS2Lab --parallel 2
+      - name: Upload Windows PS2 Lab
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStationPS2Lab-windows-perf-experiment
+          path: build-ps2/Release/VibeStationPS2Lab.exe
+          if-no-files-found: error
