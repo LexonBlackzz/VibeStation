@@ -2473,6 +2473,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
   stats_.active = true;
   stats_.native_available = impl_->native_available();
+  ++stats_.recompiler_frame_run_slice_calls;
 
   const auto fallback_one = [&]() {
     const u32 consumed = cpu_.step();
@@ -2755,7 +2756,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.instruction_budget = remaining_instructions;
     impl_->resident_dispatch(&native);
     ++stats_.native_chain_invocations;
+    ++stats_.recompiler_frame_native_dispatches;
     stats_.native_direct_link_transitions += native.direct_links;
+    stats_.recompiler_frame_direct_links += native.direct_links;
     stats_.native_dispatch_missing_exits += native.missing_exits;
     stats_.native_dispatch_epoch_exits += native.epoch_exits;
     stats_.native_dispatch_memory_exits += native.memory_exits;
@@ -2881,6 +2884,9 @@ void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   stats_.recompiler_frame_cache_misses = 0;
   stats_.recompiler_frame_icache_refills = 0;
   stats_.recompiler_frame_helper_instructions = 0;
+  stats_.recompiler_frame_run_slice_calls = 0;
+  stats_.recompiler_frame_native_dispatches = 0;
+  stats_.recompiler_frame_direct_links = 0;
   stats_.recompiler_frame_invalidations = 0;
   stats_.recompiler_frame_flushes = 0;
   stats_.recompiler_frame_dispatch_missing_exits = 0;
