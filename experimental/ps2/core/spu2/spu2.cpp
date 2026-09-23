@@ -25,6 +25,7 @@ constexpr u32 kVmixL = 0x188u;
 constexpr u32 kVmixEl = 0x18Cu;
 constexpr u32 kVmixR = 0x190u;
 constexpr u32 kVmixEr = 0x194u;
+constexpr u32 kMmix = 0x198u;
 constexpr u32 kKeyOn = 0x1A0u;
 constexpr u32 kKeyOff = 0x1A4u;
 constexpr u32 kTransferAddr = 0x1A8u;
@@ -38,8 +39,12 @@ constexpr u32 kStatx = 0x344u;
 
 constexpr u32 kMasterVolL0 = 0x760u;
 constexpr u32 kMasterVolR0 = 0x762u;
+constexpr u32 kExtVolL0 = 0x768u;
+constexpr u32 kExtVolR0 = 0x76Au;
 constexpr u32 kMasterVolL1 = 0x788u;
 constexpr u32 kMasterVolR1 = 0x78Au;
+constexpr u32 kExtVolL1 = 0x790u;
+constexpr u32 kExtVolR1 = 0x792u;
 
 constexpr u8 kLoopEnd = 1u << 0;
 constexpr u8 kLoopRepeat = 1u << 1;
@@ -94,12 +99,21 @@ void Spu2::reset() {
     set_raw16(kStatx, 0u);
     set_raw16(kCoreStride + kStatx, 0u);
 
+    // External/core-to-core inputs power up at unity.
+    set_raw16(kExtVolL0, 0x3FFFu);
+    set_raw16(kExtVolR0, 0x3FFFu);
+    set_raw16(kExtVolL1, 0x3FFFu);
+    set_raw16(kExtVolR1, 0x3FFFu);
+
     for (u32 core = 0; core < 2u; ++core) {
         const u32 base = core * kCoreStride;
         for (u32 gate : {kVmixL, kVmixEl, kVmixR, kVmixEr}) {
             set_raw16(base + gate, 0xFFFFu);
             set_raw16(base + gate + 2u, 0x00FFu);
         }
+        set_raw16(
+            base + kMmix,
+            static_cast<u16>(core == 0u ? 0x0FF0u : 0x0FFCu));
         cores_[core].endx = 0x00FFFFFFu;
         write_endx(core);
     }
@@ -531,12 +545,16 @@ void Spu2::write_endx(u32 core) {
 }
 
 void Spu2::mix_one_sample() {
-    s32 output_left = 0;
-    s32 output_right = 0;
+    const auto mix_voices = [&](u32 core, s32& left, s32& right) {
+        left = 0;
+        right = 0;
 
-    for (u32 core = 0; core < 2u; ++core) {
-        s32 core_left = 0;
-        s32 core_right = 0;
+        const u16 mmix =
+            raw16(core * kCoreStride + kMmix);
+        const bool sound_left =
+            (mmix & (0x0800u | 0x0200u)) != 0u;
+        const bool sound_right =
+            (mmix & (0x0400u | 0x0100u)) != 0u;
 
         for (u32 voice_index = 0; voice_index < 24u; ++voice_index) {
             Voice& voice = cores_[core].voices[voice_index];
@@ -573,14 +591,16 @@ void Spu2::mix_one_sample() {
                 base + kVoiceVolxR,
                 static_cast<u16>(current_right));
 
-            if (voice_gate_enabled(
+            if (sound_left &&
+                voice_gate_enabled(
                     core, voice_index, false)) {
-                core_left +=
+                left +=
                     (enveloped * current_left) >> 15;
             }
-            if (voice_gate_enabled(
+            if (sound_right &&
+                voice_gate_enabled(
                     core, voice_index, true)) {
-                core_right +=
+                right +=
                     (enveloped * current_right) >> 15;
             }
 
@@ -591,16 +611,44 @@ void Spu2::mix_one_sample() {
                 advance_voice(core, voice_index);
             }
         }
+    };
 
-        output_left +=
-            apply_master_volume(core, core_left, false);
-        output_right +=
-            apply_master_volume(core, core_right, true);
+    s32 core0_left = 0;
+    s32 core0_right = 0;
+    mix_voices(0u, core0_left, core0_right);
+
+    // Core 0 is mixed/mastered first, then appears as Core 1's external input.
+    core0_left =
+        apply_master_volume(0u, core0_left, false);
+    core0_right =
+        apply_master_volume(0u, core0_right, true);
+
+    s32 core1_left = 0;
+    s32 core1_right = 0;
+    mix_voices(1u, core1_left, core1_right);
+
+    const u16 mmix1 = raw16(kCoreStride + kMmix);
+    const bool ext_left =
+        (mmix1 & (0x0008u | 0x0002u)) != 0u;
+    const bool ext_right =
+        (mmix1 & (0x0004u | 0x0001u)) != 0u;
+
+    if (ext_left) {
+        core1_left += apply_volume(
+            core0_left,
+            raw16(kExtVolL1));
+    }
+    if (ext_right) {
+        core1_right += apply_volume(
+            core0_right,
+            raw16(kExtVolR1));
     }
 
     push_sample(
-        clamp16(output_left),
-        clamp16(output_right));
+        clamp16(apply_master_volume(
+            1u, core1_left, false)),
+        clamp16(apply_master_volume(
+            1u, core1_right, true)));
 }
 
 void Spu2::push_sample(s16 left, s16 right) {
