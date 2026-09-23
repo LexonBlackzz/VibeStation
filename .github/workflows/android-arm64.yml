@@ -26,8 +26,10 @@ jobs:
 
       - name: Install Android packages
         run: |
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager             "platforms;android-35"             "build-tools;35.0.0"             "cmake;3.22.1"             "ndk;27.2.12479018"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -36,14 +38,14 @@ jobs:
 
       - name: Add SDL Android Java glue
         run: |
-          curl -L --fail             -o /tmp/SDL2.zip             https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
+          curl -L --fail -o /tmp/SDL2.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
           rm -rf /tmp/SDL2-src
           mkdir -p /tmp/SDL2-src
           unzip -q /tmp/SDL2.zip -d /tmp/SDL2-src
           SDL_DIR="$(find /tmp/SDL2-src -maxdepth 1 -type d -name 'SDL2-*' | head -n 1)"
           test -n "$SDL_DIR"
           mkdir -p android/app/src/main/java/org/libsdl
-          cp -a "$SDL_DIR/android-project/app/src/main/java/org/libsdl/app"             android/app/src/main/java/org/libsdl/
+          cp -a "$SDL_DIR/android-project/app/src/main/java/org/libsdl/app" android/app/src/main/java/org/libsdl/
 
       - name: Build release APK
         working-directory: android
