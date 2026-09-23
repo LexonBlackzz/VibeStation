@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -650,7 +651,18 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_LOCAL_TO_LOCAL_PIXELS=" << gs_stats.local_to_local_pixels
         << " GS_UNSUPPORTED_TRANSFERS=" << gs_stats.unsupported_transfers
         << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
+        << " GS_SKIPPED_RASTER_DRAWS=" << gs_stats.skipped_raster_draws
+        << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
+        << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';
+    std::cout
+        << "GS_LAST_UNSUPPORTED PRIM=0x" << std::hex << std::uppercase
+        << gs_stats.last_unsupported_prim
+        << " FRAME=0x" << gs_stats.last_unsupported_frame
+        << " ZBUF=0x" << gs_stats.last_unsupported_zbuf
+        << " TEST=0x" << gs_stats.last_unsupported_test
+        << " TEX0=0x" << gs_stats.last_unsupported_tex0
+        << std::dec << '\n';
 
     std::cout
         << "GS_BITBLTBUF=0x" << std::hex << std::uppercase
@@ -895,8 +907,12 @@ int main(int argc, char** argv) {
     const bool ee_jit =
         (argc >= 4 && std::string_view(argv[3]) == "--ee-jit") ||
         (argc >= 5 && std::string_view(argv[4]) == "--ee-jit");
+    const bool pc_samples =
+        (argc >= 4 && std::string_view(argv[3]) == "--pc-samples") ||
+        (argc >= 5 && std::string_view(argv[4]) == "--pc-samples");
     const char* display_path =
-        argc >= 4 && std::string_view(argv[3]) != "--ee-jit"
+        argc >= 4 && std::string_view(argv[3]) != "--ee-jit" &&
+        std::string_view(argv[3]) != "--pc-samples"
             ? argv[3] : nullptr;
 
     ps2::Ps2System system;
@@ -914,6 +930,7 @@ int main(int argc, char** argv) {
 
     ps2::u64 remaining = budget;
     bool first_visible_reported = false;
+    const auto wall_start = std::chrono::steady_clock::now();
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
             remaining < kChunk ? remaining : kChunk;
@@ -931,6 +948,8 @@ int main(int argc, char** argv) {
                 << "TRACE_FIRST_VISIBLE EE=" << (budget - remaining)
                 << " NONZERO="
                 << system.gs_display().nonzero_pixel_count()
+                << " WALL_MS=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - wall_start).count()
                 << '\n';
         }
 
@@ -941,6 +960,14 @@ int main(int argc, char** argv) {
         }
 
         const ps2::u64 executed = budget - remaining;
+        if (pc_samples) {
+            std::cerr << "TRACE_PC EE=" << executed
+                << " PC=0x" << std::hex << std::uppercase
+                << system.ee().state().pc
+                << " IOP_PC=0x" << system.iop().state().pc
+                << std::dec << " IOP_HALTED=" << system.iop_halted()
+                << '\n';
+        }
         if (executed >= 200'000'000u &&
             (executed % 10'000'000u) == 0u) {
             const auto& stats = system.gs_core().stats();
@@ -954,6 +981,8 @@ int main(int argc, char** argv) {
                 << " PRIMITIVES=" << stats.primitives
                 << " DRAWS=" << stats.raster_draws
                 << " PIXELS=" << stats.raster_pixels
+                << " WALL_MS=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - wall_start).count()
                 << " TRANSFER_REMAINING="
                 << system.gs_core().transfer_pixels_remaining()
                 << '\n';

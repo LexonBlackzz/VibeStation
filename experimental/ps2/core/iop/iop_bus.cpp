@@ -708,6 +708,8 @@ bool IopBus::read8(u32 address, u8& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical < kRamMirrorEnd)
+        return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1u), value);
     if (physical >= kDev9Base &&
         physical < kDev9Base + kDev9Size) {
         // No expansion-bay adapter is attached. Real IOP mappings still
@@ -734,7 +736,6 @@ bool IopBus::read8(u32 address, u8& value) const {
         value = spu2_regs_[physical - kSpu2Base];
         return true;
     }
-    if (physical < kRamMirrorEnd) return ram_.read8(physical & static_cast<u32>(IopRam::kSize - 1), value);
     if (is_extension_rom(physical, 1u)) {
         value = 0;
         return true;
@@ -758,6 +759,11 @@ bool IopBus::read8(u32 address, u8& value) const {
 
 bool IopBus::read16(u32 address, u16& value) const {
     const u32 physical = to_physical(address);
+    if (physical <= kRamMirrorEnd - 2u) {
+        const u32 offset = physical & static_cast<u32>(IopRam::kSize - 1u);
+        if (offset <= IopRam::kSize - 2u)
+            return ram_.read16(offset, value);
+    }
     if (physical >= kDev9Base &&
         physical + 2u <= kDev9Base + kDev9Size) {
         value = 0;
@@ -805,6 +811,11 @@ bool IopBus::read32(u32 address, u32& value) const {
         return true;
     }
     const u32 physical = to_physical(address);
+    if (physical <= kRamMirrorEnd - 4u) {
+        const u32 offset = physical & static_cast<u32>(IopRam::kSize - 1u);
+        if (offset <= IopRam::kSize - 4u)
+            return ram_.read32(offset, value);
+    }
     if (physical >= kDev9Base &&
         physical + 4u <= kDev9Base + kDev9Size) {
         value = 0;
@@ -864,6 +875,8 @@ bool IopBus::write8(u32 address, u8 value) {
         cache_control_[address-kCacheControlBase]=value; return true;
     }
     const u32 physical=to_physical(address);
+    if (physical < kRamMirrorEnd)
+        return ram_.write8(physical & static_cast<u32>(IopRam::kSize - 1u), value);
     if (physical >= kDev9Base &&
         physical < kDev9Base + kDev9Size) {
         return true;
@@ -885,7 +898,6 @@ bool IopBus::write8(u32 address, u8 value) {
         spu2_regs_[physical - kSpu2Base] = value;
         return true;
     }
-    if (physical < kRamMirrorEnd) return ram_.write8(physical & static_cast<u32>(IopRam::kSize-1), value);
     if (is_extension_rom(physical, 1u)) return true;
     if (intc_.write8(physical,value)) return true;
     if (cdvd_.write8(canonical_cdvd_address(physical),value)) return true;
@@ -902,6 +914,11 @@ bool IopBus::write8(u32 address, u8 value) {
 
 bool IopBus::write16(u32 address, u16 value) {
     const u32 physical=to_physical(address);
+    if (physical <= kRamMirrorEnd - 2u) {
+        const u32 offset = physical & static_cast<u32>(IopRam::kSize - 1u);
+        if (offset <= IopRam::kSize - 2u)
+            return ram_.write16(offset, value);
+    }
     if (physical >= kDev9Base &&
         physical + 2u <= kDev9Base + kDev9Size) {
         return true;
@@ -942,6 +959,11 @@ bool IopBus::write32(u32 address, u32 value) {
         return true;
     }
     const u32 physical=to_physical(address);
+    if (physical <= kRamMirrorEnd - 4u) {
+        const u32 offset = physical & static_cast<u32>(IopRam::kSize - 1u);
+        if (offset <= IopRam::kSize - 4u)
+            return ram_.write32(offset, value);
+    }
     if (physical >= kDev9Base &&
         physical + 4u <= kDev9Base + kDev9Size) {
         return true;

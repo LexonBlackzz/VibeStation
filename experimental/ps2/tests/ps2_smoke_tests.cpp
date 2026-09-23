@@ -635,6 +635,16 @@ bool test_iop_ram_mirror_boundary() {
                "IOP mirrored boundary read failed") &&
         ok;
 
+    ps2::u16 halfword = 0;
+    ok = expect(system.iop_bus().write16(0x00200100u, 0xA1B2u) &&
+                    system.iop_bus().read16(0x00000100u, halfword) &&
+                    halfword == 0xA1B2u,
+                "IOP mirrored halfword fast path mismatch") && ok;
+    ok = expect(system.iop_bus().write16(0x005FFFFFu, 0xC3D4u) &&
+                    system.iop_bus().read16(0x001FFFFFu, halfword) &&
+                    halfword == 0xC3D4u,
+                "IOP mirrored halfword boundary mismatch") && ok;
+
     return ok;
 }
 
@@ -938,6 +948,15 @@ bool test_iop_timer_progress_and_irq() {
     ok = expect(hw.read32(0x1F801490u, count32) &&
                     count32 == 1u,
                 "IOP Timer4 /8 divider mismatch") && ok;
+
+    // Reprogramming MODE must replace the cached clock divider and reset
+    // the counter, including when returning to the default single tick.
+    ok = expect(hw.write32(0x1F801494u, 0u),
+                "IOP Timer4 clock-source reset failed") && ok;
+    hw.tick(1u, intc);
+    ok = expect(hw.read32(0x1F801490u, count32) &&
+                    count32 == 1u,
+                "IOP Timer4 cached divider was not refreshed") && ok;
 
     return ok;
 }

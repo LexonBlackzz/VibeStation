@@ -896,6 +896,9 @@ u64 GsRasterizer::draw_triangle(
     s32 right = std::min(ceil_div16(max_x_fp), ctx.scax1 + 1);
     s32 top = std::max(floor_div16(min_y_fp), ctx.scay0);
     s32 bottom = std::min(ceil_div16(max_y_fp), ctx.scay1 + 1);
+    const bool constant_q = a.q == b.q && b.q == c.q;
+    const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
+    const bool constant_z = a.z == b.z && b.z == c.z;
 
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
@@ -929,7 +932,7 @@ u64 GsRasterizer::draw_triangle(
                         (static_cast<long double>(w0) * a.t +
                          static_cast<long double>(w1) * b.t +
                          static_cast<long double>(w2) * c.t) * inv_area);
-                    const float q = static_cast<float>(
+                    const float q = constant_q ? a.q : static_cast<float>(
                         (static_cast<long double>(w0) * a.q +
                          static_cast<long double>(w1) * b.q +
                          static_cast<long double>(w2) * c.q) * inv_area);
@@ -937,7 +940,7 @@ u64 GsRasterizer::draw_triangle(
                     v = stq_to_fixed(t, q, ctx.texture.height);
                 }
             }
-            const u32 vertex_rgba = ctx.gouraud
+            const u32 vertex_rgba = ctx.gouraud && !constant_rgba
                 ? interpolate_rgba(
                     w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
                 : c.rgba;
@@ -948,9 +951,8 @@ u64 GsRasterizer::draw_triangle(
                     w0, w1, w2, area, a.fog, b.fog, c.fog);
                 rgba = apply_fog(rgba, ctx.fog_color, fog);
             }
-            const u32 z = ctx.zte
-                ? interpolate_z(w0, w1, w2, area, a.z, b.z, c.z)
-                : 0u;
+            const u32 z = !ctx.zte ? 0u : constant_z ? a.z
+                : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
             if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
         }
     }

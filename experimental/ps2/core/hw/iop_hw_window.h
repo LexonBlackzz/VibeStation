@@ -56,6 +56,7 @@ private:
     std::array<u32, 6> timer_count_{};
     std::array<u32, 6> timer_mode_{};
     std::array<u32, 6> timer_target_{};
+    std::array<u32, 6> timer_rate_cache_{};
 };
 
 } // namespace ps2

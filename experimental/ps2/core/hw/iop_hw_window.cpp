@@ -2,8 +2,6 @@
 
 #include "core/iop/iop_intc.h"
 
-#include <algorithm>
-
 namespace ps2 {
 namespace {
 
@@ -53,6 +51,7 @@ void IopHwWindow::reset() {
     timer_count_.fill(0);
     timer_target_.fill(0);
     timer_mode_.fill(kModeIrqEnabled);
+    timer_rate_cache_.fill(1u);
 }
 
 bool IopHwWindow::decode_timer(
@@ -124,6 +123,7 @@ void IopHwWindow::write_timer(u32 index, u32 reg, u32 value) {
             timer_mode_[index] & (kModeTargetFlag | kModeOverflowFlag);
         timer_mode_[index] =
             (value & 0x63FFu) | flags | kModeIrqEnabled;
+        timer_rate_cache_[index] = timer_rate(index);
         timer_count_[index] = 0;
         timer_phase_[index] = 0;
         break;
@@ -206,7 +206,7 @@ void IopHwWindow::fire_timer_irq(
 
 void IopHwWindow::tick(u64 cycles, IopIntc& intc) {
     for (u32 index = 0; index < 6u; ++index) {
-        const u32 rate = std::max(timer_rate(index), 1u);
+        const u32 rate = timer_rate_cache_[index];
         timer_phase_[index] += cycles;
 
         while (timer_phase_[index] >= rate) {
