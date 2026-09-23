@@ -1,0 +1,59 @@
+name: Android ARM64
+
+on:
+  push:
+    branches:
+      - port/android-arm64-1
+  workflow_dispatch:
+
+jobs:
+  android-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager             "platforms;android-35"             "build-tools;35.0.0"             "cmake;3.22.1"             "ndk;27.2.12479018"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Add SDL Android Java glue
+        run: |
+          curl -L --fail             -o /tmp/SDL2.zip             https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
+          rm -rf /tmp/SDL2-src
+          mkdir -p /tmp/SDL2-src
+          unzip -q /tmp/SDL2.zip -d /tmp/SDL2-src
+          SDL_DIR="$(find /tmp/SDL2-src -maxdepth 1 -type d -name 'SDL2-*' | head -n 1)"
+          test -n "$SDL_DIR"
+          mkdir -p android/app/src/main/java/org/libsdl
+          cp -a "$SDL_DIR/android-project/app/src/main/java/org/libsdl/app"             android/app/src/main/java/org/libsdl/
+
+      - name: Build release APK
+        working-directory: android
+        run: gradle :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStation-android-arm64
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: warn
+          retention-days: 14
