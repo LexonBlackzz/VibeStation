@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -156,7 +157,7 @@ void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
     }
 
     draw->AddImage(
-        reinterpret_cast<ImTextureID>(static_cast<intptr_t>(g_background_texture)),
+        (ImTextureID)(intptr_t)g_background_texture,
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
         ImVec2(u0, v0), ImVec2(u1, v1));
 }
@@ -556,9 +557,9 @@ void App::panel_definitive_home() {
             const float row_y = panel_y + 79.0f + static_cast<float>(i) * 22.0f;
             ImGui::SetCursorScreenPos(layout.point(53.0f, row_y));
             ImGui::PushID(static_cast<int>(i));
-            ImGui::PushStyleColor(ImGuiCol_Selectable, IM_COL32(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_SelectableHovered, rgba(45, 55, 67, 155));
-            ImGui::PushStyleColor(ImGuiCol_SelectableActive, rgba(55, 68, 82, 175));
+            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(45, 55, 67, 155));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, rgba(55, 68, 82, 175));
             const bool chosen = ImGui::Selectable(
                 game_library_[i].title.c_str(), false, 0, layout.size(510.0f, 19.0f));
             ImGui::PopStyleColor(3);
