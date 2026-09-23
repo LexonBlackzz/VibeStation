@@ -59,6 +59,7 @@ public:
     std::string halt_reason()const;
     u32 reset_instruction()const{return reset_instruction_;}
     u32 iop_reset_instruction()const{return iop_reset_instruction_;}
+    u64 video_fields_started() const { return video_timing_.fields_started(); }
     u64 skipped_bios_idle_iterations() const { return skipped_bios_idle_iterations_; }
     u64 skipped_bios_zero_iterations() const { return skipped_bios_zero_iterations_; }
     u64 skipped_bios_nibble_iterations() const { return skipped_bios_nibble_iterations_; }

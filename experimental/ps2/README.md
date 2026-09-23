@@ -19,6 +19,19 @@ The standalone graphical executable is `VibeStationPS2Lab`. A headless
 and an optional EE instruction budget to print the exact EE/IOP boundary
 without starting the UI.
 
+To measure sustained BIOS animation throughput rather than only time to the
+first picture, run the trace beyond 212 million EE cycles with `--profile`:
+
+```text
+vibestation_ps2_bios_trace <bios-path> 260000000 --profile
+```
+
+`PROFILE_FIELD_RATE` counts emulated NTSC video fields per host second after
+the first visible picture. `PROFILE_RUN_MS` and `PROFILE_DISPLAY_MS` separate
+core execution from display scanout. A 30 FPS interlaced target requires
+roughly 60 fields per second; a fast UI repaint alone does not imply the
+emulation is running at that rate.
+
 ### Windows profile-guided fast boot
 
 For the fastest BIOS startup on an MSVC x64 build, train a profile with your

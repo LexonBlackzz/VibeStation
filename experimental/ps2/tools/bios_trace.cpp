@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -893,7 +894,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
-               "[ee-instruction-budget] [display.ppm] [--ee-jit]\n";
+               "[ee-instruction-budget] [display.ppm] [--ee-jit|--profile]\n";
         return 64;
     }
 
@@ -910,9 +911,13 @@ int main(int argc, char** argv) {
     const bool pc_samples =
         (argc >= 4 && std::string_view(argv[3]) == "--pc-samples") ||
         (argc >= 5 && std::string_view(argv[4]) == "--pc-samples");
+    const bool profile =
+        (argc >= 4 && std::string_view(argv[3]) == "--profile") ||
+        (argc >= 5 && std::string_view(argv[4]) == "--profile");
     const char* display_path =
         argc >= 4 && std::string_view(argv[3]) != "--ee-jit" &&
-        std::string_view(argv[3]) != "--pc-samples"
+        std::string_view(argv[3]) != "--pc-samples" &&
+        std::string_view(argv[3]) != "--profile"
             ? argv[3] : nullptr;
 
     ps2::Ps2System system;
@@ -930,20 +935,32 @@ int main(int argc, char** argv) {
 
     ps2::u64 remaining = budget;
     bool first_visible_reported = false;
+    std::chrono::steady_clock::time_point first_visible_time{};
+    std::clock_t first_visible_cpu = 0;
+    ps2::u64 first_visible_field = 0;
+    std::chrono::nanoseconds run_time{};
+    std::chrono::nanoseconds display_time{};
     const auto wall_start = std::chrono::steady_clock::now();
     while (remaining > 0 && !system.halted()) {
         const ps2::u64 request =
             remaining < kChunk ? remaining : kChunk;
+        const auto run_begin = std::chrono::steady_clock::now();
         const ps2::u64 ran = system.run_ee(request, error);
+        if (profile) run_time += std::chrono::steady_clock::now() - run_begin;
         if (ran > remaining) {
             break;
         }
         remaining -= ran;
+        const auto display_begin = std::chrono::steady_clock::now();
         system.refresh_display();
+        if (profile) display_time += std::chrono::steady_clock::now() - display_begin;
 
         if (!first_visible_reported &&
             system.gs_display().nonzero_pixel_count() != 0u) {
             first_visible_reported = true;
+            first_visible_time = std::chrono::steady_clock::now();
+            first_visible_cpu = std::clock();
+            first_visible_field = system.video_fields_started();
             std::cerr
                 << "TRACE_FIRST_VISIBLE EE=" << (budget - remaining)
                 << " NONZERO="
@@ -995,7 +1012,33 @@ int main(int argc, char** argv) {
         }
     }
 
+    const auto wall_end = std::chrono::steady_clock::now();
+    const auto cpu_end = std::clock();
     print_state(system);
+    if (profile) {
+        if (first_visible_reported) {
+            const double visible_seconds =
+                std::chrono::duration<double>(
+                    wall_end - first_visible_time).count();
+            const ps2::u64 visible_fields =
+                system.video_fields_started() - first_visible_field;
+            const double visible_cpu_seconds =
+                static_cast<double>(cpu_end - first_visible_cpu) /
+                CLOCKS_PER_SEC;
+            std::cout << "PROFILE_VISIBLE_FIELDS=" << visible_fields
+                << " PROFILE_VISIBLE_SECONDS=" << visible_seconds
+                << " PROFILE_FIELD_RATE="
+                << (visible_seconds > 0 ? visible_fields / visible_seconds : 0.0)
+                << " PROFILE_FIELD_CPU_RATE="
+                << (visible_cpu_seconds > 0 ? visible_fields / visible_cpu_seconds : 0.0)
+                << '\n';
+        }
+        std::cout << "PROFILE_RUN_MS="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(run_time).count()
+            << " PROFILE_DISPLAY_MS="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(display_time).count()
+            << '\n';
+    }
     std::cout << "EE_SKIPPED_BIOS_IDLE_ITERATIONS="
               << system.skipped_bios_idle_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_ZERO_ITERATIONS="
