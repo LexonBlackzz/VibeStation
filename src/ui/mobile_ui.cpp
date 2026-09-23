@@ -207,83 +207,98 @@ void App::panel_emulator_screen_mobile() {
             refresh_game_library();
         }
 
-        if (landscape) {
-            const ImVec2 avail = ImGui::GetContentRegionAvail();
-            const ImVec2 origin = ImGui::GetCursorPos();
-            const float center_x = origin.x + avail.x * 0.5f;
-            const ImVec4 title_color =
-                ui_theme::current_startup_title_color(ui_theme::g_theme_settings);
-            const ImVec4 text_color =
-                ui_theme::current_startup_text_color(ui_theme::g_theme_settings);
+        std::string selected_game_name = "None";
+        if (selected_game) {
+            bool library_match = false;
+            for (const auto& entry : game_library_) {
+                const bool bin_match =
+                    !game_bin_path_.empty() && entry.bin_path == game_bin_path_;
+                const bool cue_match =
+                    !game_cue_path_.empty() && entry.cue_path == game_cue_path_;
+                if (bin_match || cue_match) {
+                    selected_game_name = entry.title;
+                    library_match = true;
+                    break;
+                }
+            }
 
-            const char* logo = "VibeStation";
-            ImGui::SetWindowFontScale(1.55f);
-            const ImVec2 logo_size = ImGui::CalcTextSize(logo);
-            ImGui::SetCursorPos(ImVec2(
-                center_x - logo_size.x * 0.5f,
-                origin.y + avail.y * 0.075f));
-            ImGui::TextColored(title_color, "%s", logo);
-            ImGui::SetWindowFontScale(1.0f);
+            if (!library_match && !game_bin_path_.empty()) {
+                selected_game_name =
+                    std::filesystem::path(game_bin_path_).filename().string();
+            }
+            else if (!library_match && !game_cue_path_.empty()) {
+                selected_game_name =
+                    std::filesystem::path(game_cue_path_).filename().string();
+            }
+            else if (!library_match) {
+                selected_game_name = "Loaded disc";
+            }
+        }
 
-            const char* helper = bios_loaded
-                ? (selected_game
-                    ? "Ready to boot the selected game."
-                    : "Load a game, or start the PlayStation BIOS.")
-                : "Load a PlayStation BIOS to get started.";
-            const ImVec2 helper_size = ImGui::CalcTextSize(helper);
-            ImGui::SetCursorPos(ImVec2(
-                center_x - helper_size.x * 0.5f,
-                origin.y + avail.y * 0.18f));
-            ImGui::TextColored(text_color, "%s", helper);
+        const ImVec4 title_color =
+            ui_theme::current_startup_title_color(ui_theme::g_theme_settings);
+        const ImVec4 text_color =
+            ui_theme::current_startup_text_color(ui_theme::g_theme_settings);
+        const float touch_gap = 10.0f * mobile_ui_scale_;
+        const float action_button_h =
+            std::max(ImGui::GetFrameHeight() * 1.65f,
+                60.0f * mobile_ui_scale_);
+        const float library_row_h =
+            std::max(ImGui::GetFrameHeight() * 1.15f,
+                46.0f * mobile_ui_scale_);
 
-            const std::string bios_line = bios_loaded
-                ? std::string("BIOS: ") + system_->bios().get_info()
-                : "BIOS: Not loaded";
-            const char* disc_line = selected_game ? "Disc: Selected" : "Disc: None";
-            const float status_gap = 30.0f * mobile_ui_scale_;
-            const float bios_w = ImGui::CalcTextSize(bios_line.c_str()).x;
-            const float disc_w = ImGui::CalcTextSize(disc_line).x;
-            const float status_x =
-                center_x - (bios_w + status_gap + disc_w) * 0.5f;
-            ImGui::SetCursorPos(ImVec2(status_x, origin.y + avail.y * 0.235f));
-            ImGui::TextColored(
-                bios_loaded ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
-                            : ImVec4(0.90f, 0.48f, 0.48f, 1.0f),
-                "%s", bios_line.c_str());
-            ImGui::SameLine(0.0f, status_gap);
-            ImGui::TextColored(
-                selected_game ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
-                              : ImVec4(0.70f, 0.70f, 0.76f, 1.0f),
-                "%s", disc_line);
+        auto draw_status_panel = [&](const char* id, float height) {
+            ImGui::BeginChild(id, ImVec2(0.0f, height), true);
 
-            const float row_w = std::min(avail.x * 0.78f, 1120.0f);
-            const int visible_buttons = selected_game && bios_loaded ? 4 : 3;
-            const float gap = 12.0f * mobile_ui_scale_;
-            const float button_w =
-                (row_w - gap * static_cast<float>(visible_buttons - 1)) /
-                static_cast<float>(visible_buttons);
-            const float button_h = ImGui::GetFrameHeight() * 1.38f;
-            ImGui::SetCursorPos(ImVec2(
-                center_x - row_w * 0.5f,
-                origin.y + avail.y * 0.31f));
+            ImGui::TextColored(title_color, "BIOS");
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                bios_loaded
+                    ? ImVec4(0.45f, 0.90f, 0.68f, 1.0f)
+                    : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s",
+                bios_loaded ? system_->bios().get_info().c_str() : "Not loaded");
+            ImGui::PopStyleColor();
 
-            const char* bios_label = bios_loaded ? "Change BIOS" : "Load BIOS";
-            if (ImGui::Button(bios_label, ImVec2(button_w, button_h))) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::TextColored(title_color, "Game");
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                selected_game
+                    ? text_color
+                    : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", selected_game_name.c_str());
+            ImGui::PopStyleColor();
+
+            ImGui::EndChild();
+        };
+
+        auto draw_action_buttons = [&]() {
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                ImVec2(ImGui::GetStyle().ItemSpacing.x, touch_gap));
+
+            const char* bios_label =
+                bios_loaded ? "Change BIOS" : "Load BIOS";
+            if (ImGui::Button(bios_label,
+                ImVec2(ImGui::GetContentRegionAvail().x, action_button_h))) {
                 open_file_dialog(
                     "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0",
                     "Select PS1 BIOS");
             }
-            ImGui::SameLine(0.0f, gap);
-            if (ImGui::Button("Load Game", ImVec2(button_w, button_h))) {
+
+            if (ImGui::Button("Load Game",
+                ImVec2(ImGui::GetContentRegionAvail().x, action_button_h))) {
                 open_file_dialog(
                     "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
                     "Select PS1 Game");
             }
-            ImGui::SameLine(0.0f, gap);
+
             ImGui::BeginDisabled(!bios_loaded);
             const char* start_label =
-                selected_game ? "Boot Game" : "Start BIOS";
-            if (ImGui::Button(start_label, ImVec2(button_w, button_h))) {
+                selected_game ? "Start Emulation" : "Start BIOS";
+            if (ImGui::Button(start_label,
+                ImVec2(ImGui::GetContentRegionAvail().x, action_button_h))) {
                 if (selected_game) {
                     boot_disc_from_ui();
                 }
@@ -293,212 +308,210 @@ void App::panel_emulator_screen_mobile() {
             }
             ImGui::EndDisabled();
 
-            if (selected_game && bios_loaded) {
-                ImGui::SameLine(0.0f, gap);
-                if (ImGui::Button("Eject Disc", ImVec2(button_w, button_h))) {
-                    game_bin_path_.clear();
-                    game_cue_path_.clear();
-                    if (system_->disc_loaded()) {
-                        system_->unload_disc();
-                    }
-                    status_message_ = "Disc selection cleared";
-                }
-            }
-
-            const float library_w = std::min(avail.x * 0.74f, 1180.0f);
-            const float library_h = std::max(
-                ImGui::GetFrameHeight() * 6.0f,
-                avail.y * 0.37f);
-            ImGui::SetCursorPos(ImVec2(
-                center_x - library_w * 0.5f,
-                origin.y + avail.y * 0.45f));
-            ImGui::BeginChild("LandscapeGameLibrary",
-                ImVec2(library_w, library_h), true);
-
-            ImGui::TextColored(ImVec4(0.78f, 0.72f, 0.98f, 1.0f),
-                "Game Library");
-            ImGui::SameLine();
-            if (rom_directory_valid_) {
-                ImGui::TextDisabled("%zu game%s",
-                    game_library_.size(),
-                    game_library_.size() == 1 ? "" : "s");
-            }
-            else {
-                ImGui::TextDisabled("No ROM folder imported");
-            }
-
-            const float import_w = 210.0f * mobile_ui_scale_;
-            if (ImGui::Button(
-                rom_directory_valid_ ? "Import Another Folder" : "Import ROM Folder",
-                ImVec2(import_w, 0.0f))) {
+            if (ImGui::Button("Import ROM Folder",
+                ImVec2(ImGui::GetContentRegionAvail().x, action_button_h))) {
                 open_folder_dialog("Import ROM Folder");
             }
+
+            ImGui::PopStyleVar();
+        };
+
+        auto draw_game_library = [&](const char* id, float height) {
+            ImGui::BeginChild(id, ImVec2(0.0f, height), true);
+
+            ImGui::TextColored(title_color, "Game Library");
+            const std::string count_text =
+                std::to_string(game_library_.size()) +
+                (game_library_.size() == 1 ? " game" : " games");
+            const float count_x =
+                ImGui::GetWindowContentRegionMax().x -
+                ImGui::CalcTextSize(count_text.c_str()).x;
             ImGui::SameLine();
-            ImGui::BeginDisabled(!rom_directory_valid_);
-            if (ImGui::Button("Refresh")) {
-                game_library_dirty_ = true;
-                refresh_game_library();
+            if (count_x > ImGui::GetCursorPosX()) {
+                ImGui::SetCursorPosX(count_x);
             }
-            ImGui::EndDisabled();
+            ImGui::TextDisabled("%s", count_text.c_str());
+
+            if (rom_directory_valid_) {
+                ImGui::BeginDisabled(false);
+                const float refresh_h =
+                    std::max(ImGui::GetFrameHeight(),
+                        38.0f * mobile_ui_scale_);
+                if (ImGui::Button("Refresh",
+                    ImVec2(120.0f * mobile_ui_scale_, refresh_h))) {
+                    game_library_dirty_ = true;
+                    refresh_game_library();
+                }
+                ImGui::EndDisabled();
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s", rom_directory_.c_str());
+                ImGui::PopStyleColor();
+            }
+
             ImGui::Separator();
 
+            ImGui::BeginChild("##GameLibraryRows",
+                ImVec2(0.0f, 0.0f), false);
+
             if (!rom_directory_valid_) {
-                ImGui::TextDisabled(
-                    "Import a folder containing .bin/.cue images to populate the library.");
+                ImGui::Dummy(ImVec2(0.0f, touch_gap));
+                ImGui::TextDisabled("No ROM directory configured.");
+                ImGui::Spacing();
+                if (ImGui::Button("Import ROM Folder",
+                    ImVec2(std::min(ImGui::GetContentRegionAvail().x,
+                                   260.0f * mobile_ui_scale_),
+                           action_button_h * 0.85f))) {
+                    open_folder_dialog("Import ROM Folder");
+                }
             }
             else if (game_library_.empty()) {
+                ImGui::Dummy(ImVec2(0.0f, touch_gap));
                 ImGui::TextDisabled("No playable disc images found.");
+                ImGui::Spacing();
+                if (ImGui::Button("Import Another ROM Folder",
+                    ImVec2(std::min(ImGui::GetContentRegionAvail().x,
+                                   310.0f * mobile_ui_scale_),
+                           action_button_h * 0.85f))) {
+                    open_folder_dialog("Import ROM Folder");
+                }
             }
             else {
-                for (size_t i = 0; i < game_library_.size(); ++i) {
-                    const auto& entry = game_library_[i];
-                    const std::string label =
-                        entry.title + "##landscape_game_" + std::to_string(i);
-                    if (ImGui::Selectable(label.c_str(), false,
-                        ImGuiSelectableFlags_None,
-                        ImVec2(0.0f, ImGui::GetFrameHeight() * 1.18f))) {
-                        load_disc_from_ui(entry.bin_path, entry.cue_path);
+                ImGuiListClipper clipper;
+                clipper.Begin(
+                    static_cast<int>(game_library_.size()),
+                    library_row_h);
+                while (clipper.Step()) {
+                    for (int i = clipper.DisplayStart;
+                         i < clipper.DisplayEnd; ++i) {
+                        const auto& entry =
+                            game_library_[static_cast<size_t>(i)];
+                        const std::string label =
+                            entry.title + "##mobile_library_" +
+                            std::to_string(i);
+                        if (ImGui::Selectable(label.c_str(), false,
+                            ImGuiSelectableFlags_None,
+                            ImVec2(0.0f, library_row_h))) {
+                            load_disc_from_ui(
+                                entry.bin_path, entry.cue_path);
+                        }
                     }
                 }
+            }
+
+            ImGui::EndChild();
+            ImGui::EndChild();
+        };
+
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const ImVec2 origin = ImGui::GetCursorPos();
+
+        if (landscape) {
+            const float outer_margin =
+                std::max(16.0f * mobile_ui_scale_, avail.x * 0.025f);
+            const float column_gap =
+                std::max(14.0f * mobile_ui_scale_, avail.x * 0.018f);
+            const float header_h =
+                ImGui::GetFrameHeight() * 2.55f;
+            const float usable_w =
+                std::max(1.0f, avail.x - outer_margin * 2.0f);
+            const float columns_w =
+                std::max(1.0f, usable_w - column_gap);
+            const float left_w = columns_w * 0.38f;
+            const float right_w = columns_w - left_w;
+            const float body_h =
+                std::max(ImGui::GetFrameHeight() * 6.0f,
+                    avail.y - header_h - outer_margin);
+
+            ImGui::SetCursorPos(ImVec2(
+                origin.x + outer_margin,
+                origin.y + outer_margin * 0.45f));
+            ImGui::SetWindowFontScale(1.30f);
+            ImGui::TextColored(title_color, "VibeStation");
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::TextColored(text_color,
+                "PlayStation 1 emulator on Android.");
+
+            const float body_y = origin.y + header_h;
+
+            ImGui::SetCursorPos(ImVec2(
+                origin.x + outer_margin, body_y));
+            ImGui::BeginChild("MobileLandscapeLeft",
+                ImVec2(left_w, body_h), false);
+
+            const float status_h =
+                std::max(ImGui::GetFrameHeight() * 4.7f,
+                    138.0f * mobile_ui_scale_);
+            draw_status_panel("LandscapeStatusPanel", status_h);
+            ImGui::Dummy(ImVec2(0.0f, touch_gap));
+            draw_action_buttons();
+
+            if (!status_message_.empty()) {
+                ImGui::Dummy(ImVec2(0.0f, touch_gap * 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImVec4(0.62f, 0.52f, 0.88f, 1.0f));
+                ImGui::TextWrapped("%s", status_message_.c_str());
+                ImGui::PopStyleColor();
             }
             ImGui::EndChild();
 
-            const ImVec2 message_size =
-                ImGui::CalcTextSize(status_message_.c_str());
             ImGui::SetCursorPos(ImVec2(
-                center_x - message_size.x * 0.5f,
-                origin.y + avail.y * 0.88f));
-            ImGui::TextColored(ImVec4(0.62f, 0.52f, 0.88f, 1.0f),
-                "%s", status_message_.c_str());
+                origin.x + outer_margin + left_w + column_gap,
+                body_y));
+            ImGui::BeginChild("MobileLandscapeRight",
+                ImVec2(right_w, body_h), false);
+            draw_game_library(
+                "LandscapeGameLibraryPanel",
+                ImGui::GetContentRegionAvail().y);
+            ImGui::EndChild();
             return;
         }
 
-        // Portrait keeps the stacked, finger-friendly mobile layout.
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-        const float margin = std::max(18.0f * mobile_ui_scale_, avail.x * 0.045f);
-        const float content_w = std::max(1.0f, avail.x - margin * 2.0f);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + margin);
+        // Portrait keeps the existing stacked VibeStation structure, but
+        // uses explicit touch-sized controls rather than globally inflating it.
+        const float margin =
+            std::max(16.0f * mobile_ui_scale_, avail.x * 0.045f);
+        const float content_w =
+            std::max(1.0f, avail.x - margin * 2.0f);
+        ImGui::SetCursorPos(ImVec2(
+            origin.x + margin, origin.y + touch_gap * 0.6f));
 
-        ImGui::BeginChild("MobileHome", ImVec2(content_w, 0.0f), false,
+        ImGui::BeginChild("MobileHome",
+            ImVec2(content_w, 0.0f), false,
             ImGuiWindowFlags_AlwaysUseWindowPadding);
 
-        ImGui::Dummy(ImVec2(0.0f, ImGui::GetFrameHeight() * 0.7f));
-        ImGui::SetWindowFontScale(1.55f);
-        ImGui::TextColored(
-            ui_theme::current_startup_title_color(ui_theme::g_theme_settings),
-            "VibeStation");
+        ImGui::SetWindowFontScale(1.42f);
+        ImGui::TextColored(title_color, "VibeStation");
         ImGui::SetWindowFontScale(1.0f);
-        ImGui::TextWrapped("PlayStation 1 emulation and corruption tools, now on Android.");
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+        ImGui::TextColored(text_color,
+            "PlayStation 1 emulator on Android.");
+        ImGui::Dummy(ImVec2(0.0f, touch_gap * 0.35f));
 
-        ImGui::Text("BIOS");
-        ImGui::SameLine();
-        ImGui::TextColored(
-            bios_loaded ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
-                        : ImVec4(0.95f, 0.55f, 0.50f, 1.0f),
-            "%s", bios_loaded ? system_->bios().get_info().c_str() : "Not loaded");
+        const float portrait_status_h =
+            std::max(ImGui::GetFrameHeight() * 4.7f,
+                136.0f * mobile_ui_scale_);
+        draw_status_panel("PortraitStatusPanel", portrait_status_h);
 
-        ImGui::Text("Game");
-        ImGui::SameLine();
-        ImGui::TextColored(
-            selected_game ? ImVec4(0.45f, 0.90f, 0.55f, 1.0f)
-                          : ImVec4(0.70f, 0.70f, 0.76f, 1.0f),
-            "%s", selected_game ? "Selected" : "None");
+        ImGui::Dummy(ImVec2(0.0f, touch_gap));
+        draw_action_buttons();
 
-        ImGui::Spacing();
-        const float button_h = ImGui::GetFrameHeight() * 1.65f;
-        const char* bios_label = bios_loaded ? "Change BIOS" : "Load BIOS";
-        if (ImGui::Button(bios_label, ImVec2(-1.0f, button_h))) {
-            open_file_dialog(
-                "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0",
-                "Select PS1 BIOS");
-        }
-
-        if (ImGui::Button("Load Game (.bin)", ImVec2(-1.0f, button_h))) {
-            open_file_dialog(
-                "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
-                "Select PS1 Game");
-        }
-
-        ImGui::BeginDisabled(!bios_loaded);
-        const char* start_label = selected_game
-            ? "Boot Selected Game"
-            : "Start PlayStation BIOS";
-        if (ImGui::Button(start_label, ImVec2(-1.0f, button_h))) {
-            if (selected_game) {
-                boot_disc_from_ui();
-            }
-            else {
-                start_bios_from_ui();
-            }
-        }
-        ImGui::EndDisabled();
-
-        if (selected_game && bios_loaded) {
-            if (ImGui::Button("Eject / Clear Selected Game",
-                ImVec2(-1.0f, button_h * 0.88f))) {
-                game_bin_path_.clear();
-                game_cue_path_.clear();
-                if (system_->disc_loaded()) {
-                    system_->unload_disc();
-                }
-                status_message_ = "Disc selection cleared";
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::TextColored(ImVec4(0.78f, 0.72f, 0.98f, 1.0f),
-            "Game Library");
-        if (rom_directory_valid_) {
-            ImGui::TextWrapped("%zu game%s imported from %s",
-                game_library_.size(), game_library_.size() == 1 ? "" : "s",
-                rom_directory_.c_str());
-        }
-        else {
-            ImGui::TextWrapped(
-                "Import a folder containing .bin/.cue images. Android copies them into VibeStation's private game storage so the emulator can access them reliably.");
-        }
-
-        if (ImGui::Button(
-            rom_directory_valid_ ? "Import Another ROM Folder" : "Import ROM Folder",
-            ImVec2(-1.0f, button_h))) {
-            open_folder_dialog("Import ROM Folder");
-        }
-        if (rom_directory_valid_) {
-            if (ImGui::Button("Refresh Library", ImVec2(-1.0f, button_h * 0.86f))) {
-                game_library_dirty_ = true;
-                refresh_game_library();
-            }
-        }
-
-        const float library_h = std::max(
-            ImGui::GetFrameHeight() * 5.0f,
-            ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeight());
-        ImGui::BeginChild("MobileGameLibrary", ImVec2(0.0f, library_h), true);
-        if (!rom_directory_valid_) {
-            ImGui::TextDisabled("No imported ROM folder yet.");
-        }
-        else if (game_library_.empty()) {
-            ImGui::TextDisabled("No .bin/.cue games were found.");
-        }
-        else {
-            for (size_t i = 0; i < game_library_.size(); ++i) {
-                const auto& entry = game_library_[i];
-                const std::string label =
-                    entry.title + "##mobile_game_" + std::to_string(i);
-                if (ImGui::Selectable(label.c_str(), false,
-                    ImGuiSelectableFlags_None,
-                    ImVec2(0.0f, ImGui::GetFrameHeight() * 1.35f))) {
-                    load_disc_from_ui(entry.bin_path, entry.cue_path);
-                }
-            }
-        }
-        ImGui::EndChild();
+        ImGui::Dummy(ImVec2(0.0f, touch_gap));
+        const float remaining_h =
+            ImGui::GetContentRegionAvail().y;
+        const size_t visible_rows =
+            std::min<size_t>(
+                std::max<size_t>(game_library_.size(), 3u), 6u);
+        const float desired_library_h =
+            ImGui::GetFrameHeight() * 3.2f +
+            library_row_h * static_cast<float>(visible_rows);
+        const float portrait_library_h =
+            std::max(ImGui::GetFrameHeight() * 4.5f,
+                std::min(remaining_h, desired_library_h));
+        draw_game_library(
+            "PortraitGameLibraryPanel",
+            portrait_library_h);
 
         ImGui::EndChild();
         return;
