@@ -11,7 +11,7 @@ android {
         applicationId 'com.lexonblackzz.vibestation'
         minSdk 24
         targetSdk 35
-        versionCode 1
+        versionCode (System.getenv('VIBESTATION_VERSION_CODE') ?: '1').toInteger()
         versionName '0.6.0-dev-android'
 
         ndk {
@@ -28,14 +28,24 @@ android {
         }
     }
 
+    signingConfigs {
+        vibestationTest {
+            storeFile file('../ci/vibestation-test.keystore')
+            storePassword 'VibeStation'
+            keyAlias 'vibestation'
+            keyPassword 'VibeStation'
+        }
+    }
+
     buildTypes {
         debug {
             minifyEnabled false
+            signingConfig signingConfigs.vibestationTest
         }
         release {
             minifyEnabled false
-            // Test-only signing so CI produces an APK that can be installed directly.
-            signingConfig signingConfigs.debug
+            // Stable TEST key only. Do not use this signing identity for a store release.
+            signingConfig signingConfigs.vibestationTest
         }
     }
 
