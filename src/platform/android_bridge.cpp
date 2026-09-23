@@ -28,7 +28,7 @@ std::string from_jstring(JNIEnv* env, jstring value) {
 
 bool android_request_picker(AndroidPickerKind kind) {
     JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    jobject activity = SDL_AndroidGetActivity();
+    jobject activity = reinterpret_cast<jobject>(SDL_AndroidGetActivity());
     if (env == nullptr || activity == nullptr) {
         return false;
     }
