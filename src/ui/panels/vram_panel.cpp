@@ -1,5 +1,9 @@
 #include "ui/app.h"
+#if defined(__ANDROID__)
+#include <SDL_opengles2.h>
+#else
 #include <SDL_opengl.h>
+#endif
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
