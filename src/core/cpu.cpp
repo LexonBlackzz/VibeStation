@@ -1,8 +1,5 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
-#include "cpu_jit_v2.h"
-#include "cpu_jit_v3.h"
-#include "cpu_jit_v4.h"
 #include "system.h"
 #include <array>
 #include <chrono>
@@ -773,17 +770,8 @@ Cpu::~Cpu() = default;
 
 void Cpu::init(System *sys) {
   sys_ = sys;
-  if (!optimized_backend_) {
-    optimized_backend_ = std::make_unique<CpuOptimizedBackend>(*this);
-  }
-  if (!jit_v2_backend_) {
-    jit_v2_backend_ = std::make_unique<CpuJitV2Backend>(*this);
-  }
-  if (!jit_v3_backend_) {
-    jit_v3_backend_ = std::make_unique<CpuJitV3Backend>(*this);
-  }
-  if (!jit_v4_backend_) {
-    jit_v4_backend_ = std::make_unique<CpuJitV4Backend>(*this);
+  if (!recompiler_backend_) {
+    recompiler_backend_ = std::make_unique<CpuRecompilerBackend>(*this);
   }
   reset();
 }
@@ -840,17 +828,8 @@ void Cpu::reset() {
     line = {};
   }
   icache_generation_.fill(1u);
-  if (optimized_backend_) {
-    optimized_backend_->flush();
-  }
-  if (jit_v2_backend_) {
-    jit_v2_backend_->flush();
-  }
-  if (jit_v3_backend_) {
-    jit_v3_backend_->flush();
-  }
-  if (jit_v4_backend_) {
-    jit_v4_backend_->flush();
+  if (recompiler_backend_) {
+    recompiler_backend_->flush();
   }
 }
 
@@ -1257,11 +1236,8 @@ void Cpu::invalidate_icache_line(u32 addr) {
   if (++icache_generation_[index] == 0u) {
     icache_generation_[index] = 1u;
   }
-  if (optimized_backend_) {
-    optimized_backend_->invalidate_range(addr & ~0x0Fu, 16u);
-  }
-  if (jit_v2_backend_) {
-    jit_v2_backend_->invalidate_range(addr & ~0x0Fu, 16u);
+  if (recompiler_backend_) {
+    recompiler_backend_->invalidate_range(addr & ~0x0Fu, 16u);
   }
 }
 
@@ -2588,17 +2564,8 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   }
 
   const CpuExecutionMode mode = effective_cpu_execution_mode();
-  if (mode == CpuExecutionMode::X64JitV4 && jit_v4_backend_) {
-    return jit_v4_backend_->run_slice(max_cycles, max_instructions);
-  }
-  if (mode == CpuExecutionMode::X64JitV3 && jit_v3_backend_) {
-    return jit_v3_backend_->run_slice(max_cycles, max_instructions);
-  }
-  if (mode == CpuExecutionMode::X64JitV2 && jit_v2_backend_) {
-    return jit_v2_backend_->run_slice(max_cycles, max_instructions);
-  }
-  if (mode != CpuExecutionMode::Interpreter && optimized_backend_) {
-    return optimized_backend_->run_slice(max_cycles, max_instructions, mode);
+  if (mode != CpuExecutionMode::Interpreter && recompiler_backend_) {
+    return recompiler_backend_->run_slice(max_cycles, max_instructions);
   }
 
   while (result.cycles < max_cycles &&
@@ -2682,64 +2649,29 @@ void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
 
 void Cpu::notify_jit_code_write_only(u32 phys_or_normalized_addr,
                                      u32 size_bytes) {
-  if (optimized_backend_) {
-    optimized_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
-  }
-  if (jit_v2_backend_) {
-    jit_v2_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
-  }
-  if (jit_v3_backend_) {
-    jit_v3_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
-  }
-  if (jit_v4_backend_) {
-    jit_v4_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
+  if (recompiler_backend_) {
+    recompiler_backend_->invalidate_range(phys_or_normalized_addr, size_bytes);
   }
 }
 
 void Cpu::notify_cpu_backend_frame(u32 frame_index) {
-  if (optimized_backend_) {
-    optimized_backend_->begin_frame(frame_index);
-  }
-  if (jit_v2_backend_) {
-    jit_v2_backend_->begin_frame(frame_index);
-  }
-  if (jit_v3_backend_) {
-    jit_v3_backend_->begin_frame(frame_index);
-  }
-  if (jit_v4_backend_) {
-    jit_v4_backend_->begin_frame(frame_index);
+  if (recompiler_backend_) {
+    recompiler_backend_->begin_frame(frame_index);
   }
 }
 
 void Cpu::flush_cpu_backend() {
-  if (optimized_backend_) {
-    optimized_backend_->flush();
-  }
-  if (jit_v2_backend_) {
-    jit_v2_backend_->flush();
-  }
-  if (jit_v3_backend_) {
-    jit_v3_backend_->flush();
-  }
-  if (jit_v4_backend_) {
-    jit_v4_backend_->flush();
+  if (recompiler_backend_) {
+    recompiler_backend_->flush();
   }
 }
 
 CpuBackendStats Cpu::cpu_backend_stats() const {
-  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV4 &&
-      jit_v4_backend_) {
-    return jit_v4_backend_->stats();
+  if (effective_cpu_execution_mode() != CpuExecutionMode::Interpreter &&
+      recompiler_backend_) {
+    return recompiler_backend_->stats();
   }
-  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV3 &&
-      jit_v3_backend_) {
-    return jit_v3_backend_->stats();
-  }
-  if (effective_cpu_execution_mode() == CpuExecutionMode::X64JitV2 &&
-      jit_v2_backend_) {
-    return jit_v2_backend_->stats();
-  }
-  return optimized_backend_ ? optimized_backend_->stats() : CpuBackendStats{};
+  return CpuBackendStats{};
 }
 
 void Cpu::execute(u32 i) {
