@@ -25,9 +25,10 @@ namespace ps2::ui {
 
 bool Ps2App::init() {
     SDL_SetMainReady();
-    // Input is currently keyboard-driven; initializing the controller
-    // subsystem here only delays opening the BIOS window.
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (SDL_Init(
+            SDL_INIT_VIDEO |
+            SDL_INIT_GAMECONTROLLER |
+            SDL_INIT_AUDIO) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
@@ -85,6 +86,36 @@ bool Ps2App::init() {
         return false;
     }
 
+    SDL_AudioSpec desired_audio{};
+    desired_audio.freq = static_cast<int>(Spu2::kSampleRate);
+    desired_audio.format = AUDIO_S16SYS;
+    desired_audio.channels = 2;
+    desired_audio.samples = 1024;
+    desired_audio.callback = nullptr;
+
+    SDL_AudioSpec obtained_audio{};
+    audio_device_ = SDL_OpenAudioDevice(
+        nullptr,
+        0,
+        &desired_audio,
+        &obtained_audio,
+        0);
+    if (audio_device_ != 0 &&
+        (obtained_audio.freq != desired_audio.freq ||
+         obtained_audio.format != desired_audio.format ||
+         obtained_audio.channels != desired_audio.channels)) {
+        SDL_CloseAudioDevice(audio_device_);
+        audio_device_ = 0;
+    }
+    if (audio_device_ != 0) {
+        SDL_PauseAudioDevice(audio_device_, 0);
+    } else {
+        std::fprintf(
+            stderr,
+            "PS2 audio output unavailable: %s\n",
+            SDL_GetError());
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -129,7 +160,9 @@ int Ps2App::run() {
 
     while (!quit) {
         process_events(quit);
+        update_pad_input();
         update_emulation();
+        update_audio();
 
         if (!visible_capture_path_.empty() &&
             (!emulation_running_ || system_.halted())) {
@@ -262,6 +295,16 @@ bool Ps2App::write_window_ppm(
 }
 
 void Ps2App::shutdown() {
+    if (audio_device_ != 0) {
+        SDL_ClearQueuedAudio(audio_device_);
+        SDL_CloseAudioDevice(audio_device_);
+        audio_device_ = 0;
+    }
+    if (controller_ != nullptr) {
+        SDL_GameControllerClose(controller_);
+        controller_ = nullptr;
+    }
+
     if (display_texture_ != 0 && gl_context_ != nullptr) {
         glDeleteTextures(1, &display_texture_);
         display_texture_ = 0;
@@ -344,6 +387,142 @@ void Ps2App::update_display_texture() {
 
     glBindTexture(GL_TEXTURE_2D, 0);
     display_texture_generation_ = display.generation();
+}
+
+void Ps2App::update_pad_input() {
+    if (controller_ != nullptr &&
+        SDL_GameControllerGetAttached(controller_) == SDL_FALSE) {
+        SDL_GameControllerClose(controller_);
+        controller_ = nullptr;
+    }
+
+    if (controller_ == nullptr) {
+        const int joystick_count = SDL_NumJoysticks();
+        for (int i = 0; i < joystick_count; ++i) {
+            if (SDL_IsGameController(i) == SDL_TRUE) {
+                controller_ = SDL_GameControllerOpen(i);
+                if (controller_ != nullptr) break;
+            }
+        }
+    }
+
+    Sio2Pad::State state{};
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+
+    const auto set_button =
+        [&](Sio2Pad::Button button, bool pressed) {
+            if (!pressed) return;
+            state.buttons &= static_cast<u16>(
+                ~(1u << static_cast<u8>(button)));
+        };
+
+    // Compact keyboard fallback: arrows=d-pad, Z/X/A/S=face buttons,
+    // Enter/Backspace=Start/Select, Q/E=L1/R1, W/R=L2/R2.
+    set_button(Sio2Pad::Button::Up, keys[SDL_SCANCODE_UP] != 0);
+    set_button(Sio2Pad::Button::Down, keys[SDL_SCANCODE_DOWN] != 0);
+    set_button(Sio2Pad::Button::Left, keys[SDL_SCANCODE_LEFT] != 0);
+    set_button(Sio2Pad::Button::Right, keys[SDL_SCANCODE_RIGHT] != 0);
+    set_button(Sio2Pad::Button::Cross, keys[SDL_SCANCODE_Z] != 0);
+    set_button(Sio2Pad::Button::Circle, keys[SDL_SCANCODE_X] != 0);
+    set_button(Sio2Pad::Button::Square, keys[SDL_SCANCODE_A] != 0);
+    set_button(Sio2Pad::Button::Triangle, keys[SDL_SCANCODE_S] != 0);
+    set_button(Sio2Pad::Button::Start, keys[SDL_SCANCODE_RETURN] != 0);
+    set_button(Sio2Pad::Button::Select, keys[SDL_SCANCODE_BACKSPACE] != 0);
+    set_button(Sio2Pad::Button::L1, keys[SDL_SCANCODE_Q] != 0);
+    set_button(Sio2Pad::Button::R1, keys[SDL_SCANCODE_E] != 0);
+    set_button(Sio2Pad::Button::L2, keys[SDL_SCANCODE_W] != 0);
+    set_button(Sio2Pad::Button::R2, keys[SDL_SCANCODE_R] != 0);
+
+    if (controller_ != nullptr) {
+        const auto button = [&](SDL_GameControllerButton id) {
+            return SDL_GameControllerGetButton(controller_, id) != 0;
+        };
+        set_button(Sio2Pad::Button::Cross,
+            button(SDL_CONTROLLER_BUTTON_A));
+        set_button(Sio2Pad::Button::Circle,
+            button(SDL_CONTROLLER_BUTTON_B));
+        set_button(Sio2Pad::Button::Square,
+            button(SDL_CONTROLLER_BUTTON_X));
+        set_button(Sio2Pad::Button::Triangle,
+            button(SDL_CONTROLLER_BUTTON_Y));
+        set_button(Sio2Pad::Button::Select,
+            button(SDL_CONTROLLER_BUTTON_BACK));
+        set_button(Sio2Pad::Button::Start,
+            button(SDL_CONTROLLER_BUTTON_START));
+        set_button(Sio2Pad::Button::L3,
+            button(SDL_CONTROLLER_BUTTON_LEFTSTICK));
+        set_button(Sio2Pad::Button::R3,
+            button(SDL_CONTROLLER_BUTTON_RIGHTSTICK));
+        set_button(Sio2Pad::Button::L1,
+            button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER));
+        set_button(Sio2Pad::Button::R1,
+            button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER));
+        set_button(Sio2Pad::Button::Up,
+            button(SDL_CONTROLLER_BUTTON_DPAD_UP));
+        set_button(Sio2Pad::Button::Down,
+            button(SDL_CONTROLLER_BUTTON_DPAD_DOWN));
+        set_button(Sio2Pad::Button::Left,
+            button(SDL_CONTROLLER_BUTTON_DPAD_LEFT));
+        set_button(Sio2Pad::Button::Right,
+            button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT));
+
+        const auto axis_to_u8 = [&](SDL_GameControllerAxis id) {
+            int value = SDL_GameControllerGetAxis(controller_, id);
+            if (value > -4096 && value < 4096) value = 0;
+            const int scaled =
+                ((value + 32768) * 255) / 65535;
+            return static_cast<u8>(
+                std::clamp(scaled, 0, 255));
+        };
+
+        state.lx = axis_to_u8(SDL_CONTROLLER_AXIS_LEFTX);
+        state.ly = axis_to_u8(SDL_CONTROLLER_AXIS_LEFTY);
+        state.rx = axis_to_u8(SDL_CONTROLLER_AXIS_RIGHTX);
+        state.ry = axis_to_u8(SDL_CONTROLLER_AXIS_RIGHTY);
+
+        set_button(
+            Sio2Pad::Button::L2,
+            SDL_GameControllerGetAxis(
+                controller_, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8192);
+        set_button(
+            Sio2Pad::Button::R2,
+            SDL_GameControllerGetAxis(
+                controller_, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8192);
+    }
+
+    system_.pad().set_state(state);
+}
+
+void Ps2App::update_audio() {
+    const std::size_t available = system_.spu2().queued_frames();
+    if (available == 0u) return;
+
+    // Drain the emulated queue every host frame. If emulation temporarily
+    // outruns playback (notably turbo BIOS bootstrap), keep the newest ~85 ms
+    // rather than building seconds of stale latency.
+    auto pcm = system_.spu2().take_samples(available);
+    if (audio_device_ == 0 || pcm.empty()) return;
+
+    constexpr Uint32 kLatencyResetBytes =
+        Spu2::kSampleRate * 2u * sizeof(s16) / 8u;
+    if (SDL_GetQueuedAudioSize(audio_device_) > kLatencyResetBytes) {
+        SDL_ClearQueuedAudio(audio_device_);
+    }
+
+    constexpr std::size_t kMaxSubmitFrames = 4096u;
+    const std::size_t frames = pcm.size() / 2u;
+    const std::size_t submit_frames =
+        std::min(frames, kMaxSubmitFrames);
+    const std::size_t first_frame = frames - submit_frames;
+    const s16* data = pcm.data() + first_frame * 2u;
+
+    if (SDL_QueueAudio(
+            audio_device_,
+            data,
+            static_cast<Uint32>(
+                submit_frames * 2u * sizeof(s16))) != 0) {
+        SDL_ClearQueuedAudio(audio_device_);
+    }
 }
 
 void Ps2App::process_events(bool& quit) {
@@ -1332,6 +1511,7 @@ bool Ps2App::start_bios() {
     }
 
     emulation_running_ = true;
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     speed_sample_time_ = std::chrono::steady_clock::now();
     speed_sample_instructions_ = system_.ee().state().instructions_executed;
     ee_instructions_per_second_ = 0.0;
@@ -1493,6 +1673,7 @@ void Ps2App::update_emulation() {
 void Ps2App::reset_core() {
     emulation_running_ = false;
     ee_instructions_per_second_ = 0.0;
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     system_.reset(0);
     status_message_ =
         system_.bios().loaded()
