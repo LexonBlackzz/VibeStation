@@ -159,7 +159,9 @@ bool Timers::can_batch_cpu_ticks() const {
       cpu_clocked = source == 0u || source == 2u;
     }
 
-    if (cpu_clocked && (t.irq_on_target() || t.irq_on_overflow())) {
+    if (cpu_clocked &&
+        (t.irq_on_target() || t.irq_on_overflow() ||
+         (t.reset_on_target() && t.target != 0u))) {
       return false;
     }
   }
