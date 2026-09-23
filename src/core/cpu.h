@@ -11,10 +11,7 @@
 // Features: 32 GPRs, HI/LO for multiply/divide, load and branch delay slots.
 
 class System;
-class CpuOptimizedBackend;
-class CpuJitV2Backend;
-class CpuJitV3Backend;
-class CpuJitV4Backend;
+class CpuRecompilerBackend;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -564,14 +561,8 @@ public:
 
 private:
   System *sys_ = nullptr;
-  std::unique_ptr<CpuOptimizedBackend> optimized_backend_;
-  std::unique_ptr<CpuJitV2Backend> jit_v2_backend_;
-  std::unique_ptr<CpuJitV3Backend> jit_v3_backend_;
-  std::unique_ptr<CpuJitV4Backend> jit_v4_backend_;
-  friend class CpuOptimizedBackend;
-  friend class CpuJitV2Backend;
-  friend class CpuJitV3Backend;
-  friend class CpuJitV4Backend;
+  std::unique_ptr<CpuRecompilerBackend> recompiler_backend_;
+  friend class CpuRecompilerBackend;
 
   // ── Registers ──────────────────────────────────────────────────
   u32 gpr_[32] = {};    // General purpose registers (r0 ≡ 0)
