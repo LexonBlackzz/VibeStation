@@ -1684,6 +1684,49 @@ bool test_iop_spu2_register_window() {
     return ok;
 }
 
+bool test_iop_spu2_adpcm_voice() {
+    ps2::Ps2System system;
+    bool ok = true;
+
+    // One 16-byte PS2 ADPCM block: filter 0, shift 0, end flag set.
+    // 0x11 payload nibbles decode to a stable positive waveform.
+    ok = expect(
+        system.iop_bus().write16(0x1F9001A8u, 0u) &&
+        system.iop_bus().write16(0x1F9001AAu, 0u),
+        "SPU2 transfer address setup failed") && ok;
+    ok = expect(
+        system.iop_bus().write16(0x1F9001ACu, 0x0100u),
+        "SPU2 ADPCM header write failed") && ok;
+    for (int i = 0; i < 7; ++i) {
+        ok = expect(
+            system.iop_bus().write16(0x1F9001ACu, 0x1111u),
+            "SPU2 ADPCM payload write failed") && ok;
+    }
+
+    // Voice 0: unity-ish stereo volume, native 48 kHz pitch, SSA=0.
+    ok = expect(
+        system.iop_bus().write16(0x1F900000u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900002u, 0x3FFFu) &&
+        system.iop_bus().write16(0x1F900004u, 0x1000u) &&
+        system.iop_bus().write16(0x1F9001C0u, 0u) &&
+        system.iop_bus().write16(0x1F9001C2u, 0u) &&
+        system.iop_bus().write16(0x1F9001A0u, 1u),
+        "SPU2 voice-0 key-on setup failed") && ok;
+
+    system.iop_bus().tick(
+        static_cast<ps2::u64>(ps2::Spu2::kIopCyclesPerSample) * 8u);
+    const auto pcm = system.spu2().take_samples(8u);
+    bool nonzero = false;
+    for (ps2::s16 sample : pcm) {
+        nonzero = nonzero || sample != 0;
+    }
+    ok = expect(
+        pcm.size() == 16u && nonzero,
+        "SPU2 ADPCM voice did not emit stereo PCM") && ok;
+
+    return ok;
+}
+
 bool test_iop_bus_repeating_timer_irq() {
     ps2::Ps2System system;
 
@@ -2472,6 +2515,7 @@ int main() {
     ok = test_iop_root_counters() && ok;
     ok = test_iop_event_free_tick_matches_regular_tick() && ok;
     ok = test_iop_spu2_register_window() && ok;
+    ok = test_iop_spu2_adpcm_voice() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;
     ok = test_iop_sio2_dma_bootstrap_completion() && ok;
