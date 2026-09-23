@@ -1642,7 +1642,8 @@ V4NativeFn compile_v4_store(
 }
 
 V4ResidentDispatchFn install_v4_resident_dispatch(
-    V4CodeArena &arena, void *&block_return, void *&linked_entry) {
+    V4CodeArena &arena, void *&block_return, void *&linked_entry,
+    bool collect_transition_stats) {
   using namespace Xbyak;
   constexpr size_t kReservation = 1024u;
   void *buffer = arena.begin_emit(kReservation);
@@ -1802,7 +1803,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.r14 + static_cast<int>(offsetof(V4Block, fn))]);
   code.test(code.rax, code.rax);
   code.jz(missing);
-  {
+  if (collect_transition_stats) {
     Label ordinary_entry;
     code.test(code.r9d, code.r9d);
     code.jz(ordinary_entry);
@@ -1820,42 +1821,58 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.cmp(code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  }
   code.jmp(loop);
 
   linked_entry = const_cast<u8 *>(code.getCurr());
   code.cmp(code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  }
   code.mov(code.r9d, 1u);
   code.jmp(check_block);
 
   code.L(missing);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, missing_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, missing_exits))]);
+  }
   code.jmp(done);
   code.L(stale_epoch);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, epoch_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, epoch_exits))]);
+  }
   code.jmp(done);
   code.L(blocked_memory);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, memory_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, memory_exits))]);
+  }
   code.jmp(done);
   code.L(stale_generation);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, generation_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, generation_exits))]);
+  }
   code.jmp(done);
   code.L(budget_exit);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, budget_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, budget_exits))]);
+  }
   code.jmp(done);
   code.L(bail_exit);
-  code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, bail_exits))]);
+  if (collect_transition_stats) {
+    code.inc(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, bail_exits))]);
+  }
 
   code.L(done);
 #if defined(_WIN32)
@@ -1898,6 +1915,7 @@ struct CpuRecompilerBackend::Impl {
   bool direct_links_enabled = true;
   bool crossline_branch_enabled = true;
   bool helper_profile_enabled = false;
+  bool collect_transition_stats = true;
   bool initialization_attempted = false;
   bool initialized = false;
 
@@ -1932,9 +1950,14 @@ struct CpuRecompilerBackend::Impl {
         std::getenv("VIBESTATION_V4_PROFILE_HELPERS");
     helper_profile_enabled =
         profile_helpers != nullptr && profile_helpers[0] == '1';
+    const char *lean_dispatch =
+        std::getenv("VIBESTATION_V4_LEAN_DISPATCH");
+    collect_transition_stats =
+        lean_dispatch == nullptr || lean_dispatch[0] != '1';
     resident_dispatch =
         install_v4_resident_dispatch(arena, resident_block_return,
-                                     resident_linked_entry);
+                                     resident_linked_entry,
+                                     collect_transition_stats);
     if (resident_dispatch == nullptr || resident_block_return == nullptr ||
         resident_linked_entry == nullptr) {
       return false;
