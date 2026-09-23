@@ -60,7 +60,7 @@ if (-not $pgoRuntime) {
 }
 Copy-Item -LiteralPath $pgoRuntime -Destination (Join-Path $releaseRoot 'pgort140.dll') -Force
 
-$trainingOutput = & $trace $resolvedBios 212000000 2>&1
+$trainingOutput = & $trace $resolvedBios 212000000 --gs-thread 2>&1
 $trainingExitCode = $LASTEXITCODE
 if ($trainingExitCode -ne 0 -or
     -not ($trainingOutput -match 'TRACE_FIRST_VISIBLE')) {

@@ -894,7 +894,8 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
-               "[ee-instruction-budget] [display.ppm] [--ee-jit|--profile]\n";
+               "[ee-instruction-budget] [display.ppm] "
+               "[--ee-jit|--profile|--gs-thread]\n";
         return 64;
     }
 
@@ -905,23 +906,28 @@ int main(int argc, char** argv) {
 
     const ps2::u64 budget =
         parse_budget(argc >= 3 ? argv[2] : nullptr, kDefaultBudget);
-    const bool ee_jit =
-        (argc >= 4 && std::string_view(argv[3]) == "--ee-jit") ||
-        (argc >= 5 && std::string_view(argv[4]) == "--ee-jit");
-    const bool pc_samples =
-        (argc >= 4 && std::string_view(argv[3]) == "--pc-samples") ||
-        (argc >= 5 && std::string_view(argv[4]) == "--pc-samples");
-    const bool profile =
-        (argc >= 4 && std::string_view(argv[3]) == "--profile") ||
-        (argc >= 5 && std::string_view(argv[4]) == "--profile");
-    const char* display_path =
-        argc >= 4 && std::string_view(argv[3]) != "--ee-jit" &&
-        std::string_view(argv[3]) != "--pc-samples" &&
-        std::string_view(argv[3]) != "--profile"
-            ? argv[3] : nullptr;
+    bool ee_jit = false;
+    bool pc_samples = false;
+    bool profile = false;
+    bool gs_thread = false;
+    const char* display_path = nullptr;
+    for (int index = 3; index < argc; ++index) {
+        const std::string_view option(argv[index]);
+        if (option == "--ee-jit") ee_jit = true;
+        else if (option == "--pc-samples") pc_samples = true;
+        else if (option == "--profile") profile = true;
+        else if (option == "--gs-thread") gs_thread = true;
+        else if (display_path == nullptr && !option.starts_with("--")) {
+            display_path = argv[index];
+        } else {
+            std::cerr << "Unknown or duplicate trace option: " << option << '\n';
+            return 64;
+        }
+    }
 
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
+    system.gs_core().set_async_rasterization(gs_thread);
     std::string error;
 
     if (!system.load_bios(argv[1], error)) {

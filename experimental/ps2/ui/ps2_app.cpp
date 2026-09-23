@@ -117,6 +117,7 @@ bool Ps2App::init() {
         }
     }
 
+    system_.gs_core().set_async_rasterization(true);
     reset_core();
     status_message_ = "PS2 experimental core ready";
     return true;
@@ -1461,10 +1462,9 @@ void Ps2App::update_emulation() {
         }
     }
 
-    // PCRTC register writes can become usable well before the simplified
-    // video timer reaches its next VBlank.  Sample once per host frame so the
-    // first BIOS pixels appear as soon as VRAM and DISPLAY/DISPFB are valid.
-    system_.refresh_display();
+    // Blank-screen bootstrap samples the PCRTC after each large chunk above.
+    // Once pixels are visible, VBlank already updates the display. Repeating
+    // a full VRAM scan every host UI frame needlessly drains the GS worker.
 
     const auto sample_time = std::chrono::steady_clock::now();
     const auto sample_seconds =

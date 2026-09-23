@@ -40,6 +40,8 @@ add_library(vibestation_ps2_core STATIC
 target_include_directories(vibestation_ps2_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+find_package(Threads REQUIRED)
+target_link_libraries(vibestation_ps2_core PUBLIC Threads::Threads)
 
 if(MSVC)
     target_compile_options(vibestation_ps2_core PRIVATE /W4 /permissive-)

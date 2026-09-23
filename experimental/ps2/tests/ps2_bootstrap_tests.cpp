@@ -2438,6 +2438,70 @@ bool test_gs_untextured_rasterization() {
     return ok;
 }
 
+bool test_gs_async_raster_ordering() {
+    auto ad = [](ps2::GsCore& gs, ps2::u32 address, ps2::u64 value) {
+        const ps2::u64 tag = 1ull | (1ull << 15) | (1ull << 60);
+        gs.write_gif_qword(tag, 0xEull);
+        gs.write_gif_qword(value, address);
+    };
+    auto xy = [](ps2::u32 x, ps2::u32 y) {
+        return static_cast<ps2::u64>(x * 16u) |
+               (static_cast<ps2::u64>(y * 16u) << 16);
+    };
+    auto run = [&](bool threaded) {
+        ps2::GsCore gs;
+        gs.set_async_rasterization(threaded);
+        gs.reset();
+        ad(gs, 0x1A, 1u);
+        ad(gs, 0x18, 0u);
+        ad(gs, 0x40, (63ull << 16) | (63ull << 48));
+        ad(gs, 0x47, 0u);
+        ad(gs, 0x4C, 1ull << 16);
+        ad(gs, 0x00, 6u);
+        ad(gs, 0x01, 0x11223344u);
+        ad(gs, 0x05, xy(0, 0));
+        ad(gs, 0x05, xy(64, 64));
+        ad(gs, 0x01, 0x55667788u);
+        ad(gs, 0x05, xy(8, 0));
+        ad(gs, 0x05, xy(16, 8));
+
+        // A host transfer must wait for both earlier draws before writing.
+        ad(gs, 0x50, 1ull << 48);
+        ad(gs, 0x51, 8ull << 32);
+        ad(gs, 0x52, 4ull | (1ull << 32));
+        ad(gs, 0x53, 0u);
+        gs.write_gif_qword(1ull | (1ull << 15) | (2ull << 58), 0);
+        gs.write_gif_qword(0xAABBCCDD12345678ull,
+                           0x31415926DEADBEEFull);
+
+        const auto& vram = gs.vram();
+        const auto& stats = gs.stats();
+        return std::array<ps2::u64, 7>{
+            vram.read_pixel(0, 0, 0, 0, 1),
+            vram.read_pixel(0, 8, 0, 0, 1),
+            vram.read_pixel(0, 9, 0, 0, 1),
+            vram.read_pixel(0, 12, 0, 0, 1),
+            vram.read_pixel(0, 20, 20, 0, 1),
+            stats.raster_draws,
+            stats.raster_pixels,
+        };
+    };
+
+    const auto expected = run(false);
+    bool ok = expect(expected[0] == 0x11223344u &&
+                     expected[1] == 0x12345678u &&
+                     expected[2] == 0xAABBCCDDu &&
+                     expected[3] == 0x55667788u &&
+                     expected[4] == 0x11223344u &&
+                     expected[5] == 2 && expected[6] == 4160,
+                     "GS synchronous draw/transfer fixture mismatch");
+    for (int i = 0; i < 4; ++i) {
+        ok = expect(run(true) == expected,
+                    "GS threaded raster draw/transfer ordering mismatch") && ok;
+    }
+    return ok;
+}
+
 
 bool test_gs_display_extraction() {
     ps2::Ps2System system;
@@ -3910,6 +3974,7 @@ int main() {
     ok = test_gs_vram_swizzle_addresses() && ok;
     ok = test_gs_host_to_local_image_transfer() && ok;
     ok = test_gs_untextured_rasterization() && ok;
+    ok = test_gs_async_raster_ordering() && ok;
     ok = test_gs_display_extraction() && ok;
     ok = test_gs_fst_direct_color_texturing() && ok;
     ok = test_gs_depth_layout_and_pixel_pipeline() && ok;

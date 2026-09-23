@@ -5,6 +5,10 @@
 #include "core/gs/gs_rasterizer.h"
 
 #include <array>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace ps2 {
 
@@ -90,7 +94,11 @@ class GsCore {
 public:
     static constexpr u32 kGifFifoBase = 0x10006000u;
 
+    ~GsCore();
+
     void reset();
+    void set_async_rasterization(bool enabled);
+    void flush_pending_draws() const;
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
@@ -101,9 +109,18 @@ public:
     [[nodiscard]] u64 register_value(u32 address) const {
         return registers_[address & 0x7Fu];
     }
-    [[nodiscard]] const GsStats& stats() const { return stats_; }
-    [[nodiscard]] const GsVram& vram() const { return vram_; }
-    [[nodiscard]] GsVram& vram() { return vram_; }
+    [[nodiscard]] const GsStats& stats() const {
+        flush_pending_draws();
+        return stats_;
+    }
+    [[nodiscard]] const GsVram& vram() const {
+        flush_pending_draws();
+        return vram_;
+    }
+    [[nodiscard]] GsVram& vram() {
+        flush_pending_draws();
+        return vram_;
+    }
     [[nodiscard]] bool packet_active() const { return gif_.active; }
     [[nodiscard]] bool transfer_active() const { return transfer_.active; }
     [[nodiscard]] u32 transfer_pixels_remaining() const {
@@ -117,6 +134,24 @@ public:
     }
 
 private:
+    struct RasterCommand {
+        GsRasterContext context{};
+        GsRasterVertex a{};
+        GsRasterVertex b{};
+        GsRasterVertex c{};
+        u32 primitive = 0;
+        u32 vertex_count = 0;
+        u64 effective_primitive = 0;
+        u64 alpha = 0;
+        u64 test = 0;
+        u64 frame = 0;
+        u64 rgbaq = 0;
+        u64 tex0 = 0;
+        u64 texa = 0;
+        u64 st = 0;
+        u64 uv = 0;
+    };
+
     struct TransferState {
         bool active = false;
         bool local_to_host = false;
@@ -162,6 +197,8 @@ private:
         const GsRasterVertex& b,
         const GsRasterVertex& c,
         u32 vertex_count);
+    void execute_raster_command(const RasterCommand& command);
+    void raster_worker_main();
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
 
@@ -175,6 +212,15 @@ private:
     std::array<GsRasterVertex, 3> draw_vertices_{};
     u32 draw_vertex_count_ = 0;
     GsPrivileged* privileged_ = nullptr;
+    bool async_rasterization_ = false;
+    mutable std::mutex raster_mutex_{};
+    mutable std::condition_variable raster_condition_{};
+    mutable std::condition_variable raster_completed_condition_{};
+    std::deque<RasterCommand> raster_queue_{};
+    std::thread raster_worker_{};
+    bool raster_worker_stop_ = false;
+    u64 raster_enqueued_ = 0;
+    u64 raster_completed_ = 0;
 };
 
 } // namespace ps2

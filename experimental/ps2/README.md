@@ -26,6 +26,17 @@ first picture, run the trace beyond 212 million EE cycles with `--profile`:
 vibestation_ps2_bios_trace <bios-path> 260000000 --profile
 ```
 
+The graphical app uses a separate GS raster worker so EE/IOP execution can
+overlap ordered software draw commands. Add `--gs-thread` to the trace to
+measure the same path; omit it for a single-threaded comparison. Draws are
+drained before VRAM transfers and display reads. On the development machine,
+the 260-million-instruction PGO trace improved from 2.05 to 3.11 emulated
+fields/s with the same BIOS display hash and GS raster counters. This is
+still far short of real-time animation.
+The UI also stops rescanning VRAM on every host repaint after the first
+visible frame; in a 260-million-instruction window capture, this reduced
+wall time from 10.39 to 8.88 seconds with the threaded GS build.
+
 `PROFILE_FIELD_RATE` counts emulated NTSC video fields per host second after
 the first visible picture. `PROFILE_RUN_MS` and `PROFILE_DISPLAY_MS` separate
 core execution from display scanout. A 30 FPS interlaced target requires
@@ -81,6 +92,9 @@ instructions included 10.9 million JIT-executed register instructions; a
 warm headless trace took 2.97 seconds with JIT versus 3.48 seconds without.
 The full UI startup improved only from 57.9 to 56.9 seconds, with identical
 captured pixels. Larger gains require multi-instruction block compilation.
+For the sustained 260-million-instruction BIOS animation trace, enabling this
+single-instruction JIT with the threaded GS instead reduced throughput from
+3.11 to 1.23 fields/s, so the graphical app leaves it disabled by default.
 
 ## Verified retail BIOS startup visual
 

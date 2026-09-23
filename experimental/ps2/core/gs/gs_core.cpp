@@ -3,6 +3,7 @@
 #include "core/gs/gs_privileged.h"
 
 #include <bit>
+#include <utility>
 
 namespace ps2 {
 namespace {
@@ -53,7 +54,56 @@ u32 descriptor_at(u64 regs, u32 cursor) {
 
 } // namespace
 
+GsCore::~GsCore() {
+    flush_pending_draws();
+    {
+        std::lock_guard lock(raster_mutex_);
+        raster_worker_stop_ = true;
+    }
+    raster_condition_.notify_one();
+    if (raster_worker_.joinable()) raster_worker_.join();
+}
+
+void GsCore::set_async_rasterization(bool enabled) {
+    if (async_rasterization_ == enabled) return;
+    flush_pending_draws();
+    if (enabled && !raster_worker_.joinable()) {
+        raster_worker_ = std::thread(&GsCore::raster_worker_main, this);
+    }
+    async_rasterization_ = enabled;
+}
+
+void GsCore::flush_pending_draws() const {
+    if (!raster_worker_.joinable()) return;
+    std::unique_lock lock(raster_mutex_);
+    raster_completed_condition_.wait(lock, [this] {
+        return raster_completed_ == raster_enqueued_;
+    });
+}
+
+void GsCore::raster_worker_main() {
+    for (;;) {
+        RasterCommand command;
+        {
+            std::unique_lock lock(raster_mutex_);
+            raster_condition_.wait(lock, [this] {
+                return raster_worker_stop_ || !raster_queue_.empty();
+            });
+            if (raster_queue_.empty() && raster_worker_stop_) return;
+            command = std::move(raster_queue_.front());
+            raster_queue_.pop_front();
+        }
+        execute_raster_command(command);
+        {
+            std::lock_guard lock(raster_mutex_);
+            ++raster_completed_;
+        }
+        raster_completed_condition_.notify_all();
+    }
+}
+
 void GsCore::reset() {
+    flush_pending_draws();
     registers_.fill(0);
     fifo_words_.fill(0);
     fifo_word_mask_ = 0;
@@ -277,6 +327,7 @@ void GsCore::record_unsupported_transfer(u32 reason) {
 }
 
 void GsCore::begin_host_to_local() {
+    flush_pending_draws();
     transfer_ = {};
 
     const u64 blit = registers_[kRegBitbltbuf];
@@ -307,6 +358,7 @@ void GsCore::begin_host_to_local() {
 
 
 void GsCore::begin_local_to_host() {
+    flush_pending_draws();
     transfer_ = {};
 
     const u64 blit = registers_[kRegBitbltbuf];
@@ -339,6 +391,7 @@ void GsCore::begin_local_to_host() {
 }
 
 bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
+    flush_pending_draws();
     lo = 0;
     hi = 0;
 
@@ -449,6 +502,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
 
 
 void GsCore::execute_local_to_local() {
+    flush_pending_draws();
     const u64 blit = registers_[kRegBitbltbuf];
     const u64 pos = registers_[kRegTrxpos];
     const u64 reg = registers_[kRegTrxreg];
@@ -749,6 +803,46 @@ void GsCore::emit_primitive(
     ctx.nonzero_input_alpha = &stats_.nonzero_inputs_with_alpha;
     ctx.first_input_rgba = &stats_.first_nonzero_input_rgba;
     ctx.first_alpha_input_rgba = &stats_.first_alpha_input_rgba;
+    const u32 context = static_cast<u32>((effective_prim() >> 9) & 1u);
+    RasterCommand command{};
+    command.context = ctx;
+    command.a = a;
+    command.b = b;
+    command.c = c;
+    command.primitive = prim;
+    command.vertex_count = vertex_count;
+    command.effective_primitive = effective_prim();
+    command.alpha = registers_[kRegAlpha1 + context];
+    command.test = registers_[kRegTest1 + context];
+    command.frame = registers_[kRegFrame1 + context];
+    command.rgbaq = registers_[kRegRgbaq];
+    command.tex0 = registers_[kRegTex0_1 + context];
+    command.texa = registers_[kRegTexa];
+    command.st = registers_[kRegSt];
+    command.uv = registers_[kRegUv];
+
+    if (async_rasterization_) {
+        {
+            std::unique_lock lock(raster_mutex_);
+            raster_completed_condition_.wait(lock, [this] {
+                return raster_queue_.size() < 4096u;
+            });
+            raster_queue_.push_back(std::move(command));
+            ++raster_enqueued_;
+        }
+        raster_condition_.notify_one();
+    } else {
+        execute_raster_command(command);
+    }
+}
+
+void GsCore::execute_raster_command(const RasterCommand& command) {
+    const auto& ctx = command.context;
+    const auto& a = command.a;
+    const auto& b = command.b;
+    const auto& c = command.c;
+    const u32 prim = command.primitive;
+    const u32 vertex_count = command.vertex_count;
     const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
     const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
     u64 pixels = 0;
@@ -777,32 +871,24 @@ void GsCore::emit_primitive(
         }
         if (!stats_.first_nonzero_input_valid) {
             stats_.first_nonzero_input_valid = true;
-            const u32 context =
-                static_cast<u32>((effective_prim() >> 9) & 1u);
-            stats_.first_nonzero_input_alpha =
-                registers_[kRegAlpha1 + context];
-            stats_.first_nonzero_input_test =
-                registers_[kRegTest1 + context];
-            stats_.first_nonzero_input_frame =
-                registers_[kRegFrame1 + context];
-            stats_.first_nonzero_input_prim = effective_prim();
-            stats_.first_nonzero_input_rgbaq = registers_[kRegRgbaq];
-            stats_.first_nonzero_input_tex0 =
-                registers_[kRegTex0_1 + context];
-            stats_.first_nonzero_input_texa = registers_[kRegTexa];
-            stats_.first_nonzero_input_st = registers_[kRegSt];
-            stats_.first_nonzero_input_uv = registers_[kRegUv];
+            stats_.first_nonzero_input_alpha = command.alpha;
+            stats_.first_nonzero_input_test = command.test;
+            stats_.first_nonzero_input_frame = command.frame;
+            stats_.first_nonzero_input_prim = command.effective_primitive;
+            stats_.first_nonzero_input_rgbaq = command.rgbaq;
+            stats_.first_nonzero_input_tex0 = command.tex0;
+            stats_.first_nonzero_input_texa = command.texa;
+            stats_.first_nonzero_input_st = command.st;
+            stats_.first_nonzero_input_uv = command.uv;
         }
     }
     if (!stats_.first_alpha_input_valid &&
         stats_.nonzero_inputs_with_alpha != alpha_inputs_before) {
         stats_.first_alpha_input_valid = true;
-        const u32 context =
-            static_cast<u32>((effective_prim() >> 9) & 1u);
-        stats_.first_alpha_input_alpha = registers_[kRegAlpha1 + context];
-        stats_.first_alpha_input_prim = effective_prim();
-        stats_.first_alpha_input_tex0 = registers_[kRegTex0_1 + context];
-        stats_.first_alpha_input_rgbaq = registers_[kRegRgbaq];
+        stats_.first_alpha_input_alpha = command.alpha;
+        stats_.first_alpha_input_prim = command.effective_primitive;
+        stats_.first_alpha_input_tex0 = command.tex0;
+        stats_.first_alpha_input_rgbaq = command.rgbaq;
     }
     if (ctx.texture.enabled) {
         ++stats_.textured_raster_draws;
