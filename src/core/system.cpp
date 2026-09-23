@@ -1738,11 +1738,25 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             }
 
             timer_tick_budget += spent_in_slice;
-            while (timer_tick_budget >= timer_tick_stride) {
-                ++profiling_stats_.scheduler_timer_tick_calls;
-                profiling_stats_.scheduler_timer_tick_cycles += timer_tick_stride;
-                timers_.tick(timer_tick_stride);
-                timer_tick_budget -= timer_tick_stride;
+            if (timers_.can_batch_cpu_ticks()) {
+                // With no CPU-clock timer IRQs armed, only the final counter
+                // state is guest-visible at this scheduling boundary. Collapse
+                // the old series of 16-cycle updates into one equivalent tick.
+                if (timer_tick_budget >= timer_tick_stride) {
+                    ++profiling_stats_.scheduler_timer_tick_calls;
+                    profiling_stats_.scheduler_timer_tick_cycles +=
+                        timer_tick_budget;
+                    timers_.tick(timer_tick_budget);
+                    timer_tick_budget = 0;
+                }
+            } else {
+                while (timer_tick_budget >= timer_tick_stride) {
+                    ++profiling_stats_.scheduler_timer_tick_calls;
+                    profiling_stats_.scheduler_timer_tick_cycles +=
+                        timer_tick_stride;
+                    timers_.tick(timer_tick_stride);
+                    timer_tick_budget -= timer_tick_stride;
+                }
             }
         }
         if (profile_detailed) {
