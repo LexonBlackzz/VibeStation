@@ -449,6 +449,55 @@ void print_state(const ps2::Ps2System& system) {
         }
     }
 
+    // Retail SCPH-39001 OSDSND (rspu2_driver) SIF RPC server. Dump
+    // the live server/queue objects so we can distinguish "packet arrived"
+    // from "RPC thread actually consumed it".
+    constexpr ps2::u32 kOsdSndServer = 0x001EC190u;
+    std::array<ps2::u32, 17> osdsnd_server{};
+    bool osdsnd_server_ok = true;
+    for (ps2::u32 word = 0; word < osdsnd_server.size(); ++word) {
+        osdsnd_server_ok =
+            system.iop_bus().read32(
+                kOsdSndServer + word * 4u,
+                osdsnd_server[word]) &&
+            osdsnd_server_ok;
+    }
+    if (osdsnd_server_ok) {
+        std::cout << "OSDSND_RPC_SERVER";
+        for (ps2::u32 word = 0; word < osdsnd_server.size(); ++word) {
+            std::cout
+                << " [" << word << "]=0x"
+                << std::hex << std::uppercase
+                << osdsnd_server[word] << std::dec;
+        }
+        std::cout << '\n';
+
+        const ps2::u32 queue =
+            osdsnd_server[16] & 0x001FFFFFu;
+        if (queue != 0u) {
+            std::array<ps2::u32, 6> q{};
+            bool queue_ok = true;
+            for (ps2::u32 word = 0; word < q.size(); ++word) {
+                queue_ok =
+                    system.iop_bus().read32(
+                        queue + word * 4u, q[word]) &&
+                    queue_ok;
+            }
+            if (queue_ok) {
+                std::cout
+                    << "OSDSND_RPC_QUEUE ADDR=0x"
+                    << std::hex << std::uppercase << queue
+                    << " THREAD=0x" << q[0]
+                    << " ACTIVE=0x" << q[1]
+                    << " LINK=0x" << q[2]
+                    << " START=0x" << q[3]
+                    << " END=0x" << q[4]
+                    << " NEXT=0x" << q[5]
+                    << std::dec << '\n';
+            }
+        }
+    }
+
     std::cout << "SPU2_REGS";
     for (const ps2::u32 address : {
              0x1F90019Au, 0x1F90019Cu, 0x1F90019Eu,
