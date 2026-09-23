@@ -824,9 +824,14 @@ void print_state(const ps2::Ps2System& system) {
         << "SIF1_PACKETS=" << sif_stats.sif1_packets
         << " RPC_CALLS=" << sif_stats.rpc_calls
         << " SOUND_RPC_CALLS=" << sif_stats.sound_rpc_calls
+        << " SOUND_ST_INIT=" << sif_stats.sound_st_init_calls
         << " SOUND_BGM_OPEN=" << sif_stats.sound_bgm_open_calls
+        << " SOUND_TICK_MODE=" << sif_stats.sound_tick_mode_calls
+        << " SOUND_MASTER_VOL=" << sif_stats.sound_master_volume_calls
         << " SOUND_BGM_PLAY=" << sif_stats.sound_bgm_play_calls
+        << " SOUND_BGM_STOP=" << sif_stats.sound_bgm_stop_calls
         << " SOUND_TIMER_START=" << sif_stats.sound_timer_start_calls
+        << " SOUND_SE_PLAY=" << sif_stats.sound_se_play_calls
         << " SOUND_SETPARAM=" << sif_stats.sound_set_param_calls
         << " SOUND_SETSWITCH=" << sif_stats.sound_set_switch_calls
         << " SOUND_SETADDR=" << sif_stats.sound_set_addr_calls
