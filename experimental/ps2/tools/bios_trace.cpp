@@ -32,6 +32,33 @@ ps2::u64 parse_budget(const char* text, ps2::u64 fallback) {
     return value;
 }
 
+bool simple_register_instruction(ps2::u32 instruction) {
+    if (instruction == 0u) return true;
+    const ps2::u32 opcode = instruction >> 26;
+    if (opcode == 0x09u || opcode == 0x0Cu || opcode == 0x0Du ||
+        opcode == 0x0Eu || opcode == 0x0Fu || opcode == 0x19u) return true;
+    if (opcode != 0u) return false;
+    const ps2::u32 funct = instruction & 63u;
+    const ps2::u32 rs = (instruction >> 21) & 31u;
+    const ps2::u32 sa = (instruction >> 6) & 31u;
+    if (funct == 0u || funct == 2u || funct == 3u) return rs == 0u;
+    return sa == 0u && (funct == 0x21u || funct == 0x23u ||
+                        funct == 0x24u || funct == 0x25u ||
+                        funct == 0x26u || funct == 0x2Du);
+}
+
+ps2::u32 simple_register_run(const ps2::Ps2System& system) {
+    const ps2::u32 pc = system.ee().state().pc;
+    if (pc >= ps2::EeRam::kSize) return 0;
+    ps2::u32 count = 0;
+    for (; count < 32u && pc + count * 4u < ps2::EeRam::kSize; ++count) {
+        ps2::u32 instruction = 0;
+        if (!system.bus().fetch32(pc + count * 4u, instruction) ||
+            !simple_register_instruction(instruction)) break;
+    }
+    return count;
+}
+
 bool visible_frame_ready(const ps2::Ps2System& system) {
     const auto& stats = system.gs_core().stats();
     const bool gs_wrote_pixels =
@@ -989,6 +1016,7 @@ int main(int argc, char** argv) {
                 << system.ee().state().pc
                 << " IOP_PC=0x" << system.iop().state().pc
                 << std::dec << " IOP_HALTED=" << system.iop_halted()
+                << " PURE_RUN=" << simple_register_run(system)
                 << '\n';
         }
         if (executed >= 200'000'000u &&

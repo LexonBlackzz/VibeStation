@@ -95,6 +95,13 @@ captured pixels. Larger gains require multi-instruction block compilation.
 For the sustained 260-million-instruction BIOS animation trace, enabling this
 single-instruction JIT with the threaded GS instead reduced throughput from
 3.11 to 1.23 fields/s, so the graphical app leaves it disabled by default.
+The trace's opt-in `--pc-samples` output now includes `PURE_RUN`, the number
+of consecutive instructions suitable for the current register-only emitter
+at each sample PC. In 49 samples from 212-260 million EE instructions, 23
+began at an unsupported instruction and the mean run was 1.22 instructions.
+This confirms that a useful block recompiler must handle branches, memory,
+and coprocessor instructions rather than only concatenating the current
+single-instruction register emitter.
 
 ## Verified retail BIOS startup visual
 
