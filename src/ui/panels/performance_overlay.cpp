@@ -648,6 +648,16 @@ void App::panel_performance() {
             stats.gpu_textured_commands, stats.gpu_gouraud_textured_commands,
             stats.gpu_rect_commands, stats.gpu_line_commands,
             stats.gpu_transfer_commands, stats.gpu_other_commands);
+        ImGui::Text(
+            "Scheduler: slices %u  SIO sync/tick %u/%u  DMA service/work %u/%u  timer ticks %u",
+            stats.scheduler_run_slice_calls,
+            stats.scheduler_sio_sync_calls, stats.scheduler_sio_tick_calls,
+            stats.scheduler_dma_service_calls, stats.scheduler_dma_work_calls,
+            stats.scheduler_timer_tick_calls);
+        ImGui::TextDisabled(
+            "Timer cadence covered %llu CPU cycles this frame.",
+            static_cast<unsigned long long>(
+                stats.scheduler_timer_tick_cycles));
         if (phase_diag.valid) {
             const size_t dominant_bucket = dominant_render_bucket(phase_diag);
             ImGui::Text(
@@ -676,7 +686,9 @@ void App::panel_performance() {
                     "flat=%u gouraud=%u textured=%u gouraud_textured=%u rect=%u line=%u transfer=%u other=%u "
                     "cadence_alt=%.1f active_frames=%u light_frames=%u threshold=%u "
                     "active_draws=%.1f light_draws=%.1f active_core_ms=%.3f light_core_ms=%.3f "
-                    "dominant=%s dominant_active=%.1f dominant_light=%.1f detailed=%u",
+                    "dominant=%s dominant_active=%.1f dominant_light=%.1f "
+                    "sched_slices=%u sio_sync=%u sio_tick=%u dma_service=%u dma_work=%u "
+                    "timer_ticks=%u timer_cycles=%llu detailed=%u",
                     static_cast<unsigned long long>(runtime_snapshot_.frame_id),
                     runtime_snapshot_.core_frame_ms,
                     stats.gpu_gp0_words, stats.gpu_gp0_commands,
@@ -694,6 +706,14 @@ void App::panel_performance() {
                     gpu_bucket_name(dominant_bucket),
                     phase_diag.render_buckets[dominant_bucket],
                     phase_diag.reuse_buckets[dominant_bucket],
+                    stats.scheduler_run_slice_calls,
+                    stats.scheduler_sio_sync_calls,
+                    stats.scheduler_sio_tick_calls,
+                    stats.scheduler_dma_service_calls,
+                    stats.scheduler_dma_work_calls,
+                    stats.scheduler_timer_tick_calls,
+                    static_cast<unsigned long long>(
+                        stats.scheduler_timer_tick_cycles),
                     g_profile_detailed_timing ? 1u : 0u);
                 ImGui::SetClipboardText(cadence_snapshot);
             }
