@@ -378,6 +378,7 @@ struct CpuBackendStats {
   u64 recompiler_frame_cache_misses = 0;
   u64 recompiler_frame_icache_refills = 0;
   u64 recompiler_frame_helper_instructions = 0;
+  std::array<u64, 6> recompiler_frame_helper_reasons{};
   u64 recompiler_frame_run_slice_calls = 0;
   u64 recompiler_frame_native_dispatches = 0;
   u64 recompiler_frame_direct_links = 0;
