@@ -4,7 +4,8 @@ on:
   push:
     branches:
       - main
-      - integration/jit-v2-shippable-2026-09-21
+      - perf/cpu-jit-v4
+      - integration/recompiler-promotion
   workflow_dispatch:
 
 jobs:

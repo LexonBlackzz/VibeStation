@@ -124,9 +124,13 @@ inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,
+  // Legacy values are retained only so old config/diagnostic code can migrate
+  // cleanly. Runtime selection exposes only Interpreter and Recompiler.
   DecodedBlockInterpreter = 1,
   X64Jit = 2,
   X64JitV2 = 3,
+  X64JitV3 = 4,
+  Recompiler = 5,
 };
 enum class CpuForcedInterpreterReason : u8 {
   None = 0,
@@ -298,17 +302,9 @@ inline CpuExecutionMode effective_cpu_execution_mode() {
 }
 
 inline const char *cpu_execution_mode_name(CpuExecutionMode mode) {
-  switch (mode) {
-  case CpuExecutionMode::DecodedBlockInterpreter:
-    return "Decoded Block";
-  case CpuExecutionMode::X64Jit:
-    return "x64 JIT";
-  case CpuExecutionMode::X64JitV2:
-    return "x64 JIT V2";
-  case CpuExecutionMode::Interpreter:
-  default:
-    return "Interpreter";
-  }
+  return mode == CpuExecutionMode::Interpreter
+             ? "Interpreter"
+             : "Recompiler (Experimental)";
 }
 
 inline const char *
@@ -331,30 +327,15 @@ cpu_forced_interpreter_reason_name(CpuForcedInterpreterReason reason) {
 }
 
 inline int cpu_execution_mode_to_config_value(CpuExecutionMode mode) {
-  switch (mode) {
-  case CpuExecutionMode::DecodedBlockInterpreter:
-    return 1;
-  case CpuExecutionMode::X64Jit:
-    return 2;
-  case CpuExecutionMode::X64JitV2:
-    return 3;
-  case CpuExecutionMode::Interpreter:
-  default:
-    return 0;
-  }
+  return mode == CpuExecutionMode::Interpreter ? 0 : 5;
 }
 
 inline CpuExecutionMode cpu_execution_mode_from_config_value(int value) {
-  if (value == 1) {
-    return CpuExecutionMode::DecodedBlockInterpreter;
-  }
-  if (value == 2) {
-    return CpuExecutionMode::X64Jit;
-  }
-  if (value == 3) {
-    return CpuExecutionMode::X64JitV2;
-  }
-  return CpuExecutionMode::Interpreter;
+  // 2-5 were the four historical JIT generations. Migrate all of them to the
+  // single supported recompiler. Old decoded-block mode (1) falls back to the
+  // interpreter because that backend no longer exists.
+  return (value >= 2 && value <= 5) ? CpuExecutionMode::Recompiler
+                                    : CpuExecutionMode::Interpreter;
 }
 
 inline constexpr u32 log_category_bit(LogCategory cat) {

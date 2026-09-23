@@ -125,6 +125,7 @@ struct CpuCompareNativeTierMode {
 
 struct CpuCompareCase {
   const char *name = "";
+  u32 start_pc = kCpuComparePc;
   std::vector<u32> program;
   std::vector<CpuCompareMemoryWord> memory;
   std::vector<u32> compare_memory_addresses;
@@ -132,6 +133,8 @@ struct CpuCompareCase {
   std::vector<u32> segment_instructions;
   std::vector<CpuCompareNativeTierMode> segment_native_tiers;
   std::array<u32, 32> initial_gpr{};
+  u32 initial_load_reg = 0;
+  u32 initial_load_value = 0;
   u32 initial_cop0_sr_bits = 0;
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
@@ -146,6 +149,21 @@ struct CpuCompareCase {
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
   bool require_v2_native_entry_when_available = false;
+  bool require_v4_native_entry_when_available = false;
+  bool require_v4_native_load_entry_when_available = false;
+  bool require_v4_native_store_entry_when_available = false;
+  bool require_v4_store_tail_block_when_available = false;
+  bool require_v4_store_branch_fusion_when_available = false;
+  bool require_v4_store_smc_fallback_when_available = false;
+  bool require_v4_load_tail_block_when_available = false;
+  bool require_v4_load_branch_fusion_when_available = false;
+  bool require_v4_native_branch_entry_when_available = false;
+  bool require_v4_folded_branch_block_when_available = false;
+  bool require_v4_page_local_invalidation_when_available = false;
+  bool require_v4_cached_same_page_retention_when_available = false;
+  bool require_v4_icache_revalidation_when_available = false;
+  bool require_v4_native_chain_when_available = false;
+  bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -322,6 +340,10 @@ static const char *cpu_compare_mode_name(CpuExecutionMode mode) {
     return "X64Jit";
   case CpuExecutionMode::X64JitV2:
     return "X64JitV2";
+  case CpuExecutionMode::X64JitV3:
+    return "X64JitV3";
+  case CpuExecutionMode::Recompiler:
+    return "Recompiler";
   case CpuExecutionMode::Interpreter:
   default:
     return "Interpreter";
@@ -376,7 +398,7 @@ static void log_cpu_compare_program(const CpuCompareCase &test_case) {
   for (size_t i = 0; i < test_case.program.size(); ++i) {
     LOG_ERROR("CPU_COMPARE_PROGRAM name=%s index=%u pc=0x%08X opcode=0x%08X",
               test_case.name, static_cast<unsigned>(i),
-              kCpuComparePc + static_cast<u32>(i * 4u),
+              test_case.start_pc + static_cast<u32>(i * 4u),
               test_case.program[i]);
   }
 }
@@ -530,7 +552,8 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   sys->reset();
 
   for (size_t i = 0; i < test_case.program.size(); ++i) {
-    sys->write32((kCpuComparePc & 0x1FFFFFFFu) + static_cast<u32>(i * 4u),
+    sys->write32((test_case.start_pc & 0x1FFFFFFFu) +
+                     static_cast<u32>(i * 4u),
                  test_case.program[i]);
   }
   for (const CpuCompareMemoryWord &word : test_case.memory) {
@@ -545,12 +568,12 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   }
 
   CpuDebugState initial = sys->cpu().debug_state();
-  initial.pc = kCpuComparePc;
-  initial.next_pc = kCpuComparePc + 4u;
+  initial.pc = test_case.start_pc;
+  initial.next_pc = test_case.start_pc + 4u;
   initial.current_pc = 0;
   initial.cycles = 0;
-  initial.load_reg = 0;
-  initial.load_value = 0;
+  initial.load_reg = test_case.initial_load_reg;
+  initial.load_value = test_case.initial_load_value;
   initial.next_load_reg = 0;
   initial.next_load_value = 0;
   initial.in_delay_slot = false;
@@ -584,7 +607,7 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_x64_jit_branch_tail_blacklist.clear();
   if (mode == CpuExecutionMode::X64Jit &&
       test_case.blacklist_branch_tail_for_x64) {
-    g_cpu_x64_jit_branch_tail_blacklist.push_back(kCpuComparePc);
+    g_cpu_x64_jit_branch_tail_blacklist.push_back(test_case.start_pc);
   }
   g_cpu_x64_jit_all_native_cli_override = true;
   g_cpu_x64_jit_all_native_cli_value =
@@ -782,6 +805,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   native_control.expected_current_pc = kCpuComparePc + 15u * 4u;
   native_control.expected_cycles = 32u;
   native_control.require_full_native_when_available = true;
+  native_control.require_v4_native_entry_when_available = true;
   cases.push_back(native_control);
 
   CpuCompareCase all_native_disabled{};
@@ -3012,6 +3036,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   load_delay.memory.push_back({0x00011000u, 0x12345678u});
   load_delay.require_full_native_when_available = true;
   load_delay.require_native_memory_helper_when_available = true;
+  load_delay.require_v4_native_entry_when_available = true;
+  load_delay.require_v4_native_load_entry_when_available = true;
   pad_cpu_compare_program(load_delay);
   cases.push_back(load_delay);
 
@@ -3494,6 +3520,652 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   ram_invalidation.instructions = 3;
   cases.push_back(ram_invalidation);
 
+  CpuCompareCase v4_page_local_invalidation{};
+  v4_page_local_invalidation.name = "v4_page_local_code_invalidation";
+  v4_page_local_invalidation.start_pc = 0xA0010000u;
+  v4_page_local_invalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_page_local_invalidation.start_pc),
+      0u,
+  };
+  v4_page_local_invalidation.mutations.push_back(
+      {3u, v4_page_local_invalidation.start_pc,
+       enc_i(0x09, 1, 1, 2)});
+  v4_page_local_invalidation.instructions = 6u;
+  v4_page_local_invalidation.require_v4_native_entry_when_available = true;
+  v4_page_local_invalidation
+      .require_v4_page_local_invalidation_when_available = true;
+  cases.push_back(v4_page_local_invalidation);
+
+  CpuCompareCase v4_cached_same_page_retention{};
+  v4_cached_same_page_retention.name =
+      "v4_cached_same_page_unrelated_write_retains_block";
+  v4_cached_same_page_retention.start_pc = 0x80010000u;
+  v4_cached_same_page_retention.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_cached_same_page_retention.start_pc),
+      0u,
+  };
+  // Touch another 16-byte I-cache line on the same 4 KiB physical page.
+  // The cached loop's exact guest I-cache snapshot remains valid.
+  v4_cached_same_page_retention.mutations.push_back(
+      {3u, v4_cached_same_page_retention.start_pc + 0x40u, 0xDEADBEEFu});
+  v4_cached_same_page_retention.instructions = 6u;
+  v4_cached_same_page_retention.require_v4_native_entry_when_available = true;
+  v4_cached_same_page_retention
+      .require_v4_cached_same_page_retention_when_available = true;
+  cases.push_back(v4_cached_same_page_retention);
+
+  CpuCompareCase v4_cached_icache_revalidation{};
+  v4_cached_icache_revalidation.name =
+      "v4_cached_icache_alias_revalidates_without_recompile";
+  v4_cached_icache_revalidation.start_pc = 0x80010000u;
+  v4_cached_icache_revalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, v4_cached_icache_revalidation.start_pc),
+      0u,
+  };
+  // +0x1000 maps to the same direct-mapped I-cache index but is a different
+  // physical code page. It invalidates/refills the guest line without changing
+  // the loop's instruction words.
+  v4_cached_icache_revalidation.mutations.push_back(
+      {3u, v4_cached_icache_revalidation.start_pc + 0x1000u, 0xDEADBEEFu});
+  v4_cached_icache_revalidation.instructions = 6u;
+  v4_cached_icache_revalidation.require_v4_native_entry_when_available = true;
+  v4_cached_icache_revalidation.require_v4_icache_revalidation_when_available =
+      true;
+  cases.push_back(v4_cached_icache_revalidation);
+
+  // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
+  // native execution is separately gated by native_control_state_icache_cycles.
+  CpuCompareCase v4_uncached_alu{};
+  v4_uncached_alu.name = "v4_uncached_native_alu";
+  v4_uncached_alu.start_pc = 0xA0010000u;
+  v4_uncached_alu.initial_gpr[1] = 7u;
+  v4_uncached_alu.program = {
+      enc_i(0x09, 1, 2, 5),
+      enc_i(0x0D, 2, 3, 0x0030),
+      enc_r(0, 3, 4, 1, 0x00),
+  };
+  pad_cpu_compare_program(v4_uncached_alu, 32u);
+  v4_uncached_alu.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_alu);
+
+  CpuCompareCase v4_uncached_variable_shifts{};
+  v4_uncached_variable_shifts.name = "v4_uncached_native_variable_shifts";
+  v4_uncached_variable_shifts.start_pc = 0xA0010000u;
+  v4_uncached_variable_shifts.initial_gpr[1] = 0x81234567u;
+  v4_uncached_variable_shifts.initial_gpr[2] = 5u;
+  v4_uncached_variable_shifts.program = {
+      enc_r(2, 1, 3, 0, 0x04), // SLLV
+      enc_r(2, 1, 4, 0, 0x06), // SRLV
+      enc_r(2, 1, 5, 0, 0x07), // SRAV
+  };
+  pad_cpu_compare_program(v4_uncached_variable_shifts, 32u);
+  v4_uncached_variable_shifts.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_variable_shifts);
+
+  CpuCompareCase v4_uncached_folded_branch{};
+  v4_uncached_folded_branch.name = "v4_uncached_folded_alu_branch_tail";
+  v4_uncached_folded_branch.start_pc = 0xA0010000u;
+  v4_uncached_folded_branch.initial_gpr[1] = 1u;
+  v4_uncached_folded_branch.program = {
+      enc_i(0x09, 1, 2, 4),       // ADDIU prefix
+      enc_i(0x0D, 2, 3, 0x10),    // ORI prefix
+      enc_i(0x05, 3, 0, 1),       // BNE
+      enc_i(0x09, 0, 4, 0x44),    // delay slot
+      0,
+  };
+  v4_uncached_folded_branch.instructions = 4u;
+  v4_uncached_folded_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_folded_branch.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_folded_branch.require_v4_folded_branch_block_when_available =
+      true;
+  cases.push_back(v4_uncached_folded_branch);
+
+  CpuCompareCase v4_uncached_beq{};
+  v4_uncached_beq.name = "v4_uncached_native_beq_delay";
+  v4_uncached_beq.start_pc = 0xA0010000u;
+  v4_uncached_beq.initial_gpr[1] = 0x1234u;
+  v4_uncached_beq.initial_gpr[2] = 0x1234u;
+  v4_uncached_beq.program = {
+      enc_i(0x04, 1, 2, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_beq.instructions = 2u;
+  v4_uncached_beq.require_v4_native_entry_when_available = true;
+  v4_uncached_beq.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_beq);
+
+  CpuCompareCase v4_uncached_bne_not_taken{};
+  v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
+  v4_uncached_bne_not_taken.start_pc = 0xA0010000u;
+  v4_uncached_bne_not_taken.initial_gpr[1] = 0x1234u;
+  v4_uncached_bne_not_taken.initial_gpr[2] = 0x1234u;
+  v4_uncached_bne_not_taken.program = {
+      enc_i(0x05, 1, 2, 2),
+      // Mutate an input in the delay slot: BNE must have captured "not taken"
+      // before this executes.
+      enc_i(0x09, 2, 2, 1),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bne_not_taken.instructions = 2u;
+  v4_uncached_bne_not_taken.require_v4_native_entry_when_available = true;
+  v4_uncached_bne_not_taken.require_v4_native_branch_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_bne_not_taken);
+
+  CpuCompareCase v4_uncached_jal{};
+  v4_uncached_jal.name = "v4_uncached_native_jal_link_delay";
+  v4_uncached_jal.start_pc = 0xA0010000u;
+  v4_uncached_jal.program = {
+      enc_j(0x03, v4_uncached_jal.start_pc + 0x10u),
+      enc_r(31, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jal.instructions = 2u;
+  v4_uncached_jal.require_v4_native_entry_when_available = true;
+  v4_uncached_jal.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_jal);
+
+  CpuCompareCase v4_uncached_jr_load_capture{};
+  v4_uncached_jr_load_capture.name =
+      "v4_uncached_native_jr_pending_load_capture";
+  v4_uncached_jr_load_capture.start_pc = 0xA0010000u;
+  // JR must capture the old r8 target before the pending load retires.
+  // The delay slot, however, must observe the newly committed r8 value.
+  v4_uncached_jr_load_capture.initial_gpr[8] =
+      v4_uncached_jr_load_capture.start_pc + 0x10u;
+  v4_uncached_jr_load_capture.initial_load_reg = 8u;
+  v4_uncached_jr_load_capture.initial_load_value =
+      v4_uncached_jr_load_capture.start_pc + 0x20u;
+  v4_uncached_jr_load_capture.program = {
+      enc_r(8, 0, 0, 0, 0x08),
+      enc_r(8, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jr_load_capture.instructions = 2u;
+  v4_uncached_jr_load_capture.require_v4_native_entry_when_available = true;
+  v4_uncached_jr_load_capture.require_v4_native_branch_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_jr_load_capture);
+
+  CpuCompareCase v4_uncached_jalr{};
+  v4_uncached_jalr.name = "v4_uncached_native_jalr_link_delay";
+  v4_uncached_jalr.start_pc = 0xA0010000u;
+  v4_uncached_jalr.initial_gpr[8] =
+      v4_uncached_jalr.start_pc + 0x10u;
+  v4_uncached_jalr.program = {
+      enc_r(8, 0, 9, 0, 0x09),
+      // JALR's link register must already be visible in the delay slot.
+      enc_r(9, 0, 5, 0, 0x21),
+      0,
+      0,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_jalr.instructions = 2u;
+  v4_uncached_jalr.require_v4_native_entry_when_available = true;
+  v4_uncached_jalr.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_jalr);
+
+  CpuCompareCase v4_uncached_blez{};
+  v4_uncached_blez.name = "v4_uncached_native_blez_taken";
+  v4_uncached_blez.start_pc = 0xA0010000u;
+  v4_uncached_blez.initial_gpr[8] = 0u;
+  v4_uncached_blez.program = {
+      enc_i(0x06, 8, 0, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_blez.instructions = 2u;
+  v4_uncached_blez.require_v4_native_entry_when_available = true;
+  v4_uncached_blez.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_blez);
+
+  CpuCompareCase v4_uncached_bgtz{};
+  v4_uncached_bgtz.name = "v4_uncached_native_bgtz_not_taken";
+  v4_uncached_bgtz.start_pc = 0xA0010000u;
+  v4_uncached_bgtz.initial_gpr[8] = 0u;
+  v4_uncached_bgtz.program = {
+      enc_i(0x07, 8, 0, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bgtz.instructions = 2u;
+  v4_uncached_bgtz.require_v4_native_entry_when_available = true;
+  v4_uncached_bgtz.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bgtz);
+
+  CpuCompareCase v4_uncached_bltzal{};
+  v4_uncached_bltzal.name = "v4_uncached_native_bltzal_not_taken_link";
+  v4_uncached_bltzal.start_pc = 0xA0010000u;
+  v4_uncached_bltzal.initial_gpr[8] = 1u;
+  v4_uncached_bltzal.program = {
+      // REGIMM link variants write RA even when the condition is false.
+      enc_i(0x01, 8, 0x10, 2),
+      enc_r(31, 0, 5, 0, 0x21),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bltzal.instructions = 2u;
+  v4_uncached_bltzal.require_v4_native_entry_when_available = true;
+  v4_uncached_bltzal.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bltzal);
+
+  CpuCompareCase v4_uncached_bgez{};
+  v4_uncached_bgez.name = "v4_uncached_native_bgez_taken";
+  v4_uncached_bgez.start_pc = 0xA0010000u;
+  v4_uncached_bgez.initial_gpr[8] = 0u;
+  v4_uncached_bgez.program = {
+      enc_i(0x01, 8, 0x01, 2),
+      enc_i(0x09, 0, 5, 0x0055),
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_uncached_bgez.instructions = 2u;
+  v4_uncached_bgez.require_v4_native_entry_when_available = true;
+  v4_uncached_bgez.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_bgez);
+
+  CpuCompareCase v4_uncached_delay_exception_fallback{};
+  v4_uncached_delay_exception_fallback.name =
+      "v4_uncached_branch_delay_overflow_fallback";
+  v4_uncached_delay_exception_fallback.start_pc = 0xA0010000u;
+  v4_uncached_delay_exception_fallback.initial_gpr[1] = 1u;
+  v4_uncached_delay_exception_fallback.initial_gpr[2] = 0x7FFFFFFFu;
+  v4_uncached_delay_exception_fallback.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken
+      enc_i(0x08, 2, 2, 1), // ADDI overflow in the delay slot
+      0,
+  };
+  v4_uncached_delay_exception_fallback.instructions = 2u;
+  v4_uncached_delay_exception_fallback.require_v4_clean_fallback_when_available =
+      true;
+  cases.push_back(v4_uncached_delay_exception_fallback);
+
+  CpuCompareCase v4_uncached_incoming_load{};
+  v4_uncached_incoming_load.name =
+      "v4_uncached_native_incoming_load_delay";
+  v4_uncached_incoming_load.start_pc = 0xA0010000u;
+  v4_uncached_incoming_load.initial_gpr[2] = 0x11111111u;
+  v4_uncached_incoming_load.initial_load_reg = 2u;
+  v4_uncached_incoming_load.initial_load_value = 0x12345678u;
+  v4_uncached_incoming_load.program = {
+      // First instruction sees old r2; load retires after operand capture.
+      enc_r(2, 0, 3, 0, 0x21),
+      // Second instruction sees the committed load.
+      enc_r(2, 0, 4, 0, 0x21),
+  };
+  pad_cpu_compare_program(v4_uncached_incoming_load, 32u);
+  v4_uncached_incoming_load.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_uncached_incoming_load);
+
+  CpuCompareCase v4_uncached_incoming_load_cancel{};
+  v4_uncached_incoming_load_cancel.name =
+      "v4_uncached_native_incoming_load_cancel";
+  v4_uncached_incoming_load_cancel.start_pc = 0xA0010000u;
+  v4_uncached_incoming_load_cancel.initial_gpr[2] = 0x11111111u;
+  v4_uncached_incoming_load_cancel.initial_load_reg = 2u;
+  v4_uncached_incoming_load_cancel.initial_load_value = 0x12345678u;
+  v4_uncached_incoming_load_cancel.program = {
+      // A same-register ALU write cancels the pending load.
+      enc_i(0x09, 0, 2, 5),
+      enc_r(2, 0, 3, 0, 0x21),
+  };
+  pad_cpu_compare_program(v4_uncached_incoming_load_cancel, 32u);
+  v4_uncached_incoming_load_cancel.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_incoming_load_cancel);
+
+  CpuCompareCase v4_uncached_prefix_load_tail{};
+  v4_uncached_prefix_load_tail.name =
+      "v4_uncached_native_alu_prefix_load_delay_tail";
+  v4_uncached_prefix_load_tail.start_pc = 0xA0010000u;
+  v4_uncached_prefix_load_tail.initial_gpr[1] = 0x80012000u;
+  v4_uncached_prefix_load_tail.initial_gpr[2] = 0x00000010u;
+  v4_uncached_prefix_load_tail.memory.push_back({0x00012004u, 0x12345678u});
+  v4_uncached_prefix_load_tail.program = {
+      enc_i(0x09, 1, 1, 4),  // ADDIU prefix: point at the load word
+      enc_i(0x23, 1, 2, 0),  // LW r2
+      enc_i(0x09, 2, 3, 1),  // load-delay slot must see old r2 => r3=0x11
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_load_tail.instructions = 3u;
+  v4_uncached_prefix_load_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_load_tail.require_v4_native_load_entry_when_available =
+      true;
+  v4_uncached_prefix_load_tail.require_v4_load_tail_block_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_load_tail);
+
+  CpuCompareCase v4_uncached_prefix_load_branch{};
+  v4_uncached_prefix_load_branch.name =
+      "v4_uncached_native_alu_prefix_load_branch_delay";
+  v4_uncached_prefix_load_branch.start_pc = 0xA0010000u;
+  v4_uncached_prefix_load_branch.initial_gpr[1] = 0x800120A0u;
+  v4_uncached_prefix_load_branch.initial_gpr[2] = 0u;
+  v4_uncached_prefix_load_branch.memory.push_back({0x000120A4u, 1u});
+  v4_uncached_prefix_load_branch.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x23, 1, 2, 0),       // LW r2 <- 1
+      enc_i(0x05, 2, 0, 2),       // BNE must see old r2==0: not taken
+      enc_i(0x09, 0, 4, 0x0044),  // delay slot sees committed load
+      0xFFFFFFFFu,
+      enc_i(0x09, 0, 5, 0x0055),
+  };
+  v4_uncached_prefix_load_branch.instructions = 4u;
+  v4_uncached_prefix_load_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_load_branch.require_v4_native_load_entry_when_available =
+      true;
+  v4_uncached_prefix_load_branch.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_prefix_load_branch.require_v4_load_branch_fusion_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_load_branch);
+
+  CpuCompareCase v4_uncached_prefix_unaligned_load{};
+  v4_uncached_prefix_unaligned_load.name =
+      "v4_uncached_native_alu_prefix_unaligned_load_exit";
+  v4_uncached_prefix_unaligned_load.start_pc = 0xA0010000u;
+  v4_uncached_prefix_unaligned_load.initial_gpr[1] = 0x80012100u;
+  v4_uncached_prefix_unaligned_load.program = {
+      enc_i(0x09, 1, 1, 1),  // prefix commits r1=...101
+      enc_i(0x23, 1, 2, 0),  // unaligned LW -> interpreter exception exit
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_unaligned_load.instructions = 2u;
+  v4_uncached_prefix_unaligned_load.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_unaligned_load);
+
+  CpuCompareCase v4_uncached_load_tail{};
+  v4_uncached_load_tail.name = "v4_uncached_native_load_alu_tail";
+  v4_uncached_load_tail.start_pc = 0xA0010000u;
+  v4_uncached_load_tail.initial_gpr[1] = 0x80012000u;
+  v4_uncached_load_tail.initial_gpr[2] = 0x11111111u;
+  v4_uncached_load_tail.memory.push_back({0x00012000u, 0x12345678u});
+  v4_uncached_load_tail.program = {
+      enc_i(0x23, 1, 2, 0),       // LW schedules r2
+      enc_r(2, 0, 3, 0, 0x21),    // sees old r2
+      enc_r(2, 0, 4, 0, 0x21),    // sees loaded r2
+      0x0000000Cu,                 // SYSCALL terminates native decode
+  };
+  v4_uncached_load_tail.instructions = 3u;
+  v4_uncached_load_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_load_tail.require_v4_native_load_entry_when_available = true;
+  v4_uncached_load_tail.require_v4_load_tail_block_when_available = true;
+  cases.push_back(v4_uncached_load_tail);
+
+  CpuCompareCase v4_uncached_load_widths{};
+  v4_uncached_load_widths.name = "v4_uncached_native_load_widths";
+  v4_uncached_load_widths.start_pc = 0xA0010000u;
+  v4_uncached_load_widths.initial_gpr[1] = 0x80012000u;
+  // Little-endian bytes: 01 7F FF 80.
+  v4_uncached_load_widths.memory.push_back({0x00012000u, 0x80FF7F01u});
+  v4_uncached_load_widths.program = {
+      enc_i(0x20, 1, 2, 2), // LB   -> FFFFFFFF
+      enc_i(0x24, 1, 3, 3), // LBU  -> 00000080
+      enc_i(0x21, 1, 4, 2), // LH   -> FFFF80FF
+      enc_i(0x25, 1, 5, 2), // LHU  -> 000080FF
+      0,
+  };
+  v4_uncached_load_widths.instructions = 5u;
+  v4_uncached_load_widths.require_v4_native_entry_when_available = true;
+  v4_uncached_load_widths.require_v4_native_load_entry_when_available = true;
+  cases.push_back(v4_uncached_load_widths);
+
+  CpuCompareCase v4_cached_load_alu_branch{};
+  v4_cached_load_alu_branch.name =
+      "v4_cached_fused_load_alu_branch_delay";
+  v4_cached_load_alu_branch.start_pc = 0x80010000u;
+  v4_cached_load_alu_branch.initial_gpr[1] = 0x80012000u;
+  v4_cached_load_alu_branch.initial_gpr[2] = 0x00000010u;
+  v4_cached_load_alu_branch.memory.push_back({0x00012000u, 0x00000020u});
+  v4_cached_load_alu_branch.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x09, 2, 3, 1),
+      enc_i(0x05, 2, 0, 2),
+      enc_i(0x09, 0, 5, 0x55),
+      0u,
+  };
+  v4_cached_load_alu_branch.instructions = 4u;
+  v4_cached_load_alu_branch.require_v4_native_entry_when_available = true;
+  v4_cached_load_alu_branch.require_v4_native_load_entry_when_available = true;
+  v4_cached_load_alu_branch.require_v4_native_branch_entry_when_available = true;
+  v4_cached_load_alu_branch.require_v4_load_branch_fusion_when_available = true;
+  cases.push_back(v4_cached_load_alu_branch);
+
+  CpuCompareCase v4_uncached_load_branch_delay{};
+  v4_uncached_load_branch_delay.name =
+      "v4_uncached_fused_load_branch_delay_capture";
+  v4_uncached_load_branch_delay.start_pc = 0xA0010000u;
+  v4_uncached_load_branch_delay.initial_gpr[1] = 0x80012000u;
+  v4_uncached_load_branch_delay.initial_gpr[2] = 0u;
+  v4_uncached_load_branch_delay.memory.push_back({0x00012000u, 1u});
+  v4_uncached_load_branch_delay.program = {
+      enc_i(0x23, 1, 2, 0),
+      enc_i(0x04, 2, 0, 2),
+      enc_r(2, 0, 5, 0, 0x21),
+      0u,
+  };
+  v4_uncached_load_branch_delay.instructions = 3u;
+  v4_uncached_load_branch_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_load_branch_delay.require_v4_native_load_entry_when_available =
+      true;
+  v4_uncached_load_branch_delay.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_load_branch_delay.require_v4_load_branch_fusion_when_available =
+      true;
+  cases.push_back(v4_uncached_load_branch_delay);
+
+  CpuCompareCase v4_uncached_store_widths{};
+  v4_uncached_store_widths.name = "v4_uncached_native_store_widths";
+  v4_uncached_store_widths.start_pc = 0xA0010000u;
+  v4_uncached_store_widths.initial_gpr[1] = 0x80012000u;
+  v4_uncached_store_widths.initial_gpr[2] = 0xA1B2C3D4u;
+  v4_uncached_store_widths.memory.push_back({0x00012000u, 0x11223344u});
+  v4_uncached_store_widths.compare_memory_addresses.push_back(0x00012000u);
+  v4_uncached_store_widths.program = {
+      enc_i(0x28, 1, 2, 0), // SB
+      enc_i(0x29, 1, 2, 2), // SH
+      enc_i(0x2B, 1, 2, 0), // SW
+      0u,
+  };
+  v4_uncached_store_widths.instructions = 4u;
+  v4_uncached_store_widths.require_v4_native_entry_when_available = true;
+  v4_uncached_store_widths.require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_uncached_store_widths);
+
+  CpuCompareCase v4_uncached_store_pending_load{};
+  v4_uncached_store_pending_load.name =
+      "v4_uncached_native_store_pending_load_source";
+  v4_uncached_store_pending_load.start_pc = 0xA0010000u;
+  v4_uncached_store_pending_load.initial_gpr[1] = 0x80012020u;
+  v4_uncached_store_pending_load.initial_gpr[2] = 0x11223344u;
+  v4_uncached_store_pending_load.initial_load_reg = 2u;
+  v4_uncached_store_pending_load.initial_load_value = 0xAABBCCDDu;
+  v4_uncached_store_pending_load.memory.push_back({0x00012020u, 0u});
+  v4_uncached_store_pending_load.compare_memory_addresses.push_back(
+      0x00012020u);
+  v4_uncached_store_pending_load.program = {
+      enc_i(0x2B, 1, 2, 0), // must store old r2, then delayed load commits
+      0xFFFFFFFFu,           // stop V4 tail formation after the tested store
+  };
+  v4_uncached_store_pending_load.instructions = 1u;
+  v4_uncached_store_pending_load.require_v4_native_entry_when_available = true;
+  v4_uncached_store_pending_load.require_v4_native_store_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_store_pending_load);
+
+  CpuCompareCase v4_uncached_store_alu_tail{};
+  v4_uncached_store_alu_tail.name = "v4_uncached_native_store_alu_tail";
+  v4_uncached_store_alu_tail.start_pc = 0xA0010000u;
+  v4_uncached_store_alu_tail.initial_gpr[1] = 0x80012040u;
+  v4_uncached_store_alu_tail.initial_gpr[2] = 0x12345678u;
+  v4_uncached_store_alu_tail.memory.push_back({0x00012040u, 0u});
+  v4_uncached_store_alu_tail.compare_memory_addresses.push_back(0x00012040u);
+  v4_uncached_store_alu_tail.program = {
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x09, 2, 3, 1),       // ADDIU
+      enc_i(0x0D, 3, 4, 0x0040),  // ORI
+      0xFFFFFFFFu,                 // stop after the intended fused tail
+  };
+  v4_uncached_store_alu_tail.instructions = 3u;
+  v4_uncached_store_alu_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_store_alu_tail.require_v4_native_store_entry_when_available = true;
+  v4_uncached_store_alu_tail.require_v4_store_tail_block_when_available = true;
+  cases.push_back(v4_uncached_store_alu_tail);
+
+  CpuCompareCase v4_uncached_prefix_store_tail{};
+  v4_uncached_prefix_store_tail.name =
+      "v4_uncached_native_alu_prefix_store_tail";
+  v4_uncached_prefix_store_tail.start_pc = 0xA0010000u;
+  v4_uncached_prefix_store_tail.initial_gpr[1] = 0x80012080u;
+  v4_uncached_prefix_store_tail.initial_gpr[2] = 0xCAFEBABEu;
+  v4_uncached_prefix_store_tail.memory.push_back({0x00012084u, 0u});
+  v4_uncached_prefix_store_tail.compare_memory_addresses.push_back(0x00012084u);
+  v4_uncached_prefix_store_tail.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x09, 2, 3, 1),       // ALU tail
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_store_tail.instructions = 3u;
+  v4_uncached_prefix_store_tail.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_store_tail.require_v4_native_store_entry_when_available =
+      true;
+  v4_uncached_prefix_store_tail.require_v4_store_tail_block_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_store_tail);
+
+  CpuCompareCase v4_uncached_prefix_store_branch{};
+  v4_uncached_prefix_store_branch.name =
+      "v4_uncached_native_alu_prefix_store_branch_delay";
+  v4_uncached_prefix_store_branch.start_pc = 0xA0010000u;
+  v4_uncached_prefix_store_branch.initial_gpr[1] = 0x800120C0u;
+  v4_uncached_prefix_store_branch.initial_gpr[2] = 0x0BADF00Du;
+  v4_uncached_prefix_store_branch.initial_gpr[3] = 1u;
+  v4_uncached_prefix_store_branch.memory.push_back({0x000120C4u, 0u});
+  v4_uncached_prefix_store_branch.compare_memory_addresses.push_back(0x000120C4u);
+  v4_uncached_prefix_store_branch.program = {
+      enc_i(0x09, 1, 1, 4),       // ADDIU prefix
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x05, 3, 0, 1),       // BNE taken
+      enc_i(0x09, 0, 4, 0x0044),  // delay slot
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_store_branch.instructions = 4u;
+  v4_uncached_prefix_store_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_prefix_store_branch.require_v4_native_store_entry_when_available =
+      true;
+  v4_uncached_prefix_store_branch.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_prefix_store_branch.require_v4_store_branch_fusion_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_store_branch);
+
+  CpuCompareCase v4_uncached_prefix_unaligned_store{};
+  v4_uncached_prefix_unaligned_store.name =
+      "v4_uncached_native_alu_prefix_unaligned_store_exit";
+  v4_uncached_prefix_unaligned_store.start_pc = 0xA0010000u;
+  v4_uncached_prefix_unaligned_store.initial_gpr[1] = 0x80012120u;
+  v4_uncached_prefix_unaligned_store.initial_gpr[2] = 0x12345678u;
+  v4_uncached_prefix_unaligned_store.program = {
+      enc_i(0x09, 1, 1, 1),  // prefix commits r1=...121
+      enc_i(0x2B, 1, 2, 0),  // unaligned SW -> interpreter exception exit
+      0xFFFFFFFFu,
+  };
+  v4_uncached_prefix_unaligned_store.instructions = 2u;
+  v4_uncached_prefix_unaligned_store.require_v4_native_entry_when_available =
+      true;
+  cases.push_back(v4_uncached_prefix_unaligned_store);
+
+  CpuCompareCase v4_uncached_store_branch{};
+  v4_uncached_store_branch.name = "v4_uncached_native_store_branch_delay";
+  v4_uncached_store_branch.start_pc = 0xA0010000u;
+  v4_uncached_store_branch.initial_gpr[1] = 0x80012060u;
+  v4_uncached_store_branch.initial_gpr[2] = 0x89ABCDEFu;
+  v4_uncached_store_branch.initial_gpr[3] = 1u;
+  v4_uncached_store_branch.memory.push_back({0x00012060u, 0u});
+  v4_uncached_store_branch.compare_memory_addresses.push_back(0x00012060u);
+  v4_uncached_store_branch.program = {
+      enc_i(0x2B, 1, 2, 0),       // SW
+      enc_i(0x09, 3, 3, 1),       // ADDIU tail => r3 = 2
+      enc_i(0x05, 3, 0, 1),       // BNE taken
+      enc_i(0x09, 0, 4, 0x0044),  // delay slot
+      0xFFFFFFFFu,
+  };
+  v4_uncached_store_branch.instructions = 4u;
+  v4_uncached_store_branch.require_v4_native_entry_when_available = true;
+  v4_uncached_store_branch.require_v4_native_store_entry_when_available = true;
+  v4_uncached_store_branch.require_v4_native_branch_entry_when_available = true;
+  v4_uncached_store_branch.require_v4_store_branch_fusion_when_available = true;
+  cases.push_back(v4_uncached_store_branch);
+
+  CpuCompareCase v4_uncached_store_smc{};
+  v4_uncached_store_smc.name = "v4_uncached_store_code_page_fallback";
+  v4_uncached_store_smc.start_pc = 0xA0010000u;
+  v4_uncached_store_smc.initial_gpr[1] =
+      v4_uncached_store_smc.start_pc + 0x0Cu;
+  v4_uncached_store_smc.initial_gpr[2] = 0xCAFEBABEu;
+  v4_uncached_store_smc.memory.push_back({0x0001000Cu, 0u});
+  v4_uncached_store_smc.compare_memory_addresses.push_back(0x0001000Cu);
+  v4_uncached_store_smc.program = {
+      enc_i(0x2B, 1, 2, 0),
+  };
+  v4_uncached_store_smc.instructions = 1u;
+  v4_uncached_store_smc.require_v4_store_smc_fallback_when_available = true;
+  cases.push_back(v4_uncached_store_smc);
+
+  CpuCompareCase v4_uncached_store_same_page_other_line{};
+  v4_uncached_store_same_page_other_line.name =
+      "v4_uncached_store_same_page_other_line_fast";
+  v4_uncached_store_same_page_other_line.start_pc = 0xA0010000u;
+  v4_uncached_store_same_page_other_line.initial_gpr[1] =
+      v4_uncached_store_same_page_other_line.start_pc + 0x40u;
+  v4_uncached_store_same_page_other_line.initial_gpr[2] = 0x13579BDFu;
+  v4_uncached_store_same_page_other_line.memory.push_back(
+      {0x00010040u, 0u});
+  v4_uncached_store_same_page_other_line.compare_memory_addresses.push_back(
+      0x00010040u);
+  v4_uncached_store_same_page_other_line.program = {
+      enc_i(0x2B, 1, 2, 0),
+      0xFFFFFFFFu,
+  };
+  v4_uncached_store_same_page_other_line.instructions = 1u;
+  v4_uncached_store_same_page_other_line.require_v4_native_entry_when_available =
+      true;
+  v4_uncached_store_same_page_other_line
+      .require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_uncached_store_same_page_other_line);
+
+  CpuCompareCase v4_uncached_resident_chain{};
+  v4_uncached_resident_chain.name = "v4_uncached_resident_chain";
+  v4_uncached_resident_chain.start_pc = 0xA0010000u;
+  // 32 baseline-native NOPs form block A. The J + delay-slot NOP form block B.
+  // On the first trip A and B are compiled separately; once B jumps back to A,
+  // the resident x64 path must take a direct known edge without returning to C++.
+  v4_uncached_resident_chain.program.assign(32u, 0u);
+  v4_uncached_resident_chain.program.push_back(
+      enc_j(0x02, v4_uncached_resident_chain.start_pc));
+  v4_uncached_resident_chain.program.push_back(0u);
+  v4_uncached_resident_chain.instructions = 100u;
+  v4_uncached_resident_chain.require_v4_native_entry_when_available = true;
+  v4_uncached_resident_chain.require_v4_native_branch_entry_when_available =
+      true;
+  v4_uncached_resident_chain.require_v4_native_chain_when_available = true;
+  cases.push_back(v4_uncached_resident_chain);
+
   append_deterministic_random_compare_cases(cases);
   return cases;
 }
@@ -3549,7 +4221,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   g_cpu_x64_jit_aggressive_native_prefix_ram_cli_override = false;
 
   LOG_INFO(
-      "CPU backend compare: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2%s",
+      "CPU backend compare: reference=Interpreter targets=Recompiler%s",
       memory_only ? " scope=memory-only" : "");
   int failures = 0;
   if (!run_gte_final_accumulator_regression()) {
@@ -3561,11 +4233,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
   if (!run_gte_writable_mac_regression()) {
     ++failures;
   }
-  const std::array<CpuExecutionMode, 4> modes = {
+  const std::array<CpuExecutionMode, 2> modes = {
       CpuExecutionMode::Interpreter,
-      CpuExecutionMode::DecodedBlockInterpreter,
-      CpuExecutionMode::X64Jit,
-      CpuExecutionMode::X64JitV2,
+      CpuExecutionMode::Recompiler,
   };
 
   for (const CpuCompareCase &test_case : make_cpu_compare_cases()) {
@@ -3681,6 +4351,163 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           cpu_compare_expected_state_pass(test_case, mode, result.state);
       bool native_check_pass = true;
       const char *native_check = "not_required";
+
+      if (mode == CpuExecutionMode::Recompiler &&
+          test_case.require_v4_clean_fallback_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool clean_fallback =
+              result.stats.native_block_entries == 0 &&
+              result.stats.jit_v4_helper_instructions >=
+                  test_case.instructions &&
+              result.stats.fallback_instructions == 0 &&
+              result.stats.interpreter_fallback_steps == 0;
+          native_check = clean_fallback ? "v4_compiled_helper"
+                                        : "v4_helper_missing";
+          native_check_pass = clean_fallback;
+        }
+      } else if (mode == CpuExecutionMode::Recompiler &&
+                 test_case.require_v4_store_smc_fallback_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool guarded =
+              result.stats.native_memory_blocks_compiled != 0u &&
+              result.stats.native_memory_fastpath_stores == 0u &&
+              result.stats.jit_v4_helper_instructions != 0u &&
+              result.stats.fallback_instructions == 0u &&
+              result.stats.interpreter_fallback_steps == 0u;
+          native_check = guarded ? "v4_store_smc_guarded"
+                                 : "v4_store_smc_not_guarded";
+          native_check_pass = guarded;
+        }
+      } else if (mode == CpuExecutionMode::Recompiler &&
+          (test_case.require_v4_native_entry_when_available ||
+           test_case.require_v4_native_load_entry_when_available ||
+           test_case.require_v4_native_store_entry_when_available ||
+           test_case.require_v4_store_tail_block_when_available ||
+           test_case.require_v4_store_branch_fusion_when_available ||
+           test_case.require_v4_load_tail_block_when_available ||
+           test_case.require_v4_load_branch_fusion_when_available ||
+           test_case.require_v4_native_branch_entry_when_available ||
+           test_case.require_v4_folded_branch_block_when_available ||
+           test_case.require_v4_page_local_invalidation_when_available ||
+           test_case.require_v4_cached_same_page_retention_when_available ||
+           test_case.require_v4_icache_revalidation_when_available ||
+           test_case.require_v4_native_chain_when_available)) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool native_entered =
+              result.stats.native_blocks_compiled != 0 &&
+              result.stats.native_block_entries != 0 &&
+              result.stats.native_instructions != 0 &&
+              result.stats.native_code_bytes != 0;
+          const bool load_entered =
+              !test_case.require_v4_native_load_entry_when_available ||
+              result.stats.native_memory_fastpath_loads != 0;
+          const bool store_entered =
+              !test_case.require_v4_native_store_entry_when_available ||
+              result.stats.native_memory_fastpath_stores != 0;
+          const bool store_tail_folded =
+              !test_case.require_v4_store_tail_block_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
+          const bool store_branch_fused =
+              !test_case.require_v4_store_branch_fusion_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_branch_tail_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
+          const bool load_tail_folded =
+              !test_case.require_v4_load_tail_block_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
+          const bool load_branch_fused =
+              !test_case.require_v4_load_branch_fusion_when_available ||
+              (result.stats.native_memory_blocks_compiled == 1u &&
+               result.stats.native_branch_tail_blocks_compiled == 1u &&
+               result.stats.native_alu_blocks_compiled == 0u &&
+               result.stats.native_block_entries == 1u);
+          const bool branch_entered =
+              !test_case.require_v4_native_branch_entry_when_available ||
+              result.stats.native_branch_tail_entries != 0;
+          const bool folded_branch =
+              !test_case.require_v4_folded_branch_block_when_available ||
+              (result.stats.native_branch_tail_blocks_compiled != 0 &&
+               result.stats.native_alu_blocks_compiled == 0);
+          const bool page_local_invalidation =
+              !test_case.require_v4_page_local_invalidation_when_available ||
+              (result.stats.invalidations != 0u &&
+               result.stats.native_blocks_compiled >= 2u &&
+               result.stats.block_count == 1u);
+          const bool cached_same_page_retained =
+              !test_case.require_v4_cached_same_page_retention_when_available ||
+              (result.stats.invalidations != 0u &&
+               result.stats.native_blocks_compiled == 1u &&
+               result.stats.block_count == 1u);
+          const bool icache_revalidated =
+              !test_case.require_v4_icache_revalidation_when_available ||
+              (result.stats.native_blocks_compiled == 1u &&
+               result.stats.block_count == 1u &&
+               result.stats.cache_misses != 0u &&
+               result.stats.cache_hits != 0u);
+          const bool chain_entered =
+              !test_case.require_v4_native_chain_when_available ||
+              (result.stats.native_chain_entries != 0 &&
+               result.stats.native_linked_transitions != 0 &&
+               result.stats.native_direct_link_transitions != 0 &&
+               result.stats.native_chain_max_blocks > 1u);
+          if (!native_entered) {
+            native_check = "v4_native_missing";
+          } else if (!load_entered) {
+            native_check = "v4_load_missing";
+          } else if (!store_entered) {
+            native_check = "v4_store_missing";
+          } else if (!store_tail_folded) {
+            native_check = "v4_store_tail_not_folded";
+          } else if (!store_branch_fused) {
+            native_check = "v4_store_branch_not_fused";
+          } else if (!load_tail_folded) {
+            native_check = "v4_load_tail_not_folded";
+          } else if (!load_branch_fused) {
+            native_check = "v4_load_branch_not_fused";
+          } else if (!branch_entered) {
+            native_check = "v4_branch_missing";
+          } else if (!folded_branch) {
+            native_check = "v4_branch_not_folded";
+          } else if (!page_local_invalidation) {
+            native_check = "v4_global_invalidation";
+          } else if (!cached_same_page_retained) {
+            native_check = "v4_cached_same_page_recompiled";
+          } else if (!icache_revalidated) {
+            native_check = "v4_icache_revalidation_missing";
+          } else if (!chain_entered) {
+            native_check = "v4_chain_missing";
+          } else {
+            native_check = "v4_native_entered";
+          }
+          native_check_pass =
+              native_entered && load_entered && store_entered &&
+              store_tail_folded && store_branch_fused &&
+              load_tail_folded && load_branch_fused &&
+              branch_entered && folded_branch && page_local_invalidation &&
+              cached_same_page_retained && icache_revalidated &&
+              chain_entered;
+        }
+      }
+
+      if (mode == CpuExecutionMode::Recompiler &&
+          result.stats.native_available &&
+          !test_case.request_irq_on_branch &&
+          (result.stats.fallback_instructions != 0u ||
+           result.stats.interpreter_fallback_steps != 0u)) {
+        native_check = "v4_interpreter_fallback";
+        native_check_pass = false;
+      }
 
       if (mode == CpuExecutionMode::X64JitV2 &&
           test_case.require_v2_native_entry_when_available) {
@@ -4264,7 +5091,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
     return 1;
   }
   LOG_INFO(
-      "CPU backend compare test passed: reference=Interpreter targets=DecodedBlockInterpreter,X64Jit,X64JitV2");
+      "CPU backend compare test passed: reference=Interpreter targets=Recompiler");
   return 0;
 }
 } // namespace

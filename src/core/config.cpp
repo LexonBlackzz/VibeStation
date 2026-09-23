@@ -52,15 +52,17 @@ CpuExecutionMode parse_cpu_mode(const std::string& v, CpuExecutionMode fallback)
     lower.erase(std::remove(lower.begin(), lower.end(), '_'), lower.end());
     if (lower == "1" || lower == "decoded" || lower == "decodedblock" ||
         lower == "blockinterpreter" || lower == "blockinterp" || lower == "block") {
-        return CpuExecutionMode::DecodedBlockInterpreter;
+        return CpuExecutionMode::Interpreter;
     }
-    if (lower == "2" || lower == "x64jit" || lower == "recompiler" ||
-        lower == "jit" || lower == "dynarec") {
-        return CpuExecutionMode::X64Jit;
-    }
-    if (lower == "3" || lower == "x64jitv2" || lower == "jitv2" ||
-        lower == "dynarecv2" || lower == "recompilerv2") {
-        return CpuExecutionMode::X64JitV2;
+    if (lower == "2" || lower == "3" || lower == "4" || lower == "5" ||
+        lower == "x64jit" || lower == "recompiler" || lower == "jit" ||
+        lower == "dynarec" || lower == "x64jitv2" || lower == "jitv2" ||
+        lower == "dynarecv2" || lower == "recompilerv2" ||
+        lower == "x64jitv3" || lower == "jitv3" || lower == "dynarecv3" ||
+        lower == "recompilerv3" || lower == "x64jitv4" ||
+        lower == "jitv4" || lower == "dynarecv4" ||
+        lower == "recompilerv4") {
+        return CpuExecutionMode::Recompiler;
     }
     if (lower == "0" || lower == "interpreter" || lower == "interp") {
         return CpuExecutionMode::Interpreter;
@@ -69,13 +71,7 @@ CpuExecutionMode parse_cpu_mode(const std::string& v, CpuExecutionMode fallback)
 }
 
 int cpu_mode_to_int(CpuExecutionMode mode) {
-    switch (mode) {
-    case CpuExecutionMode::DecodedBlockInterpreter: return 1;
-    case CpuExecutionMode::X64Jit: return 2;
-    case CpuExecutionMode::X64JitV2: return 3;
-    case CpuExecutionMode::Interpreter:
-    default: return 0;
-    }
+    return mode == CpuExecutionMode::Interpreter ? 0 : 5;
 }
 
 } // anonymous namespace

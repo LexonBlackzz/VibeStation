@@ -11,8 +11,7 @@
 // Features: 32 GPRs, HI/LO for multiply/divide, load and branch delay slots.
 
 class System;
-class CpuOptimizedBackend;
-class CpuJitV2Backend;
+class CpuRecompilerBackend;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -245,7 +244,20 @@ struct CpuBackendStats {
   u64 flushes = 0;
   u64 decoded_block_entries = 0;
   u64 native_block_entries = 0;
+  u64 native_chain_entries = 0;
+  u64 native_linked_transitions = 0;
+  u64 native_direct_link_transitions = 0;
+  u64 native_chain_invocations = 0;
+  u64 native_dispatch_missing_exits = 0;
+  u64 native_dispatch_epoch_exits = 0;
+  u64 native_dispatch_memory_exits = 0;
+  u64 native_dispatch_generation_exits = 0;
+  u64 native_dispatch_budget_exits = 0;
+  u64 native_dispatch_bail_exits = 0;
+  std::array<u64, 33> native_compiled_block_size_histogram{};
+  u64 native_chain_max_blocks = 0;
   u64 native_branch_tail_entries = 0;
+  u64 native_dynamic_jump_entries = 0;
   u64 native_branch_taken = 0;
   u64 native_branch_not_taken = 0;
   u64 native_branch_tail_to_decoded_fallbacks = 0;
@@ -351,6 +363,16 @@ struct CpuBackendStats {
   u64 decoded_instructions = 0;
   u64 native_instructions = 0;
   u64 native_cycles = 0;
+  u64 jit_v4_helper_instructions = 0;
+  // Compiled helper profiling. Timings sample the opcode handler and its
+  // instruction lifecycle, excluding translation and dispatch overhead.
+  std::array<u64, 6> jit_v4_helper_reasons{};
+  std::array<u64, 64> jit_v4_helper_primary_counts{};
+  std::array<u64, 64> jit_v4_helper_primary_samples{};
+  std::array<u64, 64> jit_v4_helper_primary_sample_ns{};
+  std::array<u64, 64> jit_v4_helper_special_counts{};
+  std::array<std::array<u64, 64>, 6> jit_v4_helper_primary_by_reason{};
+  std::array<std::array<u64, 64>, 6> jit_v4_helper_special_by_reason{};
   // JIT V2 split: inline host instructions vs generated helper-backed guest
   // instructions. Both are JIT-owned execution, but only the former are
   // directly lowered to host code.
@@ -369,6 +391,17 @@ struct CpuBackendStats {
   u64 jit_v2_state_load_delay = 0;
   u64 jit_v2_state_pc = 0;
   u64 jit_v2_state_diagnostics = 0;
+  // V3 profiling: shapes which force an architectural branch delay slot back
+  // through Cpu::step() instead of the native single-slot trampoline.
+  u64 jit_v3_delay_slot_load = 0;
+  u64 jit_v3_delay_slot_store = 0;
+  u64 jit_v3_delay_slot_control = 0;
+  u64 jit_v3_delay_slot_other = 0;
+  u64 jit_v3_icache_refill_load = 0;
+  u64 jit_v3_icache_refill_store = 0;
+  u64 jit_v3_icache_refill_control = 0;
+  u64 jit_v3_icache_refill_other = 0;
+  u64 jit_v3_icache_refill_budget = 0;
   u64 jit_v2_unsupported_lw = 0;
   u64 jit_v2_unsupported_other_load = 0;
   u64 jit_v2_unsupported_cop2 = 0;
@@ -492,8 +525,17 @@ public:
 
   // Execute one instruction and return the number of CPU cycles it consumed.
   u32 step();
+  // V4's compiled slow path binds each instruction to its opcode handler when
+  // the translation is built. It retains the normal instruction lifecycle.
+  using CompiledOpcodeFn = u32 (*)(Cpu *, u32);
+  static CompiledOpcodeFn compiled_opcode_fn(u32 instruction);
   CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
   u32 read_instruction_for_backend(u32 addr) const;
+  // V4 JIT helpers: expose the guest-visible I-cache snapshot without letting
+  // the compiler silently read newer RAM bytes behind the emulated cache.
+  bool prepare_instruction_cache_line_for_backend(u32 addr);
+  bool read_visible_instruction_for_backend(u32 addr, u32 &value) const;
+  u32 instruction_cache_generation_for_backend(u32 addr) const;
   void notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes);
   void notify_jit_code_write_only(u32 phys_or_normalized_addr,
                                   u32 size_bytes);
@@ -519,10 +561,8 @@ public:
 
 private:
   System *sys_ = nullptr;
-  std::unique_ptr<CpuOptimizedBackend> optimized_backend_;
-  std::unique_ptr<CpuJitV2Backend> jit_v2_backend_;
-  friend class CpuOptimizedBackend;
-  friend class CpuJitV2Backend;
+  std::unique_ptr<CpuRecompilerBackend> recompiler_backend_;
+  friend class CpuRecompilerBackend;
 
   // ── Registers ──────────────────────────────────────────────────
   u32 gpr_[32] = {};    // General purpose registers (r0 ≡ 0)
@@ -568,6 +608,9 @@ private:
     bool valid = false;
   };
   std::array<ICacheLine, 256> icache_ = {};
+  // Host-side translation validity only. Incremented whenever the guest-visible
+  // cache line is refilled or invalidated; not architectural guest state.
+  std::array<u32, 256> icache_generation_ = {};
 
   u64 cycles_ = 0;
   u64 gte_input_ready_cycle_ = 0;
@@ -617,6 +660,9 @@ private:
 
   // ── Instruction Decode ─────────────────────────────────────────
   void execute(u32 instruction);
+  void op_reserved_compiled(u32 instruction);
+  template <void (Cpu::*Handler)(u32)>
+  static u32 run_compiled_opcode(Cpu *cpu, u32 instruction);
 
   // Decode helpers (extract fields from instruction)
   static u32 op(u32 i) { return (i >> 26) & 0x3F; }

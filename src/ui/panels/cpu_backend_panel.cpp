@@ -19,7 +19,9 @@ namespace {
         const u64 total = stats.decoded_instructions +
             stats.native_instructions + stats.fallback_instructions;
         const u64 helper_native = std::min(
-            stats.native_instructions, stats.native_prepare_helper_calls);
+            stats.native_instructions,
+            std::max(stats.native_prepare_helper_calls,
+                     stats.jit_v4_helper_instructions));
         const u64 inline_native = stats.native_instructions - helper_native;
         ImGui::Text("Instruction mix: inline %.1f%%  helper %.1f%%  decoded %.1f%%  fallback %.1f%%",
             percent_of(inline_native, total),
@@ -49,10 +51,18 @@ namespace {
                 "Forced reason: %s",
                 cpu_forced_interpreter_reason_name(forced_reason));
         }
-        else if (requested_mode == CpuExecutionMode::X64Jit &&
+        else if ((requested_mode == CpuExecutionMode::X64Jit ||
+                  requested_mode == CpuExecutionMode::X64JitV2 ||
+                  requested_mode == CpuExecutionMode::X64JitV3 ||
+                  requested_mode == CpuExecutionMode::Recompiler) &&
                  !stats.native_available) {
+            const char *fallback_name =
+                requested_mode == CpuExecutionMode::Recompiler
+                    ? "Interpreter"
+                    : "Decoded blocks";
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.28f, 1.0f),
-                "Effective backend: Decoded blocks (native emitter unavailable)");
+                "Effective backend: %s (native emitter unavailable)",
+                fallback_name);
         }
         else {
             ImGui::Text("Effective backend: %s",

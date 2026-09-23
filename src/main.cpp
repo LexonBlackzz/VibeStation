@@ -765,16 +765,26 @@ static bool parse_cpu_execution_mode(const std::string &s,
   }
   if (v == "decoded" || v == "decodedblock" || v == "blockinterpreter" ||
       v == "blockinterp" || v == "block") {
-    out = CpuExecutionMode::DecodedBlockInterpreter;
+    out = CpuExecutionMode::Interpreter;
     return true;
   }
   if (v == "x64jit" || v == "jit" || v == "dynarec" || v == "recompiler") {
-    out = CpuExecutionMode::X64Jit;
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   if (v == "x64jitv2" || v == "jitv2" || v == "dynarecv2" ||
       v == "recompilerv2") {
-    out = CpuExecutionMode::X64JitV2;
+    out = CpuExecutionMode::Recompiler;
+    return true;
+  }
+  if (v == "x64jitv3" || v == "jitv3" || v == "dynarecv3" ||
+      v == "recompilerv3") {
+    out = CpuExecutionMode::Recompiler;
+    return true;
+  }
+  if (v == "x64jitv4" || v == "jitv4" || v == "dynarecv4" ||
+      v == "recompilerv4") {
+    out = CpuExecutionMode::Recompiler;
     return true;
   }
   return false;
@@ -1580,6 +1590,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       return "x64jit";
     case CpuExecutionMode::X64JitV2:
       return "x64jitv2";
+    case CpuExecutionMode::X64JitV3:
+      return "x64jitv3";
+    case CpuExecutionMode::Recompiler:
+      return "recompiler";
     }
     return "unknown";
   };
@@ -1589,7 +1603,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           ? CpuExecutionMode::DecodedBlockInterpreter
           : requested_mode;
   if ((requested_mode == CpuExecutionMode::X64Jit ||
-       requested_mode == CpuExecutionMode::X64JitV2) &&
+       requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3 ||
+       requested_mode == CpuExecutionMode::Recompiler) &&
       !availability.native_available) {
     std::printf(
         "CPU_BENCHMARK_RESULT status=error reason=native_unavailable "
@@ -1694,8 +1710,12 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           : (100.0 * static_cast<double>(native_instructions) /
              static_cast<double>(total_instructions));
   const u64 helper_calls =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
+          : requested_mode == CpuExecutionMode::Recompiler
+                ? delta(after.jit_v4_helper_instructions,
+                        before.jit_v4_helper_instructions)
           : delta(after.native_memory_helper_calls,
                   before.native_memory_helper_calls) +
                 delta(after.native_branch_helper_calls,
@@ -1705,14 +1725,19 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                 delta(after.native_finish_helper_calls,
                       before.native_finish_helper_calls);
   const u64 helper_assisted_instructions =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_instructions,
                   before.jit_v2_helper_instructions)
+          : requested_mode == CpuExecutionMode::Recompiler
+                ? delta(after.jit_v4_helper_instructions,
+                        before.jit_v4_helper_instructions)
           : std::min(native_instructions,
                      delta(after.native_prepare_helper_calls,
                            before.native_prepare_helper_calls));
   const u64 inline_native_instructions =
-      requested_mode == CpuExecutionMode::X64JitV2
+      (requested_mode == CpuExecutionMode::X64JitV2 ||
+       requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_inline_instructions,
                   before.jit_v2_inline_instructions)
           : native_instructions - helper_assisted_instructions;
@@ -1747,13 +1772,29 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       "fallback_instructions=%llu helper_calls=%llu cache_hits=%llu "
       "cache_misses=%llu invalidations=%llu native_code_bytes=%zu "
       "decoded_block_entries=%llu native_block_entries=%llu "
+      "native_chain_entries=%llu native_linked_transitions=%llu "
+      "native_chain_max_blocks=%llu "
       "native_alu_entries=%llu native_memory_entries=%llu "
-      "native_branch_entries=%llu "
+      "native_branch_entries=%llu native_dynamic_jump_entries=%llu "
       "native_compile_attempts=%llu native_compile_successes=%llu "
       "native_compile_failures=%llu native_blocks_compiled=%llu "
       "v2_helper_state=%llu v2_helper_icache=%llu v2_helper_irq=%llu "
       "v2_helper_unsupported=%llu v2_helper_memory=%llu "
       "v2_helper_budget=%llu v2_helper_internal=%llu "
+      "v2_state_branch_delay=%llu v2_state_load_delay=%llu "
+      "v2_state_pc=%llu v2_state_diagnostics=%llu "
+      "v3_delay_load=%llu v3_delay_store=%llu "
+      "v3_delay_control=%llu v3_delay_other=%llu "
+      "v3_icache_load=%llu v3_icache_store=%llu "
+      "v3_icache_control=%llu v3_icache_other=%llu "
+      "v3_icache_budget=%llu "
+      "v2_unsupported_lw=%llu v2_unsupported_other_load=%llu "
+      "v2_unsupported_cop2=%llu v2_unsupported_cop0=%llu "
+      "v2_unsupported_jump=%llu v2_unsupported_other_branch=%llu "
+      "v2_unsupported_special_control=%llu v2_unsupported_muldiv=%llu "
+      "v2_unsupported_store=%llu v2_unsupported_other=%llu "
+      "memfb_ram=%llu memfb_scratch=%llu memfb_bios=%llu "
+      "memfb_mmio=%llu memfb_unknown=%llu memfb_unaligned=%llu "
       "state_hash=%016llX cpu_state_hash=%016llX ram_hash=%016llX "
       "cpu_debug_hash=%016llX gpr_hash=%016llX gte_state_hash=%016llX "
       "cop0_timing_hash=%016llX cpu_cycles=%llu display_hash=%08X "
@@ -1791,12 +1832,20 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.decoded_block_entries, before.decoded_block_entries)),
       static_cast<unsigned long long>(
           delta(after.native_block_entries, before.native_block_entries)),
+      static_cast<unsigned long long>(
+          delta(after.native_chain_entries, before.native_chain_entries)),
+      static_cast<unsigned long long>(delta(after.native_linked_transitions,
+                                            before.native_linked_transitions)),
+      static_cast<unsigned long long>(after.native_chain_max_blocks),
       static_cast<unsigned long long>(delta(after.native_alu_block_entries,
                                             before.native_alu_block_entries)),
       static_cast<unsigned long long>(delta(after.native_memory_block_entries,
                                             before.native_memory_block_entries)),
       static_cast<unsigned long long>(delta(after.native_branch_tail_entries,
                                             before.native_branch_tail_entries)),
+      static_cast<unsigned long long>(
+          delta(after.native_dynamic_jump_entries,
+                before.native_dynamic_jump_entries)),
       static_cast<unsigned long long>(
           delta(after.native_compile_attempts, before.native_compile_attempts)),
       static_cast<unsigned long long>(delta(after.native_compile_successes,
@@ -1820,6 +1869,70 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
           delta(after.jit_v2_helper_budget, before.jit_v2_helper_budget)),
       static_cast<unsigned long long>(
           delta(after.jit_v2_helper_internal, before.jit_v2_helper_internal)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_branch_delay, before.jit_v2_state_branch_delay)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_load_delay, before.jit_v2_state_load_delay)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_pc, before.jit_v2_state_pc)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_state_diagnostics, before.jit_v2_state_diagnostics)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_delay_slot_load, before.jit_v3_delay_slot_load)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_delay_slot_store, before.jit_v3_delay_slot_store)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_delay_slot_control, before.jit_v3_delay_slot_control)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_delay_slot_other, before.jit_v3_delay_slot_other)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_load, before.jit_v3_icache_refill_load)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_store, before.jit_v3_icache_refill_store)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_control, before.jit_v3_icache_refill_control)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_other, before.jit_v3_icache_refill_other)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v3_icache_refill_budget, before.jit_v3_icache_refill_budget)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_lw, before.jit_v2_unsupported_lw)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other_load, before.jit_v2_unsupported_other_load)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_cop2, before.jit_v2_unsupported_cop2)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_cop0, before.jit_v2_unsupported_cop0)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_jump, before.jit_v2_unsupported_jump)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other_branch, before.jit_v2_unsupported_other_branch)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_special_control, before.jit_v2_unsupported_special_control)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_muldiv, before.jit_v2_unsupported_muldiv)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_store, before.jit_v2_unsupported_store)),
+      static_cast<unsigned long long>(
+          delta(after.jit_v2_unsupported_other, before.jit_v2_unsupported_other)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_ram_calls,
+                before.native_memory_helper_ram_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_scratchpad_calls,
+                before.native_memory_helper_scratchpad_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_bios_calls,
+                before.native_memory_helper_bios_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_mmio_calls,
+                before.native_memory_helper_mmio_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_unknown_calls,
+                before.native_memory_helper_unknown_calls)),
+      static_cast<unsigned long long>(
+          delta(after.native_memory_helper_unaligned_calls,
+                before.native_memory_helper_unaligned_calls)),
       static_cast<unsigned long long>(hashes.state),
       static_cast<unsigned long long>(hashes.cpu_state),
       static_cast<unsigned long long>(hashes.ram),
@@ -1829,6 +1942,122 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       static_cast<unsigned long long>(hashes.cop0_timing),
       static_cast<unsigned long long>(hashes.cpu_cycles), hashes.display,
       hashes.pc);
+  if (requested_mode == CpuExecutionMode::Recompiler) {
+    const u64 block_entries =
+        delta(after.native_block_entries, before.native_block_entries);
+    const u64 chain_invocations =
+        delta(after.native_chain_invocations, before.native_chain_invocations);
+    const u64 native_instruction_count =
+        delta(after.native_instructions, before.native_instructions);
+    std::array<u64, 5> sizes{};
+    for (size_t size = 1; size < after.native_compiled_block_size_histogram.size();
+         ++size) {
+      sizes[std::min<size_t>(size, 5u) - 1u] +=
+          delta(after.native_compiled_block_size_histogram[size],
+                before.native_compiled_block_size_histogram[size]);
+    }
+    std::printf(
+        "RECOMPILER_LINK_PROFILE direct=%llu blocks=%llu avg_instr=%.3f "
+        "avg_chain=%.3f sizes_1_2_3_4_5plus=%llu,%llu,%llu,%llu,%llu "
+        "exit_missing=%llu exit_epoch=%llu exit_memory=%llu "
+        "exit_generation=%llu exit_budget=%llu exit_bail=%llu\n",
+        static_cast<unsigned long long>(
+            delta(after.native_direct_link_transitions,
+                  before.native_direct_link_transitions)),
+        static_cast<unsigned long long>(block_entries),
+        block_entries == 0 ? 0.0
+                           : static_cast<double>(native_instruction_count) /
+                                 static_cast<double>(block_entries),
+        chain_invocations == 0
+            ? 0.0
+            : static_cast<double>(block_entries) /
+                  static_cast<double>(chain_invocations),
+        static_cast<unsigned long long>(sizes[0]),
+        static_cast<unsigned long long>(sizes[1]),
+        static_cast<unsigned long long>(sizes[2]),
+        static_cast<unsigned long long>(sizes[3]),
+        static_cast<unsigned long long>(sizes[4]),
+        static_cast<unsigned long long>(delta(after.native_dispatch_missing_exits,
+                                              before.native_dispatch_missing_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_epoch_exits,
+                                              before.native_dispatch_epoch_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_memory_exits,
+                                              before.native_dispatch_memory_exits)),
+        static_cast<unsigned long long>(
+            delta(after.native_dispatch_generation_exits,
+                  before.native_dispatch_generation_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_budget_exits,
+                                              before.native_dispatch_budget_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_bail_exits,
+                                              before.native_dispatch_bail_exits)));
+    std::array<u32, 64> primary_rank{};
+    std::array<u32, 64> special_rank{};
+    for (u32 opcode = 0; opcode < 64u; ++opcode) {
+      primary_rank[opcode] = opcode;
+      special_rank[opcode] = opcode;
+    }
+    const auto primary_calls = [&](u32 opcode) {
+      return delta(after.jit_v4_helper_primary_counts[opcode],
+                   before.jit_v4_helper_primary_counts[opcode]);
+    };
+    const auto special_calls = [&](u32 opcode) {
+      return delta(after.jit_v4_helper_special_counts[opcode],
+                   before.jit_v4_helper_special_counts[opcode]);
+    };
+    std::sort(primary_rank.begin(), primary_rank.end(),
+              [&](u32 a, u32 b) { return primary_calls(a) > primary_calls(b); });
+    std::sort(special_rank.begin(), special_rank.end(),
+              [&](u32 a, u32 b) { return special_calls(a) > special_calls(b); });
+    std::printf("RECOMPILER_HELPER_PROFILE reasons_irq_pc_state_opcode_compile_budget=");
+    for (size_t reason = 0; reason < after.jit_v4_helper_reasons.size();
+         ++reason) {
+      std::printf("%s%llu", reason == 0u ? "" : ",",
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_reasons[reason],
+                      before.jit_v4_helper_reasons[reason])));
+    }
+    std::printf(" primary_opcode_calls_avg_ns_state_opcode_budget=");
+    for (size_t rank = 0; rank < 10u && primary_calls(primary_rank[rank]);
+         ++rank) {
+      const u32 opcode = primary_rank[rank];
+      const u64 samples = delta(after.jit_v4_helper_primary_samples[opcode],
+                                before.jit_v4_helper_primary_samples[opcode]);
+      const u64 sample_ns = delta(after.jit_v4_helper_primary_sample_ns[opcode],
+                                  before.jit_v4_helper_primary_sample_ns[opcode]);
+      std::printf("%s%02X:%llu:%.1f:%llu:%llu:%llu",
+                  rank == 0u ? "" : ",", opcode,
+                  static_cast<unsigned long long>(primary_calls(opcode)),
+                  samples == 0u ? 0.0 : static_cast<double>(sample_ns) /
+                                             static_cast<double>(samples),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[2][opcode],
+                      before.jit_v4_helper_primary_by_reason[2][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[3][opcode],
+                      before.jit_v4_helper_primary_by_reason[3][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[5][opcode],
+                      before.jit_v4_helper_primary_by_reason[5][opcode])));
+    }
+    std::printf(" special_funct_calls_state_opcode_budget=");
+    for (size_t rank = 0; rank < 8u && special_calls(special_rank[rank]);
+         ++rank) {
+      const u32 opcode = special_rank[rank];
+      std::printf("%s%02X:%llu:%llu:%llu:%llu",
+                  rank == 0u ? "" : ",", opcode,
+                  static_cast<unsigned long long>(special_calls(opcode)),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[2][opcode],
+                      before.jit_v4_helper_special_by_reason[2][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[3][opcode],
+                      before.jit_v4_helper_special_by_reason[3][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[5][opcode],
+                      before.jit_v4_helper_special_by_reason[5][opcode])));
+    }
+    std::printf("\n");
+  }
   return 0;
 }
 
@@ -2653,7 +2882,7 @@ int main(int argc, char *argv[]) {
     if (a == "--cpu") {
       if ((i + 1) >= args.size()) {
         fprintf(stderr,
-                "WARN: --cpu requires interpreter, decoded, or x64jit\n");
+                "WARN: --cpu requires interpreter or recompiler (legacy JIT aliases are accepted)\n");
         continue;
       }
       CpuExecutionMode parsed = CpuExecutionMode::Interpreter;
@@ -2674,12 +2903,12 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--jit" || a == "--x64-jit" || a == "--recompiler") {
       g_cpu_execution_mode_cli_override = true;
-      g_cpu_execution_mode_cli_value = CpuExecutionMode::X64Jit;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::Recompiler;
       continue;
     }
     if (a == "--decoded" || a == "--block-interpreter") {
       g_cpu_execution_mode_cli_override = true;
-      g_cpu_execution_mode_cli_value = CpuExecutionMode::DecodedBlockInterpreter;
+      g_cpu_execution_mode_cli_value = CpuExecutionMode::Interpreter;
       continue;
     }
     const int obsolete_cpu_args = obsolete_cpu_flag_arity(a);
@@ -2688,7 +2917,7 @@ int main(int argc, char *argv[]) {
         std::fprintf(
             stderr,
             "WARN: Obsolete dynarec tuning flags are ignored; select only "
-            "Interpreter, Decoded, or x64 JIT.\n");
+            "Interpreter or Recompiler.\n");
         warned_obsolete_cpu_flag = true;
       }
       if (obsolete_cpu_args == 1 && (i + 1) < args.size()) {
