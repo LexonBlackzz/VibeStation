@@ -7,6 +7,8 @@
 #include <string>
 
 struct SDL_Window;
+struct _SDL_GameController;
+typedef struct _SDL_GameController SDL_GameController;
 typedef void* SDL_GLContext;
 
 namespace ps2::ui {
@@ -24,6 +26,8 @@ public:
 
 private:
     void process_events(bool& quit);
+    void update_pad_input();
+    void update_audio();
     void render_ui();
     void update_display_texture();
     void menu_bar();
@@ -47,6 +51,8 @@ private:
 
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_context_ = nullptr;
+    SDL_GameController* controller_ = nullptr;
+    unsigned int audio_device_ = 0;
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
     unsigned int display_texture_ = 0;
