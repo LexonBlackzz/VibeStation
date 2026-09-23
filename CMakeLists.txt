@@ -140,6 +140,7 @@ set(VIBESTATION_SOURCES
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
     src/ui/app.cpp
+    src/ui/mobile_ui.cpp
     src/ui/app_discord_presence.cpp
     src/ui/input_bindings.cpp
     src/ui/output_resolution_utils.cpp
