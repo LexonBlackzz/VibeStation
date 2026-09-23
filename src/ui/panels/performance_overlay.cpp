@@ -798,10 +798,6 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.decoded_instructions),
             static_cast<unsigned long long>(backend.native_instructions),
             static_cast<unsigned long long>(backend.fallback_instructions));
-        ImGui::Text("JIT V2 native split: inline %llu  helper-backed %llu  helper entries %llu",
-            static_cast<unsigned long long>(backend.jit_v2_inline_instructions),
-            static_cast<unsigned long long>(backend.jit_v2_helper_instructions),
-            static_cast<unsigned long long>(backend.jit_v2_helper_entries));
         if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
             ImGui::Text("Recompiler opcode helpers: %llu instructions",
                 static_cast<unsigned long long>(
