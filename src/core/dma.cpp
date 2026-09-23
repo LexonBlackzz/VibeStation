@@ -117,6 +117,7 @@ DmaController::DmaController()
 DmaController::~DmaController() = default;
 
 void DmaController::reset() {
+  active_channel_mask_ = 0;
   for (auto &ch : channels_) {
     ch = {};
   }
@@ -132,6 +133,25 @@ void DmaController::reset() {
   }
   dpcr_ = 0x07654321;
   dicr_ = 0;
+}
+
+void DmaController::refresh_active_channel(int channel) {
+  if (channel < 0 || channel >= 7) {
+    return;
+  }
+  const u8 bit = static_cast<u8>(1u << channel);
+  if (channels_[channel].is_active()) {
+    active_channel_mask_ |= bit;
+  } else {
+    active_channel_mask_ &= static_cast<u8>(~bit);
+  }
+}
+
+void DmaController::rebuild_active_channel_mask() {
+  active_channel_mask_ = 0;
+  for (int channel = 0; channel < 7; ++channel) {
+    refresh_active_channel(channel);
+  }
 }
 
 const DmaController::TransferDebug *DmaController::transfer_debug(u32 id) const {
@@ -237,6 +257,7 @@ void DmaController::write(u32 offset, u32 value) {
         value = sanitized;
       }
       ch.channel_ctrl = value;
+      refresh_active_channel(channel);
       register_write_debug_[channel].chcr_pc =
           sys_ ? sys_->cpu().pc() : 0u;
       register_write_debug_[channel].chcr_cycle =
@@ -853,6 +874,7 @@ void DmaController::transfer_complete(int channel) {
   ch.channel_ctrl &= ~(1u << 24); // Disable
   ch.channel_ctrl &= ~(1u << 28); // Clear trigger
   ch.block_words_remaining = 0;
+  refresh_active_channel(channel);
   // Keep MDEC-out reorder state across DMA1 transfer boundaries.
   // Some clients issue a sequence of DMA1 transfers while consuming one
   // continuous MDEC output stream; resetting here can desynchronize macroblock
@@ -874,6 +896,9 @@ void DmaController::transfer_complete(int channel) {
 }
 
 void DmaController::tick() {
+  if (active_channel_mask_ == 0u) {
+    return;
+  }
   const bool profile_detailed = g_profile_detailed_timing;
   // Check if any channels need to start
   for (int i = 0; i < 7; i++) {
