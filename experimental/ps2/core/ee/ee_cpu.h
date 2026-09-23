@@ -68,6 +68,7 @@ public:
     // The caller is responsible for advancing the other devices by eight
     // cycles and for guarding against interrupts within that interval.
     bool skip_bios_idle_iteration();
+    bool skip_bios_idle_iterations(u32 iterations);
     // Retire verified iterations of the BIOS's 16-byte RAM clear loop.
     bool skip_bios_zero_loop(u32 iterations);
     bool skip_bios_nibble_loop(u32 iterations);
@@ -76,6 +77,9 @@ public:
     bool skip_bios_copy_iteration();
     bool skip_bios_copy_iterations(u32 iterations);
     bool skip_bios_mmio_poll_iteration();
+    u32 skip_bios_mmio_poll_iterations(u32 max_iterations);
+    bool skip_bios_literal_iteration();
+    u32 skip_bios_literal_iterations(u32 max_iterations);
 
     [[nodiscard]] const EeCpuState& state() const { return state_; }
     [[nodiscard]] EeCpuState& state() { return state_; }
@@ -93,6 +97,7 @@ public:
     void set_vu0_micro_running(bool running);
 
 private:
+    bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
     [[nodiscard]] static u64 sign_extend_word(u32 value);

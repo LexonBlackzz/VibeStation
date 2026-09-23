@@ -25,7 +25,9 @@ namespace ps2::ui {
 
 bool Ps2App::init() {
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+    // Input is currently keyboard-driven; initializing the controller
+    // subsystem here only delays opening the BIOS window.
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
@@ -1407,12 +1409,13 @@ void Ps2App::update_emulation() {
     // During blank-screen bootstrap, run longer slices and avoid waiting for
     // VSync on frames that cannot yet show BIOS pixels. Restore normal frame
     // pacing as soon as the composed display becomes visible.
-    constexpr u64 kChunkInstructions = 8192;
+    constexpr u64 kNormalChunkInstructions = 8192;
+    constexpr u64 kBootstrapChunkInstructions = 1'000'000;
     constexpr u64 kNormalMaxInstructionsPerFrame = 500000;
-    constexpr u64 kBootstrapMaxInstructionsPerFrame = 5000000;
+    constexpr u64 kBootstrapMaxInstructionsPerFrame = 250'000'000;
     constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(14);
     constexpr auto kBootstrapCpuTimeSlice =
-        std::chrono::milliseconds(50);
+        std::chrono::seconds(6);
 
     // PCRTC can become valid while it still scans an untouched black buffer.
     // Keep the larger bootstrap slice until the composed display actually
@@ -1441,10 +1444,16 @@ void Ps2App::update_emulation() {
            !system_.halted()) {
         const u64 budget =
             std::min<u64>(
-                kChunkInstructions,
+                bootstrap_turbo ? kBootstrapChunkInstructions :
+                    kNormalChunkInstructions,
                 max_instructions - executed);
         const u64 ran = system_.run_ee(budget, error);
         executed += ran;
+
+        if (bootstrap_turbo) {
+            system_.refresh_display();
+            if (system_.gs_display().has_visible_pixels()) break;
+        }
 
         if (ran == 0 || !error.empty() ||
             std::chrono::steady_clock::now() >= deadline) {

@@ -19,6 +19,27 @@ The standalone graphical executable is `VibeStationPS2Lab`. A headless
 and an optional EE instruction budget to print the exact EE/IOP boundary
 without starting the UI.
 
+### Windows profile-guided fast boot
+
+For the fastest BIOS startup on an MSVC x64 build, train a profile with your
+own 4 MiB ROM0 BIOS and then build the graphical executable:
+
+```powershell
+.\experimental\ps2\scripts\build-pgo.ps1 -BiosPath 'C:\path\to\your\bios.bin'
+.\build-ps2-pgo\Release\VibeStationPS2Lab.exe --bios 'C:\path\to\your\bios.bin'
+```
+
+The script first runs an instrumented 212-million-instruction BIOS trace,
+then uses that profile to optimize the shared PS2 core in both the trace and
+the app. Training takes longer than a normal boot and is needed again after
+core code changes. The BIOS and generated profile stay local; neither is
+included in the repository. An installed Visual Studio MSVC x64 toolchain is
+required. On the development machine, the optimized first visible headless
+frame took about 4.7 seconds, and the graphical capture reached it in about
+4.9 seconds from process entry. Results depend on BIOS, hardware, and host
+load. While the screen is blank, the UI prioritizes uninterrupted emulation
+and may not respond to input until the first visible frame.
+
 On Windows, opening `VibeStationPS2Lab.exe` normally creates a persistent
 graphical window. If `scph39001.bin` is present in the current user's
 Downloads folder, the app loads and starts it automatically. Otherwise use

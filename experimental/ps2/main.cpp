@@ -1,6 +1,7 @@
 #include "ui/ps2_app.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -30,6 +31,7 @@ std::string find_downloads_bios() {
 } // namespace
 
 int main(int argc, char** argv) {
+    const auto startup_clock = std::chrono::steady_clock::now();
     std::string bios_path;
     std::string capture_path;
     unsigned long long capture_after_ee = 0;
@@ -90,6 +92,12 @@ int main(int argc, char** argv) {
     }
 
     const int result = app.run();
+    if (!capture_path.empty()) {
+        std::fprintf(stdout, "UI_CAPTURE_WALL_MS=%lld\n",
+            static_cast<long long>(std::chrono::duration_cast<
+                std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - startup_clock).count()));
+    }
     app.shutdown();
     return result;
 }

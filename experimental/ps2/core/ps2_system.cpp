@@ -25,6 +25,7 @@ void Ps2System::reset(u32 entry_point) {
     skipped_bios_copy_iterations_ = 0;
     skipped_bios_mmio_poll_iterations_ = 0;
     skipped_iop_idle_pairs_ = 0;
+    skipped_bios_literal_iterations_ = 0;
     idle_skip_reasons_.fill(0);
 }
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
@@ -176,7 +177,8 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
     }
 }
 bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(iop_.halted()){error=iop_.halt_reason();return false;}if(!iop_.step(error))return false;sif_dma_.tick_iop(iop_bus_);return true;}
-u64 Ps2System::try_skip_bios_idle_iteration(std::string& error) {
+u64 Ps2System::try_skip_bios_idle_iterations(
+    u64 budget, std::string& error) {
     constexpr u64 kIdleInstructions = 8u;
     if (ee_.state().pc != 0x00081FC0u) return 0;
     const u16 active_dma =
@@ -225,6 +227,34 @@ u64 Ps2System::try_skip_bios_idle_iteration(std::string& error) {
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0) {
         ++idle_skip_reasons_[5]; return 0;
+    }
+    if (!iop_.halted() &&
+        (iop_pc == 0x0000AE94u || iop_pc == 0x0000AE98u) &&
+        !sif_dma_.iop_completion_pending()) {
+        u64 iterations = std::min<u64>(4096u, budget / kIdleInstructions);
+        iterations = std::min<u64>(iterations,
+            (video_timing_.cycles_to_transition() - 1u) /
+                kIdleInstructions);
+        const u32 distance = cpu.cop0[11] - cpu.cop0[9];
+        if (distance != 0u) {
+            iterations = std::min<u64>(iterations,
+                (static_cast<u64>(distance) - 1u) /
+                    kIdleInstructions);
+        }
+        while (iterations > 1u &&
+               !iop_bus_.can_tick_event_free(iterations)) {
+            iterations >>= 1u;
+        }
+        if (iterations > 1u &&
+            ee_.skip_bios_idle_iterations(
+                static_cast<u32>(iterations))) {
+            const u64 cycles = iterations * kIdleInstructions;
+            scheduler_.run_until(scheduler_.now() + cycles, {});
+            video_timing_.tick(cycles, hw_, iop_intc_);
+            advance_iop_for_ee_cycles(cycles, error);
+            skipped_bios_idle_iterations_ += iterations;
+            return cycles;
+        }
     }
     if (!ee_.skip_bios_idle_iteration()) {
         ++idle_skip_reasons_[6]; return 0;
@@ -462,11 +492,11 @@ u64 Ps2System::try_skip_bios_copy_iterations(
     return cycles;
 }
 
-u64 Ps2System::try_skip_bios_mmio_poll_iteration(
-    std::string& error) {
-    constexpr u64 kCycles = 7u;
+u64 Ps2System::try_skip_bios_mmio_poll_iterations(
+    u64 budget, std::string& error) {
+    constexpr u64 kCyclesPerIteration = 7u;
     if (!scheduler_.empty() ||
-        video_timing_.cycles_to_transition() <= kCycles ||
+        video_timing_.cycles_to_transition() <= kCyclesPerIteration ||
         hw_.timer_irq_possible() ||
         sif_dma_.ee_completion_pending() || vu0_.running() ||
         vu1_.running() || gs_.irq_pending() ||
@@ -483,12 +513,85 @@ u64 Ps2System::try_skip_bios_mmio_poll_iteration(
     if ((cause & status & 0x0000FF00u) != 0 &&
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0) return 0;
-    if (!ee_.skip_bios_mmio_poll_iteration()) return 0;
-
+    u64 iterations = std::min<u64>(4096u, budget / kCyclesPerIteration);
+    iterations = std::min<u64>(iterations,
+        (video_timing_.cycles_to_transition() - 1u) /
+            kCyclesPerIteration);
+    const u32 distance = cpu.cop0[11] - cpu.cop0[9];
+    if (distance != 0u) {
+        iterations = std::min<u64>(iterations,
+            (static_cast<u64>(distance) - 1u) / kCyclesPerIteration);
+    }
+    if (iterations == 0u) return 0;
+    if (sif_dma_.iop_completion_pending() ||
+        iop_bus_.interrupt_pending() ||
+        (iop_.state().pc != 0x0000AE94u &&
+         iop_.state().pc != 0x0000AE98u)) iterations = 1u;
+    while (iterations > 1u) {
+        const u64 iop_steps =
+            (ee_iop_phase_ + iterations * kCyclesPerIteration) / 8u;
+        if (iop_bus_.can_tick_event_free(iop_steps)) break;
+        iterations >>= 1u;
+    }
+    iterations = ee_.skip_bios_mmio_poll_iterations(
+        static_cast<u32>(iterations));
+    if (iterations == 0u) return 0;
+    const u64 kCycles = iterations * kCyclesPerIteration;
     scheduler_.run_until(scheduler_.now() + kCycles, {});
     video_timing_.tick(kCycles, hw_, iop_intc_);
     advance_iop_for_ee_cycles(kCycles, error);
-    ++skipped_bios_mmio_poll_iterations_;
+    skipped_bios_mmio_poll_iterations_ += iterations;
+    return kCycles;
+}
+
+u64 Ps2System::try_skip_bios_literal_iterations(
+    u64 budget, std::string& error) {
+    constexpr u64 kCyclesPerIteration = 22u;
+    if (!scheduler_.empty() ||
+        video_timing_.cycles_to_transition() <= kCyclesPerIteration ||
+        hw_.timer_irq_possible() || sif_dma_.ee_completion_pending() ||
+        sif_dma_.iop_completion_pending() ||
+        vu0_.running() || vu1_.running() || gs_.irq_pending() ||
+        bus_.intc_pending() || bus_.dmac_pending() ||
+        iop_bus_.interrupt_pending()) return 0;
+    const u32 iop_pc = iop_.state().pc;
+    if (iop_pc != 0x0000AE94u && iop_pc != 0x0000AE98u) return 0;
+    const u16 active_dma =
+        hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
+    const u16 sif_channels = (1u << 5) | (1u << 6);
+    if ((active_dma & ~sif_channels) != 0u ||
+        ((active_dma & sif_channels) &
+            iop_bus_.sif_dma_ready_mask()) != 0u) return 0;
+    const auto& cpu = ee_.state();
+    const u32 status = cpu.cop0[12];
+    const u32 cause = cpu.cop0[13] & ~0x00000C00u;
+    if ((cause & status & 0x0000FF00u) != 0 &&
+        (status & 0x00010001u) == 0x00010001u &&
+        (status & 0x6u) == 0) return 0;
+    u64 iterations = std::min<u64>(4096u, budget / kCyclesPerIteration);
+    iterations = std::min<u64>(iterations,
+        (video_timing_.cycles_to_transition() - 1u) /
+            kCyclesPerIteration);
+    const u32 distance = cpu.cop0[11] - cpu.cop0[9];
+    if (distance != 0u) {
+        iterations = std::min<u64>(iterations,
+            (static_cast<u64>(distance) - 1u) / kCyclesPerIteration);
+    }
+    while (iterations != 0u) {
+        const u64 iop_steps =
+            (ee_iop_phase_ + iterations * kCyclesPerIteration) / 8u;
+        if (iop_bus_.can_tick_event_free(iop_steps)) break;
+        iterations >>= 1u;
+    }
+    if (iterations == 0u) return 0;
+    iterations = ee_.skip_bios_literal_iterations(
+        static_cast<u32>(iterations));
+    if (iterations == 0u) return 0;
+    const u64 kCycles = iterations * kCyclesPerIteration;
+    scheduler_.run_until(scheduler_.now() + kCycles, {});
+    video_timing_.tick(kCycles, hw_, iop_intc_);
+    advance_iop_for_ee_cycles(kCycles, error);
+    skipped_bios_literal_iterations_ += iterations;
     return kCycles;
 }
 
@@ -499,7 +602,8 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     while(executed<instruction_budget){
         if (instruction_budget - executed >= 8u &&
             ee_.state().pc == 0x00081FC0u) {
-            const u64 skipped = try_skip_bios_idle_iteration(error);
+            const u64 skipped = try_skip_bios_idle_iterations(
+                instruction_budget - executed, error);
             if (skipped != 0u) {
                 executed += skipped;
                 if (!error.empty()) break;
@@ -534,7 +638,8 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
             }
         }
         if (ee_.state().pc == 0x000826B0u ||
-            ee_.state().pc == 0x00252758u) {
+            ee_.state().pc == 0x00252758u ||
+            ee_.state().pc == 0x00252DE8u) {
             const u64 skipped = try_skip_bios_countdown_wait(
                 instruction_budget - executed, error);
             if (skipped != 0u) {
@@ -543,7 +648,8 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
-        if (ee_.state().pc == 0x00200DE8u &&
+        if ((ee_.state().pc == 0x00200DE8u ||
+             ee_.state().pc == 0x00100BE0u) &&
             instruction_budget - executed >= 7u) {
             const u64 skipped = try_skip_bios_copy_iterations(
                 instruction_budget - executed, error);
@@ -554,9 +660,21 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
             }
         }
         if ((ee_.state().pc == 0x8000DAD0u ||
-             ee_.state().pc == 0x00082180u) &&
+             ee_.state().pc == 0x00082180u ||
+             ee_.state().pc == 0x00266118u) &&
             instruction_budget - executed >= 7u) {
-            const u64 skipped = try_skip_bios_mmio_poll_iteration(error);
+            const u64 skipped = try_skip_bios_mmio_poll_iterations(
+                instruction_budget - executed, error);
+            if (skipped != 0u) {
+                executed += skipped;
+                if (!error.empty()) break;
+                continue;
+            }
+        }
+        if (ee_.state().pc == 0x00200D70u &&
+            instruction_budget - executed >= 22u) {
+            const u64 skipped = try_skip_bios_literal_iterations(
+                instruction_budget - executed, error);
             if (skipped != 0u) {
                 executed += skipped;
                 if (!error.empty()) break;

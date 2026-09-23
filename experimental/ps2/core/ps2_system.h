@@ -67,18 +67,20 @@ public:
     u64 skipped_bios_copy_iterations() const { return skipped_bios_copy_iterations_; }
     u64 skipped_bios_mmio_poll_iterations() const { return skipped_bios_mmio_poll_iterations_; }
     u64 skipped_iop_idle_pairs() const { return skipped_iop_idle_pairs_; }
+    u64 skipped_bios_literal_iterations() const { return skipped_bios_literal_iterations_; }
     const std::array<u64, 8>& idle_skip_reasons() const { return idle_skip_reasons_; }
 private:
     bool advance_iop_for_ee_step(std::string& error);
     bool step_ee_core(std::string& error);
     void advance_iop_for_ee_cycles(u64 cycles, std::string& error);
-    u64 try_skip_bios_idle_iteration(std::string& error);
+    u64 try_skip_bios_idle_iterations(u64 budget, std::string& error);
     u64 try_skip_bios_zero_loop(u64 budget, std::string& error);
     u64 try_skip_bios_nibble_loop(u64 budget, std::string& error);
     u64 try_skip_bios_count_wait(u64 budget, std::string& error);
     u64 try_skip_bios_countdown_wait(u64 budget, std::string& error);
     u64 try_skip_bios_copy_iterations(u64 budget, std::string& error);
-    u64 try_skip_bios_mmio_poll_iteration(std::string& error);
+    u64 try_skip_bios_mmio_poll_iterations(u64 budget, std::string& error);
+    u64 try_skip_bios_literal_iterations(u64 budget, std::string& error);
     void reset_iop_subsystem();
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
     EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{}; GsDisplay gs_display_{};
@@ -92,6 +94,7 @@ private:
     u64 skipped_bios_copy_iterations_=0;
     u64 skipped_bios_mmio_poll_iterations_=0;
     u64 skipped_iop_idle_pairs_=0;
+    u64 skipped_bios_literal_iterations_=0;
     std::array<u64, 8> idle_skip_reasons_{};
 };
 } // namespace ps2

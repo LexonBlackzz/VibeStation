@@ -1012,6 +1012,8 @@ int main(int argc, char** argv) {
               << system.skipped_bios_mmio_poll_iterations() << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="
+              << system.skipped_bios_literal_iterations() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;

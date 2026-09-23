@@ -12,7 +12,6 @@
 
 namespace ps2 {
 namespace {
-
 std::string hex32(u32 value) {
     std::ostringstream out;
     out << "0x" << std::uppercase << std::hex
@@ -2928,10 +2927,15 @@ bool EeCpu::execute_mmi(
 }
 
 bool EeCpu::skip_bios_idle_iteration() {
+    return skip_bios_idle_iterations(1u);
+}
+
+bool EeCpu::skip_bios_idle_iterations(u32 iterations) {
     constexpr u32 kIdlePc = 0x00081FC0u;
     constexpr std::array<u32, 8> kIdleCode = {
         0u, 0u, 0u, 0u, 0u, 0u, 0x1000FFF9u, 0u};
-    if (halted_ || state_.pc != kIdlePc ||
+    if (iterations == 0u || iterations > 0x1FFFFFFFu ||
+        halted_ || state_.pc != kIdlePc ||
         state_.next_pc != kIdlePc + 4u || next_is_delay_slot_) {
         return false;
     }
@@ -2941,17 +2945,18 @@ bool EeCpu::skip_bios_idle_iteration() {
     // Compare match: that interrupt must be observed at its exact cycle.
     const u32 count = state_.cop0[9];
     const u32 distance_to_compare = state_.cop0[11] - count;
-    if (distance_to_compare != 0u && distance_to_compare <= 8u) {
+    const u32 cycles = iterations * 8u;
+    if (distance_to_compare != 0u && distance_to_compare <= cycles) {
         return false;
     }
     state_.cop0[13] &= ~0x00000C00u;
-    state_.cop0[9] += 8u;
-    state_.instructions_executed += 8u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
     state_.last_pc = kIdlePc + 0x1Cu;
     state_.last_instruction = 0u;
     current_is_delay_slot_ = true;
     next_is_delay_slot_ = false;
-    bus_.tick(8u);
+    bus_.tick(cycles);
     return true;
 }
 
@@ -3074,7 +3079,8 @@ u32 EeCpu::skip_bios_count_wait(u32 max_iterations) {
 u32 EeCpu::skip_bios_countdown_wait(u32 max_iterations) {
     const u32 pc = state_.pc;
     const bool first_loop = pc == 0x000826B0u;
-    if ((!first_loop && pc != 0x00252758u) ||
+    if ((!first_loop && pc != 0x00252758u &&
+         pc != 0x00252DE8u) ||
         max_iterations == 0u || halted_ ||
         state_.next_pc != pc + 4u || next_is_delay_slot_) return 0;
     const std::array<u32, 7> code = {
@@ -3112,15 +3118,16 @@ bool EeCpu::skip_bios_copy_iteration() {
 }
 
 bool EeCpu::skip_bios_copy_iterations(u32 iterations) {
-    constexpr u32 kLoopPc = 0x00200DE8u;
+    const u32 pc = state_.pc;
     constexpr std::array<u32, 7> kLoopCode = {
         0x90A20000u, 0x2484FFFFu, 0x24A50001u,
         0xA2020000u, 0x26100001u, 0x1480FFFAu, 0u};
-    if (iterations == 0u || halted_ || state_.pc != kLoopPc ||
-        state_.next_pc != kLoopPc + 4u || next_is_delay_slot_ ||
+    if (iterations == 0u || halted_ ||
+        (pc != 0x00200DE8u && pc != 0x00100BE0u) ||
+        state_.next_pc != pc + 4u || next_is_delay_slot_ ||
         state_.gpr[4].lo < iterations ||
         state_.gpr[4].lo > 0x7FFFFFFFu) return false;
-    if (!bus_.matches_code(kLoopPc, kLoopCode)) return false;
+    if (!bus_.matches_code(pc, kLoopCode)) return false;
     const u32 distance = state_.cop0[11] - state_.cop0[9];
     const u32 cycles = 7u * iterations;
     if (distance != 0u && distance <= cycles) return false;
@@ -3131,7 +3138,7 @@ bool EeCpu::skip_bios_copy_iterations(u32 iterations) {
         state_.gpr[16].lo + iterations > 0x02000000u) return false;
     const u32 src = static_cast<u32>(state_.gpr[5].lo);
     const u32 dst = static_cast<u32>(state_.gpr[16].lo);
-    if (dst < kLoopPc + 28u && dst + iterations > kLoopPc) return false;
+    if (dst < pc + 28u && dst + iterations > pc) return false;
     u8 value = 0;
     if (!bus_.copy_ram_forward(dst, src, iterations, value)) return false;
 
@@ -3142,11 +3149,11 @@ bool EeCpu::skip_bios_copy_iterations(u32 iterations) {
     state_.gpr[5].lo = sign_extend_word(src + iterations);
     state_.gpr[16].lo = sign_extend_word(dst + iterations);
     state_.gpr[0] = {};
-    state_.last_pc = kLoopPc + 24u;
+    state_.last_pc = pc + 24u;
     state_.last_instruction = 0u;
     if (final_iteration) {
-        state_.pc = kLoopPc + 28u;
-        state_.next_pc = kLoopPc + 32u;
+        state_.pc = pc + 28u;
+        state_.next_pc = pc + 32u;
     }
     state_.cop0[13] &= ~0x00000C00u;
     state_.cop0[9] += cycles;
@@ -3160,27 +3167,32 @@ bool EeCpu::skip_bios_copy_iterations(u32 iterations) {
 bool EeCpu::skip_bios_mmio_poll_iteration() {
     const u32 pc = state_.pc;
     const bool intc_poll = pc == 0x8000DAD0u;
-    if ((!intc_poll && pc != 0x00082180u) || halted_ ||
+    const bool bios_intc_poll = pc == 0x00266118u;
+    if ((!intc_poll && !bios_intc_poll && pc != 0x00082180u) || halted_ ||
         state_.next_pc != pc + 4u || next_is_delay_slot_) return false;
     const std::array<u32, 7> code = {
         intc_poll ? 0x8C820000u : 0x8C620000u,
-        intc_poll ? 0x30420004u : 0x00441024u,
-        0u, 0u, 0u, 0x1040FFFAu, 0x3C021000u};
+        intc_poll || bios_intc_poll ? 0x30420004u : 0x00441024u,
+        0u, 0u, 0u, 0x1040FFFAu,
+        bios_intc_poll ? 0x24020004u : 0x3C021000u};
     if (!bus_.matches_code(pc, code)) return false;
     const u32 address_reg = intc_poll ? 4u : 3u;
-    const u32 address = intc_poll ? 0x1000F000u : 0x1000F230u;
+    const u32 address = intc_poll || bios_intc_poll ?
+        0x1000F000u : 0x1000F230u;
     if (state_.gpr[address_reg].lo != address ||
-        (!intc_poll && state_.gpr[4].lo != 0x00040000u)) return false;
+        (!intc_poll && !bios_intc_poll &&
+         state_.gpr[4].lo != 0x00040000u)) return false;
     u32 value = 0;
     if (!bus_.read32(address, value) ||
-        (value & (intc_poll ? 4u : 0x00040000u)) != 0u) return false;
+        (value & (intc_poll || bios_intc_poll ?
+                  4u : 0x00040000u)) != 0u) return false;
     const u32 distance = state_.cop0[11] - state_.cop0[9];
     if (distance != 0u && distance <= 7u) return false;
 
-    state_.gpr[2].lo = 0x10000000u;
+    state_.gpr[2].lo = bios_intc_poll ? 4u : 0x10000000u;
     state_.gpr[0] = {};
     state_.last_pc = pc + 24u;
-    state_.last_instruction = 0x3C021000u;
+    state_.last_instruction = code[6];
     state_.cop0[13] &= ~0x00000C00u;
     state_.cop0[9] += 7u;
     state_.instructions_executed += 7u;
@@ -3188,6 +3200,128 @@ bool EeCpu::skip_bios_mmio_poll_iteration() {
     next_is_delay_slot_ = false;
     bus_.tick(7u);
     return true;
+}
+
+u32 EeCpu::skip_bios_mmio_poll_iterations(u32 max_iterations) {
+    if (max_iterations == 0u || !skip_bios_mmio_poll_iteration())
+        return 0u;
+    // The caller permits more than one iteration only while the polled
+    // interrupt source and code cannot change. Every iteration returns to
+    // the same PC with the same register result and branch-delay state.
+    if (max_iterations > 1u) {
+        const u32 extra_cycles = (max_iterations - 1u) * 7u;
+        state_.cop0[9] += extra_cycles;
+        state_.instructions_executed += extra_cycles;
+        bus_.tick(extra_cycles);
+    }
+    return max_iterations;
+}
+
+bool EeCpu::skip_bios_literal_iteration() {
+    return skip_bios_literal_iteration_impl(true);
+}
+
+bool EeCpu::skip_bios_literal_iteration_impl(bool verify_code) {
+    constexpr u32 kPc = 0x00200D70u;
+    constexpr std::array<u32, 2> kEntry = {
+        0x16200004u, 0x268781C8u};
+    constexpr std::array<u32, 7> kInput = {
+        0x8CE50014u, 0x8CE20004u, 0x90A60000u,
+        0x24A50001u, 0x00551024u, 0x1040001Cu,
+        0xACE50014u};
+    constexpr std::array<u32, 13> kOutput = {
+        0xA2060000u, 0x26100001u, 0x8E6381C8u,
+        0x02121023u, 0x10430008u, 0x266481C8u,
+        0x0062102Bu, 0x14400005u, 0x2631FFFFu,
+        0x8C820004u, 0x00021040u, 0x1000FFCDu,
+        0xAC820004u};
+    if (halted_ || state_.pc != kPc ||
+        state_.next_pc != kPc + 4u || next_is_delay_slot_ ||
+        state_.gpr[17].lo == 0u ||
+        (verify_code &&
+         (!bus_.matches_code(kPc, kEntry) ||
+          !bus_.matches_code(0x00200D84u, kInput) ||
+          !bus_.matches_code(0x00200E0Cu, kOutput)))) return false;
+    const u32 distance = state_.cop0[11] - state_.cop0[9];
+    if (distance != 0u && distance <= 22u) return false;
+
+    const u32 context = static_cast<u32>(state_.gpr[20].lo) - 32312u;
+    const u32 input_slot = context + 20u;
+    const u32 mask_slot = context + 4u;
+    const u32 output = static_cast<u32>(state_.gpr[16].lo);
+    const u32 output_next = output + 1u;
+    const u32 output_context =
+        static_cast<u32>(state_.gpr[19].lo) - 32312u;
+    if (context >= 0x02000000u - 24u ||
+        output >= 0x02000000u ||
+        output_context >= 0x02000000u - 8u) return false;
+
+    u32 cursor = 0, mask_word = 0;
+    if (!bus_.read32(input_slot, cursor) ||
+        !bus_.read32(mask_slot, mask_word) ||
+        cursor >= 0x02000000u) return false;
+    u8 byte = 0;
+    if (!bus_.read8(cursor, byte)) return false;
+    const u64 masked = sign_extend_word(mask_word) &
+                       state_.gpr[21].lo;
+    if (masked != 0u) return false;
+
+    u32 output_count = 0;
+    if (!bus_.read32(output_context, output_count)) return false;
+    const u64 count_value = sign_extend_word(output_count);
+    const u64 produced = sign_extend_word(
+        output_next - static_cast<u32>(state_.gpr[18].lo));
+    if (produced == count_value || count_value < produced) return false;
+    const u32 counter_slot = output_context + 4u;
+    // These writes precede the later counter reads in the guest routine.
+    // Restrict this path to disjoint RAM so pre-reading them is equivalent.
+    auto overlaps = [](u32 a, u32 a_size, u32 b, u32 b_size) {
+        return a < b + b_size && b < a + a_size;
+    };
+    if (overlaps(input_slot, 4u, output_context, 4u) ||
+        overlaps(input_slot, 4u, counter_slot, 4u) ||
+        overlaps(input_slot, 4u, kPc, 0xD0u) ||
+        overlaps(counter_slot, 4u, kPc, 0xD0u) ||
+        overlaps(output, 1u, output_context, 4u) ||
+        overlaps(output, 1u, counter_slot, 4u) ||
+        overlaps(output, 1u, kPc, 0xD0u)) return false;
+    u32 counter = 0;
+    if (!bus_.read32(counter_slot, counter)) return false;
+    if (!bus_.write32(input_slot, cursor + 1u) ||
+        !bus_.write8(output, byte) ||
+        !bus_.write32(counter_slot, counter << 1u)) return false;
+
+    state_.gpr[2].lo = sign_extend_word(counter << 1u);
+    state_.gpr[3].lo = count_value;
+    state_.gpr[4].lo = sign_extend_word(output_context);
+    state_.gpr[5].lo = sign_extend_word(cursor + 1u);
+    state_.gpr[6].lo = byte;
+    state_.gpr[7].lo = sign_extend_word(context);
+    state_.gpr[16].lo = sign_extend_word(output_next);
+    state_.gpr[17].lo = sign_extend_word(
+        static_cast<u32>(state_.gpr[17].lo) - 1u);
+    state_.gpr[0] = {};
+    state_.last_pc = 0x00200E3Cu;
+    state_.last_instruction = kOutput[12];
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += 22u;
+    state_.instructions_executed += 22u;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(22u);
+    return true;
+}
+
+u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
+    u32 completed = 0;
+    // All three guest write ranges are kept disjoint from this code above.
+    // With no external writer during a system-approved batch, one validation
+    // is enough; each later iteration still checks its data/exit conditions.
+    while (completed < max_iterations &&
+           skip_bios_literal_iteration_impl(completed == 0u)) {
+        ++completed;
+    }
+    return completed;
 }
 
 bool EeCpu::step(std::string& error) {
@@ -3246,7 +3380,6 @@ bool EeCpu::step(std::string& error) {
             "Instruction fetch fault from " + hex32(pc),
             error);
     }
-
     state_.last_pc = pc;
     state_.last_instruction = instruction;
     state_.pc = old_next_pc;
@@ -3309,6 +3442,42 @@ bool EeCpu::step(std::string& error) {
         return true;
     }
 
+    // Common register-only SPECIAL instructions need none of the generic
+    // memory/fault decoder's setup. Keep this path instruction-exact.
+    if (!jit_enabled_ && opcode == 0u) {
+        const u32 funct = instruction & 63u;
+        const u32 rd = (instruction >> 11) & 31u;
+        const u32 sa = (instruction >> 6) & 31u;
+        switch (funct) {
+        case 0x00u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) << sa); break;
+        case 0x02u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) >> sa); break;
+        case 0x03u: write_gpr_word(rd, static_cast<u32>(
+            static_cast<s32>(static_cast<u32>(gpr_u64(rt))) >> sa)); break;
+        case 0x06u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) >>
+            (static_cast<u32>(gpr_u64(rs)) & 31u)); break;
+        case 0x08u:
+            state_.next_pc = static_cast<u32>(gpr_u64(rs));
+            next_is_delay_slot_ = true;
+            break;
+        case 0x21u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) +
+            static_cast<u32>(gpr_u64(rt))); break;
+        case 0x23u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) -
+            static_cast<u32>(gpr_u64(rt))); break;
+        case 0x24u: write_gpr64(rd, gpr_u64(rs) & gpr_u64(rt)); break;
+        case 0x25u: write_gpr64(rd, gpr_u64(rs) | gpr_u64(rt)); break;
+        case 0x2Bu: write_gpr64(rd, gpr_u64(rs) < gpr_u64(rt) ? 1u : 0u); break;
+        case 0x2Du: write_gpr64(rd, gpr_u64(rs) + gpr_u64(rt)); break;
+        default: goto generic_decode;
+        }
+        state_.gpr[0] = {};
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) state_.cop0[13] |= 0x00008000u;
+        bus_.tick(1);
+        return true;
+    }
+
+generic_decode:
     const auto effective_address = [&]() {
         return static_cast<u32>(
             gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));

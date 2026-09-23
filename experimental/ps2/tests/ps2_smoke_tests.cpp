@@ -125,6 +125,28 @@ bool test_bios_idle_iteration_matches_ee_steps() {
                 "EE branch-delay state diverged after idle skip") && ok;
 
     fast.ee().reset(kIdlePc);
+    reference.ee().reset(kIdlePc);
+    fast.ee().state().cop0[11] = 100u;
+    reference.ee().state().cop0[11] = 100u;
+    ok = expect(fast.ee().skip_bios_idle_iterations(3u),
+                "verified BIOS idle batch was not skipped") && ok;
+    for (int i = 0; i < 24; ++i) {
+        if (!expect(reference.ee().step(error),
+                    "reference BIOS idle batch instruction failed")) return false;
+    }
+    ok = expect(fast.ee().state().pc == reference.ee().state().pc &&
+                fast.ee().state().next_pc == reference.ee().state().next_pc &&
+                fast.ee().state().last_pc == reference.ee().state().last_pc &&
+                fast.ee().state().instructions_executed ==
+                    reference.ee().state().instructions_executed &&
+                fast.ee().state().cop0[9] == reference.ee().state().cop0[9],
+                "batched BIOS idle state diverged") && ok;
+    ok = expect(fast.bus().read32(0x10000000u, fast_count) &&
+                reference.bus().read32(0x10000000u, reference_count) &&
+                fast_count == reference_count,
+                "batched BIOS idle timer diverged") && ok;
+
+    fast.ee().reset(kIdlePc);
     fast.ee().state().cop0[11] = 4u;
     ok = expect(!fast.ee().skip_bios_idle_iteration(),
                 "idle skip crossed COP0 Compare event") && ok;
@@ -248,6 +270,54 @@ bool test_bios_loop_fast_paths_match_ee_steps() {
         },
         [](auto& s) { return s.ee().skip_bios_mmio_poll_iteration(); },
         7u, 0u, 0u) && ok;
+    constexpr std::array<ps2::u32, 7> bios_poll = {
+        0x8C620000u, 0x30420004u, 0u, 0u, 0u,
+        0x1040FFFAu, 0x24020004u};
+    ok = compare("BIOS MMIO poll shortcut rejected valid code",
+        0x00266118u, bios_poll,
+        [](auto& s) {
+            s.ee().state().gpr[3].lo = 0x1000F000u;
+        },
+        [](auto& s) { return s.ee().skip_bios_mmio_poll_iteration(); },
+        7u, 0u, 0u) && ok;
+    std::array<ps2::u32, (0x00200E40u - 0x00200D70u) / 4u> literal{};
+    auto put_literal = [&](ps2::u32 address, ps2::u32 instruction) {
+        literal[(address - 0x00200D70u) / 4u] = instruction;
+    };
+    put_literal(0x00200D70u, 0x16200004u);
+    put_literal(0x00200D74u, 0x268781C8u);
+    constexpr std::array<ps2::u32, 7> literal_input = {
+        0x8CE50014u, 0x8CE20004u, 0x90A60000u,
+        0x24A50001u, 0x00551024u, 0x1040001Cu,
+        0xACE50014u};
+    for (ps2::u32 i = 0; i < literal_input.size(); ++i)
+        put_literal(0x00200D84u + i * 4u, literal_input[i]);
+    constexpr std::array<ps2::u32, 13> literal_output = {
+        0xA2060000u, 0x26100001u, 0x8E6381C8u,
+        0x02121023u, 0x10430008u, 0x266481C8u,
+        0x0062102Bu, 0x14400005u, 0x2631FFFFu,
+        0x8C820004u, 0x00021040u, 0x1000FFCDu,
+        0xAC820004u};
+    for (ps2::u32 i = 0; i < literal_output.size(); ++i)
+        put_literal(0x00200E0Cu + i * 4u, literal_output[i]);
+    ok = compare("literal decoder shortcut rejected valid code",
+        0x00200D70u, literal,
+        [](auto& s) {
+            auto& gpr = s.ee().state().gpr;
+            gpr[16].lo = 0x5000u;
+            gpr[17].lo = 3u;
+            gpr[18].lo = 0x5000u;
+            gpr[19].lo = 0x3000u + 32312u;
+            gpr[20].lo = 0x2000u + 32312u;
+            gpr[21].lo = 1u;
+            (void)s.bus().write32(0x2004u, 0u);
+            (void)s.bus().write32(0x2014u, 0x4000u);
+            (void)s.bus().write8(0x4000u, 0xA5u);
+            (void)s.bus().write32(0x3000u, 100u);
+            (void)s.bus().write32(0x3004u, 1u);
+        },
+        [](auto& s) { return s.ee().skip_bios_literal_iteration(); },
+        22u, 0x2000u, 0x3010u) && ok;
     return ok;
 }
 
