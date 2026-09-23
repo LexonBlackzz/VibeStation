@@ -352,6 +352,15 @@ void System::sync_sio_to_cpu() {
         return;
     }
 
+    // An idle SIO has no continuously-running state. Keep its absolute
+    // synchronization anchor current without entering Sio::tick thousands of
+    // times per frame. MMIO that starts a transfer synchronizes before changing
+    // the transport state, so no elapsed transfer time is lost here.
+    if (sio_.cycles_until_event() == 0u) {
+        sio_synced_cpu_cycle_ = target_cycle;
+        return;
+    }
+
     u64 delta = target_cycle - sio_synced_cpu_cycle_;
     while (delta > 0) {
         const u32 step =
@@ -1718,7 +1727,13 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
 
             dma_tick_budget += spent_in_slice;
             if (dma_tick_budget >= dma_tick_stride) {
-                service_dma();
+                // CHCR writes already execute immediately when their request is
+                // ready. Only poll request-driven channels while at least one
+                // transfer remains armed; Spyro otherwise paid ~7.7k seven-
+                // channel scans per frame for no DMA work.
+                if (dma_.has_active_channels()) {
+                    service_dma();
+                }
                 dma_tick_budget -= dma_tick_stride;
             }
 
