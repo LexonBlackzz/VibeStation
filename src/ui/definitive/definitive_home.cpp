@@ -170,7 +170,7 @@ std::vector<unsigned char> make_softened_background(
                 const float soft = static_cast<float>(blurred[base + channel]);
                 output[base + channel] = static_cast<unsigned char>(
                     std::clamp(std::round(
-                        sharp + (soft - sharp) * blur_mix), 0.0f, 255.0f));
+                        sharp + (soft - sharp) * blur_mix), 0.0, 255.0));
             }
             output[base + 3] = source[base + 3];
         }
@@ -395,7 +395,7 @@ void draw_readability_shade(ImDrawList* draw,
     constexpr float kTopAlpha = 208.0f;
     constexpr float kBottomAlpha = 216.0f;
 
-    const auto strength_at = [](float nx) {
+    const auto strength_at = [=](float nx) {
         if (nx <= kSolidEnd) {
             return 1.0f;
         }
