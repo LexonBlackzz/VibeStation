@@ -239,6 +239,8 @@ private:
 	// UI panels
 	void menu_bar();
 	void panel_emulator_screen();
+	void panel_definitive_home();
+	void release_definitive_ui_assets();
 	void panel_settings();
 	void panel_about();
 	void panel_debug_cpu();
