@@ -1027,7 +1027,8 @@ int main(int argc, char** argv) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
-               "[--ee-jit|--profile|--gs-thread] [--wav=audio.wav]\n";
+               "[--ee-jit|--profile|--gs-thread|--audio-only] "
+               "[--wav=audio.wav]\n";
         return 64;
     }
 
@@ -1042,6 +1043,7 @@ int main(int argc, char** argv) {
     bool pc_samples = false;
     bool profile = false;
     bool gs_thread = false;
+    bool audio_only = false;
     const char* display_path = nullptr;
     std::string wav_path;
     for (int index = 3; index < argc; ++index) {
@@ -1050,6 +1052,7 @@ int main(int argc, char** argv) {
         else if (option == "--pc-samples") pc_samples = true;
         else if (option == "--profile") profile = true;
         else if (option == "--gs-thread") gs_thread = true;
+        else if (option == "--audio-only") audio_only = true;
         else if (option.starts_with("--wav=") && option.size() > 6u) {
             wav_path = std::string(option.substr(6));
         }
@@ -1064,6 +1067,7 @@ int main(int argc, char** argv) {
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
     system.gs_core().set_async_rasterization(gs_thread);
+    system.gs_core().set_rasterization_enabled(!audio_only);
     std::string error;
 
     if (!system.load_bios(argv[1], error)) {
@@ -1094,9 +1098,14 @@ int main(int argc, char** argv) {
             break;
         }
         remaining -= ran;
-        const auto display_begin = std::chrono::steady_clock::now();
-        system.refresh_display();
-        if (profile) display_time += std::chrono::steady_clock::now() - display_begin;
+        if (!audio_only) {
+            const auto display_begin = std::chrono::steady_clock::now();
+            system.refresh_display();
+            if (profile) {
+                display_time +=
+                    std::chrono::steady_clock::now() - display_begin;
+            }
+        }
 
         if (!wav_path.empty()) {
             const std::size_t queued =
@@ -1111,7 +1120,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!first_visible_reported &&
+        if (!audio_only &&
+            !first_visible_reported &&
             system.gs_display().nonzero_pixel_count() != 0u) {
             first_visible_reported = true;
             first_visible_time = std::chrono::steady_clock::now();
