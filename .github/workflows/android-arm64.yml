@@ -13,6 +13,7 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      VIBESTATION_VERSION_CODE: ${{ github.run_number }}
 
     steps:
       - name: Checkout
@@ -46,6 +47,11 @@ jobs:
           test -n "$SDL_DIR"
           mkdir -p android/app/src/main/java/org/libsdl
           cp -a "$SDL_DIR/android-project/app/src/main/java/org/libsdl/app" android/app/src/main/java/org/libsdl/
+
+      - name: Restore stable test signing key
+        run: |
+          base64 --decode android/ci/vibestation-test.keystore.b64 > android/ci/vibestation-test.keystore
+          keytool -list -keystore android/ci/vibestation-test.keystore -storepass VibeStation -alias vibestation >/dev/null
 
       - name: Build release APK
         working-directory: android
