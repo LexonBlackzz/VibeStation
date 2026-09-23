@@ -382,18 +382,36 @@ bool SifDma::service_sif1(
                 stats_.recent_rpc_count + 1u,
                 static_cast<u32>(stats_.recent_rpc_calls.size()));
 
-            constexpr u32 kSdrSid = 0x80000701u;
-            if (sid == kSdrSid) {
+            // Retail SCPH-39001 OSDSYS talks to rom0:OSDSND, Sony's
+            // rspu2_driver 1.03, on server 0x80000601. Its libsnd2
+            // sequencer command block uses the older 0x50xx vocabulary.
+            constexpr u32 kOsdSndSid = 0x80000601u;
+            if (sid == kOsdSndSid) {
                 ++stats_.sound_rpc_calls;
                 switch (rpc_number) {
-                case 0x6090u:
+                case 0x5001u:
+                    ++stats_.sound_st_init_calls;
+                    break;
+                case 0x5009u:
                     ++stats_.sound_bgm_open_calls;
                     break;
-                case 0x6140u:
+                case 0x500Au:
+                    ++stats_.sound_tick_mode_calls;
+                    break;
+                case 0x5012u:
+                    ++stats_.sound_master_volume_calls;
+                    break;
+                case 0x5014u:
                     ++stats_.sound_bgm_play_calls;
                     break;
-                case 0x6200u:
+                case 0x5015u:
+                    ++stats_.sound_bgm_stop_calls;
+                    break;
+                case 0x5100u:
                     ++stats_.sound_timer_start_calls;
+                    break;
+                case 0x5200u:
+                    ++stats_.sound_se_play_calls;
                     break;
                 case 0x8010u:
                     ++stats_.sound_set_param_calls;
