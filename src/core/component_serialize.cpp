@@ -179,6 +179,7 @@ void DmaController::restore_state(const u8*& pos, size_t& remaining) {
   }
   read_val(dpcr_);
   read_val(dicr_);
+  rebuild_active_channel_mask();
 }
 
 // ── Sio ─────────────────────────────────────────────────────────────
