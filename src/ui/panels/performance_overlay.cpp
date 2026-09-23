@@ -145,6 +145,28 @@ namespace {
         return out;
     }
 
+    const char* gpu_bucket_name(size_t bucket) {
+        static constexpr std::array<const char*, 8> kNames = {
+            "flat", "gouraud", "textured", "gouraud+texture",
+            "rect", "line", "transfer", "other"
+        };
+        return bucket < kNames.size() ? kNames[bucket] : "unknown";
+    }
+
+    size_t dominant_render_bucket(const FramePhaseDiagnostics& phase) {
+        size_t best_bucket = 0;
+        double best_delta = 0.0;
+        for (size_t bucket = 0; bucket < phase.render_buckets.size(); ++bucket) {
+            const double delta =
+                phase.render_buckets[bucket] - phase.reuse_buckets[bucket];
+            if (delta > best_delta) {
+                best_delta = delta;
+                best_bucket = bucket;
+            }
+        }
+        return best_bucket;
+    }
+
     struct GpuDipDiagnostics {
         bool valid = false;
         int dip_count = 0;
@@ -353,23 +375,28 @@ void App::push_performance_history_sample() {
     perf_core_ms_history_[idx] =
         static_cast<float>(std::max(0.0, runtime_snapshot_.core_frame_ms));
     perf_frame_id_history_[idx] = frame_id;
-    if (g_profile_detailed_timing) {
-        perf_gpu_words_history_[idx] = runtime_snapshot_.profiling.gpu_gp0_words;
-        perf_gpu_draw_commands_history_[idx] =
-            runtime_snapshot_.profiling.gpu_draw_commands;
-        perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
-        perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
-        perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
-        perf_display_hash_history_[idx] = runtime_snapshot_.boot_diag.display_hash;
-    }
-    else {
-        perf_gpu_words_history_[idx] = 0;
-        perf_gpu_draw_commands_history_[idx] = 0;
-        perf_cpu_pc_history_[idx] = 0;
-        perf_dma2_words_history_[idx] = 0;
-        perf_dma2_base_history_[idx] = 0;
-        perf_display_hash_history_[idx] = 0;
-    }
+
+    // These are integer-only bookkeeping counters and are intentionally kept
+    // live with detailed timing disabled. That lets the Spyro cadence probe
+    // correlate real frame time with GPU work without clock-sampling overhead.
+    const auto& gpu_stats = runtime_snapshot_.profiling;
+    perf_gpu_words_history_[idx] = gpu_stats.gpu_gp0_words;
+    perf_gpu_draw_commands_history_[idx] = gpu_stats.gpu_draw_commands;
+    perf_gpu_bucket_commands_history_[idx] = {
+        gpu_stats.gpu_flat_commands,
+        gpu_stats.gpu_gouraud_commands,
+        gpu_stats.gpu_textured_commands,
+        gpu_stats.gpu_gouraud_textured_commands,
+        gpu_stats.gpu_rect_commands,
+        gpu_stats.gpu_line_commands,
+        gpu_stats.gpu_transfer_commands,
+        gpu_stats.gpu_other_commands,
+    };
+    perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
+    perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
+    perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
+    perf_display_hash_history_[idx] =
+        g_profile_detailed_timing ? runtime_snapshot_.boot_diag.display_hash : 0;
 
     perf_history_write_index_ = (perf_history_write_index_ + 1) % kPerfHistorySamples;
     if (perf_history_count_ < kPerfHistorySamples) {
