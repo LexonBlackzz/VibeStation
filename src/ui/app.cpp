@@ -811,7 +811,6 @@ void App::process_events(bool& quit) {
             }
             else if (no_mod && key == SDLK_F12) {
                 show_perf_profiler_ = !show_perf_profiler_;
-                g_profile_detailed_timing = show_perf_profiler_;
             }
         }
 
