@@ -128,7 +128,6 @@ private:
     u64 cycle_phase_ = 0;
     std::deque<s16> pcm_queue_;
     DebugStats debug_stats_{};
-    DebugStats debug_stats_{};
 };
 
 } // namespace ps2
