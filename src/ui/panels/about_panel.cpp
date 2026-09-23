@@ -8,7 +8,7 @@ void App::panel_about() {
     ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("About VibeStation", &show_about_,
         ImGuiWindowFlags_NoResize)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f),
+        ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "%s",
             vibestation_full_version_string());
         ImGui::Separator();
         ImGui::Text("A PlayStation 1 emulator");
@@ -34,7 +34,11 @@ void App::panel_about() {
         ImGui::Text("SPU: Gaussian + reverb core (stage 2)");
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f),
-            "Built with SDL2 + Dear ImGui + OpenGL 3.3");
+            #if defined(__ANDROID__)
+            "Built with SDL2 + Dear ImGui + OpenGL ES 3"
+#else
+            "Built with SDL2 + Dear ImGui + OpenGL 3.3"
+#endif);
     }
     ImGui::End();
 }
