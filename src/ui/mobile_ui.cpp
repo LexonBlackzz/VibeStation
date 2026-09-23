@@ -40,7 +40,7 @@ MobileControlLayout make_mobile_layout(float width, float height) {
 
     const float dpad_x = width * (landscape ? 0.14f : 0.19f);
     const float face_x = width * (landscape ? 0.86f : 0.81f);
-    const float center_y = height * (landscape ? 0.72f : 0.80f);
+    const float center_y = height * (landscape ? 0.72f : 0.775f);
     const float step = out.radius * 1.25f;
 
     out.up = ImVec2(dpad_x, center_y - step);
@@ -53,8 +53,8 @@ MobileControlLayout make_mobile_layout(float width, float height) {
     out.cross = ImVec2(face_x, center_y + step);
     out.square = ImVec2(face_x - step, center_y);
 
-    out.l1 = ImVec2(width * 0.16f, height * (landscape ? 0.14f : 0.62f));
-    out.r1 = ImVec2(width * 0.84f, height * (landscape ? 0.14f : 0.62f));
+    out.l1 = ImVec2(width * 0.16f, height * (landscape ? 0.14f : 0.60f));
+    out.r1 = ImVec2(width * 0.84f, height * (landscape ? 0.14f : 0.60f));
     out.select = ImVec2(width * 0.43f, height * (landscape ? 0.90f : 0.91f));
     out.start = ImVec2(width * 0.57f, height * (landscape ? 0.90f : 0.91f));
     return out;
@@ -526,7 +526,9 @@ void App::panel_emulator_screen_mobile() {
         draw_size.y = avail.x / display_aspect;
     }
     const float x_pad = std::max(0.0f, (avail.x - draw_size.x) * 0.5f);
-    const float y_pad = std::max(0.0f, (avail.y - draw_size.y) * 0.5f);
+    const float y_pad = portrait
+        ? 0.0f
+        : std::max(0.0f, (avail.y - draw_size.y) * 0.5f);
     ImVec2 cursor = ImGui::GetCursorPos();
     ImGui::SetCursorPos(ImVec2(cursor.x + x_pad, cursor.y + y_pad));
     const ImVec2 image_pos = ImGui::GetCursorScreenPos();
@@ -563,16 +565,32 @@ void App::draw_mobile_touch_overlay() {
     const ImU32 outline = IM_COL32(192, 172, 255, 178);
     const ImU32 text = IM_COL32(240, 236, 255, 215);
 
-    const struct DrawCircle {
+    // D-pad: rounded directional pads instead of four overlapping circles.
+    const struct DrawPad {
         ImVec2 center;
         const char* label;
-    } circles[] = {
-        {c.up, "U"}, {c.right, "R"}, {c.down, "D"}, {c.left, "L"},
-        {c.triangle, "T"}, {c.circle, "O"}, {c.cross, "X"}, {c.square, "S"},
+    } pads[] = {
+        {c.up, "^"}, {c.right, ">"}, {c.down, "v"}, {c.left, "<"},
     };
-    for (const auto& item : circles) {
-        draw->AddCircleFilled(item.center, c.radius, fill, 32);
-        draw->AddCircle(item.center, c.radius, outline, 32, 2.0f);
+    const float pad_half = c.radius * 0.78f;
+    for (const auto& item : pads) {
+        const ImVec2 a(item.center.x - pad_half, item.center.y - pad_half);
+        const ImVec2 b(item.center.x + pad_half, item.center.y + pad_half);
+        draw->AddRectFilled(a, b, fill, c.radius * 0.30f);
+        draw->AddRect(a, b, outline, c.radius * 0.30f, 0, 2.0f);
+        draw_centered_text(draw, item.center, text, item.label);
+    }
+
+    const struct DrawFace {
+        ImVec2 center;
+        const char* label;
+    } faces[] = {
+        {c.triangle, "TRI"}, {c.circle, "O"},
+        {c.cross, "X"}, {c.square, "SQ"},
+    };
+    for (const auto& item : faces) {
+        draw->AddCircleFilled(item.center, c.radius * 0.90f, fill, 32);
+        draw->AddCircle(item.center, c.radius * 0.90f, outline, 32, 2.0f);
         draw_centered_text(draw, item.center, text, item.label);
     }
 
