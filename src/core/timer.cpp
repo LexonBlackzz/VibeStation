@@ -145,6 +145,27 @@ void Timers::write(u32 offset, u32 value) {
   }
 }
 
+bool Timers::can_batch_cpu_ticks() const {
+  for (int i = 0; i < 3; ++i) {
+    const Timer &t = timers_[i];
+    bool cpu_clocked = false;
+    if (i == 2) {
+      // Timer 2 always derives from the CPU clock: source 0/1 is sysclk,
+      // source 2/3 is sysclk/8.
+      cpu_clocked = true;
+    } else {
+      // Timer 0/1 source 1/3 is advanced by HBlank pulses instead.
+      const u8 source = t.clock_source();
+      cpu_clocked = source == 0u || source == 2u;
+    }
+
+    if (cpu_clocked && (t.irq_on_target() || t.irq_on_overflow())) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void Timers::tick(u32 cycles) {
   for (int i = 0; i < 3; ++i) {
     const u8 source = timers_[i].clock_source();
