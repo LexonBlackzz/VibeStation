@@ -1039,7 +1039,16 @@ void App::update() {
 }
 
 void App::render_ui() {
-#if !defined(__ANDROID__)
+#if defined(__ANDROID__)
+    ImGuiViewport* orientation_viewport = ImGui::GetMainViewport();
+    const bool android_landscape =
+        orientation_viewport->Size.x > orientation_viewport->Size.y;
+    if (android_landscape) {
+        // Landscape intentionally keeps VibeStation's desktop identity.
+        // Global Android DPI scaling makes the menu touch-friendly.
+        menu_bar();
+    }
+#else
     menu_bar();
 #endif
 
@@ -1061,8 +1070,10 @@ void App::render_ui() {
     ImGui::PopStyleVar(3);
 
 #if defined(__ANDROID__)
-    mobile_top_bar();
-    ImGui::Separator();
+    if (!android_landscape) {
+        mobile_top_bar();
+        ImGui::Separator();
+    }
 #endif
     panel_emulator_screen();
     ImGui::End();
