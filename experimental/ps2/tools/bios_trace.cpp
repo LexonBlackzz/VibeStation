@@ -996,6 +996,26 @@ int main(int argc, char** argv) {
     }
 
     print_state(system);
+    std::cout << "EE_SKIPPED_BIOS_IDLE_ITERATIONS="
+              << system.skipped_bios_idle_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_ZERO_ITERATIONS="
+              << system.skipped_bios_zero_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_NIBBLE_ITERATIONS="
+              << system.skipped_bios_nibble_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_COUNT_WAIT_ITERATIONS="
+              << system.skipped_bios_count_wait_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_COUNTDOWN_ITERATIONS="
+              << system.skipped_bios_countdown_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_COPY_ITERATIONS="
+              << system.skipped_bios_copy_iterations() << '\n';
+    std::cout << "EE_SKIPPED_BIOS_MMIO_POLL_ITERATIONS="
+              << system.skipped_bios_mmio_poll_iterations() << '\n';
+    std::cout << "IOP_SKIPPED_IDLE_PAIRS="
+              << system.skipped_iop_idle_pairs() << '\n';
+    const auto& idle_reasons = system.idle_skip_reasons();
+    std::cout << "EE_IDLE_SKIP_REASONS";
+    for (auto count : idle_reasons) std::cout << ' ' << count;
+    std::cout << '\n';
 
     if (ee_jit) {
         std::cout << "EE_JIT_COMPILED=" << system.ee().jit().compiled_count()

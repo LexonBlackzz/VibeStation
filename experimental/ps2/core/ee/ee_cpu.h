@@ -64,6 +64,18 @@ public:
     void reset(u32 entry_point = 0);
     bool step(std::string& error);
     u64 run(u64 instruction_budget, std::string& error);
+    // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
+    // The caller is responsible for advancing the other devices by eight
+    // cycles and for guarding against interrupts within that interval.
+    bool skip_bios_idle_iteration();
+    // Retire verified iterations of the BIOS's 16-byte RAM clear loop.
+    bool skip_bios_zero_loop(u32 iterations);
+    bool skip_bios_nibble_loop(u32 iterations);
+    u32 skip_bios_count_wait(u32 max_iterations);
+    u32 skip_bios_countdown_wait(u32 max_iterations);
+    bool skip_bios_copy_iteration();
+    bool skip_bios_copy_iterations(u32 iterations);
+    bool skip_bios_mmio_poll_iteration();
 
     [[nodiscard]] const EeCpuState& state() const { return state_; }
     [[nodiscard]] EeCpuState& state() { return state_; }

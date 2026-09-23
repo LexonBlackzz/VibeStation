@@ -54,6 +54,13 @@ public:
         std::string& error);
 
     void tick_ee(EeBus& ee_bus);
+    [[nodiscard]] bool ee_completion_pending() const {
+        return sif0_ee_completion_cycles_ != 0;
+    }
+    [[nodiscard]] bool iop_completion_pending() const {
+        return sif0_iop_completion_cycles_ != 0 ||
+               sif1_iop_completion_cycles_ != 0;
+    }
     void tick_iop(IopBus& iop_bus);
 
 private:

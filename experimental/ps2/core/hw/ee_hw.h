@@ -17,6 +17,16 @@ public:
     [[nodiscard]] u32 vif1_stat() const;
     [[nodiscard]] bool intc_pending() const;
     [[nodiscard]] bool dmac_pending() const;
+    [[nodiscard]] bool timer_irq_possible() const {
+        const u32 mask = generic_read32(kRegBase + 0x10u);
+        for (u32 i = 0; i < timer_mode_.size(); ++i) {
+            if ((mask & (1u << (9u + i))) != 0 &&
+                (timer_mode_[i] & ((1u << 8) | (1u << 9))) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
     [[nodiscard]] bool dmac_enabled() const {
         return (dmac_regs_[0x6000u] & 1u) != 0;
     }
@@ -48,8 +58,10 @@ private:
 
     u64 cycles_ = 0;
     std::array<u64, 4> timer_phase_{};
+    std::array<u32, 4> timer_rate_cache_{};
     std::array<u32, 4> timer_count_base_{};
     std::array<u32, 4> timer_mode_{};
+    u8 timer_enabled_mask_ = 0;
     std::array<u32, 4> timer_comp_{};
     std::array<u32, 4> timer_hold_{};
 

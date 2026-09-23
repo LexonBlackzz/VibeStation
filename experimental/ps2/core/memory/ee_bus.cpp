@@ -81,6 +81,43 @@ bool EeBus::fetch32(u32 address, u32& value) const {
     return read32(address, value);
 }
 
+bool EeBus::matches_code(u32 address,
+                         std::span<const u32> words) const {
+    const u32 physical = to_physical(address);
+    if (physical < EeRam::kSize) {
+        return ram_.matches_words(physical, words);
+    }
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        u32 actual = 0;
+        if (!fetch32(address + static_cast<u32>(4u * i), actual) ||
+            actual != words[i]) return false;
+    }
+    return true;
+}
+
+bool EeBus::fill_ram_zero(u32 address, std::size_t length) {
+    const u32 physical = to_physical(address);
+    return physical < EeRam::kSize &&
+           ram_.fill_zero(physical, length);
+}
+
+bool EeBus::nibble_swap_ram(u32 address, std::size_t length,
+                            u8& last_original) {
+    const u32 physical = to_physical(address);
+    return physical < EeRam::kSize &&
+           ram_.nibble_swap(physical, length, last_original);
+}
+
+bool EeBus::copy_ram_forward(u32 destination, u32 source,
+                             std::size_t length, u8& last_value) {
+    const u32 physical_destination = to_physical(destination);
+    const u32 physical_source = to_physical(source);
+    return physical_destination < EeRam::kSize &&
+           physical_source < EeRam::kSize &&
+           ram_.copy_forward(physical_destination, physical_source,
+                             length, last_value);
+}
+
 bool EeBus::read32(u32 address,u32& value) const {
     if(scratchpad_.contains(address,4)) return scratchpad_.read32(address,value);
     const u32 physical=to_physical(address);

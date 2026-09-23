@@ -3,6 +3,7 @@
 #include "common/types.h"
 
 #include <cstddef>
+#include <span>
 #include <vector>
 
 namespace ps2 {
@@ -24,6 +25,13 @@ public:
     [[nodiscard]] bool write16(u32 offset, u16 value);
     [[nodiscard]] bool write32(u32 offset, u32 value);
     [[nodiscard]] bool write64(u32 offset, u64 value);
+    [[nodiscard]] bool fill_zero(u32 offset, std::size_t length);
+    [[nodiscard]] bool nibble_swap(u32 offset, std::size_t length,
+                                   u8& last_original);
+    [[nodiscard]] bool copy_forward(u32 destination, u32 source,
+                                    std::size_t length, u8& last_value);
+    [[nodiscard]] bool matches_words(u32 offset,
+                                     std::span<const u32> words) const;
 
     [[nodiscard]] constexpr std::size_t size() const { return kSize; }
 

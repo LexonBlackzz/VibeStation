@@ -2927,6 +2927,269 @@ bool EeCpu::execute_mmi(
     }
 }
 
+bool EeCpu::skip_bios_idle_iteration() {
+    constexpr u32 kIdlePc = 0x00081FC0u;
+    constexpr std::array<u32, 8> kIdleCode = {
+        0u, 0u, 0u, 0u, 0u, 0u, 0x1000FFF9u, 0u};
+    if (halted_ || state_.pc != kIdlePc ||
+        state_.next_pc != kIdlePc + 4u || next_is_delay_slot_) {
+        return false;
+    }
+    if (!bus_.matches_code(kIdlePc, kIdleCode)) return false;
+
+    // COP0 Count is advanced by every retired instruction. Do not cross a
+    // Compare match: that interrupt must be observed at its exact cycle.
+    const u32 count = state_.cop0[9];
+    const u32 distance_to_compare = state_.cop0[11] - count;
+    if (distance_to_compare != 0u && distance_to_compare <= 8u) {
+        return false;
+    }
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += 8u;
+    state_.instructions_executed += 8u;
+    state_.last_pc = kIdlePc + 0x1Cu;
+    state_.last_instruction = 0u;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(8u);
+    return true;
+}
+
+bool EeCpu::skip_bios_zero_loop(u32 iterations) {
+    constexpr u32 kLoopPc = 0x8000E3C8u;
+    constexpr std::array<u32, 7> kLoopCode = {
+        0x7E020000u, 0x26100010u, 0x0204102Bu, 0u, 0u,
+        0x1440FFFAu, 0x700014A9u};
+    if (iterations == 0u || halted_ || state_.pc != kLoopPc ||
+        state_.next_pc != kLoopPc + 4u || next_is_delay_slot_ ||
+        state_.gpr[2].lo != 0u || state_.gpr[2].hi != 0u) {
+        return false;
+    }
+    if (!bus_.matches_code(kLoopPc, kLoopCode)) return false;
+
+    const u64 address = state_.gpr[16].lo;
+    const u64 end = address + 16ull * iterations;
+    if (address >= 0x02000000u || end >= state_.gpr[4].lo ||
+        end > 0x02000000u || (address & 15u) != 0u) return false;
+    const u32 cycles = 7u * iterations;
+    const u32 distance = state_.cop0[11] - state_.cop0[9];
+    if (distance != 0u && distance <= cycles) return false;
+    if (!bus_.fill_ram_zero(static_cast<u32>(address), 16u * iterations))
+        return false;
+
+    state_.gpr[16].lo = end;
+    state_.gpr[2] = {};
+    state_.gpr[0] = {};
+    state_.last_pc = kLoopPc + 24u;
+    state_.last_instruction = kLoopCode[6];
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(cycles);
+    return true;
+}
+
+bool EeCpu::skip_bios_nibble_loop(u32 iterations) {
+    constexpr u32 kLoopPc = 0x0020A0E8u;
+    constexpr std::array<u32, 9> kLoopCode = {
+        0x90A20000u, 0x24C6FFFFu, 0x3043000Fu,
+        0x00021102u, 0x00031900u, 0x00431021u,
+        0xA0A20000u, 0x04C1FFF8u, 0x24A50001u};
+    if (iterations == 0u || halted_ || state_.pc != kLoopPc ||
+        state_.next_pc != kLoopPc + 4u || next_is_delay_slot_) {
+        return false;
+    }
+    if (!bus_.matches_code(kLoopPc, kLoopCode)) return false;
+
+    const u64 address = state_.gpr[5].lo;
+    const u64 remaining = state_.gpr[6].lo;
+    if (remaining < iterations || address >= 0x02000000u ||
+        address + iterations > 0x02000000u) return false;
+    const u32 cycles = 9u * iterations;
+    const u32 distance = state_.cop0[11] - state_.cop0[9];
+    if (distance != 0u && distance <= cycles) return false;
+    u8 last_original = 0;
+    if (!bus_.nibble_swap_ram(static_cast<u32>(address), iterations,
+                              last_original)) return false;
+
+    const u32 low_nibble = last_original & 0x0Fu;
+    state_.gpr[2].lo = static_cast<u8>((last_original >> 4) |
+                                        (last_original << 4));
+    state_.gpr[3].lo = low_nibble << 4;
+    state_.gpr[5].lo = static_cast<u32>(address + iterations);
+    state_.gpr[6].lo = static_cast<u32>(remaining - iterations);
+    state_.gpr[0] = {};
+    state_.last_pc = kLoopPc + 32u;
+    state_.last_instruction = kLoopCode[8];
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(cycles);
+    return true;
+}
+
+u32 EeCpu::skip_bios_count_wait(u32 max_iterations) {
+    constexpr u32 kLoopPc = 0x9FC42930u;
+    constexpr std::array<u32, 7> kLoopCode = {
+        0x40024800u, 0x00431023u, 0x0044102Bu,
+        0u, 0u, 0x1440FFFAu, 0u};
+    if (max_iterations == 0u || halted_ || state_.pc != kLoopPc ||
+        state_.next_pc != kLoopPc + 4u || next_is_delay_slot_) return 0;
+    if (!bus_.matches_code(kLoopPc, kLoopCode)) return 0;
+
+    const u32 count = state_.cop0[9];
+    const u32 base = static_cast<u32>(state_.gpr[3].lo);
+    const u64 target = state_.gpr[4].lo;
+    u32 iterations = 0;
+    while (iterations < max_iterations) {
+        const u32 current_count = count + 7u * iterations;
+        const u32 difference = current_count - base;
+        const u64 signed_difference = static_cast<u64>(
+            static_cast<s64>(static_cast<s32>(difference)));
+        if (signed_difference >= target) break;
+        ++iterations;
+    }
+    if (iterations == 0u) return 0;
+    const u32 cycles = 7u * iterations;
+    const u32 distance = state_.cop0[11] - count;
+    if (distance != 0u && distance <= cycles) return 0;
+
+    state_.gpr[2].lo = 1u;
+    state_.gpr[0] = {};
+    state_.last_pc = kLoopPc + 24u;
+    state_.last_instruction = 0u;
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(cycles);
+    return iterations;
+}
+
+u32 EeCpu::skip_bios_countdown_wait(u32 max_iterations) {
+    const u32 pc = state_.pc;
+    const bool first_loop = pc == 0x000826B0u;
+    if ((!first_loop && pc != 0x00252758u) ||
+        max_iterations == 0u || halted_ ||
+        state_.next_pc != pc + 4u || next_is_delay_slot_) return 0;
+    const std::array<u32, 7> code = {
+        0u, 0u, 0u, 0u, 0u,
+        first_loop ? 0x1443FFFAu : 0x1440FFFAu,
+        0x2442FFFFu};
+    if (!bus_.matches_code(pc, code)) return 0;
+
+    const u32 initial = static_cast<u32>(state_.gpr[2].lo);
+    const u32 target = first_loop ?
+        static_cast<u32>(state_.gpr[3].lo) : 0u;
+    const u32 distance_to_exit = initial - target;
+    const u32 iterations = std::min(max_iterations, distance_to_exit);
+    if (iterations == 0u) return 0;
+    const u32 cycles = iterations * 7u;
+    const u32 distance_to_compare = state_.cop0[11] - state_.cop0[9];
+    if (distance_to_compare != 0u &&
+        distance_to_compare <= cycles) return 0;
+
+    state_.gpr[2].lo = sign_extend_word(initial - iterations);
+    state_.gpr[0] = {};
+    state_.last_pc = pc + 24u;
+    state_.last_instruction = code[6];
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(cycles);
+    return iterations;
+}
+
+bool EeCpu::skip_bios_copy_iteration() {
+    return skip_bios_copy_iterations(1u);
+}
+
+bool EeCpu::skip_bios_copy_iterations(u32 iterations) {
+    constexpr u32 kLoopPc = 0x00200DE8u;
+    constexpr std::array<u32, 7> kLoopCode = {
+        0x90A20000u, 0x2484FFFFu, 0x24A50001u,
+        0xA2020000u, 0x26100001u, 0x1480FFFAu, 0u};
+    if (iterations == 0u || halted_ || state_.pc != kLoopPc ||
+        state_.next_pc != kLoopPc + 4u || next_is_delay_slot_ ||
+        state_.gpr[4].lo < iterations ||
+        state_.gpr[4].lo > 0x7FFFFFFFu) return false;
+    if (!bus_.matches_code(kLoopPc, kLoopCode)) return false;
+    const u32 distance = state_.cop0[11] - state_.cop0[9];
+    const u32 cycles = 7u * iterations;
+    if (distance != 0u && distance <= cycles) return false;
+
+    if (state_.gpr[5].lo >= 0x02000000u ||
+        state_.gpr[16].lo >= 0x02000000u ||
+        state_.gpr[5].lo + iterations > 0x02000000u ||
+        state_.gpr[16].lo + iterations > 0x02000000u) return false;
+    const u32 src = static_cast<u32>(state_.gpr[5].lo);
+    const u32 dst = static_cast<u32>(state_.gpr[16].lo);
+    if (dst < kLoopPc + 28u && dst + iterations > kLoopPc) return false;
+    u8 value = 0;
+    if (!bus_.copy_ram_forward(dst, src, iterations, value)) return false;
+
+    state_.gpr[2].lo = value;
+    const bool final_iteration = state_.gpr[4].lo == iterations;
+    state_.gpr[4].lo = sign_extend_word(
+        static_cast<u32>(state_.gpr[4].lo) - iterations);
+    state_.gpr[5].lo = sign_extend_word(src + iterations);
+    state_.gpr[16].lo = sign_extend_word(dst + iterations);
+    state_.gpr[0] = {};
+    state_.last_pc = kLoopPc + 24u;
+    state_.last_instruction = 0u;
+    if (final_iteration) {
+        state_.pc = kLoopPc + 28u;
+        state_.next_pc = kLoopPc + 32u;
+    }
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += cycles;
+    state_.instructions_executed += cycles;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(cycles);
+    return true;
+}
+
+bool EeCpu::skip_bios_mmio_poll_iteration() {
+    const u32 pc = state_.pc;
+    const bool intc_poll = pc == 0x8000DAD0u;
+    if ((!intc_poll && pc != 0x00082180u) || halted_ ||
+        state_.next_pc != pc + 4u || next_is_delay_slot_) return false;
+    const std::array<u32, 7> code = {
+        intc_poll ? 0x8C820000u : 0x8C620000u,
+        intc_poll ? 0x30420004u : 0x00441024u,
+        0u, 0u, 0u, 0x1040FFFAu, 0x3C021000u};
+    if (!bus_.matches_code(pc, code)) return false;
+    const u32 address_reg = intc_poll ? 4u : 3u;
+    const u32 address = intc_poll ? 0x1000F000u : 0x1000F230u;
+    if (state_.gpr[address_reg].lo != address ||
+        (!intc_poll && state_.gpr[4].lo != 0x00040000u)) return false;
+    u32 value = 0;
+    if (!bus_.read32(address, value) ||
+        (value & (intc_poll ? 4u : 0x00040000u)) != 0u) return false;
+    const u32 distance = state_.cop0[11] - state_.cop0[9];
+    if (distance != 0u && distance <= 7u) return false;
+
+    state_.gpr[2].lo = 0x10000000u;
+    state_.gpr[0] = {};
+    state_.last_pc = pc + 24u;
+    state_.last_instruction = 0x3C021000u;
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += 7u;
+    state_.instructions_executed += 7u;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+    bus_.tick(7u);
+    return true;
+}
+
 bool EeCpu::step(std::string& error) {
     error.clear();
 
@@ -3006,6 +3269,45 @@ bool EeCpu::step(std::string& error) {
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
     const s16 imm = immediate(instruction);
+
+    // These BIOS staples do not access memory or the coprocessors. Retire
+    // them before constructing the full decoder's memory/fault helpers.
+    if (!jit_enabled_ && (opcode == 0x09u || opcode == 0x04u ||
+                          opcode == 0x05u || opcode == 0x0Cu ||
+                          opcode == 0x0Du || opcode == 0x0Fu)) {
+        switch (opcode) {
+        case 0x09u:
+            write_gpr_word(rt, static_cast<u32>(gpr_u64(rs)) +
+                               static_cast<u32>(static_cast<s32>(imm)));
+            break;
+        case 0x04u:
+        case 0x05u:
+            if ((gpr_u64(rs) == gpr_u64(rt)) == (opcode == 0x04u)) {
+                state_.next_pc = branch_target(pc, imm);
+            }
+            next_is_delay_slot_ = true;
+            break;
+        case 0x0Cu:
+            write_gpr64(rt, gpr_u64(rs) &
+                                static_cast<u64>(instruction & 0xFFFFu));
+            break;
+        case 0x0Du:
+            write_gpr64(rt, gpr_u64(rs) |
+                                static_cast<u64>(instruction & 0xFFFFu));
+            break;
+        case 0x0Fu:
+            write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
+            break;
+        }
+        state_.gpr[0] = {};
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) {
+            state_.cop0[13] |= 0x00008000u;
+        }
+        bus_.tick(1);
+        return true;
+    }
 
     const auto effective_address = [&]() {
         return static_cast<u32>(

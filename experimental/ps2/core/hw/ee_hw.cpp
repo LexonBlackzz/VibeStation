@@ -30,8 +30,10 @@ bool decode_timer(u32 address, u32& index, u32& reg) {
 void EeHw::reset() {
     cycles_ = 0;
     timer_phase_.fill(0);
+    timer_rate_cache_.fill(2u);
     timer_count_base_.fill(0);
     timer_mode_.fill(0);
+    timer_enabled_mask_ = 0;
     timer_comp_.fill(0);
     timer_hold_.fill(0);
     regs_.fill(0);
@@ -79,23 +81,12 @@ bool EeHw::take_iop_reset_request() {
 void EeHw::tick(u64 cycles) {
     cycles_ += cycles;
 
+    if (timer_enabled_mask_ == 0u) return;
+
     for (u32 i = 0; i < 4u; ++i) {
+        if ((timer_enabled_mask_ & (1u << i)) == 0u) continue;
         u32& mode = timer_mode_[i];
-
-        // CUE=0 pauses the counter. Gate timing is intentionally permissive
-        // until H/V gate edges are supplied by VideoTiming; BIOS bootstrap
-        // primarily relies on free-running timers.
-        if ((mode & (1u << 7)) == 0) {
-            continue;
-        }
-
-        u64 rate = 2;
-        switch (mode & 0x3u) {
-        case 0: rate = 2; break;       // BUSCLK (EE clock / 2)
-        case 1: rate = 32; break;      // BUSCLK / 16
-        case 2: rate = 512; break;     // BUSCLK / 256
-        case 3: rate = 18876; break;   // Bootstrap HBLANK divisor used by BIOS calibration
-        }
+        const u64 rate = timer_rate_cache_[i];
 
         timer_phase_[i] += cycles;
         while (timer_phase_[i] >= rate) {
@@ -550,6 +541,13 @@ bool EeHw::write32(u32 address, u32 value) {
             u32 flags = timer_mode_[timer_index] & 0xC00u;
             flags &= ~(value & 0xC00u);
             timer_mode_[timer_index] = (value & 0x3FFu) | flags;
+            static constexpr u32 kRates[4] = {2u, 32u, 512u, 18876u};
+            timer_rate_cache_[timer_index] = kRates[value & 0x3u];
+            const u8 bit = static_cast<u8>(1u << timer_index);
+            if ((value & (1u << 7)) != 0)
+                timer_enabled_mask_ |= bit;
+            else
+                timer_enabled_mask_ &= static_cast<u8>(~bit);
             timer_phase_[timer_index] = 0;
             return true;
         }

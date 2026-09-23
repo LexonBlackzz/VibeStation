@@ -25,6 +25,10 @@ public:
 
     void reset();
     void tick(u64 cycles);
+    // Advance root counters only when no target, overflow, or DMA IRQ can
+    // occur during the interval. Returns false without changing state.
+    bool tick_event_free(u64 cycles);
+    [[nodiscard]] bool can_tick_event_free(u64 cycles) const;
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;
@@ -80,6 +84,7 @@ private:
     u64 ohci_frame_phase_ = 0;
     std::array<u32, 0x60> firewire_regs_{};
     std::array<RootCounter, 6> root_counters_{};
+    std::array<u32, 6> root_counter_rate_cache_{};
     u64 spu2_dma4_irq_cycles_ = 0;
 };
 

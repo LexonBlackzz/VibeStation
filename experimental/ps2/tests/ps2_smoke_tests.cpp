@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <vector>
 
 namespace {
@@ -77,6 +78,177 @@ bool test_ram_bounds() {
                    static_cast<ps2::u32>(ps2::EeRam::kSize - 2),
                    0xFFFFFFFFu),
                "cross-boundary write unexpectedly succeeded");
+}
+
+bool test_bios_idle_iteration_matches_ee_steps() {
+    constexpr ps2::u32 kIdlePc = 0x00081FC0u;
+    constexpr std::array<ps2::u32, 8> kInstructions = {
+        0u, 0u, 0u, 0u, 0u, 0u, 0x1000FFF9u, 0u};
+    ps2::Ps2System fast;
+    ps2::Ps2System reference;
+    for (ps2::u32 i = 0; i < kInstructions.size(); ++i) {
+        if (!expect(fast.bus().write32(kIdlePc + i * 4u, kInstructions[i]) &&
+                    reference.bus().write32(kIdlePc + i * 4u, kInstructions[i]),
+                    "idle loop setup failed")) return false;
+    }
+    fast.ee().reset(kIdlePc);
+    reference.ee().reset(kIdlePc);
+    fast.ee().state().cop0[11] = 100u;
+    reference.ee().state().cop0[11] = 100u;
+    if (!expect(fast.bus().write32(0x10000010u, 0x80u) &&
+                reference.bus().write32(0x10000010u, 0x80u),
+                "idle timer setup failed")) return false;
+
+    if (!expect(fast.ee().skip_bios_idle_iteration(),
+                "verified BIOS idle loop was not skipped")) return false;
+    std::string error;
+    for (int i = 0; i < 8; ++i) {
+        if (!expect(reference.ee().step(error),
+                    "reference BIOS idle instruction failed")) return false;
+    }
+    const auto& skipped = fast.ee().state();
+    const auto& stepped = reference.ee().state();
+    bool ok = expect(skipped.pc == stepped.pc &&
+                     skipped.next_pc == stepped.next_pc &&
+                     skipped.last_pc == stepped.last_pc &&
+                     skipped.last_instruction == stepped.last_instruction &&
+                     skipped.instructions_executed == stepped.instructions_executed &&
+                     skipped.cop0[9] == stepped.cop0[9],
+                     "skipped BIOS idle state diverged from eight EE steps");
+    ps2::u32 fast_count = 0, reference_count = 0;
+    ok = expect(fast.bus().read32(0x10000000u, fast_count) &&
+                reference.bus().read32(0x10000000u, reference_count) &&
+                fast_count == reference_count,
+                "skipped BIOS idle timer diverged") && ok;
+    ok = expect(fast.ee().step(error) && reference.ee().step(error) &&
+                fast.ee().state().pc == reference.ee().state().pc,
+                "EE branch-delay state diverged after idle skip") && ok;
+
+    fast.ee().reset(kIdlePc);
+    fast.ee().state().cop0[11] = 4u;
+    ok = expect(!fast.ee().skip_bios_idle_iteration(),
+                "idle skip crossed COP0 Compare event") && ok;
+    fast.ee().state().cop0[11] = 100u;
+    ok = expect(fast.bus().write32(kIdlePc + 4u, 0x24020001u) &&
+                !fast.ee().skip_bios_idle_iteration(),
+                "idle skip accepted changed code") && ok;
+    return ok;
+}
+
+bool test_bios_loop_fast_paths_match_ee_steps() {
+    auto compare = [](
+        const char* label, ps2::u32 pc,
+        std::span<const ps2::u32> code,
+        auto setup, auto skip, ps2::u32 retired,
+        ps2::u32 memory, ps2::u32 bytes) {
+        ps2::Ps2System fast;
+        ps2::Ps2System reference;
+        for (ps2::u32 i = 0; i < code.size(); ++i) {
+            if (!expect(fast.bus().write32(pc + 4u * i, code[i]) &&
+                        reference.bus().write32(pc + 4u * i, code[i]),
+                        "BIOS loop code setup failed")) return false;
+        }
+        fast.ee().reset(pc);
+        reference.ee().reset(pc);
+        fast.ee().state().cop0[11] = 0x10000000u;
+        reference.ee().state().cop0[11] = 0x10000000u;
+        setup(fast);
+        setup(reference);
+        if (!expect(skip(fast), label)) return false;
+        std::string error;
+        for (ps2::u32 i = 0; i < retired; ++i) {
+            if (!expect(reference.ee().step(error),
+                        "BIOS loop reference step failed")) return false;
+        }
+        auto equal_state = [&]() {
+            const auto& a = fast.ee().state();
+            const auto& b = reference.ee().state();
+            if (a.pc != b.pc || a.next_pc != b.next_pc ||
+                a.last_pc != b.last_pc ||
+                a.last_instruction != b.last_instruction ||
+                a.instructions_executed != b.instructions_executed ||
+                a.cop0[9] != b.cop0[9] || a.cop0[13] != b.cop0[13])
+                return false;
+            for (ps2::u32 i = 0; i < a.gpr.size(); ++i) {
+                if (a.gpr[i].lo != b.gpr[i].lo ||
+                    a.gpr[i].hi != b.gpr[i].hi) return false;
+            }
+            return true;
+        };
+        if (!expect(equal_state(), "BIOS loop CPU state diverged"))
+            return false;
+        for (ps2::u32 i = 0; i < bytes; ++i) {
+            ps2::u8 a = 0, b = 0;
+            if (!expect(fast.bus().read8(memory + i, a) &&
+                        reference.bus().read8(memory + i, b) && a == b,
+                        "BIOS loop RAM diverged")) return false;
+        }
+        if (!expect(fast.ee().step(error) && reference.ee().step(error) &&
+                    equal_state(), "BIOS loop follow-up step diverged"))
+            return false;
+        return true;
+    };
+
+    constexpr std::array<ps2::u32, 7> zero = {
+        0x7E020000u, 0x26100010u, 0x0204102Bu, 0u, 0u,
+        0x1440FFFAu, 0x700014A9u};
+    constexpr std::array<ps2::u32, 9> nibble = {
+        0x90A20000u, 0x24C6FFFFu, 0x3043000Fu,
+        0x00021102u, 0x00031900u, 0x00431021u,
+        0xA0A20000u, 0x04C1FFF8u, 0x24A50001u};
+    constexpr std::array<ps2::u32, 7> countdown = {
+        0u, 0u, 0u, 0u, 0u, 0x1443FFFAu, 0x2442FFFFu};
+    constexpr std::array<ps2::u32, 7> copy = {
+        0x90A20000u, 0x2484FFFFu, 0x24A50001u,
+        0xA2020000u, 0x26100001u, 0x1480FFFAu, 0u};
+    constexpr std::array<ps2::u32, 7> poll = {
+        0x8C620000u, 0x00441024u, 0u, 0u, 0u,
+        0x1040FFFAu, 0x3C021000u};
+    bool ok = compare("zero-loop shortcut rejected valid code",
+        0x8000E3C8u, zero,
+        [](auto& s) {
+            s.ee().state().gpr[2] = {};
+            s.ee().state().gpr[16].lo = 0x1000u;
+            s.ee().state().gpr[4].lo = 0x2000u;
+        },
+        [](auto& s) { return s.ee().skip_bios_zero_loop(3u); },
+        21u, 0x1000u, 48u);
+    ok = compare("nibble-loop shortcut rejected valid code",
+        0x0020A0E8u, nibble,
+        [](auto& s) {
+            s.ee().state().gpr[5].lo = 0x1B00100u;
+            s.ee().state().gpr[6].lo = 5u;
+            (void)s.bus().write32(0x1B00100u, 0x78563412u);
+        },
+        [](auto& s) { return s.ee().skip_bios_nibble_loop(3u); },
+        27u, 0x1B00100u, 4u) && ok;
+    ok = compare("countdown shortcut rejected valid code",
+        0x000826B0u, countdown,
+        [](auto& s) {
+            s.ee().state().gpr[2].lo = 5u;
+            s.ee().state().gpr[3].lo = 0xFFFFFFFFFFFFFFFFull;
+        },
+        [](auto& s) { return s.ee().skip_bios_countdown_wait(3u) == 3u; },
+        21u, 0u, 0u) && ok;
+    ok = compare("copy shortcut rejected valid code",
+        0x00200DE8u, copy,
+        [](auto& s) {
+            s.ee().state().gpr[4].lo = 1u;
+            s.ee().state().gpr[5].lo = 0x1200u;
+            s.ee().state().gpr[16].lo = 0x1300u;
+            (void)s.bus().write8(0x1200u, 0xA5u);
+        },
+        [](auto& s) { return s.ee().skip_bios_copy_iteration(); },
+        7u, 0x1300u, 1u) && ok;
+    ok = compare("MMIO poll shortcut rejected valid code",
+        0x00082180u, poll,
+        [](auto& s) {
+            s.ee().state().gpr[3].lo = 0x1000F230u;
+            s.ee().state().gpr[4].lo = 0x00040000u;
+        },
+        [](auto& s) { return s.ee().skip_bios_mmio_poll_iteration(); },
+        7u, 0u, 0u) && ok;
+    return ok;
 }
 
 bool test_scanout_skips_unchanged_vram() {
@@ -1344,7 +1516,50 @@ bool test_iop_root_counters() {
                     count32 == 1u,
                 "IOP Timer4 /16 prescaler mismatch") && ok;
 
+    ok = expect(system.iop_bus().write32(0x1F801494u, 0u),
+                "IOP Timer4 default-rate write failed") && ok;
+    system.iop_bus().tick(1u);
+    ok = expect(system.iop_bus().read32(0x1F801490u, count32) &&
+                    count32 == 1u,
+                "IOP Timer4 cached rate did not update") && ok;
+
     return ok;
+}
+
+bool test_iop_event_free_tick_matches_regular_tick() {
+    ps2::Ps2System fast;
+    ps2::Ps2System reference;
+    constexpr std::array<ps2::u32, 6> bases = {
+        0x1F801100u, 0x1F801110u, 0x1F801120u,
+        0x1F801480u, 0x1F801490u, 0x1F8014A0u};
+    for (ps2::u32 i = 0; i < bases.size(); ++i) {
+        const ps2::u32 target = i < 3u ? 0xFF00u : 0xFFFFFF00u;
+        if (!expect(fast.iop_bus().write32(bases[i] + 8u, target) &&
+                    reference.iop_bus().write32(bases[i] + 8u, target),
+                    "IOP event-free timer setup failed")) return false;
+    }
+    if (!expect(fast.iop_bus().tick_event_free(1000u),
+                "event-free IOP tick rejected a safe interval")) return false;
+    reference.iop_bus().tick(1000u);
+    for (const ps2::u32 base : bases) {
+        ps2::u32 fast_count = 0, reference_count = 0;
+        ps2::u32 fast_mode = 0, reference_mode = 0;
+        if (!expect(fast.iop_bus().read32(base, fast_count) &&
+                    reference.iop_bus().read32(base, reference_count) &&
+                    fast_count == reference_count &&
+                    fast.iop_bus().read32(base + 4u, fast_mode) &&
+                    reference.iop_bus().read32(base + 4u, reference_mode) &&
+                    fast_mode == reference_mode,
+                    "event-free IOP root counter diverged")) return false;
+    }
+    ps2::u32 before = 0, after = 0;
+    if (!expect(fast.iop_bus().write32(bases[0] + 8u, 1001u) &&
+                fast.iop_bus().read32(bases[0], before) &&
+                !fast.iop_bus().tick_event_free(1u) &&
+                fast.iop_bus().read32(bases[0], after) &&
+                before == after,
+                "event-free IOP tick crossed a timer target")) return false;
+    return true;
 }
 
 bool test_iop_spu2_register_window() {
@@ -2128,6 +2343,8 @@ int main() {
     ok = test_gs_untextured_triangle_without_depth() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
+    ok = test_bios_idle_iteration_matches_ee_steps() && ok;
+    ok = test_bios_loop_fast_paths_match_ee_steps() && ok;
     ok = test_dmac_running_mask() && ok;
     ok = test_ee_jit_matches_interpreter() && ok;
     ok = test_scheduler_ordering() && ok;
@@ -2154,6 +2371,7 @@ int main() {
     ok = test_iop_external_interrupt_exception() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
     ok = test_iop_root_counters() && ok;
+    ok = test_iop_event_free_tick_matches_regular_tick() && ok;
     ok = test_iop_spu2_register_window() && ok;
     ok = test_iop_spu2_dma_bootstrap_completion() && ok;
     ok = test_iop_sio2_minimal_transfer_status() && ok;

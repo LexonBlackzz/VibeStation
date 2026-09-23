@@ -92,6 +92,7 @@ void IopBus::reset() {
     firewire_regs_.fill(0);
     firewire_regs_[(0x10u) >> 2] = 0x8u; // SCLK ready.
     root_counters_.fill({});
+    root_counter_rate_cache_.fill(1u);
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         root_counters_[i].mode = 1u << 10; // IRQ output starts enabled.
         root_counters_[i].target =
@@ -468,6 +469,8 @@ bool IopBus::write_root_counter(
         counter.mode =
             (merged & 0x63FFu) |
             (counter.mode & 0x1C00u);
+        root_counter_rate_cache_[index] =
+            static_cast<u32>(root_counter_rate(index));
         counter.count = 0;
         counter.phase = 0;
         return true;
@@ -491,10 +494,19 @@ void IopBus::tick(u64 cycles) {
 
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         RootCounter& counter = root_counters_[i];
-        const u64 rate = root_counter_rate(i);
-        counter.phase += cycles;
-        const u64 increments = counter.phase / rate;
-        counter.phase %= rate;
+        const u64 rate = root_counter_rate_cache_[i];
+        u64 increments = 0;
+        if (cycles == 1u) {
+            ++counter.phase;
+            if (counter.phase >= rate) {
+                counter.phase -= rate;
+                increments = 1;
+            }
+        } else {
+            counter.phase += cycles;
+            increments = counter.phase / rate;
+            counter.phase %= rate;
+        }
         if (increments == 0) continue;
 
         const u64 maximum =
@@ -700,6 +712,41 @@ bool IopBus::write_sif32(u32 physical, u32 value) {
 
 u16 IopBus::sif_dma_ready_mask() const {
     return hw_.sif_dma_ready_mask();
+}
+
+bool IopBus::can_tick_event_free(u64 cycles) const {
+    if (spu2_dma4_irq_cycles_ != 0u &&
+        spu2_dma4_irq_cycles_ <= cycles) return false;
+    for (u32 i = 0; i < root_counters_.size(); ++i) {
+        const RootCounter& counter = root_counters_[i];
+        const u64 rate = root_counter_rate_cache_[i];
+        const u64 increments = (counter.phase + cycles) / rate;
+        if (increments == 0u) continue;
+        const u64 maximum = i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+        if (counter.count + increments >= counter.target ||
+            counter.count + increments > maximum) return false;
+    }
+    return true;
+}
+
+bool IopBus::tick_event_free(u64 cycles) {
+    if (!can_tick_event_free(cycles)) return false;
+
+    const u64 frame_total = ohci_frame_phase_ + cycles;
+    ohci_regs_[15] = (ohci_regs_[15] +
+        static_cast<u32>(frame_total / kOhciFrameCycles)) & 0xFFFFu;
+    ohci_frame_phase_ = frame_total % kOhciFrameCycles;
+    for (u32 i = 0; i < root_counters_.size(); ++i) {
+        RootCounter& counter = root_counters_[i];
+        const u64 rate = root_counter_rate_cache_[i];
+        const u64 phase_total = counter.phase + cycles;
+        counter.count += phase_total / rate;
+        counter.phase = phase_total % rate;
+    }
+    if (spu2_dma4_irq_cycles_ != 0u) {
+        spu2_dma4_irq_cycles_ -= cycles;
+    }
+    return true;
 }
 
 bool IopBus::read8(u32 address, u8& value) const {

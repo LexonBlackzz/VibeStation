@@ -3,6 +3,8 @@
 #include "common/types.h"
 
 #include <array>
+#include <cstddef>
+#include <span>
 
 namespace ps2 {
 
@@ -35,6 +37,13 @@ public:
     [[nodiscard]] bool read16(u32 address, u16& value) const;
     [[nodiscard]] bool read32(u32 address, u32& value) const;
     [[nodiscard]] bool fetch32(u32 address, u32& value) const;
+    [[nodiscard]] bool matches_code(u32 address,
+                                    std::span<const u32> words) const;
+    [[nodiscard]] bool fill_ram_zero(u32 address, std::size_t length);
+    [[nodiscard]] bool nibble_swap_ram(u32 address, std::size_t length,
+                                       u8& last_original);
+    [[nodiscard]] bool copy_ram_forward(u32 destination, u32 source,
+                                        std::size_t length, u8& last_value);
     [[nodiscard]] bool read64(u32 address, u64& value) const;
 
     [[nodiscard]] bool write8(u32 address, u8 value);
