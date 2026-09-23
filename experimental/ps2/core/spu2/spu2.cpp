@@ -94,7 +94,6 @@ void Spu2::reset() {
     cycle_phase_ = 0;
     pcm_queue_.clear();
     debug_stats_ = {};
-    debug_stats_ = {};
 
     // Keep the bootstrap-visible STATX reset value at zero. DMA completion
     // raises the transfer-ready bit just like the earlier compatibility path.
@@ -326,11 +325,6 @@ bool Spu2::decode_block(u32 core, u32 voice_index) {
     }
 
     voice.decoded_pos = 0;
-    ++debug_stats_.decoded_blocks;
-    for (const s16 sample : voice.decoded) {
-        if (sample != 0)
-            ++debug_stats_.decoded_nonzero_samples;
-    }
     const u32 addr_reg =
         core * kCoreStride +
         kVoiceNextAddr +
@@ -569,8 +563,7 @@ void Spu2::write_endx(u32 core) {
 }
 
 void Spu2::mix_one_sample() {
-    ++debug_stats_.mixer_frames;
-    u32 active_voices = 0;
+     u32 active_voices = 0;
     for (u32 core = 0; core < 2u; ++core) {
         for (const Voice& voice : cores_[core].voices) {
             if (voice.active) ++active_voices;
