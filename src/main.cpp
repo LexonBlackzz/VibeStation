@@ -1660,6 +1660,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   double cdrom_ms = 0.0;
   double gte_ms = 0.0;
   u64 gte_commands = 0u;
+  u64 scheduler_run_slice_calls = 0;
+  u64 scheduler_sio_sync_calls = 0;
+  u64 scheduler_sio_tick_calls = 0;
+  u64 scheduler_dma_service_calls = 0;
+  u64 scheduler_dma_work_calls = 0;
+  u64 scheduler_timer_tick_calls = 0;
+  u64 scheduler_timer_tick_cycles = 0;
   std::vector<double> cpu_samples;
   std::vector<double> core_samples;
   cpu_samples.reserve(static_cast<size_t>(measured_frames));
@@ -1680,6 +1687,13 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     cdrom_ms += profile.cdrom_ms;
     gte_ms += profile.gte_total_ms;
     gte_commands += profile.gte_total_commands;
+    scheduler_run_slice_calls += profile.scheduler_run_slice_calls;
+    scheduler_sio_sync_calls += profile.scheduler_sio_sync_calls;
+    scheduler_sio_tick_calls += profile.scheduler_sio_tick_calls;
+    scheduler_dma_service_calls += profile.scheduler_dma_service_calls;
+    scheduler_dma_work_calls += profile.scheduler_dma_work_calls;
+    scheduler_timer_tick_calls += profile.scheduler_timer_tick_calls;
+    scheduler_timer_tick_cycles += profile.scheduler_timer_tick_cycles;
     cpu_samples.push_back(profile.cpu_ms);
     core_samples.push_back(sys->profiling_stats().total_ms);
     if (!emit_checkpoint(absolute_frame)) {
@@ -1755,6 +1769,20 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   std::sort(cpu_samples.begin(), cpu_samples.end());
   std::sort(core_samples.begin(), core_samples.end());
   const double measured_divisor = static_cast<double>(measured_frames);
+
+  std::printf(
+      "CPU_BENCHMARK_SCHED frames=%d "
+      "run_slice_avg=%.3f sio_sync_avg=%.3f sio_tick_avg=%.3f "
+      "dma_service_avg=%.3f dma_work_avg=%.3f "
+      "timer_tick_avg=%.3f timer_cycles_avg=%.3f\n",
+      measured_frames,
+      static_cast<double>(scheduler_run_slice_calls) / measured_divisor,
+      static_cast<double>(scheduler_sio_sync_calls) / measured_divisor,
+      static_cast<double>(scheduler_sio_tick_calls) / measured_divisor,
+      static_cast<double>(scheduler_dma_service_calls) / measured_divisor,
+      static_cast<double>(scheduler_dma_work_calls) / measured_divisor,
+      static_cast<double>(scheduler_timer_tick_calls) / measured_divisor,
+      static_cast<double>(scheduler_timer_tick_cycles) / measured_divisor);
 
   std::printf(
       "CPU_BENCHMARK_RESULT status=ok requested_backend=%s "
