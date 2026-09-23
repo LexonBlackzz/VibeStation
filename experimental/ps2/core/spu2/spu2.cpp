@@ -216,7 +216,7 @@ bool Spu2::decode_block(u32 core, u32 voice_index) {
 
     const u32 address = voice.current_addr & 0xFFFF8u;
     const u16 header = ram_[address & 0xFFFFFu];
-    const u32 shift = std::min<u32>(header & 0xFu, 12u);
+    const u32 shift = header & 0xFu;
     const u32 predictor_id = (header >> 4) & 0xFu;
     const u32 predictor = predictor_id <= 4u ? predictor_id : 0u;
     voice.block_flags = static_cast<u8>(header >> 8);
