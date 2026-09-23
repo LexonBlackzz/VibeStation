@@ -34,6 +34,8 @@ android {
         }
         release {
             minifyEnabled false
+            // Test-only signing so CI produces an APK that can be installed directly.
+            signingConfig signingConfigs.debug
         }
     }
 
