@@ -853,6 +853,7 @@ void App::panel_performance() {
                 u64 cache_misses = 0;
                 u64 icache_refills = 0;
                 u64 helper_instructions = 0;
+                std::array<u64, 6> helper_reasons{};
                 u64 invalidations = 0;
                 u64 flushes = 0;
                 u64 run_slice_calls = 0;
@@ -891,6 +892,8 @@ void App::panel_performance() {
                         backend.recompiler_frame_icache_refills;
                     worst_spike.helper_instructions =
                         backend.recompiler_frame_helper_instructions;
+                    worst_spike.helper_reasons =
+                        backend.recompiler_frame_helper_reasons;
                     worst_spike.invalidations =
                         backend.recompiler_frame_invalidations;
                     worst_spike.flushes = backend.recompiler_frame_flushes;
@@ -928,7 +931,9 @@ void App::panel_performance() {
                     "frame=%llu core_ms=%.3f detailed=%u "
                     "compile_ms=%.3f compile_max_ms=%.3f compile_blocks=%llu compile_fail=%llu "
                     "revalidate_ms=%.3f revalidate=%llu/%llu "
-                    "misses=%llu icache_refills=%llu helpers=%llu invalidations=%llu flushes=%llu "
+                    "misses=%llu icache_refills=%llu helpers=%llu "
+                    "helper_irq=%llu helper_unaligned=%llu helper_unsafe=%llu helper_opcode=%llu helper_compilefail=%llu helper_budget=%llu "
+                    "invalidations=%llu flushes=%llu "
                     "run_slice=%llu native_dispatch=%llu direct_links=%llu "
                     "exits_missing=%llu exits_epoch=%llu exits_memory=%llu exits_generation=%llu "
                     "exits_budget=%llu exits_bail=%llu",
@@ -945,6 +950,12 @@ void App::panel_performance() {
                     static_cast<unsigned long long>(worst_spike.cache_misses),
                     static_cast<unsigned long long>(worst_spike.icache_refills),
                     static_cast<unsigned long long>(worst_spike.helper_instructions),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[5]),
                     static_cast<unsigned long long>(worst_spike.invalidations),
                     static_cast<unsigned long long>(worst_spike.flushes),
                     static_cast<unsigned long long>(worst_spike.run_slice_calls),
@@ -972,6 +983,14 @@ void App::panel_performance() {
                 static_cast<unsigned long long>(worst_spike.invalidations),
                 static_cast<unsigned long long>(worst_spike.flushes),
                 static_cast<unsigned long long>(worst_spike.run_slice_calls));
+            ImGui::Text(
+                "Worst helpers: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[5]));
 
             ImGui::Text(
                 "Spike probe: compile %.3f ms (%llu blocks, max %.3f, fail %llu)  revalidate %.3f ms (%llu/%llu)",
