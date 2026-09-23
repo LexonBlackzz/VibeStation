@@ -98,7 +98,7 @@ void Sio2Pad::write_byte(u8 value) {
     }
 }
 
-u8 Sio2Pad::read_byte() {
+u8 Sio2Pad::read_byte() const {
     ++rx_count_;
     if (output_.empty()) return 0xFFu;
     const u8 value = output_.front();
