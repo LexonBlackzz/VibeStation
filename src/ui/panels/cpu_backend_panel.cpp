@@ -19,7 +19,9 @@ namespace {
         const u64 total = stats.decoded_instructions +
             stats.native_instructions + stats.fallback_instructions;
         const u64 helper_native = std::min(
-            stats.native_instructions, stats.native_prepare_helper_calls);
+            stats.native_instructions,
+            std::max(stats.native_prepare_helper_calls,
+                     stats.jit_v4_helper_instructions));
         const u64 inline_native = stats.native_instructions - helper_native;
         ImGui::Text("Instruction mix: inline %.1f%%  helper %.1f%%  decoded %.1f%%  fallback %.1f%%",
             percent_of(inline_native, total),

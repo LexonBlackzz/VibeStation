@@ -1713,6 +1713,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       (requested_mode == CpuExecutionMode::X64JitV2 ||
        requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_entries, before.jit_v2_helper_entries)
+          : requested_mode == CpuExecutionMode::X64JitV4
+                ? delta(after.jit_v4_helper_instructions,
+                        before.jit_v4_helper_instructions)
           : delta(after.native_memory_helper_calls,
                   before.native_memory_helper_calls) +
                 delta(after.native_branch_helper_calls,
@@ -1726,6 +1729,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
        requested_mode == CpuExecutionMode::X64JitV3)
           ? delta(after.jit_v2_helper_instructions,
                   before.jit_v2_helper_instructions)
+          : requested_mode == CpuExecutionMode::X64JitV4
+                ? delta(after.jit_v4_helper_instructions,
+                        before.jit_v4_helper_instructions)
           : std::min(native_instructions,
                      delta(after.native_prepare_helper_calls,
                            before.native_prepare_helper_calls));
@@ -1936,6 +1942,122 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
       static_cast<unsigned long long>(hashes.cop0_timing),
       static_cast<unsigned long long>(hashes.cpu_cycles), hashes.display,
       hashes.pc);
+  if (requested_mode == CpuExecutionMode::X64JitV4) {
+    const u64 block_entries =
+        delta(after.native_block_entries, before.native_block_entries);
+    const u64 chain_invocations =
+        delta(after.native_chain_invocations, before.native_chain_invocations);
+    const u64 native_instruction_count =
+        delta(after.native_instructions, before.native_instructions);
+    std::array<u64, 5> sizes{};
+    for (size_t size = 1; size < after.native_compiled_block_size_histogram.size();
+         ++size) {
+      sizes[std::min<size_t>(size, 5u) - 1u] +=
+          delta(after.native_compiled_block_size_histogram[size],
+                before.native_compiled_block_size_histogram[size]);
+    }
+    std::printf(
+        "V4_LINK_PROFILE direct=%llu blocks=%llu avg_instr=%.3f "
+        "avg_chain=%.3f sizes_1_2_3_4_5plus=%llu,%llu,%llu,%llu,%llu "
+        "exit_missing=%llu exit_epoch=%llu exit_memory=%llu "
+        "exit_generation=%llu exit_budget=%llu exit_bail=%llu\n",
+        static_cast<unsigned long long>(
+            delta(after.native_direct_link_transitions,
+                  before.native_direct_link_transitions)),
+        static_cast<unsigned long long>(block_entries),
+        block_entries == 0 ? 0.0
+                           : static_cast<double>(native_instruction_count) /
+                                 static_cast<double>(block_entries),
+        chain_invocations == 0
+            ? 0.0
+            : static_cast<double>(block_entries) /
+                  static_cast<double>(chain_invocations),
+        static_cast<unsigned long long>(sizes[0]),
+        static_cast<unsigned long long>(sizes[1]),
+        static_cast<unsigned long long>(sizes[2]),
+        static_cast<unsigned long long>(sizes[3]),
+        static_cast<unsigned long long>(sizes[4]),
+        static_cast<unsigned long long>(delta(after.native_dispatch_missing_exits,
+                                              before.native_dispatch_missing_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_epoch_exits,
+                                              before.native_dispatch_epoch_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_memory_exits,
+                                              before.native_dispatch_memory_exits)),
+        static_cast<unsigned long long>(
+            delta(after.native_dispatch_generation_exits,
+                  before.native_dispatch_generation_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_budget_exits,
+                                              before.native_dispatch_budget_exits)),
+        static_cast<unsigned long long>(delta(after.native_dispatch_bail_exits,
+                                              before.native_dispatch_bail_exits)));
+    std::array<u32, 64> primary_rank{};
+    std::array<u32, 64> special_rank{};
+    for (u32 opcode = 0; opcode < 64u; ++opcode) {
+      primary_rank[opcode] = opcode;
+      special_rank[opcode] = opcode;
+    }
+    const auto primary_calls = [&](u32 opcode) {
+      return delta(after.jit_v4_helper_primary_counts[opcode],
+                   before.jit_v4_helper_primary_counts[opcode]);
+    };
+    const auto special_calls = [&](u32 opcode) {
+      return delta(after.jit_v4_helper_special_counts[opcode],
+                   before.jit_v4_helper_special_counts[opcode]);
+    };
+    std::sort(primary_rank.begin(), primary_rank.end(),
+              [&](u32 a, u32 b) { return primary_calls(a) > primary_calls(b); });
+    std::sort(special_rank.begin(), special_rank.end(),
+              [&](u32 a, u32 b) { return special_calls(a) > special_calls(b); });
+    std::printf("V4_HELPER_PROFILE reasons_irq_pc_state_opcode_compile_budget=");
+    for (size_t reason = 0; reason < after.jit_v4_helper_reasons.size();
+         ++reason) {
+      std::printf("%s%llu", reason == 0u ? "" : ",",
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_reasons[reason],
+                      before.jit_v4_helper_reasons[reason])));
+    }
+    std::printf(" primary_opcode_calls_avg_ns_state_opcode_budget=");
+    for (size_t rank = 0; rank < 10u && primary_calls(primary_rank[rank]);
+         ++rank) {
+      const u32 opcode = primary_rank[rank];
+      const u64 samples = delta(after.jit_v4_helper_primary_samples[opcode],
+                                before.jit_v4_helper_primary_samples[opcode]);
+      const u64 sample_ns = delta(after.jit_v4_helper_primary_sample_ns[opcode],
+                                  before.jit_v4_helper_primary_sample_ns[opcode]);
+      std::printf("%s%02X:%llu:%.1f:%llu:%llu:%llu",
+                  rank == 0u ? "" : ",", opcode,
+                  static_cast<unsigned long long>(primary_calls(opcode)),
+                  samples == 0u ? 0.0 : static_cast<double>(sample_ns) /
+                                             static_cast<double>(samples),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[2][opcode],
+                      before.jit_v4_helper_primary_by_reason[2][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[3][opcode],
+                      before.jit_v4_helper_primary_by_reason[3][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_primary_by_reason[5][opcode],
+                      before.jit_v4_helper_primary_by_reason[5][opcode])));
+    }
+    std::printf(" special_funct_calls_state_opcode_budget=");
+    for (size_t rank = 0; rank < 8u && special_calls(special_rank[rank]);
+         ++rank) {
+      const u32 opcode = special_rank[rank];
+      std::printf("%s%02X:%llu:%llu:%llu:%llu",
+                  rank == 0u ? "" : ",", opcode,
+                  static_cast<unsigned long long>(special_calls(opcode)),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[2][opcode],
+                      before.jit_v4_helper_special_by_reason[2][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[3][opcode],
+                      before.jit_v4_helper_special_by_reason[3][opcode])),
+                  static_cast<unsigned long long>(delta(
+                      after.jit_v4_helper_special_by_reason[5][opcode],
+                      before.jit_v4_helper_special_by_reason[5][opcode])));
+    }
+    std::printf("\n");
+  }
   return 0;
 }
 

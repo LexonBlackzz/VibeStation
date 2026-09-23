@@ -2432,6 +2432,155 @@ u32 Cpu::step() {
 
 // ── Instruction Dispatch ───────────────────────────────────────────
 
+template <void (Cpu::*Handler)(u32)>
+u32 Cpu::run_compiled_opcode(Cpu *cpu, u32 instruction) {
+  cpu->executing_step_ = true;
+  cpu->current_pc_ = cpu->pc_;
+  g_diag_current_pc = cpu->current_pc_;
+  cpu->exception_raised_ = false;
+  cpu->cycle_penalty_ = 0;
+  cpu->in_delay_slot_ = cpu->pending_delay_slot_;
+  cpu->active_branch_pc_ = cpu->pending_branch_pc_;
+  cpu->pending_delay_slot_ = false;
+  cpu->pending_branch_taken_ = false;
+  cpu->pending_branch_pc_ = 0;
+
+  if (cpu->sys_->irq_pending()) {
+    cpu->cop0_cause_ |= (1u << 10);
+  } else {
+    cpu->cop0_cause_ &= ~(1u << 10);
+  }
+  if (!cpu->in_delay_slot_ && cpu->check_irq()) {
+    cpu->exception(Exception::Interrupt);
+    cpu->cycles_ += 2u;
+    cpu->executing_step_ = false;
+    return 2u;
+  }
+  if ((cpu->current_pc_ & 3u) != 0u) {
+    (void)cpu->fetch32(cpu->current_pc_);
+    cpu->cycles_ += 2u;
+    cpu->executing_step_ = false;
+    return 2u;
+  }
+
+  cpu->pc_ = cpu->next_pc_;
+  cpu->next_pc_ += 4u;
+  (cpu->*Handler)(instruction);
+  if (!cpu->exception_raised_) {
+    cpu->advance_load_delay();
+  }
+  const u32 consumed = cpu->instruction_cycles(instruction) +
+                       cpu->cycle_penalty_;
+  cpu->cycles_ += consumed;
+  cpu->executing_step_ = false;
+  cpu->rr4_diag_state_.prev_pc_for_diag = cpu->current_pc_;
+  return consumed;
+}
+
+void Cpu::op_reserved_compiled(u32 instruction) {
+  log_repeated_decode_warning("opcode", op(instruction), instruction,
+                              current_pc_,
+                              "CPU: Unhandled opcode 0x%02X instr=0x%08X at PC=0x%08X");
+  log_dma_context(sys_, current_pc_, instruction, gpr_);
+  if (!g_experimental_unhandled_special_returns_zero) {
+    exception(Exception::ReservedInst);
+  }
+}
+
+Cpu::CompiledOpcodeFn Cpu::compiled_opcode_fn(u32 instruction) {
+#define V4_HANDLER(opcode, handler) \
+  case opcode: return &Cpu::run_compiled_opcode<&Cpu::handler>
+  switch (op(instruction)) {
+    case 0x00:
+      switch (funct(instruction)) {
+        V4_HANDLER(0x00, op_sll);
+        V4_HANDLER(0x02, op_srl);
+        V4_HANDLER(0x03, op_sra);
+        V4_HANDLER(0x04, op_sllv);
+        V4_HANDLER(0x06, op_srlv);
+        V4_HANDLER(0x07, op_srav);
+        V4_HANDLER(0x08, op_jr);
+        V4_HANDLER(0x09, op_jalr);
+        V4_HANDLER(0x0A, op_movz);
+        V4_HANDLER(0x0B, op_movn);
+        V4_HANDLER(0x0C, op_syscall);
+        V4_HANDLER(0x0D, op_break);
+        V4_HANDLER(0x0F, op_sync);
+        V4_HANDLER(0x10, op_mfhi);
+        V4_HANDLER(0x11, op_mthi);
+        V4_HANDLER(0x12, op_mflo);
+        V4_HANDLER(0x13, op_mtlo);
+        V4_HANDLER(0x18, op_mult);
+        V4_HANDLER(0x19, op_multu);
+        V4_HANDLER(0x1A, op_div);
+        V4_HANDLER(0x1B, op_divu);
+        V4_HANDLER(0x20, op_add);
+        V4_HANDLER(0x21, op_addu);
+        V4_HANDLER(0x22, op_sub);
+        V4_HANDLER(0x23, op_subu);
+        V4_HANDLER(0x24, op_and);
+        V4_HANDLER(0x25, op_or);
+        V4_HANDLER(0x26, op_xor);
+        V4_HANDLER(0x27, op_nor);
+        V4_HANDLER(0x2A, op_slt);
+        V4_HANDLER(0x2B, op_sltu);
+        V4_HANDLER(0x2C, op_add);
+        V4_HANDLER(0x2D, op_addu);
+        V4_HANDLER(0x2E, op_sub);
+        V4_HANDLER(0x2F, op_subu);
+        case 0x30: case 0x31: case 0x32:
+        case 0x33: case 0x34: case 0x36:
+          return &Cpu::run_compiled_opcode<&Cpu::op_trap_special>;
+        default: return &Cpu::run_compiled_opcode<&Cpu::op_special>;
+      }
+    V4_HANDLER(0x01, op_bcondz);
+    V4_HANDLER(0x02, op_j);
+    V4_HANDLER(0x03, op_jal);
+    V4_HANDLER(0x04, op_beq);
+    V4_HANDLER(0x05, op_bne);
+    V4_HANDLER(0x06, op_blez);
+    V4_HANDLER(0x07, op_bgtz);
+    V4_HANDLER(0x08, op_addi);
+    V4_HANDLER(0x09, op_addiu);
+    V4_HANDLER(0x0A, op_slti);
+    V4_HANDLER(0x0B, op_sltiu);
+    V4_HANDLER(0x0C, op_andi);
+    V4_HANDLER(0x0D, op_ori);
+    V4_HANDLER(0x0E, op_xori);
+    V4_HANDLER(0x0F, op_lui);
+    V4_HANDLER(0x10, op_cop0);
+    V4_HANDLER(0x11, op_cop1);
+    V4_HANDLER(0x12, op_cop2);
+    V4_HANDLER(0x13, op_cop3);
+    V4_HANDLER(0x14, op_beql);
+    V4_HANDLER(0x15, op_bnel);
+    V4_HANDLER(0x16, op_blezl);
+    V4_HANDLER(0x17, op_bgtzl);
+    V4_HANDLER(0x20, op_lb);
+    V4_HANDLER(0x21, op_lh);
+    V4_HANDLER(0x22, op_lwl);
+    V4_HANDLER(0x23, op_lw);
+    V4_HANDLER(0x24, op_lbu);
+    V4_HANDLER(0x25, op_lhu);
+    V4_HANDLER(0x26, op_lwr);
+    V4_HANDLER(0x28, op_sb);
+    V4_HANDLER(0x29, op_sh);
+    V4_HANDLER(0x2A, op_swl);
+    V4_HANDLER(0x2B, op_sw);
+    V4_HANDLER(0x2E, op_swr);
+    V4_HANDLER(0x30, op_lwc0);
+    V4_HANDLER(0x31, op_lwc1);
+    V4_HANDLER(0x32, op_lwc2);
+    V4_HANDLER(0x33, op_lwc3);
+    V4_HANDLER(0x38, op_swc0);
+    V4_HANDLER(0x39, op_swc1);
+    V4_HANDLER(0x3A, op_swc2);
+    V4_HANDLER(0x3B, op_swc3);
+    default: return &Cpu::run_compiled_opcode<&Cpu::op_reserved_compiled>;
+  }
+#undef V4_HANDLER
+}
+
 CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   CpuRunSliceResult result{};
   if (max_cycles == 0 || max_instructions == 0) {

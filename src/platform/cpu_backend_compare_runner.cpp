@@ -4154,7 +4154,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_resident_chain.start_pc = 0xA0010000u;
   // 32 baseline-native NOPs form block A. The J + delay-slot NOP form block B.
   // On the first trip A and B are compiled separately; once B jumps back to A,
-  // the resident x64 dispatcher must execute A->B->A without returning to C++.
+  // the resident x64 path must take a direct known edge without returning to C++.
   v4_uncached_resident_chain.program.assign(32u, 0u);
   v4_uncached_resident_chain.program.push_back(
       enc_j(0x02, v4_uncached_resident_chain.start_pc));
@@ -4363,9 +4363,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
         } else {
           const bool clean_fallback =
               result.stats.native_block_entries == 0 &&
-              result.stats.native_instructions == 0;
-          native_check = clean_fallback ? "v4_clean_fallback"
-                                        : "v4_unexpected_native";
+              result.stats.jit_v4_helper_instructions >=
+                  test_case.instructions &&
+              result.stats.fallback_instructions == 0 &&
+              result.stats.interpreter_fallback_steps == 0;
+          native_check = clean_fallback ? "v4_compiled_helper"
+                                        : "v4_helper_missing";
           native_check_pass = clean_fallback;
         }
       } else if (mode == CpuExecutionMode::X64JitV4 &&
@@ -4376,7 +4379,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool guarded =
               result.stats.native_memory_blocks_compiled != 0u &&
               result.stats.native_memory_fastpath_stores == 0u &&
-              result.stats.fallback_instructions != 0u;
+              result.stats.jit_v4_helper_instructions != 0u &&
+              result.stats.fallback_instructions == 0u &&
+              result.stats.interpreter_fallback_steps == 0u;
           native_check = guarded ? "v4_store_smc_guarded"
                                  : "v4_store_smc_not_guarded";
           native_check_pass = guarded;
@@ -4458,6 +4463,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
                result.stats.native_linked_transitions != 0 &&
+               result.stats.native_direct_link_transitions != 0 &&
                result.stats.native_chain_max_blocks > 1u);
           if (!native_entered) {
             native_check = "v4_native_missing";
@@ -4496,6 +4502,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               cached_same_page_retained && icache_revalidated &&
               chain_entered;
         }
+      }
+
+      if (mode == CpuExecutionMode::X64JitV4 &&
+          result.stats.native_available &&
+          !test_case.request_irq_on_branch &&
+          (result.stats.fallback_instructions != 0u ||
+           result.stats.interpreter_fallback_steps != 0u)) {
+        native_check = "v4_interpreter_fallback";
+        native_check_pass = false;
       }
 
       if (mode == CpuExecutionMode::X64JitV2 &&
