@@ -15,12 +15,14 @@
 #include <cmath>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
 GLuint g_background_texture = 0;
+GLuint g_background_blur_texture = 0;
 int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
@@ -42,6 +44,95 @@ float animate_towards(float current, float target, float response = 13.0f) {
 
 int glow_alpha(float value) {
     return std::clamp(static_cast<int>(std::round(value)), 0, 255);
+}
+
+
+std::vector<unsigned char> make_blurred_rgba(
+    const unsigned char* source, int width, int height, int radius) {
+    const size_t pixel_count =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<unsigned char> horizontal(pixel_count * 4u);
+    std::vector<unsigned char> output(pixel_count * 4u);
+    if (source == nullptr || width <= 0 || height <= 0 || radius <= 0) {
+        return output;
+    }
+
+    const int kernel = radius * 2 + 1;
+
+    // Horizontal pass using a sliding window. Edge pixels are clamped so the
+    // backdrop does not darken near the image boundary.
+    for (int y = 0; y < height; ++y) {
+        for (int channel = 0; channel < 4; ++channel) {
+            int sum = 0;
+            for (int k = -radius; k <= radius; ++k) {
+                const int sx = std::clamp(k, 0, width - 1);
+                sum += source[(static_cast<size_t>(y) * width + sx) * 4u + channel];
+            }
+
+            for (int x = 0; x < width; ++x) {
+                horizontal[(static_cast<size_t>(y) * width + x) * 4u + channel] =
+                    static_cast<unsigned char>(sum / kernel);
+
+                const int remove_x = std::clamp(x - radius, 0, width - 1);
+                const int add_x = std::clamp(x + radius + 1, 0, width - 1);
+                sum -= source[
+                    (static_cast<size_t>(y) * width + remove_x) * 4u + channel];
+                sum += source[
+                    (static_cast<size_t>(y) * width + add_x) * 4u + channel];
+            }
+        }
+    }
+
+    // Vertical pass.
+    for (int x = 0; x < width; ++x) {
+        for (int channel = 0; channel < 4; ++channel) {
+            int sum = 0;
+            for (int k = -radius; k <= radius; ++k) {
+                const int sy = std::clamp(k, 0, height - 1);
+                sum += horizontal[
+                    (static_cast<size_t>(sy) * width + x) * 4u + channel];
+            }
+
+            for (int y = 0; y < height; ++y) {
+                output[(static_cast<size_t>(y) * width + x) * 4u + channel] =
+                    static_cast<unsigned char>(sum / kernel);
+
+                const int remove_y = std::clamp(y - radius, 0, height - 1);
+                const int add_y = std::clamp(y + radius + 1, 0, height - 1);
+                sum -= horizontal[
+                    (static_cast<size_t>(remove_y) * width + x) * 4u + channel];
+                sum += horizontal[
+                    (static_cast<size_t>(add_y) * width + x) * 4u + channel];
+            }
+        }
+    }
+
+    return output;
+}
+
+bool upload_rgba_texture(
+    GLuint& texture, const unsigned char* pixels, int width, int height) {
+    if (pixels == nullptr || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    glGenTextures(1, &texture);
+    if (texture == 0) {
+        return false;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
 }
 
 std::filesystem::path find_background_path() {
@@ -98,20 +189,21 @@ bool ensure_background_texture_loaded() {
         return false;
     }
 
-    glGenTextures(1, &g_background_texture);
-    glBindTexture(GL_TEXTURE_2D, g_background_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(
-        GL_TEXTURE_2D, 0, GL_RGBA, g_background_width, g_background_height, 0,
-        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    const bool sharp_uploaded = upload_rgba_texture(
+        g_background_texture, pixels, g_background_width, g_background_height);
+
+    // A modest one-time blur gives the text zones a glassy backdrop without
+    // adding a per-frame render pass.
+    const std::vector<unsigned char> blurred =
+        make_blurred_rgba(pixels, g_background_width, g_background_height, 7);
+    if (!blurred.empty()) {
+        upload_rgba_texture(
+            g_background_blur_texture, blurred.data(),
+            g_background_width, g_background_height);
+    }
+
     stbi_image_free(pixels);
-    return g_background_texture != 0;
+    return sharp_uploaded;
 }
 
 struct Layout {
@@ -140,6 +232,65 @@ Layout make_layout(const ImVec2& window_pos, const ImVec2& window_size) {
     return layout;
 }
 
+struct CoverUv {
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = 1.0f;
+    float v1 = 1.0f;
+};
+
+CoverUv cover_uv_for_size(const ImVec2& size) {
+    CoverUv uv{};
+    if (g_background_width <= 0 || g_background_height <= 0) {
+        return uv;
+    }
+
+    const float image_aspect =
+        static_cast<float>(g_background_width) / static_cast<float>(g_background_height);
+    const float canvas_aspect = size.x / std::max(1.0f, size.y);
+
+    if (canvas_aspect > image_aspect) {
+        const float visible_v = image_aspect / canvas_aspect;
+        uv.v0 = (1.0f - visible_v) * 0.5f;
+        uv.v1 = uv.v0 + visible_v;
+    }
+    else {
+        const float visible_u = canvas_aspect / image_aspect;
+        uv.u0 = (1.0f - visible_u) * 0.5f;
+        uv.u1 = uv.u0 + visible_u;
+    }
+    return uv;
+}
+
+void draw_cover_region(ImDrawList* draw, GLuint texture,
+    const ImVec2& canvas_pos, const ImVec2& canvas_size,
+    const ImVec2& region_min, const ImVec2& region_max, ImU32 tint) {
+    if (texture == 0 || canvas_size.x <= 0.0f || canvas_size.y <= 0.0f) {
+        return;
+    }
+
+    const CoverUv uv = cover_uv_for_size(canvas_size);
+    const float tx0 = std::clamp(
+        (region_min.x - canvas_pos.x) / canvas_size.x, 0.0f, 1.0f);
+    const float ty0 = std::clamp(
+        (region_min.y - canvas_pos.y) / canvas_size.y, 0.0f, 1.0f);
+    const float tx1 = std::clamp(
+        (region_max.x - canvas_pos.x) / canvas_size.x, 0.0f, 1.0f);
+    const float ty1 = std::clamp(
+        (region_max.y - canvas_pos.y) / canvas_size.y, 0.0f, 1.0f);
+
+    const ImVec2 region_uv0(
+        uv.u0 + (uv.u1 - uv.u0) * tx0,
+        uv.v0 + (uv.v1 - uv.v0) * ty0);
+    const ImVec2 region_uv1(
+        uv.u0 + (uv.u1 - uv.u0) * tx1,
+        uv.v0 + (uv.v1 - uv.v0) * ty1);
+
+    draw->AddImage(
+        (ImTextureID)(intptr_t)texture,
+        region_min, region_max, region_uv0, region_uv1, tint);
+}
+
 void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
     draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
         rgba(7, 9, 12, 255));
@@ -152,29 +303,46 @@ void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
         return;
     }
 
-    float u0 = 0.0f;
-    float v0 = 0.0f;
-    float u1 = 1.0f;
-    float v1 = 1.0f;
-    const float image_aspect =
-        static_cast<float>(g_background_width) / static_cast<float>(g_background_height);
-    const float canvas_aspect = size.x / std::max(1.0f, size.y);
-
-    if (canvas_aspect > image_aspect) {
-        const float visible_v = image_aspect / canvas_aspect;
-        v0 = (1.0f - visible_v) * 0.5f;
-        v1 = v0 + visible_v;
-    }
-    else {
-        const float visible_u = canvas_aspect / image_aspect;
-        u0 = (1.0f - visible_u) * 0.5f;
-        u1 = u0 + visible_u;
-    }
-
+    const CoverUv uv = cover_uv_for_size(size);
     draw->AddImage(
         (ImTextureID)(intptr_t)g_background_texture,
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
-        ImVec2(u0, v0), ImVec2(u1, v1));
+        ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1));
+}
+
+void draw_soft_backdrops(ImDrawList* draw,
+    const ImVec2& pos, const ImVec2& size) {
+    if (g_background_blur_texture == 0) {
+        return;
+    }
+
+    // Stronger blur directly behind the branding/menu.
+    const float solid_right = pos.x + size.x * 0.37f;
+    draw_cover_region(draw, g_background_blur_texture, pos, size,
+        pos, ImVec2(solid_right, pos.y + size.y),
+        rgba(255, 255, 255, 190));
+
+    // Feather the blurred image back into the sharp background instead of
+    // ending it on a visible vertical seam.
+    constexpr int kFeatherSteps = 10;
+    const float feather_end = pos.x + size.x * 0.58f;
+    const float feather_width = feather_end - solid_right;
+    for (int i = 0; i < kFeatherSteps; ++i) {
+        const float t0 = static_cast<float>(i) / kFeatherSteps;
+        const float t1 = static_cast<float>(i + 1) / kFeatherSteps;
+        const float alpha_t = 1.0f - (t0 + t1) * 0.5f;
+        const ImVec2 r0(solid_right + feather_width * t0, pos.y);
+        const ImVec2 r1(solid_right + feather_width * t1, pos.y + size.y);
+        draw_cover_region(draw, g_background_blur_texture, pos, size, r0, r1,
+            rgba(255, 255, 255, glow_alpha(185.0f * alpha_t)));
+    }
+
+    // A much lighter blur under the lower information band keeps the panels
+    // readable while preserving the photograph through their translucent fill.
+    const float band_top = pos.y + size.y * 0.70f;
+    draw_cover_region(draw, g_background_blur_texture, pos, size,
+        ImVec2(pos.x, band_top), ImVec2(pos.x + size.x, pos.y + size.y),
+        rgba(255, 255, 255, 92));
 }
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
@@ -279,7 +447,7 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
 }
 
 bool menu_button(const Layout& layout, ImDrawList* draw, int index,
-    MenuIcon icon, const char* title, const char* subtitle, int& selected_index) {
+    MenuIcon icon, const char* title, const char* subtitle) {
     constexpr float kX = 36.0f;
     constexpr float kY = 218.0f;
     constexpr float kWidth = 396.0f;
@@ -301,54 +469,57 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     const bool hovered = ImGui::IsItemHovered();
     const bool focused = ImGui::IsItemFocused();
     const bool active = ImGui::IsItemActive();
-    if (hovered || focused || pressed) {
-        selected_index = index;
+    const bool engaged = hovered || focused || active;
+
+    // Every item gets an explicit zero target whenever it is not engaged.
+    // This prevents the previous menu item from remaining lit after focus moves.
+    const float target_mix = engaged ? 1.0f : 0.0f;
+    float& highlight_mix = g_menu_highlight_mix[static_cast<size_t>(index)];
+    highlight_mix = animate_towards(
+        highlight_mix, target_mix, engaged ? 16.0f : 9.5f);
+    if (!engaged && highlight_mix < 0.004f) {
+        highlight_mix = 0.0f;
     }
 
-    const bool selected = selected_index == index;
-    const float target_mix = selected ? (hovered || focused ? 1.0f : 0.78f)
-                                      : (hovered ? 0.42f : 0.0f);
-    float& highlight_mix = g_menu_highlight_mix[static_cast<size_t>(index)];
-    highlight_mix = animate_towards(highlight_mix, target_mix, selected ? 15.0f : 11.0f);
-
-    const float pulse =
-        selected ? (0.88f + 0.12f * std::sin(static_cast<float>(ImGui::GetTime()) * 2.15f))
-                 : 1.0f;
-    const float glow = std::clamp(highlight_mix * pulse + (active ? 0.18f : 0.0f),
-        0.0f, 1.15f);
+    const float pulse = engaged
+        ? (0.92f + 0.08f *
+            std::sin(static_cast<float>(ImGui::GetTime()) * 2.1f))
+        : 1.0f;
+    const float glow = std::clamp(
+        highlight_mix * pulse + (active ? 0.14f : 0.0f), 0.0f, 1.1f);
 
     if (glow > 0.01f) {
-        const float glow_outer = layout.px(7.0f + glow * 2.0f);
-        const float glow_mid = layout.px(3.5f + glow);
+        const float glow_outer = layout.px(6.0f + glow * 2.0f);
+        const float glow_mid = layout.px(3.0f + glow);
         const ImVec2 outer0(p.x - glow_outer, p.y - glow_outer);
         const ImVec2 outer1(p.x + size.x + glow_outer, p.y + size.y + glow_outer);
         const ImVec2 mid0(p.x - glow_mid, p.y - glow_mid);
         const ImVec2 mid1(p.x + size.x + glow_mid, p.y + size.y + glow_mid);
 
         draw->AddRect(outer0, outer1,
-            rgba(90, 154, 216, glow_alpha(18.0f * glow)),
+            rgba(90, 154, 216, glow_alpha(17.0f * glow)),
             0.0f, 0, layout.px(1.0f));
         draw->AddRect(mid0, mid1,
             rgba(126, 184, 236, glow_alpha(34.0f * glow)),
             0.0f, 0, layout.px(1.2f));
     }
 
-    if (selected || highlight_mix > 0.02f) {
-        const int fill_alpha = glow_alpha(
-            42.0f + 76.0f * highlight_mix + (hovered ? 16.0f : 0.0f));
+    if (highlight_mix > 0.01f) {
+        const int fill_alpha =
+            glow_alpha(116.0f * highlight_mix + (hovered ? 10.0f : 0.0f));
         draw->AddRectFilled(
             p, ImVec2(p.x + size.x, p.y + size.y),
             rgba(12, 17, 23, fill_alpha));
 
-        const int border_alpha = glow_alpha(155.0f + 90.0f * highlight_mix);
         draw->AddRect(
             p, ImVec2(p.x + size.x, p.y + size.y),
-            rgba(211, 229, 246, border_alpha), 0.0f, 0, layout.px(1.35f));
+            rgba(211, 229, 246, glow_alpha(235.0f * highlight_mix)),
+            0.0f, 0, layout.px(1.35f));
         draw->AddRect(
             ImVec2(p.x + layout.px(2.0f), p.y + layout.px(2.0f)),
             ImVec2(p.x + size.x - layout.px(2.0f),
                 p.y + size.y - layout.px(2.0f)),
-            rgba(103, 154, 205, glow_alpha(62.0f + 78.0f * highlight_mix)),
+            rgba(103, 154, 205, glow_alpha(128.0f * highlight_mix)),
             0.0f, 0, layout.px(0.8f));
 
         const float rail_half = layout.px(16.0f + 5.0f * highlight_mix);
@@ -356,18 +527,24 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         draw->AddRectFilled(
             ImVec2(p.x - layout.px(2.0f), center_y - rail_half),
             ImVec2(p.x, center_y + rail_half),
-            rgba(205, 231, 255, glow_alpha(95.0f + 150.0f * highlight_mix)));
+            rgba(205, 231, 255, glow_alpha(235.0f * highlight_mix)));
     }
 
-    const ImU32 main_color = selected
-        ? rgba(242, 246, 250, 255)
-        : rgba(206, 208, 211, 228);
-    const ImU32 sub_color = selected
-        ? rgba(184, 192, 201, 238)
-        : rgba(150, 154, 161, 210);
+    const float emphasis = std::clamp(highlight_mix, 0.0f, 1.0f);
+    const ImU32 main_color = rgba(
+        static_cast<int>(206 + 36 * emphasis),
+        static_cast<int>(208 + 38 * emphasis),
+        static_cast<int>(211 + 39 * emphasis),
+        static_cast<int>(228 + 27 * emphasis));
+    const ImU32 sub_color = rgba(
+        static_cast<int>(150 + 34 * emphasis),
+        static_cast<int>(154 + 38 * emphasis),
+        static_cast<int>(161 + 40 * emphasis),
+        static_cast<int>(210 + 28 * emphasis));
 
     const float content_shift = 2.0f * highlight_mix;
-    draw_icon(draw, layout, icon, kX + 24.0f + content_shift, y + 18.0f, main_color);
+    draw_icon(draw, layout, icon,
+        kX + 24.0f + content_shift, y + 18.0f, main_color);
     add_text(draw, layout, kX + 72.0f + content_shift, y + 13.0f, 18.0f,
         main_color, title);
     add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 10.5f,
@@ -405,7 +582,7 @@ void draw_panel(ImDrawList* draw, const Layout& layout,
     float x, float y, float w, float h) {
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 p1 = layout.point(x + w, y + h);
-    draw->AddRectFilled(p0, p1, rgba(5, 8, 11, 198));
+    draw->AddRectFilled(p0, p1, rgba(5, 8, 11, 178));
     draw->AddRect(p0, p1, rgba(102, 116, 130, 205), 0.0f, 0, layout.px(1.0f));
 }
 
@@ -439,6 +616,10 @@ void App::release_definitive_ui_assets() {
         glDeleteTextures(1, &g_background_texture);
         g_background_texture = 0;
     }
+    if (g_background_blur_texture != 0) {
+        glDeleteTextures(1, &g_background_blur_texture);
+        g_background_blur_texture = 0;
+    }
     g_background_width = 0;
     g_background_height = 0;
     g_background_load_attempted = false;
@@ -451,12 +632,13 @@ void App::panel_definitive_home() {
     const Layout layout = make_layout(window_pos, window_size);
 
     draw_background(draw, window_pos, window_size);
+    draw_soft_backdrops(draw, window_pos, window_size);
 
     const ImVec2 left0 = window_pos;
     const ImVec2 left1(window_pos.x + window_size.x * 0.58f, window_pos.y + window_size.y);
     draw->AddRectFilledMultiColor(left0, left1,
-        rgba(0, 2, 5, 210), rgba(0, 2, 5, 38),
-        rgba(0, 2, 5, 218), rgba(0, 2, 5, 68));
+        rgba(0, 2, 5, 204), rgba(0, 2, 5, 0),
+        rgba(0, 2, 5, 214), rgba(0, 2, 5, 0));
 
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
     const ImVec2 bottom1(window_pos.x + window_size.x, window_pos.y + window_size.y);
@@ -512,17 +694,16 @@ void App::panel_definitive_home() {
     const ImVec2 dash1 = layout.point(1235.0f, 93.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
 
-    static int selected_menu = 0;
     const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
-        "Start Emulation", "Load BIOS and start playing", selected_menu);
+        "Start Emulation", "Load BIOS and start playing");
     const bool load_game_pressed = menu_button(layout, draw, 1, MenuIcon::Folder,
-        "Load Game", "Choose a game from your library", selected_menu);
+        "Load Game", "Choose a game from your library");
     const bool change_bios_pressed = menu_button(layout, draw, 2, MenuIcon::Chip,
-        "Change BIOS", "Manage BIOS files", selected_menu);
+        "Change BIOS", "Manage BIOS files");
     const bool settings_pressed = menu_button(layout, draw, 3, MenuIcon::Settings,
-        "Settings", "Configure emulator options", selected_menu);
+        "Settings", "Configure emulator options");
     const bool exit_pressed = menu_button(layout, draw, 4, MenuIcon::Exit,
-        "Exit", "Close VibeStation", selected_menu);
+        "Exit", "Close VibeStation");
 
     const auto choose_bios = [this]() -> bool {
         std::string path = open_file_dialog(
@@ -624,28 +805,67 @@ void App::panel_definitive_home() {
             rgba(207, 180, 108, 235), "No playable disc images found.");
     }
     else {
-        const size_t visible_count = std::min<size_t>(3, game_library_.size());
-        for (size_t i = 0; i < visible_count; ++i) {
-            const float row_y = panel_y + 79.0f + static_cast<float>(i) * 22.0f;
-            ImGui::SetCursorScreenPos(layout.point(53.0f, row_y));
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(45, 55, 67, 155));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive, rgba(55, 68, 82, 175));
-            const bool chosen = ImGui::Selectable(
-                game_library_[i].title.c_str(), false, 0, layout.size(510.0f, 19.0f));
-            ImGui::PopStyleColor(3);
-            ImGui::PopID();
-            if (chosen) {
-                load_disc_from_ui(game_library_[i].bin_path, game_library_[i].cue_path);
+        const std::string count_label =
+            std::to_string(game_library_.size()) + " games";
+        add_text(draw, layout, 752.0f, panel_y + 55.0f, 8.8f,
+            rgba(139, 147, 157, 205), count_label.c_str());
+
+        ImGui::SetCursorScreenPos(layout.point(53.0f, panel_y + 76.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(
+            ImGuiStyleVar_ItemSpacing, layout.size(5.0f, 2.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, layout.px(7.0f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, rgba(4, 7, 10, 90));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, rgba(104, 120, 137, 145));
+        ImGui::PushStyleColor(
+            ImGuiCol_ScrollbarGrabHovered, rgba(150, 172, 194, 190));
+        ImGui::PushStyleColor(
+            ImGuiCol_ScrollbarGrabActive, rgba(193, 216, 238, 220));
+
+        const ImGuiWindowFlags library_flags =
+            ImGuiWindowFlags_NoBackground |
+            (game_library_.size() > 3
+                ? ImGuiWindowFlags_AlwaysVerticalScrollbar
+                : ImGuiWindowFlags_None);
+        ImGui::BeginChild(
+            "##DefinitiveGameLibraryScroll",
+            layout.size(755.0f, 59.0f), false, library_flags);
+
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(game_library_.size()),
+            layout.px(19.0f) + ImGui::GetStyle().ItemSpacing.y);
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const auto& entry = game_library_[static_cast<size_t>(i)];
+                const bool is_selected =
+                    entry.bin_path == game_bin_path_ &&
+                    entry.cue_path == game_cue_path_;
+
+                ImGui::PushID(i);
+                ImGui::PushStyleColor(
+                    ImGuiCol_Header, is_selected
+                        ? rgba(58, 79, 98, 125)
+                        : IM_COL32(0, 0, 0, 0));
+                ImGui::PushStyleColor(
+                    ImGuiCol_HeaderHovered, rgba(53, 68, 83, 150));
+                ImGui::PushStyleColor(
+                    ImGuiCol_HeaderActive, rgba(69, 91, 111, 175));
+                const bool chosen = ImGui::Selectable(
+                    entry.title.c_str(), is_selected, 0,
+                    ImVec2(0.0f, layout.px(19.0f)));
+                ImGui::PopStyleColor(3);
+                ImGui::PopID();
+
+                if (chosen) {
+                    load_disc_from_ui(entry.bin_path, entry.cue_path);
+                }
             }
         }
-        if (game_library_.size() > visible_count) {
-            const std::string more = "+" +
-                std::to_string(game_library_.size() - visible_count) + " more";
-            add_text(draw, layout, 584.0f, panel_y + 124.0f, 9.0f,
-                rgba(145, 151, 160, 215), more.c_str());
-        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor(5);
+        ImGui::PopStyleVar(3);
     }
 
     if (small_button(layout, "set_rom_dir", "Set Directory",
