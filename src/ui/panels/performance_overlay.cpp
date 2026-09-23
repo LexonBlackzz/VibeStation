@@ -802,8 +802,8 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.jit_v2_inline_instructions),
             static_cast<unsigned long long>(backend.jit_v2_helper_instructions),
             static_cast<unsigned long long>(backend.jit_v2_helper_entries));
-        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::X64JitV4) {
-            ImGui::Text("JIT V4 opcode helpers: %llu instructions",
+        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            ImGui::Text("Recompiler opcode helpers: %llu instructions",
                 static_cast<unsigned long long>(
                     backend.jit_v4_helper_instructions));
         }
@@ -831,14 +831,14 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_chain_entries),
             static_cast<unsigned long long>(backend.native_linked_transitions),
             static_cast<unsigned long long>(backend.native_chain_max_blocks));
-        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::X64JitV4) {
-            ImGui::Text("V4 chains: %.2f blocks/entry  direct links %llu",
+        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            ImGui::Text("Recompiler chains: %.2f blocks/entry  direct links %llu",
                 backend.native_chain_invocations == 0 ? 0.0 :
                     static_cast<double>(backend.native_block_entries) /
                         static_cast<double>(backend.native_chain_invocations),
                 static_cast<unsigned long long>(
                     backend.native_direct_link_transitions));
-            ImGui::Text("V4 compiled size: 1=%llu  2=%llu  3=%llu  4=%llu  5+=%llu",
+            ImGui::Text("Recompiler compiled size: 1=%llu  2=%llu  3=%llu  4=%llu  5+=%llu",
                 static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[1]),
                 static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[2]),
                 static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[3]),
@@ -849,7 +849,7 @@ void App::panel_performance() {
                     backend.native_compiled_block_size_histogram[2] -
                     backend.native_compiled_block_size_histogram[3] -
                     backend.native_compiled_block_size_histogram[4]));
-            ImGui::Text("V4 dispatch exits: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
+            ImGui::Text("Recompiler dispatch exits: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
                 static_cast<unsigned long long>(backend.native_dispatch_missing_exits),
                 static_cast<unsigned long long>(backend.native_dispatch_epoch_exits),
                 static_cast<unsigned long long>(backend.native_dispatch_memory_exits),
