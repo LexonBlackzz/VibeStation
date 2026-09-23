@@ -2504,6 +2504,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     if (fn == nullptr) {
       impl_->reset_translations();
       ++stats_.flushes;
+      ++stats_.recompiler_frame_flushes;
       fn = impl_->helper_for(instruction);
     }
     const bool profile = impl_->helper_profile_enabled;
@@ -2539,6 +2540,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     ++result.instructions;
     ++stats_.native_instructions;
     ++stats_.jit_v4_helper_instructions;
+    ++stats_.recompiler_frame_helper_instructions;
     stats_.native_cycles += consumed;
     ++stats_.optimized_instructions;
     stats_.executed_cycles += consumed;
@@ -2604,6 +2606,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       // Refill only the line containing the instruction about to execute.
       // The JIT compiler consumes that guest-visible snapshot rather than RAM.
       if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
+        ++stats_.recompiler_frame_icache_refills;
         constexpr u32 kRefillCycles = 4u;
         cpu_.cycles_ += kRefillCycles;
         result.cycles += kRefillCycles;
@@ -2629,6 +2632,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       ++stats_.cache_hits;
     } else {
       ++stats_.cache_misses;
+      ++stats_.recompiler_frame_cache_misses;
       if (impl_->crossline_waiting_for_refill(
               cpu_, cpu_.pc_, cacheable)) {
         u32 instruction = 0u;
@@ -2637,13 +2641,36 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         run_helper(instruction, V4HelperReason::Opcode);
         continue;
       }
+      ++stats_.recompiler_frame_revalidate_attempts;
+      const auto revalidate_start = std::chrono::steady_clock::now();
       block = impl_->try_revalidate(
           cpu_, cpu_.pc_, cacheable, icache_generation);
+      const auto revalidate_elapsed =
+          std::chrono::steady_clock::now() - revalidate_start;
+      stats_.recompiler_frame_revalidate_ns +=
+          static_cast<u64>(std::chrono::duration_cast<
+                               std::chrono::nanoseconds>(revalidate_elapsed)
+                               .count());
       if (block != nullptr) {
         ++stats_.cache_hits;
+        ++stats_.recompiler_frame_revalidate_successes;
       } else {
+        const auto compile_start = std::chrono::steady_clock::now();
         block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
                                      icache_generation);
+        const auto compile_elapsed =
+            std::chrono::steady_clock::now() - compile_start;
+        const u64 compile_ns =
+            static_cast<u64>(std::chrono::duration_cast<
+                                 std::chrono::nanoseconds>(compile_elapsed)
+                                 .count());
+        stats_.recompiler_frame_compile_ns += compile_ns;
+        stats_.recompiler_frame_compile_max_ns =
+            std::max(stats_.recompiler_frame_compile_max_ns, compile_ns);
+        ++stats_.recompiler_frame_compile_blocks;
+        if (block == nullptr) {
+          ++stats_.recompiler_frame_compile_failures;
+        }
       }
       if (block == nullptr) {
         // A full arena/metadata slab is recycled in bulk; no per-block
@@ -2653,8 +2680,23 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         stats_.block_count = 0u;
         stats_.interpreter_only_blocks = 0u;
         ++stats_.flushes;
+        ++stats_.recompiler_frame_flushes;
+        const auto retry_compile_start = std::chrono::steady_clock::now();
         block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
-                                   icache_generation);
+                                    icache_generation);
+        const auto retry_compile_elapsed =
+            std::chrono::steady_clock::now() - retry_compile_start;
+        const u64 retry_compile_ns =
+            static_cast<u64>(std::chrono::duration_cast<
+                                 std::chrono::nanoseconds>(retry_compile_elapsed)
+                                 .count());
+        stats_.recompiler_frame_compile_ns += retry_compile_ns;
+        stats_.recompiler_frame_compile_max_ns =
+            std::max(stats_.recompiler_frame_compile_max_ns, retry_compile_ns);
+        ++stats_.recompiler_frame_compile_blocks;
+        if (block == nullptr) {
+          ++stats_.recompiler_frame_compile_failures;
+        }
       }
     }
 
@@ -2720,6 +2762,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.native_dispatch_generation_exits += native.generation_exits;
     stats_.native_dispatch_budget_exits += native.budget_exits;
     stats_.native_dispatch_bail_exits += native.bail_exits;
+    stats_.recompiler_frame_dispatch_missing_exits += native.missing_exits;
+    stats_.recompiler_frame_dispatch_epoch_exits += native.epoch_exits;
+    stats_.recompiler_frame_dispatch_memory_exits += native.memory_exits;
+    stats_.recompiler_frame_dispatch_generation_exits += native.generation_exits;
+    stats_.recompiler_frame_dispatch_budget_exits += native.budget_exits;
+    stats_.recompiler_frame_dispatch_bail_exits += native.bail_exits;
 
     if (native.instructions == 0u) {
       ++stats_.native_reject_budget;
@@ -2812,6 +2860,7 @@ void CpuRecompilerBackend::invalidate_range(u32 phys_or_normalized_addr,
   // written physical page fail their generation guard and are lazily replaced
   // only if execution returns to them.
   ++stats_.invalidations;
+  ++stats_.recompiler_frame_invalidations;
 #else
   (void)phys_or_normalized_addr;
 #endif
@@ -2821,6 +2870,25 @@ void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   current_frame_ = frame_index;
   stats_.active =
       effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
+
+  stats_.recompiler_frame_compile_ns = 0;
+  stats_.recompiler_frame_compile_max_ns = 0;
+  stats_.recompiler_frame_compile_blocks = 0;
+  stats_.recompiler_frame_compile_failures = 0;
+  stats_.recompiler_frame_revalidate_ns = 0;
+  stats_.recompiler_frame_revalidate_attempts = 0;
+  stats_.recompiler_frame_revalidate_successes = 0;
+  stats_.recompiler_frame_cache_misses = 0;
+  stats_.recompiler_frame_icache_refills = 0;
+  stats_.recompiler_frame_helper_instructions = 0;
+  stats_.recompiler_frame_invalidations = 0;
+  stats_.recompiler_frame_flushes = 0;
+  stats_.recompiler_frame_dispatch_missing_exits = 0;
+  stats_.recompiler_frame_dispatch_epoch_exits = 0;
+  stats_.recompiler_frame_dispatch_memory_exits = 0;
+  stats_.recompiler_frame_dispatch_generation_exits = 0;
+  stats_.recompiler_frame_dispatch_budget_exits = 0;
+  stats_.recompiler_frame_dispatch_bail_exits = 0;
 }
 
 void CpuRecompilerBackend::flush() {
