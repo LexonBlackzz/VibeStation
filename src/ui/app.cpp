@@ -998,8 +998,11 @@ void App::render_ui() {
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoBackground;
+    if (has_started_emulation_) {
+        flags |= ImGuiWindowFlags_NoNavFocus;
+    }
 
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
