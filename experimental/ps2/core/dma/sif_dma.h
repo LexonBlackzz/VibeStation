@@ -52,9 +52,14 @@ public:
 
         u64 rpc_calls = 0;
         u64 sound_rpc_calls = 0;
+        u64 sound_st_init_calls = 0;
         u64 sound_bgm_play_calls = 0;
+        u64 sound_bgm_stop_calls = 0;
         u64 sound_bgm_open_calls = 0;
+        u64 sound_tick_mode_calls = 0;
+        u64 sound_master_volume_calls = 0;
         u64 sound_timer_start_calls = 0;
+        u64 sound_se_play_calls = 0;
         u64 sound_set_param_calls = 0;
         u64 sound_set_switch_calls = 0;
         u64 sound_set_addr_calls = 0;
