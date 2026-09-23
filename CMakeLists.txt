@@ -32,7 +32,6 @@ include(FetchContent)
 # SDL2 (source build)
 FetchContent_Declare(SDL2
     URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 if(ANDROID)
     # SDLActivity loads libSDL2.so and then libmain.so.
@@ -55,7 +54,6 @@ endif()
 # Dear ImGui
 FetchContent_Declare(imgui
     URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.8.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(imgui)
 
