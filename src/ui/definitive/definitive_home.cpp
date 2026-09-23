@@ -333,42 +333,37 @@ void draw_soft_backdrops(ImDrawList* draw,
         return;
     }
 
-    // Keep the photograph sharp behind the actual text. The blur is only used
-    // at the far-right edge of the dark readability zone so that edge dissolves
-    // into the untouched background instead of looking like a hard overlay.
-    constexpr int kEdgeSteps = 14;
-    const float edge_start = pos.x + size.x * 0.43f;
-    const float edge_peak = pos.x + size.x * 0.51f;
-    const float edge_end = pos.x + size.x * 0.60f;
+    // Blur the left presentation zone behind the branding and primary menu.
+    // The photograph stays increasingly sharp as we approach the console.
+    const float blur_solid_end = pos.x + size.x * 0.39f;
+    const float blur_fade_end = pos.x + size.x * 0.57f;
 
-    for (int i = 0; i < kEdgeSteps; ++i) {
-        const float t0 = static_cast<float>(i) / kEdgeSteps;
-        const float t1 = static_cast<float>(i + 1) / kEdgeSteps;
-        const float x0 = edge_start + (edge_end - edge_start) * t0;
-        const float x1 = edge_start + (edge_end - edge_start) * t1;
-        const float center = (x0 + x1) * 0.5f;
+    draw_cover_region(draw, g_background_blur_texture, pos, size,
+        pos, ImVec2(blur_solid_end, pos.y + size.y),
+        rgba(255, 255, 255, 178));
 
-        float strength = 0.0f;
-        if (center <= edge_peak) {
-            strength = (center - edge_start) /
-                std::max(1.0f, edge_peak - edge_start);
-        }
-        else {
-            strength = 1.0f - ((center - edge_peak) /
-                std::max(1.0f, edge_end - edge_peak));
-        }
-        strength = smoothstep01(strength);
+    constexpr int kBlurFadeSteps = 14;
+    const float fade_width = blur_fade_end - blur_solid_end;
+    for (int i = 0; i < kBlurFadeSteps; ++i) {
+        const float t0 = static_cast<float>(i) / kBlurFadeSteps;
+        const float t1 = static_cast<float>(i + 1) / kBlurFadeSteps;
+        const float center_t = (t0 + t1) * 0.5f;
+        const float strength = 1.0f - smoothstep01(center_t);
 
-        draw_cover_region(draw, g_background_blur_texture, pos, size,
-            ImVec2(x0, pos.y), ImVec2(x1, pos.y + size.y),
-            rgba(255, 255, 255, glow_alpha(175.0f * strength)));
+        const ImVec2 r0(
+            blur_solid_end + fade_width * t0, pos.y);
+        const ImVec2 r1(
+            blur_solid_end + fade_width * t1, pos.y + size.y);
+        draw_cover_region(draw, g_background_blur_texture, pos, size, r0, r1,
+            rgba(255, 255, 255, glow_alpha(178.0f * strength)));
     }
 
-    // Keep only a restrained blur beneath the lower information glass.
-    const float band_top = pos.y + size.y * 0.72f;
+    // A light backdrop under the lower information glass keeps small text
+    // legible without making the entire lower photograph visibly blurred.
+    const float band_top = pos.y + size.y * 0.74f;
     draw_cover_region(draw, g_background_blur_texture, pos, size,
         ImVec2(pos.x, band_top), ImVec2(pos.x + size.x, pos.y + size.y),
-        rgba(255, 255, 255, 70));
+        rgba(255, 255, 255, 58));
 }
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
@@ -663,11 +658,18 @@ void App::panel_definitive_home() {
     draw_background(draw, window_pos, window_size);
     draw_soft_backdrops(draw, window_pos, window_size);
 
-    const ImVec2 left0 = window_pos;
-    const ImVec2 left1(window_pos.x + window_size.x * 0.58f, window_pos.y + window_size.y);
-    draw->AddRectFilledMultiColor(left0, left1,
-        rgba(0, 2, 5, 204), rgba(0, 2, 5, 0),
-        rgba(0, 2, 5, 214), rgba(0, 2, 5, 0));
+    const float dark_solid_end = window_pos.x + window_size.x * 0.41f;
+    const float dark_fade_end = window_pos.x + window_size.x * 0.63f;
+    draw->AddRectFilled(
+        window_pos,
+        ImVec2(dark_solid_end, window_pos.y + window_size.y),
+        rgba(0, 2, 5, 206));
+
+    draw->AddRectFilledMultiColor(
+        ImVec2(dark_solid_end, window_pos.y),
+        ImVec2(dark_fade_end, window_pos.y + window_size.y),
+        rgba(0, 2, 5, 206), rgba(0, 2, 5, 0),
+        rgba(0, 2, 5, 216), rgba(0, 2, 5, 0));
 
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
     const ImVec2 bottom1(window_pos.x + window_size.x, window_pos.y + window_size.y);
@@ -994,11 +996,13 @@ void App::panel_definitive_home() {
     add_text(draw, layout, 875.0f, panel_y + 164.0f, 8.8f,
         rgba(145, 150, 158, 205), "Same console. Different vibes.");
 
-    // Launcher-to-emulator transition. Fade the completed launcher frame to
-    // black before handing the viewport to the emulation presentation.
+    // Launcher-to-emulator transition. Use the viewport foreground draw list
+    // so the fade also covers child windows (notably the scrollable game list).
     if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
         const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
-        draw->AddRectFilled(
+        ImDrawList* fade_draw =
+            ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+        fade_draw->AddRectFilled(
             window_pos,
             ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
             rgba(0, 0, 0, fade_alpha));
