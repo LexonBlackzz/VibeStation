@@ -130,37 +130,81 @@ void EeHw::tick(u64 cycles) {
 
     for (u32 i = 0; i < 4u; ++i) {
         if ((timer_enabled_mask_ & (1u << i)) == 0u) continue;
+
         u32& mode = timer_mode_[i];
         const u64 rate = timer_rate_cache_[i];
+        const u64 total_phase = timer_phase_[i] + cycles;
+        const u64 ticks = total_phase / rate;
+        timer_phase_[i] = total_phase % rate;
+        if (ticks == 0u) continue;
 
-        timer_phase_[i] += cycles;
-        while (timer_phase_[i] >= rate) {
-            timer_phase_[i] -= rate;
+        const u32 count = timer_count_base_[i] & 0xFFFFu;
+        const u32 comp = timer_comp_[i] & 0xFFFFu;
+        const bool zero_return = (mode & (1u << 6)) != 0u;
 
-            const u32 previous = timer_count_base_[i] & 0xFFFFu;
-            u32 next = (previous + 1u) & 0xFFFFu;
+        bool compare_hit = false;
+        bool overflow_hit = false;
+        u32 final_count = count;
 
-            if (next == (timer_comp_[i] & 0xFFFFu)) {
-                const bool flag_was_clear = (mode & (1u << 10)) == 0;
-                mode |= 1u << 10;
-                if (flag_was_clear && (mode & (1u << 8)) != 0) {
-                    raise_intc(9u + i);
-                }
-                if ((mode & (1u << 6)) != 0) {
-                    next = 0;
-                }
+        if (!zero_return) {
+            const u32 compare_delta = (comp - count) & 0xFFFFu;
+            const u64 compare_ticks =
+                compare_delta == 0u ? 0x10000u : compare_delta;
+            compare_hit = ticks >= compare_ticks;
+
+            const u64 overflow_ticks = 0x10000u - count;
+            overflow_hit = ticks >= overflow_ticks;
+
+            final_count = static_cast<u32>(
+                (static_cast<u64>(count) + ticks) & 0xFFFFu);
+        } else if (comp == 0u) {
+            // A zero target coincides with the 16-bit wrap edge. Compare and
+            // overflow therefore occur on the same timer tick.
+            const u64 wrap_ticks = 0x10000u - count;
+            compare_hit = ticks >= wrap_ticks;
+            overflow_hit = compare_hit;
+            final_count = static_cast<u32>(
+                (static_cast<u64>(count) + ticks) & 0xFFFFu);
+        } else {
+            u64 first_compare = 0;
+            if (count < comp) {
+                first_compare = comp - count;
+            } else {
+                const u64 first_overflow = 0x10000u - count;
+                overflow_hit = ticks >= first_overflow;
+                first_compare = first_overflow + comp;
             }
 
-            if (previous == 0xFFFFu) {
-                const bool flag_was_clear = (mode & (1u << 11)) == 0;
-                mode |= 1u << 11;
-                if (flag_was_clear && (mode & (1u << 9)) != 0) {
-                    raise_intc(9u + i);
-                }
+            if (ticks < first_compare) {
+                final_count = static_cast<u32>(
+                    (static_cast<u64>(count) + ticks) & 0xFFFFu);
+            } else {
+                compare_hit = true;
+                const u64 after_compare = ticks - first_compare;
+                final_count =
+                    static_cast<u32>(after_compare % comp);
             }
-
-            timer_count_base_[i] = next;
         }
+
+        if (compare_hit) {
+            const bool flag_was_clear =
+                (mode & (1u << 10)) == 0u;
+            mode |= 1u << 10;
+            if (flag_was_clear && (mode & (1u << 8)) != 0u) {
+                raise_intc(9u + i);
+            }
+        }
+
+        if (overflow_hit) {
+            const bool flag_was_clear =
+                (mode & (1u << 11)) == 0u;
+            mode |= 1u << 11;
+            if (flag_was_clear && (mode & (1u << 9)) != 0u) {
+                raise_intc(9u + i);
+            }
+        }
+
+        timer_count_base_[i] = final_count;
     }
 }
 
