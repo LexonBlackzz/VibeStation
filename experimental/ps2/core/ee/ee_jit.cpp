@@ -24,9 +24,12 @@ constexpr std::size_t kPageSize = 64u * 1024u;
 constexpr std::size_t kMaxPages = 256u;
 #ifdef _WIN32
 constexpr u8 kArgumentRegister = 1u; // RCX
+constexpr u8 kRamArgumentRegister = 2u; // RDX
 #else
 constexpr u8 kArgumentRegister = 7u; // RDI
+constexpr u8 kRamArgumentRegister = 6u; // RSI
 #endif
+constexpr u32 kEeRamSize = 32u * 1024u * 1024u;
 
 struct Emitter {
     std::vector<u8> bytes;
@@ -83,6 +86,18 @@ struct Emitter {
         const std::size_t displacement = bytes.size();
         emit32(0u);
         return displacement;
+    }
+    std::size_t jmp32() {
+        emit(0xE9u);
+        const std::size_t displacement = bytes.size();
+        emit32(0u);
+        return displacement;
+    }
+    void preserve_ram_base() {
+        emit(0x49u);
+        emit(0x89u);
+        emit(static_cast<u8>(0xC0u |
+            (kRamArgumentRegister << 3) | 3u)); // MOV R11, RAM arg
     }
     void patch_rel32(std::size_t displacement, std::size_t target) {
         const s64 rel = static_cast<s64>(target) -
