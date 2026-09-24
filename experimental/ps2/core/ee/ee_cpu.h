@@ -63,6 +63,7 @@ public:
 
     void reset(u32 entry_point = 0);
     bool step(std::string& error);
+    bool step_predecoded(u32 instruction, std::string& error);
     // Execute one instruction while the system layer guarantees that no
     // external EE interrupt or hardware-timer event can occur. The caller
     // must apply one deferred EeBus::tick cycle after successful retirement.
