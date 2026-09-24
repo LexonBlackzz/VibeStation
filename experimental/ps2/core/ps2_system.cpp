@@ -982,7 +982,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 }
 
                 const bool ok = defer_ee_tick
-                    ? ee_.step_quiet_predecoded(instruction, error)
+                    ? ee_.step_quiet_unchecked_predecoded(
+                        instruction, error)
                     : ee_.step_predecoded(instruction, error);
                 if (!ok) break;
 
@@ -1002,7 +1003,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
             break;
         }
         const bool ok = defer_ee_tick
-            ? ee_.step_quiet_predecoded(instruction, error)
+            ? ee_.step_quiet_unchecked_predecoded(instruction, error)
             : ee_.step_predecoded(instruction, error);
         if (!ok) break;
         ++retired;
