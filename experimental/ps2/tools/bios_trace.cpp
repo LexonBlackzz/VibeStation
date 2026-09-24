@@ -1500,7 +1500,11 @@ int main(int argc, char** argv) {
               << " EE_BLOCK_HITS="
               << system.quiet_block_hits()
               << " EE_BLOCK_COMPILES="
-              << system.quiet_block_compiles() << '\n';
+              << system.quiet_block_compiles()
+              << " EE_NATIVE_CHAIN_INSTRUCTIONS="
+              << system.native_chain_instructions()
+              << " EE_NATIVE_CHAIN_CALLS="
+              << system.native_chain_calls() << '\n';
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
