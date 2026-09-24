@@ -670,6 +670,7 @@ u32 EeJit::execute_block(
     const u32* instructions,
     u32 instruction_count,
     u32 maximum_instructions,
+    const u8* ram_data,
     bool& control_flow) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
@@ -692,33 +693,42 @@ u32 EeJit::execute_block(
         entry.page_generation != page_generation) {
         u32 compiled_instructions = 0;
         bool compiled_control_flow = false;
-        Function function = compile_block(
+        bool compiled_uses_ram = false;
+        BlockFunction function = compile_block(
             pc,
             instructions,
             instruction_count,
             compiled_instructions,
-            compiled_control_flow);
+            compiled_control_flow,
+            compiled_uses_ram);
         entry.pc = pc;
         entry.page_generation = page_generation;
         entry.instruction_count =
             static_cast<u8>(compiled_instructions);
         entry.function = function;
         entry.control_flow = compiled_control_flow;
+        entry.uses_ram = compiled_uses_ram;
         entry.known = true;
     }
 
     if (entry.function == nullptr ||
         entry.instruction_count == 0u ||
-        entry.instruction_count > maximum_instructions) {
+        entry.instruction_count > maximum_instructions ||
+        (entry.uses_ram && ram_data == nullptr)) {
         control_flow = false;
         return 0;
     }
 
-    entry.function(&state);
-    control_flow = entry.control_flow;
+    const u32 retired = entry.function(&state, ram_data);
+    if (retired == 0u || retired > entry.instruction_count) {
+        control_flow = false;
+        return 0u;
+    }
+    control_flow =
+        entry.control_flow && retired == entry.instruction_count;
     ++block_executed_count_;
-    block_instruction_count_ += entry.instruction_count;
-    return entry.instruction_count;
+    block_instruction_count_ += retired;
+    return retired;
 #else
     (void)state;
     (void)pc;
@@ -726,6 +736,7 @@ u32 EeJit::execute_block(
     (void)instructions;
     (void)instruction_count;
     (void)maximum_instructions;
+    (void)ram_data;
     control_flow = false;
     return 0;
 #endif
