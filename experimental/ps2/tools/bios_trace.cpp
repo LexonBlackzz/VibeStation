@@ -1330,6 +1330,9 @@ int main(int argc, char** argv) {
 
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
+    std::cout << "EE_BACKEND="
+              << (ee_jit ? "experimental-x64-jit" : "cached-interpreter")
+              << '\n';
     system.gs_core().set_async_rasterization(gs_thread);
     system.gs_core().set_detailed_raster_stats(detailed_gs_stats);
     system.gs_core().set_rasterization_enabled(!audio_only);
