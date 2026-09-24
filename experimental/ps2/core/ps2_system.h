@@ -126,6 +126,7 @@ private:
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
     EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{}; GsDisplay gs_display_{};
     IopBus iop_bus_; EeBus bus_; Vu1 vu0_; Vu1 vu1_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; IpuDma ipu_dma_{}; Vif0Dma vif0_dma_{}; Vif1Dma vif1_dma_{}; SifDma sif_dma_{}; SprDma spr_dma_{}; EeCpu ee_; IopCpu iop_;
+    std::string iop_step_error_scratch_{};
     bool bios_started_=false; u32 reset_instruction_=0; u32 iop_reset_instruction_=0; u32 ee_iop_phase_=0;
     u64 skipped_bios_idle_iterations_=0;
     u64 skipped_bios_idle_offphase_batches_=0;
