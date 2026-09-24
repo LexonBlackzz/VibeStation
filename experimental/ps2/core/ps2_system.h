@@ -83,6 +83,9 @@ public:
     u64 fast_interpreter_instructions() const {
         return fast_interpreter_instructions_;
     }
+    u64 fast_interpreter_calls() const {
+        return fast_interpreter_calls_;
+    }
     u64 quiet_superbatch_calls() const {
         return quiet_superbatch_calls_;
     }
@@ -137,6 +140,7 @@ private:
     u64 quiet_block_hits_=0;
     u64 quiet_block_compiles_=0;
     u64 fast_interpreter_instructions_=0;
+    u64 fast_interpreter_calls_=0;
     u64 quiet_superbatch_calls_=0;
     u64 quiet_superbatch_instructions_=0;
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
