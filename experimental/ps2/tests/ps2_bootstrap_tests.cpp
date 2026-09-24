@@ -4723,7 +4723,7 @@ bool test_ee_quiet_fast_prefix() {
         (1u << 21) | 0x11u, // MTHI r1
         (3u << 11) | 0x10u, // MFHI r3
         (2u << 21) | (3u << 16) | (4u << 11) | 0x27u, // NOR
-        (4u << 21) | (5u << 16) | 0x19u, // DADDIU r5,r4,0
+        (0x19u << 26) | (4u << 21) | (5u << 16), // DADDIU r5,r4,0
         (0x23u << 26) | (6u << 16), // LW r6,0(r0): stop before memory
     };
 
