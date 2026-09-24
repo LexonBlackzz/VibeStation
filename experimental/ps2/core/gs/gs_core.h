@@ -119,6 +119,15 @@ public:
         flush_pending_draws();
         return stats_;
     }
+    // These counters are updated by GIF submission on the emulation thread,
+    // not by the async raster worker. UI telemetry can read them without
+    // draining queued raster work.
+    [[nodiscard]] u64 submitted_gif_qwords() const {
+        return stats_.gif_qwords;
+    }
+    [[nodiscard]] u64 submitted_primitives() const {
+        return stats_.primitives;
+    }
     [[nodiscard]] const GsVram& vram() const {
         flush_pending_draws();
         return vram_;
