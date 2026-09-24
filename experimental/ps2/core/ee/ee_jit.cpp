@@ -759,6 +759,8 @@ void EeJit::clear() {
     block_instruction_count_ = 0;
     block_fastmem_load_count_ = 0;
     block_guard_bailout_count_ = 0;
+    block_fastmem_store_count_ = 0;
+    block_code_store_exit_count_ = 0;
 }
 
 EeJit::Function EeJit::compile(u32 instruction) {
@@ -843,6 +845,7 @@ u32 EeJit::execute_block(
     u32 instruction_count,
     u32 maximum_instructions,
     const u8* ram_data,
+    u32* page_generations,
     bool& control_flow) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
@@ -881,6 +884,7 @@ u32 EeJit::execute_block(
         entry.control_flow = compiled_control_flow;
         entry.uses_ram = compiled_uses_ram;
         entry.ram_load_mask = 0u;
+        entry.ram_store_mask = 0u;
         for (u32 i = 0; i < compiled_instructions && i < 32u; ++i) {
             switch (instructions[i] >> 26) {
             case 0x20u:
@@ -894,6 +898,12 @@ u32 EeJit::execute_block(
             case 0x37u:
                 entry.ram_load_mask |= 1u << i;
                 break;
+            case 0x28u:
+            case 0x29u:
+            case 0x2Bu:
+            case 0x3Fu:
+                entry.ram_store_mask |= 1u << i;
+                break;
             default:
                 break;
             }
@@ -904,12 +914,14 @@ u32 EeJit::execute_block(
     if (entry.function == nullptr ||
         entry.instruction_count == 0u ||
         entry.instruction_count > maximum_instructions ||
-        (entry.uses_ram && ram_data == nullptr)) {
+        (entry.uses_ram &&
+         (ram_data == nullptr || page_generations == nullptr))) {
         control_flow = false;
         return 0;
     }
 
-    const u32 retired = entry.function(&state, ram_data);
+    const u32 retired =
+        entry.function(&state, ram_data, page_generations);
     if (retired == 0u || retired > entry.instruction_count) {
         control_flow = false;
         return 0u;
@@ -920,11 +932,18 @@ u32 EeJit::execute_block(
     block_instruction_count_ += retired;
     if (retired < entry.instruction_count) {
         ++block_guard_bailout_count_;
+        if (retired != 0u &&
+            (entry.ram_store_mask &
+             (1u << (retired - 1u))) != 0u) {
+            ++block_code_store_exit_count_;
+        }
     }
     const u32 retired_mask =
         retired >= 32u ? 0xFFFFFFFFu : ((1u << retired) - 1u);
     block_fastmem_load_count_ +=
         std::popcount(entry.ram_load_mask & retired_mask);
+    block_fastmem_store_count_ +=
+        std::popcount(entry.ram_store_mask & retired_mask);
     return retired;
 #else
     (void)state;
@@ -934,6 +953,7 @@ u32 EeJit::execute_block(
     (void)instruction_count;
     (void)maximum_instructions;
     (void)ram_data;
+    (void)page_generations;
     control_flow = false;
     return 0;
 #endif
