@@ -29,6 +29,7 @@ public:
         u32 instruction_count,
         u32 maximum_instructions,
         const u8* ram_data,
+        u32* page_generations,
         bool& control_flow);
     void clear();
 
@@ -49,10 +50,16 @@ public:
     [[nodiscard]] u64 block_guard_bailout_count() const {
         return block_guard_bailout_count_;
     }
+    [[nodiscard]] u64 block_fastmem_store_count() const {
+        return block_fastmem_store_count_;
+    }
+    [[nodiscard]] u64 block_code_store_exit_count() const {
+        return block_code_store_exit_count_;
+    }
 
 private:
     using Function = void (*)(EeCpuState*);
-    using BlockFunction = u32 (*)(EeCpuState*, const u8*);
+    using BlockFunction = u32 (*)(EeCpuState*, const u8*, u32*);
     struct Entry {
         u32 instruction = 0;
         Function function = nullptr;
@@ -66,6 +73,7 @@ private:
         bool control_flow = false;
         bool uses_ram = false;
         u32 ram_load_mask = 0;
+        u32 ram_store_mask = 0;
         bool known = false;
     };
     struct Page {
@@ -91,6 +99,8 @@ private:
     u64 block_instruction_count_ = 0;
     u64 block_fastmem_load_count_ = 0;
     u64 block_guard_bailout_count_ = 0;
+    u64 block_fastmem_store_count_ = 0;
+    u64 block_code_store_exit_count_ = 0;
 };
 
 } // namespace ps2
