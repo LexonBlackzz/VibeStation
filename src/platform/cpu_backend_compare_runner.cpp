@@ -158,6 +158,7 @@ struct CpuCompareCase {
   bool require_v4_load_tail_block_when_available = false;
   bool require_v4_load_branch_fusion_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
+  bool require_v4_pending_delay_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -3656,6 +3657,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_beq.compare_segment_states = true;
   v4_split_scheduler_beq.require_v4_native_entry_when_available = true;
   v4_split_scheduler_beq.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_beq.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_beq);
 
   CpuCompareCase v4_uncached_bne_not_taken{};
@@ -4449,6 +4451,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_load_tail_block_when_available ||
            test_case.require_v4_load_branch_fusion_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
+           test_case.require_v4_pending_delay_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4493,6 +4496,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool branch_entered =
               !test_case.require_v4_native_branch_entry_when_available ||
               result.stats.native_branch_tail_entries != 0;
+          const bool pending_delay_native =
+              !test_case.require_v4_pending_delay_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4535,6 +4541,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_load_branch_not_fused";
           } else if (!branch_entered) {
             native_check = "v4_branch_missing";
+          } else if (!pending_delay_native) {
+            native_check = "v4_pending_delay_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4552,7 +4560,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               native_entered && load_entered && store_entered &&
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
-              branch_entered && folded_branch && page_local_invalidation &&
+              branch_entered && pending_delay_native && folded_branch &&
+              page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               chain_entered;
         }
