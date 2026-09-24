@@ -4462,6 +4462,91 @@ bool test_ee_native_ram_stores() {
     return ok;
 }
 
+bool test_ee_native_fpu_and_sc_fastmem() {
+    constexpr ps2::u32 pc = 0x6C00u;
+    constexpr ps2::u32 data = 0x9800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x31u << 26) | (1u << 21) | (4u << 16) | 0u,  // LWC1 f4,0(r1)
+        (0x39u << 26) | (1u << 21) | (3u << 16) | 4u,  // SWC1 f3,4(r1)
+        (0x38u << 26) | (1u << 21) | (2u << 16) | 8u,  // SC r2,8(r1)
+        (0x3Cu << 26) | (1u << 21) | (5u << 16) | 16u, // SCD r5,16(r1)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = expect(
+        exact.bus().write32(data, 0xDEADBEEFu) &&
+        native.bus().write32(data, 0xDEADBEEFu),
+        "EE native FPU fastmem setup failed");
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = data;
+    native.ee().state().gpr[1].lo = data;
+    exact.ee().state().gpr[2].lo = 0x1122334455667788ull;
+    native.ee().state().gpr[2].lo = 0x1122334455667788ull;
+    exact.ee().state().gpr[5].lo = 0x8877665544332211ull;
+    native.ee().state().gpr[5].lo = 0x8877665544332211ull;
+    exact.ee().state().fpr[3] = 0xAABBCCDDu;
+    native.ee().state().fpr[3] = 0xAABBCCDDu;
+    exact.ram().track_code_page(data);
+    native.ram().track_code_page(data);
+
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE native FPU/SC reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size(),
+        "EE native FPU/SC block did not retire fully") && ok;
+    ok = expect(
+        exact.ee().state().fpr[4] == native.ee().state().fpr[4] &&
+        exact.ee().state().gpr[2].lo == native.ee().state().gpr[2].lo &&
+        exact.ee().state().gpr[5].lo == native.ee().state().gpr[5].lo,
+        "EE native FPU/SC register state diverged") && ok;
+
+    ps2::u32 exact32 = 0;
+    ps2::u32 native32 = 0;
+    ps2::u64 exact64 = 0;
+    ps2::u64 native64 = 0;
+    ok = expect(
+        exact.ram().read32(data + 4u, exact32) &&
+        native.ram().read32(data + 4u, native32) &&
+        exact32 == native32 &&
+        exact32 == 0xAABBCCDDu,
+        "EE native SWC1 result diverged") && ok;
+    ok = expect(
+        exact.ram().read32(data + 8u, exact32) &&
+        native.ram().read32(data + 8u, native32) &&
+        exact32 == native32,
+        "EE native SC result diverged") && ok;
+    ok = expect(
+        exact.ram().read64(data + 16u, exact64) &&
+        native.ram().read64(data + 16u, native64) &&
+        exact64 == native64,
+        "EE native SCD result diverged") && ok;
+    ok = expect(
+        exact.ram().page_generation(data) ==
+            native.ram().page_generation(data),
+        "EE native FPU/SC write barrier diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE native FPU/SC unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -4695,6 +4780,7 @@ int main() {
     ok = test_ee_native_chain() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
+    ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
