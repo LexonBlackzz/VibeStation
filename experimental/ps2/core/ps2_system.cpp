@@ -945,14 +945,24 @@ u64 Ps2System::try_run_quiet_ee_batch(
     }
 
     // An armed but unmatched SIF channel is intentionally left running by
-    // the BIOS. It does not need to be reprobed after every EE instruction;
-    // only a ready SIF pair or another active DMA channel is observable here.
+    // the BIOS. A ready channel only requires immediate service when no
+    // transfer is already in its completion countdown. During that latency
+    // the service routine is a no-op, so quiet EE execution may continue up
+    // to (but not past) the exact completion edge.
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
+    const u16 ready_sif =
+        (active_dma & sif_channels) &
+        iop_bus_.sif_dma_ready_mask();
+    const bool sif0_needs_service =
+        (ready_sif & (1u << 5)) != 0u &&
+        !sif_dma_.sif0_completion_pending();
+    const bool sif1_needs_service =
+        (ready_sif & (1u << 6)) != 0u &&
+        !sif_dma_.sif1_completion_pending();
     if ((active_dma & ~sif_channels) != 0u ||
-        ((active_dma & sif_channels) &
-         iop_bus_.sif_dma_ready_mask()) != 0u) {
+        sif0_needs_service || sif1_needs_service) {
         return 0;
     }
 
@@ -974,17 +984,31 @@ u64 Ps2System::try_run_quiet_ee_batch(
     const bool iop_idle =
         !iop_halted && iop_.in_osdsys_idle_loop();
 
-    // IOP-side SIF completion is safe while doing exact 8:1 interleave:
-    // advance_iop_for_ee_cycles() ticks it immediately after the due IOP
-    // instruction. Long idle-loop skipping still requires an event-free
-    // interval and is guarded below.
-    if (iop_idle && sif_dma_.iop_completion_pending()) return 0;
-
+    // SIF completion countdowns are explicit event boundaries. EE-side
+    // completion is bulk-ticked after retirement; IOP-side completion is
+    // still ticked on the exact due IOP instruction by
+    // advance_iop_for_ee_cycles().
     const u64 video_room = video_timing_.cycles_to_transition();
     if (video_room <= 1u) return 0;
 
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
+
+    const u32 sif_ee_completion =
+        sif_dma_.ee_completion_cycles();
+    if (sif_ee_completion != 0u) {
+        maximum = std::min<u64>(
+            maximum, sif_ee_completion);
+    }
+
+    const u32 sif_iop_completion =
+        sif_dma_.iop_completion_steps();
+    if (sif_iop_completion != 0u) {
+        const u64 iop_room =
+            static_cast<u64>(sif_iop_completion) * 8u -
+            ee_iop_phase_;
+        maximum = std::min<u64>(maximum, iop_room);
+    }
 
     // Preserve the current 8:1 EE/IOP interleave exactly while the IOP is
     // doing real work. We may batch several EE instructions, but never cross
@@ -1097,6 +1121,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
     // event boundary to the guest. The timer-IRQ path used step() and has
     // already advanced this clock instruction by instruction.
     if (defer_ee_tick) bus_.tick(retired);
+    sif_dma_.tick_ee_cycles(bus_, retired);
     scheduler_.run_until(scheduler_.now() + retired, {});
 
     const u64 fields_before = video_timing_.fields_started();
