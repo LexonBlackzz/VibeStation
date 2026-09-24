@@ -81,13 +81,25 @@ public:
         std::string& error);
 
     void tick_ee(EeBus& ee_bus);
+    void tick_ee_cycles(EeBus& ee_bus, u64 cycles);
     [[nodiscard]] bool ee_completion_pending() const {
         return sif0_ee_completion_cycles_ != 0;
+    }
+    [[nodiscard]] u32 ee_completion_cycles() const {
+        return sif0_ee_completion_cycles_;
+    }
+    [[nodiscard]] bool sif0_completion_pending() const {
+        return sif0_ee_completion_cycles_ != 0 ||
+               sif0_iop_completion_cycles_ != 0;
+    }
+    [[nodiscard]] bool sif1_completion_pending() const {
+        return sif1_iop_completion_cycles_ != 0;
     }
     [[nodiscard]] bool iop_completion_pending() const {
         return sif0_iop_completion_cycles_ != 0 ||
                sif1_iop_completion_cycles_ != 0;
     }
+    [[nodiscard]] u32 iop_completion_steps() const;
     void tick_iop(IopBus& iop_bus);
 
 private:
