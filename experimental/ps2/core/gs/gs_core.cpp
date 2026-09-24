@@ -797,17 +797,19 @@ void GsCore::emit_primitive(
         return;
     }
 
-    ctx.texture.nonzero_samples = &stats_.nonzero_texture_samples;
-    ctx.texture.alpha_samples = &stats_.texture_alpha_samples;
-    ctx.texture.first_sample_x = &stats_.first_texture_sample_x;
-    ctx.texture.first_sample_y = &stats_.first_texture_sample_y;
-    ctx.texture.first_sample_rgba = &stats_.first_texture_sample_rgba;
-    ctx.texture.nonzero_shaded = &stats_.nonzero_shaded_samples;
-    ctx.nonzero_colors = &stats_.nonzero_raster_colors;
-    ctx.nonzero_inputs = &stats_.nonzero_raster_inputs;
-    ctx.nonzero_input_alpha = &stats_.nonzero_inputs_with_alpha;
-    ctx.first_input_rgba = &stats_.first_nonzero_input_rgba;
-    ctx.first_alpha_input_rgba = &stats_.first_alpha_input_rgba;
+    if (detailed_raster_stats_) {
+        ctx.texture.nonzero_samples = &stats_.nonzero_texture_samples;
+        ctx.texture.alpha_samples = &stats_.texture_alpha_samples;
+        ctx.texture.first_sample_x = &stats_.first_texture_sample_x;
+        ctx.texture.first_sample_y = &stats_.first_texture_sample_y;
+        ctx.texture.first_sample_rgba = &stats_.first_texture_sample_rgba;
+        ctx.texture.nonzero_shaded = &stats_.nonzero_shaded_samples;
+        ctx.nonzero_colors = &stats_.nonzero_raster_colors;
+        ctx.nonzero_inputs = &stats_.nonzero_raster_inputs;
+        ctx.nonzero_input_alpha = &stats_.nonzero_inputs_with_alpha;
+        ctx.first_input_rgba = &stats_.first_nonzero_input_rgba;
+        ctx.first_alpha_input_rgba = &stats_.first_alpha_input_rgba;
+    }
     const u32 context = static_cast<u32>((effective_prim() >> 9) & 1u);
     RasterCommand command{};
     command.context = ctx;
@@ -866,34 +868,39 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
-    const u64 new_nonzero_inputs =
-        stats_.nonzero_raster_inputs - nonzero_inputs_before;
-    if (new_nonzero_inputs != 0u) {
-        if (ctx.alpha_blend) {
-            stats_.nonzero_inputs_with_blend += new_nonzero_inputs;
-        } else {
-            stats_.nonzero_inputs_without_blend += new_nonzero_inputs;
-        }
-        if (!stats_.first_nonzero_input_valid) {
-            stats_.first_nonzero_input_valid = true;
-            stats_.first_nonzero_input_alpha = command.alpha;
-            stats_.first_nonzero_input_test = command.test;
-            stats_.first_nonzero_input_frame = command.frame;
-            stats_.first_nonzero_input_prim = command.effective_primitive;
-            stats_.first_nonzero_input_rgbaq = command.rgbaq;
-            stats_.first_nonzero_input_tex0 = command.tex0;
-            stats_.first_nonzero_input_texa = command.texa;
-            stats_.first_nonzero_input_st = command.st;
-            stats_.first_nonzero_input_uv = command.uv;
-        }
+    if (pixels != 0u) {
+        vram_.mark_modified();
     }
-    if (!stats_.first_alpha_input_valid &&
-        stats_.nonzero_inputs_with_alpha != alpha_inputs_before) {
-        stats_.first_alpha_input_valid = true;
-        stats_.first_alpha_input_alpha = command.alpha;
-        stats_.first_alpha_input_prim = command.effective_primitive;
-        stats_.first_alpha_input_tex0 = command.tex0;
-        stats_.first_alpha_input_rgbaq = command.rgbaq;
+    if (detailed_raster_stats_) {
+        const u64 new_nonzero_inputs =
+            stats_.nonzero_raster_inputs - nonzero_inputs_before;
+        if (new_nonzero_inputs != 0u) {
+            if (ctx.alpha_blend) {
+                stats_.nonzero_inputs_with_blend += new_nonzero_inputs;
+            } else {
+                stats_.nonzero_inputs_without_blend += new_nonzero_inputs;
+            }
+            if (!stats_.first_nonzero_input_valid) {
+                stats_.first_nonzero_input_valid = true;
+                stats_.first_nonzero_input_alpha = command.alpha;
+                stats_.first_nonzero_input_test = command.test;
+                stats_.first_nonzero_input_frame = command.frame;
+                stats_.first_nonzero_input_prim = command.effective_primitive;
+                stats_.first_nonzero_input_rgbaq = command.rgbaq;
+                stats_.first_nonzero_input_tex0 = command.tex0;
+                stats_.first_nonzero_input_texa = command.texa;
+                stats_.first_nonzero_input_st = command.st;
+                stats_.first_nonzero_input_uv = command.uv;
+            }
+        }
+        if (!stats_.first_alpha_input_valid &&
+            stats_.nonzero_inputs_with_alpha != alpha_inputs_before) {
+            stats_.first_alpha_input_valid = true;
+            stats_.first_alpha_input_alpha = command.alpha;
+            stats_.first_alpha_input_prim = command.effective_primitive;
+            stats_.first_alpha_input_tex0 = command.tex0;
+            stats_.first_alpha_input_rgbaq = command.rgbaq;
+        }
     }
     if (ctx.texture.enabled) {
         ++stats_.textured_raster_draws;
