@@ -1,8 +1,116 @@
 #include "core/ps2_system.h"
+
+#include <algorithm>
+
 namespace ps2 {
 namespace {
 // Keep independent VU1 execution synchronized to EE instruction steps.
 constexpr u64 kVu1InstructionsPerEeStep = 1;
+constexpr u64 kQuietEeBatchLimit = 4096u;
+constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
+
+bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
+    if (virtual_address >= 0xC0000000u) return false;
+    const u32 aligned = virtual_address & ~alignment_mask;
+    const u32 physical = EeBus::to_physical(aligned);
+    return physical < kEeMainRamSize &&
+           width <= kEeMainRamSize - physical;
+}
+
+bool quiet_ee_instruction(const EeCpuState& state, const EeBus& bus) {
+    // Mapped kernel segments can fault or update TLB exception state while
+    // translating the instruction fetch. Leave those to the exact path.
+    if (state.pc >= 0xC0000000u) return false;
+
+    u32 instruction = 0;
+    if (!bus.fetch32(state.pc, instruction)) return false;
+    if (instruction == 0u) return true;
+
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+
+    // Register/control-flow/FPU/MMI instructions below cannot start DMA,
+    // touch GS/VU micro execution, or access MMIO in the current core.
+    switch (opcode) {
+    case 0x00u: // SPECIAL
+    case 0x01u: // REGIMM
+    case 0x02u: // J
+    case 0x03u: // JAL
+    case 0x04u: // BEQ
+    case 0x05u: // BNE
+    case 0x06u: // BLEZ
+    case 0x07u: // BGTZ
+    case 0x08u: // ADDI
+    case 0x09u: // ADDIU
+    case 0x0Au: // SLTI
+    case 0x0Bu: // SLTIU
+    case 0x0Cu: // ANDI
+    case 0x0Du: // ORI
+    case 0x0Eu: // XORI
+    case 0x0Fu: // LUI
+    case 0x11u: // COP1
+    case 0x14u: // BEQL
+    case 0x15u: // BNEL
+    case 0x16u: // BLEZL
+    case 0x17u: // BGTZL
+    case 0x18u: // DADDI
+    case 0x19u: // DADDIU
+    case 0x1Cu: // MMI
+    case 0x2Fu: // CACHE (currently no-op)
+    case 0x33u: // PREF (currently no-op)
+        return true;
+    default:
+        break;
+    }
+
+    const s16 immediate = static_cast<s16>(instruction & 0xFFFFu);
+    const u32 address = static_cast<u32>(
+        state.gpr[rs].lo + static_cast<u64>(static_cast<s64>(immediate)));
+
+    // RAM-only memory operations are also quiet. The next instruction is
+    // reclassified after every retirement, so self-modifying RAM code stays
+    // correct and an MMIO access immediately falls back to step_ee_core().
+    switch (opcode) {
+    case 0x20u: // LB
+    case 0x24u: // LBU
+    case 0x28u: // SB
+        return quiet_ram_span(address, 1u);
+    case 0x21u: // LH
+    case 0x25u: // LHU
+    case 0x29u: // SH
+        return quiet_ram_span(address, 2u);
+    case 0x22u: // LWL
+    case 0x26u: // LWR
+    case 0x2Au: // SWL
+    case 0x2Eu: // SWR
+        return quiet_ram_span(address, 4u, 3u);
+    case 0x23u: // LW
+    case 0x27u: // LWU
+    case 0x2Bu: // SW
+    case 0x30u: // LL
+    case 0x31u: // LWC1
+    case 0x38u: // SC
+    case 0x39u: // SWC1
+        return quiet_ram_span(address, 4u);
+    case 0x1Au: // LDL
+    case 0x1Bu: // LDR
+    case 0x2Cu: // SDL
+    case 0x2Du: // SDR
+        return quiet_ram_span(address, 8u, 7u);
+    case 0x34u: // LLD
+    case 0x37u: // LD
+    case 0x3Cu: // SCD
+    case 0x3Fu: // SD
+        return quiet_ram_span(address, 8u);
+    case 0x1Eu: // LQ
+    case 0x1Fu: // SQ
+    case 0x36u: // LQC2
+    case 0x3Eu: // SQC2
+        return quiet_ram_span(address, 16u, 15u);
+    default:
+        return false;
+    }
+}
 }
 Ps2System::Ps2System():cdvd_(iop_intc_,bios_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu0_(bus_,gs_core_,0x11000000u,0x11004000u,0x0FFFu,0x100038D0u,0x100038E0u,false),vu1_(bus_,gs_core_),ee_(bus_,&vu0_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif0_dma_.attach_vu0(vu0_);vif0_dma_.attach_ee(ee_);vif1_dma_.attach_vu1(vu1_);reset();}
 void Ps2System::reset(u32 entry_point) {
@@ -26,6 +134,7 @@ void Ps2System::reset(u32 entry_point) {
     skipped_bios_mmio_poll_iterations_ = 0;
     skipped_iop_idle_pairs_ = 0;
     skipped_bios_literal_iterations_ = 0;
+    quiet_ee_batch_instructions_ = 0;
     idle_skip_reasons_.fill(0);
 }
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
@@ -595,6 +704,66 @@ u64 Ps2System::try_skip_bios_literal_iterations(
     return kCycles;
 }
 
+u64 Ps2System::try_run_quiet_ee_batch(
+    u64 budget, std::string& error) {
+    if (budget < 2u || !scheduler_.empty() ||
+        hw_.dmac_running_mask() != 0u ||
+        sif_dma_.ee_completion_pending() ||
+        sif_dma_.iop_completion_pending() ||
+        vu0_.running() || vu1_.running() || gs_.irq_pending() ||
+        bus_.intc_pending() || bus_.dmac_pending()) {
+        return 0;
+    }
+
+    const bool iop_halted = iop_.halted();
+    if (!iop_halted && !iop_.in_osdsys_idle_loop()) return 0;
+
+    const u64 video_room = video_timing_.cycles_to_transition();
+    if (video_room <= 1u) return 0;
+
+    u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
+    maximum = std::min<u64>(maximum, video_room - 1u);
+
+    // The IOP idle pair has no architectural side effects, but its timers,
+    // SPU2 cadence and DMA IRQ countdown still matter. Only defer the pair
+    // when the complete interval is event-free.
+    if (!iop_halted) {
+        while (maximum > 1u) {
+            const u64 iop_steps = (ee_iop_phase_ + maximum) / 8u;
+            if (iop_steps == 0u ||
+                iop_bus_.can_tick_event_free(iop_steps)) {
+                break;
+            }
+            maximum >>= 1u;
+        }
+    }
+    if (maximum < 2u) return 0;
+
+    u64 retired = 0;
+    while (retired < maximum && !ee_.halted() &&
+           quiet_ee_instruction(ee_.state(), bus_)) {
+        if (!ee_.step(error)) break;
+        ++retired;
+        if (!error.empty()) break;
+    }
+    if (retired == 0u) return 0;
+
+    scheduler_.run_until(scheduler_.now() + retired, {});
+
+    const u64 fields_before = video_timing_.fields_started();
+    video_timing_.tick(retired, hw_, iop_intc_);
+    if (video_timing_.fields_started() != fields_before) {
+        // maximum is capped before the next transition, so this is defensive.
+        gs_.raise_vsync();
+        gs_display_.update(gs_, gs_core_.vram());
+    }
+
+    advance_iop_for_ee_cycles(retired, error);
+    if (gs_.irq_pending()) hw_.raise_intc(0);
+    quiet_ee_batch_instructions_ += retired;
+    return retired;
+}
+
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
@@ -681,6 +850,14 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
+        const u64 quiet_batch = try_run_quiet_ee_batch(
+            instruction_budget - executed, error);
+        if (quiet_batch != 0u) {
+            executed += quiet_batch;
+            if (!error.empty()) break;
+            continue;
+        }
+
         const u64 before=ee_.state().instructions_executed;
         if(!step_ee_core(error)){
             if(ee_.state().instructions_executed!=before)++executed;
