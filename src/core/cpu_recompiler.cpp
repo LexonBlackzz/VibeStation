@@ -300,6 +300,7 @@ struct V4NativeState {
   const u64 *code_page_bits = nullptr;
   const u64 *code_line_bits = nullptr;
   void *block_return = nullptr;
+  void *pending_delay_fn = nullptr;
   u8 *main_ram = nullptr;
   u8 *scratchpad = nullptr;
   u32 mapped_main_ram_size = 0;
@@ -896,6 +897,68 @@ V4NativeFn compile_v4_alu(
   code.add(code.ebx, count);
   code.sub(code.r12d, count);
   emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_pending_delay_alu(
+    V4CodeArena &arena, const V4DecodedInstruction &inst,
+    u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 512u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+
+  // The branch decision and target were captured by the previous scheduler
+  // slice. Execute only the already-pending delay-slot instruction here, then
+  // resume at native.next_pc exactly like Cpu::step().
+  emit_v4_alu_instruction(code, inst);
+  emit_retire_incoming_load(code, v4_alu_write_reg(inst));
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  // Preserve the architectural interrupt sampling point immediately after a
+  // delay slot. A later execution-flow phase can move that check into the
+  // resident dispatcher; until then, yield without using the opcode helper.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
@@ -2217,6 +2280,24 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       static_cast<int>(offsetof(V4NativeState, icache_generations))]);
 
   code.L(loop);
+  {
+    Label normal_dispatch;
+    code.cmp(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+        0u);
+    code.je(normal_dispatch);
+    code.test(code.r12d, code.r12d);
+    code.jz(budget_exit);
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jae(budget_exit);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_fn))]);
+    code.test(code.rax, code.rax);
+    code.jz(missing);
+    code.jmp(code.rax);
+    code.L(normal_dispatch);
+  }
   code.xor_(code.r9d, code.r9d);
   code.mov(code.eax, code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
@@ -2468,6 +2549,7 @@ struct CpuRecompilerBackend::Impl {
   V4ResidentDispatchFn resident_dispatch = nullptr;
   V4NativeState native_state{};
   bool native_state_bound = false;
+  std::unordered_map<u32, V4NativeFn> pending_delay_alu_cache;
   std::unordered_map<u32, V4HelperFn> helper_cache;
   void *resident_block_return = nullptr;
   void *resident_linked_entry = nullptr;
@@ -2664,6 +2746,7 @@ struct CpuRecompilerBackend::Impl {
     }
     arena.reset_to(permanent_code_bytes);
     helper_cache.clear();
+    pending_delay_alu_cache.clear();
     block_count = 0u;
     code_pages.clear();
     code_lines.clear();
@@ -2676,6 +2759,23 @@ struct CpuRecompilerBackend::Impl {
       }
       cache_epoch = 1u;
     }
+  }
+
+  V4NativeFn pending_delay_alu_for(u32 instruction) {
+    const auto found = pending_delay_alu_cache.find(instruction);
+    if (found != pending_delay_alu_cache.end()) {
+      return found->second;
+    }
+    V4DecodedInstruction decoded{};
+    if (!decode_v4_alu(instruction, decoded)) {
+      return nullptr;
+    }
+    u32 code_size = 0u;
+    V4NativeFn fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
+    if (fn != nullptr) {
+      pending_delay_alu_cache.emplace(instruction, fn);
+    }
+    return fn;
   }
 
   V4HelperFn helper_for(u32 instruction) {
@@ -3210,21 +3310,19 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
     bool unsafe_state = false;
-    if ((cpu_.pc_ & 3u) != 0u || cpu_.next_pc_ != cpu_.pc_ + 4u) {
+    const bool pending_branch_delay =
+        cpu_.pending_delay_slot_ || cpu_.pending_branch_taken_ ||
+        cpu_.pending_branch_pc_ != 0u;
+    if ((cpu_.pc_ & 3u) != 0u) {
       ++stats_.native_reject_pc_state;
       unsafe_state = true;
-    }
-    if (cpu_.pending_delay_slot_ || cpu_.pending_branch_taken_ ||
-        cpu_.pending_branch_pc_ != 0u) {
-      ++stats_.native_reject_branch_delay_state;
+    } else if (!pending_branch_delay && cpu_.next_pc_ != cpu_.pc_ + 4u) {
+      ++stats_.native_reject_pc_state;
       unsafe_state = true;
     }
     if (cpu_.next_load_.reg != 0u) {
       ++stats_.native_reject_load_delay_state;
       unsafe_state = true;
-    }
-    if (unsafe_state) {
-      ++stats_.native_reject_unsafe_state;
     }
 
     // Match Cpu::step()'s hardware IRQ line synchronization before deciding
@@ -3260,6 +3358,23 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       }
       icache_generation =
           cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
+    }
+
+    V4NativeFn pending_delay_fn = nullptr;
+    if (pending_branch_delay && !unsafe_state && cpu_.pending_delay_slot_ &&
+        cpu_.pending_branch_pc_ != 0u) {
+      u32 delay_instruction = 0u;
+      if (cpu_.read_visible_instruction_for_backend(cpu_.pc_,
+                                                    delay_instruction)) {
+        pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
+      }
+    }
+    if (pending_branch_delay && pending_delay_fn == nullptr) {
+      ++stats_.native_reject_branch_delay_state;
+      unsafe_state = true;
+    }
+    if (unsafe_state) {
+      ++stats_.native_reject_unsafe_state;
     }
 
     if (unsafe_state) {
@@ -3405,13 +3520,17 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.cop0_sr = cpu_.cop0_sr_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
-    native.next_pc = start_pc + 4u;
+    native.next_pc =
+        pending_delay_fn != nullptr ? cpu_.next_pc_ : start_pc + 4u;
     native.last_pc = 0u;
     native.last_in_delay_slot = 0u;
     native.active_branch_pc = 0u;
-    native.pending_delay_slot = 0u;
-    native.pending_branch_taken = 0u;
-    native.pending_branch_pc = 0u;
+    native.pending_delay_slot = pending_delay_fn != nullptr ? 1u : 0u;
+    native.pending_branch_taken =
+        pending_delay_fn != nullptr && cpu_.pending_branch_taken_ ? 1u : 0u;
+    native.pending_branch_pc =
+        pending_delay_fn != nullptr ? cpu_.pending_branch_pc_ : 0u;
+    native.pending_delay_fn = reinterpret_cast<void *>(pending_delay_fn);
     native.scheduler_yield = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
