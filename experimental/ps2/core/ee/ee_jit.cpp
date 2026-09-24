@@ -530,13 +530,24 @@ bool emit_block(
     u32 instruction_count,
     Emitter& out,
     u32& compiled_instructions,
-    bool& control_flow) {
+    bool& control_flow,
+    bool& uses_ram) {
     compiled_instructions = 0;
     control_flow = false;
+    uses_ram = false;
+    out.preserve_ram_base();
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
         if (emit_instruction_body(instructions[i], out)) {
             ++compiled_instructions;
+            continue;
+        }
+
+        out.bytes.resize(before);
+        if (emit_guarded_ram_load(
+                instructions[i], compiled_instructions, out)) {
+            ++compiled_instructions;
+            uses_ram = true;
             continue;
         }
 
@@ -553,6 +564,8 @@ bool emit_block(
         break;
     }
     if (compiled_instructions == 0u) return false;
+    out.emit(0xB8u); // MOV EAX, compiled instruction count
+    out.emit32(compiled_instructions);
     out.emit(0xC3u); // RET
     return true;
 }
@@ -602,12 +615,13 @@ EeJit::Function EeJit::compile(u32 instruction) {
 #endif
 }
 
-EeJit::Function EeJit::compile_block(
+EeJit::BlockFunction EeJit::compile_block(
     u32 pc,
     const u32* instructions,
     u32 instruction_count,
     u32& compiled_instructions,
-    bool& control_flow) {
+    bool& control_flow,
+    bool& uses_ram) {
 #if defined(VIBESTATION_EE_JIT_X64)
     Emitter emitter;
     if (!emit_block(
@@ -616,7 +630,8 @@ EeJit::Function EeJit::compile_block(
             instruction_count,
             emitter,
             compiled_instructions,
-            control_flow)) {
+            control_flow,
+            uses_ram)) {
         return nullptr;
     }
 
@@ -636,13 +651,14 @@ EeJit::Function EeJit::compile_block(
     flush_code(code, emitter.bytes.size());
     page.used += emitter.bytes.size();
     ++block_compiled_count_;
-    return reinterpret_cast<Function>(code);
+    return reinterpret_cast<BlockFunction>(code);
 #else
     (void)pc;
     (void)instructions;
     (void)instruction_count;
     compiled_instructions = 0;
     control_flow = false;
+    uses_ram = false;
     return nullptr;
 #endif
 }
