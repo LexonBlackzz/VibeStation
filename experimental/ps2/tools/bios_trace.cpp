@@ -1514,7 +1514,9 @@ int main(int argc, char** argv) {
               << " EE_JIT_CODE_STORE_EXITS="
               << system.ee().jit().block_code_store_exit_count()
               << " EE_JIT_GUARD_BAILOUTS="
-              << system.ee().jit().block_guard_bailout_count() << '\n';
+              << system.ee().jit().block_guard_bailout_count()
+              << " EE_JIT_CACHE_FLUSHES="
+              << system.ee().jit().cache_flush_count() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;
