@@ -247,7 +247,10 @@ void Ps2System::reset(u32 entry_point) {
     quiet_block_instructions_ = 0;
     quiet_block_hits_ = 0;
     quiet_block_compiles_ = 0;
-    quiet_ee_blocks_.fill(QuietEeBlock{});
+    std::fill(
+        quiet_ee_blocks_.begin(),
+        quiet_ee_blocks_.end(),
+        QuietEeBlock{});
     idle_skip_reasons_.fill(0);
 }
 Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
