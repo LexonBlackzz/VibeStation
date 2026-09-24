@@ -40,6 +40,12 @@ public:
     [[nodiscard]] constexpr std::size_t size() const { return kSize; }
     [[nodiscard]] u8* data() { return data_.data(); }
     [[nodiscard]] const u8* data() const { return data_.data(); }
+    [[nodiscard]] u32* page_generation_data() {
+        return page_generation_.data();
+    }
+    [[nodiscard]] const u32* page_generation_data() const {
+        return page_generation_.data();
+    }
     [[nodiscard]] u32 page_generation(u32 offset) const {
         return page_generation_[offset / kPageSize];
     }
