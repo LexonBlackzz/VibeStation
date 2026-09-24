@@ -248,8 +248,6 @@ void Ps2System::reset(u32 entry_point) {
     quiet_block_instructions_ = 0;
     quiet_block_hits_ = 0;
     quiet_block_compiles_ = 0;
-    native_chain_instructions_ = 0;
-    native_chain_calls_ = 0;
     std::fill(
         quiet_ee_blocks_.begin(),
         quiet_ee_blocks_.end(),
@@ -1056,22 +1054,6 @@ u64 Ps2System::try_run_quiet_ee_batch(
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
         bool progressed = false;
-
-        if (defer_ee_tick) {
-            const u32 chained = ee_.run_native_chain(
-                static_cast<u32>(maximum - retired),
-                ram_.data(),
-                ram_.page_generation_data(),
-                ram_.code_page_tracked_data());
-            if (chained != 0u) {
-                retired += chained;
-                quiet_block_instructions_ += chained;
-                native_chain_instructions_ += chained;
-                ++native_chain_calls_;
-                progressed = true;
-                continue;
-            }
-        }
 
         if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
             const u32 block_pc = block->pc;
