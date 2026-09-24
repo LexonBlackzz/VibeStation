@@ -4715,6 +4715,81 @@ bool test_ee_native_branch_delay() {
     return ok;
 }
 
+bool test_ee_phase_aware_idle_skip() {
+    constexpr ps2::u32 pc = 0x00081FC0u;
+    const std::array<ps2::u32, 8> code = {
+        0u, 0u, 0u, 0u, 0u, 0u, 0x1000FFF9u, 0u};
+
+    auto run_case = [&](ps2::u32 entry_steps,
+                        ps2::u32 skipped_steps,
+                        const char* label) {
+        ps2::Ps2System exact;
+        ps2::Ps2System fast;
+        bool ok = true;
+        for (ps2::u32 i = 0u; i < code.size(); ++i) {
+            ok = expect(
+                exact.bus().write32(pc + i * 4u, code[i]) &&
+                fast.bus().write32(pc + i * 4u, code[i]),
+                "EE idle-loop test code setup failed") && ok;
+        }
+        exact.ee().reset(pc);
+        fast.ee().reset(pc);
+
+        std::string error;
+        for (ps2::u32 i = 0u; i < entry_steps; ++i) {
+            ok = expect(
+                exact.ee().step_quiet(error) &&
+                fast.ee().step_quiet(error),
+                "EE idle-loop phase setup failed") && ok;
+        }
+
+        for (ps2::u32 i = 0u; i < skipped_steps; ++i) {
+            ok = expect(
+                exact.ee().step_quiet(error),
+                "EE idle-loop scalar reference failed") && ok;
+        }
+        ok = expect(
+            fast.ee().skip_bios_idle_instructions(skipped_steps),
+            label) && ok;
+
+        const auto& a = exact.ee().state();
+        const auto& b = fast.ee().state();
+        ok = expect(
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.last_pc == b.last_pc &&
+            a.last_instruction == b.last_instruction &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.cop0[13] == b.cop0[13],
+            label) && ok;
+
+        // Run one more instruction on both sides to verify that branch-delay
+        // phase was reconstructed correctly, including the 0x81FDC slot.
+        ok = expect(
+            exact.ee().step_quiet(error) &&
+            fast.ee().step_quiet(error),
+            "EE idle-loop phase continuation failed") && ok;
+        ok = expect(
+            exact.ee().state().pc == fast.ee().state().pc &&
+            exact.ee().state().next_pc == fast.ee().state().next_pc,
+            "EE idle-loop phase continuation diverged") && ok;
+        return ok;
+    };
+
+    bool ok = true;
+    ok = run_case(
+        2u, 16u,
+        "EE phase-aware idle skip diverged from 0x81FC8") && ok;
+    ok = run_case(
+        6u, 8u,
+        "EE phase-aware idle skip diverged from branch phase") && ok;
+    ok = run_case(
+        7u, 8u,
+        "EE phase-aware idle skip diverged from delay-slot phase") && ok;
+    return ok;
+}
+
 bool test_ee_quiet_fast_prefix() {
     constexpr ps2::u32 pc = 0x5A00u;
     const std::array<ps2::u32, 7> code = {
@@ -5257,6 +5332,7 @@ int main() {
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
+    ok = test_ee_phase_aware_idle_skip() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
     ok = test_ee_quiet_fast_ram_store_barrier() && ok;
     ok = test_ee_quiet_fast_ram_loads() && ok;
