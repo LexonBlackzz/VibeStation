@@ -532,9 +532,112 @@ u64 Ps2System::try_skip_bios_idle_iterations(
     if (hw_.timer_irq_possible()) {
         ++idle_skip_reasons_[7]; return 0;
     }
-    // With arbitrary EE/IOP phase, exactly one IOP instruction can retire
-    // during these eight EE cycles. A store could change EE-visible SIF/INTC
-    // state midway through the interval, so keep those steps cycle-exact.
+
+    // When the IOP is doing real work, the old idle skip gave up because an
+    // IOP store could become EE-visible part-way through an eight-instruction
+    // idle-loop iteration. Instead, advance the verified EE idle loop only up
+    // to the next exact 8:1 IOP boundary, retire that one IOP instruction, then
+    // re-check every shared-device condition before skipping further. This
+    // preserves ordering while removing the EE NOP/branch interpreter tax
+    // during active IOP bootstrap work.
+    const u32 initial_iop_pc = iop_.state().pc;
+    if (!iop_.halted() &&
+        initial_iop_pc != 0x0000AE94u &&
+        initial_iop_pc != 0x0000AE98u) {
+        const u64 co_limit = std::min<u64>(budget, 65536u);
+        u64 co_retired = 0u;
+
+        while (co_retired < co_limit && !ee_.halted()) {
+            const u32 pc = ee_.state().pc;
+            if (pc < 0x00081FC0u || pc > 0x00081FDCu ||
+                ((pc - 0x00081FC0u) & 3u) != 0u) {
+                break;
+            }
+
+            const u16 co_active_dma =
+                hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
+            const u16 co_ready_sif =
+                (co_active_dma & sif_channels) &
+                iop_bus_.sif_dma_ready_mask();
+            const bool co_sif0_needs_service =
+                (co_ready_sif & (1u << 5)) != 0u &&
+                !sif_dma_.sif0_completion_pending();
+            const bool co_sif1_needs_service =
+                (co_ready_sif & (1u << 6)) != 0u &&
+                !sif_dma_.sif1_completion_pending();
+            if ((co_active_dma & ~sif_channels) != 0u ||
+                co_sif0_needs_service || co_sif1_needs_service ||
+                !scheduler_.empty() ||
+                sif_dma_.ee_completion_pending() ||
+                vu0_.running() || vu1_.running() ||
+                gs_.irq_pending() ||
+                bus_.intc_pending() || bus_.dmac_pending()) {
+                break;
+            }
+
+            const auto& co_cpu = ee_.state();
+            const u32 co_status = co_cpu.cop0[12];
+            const u32 co_cause = co_cpu.cop0[13] & ~0x00000C00u;
+            if ((co_cause & co_status & 0x0000FF00u) != 0u &&
+                (co_status & 0x00010001u) == 0x00010001u &&
+                (co_status & 0x6u) == 0u) {
+                break;
+            }
+
+            u64 room = co_limit - co_retired;
+            const u64 until_iop =
+                ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
+            room = std::min(room, until_iop);
+
+            const u64 video_room =
+                video_timing_.cycles_to_transition();
+            if (video_room <= 1u) break;
+            room = std::min<u64>(room, video_room - 1u);
+
+            const u32 ee_completion =
+                sif_dma_.ee_completion_cycles();
+            if (ee_completion != 0u) {
+                room = std::min<u64>(room, ee_completion);
+            }
+
+            const u32 compare_distance =
+                co_cpu.cop0[11] - co_cpu.cop0[9];
+            if (compare_distance != 0u) {
+                if (compare_distance <= 1u) break;
+                room = std::min<u64>(
+                    room,
+                    static_cast<u64>(compare_distance - 1u));
+            }
+
+            if (room == 0u ||
+                !ee_.skip_bios_idle_instructions(
+                    static_cast<u32>(room))) {
+                break;
+            }
+
+            sif_dma_.tick_ee_cycles(bus_, room);
+            scheduler_.run_until(
+                scheduler_.now() + room, {});
+            video_timing_.tick(room, hw_, iop_intc_);
+            advance_iop_for_ee_cycles(room, error);
+            if (gs_.irq_pending()) hw_.raise_intc(0);
+
+            co_retired += room;
+            if (!error.empty()) break;
+        }
+
+        if (co_retired != 0u) {
+            skipped_bios_idle_iterations_ +=
+                co_retired / kIdleInstructions;
+            if (idle_offphase) {
+                ++skipped_bios_idle_offphase_batches_;
+            }
+            return co_retired;
+        }
+    }
+
+    // The legacy one-iteration path below is retained for the canonical idle
+    // entry. It only runs when the co-paced path above could not make progress.
     const u32 iop_pc = iop_.state().pc;
     if (!iop_.halted()) {
         if (iop_bus_.interrupt_pending()) {
