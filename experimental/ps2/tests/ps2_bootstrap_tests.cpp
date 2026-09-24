@@ -3990,8 +3990,9 @@ bool test_ee_quiet_step_matches_exact_execution() {
     for (ps2::u32 i = 0; i < 4u; ++i) {
         ok = expect(exact.ee().step(exact_error),
                     "EE exact reference step failed") && ok;
-        ok = expect(quiet.ee().step_quiet(quiet_error),
-                    "EE quiet step failed") && ok;
+        ok = expect(quiet.ee().step_quiet_predecoded(
+                        code[i], quiet_error),
+                    "EE predecoded quiet step failed") && ok;
     }
     quiet.bus().tick(4u);
 
