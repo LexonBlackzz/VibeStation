@@ -351,6 +351,24 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                     static_cast<s16>(immediate))));
             }
             break;
+        case 0x01u: { // non-branch REGIMM helpers
+            const u32 variant = rt;
+            if (variant != 0x18u && variant != 0x19u) return false;
+            out.load_rax(rs, true);
+            out.emit(0x25u); // AND EAX, mask
+            out.emit32(variant == 0x18u ? 0xFu : 0x7u);
+            out.emit(0x35u); // XOR EAX, immediate low bits
+            out.emit32(
+                static_cast<u32>(static_cast<u16>(immediate)) &
+                (variant == 0x18u ? 0xFu : 0x7u));
+            if (variant == 0x19u) {
+                out.emit(0xD1u); out.emit(0xE0u); // SHL EAX,1
+            }
+            out.store_state_eax(
+                static_cast<u32>(offsetof(EeCpuState, sa)));
+            destination = 0u;
+            break;
+        }
         case 0x2Fu: // CACHE
         case 0x33u: // PREF
             destination = 0u;
@@ -757,6 +775,44 @@ bool emit_branch_and_delay(
             out.store_state_eax(next_pc_offset);
             return true;
         }
+    }
+
+    if (opcode == 0x01u) {
+        const u32 variant = rt;
+        const bool bltz =
+            variant == 0x00u || variant == 0x10u;
+        const bool bgez =
+            variant == 0x01u || variant == 0x11u;
+        if (!bltz && !bgez) {
+            out.bytes.resize(before);
+            return false;
+        }
+
+        if (variant == 0x10u || variant == 0x11u) {
+            const u64 link = static_cast<u64>(static_cast<s64>(
+                static_cast<s32>(branch_pc + 8u)));
+            out.store_gpr_imm64(31u, link);
+        }
+
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.load_rax(rs, false);
+        out.emit(0x48u);
+        out.emit(0x85u);
+        out.emit(0xC0u); // TEST RAX,RAX
+        const std::size_t skip_target =
+            out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
+        out.store_state_imm32(pc_offset, target);
+        out.patch_rel32(skip_target, out.bytes.size());
+
+        if (!emit_instruction_body(delay_instruction, out)) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u);
+        out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        return true;
     }
 
     switch (opcode) {
