@@ -285,6 +285,7 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
         static_cast<u32>(block.words.size()),
         instructions_left_in_page);
 
+    bool fetch_delay_slot = false;
     for (u32 i = 0; i < limit; ++i) {
         u32 instruction = 0;
         const u32 address = pc + i * 4u;
@@ -295,12 +296,19 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
 
         block.words[block.count++] = instruction;
 
+        if (fetch_delay_slot) {
+            break;
+        }
+
         // A store can invalidate this block's code page. End immediately so
         // the next lookup observes the new generation before executing more
-        // cached words. Control flow also forms a natural block boundary.
-        if (quiet_ee_store(instruction) ||
-            quiet_ee_control_flow(instruction)) {
+        // cached words. For control flow, cache one additional sequential
+        // word so the native tier can compile the architectural delay slot.
+        if (quiet_ee_store(instruction)) {
             break;
+        }
+        if (quiet_ee_control_flow(instruction)) {
+            fetch_delay_slot = true;
         }
     }
 
@@ -977,7 +985,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
             const u32 block_pc = block->pc;
 
             if (defer_ee_tick) {
-                const u32 native_retired = ee_.run_native_linear_block(
+                const u32 native_retired = ee_.run_native_block(
                     block_pc,
                     block->page_generation,
                     block->words.data(),
