@@ -966,13 +966,44 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
+        bool progressed = false;
+
+        if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
+            const u32 block_pc = block->pc;
+            for (u32 i = 0;
+                 i < block->count && retired < maximum;
+                 ++i) {
+                if (ee_.state().pc != block_pc + i * 4u) break;
+
+                const u32 instruction = block->words[i];
+                if (!quiet_ee_instruction_value(
+                        ee_.state(), instruction)) {
+                    break;
+                }
+
+                const bool ok = defer_ee_tick
+                    ? ee_.step_quiet_predecoded(instruction, error)
+                    : ee_.step_predecoded(instruction, error);
+                if (!ok) break;
+
+                ++retired;
+                ++quiet_block_instructions_;
+                progressed = true;
+                if (!error.empty()) break;
+            }
+            if (!error.empty()) break;
+            if (progressed) continue;
+        }
+
+        // BIOS ROM and uncommon dynamically unsafe instructions retain the
+        // original classified single-step fallback.
         u32 instruction = 0;
         if (!quiet_ee_instruction(ee_.state(), bus_, instruction)) {
             break;
         }
         const bool ok = defer_ee_tick
             ? ee_.step_quiet_predecoded(instruction, error)
-            : ee_.step(error);
+            : ee_.step_predecoded(instruction, error);
         if (!ok) break;
         ++retired;
         if (!error.empty()) break;
