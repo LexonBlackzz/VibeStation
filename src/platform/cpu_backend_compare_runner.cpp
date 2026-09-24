@@ -3660,6 +3660,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_beq.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_beq);
 
+  CpuCompareCase v4_split_scheduler_store{};
+  v4_split_scheduler_store.name = "v4_split_scheduler_store_delay_native";
+  v4_split_scheduler_store.start_pc = 0xA0010000u;
+  v4_split_scheduler_store.initial_gpr[1] = 1u;
+  v4_split_scheduler_store.initial_gpr[2] = 0x80012200u;
+  v4_split_scheduler_store.initial_gpr[3] = 0x13579BDFu;
+  v4_split_scheduler_store.memory.push_back({0x00012200u, 0u});
+  v4_split_scheduler_store.compare_memory_addresses.push_back(0x00012200u);
+  v4_split_scheduler_store.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x2B, 2, 3, 0),  // SW executes as the pending delay slot.
+      0,
+  };
+  v4_split_scheduler_store.instructions = 2u;
+  v4_split_scheduler_store.segment_instructions = {1u, 1u};
+  v4_split_scheduler_store.compare_segment_states = true;
+  v4_split_scheduler_store.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_store.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_store.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_store);
+
   CpuCompareCase v4_uncached_bne_not_taken{};
   v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
   v4_uncached_bne_not_taken.start_pc = 0xA0010000u;
