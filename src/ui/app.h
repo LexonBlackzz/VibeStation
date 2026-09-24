@@ -50,6 +50,7 @@ private:
 	// UI State
 	bool show_demo_window_ = false;
 	bool show_settings_ = false;
+	bool definitive_detailed_settings_ = false;
 	bool show_about_ = false;
 	bool show_debug_cpu_ = false;
 	bool show_vram_ = false;
@@ -240,6 +241,7 @@ private:
 	void menu_bar();
 	void panel_emulator_screen();
 	void panel_definitive_home();
+	void panel_definitive_settings();
 	void release_definitive_ui_assets();
 	void panel_settings();
 	void panel_about();
