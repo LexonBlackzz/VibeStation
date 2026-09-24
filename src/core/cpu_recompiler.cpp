@@ -328,8 +328,6 @@ struct V4NativeState {
   System *system = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
   u32 *icache_generations = nullptr;
-  const u32 *icache_tags = nullptr;
-  const u32 *icache_words = nullptr;
   bool *icache_valid = nullptr;
   u32 icache_line_stride = 0;
   const u32 *code_page_generations = nullptr;
@@ -1376,7 +1374,7 @@ V4NativeFn compile_v4_budget_branch(
     V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
     u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 4096u;
+  constexpr size_t kReservation = 1024u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -2782,21 +2780,18 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   }
 
   {
-    Label uncached, validity_ok, revalidate_cached, revalidate_loop;
+    Label uncached, validity_ok;
     code.cmp(code.byte[
         code.r14 + static_cast<int>(offsetof(V4Block, cacheable))], 0u);
     code.je(uncached);
 
-    // Cached code normally takes the generation fast path. A direct-mapped
-    // guest I-cache refill can change the host generation even when the
-    // visible instruction bytes are identical, so validate that uncommon
-    // case in the resident dispatcher instead of bouncing through C++.
+    // Cached code: exact guest I-cache line generation is authoritative.
     code.movzx(code.ecx, code.word[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
     code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
     code.cmp(code.edx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
-    code.jne(revalidate_cached);
+    code.jne(stale_generation);
     {
       Label one_line;
       code.cmp(code.byte[
@@ -2809,81 +2804,8 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.cmp(code.edx, code.dword[
           code.r14 +
           static_cast<int>(offsetof(V4Block, second_icache_generation))]);
-      code.jne(revalidate_cached);
+      code.jne(stale_generation);
       code.L(one_line);
-    }
-    code.jmp(validity_ok);
-
-    // Exact native equivalent of read_visible_instruction_for_backend() for
-    // the already-compiled block. Cached V4 blocks are one I-cache line wide,
-    // except for a possible branch delay slot in the following line.
-    code.L(revalidate_cached);
-    code.xor_(code.ecx, code.ecx);
-    code.L(revalidate_loop);
-    code.mov(code.r8d, code.dword[
-        code.r14 + static_cast<int>(offsetof(V4Block, start_pc))]);
-    code.lea(code.r8d, code.ptr[code.r8d + code.rcx * 4]);
-
-    // Cache index uses the virtual low bits; tag uses the PS1 cached physical
-    // view. All cacheable high addresses are KSEG0, so clearing bit 31 matches
-    // psx::mask_address() here while leaving low physical addresses unchanged.
-    code.mov(code.edx, code.r8d);
-    code.shr(code.edx, 4u);
-    code.and_(code.edx, 0xFFu);
-    code.imul(code.edx, code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
-
-    code.mov(code.rax, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-    code.cmp(code.byte[code.rax + code.rdx], 0u);
-    code.je(stale_generation);
-
-    code.and_(code.r8d, 0x7FFFFFF0u);
-    code.mov(code.rax, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
-    code.cmp(code.dword[code.rax + code.rdx], code.r8d);
-    code.jne(stale_generation);
-
-    code.mov(code.eax, code.ecx);
-    code.and_(code.eax, 0x03u);
-    code.shl(code.eax, 2u);
-    code.add(code.edx, code.eax);
-    code.mov(code.rax, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
-    code.mov(code.r8d, code.dword[code.rax + code.rdx]);
-    code.cmp(code.r8d, code.dword[
-        code.r14 + code.rcx * 4 +
-        static_cast<int>(offsetof(V4Block, guest_bits))]);
-    code.jne(stale_generation);
-
-    code.inc(code.ecx);
-    code.cmp(code.ecx, code.dword[
-        code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
-    code.jb(revalidate_loop);
-
-    // The bytes are still guest-visible and identical. Adopt the current
-    // generations in place and remain in the native chain.
-    code.movzx(code.ecx, code.word[
-        code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
-    code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
-    code.mov(code.dword[
-        code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))],
-        code.edx);
-    {
-      Label revalidate_done;
-      code.cmp(code.byte[
-          code.r14 + static_cast<int>(offsetof(V4Block, second_icache_line))],
-          0u);
-      code.je(revalidate_done);
-      code.movzx(code.ecx, code.word[
-          code.r14 + static_cast<int>(offsetof(V4Block, second_icache_index))]);
-      code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
-      code.mov(code.dword[
-          code.r14 +
-          static_cast<int>(offsetof(V4Block, second_icache_generation))],
-          code.edx);
-      code.L(revalidate_done);
     }
     code.jmp(validity_ok);
 
@@ -4069,8 +3991,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
       native.icache_generations = cpu_.icache_generation_.data();
-      native.icache_tags = &cpu_.icache_[0].tag;
-      native.icache_words = cpu_.icache_[0].words.data();
       native.icache_valid = &cpu_.icache_[0].valid;
       native.icache_line_stride = sizeof(cpu_.icache_[0]);
       native.code_page_generations = impl_->page_generations.data();
