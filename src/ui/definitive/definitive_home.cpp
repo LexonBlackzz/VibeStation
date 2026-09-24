@@ -42,8 +42,19 @@ constexpr float kLauncherStartFadeSeconds = 0.42f;
 
 float g_launcher_intro_elapsed = 0.0f;
 bool g_launcher_intro_complete = false;
-constexpr float kLauncherIntroRevealStart = 1.24f;
-constexpr float kLauncherIntroDuration = 1.82f;
+
+// Stage 1: a PS1-inspired VibeStation boot presentation on black.
+// Stage 2: the launcher itself initializes in staggered groups.
+constexpr float kBootLogoBegin = 0.34f;
+constexpr float kBootLogoSettle = 1.18f;
+constexpr float kBootWordmarkBegin = 0.92f;
+constexpr float kBootFadeBegin = 1.78f;
+constexpr float kUiBackgroundBegin = 2.08f;
+constexpr float kUiBackgroundReady = 2.72f;
+constexpr float kUiBrandBegin = 2.38f;
+constexpr float kUiMenuBegin = 2.62f;
+constexpr float kUiPanelsBegin = 3.04f;
+constexpr float kLauncherIntroDuration = 3.62f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -448,108 +459,256 @@ void draw_readability_shade(ImDrawList* draw,
 }
 
 
-void draw_startup_sequence_overlay(
-    const ImVec2& pos, const ImVec2& size, float elapsed, float home_reveal) {
+void draw_centered_intro_text(
+    ImDrawList* draw, const ImVec2& center, float font_size,
+    ImU32 color, const char* text) {
+    const ImVec2 text_size = ImGui::GetFont()->CalcTextSizeA(
+        font_size, FLT_MAX, 0.0f, text);
+    draw->AddText(
+        ImGui::GetFont(), font_size,
+        ImVec2(center.x - text_size.x * 0.5f,
+            center.y - text_size.y * 0.5f),
+        color, text);
+}
+
+void draw_boot_presentation(
+    const ImVec2& pos, const ImVec2& size, float elapsed) {
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    const ImVec2 end(pos.x + size.x, pos.y + size.y);
 
-    const int black_alpha =
-        glow_alpha(255.0f * (1.0f - std::clamp(home_reveal, 0.0f, 1.0f)));
-    if (black_alpha > 0) {
-        overlay->AddRectFilled(
-            pos, ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(0, 0, 0, black_alpha));
-    }
+    // This is intentionally an homage in pacing/mood rather than a recreation
+    // of Sony's startup artwork: long black hold, luminous geometric mark,
+    // wordmark, then a clean fade into the launcher initialization.
+    overlay->AddRectFilled(pos, end, rgba(0, 0, 0, 255));
 
-    // Geometry based on the supplied startup concept: an offset red frame
-    // with a strong top/right edge, a light bottom edge, and broken left data
-    // segments that resolve in after the main trace.
-    const ImVec2 box0(
-        pos.x + size.x * 0.522f,
-        pos.y + size.y * 0.216f);
-    const ImVec2 box1(
-        pos.x + size.x * 0.942f,
-        pos.y + size.y * 0.832f);
+    const float logo_in =
+        timeline_progress(elapsed, kBootLogoBegin, kBootLogoSettle);
+    const float wordmark_in =
+        timeline_progress(elapsed, kBootWordmarkBegin, 1.42f);
+    const float boot_fade =
+        1.0f - timeline_progress(elapsed, kBootFadeBegin, kUiBackgroundBegin);
 
-    const float frame_fade =
-        1.0f - timeline_progress(elapsed, 1.28f, kLauncherIntroDuration);
-    if (frame_fade <= 0.001f) {
+    if (boot_fade <= 0.001f) {
         return;
     }
 
-    const ImU32 red = rgba(
-        241, 24, 47, glow_alpha(255.0f * frame_fade));
-    const ImU32 red_dim = rgba(
-        241, 24, 47, glow_alpha(105.0f * frame_fade));
-    const float heavy = std::max(2.0f, size.y * 0.0060f);
-    const float light = std::max(1.0f, size.y * 0.0018f);
+    const ImVec2 center(
+        pos.x + size.x * 0.50f,
+        pos.y + size.y * 0.45f);
+    const float unit = std::min(size.x, size.y);
+    const float mark_scale =
+        (0.72f + 0.28f * logo_in) * unit;
+    const float logo_alpha = logo_in * boot_fade;
 
-    const float top_p = timeline_progress(elapsed, 0.16f, 0.50f);
-    const float right_p = timeline_progress(elapsed, 0.42f, 0.78f);
-    const float bottom_p = timeline_progress(elapsed, 0.72f, 1.00f);
-    const float left_trace_p = timeline_progress(elapsed, 0.90f, 1.18f);
-
-    if (top_p > 0.0f) {
-        overlay->AddLine(
-            box0,
-            lerp_point(box0, ImVec2(box1.x, box0.y), top_p),
-            red, heavy);
+    // A soft luminous core appears first.
+    const float halo_in =
+        timeline_progress(elapsed, 0.14f, 0.78f) * boot_fade;
+    for (int ring = 7; ring >= 1; --ring) {
+        const float t = static_cast<float>(ring) / 7.0f;
+        const float radius = unit * (0.018f + 0.050f * t) *
+            (0.80f + 0.20f * logo_in);
+        overlay->AddCircleFilled(
+            center, radius,
+            rgba(213, 224, 239,
+                glow_alpha(halo_in * (10.0f + (1.0f - t) * 16.0f))),
+            48);
     }
 
-    if (right_p > 0.0f) {
-        const ImVec2 right_top(box1.x, box0.y);
+    // Original V-shaped four-color mark using the launcher's established
+    // accent palette. Each stroke resolves at a slightly different time.
+    constexpr std::array<ImU32, 4> colors = {
+        IM_COL32(194, 44, 56, 255),
+        IM_COL32(52, 128, 125, 255),
+        IM_COL32(177, 145, 72, 255),
+        IM_COL32(52, 93, 157, 255),
+    };
+
+    const float arm = mark_scale * 0.075f;
+    const float stroke = std::max(2.0f, unit * 0.007f);
+    const std::array<ImVec2, 4> outer = {
+        ImVec2(center.x - arm * 1.35f, center.y - arm * 0.90f),
+        ImVec2(center.x - arm * 0.42f, center.y - arm * 0.32f),
+        ImVec2(center.x + arm * 0.42f, center.y - arm * 0.32f),
+        ImVec2(center.x + arm * 1.35f, center.y - arm * 0.90f),
+    };
+    const std::array<ImVec2, 4> inner = {
+        ImVec2(center.x - arm * 0.58f, center.y + arm * 0.78f),
+        ImVec2(center.x - arm * 0.12f, center.y + arm * 0.98f),
+        ImVec2(center.x + arm * 0.12f, center.y + arm * 0.98f),
+        ImVec2(center.x + arm * 0.58f, center.y + arm * 0.78f),
+    };
+
+    for (size_t i = 0; i < outer.size(); ++i) {
+        const float arm_in = timeline_progress(
+            elapsed,
+            kBootLogoBegin + static_cast<float>(i) * 0.07f,
+            0.98f + static_cast<float>(i) * 0.07f);
+        const ImVec2 tip = lerp_point(outer[i], inner[i], arm_in);
+        const ImU32 base = colors[i];
+        const int r = (base >> IM_COL32_R_SHIFT) & 0xFF;
+        const int g = (base >> IM_COL32_G_SHIFT) & 0xFF;
+        const int b = (base >> IM_COL32_B_SHIFT) & 0xFF;
+
+        // Low-alpha outer stroke provides a subdued CRT-like bloom.
         overlay->AddLine(
-            right_top,
-            lerp_point(right_top, box1, right_p),
-            red, heavy);
+            outer[i], tip,
+            rgba(r, g, b, glow_alpha(48.0f * logo_alpha)),
+            stroke * 2.8f);
+        overlay->AddLine(
+            outer[i], tip,
+            rgba(r, g, b, glow_alpha(235.0f * logo_alpha)),
+            stroke);
     }
 
-    if (bottom_p > 0.0f) {
-        const ImVec2 bottom_right(box1.x, box1.y);
-        const ImVec2 bottom_left(box0.x, box1.y);
-        overlay->AddLine(
-            bottom_right,
-            lerp_point(bottom_right, bottom_left, bottom_p),
-            red, light);
+    const float core_flash =
+        (1.0f - timeline_progress(elapsed, 0.96f, 1.42f)) *
+        timeline_progress(elapsed, 0.56f, 0.94f) * boot_fade;
+    if (core_flash > 0.001f) {
+        overlay->AddCircleFilled(
+            center, unit * (0.010f + 0.014f * core_flash),
+            rgba(245, 247, 250, glow_alpha(230.0f * core_flash)),
+            40);
     }
 
-    if (left_trace_p > 0.0f) {
-        const float full_height = box1.y - box0.y;
+    if (wordmark_in > 0.001f) {
+        const float word_alpha = wordmark_in * boot_fade;
+        draw_centered_intro_text(
+            overlay,
+            ImVec2(center.x, center.y + unit * 0.145f),
+            std::max(20.0f, unit * 0.045f),
+            rgba(221, 224, 230, glow_alpha(235.0f * word_alpha)),
+            "VibeStation");
+        draw_centered_intro_text(
+            overlay,
+            ImVec2(center.x, center.y + unit * 0.193f),
+            std::max(8.0f, unit * 0.012f),
+            rgba(137, 143, 151, glow_alpha(205.0f * word_alpha)),
+            "PS1 EMULATOR");
+    }
+}
 
-        // A very thin low-energy trace hints at the full left boundary.
+void draw_ui_initialization_overlay(
+    const ImVec2& pos, const ImVec2& size, float elapsed) {
+    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    const Layout layout = make_layout(pos, size);
+
+    const float background_reveal =
+        timeline_progress(elapsed, kUiBackgroundBegin, kUiBackgroundReady);
+
+    // Overall black veil lets the photographic background arrive first.
+    const int global_black =
+        glow_alpha(255.0f * (1.0f - background_reveal));
+    if (global_black > 0) {
+        overlay->AddRectFilled(
+            pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            rgba(0, 0, 0, global_black));
+    }
+
+    // Branding: short downward-to-upward wipe with a very light scan edge.
+    const float brand_reveal =
+        timeline_progress(elapsed, kUiBrandBegin, 2.94f);
+    const ImVec2 brand0 = layout.point(28.0f, 22.0f);
+    const ImVec2 brand1 = layout.point(455.0f, 205.0f);
+    if (brand_reveal < 1.0f) {
+        const float wipe_y =
+            brand1.y - (brand1.y - brand0.y) * brand_reveal;
+        overlay->AddRectFilled(
+            ImVec2(brand0.x, brand0.y),
+            ImVec2(brand1.x, wipe_y),
+            rgba(0, 0, 0, 255));
         overlay->AddLine(
-            box0,
-            ImVec2(box0.x, box0.y + full_height * left_trace_p),
-            red_dim, light);
+            ImVec2(brand0.x, wipe_y),
+            ImVec2(brand1.x, wipe_y),
+            rgba(186, 211, 232, glow_alpha(105.0f * brand_reveal)),
+            layout.px(1.0f));
+    }
 
-        struct Segment {
-            float start;
-            float end;
-        };
-        constexpr std::array<Segment, 4> segments = {{
-            {0.000f, 0.085f},
-            {0.247f, 0.272f},
-            {0.460f, 0.503f},
-            {0.657f, 0.691f},
-        }};
+    // Right-side metadata resolves just after the brand.
+    const float meta_reveal =
+        timeline_progress(elapsed, 2.50f, 3.02f);
+    const ImVec2 meta0 = layout.point(1030.0f, 24.0f);
+    const ImVec2 meta1 = layout.point(1248.0f, 116.0f);
+    if (meta_reveal < 1.0f) {
+        overlay->AddRectFilled(
+            meta0, meta1,
+            rgba(0, 0, 0, glow_alpha(255.0f * (1.0f - meta_reveal))));
+    }
 
-        for (size_t i = 0; i < segments.size(); ++i) {
-            const float segment_p = timeline_progress(
-                elapsed,
-                0.92f + static_cast<float>(i) * 0.055f,
-                1.04f + static_cast<float>(i) * 0.055f);
-            if (segment_p <= 0.0f) {
-                continue;
+    // Primary actions initialize one after another from top to bottom. The
+    // image concept is used here as a placement/timing guide, not as literal
+    // startup artwork.
+    constexpr float kMenuX = 28.0f;
+    constexpr float kMenuY = 210.0f;
+    constexpr float kMenuW = 420.0f;
+    constexpr float kMenuH = 66.0f;
+    constexpr float kMenuStep = 70.0f;
+
+    for (int i = 0; i < 5; ++i) {
+        const float item_start =
+            kUiMenuBegin + static_cast<float>(i) * 0.095f;
+        const float item_reveal =
+            timeline_progress(elapsed, item_start, item_start + 0.46f);
+
+        const ImVec2 row0 =
+            layout.point(kMenuX, kMenuY + kMenuStep * i);
+        const ImVec2 row1 =
+            layout.point(kMenuX + kMenuW,
+                kMenuY + kMenuStep * i + kMenuH);
+
+        if (item_reveal < 1.0f) {
+            const float wipe_x =
+                row0.x + (row1.x - row0.x) * item_reveal;
+
+            overlay->AddRectFilled(
+                ImVec2(wipe_x, row0.y),
+                row1,
+                rgba(0, 0, 0, 255));
+
+            const int veil_alpha =
+                glow_alpha(180.0f * (1.0f - item_reveal));
+            if (veil_alpha > 0) {
+                overlay->AddRectFilled(
+                    row0, ImVec2(wipe_x, row1.y),
+                    rgba(0, 0, 0, veil_alpha));
             }
 
-            const float y0 = box0.y + full_height * segments[i].start;
-            const float y1 = box0.y + full_height * segments[i].end;
             overlay->AddLine(
-                ImVec2(box0.x, y0),
-                ImVec2(box0.x, y0 + (y1 - y0) * segment_p),
-                red, heavy);
+                ImVec2(wipe_x, row0.y + layout.px(5.0f)),
+                ImVec2(wipe_x, row1.y - layout.px(5.0f)),
+                rgba(181, 211, 236,
+                    glow_alpha(125.0f * item_reveal)),
+                layout.px(1.0f));
+        }
+    }
+
+    // Bottom cards lift in last. Separate timing makes the right system card
+    // trail the library by a fraction of a second.
+    const std::array<ImVec4, 2> panels = {
+        ImVec4(25.0f, 575.0f, 845.0f, 780.0f),
+        ImVec4(850.0f, 575.0f, 1255.0f, 780.0f),
+    };
+    for (size_t i = 0; i < panels.size(); ++i) {
+        const float start =
+            kUiPanelsBegin + static_cast<float>(i) * 0.11f;
+        const float reveal =
+            timeline_progress(elapsed, start, start + 0.48f);
+        const ImVec2 p0 = layout.point(panels[i].x, panels[i].y);
+        const ImVec2 p1 = layout.point(panels[i].z, panels[i].w);
+
+        if (reveal < 1.0f) {
+            const float wipe_y =
+                p1.y - (p1.y - p0.y) * reveal;
+            overlay->AddRectFilled(
+                p0, ImVec2(p1.x, wipe_y),
+                rgba(0, 0, 0, 255));
+            overlay->AddRectFilled(
+                ImVec2(p0.x, wipe_y), p1,
+                rgba(0, 0, 0,
+                    glow_alpha(155.0f * (1.0f - reveal))));
         }
     }
 }
+
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     float size, ImU32 color, const char* text) {
@@ -849,26 +1008,19 @@ void App::panel_definitive_home() {
     }
 
     const bool launcher_intro_active = !g_launcher_intro_complete;
-    const float home_reveal = g_launcher_intro_complete
-        ? 1.0f
-        : timeline_progress(
-            g_launcher_intro_elapsed,
-            kLauncherIntroRevealStart,
-            kLauncherIntroDuration);
 
-    // Preload the background/softened texture under the black intro so the
-    // reveal does not hitch when the frame animation finishes.
+    // Load/soften the photograph while the boot presentation is still on
+    // black so the transition into the launcher is hitch-free.
     ensure_background_texture_loaded();
 
     if (launcher_intro_active &&
-        g_launcher_intro_elapsed < kLauncherIntroRevealStart) {
-        draw_startup_sequence_overlay(
-            window_pos, window_size, g_launcher_intro_elapsed, 0.0f);
+        g_launcher_intro_elapsed < kUiBackgroundBegin) {
+        draw_boot_presentation(
+            window_pos, window_size, g_launcher_intro_elapsed);
         return;
     }
 
     Layout layout = make_layout(window_pos, window_size);
-    layout.origin.y += layout.px(10.0f * (1.0f - home_reveal));
 
     draw_background(draw, window_pos, window_size);
     draw_readability_shade(draw, window_pos, window_size);
@@ -1217,7 +1369,7 @@ void App::panel_definitive_home() {
     }
 
     if (launcher_intro_active) {
-        draw_startup_sequence_overlay(
-            window_pos, window_size, g_launcher_intro_elapsed, home_reveal);
+        draw_ui_initialization_overlay(
+            window_pos, window_size, g_launcher_intro_elapsed);
     }
 }
