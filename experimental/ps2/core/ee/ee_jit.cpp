@@ -383,6 +383,7 @@ bool emit_guarded_ram_load(
     case 0x23u: // LW
     case 0x27u: // LWU
     case 0x30u: // LL
+    case 0x31u: // LWC1
         width = 4u;
         break;
     case 0x34u: // LLD
@@ -450,7 +451,14 @@ bool emit_guarded_ram_load(
     out.emit32(kEeRamSize - width);
     fail_jumps.push_back(out.jcc32(0x87u)); // JA
 
-    if (rt != 0u) {
+    if (opcode == 0x31u) {
+        out.emit(0x41u); out.emit(0x8Bu); // MOV EAX,dword [R11+RAX]
+        out.emit(0x04u); out.emit(0x03u);
+        out.store_state_eax(
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) +
+                rt * sizeof(u32)));
+    } else if (rt != 0u) {
         switch (opcode) {
         case 0x20u: // MOVSX RAX, byte [R11+RAX]
             out.emit(0x49u); out.emit(0x0Fu); out.emit(0xBEu);
@@ -527,6 +535,9 @@ bool emit_guarded_ram_store(
     case 0x28u: width = 1u; break; // SB
     case 0x29u: width = 2u; break; // SH
     case 0x2Bu: width = 4u; break; // SW
+    case 0x38u: width = 4u; break; // SC
+    case 0x39u: width = 4u; break; // SWC1
+    case 0x3Cu: width = 8u; break; // SCD
     case 0x3Fu: width = 8u; break; // SD
     default: return false;
     }
@@ -591,31 +602,44 @@ bool emit_guarded_ram_store(
         fail_jumps.push_back(out.jcc32(0x85u)); // JNZ
     }
 
-    out.load_rdx(rt, width != 8u);
-    switch (width) {
-    case 1u:
-        out.emit(0x41u); out.emit(0x88u);
-        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],DL
-        break;
-    case 2u:
-        out.emit(0x66u); out.emit(0x41u); out.emit(0x89u);
-        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],DX
-        break;
-    case 4u:
-        out.emit(0x41u); out.emit(0x89u);
-        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],EDX
-        break;
-    case 8u:
-        out.emit(0x49u); out.emit(0x89u);
-        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],RDX
-        break;
-    default:
-        return false;
+    out.emit(0x41u); out.emit(0x89u); out.emit(0xC0u); // MOV R8D,EAX
+    if (opcode == 0x39u) {
+        out.load_state_eax(
+            static_cast<u32>(
+                offsetof(EeCpuState, fpr) +
+                rt * sizeof(u32)));
+        out.emit(0x43u); out.emit(0x89u);
+        out.emit(0x04u); out.emit(0x03u); // MOV [R11+R8],EAX
+    } else {
+        out.load_rdx(rt, width != 8u);
+        switch (width) {
+        case 1u:
+            out.emit(0x43u); out.emit(0x88u);
+            out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],DL
+            break;
+        case 2u:
+            out.emit(0x66u); out.emit(0x43u); out.emit(0x89u);
+            out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],DX
+            break;
+        case 4u:
+            out.emit(0x43u); out.emit(0x89u);
+            out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],EDX
+            break;
+        case 8u:
+            out.emit(0x4Bu); out.emit(0x89u);
+            out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],RDX
+            break;
+        default:
+            return false;
+        }
+    }
+
+    if ((opcode == 0x38u || opcode == 0x3Cu) && rt != 0u) {
+        out.store_gpr_imm64(rt, 1u);
     }
 
     // Conservative write barrier: every native RAM store advances the page
     // generation. Cached code on that page will be recompiled on next entry.
-    out.emit(0x41u); out.emit(0x89u); out.emit(0xC0u); // MOV R8D,EAX
     out.emit(0x41u); out.emit(0xC1u); out.emit(0xE8u); out.emit(0x0Cu);
     out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
     out.emit(0x82u); out.emit(0x01u); // ADD dword [R10+R8*4],1
@@ -957,6 +981,7 @@ u32 EeJit::execute_block(
             case 0x25u:
             case 0x27u:
             case 0x30u:
+            case 0x31u:
             case 0x34u:
             case 0x37u:
                 entry.ram_load_mask |= 1u << i;
@@ -964,6 +989,9 @@ u32 EeJit::execute_block(
             case 0x28u:
             case 0x29u:
             case 0x2Bu:
+            case 0x38u:
+            case 0x39u:
+            case 0x3Cu:
             case 0x3Fu:
                 entry.ram_store_mask |= 1u << i;
                 break;
