@@ -251,8 +251,8 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                     out.emit(
                         funct == 0x23u || funct == 0x2Fu ? 0x29u :
                         funct == 0x24u ? 0x21u :
-                        funct == 0x25u ? 0x09u :
-                        funct == 0x26u || funct == 0x27u ? 0x31u :
+                        funct == 0x25u || funct == 0x27u ? 0x09u :
+                        funct == 0x26u ? 0x31u :
                         0x01u);
                     out.emit(0xD0u); // operation RAX, RDX
                     if (funct == 0x27u) {
