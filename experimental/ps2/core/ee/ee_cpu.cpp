@@ -141,7 +141,6 @@ void EeCpu::reset(u32 entry_point) {
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
     halt_reason_.clear();
-    jit_.clear();
 }
 
 void EeCpu::clear_halt() {
