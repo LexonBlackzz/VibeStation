@@ -4767,6 +4767,81 @@ bool test_ee_quiet_fast_prefix() {
     return ok;
 }
 
+bool test_ee_quiet_fast_branch_block() {
+    constexpr ps2::u32 pc = 0x5B00u;
+    bool ok = true;
+
+    {
+        const std::array<ps2::u32, 3> code = {
+            (0x09u << 26) | (1u << 16) | 1u, // ADDIU r1,r0,1
+            (0x04u << 26) | (1u << 21) | (1u << 16) | 2u, // BEQ taken
+            (0x09u << 26) | (2u << 16) | 7u, // delay slot
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System fast;
+        exact.ee().reset(pc);
+        fast.ee().reset(pc);
+        std::string error;
+        for (const ps2::u32 instruction : code) {
+            ok = expect(
+                exact.ee().step_quiet_predecoded(instruction, error),
+                "EE fast branch reference step failed") && ok;
+        }
+        const ps2::u32 retired = fast.ee().run_quiet_fast_prefix(
+            pc,
+            code.data(),
+            static_cast<ps2::u32>(code.size()),
+            static_cast<ps2::u32>(code.size()));
+        const auto& a = exact.ee().state();
+        const auto& b = fast.ee().state();
+        ok = expect(
+            retired == code.size() &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.gpr[1].lo == b.gpr[1].lo &&
+            a.gpr[2].lo == b.gpr[2].lo,
+            "EE tight interpreter taken branch diverged") && ok;
+    }
+
+    {
+        const std::array<ps2::u32, 2> code = {
+            (0x14u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQL not taken
+            (0x09u << 26) | (3u << 16) | 9u, // annulled delay slot
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System fast;
+        exact.ee().reset(pc);
+        fast.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = 1u;
+        exact.ee().state().gpr[2].lo = 2u;
+        fast.ee().state().gpr[1].lo = 1u;
+        fast.ee().state().gpr[2].lo = 2u;
+        std::string error;
+        ok = expect(
+            exact.ee().step_quiet_predecoded(code[0], error),
+            "EE fast likely-branch reference step failed") && ok;
+        const ps2::u32 retired = fast.ee().run_quiet_fast_prefix(
+            pc,
+            code.data(),
+            static_cast<ps2::u32>(code.size()),
+            static_cast<ps2::u32>(code.size()));
+        const auto& a = exact.ee().state();
+        const auto& b = fast.ee().state();
+        ok = expect(
+            retired == 1u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            b.gpr[3].lo == 0u,
+            "EE tight interpreter likely branch annul diverged") && ok;
+    }
+
+    return ok;
+}
+
 bool test_ee_quiet_step_matches_exact_execution() {
     ps2::Ps2System exact;
     ps2::Ps2System quiet;
@@ -4976,6 +5051,7 @@ int main() {
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
+    ok = test_ee_quiet_fast_branch_block() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
     ok = test_iop_osdsys_idle_detection() && ok;
