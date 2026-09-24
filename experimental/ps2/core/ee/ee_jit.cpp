@@ -689,7 +689,10 @@ bool emit_guarded_ram_store(
     // generation. Cached code on that page will be recompiled on next entry.
     out.emit(0x41u); out.emit(0xC1u); out.emit(0xE8u); out.emit(0x0Cu);
     out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
-    out.emit(0x82u); out.emit(0x01u); // ADD dword [R10+R8*4],1
+    out.emit(0x82u);
+    out.emit(opcode == 0x1Fu ? 0x02u : 0x01u);
+    // SQ mirrors the interpreter's two write64 calls, so a tracked code page
+    // advances twice. Scalar stores advance it once.
 
     // A self-modifying store must end this block immediately. The caller will
     // observe the bumped generation before fetching any later cached word.
