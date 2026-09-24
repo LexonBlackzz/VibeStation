@@ -302,7 +302,26 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
             break;
         }
 
+        const u32 slot = block.count;
         block.words[block.count++] = instruction;
+        const u32 opcode = instruction >> 26;
+        switch (opcode) {
+        case 0x1Au: case 0x1Bu: case 0x1Eu: case 0x1Fu:
+        case 0x20u: case 0x21u: case 0x22u: case 0x23u:
+        case 0x24u: case 0x25u: case 0x26u: case 0x27u:
+        case 0x28u: case 0x29u: case 0x2Au: case 0x2Bu:
+        case 0x2Cu: case 0x2Du: case 0x2Eu:
+        case 0x30u: case 0x31u: case 0x34u:
+        case 0x36u: case 0x37u: case 0x38u: case 0x39u:
+        case 0x3Cu: case 0x3Eu: case 0x3Fu:
+            block.memory_mask |= 1u << slot;
+            break;
+        default:
+            break;
+        }
+        if (quiet_ee_store(instruction)) {
+            block.store_mask |= 1u << slot;
+        }
 
         if (fetch_delay_slot) {
             break;
@@ -1097,7 +1116,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 if (ee_.state().pc != block_pc + i * 4u) break;
 
                 const u32 instruction = block->words[i];
-                if (!quiet_ee_instruction_value(
+                if ((block->memory_mask & (1u << i)) != 0u &&
+                    !quiet_ee_instruction_value(
                         ee_.state(), instruction)) {
                     break;
                 }
@@ -1111,7 +1131,16 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 ++retired;
                 ++quiet_block_instructions_;
                 progressed = true;
-                if (!error.empty() || quiet_ee_store(instruction)) break;
+                if (!error.empty()) break;
+
+                if ((block->store_mask & (1u << i)) != 0u) {
+                    const u32 code_physical =
+                        EeBus::to_physical(block_pc);
+                    if (ram_.page_generation(code_physical) !=
+                        block->page_generation) {
+                        break;
+                    }
+                }
             }
             if (!error.empty()) break;
             if (progressed) continue;
