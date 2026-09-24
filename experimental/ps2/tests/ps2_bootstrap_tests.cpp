@@ -4221,6 +4221,129 @@ bool test_ee_native_ram_loads() {
     return ok;
 }
 
+bool test_ee_native_ram_stores() {
+    constexpr ps2::u32 pc = 0x6800u;
+    constexpr ps2::u32 data = 0x9000u;
+    const std::array<ps2::u32, 5> code = {
+        (0x28u << 26) | (1u << 21) | (2u << 16) | 0u, // SB
+        (0x29u << 26) | (1u << 21) | (2u << 16) | 2u, // SH
+        (0x2Bu << 26) | (1u << 21) | (2u << 16) | 4u, // SW
+        (0x3Fu << 26) | (1u << 21) | (2u << 16) | 8u, // SD
+        (0x09u << 26) | (3u << 16) | 9u,              // ADDIU r3,r0,9
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = data;
+    native.ee().state().gpr[1].lo = data;
+    exact.ee().state().gpr[2].lo = 0xFEDCBA9876543210ull;
+    native.ee().state().gpr[2].lo = 0xFEDCBA9876543210ull;
+    exact.ram().track_code_page(data);
+    native.ram().track_code_page(data);
+
+    std::string error;
+    bool ok = true;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE native store reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(retired == code.size(),
+                "EE native store block did not retire fully") && ok;
+    for (ps2::u32 offset : {0u, 2u, 4u}) {
+        ps2::u32 a = 0;
+        ps2::u32 b = 0;
+        const ps2::u32 width = offset == 0u ? 1u :
+                               offset == 2u ? 2u : 4u;
+        if (width == 1u) {
+            ps2::u8 av = 0;
+            ps2::u8 bv = 0;
+            ok = expect(exact.ram().read8(data + offset, av) &&
+                        native.ram().read8(data + offset, bv) &&
+                        av == bv,
+                        "EE native byte store diverged") && ok;
+        } else if (width == 2u) {
+            ps2::u16 av = 0;
+            ps2::u16 bv = 0;
+            ok = expect(exact.ram().read16(data + offset, av) &&
+                        native.ram().read16(data + offset, bv) &&
+                        av == bv,
+                        "EE native halfword store diverged") && ok;
+        } else {
+            ok = expect(exact.ram().read32(data + offset, a) &&
+                        native.ram().read32(data + offset, b) &&
+                        a == b,
+                        "EE native word store diverged") && ok;
+        }
+    }
+    ps2::u64 exact64 = 0;
+    ps2::u64 native64 = 0;
+    ok = expect(exact.ram().read64(data + 8u, exact64) &&
+                native.ram().read64(data + 8u, native64) &&
+                exact64 == native64,
+                "EE native doubleword store diverged") && ok;
+    ok = expect(
+        exact.ram().page_generation(data) ==
+            native.ram().page_generation(data),
+        "EE native store write barrier generation diverged") && ok;
+    ok = expect(
+        exact.ee().state().gpr[3].lo ==
+            native.ee().state().gpr[3].lo,
+        "EE native store block did not continue after data stores") && ok;
+
+    ps2::Ps2System selfmod;
+    selfmod.ee().reset(pc);
+    selfmod.ee().state().gpr[1].lo = pc + 0x100u;
+    selfmod.ee().state().gpr[2].lo = 0x12345678u;
+    selfmod.ram().track_code_page(pc);
+    const ps2::u32 generation =
+        selfmod.ram().page_generation(pc);
+    const ps2::u32 selfmod_code[2] = {
+        (0x2Bu << 26) | (1u << 21) | (2u << 16),
+        (0x09u << 26) | (3u << 16) | 1u,
+    };
+    const ps2::u32 selfmod_retired =
+        selfmod.ee().run_native_block(
+            pc, generation, selfmod_code, 2u, 2u,
+            selfmod.ram().data(),
+            selfmod.ram().page_generation_data());
+    ok = expect(
+        selfmod_retired == 1u &&
+        selfmod.ee().state().pc == pc + 4u &&
+        selfmod.ram().page_generation(pc) == generation + 1u,
+        "EE self-modifying native store did not exit at barrier") && ok;
+
+    ps2::Ps2System guarded;
+    guarded.ee().reset(pc);
+    guarded.ee().state().gpr[1].lo = 0x10000000u;
+    guarded.ee().state().gpr[2].lo = 0x12345678u;
+    const ps2::u32 guarded_retired =
+        guarded.ee().run_native_block(
+            pc, 0u, selfmod_code, 2u, 2u,
+            guarded.ram().data(),
+            guarded.ram().page_generation_data());
+    ok = expect(
+        guarded_retired == 0u &&
+        guarded.ee().state().pc == pc,
+        "EE native store guard accepted MMIO address") && ok;
+#else
+    ok = expect(retired == 0u,
+                "EE native stores unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -4451,6 +4574,7 @@ int main() {
     ok = test_vif1_reverse_dma() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_ram_loads() && ok;
+    ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
