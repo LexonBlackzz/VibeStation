@@ -80,8 +80,6 @@ public:
     u64 quiet_block_instructions() const { return quiet_block_instructions_; }
     u64 quiet_block_hits() const { return quiet_block_hits_; }
     u64 quiet_block_compiles() const { return quiet_block_compiles_; }
-    u64 native_chain_instructions() const { return native_chain_instructions_; }
-    u64 native_chain_calls() const { return native_chain_calls_; }
     const std::array<u64, 8>& idle_skip_reasons() const { return idle_skip_reasons_; }
 private:
     bool advance_iop_for_ee_step(std::string& error);
@@ -123,8 +121,6 @@ private:
     u64 quiet_block_instructions_=0;
     u64 quiet_block_hits_=0;
     u64 quiet_block_compiles_=0;
-    u64 native_chain_instructions_=0;
-    u64 native_chain_calls_=0;
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 8> idle_skip_reasons_{};
 };
