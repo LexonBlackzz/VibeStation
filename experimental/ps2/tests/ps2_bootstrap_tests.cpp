@@ -2267,6 +2267,13 @@ bool test_gs_vram_swizzle_addresses() {
                 vram.byte_at(258) == 0x33u &&
                 vram.byte_at(259) == 0x44u,
                 "PSMCT32 x=8 block address mismatch") && ok;
+    const ps2::u32 addr32 =
+        ps2::GsVram::pixel_address_bytes(0, 8, 0, 0, 1);
+    ok = expect(
+        vram.read_pixel_at_address(0, addr32) == 0x44332211u &&
+        vram.write_pixel_at_address_untracked(0, addr32, 0x88776655u) &&
+        vram.read_pixel(0, 8, 0, 0, 1) == 0x88776655u,
+        "PSMCT32 addressed access mismatch") && ok;
 
     vram.reset();
     ok = expect(vram.write_pixel(2, 16, 0, 0, 1, 0xBEEFu),
@@ -2274,6 +2281,13 @@ bool test_gs_vram_swizzle_addresses() {
     ok = expect(vram.byte_at(512) == 0xEFu &&
                 vram.byte_at(513) == 0xBEu,
                 "PSMCT16 x=16 block address mismatch") && ok;
+    const ps2::u32 addr16 =
+        ps2::GsVram::pixel_address_bytes(2, 16, 0, 0, 1);
+    ok = expect(
+        vram.read_pixel_at_address(2, addr16) == 0xBEEFu &&
+        vram.write_pixel_at_address_untracked(2, addr16, 0x1357u) &&
+        vram.read_pixel(2, 16, 0, 0, 1) == 0x1357u,
+        "PSMCT16 addressed access mismatch") && ok;
 
     vram.reset();
     ok = expect(vram.write_pixel(10, 32, 0, 0, 1, 0x1234u),
@@ -3078,6 +3092,12 @@ bool test_gs_depth_layout_and_pixel_pipeline() {
         ok = expect(vram.write_depth(48, 0, 0, 0, 1, 0x12345678u) &&
                     vram.read_depth(48, 0, 0, 0, 1) == 0x12345678u,
                     "PSMZ32 read/write mismatch") && ok;
+        ok = expect(
+            vram.read_depth_at_address(48, depth_address) == 0x12345678u &&
+            vram.write_depth_at_address_untracked(
+                48, depth_address, 0x89ABCDEFu) &&
+            vram.read_depth(48, 0, 0, 0, 1) == 0x89ABCDEFu,
+            "PSMZ32 addressed access mismatch") && ok;
         ok = expect(vram.write_depth(49, 1, 0, 0, 1, 0xAABBCCDDu) &&
                     vram.read_depth(49, 1, 0, 0, 1) == 0x00BBCCDDu,
                     "PSMZ24 masking mismatch") && ok;
