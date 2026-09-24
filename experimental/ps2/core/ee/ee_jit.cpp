@@ -880,15 +880,19 @@ bool emit_block(
 
 } // namespace
 
-EeJit::~EeJit() { clear(); }
+EeJit::~EeJit() { release_code_cache(); }
 
-void EeJit::clear() {
+void EeJit::release_code_cache() {
 #if defined(VIBESTATION_EE_JIT_X64)
     for (const Page& page : pages_) release_page(page.address);
 #endif
     pages_.clear();
     entries_ = {};
     std::fill(block_entries_.begin(), block_entries_.end(), BlockEntry{});
+}
+
+void EeJit::clear() {
+    release_code_cache();
     compiled_count_ = 0;
     executed_count_ = 0;
     block_compiled_count_ = 0;
@@ -898,6 +902,7 @@ void EeJit::clear() {
     block_guard_bailout_count_ = 0;
     block_fastmem_store_count_ = 0;
     block_code_store_exit_count_ = 0;
+    cache_flush_count_ = 0;
 }
 
 EeJit::Function EeJit::compile(u32 instruction) {
@@ -906,7 +911,7 @@ EeJit::Function EeJit::compile(u32 instruction) {
     if (!emit_instruction(instruction, emitter)) return nullptr;
     if (pages_.empty() ||
         pages_.back().used + emitter.bytes.size() > kPageSize) {
-        if (pages_.size() >= kMaxPages) clear();
+        if (pages_.size() >= kMaxPages) { release_code_cache(); ++cache_flush_count_; }
         void* address = allocate_page();
         if (address == nullptr) return nullptr;
         pages_.push_back(Page{address, 0});
@@ -948,7 +953,7 @@ EeJit::BlockFunction EeJit::compile_block(
 
     if (pages_.empty() ||
         pages_.back().used + emitter.bytes.size() > kPageSize) {
-        if (pages_.size() >= kMaxPages) clear();
+        if (pages_.size() >= kMaxPages) { release_code_cache(); ++cache_flush_count_; }
         void* address = allocate_page();
         if (address == nullptr) return nullptr;
         pages_.push_back(Page{address, 0});
