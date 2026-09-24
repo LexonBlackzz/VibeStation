@@ -2,6 +2,7 @@
 #include "core/ee/ee_cpu.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -587,6 +588,8 @@ void EeJit::clear() {
     block_compiled_count_ = 0;
     block_executed_count_ = 0;
     block_instruction_count_ = 0;
+    block_fastmem_load_count_ = 0;
+    block_guard_bailout_count_ = 0;
 }
 
 EeJit::Function EeJit::compile(u32 instruction) {
@@ -708,6 +711,24 @@ u32 EeJit::execute_block(
         entry.function = function;
         entry.control_flow = compiled_control_flow;
         entry.uses_ram = compiled_uses_ram;
+        entry.ram_load_mask = 0u;
+        for (u32 i = 0; i < compiled_instructions && i < 32u; ++i) {
+            switch (instructions[i] >> 26) {
+            case 0x20u:
+            case 0x21u:
+            case 0x23u:
+            case 0x24u:
+            case 0x25u:
+            case 0x27u:
+            case 0x30u:
+            case 0x34u:
+            case 0x37u:
+                entry.ram_load_mask |= 1u << i;
+                break;
+            default:
+                break;
+            }
+        }
         entry.known = true;
     }
 
@@ -728,6 +749,13 @@ u32 EeJit::execute_block(
         entry.control_flow && retired == entry.instruction_count;
     ++block_executed_count_;
     block_instruction_count_ += retired;
+    if (retired < entry.instruction_count) {
+        ++block_guard_bailout_count_;
+    }
+    const u32 retired_mask =
+        retired >= 32u ? 0xFFFFFFFFu : ((1u << retired) - 1u);
+    block_fastmem_load_count_ +=
+        std::popcount(entry.ram_load_mask & retired_mask);
     return retired;
 #else
     (void)state;
