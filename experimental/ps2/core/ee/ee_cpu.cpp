@@ -3427,13 +3427,30 @@ bool EeCpu::step_internal(
 
     // These BIOS staples do not access memory or the coprocessors. Retire
     // them before constructing the full decoder's memory/fault helpers.
-    if (!jit_enabled_ && (opcode == 0x09u || opcode == 0x04u ||
-                          opcode == 0x05u || opcode == 0x0Cu ||
-                          opcode == 0x0Du || opcode == 0x0Fu)) {
+    if (!jit_enabled_ && (
+            opcode == 0x02u || opcode == 0x03u ||
+            opcode == 0x04u || opcode == 0x05u ||
+            opcode == 0x06u || opcode == 0x07u ||
+            opcode == 0x09u || opcode == 0x0Au ||
+            opcode == 0x0Bu || opcode == 0x0Cu ||
+            opcode == 0x0Du || opcode == 0x0Eu ||
+            opcode == 0x0Fu || opcode == 0x14u ||
+            opcode == 0x15u || opcode == 0x16u ||
+            opcode == 0x17u || opcode == 0x19u ||
+            opcode == 0x2Fu || opcode == 0x33u)) {
         switch (opcode) {
-        case 0x09u:
-            write_gpr_word(rt, static_cast<u32>(gpr_u64(rs)) +
-                               static_cast<u32>(static_cast<s32>(imm)));
+        case 0x02u: // J
+            state_.next_pc =
+                ((pc + 4u) & 0xF0000000u) |
+                ((instruction & 0x03FFFFFFu) << 2);
+            next_is_delay_slot_ = true;
+            break;
+        case 0x03u: // JAL
+            write_gpr_word(31u, pc + 8u);
+            state_.next_pc =
+                ((pc + 4u) & 0xF0000000u) |
+                ((instruction & 0x03FFFFFFu) << 2);
+            next_is_delay_slot_ = true;
             break;
         case 0x04u:
         case 0x05u:
@@ -3441,6 +3458,27 @@ bool EeCpu::step_internal(
                 state_.next_pc = branch_target(pc, imm);
             }
             next_is_delay_slot_ = true;
+            break;
+        case 0x06u:
+            if (gpr_s64(rs) <= 0) state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
+            break;
+        case 0x07u:
+            if (gpr_s64(rs) > 0) state_.next_pc = branch_target(pc, imm);
+            next_is_delay_slot_ = true;
+            break;
+        case 0x09u:
+            write_gpr_word(rt, static_cast<u32>(gpr_u64(rs)) +
+                               static_cast<u32>(static_cast<s32>(imm)));
+            break;
+        case 0x0Au:
+            write_gpr64(rt, gpr_s64(rs) < static_cast<s64>(imm) ? 1u : 0u);
+            break;
+        case 0x0Bu:
+            write_gpr64(
+                rt,
+                gpr_u64(rs) < static_cast<u64>(static_cast<s64>(imm))
+                    ? 1u : 0u);
             break;
         case 0x0Cu:
             write_gpr64(rt, gpr_u64(rs) &
@@ -3450,8 +3488,44 @@ bool EeCpu::step_internal(
             write_gpr64(rt, gpr_u64(rs) |
                                 static_cast<u64>(instruction & 0xFFFFu));
             break;
+        case 0x0Eu:
+            write_gpr64(rt, gpr_u64(rs) ^
+                                static_cast<u64>(instruction & 0xFFFFu));
+            break;
         case 0x0Fu:
             write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
+            break;
+        case 0x14u:
+        case 0x15u: {
+            const bool taken =
+                (gpr_u64(rs) == gpr_u64(rt)) == (opcode == 0x14u);
+            if (taken) {
+                state_.next_pc = branch_target(pc, imm);
+                next_is_delay_slot_ = true;
+            } else {
+                branch_likely_not_taken(pc);
+            }
+            break;
+        }
+        case 0x16u:
+        case 0x17u: {
+            const bool taken =
+                opcode == 0x16u ? gpr_s64(rs) <= 0 : gpr_s64(rs) > 0;
+            if (taken) {
+                state_.next_pc = branch_target(pc, imm);
+                next_is_delay_slot_ = true;
+            } else {
+                branch_likely_not_taken(pc);
+            }
+            break;
+        }
+        case 0x19u:
+            write_gpr64(
+                rt,
+                gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));
+            break;
+        case 0x2Fu: // CACHE
+        case 0x33u: // PREF
             break;
         }
         state_.gpr[0] = {};
@@ -3497,6 +3571,124 @@ bool EeCpu::step_internal(
         if (state_.cop0[9] == state_.cop0[11]) state_.cop0[13] |= 0x00008000u;
         if (!quiet) bus_.tick(1);
         return true;
+    }
+
+    // The system's predecoded quiet path has already proven that these
+    // accesses land entirely in EE main RAM. Handle the common scalar memory
+    // operations here instead of constructing the generic translation/fault
+    // helper stack for every load/store.
+    if (prefetched_instruction != nullptr && !jit_enabled_) {
+        const u32 address = static_cast<u32>(
+            gpr_u64(rs) + static_cast<u64>(static_cast<s64>(imm)));
+        bool handled = true;
+        bool access_ok = true;
+        switch (opcode) {
+        case 0x20u: { // LB
+            u8 value = 0;
+            access_ok = bus_.read8(address, value);
+            if (access_ok) write_gpr64(
+                rt, static_cast<u64>(static_cast<s64>(
+                    static_cast<s8>(value))));
+            break;
+        }
+        case 0x21u: { // LH
+            u16 value = 0;
+            access_ok = bus_.read16(address, value);
+            if (access_ok) write_gpr64(
+                rt, static_cast<u64>(static_cast<s64>(
+                    static_cast<s16>(value))));
+            break;
+        }
+        case 0x23u: { // LW
+            u32 value = 0;
+            access_ok = bus_.read32(address, value);
+            if (access_ok) write_gpr_word(rt, value);
+            break;
+        }
+        case 0x24u: { // LBU
+            u8 value = 0;
+            access_ok = bus_.read8(address, value);
+            if (access_ok) write_gpr64(rt, value);
+            break;
+        }
+        case 0x25u: { // LHU
+            u16 value = 0;
+            access_ok = bus_.read16(address, value);
+            if (access_ok) write_gpr64(rt, value);
+            break;
+        }
+        case 0x27u: { // LWU
+            u32 value = 0;
+            access_ok = bus_.read32(address, value);
+            if (access_ok) write_gpr64(rt, value);
+            break;
+        }
+        case 0x28u: // SB
+            access_ok = bus_.write8(address, static_cast<u8>(gpr_u64(rt)));
+            break;
+        case 0x29u: // SH
+            access_ok = bus_.write16(address, static_cast<u16>(gpr_u64(rt)));
+            break;
+        case 0x2Bu: // SW
+            access_ok = bus_.write32(address, static_cast<u32>(gpr_u64(rt)));
+            break;
+        case 0x30u: { // LL
+            u32 value = 0;
+            access_ok = bus_.read32(address, value);
+            if (access_ok) write_gpr_word(rt, value);
+            break;
+        }
+        case 0x31u: { // LWC1
+            u32 value = 0;
+            access_ok = bus_.read32(address, value);
+            if (access_ok) state_.fpr[rt] = value;
+            break;
+        }
+        case 0x34u: // LLD
+        case 0x37u: { // LD
+            u64 value = 0;
+            access_ok = bus_.read64(address, value);
+            if (access_ok) write_gpr64(rt, value);
+            break;
+        }
+        case 0x38u: // SC
+            access_ok = bus_.write32(address, static_cast<u32>(gpr_u64(rt)));
+            if (access_ok) write_gpr_word(rt, 1u);
+            break;
+        case 0x39u: // SWC1
+            access_ok = bus_.write32(address, state_.fpr[rt]);
+            break;
+        case 0x3Cu: // SCD
+            access_ok = bus_.write64(address, gpr_u64(rt));
+            if (access_ok) write_gpr64(rt, 1u);
+            break;
+        case 0x3Fu: // SD
+            access_ok = bus_.write64(address, gpr_u64(rt));
+            break;
+        default:
+            handled = false;
+            break;
+        }
+
+        if (handled) {
+            if (!access_ok) {
+                state_.pc = pc;
+                state_.next_pc = old_next_pc;
+                return fail(
+                    pc,
+                    instruction,
+                    "Predecoded EE RAM access failed",
+                    error);
+            }
+            state_.gpr[0] = {};
+            ++state_.instructions_executed;
+            ++state_.cop0[9];
+            if (state_.cop0[9] == state_.cop0[11]) {
+                state_.cop0[13] |= 0x00008000u;
+            }
+            if (!quiet) bus_.tick(1);
+            return true;
+        }
     }
 
 generic_decode:
