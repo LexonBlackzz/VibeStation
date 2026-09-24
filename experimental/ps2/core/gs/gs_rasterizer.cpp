@@ -461,8 +461,6 @@ bool GsRasterizer::draw_pixel(
 
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
-    u32 destination = 0;
-    bool destination_valid = false;
     if (ctx.nonzero_inputs != nullptr &&
         (rgba & 0x00FFFFFFu) != 0u) {
         ++*ctx.nonzero_inputs;
@@ -506,28 +504,55 @@ bool GsRasterizer::draw_pixel(
 
     if (!write_frame && !write_depth) return false;
 
-    const auto load_destination = [&]() -> u32 {
-        if (!destination_valid) {
-            destination = read_frame_rgba(vram, ctx, ux, uy);
-            destination_valid = true;
+    u32 frame_address = 0;
+    bool frame_address_valid = false;
+    auto load_frame_address = [&]() -> u32 {
+        if (!frame_address_valid) {
+            frame_address = GsVram::pixel_address_bytes(
+                ctx.psm, ux, uy, ctx.fbp, ctx.fbw);
+            frame_address_valid = true;
         }
-        return destination;
+        return frame_address;
+    };
+
+    u32 destination_raw = 0;
+    bool destination_raw_valid = false;
+    auto load_destination_raw = [&]() -> u32 {
+        if (!destination_raw_valid) {
+            destination_raw = vram.read_pixel_at_address(
+                ctx.psm, load_frame_address());
+            destination_raw_valid = true;
+        }
+        return destination_raw;
+    };
+    auto load_destination_rgba = [&]() -> u32 {
+        const u32 raw = load_destination_raw();
+        if (ctx.psm == 0u) return raw;
+        if (ctx.psm == 1u) {
+            return (raw & 0x00FFFFFFu) | 0x80000000u;
+        }
+        return rgba16_to_32(static_cast<u16>(raw));
     };
 
     // DATE has no effect on a 24-bit framebuffer. Otherwise DATM selects the
     // destination-alpha MSB that is allowed to pass.
     if (ctx.date && ctx.psm != 1u) {
+        const u32 raw = load_destination_raw();
         const bool destination_alpha =
             ctx.psm == 0u
-                ? ((load_destination() >> 31) & 1u) != 0
-                : ((vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw) >> 15) & 1u) != 0;
+                ? ((raw >> 31) & 1u) != 0
+                : ((raw >> 15) & 1u) != 0;
         if (destination_alpha != ctx.datm) return false;
     }
 
+    u32 depth_address = 0;
+    u32 source_z = 0;
     if (ctx.zte) {
-        const u32 source_z = depth_value_for_psm(ctx.zpsm, z);
-        const u32 destination_z = vram.read_depth(
+        source_z = depth_value_for_psm(ctx.zpsm, z);
+        depth_address = GsVram::depth_address_bytes(
             ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
+        const u32 destination_z = vram.read_depth_at_address(
+            ctx.zpsm, depth_address);
         if (!depth_test_pass(ctx.ztst, source_z, destination_z)) {
             return false;
         }
@@ -538,7 +563,7 @@ bool GsRasterizer::draw_pixel(
             ctx.alpha_blend &&
             (!ctx.pabe || ((rgba & 0x80000000u) != 0));
         u32 output = blend_enabled
-            ? blend_color(rgba, load_destination(), ctx)
+            ? blend_color(rgba, load_destination_rgba(), ctx)
             : rgba;
 
         if (ctx.fba && !rgb_only) output |= 0x80000000u;
@@ -548,24 +573,29 @@ bool GsRasterizer::draw_pixel(
             u32 mask = ctx.fbmask;
             if (rgb_only) mask |= 0xFF000000u;
             if (mask != 0u) {
-                const u32 old = load_destination();
+                const u32 old = load_destination_raw();
                 output = (old & mask) | (output & ~mask);
             }
             written_color = output & 0x00FFFFFFu;
-            if (!vram.write_pixel_untracked(0, ux, uy, ctx.fbp, ctx.fbw, output))
+            if (!vram.write_pixel_at_address_untracked(
+                    0u, load_frame_address(), output)) {
                 return false;
+            }
         } else if (ctx.psm == 1u) {
             const u32 mask = ctx.fbmask & 0x00FFFFFFu;
             if (mask != 0u) {
-                const u32 old = load_destination() & 0x00FFFFFFu;
+                const u32 old =
+                    load_destination_raw() & 0x00FFFFFFu;
                 output = (old & mask) |
                          (output & ~mask & 0x00FFFFFFu);
             } else {
                 output &= 0x00FFFFFFu;
             }
             written_color = output & 0x00FFFFFFu;
-            if (!vram.write_pixel_untracked(1, ux, uy, ctx.fbp, ctx.fbw, output))
+            if (!vram.write_pixel_at_address_untracked(
+                    1u, load_frame_address(), output)) {
                 return false;
+            }
         } else {
             output = apply_dither(output, ctx, x, y);
             u16 packed = rgba32_to_16(output);
@@ -580,14 +610,16 @@ bool GsRasterizer::draw_pixel(
             if (rgb_only) mask = static_cast<u16>(mask | 0x8000u);
 
             if (mask != 0u) {
-                const u16 old = static_cast<u16>(
-                    vram.read_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw));
+                const u16 old =
+                    static_cast<u16>(load_destination_raw());
                 packed = static_cast<u16>(
                     (old & mask) | (packed & static_cast<u16>(~mask)));
             }
             written_color = packed & 0x7FFFu;
-            if (!vram.write_pixel_untracked(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
+            if (!vram.write_pixel_at_address_untracked(
+                    ctx.psm, load_frame_address(), packed)) {
                 return false;
+            }
         }
         if (ctx.nonzero_colors != nullptr && written_color != 0u) {
             ++*ctx.nonzero_colors;
@@ -595,9 +627,10 @@ bool GsRasterizer::draw_pixel(
     }
 
     if (write_depth) {
-        const u32 source_z = depth_value_for_psm(ctx.zpsm, z);
-        if (!vram.write_depth_untracked(ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw, source_z))
+        if (!vram.write_depth_at_address_untracked(
+                ctx.zpsm, depth_address, source_z)) {
             return false;
+        }
     }
 
     return true;
