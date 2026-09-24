@@ -788,17 +788,21 @@ bool emit_branch_and_delay(
             return false;
         }
 
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.load_rax(rs, false);
+        out.emit(0x48u);
+        out.emit(0x85u);
+        out.emit(0xC0u); // TEST RAX,RAX
+
+        // REGIMM link branches test the source before writing r31. MOV/store
+        // preserve flags, so this also handles the architectural rs == r31
+        // case without an extra temporary register.
         if (variant == 0x10u || variant == 0x11u) {
             const u64 link = static_cast<u64>(static_cast<s64>(
                 static_cast<s32>(branch_pc + 8u)));
             out.store_gpr_imm64(31u, link);
         }
 
-        out.store_state_imm32(pc_offset, fallthrough);
-        out.load_rax(rs, false);
-        out.emit(0x48u);
-        out.emit(0x85u);
-        out.emit(0xC0u); // TEST RAX,RAX
         const std::size_t skip_target =
             out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
         out.store_state_imm32(pc_offset, target);
