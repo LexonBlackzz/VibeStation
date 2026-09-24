@@ -60,11 +60,20 @@ void SifDma::reset() {
 }
 
 void SifDma::tick_ee(EeBus& ee_bus) {
-    if (sif0_ee_completion_cycles_ == 0 ||
-        --sif0_ee_completion_cycles_ != 0) {
+    tick_ee_cycles(ee_bus, 1u);
+}
+
+void SifDma::tick_ee_cycles(EeBus& ee_bus, u64 cycles) {
+    if (sif0_ee_completion_cycles_ == 0u || cycles == 0u) {
         return;
     }
 
+    if (cycles < sif0_ee_completion_cycles_) {
+        sif0_ee_completion_cycles_ -= static_cast<u32>(cycles);
+        return;
+    }
+
+    sif0_ee_completion_cycles_ = 0u;
     u32 chcr = 0;
     if (!ee_bus.read32(kEeSif0 + kEeChcr, chcr)) {
         return;
@@ -73,6 +82,18 @@ void SifDma::tick_ee(EeBus& ee_bus) {
         kEeSif0 + kEeChcr,
         chcr & ~kEeStr);
     ee_bus.raise_dmac(5);
+}
+
+u32 SifDma::iop_completion_steps() const {
+    u32 best = 0u;
+    if (sif0_iop_completion_cycles_ != 0u) {
+        best = sif0_iop_completion_cycles_;
+    }
+    if (sif1_iop_completion_cycles_ != 0u &&
+        (best == 0u || sif1_iop_completion_cycles_ < best)) {
+        best = sif1_iop_completion_cycles_;
+    }
+    return best;
 }
 
 void SifDma::tick_iop(IopBus& iop_bus) {
