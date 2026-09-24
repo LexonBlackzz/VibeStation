@@ -7,6 +7,7 @@ namespace {
 // Keep independent VU1 execution synchronized to EE instruction steps.
 constexpr u64 kVu1InstructionsPerEeStep = 1;
 constexpr u64 kQuietEeBatchLimit = 4096u;
+constexpr u64 kQuietEeSuperbatchLimit = 65536u;
 constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
 
 bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
@@ -254,6 +255,8 @@ void Ps2System::reset(u32 entry_point) {
     quiet_block_hits_ = 0;
     quiet_block_compiles_ = 0;
     fast_interpreter_instructions_ = 0;
+    quiet_superbatch_calls_ = 0;
+    quiet_superbatch_instructions_ = 0;
     std::fill(
         quiet_ee_blocks_.begin(),
         quiet_ee_blocks_.end(),
@@ -1209,6 +1212,54 @@ u64 Ps2System::try_run_quiet_ee_batch(
     return retired;
 }
 
+u64 Ps2System::try_run_quiet_ee_superbatch(
+    u64 budget, std::string& error) {
+    const u64 limit =
+        std::min<u64>(budget, kQuietEeSuperbatchLimit);
+    u64 retired = 0u;
+
+    auto specialized_skip_entry = [](u32 pc) {
+        switch (pc) {
+        case 0x00081FC0u:
+        case 0x8000E3C8u:
+        case 0x0020A0E8u:
+        case 0x9FC42930u:
+        case 0x000826B0u:
+        case 0x00252758u:
+        case 0x00252DE8u:
+        case 0x00200DE8u:
+        case 0x00100BE0u:
+        case 0x8000DAD0u:
+        case 0x00082180u:
+        case 0x00266118u:
+        case 0x00200D70u:
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    while (retired < limit && !ee_.halted()) {
+        if (retired != 0u &&
+            specialized_skip_entry(ee_.state().pc)) {
+            break;
+        }
+
+        const u64 chunk = try_run_quiet_ee_batch(
+            limit - retired, error);
+        if (chunk == 0u) break;
+
+        retired += chunk;
+        if (!error.empty()) break;
+    }
+
+    if (retired != 0u) {
+        ++quiet_superbatch_calls_;
+        quiet_superbatch_instructions_ += retired;
+    }
+    return retired;
+}
+
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
@@ -1295,7 +1346,7 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
-        const u64 quiet_batch = try_run_quiet_ee_batch(
+        const u64 quiet_batch = try_run_quiet_ee_superbatch(
             instruction_budget - executed, error);
         if (quiet_batch != 0u) {
             executed += quiet_batch;
