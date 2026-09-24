@@ -4764,6 +4764,38 @@ bool test_ee_quiet_fast_prefix() {
         a.gpr[4].lo == b.gpr[4].lo &&
         a.gpr[5].lo == b.gpr[5].lo,
         "EE fast-prefix architectural state diverged") && ok;
+
+    {
+        const std::array<ps2::u32, 6> nops{};
+        ps2::Ps2System exact_nops;
+        ps2::Ps2System fast_nops;
+        exact_nops.ee().reset(pc);
+        fast_nops.ee().reset(pc);
+        exact_nops.ee().state().cop0[11] = 6u;
+        fast_nops.ee().state().cop0[11] = 6u;
+        std::string nop_error;
+        for (ps2::u32 i = 0u; i < nops.size(); ++i) {
+            ok = expect(
+                exact_nops.ee().step_quiet_predecoded(0u, nop_error),
+                "EE bulk-NOP reference step failed") && ok;
+        }
+        const ps2::u32 nop_retired =
+            fast_nops.ee().run_quiet_fast_prefix(
+                pc,
+                nops.data(),
+                static_cast<ps2::u32>(nops.size()),
+                static_cast<ps2::u32>(nops.size()));
+        const auto& na = exact_nops.ee().state();
+        const auto& nb = fast_nops.ee().state();
+        ok = expect(
+            nop_retired == nops.size() &&
+            na.pc == nb.pc &&
+            na.next_pc == nb.next_pc &&
+            na.instructions_executed == nb.instructions_executed &&
+            na.cop0[9] == nb.cop0[9] &&
+            na.cop0[13] == nb.cop0[13],
+            "EE bulk-NOP retirement diverged") && ok;
+    }
     return ok;
 }
 
