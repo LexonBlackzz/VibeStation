@@ -4946,6 +4946,74 @@ bool test_ee_quiet_fast_branch_block() {
 
     {
         const std::array<ps2::u32, 2> code = {
+            (0x04u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQ not taken
+            (0x09u << 26) | (3u << 16) | 5u, // real delay slot
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System fast;
+        exact.ee().reset(pc);
+        fast.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = 1u;
+        exact.ee().state().gpr[2].lo = 2u;
+        fast.ee().state().gpr[1].lo = 1u;
+        fast.ee().state().gpr[2].lo = 2u;
+        std::string error;
+        ok = expect(
+            exact.ee().step_quiet_predecoded(code[0], error) &&
+            exact.ee().step_quiet_predecoded(code[1], error),
+            "EE fast not-taken branch reference failed") && ok;
+        const ps2::u32 retired = fast.ee().run_quiet_fast_prefix(
+            pc,
+            code.data(),
+            static_cast<ps2::u32>(code.size()),
+            static_cast<ps2::u32>(code.size()));
+        const auto& a = exact.ee().state();
+        const auto& b = fast.ee().state();
+        ok = expect(
+            retired == 2u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.gpr[3].lo == b.gpr[3].lo,
+            "EE tight interpreter not-taken branch pipeline diverged") && ok;
+    }
+
+    {
+        const std::array<ps2::u32, 2> code = {
+            (0x01u << 26) | (1u << 21) | (0x01u << 16) | 2u, // BGEZ not taken
+            (0x09u << 26) | (3u << 16) | 6u, // delay slot
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System fast;
+        exact.ee().reset(pc);
+        fast.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = 0xFFFFFFFFFFFFFFFFull;
+        fast.ee().state().gpr[1].lo = 0xFFFFFFFFFFFFFFFFull;
+        std::string error;
+        ok = expect(
+            exact.ee().step_quiet_predecoded(code[0], error) &&
+            exact.ee().step_quiet_predecoded(code[1], error),
+            "EE fast REGIMM not-taken reference failed") && ok;
+        const ps2::u32 retired = fast.ee().run_quiet_fast_prefix(
+            pc,
+            code.data(),
+            static_cast<ps2::u32>(code.size()),
+            static_cast<ps2::u32>(code.size()));
+        const auto& a = exact.ee().state();
+        const auto& b = fast.ee().state();
+        ok = expect(
+            retired == 2u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9] &&
+            a.gpr[3].lo == b.gpr[3].lo,
+            "EE tight interpreter REGIMM not-taken pipeline diverged") && ok;
+    }
+
+    {
+        const std::array<ps2::u32, 2> code = {
             (0x14u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQL not taken
             (0x09u << 26) | (3u << 16) | 9u, // annulled delay slot
         };
