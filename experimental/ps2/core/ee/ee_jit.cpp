@@ -439,6 +439,149 @@ bool emit_guarded_ram_load(
     return true;
 }
 
+u32 ram_physical_address(u32 address) {
+    if (address < 0x20000000u) return address;
+    if (address < 0x22000000u) return address & 0x01FFFFFFu;
+    if (address < 0x30000000u) return address;
+    if (address < 0x32000000u) return address & 0x01FFFFFFu;
+    if (address < 0x80000000u) return address;
+    return address & 0x1FFFFFFFu;
+}
+
+bool emit_guarded_ram_store(
+    u32 instruction,
+    u32 retired_before,
+    u32 code_page,
+    Emitter& out) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const s16 immediate =
+        static_cast<s16>(instruction & 0xFFFFu);
+
+    u32 width = 0;
+    switch (opcode) {
+    case 0x28u: width = 1u; break; // SB
+    case 0x29u: width = 2u; break; // SH
+    case 0x2Bu: width = 4u; break; // SW
+    case 0x3Fu: width = 8u; break; // SD
+    default: return false;
+    }
+
+    out.load_rax(rs, true);
+    out.emit(0x05u); // ADD EAX, imm32
+    out.emit32(static_cast<u32>(static_cast<s32>(immediate)));
+
+    std::vector<std::size_t> fail_jumps;
+    std::vector<std::size_t> direct_jumps;
+    std::vector<std::size_t> alias_jumps;
+
+    out.emit(0x3Du);
+    out.emit32(0xC0000000u);
+    fail_jumps.push_back(out.jcc32(0x83u)); // JAE
+
+    out.emit(0x3Du);
+    out.emit32(0x20000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du);
+    out.emit32(0x22000000u);
+    alias_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du);
+    out.emit32(0x30000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du);
+    out.emit32(0x32000000u);
+    alias_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du);
+    out.emit32(0x80000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x25u); // AND EAX, KSEG physical mask
+    out.emit32(0x1FFFFFFFu);
+    direct_jumps.push_back(out.jmp32());
+
+    const std::size_t alias_label = out.bytes.size();
+    out.emit(0x25u);
+    out.emit32(0x01FFFFFFu);
+
+    const std::size_t mapped_label = out.bytes.size();
+    for (const std::size_t jump : direct_jumps) {
+        out.patch_rel32(jump, mapped_label);
+    }
+    for (const std::size_t jump : alias_jumps) {
+        out.patch_rel32(jump, alias_label);
+    }
+
+    out.emit(0x3Du);
+    out.emit32(kEeRamSize - width);
+    fail_jumps.push_back(out.jcc32(0x87u)); // JA
+
+    // Keep the fast path simple and page-local. Unaligned stores retain the
+    // interpreter's exact merge/fault behavior.
+    if (width > 1u) {
+        out.emit(0xA9u); // TEST EAX, imm32
+        out.emit32(width - 1u);
+        fail_jumps.push_back(out.jcc32(0x85u)); // JNZ
+    }
+
+    out.load_rdx(rt, width != 8u);
+    switch (width) {
+    case 1u:
+        out.emit(0x41u); out.emit(0x88u);
+        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],DL
+        break;
+    case 2u:
+        out.emit(0x66u); out.emit(0x41u); out.emit(0x89u);
+        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],DX
+        break;
+    case 4u:
+        out.emit(0x41u); out.emit(0x89u);
+        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],EDX
+        break;
+    case 8u:
+        out.emit(0x49u); out.emit(0x89u);
+        out.emit(0x14u); out.emit(0x03u); // MOV [R11+RAX],RDX
+        break;
+    default:
+        return false;
+    }
+
+    // Conservative write barrier: every native RAM store advances the page
+    // generation. Cached code on that page will be recompiled on next entry.
+    out.emit(0x41u); out.emit(0x89u); out.emit(0xC0u); // MOV R8D,EAX
+    out.emit(0x41u); out.emit(0xC1u); out.emit(0xE8u); out.emit(0x0Cu);
+    out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
+    out.emit(0x82u); out.emit(0x01u); // ADD dword [R10+R8*4],1
+
+    // A self-modifying store must end this block immediately. The caller will
+    // observe the bumped generation before fetching any later cached word.
+    out.emit(0x41u); out.emit(0x81u); out.emit(0xF8u);
+    out.emit32(code_page);
+    const std::size_t not_code_page = out.jcc32(0x85u); // JNE
+    out.emit(0xB8u);
+    out.emit32(retired_before + 1u);
+    out.emit(0xC3u);
+    const std::size_t done_label = out.bytes.size();
+    out.patch_rel32(not_code_page, done_label);
+
+    const std::size_t continue_jump = out.jmp32();
+    const std::size_t fail_label = out.bytes.size();
+    out.emit(0xB8u);
+    out.emit32(retired_before);
+    out.emit(0xC3u);
+    const std::size_t continue_label = out.bytes.size();
+
+    for (const std::size_t jump : fail_jumps) {
+        out.patch_rel32(jump, fail_label);
+    }
+    out.patch_rel32(continue_jump, continue_label);
+    return true;
+}
+
 bool emit_branch_and_delay(
     u32 branch_pc,
     u32 branch_instruction,
@@ -549,6 +692,7 @@ bool emit_block(
     control_flow = false;
     uses_ram = false;
     out.preserve_ram_base();
+    out.preserve_generation_base();
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
         if (emit_instruction_body(instructions[i], out)) {
@@ -559,6 +703,19 @@ bool emit_block(
         out.bytes.resize(before);
         if (emit_guarded_ram_load(
                 instructions[i], compiled_instructions, out)) {
+            ++compiled_instructions;
+            uses_ram = true;
+            continue;
+        }
+
+        out.bytes.resize(before);
+        const u32 code_page =
+            ram_physical_address(pc) / 4096u;
+        if (emit_guarded_ram_store(
+                instructions[i],
+                compiled_instructions,
+                code_page,
+                out)) {
             ++compiled_instructions;
             uses_ram = true;
             continue;
