@@ -40,6 +40,11 @@ LauncherStartTransition g_launcher_start_transition =
 float g_launcher_start_transition_elapsed = 0.0f;
 constexpr float kLauncherStartFadeSeconds = 0.42f;
 
+float g_launcher_intro_elapsed = 0.0f;
+bool g_launcher_intro_complete = false;
+constexpr float kLauncherIntroRevealStart = 1.24f;
+constexpr float kLauncherIntroDuration = 1.82f;
+
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
@@ -61,6 +66,20 @@ int glow_alpha(float value) {
 float smoothstep01(float value) {
     const float t = std::clamp(value, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
+}
+
+float timeline_progress(float time, float start, float end) {
+    if (end <= start) {
+        return time >= end ? 1.0f : 0.0f;
+    }
+    return smoothstep01((time - start) / (end - start));
+}
+
+ImVec2 lerp_point(const ImVec2& a, const ImVec2& b, float t) {
+    const float clamped = std::clamp(t, 0.0f, 1.0f);
+    return ImVec2(
+        a.x + (b.x - a.x) * clamped,
+        a.y + (b.y - a.y) * clamped);
 }
 
 
@@ -428,6 +447,110 @@ void draw_readability_shade(ImDrawList* draw,
     }
 }
 
+
+void draw_startup_sequence_overlay(
+    const ImVec2& pos, const ImVec2& size, float elapsed, float home_reveal) {
+    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+
+    const int black_alpha =
+        glow_alpha(255.0f * (1.0f - std::clamp(home_reveal, 0.0f, 1.0f)));
+    if (black_alpha > 0) {
+        overlay->AddRectFilled(
+            pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            rgba(0, 0, 0, black_alpha));
+    }
+
+    // Geometry based on the supplied startup concept: an offset red frame
+    // with a strong top/right edge, a light bottom edge, and broken left data
+    // segments that resolve in after the main trace.
+    const ImVec2 box0(
+        pos.x + size.x * 0.522f,
+        pos.y + size.y * 0.216f);
+    const ImVec2 box1(
+        pos.x + size.x * 0.942f,
+        pos.y + size.y * 0.832f);
+
+    const float frame_fade =
+        1.0f - timeline_progress(elapsed, 1.28f, kLauncherIntroDuration);
+    if (frame_fade <= 0.001f) {
+        return;
+    }
+
+    const ImU32 red = rgba(
+        241, 24, 47, glow_alpha(255.0f * frame_fade));
+    const ImU32 red_dim = rgba(
+        241, 24, 47, glow_alpha(105.0f * frame_fade));
+    const float heavy = std::max(2.0f, size.y * 0.0060f);
+    const float light = std::max(1.0f, size.y * 0.0018f);
+
+    const float top_p = timeline_progress(elapsed, 0.16f, 0.50f);
+    const float right_p = timeline_progress(elapsed, 0.42f, 0.78f);
+    const float bottom_p = timeline_progress(elapsed, 0.72f, 1.00f);
+    const float left_trace_p = timeline_progress(elapsed, 0.90f, 1.18f);
+
+    if (top_p > 0.0f) {
+        overlay->AddLine(
+            box0,
+            lerp_point(box0, ImVec2(box1.x, box0.y), top_p),
+            red, heavy);
+    }
+
+    if (right_p > 0.0f) {
+        const ImVec2 right_top(box1.x, box0.y);
+        overlay->AddLine(
+            right_top,
+            lerp_point(right_top, box1, right_p),
+            red, heavy);
+    }
+
+    if (bottom_p > 0.0f) {
+        const ImVec2 bottom_right(box1.x, box1.y);
+        const ImVec2 bottom_left(box0.x, box1.y);
+        overlay->AddLine(
+            bottom_right,
+            lerp_point(bottom_right, bottom_left, bottom_p),
+            red, light);
+    }
+
+    if (left_trace_p > 0.0f) {
+        const float full_height = box1.y - box0.y;
+
+        // A very thin low-energy trace hints at the full left boundary.
+        overlay->AddLine(
+            box0,
+            ImVec2(box0.x, box0.y + full_height * left_trace_p),
+            red_dim, light);
+
+        struct Segment {
+            float start;
+            float end;
+        };
+        constexpr std::array<Segment, 4> segments = {{
+            {0.000f, 0.085f},
+            {0.247f, 0.272f},
+            {0.460f, 0.503f},
+            {0.657f, 0.691f},
+        }};
+
+        for (size_t i = 0; i < segments.size(); ++i) {
+            const float segment_p = timeline_progress(
+                elapsed,
+                0.92f + static_cast<float>(i) * 0.055f,
+                1.04f + static_cast<float>(i) * 0.055f);
+            if (segment_p <= 0.0f) {
+                continue;
+            }
+
+            const float y0 = box0.y + full_height * segments[i].start;
+            const float y1 = box0.y + full_height * segments[i].end;
+            overlay->AddLine(
+                ImVec2(box0.x, y0),
+                ImVec2(box0.x, y0 + (y1 - y0) * segment_p),
+                red, heavy);
+        }
+    }
+}
+
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     float size, ImU32 color, const char* text) {
     draw->AddText(
@@ -715,7 +838,37 @@ void App::panel_definitive_home() {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
-    const Layout layout = make_layout(window_pos, window_size);
+
+    if (!g_launcher_intro_complete) {
+        const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+        g_launcher_intro_elapsed += dt;
+        if (g_launcher_intro_elapsed >= kLauncherIntroDuration) {
+            g_launcher_intro_elapsed = kLauncherIntroDuration;
+            g_launcher_intro_complete = true;
+        }
+    }
+
+    const bool launcher_intro_active = !g_launcher_intro_complete;
+    const float home_reveal = g_launcher_intro_complete
+        ? 1.0f
+        : timeline_progress(
+            g_launcher_intro_elapsed,
+            kLauncherIntroRevealStart,
+            kLauncherIntroDuration);
+
+    // Preload the background/softened texture under the black intro so the
+    // reveal does not hitch when the frame animation finishes.
+    ensure_background_texture_loaded();
+
+    if (launcher_intro_active &&
+        g_launcher_intro_elapsed < kLauncherIntroRevealStart) {
+        draw_startup_sequence_overlay(
+            window_pos, window_size, g_launcher_intro_elapsed, 0.0f);
+        return;
+    }
+
+    Layout layout = make_layout(window_pos, window_size);
+    layout.origin.y += layout.px(10.0f * (1.0f - home_reveal));
 
     draw_background(draw, window_pos, window_size);
     draw_readability_shade(draw, window_pos, window_size);
@@ -809,7 +962,7 @@ void App::panel_definitive_home() {
         return true;
     };
 
-    if (start_pressed &&
+    if (start_pressed && !launcher_intro_active &&
         g_launcher_start_transition == LauncherStartTransition::None) {
         if (!system_->bios_loaded() && !choose_bios()) {
             // File picker cancelled or BIOS failed to load.
@@ -830,7 +983,8 @@ void App::panel_definitive_home() {
     const bool launcher_transitioning =
         g_launcher_start_transition != LauncherStartTransition::None;
 
-    if (load_game_pressed && !launcher_transitioning) {
+    if (load_game_pressed && !launcher_intro_active &&
+        !launcher_transitioning) {
         std::string path = open_file_dialog(
             "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
             "Select PS1 Game");
@@ -847,13 +1001,16 @@ void App::panel_definitive_home() {
         }
     }
 
-    if (change_bios_pressed && !launcher_transitioning) {
+    if (change_bios_pressed && !launcher_intro_active &&
+        !launcher_transitioning) {
         choose_bios();
     }
-    if (settings_pressed && !launcher_transitioning) {
+    if (settings_pressed && !launcher_intro_active &&
+        !launcher_transitioning) {
         show_settings_ = true;
     }
-    if (exit_pressed && !launcher_transitioning) {
+    if (exit_pressed && !launcher_intro_active &&
+        !launcher_transitioning) {
         SDL_Event quit_event{};
         quit_event.type = SDL_QUIT;
         SDL_PushEvent(&quit_event);
@@ -980,7 +1137,7 @@ void App::panel_definitive_home() {
                 ImGui::PopStyleColor(3);
                 ImGui::PopID();
 
-                if (chosen) {
+                if (chosen && !launcher_intro_active) {
                     load_disc_from_ui(entry.bin_path, entry.cue_path);
                 }
             }
@@ -992,7 +1149,8 @@ void App::panel_definitive_home() {
     }
 
     if (small_button(layout, "set_rom_dir", "Set Directory",
-        53.0f, panel_y + 145.0f, 130.0f, 25.0f)) {
+        53.0f, panel_y + 145.0f, 130.0f, 25.0f) &&
+        !launcher_intro_active) {
         const std::string selected = open_folder_dialog("Select ROM Directory");
         if (!selected.empty()) {
             rom_directory_ = selected;
@@ -1003,7 +1161,8 @@ void App::panel_definitive_home() {
         }
     }
     if (small_button(layout, "refresh_rom_dir", "Refresh",
-        196.0f, panel_y + 145.0f, 90.0f, 25.0f, rom_directory_valid_)) {
+        196.0f, panel_y + 145.0f, 90.0f, 25.0f, rom_directory_valid_) &&
+        !launcher_intro_active) {
         game_library_dirty_ = true;
         refresh_game_library();
     }
@@ -1055,5 +1214,10 @@ void App::panel_definitive_home() {
             window_pos,
             ImVec2(window_pos.x + window_size.x, window_pos.y + window_size.y),
             rgba(0, 0, 0, fade_alpha));
+    }
+
+    if (launcher_intro_active) {
+        draw_startup_sequence_overlay(
+            window_pos, window_size, g_launcher_intro_elapsed, home_reveal);
     }
 }
