@@ -366,6 +366,10 @@ struct V4NativeState {
   u32 instructions = 0;
   u32 cycle_budget = 0;
   u32 instruction_budget = 0;
+  // Remaining instruction budget at the most recent logical dispatcher entry.
+  // Safe resident revalidation models the historical generation-exit ->
+  // redispatch boundary without leaving native execution.
+  u32 dispatch_instruction_budget = 0;
   u32 block_entries = 0;
   u32 direct_links = 0;
   u32 missing_exits = 0;
@@ -2916,6 +2920,16 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
+
+    // The old generation-mismatch path returned to C++ and entered a fresh
+    // resident dispatch here. Preserve that logical boundary for downstream
+    // scheduler-tail eligibility. The block itself has already been screened
+    // out above when it requires an empty-chain branch boundary.
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(
+            offsetof(V4NativeState, dispatch_instruction_budget))],
+        code.r12d);
+    code.xor_(code.r9d, code.r9d);
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
@@ -2986,7 +3000,8 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.je(budget_chain_ok);
     code.cmp(code.r12d, code.dword[
         code.r11 +
-        static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+        static_cast<int>(offsetof(V4NativeState,
+                                  dispatch_instruction_budget))]);
     code.jne(budget_exit);
     code.L(budget_chain_ok);
   }
@@ -4148,6 +4163,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
     native.instruction_budget = remaining_instructions;
+    native.dispatch_instruction_budget = remaining_instructions;
     native.block_entries = 0u;
     native.direct_links = 0u;
     native.missing_exits = 0u;
