@@ -3325,27 +3325,33 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
 }
 
 bool EeCpu::step(std::string& error) {
-    return step_internal(error, false, nullptr);
+    return step_internal(error, false, nullptr, false);
 }
 
 bool EeCpu::step_predecoded(
     u32 instruction, std::string& error) {
-    return step_internal(error, false, &instruction);
+    return step_internal(error, false, &instruction, false);
 }
 
 bool EeCpu::step_quiet(std::string& error) {
-    return step_internal(error, true, nullptr);
+    return step_internal(error, true, nullptr, false);
 }
 
 bool EeCpu::step_quiet_predecoded(
     u32 instruction, std::string& error) {
-    return step_internal(error, true, &instruction);
+    return step_internal(error, true, &instruction, false);
+}
+
+bool EeCpu::step_quiet_unchecked_predecoded(
+    u32 instruction, std::string& error) {
+    return step_internal(error, true, &instruction, true);
 }
 
 bool EeCpu::step_internal(
     std::string& error,
     bool quiet,
-    const u32* prefetched_instruction) {
+    const u32* prefetched_instruction,
+    bool skip_interrupt_check) {
     error.clear();
 
     if (halted_) {
@@ -3366,7 +3372,8 @@ bool EeCpu::step_internal(
     }
 
     const u32 status = state_.cop0[12];
-    if ((state_.cop0[13] & status & 0x0000FF00u) != 0 &&
+    if (!skip_interrupt_check &&
+        (state_.cop0[13] & status & 0x0000FF00u) != 0 &&
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0) {
         raise_exception(0u, pc, current_is_delay_slot_);
