@@ -4724,7 +4724,7 @@ bool test_ee_quiet_fast_prefix() {
         (3u << 11) | 0x10u, // MFHI r3
         (2u << 21) | (3u << 16) | (4u << 11) | 0x27u, // NOR
         (0x19u << 26) | (4u << 21) | (5u << 16), // DADDIU r5,r4,0
-        (0x2Bu << 26) | (6u << 16), // SW r6,0(r0): stop before store
+        (0x2Au << 26) | (6u << 16), // SWL r6,0(r0): unsupported fast store
     };
 
     ps2::Ps2System exact;
@@ -4751,7 +4751,7 @@ bool test_ee_quiet_fast_prefix() {
     const auto& b = fast.ee().state();
     ok = expect(
         retired == expected,
-        "EE fast-prefix did not stop before store instruction") && ok;
+        "EE fast-prefix did not stop before unsupported store") && ok;
     ok = expect(
         a.pc == b.pc &&
         a.next_pc == b.next_pc &&
@@ -4764,6 +4764,44 @@ bool test_ee_quiet_fast_prefix() {
         a.gpr[4].lo == b.gpr[4].lo &&
         a.gpr[5].lo == b.gpr[5].lo,
         "EE fast-prefix architectural state diverged") && ok;
+    return ok;
+}
+
+bool test_ee_quiet_fast_ram_store_barrier() {
+    constexpr ps2::u32 pc = 0x5A40u;
+    const std::array<ps2::u32, 3> code = {
+        (0x09u << 26) | (1u << 16) | 0x5A40u, // ADDIU r1,r0,pc
+        (0x2Bu << 26) | (1u << 21) | (2u << 16), // SW r2,0(r1)
+        (0x09u << 26) | (3u << 16) | 9u, // must not execute in same prefix
+    };
+
+    ps2::Ps2System system;
+    system.ee().reset(pc);
+    system.ee().state().gpr[2].lo = 0x12345678u;
+    system.ram().track_code_page(pc);
+    const ps2::u32 generation =
+        system.ram().page_generation(pc);
+
+    bool store_executed = false;
+    const ps2::u32 retired = system.ee().run_quiet_fast_prefix(
+        pc,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        &store_executed);
+
+    ps2::u32 stored = 0u;
+    bool ok = expect(
+        system.ram().read32(pc, stored),
+        "EE tight store result could not be read");
+    ok = expect(
+        retired == 2u &&
+        store_executed &&
+        stored == 0x12345678u &&
+        system.ee().state().pc == pc + 8u &&
+        system.ee().state().gpr[3].lo == 0u &&
+        system.ram().page_generation(pc) == generation + 1u,
+        "EE tight interpreter store barrier diverged") && ok;
     return ok;
 }
 
@@ -5105,6 +5143,7 @@ int main() {
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
+    ok = test_ee_quiet_fast_ram_store_barrier() && ok;
     ok = test_ee_quiet_fast_ram_loads() && ok;
     ok = test_ee_quiet_fast_branch_block() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
