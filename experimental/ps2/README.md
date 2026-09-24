@@ -82,26 +82,23 @@ emulated EE clock or a guarantee of full-speed emulation on other machines.
 
 ## Experimental EE recompiler
 
-An opt-in x64 EE JIT now emits native code for a first set of side-effect-free
-register instructions. Run `VibeStationPS2Lab --ee-jit` or add `--ee-jit` to
-the headless trace command to try it. The normal graphical launch still uses
-the interpreter. All memory, branch, COP, VU, and device operations fall back
-to the interpreter, which also continues to own fetch, interrupts, PC, and
-timing. On the Windows development machine, the first 20 million BIOS
-instructions included 10.9 million JIT-executed register instructions; a
-warm headless trace took 2.97 seconds with JIT versus 3.48 seconds without.
-The full UI startup improved only from 57.9 to 56.9 seconds, with identical
-captured pixels. Larger gains require multi-instruction block compilation.
-For the sustained 260-million-instruction BIOS animation trace, enabling this
-single-instruction JIT with the threaded GS instead reduced throughput from
-3.11 to 1.23 fields/s, so the graphical app leaves it disabled by default.
-The trace's opt-in `--pc-samples` output now includes `PURE_RUN`, the number
-of consecutive instructions suitable for the current register-only emitter
-at each sample PC. In 49 samples from 212-260 million EE instructions, 23
-began at an unsupported instruction and the mean run was 1.22 instructions.
-This confirms that a useful block recompiler must handle branches, memory,
-and coprocessor instructions rather than only concatenating the current
-single-instruction register emitter.
+The x64 EE recompiler is retained as an **opt-in research backend**. The
+normal PS2 BIOS path uses the cached/predecoded interpreter because current
+measurements show it is faster for sustained BIOS animation.
+
+Run `VibeStationPS2Lab --ee-jit` or add `--ee-jit` to the headless trace
+only when testing the experimental native backend. The current emitter still
+synchronizes architectural state frequently and returns to the system layer
+after short blocks, so its dispatch and state-spill overhead can outweigh
+the native instruction execution benefit.
+
+The default interpreter now caches RAM-resident instruction blocks, reuses
+predecoded opcodes, batches device timing between event boundaries, and
+continues across ordinary data stores unless they invalidate the executing
+code page. Future recompiler work should use a second-generation design with
+persistent host-register allocation, dirty-register tracking, direct block
+linking, fastmem, and lazy architectural-state synchronization rather than
+continuing to extend the current first-stage emitter.
 
 ## Verified retail BIOS startup visual
 
