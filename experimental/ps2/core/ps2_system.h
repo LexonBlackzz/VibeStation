@@ -64,6 +64,9 @@ public:
     u32 iop_reset_instruction()const{return iop_reset_instruction_;}
     u64 video_fields_started() const { return video_timing_.fields_started(); }
     u64 skipped_bios_idle_iterations() const { return skipped_bios_idle_iterations_; }
+    u64 skipped_bios_idle_offphase_batches() const {
+        return skipped_bios_idle_offphase_batches_;
+    }
     u64 skipped_bios_zero_iterations() const { return skipped_bios_zero_iterations_; }
     u64 skipped_bios_nibble_iterations() const { return skipped_bios_nibble_iterations_; }
     u64 skipped_bios_count_wait_iterations() const { return skipped_bios_count_wait_iterations_; }
@@ -125,6 +128,7 @@ private:
     IopBus iop_bus_; EeBus bus_; Vu1 vu0_; Vu1 vu1_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; IpuDma ipu_dma_{}; Vif0Dma vif0_dma_{}; Vif1Dma vif1_dma_{}; SifDma sif_dma_{}; SprDma spr_dma_{}; EeCpu ee_; IopCpu iop_;
     bool bios_started_=false; u32 reset_instruction_=0; u32 iop_reset_instruction_=0; u32 ee_iop_phase_=0;
     u64 skipped_bios_idle_iterations_=0;
+    u64 skipped_bios_idle_offphase_batches_=0;
     u64 skipped_bios_zero_iterations_=0;
     u64 skipped_bios_nibble_iterations_=0;
     u64 skipped_bios_count_wait_iterations_=0;
