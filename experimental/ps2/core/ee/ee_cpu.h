@@ -73,6 +73,14 @@ public:
     bool step_quiet_predecoded(u32 instruction, std::string& error);
     bool step_quiet_unchecked_predecoded(
         u32 instruction, std::string& error);
+    // Execute a linear prefix of already-fetched, side-effect-free EE
+    // instructions without re-entering the full per-instruction decoder.
+    // Stops before memory, coprocessor, exception-capable or control-flow ops.
+    u32 run_quiet_fast_prefix(
+        u32 block_pc,
+        const u32* instructions,
+        u32 instruction_count,
+        u32 maximum_instructions);
     u32 run_native_block(
         u32 pc,
         u32 page_generation,
