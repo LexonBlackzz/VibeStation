@@ -1487,7 +1487,11 @@ int main(int argc, char** argv) {
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="
               << system.skipped_bios_literal_iterations() << '\n';
     std::cout << "EE_QUIET_BATCH_INSTRUCTIONS="
-              << system.quiet_ee_batch_instructions() << '\n';
+              << system.quiet_ee_batch_instructions()
+              << " EE_QUIET_ACTIVE_IOP_INSTRUCTIONS="
+              << system.quiet_ee_active_iop_instructions()
+              << " EE_QUIET_BATCHES="
+              << system.quiet_ee_batches() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;
