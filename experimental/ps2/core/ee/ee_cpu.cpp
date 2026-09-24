@@ -3347,7 +3347,7 @@ bool EeCpu::step_quiet_unchecked_predecoded(
     return step_internal(error, true, &instruction, true);
 }
 
-u32 EeCpu::run_native_linear_block(
+u32 EeCpu::run_native_block(
     u32 pc,
     u32 page_generation,
     const u32* instructions,
@@ -3361,19 +3361,23 @@ u32 EeCpu::run_native_linear_block(
         return 0u;
     }
 
+    bool control_flow = false;
     const u32 retired = jit_.execute_block(
         state_,
         pc,
         page_generation,
         instructions,
         instruction_count,
-        maximum_instructions);
+        maximum_instructions,
+        control_flow);
     if (retired == 0u) return 0u;
 
     state_.last_pc = pc + (retired - 1u) * 4u;
     state_.last_instruction = instructions[retired - 1u];
-    state_.pc = pc + retired * 4u;
-    state_.next_pc = state_.pc + 4u;
+    if (!control_flow) {
+        state_.pc = pc + retired * 4u;
+        state_.next_pc = state_.pc + 4u;
+    }
     state_.gpr[0] = {};
     state_.instructions_executed += retired;
     state_.cop0[9] += retired;
