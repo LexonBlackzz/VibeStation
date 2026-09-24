@@ -20,7 +20,7 @@ namespace {
 
 #if defined(VIBESTATION_EE_JIT_X64)
 constexpr std::size_t kPageSize = 64u * 1024u;
-constexpr std::size_t kMaxPages = 64u;
+constexpr std::size_t kMaxPages = 256u;
 #ifdef _WIN32
 constexpr u8 kArgumentRegister = 1u; // RCX
 #else
@@ -99,7 +99,7 @@ void flush_code(void* code, std::size_t size) {
 #endif
 }
 
-bool emit_instruction(u32 instruction, Emitter& out) {
+bool emit_instruction_body(u32 instruction, Emitter& out) {
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
@@ -192,6 +192,30 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     }
 
     if (destination != 0u) out.store_rax(destination);
+    return true;
+}
+
+bool emit_instruction(u32 instruction, Emitter& out) {
+    if (!emit_instruction_body(instruction, out)) return false;
+    out.emit(0xC3u); // RET
+    return true;
+}
+
+bool emit_block(
+    const u32* instructions,
+    u32 instruction_count,
+    Emitter& out,
+    u32& compiled_instructions) {
+    compiled_instructions = 0;
+    for (u32 i = 0; i < instruction_count; ++i) {
+        const std::size_t before = out.bytes.size();
+        if (!emit_instruction_body(instructions[i], out)) {
+            out.bytes.resize(before);
+            break;
+        }
+        ++compiled_instructions;
+    }
+    if (compiled_instructions == 0u) return false;
     out.emit(0xC3u); // RET
     return true;
 }
@@ -207,8 +231,12 @@ void EeJit::clear() {
 #endif
     pages_.clear();
     entries_ = {};
+    std::fill(block_entries_.begin(), block_entries_.end(), BlockEntry{});
     compiled_count_ = 0;
     executed_count_ = 0;
+    block_compiled_count_ = 0;
+    block_executed_count_ = 0;
+    block_instruction_count_ = 0;
 }
 
 EeJit::Function EeJit::compile(u32 instruction) {
@@ -234,6 +262,104 @@ EeJit::Function EeJit::compile(u32 instruction) {
 #else
     (void)instruction;
     return nullptr;
+#endif
+}
+
+EeJit::Function EeJit::compile_block(
+    const u32* instructions,
+    u32 instruction_count,
+    u32& compiled_instructions) {
+#if defined(VIBESTATION_EE_JIT_X64)
+    Emitter emitter;
+    if (!emit_block(
+            instructions,
+            instruction_count,
+            emitter,
+            compiled_instructions)) {
+        return nullptr;
+    }
+
+    if (pages_.empty() ||
+        pages_.back().used + emitter.bytes.size() > kPageSize) {
+        if (pages_.size() >= kMaxPages) clear();
+        void* address = allocate_page();
+        if (address == nullptr) return nullptr;
+        pages_.push_back(Page{address, 0});
+    }
+
+    Page& page = pages_.back();
+    if (page.used != 0 && !protect_page(page.address, false)) return nullptr;
+    auto* code = static_cast<u8*>(page.address) + page.used;
+    std::memcpy(code, emitter.bytes.data(), emitter.bytes.size());
+    if (!protect_page(page.address, true)) return nullptr;
+    flush_code(code, emitter.bytes.size());
+    page.used += emitter.bytes.size();
+    ++block_compiled_count_;
+    return reinterpret_cast<Function>(code);
+#else
+    (void)instructions;
+    (void)instruction_count;
+    compiled_instructions = 0;
+    return nullptr;
+#endif
+}
+
+u32 EeJit::execute_block(
+    EeCpuState& state,
+    u32 pc,
+    u32 page_generation,
+    const u32* instructions,
+    u32 instruction_count,
+    u32 maximum_instructions) {
+#if defined(VIBESTATION_EE_JIT_X64)
+    if (instructions == nullptr ||
+        instruction_count == 0u ||
+        maximum_instructions == 0u) {
+        return 0;
+    }
+
+    const u32 hash =
+        (pc >> 2) * 2654435761u ^
+        page_generation * 2246822519u;
+    const std::size_t index =
+        (static_cast<std::size_t>(hash) *
+         block_entries_.size()) >> 32;
+    BlockEntry& entry = block_entries_[index];
+
+    if (!entry.known ||
+        entry.pc != pc ||
+        entry.page_generation != page_generation) {
+        u32 compiled_instructions = 0;
+        Function function = compile_block(
+            instructions,
+            instruction_count,
+            compiled_instructions);
+        entry.pc = pc;
+        entry.page_generation = page_generation;
+        entry.instruction_count =
+            static_cast<u8>(compiled_instructions);
+        entry.function = function;
+        entry.known = true;
+    }
+
+    if (entry.function == nullptr ||
+        entry.instruction_count == 0u ||
+        entry.instruction_count > maximum_instructions) {
+        return 0;
+    }
+
+    entry.function(&state);
+    ++block_executed_count_;
+    block_instruction_count_ += entry.instruction_count;
+    return entry.instruction_count;
+#else
+    (void)state;
+    (void)pc;
+    (void)page_generation;
+    (void)instructions;
+    (void)instruction_count;
+    (void)maximum_instructions;
+    return 0;
 #endif
 }
 
