@@ -3443,6 +3443,10 @@ u32 EeCpu::run_quiet_fast_prefix(
             case 0x07u: take = gpr_s64(rs) > 0; break;
             default: break;
             }
+            // step_internal() normally advances next_pc to the instruction
+            // after the delay slot before branch decode. Reproduce that
+            // pipeline state here even when the branch is not taken.
+            state_.next_pc = expected_pc + 8u;
             if (take) state_.next_pc = branch_target(expected_pc, imm);
             next_is_delay_slot_ = true;
         } else if (opcode >= 0x14u && opcode <= 0x17u) {
@@ -3735,6 +3739,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                     state_.next_pc = expected_pc + 12u;
                     next_is_delay_slot_ = false;
                 } else {
+                    state_.next_pc = expected_pc + 8u;
                     next_is_delay_slot_ = true;
                 }
             } else if (rt == 0x18u) { // MTSAB
