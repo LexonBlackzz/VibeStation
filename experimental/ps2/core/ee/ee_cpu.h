@@ -80,7 +80,8 @@ public:
         u32 block_pc,
         const u32* instructions,
         u32 instruction_count,
-        u32 maximum_instructions);
+        u32 maximum_instructions,
+        bool* store_executed = nullptr);
     u32 run_native_block(
         u32 pc,
         u32 page_generation,
