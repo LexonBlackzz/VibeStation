@@ -254,7 +254,13 @@ bool Ps2System::step_ee_core(std::string& error) {
     video_timing_.tick(1, hw_, iop_intc_);
     if (video_timing_.fields_started() != fields_before) {
         gs_.raise_vsync();
-        gs_display_.update(gs_, gs_core_.vram());
+        // PCRTC is field-timed, but the UI presents a full bobbed frame.
+        // After first visibility, scan out once per two interlaced fields so
+        // the raster worker is not synchronously drained twice per frame.
+        const u64 field = video_timing_.fields_started();
+        if (!gs_display_.has_visible_pixels() || (field & 1u) == 0u) {
+            gs_display_.update(gs_, gs_core_.vram());
+        }
     }
     if (gs_.irq_pending()) hw_.raise_intc(0);
     return advance_iop_for_ee_step(error);
@@ -801,7 +807,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     if (video_timing_.fields_started() != fields_before) {
         // maximum is capped before the next transition, so this is defensive.
         gs_.raise_vsync();
-        gs_display_.update(gs_, gs_core_.vram());
+        const u64 field = video_timing_.fields_started();
+        if (!gs_display_.has_visible_pixels() || (field & 1u) == 0u) {
+            gs_display_.update(gs_, gs_core_.vram());
+        }
     }
 
     advance_iop_for_ee_cycles(retired, error);
