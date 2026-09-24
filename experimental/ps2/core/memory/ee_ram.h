@@ -2,6 +2,7 @@
 
 #include "common/types.h"
 
+#include <array>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -11,6 +12,9 @@ namespace ps2 {
 class EeRam {
 public:
     static constexpr std::size_t kSize = 32u * 1024u * 1024u;
+    static constexpr u32 kPageSize = 4096u;
+    static constexpr u32 kPageCount =
+        static_cast<u32>(kSize / kPageSize);
 
     EeRam();
 
@@ -34,11 +38,16 @@ public:
                                      std::span<const u32> words) const;
 
     [[nodiscard]] constexpr std::size_t size() const { return kSize; }
+    [[nodiscard]] u32 page_generation(u32 offset) const {
+        return page_generation_[offset / kPageSize];
+    }
 
 private:
     [[nodiscard]] bool contains(u32 offset, std::size_t width) const;
+    void mark_written(u32 offset, std::size_t width);
 
     std::vector<u8> data_;
+    std::array<u32, kPageCount> page_generation_{};
 };
 
 } // namespace ps2
