@@ -914,8 +914,8 @@ u32 EeJit::execute_block(
     if (entry.function == nullptr ||
         entry.instruction_count == 0u ||
         entry.instruction_count > maximum_instructions ||
-        (entry.uses_ram &&
-         (ram_data == nullptr || page_generations == nullptr))) {
+        (entry.uses_ram && ram_data == nullptr) ||
+        (entry.ram_store_mask != 0u && page_generations == nullptr)) {
         control_flow = false;
         return 0;
     }
