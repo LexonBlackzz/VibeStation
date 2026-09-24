@@ -168,19 +168,33 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
         case 0x24u: // AND
         case 0x25u: // OR
         case 0x26u: // XOR
+        case 0x2Au: // SLT
+        case 0x2Bu: // SLTU
         case 0x2Du: // DADDU
             if (sa != 0u) return false;
             if (destination != 0u) {
                 const bool word = funct == 0x21u || funct == 0x23u;
                 out.load_rax(rs, word);
                 out.load_rdx(rt, word);
-                if (!word) out.emit(0x48u);
-                out.emit(funct == 0x23u ? 0x29u :
-                         funct == 0x24u ? 0x21u :
-                         funct == 0x25u ? 0x09u :
-                         funct == 0x26u ? 0x31u : 0x01u);
-                out.emit(0xD0u); // operation RAX, RDX
-                if (word) out.sign_extend_word();
+                if (funct == 0x2Au || funct == 0x2Bu) {
+                    out.emit(0x48u);
+                    out.emit(0x39u);
+                    out.emit(0xD0u); // CMP RAX,RDX
+                    out.emit(0x0Fu);
+                    out.emit(funct == 0x2Au ? 0x9Cu : 0x92u);
+                    out.emit(0xC0u); // SETL / SETB AL
+                    out.emit(0x0Fu);
+                    out.emit(0xB6u);
+                    out.emit(0xC0u); // MOVZX EAX,AL
+                } else {
+                    if (!word) out.emit(0x48u);
+                    out.emit(funct == 0x23u ? 0x29u :
+                             funct == 0x24u ? 0x21u :
+                             funct == 0x25u ? 0x09u :
+                             funct == 0x26u ? 0x31u : 0x01u);
+                    out.emit(0xD0u); // operation RAX, RDX
+                    if (word) out.sign_extend_word();
+                }
             }
             break;
         default:
