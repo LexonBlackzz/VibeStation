@@ -4795,6 +4795,21 @@ bool test_ee_quiet_fast_prefix() {
             na.cop0[9] == nb.cop0[9] &&
             na.cop0[13] == nb.cop0[13],
             "EE bulk-NOP retirement diverged") && ok;
+
+        ps2::Ps2System compare_limited;
+        compare_limited.ee().reset(pc);
+        compare_limited.ee().state().cop0[11] = 3u;
+        const ps2::u32 compare_retired =
+            compare_limited.ee().run_quiet_fast_prefix(
+                pc,
+                nops.data(),
+                static_cast<ps2::u32>(nops.size()),
+                static_cast<ps2::u32>(nops.size()));
+        ok = expect(
+            compare_retired == 3u &&
+            compare_limited.ee().state().cop0[9] == 3u &&
+            (compare_limited.ee().state().cop0[13] & 0x8000u) != 0u,
+            "EE tight interpreter crossed COP0 Compare boundary") && ok;
     }
     return ok;
 }
