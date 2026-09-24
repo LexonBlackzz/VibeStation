@@ -3351,12 +3351,17 @@ u32 EeCpu::run_quiet_fast_prefix(
     u32 block_pc,
     const u32* instructions,
     u32 instruction_count,
-    u32 maximum_instructions) {
+    u32 maximum_instructions,
+    bool* store_executed) {
     if (halted_ || instructions == nullptr ||
         instruction_count == 0u ||
         maximum_instructions == 0u ||
         state_.pc != block_pc) {
         return 0u;
+    }
+
+    if (store_executed != nullptr) {
+        *store_executed = false;
     }
 
     const u32 limit = std::min(
@@ -3377,6 +3382,7 @@ u32 EeCpu::run_quiet_fast_prefix(
         const s16 imm = immediate(instruction);
 
         bool handled = true;
+        bool stop_after_instruction = false;
         const u32 old_next_pc = state_.next_pc;
         const bool was_delay_slot = next_is_delay_slot_;
         next_is_delay_slot_ = false;
@@ -3582,6 +3588,95 @@ u32 EeCpu::run_quiet_fast_prefix(
                     break;
                 }
                 if (!access_ok) handled = false;
+            }
+        } else if (
+            opcode == 0x1Fu ||
+            opcode == 0x28u || opcode == 0x29u ||
+            opcode == 0x2Bu || opcode == 0x38u ||
+            opcode == 0x39u || opcode == 0x3Cu ||
+            opcode == 0x3Eu || opcode == 0x3Fu) {
+            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+            const u32 address = static_cast<u32>(
+                gpr_u64(rs) +
+                static_cast<u64>(static_cast<s64>(imm)));
+            const u32 aligned =
+                (opcode == 0x1Fu || opcode == 0x3Eu)
+                    ? (address & ~0x0Fu)
+                    : address;
+            const u32 width =
+                opcode == 0x28u ? 1u :
+                opcode == 0x29u ? 2u :
+                (opcode == 0x2Bu || opcode == 0x38u ||
+                 opcode == 0x39u) ? 4u :
+                (opcode == 0x3Cu || opcode == 0x3Fu) ? 8u :
+                16u;
+            const u32 physical = EeBus::to_physical(aligned);
+            if (address >= 0xC0000000u ||
+                physical >= kMainRamSize ||
+                width > kMainRamSize - physical) {
+                handled = false;
+            } else {
+                bool access_ok = true;
+                switch (opcode) {
+                case 0x1Fu: // SQ
+                    access_ok =
+                        bus_.write64(aligned, state_.gpr[rt].lo) &&
+                        bus_.write64(
+                            aligned + 8u, state_.gpr[rt].hi);
+                    break;
+                case 0x28u: // SB
+                    access_ok = bus_.write8(
+                        address,
+                        static_cast<u8>(gpr_u64(rt)));
+                    break;
+                case 0x29u: // SH
+                    access_ok = bus_.write16(
+                        address,
+                        static_cast<u16>(gpr_u64(rt)));
+                    break;
+                case 0x2Bu: // SW
+                    access_ok = bus_.write32(
+                        address,
+                        static_cast<u32>(gpr_u64(rt)));
+                    break;
+                case 0x38u: // SC
+                    access_ok = bus_.write32(
+                        address,
+                        static_cast<u32>(gpr_u64(rt)));
+                    if (access_ok) write_gpr_word(rt, 1u);
+                    break;
+                case 0x39u: // SWC1
+                    access_ok = bus_.write32(
+                        address, state_.fpr[rt]);
+                    break;
+                case 0x3Cu: // SCD
+                    access_ok = bus_.write64(
+                        address, gpr_u64(rt));
+                    if (access_ok) write_gpr64(rt, 1u);
+                    break;
+                case 0x3Eu: // SQC2
+                    access_ok =
+                        bus_.write64(
+                            aligned, state_.vu_vf[rt].lo) &&
+                        bus_.write64(
+                            aligned + 8u, state_.vu_vf[rt].hi);
+                    break;
+                case 0x3Fu: // SD
+                    access_ok = bus_.write64(
+                        address, gpr_u64(rt));
+                    break;
+                default:
+                    access_ok = false;
+                    break;
+                }
+                if (!access_ok) {
+                    handled = false;
+                } else {
+                    stop_after_instruction = true;
+                    if (store_executed != nullptr) {
+                        *store_executed = true;
+                    }
+                }
             }
         } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
@@ -3800,6 +3895,10 @@ u32 EeCpu::run_quiet_fast_prefix(
         ++state_.cop0[9];
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
+        }
+        if (stop_after_instruction) {
+            ++retired;
+            break;
         }
     }
 
