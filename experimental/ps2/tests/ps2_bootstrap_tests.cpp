@@ -3963,6 +3963,40 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_iop_osdsys_idle_detection() {
+    ps2::Ps2System system;
+    constexpr ps2::u32 branch_pc = 0x0000AE94u;
+    constexpr ps2::u32 delay_pc = 0x0000AE98u;
+    constexpr ps2::u32 idle_branch = 0x08002BA5u;
+
+    bool ok = expect(
+        system.iop_bus().write32(branch_pc, idle_branch) &&
+        system.iop_bus().write32(delay_pc, 0u),
+        "IOP idle-loop test setup failed");
+    system.iop().reset(branch_pc);
+
+    ok = expect(system.iop().in_osdsys_idle_loop(),
+                "IOP idle loop was not recognized at branch") && ok;
+
+    std::string error;
+    ok = expect(system.iop().step(error),
+                "IOP idle branch step failed") && ok;
+    ok = expect(system.iop().in_osdsys_idle_loop(),
+                "IOP idle loop was not recognized in delay slot") && ok;
+
+    error.clear();
+    ok = expect(system.iop().step(error),
+                "IOP idle delay-slot step failed") && ok;
+    ok = expect(system.iop().in_osdsys_idle_loop(),
+                "IOP idle loop was not recognized after one pair") && ok;
+
+    ok = expect(system.iop_bus().write32(delay_pc, 1u),
+                "IOP idle-loop mutation failed") && ok;
+    ok = expect(!system.iop().in_osdsys_idle_loop(),
+                "IOP idle detector accepted mutated code") && ok;
+    return ok;
+}
+
 bool test_iop_halt_is_nonfatal_to_ee_bootstrap() {
     ps2::Ps2System system;
     // COP1 is not part of the PS1-derived IOP/R3000A ISA and deliberately
@@ -4042,6 +4076,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_iop_osdsys_idle_detection() && ok;
     ok = test_iop_halt_is_nonfatal_to_ee_bootstrap() && ok;
     ok = test_fpu_accumulator() && ok;
     if (!ok) return EXIT_FAILURE;
