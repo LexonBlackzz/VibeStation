@@ -71,7 +71,7 @@ private:
         u32& compiled_instructions,
         bool& control_flow);
     std::array<Entry, 4096> entries_{};
-    std::vector<BlockEntry> block_entries_{4096};
+    std::vector<BlockEntry> block_entries_{32768};
     std::vector<Page> pages_{};
     u64 compiled_count_ = 0;
     u64 executed_count_ = 0;
