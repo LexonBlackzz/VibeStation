@@ -80,8 +80,14 @@ struct Emitter {
     void load_state_eax(u32 offset) {
         memory(0u, 0x8Bu, 0u, offset);
     }
+    void load_state_rax(u32 offset) {
+        memory(0x48u, 0x8Bu, 0u, offset);
+    }
     void store_state_eax(u32 offset) {
         memory(0u, 0x89u, 0u, offset);
+    }
+    void store_state_rax(u32 offset) {
+        memory(0x48u, 0x89u, 0u, offset);
     }
     std::size_t jcc32(u8 condition) {
         emit(0x0Fu);
@@ -191,14 +197,40 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                 out.sign_extend_word();
             }
             break;
+        case 0x10u: // MFHI
+            if (destination != 0u) {
+                out.load_state_rax(
+                    static_cast<u32>(offsetof(EeCpuState, hi)));
+            }
+            break;
+        case 0x11u: // MTHI
+            out.load_rax(rs, false);
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, hi)));
+            destination = 0u;
+            break;
+        case 0x12u: // MFLO
+            if (destination != 0u) {
+                out.load_state_rax(
+                    static_cast<u32>(offsetof(EeCpuState, lo)));
+            }
+            break;
+        case 0x13u: // MTLO
+            out.load_rax(rs, false);
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, lo)));
+            destination = 0u;
+            break;
         case 0x21u: // ADDU
         case 0x23u: // SUBU
         case 0x24u: // AND
         case 0x25u: // OR
         case 0x26u: // XOR
+        case 0x27u: // NOR
         case 0x2Au: // SLT
         case 0x2Bu: // SLTU
         case 0x2Du: // DADDU
+        case 0x2Fu: // DSUBU
             if (sa != 0u) return false;
             if (destination != 0u) {
                 const bool word = funct == 0x21u || funct == 0x23u;
@@ -216,13 +248,40 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                     out.emit(0xC0u); // MOVZX EAX,AL
                 } else {
                     if (!word) out.emit(0x48u);
-                    out.emit(funct == 0x23u ? 0x29u :
-                             funct == 0x24u ? 0x21u :
-                             funct == 0x25u ? 0x09u :
-                             funct == 0x26u ? 0x31u : 0x01u);
+                    out.emit(
+                        funct == 0x23u || funct == 0x2Fu ? 0x29u :
+                        funct == 0x24u ? 0x21u :
+                        funct == 0x25u ? 0x09u :
+                        funct == 0x26u || funct == 0x27u ? 0x31u :
+                        0x01u);
                     out.emit(0xD0u); // operation RAX, RDX
+                    if (funct == 0x27u) {
+                        out.emit(0x48u);
+                        out.emit(0xF7u);
+                        out.emit(0xD0u); // NOT RAX
+                    }
                     if (word) out.sign_extend_word();
                 }
+            }
+            break;
+        case 0x38u: // DSLL
+        case 0x3Au: // DSRL
+        case 0x3Bu: // DSRA
+        case 0x3Cu: // DSLL32
+        case 0x3Eu: // DSRL32
+        case 0x3Fu: // DSRA32
+            if (rs != 0u) return false;
+            if (destination != 0u) {
+                out.load_rax(rt, false);
+                out.emit(0x48u);
+                out.emit(0xC1u);
+                out.emit(
+                    funct == 0x38u || funct == 0x3Cu ? 0xE0u :
+                    funct == 0x3Au || funct == 0x3Eu ? 0xE8u :
+                    0xF8u);
+                const u32 shift =
+                    sa + ((funct & 0x04u) != 0u ? 32u : 0u);
+                out.emit(static_cast<u8>(shift));
             }
             break;
         default:
@@ -281,6 +340,10 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                 out.emit32(static_cast<u32>(static_cast<s32>(
                     static_cast<s16>(immediate))));
             }
+            break;
+        case 0x2Fu: // CACHE
+        case 0x33u: // PREF
+            destination = 0u;
             break;
         default:
             return false;
