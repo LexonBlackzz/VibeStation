@@ -435,6 +435,10 @@ struct V4Block {
   u16 second_icache_index = 0;
   std::array<u32, kV4MaxBlockInstructions> guest_bits{};
   V4NativeFn fn = nullptr;
+  // One-instruction native prefix used when the outer scheduler has less
+  // budget left than the full translated block. This preserves the existing
+  // slice boundary without dropping back to a C++ opcode helper.
+  V4NativeFn budget_fn = nullptr;
   V4HelperFn helper_fn = nullptr;
   V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
@@ -1766,10 +1770,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.L(validity_ok);
   }
 
+  Label full_instruction_budget, full_cycle_budget, try_budget_fragment;
   code.cmp(code.r12d, code.dword[
       code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
-  code.jb(budget_exit);
+  code.jae(full_instruction_budget);
+  code.jmp(try_budget_fragment);
 
+  code.L(full_instruction_budget);
   {
     Label cycle_ok, strict_cycle_budget;
     code.cmp(code.dword[
@@ -1785,7 +1792,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.cmp(code.eax, code.dword[
         code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.jb(cycle_ok);
-    code.jmp(budget_exit);
+    code.jmp(try_budget_fragment);
 
     code.L(strict_cycle_budget);
     code.mov(code.eax, code.dword[
@@ -1794,10 +1801,30 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
     code.cmp(code.eax, code.dword[
         code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-    code.ja(budget_exit);
+    code.ja(try_budget_fragment);
     code.L(cycle_ok);
   }
+  code.jmp(full_cycle_budget);
 
+  // A translated block can be larger than the remaining scheduler budget. If
+  // its first instruction is independently compilable, execute that exact one
+  // instruction natively and return through the normal resident trampoline.
+  // This keeps the historical scheduler boundary while avoiding a helper call.
+  code.L(try_budget_fragment);
+  code.test(code.r12d, code.r12d);
+  code.jz(budget_exit);
+  code.mov(code.rax, code.ptr[
+      code.r14 + static_cast<int>(offsetof(V4Block, budget_fn))]);
+  code.test(code.rax, code.rax);
+  code.jz(budget_exit);
+  code.mov(code.ecx, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code.cmp(code.ecx, code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+  code.jae(budget_exit);
+  code.jmp(code.rax);
+
+  code.L(full_cycle_budget);
   code.mov(code.rax, code.ptr[
       code.r14 + static_cast<int>(offsetof(V4Block, fn))]);
   code.test(code.rax, code.rax);
@@ -2379,6 +2406,25 @@ struct CpuRecompilerBackend::Impl {
         return nullptr;
       }
       block->fn = entry;
+
+      // Compile a one-instruction native prefix for scheduler-tail execution.
+      // Branches are intentionally excluded because a branch cannot be split
+      // from its delay slot without materializing the interpreter's pending
+      // branch state.
+      V4LinkTargets budget_links{};
+      u32 budget_code_size = 0u;
+      if (count != 0u) {
+        block->budget_fn = compile_v4_alu(
+            arena, decoded, 1u, start_pc, budget_links, budget_code_size);
+      } else if (simple_load) {
+        block->budget_fn = compile_v4_load(
+            arena, decoded, 0u, load, load_tail, 0u, nullptr, nullptr,
+            start_pc, start_pc, budget_links, budget_code_size);
+      } else if (simple_store) {
+        block->budget_fn = compile_v4_store(
+            arena, decoded, 0u, store, store_tail, 0u, nullptr, nullptr,
+            start_pc, start_pc, cacheable, budget_links, budget_code_size);
+      }
       block->instruction_count =
           simple_control
               ? count + 2u
