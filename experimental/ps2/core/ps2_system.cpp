@@ -244,8 +244,66 @@ void Ps2System::reset(u32 entry_point) {
     quiet_ee_batch_instructions_ = 0;
     quiet_ee_active_iop_instructions_ = 0;
     quiet_ee_batches_ = 0;
+    quiet_block_instructions_ = 0;
+    quiet_block_hits_ = 0;
+    quiet_block_compiles_ = 0;
+    quiet_ee_blocks_.fill({});
     idle_skip_reasons_.fill(0);
 }
+Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
+    if (pc >= 0xC0000000u) return nullptr;
+
+    const u32 physical = EeBus::to_physical(pc);
+    if (physical >= EeRam::kSize) return nullptr;
+
+    const u32 page_offset = physical & (EeRam::kPageSize - 1u);
+    const u32 generation = ram_.page_generation(physical);
+    const std::size_t index =
+        ((static_cast<u64>(pc >> 2) * 2654435761ull) >> 19) &
+        (quiet_ee_blocks_.size() - 1u);
+    QuietEeBlock& block = quiet_ee_blocks_[index];
+
+    if (block.count != 0u &&
+        block.pc == pc &&
+        block.page_generation == generation) {
+        ++quiet_block_hits_;
+        return &block;
+    }
+
+    block = {};
+    block.pc = pc;
+    block.page_generation = generation;
+
+    const u32 instructions_left_in_page =
+        (EeRam::kPageSize - page_offset) / 4u;
+    const u32 limit = std::min<u32>(
+        static_cast<u32>(block.words.size()),
+        instructions_left_in_page);
+
+    for (u32 i = 0; i < limit; ++i) {
+        u32 instruction = 0;
+        const u32 address = pc + i * 4u;
+        if (!bus_.fetch32(address, instruction) ||
+            !quiet_ee_static_instruction(instruction)) {
+            break;
+        }
+
+        block.words[block.count++] = instruction;
+
+        // A store can invalidate this block's code page. End immediately so
+        // the next lookup observes the new generation before executing more
+        // cached words. Control flow also forms a natural block boundary.
+        if (quiet_ee_store(instruction) ||
+            quiet_ee_control_flow(instruction)) {
+            break;
+        }
+    }
+
+    if (block.count == 0u) return nullptr;
+    ++quiet_block_compiles_;
+    return &block;
+}
+
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
 bool Ps2System::boot_bios(std::string& error){error.clear();if(!bios_.loaded()){error="No PS2 BIOS is loaded.";return false;}reset(Bios::kResetVector);if(!bus_.read32(ee_.state().pc,reset_instruction_)){error="BIOS loaded, but the EE reset vector could not be fetched.";reset();return false;}if(!iop_bus_.read32(iop_.state().pc,iop_reset_instruction_)){error="BIOS loaded, but the IOP reset vector could not be fetched.";reset();return false;}bios_started_=true;return true;}
 bool Ps2System::advance_iop_for_ee_step(std::string& error){
