@@ -73,6 +73,12 @@ public:
     bool step_quiet_predecoded(u32 instruction, std::string& error);
     bool step_quiet_unchecked_predecoded(
         u32 instruction, std::string& error);
+    u32 run_native_linear_block(
+        u32 pc,
+        u32 page_generation,
+        const u32* instructions,
+        u32 instruction_count,
+        u32 maximum_instructions);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
     // The caller is responsible for advancing the other devices by eight
