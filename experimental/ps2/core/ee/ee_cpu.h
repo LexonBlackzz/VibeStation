@@ -67,6 +67,9 @@ public:
     // external EE interrupt or hardware-timer event can occur. The caller
     // must apply one deferred EeBus::tick cycle after successful retirement.
     bool step_quiet(std::string& error);
+    // Same quiet path when the caller already fetched and classified the
+    // current instruction. Valid only for direct-mapped instruction fetches.
+    bool step_quiet_predecoded(u32 instruction, std::string& error);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
     // The caller is responsible for advancing the other devices by eight
@@ -101,7 +104,10 @@ public:
     void set_vu0_micro_running(bool running);
 
 private:
-    bool step_internal(std::string& error, bool quiet);
+    bool step_internal(
+        std::string& error,
+        bool quiet,
+        const u32* prefetched_instruction = nullptr);
     bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
