@@ -4017,6 +4017,34 @@ bool test_ee_native_linear_block() {
     return ok;
 }
 
+bool test_ee_native_branch_delay() {
+    constexpr ps2::u32 pc = 0x5800u;
+    const ps2::u32 code[2] = {
+        0x1000FFFFu,
+        (0x09u << 26) | (1u << 16) | 7u,
+    };
+    ps2::Ps2System exact;
+    ps2::Ps2System compiled;
+    exact.ee().reset(pc);
+    compiled.ee().reset(pc);
+    std::string error;
+    bool ok = expect(exact.ee().step_predecoded(code[0], error) &&
+                     exact.ee().step_predecoded(code[1], error),
+                     "EE branch reference failed");
+    const ps2::u32 retired =
+        compiled.ee().run_native_block(pc, 0u, code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(retired == 2u &&
+                compiled.ee().state().pc == exact.ee().state().pc &&
+                compiled.ee().state().next_pc == exact.ee().state().next_pc &&
+                compiled.ee().state().gpr[1].lo == exact.ee().state().gpr[1].lo,
+                "EE native branch-delay state diverged") && ok;
+#else
+    ok = expect(retired == 0u, "EE native branch ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_quiet_step_matches_exact_execution() {
     ps2::Ps2System exact;
     ps2::Ps2System quiet;
@@ -4216,6 +4244,7 @@ int main() {
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
     ok = test_ee_native_linear_block() && ok;
+    ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
     ok = test_iop_osdsys_idle_detection() && ok;
