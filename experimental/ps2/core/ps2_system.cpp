@@ -257,6 +257,7 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     if (physical >= EeRam::kSize) return nullptr;
 
     const u32 page_offset = physical & (EeRam::kPageSize - 1u);
+    ram_.track_code_page(physical);
     const u32 generation = ram_.page_generation(physical);
     const std::size_t index =
         ((static_cast<u64>(pc >> 2) * 2654435761ull) >> 19) &
