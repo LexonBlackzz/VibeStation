@@ -311,9 +311,14 @@ struct V4NativeState {
   u32 cop0_sr = 0;
   u32 cache_epoch = 0;
   u32 pc = 0;
+  u32 next_pc = 0;
   u32 last_pc = 0;
   u32 last_in_delay_slot = 0;
   u32 active_branch_pc = 0;
+  u32 pending_delay_slot = 0;
+  u32 pending_branch_taken = 0;
+  u32 pending_branch_pc = 0;
+  u32 scheduler_yield = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
   u32 cycles = 0;
@@ -470,11 +475,12 @@ struct V4Block {
   u16 second_icache_index = 0;
   std::array<u32, kV4MaxBlockInstructions> guest_bits{};
   V4NativeFn fn = nullptr;
-  // One-instruction native prefix used when the outer scheduler has less
-  // budget left than the full translated block. This preserves the existing
-  // slice boundary without dropping back to a C++ opcode helper.
+  // Native scheduler-tail prefix. Branch-only prefixes are restricted to a
+  // fresh dispatcher entry so they cannot cross a System scheduling boundary
+  // that an earlier native chain would otherwise have returned at.
   V4NativeFn budget_fn = nullptr;
   V4HelperFn helper_fn = nullptr;
+  bool budget_requires_empty_chain = false;
   V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
   bool has_control = false;
@@ -897,6 +903,159 @@ V4NativeFn compile_v4_alu(
       count);
   code.sub(code.r12d, count);
   emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_budget_branch(
+    V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
+    u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  Label not_taken, selected;
+
+  const u32 fallthrough = branch_pc + 8u;
+  const u32 jump_target =
+      ((branch_pc + 4u) & 0xF0000000u) | (control.imm26 << 2u);
+  const u32 branch_target =
+      branch_pc + 4u + static_cast<u32>(control.simm * 4);
+
+  // Capture operands before the incoming load retires, exactly like the
+  // interpreter. Leave the delay slot pending so System keeps the same
+  // device-service boundary it had when this branch used the opcode helper.
+  if (control.op == V4ControlOp::Beq || control.op == V4ControlOp::Bne) {
+    emit_read_guest(code, code.eax, control.rs);
+    emit_read_guest(code, code.ecx, control.rt);
+    code.cmp(code.eax, code.ecx);
+    if (control.op == V4ControlOp::Beq) {
+      code.sete(code.dl);
+    } else {
+      code.setne(code.dl);
+    }
+    code.movzx(code.edx, code.dl);
+  } else if (control.op == V4ControlOp::Blez ||
+             control.op == V4ControlOp::Bgtz ||
+             control.op == V4ControlOp::Bltz ||
+             control.op == V4ControlOp::Bgez ||
+             control.op == V4ControlOp::Bltzal ||
+             control.op == V4ControlOp::Bgezal) {
+    emit_read_guest(code, code.eax, control.rs);
+    code.cmp(code.eax, 0);
+    switch (control.op) {
+    case V4ControlOp::Blez: code.setle(code.dl); break;
+    case V4ControlOp::Bgtz: code.setg(code.dl); break;
+    case V4ControlOp::Bltz:
+    case V4ControlOp::Bltzal: code.setl(code.dl); break;
+    case V4ControlOp::Bgez:
+    case V4ControlOp::Bgezal: code.setge(code.dl); break;
+    default: break;
+    }
+    code.movzx(code.edx, code.dl);
+    if (control.op == V4ControlOp::Bltzal ||
+        control.op == V4ControlOp::Bgezal) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, 31u, code.eax);
+    }
+  } else if (control.op == V4ControlOp::Jr ||
+             control.op == V4ControlOp::Jalr) {
+    emit_read_guest(code, code.r8d, control.rs);
+    if (control.op == V4ControlOp::Jalr) {
+      code.mov(code.eax, branch_pc + 8u);
+      emit_write_guest(code, control.rd, code.eax);
+    }
+  } else if (control.op == V4ControlOp::Jal) {
+    code.mov(code.eax, branch_pc + 8u);
+    emit_write_guest(code, 31u, code.eax);
+  }
+
+  emit_retire_incoming_load(code, v4_control_write_reg(control));
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      branch_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      branch_pc + 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      branch_pc);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code.dec(code.r12d);
+
+  if (control.op == V4ControlOp::J || control.op == V4ControlOp::Jal) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        jump_target);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        1u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  } else if (control.op == V4ControlOp::Jr ||
+             control.op == V4ControlOp::Jalr) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        code.r8d);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        1u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  } else {
+    code.test(code.edx, code.edx);
+    code.jz(not_taken);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        branch_target);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        1u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code.jmp(selected);
+
+    code.L(not_taken);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        fallthrough);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        0u);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
+    code.L(selected);
+  }
+
+  // Yield after the branch only. The pending delay slot remains at the same
+  // outer scheduler boundary as the previous helper implementation.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
@@ -2262,6 +2421,18 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.r14 + static_cast<int>(offsetof(V4Block, budget_fn))]);
   code.test(code.rax, code.rax);
   code.jz(budget_exit);
+  {
+    Label budget_chain_ok;
+    code.cmp(code.byte[
+        code.r14 +
+        static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
+    code.je(budget_chain_ok);
+    code.cmp(code.dword[
+        code.rbx + static_cast<int>(offsetof(V4NativeState, instructions))],
+        0u);
+    code.jne(budget_exit);
+    code.L(budget_chain_ok);
+  }
   code.mov(code.ecx, code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
   code.cmp(code.ecx, code.dword[
@@ -2294,6 +2465,10 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.jne(bail_exit);
   code.inc(code.dword[
       code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  code.cmp(code.dword[
+      code.rbx + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      0u);
+  code.jne(done);
   code.jmp(loop);
 
   linked_entry = const_cast<u8 *>(code.getCurr());
@@ -2882,15 +3057,20 @@ struct CpuRecompilerBackend::Impl {
       }
       block->fn = entry;
 
-      // Compile a one-instruction native prefix for scheduler-tail execution.
-      // Branches are intentionally excluded because a branch cannot be split
-      // from its delay slot without materializing the interpreter's pending
-      // branch state.
+      // Compile a scheduler-tail fragment. Straight-line work uses a one-op
+      // native prefix. A branch at the start of the block may also execute
+      // natively by materializing the pending delay state, but only from a
+      // fresh dispatcher entry so an earlier chain cannot cross a System
+      // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
       if (count != 0u) {
         block->budget_fn = compile_v4_alu(
             arena, decoded, 1u, start_pc, budget_links, budget_code_size);
+      } else if (simple_control || guarded_control || guarded_store_control) {
+        block->budget_fn = compile_v4_budget_branch(
+            arena, control, branch_pc, budget_code_size);
+        block->budget_requires_empty_chain = block->budget_fn != nullptr;
       } else if (simple_load) {
         block->budget_fn = compile_v4_load(
             arena, decoded, 0u, load, load_tail, 0u, nullptr, nullptr,
@@ -3297,9 +3477,14 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.cop0_sr = cpu_.cop0_sr_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
+    native.next_pc = start_pc + 4u;
     native.last_pc = 0u;
     native.last_in_delay_slot = 0u;
     native.active_branch_pc = 0u;
+    native.pending_delay_slot = 0u;
+    native.pending_branch_taken = 0u;
+    native.pending_branch_pc = 0u;
+    native.scheduler_yield = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.cycles = 0u;
@@ -3341,12 +3526,14 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
     cpu_.current_pc_ = native.last_pc;
     cpu_.pc_ = native.pc;
-    cpu_.next_pc_ = native.pc + 4u;
+    cpu_.next_pc_ = native.pending_delay_slot != 0u
+                        ? native.next_pc
+                        : native.pc + 4u;
     cpu_.in_delay_slot_ = native.last_in_delay_slot != 0u;
     cpu_.active_branch_pc_ = native.active_branch_pc;
-    cpu_.pending_delay_slot_ = false;
-    cpu_.pending_branch_taken_ = false;
-    cpu_.pending_branch_pc_ = 0u;
+    cpu_.pending_delay_slot_ = native.pending_delay_slot != 0u;
+    cpu_.pending_branch_taken_ = native.pending_branch_taken != 0u;
+    cpu_.pending_branch_pc_ = native.pending_branch_pc;
     cpu_.load_ = {native.pending_load_reg, native.pending_load_value};
     cpu_.next_load_ = {0u, 0u};
     cpu_.exception_raised_ = false;
