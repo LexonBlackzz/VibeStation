@@ -239,19 +239,108 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     return true;
 }
 
+bool emit_branch_and_delay(
+    u32 branch_pc,
+    u32 branch_instruction,
+    u32 delay_instruction,
+    Emitter& out) {
+    const std::size_t before = out.bytes.size();
+    const u32 opcode = branch_instruction >> 26;
+    const u32 rs = (branch_instruction >> 21) & 31u;
+    const u32 rt = (branch_instruction >> 16) & 31u;
+    const s16 imm = static_cast<s16>(branch_instruction & 0xFFFFu);
+    const u32 pc_offset = static_cast<u32>(offsetof(EeCpuState, pc));
+    const u32 next_pc_offset =
+        static_cast<u32>(offsetof(EeCpuState, next_pc));
+    const u32 fallthrough = branch_pc + 8u;
+    const u32 target = branch_pc + 4u +
+        static_cast<u32>(static_cast<s32>(imm) * 4);
+
+    switch (opcode) {
+    case 0x02u: // J
+    case 0x03u: { // JAL
+        const u32 jump_target =
+            ((branch_pc + 4u) & 0xF0000000u) |
+            ((branch_instruction & 0x03FFFFFFu) << 2);
+        if (opcode == 0x03u) {
+            const u64 link = static_cast<u64>(static_cast<s64>(
+                static_cast<s32>(branch_pc + 8u)));
+            out.store_gpr_imm64(31u, link);
+        }
+        out.store_state_imm32(pc_offset, jump_target);
+        break;
+    }
+    case 0x04u: // BEQ
+    case 0x05u: { // BNE
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.load_rax(rs, false);
+        out.load_rdx(rt, false);
+        out.emit(0x48u);
+        out.emit(0x39u);
+        out.emit(0xD0u); // CMP RAX,RDX
+        const std::size_t skip_target =
+            out.jcc32(opcode == 0x04u ? 0x85u : 0x84u);
+        out.store_state_imm32(pc_offset, target);
+        out.patch_rel32(skip_target, out.bytes.size());
+        break;
+    }
+    case 0x06u: // BLEZ
+    case 0x07u: { // BGTZ
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.load_rax(rs, false);
+        out.emit(0x48u);
+        out.emit(0x85u);
+        out.emit(0xC0u); // TEST RAX,RAX
+        const std::size_t skip_target =
+            out.jcc32(opcode == 0x06u ? 0x8Fu : 0x8Eu);
+        out.store_state_imm32(pc_offset, target);
+        out.patch_rel32(skip_target, out.bytes.size());
+        break;
+    }
+    default:
+        out.bytes.resize(before);
+        return false;
+    }
+
+    if (!emit_instruction_body(delay_instruction, out)) {
+        out.bytes.resize(before);
+        return false;
+    }
+
+    out.load_state_eax(pc_offset);
+    out.emit(0x05u); // ADD EAX, imm32
+    out.emit32(4u);
+    out.store_state_eax(next_pc_offset);
+    return true;
+}
+
 bool emit_block(
+    u32 pc,
     const u32* instructions,
     u32 instruction_count,
     Emitter& out,
-    u32& compiled_instructions) {
+    u32& compiled_instructions,
+    bool& control_flow) {
     compiled_instructions = 0;
+    control_flow = false;
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
-        if (!emit_instruction_body(instructions[i], out)) {
-            out.bytes.resize(before);
-            break;
+        if (emit_instruction_body(instructions[i], out)) {
+            ++compiled_instructions;
+            continue;
         }
-        ++compiled_instructions;
+
+        out.bytes.resize(before);
+        if (i + 1u < instruction_count &&
+            emit_branch_and_delay(
+                pc + i * 4u,
+                instructions[i],
+                instructions[i + 1u],
+                out)) {
+            compiled_instructions += 2u;
+            control_flow = true;
+        }
+        break;
     }
     if (compiled_instructions == 0u) return false;
     out.emit(0xC3u); // RET
