@@ -4138,6 +4138,63 @@ bool test_ee_native_linear_block() {
     return ok;
 }
 
+bool test_ee_native_extended_integer_block() {
+    constexpr ps2::u32 pc = 0x5400u;
+    const std::array<ps2::u32, 9> code = {
+        (0x09u << 26) | (1u << 16) | 0x1234u, // ADDIU r1,r0,0x1234
+        (1u << 21) | 0x11u,                   // MTHI r1
+        (2u << 11) | 0x10u,                   // MFHI r2
+        (0x09u << 26) | (3u << 16) | 0x00FFu, // ADDIU r3,r0,0xff
+        (2u << 21) | (3u << 16) | (4u << 11) | 0x27u, // NOR
+        (2u << 21) | (3u << 16) | (5u << 11) | 0x2Fu, // DSUBU
+        (2u << 16) | (6u << 11) | (4u << 6) | 0x3Cu,  // DSLL32
+        (0x2Fu << 26) | (1u << 21),            // CACHE
+        (0x33u << 26) | (1u << 21),            // PREF
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+
+    std::string error;
+    bool ok = true;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE extended native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size(),
+        "EE extended native block did not retire fully") && ok;
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.hi == b.hi &&
+        a.gpr[1].lo == b.gpr[1].lo &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.gpr[5].lo == b.gpr[5].lo &&
+        a.gpr[6].lo == b.gpr[6].lo,
+        "EE extended native integer state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE extended native block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_ram_loads() {
     constexpr ps2::u32 pc = 0x5C00u;
     const std::array<ps2::u32, 7> code = {
@@ -4573,6 +4630,7 @@ int main() {
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
     ok = test_ee_native_linear_block() && ok;
+    ok = test_ee_native_extended_integer_block() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_branch_delay() && ok;
