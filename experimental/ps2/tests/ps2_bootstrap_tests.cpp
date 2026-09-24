@@ -4846,7 +4846,7 @@ bool test_ee_quiet_fast_ram_loads() {
         (0x37u << 26) | (1u << 21) | (4u << 16),      // LD
         (0x31u << 26) | (1u << 21) | (5u << 16) | 4u, // LWC1
         (0x09u << 26) | (6u << 16) | 7u,              // ADDIU
-        (0x2Bu << 26) | (1u << 21) | (6u << 16) | 8u, // SW: stop
+        (0x2Au << 26) | (1u << 21) | (6u << 16) | 8u, // SWL: fallback
     };
 
     ps2::Ps2System exact;
