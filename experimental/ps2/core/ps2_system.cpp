@@ -951,17 +951,21 @@ u64 Ps2System::try_run_quiet_ee_batch(
         maximum = std::min<u64>(maximum, until_iop_step);
     }
 
-    // If EE timer IRQs are possible, retain EeCpu::step's instruction-exact
-    // hardware tick/IRQ polling while still batching the much larger system
-    // layer. Otherwise the hardware tick itself can also be coalesced.
-    const bool defer_ee_tick = !hw_.timer_irq_possible();
-    if (defer_ee_tick) {
-        // Stop on the instruction that reaches COP0 Compare. It can set IP7
-        // at retirement; the next outer iteration then takes the exact IRQ.
-        const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
-        if (compare_distance != 0u) {
-            maximum = std::min<u64>(maximum, compare_distance);
-        }
+    // Device time can be coalesced as long as the block ends no later than
+    // the first enabled EE timer IRQ edge. If an edge lands on the final
+    // retired instruction, bus_.tick() raises it before the next EE
+    // instruction is allowed to execute.
+    const u64 timer_irq_room = hw_.cycles_to_timer_irq();
+    if (timer_irq_room != ~u64{0}) {
+        maximum = std::min<u64>(maximum, timer_irq_room);
+    }
+    const bool defer_ee_tick = true;
+
+    // Stop on the instruction that reaches COP0 Compare. It can set IP7 at
+    // retirement; the next outer iteration then takes the exact IRQ.
+    const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
+    if (compare_distance != 0u) {
+        maximum = std::min<u64>(maximum, compare_distance);
     }
 
     // The IOP idle pair has no architectural side effects, but its timers,
