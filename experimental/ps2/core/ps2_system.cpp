@@ -362,13 +362,12 @@ bool Ps2System::advance_iop_for_ee_step(std::string& error){
         return true;
     }
 
-    std::string iop_error;
-    if(!iop_.step(iop_error)){
+    if(!iop_.step_hot(iop_step_error_scratch_)){
         if(iop_.halted()){
             error.clear();
             return true;
         }
-        error="IOP step failed: "+iop_error;
+        error="IOP step failed: "+iop_step_error_scratch_;
         return false;
     }
     // IopCpu::step already advances the IOP bus root counters. The
@@ -493,9 +492,10 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
             i += 2u;
             continue;
         }
-        std::string iop_error;
-        if (!iop_.step(iop_error)) {
-            if (!iop_.halted()) error = "IOP step failed: " + iop_error;
+        if (!iop_.step_hot(iop_step_error_scratch_)) {
+            if (!iop_.halted()) {
+                error = "IOP step failed: " + iop_step_error_scratch_;
+            }
             break;
         }
         sif_dma_.tick_iop(iop_bus_);
