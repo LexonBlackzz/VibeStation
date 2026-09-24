@@ -150,6 +150,35 @@ bool decode_v4_overflow_alu(u32 bits, V4DecodedOverflowAlu &out) {
   return false;
 }
 
+enum class V4HiLoOp : u8 {
+  Mfhi,
+  Mthi,
+  Mflo,
+  Mtlo,
+};
+
+struct V4DecodedHiLo {
+  V4HiLoOp op = V4HiLoOp::Mfhi;
+  u8 rs = 0;
+  u8 rd = 0;
+};
+
+bool decode_v4_hilo(u32 bits, V4DecodedHiLo &out) {
+  if (((bits >> 26) & 0x3Fu) != 0u) {
+    return false;
+  }
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  switch (bits & 0x3Fu) {
+  case 0x10: out.op = V4HiLoOp::Mfhi; return true;
+  case 0x11: out.op = V4HiLoOp::Mthi; return true;
+  case 0x12: out.op = V4HiLoOp::Mflo; return true;
+  case 0x13: out.op = V4HiLoOp::Mtlo; return true;
+  default: return false;
+  }
+}
+
 enum class V4LoadOp : u8 {
   Lb,
   Lh,
@@ -316,6 +345,10 @@ struct V4NativeState {
   u32 store_phys = 0;
   u32 cop0_sr = 0;
   u32 cop0_cause = 0;
+  u32 hi = 0;
+  u32 lo = 0;
+  u64 muldiv_result_ready_cycle = 0;
+  u64 cpu_cycle_base = 0;
   u32 cache_epoch = 0;
   u32 pc = 0;
   u32 next_pc = 0;
@@ -727,6 +760,102 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
   emit_v4_block_return(code);
 
   code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_hilo(V4CodeArena &arena,
+                               const V4DecodedHiLo &inst,
+                               u32 start_pc,
+                               const V4LinkTargets &links,
+                               u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 768u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+
+  // Keep HI/LO transfers as one-instruction blocks so EBX is the exact cycle
+  // offset at which the operation issues. This matches the interpreter's
+  // multiply/divide scoreboard without forcing a helper transition.
+  Label ready;
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))]);
+  code.mov(code.rcx, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rcx, code.rbx);
+  code.inc(code.rcx);
+  code.cmp(code.rax, code.rcx);
+  code.jbe(ready);
+  code.sub(code.rax, code.rcx);
+  code.add(code.ebx, code.eax);
+  code.L(ready);
+
+  u8 cancel_reg = 0u;
+  switch (inst.op) {
+  case V4HiLoOp::Mfhi:
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))]);
+    emit_write_guest(code, inst.rd, code.eax);
+    cancel_reg = inst.rd;
+    break;
+  case V4HiLoOp::Mflo:
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))]);
+    emit_write_guest(code, inst.rd, code.eax);
+    cancel_reg = inst.rd;
+    break;
+  case V4HiLoOp::Mthi:
+    emit_read_guest(code, code.eax, inst.rs);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.eax);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.inc(code.rax);
+    code.mov(code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                             muldiv_result_ready_cycle))],
+        code.rax);
+    break;
+  case V4HiLoOp::Mtlo:
+    emit_read_guest(code, code.eax, inst.rs);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.inc(code.rax);
+    code.mov(code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                             muldiv_result_ready_cycle))],
+        code.rax);
+    break;
+  }
+
+  emit_retire_incoming_load(code, cancel_reg);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
   code_size = static_cast<u32>(code.getSize());
   if (!arena.commit_emit(buffer, code_size)) {
     return nullptr;
@@ -3263,6 +3392,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_overflow_alu =
         count == 0u && read_visible(start_pc, overflow_bits) &&
         decode_v4_overflow_alu(overflow_bits, overflow_alu);
+    V4DecodedHiLo hilo{};
+    u32 hilo_bits = 0u;
+    const bool simple_hilo =
+        count == 0u && read_visible(start_pc, hilo_bits) &&
+        decode_v4_hilo(hilo_bits, hilo);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -3322,7 +3456,7 @@ struct CpuRecompilerBackend::Impl {
 
     if (count == 0u && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
-        !simple_overflow_alu) {
+        !simple_overflow_alu && !simple_hilo) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -3383,7 +3517,7 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              simple_overflow_alu
+              (simple_overflow_alu || simple_hilo)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -3400,7 +3534,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_overflow_alu) {
+      if (simple_hilo) {
+        entry = compile_v4_hilo(
+            arena, hilo, start_pc, links, block->code_size);
+      } else if (simple_overflow_alu) {
         entry = compile_v4_overflow_alu(
             arena, overflow_alu, start_pc, links, block->code_size);
       } else if (guarded_control) {
@@ -3465,7 +3602,7 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          simple_overflow_alu
+          (simple_overflow_alu || simple_hilo)
               ? 1u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? count + 2u
@@ -3477,8 +3614,8 @@ struct CpuRecompilerBackend::Impl {
                                          (store_has_control ? 3u : 1u)
                                    : count)));
       block->max_cycles =
-          simple_overflow_alu
-              ? 1u
+          (simple_overflow_alu || simple_hilo)
+              ? 40u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? (guarded_store_control ? 5u : count + 3u)
                      : (simple_load
@@ -3502,7 +3639,7 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        simple_overflow_alu
+        (simple_overflow_alu || simple_hilo)
             ? 1u
             : ((simple_control || guarded_control || guarded_store_control)
                    ? count + 2u
@@ -3534,7 +3671,7 @@ struct CpuRecompilerBackend::Impl {
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
       }
-    } else if (simple_overflow_alu) {
+    } else if (simple_overflow_alu || simple_hilo) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
@@ -3876,6 +4013,10 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.store_phys = 0u;
     native.cop0_sr = cpu_.cop0_sr_;
     native.cop0_cause = cpu_.cop0_cause_;
+    native.hi = cpu_.hi_;
+    native.lo = cpu_.lo_;
+    native.muldiv_result_ready_cycle = cpu_.muldiv_result_ready_cycle_;
+    native.cpu_cycle_base = cpu_.cycles_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
     native.next_pc =
@@ -3945,6 +4086,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = false;
     cpu_.gpr_[0] = 0u;
+    cpu_.hi_ = native.hi;
+    cpu_.lo_ = native.lo;
+    cpu_.muldiv_result_ready_cycle_ = native.muldiv_result_ready_cycle;
     cpu_.cycles_ += native.cycles;
 
     result.cycles += native.cycles;
