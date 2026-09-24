@@ -3794,6 +3794,29 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_guarded_addi_delay);
 
+  CpuCompareCase v4_uncached_branch_store_delay{};
+  v4_uncached_branch_store_delay.name =
+      "v4_uncached_native_branch_store_delay";
+  v4_uncached_branch_store_delay.start_pc = 0xA0010000u;
+  v4_uncached_branch_store_delay.initial_gpr[1] = 1u;
+  v4_uncached_branch_store_delay.initial_gpr[2] = 0x80012080u;
+  v4_uncached_branch_store_delay.initial_gpr[3] = 0x89ABCDEFu;
+  v4_uncached_branch_store_delay.memory.push_back({0x00012080u, 0u});
+  v4_uncached_branch_store_delay.compare_memory_addresses.push_back(
+      0x00012080u);
+  v4_uncached_branch_store_delay.program = {
+      enc_i(0x04, 1, 1, 1), // BEQ taken
+      enc_i(0x2B, 2, 3, 0), // SW in the delay slot
+      0,
+  };
+  v4_uncached_branch_store_delay.instructions = 2u;
+  v4_uncached_branch_store_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_branch_store_delay
+      .require_v4_native_store_entry_when_available = true;
+  v4_uncached_branch_store_delay
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_branch_store_delay);
+
   CpuCompareCase v4_uncached_delay_exception_fallback{};
   v4_uncached_delay_exception_fallback.name =
       "v4_uncached_branch_delay_overflow_fallback";
