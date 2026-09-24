@@ -3963,6 +3963,59 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_ee_quiet_step_matches_exact_execution() {
+    ps2::Ps2System exact;
+    ps2::Ps2System quiet;
+    constexpr ps2::u32 pc = 0x3000u;
+    const ps2::u32 code[] = {
+        (0x09u << 26) | (1u << 16) | 0x4000u,                 // addiu r1,r0,0x4000
+        (0x09u << 26) | (2u << 16) | 0x1234u,                 // addiu r2,r0,0x1234
+        (0x2Bu << 26) | (1u << 21) | (2u << 16),              // sw r2,0(r1)
+        (0x23u << 26) | (1u << 21) | (3u << 16),              // lw r3,0(r1)
+    };
+
+    bool ok = true;
+    for (ps2::u32 i = 0; i < 4u; ++i) {
+        ok = expect(exact.bus().write32(pc + i * 4u, code[i]) &&
+                    quiet.bus().write32(pc + i * 4u, code[i]),
+                    "EE quiet-step code setup failed") && ok;
+    }
+    exact.ee().reset(pc);
+    quiet.ee().reset(pc);
+    exact.ee().state().cop0[11] = 4u;
+    quiet.ee().state().cop0[11] = 4u;
+
+    std::string exact_error;
+    std::string quiet_error;
+    for (ps2::u32 i = 0; i < 4u; ++i) {
+        ok = expect(exact.ee().step(exact_error),
+                    "EE exact reference step failed") && ok;
+        ok = expect(quiet.ee().step_quiet(quiet_error),
+                    "EE quiet step failed") && ok;
+    }
+    quiet.bus().tick(4u);
+
+    const auto& a = exact.ee().state();
+    const auto& b = quiet.ee().state();
+    ok = expect(a.pc == b.pc && a.next_pc == b.next_pc &&
+                    a.instructions_executed == b.instructions_executed &&
+                    a.cop0[9] == b.cop0[9] &&
+                    a.cop0[13] == b.cop0[13] &&
+                    a.gpr[1].lo == b.gpr[1].lo &&
+                    a.gpr[2].lo == b.gpr[2].lo &&
+                    a.gpr[3].lo == b.gpr[3].lo,
+                "EE quiet-step architectural state diverged") && ok;
+
+    ps2::u32 exact_word = 0;
+    ps2::u32 quiet_word = 0;
+    ok = expect(exact.bus().read32(0x4000u, exact_word) &&
+                    quiet.bus().read32(0x4000u, quiet_word) &&
+                    exact_word == quiet_word &&
+                    exact_word == 0x1234u,
+                "EE quiet-step RAM result diverged") && ok;
+    return ok;
+}
+
 bool test_iop_osdsys_idle_detection() {
     ps2::Ps2System system;
     constexpr ps2::u32 branch_pc = 0x0000AE94u;
@@ -4076,6 +4129,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_iop_osdsys_idle_detection() && ok;
     ok = test_iop_halt_is_nonfatal_to_ee_bootstrap() && ok;
     ok = test_fpu_accumulator() && ok;
