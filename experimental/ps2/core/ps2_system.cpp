@@ -227,6 +227,7 @@ void Ps2System::reset(u32 entry_point) {
     scheduler_.reset(); video_timing_.reset(); gif_dma_.reset();
     vif0_dma_.reset(); vif1_dma_.reset(); sif_dma_.reset();
     spr_dma_.reset(); ipu_dma_.reset(); vu0_.reset(); vu1_.reset();
+    ee_.clear_jit_cache();
     ee_.reset(entry_point); iop_.reset(Bios::kResetVector);
     bios_started_ = false;
     reset_instruction_ = 0;
