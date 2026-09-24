@@ -899,18 +899,19 @@ void Ps2App::panel_main() {
         static_cast<unsigned long long>(iop_state.instructions_executed));
 
 
-    const auto& gs_stats = system_.gs_core().stats();
     ImGui::Text("GIF qwords");
     ImGui::SameLine(190.0f);
     ImGui::Text(
         "%llu",
-        static_cast<unsigned long long>(gs_stats.gif_qwords));
+        static_cast<unsigned long long>(
+            system_.gs_core().submitted_gif_qwords()));
 
     ImGui::Text("GS primitives");
     ImGui::SameLine(190.0f);
     ImGui::Text(
         "%llu",
-        static_cast<unsigned long long>(gs_stats.primitives));
+        static_cast<unsigned long long>(
+            system_.gs_core().submitted_primitives()));
 
     const auto& vu_stats = system_.vu1().stats();
     ImGui::Text("VU1 / XGKICK");
