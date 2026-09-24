@@ -65,6 +65,16 @@ struct Emitter {
                static_cast<u32>(offsetof(EeCpuState, gpr) +
                                 reg * sizeof(EeGpr)));
     }
+    void store_rax_hi(u32 reg) {
+        memory(0x48u, 0x89u, 0u,
+               static_cast<u32>(offsetof(EeCpuState, gpr) +
+                                reg * sizeof(EeGpr) + sizeof(u64)));
+    }
+    void load_rdx_hi(u32 reg) {
+        memory(0x48u, 0x8Bu, 2u,
+               static_cast<u32>(offsetof(EeCpuState, gpr) +
+                                reg * sizeof(EeGpr) + sizeof(u64)));
+    }
     void store_gpr_imm64(u32 reg, u64 value) {
         emit(0x48u);
         emit(0xB8u);
@@ -390,6 +400,9 @@ bool emit_guarded_ram_load(
     case 0x37u: // LD
         width = 8u;
         break;
+    case 0x1Eu: // LQ
+        width = 16u;
+        break;
     default:
         return false;
     }
@@ -447,6 +460,11 @@ bool emit_guarded_ram_load(
         out.patch_rel32(jump, alias_label);
     }
 
+    if (opcode == 0x1Eu) {
+        out.emit(0x25u); // LQ aligns the effective address down to 16 bytes.
+        out.emit32(0xFFFFFFF0u);
+    }
+
     out.emit(0x3Du); // CMP EAX, last legal starting byte
     out.emit32(kEeRamSize - width);
     fail_jumps.push_back(out.jcc32(0x87u)); // JA
@@ -458,6 +476,25 @@ bool emit_guarded_ram_load(
             static_cast<u32>(
                 offsetof(EeCpuState, fpr) +
                 rt * sizeof(u32)));
+    } else if (opcode == 0x1Eu) {
+        if (rt != 0u) {
+            out.emit(0x49u); out.emit(0x8Bu); // MOV RAX,[R11+RAX]
+            out.emit(0x04u); out.emit(0x03u);
+            out.store_rax(rt);
+            out.load_rax(rs, true);
+            out.emit(0x05u);
+            out.emit32(static_cast<u32>(static_cast<s32>(immediate)));
+            // Recreate and align the address after RAX was used for data.
+            out.emit(0x25u);
+            out.emit32(0xFFFFFFF0u);
+            // Address aliases were already proven by the guard. Reapply the
+            // direct physical mapping used above.
+            out.emit(0x25u);
+            out.emit32(0x01FFFFFFu);
+            out.emit(0x49u); out.emit(0x8Bu);
+            out.emit(0x44u); out.emit(0x03u); out.emit(0x08u);
+            out.store_rax_hi(rt);
+        }
     } else if (rt != 0u) {
         switch (opcode) {
         case 0x20u: // MOVSX RAX, byte [R11+RAX]
@@ -539,6 +576,7 @@ bool emit_guarded_ram_store(
     case 0x39u: width = 4u; break; // SWC1
     case 0x3Cu: width = 8u; break; // SCD
     case 0x3Fu: width = 8u; break; // SD
+    case 0x1Fu: width = 16u; break; // SQ
     default: return false;
     }
 
@@ -594,9 +632,11 @@ bool emit_guarded_ram_store(
     out.emit32(kEeRamSize - width);
     fail_jumps.push_back(out.jcc32(0x87u)); // JA
 
-    // Keep the fast path simple and page-local. Unaligned stores retain the
-    // interpreter's exact merge/fault behavior.
-    if (width > 1u) {
+    // SQ/LQ semantics align down; scalar stores retain alignment checks.
+    if (opcode == 0x1Fu) {
+        out.emit(0x25u);
+        out.emit32(0xFFFFFFF0u);
+    } else if (width > 1u) {
         out.emit(0xA9u); // TEST EAX, imm32
         out.emit32(width - 1u);
         fail_jumps.push_back(out.jcc32(0x85u)); // JNZ
@@ -610,6 +650,13 @@ bool emit_guarded_ram_store(
                 rt * sizeof(u32)));
         out.emit(0x43u); out.emit(0x89u);
         out.emit(0x04u); out.emit(0x03u); // MOV [R11+R8],EAX
+    } else if (opcode == 0x1Fu) {
+        out.load_rdx(rt, false);
+        out.emit(0x4Bu); out.emit(0x89u);
+        out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],RDX
+        out.load_rdx_hi(rt);
+        out.emit(0x4Bu); out.emit(0x89u);
+        out.emit(0x54u); out.emit(0x03u); out.emit(0x08u);
     } else {
         out.load_rdx(rt, width != 8u);
         switch (width) {
@@ -974,6 +1021,7 @@ u32 EeJit::execute_block(
         entry.ram_store_mask = 0u;
         for (u32 i = 0; i < compiled_instructions && i < 32u; ++i) {
             switch (instructions[i] >> 26) {
+            case 0x1Eu:
             case 0x20u:
             case 0x21u:
             case 0x23u:
@@ -986,6 +1034,7 @@ u32 EeJit::execute_block(
             case 0x37u:
                 entry.ram_load_mask |= 1u << i;
                 break;
+            case 0x1Fu:
             case 0x28u:
             case 0x29u:
             case 0x2Bu:
