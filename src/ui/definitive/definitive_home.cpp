@@ -45,16 +45,16 @@ bool g_launcher_intro_complete = false;
 
 // Stage 1: a PS1-inspired VibeStation boot presentation on black.
 // Stage 2: the launcher itself initializes in staggered groups.
-constexpr float kBootLogoBegin = 0.34f;
-constexpr float kBootLogoSettle = 1.18f;
-constexpr float kBootWordmarkBegin = 0.92f;
-constexpr float kBootFadeBegin = 1.78f;
-constexpr float kUiBackgroundBegin = 2.08f;
-constexpr float kUiBackgroundReady = 2.72f;
-constexpr float kUiBrandBegin = 2.38f;
-constexpr float kUiMenuBegin = 2.62f;
-constexpr float kUiPanelsBegin = 3.04f;
-constexpr float kLauncherIntroDuration = 3.62f;
+constexpr float kBootLogoBegin = 0.28f;
+constexpr float kBootLogoSettle = 1.26f;
+constexpr float kBootWordmarkBegin = 1.30f;
+constexpr float kBootFadeBegin = 1.96f;
+constexpr float kUiBackgroundBegin = 2.24f;
+constexpr float kUiBackgroundReady = 2.88f;
+constexpr float kUiBrandBegin = 2.54f;
+constexpr float kUiMenuBegin = 2.78f;
+constexpr float kUiPanelsBegin = 3.20f;
+constexpr float kLauncherIntroDuration = 3.82f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -471,119 +471,268 @@ void draw_centered_intro_text(
         color, text);
 }
 
+void draw_tapered_beam(
+    ImDrawList* draw,
+    const ImVec2& source,
+    const ImVec2& destination,
+    float progress,
+    float source_half_width,
+    float destination_half_width,
+    ImU32 color,
+    ImU32 glow_color) {
+    const float p = std::clamp(progress, 0.0f, 1.0f);
+    if (p <= 0.001f) {
+        return;
+    }
+
+    const ImVec2 head = lerp_point(source, destination, p);
+    const ImVec2 delta(head.x - source.x, head.y - source.y);
+    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+    if (length <= 0.001f) {
+        return;
+    }
+
+    const ImVec2 normal(-delta.y / length, delta.x / length);
+    const float head_half_width =
+        source_half_width +
+        (destination_half_width - source_half_width) * p;
+
+    const ImVec2 s0(
+        source.x + normal.x * source_half_width,
+        source.y + normal.y * source_half_width);
+    const ImVec2 s1(
+        source.x - normal.x * source_half_width,
+        source.y - normal.y * source_half_width);
+    const ImVec2 h0(
+        head.x + normal.x * head_half_width,
+        head.y + normal.y * head_half_width);
+    const ImVec2 h1(
+        head.x - normal.x * head_half_width,
+        head.y - normal.y * head_half_width);
+
+    // Wide, low-alpha bloom underneath the beam.
+    const float glow_scale = 2.8f;
+    draw->AddQuadFilled(
+        ImVec2(source.x + normal.x * source_half_width * glow_scale,
+            source.y + normal.y * source_half_width * glow_scale),
+        ImVec2(source.x - normal.x * source_half_width * glow_scale,
+            source.y - normal.y * source_half_width * glow_scale),
+        ImVec2(head.x - normal.x * head_half_width * glow_scale,
+            head.y - normal.y * head_half_width * glow_scale),
+        ImVec2(head.x + normal.x * head_half_width * glow_scale,
+            head.y + normal.y * head_half_width * glow_scale),
+        glow_color);
+
+    draw->AddQuadFilled(s0, s1, h1, h0, color);
+}
+
 void draw_boot_presentation(
     const ImVec2& pos, const ImVec2& size, float elapsed) {
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
     const ImVec2 end(pos.x + size.x, pos.y + size.y);
 
-    // This is intentionally an homage in pacing/mood rather than a recreation
-    // of Sony's startup artwork: long black hold, luminous geometric mark,
-    // wordmark, then a clean fade into the launcher initialization.
     overlay->AddRectFilled(pos, end, rgba(0, 0, 0, 255));
 
-    const float logo_in =
-        timeline_progress(elapsed, kBootLogoBegin, kBootLogoSettle);
-    const float wordmark_in =
-        timeline_progress(elapsed, kBootWordmarkBegin, 1.42f);
     const float boot_fade =
         1.0f - timeline_progress(elapsed, kBootFadeBegin, kUiBackgroundBegin);
-
     if (boot_fade <= 0.001f) {
         return;
     }
 
-    const ImVec2 center(
-        pos.x + size.x * 0.50f,
-        pos.y + size.y * 0.45f);
     const float unit = std::min(size.x, size.y);
-    const float mark_scale =
-        (0.72f + 0.28f * logo_in) * unit;
-    const float logo_alpha = logo_in * boot_fade;
+    const ImVec2 convergence(
+        pos.x + size.x * 0.50f,
+        pos.y + size.y * 0.505f);
 
-    // A soft luminous core appears first.
-    const float halo_in =
-        timeline_progress(elapsed, 0.14f, 0.78f) * boot_fade;
-    for (int ring = 7; ring >= 1; --ring) {
-        const float t = static_cast<float>(ring) / 7.0f;
-        const float radius = unit * (0.018f + 0.050f * t) *
-            (0.80f + 0.20f * logo_in);
-        overlay->AddCircleFilled(
-            center, radius,
-            rgba(213, 224, 239,
-                glow_alpha(halo_in * (10.0f + (1.0f - t) * 16.0f))),
-            48);
-    }
-
-    // Original V-shaped four-color mark using the launcher's established
-    // accent palette. Each stroke resolves at a slightly different time.
-    constexpr std::array<ImU32, 4> colors = {
+    constexpr std::array<ImU32, 4> beam_colors = {
         IM_COL32(194, 44, 56, 255),
         IM_COL32(52, 128, 125, 255),
         IM_COL32(177, 145, 72, 255),
         IM_COL32(52, 93, 157, 255),
     };
 
-    const float arm = mark_scale * 0.075f;
-    const float stroke = std::max(2.0f, unit * 0.007f);
-    const std::array<ImVec2, 4> outer = {
-        ImVec2(center.x - arm * 1.35f, center.y - arm * 0.90f),
-        ImVec2(center.x - arm * 0.42f, center.y - arm * 0.32f),
-        ImVec2(center.x + arm * 0.42f, center.y - arm * 0.32f),
-        ImVec2(center.x + arm * 1.35f, center.y - arm * 0.90f),
+    // Sources deliberately begin above the viewport so the mark reads as four
+    // light beams sweeping in, rather than four static sticks already on-screen.
+    const std::array<ImVec2, 4> sources = {
+        ImVec2(pos.x + size.x * 0.31f, pos.y - unit * 0.18f),
+        ImVec2(pos.x + size.x * 0.43f, pos.y - unit * 0.24f),
+        ImVec2(pos.x + size.x * 0.57f, pos.y - unit * 0.21f),
+        ImVec2(pos.x + size.x * 0.69f, pos.y - unit * 0.16f),
     };
-    const std::array<ImVec2, 4> inner = {
-        ImVec2(center.x - arm * 0.58f, center.y + arm * 0.78f),
-        ImVec2(center.x - arm * 0.12f, center.y + arm * 0.98f),
-        ImVec2(center.x + arm * 0.12f, center.y + arm * 0.98f),
-        ImVec2(center.x + arm * 0.58f, center.y + arm * 0.78f),
+    const std::array<ImVec2, 4> targets = {
+        ImVec2(convergence.x - unit * 0.030f, convergence.y),
+        ImVec2(convergence.x - unit * 0.010f, convergence.y + unit * 0.006f),
+        ImVec2(convergence.x + unit * 0.010f, convergence.y + unit * 0.006f),
+        ImVec2(convergence.x + unit * 0.030f, convergence.y),
     };
 
-    for (size_t i = 0; i < outer.size(); ++i) {
-        const float arm_in = timeline_progress(
-            elapsed,
-            kBootLogoBegin + static_cast<float>(i) * 0.07f,
-            0.98f + static_cast<float>(i) * 0.07f);
-        const ImVec2 tip = lerp_point(outer[i], inner[i], arm_in);
-        const ImU32 base = colors[i];
+    const float source_width = std::max(8.0f, unit * 0.025f);
+    const float destination_width = std::max(1.5f, unit * 0.0040f);
+
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const float start =
+            kBootLogoBegin + static_cast<float>(i) * 0.085f;
+        const float finish =
+            0.93f + static_cast<float>(i) * 0.085f;
+        const float beam_progress =
+            timeline_progress(elapsed, start, finish);
+
+        const ImU32 base = beam_colors[i];
         const int r = (base >> IM_COL32_R_SHIFT) & 0xFF;
         const int g = (base >> IM_COL32_G_SHIFT) & 0xFF;
         const int b = (base >> IM_COL32_B_SHIFT) & 0xFF;
 
-        // Low-alpha outer stroke provides a subdued CRT-like bloom.
-        overlay->AddLine(
-            outer[i], tip,
-            rgba(r, g, b, glow_alpha(48.0f * logo_alpha)),
-            stroke * 2.8f);
-        overlay->AddLine(
-            outer[i], tip,
-            rgba(r, g, b, glow_alpha(235.0f * logo_alpha)),
-            stroke);
+        draw_tapered_beam(
+            overlay,
+            sources[i],
+            targets[i],
+            beam_progress,
+            source_width,
+            destination_width,
+            rgba(r, g, b, glow_alpha(238.0f * boot_fade)),
+            rgba(r, g, b, glow_alpha(42.0f * boot_fade)));
     }
 
-    const float core_flash =
-        (1.0f - timeline_progress(elapsed, 0.96f, 1.42f)) *
-        timeline_progress(elapsed, 0.56f, 0.94f) * boot_fade;
-    if (core_flash > 0.001f) {
+    // The convergence point is the brightest part of the frame. Its glow
+    // swells just as the fourth beam arrives, then settles behind the wordmark.
+    const float convergence_in =
+        timeline_progress(elapsed, 0.82f, 1.16f);
+    const float convergence_settle =
+        1.0f - 0.55f * timeline_progress(elapsed, 1.18f, 1.70f);
+    const float convergence_energy =
+        convergence_in * convergence_settle * boot_fade;
+
+    for (int ring = 10; ring >= 1; --ring) {
+        const float t = static_cast<float>(ring) / 10.0f;
+        const float radius =
+            unit * (0.010f + 0.125f * t) *
+            (0.70f + 0.30f * convergence_in);
         overlay->AddCircleFilled(
-            center, unit * (0.010f + 0.014f * core_flash),
-            rgba(245, 247, 250, glow_alpha(230.0f * core_flash)),
-            40);
+            convergence,
+            radius,
+            rgba(214, 224, 238,
+                glow_alpha(convergence_energy *
+                    (7.0f + (1.0f - t) * 20.0f))),
+            64);
     }
 
+    const float core_pulse =
+        timeline_progress(elapsed, 1.02f, 1.20f) *
+        (1.0f - timeline_progress(elapsed, 1.20f, 1.50f)) *
+        boot_fade;
+    if (core_pulse > 0.001f) {
+        overlay->AddCircleFilled(
+            convergence,
+            unit * (0.012f + 0.020f * core_pulse),
+            rgba(255, 255, 255, glow_alpha(255.0f * core_pulse)),
+            48);
+    }
+
+    // Once converged, retain a compact four-ray mark so the light beams feel
+    // like they assembled into an identity rather than simply disappearing.
+    const float assembled_in =
+        timeline_progress(elapsed, 1.08f, 1.30f) * boot_fade;
+    if (assembled_in > 0.001f) {
+        const float arm = unit * 0.065f;
+        const float stroke = std::max(2.0f, unit * 0.006f);
+        for (size_t i = 0; i < targets.size(); ++i) {
+            const ImVec2 outer = lerp_point(
+                convergence, sources[i], arm /
+                    std::max(1.0f, std::sqrt(
+                        (sources[i].x - convergence.x) *
+                        (sources[i].x - convergence.x) +
+                        (sources[i].y - convergence.y) *
+                        (sources[i].y - convergence.y))));
+            const ImU32 base = beam_colors[i];
+            const int r = (base >> IM_COL32_R_SHIFT) & 0xFF;
+            const int g = (base >> IM_COL32_G_SHIFT) & 0xFF;
+            const int b = (base >> IM_COL32_B_SHIFT) & 0xFF;
+            overlay->AddLine(
+                convergence, outer,
+                rgba(r, g, b, glow_alpha(220.0f * assembled_in)),
+                stroke);
+        }
+    }
+
+    const float wordmark_in =
+        timeline_progress(elapsed, kBootWordmarkBegin, 1.62f);
     if (wordmark_in > 0.001f) {
         const float word_alpha = wordmark_in * boot_fade;
         draw_centered_intro_text(
             overlay,
-            ImVec2(center.x, center.y + unit * 0.145f),
+            ImVec2(convergence.x, convergence.y + unit * 0.145f),
             std::max(20.0f, unit * 0.045f),
-            rgba(221, 224, 230, glow_alpha(235.0f * word_alpha)),
+            rgba(224, 227, 233, glow_alpha(238.0f * word_alpha)),
             "VibeStation");
         draw_centered_intro_text(
             overlay,
-            ImVec2(center.x, center.y + unit * 0.193f),
+            ImVec2(convergence.x, convergence.y + unit * 0.193f),
             std::max(8.0f, unit * 0.012f),
             rgba(137, 143, 151, glow_alpha(205.0f * word_alpha)),
             "PS1 EMULATOR");
+    }
+
+    // A very brief corruption hiccup after the logo assembles. It is short
+    // enough to feel intentional rather than becoming a full glitch effect.
+    const bool glitch_frame = elapsed >= 1.54f && elapsed < 1.595f;
+    if (glitch_frame) {
+        const float glitch_alpha = boot_fade;
+        draw_centered_intro_text(
+            overlay,
+            ImVec2(convergence.x - unit * 0.006f,
+                convergence.y + unit * 0.145f),
+            std::max(20.0f, unit * 0.045f),
+            rgba(194, 44, 56, glow_alpha(135.0f * glitch_alpha)),
+            "VibeStation");
+        draw_centered_intro_text(
+            overlay,
+            ImVec2(convergence.x + unit * 0.006f,
+                convergence.y + unit * 0.145f),
+            std::max(20.0f, unit * 0.045f),
+            rgba(52, 128, 157, glow_alpha(135.0f * glitch_alpha)),
+            "VibeStation");
+
+        const float tear_y = convergence.y + unit * 0.018f;
+        overlay->AddRectFilled(
+            ImVec2(pos.x + size.x * 0.30f, tear_y),
+            ImVec2(pos.x + size.x * 0.71f,
+                tear_y + std::max(2.0f, unit * 0.004f)),
+            rgba(238, 242, 246, glow_alpha(78.0f * glitch_alpha)));
+    }
+
+    // Small signs of life prevent the black frame from feeling frozen and
+    // make the sequence practical during development.
+    const bool cursor_on =
+        (static_cast<int>(elapsed * 4.0f) & 1) == 0;
+    std::string status = "INITIALIZING VIBESTATION";
+    if (cursor_on) {
+        status += "_";
+    }
+
+    const float status_alpha =
+        timeline_progress(elapsed, 0.24f, 0.62f) * boot_fade;
+    if (status_alpha > 0.001f) {
+        overlay->AddText(
+            ImGui::GetFont(),
+            std::max(9.0f, unit * 0.011f),
+            ImVec2(pos.x + unit * 0.035f,
+                pos.y + size.y - unit * 0.055f),
+            rgba(128, 136, 146, glow_alpha(185.0f * status_alpha)),
+            status.c_str());
+
+        const char* skip_text = "SPACE / ENTER  SKIP";
+        const float font_size = std::max(9.0f, unit * 0.011f);
+        const ImVec2 skip_size =
+            ImGui::GetFont()->CalcTextSizeA(
+                font_size, FLT_MAX, 0.0f, skip_text);
+        overlay->AddText(
+            ImGui::GetFont(),
+            font_size,
+            ImVec2(
+                pos.x + size.x - unit * 0.035f - skip_size.x,
+                pos.y + size.y - unit * 0.055f),
+            rgba(105, 112, 122, glow_alpha(165.0f * status_alpha)),
+            skip_text);
     }
 }
 
@@ -999,6 +1148,20 @@ void App::panel_definitive_home() {
     const ImVec2 window_size = ImGui::GetWindowSize();
 
     if (!g_launcher_intro_complete) {
+        const bool skip_intro =
+            ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+
+        if (skip_intro) {
+            // End the intro on this frame and return once so the same keypress
+            // cannot also activate a launcher button underneath it.
+            g_launcher_intro_elapsed = kLauncherIntroDuration;
+            g_launcher_intro_complete = true;
+            ensure_background_texture_loaded();
+            return;
+        }
+
         const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
         g_launcher_intro_elapsed += dt;
         if (g_launcher_intro_elapsed >= kLauncherIntroDuration) {
