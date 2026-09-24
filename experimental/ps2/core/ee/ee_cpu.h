@@ -91,11 +91,13 @@ public:
         const u8* ram_data = nullptr,
         u32* page_generations = nullptr);
     u64 run(u64 instruction_budget, std::string& error);
-    // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
-    // The caller is responsible for advancing the other devices by eight
-    // cycles and for guarding against interrupts within that interval.
+    // Retire verified instructions from the OSDSYS eight-instruction idle
+    // loop. The current PC may be at any phase of the loop. The caller is
+    // responsible for advancing the other devices by the same cycle count
+    // and for guarding against interrupts within that interval.
     bool skip_bios_idle_iteration();
     bool skip_bios_idle_iterations(u32 iterations);
+    bool skip_bios_idle_instructions(u32 instructions);
     // Retire verified iterations of the BIOS's 16-byte RAM clear loop.
     bool skip_bios_zero_loop(u32 iterations);
     bool skip_bios_nibble_loop(u32 iterations);
