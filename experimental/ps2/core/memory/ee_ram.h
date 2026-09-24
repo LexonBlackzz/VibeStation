@@ -41,6 +41,9 @@ public:
     [[nodiscard]] u32 page_generation(u32 offset) const {
         return page_generation_[offset / kPageSize];
     }
+    void track_code_page(u32 offset) {
+        code_page_tracked_[offset / kPageSize] = 1u;
+    }
 
 private:
     [[nodiscard]] bool contains(u32 offset, std::size_t width) const;
@@ -48,6 +51,7 @@ private:
 
     std::vector<u8> data_;
     std::array<u32, kPageCount> page_generation_{};
+    std::array<u8, kPageCount> code_page_tracked_{};
 };
 
 } // namespace ps2
