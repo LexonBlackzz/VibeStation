@@ -288,10 +288,15 @@ bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
 
 #if VIBESTATION_JIT_V4_X64
 
+u32 v4_hot_mmio_read16(System *sys, u32 phys) {
+  return sys != nullptr ? sys->jit_read16_hot_mmio(phys) : 0x10000u;
+}
+
 struct V4DispatchPage;
 
 struct V4NativeState {
   u32 *gpr = nullptr;
+  System *system = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
   u32 *icache_generations = nullptr;
   bool *icache_valid = nullptr;
@@ -1876,7 +1881,7 @@ V4NativeFn compile_v4_load(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, loaded, slow_after_prefix, bail;
+  Label ram, scratch, hot_mmio16, loaded, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -1931,7 +1936,18 @@ V4NativeFn compile_v4_load(
   code.cmp(code.edx, 0x1F800000u);
   code.jb(slow_exit);
   code.cmp(code.edx, 0x1F801000u);
-  code.jae(slow_exit);
+  code.jb(scratch);
+  if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    code.cmp(code.edx, 0x1F801070u);
+    code.jb(slow_exit);
+    code.cmp(code.edx, 0x1F801078u);
+    code.jb(hot_mmio16);
+    code.cmp(code.edx, 0x1F801100u);
+    code.jb(slow_exit);
+    code.cmp(code.edx, 0x1F801130u);
+    code.jb(hot_mmio16);
+  }
+  code.jmp(slow_exit);
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
@@ -1950,6 +1966,38 @@ V4NativeFn compile_v4_load(
   code.jz(slow_exit);
   emit_memory_read();
   code.mov(code.r9d, 4u);
+  code.jmp(loaded);
+
+  code.L(hot_mmio16);
+  // Call only the narrow timer/IRQ bridge. Keep the resident state and GPR
+  // pointers intact across the host ABI call so execution can remain native.
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  // EDX already carries the physical address.
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.edx);
+#endif
+  code.mov(code.rax, reinterpret_cast<size_t>(&v4_hot_mmio_read16));
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+  code.cmp(code.eax, 0x10000u);
+  code.jae(slow_exit);
+  code.mov(code.r8d, code.eax);
+  if (load.op == V4LoadOp::Lh) {
+    code.shl(code.r8d, 16);
+    code.sar(code.r8d, 16);
+  }
+  code.xor_(code.r9d, code.r9d);
 
   code.L(loaded);
   // A prefix already retired the incoming load. Otherwise the load retires or
@@ -3803,6 +3851,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     V4NativeState &native = impl_->native_state;
     if (!impl_->native_state_bound) {
       native.gpr = cpu_.gpr_;
+      native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
       native.icache_generations = cpu_.icache_generation_.data();
       native.icache_valid = &cpu_.icache_[0].valid;

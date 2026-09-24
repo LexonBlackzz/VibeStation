@@ -163,6 +163,7 @@ struct CpuCompareCase {
   bool require_v4_load_branch_fusion_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_pending_delay_native_when_available = false;
+  bool require_v4_hot_mmio16_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -3938,6 +3939,36 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_uncached_delay_exception_fallback);
 
+  CpuCompareCase v4_hot_timer_lhu{};
+  v4_hot_timer_lhu.name = "v4_hot_timer_lhu_native";
+  v4_hot_timer_lhu.start_pc = 0xA0010000u;
+  v4_hot_timer_lhu.initial_gpr[1] = 0x1F801120u;
+  v4_hot_timer_lhu.program = {
+      enc_i(0x25, 1, 2, 0), // LHU timer 1 counter
+      0,                    // retire the load delay
+  };
+  v4_hot_timer_lhu.instructions = 2u;
+  v4_hot_timer_lhu.require_v4_native_entry_when_available = true;
+  v4_hot_timer_lhu.require_v4_native_load_entry_when_available = true;
+  v4_hot_timer_lhu.require_v4_hot_mmio16_native_when_available = true;
+  cases.push_back(v4_hot_timer_lhu);
+
+  CpuCompareCase v4_hot_irq_lhu{};
+  v4_hot_irq_lhu.name = "v4_hot_irq_lhu_native";
+  v4_hot_irq_lhu.start_pc = 0xA0010000u;
+  v4_hot_irq_lhu.initial_gpr[1] = 0x1F801070u;
+  v4_hot_irq_lhu.initial_irq_mask = 1u;
+  v4_hot_irq_lhu.initial_irq_pending = true;
+  v4_hot_irq_lhu.program = {
+      enc_i(0x25, 1, 2, 0), // LHU I_STAT
+      0,                    // retire the load delay
+  };
+  v4_hot_irq_lhu.instructions = 2u;
+  v4_hot_irq_lhu.require_v4_native_entry_when_available = true;
+  v4_hot_irq_lhu.require_v4_native_load_entry_when_available = true;
+  v4_hot_irq_lhu.require_v4_hot_mmio16_native_when_available = true;
+  cases.push_back(v4_hot_irq_lhu);
+
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
       "v4_uncached_native_incoming_load_delay";
@@ -4537,6 +4568,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_load_branch_fusion_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_pending_delay_native_when_available ||
+           test_case.require_v4_hot_mmio16_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4584,6 +4616,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool pending_delay_native =
               !test_case.require_v4_pending_delay_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
+          const bool hot_mmio16_native =
+              !test_case.require_v4_hot_mmio16_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4628,6 +4663,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_branch_missing";
           } else if (!pending_delay_native) {
             native_check = "v4_pending_delay_helper";
+          } else if (!hot_mmio16_native) {
+            native_check = "v4_hot_mmio16_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4645,7 +4682,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               native_entered && load_entered && store_entered &&
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
-              branch_entered && pending_delay_native && folded_branch &&
+              branch_entered && pending_delay_native && hot_mmio16_native &&
+              folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               chain_entered;
