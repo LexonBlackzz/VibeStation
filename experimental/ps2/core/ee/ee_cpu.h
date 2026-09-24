@@ -78,7 +78,8 @@ public:
         u32 page_generation,
         const u32* instructions,
         u32 instruction_count,
-        u32 maximum_instructions);
+        u32 maximum_instructions,
+        const u8* ram_data = nullptr);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
     // The caller is responsible for advancing the other devices by eight
