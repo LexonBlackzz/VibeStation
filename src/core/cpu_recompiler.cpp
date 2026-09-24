@@ -115,6 +115,41 @@ struct V4DecodedControl {
   u32 imm26 = 0;
 };
 
+enum class V4OverflowAluOp : u8 {
+  Add,
+  Sub,
+  Addi,
+};
+
+struct V4DecodedOverflowAlu {
+  V4OverflowAluOp op = V4OverflowAluOp::Add;
+  u8 rs = 0;
+  u8 rt = 0;
+  u8 rd = 0;
+  s32 simm = 0;
+};
+
+bool decode_v4_overflow_alu(u32 bits, V4DecodedOverflowAlu &out) {
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  out.simm = static_cast<s32>(static_cast<s16>(bits & 0xFFFFu));
+  const u32 primary = (bits >> 26) & 0x3Fu;
+  if (primary == 0u) {
+    switch (bits & 0x3Fu) {
+    case 0x20: out.op = V4OverflowAluOp::Add; return true;
+    case 0x22: out.op = V4OverflowAluOp::Sub; return true;
+    default: return false;
+    }
+  }
+  if (primary == 0x08u) {
+    out.op = V4OverflowAluOp::Addi;
+    return true;
+  }
+  return false;
+}
+
 enum class V4LoadOp : u8 {
   Lb,
   Lh,
@@ -619,6 +654,74 @@ void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
       code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_value))],
       0u);
   code.L(done);
+}
+
+V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
+                                    const V4DecodedOverflowAlu &inst,
+                                    u32 start_pc,
+                                    const V4LinkTargets &links,
+                                    u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 512u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  // The overflow slow path sits beyond the normal success epilogue and direct
+  // link sequence, so force a near conditional branch instead of relying on
+  // Xbyak's short forward-jump form.
+  code.setDefaultJmpNEAR(true);
+  Label overflow;
+
+  emit_read_guest(code, code.eax, inst.rs);
+  if (inst.op == V4OverflowAluOp::Add) {
+    emit_read_guest(code, code.ecx, inst.rt);
+    code.add(code.eax, code.ecx);
+  } else if (inst.op == V4OverflowAluOp::Sub) {
+    emit_read_guest(code, code.ecx, inst.rt);
+    code.sub(code.eax, code.ecx);
+  } else {
+    code.add(code.eax, static_cast<u32>(inst.simm));
+  }
+  code.jo(overflow);
+
+  const u8 dest =
+      inst.op == V4OverflowAluOp::Addi ? inst.rt : inst.rd;
+  // Commit the arithmetic result before retiring the previous load. The
+  // retire helper intentionally clobbers EAX/ECX while preserving the write
+  // via its cancel register semantics.
+  emit_write_guest(code, dest, code.eax);
+  emit_retire_incoming_load(code, dest);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+
+  code.L(overflow);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
 }
 
 void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
@@ -2245,6 +2348,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_store =
         count < decode_limit && read_visible(memory_pc, store_bits) &&
         decode_v4_store(store_bits, store);
+    V4DecodedOverflowAlu overflow_alu{};
+    u32 overflow_bits = 0u;
+    const bool simple_overflow_alu =
+        count == 0u && read_visible(start_pc, overflow_bits) &&
+        decode_v4_overflow_alu(overflow_bits, overflow_alu);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -2302,7 +2410,8 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(load_control_bits, load_control) &&
         decode_v4_alu(load_delay_bits, load_delay);
 
-    if (count == 0u && !simple_control && !simple_load && !simple_store) {
+    if (count == 0u && !simple_control && !simple_load && !simple_store &&
+        !simple_overflow_alu) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -2363,9 +2472,12 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              simple_load ? count + load_tail_count + 1u
-                          : (simple_store ? count + store_tail_count + 1u
-                                          : count);
+              simple_overflow_alu
+                  ? 1u
+                  : (simple_load ? count + load_tail_count + 1u
+                                 : (simple_store
+                                        ? count + store_tail_count + 1u
+                                        : count));
           links.fallthrough =
               dispatch_entry(start_pc + translated_count * 4u, true);
         }
@@ -2377,7 +2489,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_control) {
+      if (simple_overflow_alu) {
+        entry = compile_v4_overflow_alu(
+            arena, overflow_alu, start_pc, links, block->code_size);
+      } else if (simple_control) {
         entry = compile_v4_branch(
             arena, decoded, count, control, delay, branch_pc,
             links, block->code_size);
@@ -2426,25 +2541,29 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          simple_control
-              ? count + 2u
-              : (simple_load
-                     ? count + load_tail_count +
-                           (load_has_control ? 3u : 1u)
-                     : (simple_store
-                            ? count + store_tail_count +
-                                  (store_has_control ? 3u : 1u)
-                            : count));
+          simple_overflow_alu
+              ? 1u
+              : (simple_control
+                     ? count + 2u
+                     : (simple_load
+                            ? count + load_tail_count +
+                                  (load_has_control ? 3u : 1u)
+                            : (simple_store
+                                   ? count + store_tail_count +
+                                         (store_has_control ? 3u : 1u)
+                                   : count)));
       block->max_cycles =
-          simple_control
-              ? count + 3u
-              : (simple_load
-                     ? count + load_tail_count +
-                           (load_has_control ? 9u : 6u)
-                     : (simple_store
-                            ? count + store_tail_count +
-                                  (store_has_control ? 6u : 3u)
-                            : count));
+          simple_overflow_alu
+              ? 1u
+              : (simple_control
+                     ? count + 3u
+                     : (simple_load
+                            ? count + load_tail_count +
+                                  (load_has_control ? 9u : 6u)
+                            : (simple_store
+                                   ? count + store_tail_count +
+                                         (store_has_control ? 6u : 3u)
+                                   : count)));
       block->has_control =
           simple_control || load_has_control || store_has_control;
       block->has_memory = simple_load || simple_store;
@@ -2457,15 +2576,17 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        simple_control
-            ? count + 2u
-            : (simple_load
-                   ? count + load_tail_count +
-                         (load_has_control ? 3u : 1u)
-                   : (simple_store
-                          ? count + store_tail_count +
-                                (store_has_control ? 3u : 1u)
-                          : count));
+        simple_overflow_alu
+            ? 1u
+            : (simple_control
+                   ? count + 2u
+                   : (simple_load
+                          ? count + load_tail_count +
+                                (load_has_control ? 3u : 1u)
+                          : (simple_store
+                                 ? count + store_tail_count +
+                                       (store_has_control ? 3u : 1u)
+                                 : count)));
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
       if (!read_visible(start_pc + i * 4u, translated_bits)) {
@@ -2484,6 +2605,8 @@ struct CpuRecompilerBackend::Impl {
     ++stats.native_compiled_block_size_histogram[block->instruction_count];
     if (simple_control) {
       ++stats.native_branch_tail_blocks_compiled;
+    } else if (simple_overflow_alu) {
+      ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
       if (load_has_control || store_has_control) {
