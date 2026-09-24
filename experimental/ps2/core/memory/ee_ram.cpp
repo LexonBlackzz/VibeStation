@@ -11,6 +11,17 @@ EeRam::EeRam()
 
 void EeRam::reset() {
     std::fill(data_.begin(), data_.end(), u8{0});
+    page_generation_.fill(0);
+}
+
+void EeRam::mark_written(u32 offset, std::size_t width) {
+    if (width == 0u) return;
+    const u32 first = offset / kPageSize;
+    const u32 last = static_cast<u32>(
+        (static_cast<std::size_t>(offset) + width - 1u) / kPageSize);
+    for (u32 page = first; page <= last; ++page) {
+        ++page_generation_[page];
+    }
 }
 
 bool EeRam::contains(u32 offset, std::size_t width) const {
@@ -75,6 +86,7 @@ bool EeRam::write8(u32 offset, u8 value) {
         return false;
     }
     data_[offset] = value;
+    mark_written(offset, 1u);
     return true;
 }
 
@@ -89,6 +101,7 @@ bool EeRam::write16(u32 offset, u16 value) {
             data_[offset + i] = static_cast<u8>(value >> (i * 8));
         }
     }
+    mark_written(offset, 2u);
     return true;
 }
 
@@ -103,6 +116,7 @@ bool EeRam::write32(u32 offset, u32 value) {
             data_[offset + i] = static_cast<u8>(value >> (i * 8));
         }
     }
+    mark_written(offset, 4u);
     return true;
 }
 
@@ -117,12 +131,14 @@ bool EeRam::write64(u32 offset, u64 value) {
             data_[offset + i] = static_cast<u8>(value >> (i * 8));
         }
     }
+    mark_written(offset, 8u);
     return true;
 }
 
 bool EeRam::fill_zero(u32 offset, std::size_t length) {
     if (!contains(offset, length)) return false;
     std::memset(data_.data() + offset, 0, length);
+    mark_written(offset, length);
     return true;
 }
 
@@ -134,6 +150,7 @@ bool EeRam::nibble_swap(u32 offset, std::size_t length,
         const u8 byte = data_[offset + i];
         data_[offset + i] = static_cast<u8>((byte >> 4) | (byte << 4));
     }
+    mark_written(offset, length);
     return true;
 }
 
@@ -145,6 +162,7 @@ bool EeRam::copy_forward(u32 destination, u32 source,
         last_value = data_[source + i];
         data_[destination + i] = last_value;
     }
+    mark_written(destination, length);
     return true;
 }
 
