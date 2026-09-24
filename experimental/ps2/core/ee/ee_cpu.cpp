@@ -2931,32 +2931,76 @@ bool EeCpu::skip_bios_idle_iteration() {
 }
 
 bool EeCpu::skip_bios_idle_iterations(u32 iterations) {
+    if (iterations == 0u || iterations > 0x1FFFFFFFu) {
+        return false;
+    }
+    return skip_bios_idle_instructions(iterations * 8u);
+}
+
+bool EeCpu::skip_bios_idle_instructions(u32 instructions) {
     constexpr u32 kIdlePc = 0x00081FC0u;
     constexpr std::array<u32, 8> kIdleCode = {
         0u, 0u, 0u, 0u, 0u, 0u, 0x1000FFF9u, 0u};
-    if (iterations == 0u || iterations > 0x1FFFFFFFu ||
-        halted_ || state_.pc != kIdlePc ||
-        state_.next_pc != kIdlePc + 4u || next_is_delay_slot_) {
+
+    if (instructions == 0u || halted_) return false;
+    if (!bus_.matches_code(kIdlePc, kIdleCode)) return false;
+
+    u32 phase = 0u;
+    if (state_.pc >= kIdlePc &&
+        state_.pc <= kIdlePc + 0x18u &&
+        ((state_.pc - kIdlePc) & 3u) == 0u &&
+        state_.next_pc == state_.pc + 4u &&
+        !next_is_delay_slot_) {
+        phase = (state_.pc - kIdlePc) >> 2u;
+    } else if (
+        state_.pc == kIdlePc + 0x1Cu &&
+        state_.next_pc == kIdlePc &&
+        next_is_delay_slot_) {
+        phase = 7u;
+    } else {
         return false;
     }
-    if (!bus_.matches_code(kIdlePc, kIdleCode)) return false;
 
     // COP0 Count is advanced by every retired instruction. Do not cross a
     // Compare match: that interrupt must be observed at its exact cycle.
     const u32 count = state_.cop0[9];
     const u32 distance_to_compare = state_.cop0[11] - count;
-    const u32 cycles = iterations * 8u;
-    if (distance_to_compare != 0u && distance_to_compare <= cycles) {
+    if (distance_to_compare != 0u &&
+        distance_to_compare <= instructions) {
         return false;
     }
+
+    const u32 final_phase =
+        static_cast<u32>(
+            (static_cast<u64>(phase) + instructions) & 7u);
+    const u32 last_phase =
+        static_cast<u32>(
+            (static_cast<u64>(phase) + instructions - 1u) & 7u);
+
+    auto phase_pc = [](u32 value) {
+        return kIdlePc + value * 4u;
+    };
+
     state_.cop0[13] &= ~0x00000C00u;
-    state_.cop0[9] += cycles;
-    state_.instructions_executed += cycles;
-    state_.last_pc = kIdlePc + 0x1Cu;
-    state_.last_instruction = 0u;
-    current_is_delay_slot_ = true;
-    next_is_delay_slot_ = false;
-    bus_.tick(cycles);
+    state_.cop0[9] += instructions;
+    state_.instructions_executed += instructions;
+    state_.last_pc = phase_pc(last_phase);
+    state_.last_instruction =
+        last_phase == 6u ? kIdleCode[6] : 0u;
+    current_is_delay_slot_ = last_phase == 7u;
+
+    if (final_phase == 7u) {
+        state_.pc = kIdlePc + 0x1Cu;
+        state_.next_pc = kIdlePc;
+        next_is_delay_slot_ = true;
+    } else {
+        state_.pc = phase_pc(final_phase);
+        state_.next_pc = state_.pc + 4u;
+        next_is_delay_slot_ = false;
+    }
+
+    state_.gpr[0] = {};
+    bus_.tick(instructions);
     return true;
 }
 
