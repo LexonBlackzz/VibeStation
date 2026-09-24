@@ -3969,6 +3969,54 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_ee_native_linear_block() {
+    constexpr ps2::u32 pc = 0x5000u;
+    const std::array<ps2::u32, 4> code = {
+        (0x09u << 26) | (1u << 16) | 7u,
+        (0x0Du << 26) | (1u << 21) | (2u << 16) | 0x100u,
+        (0u << 26) | (1u << 21) | (2u << 16) | (3u << 11) | 0x2Du,
+        (0u << 26) | (3u << 16) | (4u << 11) | (2u << 6) | 0x00u,
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+
+    std::string error;
+    bool ok = true;
+    for (ps2::u32 instruction : code) {
+        ok = expect(exact.ee().step_predecoded(instruction, error),
+                    "EE native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_linear_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(retired == code.size(),
+                "EE native block did not retire the full block") && ok;
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.cop0[9] == b.cop0[9] &&
+        a.gpr[1].lo == b.gpr[1].lo &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo,
+        "EE native block architectural state diverged") && ok;
+#else
+    ok = expect(retired == 0u,
+                "EE native block unexpectedly ran on non-x64 host") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_quiet_step_matches_exact_execution() {
     ps2::Ps2System exact;
     ps2::Ps2System quiet;
@@ -4167,6 +4215,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_ee_native_linear_block() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
     ok = test_iop_osdsys_idle_detection() && ok;
