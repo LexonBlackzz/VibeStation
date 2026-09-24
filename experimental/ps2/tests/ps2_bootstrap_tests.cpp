@@ -4017,6 +4017,89 @@ bool test_ee_native_linear_block() {
     return ok;
 }
 
+bool test_ee_native_ram_loads() {
+    constexpr ps2::u32 pc = 0x5C00u;
+    const std::array<ps2::u32, 7> code = {
+        (0x20u << 26) | (1u << 21) | (2u << 16) | 0u, // LB
+        (0x24u << 26) | (1u << 21) | (3u << 16) | 7u, // LBU
+        (0x21u << 26) | (1u << 21) | (4u << 16) | 6u, // LH
+        (0x25u << 26) | (1u << 21) | (5u << 16) | 6u, // LHU
+        (0x23u << 26) | (1u << 21) | (6u << 16) | 4u, // LW
+        (0x27u << 26) | (1u << 21) | (7u << 16) | 4u, // LWU
+        (0x37u << 26) | (1u << 21) | (8u << 16) | 0u, // LD
+    };
+    constexpr std::array<ps2::u32, 5> aliases = {
+        0x00006000u,
+        0x20006000u,
+        0x30006000u,
+        0x80006000u,
+        0xA0006000u,
+    };
+
+    bool ok = true;
+    for (const ps2::u32 base : aliases) {
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        ok = expect(
+            exact.bus().write64(0x6000u, 0xFEDCBA9876543210ull) &&
+            native.bus().write64(0x6000u, 0xFEDCBA9876543210ull),
+            "EE fastmem load data setup failed") && ok;
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = base;
+        native.ee().state().gpr[1].lo = base;
+
+        std::string error;
+        for (const ps2::u32 instruction : code) {
+            ok = expect(exact.ee().step_predecoded(instruction, error),
+                        "EE fastmem reference load failed") && ok;
+        }
+
+        const ps2::u32 retired = native.ee().run_native_block(
+            pc, 0u, code.data(),
+            static_cast<ps2::u32>(code.size()),
+            static_cast<ps2::u32>(code.size()),
+            native.ram().data());
+#if defined(_M_X64) || defined(__x86_64__)
+        ok = expect(retired == code.size(),
+                    "EE fastmem block did not retire all loads") && ok;
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.instructions_executed == b.instructions_executed &&
+            a.cop0[9] == b.cop0[9],
+            "EE fastmem load control state diverged") && ok;
+        for (ps2::u32 reg = 2u; reg <= 8u; ++reg) {
+            ok = expect(
+                a.gpr[reg].lo == b.gpr[reg].lo,
+                "EE fastmem loaded register diverged") && ok;
+        }
+#else
+        ok = expect(retired == 0u,
+                    "EE fastmem unexpectedly ran on non-x64") && ok;
+#endif
+    }
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ps2::Ps2System guarded;
+    guarded.ee().reset(pc);
+    guarded.ee().state().gpr[1].lo = 0x10000000u;
+    const ps2::u32 retired = guarded.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        guarded.ram().data());
+    ok = expect(
+        retired == 0u &&
+        guarded.ee().state().pc == pc &&
+        guarded.ee().state().instructions_executed == 0u,
+        "EE fastmem guard did not reject MMIO address") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -4244,6 +4327,7 @@ int main() {
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
     ok = test_ee_native_linear_block() && ok;
+    ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
