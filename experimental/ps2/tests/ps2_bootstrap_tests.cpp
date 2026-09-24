@@ -4724,7 +4724,7 @@ bool test_ee_quiet_fast_prefix() {
         (3u << 11) | 0x10u, // MFHI r3
         (2u << 21) | (3u << 16) | (4u << 11) | 0x27u, // NOR
         (0x19u << 26) | (4u << 21) | (5u << 16), // DADDIU r5,r4,0
-        (0x23u << 26) | (6u << 16), // LW r6,0(r0): stop before memory
+        (0x2Bu << 26) | (6u << 16), // SW r6,0(r0): stop before store
     };
 
     ps2::Ps2System exact;
@@ -4751,7 +4751,7 @@ bool test_ee_quiet_fast_prefix() {
     const auto& b = fast.ee().state();
     ok = expect(
         retired == expected,
-        "EE fast-prefix did not stop before memory instruction") && ok;
+        "EE fast-prefix did not stop before store instruction") && ok;
     ok = expect(
         a.pc == b.pc &&
         a.next_pc == b.next_pc &&
@@ -4764,6 +4764,60 @@ bool test_ee_quiet_fast_prefix() {
         a.gpr[4].lo == b.gpr[4].lo &&
         a.gpr[5].lo == b.gpr[5].lo,
         "EE fast-prefix architectural state diverged") && ok;
+    return ok;
+}
+
+bool test_ee_quiet_fast_ram_loads() {
+    constexpr ps2::u32 pc = 0x5A80u;
+    constexpr ps2::u32 data = 0x6400u;
+    const std::array<ps2::u32, 6> code = {
+        (0x23u << 26) | (1u << 21) | (2u << 16),      // LW
+        (0x27u << 26) | (1u << 21) | (3u << 16),      // LWU
+        (0x37u << 26) | (1u << 21) | (4u << 16),      // LD
+        (0x31u << 26) | (1u << 21) | (5u << 16) | 4u, // LWC1
+        (0x09u << 26) | (6u << 16) | 7u,              // ADDIU
+        (0x2Bu << 26) | (1u << 21) | (6u << 16) | 8u, // SW: stop
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System fast;
+    bool ok = expect(
+        exact.bus().write64(data, 0xFEDCBA9876543210ull) &&
+        fast.bus().write64(data, 0xFEDCBA9876543210ull),
+        "EE tight RAM-load setup failed");
+    exact.ee().reset(pc);
+    fast.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = data;
+    fast.ee().state().gpr[1].lo = data;
+
+    std::string error;
+    constexpr ps2::u32 expected = 5u;
+    for (ps2::u32 i = 0u; i < expected; ++i) {
+        ok = expect(
+            exact.ee().step_quiet_predecoded(code[i], error),
+            "EE tight RAM-load reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = fast.ee().run_quiet_fast_prefix(
+        pc,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+    const auto& a = exact.ee().state();
+    const auto& b = fast.ee().state();
+    ok = expect(
+        retired == expected &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.cop0[9] == b.cop0[9] &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.fpr[5] == b.fpr[5] &&
+        a.gpr[6].lo == b.gpr[6].lo,
+        "EE tight interpreter RAM-load state diverged") && ok;
     return ok;
 }
 
@@ -5051,6 +5105,7 @@ int main() {
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
+    ok = test_ee_quiet_fast_ram_loads() && ok;
     ok = test_ee_quiet_fast_branch_block() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
