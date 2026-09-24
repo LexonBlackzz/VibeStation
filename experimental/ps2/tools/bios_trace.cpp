@@ -1509,6 +1509,10 @@ int main(int argc, char** argv) {
               << system.ee().jit().block_compiled_count()
               << " EE_JIT_FASTMEM_LOADS="
               << system.ee().jit().block_fastmem_load_count()
+              << " EE_JIT_FASTMEM_STORES="
+              << system.ee().jit().block_fastmem_store_count()
+              << " EE_JIT_CODE_STORE_EXITS="
+              << system.ee().jit().block_code_store_exit_count()
               << " EE_JIT_GUARD_BAILOUTS="
               << system.ee().jit().block_guard_bailout_count() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
