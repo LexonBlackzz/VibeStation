@@ -3373,6 +3373,33 @@ u32 EeCpu::run_quiet_fast_prefix(
         if (state_.pc != expected_pc) break;
 
         const u32 instruction = instructions[retired];
+
+        if (instruction == 0u &&
+            !next_is_delay_slot_ &&
+            state_.next_pc == expected_pc + 4u) {
+            u32 run = 1u;
+            while (retired + run < limit &&
+                   instructions[retired + run] == 0u) {
+                ++run;
+            }
+
+            state_.last_pc =
+                expected_pc + (run - 1u) * 4u;
+            state_.last_instruction = 0u;
+            state_.pc = expected_pc + run * 4u;
+            state_.next_pc = state_.pc + 4u;
+            current_is_delay_slot_ = false;
+            state_.gpr[0] = {};
+            state_.instructions_executed += run;
+            state_.cop0[9] += run;
+            if (state_.cop0[9] == state_.cop0[11]) {
+                state_.cop0[13] |= 0x00008000u;
+            }
+
+            retired += run - 1u;
+            continue;
+        }
+
         const u32 opcode = instruction >> 26;
         const u32 rs = (instruction >> 21) & 31u;
         const u32 rt = (instruction >> 16) & 31u;
