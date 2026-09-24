@@ -257,6 +257,7 @@ void Ps2System::reset(u32 entry_point) {
         quiet_ee_blocks_.begin(),
         quiet_ee_blocks_.end(),
         QuietEeBlock{});
+    native_fallback_opcodes_.fill(0);
     idle_skip_reasons_.fill(0);
 }
 Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
@@ -1077,6 +1078,16 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     quiet_block_instructions_ += native_retired;
                     progressed = true;
                     continue;
+                }
+
+                const u32 remaining =
+                    static_cast<u32>(maximum - retired);
+                if (block->count != 0u &&
+                    remaining >= block->count &&
+                    quiet_ee_instruction_value(
+                        ee_.state(), block->words[0])) {
+                    ++native_fallback_opcodes_[
+                        block->words[0] >> 26];
                 }
             }
 
