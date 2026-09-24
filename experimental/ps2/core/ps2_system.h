@@ -26,6 +26,7 @@
 #include <string>
 #include <array>
 #include <vector>
+#include <utility>
 namespace ps2 {
 class Ps2System {
 public:
@@ -99,6 +100,8 @@ public:
         return native_fallback_opcodes_;
     }
     const std::array<u64, 8>& idle_skip_reasons() const { return idle_skip_reasons_; }
+    std::vector<std::pair<u32, u64>> quiet_block_hotspots(
+        std::size_t limit = 32u) const;
 private:
     bool advance_iop_for_ee_step(std::string& error);
     bool step_ee_core(std::string& error);
@@ -119,6 +122,7 @@ private:
         u8 count = 0;
         u32 memory_mask = 0;
         u32 store_mask = 0;
+        u64 hits = 0;
         std::array<u32, 32> words{};
     };
     QuietEeBlock* quiet_ee_block(u32 pc);
