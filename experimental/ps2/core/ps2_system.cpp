@@ -505,7 +505,12 @@ bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){er
 u64 Ps2System::try_skip_bios_idle_iterations(
     u64 budget, std::string& error) {
     constexpr u64 kIdleInstructions = 8u;
-    if (ee_.state().pc != 0x00081FC0u) return 0;
+    const u32 idle_pc = ee_.state().pc;
+    if (idle_pc < 0x00081FC0u ||
+        idle_pc > 0x00081FDCu ||
+        ((idle_pc - 0x00081FC0u) & 3u) != 0u) {
+        return 0;
+    }
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
@@ -1115,29 +1120,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 }
             }
 
-            u32 fast_prefix = 0u;
-            bool fast_store = false;
-            if (!ee_.jit_enabled()) {
-                fast_prefix = ee_.run_quiet_fast_prefix(
-                    block_pc,
-                    block->words.data(),
-                    block->count,
-                    static_cast<u32>(maximum - retired),
-                    &fast_store);
-                if (fast_prefix != 0u) {
-                    retired += fast_prefix;
-                    quiet_block_instructions_ += fast_prefix;
-                    fast_interpreter_instructions_ += fast_prefix;
-                    ++fast_interpreter_calls_;
-                    progressed = true;
-                    // Stores terminate the tight prefix. Re-enter through the
-                    // block cache so a self-modifying write observes the new
-                    // RAM page generation before another cached word runs.
-                    if (fast_store || retired >= maximum) {
-                        continue;
-                    }
-                }
-            }
+            const u32 fast_prefix = 0u;
 
             for (u32 i = fast_prefix;
                  i < block->count && retired < maximum;
@@ -1273,7 +1256,9 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     u64 executed=0;
     while(executed<instruction_budget){
         if (instruction_budget - executed >= 8u &&
-            ee_.state().pc == 0x00081FC0u) {
+            ee_.state().pc >= 0x00081FC0u &&
+            ee_.state().pc <= 0x00081FDCu &&
+            ((ee_.state().pc - 0x00081FC0u) & 3u) == 0u) {
             const u64 skipped = try_skip_bios_idle_iterations(
                 instruction_budget - executed, error);
             if (skipped != 0u) {
@@ -1353,7 +1338,7 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
-        const u64 quiet_batch = try_run_quiet_ee_superbatch(
+        const u64 quiet_batch = try_run_quiet_ee_batch(
             instruction_budget - executed, error);
         if (quiet_batch != 0u) {
             executed += quiet_batch;
