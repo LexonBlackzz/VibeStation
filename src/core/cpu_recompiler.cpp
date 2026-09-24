@@ -2861,6 +2861,11 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     // run_slice(), lookup() and try_revalidate(). The equal-generation path
     // above remains call-free.
     code.L(revalidate_cached);
+    // A direct-linked block can be reached exactly as the scheduler instruction
+    // budget becomes empty. Do not make the next guest I-cache refill visible
+    // after the requested instruction count has already retired.
+    code.test(code.r12d, code.r12d);
+    code.jz(budget_exit);
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_attempts))]);
