@@ -968,6 +968,191 @@ V4NativeFn compile_v4_pending_delay_alu(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_store(
+    V4CodeArena &arena, const V4DecodedStore &store, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1536u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label ram, stored, bail;
+
+  // Pending delay-slot stores may stay native only for ordinary RAM and
+  // scratchpad accesses. MMIO, cache isolation, misalignment and writes into
+  // translated code fall back before any architectural side effect so the
+  // regular Cpu::step() path can preserve precise exception/BD semantics.
+  code.cmp(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
+      0u);
+  code.je(bail);
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 16);
+  code.jnz(bail);
+
+  // Capture both store operands before retiring any incoming delayed load.
+  emit_read_guest(code, code.eax, store.rs);
+  code.add(code.eax, static_cast<u32>(store.simm));
+  emit_read_guest(code, code.r8d, store.rt);
+  if (store.op == V4StoreOp::Sh) {
+    code.test(code.eax, 1u);
+    code.jnz(bail);
+  } else if (store.op == V4StoreOp::Sw) {
+    code.test(code.eax, 3u);
+    code.jnz(bail);
+  }
+
+  code.mov(code.edx, code.eax);
+  code.and_(code.edx, 0x1FFFFFFFu);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+      code.edx);
+
+  // Do not fast-store into a translated 16-byte code line. Normalize RAM
+  // mirrors to the same 2 MiB backing address before consulting the bitmap.
+  code.mov(code.r9d, code.edx);
+  {
+    Label line_key_ready;
+    code.cmp(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jae(line_key_ready);
+    code.and_(code.r9d, psx::RAM_SIZE - 1u);
+    code.L(line_key_ready);
+  }
+  code.shr(code.r9d, 4u);
+  code.mov(code.ecx, code.r9d);
+  code.shr(code.r9d, 6u);
+  code.and_(code.ecx, 63u);
+  code.mov(code.rax, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
+  code.test(code.rax, code.rax);
+  code.jz(bail);
+  code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+  code.shr(code.rax, code.cl);
+  code.test(code.al, 1u);
+  code.jnz(bail);
+
+  code.cmp(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+  code.jb(ram);
+  code.cmp(code.edx, 0x1F800000u);
+  code.jb(bail);
+  code.cmp(code.edx, 0x1F801000u);
+  code.jae(bail);
+
+  code.sub(code.edx, 0x1F800000u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  switch (store.op) {
+  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
+  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  }
+  code.xor_(code.r9d, code.r9d);
+  code.jmp(stored);
+
+  code.L(ram);
+  code.and_(code.edx, psx::RAM_SIZE - 1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+      code.edx);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  switch (store.op) {
+  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
+  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  }
+  code.mov(code.r9d, 1u);
+
+  code.L(stored);
+  emit_retire_incoming_load(code, 0u);
+  code.add(code.ebx, 2u);
+  code.add(code.ebx, code.r9d);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+
+  // Match native store invalidation of the direct-mapped guest I-cache slot.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.shr(code.eax, 4u);
+  code.and_(code.eax, 0xFFu);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+  code.mov(code.edx, code.eax);
+  code.imul(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+  code.mov(code.byte[code.rcx + code.rdx], 0u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+  code.inc(code.dword[code.rcx + code.rax * 4]);
+  {
+    Label generation_ok;
+    code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
+    code.jne(generation_ok);
+    code.mov(code.dword[code.rcx + code.rax * 4], 1u);
+    code.L(generation_ok);
+  }
+
+  // Resolve the already-captured branch destination after its delay slot.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+
+  code.L(bail);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_budget_branch(
     V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
     u32 &code_size) {
@@ -2766,12 +2951,17 @@ struct CpuRecompilerBackend::Impl {
     if (found != pending_delay_alu_cache.end()) {
       return found->second;
     }
-    V4DecodedInstruction decoded{};
-    if (!decode_v4_alu(instruction, decoded)) {
-      return nullptr;
-    }
     u32 code_size = 0u;
-    V4NativeFn fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
+    V4NativeFn fn = nullptr;
+    V4DecodedInstruction decoded{};
+    if (decode_v4_alu(instruction, decoded)) {
+      fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
+    } else {
+      V4DecodedStore store{};
+      if (decode_v4_store(instruction, store)) {
+        fn = compile_v4_pending_delay_store(arena, store, code_size);
+      }
+    }
     if (fn != nullptr) {
       pending_delay_alu_cache.emplace(instruction, fn);
     }
