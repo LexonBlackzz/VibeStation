@@ -1064,7 +1064,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
         if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
             const u32 block_pc = block->pc;
 
-            if (defer_ee_tick) {
+            if (defer_ee_tick && ee_.jit_enabled()) {
                 const u32 native_retired = ee_.run_native_block(
                     block_pc,
                     block->page_generation,
