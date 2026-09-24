@@ -35,6 +35,9 @@ struct Emitter {
     void emit32(u32 value) {
         for (u32 i = 0; i < 4; ++i) emit(static_cast<u8>(value >> (i * 8)));
     }
+    void emit64(u64 value) {
+        for (u32 i = 0; i < 8; ++i) emit(static_cast<u8>(value >> (i * 8)));
+    }
     void memory(u8 rex, u8 opcode, u8 reg, u32 offset) {
         if (rex != 0) emit(rex);
         emit(opcode);
@@ -55,6 +58,40 @@ struct Emitter {
         memory(0x48u, 0x89u, 0u,
                static_cast<u32>(offsetof(EeCpuState, gpr) +
                                 reg * sizeof(EeGpr)));
+    }
+    void store_gpr_imm64(u32 reg, u64 value) {
+        emit(0x48u);
+        emit(0xB8u);
+        emit64(value);
+        store_rax(reg);
+    }
+    void store_state_imm32(u32 offset, u32 value) {
+        emit(0xC7u);
+        emit(static_cast<u8>(0x80u | kArgumentRegister));
+        emit32(offset);
+        emit32(value);
+    }
+    void load_state_eax(u32 offset) {
+        memory(0u, 0x8Bu, 0u, offset);
+    }
+    void store_state_eax(u32 offset) {
+        memory(0u, 0x89u, 0u, offset);
+    }
+    std::size_t jcc32(u8 condition) {
+        emit(0x0Fu);
+        emit(condition);
+        const std::size_t displacement = bytes.size();
+        emit32(0u);
+        return displacement;
+    }
+    void patch_rel32(std::size_t displacement, std::size_t target) {
+        const s64 rel = static_cast<s64>(target) -
+            static_cast<s64>(displacement + 4u);
+        const u32 encoded = static_cast<u32>(static_cast<s32>(rel));
+        for (u32 i = 0; i < 4u; ++i) {
+            bytes[displacement + i] =
+                static_cast<u8>(encoded >> (i * 8u));
+        }
     }
     void sign_extend_word() { emit(0x48u); emit(0x98u); } // CDQE
 };
