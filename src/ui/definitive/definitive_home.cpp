@@ -3,6 +3,7 @@
 #include <stb_image.h>
 
 #include "ui/app.h"
+#include "ui/output_resolution_utils.h"
 #include "vibestation_version.h"
 
 #include <SDL.h>
@@ -23,6 +24,7 @@ constexpr float kDesignHeight = 800.0f;
 
 GLuint g_background_texture = 0;
 GLuint g_background_soft_texture = 0;
+GLuint g_background_blur_texture = 0;
 int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
@@ -296,6 +298,12 @@ bool ensure_background_texture_loaded() {
     const std::vector<unsigned char> blurred =
         make_blurred_rgba(pixels, g_background_width, g_background_height, 7);
     if (!blurred.empty()) {
+        // Keep a fully blurred copy for modal overlays, and a left-softened
+        // copy for the normal definitive launcher presentation.
+        upload_rgba_texture(
+            g_background_blur_texture, blurred.data(),
+            g_background_width, g_background_height);
+
         const std::vector<unsigned char> softened =
             make_softened_background(
                 pixels, blurred, g_background_width, g_background_height);
@@ -1310,6 +1318,10 @@ void App::release_definitive_ui_assets() {
     if (g_background_soft_texture != 0) {
         glDeleteTextures(1, &g_background_soft_texture);
         g_background_soft_texture = 0;
+    }
+    if (g_background_blur_texture != 0) {
+        glDeleteTextures(1, &g_background_blur_texture);
+        g_background_blur_texture = 0;
     }
     g_background_width = 0;
     g_background_height = 0;
