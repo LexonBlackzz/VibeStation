@@ -3364,8 +3364,13 @@ u32 EeCpu::run_quiet_fast_prefix(
         *store_executed = false;
     }
 
-    const u32 limit = std::min(
+    u32 limit = std::min(
         instruction_count, maximum_instructions);
+    const u32 compare_distance =
+        state_.cop0[11] - state_.cop0[9];
+    if (compare_distance != 0u) {
+        limit = std::min(limit, compare_distance);
+    }
     u32 retired = 0u;
 
     for (; retired < limit; ++retired) {
