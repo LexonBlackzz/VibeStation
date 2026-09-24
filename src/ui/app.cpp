@@ -1020,8 +1020,14 @@ void App::render_ui() {
         show_settings_ = true;
         show_logging_ = false;
     }
-    if (show_settings_)
-        panel_settings();
+    if (show_settings_) {
+        if (!has_started_emulation_ && !definitive_detailed_settings_) {
+            panel_definitive_settings();
+        }
+        else {
+            panel_settings();
+        }
+    }
     if (show_grim_reaper_)
         panel_grim_reaper();
     if (show_about_)
