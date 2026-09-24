@@ -1475,7 +1475,9 @@ int main(int argc, char** argv) {
             << '\n';
     }
     std::cout << "EE_SKIPPED_BIOS_IDLE_ITERATIONS="
-              << system.skipped_bios_idle_iterations() << '\n';
+              << system.skipped_bios_idle_iterations()
+              << " EE_SKIPPED_BIOS_IDLE_OFFPHASE_BATCHES="
+              << system.skipped_bios_idle_offphase_batches() << '\n';
     std::cout << "EE_SKIPPED_BIOS_ZERO_ITERATIONS="
               << system.skipped_bios_zero_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_NIBBLE_ITERATIONS="
