@@ -716,15 +716,29 @@ u64 Ps2System::try_skip_bios_literal_iterations(
 u64 Ps2System::try_run_quiet_ee_batch(
     u64 budget, std::string& error) {
     if (budget < 2u || !scheduler_.empty() ||
-        hw_.dmac_running_mask() != 0u ||
         sif_dma_.ee_completion_pending() ||
-        sif_dma_.iop_completion_pending() ||
-        vu0_.running() || vu1_.running() || gs_.irq_pending() ||
-        bus_.intc_pending() || bus_.dmac_pending()) {
+        vu0_.running() || vu1_.running() || gs_.irq_pending()) {
         return 0;
     }
 
-    const auto& cpu = ee_.state();
+    // An armed but unmatched SIF channel is intentionally left running by
+    // the BIOS. It does not need to be reprobed after every EE instruction;
+    // only a ready SIF pair or another active DMA channel is observable here.
+    const u16 active_dma =
+        hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
+    const u16 sif_channels = (1u << 5) | (1u << 6);
+    if ((active_dma & ~sif_channels) != 0u ||
+        ((active_dma & sif_channels) &
+         iop_bus_.sif_dma_ready_mask()) != 0u) {
+        return 0;
+    }
+
+    auto& cpu = ee_.state();
+    if (bus_.intc_pending()) cpu.cop0[13] |= 0x00000400u;
+    else cpu.cop0[13] &= ~0x00000400u;
+    if (bus_.dmac_pending()) cpu.cop0[13] |= 0x00000800u;
+    else cpu.cop0[13] &= ~0x00000800u;
+
     const u32 status = cpu.cop0[12];
     const u32 cause = cpu.cop0[13];
     if ((cause & status & 0x0000FF00u) != 0u &&
@@ -736,6 +750,12 @@ u64 Ps2System::try_run_quiet_ee_batch(
     const bool iop_halted = iop_.halted();
     const bool iop_idle =
         !iop_halted && iop_.in_osdsys_idle_loop();
+
+    // IOP-side SIF completion is safe while doing exact 8:1 interleave:
+    // advance_iop_for_ee_cycles() ticks it immediately after the due IOP
+    // instruction. Long idle-loop skipping still requires an event-free
+    // interval and is guarded below.
+    if (iop_idle && sif_dma_.iop_completion_pending()) return 0;
 
     const u64 video_room = video_timing_.cycles_to_transition();
     if (video_room <= 1u) return 0;
