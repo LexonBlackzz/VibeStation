@@ -56,6 +56,9 @@ public:
     [[nodiscard]] u64 block_code_store_exit_count() const {
         return block_code_store_exit_count_;
     }
+    [[nodiscard]] u64 cache_flush_count() const {
+        return cache_flush_count_;
+    }
 
 private:
     using Function = void (*)(EeCpuState*);
@@ -81,6 +84,7 @@ private:
         std::size_t used = 0;
     };
 
+    void release_code_cache();
     Function compile(u32 instruction);
     BlockFunction compile_block(
         u32 pc,
@@ -101,6 +105,7 @@ private:
     u64 block_guard_bailout_count_ = 0;
     u64 block_fastmem_store_count_ = 0;
     u64 block_code_store_exit_count_ = 0;
+    u64 cache_flush_count_ = 0;
 };
 
 } // namespace ps2
