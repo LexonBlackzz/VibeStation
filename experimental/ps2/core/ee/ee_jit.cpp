@@ -272,6 +272,29 @@ bool emit_branch_and_delay(
     const u32 target = branch_pc + 4u +
         static_cast<u32>(static_cast<s32>(imm) * 4);
 
+    if (opcode == 0x00u) {
+        const u32 funct = branch_instruction & 63u;
+        if (funct == 0x08u || funct == 0x09u) { // JR / JALR
+            const u32 rd = (branch_instruction >> 11) & 31u;
+            out.load_rax(rs, true);
+            out.store_state_eax(pc_offset);
+            if (funct == 0x09u && rd != 0u) {
+                const u64 link = static_cast<u64>(static_cast<s64>(
+                    static_cast<s32>(branch_pc + 8u)));
+                out.store_gpr_imm64(rd, link);
+            }
+            if (!emit_instruction_body(delay_instruction, out)) {
+                out.bytes.resize(before);
+                return false;
+            }
+            out.load_state_eax(pc_offset);
+            out.emit(0x05u);
+            out.emit32(4u);
+            out.store_state_eax(next_pc_offset);
+            return true;
+        }
+    }
+
     switch (opcode) {
     case 0x02u: // J
     case 0x03u: { // JAL
