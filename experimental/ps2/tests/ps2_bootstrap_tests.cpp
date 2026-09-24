@@ -3990,7 +3990,7 @@ bool test_ee_native_linear_block() {
                     "EE native reference step failed") && ok;
     }
 
-    const ps2::u32 retired = native.ee().run_native_linear_block(
+    const ps2::u32 retired = native.ee().run_native_block(
         pc, 0u, code.data(),
         static_cast<ps2::u32>(code.size()),
         static_cast<ps2::u32>(code.size()));
