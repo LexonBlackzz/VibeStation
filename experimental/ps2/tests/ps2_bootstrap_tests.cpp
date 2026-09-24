@@ -19,6 +19,12 @@ bool step_at(ps2::Ps2System& system, ps2::u32 pc, ps2::u32 instruction) {
     return system.ee().step(error);
 }
 
+bool test_system_stack_footprint() {
+    return expect(
+        sizeof(ps2::Ps2System) < 512u * 1024u,
+        "Ps2System stack footprint is too large for the default Windows stack");
+}
+
 bool test_mmi_por_128() {
     ps2::Ps2System system;
     constexpr ps2::u32 pc = 0x2000;
@@ -4118,6 +4124,7 @@ bool test_fpu_accumulator() {
 
 int main() {
     bool ok = true;
+    ok = test_system_stack_footprint() && ok;
     ok = test_mmi_por_128() && ok;
     ok = test_mmi_padduw() && ok;
     ok = test_mmi_madd_and_plzcw() && ok;
