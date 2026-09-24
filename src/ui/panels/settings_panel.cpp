@@ -8,6 +8,14 @@
 void App::panel_settings() {
     ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Settings", &show_settings_)) {
+        if (!has_started_emulation_) {
+            bool detailed = definitive_detailed_settings_;
+            if (ImGui::Checkbox("Detailed Settings", &detailed)) {
+                definitive_detailed_settings_ = detailed;
+            }
+            ImGui::Separator();
+        }
+
         if (ImGui::BeginTabBar("SettingsTabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
@@ -381,5 +389,9 @@ void App::panel_settings() {
         }
     }
     ImGui::End();
+
+    if (!show_settings_) {
+        definitive_detailed_settings_ = false;
+    }
 }
 
