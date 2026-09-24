@@ -138,6 +138,10 @@ struct CpuCompareCase {
   u32 initial_cop0_sr_bits = 0;
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
+  u32 initial_next_pc = 0;
+  bool initial_pending_delay_slot = false;
+  bool initial_pending_branch_taken = false;
+  u32 initial_pending_branch_pc = 0;
   bool request_irq_on_branch = false;
   u32 instructions = 0;
   bool expect_final_control_state = false;
@@ -570,7 +574,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
 
   CpuDebugState initial = sys->cpu().debug_state();
   initial.pc = test_case.start_pc;
-  initial.next_pc = test_case.start_pc + 4u;
+  initial.next_pc =
+      test_case.initial_next_pc != 0u ? test_case.initial_next_pc
+                                     : test_case.start_pc + 4u;
   initial.current_pc = 0;
   initial.cycles = 0;
   initial.load_reg = test_case.initial_load_reg;
@@ -578,9 +584,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   initial.next_load_reg = 0;
   initial.next_load_value = 0;
   initial.in_delay_slot = false;
-  initial.pending_delay_slot = false;
-  initial.pending_branch_taken = false;
-  initial.pending_branch_pc = 0;
+  initial.pending_delay_slot = test_case.initial_pending_delay_slot;
+  initial.pending_branch_taken = test_case.initial_pending_branch_taken;
+  initial.pending_branch_pc = test_case.initial_pending_branch_pc;
   initial.active_branch_pc = 0;
   initial.exception_raised = false;
   initial.cop0_sr |= test_case.initial_cop0_sr_bits;
@@ -2729,6 +2735,25 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_irq_delay.compare_segment_states = true;
   branch_irq_delay.native_branch_should_be_taken = true;
   cases.push_back(branch_irq_delay);
+
+  CpuCompareCase pending_delay_irq{};
+  pending_delay_irq.name = "v4_pending_delay_irq_sampling";
+  pending_delay_irq.start_pc = 0xA0010004u;
+  pending_delay_irq.initial_next_pc = 0xA0010040u;
+  pending_delay_irq.initial_pending_delay_slot = true;
+  pending_delay_irq.initial_pending_branch_taken = true;
+  pending_delay_irq.initial_pending_branch_pc = 0xA0010000u;
+  pending_delay_irq.initial_cop0_sr_bits = 1u | (1u << 10);
+  pending_delay_irq.initial_irq_mask = 1u;
+  pending_delay_irq.initial_irq_pending = true;
+  pending_delay_irq.initial_gpr[3] = 0u;
+  pending_delay_irq.program = {
+      enc_i(0x09, 3, 3, 1),
+      0u,
+  };
+  pending_delay_irq.instructions = 2u;
+  pending_delay_irq.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(pending_delay_irq);
 
   CpuCompareCase branch_mmio_body{};
   branch_mmio_body.name = "native_branch_tail_mmio_body_read_write";
