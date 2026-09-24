@@ -1554,6 +1554,24 @@ int main(int argc, char** argv) {
     }
     std::cout << '\n';
 
+    for (const auto& [pc, hits] : system.quiet_block_hotspots(20u)) {
+        std::cout
+            << "EE_HOT_CODE PC=0x" << std::hex << std::uppercase << pc
+            << std::dec << " HITS=" << hits;
+        for (int word = -4; word <= 12; ++word) {
+            const ps2::u32 address =
+                pc + static_cast<ps2::u32>(word * 4);
+            ps2::u32 opcode = 0;
+            if (system.bus().read32(address, opcode)) {
+                std::cout
+                    << " A" << (word >= 0 ? "+" : "") << word * 4
+                    << "=0x" << std::hex << std::uppercase << opcode
+                    << std::dec;
+            }
+        }
+        std::cout << '\n';
+    }
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
