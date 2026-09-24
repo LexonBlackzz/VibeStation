@@ -544,8 +544,8 @@ constexpr u32 kV4RevalidateRefilled = 1u << 1;
 // the architectural line refill that the C++ run_slice path would have done.
 u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
   if (state == nullptr || state->cpu == nullptr || block == nullptr ||
-      !block->cacheable || block->retry_second_line ||
-      block->instruction_count == 0u ||
+      !block->cacheable || block->retry_second_line || block->has_control ||
+      block->budget_requires_empty_chain || block->instruction_count == 0u ||
       block->instruction_count > kV4MaxBlockInstructions) {
     return 0u;
   }
@@ -2916,15 +2916,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
-
-    // Branch scheduler-tail fragments are only valid from a fresh dispatcher
-    // entry. Revalidate/refill their cached bytes here so the following C++
-    // pass is a cache hit, but preserve the historical generation boundary
-    // before the branch itself executes.
-    code.cmp(code.byte[
-        code.r14 +
-        static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
-    code.jne(stale_generation);
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
