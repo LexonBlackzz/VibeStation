@@ -1050,6 +1050,24 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
         << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';
+    std::cout << "GS_RASTER_PRIMITIVES";
+    for (ps2::u32 i = 0; i < gs_stats.raster_draws_by_primitive.size(); ++i) {
+        if (gs_stats.raster_draws_by_primitive[i] == 0u) continue;
+        std::cout
+            << " P" << i << "_DRAWS="
+            << gs_stats.raster_draws_by_primitive[i]
+            << " P" << i << "_PIXELS="
+            << gs_stats.raster_pixels_by_primitive[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_TEXTURE_PSM_DRAWS";
+    for (ps2::u32 i = 0; i < gs_stats.texture_draws_by_psm.size(); ++i) {
+        if (gs_stats.texture_draws_by_psm[i] == 0u) continue;
+        std::cout << " PSM" << i << '=' << gs_stats.texture_draws_by_psm[i];
+    }
+    std::cout << '\n';
+
     std::cout
         << "GS_LAST_UNSUPPORTED PRIM=0x" << std::hex << std::uppercase
         << gs_stats.last_unsupported_prim
