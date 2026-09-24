@@ -291,8 +291,12 @@ bool GsVram::write_pixel(
 bool GsVram::write_pixel_untracked(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_color_psm(psm)) return false;
+    return write_pixel_at_address_untracked(
+        psm, pixel_address_bytes(psm, x, y, bp, bw), value);
+}
 
-    const u32 a = pixel_address_bytes(psm, x, y, bp, bw);
+bool GsVram::write_pixel_at_address_untracked(
+    u32 psm, u32 a, u32 value) {
     if (psm == 0u) {
         if constexpr (std::endian::native == std::endian::little) {
             std::memcpy(data_.data() + a, &value, sizeof(value));
@@ -306,7 +310,7 @@ bool GsVram::write_pixel_untracked(
         data_[a + 0] = static_cast<u8>(value);
         data_[a + 1] = static_cast<u8>(value >> 8);
         data_[a + 2] = static_cast<u8>(value >> 16);
-    } else {
+    } else if (psm == 2u || psm == 10u) {
         const u16 packed = static_cast<u16>(value);
         if constexpr (std::endian::native == std::endian::little) {
             std::memcpy(data_.data() + a, &packed, sizeof(packed));
@@ -314,6 +318,8 @@ bool GsVram::write_pixel_untracked(
             data_[a + 0] = static_cast<u8>(packed);
             data_[a + 1] = static_cast<u8>(packed >> 8);
         }
+    } else {
+        return false;
     }
     return true;
 }
@@ -321,8 +327,11 @@ bool GsVram::write_pixel_untracked(
 u32 GsVram::read_pixel(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw) const {
     if (!supported_color_psm(psm)) return 0;
+    return read_pixel_at_address(
+        psm, pixel_address_bytes(psm, x, y, bp, bw));
+}
 
-    const u32 a = pixel_address_bytes(psm, x, y, bp, bw);
+u32 GsVram::read_pixel_at_address(u32 psm, u32 a) const {
     if (psm == 0u) {
         if constexpr (std::endian::native == std::endian::little) {
             u32 value = 0;
@@ -339,6 +348,7 @@ u32 GsVram::read_pixel(
                (static_cast<u32>(data_[a + 1]) << 8) |
                (static_cast<u32>(data_[a + 2]) << 16);
     }
+    if (psm != 2u && psm != 10u) return 0;
     if constexpr (std::endian::native == std::endian::little) {
         u16 value = 0;
         std::memcpy(&value, data_.data() + a, sizeof(value));
@@ -358,8 +368,12 @@ bool GsVram::write_depth(
 bool GsVram::write_depth_untracked(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_depth_psm(psm)) return false;
-    const u32 a = depth_address_bytes(psm, x, y, bp, bw);
+    return write_depth_at_address_untracked(
+        psm, depth_address_bytes(psm, x, y, bp, bw), value);
+}
 
+bool GsVram::write_depth_at_address_untracked(
+    u32 psm, u32 a, u32 value) {
     if (psm == 48u) {
         if constexpr (std::endian::native == std::endian::little) {
             std::memcpy(data_.data() + a, &value, sizeof(value));
@@ -373,7 +387,7 @@ bool GsVram::write_depth_untracked(
         data_[a + 0] = static_cast<u8>(value);
         data_[a + 1] = static_cast<u8>(value >> 8);
         data_[a + 2] = static_cast<u8>(value >> 16);
-    } else {
+    } else if (psm == 50u || psm == 58u) {
         const u16 packed = static_cast<u16>(value);
         if constexpr (std::endian::native == std::endian::little) {
             std::memcpy(data_.data() + a, &packed, sizeof(packed));
@@ -381,6 +395,8 @@ bool GsVram::write_depth_untracked(
             data_[a + 0] = static_cast<u8>(packed);
             data_[a + 1] = static_cast<u8>(packed >> 8);
         }
+    } else {
+        return false;
     }
     return true;
 }
@@ -388,8 +404,11 @@ bool GsVram::write_depth_untracked(
 u32 GsVram::read_depth(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw) const {
     if (!supported_depth_psm(psm)) return 0;
-    const u32 a = depth_address_bytes(psm, x, y, bp, bw);
+    return read_depth_at_address(
+        psm, depth_address_bytes(psm, x, y, bp, bw));
+}
 
+u32 GsVram::read_depth_at_address(u32 psm, u32 a) const {
     if (psm == 48u) {
         if constexpr (std::endian::native == std::endian::little) {
             u32 value = 0;
@@ -406,6 +425,7 @@ u32 GsVram::read_depth(
                (static_cast<u32>(data_[a + 1]) << 8) |
                (static_cast<u32>(data_[a + 2]) << 16);
     }
+    if (psm != 50u && psm != 58u) return 0;
     if constexpr (std::endian::native == std::endian::little) {
         u16 value = 0;
         std::memcpy(&value, data_.data() + a, sizeof(value));
@@ -414,7 +434,6 @@ u32 GsVram::read_depth(
     return static_cast<u32>(data_[a + 0]) |
            (static_cast<u32>(data_[a + 1]) << 8);
 }
-
 
 bool GsVram::write_index(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
