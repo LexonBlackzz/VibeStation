@@ -12,6 +12,7 @@ EeRam::EeRam()
 void EeRam::reset() {
     std::fill(data_.begin(), data_.end(), u8{0});
     page_generation_.fill(0);
+    code_page_tracked_.fill(0);
 }
 
 void EeRam::mark_written(u32 offset, std::size_t width) {
@@ -20,7 +21,9 @@ void EeRam::mark_written(u32 offset, std::size_t width) {
     const u32 last = static_cast<u32>(
         (static_cast<std::size_t>(offset) + width - 1u) / kPageSize);
     for (u32 page = first; page <= last; ++page) {
-        ++page_generation_[page];
+        if (code_page_tracked_[page] != 0u) {
+            ++page_generation_[page];
+        }
     }
 }
 
