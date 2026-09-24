@@ -433,6 +433,30 @@ bool IopCpu::execute_cop2(
         error);
 }
 
+bool IopCpu::in_osdsys_idle_loop() const {
+    if (halted_ || pending_load_.valid || next_load_.valid ||
+        bus_.interrupt_pending()) {
+        return false;
+    }
+
+    const bool at_branch =
+        state_.pc == 0x0000AE94u &&
+        state_.next_pc == 0x0000AE98u &&
+        !next_is_delay_slot_;
+    const bool at_delay =
+        state_.pc == 0x0000AE98u &&
+        state_.next_pc == 0x0000AE94u &&
+        next_is_delay_slot_;
+    if (!at_branch && !at_delay) return false;
+
+    u32 branch = 0;
+    u32 delay = 0;
+    return bus_.read32(0x0000AE94u, branch) &&
+           bus_.read32(0x0000AE98u, delay) &&
+           branch == 0x08002BA5u &&
+           delay == 0u;
+}
+
 bool IopCpu::skip_osdsys_idle_pair() {
     if (halted_ || state_.pc != 0x0000AE94u ||
         state_.next_pc != 0x0000AE98u || next_is_delay_slot_ ||
