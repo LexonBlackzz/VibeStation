@@ -47,6 +47,9 @@ struct GsStats {
     u64 primitives = 0;
     u64 raster_draws = 0;
     u64 raster_pixels = 0;
+    std::array<u64, 8> raster_draws_by_primitive{};
+    std::array<u64, 8> raster_pixels_by_primitive{};
+    std::array<u64, 64> texture_draws_by_psm{};
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
     u64 nonzero_texture_samples = 0;
