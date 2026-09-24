@@ -1553,8 +1553,8 @@ void App::panel_definitive_home() {
     draw_panel(draw, layout, 854.0f, panel_y, 394.0f, 183.0f);
 
     draw_folder_badge(draw, layout, 53.0f, panel_y + 17.0f);
-    add_text(draw, layout, 86.0f, panel_y + 15.0f, 13.5f,
-        rgba(226, 230, 235, 245), "Game Library");
+    add_text(draw, layout, 86.0f, panel_y + 14.0f, 14.2f,
+        rgba(236, 239, 243, 252), "Game Library");
     draw->AddLine(layout.point(46.0f, panel_y + 44.0f),
         layout.point(826.0f, panel_y + 44.0f),
         rgba(105, 116, 128, 165), layout.px(1.0f));
@@ -1562,14 +1562,14 @@ void App::panel_definitive_home() {
     const std::string rom_label = rom_directory_valid_
         ? "ROM Directory: " + rom_directory_
         : "ROM Directory: not set";
-    add_text(draw, layout, 53.0f, panel_y + 55.0f, 9.8f,
-        rgba(163, 168, 176, 225), rom_label.c_str());
+    add_text(draw, layout, 53.0f, panel_y + 54.0f, 10.4f,
+        rgba(190, 196, 204, 242), rom_label.c_str());
 
     if (!rom_directory_valid_) {
         add_text(draw, layout, 53.0f, panel_y + 87.0f, 10.2f,
             rgba(224, 74, 74, 245), "No ROM directory configured.");
-        add_text(draw, layout, 53.0f, panel_y + 111.0f, 9.7f,
-            rgba(187, 191, 198, 225),
+        add_text(draw, layout, 53.0f, panel_y + 111.0f, 10.0f,
+            rgba(205, 210, 217, 238),
             "Set a ROM directory to scan and list games here.");
     }
     else if (game_library_.empty()) {
@@ -1579,8 +1579,8 @@ void App::panel_definitive_home() {
     else {
         const std::string count_label =
             std::to_string(game_library_.size()) + " games";
-        add_text(draw, layout, 752.0f, panel_y + 55.0f, 8.8f,
-            rgba(139, 147, 157, 205), count_label.c_str());
+        add_text(draw, layout, 748.0f, panel_y + 54.0f, 9.4f,
+            rgba(177, 185, 195, 235), count_label.c_str());
 
         ImGui::SetCursorScreenPos(layout.point(53.0f, panel_y + 76.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
@@ -1660,41 +1660,41 @@ void App::panel_definitive_home() {
     }
 
     draw_info_badge(draw, layout, 875.0f, panel_y + 17.0f);
-    add_text(draw, layout, 905.0f, panel_y + 15.0f, 13.5f,
-        rgba(226, 230, 235, 245), "System Info");
+    add_text(draw, layout, 905.0f, panel_y + 14.0f, 14.2f,
+        rgba(236, 239, 243, 252), "System Info");
     draw->AddLine(layout.point(868.0f, panel_y + 44.0f),
         layout.point(1232.0f, panel_y + 44.0f),
         rgba(105, 116, 128, 165), layout.px(1.0f));
 
-    const ImU32 label_color = rgba(165, 170, 177, 225);
-    const ImU32 value_color = rgba(211, 214, 219, 235);
-    add_text(draw, layout, 875.0f, panel_y + 58.0f, 9.5f,
+    const ImU32 label_color = rgba(190, 196, 204, 242);
+    const ImU32 value_color = rgba(230, 234, 239, 250);
+    add_text(draw, layout, 875.0f, panel_y + 58.0f, 10.0f,
         label_color, "Emulator:");
-    add_text(draw, layout, 995.0f, panel_y + 58.0f, 9.5f,
+    add_text(draw, layout, 995.0f, panel_y + 58.0f, 10.2f,
         value_color, "VibeStation");
-    add_text(draw, layout, 875.0f, panel_y + 77.0f, 9.5f,
+    add_text(draw, layout, 875.0f, panel_y + 77.0f, 10.0f,
         label_color, "Version:");
-    add_text(draw, layout, 995.0f, panel_y + 77.0f, 9.5f,
+    add_text(draw, layout, 995.0f, panel_y + 77.0f, 10.2f,
         value_color, VIBESTATION_VERSION_STRING);
-    add_text(draw, layout, 875.0f, panel_y + 96.0f, 9.5f,
+    add_text(draw, layout, 875.0f, panel_y + 96.0f, 10.0f,
         label_color, "BIOS:");
-    add_text(draw, layout, 995.0f, panel_y + 96.0f, 9.5f,
+    add_text(draw, layout, 995.0f, panel_y + 96.0f, 10.2f,
         value_color, system_->bios_loaded() ? "Loaded" : "Not loaded");
-    add_text(draw, layout, 875.0f, panel_y + 115.0f, 9.5f,
+    add_text(draw, layout, 875.0f, panel_y + 115.0f, 10.0f,
         label_color, "ROM Directory:");
-    add_text(draw, layout, 995.0f, panel_y + 115.0f, 9.5f,
+    add_text(draw, layout, 995.0f, panel_y + 115.0f, 10.2f,
         value_color, rom_directory_valid_ ? "Set" : "Not set");
-    add_text(draw, layout, 875.0f, panel_y + 134.0f, 9.5f,
+    add_text(draw, layout, 875.0f, panel_y + 134.0f, 10.0f,
         label_color, "Games Found:");
     const std::string games_found = std::to_string(game_library_.size());
-    add_text(draw, layout, 995.0f, panel_y + 134.0f, 9.5f,
+    add_text(draw, layout, 995.0f, panel_y + 134.0f, 10.2f,
         value_color, games_found.c_str());
 
     draw->AddLine(layout.point(875.0f, panel_y + 155.0f),
         layout.point(1232.0f, panel_y + 155.0f),
         rgba(91, 101, 111, 145), layout.px(1.0f));
-    add_text(draw, layout, 875.0f, panel_y + 164.0f, 8.8f,
-        rgba(145, 150, 158, 205), "Same console. Different vibes.");
+    add_text(draw, layout, 875.0f, panel_y + 164.0f, 9.2f,
+        rgba(177, 183, 191, 232), "Same console. Different vibes.");
 
     // Launcher-to-emulator transition. Use the viewport foreground draw list
     // so the fade also covers child windows (notably the scrollable game list).
