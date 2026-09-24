@@ -3603,25 +3603,112 @@ bool EeCpu::step_internal(
         const u32 rd = (instruction >> 11) & 31u;
         const u32 sa = (instruction >> 6) & 31u;
         switch (funct) {
-        case 0x00u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) << sa); break;
-        case 0x02u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) >> sa); break;
-        case 0x03u: write_gpr_word(rd, static_cast<u32>(
-            static_cast<s32>(static_cast<u32>(gpr_u64(rt))) >> sa)); break;
-        case 0x06u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) >>
-            (static_cast<u32>(gpr_u64(rs)) & 31u)); break;
+        case 0x00u:
+            write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) << sa);
+            break;
+        case 0x02u:
+            write_gpr_word(rd, static_cast<u32>(gpr_u64(rt)) >> sa);
+            break;
+        case 0x03u:
+            write_gpr_word(rd, static_cast<u32>(
+                static_cast<s32>(static_cast<u32>(gpr_u64(rt))) >> sa));
+            break;
+        case 0x04u:
+            write_gpr_word(
+                rd,
+                static_cast<u32>(gpr_u64(rt)) <<
+                    (static_cast<u32>(gpr_u64(rs)) & 31u));
+            break;
+        case 0x06u:
+            write_gpr_word(
+                rd,
+                static_cast<u32>(gpr_u64(rt)) >>
+                    (static_cast<u32>(gpr_u64(rs)) & 31u));
+            break;
+        case 0x07u:
+            write_gpr_word(
+                rd,
+                static_cast<u32>(
+                    static_cast<s32>(static_cast<u32>(gpr_u64(rt))) >>
+                    (static_cast<u32>(gpr_u64(rs)) & 31u)));
+            break;
         case 0x08u:
             state_.next_pc = static_cast<u32>(gpr_u64(rs));
             next_is_delay_slot_ = true;
             break;
-        case 0x21u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) +
-            static_cast<u32>(gpr_u64(rt))); break;
-        case 0x23u: write_gpr_word(rd, static_cast<u32>(gpr_u64(rs)) -
-            static_cast<u32>(gpr_u64(rt))); break;
+        case 0x09u:
+            write_gpr_word(rd, pc + 8u);
+            state_.next_pc = static_cast<u32>(gpr_u64(rs));
+            next_is_delay_slot_ = true;
+            break;
+        case 0x0Au:
+            if (gpr_u64(rt) == 0u) write_gpr64(rd, gpr_u64(rs));
+            break;
+        case 0x0Bu:
+            if (gpr_u64(rt) != 0u) write_gpr64(rd, gpr_u64(rs));
+            break;
+        case 0x0Fu:
+            break;
+        case 0x10u: write_gpr64(rd, state_.hi); break;
+        case 0x11u: state_.hi = gpr_u64(rs); break;
+        case 0x12u: write_gpr64(rd, state_.lo); break;
+        case 0x13u: state_.lo = gpr_u64(rs); break;
+        case 0x14u:
+            write_gpr64(rd, gpr_u64(rt) << (gpr_u64(rs) & 63u));
+            break;
+        case 0x16u:
+            write_gpr64(rd, gpr_u64(rt) >> (gpr_u64(rs) & 63u));
+            break;
+        case 0x17u:
+            write_gpr64(
+                rd,
+                static_cast<u64>(
+                    static_cast<s64>(gpr_u64(rt)) >>
+                    (gpr_u64(rs) & 63u)));
+            break;
+        case 0x21u:
+            write_gpr_word(
+                rd,
+                static_cast<u32>(gpr_u64(rs)) +
+                    static_cast<u32>(gpr_u64(rt)));
+            break;
+        case 0x23u:
+            write_gpr_word(
+                rd,
+                static_cast<u32>(gpr_u64(rs)) -
+                    static_cast<u32>(gpr_u64(rt)));
+            break;
         case 0x24u: write_gpr64(rd, gpr_u64(rs) & gpr_u64(rt)); break;
         case 0x25u: write_gpr64(rd, gpr_u64(rs) | gpr_u64(rt)); break;
-        case 0x2Bu: write_gpr64(rd, gpr_u64(rs) < gpr_u64(rt) ? 1u : 0u); break;
+        case 0x26u: write_gpr64(rd, gpr_u64(rs) ^ gpr_u64(rt)); break;
+        case 0x27u: write_gpr64(rd, ~(gpr_u64(rs) | gpr_u64(rt))); break;
+        case 0x28u: write_gpr64(rd, state_.sa); break;
+        case 0x29u: state_.sa = static_cast<u32>(gpr_u64(rs)); break;
+        case 0x2Au:
+            write_gpr64(rd, gpr_s64(rs) < gpr_s64(rt) ? 1u : 0u);
+            break;
+        case 0x2Bu:
+            write_gpr64(rd, gpr_u64(rs) < gpr_u64(rt) ? 1u : 0u);
+            break;
         case 0x2Du: write_gpr64(rd, gpr_u64(rs) + gpr_u64(rt)); break;
-        default: goto generic_decode;
+        case 0x2Fu: write_gpr64(rd, gpr_u64(rs) - gpr_u64(rt)); break;
+        case 0x38u: write_gpr64(rd, gpr_u64(rt) << sa); break;
+        case 0x3Au: write_gpr64(rd, gpr_u64(rt) >> sa); break;
+        case 0x3Bu:
+            write_gpr64(
+                rd,
+                static_cast<u64>(static_cast<s64>(gpr_u64(rt)) >> sa));
+            break;
+        case 0x3Cu: write_gpr64(rd, gpr_u64(rt) << (sa + 32u)); break;
+        case 0x3Eu: write_gpr64(rd, gpr_u64(rt) >> (sa + 32u)); break;
+        case 0x3Fu:
+            write_gpr64(
+                rd,
+                static_cast<u64>(
+                    static_cast<s64>(gpr_u64(rt)) >> (sa + 32u)));
+            break;
+        default:
+            goto generic_decode;
         }
         state_.gpr[0] = {};
         ++state_.instructions_executed;
@@ -3629,6 +3716,22 @@ bool EeCpu::step_internal(
         if (state_.cop0[9] == state_.cop0[11]) state_.cop0[13] |= 0x00008000u;
         if (!quiet) bus_.tick(1);
         return true;
+    }
+
+    // REGIMM branches and shift-address helpers are common in BIOS/OSDSYS.
+    // Dispatch them before constructing the generic memory helper stack.
+    if (!jit_enabled_ && opcode == 0x01u) {
+        if (execute_regimm(pc, instruction, error)) {
+            state_.gpr[0] = {};
+            ++state_.instructions_executed;
+            ++state_.cop0[9];
+            if (state_.cop0[9] == state_.cop0[11]) {
+                state_.cop0[13] |= 0x00008000u;
+            }
+            if (!quiet) bus_.tick(1);
+            return true;
+        }
+        goto generic_decode;
     }
 
     // The system's predecoded quiet path has already proven that these
@@ -3641,6 +3744,26 @@ bool EeCpu::step_internal(
         bool handled = true;
         bool access_ok = true;
         switch (opcode) {
+        case 0x1Eu: { // LQ
+            const u32 aligned = address & ~0x0Fu;
+            u64 lo = 0;
+            u64 hi = 0;
+            access_ok =
+                bus_.read64(aligned, lo) &&
+                bus_.read64(aligned + 8u, hi);
+            if (access_ok && rt != 0u) {
+                state_.gpr[rt].lo = lo;
+                state_.gpr[rt].hi = hi;
+            }
+            break;
+        }
+        case 0x1Fu: { // SQ
+            const u32 aligned = address & ~0x0Fu;
+            access_ok =
+                bus_.write64(aligned, state_.gpr[rt].lo) &&
+                bus_.write64(aligned + 8u, state_.gpr[rt].hi);
+            break;
+        }
         case 0x20u: { // LB
             u8 value = 0;
             access_ok = bus_.read8(address, value);
@@ -3702,6 +3825,19 @@ bool EeCpu::step_internal(
             if (access_ok) state_.fpr[rt] = value;
             break;
         }
+        case 0x36u: { // LQC2
+            const u32 aligned = address & ~0x0Fu;
+            u64 lo = 0;
+            u64 hi = 0;
+            access_ok =
+                bus_.read64(aligned, lo) &&
+                bus_.read64(aligned + 8u, hi);
+            if (access_ok && rt != 0u) {
+                state_.vu_vf[rt].lo = lo;
+                state_.vu_vf[rt].hi = hi;
+            }
+            break;
+        }
         case 0x34u: // LLD
         case 0x37u: { // LD
             u64 value = 0;
@@ -3720,6 +3856,13 @@ bool EeCpu::step_internal(
             access_ok = bus_.write64(address, gpr_u64(rt));
             if (access_ok) write_gpr64(rt, 1u);
             break;
+        case 0x3Eu: { // SQC2
+            const u32 aligned = address & ~0x0Fu;
+            access_ok =
+                bus_.write64(aligned, state_.vu_vf[rt].lo) &&
+                bus_.write64(aligned + 8u, state_.vu_vf[rt].hi);
+            break;
+        }
         case 0x3Fu: // SD
             access_ok = bus_.write64(address, gpr_u64(rt));
             break;
