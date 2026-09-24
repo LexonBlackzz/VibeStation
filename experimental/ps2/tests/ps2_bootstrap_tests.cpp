@@ -996,6 +996,82 @@ bool test_ee_timer_events() {
     return ok;
 }
 
+bool test_ee_timer_bulk_tick_matches_scalar() {
+    constexpr ps2::u32 count = 0x10000000u;
+    constexpr ps2::u32 mode = 0x10000010u;
+    constexpr ps2::u32 comp = 0x10000020u;
+    constexpr ps2::u32 intc_stat = 0x1000F000u;
+    constexpr ps2::u32 intc_mask = 0x1000F010u;
+
+    auto run_case = [&](ps2::u32 initial_count,
+                        ps2::u32 compare,
+                        ps2::u32 timer_mode,
+                        ps2::u32 cycles) {
+        ps2::EeHw bulk;
+        ps2::EeHw scalar;
+        bulk.reset();
+        scalar.reset();
+
+        bool ok = expect(
+            bulk.write32(intc_mask, 1u << 9) &&
+            scalar.write32(intc_mask, 1u << 9) &&
+            bulk.write32(count, initial_count) &&
+            scalar.write32(count, initial_count) &&
+            bulk.write32(comp, compare) &&
+            scalar.write32(comp, compare) &&
+            bulk.write32(mode, timer_mode) &&
+            scalar.write32(mode, timer_mode),
+            "EE bulk timer test setup failed");
+
+        bulk.tick(cycles);
+        for (ps2::u32 i = 0; i < cycles; ++i) {
+            scalar.tick(1u);
+        }
+
+        ps2::u32 bulk_count = 0;
+        ps2::u32 scalar_count = 0;
+        ps2::u32 bulk_mode = 0;
+        ps2::u32 scalar_mode = 0;
+        ps2::u32 bulk_stat = 0;
+        ps2::u32 scalar_stat = 0;
+        ok = expect(
+            bulk.read32(count, bulk_count) &&
+            scalar.read32(count, scalar_count) &&
+            bulk.read32(mode, bulk_mode) &&
+            scalar.read32(mode, scalar_mode) &&
+            bulk.read32(intc_stat, bulk_stat) &&
+            scalar.read32(intc_stat, scalar_stat),
+            "EE bulk timer state read failed") && ok;
+        ok = expect(
+            bulk_count == scalar_count &&
+            bulk_mode == scalar_mode &&
+            bulk_stat == scalar_stat &&
+            bulk.cycles() == scalar.cycles(),
+            "EE bulk timer advance diverged from scalar ticking") && ok;
+        return ok;
+    };
+
+    bool ok = true;
+    ok = run_case(
+        0u, 3u,
+        (1u << 6) | (1u << 7) | (1u << 8),
+        123u) && ok;
+    ok = run_case(
+        0xFFF0u, 0x3456u,
+        (1u << 7) | (1u << 9),
+        100u) && ok;
+    ok = run_case(
+        0xFFFEu, 3u,
+        (1u << 6) | (1u << 7) |
+        (1u << 8) | (1u << 9),
+        40u) && ok;
+    ok = run_case(
+        0x1200u, 0x1220u,
+        1u | (1u << 7) | (1u << 8),
+        1001u) && ok;
+    return ok;
+}
+
 bool test_ee_timer_irq_distance() {
     ps2::EeHw hw;
     hw.reset();
@@ -4341,6 +4417,7 @@ int main() {
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
     ok = test_ee_timer_events() && ok;
+    ok = test_ee_timer_bulk_tick_matches_scalar() && ok;
     ok = test_ee_timer_irq_distance() && ok;
     ok = test_ee_intc_register_semantics() && ok;
     ok = test_vu_mapping_and_cop2() && ok;
