@@ -3,6 +3,7 @@
 #include "core/gs/gs_vram.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -829,25 +830,49 @@ u64 GsRasterizer::draw_sprite(
 
     const s64 dx = static_cast<s64>(b.x) - a.x;
     const s64 dy = static_cast<s64>(b.y) - a.y;
-    u64 pixels = 0;
-    for (s32 y = top; y < bottom; ++y) {
+
+    // FST sprite coordinates are separable: U depends only on X and V only
+    // on Y. BIOS/OSDSYS draws many textured sprites, so computing both
+    // 64-bit divisions for every pixel wastes most of the raster time.
+    // Precompute each axis once while preserving the exact integer formula.
+    std::array<s32, 2048> cached_u{};
+    std::array<s32, 2048> cached_v{};
+    const bool cached_fst = ctx.texture.enabled && ctx.texture.fst;
+    if (cached_fst) {
         for (s32 x = left; x < right; ++x) {
             const s32 px = x * 16 + 8;
+            cached_u[static_cast<std::size_t>(x - left)] =
+                dx != 0
+                    ? static_cast<s32>(
+                        static_cast<s64>(a.u) +
+                        (static_cast<s64>(b.u - a.u) * (px - a.x)) / dx)
+                    : a.u;
+        }
+        for (s32 y = top; y < bottom; ++y) {
             const s32 py = y * 16 + 8;
+            cached_v[static_cast<std::size_t>(y - top)] =
+                dy != 0
+                    ? static_cast<s32>(
+                        static_cast<s64>(a.v) +
+                        (static_cast<s64>(b.v - a.v) * (py - a.y)) / dy)
+                    : a.v;
+        }
+    }
+
+    u64 pixels = 0;
+    for (s32 y = top; y < bottom; ++y) {
+        const s32 py = y * 16 + 8;
+        const s32 cached_row_v = cached_fst
+            ? cached_v[static_cast<std::size_t>(y - top)]
+            : 0;
+        for (s32 x = left; x < right; ++x) {
+            const s32 px = x * 16 + 8;
             s32 u = 0;
             s32 v = 0;
             if (ctx.texture.enabled) {
                 if (ctx.texture.fst) {
-                    u = dx != 0
-                        ? static_cast<s32>(
-                            static_cast<s64>(a.u) +
-                            (static_cast<s64>(b.u - a.u) * (px - a.x)) / dx)
-                        : a.u;
-                    v = dy != 0
-                        ? static_cast<s32>(
-                            static_cast<s64>(a.v) +
-                            (static_cast<s64>(b.v - a.v) * (py - a.y)) / dy)
-                        : a.v;
+                    u = cached_u[static_cast<std::size_t>(x - left)];
+                    v = cached_row_v;
                 } else {
                     const long double fx = dx != 0
                         ? static_cast<long double>(px - a.x) / static_cast<long double>(dx)
