@@ -1,6 +1,7 @@
 #include "core/ee/ee_jit.h"
 #include "core/ee/ee_cpu.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
