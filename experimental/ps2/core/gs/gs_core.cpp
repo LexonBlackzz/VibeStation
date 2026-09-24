@@ -868,6 +868,14 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
+    if (prim < stats_.raster_draws_by_primitive.size()) {
+        ++stats_.raster_draws_by_primitive[prim];
+        stats_.raster_pixels_by_primitive[prim] += pixels;
+    }
+    if (ctx.texture.enabled &&
+        ctx.texture.psm < stats_.texture_draws_by_psm.size()) {
+        ++stats_.texture_draws_by_psm[ctx.texture.psm];
+    }
     if (pixels != 0u) {
         vram_.mark_modified();
     }
