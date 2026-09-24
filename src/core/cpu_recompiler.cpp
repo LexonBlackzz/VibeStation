@@ -310,6 +310,7 @@ struct V4NativeState {
   u32 store_entries = 0;
   u32 store_phys = 0;
   u32 cop0_sr = 0;
+  u32 cop0_cause = 0;
   u32 cache_epoch = 0;
   u32 pc = 0;
   u32 next_pc = 0;
@@ -2733,11 +2734,40 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.jne(bail_exit);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_entries))]);
-  code.cmp(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
-      0u);
-  code.jne(done);
-  code.jmp(loop);
+  {
+    Label no_scheduler_yield, post_delay_irq_clear;
+    code.cmp(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        0u);
+    code.je(no_scheduler_yield);
+
+    // Split branches still yield before their delay slot to preserve the
+    // scheduler boundary. Once the delay slot itself has retired, the only
+    // required boundary here is interrupt sampling. Check the already-synced
+    // COP0 state in native code and keep the resident chain alive when no IRQ
+    // is eligible.
+    code.cmp(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+        0u);
+    code.jne(done);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        0u);
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+    code.test(code.eax, 1u);
+    code.jz(post_delay_irq_clear);
+    code.mov(code.ecx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+    code.and_(code.ecx, code.eax);
+    code.test(code.ecx, 0xFF00u);
+    code.jnz(done);
+    code.L(post_delay_irq_clear);
+    code.jmp(loop);
+
+    code.L(no_scheduler_yield);
+    code.jmp(loop);
+  }
 
   linked_entry = const_cast<u8 *>(code.getCurr());
   code.cmp(code.dword[
@@ -3796,6 +3826,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.store_entries = 0u;
     native.store_phys = 0u;
     native.cop0_sr = cpu_.cop0_sr_;
+    native.cop0_cause = cpu_.cop0_cause_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
     native.next_pc =
