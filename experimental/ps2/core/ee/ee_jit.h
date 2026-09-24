@@ -28,6 +28,7 @@ public:
         const u32* instructions,
         u32 instruction_count,
         u32 maximum_instructions,
+        const u8* ram_data,
         bool& control_flow);
     void clear();
 
@@ -45,6 +46,7 @@ public:
 
 private:
     using Function = void (*)(EeCpuState*);
+    using BlockFunction = u32 (*)(EeCpuState*, const u8*);
     struct Entry {
         u32 instruction = 0;
         Function function = nullptr;
@@ -54,8 +56,9 @@ private:
         u32 pc = 0;
         u32 page_generation = 0;
         u8 instruction_count = 0;
-        Function function = nullptr;
+        BlockFunction function = nullptr;
         bool control_flow = false;
+        bool uses_ram = false;
         bool known = false;
     };
     struct Page {
@@ -64,12 +67,13 @@ private:
     };
 
     Function compile(u32 instruction);
-    Function compile_block(
+    BlockFunction compile_block(
         u32 pc,
         const u32* instructions,
         u32 instruction_count,
         u32& compiled_instructions,
-        bool& control_flow);
+        bool& control_flow,
+        bool& uses_ram);
     std::array<Entry, 4096> entries_{};
     std::vector<BlockEntry> block_entries_{32768};
     std::vector<Page> pages_{};
