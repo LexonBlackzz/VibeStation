@@ -1366,7 +1366,11 @@ int main(int argc, char** argv) {
             break;
         }
         remaining -= ran;
-        if (!audio_only) {
+        // VBlank already refreshes the composed display at the correct
+        // emulated boundary. In threaded profile runs, forcing another full
+        // scanout every 1M EE instructions drains the async raster worker and
+        // measures synchronization overhead instead of emulation throughput.
+        if (!audio_only && !(profile && gs_thread)) {
             const auto display_begin = std::chrono::steady_clock::now();
             system.refresh_display();
             if (profile) {
@@ -1422,17 +1426,27 @@ int main(int argc, char** argv) {
         }
         if (executed >= 200'000'000u &&
             (executed % 10'000'000u) == 0u) {
-            const auto& stats = system.gs_core().stats();
             std::cerr
                 << "TRACE_PROGRESS EE=" << executed
                 << " PC=0x" << std::hex << std::uppercase
                 << system.ee().state().pc
                 << std::dec
-                << " GIF_QWORDS=" << stats.gif_qwords
-                << " IMAGE_QWORDS=" << stats.image_qwords
-                << " PRIMITIVES=" << stats.primitives
-                << " DRAWS=" << stats.raster_draws
-                << " PIXELS=" << stats.raster_pixels
+                << " GIF_QWORDS="
+                << system.gs_core().submitted_gif_qwords()
+                << " PRIMITIVES="
+                << system.gs_core().submitted_primitives();
+            if (gs_thread) {
+                // Worker-owned raster counters are intentionally deferred
+                // until final print_state(), which performs one synchronization.
+                std::cerr << " RASTER_STATS=deferred";
+            } else {
+                const auto& stats = system.gs_core().stats();
+                std::cerr
+                    << " IMAGE_QWORDS=" << stats.image_qwords
+                    << " DRAWS=" << stats.raster_draws
+                    << " PIXELS=" << stats.raster_pixels;
+            }
+            std::cerr
                 << " WALL_MS=" << std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - wall_start).count()
                 << " TRANSFER_REMAINING="
