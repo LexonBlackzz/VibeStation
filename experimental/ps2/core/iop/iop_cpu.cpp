@@ -494,7 +494,7 @@ u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
         !bus_.read32(0x0000AE98u, delay) ||
         branch != 0x08002BA5u || delay != 0u) return 0;
 
-    u64 pairs = std::min<u64>(max_pairs, 4096u);
+    u64 pairs = std::min<u64>(max_pairs, 65536u);
     while (pairs != 0u && !bus_.tick_event_free(pairs * 2u)) {
         pairs >>= 1u;
     }
