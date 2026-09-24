@@ -17,23 +17,9 @@ bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
            width <= kEeMainRamSize - physical;
 }
 
-bool quiet_ee_instruction(
-    const EeCpuState& state,
-    const EeBus& bus,
-    u32& instruction) {
-    // Mapped kernel segments can fault or update TLB exception state while
-    // translating the instruction fetch. Leave those to the exact path.
-    if (state.pc >= 0xC0000000u) return false;
-
-    instruction = 0;
-    if (!bus.fetch32(state.pc, instruction)) return false;
+bool quiet_ee_static_instruction(u32 instruction) {
     if (instruction == 0u) return true;
-
     const u32 opcode = instruction >> 26;
-    const u32 rs = (instruction >> 21) & 31u;
-
-    // Register/control-flow/FPU/MMI instructions below cannot start DMA,
-    // touch GS/VU micro execution, or access MMIO in the current core.
     switch (opcode) {
     case 0x00u: // SPECIAL
     case 0x01u: // REGIMM
@@ -58,9 +44,120 @@ bool quiet_ee_instruction(
     case 0x17u: // BGTZL
     case 0x18u: // DADDI
     case 0x19u: // DADDIU
+    case 0x1Au: // LDL
+    case 0x1Bu: // LDR
     case 0x1Cu: // MMI
-    case 0x2Fu: // CACHE (currently no-op)
-    case 0x33u: // PREF (currently no-op)
+    case 0x1Eu: // LQ
+    case 0x1Fu: // SQ
+    case 0x20u: // LB
+    case 0x21u: // LH
+    case 0x22u: // LWL
+    case 0x23u: // LW
+    case 0x24u: // LBU
+    case 0x25u: // LHU
+    case 0x26u: // LWR
+    case 0x27u: // LWU
+    case 0x28u: // SB
+    case 0x29u: // SH
+    case 0x2Au: // SWL
+    case 0x2Bu: // SW
+    case 0x2Cu: // SDL
+    case 0x2Du: // SDR
+    case 0x2Eu: // SWR
+    case 0x2Fu: // CACHE
+    case 0x30u: // LL
+    case 0x31u: // LWC1
+    case 0x33u: // PREF
+    case 0x34u: // LLD
+    case 0x36u: // LQC2
+    case 0x37u: // LD
+    case 0x38u: // SC
+    case 0x39u: // SWC1
+    case 0x3Cu: // SCD
+    case 0x3Eu: // SQC2
+    case 0x3Fu: // SD
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool quiet_ee_control_flow(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    if (opcode == 0x01u ||
+        (opcode >= 0x02u && opcode <= 0x07u) ||
+        (opcode >= 0x14u && opcode <= 0x17u)) {
+        return true;
+    }
+    if (opcode == 0x00u) {
+        const u32 funct = instruction & 63u;
+        return funct == 0x08u || funct == 0x09u ||
+               funct == 0x0Cu || funct == 0x0Du;
+    }
+    if (opcode == 0x11u) {
+        return ((instruction >> 21) & 31u) == 0x08u;
+    }
+    return false;
+}
+
+bool quiet_ee_store(u32 instruction) {
+    switch (instruction >> 26) {
+    case 0x1Fu: // SQ
+    case 0x28u: // SB
+    case 0x29u: // SH
+    case 0x2Au: // SWL
+    case 0x2Bu: // SW
+    case 0x2Cu: // SDL
+    case 0x2Du: // SDR
+    case 0x2Eu: // SWR
+    case 0x38u: // SC
+    case 0x39u: // SWC1
+    case 0x3Cu: // SCD
+    case 0x3Eu: // SQC2
+    case 0x3Fu: // SD
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool quiet_ee_instruction_value(
+    const EeCpuState& state,
+    u32 instruction) {
+    if (!quiet_ee_static_instruction(instruction)) return false;
+    if (instruction == 0u) return true;
+
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+
+    // Register/control-flow/FPU/MMI operations have no EE MMIO side effects.
+    switch (opcode) {
+    case 0x00u:
+    case 0x01u:
+    case 0x02u:
+    case 0x03u:
+    case 0x04u:
+    case 0x05u:
+    case 0x06u:
+    case 0x07u:
+    case 0x08u:
+    case 0x09u:
+    case 0x0Au:
+    case 0x0Bu:
+    case 0x0Cu:
+    case 0x0Du:
+    case 0x0Eu:
+    case 0x0Fu:
+    case 0x11u:
+    case 0x14u:
+    case 0x15u:
+    case 0x16u:
+    case 0x17u:
+    case 0x18u:
+    case 0x19u:
+    case 0x1Cu:
+    case 0x2Fu:
+    case 0x33u:
         return true;
     default:
         break;
@@ -70,49 +167,56 @@ bool quiet_ee_instruction(
     const u32 address = static_cast<u32>(
         state.gpr[rs].lo + static_cast<u64>(static_cast<s64>(immediate)));
 
-    // RAM-only memory operations are also quiet. The next instruction is
-    // reclassified after every retirement, so self-modifying RAM code stays
-    // correct and an MMIO access immediately falls back to step_ee_core().
     switch (opcode) {
-    case 0x20u: // LB
-    case 0x24u: // LBU
-    case 0x28u: // SB
+    case 0x20u:
+    case 0x24u:
+    case 0x28u:
         return quiet_ram_span(address, 1u);
-    case 0x21u: // LH
-    case 0x25u: // LHU
-    case 0x29u: // SH
+    case 0x21u:
+    case 0x25u:
+    case 0x29u:
         return quiet_ram_span(address, 2u);
-    case 0x22u: // LWL
-    case 0x26u: // LWR
-    case 0x2Au: // SWL
-    case 0x2Eu: // SWR
+    case 0x22u:
+    case 0x26u:
+    case 0x2Au:
+    case 0x2Eu:
         return quiet_ram_span(address, 4u, 3u);
-    case 0x23u: // LW
-    case 0x27u: // LWU
-    case 0x2Bu: // SW
-    case 0x30u: // LL
-    case 0x31u: // LWC1
-    case 0x38u: // SC
-    case 0x39u: // SWC1
+    case 0x23u:
+    case 0x27u:
+    case 0x2Bu:
+    case 0x30u:
+    case 0x31u:
+    case 0x38u:
+    case 0x39u:
         return quiet_ram_span(address, 4u);
-    case 0x1Au: // LDL
-    case 0x1Bu: // LDR
-    case 0x2Cu: // SDL
-    case 0x2Du: // SDR
+    case 0x1Au:
+    case 0x1Bu:
+    case 0x2Cu:
+    case 0x2Du:
         return quiet_ram_span(address, 8u, 7u);
-    case 0x34u: // LLD
-    case 0x37u: // LD
-    case 0x3Cu: // SCD
-    case 0x3Fu: // SD
+    case 0x34u:
+    case 0x37u:
+    case 0x3Cu:
+    case 0x3Fu:
         return quiet_ram_span(address, 8u);
-    case 0x1Eu: // LQ
-    case 0x1Fu: // SQ
-    case 0x36u: // LQC2
-    case 0x3Eu: // SQC2
+    case 0x1Eu:
+    case 0x1Fu:
+    case 0x36u:
+    case 0x3Eu:
         return quiet_ram_span(address, 16u, 15u);
     default:
         return false;
     }
+}
+
+bool quiet_ee_instruction(
+    const EeCpuState& state,
+    const EeBus& bus,
+    u32& instruction) {
+    if (state.pc >= 0xC0000000u) return false;
+    instruction = 0;
+    return bus.fetch32(state.pc, instruction) &&
+           quiet_ee_instruction_value(state, instruction);
 }
 }
 Ps2System::Ps2System():cdvd_(iop_intc_,bios_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu0_(bus_,gs_core_,0x11000000u,0x11004000u,0x0FFFu,0x100038D0u,0x100038E0u,false),vu1_(bus_,gs_core_),ee_(bus_,&vu0_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif0_dma_.attach_vu0(vu0_);vif0_dma_.attach_ee(ee_);vif1_dma_.attach_vu1(vu1_);reset();}
