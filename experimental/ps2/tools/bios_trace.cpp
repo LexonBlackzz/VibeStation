@@ -1546,6 +1546,14 @@ int main(int argc, char** argv) {
               << system.quiet_superbatch_calls()
               << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
               << system.quiet_superbatch_instructions() << '\n';
+    std::cout << "EE_QUIET_HOT_BLOCKS";
+    for (const auto& [pc, hits] : system.quiet_block_hotspots(32u)) {
+        std::cout
+            << " PC_0x" << std::hex << std::uppercase << pc
+            << std::dec << "=" << hits;
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
