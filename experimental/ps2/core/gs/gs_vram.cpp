@@ -283,6 +283,12 @@ bool GsVram::write_pixel(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_color_psm(psm)) return false;
     ++generation_;
+    return write_pixel_untracked(psm, x, y, bp, bw, value);
+}
+
+bool GsVram::write_pixel_untracked(
+    u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
+    if (!supported_color_psm(psm)) return false;
 
     const u32 a = pixel_address_bytes(psm, x, y, bp, bw);
     if (psm == 0u) {
@@ -325,6 +331,12 @@ bool GsVram::write_depth(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_depth_psm(psm)) return false;
     ++generation_;
+    return write_depth_untracked(psm, x, y, bp, bw, value);
+}
+
+bool GsVram::write_depth_untracked(
+    u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
+    if (!supported_depth_psm(psm)) return false;
     const u32 a = depth_address_bytes(psm, x, y, bp, bw);
 
     if (psm == 48u) {
