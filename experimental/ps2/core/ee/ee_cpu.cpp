@@ -3462,6 +3462,127 @@ u32 EeCpu::run_quiet_fast_prefix(
                 rt,
                 gpr_u64(rs) +
                     static_cast<u64>(static_cast<s64>(imm)));
+        } else if (
+            opcode == 0x1Eu ||
+            opcode == 0x20u || opcode == 0x21u ||
+            opcode == 0x23u || opcode == 0x24u ||
+            opcode == 0x25u || opcode == 0x27u ||
+            opcode == 0x30u || opcode == 0x31u ||
+            opcode == 0x34u || opcode == 0x36u ||
+            opcode == 0x37u) {
+            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+            const u32 address = static_cast<u32>(
+                gpr_u64(rs) +
+                static_cast<u64>(static_cast<s64>(imm)));
+            const u32 aligned =
+                (opcode == 0x1Eu || opcode == 0x36u)
+                    ? (address & ~0x0Fu)
+                    : address;
+            const u32 width =
+                (opcode == 0x20u || opcode == 0x24u) ? 1u :
+                (opcode == 0x21u || opcode == 0x25u) ? 2u :
+                (opcode == 0x23u || opcode == 0x27u ||
+                 opcode == 0x30u || opcode == 0x31u) ? 4u :
+                (opcode == 0x34u || opcode == 0x37u) ? 8u :
+                16u;
+            const u32 physical = EeBus::to_physical(aligned);
+            if (address >= 0xC0000000u ||
+                physical >= kMainRamSize ||
+                width > kMainRamSize - physical) {
+                handled = false;
+            } else {
+                bool access_ok = true;
+                switch (opcode) {
+                case 0x1Eu: { // LQ
+                    u64 lo = 0;
+                    u64 hi = 0;
+                    access_ok =
+                        bus_.read64(aligned, lo) &&
+                        bus_.read64(aligned + 8u, hi);
+                    if (access_ok && rt != 0u) {
+                        state_.gpr[rt].lo = lo;
+                        state_.gpr[rt].hi = hi;
+                    }
+                    break;
+                }
+                case 0x20u: { // LB
+                    u8 value = 0;
+                    access_ok = bus_.read8(address, value);
+                    if (access_ok) {
+                        write_gpr64(
+                            rt,
+                            static_cast<u64>(static_cast<s64>(
+                                static_cast<s8>(value))));
+                    }
+                    break;
+                }
+                case 0x21u: { // LH
+                    u16 value = 0;
+                    access_ok = bus_.read16(address, value);
+                    if (access_ok) {
+                        write_gpr64(
+                            rt,
+                            static_cast<u64>(static_cast<s64>(
+                                static_cast<s16>(value))));
+                    }
+                    break;
+                }
+                case 0x23u:
+                case 0x30u: { // LW / LL
+                    u32 value = 0;
+                    access_ok = bus_.read32(address, value);
+                    if (access_ok) write_gpr_word(rt, value);
+                    break;
+                }
+                case 0x24u: { // LBU
+                    u8 value = 0;
+                    access_ok = bus_.read8(address, value);
+                    if (access_ok) write_gpr64(rt, value);
+                    break;
+                }
+                case 0x25u: { // LHU
+                    u16 value = 0;
+                    access_ok = bus_.read16(address, value);
+                    if (access_ok) write_gpr64(rt, value);
+                    break;
+                }
+                case 0x27u: { // LWU
+                    u32 value = 0;
+                    access_ok = bus_.read32(address, value);
+                    if (access_ok) write_gpr64(rt, value);
+                    break;
+                }
+                case 0x31u: { // LWC1
+                    u32 value = 0;
+                    access_ok = bus_.read32(address, value);
+                    if (access_ok) state_.fpr[rt] = value;
+                    break;
+                }
+                case 0x34u:
+                case 0x37u: { // LLD / LD
+                    u64 value = 0;
+                    access_ok = bus_.read64(address, value);
+                    if (access_ok) write_gpr64(rt, value);
+                    break;
+                }
+                case 0x36u: { // LQC2
+                    u64 lo = 0;
+                    u64 hi = 0;
+                    access_ok =
+                        bus_.read64(aligned, lo) &&
+                        bus_.read64(aligned + 8u, hi);
+                    if (access_ok && rt != 0u) {
+                        state_.vu_vf[rt].lo = lo;
+                        state_.vu_vf[rt].hi = hi;
+                    }
+                    break;
+                }
+                default:
+                    access_ok = false;
+                    break;
+                }
+                if (!access_ok) handled = false;
+            }
         } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
         } else if (opcode == 0x01u) {
