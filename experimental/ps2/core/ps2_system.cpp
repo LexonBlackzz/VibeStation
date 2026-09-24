@@ -84,8 +84,13 @@ bool quiet_ee_static_instruction(u32 instruction) {
 
 bool quiet_ee_control_flow(u32 instruction) {
     const u32 opcode = instruction >> 26;
-    if (opcode == 0x01u ||
-        (opcode >= 0x02u && opcode <= 0x07u) ||
+    if (opcode == 0x01u) {
+        const u32 rt = (instruction >> 16) & 31u;
+        if (rt <= 0x03u || (rt >= 0x10u && rt <= 0x13u)) {
+            return true;
+        }
+    }
+    if ((opcode >= 0x02u && opcode <= 0x07u) ||
         (opcode >= 0x14u && opcode <= 0x17u)) {
         return true;
     }
