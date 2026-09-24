@@ -531,6 +531,9 @@ public:
   const u8 *jit_main_ram_data() const { return ram_.data(); }
   u8 *jit_main_ram_data_mut() { return ram_.data(); }
   u8 *jit_scratchpad_data_mut() { return ram_.scratch_data(); }
+  // Narrow reduced bridge used by the experimental recompiler for hot
+  // side-effect-compatible 16-bit timer/IRQ reads.
+  u32 jit_read16_hot_mmio(u32 phys);
   u32 jit_mapped_main_ram_size() const {
     const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
     return (memory_window == 5u || memory_window == 7u)
@@ -621,9 +624,24 @@ public:
   void debug_log_last_ram_word_write(u32 addr,
                                      const char *log_prefix = "BUS") const;
 
+  struct SnapshotComponentHashes {
+    u64 cpu = 0;
+    u64 ram = 0;
+    u64 gpu = 0;
+    u64 irq = 0;
+    u64 timers = 0;
+    u64 dma = 0;
+    u64 sio = 0;
+    u64 cdrom = 0;
+    u64 spu = 0;
+    u64 mdec = 0;
+    u64 system = 0;
+  };
+
   // State save/restore for rewind
   bool save_state(SystemSnapshot &out);
   bool restore_state(const SystemSnapshot &snap);
+  bool debug_snapshot_component_hashes(SnapshotComponentHashes &out) const;
 
   // Public component access
   Gpu &gpu() { return gpu_; }

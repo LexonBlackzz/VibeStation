@@ -138,6 +138,10 @@ struct CpuCompareCase {
   u32 initial_cop0_sr_bits = 0;
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
+  u32 initial_next_pc = 0;
+  bool initial_pending_delay_slot = false;
+  bool initial_pending_branch_taken = false;
+  u32 initial_pending_branch_pc = 0;
   bool request_irq_on_branch = false;
   u32 instructions = 0;
   bool expect_final_control_state = false;
@@ -158,10 +162,14 @@ struct CpuCompareCase {
   bool require_v4_load_tail_block_when_available = false;
   bool require_v4_load_branch_fusion_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
+  bool require_v4_pending_delay_native_when_available = false;
+  bool require_v4_hot_mmio16_native_when_available = false;
+  bool require_v4_hilo_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
   bool require_v4_icache_revalidation_when_available = false;
+  bool require_v4_native_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
@@ -183,6 +191,7 @@ struct CpuCompareCase {
   bool enable_reduced_helper_branch_tail_for_x64 = false;
   bool allow_partial_native_memory_helper = false;
   bool compare_segment_states = false;
+  u32 run_slice_cycle_budget = 100000u;
   bool disable_all_native_for_x64 = false;
   bool disable_memory_native_for_x64 = false;
   bool disable_alu_native_for_x64 = false;
@@ -569,7 +578,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
 
   CpuDebugState initial = sys->cpu().debug_state();
   initial.pc = test_case.start_pc;
-  initial.next_pc = test_case.start_pc + 4u;
+  initial.next_pc =
+      test_case.initial_next_pc != 0u ? test_case.initial_next_pc
+                                     : test_case.start_pc + 4u;
   initial.current_pc = 0;
   initial.cycles = 0;
   initial.load_reg = test_case.initial_load_reg;
@@ -577,9 +588,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   initial.next_load_reg = 0;
   initial.next_load_value = 0;
   initial.in_delay_slot = false;
-  initial.pending_delay_slot = false;
-  initial.pending_branch_taken = false;
-  initial.pending_branch_pc = 0;
+  initial.pending_delay_slot = test_case.initial_pending_delay_slot;
+  initial.pending_branch_taken = test_case.initial_pending_branch_taken;
+  initial.pending_branch_pc = test_case.initial_pending_branch_pc;
   initial.active_branch_pc = 0;
   initial.exception_raised = false;
   initial.cop0_sr |= test_case.initial_cop0_sr_bits;
@@ -651,7 +662,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
       g_cpu_x64_jit_native_memory_cli_value = tiers.memory_native;
       g_cpu_x64_jit_native_alu_cli_value = tiers.alu_native;
     }
-    CpuRunSliceResult segment = sys->cpu().run_slice(100000u, instruction_count);
+    CpuRunSliceResult segment =
+        sys->cpu().run_slice(test_case.run_slice_cycle_budget,
+                             instruction_count);
     out.run.cycles += segment.cycles;
     out.run.instructions += segment.instructions;
     executed += segment.instructions;
@@ -2729,6 +2742,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_irq_delay.native_branch_should_be_taken = true;
   cases.push_back(branch_irq_delay);
 
+  CpuCompareCase pending_delay_irq{};
+  pending_delay_irq.name = "v4_pending_delay_irq_sampling";
+  pending_delay_irq.start_pc = 0xA0010004u;
+  pending_delay_irq.initial_next_pc = 0xA0010040u;
+  pending_delay_irq.initial_pending_delay_slot = true;
+  pending_delay_irq.initial_pending_branch_taken = true;
+  pending_delay_irq.initial_pending_branch_pc = 0xA0010000u;
+  pending_delay_irq.initial_cop0_sr_bits = 1u | (1u << 10);
+  pending_delay_irq.initial_irq_mask = 1u;
+  pending_delay_irq.initial_irq_pending = true;
+  pending_delay_irq.initial_gpr[3] = 0u;
+  pending_delay_irq.program = {
+      enc_i(0x09, 3, 3, 1),
+      0u,
+  };
+  pending_delay_irq.instructions = 2u;
+  // The delay slot must enter native execution, while the interrupt entry
+  // itself is still intentionally handled by the architectural helper.
+  pending_delay_irq.require_v4_native_entry_when_available = true;
+  cases.push_back(pending_delay_irq);
+
   CpuCompareCase branch_mmio_body{};
   branch_mmio_body.name = "native_branch_tail_mmio_body_read_write";
   branch_mmio_body.initial_gpr[1] = 0x1F801070u;
@@ -3576,6 +3610,52 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_cached_icache_revalidation);
 
+  CpuCompareCase v4_native_icache_revalidation{};
+  v4_native_icache_revalidation.name =
+      "v4_native_icache_alias_revalidates_inside_dispatch";
+  v4_native_icache_revalidation.start_pc = 0x80010000u;
+  v4_native_icache_revalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, 0x80011000u),
+      0u,
+  };
+  v4_native_icache_revalidation.memory = {
+      {0x80011000u, enc_i(0x09, 2, 2, 1)},
+      {0x80011004u,
+       enc_j(0x02, v4_native_icache_revalidation.start_pc)},
+      {0x80011008u, 0u},
+  };
+  v4_native_icache_revalidation.instructions = 18u;
+  v4_native_icache_revalidation.require_v4_native_entry_when_available = true;
+  v4_native_icache_revalidation
+      .require_v4_native_icache_revalidation_when_available = true;
+  cases.push_back(v4_native_icache_revalidation);
+
+  CpuCompareCase v4_icache_cycle_budget_boundary{};
+  v4_icache_cycle_budget_boundary.name =
+      "v4_icache_alias_preserves_cycle_budget_boundary";
+  v4_icache_cycle_budget_boundary.start_pc = 0x80010000u;
+  v4_icache_cycle_budget_boundary.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, 0x80011000u),
+      0u,
+  };
+  v4_icache_cycle_budget_boundary.memory = {
+      {0x80011000u, enc_i(0x09, 2, 2, 1)},
+      {0x80011004u,
+       enc_j(0x02, v4_icache_cycle_budget_boundary.start_pc)},
+      {0x80011008u, 0u},
+  };
+  // A then B consume exactly enough work that the next aliased A-line refill
+  // reaches the 20-cycle slice deadline. The interpreter and historical
+  // recompiler still execute one architectural instruction after that refill.
+  // Compare the first run_slice boundary, not only the final converged state.
+  v4_icache_cycle_budget_boundary.instructions = 9u;
+  v4_icache_cycle_budget_boundary.run_slice_cycle_budget = 20u;
+  v4_icache_cycle_budget_boundary.compare_segment_states = true;
+  v4_icache_cycle_budget_boundary.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_icache_cycle_budget_boundary);
+
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
@@ -3639,6 +3719,83 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_beq.require_v4_native_entry_when_available = true;
   v4_uncached_beq.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_beq);
+
+  CpuCompareCase v4_split_scheduler_beq{};
+  v4_split_scheduler_beq.name = "v4_split_scheduler_beq_delay_state";
+  v4_split_scheduler_beq.start_pc = 0xA0010000u;
+  v4_split_scheduler_beq.initial_gpr[1] = 0x1234u;
+  v4_split_scheduler_beq.initial_gpr[2] = 0x1234u;
+  v4_split_scheduler_beq.program = {
+      enc_i(0x04, 1, 2, 2),       // BEQ taken; execute alone in segment 0.
+      enc_i(0x09, 0, 5, 0x0055),  // Delay slot executes in segment 1.
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_split_scheduler_beq.instructions = 2u;
+  v4_split_scheduler_beq.segment_instructions = {1u, 1u};
+  v4_split_scheduler_beq.compare_segment_states = true;
+  v4_split_scheduler_beq.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_beq.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_beq.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_beq);
+
+  CpuCompareCase v4_split_scheduler_store{};
+  v4_split_scheduler_store.name = "v4_split_scheduler_store_delay_native";
+  v4_split_scheduler_store.start_pc = 0xA0010000u;
+  v4_split_scheduler_store.initial_gpr[1] = 1u;
+  v4_split_scheduler_store.initial_gpr[2] = 0x80012200u;
+  v4_split_scheduler_store.initial_gpr[3] = 0x13579BDFu;
+  v4_split_scheduler_store.memory.push_back({0x00012200u, 0u});
+  v4_split_scheduler_store.compare_memory_addresses.push_back(0x00012200u);
+  v4_split_scheduler_store.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x2B, 2, 3, 0),  // SW executes as the pending delay slot.
+      0,
+  };
+  v4_split_scheduler_store.instructions = 2u;
+  v4_split_scheduler_store.segment_instructions = {1u, 1u};
+  v4_split_scheduler_store.compare_segment_states = true;
+  v4_split_scheduler_store.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_store.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_store.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_store);
+
+  CpuCompareCase v4_split_scheduler_addi{};
+  v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
+  v4_split_scheduler_addi.start_pc = 0xA0010000u;
+  v4_split_scheduler_addi.initial_gpr[1] = 1u;
+  v4_split_scheduler_addi.initial_gpr[2] = 40u;
+  v4_split_scheduler_addi.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x08, 2, 2, 2),  // ADDI delay slot, no overflow.
+      0,
+  };
+  v4_split_scheduler_addi.instructions = 2u;
+  v4_split_scheduler_addi.segment_instructions = {1u, 1u};
+  v4_split_scheduler_addi.compare_segment_states = true;
+  v4_split_scheduler_addi.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_addi.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_addi.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_addi);
+
+  CpuCompareCase v4_split_scheduler_addi_overflow{};
+  v4_split_scheduler_addi_overflow.name =
+      "v4_split_scheduler_addi_delay_overflow_fallback";
+  v4_split_scheduler_addi_overflow.start_pc = 0xA0010000u;
+  v4_split_scheduler_addi_overflow.initial_gpr[1] = 1u;
+  v4_split_scheduler_addi_overflow.initial_gpr[2] = 0x7FFFFFFFu;
+  v4_split_scheduler_addi_overflow.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x08, 2, 2, 1),  // ADDI overflows in the delay slot.
+      0,
+  };
+  v4_split_scheduler_addi_overflow.instructions = 2u;
+  v4_split_scheduler_addi_overflow.segment_instructions = {1u, 1u};
+  v4_split_scheduler_addi_overflow.compare_segment_states = true;
+  v4_split_scheduler_addi_overflow.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_addi_overflow
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_split_scheduler_addi_overflow);
 
   CpuCompareCase v4_uncached_bne_not_taken{};
   v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
@@ -3777,6 +3934,46 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_bgez.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_bgez);
 
+  CpuCompareCase v4_uncached_guarded_addi_delay{};
+  v4_uncached_guarded_addi_delay.name =
+      "v4_uncached_native_branch_guarded_addi_delay";
+  v4_uncached_guarded_addi_delay.start_pc = 0xA0010000u;
+  v4_uncached_guarded_addi_delay.initial_gpr[1] = 1u;
+  v4_uncached_guarded_addi_delay.initial_gpr[2] = 40u;
+  v4_uncached_guarded_addi_delay.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken
+      enc_i(0x08, 2, 2, 2), // ADDI r2,r2,2 in the delay slot
+      0,
+  };
+  v4_uncached_guarded_addi_delay.instructions = 2u;
+  v4_uncached_guarded_addi_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_guarded_addi_delay
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_guarded_addi_delay);
+
+  CpuCompareCase v4_uncached_branch_store_delay{};
+  v4_uncached_branch_store_delay.name =
+      "v4_uncached_native_branch_store_delay";
+  v4_uncached_branch_store_delay.start_pc = 0xA0010000u;
+  v4_uncached_branch_store_delay.initial_gpr[1] = 1u;
+  v4_uncached_branch_store_delay.initial_gpr[2] = 0x80012080u;
+  v4_uncached_branch_store_delay.initial_gpr[3] = 0x89ABCDEFu;
+  v4_uncached_branch_store_delay.memory.push_back({0x00012080u, 0u});
+  v4_uncached_branch_store_delay.compare_memory_addresses.push_back(
+      0x00012080u);
+  v4_uncached_branch_store_delay.program = {
+      enc_i(0x04, 1, 1, 1), // BEQ taken
+      enc_i(0x2B, 2, 3, 0), // SW in the delay slot
+      0,
+  };
+  v4_uncached_branch_store_delay.instructions = 2u;
+  v4_uncached_branch_store_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_branch_store_delay
+      .require_v4_native_store_entry_when_available = true;
+  v4_uncached_branch_store_delay
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_branch_store_delay);
+
   CpuCompareCase v4_uncached_delay_exception_fallback{};
   v4_uncached_delay_exception_fallback.name =
       "v4_uncached_branch_delay_overflow_fallback";
@@ -3792,6 +3989,78 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_delay_exception_fallback.require_v4_clean_fallback_when_available =
       true;
   cases.push_back(v4_uncached_delay_exception_fallback);
+
+  CpuCompareCase v4_hot_timer_lhu{};
+  v4_hot_timer_lhu.name = "v4_hot_timer_lhu_native";
+  v4_hot_timer_lhu.start_pc = 0xA0010000u;
+  v4_hot_timer_lhu.initial_gpr[1] = 0x1F801120u;
+  v4_hot_timer_lhu.program = {
+      enc_i(0x25, 1, 2, 0), // LHU timer 1 counter
+      0,                    // retire the load delay
+  };
+  v4_hot_timer_lhu.instructions = 2u;
+  v4_hot_timer_lhu.require_v4_native_entry_when_available = true;
+  v4_hot_timer_lhu.require_v4_native_load_entry_when_available = true;
+  v4_hot_timer_lhu.require_v4_hot_mmio16_native_when_available = true;
+  cases.push_back(v4_hot_timer_lhu);
+
+  CpuCompareCase v4_hot_irq_lhu{};
+  v4_hot_irq_lhu.name = "v4_hot_irq_lhu_native";
+  v4_hot_irq_lhu.start_pc = 0xA0010000u;
+  v4_hot_irq_lhu.initial_gpr[1] = 0x1F801070u;
+  v4_hot_irq_lhu.initial_irq_mask = 1u;
+  v4_hot_irq_lhu.initial_irq_pending = true;
+  v4_hot_irq_lhu.program = {
+      enc_i(0x25, 1, 2, 0), // LHU I_STAT
+      0,                    // retire the load delay
+  };
+  v4_hot_irq_lhu.instructions = 2u;
+  v4_hot_irq_lhu.require_v4_native_entry_when_available = true;
+  v4_hot_irq_lhu.require_v4_native_load_entry_when_available = true;
+  v4_hot_irq_lhu.require_v4_hot_mmio16_native_when_available = true;
+  cases.push_back(v4_hot_irq_lhu);
+
+  CpuCompareCase v4_hilo_transfer{};
+  v4_hilo_transfer.name = "v4_hilo_transfer_native";
+  v4_hilo_transfer.start_pc = 0xA0010000u;
+  v4_hilo_transfer.initial_gpr[1] = 0x12345678u;
+  v4_hilo_transfer.initial_gpr[3] = 0x89ABCDEFu;
+  v4_hilo_transfer.program = {
+      enc_r(1, 0, 0, 0, 0x11), // MTHI r1
+      enc_r(0, 0, 2, 0, 0x10), // MFHI r2
+      enc_r(3, 0, 0, 0, 0x13), // MTLO r3
+      enc_r(0, 0, 4, 0, 0x12), // MFLO r4
+  };
+  v4_hilo_transfer.instructions = 4u;
+  v4_hilo_transfer.require_v4_native_entry_when_available = true;
+  v4_hilo_transfer.require_v4_hilo_native_when_available = true;
+  cases.push_back(v4_hilo_transfer);
+
+  CpuCompareCase v4_mflo_muldiv_stall{};
+  v4_mflo_muldiv_stall.name = "v4_mflo_muldiv_stall";
+  v4_mflo_muldiv_stall.start_pc = 0xA0010000u;
+  v4_mflo_muldiv_stall.initial_gpr[1] = 0x00100000u;
+  v4_mflo_muldiv_stall.initial_gpr[2] = 3u;
+  v4_mflo_muldiv_stall.program = {
+      enc_r(1, 2, 0, 0, 0x18), // MULT r1,r2 (helper establishes scoreboard)
+      enc_r(0, 0, 3, 0, 0x12), // MFLO r3 must honor result-ready stall
+  };
+  v4_mflo_muldiv_stall.instructions = 2u;
+  v4_mflo_muldiv_stall.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_mflo_muldiv_stall);
+
+  CpuCompareCase v4_mfhi_div_stall{};
+  v4_mfhi_div_stall.name = "v4_mfhi_div_stall";
+  v4_mfhi_div_stall.start_pc = 0xA0010000u;
+  v4_mfhi_div_stall.initial_gpr[1] = 100u;
+  v4_mfhi_div_stall.initial_gpr[2] = 7u;
+  v4_mfhi_div_stall.program = {
+      enc_r(1, 2, 0, 0, 0x1A), // DIV r1,r2
+      enc_r(0, 0, 3, 0, 0x10), // MFHI r3 must honor divide latency
+  };
+  v4_mfhi_div_stall.instructions = 2u;
+  v4_mfhi_div_stall.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_mfhi_div_stall);
 
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
@@ -4391,10 +4660,14 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_load_tail_block_when_available ||
            test_case.require_v4_load_branch_fusion_when_available ||
            test_case.require_v4_native_branch_entry_when_available ||
+           test_case.require_v4_pending_delay_native_when_available ||
+           test_case.require_v4_hot_mmio16_native_when_available ||
+           test_case.require_v4_hilo_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
            test_case.require_v4_icache_revalidation_when_available ||
+           test_case.require_v4_native_icache_revalidation_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4435,6 +4708,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool branch_entered =
               !test_case.require_v4_native_branch_entry_when_available ||
               result.stats.native_branch_tail_entries != 0;
+          const bool pending_delay_native =
+              !test_case.require_v4_pending_delay_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
+          const bool hot_mmio16_native =
+              !test_case.require_v4_hot_mmio16_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
+          const bool hilo_native =
+              !test_case.require_v4_hilo_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4455,6 +4737,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                result.stats.block_count == 1u &&
                result.stats.cache_misses != 0u &&
                result.stats.cache_hits != 0u);
+          const bool native_icache_revalidated =
+              !test_case.require_v4_native_icache_revalidation_when_available ||
+              (result.stats.native_blocks_compiled == 2u &&
+               result.stats.native_dispatch_generation_exits == 0u &&
+               result.stats.recompiler_frame_revalidate_successes >= 3u &&
+               result.stats.recompiler_frame_icache_refills >= 3u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
@@ -4477,6 +4765,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_load_branch_not_fused";
           } else if (!branch_entered) {
             native_check = "v4_branch_missing";
+          } else if (!pending_delay_native) {
+            native_check = "v4_pending_delay_helper";
+          } else if (!hot_mmio16_native) {
+            native_check = "v4_hot_mmio16_helper";
+          } else if (!hilo_native) {
+            native_check = "v4_hilo_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4485,6 +4779,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_cached_same_page_recompiled";
           } else if (!icache_revalidated) {
             native_check = "v4_icache_revalidation_missing";
+          } else if (!native_icache_revalidated) {
+            native_check = "v4_native_icache_revalidation_missing";
           } else if (!chain_entered) {
             native_check = "v4_chain_missing";
           } else {
@@ -4494,9 +4790,11 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               native_entered && load_entered && store_entered &&
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
-              branch_entered && folded_branch && page_local_invalidation &&
+              branch_entered && pending_delay_native && hot_mmio16_native &&
+              hilo_native && folded_branch &&
+              page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
-              chain_entered;
+              native_icache_revalidated && chain_entered;
         }
       }
 

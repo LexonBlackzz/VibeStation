@@ -1491,6 +1491,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
 
 struct BenchmarkStateHashes {
   u64 state = 0;
+  System::SnapshotComponentHashes components{};
   u64 cpu_state = 0;
   u64 ram = 0;
   u64 cpu_debug = 0;
@@ -1524,6 +1525,9 @@ static bool capture_benchmark_state_hashes(System &sys,
 
   out.state =
       benchmark_hash_bytes(snapshot.data.data(), snapshot.data.size());
+  if (!sys.debug_snapshot_component_hashes(out.components)) {
+    return false;
+  }
   out.cpu_state = benchmark_hash_bytes(snapshot.data.data() + cpu_offset,
                                        cpu_snapshot.size());
   out.ram = benchmark_hash_bytes(snapshot.data.data() + ram_offset,
@@ -1664,6 +1668,17 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   std::vector<double> core_samples;
   cpu_samples.reserve(static_cast<size_t>(measured_frames));
   core_samples.reserve(static_cast<size_t>(measured_frames));
+  u64 frame_revalidate_attempts = 0u;
+  u64 frame_revalidate_successes = 0u;
+  u64 frame_cache_misses = 0u;
+  u64 frame_icache_refills = 0u;
+  u64 frame_run_slice_calls = 0u;
+  u64 frame_native_dispatches = 0u;
+  u64 frame_direct_links = 0u;
+  u64 frame_missing_exits = 0u;
+  u64 frame_generation_exits = 0u;
+  u64 frame_budget_exits = 0u;
+  u64 frame_bail_exits = 0u;
   const auto wall_start = std::chrono::steady_clock::now();
   for (int frame = 0; frame < measured_frames; ++frame) {
     const int absolute_frame = warmup_frames + frame + 1;
@@ -1671,6 +1686,27 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
         auto_input_buttons_for_frame(absolute_frame));
     sys->run_frame();
     const auto &profile = sys->profiling_stats();
+    if (requested_mode == CpuExecutionMode::Recompiler) {
+      const CpuBackendStats frame_backend = sys->cpu().cpu_backend_stats();
+      frame_revalidate_attempts +=
+          frame_backend.recompiler_frame_revalidate_attempts;
+      frame_revalidate_successes +=
+          frame_backend.recompiler_frame_revalidate_successes;
+      frame_cache_misses += frame_backend.recompiler_frame_cache_misses;
+      frame_icache_refills += frame_backend.recompiler_frame_icache_refills;
+      frame_run_slice_calls += frame_backend.recompiler_frame_run_slice_calls;
+      frame_native_dispatches +=
+          frame_backend.recompiler_frame_native_dispatches;
+      frame_direct_links += frame_backend.recompiler_frame_direct_links;
+      frame_missing_exits +=
+          frame_backend.recompiler_frame_dispatch_missing_exits;
+      frame_generation_exits +=
+          frame_backend.recompiler_frame_dispatch_generation_exits;
+      frame_budget_exits +=
+          frame_backend.recompiler_frame_dispatch_budget_exits;
+      frame_bail_exits +=
+          frame_backend.recompiler_frame_dispatch_bail_exits;
+    }
     cpu_ms += profile.cpu_ms;
     core_ms += profile.total_ms;
     gpu_ms += profile.gpu_ms;
@@ -1752,6 +1788,23 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     std::printf("CPU_BENCHMARK_RESULT status=error reason=state_capture\n");
     return 1;
   }
+  std::printf(
+      "CPU_BENCHMARK_COMPONENT_HASHES "
+      "cpu=%016llX ram=%016llX gpu=%016llX irq=%016llX "
+      "timers=%016llX dma=%016llX sio=%016llX cdrom=%016llX "
+      "spu=%016llX mdec=%016llX system=%016llX\n",
+      static_cast<unsigned long long>(hashes.components.cpu),
+      static_cast<unsigned long long>(hashes.components.ram),
+      static_cast<unsigned long long>(hashes.components.gpu),
+      static_cast<unsigned long long>(hashes.components.irq),
+      static_cast<unsigned long long>(hashes.components.timers),
+      static_cast<unsigned long long>(hashes.components.dma),
+      static_cast<unsigned long long>(hashes.components.sio),
+      static_cast<unsigned long long>(hashes.components.cdrom),
+      static_cast<unsigned long long>(hashes.components.spu),
+      static_cast<unsigned long long>(hashes.components.mdec),
+      static_cast<unsigned long long>(hashes.components.system));
+
   std::sort(cpu_samples.begin(), cpu_samples.end());
   std::sort(core_samples.begin(), core_samples.end());
   const double measured_divisor = static_cast<double>(measured_frames);
@@ -1990,6 +2043,23 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                                               before.native_dispatch_budget_exits)),
         static_cast<unsigned long long>(delta(after.native_dispatch_bail_exits,
                                               before.native_dispatch_bail_exits)));
+    std::printf(
+        "RECOMPILER_FRAME_PROFILE frames=%d revalidate=%llu/%llu "
+        "misses=%llu icache_refills=%llu run_slice=%llu "
+        "native_dispatch=%llu direct_links=%llu exit_missing=%llu "
+        "exit_generation=%llu exit_budget=%llu exit_bail=%llu\n",
+        measured_frames,
+        static_cast<unsigned long long>(frame_revalidate_successes),
+        static_cast<unsigned long long>(frame_revalidate_attempts),
+        static_cast<unsigned long long>(frame_cache_misses),
+        static_cast<unsigned long long>(frame_icache_refills),
+        static_cast<unsigned long long>(frame_run_slice_calls),
+        static_cast<unsigned long long>(frame_native_dispatches),
+        static_cast<unsigned long long>(frame_direct_links),
+        static_cast<unsigned long long>(frame_missing_exits),
+        static_cast<unsigned long long>(frame_generation_exits),
+        static_cast<unsigned long long>(frame_budget_exits),
+        static_cast<unsigned long long>(frame_bail_exits));
     std::array<u32, 64> primary_rank{};
     std::array<u32, 64> special_rank{};
     for (u32 opcode = 0; opcode < 64u; ++opcode) {

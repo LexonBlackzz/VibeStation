@@ -8,6 +8,7 @@ on:
       - integration/recompiler-promotion
       - perf/recompiler-spike-profiling
       - perf/gpu-oscillation-probe
+      - perf/recompiler-execution-flow-1
   workflow_dispatch:
 
 jobs:

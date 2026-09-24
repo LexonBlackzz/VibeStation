@@ -120,7 +120,66 @@ struct BufReader {
   }
 };
 
+u64 snapshot_hash_bytes(const u8 *data, size_t size) {
+  constexpr u64 kOffset = 1469598103934665603ull;
+  constexpr u64 kPrime = 1099511628211ull;
+  u64 hash = kOffset;
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= data[i];
+    hash *= kPrime;
+  }
+  return hash;
+}
+
 } // anonymous namespace
+
+bool System::debug_snapshot_component_hashes(
+    SnapshotComponentHashes &out) const {
+  std::vector<u8> buffer;
+  const auto capture = [&](const auto &component, u64 &hash) {
+    buffer.clear();
+    component.save_state(buffer);
+    hash = snapshot_hash_bytes(buffer.data(), buffer.size());
+  };
+
+  capture(cpu_, out.cpu);
+
+  buffer.clear();
+  buffer.insert(buffer.end(), ram_.data(), ram_.data() + psx::RAM_MAX_SIZE);
+  buffer.insert(buffer.end(), ram_.scratch_data(),
+                ram_.scratch_data() + psx::SCRATCHPAD_SIZE);
+  out.ram = snapshot_hash_bytes(buffer.data(), buffer.size());
+
+  capture(gpu_, out.gpu);
+  capture(irq_, out.irq);
+  capture(timers_, out.timers);
+  capture(dma_, out.dma);
+  capture(sio_, out.sio);
+  capture(cdrom_, out.cdrom);
+  capture(spu_, out.spu);
+  capture(mdec_, out.mdec);
+
+  buffer.clear();
+  BufWriter w{buffer};
+  for (int i = 0; i < 9; ++i) {
+    w.val(mem_ctrl_[i]);
+  }
+  w.val(ram_size_);
+  w.val(cache_ctrl_);
+  w.val(mdec_command_shadow_);
+  w.val(mdec_command_shadow_mask_);
+  w.val(mdec_control_shadow_);
+  w.val(mdec_control_shadow_mask_);
+  w.val(gpu_gp0_shadow_);
+  w.val(gpu_gp0_shadow_mask_);
+  w.val(gpu_gp1_shadow_);
+  w.val(gpu_gp1_shadow_mask_);
+  w.val(post_reg_);
+  w.val(frame_cycles_);
+  w.val(frame_cycle_remainder_);
+  out.system = snapshot_hash_bytes(buffer.data(), buffer.size());
+  return true;
+}
 
 bool System::save_state(SystemSnapshot &out) {
   BufWriter w{out.data};
