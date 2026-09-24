@@ -138,6 +138,8 @@ void Ps2System::reset(u32 entry_point) {
     skipped_iop_idle_pairs_ = 0;
     skipped_bios_literal_iterations_ = 0;
     quiet_ee_batch_instructions_ = 0;
+    quiet_ee_active_iop_instructions_ = 0;
+    quiet_ee_batches_ = 0;
     idle_skip_reasons_.fill(0);
 }
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
@@ -836,6 +838,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     advance_iop_for_ee_cycles(retired, error);
     if (gs_.irq_pending()) hw_.raise_intc(0);
     quiet_ee_batch_instructions_ += retired;
+    if (!iop_halted && !iop_idle) {
+        quiet_ee_active_iop_instructions_ += retired;
+    }
+    ++quiet_ee_batches_;
     return retired;
 }
 
