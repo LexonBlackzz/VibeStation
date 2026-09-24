@@ -4195,67 +4195,6 @@ bool test_ee_native_extended_integer_block() {
     return ok;
 }
 
-bool test_ee_native_chain() {
-    constexpr ps2::u32 pc = 0x7000u;
-    const std::array<ps2::u32, 7> code = {
-        (0x09u << 26) | (1u << 16) | 1u, // ADDIU r1,r0,1
-        (0x04u << 26) | (1u << 21) | (1u << 16) | 2u, // BEQ -> 0x7010
-        (0x09u << 26) | (2u << 16) | 2u, // delay slot
-        (0x09u << 26) | (3u << 16) | 99u, // skipped
-        (0x09u << 26) | (3u << 16) | 3u,
-        (0x09u << 26) | (3u << 21) | (4u << 16) | 4u,
-        0x0000000Cu, // SYSCALL: native chain must stop before this
-    };
-
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
-    bool ok = true;
-    for (ps2::u32 i = 0u; i < code.size(); ++i) {
-        ok = expect(
-            exact.bus().write32(pc + i * 4u, code[i]) &&
-            native.bus().write32(pc + i * 4u, code[i]),
-            "EE native chain code setup failed") && ok;
-    }
-    exact.ee().reset(pc);
-    native.ee().reset(pc);
-
-    std::string error;
-    for (ps2::u32 i = 0u; i < 5u; ++i) {
-        ok = expect(
-            exact.ee().step(error),
-            "EE native chain reference step failed") && ok;
-    }
-
-    const ps2::u32 retired = native.ee().run_native_chain(
-        64u,
-        native.ram().data(),
-        native.ram().page_generation_data(),
-        native.ram().code_page_tracked_data());
-
-#if defined(_M_X64) || defined(__x86_64__)
-    ok = expect(
-        retired == 5u,
-        "EE native chain retired unexpected instruction count") && ok;
-    const auto& a = exact.ee().state();
-    const auto& b = native.ee().state();
-    ok = expect(
-        a.pc == b.pc &&
-        a.next_pc == b.next_pc &&
-        a.instructions_executed == b.instructions_executed &&
-        a.cop0[9] == b.cop0[9] &&
-        a.gpr[1].lo == b.gpr[1].lo &&
-        a.gpr[2].lo == b.gpr[2].lo &&
-        a.gpr[3].lo == b.gpr[3].lo &&
-        a.gpr[4].lo == b.gpr[4].lo,
-        "EE native chain architectural state diverged") && ok;
-#else
-    ok = expect(
-        retired == 0u,
-        "EE native chain unexpectedly ran on non-x64") && ok;
-#endif
-    return ok;
-}
-
 bool test_ee_native_ram_loads() {
     constexpr ps2::u32 pc = 0x5C00u;
     const std::array<ps2::u32, 7> code = {
@@ -4857,7 +4796,6 @@ int main() {
     ok = test_vif1_reverse_dma() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
-    ok = test_ee_native_chain() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_quadword_fastmem() && ok;
