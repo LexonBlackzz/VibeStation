@@ -1,7 +1,6 @@
 #include "core/ee/ee_cpu.h"
 
 #include "core/memory/ee_bus.h"
-#include "core/memory/ee_ram.h"
 #include "core/vu/vu1.h"
 
 #include <algorithm>
@@ -3392,91 +3391,6 @@ u32 EeCpu::run_native_block(
     current_is_delay_slot_ = false;
     next_is_delay_slot_ = false;
     return retired;
-}
-
-u32 EeCpu::run_native_chain(
-    u32 maximum_instructions,
-    const u8* ram_data,
-    u32* page_generations,
-    u8* code_page_tracked) {
-    if (halted_ || next_is_delay_slot_ ||
-        maximum_instructions == 0u ||
-        ram_data == nullptr ||
-        page_generations == nullptr ||
-        code_page_tracked == nullptr) {
-        return 0u;
-    }
-
-    u32 total_retired = 0u;
-    std::array<u32, 32> words{};
-
-    while (total_retired < maximum_instructions &&
-           !halted_ && !next_is_delay_slot_) {
-        const u32 pc = state_.pc;
-        if (pc >= 0xC0000000u) break;
-
-        const u32 physical = EeBus::to_physical(pc);
-        if (physical >= EeRam::kSize) break;
-
-        const u32 page =
-            physical / EeRam::kPageSize;
-        const u32 page_offset =
-            physical & (EeRam::kPageSize - 1u);
-        code_page_tracked[page] = 1u;
-        const u32 generation = page_generations[page];
-
-        const u32 count = std::min<u32>(
-            static_cast<u32>(words.size()),
-            (EeRam::kPageSize - page_offset) / 4u);
-        if (count == 0u) break;
-
-        for (u32 i = 0u; i < count; ++i) {
-            const u32 at = physical + i * 4u;
-            words[i] =
-                static_cast<u32>(ram_data[at + 0u]) |
-                (static_cast<u32>(ram_data[at + 1u]) << 8u) |
-                (static_cast<u32>(ram_data[at + 2u]) << 16u) |
-                (static_cast<u32>(ram_data[at + 3u]) << 24u);
-        }
-
-        bool control_flow = false;
-        const u32 remaining =
-            maximum_instructions - total_retired;
-        const u32 retired = jit_.execute_block(
-            state_,
-            pc,
-            generation,
-            words.data(),
-            count,
-            remaining,
-            ram_data,
-            page_generations,
-            control_flow);
-        if (retired == 0u || retired > remaining) break;
-
-        state_.last_pc = pc + (retired - 1u) * 4u;
-        state_.last_instruction = words[retired - 1u];
-        if (!control_flow) {
-            state_.pc = pc + retired * 4u;
-            state_.next_pc = state_.pc + 4u;
-        }
-        state_.gpr[0] = {};
-        state_.instructions_executed += retired;
-        state_.cop0[9] += retired;
-        if (state_.cop0[9] == state_.cop0[11]) {
-            state_.cop0[13] |= 0x00008000u;
-        }
-        current_is_delay_slot_ = false;
-        next_is_delay_slot_ = false;
-        total_retired += retired;
-
-        // A guarded memory operation can return a strict prefix. The next
-        // lookup will start exactly at the unexecuted instruction; if it is
-        // not native-safe, execute_block returns zero and the system-level
-        // interpreter fallback takes over.
-    }
-
-    return total_retired;
 }
 
 bool EeCpu::step_internal(
