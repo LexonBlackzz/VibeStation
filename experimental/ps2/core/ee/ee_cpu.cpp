@@ -3384,6 +3384,45 @@ u32 EeCpu::run_quiet_fast_prefix(
         // belongs to the no-MMIO/no-exception linear fast subset.
         if (instruction == 0u) {
             // NOP
+        } else if (opcode == 0x02u) { // J
+            state_.next_pc =
+                ((expected_pc + 4u) & 0xF0000000u) |
+                ((instruction & 0x03FFFFFFu) << 2);
+            next_is_delay_slot_ = true;
+        } else if (opcode == 0x03u) { // JAL
+            write_gpr_word(31u, expected_pc + 8u);
+            state_.next_pc =
+                ((expected_pc + 4u) & 0xF0000000u) |
+                ((instruction & 0x03FFFFFFu) << 2);
+            next_is_delay_slot_ = true;
+        } else if (opcode >= 0x04u && opcode <= 0x07u) {
+            bool take = false;
+            switch (opcode) {
+            case 0x04u: take = gpr_u64(rs) == gpr_u64(rt); break;
+            case 0x05u: take = gpr_u64(rs) != gpr_u64(rt); break;
+            case 0x06u: take = gpr_s64(rs) <= 0; break;
+            case 0x07u: take = gpr_s64(rs) > 0; break;
+            default: break;
+            }
+            if (take) state_.next_pc = branch_target(expected_pc, imm);
+            next_is_delay_slot_ = true;
+        } else if (opcode >= 0x14u && opcode <= 0x17u) {
+            bool take = false;
+            switch (opcode) {
+            case 0x14u: take = gpr_u64(rs) == gpr_u64(rt); break;
+            case 0x15u: take = gpr_u64(rs) != gpr_u64(rt); break;
+            case 0x16u: take = gpr_s64(rs) <= 0; break;
+            case 0x17u: take = gpr_s64(rs) > 0; break;
+            default: break;
+            }
+            if (take) {
+                state_.next_pc = branch_target(expected_pc, imm);
+                next_is_delay_slot_ = true;
+            } else {
+                state_.pc = expected_pc + 8u;
+                state_.next_pc = expected_pc + 12u;
+                next_is_delay_slot_ = false;
+            }
         } else if (opcode == 0x09u) {
             write_gpr_word(
                 rt,
@@ -3425,7 +3464,31 @@ u32 EeCpu::run_quiet_fast_prefix(
         } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
         } else if (opcode == 0x01u) {
-            if (rt == 0x18u) { // MTSAB
+            if (rt <= 0x03u || (rt >= 0x10u && rt <= 0x13u)) {
+                const bool less_zero = gpr_s64(rs) < 0;
+                const bool take =
+                    (rt == 0x00u || rt == 0x02u ||
+                     rt == 0x10u || rt == 0x12u)
+                        ? less_zero
+                        : !less_zero;
+                const bool likely = rt == 0x02u || rt == 0x03u ||
+                                    rt == 0x12u || rt == 0x13u;
+                const bool link = rt >= 0x10u && rt <= 0x13u;
+
+                if (link) {
+                    write_gpr_word(31u, expected_pc + 8u);
+                }
+                if (take) {
+                    state_.next_pc = branch_target(expected_pc, imm);
+                    next_is_delay_slot_ = true;
+                } else if (likely) {
+                    state_.pc = expected_pc + 8u;
+                    state_.next_pc = expected_pc + 12u;
+                    next_is_delay_slot_ = false;
+                } else {
+                    next_is_delay_slot_ = true;
+                }
+            } else if (rt == 0x18u) { // MTSAB
                 state_.sa =
                     (static_cast<u32>(gpr_u64(rs)) & 0xFu) ^
                     (static_cast<u32>(imm) & 0xFu);
@@ -3473,6 +3536,17 @@ u32 EeCpu::run_quiet_fast_prefix(
                             static_cast<u32>(gpr_u64(rt))) >>
                         (static_cast<u32>(gpr_u64(rs)) & 31u)));
                 break;
+            case 0x08u: // JR
+                state_.next_pc = static_cast<u32>(gpr_u64(rs));
+                next_is_delay_slot_ = true;
+                break;
+            case 0x09u: { // JALR
+                const u32 target = static_cast<u32>(gpr_u64(rs));
+                write_gpr_word(rd, expected_pc + 8u);
+                state_.next_pc = target;
+                next_is_delay_slot_ = true;
+                break;
+            }
             case 0x0Au:
                 if (gpr_u64(rt) == 0u) write_gpr64(rd, gpr_u64(rs));
                 break;
@@ -3588,11 +3662,17 @@ u32 EeCpu::run_quiet_fast_prefix(
         if (!handled) break;
 
         current_is_delay_slot_ = was_delay_slot;
-        next_is_delay_slot_ = false;
         state_.last_pc = expected_pc;
         state_.last_instruction = instruction;
-        state_.pc = old_next_pc;
-        state_.next_pc = old_next_pc + 4u;
+
+        const bool redirected_pc =
+            state_.pc != expected_pc;
+        if (!redirected_pc) {
+            state_.pc = old_next_pc;
+            if (!next_is_delay_slot_) {
+                state_.next_pc = old_next_pc + 4u;
+            }
+        }
         state_.gpr[0] = {};
         ++state_.instructions_executed;
         ++state_.cop0[9];
