@@ -164,6 +164,7 @@ struct CpuCompareCase {
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_pending_delay_native_when_available = false;
   bool require_v4_hot_mmio16_native_when_available = false;
+  bool require_v4_hilo_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -3969,6 +3970,48 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_hot_irq_lhu.require_v4_hot_mmio16_native_when_available = true;
   cases.push_back(v4_hot_irq_lhu);
 
+  CpuCompareCase v4_hilo_transfer{};
+  v4_hilo_transfer.name = "v4_hilo_transfer_native";
+  v4_hilo_transfer.start_pc = 0xA0010000u;
+  v4_hilo_transfer.initial_gpr[1] = 0x12345678u;
+  v4_hilo_transfer.initial_gpr[3] = 0x89ABCDEFu;
+  v4_hilo_transfer.program = {
+      enc_r(1, 0, 0, 0, 0x11), // MTHI r1
+      enc_r(0, 0, 2, 0, 0x10), // MFHI r2
+      enc_r(3, 0, 0, 0, 0x13), // MTLO r3
+      enc_r(0, 0, 4, 0, 0x12), // MFLO r4
+  };
+  v4_hilo_transfer.instructions = 4u;
+  v4_hilo_transfer.require_v4_native_entry_when_available = true;
+  v4_hilo_transfer.require_v4_hilo_native_when_available = true;
+  cases.push_back(v4_hilo_transfer);
+
+  CpuCompareCase v4_mflo_muldiv_stall{};
+  v4_mflo_muldiv_stall.name = "v4_mflo_muldiv_stall";
+  v4_mflo_muldiv_stall.start_pc = 0xA0010000u;
+  v4_mflo_muldiv_stall.initial_gpr[1] = 0x00100000u;
+  v4_mflo_muldiv_stall.initial_gpr[2] = 3u;
+  v4_mflo_muldiv_stall.program = {
+      enc_r(1, 2, 0, 0, 0x18), // MULT r1,r2 (helper establishes scoreboard)
+      enc_r(0, 0, 3, 0, 0x12), // MFLO r3 must honor result-ready stall
+  };
+  v4_mflo_muldiv_stall.instructions = 2u;
+  v4_mflo_muldiv_stall.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_mflo_muldiv_stall);
+
+  CpuCompareCase v4_mfhi_div_stall{};
+  v4_mfhi_div_stall.name = "v4_mfhi_div_stall";
+  v4_mfhi_div_stall.start_pc = 0xA0010000u;
+  v4_mfhi_div_stall.initial_gpr[1] = 100u;
+  v4_mfhi_div_stall.initial_gpr[2] = 7u;
+  v4_mfhi_div_stall.program = {
+      enc_r(1, 2, 0, 0, 0x1A), // DIV r1,r2
+      enc_r(0, 0, 3, 0, 0x10), // MFHI r3 must honor divide latency
+  };
+  v4_mfhi_div_stall.instructions = 2u;
+  v4_mfhi_div_stall.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_mfhi_div_stall);
+
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
       "v4_uncached_native_incoming_load_delay";
@@ -4569,6 +4612,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_pending_delay_native_when_available ||
            test_case.require_v4_hot_mmio16_native_when_available ||
+           test_case.require_v4_hilo_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4619,6 +4663,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool hot_mmio16_native =
               !test_case.require_v4_hot_mmio16_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
+          const bool hilo_native =
+              !test_case.require_v4_hilo_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4665,6 +4712,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_pending_delay_helper";
           } else if (!hot_mmio16_native) {
             native_check = "v4_hot_mmio16_helper";
+          } else if (!hilo_native) {
+            native_check = "v4_hilo_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4683,7 +4732,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              folded_branch &&
+              hilo_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               chain_entered;
