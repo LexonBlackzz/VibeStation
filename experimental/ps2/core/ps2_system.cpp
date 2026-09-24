@@ -17,12 +17,15 @@ bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
            width <= kEeMainRamSize - physical;
 }
 
-bool quiet_ee_instruction(const EeCpuState& state, const EeBus& bus) {
+bool quiet_ee_instruction(
+    const EeCpuState& state,
+    const EeBus& bus,
+    u32& instruction) {
     // Mapped kernel segments can fault or update TLB exception state while
     // translating the instruction fetch. Leave those to the exact path.
     if (state.pc >= 0xC0000000u) return false;
 
-    u32 instruction = 0;
+    instruction = 0;
     if (!bus.fetch32(state.pc, instruction)) return false;
     if (instruction == 0u) return true;
 
@@ -725,13 +728,23 @@ u64 Ps2System::try_run_quiet_ee_batch(
     }
 
     const bool iop_halted = iop_.halted();
-    if (!iop_halted && !iop_.in_osdsys_idle_loop()) return 0;
+    const bool iop_idle =
+        !iop_halted && iop_.in_osdsys_idle_loop();
 
     const u64 video_room = video_timing_.cycles_to_transition();
     if (video_room <= 1u) return 0;
 
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
+
+    // Preserve the current 8:1 EE/IOP interleave exactly while the IOP is
+    // doing real work. We may batch several EE instructions, but never cross
+    // the point where the next IOP instruction is due.
+    if (!iop_halted && !iop_idle) {
+        const u64 until_iop_step =
+            ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
+        maximum = std::min<u64>(maximum, until_iop_step);
+    }
 
     // If EE timer IRQs are possible, retain EeCpu::step's instruction-exact
     // hardware tick/IRQ polling while still batching the much larger system
@@ -749,7 +762,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
     // The IOP idle pair has no architectural side effects, but its timers,
     // SPU2 cadence and DMA IRQ countdown still matter. Only defer the pair
     // when the complete interval is event-free.
-    if (!iop_halted) {
+    if (iop_idle) {
         while (maximum > 1u) {
             const u64 iop_steps = (ee_iop_phase_ + maximum) / 8u;
             if (iop_steps == 0u ||
@@ -762,10 +775,13 @@ u64 Ps2System::try_run_quiet_ee_batch(
     if (maximum < 2u) return 0;
 
     u64 retired = 0;
-    while (retired < maximum && !ee_.halted() &&
-           quiet_ee_instruction(ee_.state(), bus_)) {
+    while (retired < maximum && !ee_.halted()) {
+        u32 instruction = 0;
+        if (!quiet_ee_instruction(ee_.state(), bus_, instruction)) {
+            break;
+        }
         const bool ok = defer_ee_tick
-            ? ee_.step_quiet(error)
+            ? ee_.step_quiet_predecoded(instruction, error)
             : ee_.step(error);
         if (!ok) break;
         ++retired;
