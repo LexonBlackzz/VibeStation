@@ -1062,6 +1062,135 @@ V4NativeFn compile_v4_branch(
 }
 
 
+bool v4_nonlink_conditional(const V4DecodedControl &control) {
+  switch (control.op) {
+  case V4ControlOp::Beq:
+  case V4ControlOp::Bne:
+  case V4ControlOp::Blez:
+  case V4ControlOp::Bgtz:
+  case V4ControlOp::Bltz:
+  case V4ControlOp::Bgez:
+    return true;
+  default:
+    return false;
+  }
+}
+
+V4NativeFn compile_v4_guarded_delay_branch(
+    V4CodeArena &arena, const V4DecodedControl &control,
+    const V4DecodedOverflowAlu &delay, u32 branch_pc,
+    const V4LinkTargets &links, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label bail, not_taken, selected;
+
+  // A branch retires the incoming delayed load before its delay-slot
+  // instruction observes registers. Rather than materializing that state on a
+  // guarded bailout, keep this first implementation conservative and let the
+  // precise helper path handle branch entries with a pending load.
+  code.cmp(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+      0u);
+  code.jne(bail);
+
+  // Capture the branch condition before executing the delay slot.
+  if (control.op == V4ControlOp::Beq ||
+      control.op == V4ControlOp::Bne) {
+    emit_read_guest(code, code.eax, control.rs);
+    emit_read_guest(code, code.ecx, control.rt);
+    code.cmp(code.eax, code.ecx);
+    if (control.op == V4ControlOp::Beq) {
+      code.sete(code.dl);
+    } else {
+      code.setne(code.dl);
+    }
+    code.movzx(code.edx, code.dl);
+  } else {
+    emit_read_guest(code, code.eax, control.rs);
+    code.cmp(code.eax, 0);
+    switch (control.op) {
+    case V4ControlOp::Blez: code.setle(code.dl); break;
+    case V4ControlOp::Bgtz: code.setg(code.dl); break;
+    case V4ControlOp::Bltz: code.setl(code.dl); break;
+    case V4ControlOp::Bgez: code.setge(code.dl); break;
+    default: code.jmp(bail); break;
+    }
+    code.movzx(code.edx, code.dl);
+  }
+
+  // Guard the signed delay-slot arithmetic before committing any architectural
+  // state. On actual overflow, the block exits untouched and the existing
+  // helper executes the branch + delay slot with precise EPC/BD semantics.
+  emit_read_guest(code, code.eax, delay.rs);
+  if (delay.op == V4OverflowAluOp::Add) {
+    emit_read_guest(code, code.ecx, delay.rt);
+    code.add(code.eax, code.ecx);
+  } else if (delay.op == V4OverflowAluOp::Sub) {
+    emit_read_guest(code, code.ecx, delay.rt);
+    code.sub(code.eax, code.ecx);
+  } else {
+    code.add(code.eax, static_cast<u32>(delay.simm));
+  }
+  code.jo(bail);
+
+  const u8 delay_dest =
+      delay.op == V4OverflowAluOp::Addi ? delay.rt : delay.rd;
+  emit_write_guest(code, delay_dest, code.eax);
+
+  const u32 fallthrough = branch_pc + 8u;
+  const u32 branch_target =
+      branch_pc + 4u + static_cast<u32>(control.simm * 4);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      branch_pc + 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      branch_pc);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))], 2u);
+  code.sub(code.r12d, 2u);
+
+  code.test(code.edx, code.edx);
+  code.jz(not_taken);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      branch_target);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+  code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
+  code.jmp(selected);
+
+  code.L(not_taken);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], fallthrough);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
+  code.L(selected);
+  emit_v4_selected_link(code, links);
+
+  code.L(bail);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_load(
     V4CodeArena &arena,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &prefix,
@@ -2329,7 +2458,11 @@ struct CpuRecompilerBackend::Impl {
         control_candidate && read_visible(branch_pc + 4u, delay_bits);
     const bool simple_control =
         delay_visible && decode_v4_alu(delay_bits, delay);
-    if (simple_control && control_pair_cross_line) {
+    V4DecodedOverflowAlu guarded_control_delay{};
+    const bool guarded_control =
+        count == 0u && delay_visible && v4_nonlink_conditional(control) &&
+        decode_v4_overflow_alu(delay_bits, guarded_control_delay);
+    if ((simple_control || guarded_control) && control_pair_cross_line) {
       block->second_icache_line = true;
       block->second_icache_index =
           static_cast<u16>(((branch_pc + 4u) >> 4u) & 0xFFu);
@@ -2410,8 +2543,8 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(load_control_bits, load_control) &&
         decode_v4_alu(load_delay_bits, load_delay);
 
-    if (count == 0u && !simple_control && !simple_load && !simple_store &&
-        !simple_overflow_alu) {
+    if (count == 0u && !simple_control && !guarded_control &&
+        !simple_load && !simple_store && !simple_overflow_alu) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -2464,7 +2597,7 @@ struct CpuRecompilerBackend::Impl {
         }
       };
       if (direct_links_enabled) {
-        if (simple_control) {
+        if (simple_control || guarded_control) {
           link_control(control, branch_pc);
         } else if (simple_load && load_has_control) {
           link_control(load_control, load_branch_pc);
@@ -2492,6 +2625,10 @@ struct CpuRecompilerBackend::Impl {
       if (simple_overflow_alu) {
         entry = compile_v4_overflow_alu(
             arena, overflow_alu, start_pc, links, block->code_size);
+      } else if (guarded_control) {
+        entry = compile_v4_guarded_delay_branch(
+            arena, control, guarded_control_delay, branch_pc, links,
+            block->code_size);
       } else if (simple_control) {
         entry = compile_v4_branch(
             arena, decoded, count, control, delay, branch_pc,
@@ -2543,7 +2680,7 @@ struct CpuRecompilerBackend::Impl {
       block->instruction_count =
           simple_overflow_alu
               ? 1u
-              : (simple_control
+              : ((simple_control || guarded_control)
                      ? count + 2u
                      : (simple_load
                             ? count + load_tail_count +
@@ -2555,7 +2692,7 @@ struct CpuRecompilerBackend::Impl {
       block->max_cycles =
           simple_overflow_alu
               ? 1u
-              : (simple_control
+              : ((simple_control || guarded_control)
                      ? count + 3u
                      : (simple_load
                             ? count + load_tail_count +
@@ -2565,7 +2702,8 @@ struct CpuRecompilerBackend::Impl {
                                          (store_has_control ? 6u : 3u)
                                    : count)));
       block->has_control =
-          simple_control || load_has_control || store_has_control;
+          simple_control || guarded_control || load_has_control ||
+          store_has_control;
       block->has_memory = simple_load || simple_store;
     } catch (...) {
       if (!reused_block) {
@@ -2578,7 +2716,7 @@ struct CpuRecompilerBackend::Impl {
     const u32 translated_count =
         simple_overflow_alu
             ? 1u
-            : (simple_control
+            : ((simple_control || guarded_control)
                    ? count + 2u
                    : (simple_load
                           ? count + load_tail_count +
@@ -2603,7 +2741,7 @@ struct CpuRecompilerBackend::Impl {
     ++stats.native_compile_successes;
     ++stats.native_blocks_compiled;
     ++stats.native_compiled_block_size_histogram[block->instruction_count];
-    if (simple_control) {
+    if (simple_control || guarded_control) {
       ++stats.native_branch_tail_blocks_compiled;
     } else if (simple_overflow_alu) {
       ++stats.native_alu_blocks_compiled;
