@@ -992,7 +992,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     block->page_generation,
                     block->words.data(),
                     block->count,
-                    static_cast<u32>(maximum - retired));
+                    static_cast<u32>(maximum - retired),
+                    ram_.data());
                 if (native_retired != 0u) {
                     retired += native_retired;
                     quiet_block_instructions_ += native_retired;
