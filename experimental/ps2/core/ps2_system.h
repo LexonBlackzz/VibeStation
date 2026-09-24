@@ -72,6 +72,10 @@ public:
     u64 skipped_iop_idle_pairs() const { return skipped_iop_idle_pairs_; }
     u64 skipped_bios_literal_iterations() const { return skipped_bios_literal_iterations_; }
     u64 quiet_ee_batch_instructions() const { return quiet_ee_batch_instructions_; }
+    u64 quiet_ee_active_iop_instructions() const {
+        return quiet_ee_active_iop_instructions_;
+    }
+    u64 quiet_ee_batches() const { return quiet_ee_batches_; }
     const std::array<u64, 8>& idle_skip_reasons() const { return idle_skip_reasons_; }
 private:
     bool advance_iop_for_ee_step(std::string& error);
@@ -101,6 +105,8 @@ private:
     u64 skipped_iop_idle_pairs_=0;
     u64 skipped_bios_literal_iterations_=0;
     u64 quiet_ee_batch_instructions_=0;
+    u64 quiet_ee_active_iop_instructions_=0;
+    u64 quiet_ee_batches_=0;
     std::array<u64, 8> idle_skip_reasons_{};
 };
 } // namespace ps2
