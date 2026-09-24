@@ -197,6 +197,22 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                 out.sign_extend_word();
             }
             break;
+        case 0x0Au: // SLTI
+        case 0x0Bu: // SLTIU
+            if (destination != 0u) {
+                out.load_rax(rs, false);
+                out.emit(0x48u);
+                out.emit(0x3Du); // CMP RAX, sign-extended imm32
+                out.emit32(static_cast<u32>(static_cast<s32>(
+                    static_cast<s16>(immediate))));
+                out.emit(0x0Fu);
+                out.emit(opcode == 0x0Au ? 0x9Cu : 0x92u); // SETL / SETB
+                out.emit(0xC0u);
+                out.emit(0x0Fu);
+                out.emit(0xB6u);
+                out.emit(0xC0u); // MOVZX EAX,AL
+            }
+            break;
         case 0x0Cu: // ANDI
         case 0x0Du: // ORI
         case 0x0Eu: // XORI
