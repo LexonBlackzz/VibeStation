@@ -3325,14 +3325,22 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
 }
 
 bool EeCpu::step(std::string& error) {
-    return step_internal(error, false);
+    return step_internal(error, false, nullptr);
 }
 
 bool EeCpu::step_quiet(std::string& error) {
-    return step_internal(error, true);
+    return step_internal(error, true, nullptr);
 }
 
-bool EeCpu::step_internal(std::string& error, bool quiet) {
+bool EeCpu::step_quiet_predecoded(
+    u32 instruction, std::string& error) {
+    return step_internal(error, true, &instruction);
+}
+
+bool EeCpu::step_internal(
+    std::string& error,
+    bool quiet,
+    const u32* prefetched_instruction) {
     error.clear();
 
     if (halted_) {
@@ -3367,28 +3375,32 @@ bool EeCpu::step_internal(std::string& error, bool quiet) {
     }
 
     u32 instruction = 0;
-    u32 fetch_address = 0;
-    if (!translate_address(
-            pc,
-            false,
-            pc,
-            current_is_delay_slot_,
-            fetch_address)) {
-        memory_exception_pending_ = false;
-        ++state_.instructions_executed;
-        ++state_.cop0[9];
-        if (state_.cop0[9] == state_.cop0[11]) {
-            state_.cop0[13] |= 0x00008000u;
+    if (prefetched_instruction != nullptr) {
+        instruction = *prefetched_instruction;
+    } else {
+        u32 fetch_address = 0;
+        if (!translate_address(
+                pc,
+                false,
+                pc,
+                current_is_delay_slot_,
+                fetch_address)) {
+            memory_exception_pending_ = false;
+            ++state_.instructions_executed;
+            ++state_.cop0[9];
+            if (state_.cop0[9] == state_.cop0[11]) {
+                state_.cop0[13] |= 0x00008000u;
+            }
+            if (!quiet) bus_.tick(1);
+            return true;
         }
-        if (!quiet) bus_.tick(1);
-        return true;
-    }
-    if (!bus_.fetch32(fetch_address, instruction)) {
-        return fail(
-            pc,
-            0,
-            "Instruction fetch fault from " + hex32(pc),
-            error);
+        if (!bus_.fetch32(fetch_address, instruction)) {
+            return fail(
+                pc,
+                0,
+                "Instruction fetch fault from " + hex32(pc),
+                error);
+        }
     }
     state_.last_pc = pc;
     state_.last_instruction = instruction;
