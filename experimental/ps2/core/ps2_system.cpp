@@ -974,6 +974,22 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
         if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
             const u32 block_pc = block->pc;
+
+            if (defer_ee_tick) {
+                const u32 native_retired = ee_.run_native_linear_block(
+                    block_pc,
+                    block->page_generation,
+                    block->words.data(),
+                    block->count,
+                    static_cast<u32>(maximum - retired));
+                if (native_retired != 0u) {
+                    retired += native_retired;
+                    quiet_block_instructions_ += native_retired;
+                    progressed = true;
+                    continue;
+                }
+            }
+
             for (u32 i = 0;
                  i < block->count && retired < maximum;
                  ++i) {
