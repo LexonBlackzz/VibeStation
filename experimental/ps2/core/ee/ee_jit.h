@@ -27,7 +27,8 @@ public:
         u32 page_generation,
         const u32* instructions,
         u32 instruction_count,
-        u32 maximum_instructions);
+        u32 maximum_instructions,
+        bool& control_flow);
     void clear();
 
     [[nodiscard]] u64 compiled_count() const { return compiled_count_; }
@@ -54,6 +55,7 @@ private:
         u32 page_generation = 0;
         u8 instruction_count = 0;
         Function function = nullptr;
+        bool control_flow = false;
         bool known = false;
     };
     struct Page {
@@ -63,9 +65,11 @@ private:
 
     Function compile(u32 instruction);
     Function compile_block(
+        u32 pc,
         const u32* instructions,
         u32 instruction_count,
-        u32& compiled_instructions);
+        u32& compiled_instructions,
+        bool& control_flow);
     std::array<Entry, 4096> entries_{};
     std::vector<BlockEntry> block_entries_{4096};
     std::vector<Page> pages_{};
