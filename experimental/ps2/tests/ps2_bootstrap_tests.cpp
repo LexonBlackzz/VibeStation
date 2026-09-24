@@ -4566,6 +4566,92 @@ bool test_ee_native_fpu_and_sc_fastmem() {
     return ok;
 }
 
+bool test_ee_native_regimm() {
+    constexpr ps2::u32 pc = 0x5700u;
+    bool ok = true;
+
+    auto compare_branch = [&](ps2::u32 variant,
+                              ps2::u64 source,
+                              const char* label) {
+        const ps2::u32 code[2] = {
+            (0x01u << 26) | (1u << 21) |
+                (variant << 16) | 2u,
+            (0x09u << 26) | (2u << 16) | 7u,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[1].lo = source;
+        native.ee().state().gpr[1].lo = source;
+
+        std::string error;
+        ok = expect(
+            exact.ee().step_predecoded(code[0], error) &&
+            exact.ee().step_predecoded(code[1], error),
+            label) && ok;
+
+        const ps2::u32 retired = native.ee().run_native_block(
+            pc, 0u, code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+        const auto& a = exact.ee().state();
+        const auto& b = native.ee().state();
+        ok = expect(
+            retired == 2u &&
+            a.pc == b.pc &&
+            a.next_pc == b.next_pc &&
+            a.gpr[2].lo == b.gpr[2].lo &&
+            a.gpr[31].lo == b.gpr[31].lo,
+            label) && ok;
+#else
+        ok = expect(
+            retired == 0u,
+            "EE native REGIMM branch ran on non-x64") && ok;
+#endif
+    };
+
+    compare_branch(
+        0x10u,
+        0xFFFFFFFFFFFFFFFFull,
+        "EE native BLTZAL state diverged");
+    compare_branch(
+        0x01u,
+        0xFFFFFFFFFFFFFFFFull,
+        "EE native BGEZ not-taken state diverged");
+
+    const ps2::u32 sa_code[2] = {
+        (0x01u << 26) | (3u << 21) | (0x18u << 16) | 0x000Bu,
+        (0x01u << 26) | (3u << 21) | (0x19u << 16) | 0x0005u,
+    };
+    ps2::Ps2System exact_sa;
+    ps2::Ps2System native_sa;
+    exact_sa.ee().reset(pc);
+    native_sa.ee().reset(pc);
+    exact_sa.ee().state().gpr[3].lo = 0xAu;
+    native_sa.ee().state().gpr[3].lo = 0xAu;
+
+    std::string error;
+    ok = expect(
+        exact_sa.ee().step_predecoded(sa_code[0], error) &&
+        exact_sa.ee().step_predecoded(sa_code[1], error),
+        "EE REGIMM SA reference failed") && ok;
+    const ps2::u32 sa_retired = native_sa.ee().run_native_block(
+        pc, 0u, sa_code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        sa_retired == 2u &&
+        exact_sa.ee().state().sa == native_sa.ee().state().sa &&
+        exact_sa.ee().state().pc == native_sa.ee().state().pc,
+        "EE native MTSAB/MTSAH state diverged") && ok;
+#else
+    ok = expect(
+        sa_retired == 0u,
+        "EE native SA helpers ran on non-x64") && ok;
+#endif
+
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -4800,6 +4886,7 @@ int main() {
     ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_quadword_fastmem() && ok;
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
+    ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
     ok = test_ee_ram_page_generation() && ok;
