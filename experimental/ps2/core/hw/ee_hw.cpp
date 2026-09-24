@@ -80,6 +80,49 @@ bool EeHw::take_iop_reset_request() {
     return requested;
 }
 
+u64 EeHw::cycles_to_timer_irq() const {
+    const u32 mask = generic_read32(kIntcMask);
+    u64 best = ~u64{0};
+
+    for (u32 i = 0; i < timer_mode_.size(); ++i) {
+        const u8 timer_bit = static_cast<u8>(1u << i);
+        if ((timer_enabled_mask_ & timer_bit) == 0u ||
+            (mask & (1u << (9u + i))) == 0u) {
+            continue;
+        }
+
+        const u32 mode = timer_mode_[i];
+        const u64 rate = timer_rate_cache_[i];
+        const u32 count = timer_count_base_[i] & 0xFFFFu;
+        const u64 phase = timer_phase_[i];
+
+        auto consider_ticks = [&](u64 ticks) {
+            if (ticks == 0u) ticks = 0x10000u;
+            const u64 cycles = ticks * rate - phase;
+            if (cycles < best) best = cycles;
+        };
+
+        if ((mode & (1u << 8)) != 0u &&
+            (mode & (1u << 10)) == 0u) {
+            const u32 comp = timer_comp_[i] & 0xFFFFu;
+            consider_ticks((comp - count) & 0xFFFFu);
+        }
+
+        if ((mode & (1u << 9)) != 0u &&
+            (mode & (1u << 11)) == 0u) {
+            const u32 comp = timer_comp_[i] & 0xFFFFu;
+            const bool zero_return = (mode & (1u << 6)) != 0u;
+            // A nonzero zero-return target prevents the counter from ever
+            // reaching the wrap edge.
+            if (!zero_return || comp == 0u) {
+                consider_ticks(0x10000u - count);
+            }
+        }
+    }
+
+    return best;
+}
+
 void EeHw::tick(u64 cycles) {
     cycles_ += cycles;
 
