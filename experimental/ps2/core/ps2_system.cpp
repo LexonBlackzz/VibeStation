@@ -255,6 +255,7 @@ void Ps2System::reset(u32 entry_point) {
     quiet_block_hits_ = 0;
     quiet_block_compiles_ = 0;
     fast_interpreter_instructions_ = 0;
+    fast_interpreter_calls_ = 0;
     quiet_superbatch_calls_ = 0;
     quiet_superbatch_instructions_ = 0;
     std::fill(
@@ -1127,6 +1128,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     retired += fast_prefix;
                     quiet_block_instructions_ += fast_prefix;
                     fast_interpreter_instructions_ += fast_prefix;
+                    ++fast_interpreter_calls_;
                     progressed = true;
                     // Stores terminate the tight prefix. Re-enter through the
                     // block cache so a self-modifying write observes the new
