@@ -3353,7 +3353,8 @@ u32 EeCpu::run_native_block(
     const u32* instructions,
     u32 instruction_count,
     u32 maximum_instructions,
-    const u8* ram_data) {
+    const u8* ram_data,
+    u32* page_generations) {
     if (halted_ || next_is_delay_slot_ ||
         state_.pc != pc ||
         instructions == nullptr ||
@@ -3371,6 +3372,7 @@ u32 EeCpu::run_native_block(
         instruction_count,
         maximum_instructions,
         ram_data,
+        page_generations,
         control_flow);
     if (retired == 0u) return 0u;
 
