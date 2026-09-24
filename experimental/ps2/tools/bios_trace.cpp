@@ -1517,6 +1517,24 @@ int main(int argc, char** argv) {
               << system.ee().jit().block_guard_bailout_count()
               << " EE_JIT_CACHE_FLUSHES="
               << system.ee().jit().cache_flush_count() << '\n';
+    auto fallback_opcodes = system.native_fallback_opcodes();
+    std::cout << "EE_NATIVE_FALLBACK_TOP";
+    for (u32 rank = 0u; rank < 8u; ++rank) {
+        u32 best_opcode = 0u;
+        u64 best_count = 0u;
+        for (u32 opcode = 0u; opcode < fallback_opcodes.size(); ++opcode) {
+            if (fallback_opcodes[opcode] > best_count) {
+                best_opcode = opcode;
+                best_count = fallback_opcodes[opcode];
+            }
+        }
+        if (best_count == 0u) break;
+        std::cout << " 0x" << std::hex << best_opcode
+                  << std::dec << ':' << best_count;
+        fallback_opcodes[best_opcode] = 0u;
+    }
+    std::cout << '\n';
+
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;
