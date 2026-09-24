@@ -48,13 +48,13 @@ bool g_launcher_intro_complete = false;
 constexpr float kBootLogoBegin = 0.28f;
 constexpr float kBootLogoSettle = 1.26f;
 constexpr float kBootWordmarkBegin = 1.30f;
-constexpr float kBootFadeBegin = 1.96f;
-constexpr float kUiBackgroundBegin = 2.24f;
-constexpr float kUiBackgroundReady = 2.88f;
-constexpr float kUiBrandBegin = 2.54f;
-constexpr float kUiMenuBegin = 2.78f;
-constexpr float kUiPanelsBegin = 3.20f;
-constexpr float kLauncherIntroDuration = 3.82f;
+constexpr float kBootFadeBegin = 2.68f;
+constexpr float kUiBackgroundBegin = 3.00f;
+constexpr float kUiBackgroundReady = 3.64f;
+constexpr float kUiBrandBegin = 3.30f;
+constexpr float kUiMenuBegin = 3.54f;
+constexpr float kUiPanelsBegin = 3.96f;
+constexpr float kLauncherIntroDuration = 4.58f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -672,32 +672,208 @@ void draw_boot_presentation(
             "PS1 EMULATOR");
     }
 
-    // A very brief corruption hiccup after the logo assembles. It is short
-    // enough to feel intentional rather than becoming a full glitch effect.
-    const bool glitch_frame = elapsed >= 1.54f && elapsed < 1.595f;
-    if (glitch_frame) {
+    // Short multi-frame corruption burst. At 60 Hz this spans roughly four
+    // frames; at lower refresh rates it still shows at least a couple of
+    // distinct patterns because the corruption is time-indexed.
+    constexpr float kGlitchStart = 1.66f;
+    constexpr float kGlitchEnd = 1.728f;
+    if (elapsed >= kGlitchStart && elapsed < kGlitchEnd) {
         const float glitch_alpha = boot_fade;
+        const float glitch_time =
+            (elapsed - kGlitchStart) / (kGlitchEnd - kGlitchStart);
+        const int glitch_pattern = std::clamp(
+            static_cast<int>(glitch_time * 4.0f), 0, 3);
+
+        constexpr std::array<float, 4> x_offsets = {
+            -2.0f, 1.0f, -1.0f, 2.0f
+        };
+        constexpr std::array<float, 4> tear_offsets = {
+            -0.010f, 0.006f, -0.003f, 0.012f
+        };
+        constexpr std::array<float, 4> tear_widths = {
+            0.33f, 0.24f, 0.39f, 0.28f
+        };
+
+        const float px = std::max(1.0f, unit / 800.0f);
+        const float channel_shift =
+            x_offsets[static_cast<size_t>(glitch_pattern)] * px;
+
+        // Chromatic channel separation across the full beam/mark graphic.
+        // Red and cyan copies move in opposite directions by only a few pixels.
+        for (size_t i = 0; i < sources.size(); ++i) {
+            const ImVec2 red_source(
+                sources[i].x + channel_shift, sources[i].y);
+            const ImVec2 red_target(
+                targets[i].x + channel_shift, targets[i].y);
+            const ImVec2 blue_source(
+                sources[i].x - channel_shift, sources[i].y);
+            const ImVec2 blue_target(
+                targets[i].x - channel_shift, targets[i].y);
+
+            draw_tapered_beam(
+                overlay,
+                red_source, red_target, 1.0f,
+                source_width, destination_width,
+                rgba(232, 35, 49, glow_alpha(72.0f * glitch_alpha)),
+                rgba(232, 35, 49, glow_alpha(14.0f * glitch_alpha)));
+            draw_tapered_beam(
+                overlay,
+                blue_source, blue_target, 1.0f,
+                source_width, destination_width,
+                rgba(38, 133, 191, glow_alpha(72.0f * glitch_alpha)),
+                rgba(38, 133, 191, glow_alpha(14.0f * glitch_alpha)));
+        }
+
+        // RGB-split the compact assembled mark too.
+        const float arm = unit * 0.065f;
+        const float stroke = std::max(2.0f, unit * 0.006f);
+        for (size_t i = 0; i < sources.size(); ++i) {
+            const float distance = std::max(
+                1.0f,
+                std::sqrt(
+                    (sources[i].x - convergence.x) *
+                        (sources[i].x - convergence.x) +
+                    (sources[i].y - convergence.y) *
+                        (sources[i].y - convergence.y)));
+            const ImVec2 outer = lerp_point(
+                convergence, sources[i], arm / distance);
+
+            overlay->AddLine(
+                ImVec2(convergence.x + channel_shift, convergence.y),
+                ImVec2(outer.x + channel_shift, outer.y),
+                rgba(235, 38, 52, glow_alpha(132.0f * glitch_alpha)),
+                stroke);
+            overlay->AddLine(
+                ImVec2(convergence.x - channel_shift, convergence.y),
+                ImVec2(outer.x - channel_shift, outer.y),
+                rgba(36, 132, 190, glow_alpha(132.0f * glitch_alpha)),
+                stroke);
+        }
+
+        // Wordmark split uses the same pattern so the glitch feels like one
+        // system-wide corruption event rather than a text-only overlay.
         draw_centered_intro_text(
             overlay,
-            ImVec2(convergence.x - unit * 0.006f,
+            ImVec2(
+                convergence.x + channel_shift * 1.6f,
                 convergence.y + unit * 0.145f),
             std::max(20.0f, unit * 0.045f),
-            rgba(194, 44, 56, glow_alpha(135.0f * glitch_alpha)),
+            rgba(232, 35, 49, glow_alpha(138.0f * glitch_alpha)),
             "VibeStation");
         draw_centered_intro_text(
             overlay,
-            ImVec2(convergence.x + unit * 0.006f,
+            ImVec2(
+                convergence.x - channel_shift * 1.6f,
                 convergence.y + unit * 0.145f),
             std::max(20.0f, unit * 0.045f),
-            rgba(52, 128, 157, glow_alpha(135.0f * glitch_alpha)),
+            rgba(38, 133, 191, glow_alpha(138.0f * glitch_alpha)),
             "VibeStation");
 
-        const float tear_y = convergence.y + unit * 0.018f;
+        // Uneven primary tear: broken sections, per-pattern placement, and
+        // red/blue fringing instead of a single flat horizontal bar.
+        const float tear_y =
+            convergence.y +
+            unit * (0.010f +
+                tear_offsets[static_cast<size_t>(glitch_pattern)]);
+        const float tear_extent =
+            size.x * tear_widths[static_cast<size_t>(glitch_pattern)];
+        const float tear_center =
+            convergence.x + channel_shift * 3.0f;
+        const float tear_h =
+            std::max(2.0f, unit * (0.0030f +
+                0.0008f * static_cast<float>(glitch_pattern)));
+
+        const std::array<ImVec2, 3> tear_segments = {
+            ImVec2(-0.50f, -0.19f),
+            ImVec2(-0.12f,  0.15f),
+            ImVec2( 0.23f,  0.50f),
+        };
+
+        for (size_t i = 0; i < tear_segments.size(); ++i) {
+            const float jitter =
+                ((glitch_pattern + static_cast<int>(i)) & 1) ? px * 4.0f : -px * 3.0f;
+            const float x0 =
+                tear_center + tear_extent * tear_segments[i].x + jitter;
+            const float x1 =
+                tear_center + tear_extent * tear_segments[i].y + jitter;
+
+            // Red fringe above, bright broken core, blue fringe below.
+            overlay->AddRectFilled(
+                ImVec2(x0 - px * 2.0f, tear_y - px * 1.5f),
+                ImVec2(x1, tear_y),
+                rgba(230, 38, 52, glow_alpha(128.0f * glitch_alpha)));
+            overlay->AddRectFilled(
+                ImVec2(x0, tear_y),
+                ImVec2(x1, tear_y + tear_h),
+                rgba(236, 241, 246, glow_alpha(108.0f * glitch_alpha)));
+            overlay->AddRectFilled(
+                ImVec2(x0 + px * 2.0f, tear_y + tear_h),
+                ImVec2(x1 + px * 3.0f, tear_y + tear_h + px * 1.4f),
+                rgba(40, 132, 194, glow_alpha(122.0f * glitch_alpha)));
+        }
+
+        // Secondary thinner tear at a different height/length.
+        const float tear2_y =
+            tear_y + unit * (0.032f +
+                0.004f * static_cast<float>(glitch_pattern));
+        const float tear2_x0 =
+            convergence.x - size.x * (0.11f +
+                0.015f * static_cast<float>(glitch_pattern));
+        const float tear2_x1 =
+            convergence.x + size.x * (0.07f +
+                0.012f * static_cast<float>((glitch_pattern + 1) & 3));
         overlay->AddRectFilled(
-            ImVec2(pos.x + size.x * 0.30f, tear_y),
-            ImVec2(pos.x + size.x * 0.71f,
-                tear_y + std::max(2.0f, unit * 0.004f)),
-            rgba(238, 242, 246, glow_alpha(78.0f * glitch_alpha)));
+            ImVec2(tear2_x0, tear2_y),
+            ImVec2(tear2_x1, tear2_y + std::max(1.0f, px)),
+            rgba(218, 224, 231, glow_alpha(78.0f * glitch_alpha)));
+
+        // Simulated content displacement immediately around the primary tear:
+        // clipped chromatic copies of the mark are shifted in opposite
+        // directions above/below the rupture.
+        const float clip_half = std::max(4.0f, unit * 0.012f);
+        overlay->PushClipRect(
+            ImVec2(pos.x, tear_y - clip_half),
+            ImVec2(pos.x + size.x, tear_y),
+            true);
+        for (size_t i = 0; i < sources.size(); ++i) {
+            const float distance = std::max(
+                1.0f,
+                std::sqrt(
+                    (sources[i].x - convergence.x) *
+                        (sources[i].x - convergence.x) +
+                    (sources[i].y - convergence.y) *
+                        (sources[i].y - convergence.y)));
+            const ImVec2 outer = lerp_point(
+                convergence, sources[i], arm / distance);
+            overlay->AddLine(
+                ImVec2(convergence.x + px * 4.0f, convergence.y),
+                ImVec2(outer.x + px * 4.0f, outer.y),
+                rgba(241, 243, 247, glow_alpha(115.0f * glitch_alpha)),
+                stroke);
+        }
+        overlay->PopClipRect();
+
+        overlay->PushClipRect(
+            ImVec2(pos.x, tear_y),
+            ImVec2(pos.x + size.x, tear_y + clip_half),
+            true);
+        for (size_t i = 0; i < sources.size(); ++i) {
+            const float distance = std::max(
+                1.0f,
+                std::sqrt(
+                    (sources[i].x - convergence.x) *
+                        (sources[i].x - convergence.x) +
+                    (sources[i].y - convergence.y) *
+                        (sources[i].y - convergence.y)));
+            const ImVec2 outer = lerp_point(
+                convergence, sources[i], arm / distance);
+            overlay->AddLine(
+                ImVec2(convergence.x - px * 3.0f, convergence.y),
+                ImVec2(outer.x - px * 3.0f, outer.y),
+                rgba(241, 243, 247, glow_alpha(96.0f * glitch_alpha)),
+                stroke);
+        }
+        overlay->PopClipRect();
     }
 
     // Small signs of life prevent the black frame from feeling frozen and
@@ -755,7 +931,7 @@ void draw_ui_initialization_overlay(
 
     // Branding: short downward-to-upward wipe with a very light scan edge.
     const float brand_reveal =
-        timeline_progress(elapsed, kUiBrandBegin, 2.94f);
+        timeline_progress(elapsed, kUiBrandBegin, kUiBrandBegin + 0.56f);
     const ImVec2 brand0 = layout.point(28.0f, 22.0f);
     const ImVec2 brand1 = layout.point(455.0f, 205.0f);
     if (brand_reveal < 1.0f) {
@@ -774,7 +950,8 @@ void draw_ui_initialization_overlay(
 
     // Right-side metadata resolves just after the brand.
     const float meta_reveal =
-        timeline_progress(elapsed, 2.50f, 3.02f);
+        timeline_progress(
+            elapsed, kUiBrandBegin + 0.12f, kUiBrandBegin + 0.64f);
     const ImVec2 meta0 = layout.point(1030.0f, 24.0f);
     const ImVec2 meta1 = layout.point(1248.0f, 116.0f);
     if (meta_reveal < 1.0f) {
