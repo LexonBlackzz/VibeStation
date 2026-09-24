@@ -479,9 +479,17 @@ u64 Ps2System::try_skip_bios_idle_iterations(
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
+    const u16 ready_sif =
+        (active_dma & sif_channels) &
+        iop_bus_.sif_dma_ready_mask();
+    const bool sif0_needs_service =
+        (ready_sif & (1u << 5)) != 0u &&
+        !sif_dma_.sif0_completion_pending();
+    const bool sif1_needs_service =
+        (ready_sif & (1u << 6)) != 0u &&
+        !sif_dma_.sif1_completion_pending();
     if ((active_dma & ~sif_channels) != 0u ||
-        ((active_dma & sif_channels) &
-            iop_bus_.sif_dma_ready_mask()) != 0u) {
+        sif0_needs_service || sif1_needs_service) {
         ++idle_skip_reasons_[2]; return 0;
     }
     if (hw_.timer_irq_possible()) {
@@ -526,10 +534,30 @@ u64 Ps2System::try_skip_bios_idle_iterations(
     if (!iop_.halted() &&
         (iop_pc == 0x0000AE94u || iop_pc == 0x0000AE98u) &&
         !sif_dma_.iop_completion_pending()) {
-        u64 iterations = std::min<u64>(4096u, budget / kIdleInstructions);
-        iterations = std::min<u64>(iterations,
-            (video_timing_.cycles_to_transition() - 1u) /
-                kIdleInstructions);
+        u64 safe_cycles = budget;
+        safe_cycles = std::min<u64>(
+            safe_cycles,
+            video_timing_.cycles_to_transition() - 1u);
+
+        const u32 ee_completion =
+            sif_dma_.ee_completion_cycles();
+        if (ee_completion != 0u) {
+            safe_cycles = std::min<u64>(
+                safe_cycles, ee_completion);
+        }
+
+        const u32 iop_completion =
+            sif_dma_.iop_completion_steps();
+        if (iop_completion != 0u) {
+            const u64 iop_room =
+                static_cast<u64>(iop_completion) * 8u -
+                ee_iop_phase_;
+            safe_cycles = std::min<u64>(
+                safe_cycles, iop_room);
+        }
+
+        u64 iterations = std::min<u64>(
+            4096u, safe_cycles / kIdleInstructions);
         const u32 distance = cpu.cop0[11] - cpu.cop0[9];
         if (distance != 0u) {
             iterations = std::min<u64>(iterations,
@@ -544,6 +572,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
             ee_.skip_bios_idle_iterations(
                 static_cast<u32>(iterations))) {
             const u64 cycles = iterations * kIdleInstructions;
+            sif_dma_.tick_ee_cycles(bus_, cycles);
             scheduler_.run_until(scheduler_.now() + cycles, {});
             video_timing_.tick(cycles, hw_, iop_intc_);
             advance_iop_for_ee_cycles(cycles, error);
@@ -551,11 +580,28 @@ u64 Ps2System::try_skip_bios_idle_iterations(
             return cycles;
         }
     }
+    const u32 ee_completion =
+        sif_dma_.ee_completion_cycles();
+    if (ee_completion != 0u &&
+        ee_completion < kIdleInstructions) {
+        ++idle_skip_reasons_[2]; return 0;
+    }
+    const u32 iop_completion =
+        sif_dma_.iop_completion_steps();
+    if (iop_completion != 0u) {
+        const u64 iop_room =
+            static_cast<u64>(iop_completion) * 8u -
+            ee_iop_phase_;
+        if (iop_room < kIdleInstructions) {
+            ++idle_skip_reasons_[2]; return 0;
+        }
+    }
     if (!ee_.skip_bios_idle_iteration()) {
         ++idle_skip_reasons_[6]; return 0;
     }
     ++skipped_bios_idle_iterations_;
 
+    sif_dma_.tick_ee_cycles(bus_, kIdleInstructions);
     scheduler_.run_until(scheduler_.now() + kIdleInstructions, {});
     video_timing_.tick(kIdleInstructions, hw_, iop_intc_);
     for (u32 i = 0; i < kIdleInstructions; ++i) {
