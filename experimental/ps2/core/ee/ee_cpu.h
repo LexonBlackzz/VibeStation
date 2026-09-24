@@ -71,6 +71,8 @@ public:
     // Same quiet path when the caller already fetched and classified the
     // current instruction. Valid only for direct-mapped instruction fetches.
     bool step_quiet_predecoded(u32 instruction, std::string& error);
+    bool step_quiet_unchecked_predecoded(
+        u32 instruction, std::string& error);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire one verified eight-instruction NOP/branch BIOS idle iteration.
     // The caller is responsible for advancing the other devices by eight
@@ -108,7 +110,8 @@ private:
     bool step_internal(
         std::string& error,
         bool quiet,
-        const u32* prefetched_instruction = nullptr);
+        const u32* prefetched_instruction = nullptr,
+        bool skip_interrupt_check = false);
     bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
