@@ -1376,7 +1376,7 @@ V4NativeFn compile_v4_budget_branch(
     V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
     u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 1024u;
+  constexpr size_t kReservation = 4096u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -2846,9 +2846,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.jne(stale_generation);
 
     code.mov(code.eax, code.ecx);
-    code.add(code.eax, code.dword[
-        code.r14 + static_cast<int>(offsetof(V4Block, start_pc))]);
-    code.shr(code.eax, 2u);
     code.and_(code.eax, 0x03u);
     code.shl(code.eax, 2u);
     code.add(code.edx, code.eax);
