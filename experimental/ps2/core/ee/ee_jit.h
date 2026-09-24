@@ -21,15 +21,38 @@ public:
     EeJit& operator=(const EeJit&) = delete;
 
     bool execute(EeCpuState& state, u32 instruction);
+    u32 execute_block(
+        EeCpuState& state,
+        u32 pc,
+        u32 page_generation,
+        const u32* instructions,
+        u32 instruction_count,
+        u32 maximum_instructions);
     void clear();
 
     [[nodiscard]] u64 compiled_count() const { return compiled_count_; }
     [[nodiscard]] u64 executed_count() const { return executed_count_; }
+    [[nodiscard]] u64 block_compiled_count() const {
+        return block_compiled_count_;
+    }
+    [[nodiscard]] u64 block_executed_count() const {
+        return block_executed_count_;
+    }
+    [[nodiscard]] u64 block_instruction_count() const {
+        return block_instruction_count_;
+    }
 
 private:
     using Function = void (*)(EeCpuState*);
     struct Entry {
         u32 instruction = 0;
+        Function function = nullptr;
+        bool known = false;
+    };
+    struct BlockEntry {
+        u32 pc = 0;
+        u32 page_generation = 0;
+        u8 instruction_count = 0;
         Function function = nullptr;
         bool known = false;
     };
@@ -39,10 +62,18 @@ private:
     };
 
     Function compile(u32 instruction);
+    Function compile_block(
+        const u32* instructions,
+        u32 instruction_count,
+        u32& compiled_instructions);
     std::array<Entry, 4096> entries_{};
+    std::vector<BlockEntry> block_entries_{4096};
     std::vector<Page> pages_{};
     u64 compiled_count_ = 0;
     u64 executed_count_ = 0;
+    u64 block_compiled_count_ = 0;
+    u64 block_executed_count_ = 0;
+    u64 block_instruction_count_ = 0;
 };
 
 } // namespace ps2
