@@ -4619,6 +4619,41 @@ bool test_ee_native_regimm() {
         0xFFFFFFFFFFFFFFFFull,
         "EE native BGEZ not-taken state diverged");
 
+    {
+        const ps2::u32 code[2] = {
+            (0x01u << 26) | (31u << 21) |
+                (0x10u << 16) | 2u,
+            (0x09u << 26) | (2u << 16) | 9u,
+        };
+        ps2::Ps2System exact;
+        ps2::Ps2System native;
+        exact.ee().reset(pc);
+        native.ee().reset(pc);
+        exact.ee().state().gpr[31].lo =
+            0xFFFFFFFFFFFFFFFFull;
+        native.ee().state().gpr[31].lo =
+            0xFFFFFFFFFFFFFFFFull;
+        std::string error;
+        ok = expect(
+            exact.ee().step_predecoded(code[0], error) &&
+            exact.ee().step_predecoded(code[1], error),
+            "EE REGIMM link-source reference failed") && ok;
+        const ps2::u32 retired =
+            native.ee().run_native_block(pc, 0u, code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+        ok = expect(
+            retired == 2u &&
+            exact.ee().state().pc == native.ee().state().pc &&
+            exact.ee().state().gpr[31].lo ==
+                native.ee().state().gpr[31].lo,
+            "EE native REGIMM rs=r31 ordering diverged") && ok;
+#else
+        ok = expect(
+            retired == 0u,
+            "EE native REGIMM rs=r31 ran on non-x64") && ok;
+#endif
+    }
+
     const ps2::u32 sa_code[2] = {
         (0x01u << 26) | (3u << 21) | (0x18u << 16) | 0x000Bu,
         (0x01u << 26) | (3u << 21) | (0x19u << 16) | 0x0005u,
