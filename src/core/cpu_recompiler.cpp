@@ -968,6 +968,88 @@ V4NativeFn compile_v4_pending_delay_alu(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_overflow_alu(
+    V4CodeArena &arena, const V4DecodedOverflowAlu &inst,
+    u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 768u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  // The overflow bailout is past the normal success epilogue, so force near
+  // conditional branches rather than relying on Xbyak's short forward form.
+  code.setDefaultJmpNEAR(true);
+  Label overflow;
+
+  // Evaluate the pending delay-slot arithmetic without committing any guest
+  // state. If it overflows, the ordinary helper re-executes this instruction
+  // with the branch-delay state still intact, preserving EPC/BD semantics.
+  emit_read_guest(code, code.eax, inst.rs);
+  if (inst.op == V4OverflowAluOp::Add) {
+    emit_read_guest(code, code.ecx, inst.rt);
+    code.add(code.eax, code.ecx);
+  } else if (inst.op == V4OverflowAluOp::Sub) {
+    emit_read_guest(code, code.ecx, inst.rt);
+    code.sub(code.eax, code.ecx);
+  } else {
+    code.add(code.eax, static_cast<u32>(inst.simm));
+  }
+  code.jo(overflow);
+
+  const u8 dest =
+      inst.op == V4OverflowAluOp::Addi ? inst.rt : inst.rd;
+  emit_write_guest(code, dest, code.eax);
+  emit_retire_incoming_load(code, dest);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+
+  code.L(overflow);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_pending_delay_store(
     V4CodeArena &arena, const V4DecodedStore &store, u32 &code_size) {
   using namespace Xbyak;
@@ -2957,9 +3039,15 @@ struct CpuRecompilerBackend::Impl {
     if (decode_v4_alu(instruction, decoded)) {
       fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
     } else {
-      V4DecodedStore store{};
-      if (decode_v4_store(instruction, store)) {
-        fn = compile_v4_pending_delay_store(arena, store, code_size);
+      V4DecodedOverflowAlu overflow{};
+      if (decode_v4_overflow_alu(instruction, overflow)) {
+        fn = compile_v4_pending_delay_overflow_alu(
+            arena, overflow, code_size);
+      } else {
+        V4DecodedStore store{};
+        if (decode_v4_store(instruction, store)) {
+          fn = compile_v4_pending_delay_store(arena, store, code_size);
+        }
       }
     }
     if (fn != nullptr) {
