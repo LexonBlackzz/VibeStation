@@ -121,7 +121,7 @@ private:
     u64 quiet_block_instructions_=0;
     u64 quiet_block_hits_=0;
     u64 quiet_block_compiles_=0;
-    std::vector<QuietEeBlock> quiet_ee_blocks_{8192};
+    std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 8> idle_skip_reasons_{};
 };
 } // namespace ps2
