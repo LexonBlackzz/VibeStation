@@ -711,8 +711,6 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
   code.inc(code.ebx);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.dec(code.r12d);
   emit_v4_link(code, links.fallthrough, links);
 
@@ -896,9 +894,6 @@ V4NativeFn compile_v4_alu(
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       count * 4u);
   code.add(code.ebx, count);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-      count);
   code.sub(code.r12d, count);
   emit_v4_link(code, links.fallthrough, links);
   code.ready();
@@ -996,8 +991,6 @@ V4NativeFn compile_v4_budget_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
       branch_pc);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.dec(code.r12d);
 
   if (control.op == V4ControlOp::J || control.op == V4ControlOp::Jal) {
@@ -1154,9 +1147,6 @@ V4NativeFn compile_v4_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       branch_pc);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-      prefix_count + 2u);
   code.sub(code.r12d, prefix_count + 2u);
 
   if (control.op == V4ControlOp::J ||
@@ -1300,8 +1290,6 @@ V4NativeFn compile_v4_guarded_delay_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       branch_pc);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))], 2u);
   code.sub(code.r12d, 2u);
 
   code.test(code.edx, code.edx);
@@ -1511,8 +1499,6 @@ V4NativeFn compile_v4_store_delay_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
       branch_pc);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))], 2u);
   code.sub(code.r12d, 2u);
 
   code.test(code.edx, code.edx);
@@ -1737,9 +1723,6 @@ V4NativeFn compile_v4_load(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
         branch_pc);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        prefix_count + tail_count + 3u);
     code.sub(code.r12d, prefix_count + tail_count + 3u);
 
     if (branch.op == V4ControlOp::J ||
@@ -1791,9 +1774,6 @@ V4NativeFn compile_v4_load(
         (prefix_count + tail_count + 1u) * 4u);
     code.add(code.r9d, prefix_count + tail_count + 2u);
     code.add(code.ebx, code.r9d);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        prefix_count + tail_count + 1u);
     code.sub(code.r12d, prefix_count + tail_count + 1u);
   }
 
@@ -1823,9 +1803,6 @@ V4NativeFn compile_v4_load(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         start_pc + prefix_count * 4u);
     code.add(code.ebx, prefix_count);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        prefix_count);
     code.sub(code.r12d, prefix_count);
     emit_v4_block_return(code);
   }
@@ -1871,9 +1848,6 @@ V4NativeFn compile_v4_store(
   }
   if (prefix_count != 0u) {
     code.add(code.ebx, prefix_count);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        prefix_count);
     code.sub(code.r12d, prefix_count);
   }
 
@@ -2088,9 +2062,6 @@ V4NativeFn compile_v4_store(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
         branch_pc);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        tail_count + 3u);
     code.sub(code.r12d, tail_count + 3u);
 
     if (branch.op == V4ControlOp::J ||
@@ -2141,9 +2112,6 @@ V4NativeFn compile_v4_store(
     if (tail_count != 0u) {
       code.add(code.ebx, tail_count);
     }
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        tail_count + 1u);
     code.sub(code.r12d, tail_count + 1u);
   }
   code.inc(code.dword[
@@ -2171,8 +2139,6 @@ V4NativeFn compile_v4_store(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       start_pc + (prefix_count + 1u) * 4u);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.dec(code.r12d);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
@@ -2383,9 +2349,9 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r14 +
         static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
     code.je(budget_chain_ok);
-    code.cmp(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
-        0u);
+    code.cmp(code.r12d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
     code.jne(budget_exit);
     code.L(budget_chain_ok);
   }
@@ -2461,6 +2427,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.L(done);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], code.ebx);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+  code.sub(code.eax, code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
+      code.eax);
 #if defined(_WIN32)
   code.add(code.rsp, 32);
 #endif
