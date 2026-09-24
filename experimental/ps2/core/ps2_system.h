@@ -25,6 +25,7 @@
 #include "core/vu/vu1.h"
 #include <string>
 #include <array>
+#include <vector>
 namespace ps2 {
 class Ps2System {
 public:
@@ -120,7 +121,7 @@ private:
     u64 quiet_block_instructions_=0;
     u64 quiet_block_hits_=0;
     u64 quiet_block_compiles_=0;
-    std::array<QuietEeBlock, 8192> quiet_ee_blocks_{};
+    std::vector<QuietEeBlock> quiet_ee_blocks_{8192};
     std::array<u64, 8> idle_skip_reasons_{};
 };
 } // namespace ps2
