@@ -325,6 +325,7 @@ struct V4DispatchPage;
 
 struct V4NativeState {
   u32 *gpr = nullptr;
+  Cpu *cpu = nullptr;
   System *system = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
   u32 *icache_generations = nullptr;
@@ -373,6 +374,9 @@ struct V4NativeState {
   u32 generation_exits = 0;
   u32 budget_exits = 0;
   u32 bail_exits = 0;
+  u32 icache_refills = 0;
+  u32 revalidate_attempts = 0;
+  u32 revalidate_successes = 0;
 };
 
 using V4NativeFn = void (*)(V4NativeState *);
@@ -529,6 +533,47 @@ struct V4Block {
   bool second_icache_line = false;
   bool retry_second_line = false;
 };
+
+constexpr u32 kV4RevalidateValid = 1u << 0;
+constexpr u32 kV4RevalidateRefilled = 1u << 1;
+
+// Cold generation-mismatch path. Keep the resident dispatcher compact and let
+// Cpu's existing guest-visible I-cache helpers remain the single source of
+// truth for direct-mapped tags, refill visibility and instruction snapshots.
+// Bit 0 means the compiled bytes still match; bit 1 means this call performed
+// the architectural line refill that the C++ run_slice path would have done.
+u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
+  if (state == nullptr || state->cpu == nullptr || block == nullptr ||
+      !block->cacheable || block->retry_second_line ||
+      block->instruction_count == 0u ||
+      block->instruction_count > kV4MaxBlockInstructions) {
+    return 0u;
+  }
+
+  Cpu &cpu = *state->cpu;
+  u32 result = 0u;
+  if (cpu.prepare_instruction_cache_line_for_backend(block->start_pc)) {
+    result |= kV4RevalidateRefilled;
+  }
+
+  for (u32 i = 0u; i < block->instruction_count; ++i) {
+    u32 visible = 0u;
+    if (!cpu.read_visible_instruction_for_backend(
+            block->start_pc + i * 4u, visible) ||
+        visible != block->guest_bits[i]) {
+      return result;
+    }
+  }
+
+  block->icache_generation =
+      cpu.instruction_cache_generation_for_backend(block->start_pc);
+  if (block->second_icache_line) {
+    block->second_icache_generation =
+        cpu.instruction_cache_generation_for_backend(
+            static_cast<u32>(block->second_icache_index) << 4u);
+  }
+  return result | kV4RevalidateValid;
+}
 
 struct V4DispatchEntry {
   V4Block *block = nullptr;
@@ -2683,9 +2728,10 @@ V4NativeFn compile_v4_store(
 }
 
 V4ResidentDispatchFn install_v4_resident_dispatch(
-    V4CodeArena &arena, void *&block_return, void *&linked_entry) {
+    V4CodeArena &arena, V4NativeState *bound_state,
+    void *&block_return, void *&linked_entry) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 1024u;
+  constexpr size_t kReservation = 2048u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -2694,7 +2740,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.setDefaultJmpNEAR(true);
   Label loop, check_block, after_block, done;
   Label missing, stale_epoch, blocked_memory, stale_generation, budget_exit;
-  Label bail_exit;
+  Label revalidate_cached, bail_exit;
 
   code.push(code.rbx);
   code.push(code.r12);
@@ -2791,7 +2837,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
     code.cmp(code.edx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))]);
-    code.jne(stale_generation);
+    code.jne(revalidate_cached);
     {
       Label one_line;
       code.cmp(code.byte[
@@ -2804,9 +2850,51 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.cmp(code.edx, code.dword[
           code.r14 +
           static_cast<int>(offsetof(V4Block, second_icache_generation))]);
-      code.jne(stale_generation);
+      code.jne(revalidate_cached);
       code.L(one_line);
     }
+    code.jmp(validity_ok);
+
+    // Generation mismatches are common with the PS1's direct-mapped I-cache,
+    // but the compiled bytes are usually still identical after the next guest
+    // line refill. Call one compact C++ validator instead of returning through
+    // run_slice(), lookup() and try_revalidate(). The equal-generation path
+    // above remains call-free.
+    code.L(revalidate_cached);
+    code.inc(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, revalidate_attempts))]);
+#if defined(_WIN32)
+    code.mov(code.rcx, code.r11);
+    code.mov(code.rdx, code.r14);
+#else
+    code.mov(code.rdi, code.r11);
+    code.mov(code.rsi, code.r14);
+#endif
+    code.mov(code.rax,
+             reinterpret_cast<size_t>(&v4_revalidate_cached_block));
+    code.call(code.rax);
+
+    // r10/r11 are volatile in both x64 ABIs. The dispatcher is permanently
+    // bound to Impl::native_state, so restore those pinned bases after the
+    // cold helper call. r12-r15/rbx remain callee-saved.
+    code.mov(code.r11, reinterpret_cast<size_t>(bound_state));
+    code.mov(code.r10, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
+    {
+      Label no_refill;
+      code.test(code.eax, kV4RevalidateRefilled);
+      code.jz(no_refill);
+      code.add(code.ebx, 4u);
+      code.inc(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_refills))]);
+      code.L(no_refill);
+    }
+    code.test(code.eax, kV4RevalidateValid);
+    code.jz(stale_generation);
+    code.inc(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
@@ -3066,7 +3154,8 @@ struct CpuRecompilerBackend::Impl {
     helper_profile_enabled =
         profile_helpers != nullptr && profile_helpers[0] == '1';
     resident_dispatch =
-        install_v4_resident_dispatch(arena, resident_block_return,
+        install_v4_resident_dispatch(arena, &native_state,
+                                     resident_block_return,
                                      resident_linked_entry);
     if (resident_dispatch == nullptr || resident_block_return == nullptr ||
         resident_linked_entry == nullptr) {
@@ -3988,6 +4077,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     V4NativeState &native = impl_->native_state;
     if (!impl_->native_state_bound) {
       native.gpr = cpu_.gpr_;
+      native.cpu = &cpu_;
       native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
       native.icache_generations = cpu_.icache_generation_.data();
@@ -4045,6 +4135,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.generation_exits = 0u;
     native.budget_exits = 0u;
     native.bail_exits = 0u;
+    native.icache_refills = 0u;
+    native.revalidate_attempts = 0u;
+    native.revalidate_successes = 0u;
     impl_->resident_dispatch(&native);
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
@@ -4062,6 +4155,24 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.recompiler_frame_dispatch_generation_exits += native.generation_exits;
     stats_.recompiler_frame_dispatch_budget_exits += native.budget_exits;
     stats_.recompiler_frame_dispatch_bail_exits += native.bail_exits;
+    stats_.recompiler_frame_icache_refills += native.icache_refills;
+    stats_.recompiler_frame_revalidate_attempts += native.revalidate_attempts;
+    stats_.recompiler_frame_revalidate_successes += native.revalidate_successes;
+    stats_.cache_hits += native.revalidate_successes;
+
+    // The mismatch helper may refill the guest I-cache before discovering that
+    // a block is genuinely stale. Commit those cycles even if no guest
+    // instruction retired, so the C++ fallback sees identical timing.
+    constexpr u32 kIcacheRefillCycles = 4u;
+    const u32 native_refill_cycles =
+        native.icache_refills * kIcacheRefillCycles;
+    cpu_.cycles_ += native.cycles;
+    result.cycles += native.cycles;
+    stats_.native_cycles +=
+        native.cycles >= native_refill_cycles
+            ? native.cycles - native_refill_cycles
+            : 0u;
+    stats_.executed_cycles += native.cycles;
 
     if (native.instructions == 0u) {
       ++stats_.native_reject_budget;
@@ -4089,9 +4200,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.hi_ = native.hi;
     cpu_.lo_ = native.lo;
     cpu_.muldiv_result_ready_cycle_ = native.muldiv_result_ready_cycle;
-    cpu_.cycles_ += native.cycles;
 
-    result.cycles += native.cycles;
     result.instructions += native.instructions;
     stats_.native_block_entries += native.block_entries;
     stats_.native_memory_fastpath_loads += native.memory_entries;
@@ -4108,9 +4217,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           std::max<u64>(stats_.native_chain_max_blocks, native.block_entries);
     }
     stats_.native_instructions += native.instructions;
-    stats_.native_cycles += native.cycles;
     stats_.optimized_instructions += native.instructions;
-    stats_.executed_cycles += native.cycles;
   }
   return result;
 #endif

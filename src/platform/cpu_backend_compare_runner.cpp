@@ -169,6 +169,7 @@ struct CpuCompareCase {
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
   bool require_v4_icache_revalidation_when_available = false;
+  bool require_v4_native_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
@@ -3606,6 +3607,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_cached_icache_revalidation);
 
+  CpuCompareCase v4_native_icache_revalidation{};
+  v4_native_icache_revalidation.name =
+      "v4_native_icache_alias_revalidates_inside_dispatch";
+  v4_native_icache_revalidation.start_pc = 0x80010000u;
+  v4_native_icache_revalidation.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, 0x80011000u),
+      0u,
+  };
+  v4_native_icache_revalidation.memory = {
+      {0x80011000u, enc_i(0x09, 2, 2, 1)},
+      {0x80011004u,
+       enc_j(0x02, v4_native_icache_revalidation.start_pc)},
+      {0x80011008u, 0u},
+  };
+  v4_native_icache_revalidation.instructions = 18u;
+  v4_native_icache_revalidation.require_v4_native_entry_when_available = true;
+  v4_native_icache_revalidation
+      .require_v4_native_icache_revalidation_when_available = true;
+  cases.push_back(v4_native_icache_revalidation);
+
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
   CpuCompareCase v4_uncached_alu{};
@@ -4617,6 +4639,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
            test_case.require_v4_icache_revalidation_when_available ||
+           test_case.require_v4_native_icache_revalidation_when_available ||
            test_case.require_v4_native_chain_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -4686,6 +4709,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                result.stats.block_count == 1u &&
                result.stats.cache_misses != 0u &&
                result.stats.cache_hits != 0u);
+          const bool native_icache_revalidated =
+              !test_case.require_v4_native_icache_revalidation_when_available ||
+              (result.stats.native_blocks_compiled == 2u &&
+               result.stats.native_dispatch_generation_exits == 0u &&
+               result.stats.native_direct_link_transitions != 0u &&
+               result.stats.recompiler_frame_icache_refills >= 3u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
               (result.stats.native_chain_entries != 0 &&
@@ -4722,6 +4751,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_cached_same_page_recompiled";
           } else if (!icache_revalidated) {
             native_check = "v4_icache_revalidation_missing";
+          } else if (!native_icache_revalidated) {
+            native_check = "v4_native_icache_revalidation_missing";
           } else if (!chain_entered) {
             native_check = "v4_chain_missing";
           } else {
@@ -4735,7 +4766,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               hilo_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
-              chain_entered;
+              native_icache_revalidated && chain_entered;
         }
       }
 
