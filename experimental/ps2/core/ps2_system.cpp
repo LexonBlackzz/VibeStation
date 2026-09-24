@@ -707,11 +707,21 @@ u64 Ps2System::try_skip_bios_literal_iterations(
 u64 Ps2System::try_run_quiet_ee_batch(
     u64 budget, std::string& error) {
     if (budget < 2u || !scheduler_.empty() ||
+        hw_.timer_irq_possible() ||
         hw_.dmac_running_mask() != 0u ||
         sif_dma_.ee_completion_pending() ||
         sif_dma_.iop_completion_pending() ||
         vu0_.running() || vu1_.running() || gs_.irq_pending() ||
         bus_.intc_pending() || bus_.dmac_pending()) {
+        return 0;
+    }
+
+    const auto& cpu = ee_.state();
+    const u32 status = cpu.cop0[12];
+    const u32 cause = cpu.cop0[13];
+    if ((cause & status & 0x0000FF00u) != 0u &&
+        (status & 0x00010001u) == 0x00010001u &&
+        (status & 0x6u) == 0u) {
         return 0;
     }
 
@@ -723,6 +733,14 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
+
+    // Stop on the instruction that reaches COP0 Compare. It can set IP7 at
+    // retirement, after which the next outer iteration falls back to the
+    // exact interrupt path before executing another instruction.
+    const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
+    if (compare_distance != 0u) {
+        maximum = std::min<u64>(maximum, compare_distance);
+    }
 
     // The IOP idle pair has no architectural side effects, but its timers,
     // SPU2 cadence and DMA IRQ countdown still matter. Only defer the pair
@@ -742,12 +760,16 @@ u64 Ps2System::try_run_quiet_ee_batch(
     u64 retired = 0;
     while (retired < maximum && !ee_.halted() &&
            quiet_ee_instruction(ee_.state(), bus_)) {
-        if (!ee_.step(error)) break;
+        if (!ee_.step_quiet(error)) break;
         ++retired;
         if (!error.empty()) break;
     }
     if (retired == 0u) return 0;
 
+    // step_quiet deliberately leaves EE hardware time untouched. Apply the
+    // exact number of retired cycles once, before exposing the next MMIO or
+    // event boundary to the guest.
+    bus_.tick(retired);
     scheduler_.run_until(scheduler_.now() + retired, {});
 
     const u64 fields_before = video_timing_.fields_started();
