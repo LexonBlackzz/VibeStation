@@ -996,6 +996,51 @@ bool test_ee_timer_events() {
     return ok;
 }
 
+bool test_ee_timer_irq_distance() {
+    ps2::EeHw hw;
+    hw.reset();
+
+    constexpr ps2::u32 count = 0x10000000u;
+    constexpr ps2::u32 mode = 0x10000010u;
+    constexpr ps2::u32 comp = 0x10000020u;
+    constexpr ps2::u32 intc_mask = 0x1000F010u;
+    constexpr ps2::u32 compare_mode =
+        (1u << 6) | (1u << 7) | (1u << 8);
+
+    bool ok = expect(
+        hw.write32(intc_mask, 1u << 9) &&
+        hw.write32(count, 0u) &&
+        hw.write32(comp, 3u) &&
+        hw.write32(mode, compare_mode),
+        "EE timer distance setup failed");
+    ok = expect(
+        hw.cycles_to_timer_irq() == 6u,
+        "EE timer distance did not match compare edge") && ok;
+
+    hw.tick(5u);
+    ok = expect(
+        hw.cycles_to_timer_irq() == 1u &&
+        !hw.intc_pending(),
+        "EE timer distance did not preserve partial phase") && ok;
+
+    hw.tick(1u);
+    ok = expect(
+        hw.intc_pending() &&
+        hw.cycles_to_timer_irq() == ~ps2::u64{0},
+        "EE timer distance did not retire the sticky IRQ edge") && ok;
+
+    hw.reset();
+    ok = expect(
+        hw.write32(intc_mask, 1u << 9) &&
+        hw.write32(comp, 3u) &&
+        hw.write32(mode, (1u << 8)),
+        "EE disabled timer distance setup failed") && ok;
+    ok = expect(
+        hw.cycles_to_timer_irq() == ~ps2::u64{0},
+        "disabled EE timer incorrectly blocked batching") && ok;
+    return ok;
+}
+
 bool test_ee_intc_register_semantics() {
     ps2::Ps2System system;
     ps2::u32 value = 0;
@@ -4296,6 +4341,7 @@ int main() {
     ok = test_unaligned_word_and_atomic_memory_ops() && ok;
     ok = test_bootstrap_mmio() && ok;
     ok = test_ee_timer_events() && ok;
+    ok = test_ee_timer_irq_distance() && ok;
     ok = test_ee_intc_register_semantics() && ok;
     ok = test_vu_mapping_and_cop2() && ok;
     ok = test_ee_intc_cpu_exception() && ok;
