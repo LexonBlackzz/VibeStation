@@ -3681,6 +3681,43 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_store.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_store);
 
+  CpuCompareCase v4_split_scheduler_addi{};
+  v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
+  v4_split_scheduler_addi.start_pc = 0xA0010000u;
+  v4_split_scheduler_addi.initial_gpr[1] = 1u;
+  v4_split_scheduler_addi.initial_gpr[2] = 40u;
+  v4_split_scheduler_addi.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x08, 2, 2, 2),  // ADDI delay slot, no overflow.
+      0,
+  };
+  v4_split_scheduler_addi.instructions = 2u;
+  v4_split_scheduler_addi.segment_instructions = {1u, 1u};
+  v4_split_scheduler_addi.compare_segment_states = true;
+  v4_split_scheduler_addi.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_addi.require_v4_native_branch_entry_when_available = true;
+  v4_split_scheduler_addi.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_addi);
+
+  CpuCompareCase v4_split_scheduler_addi_overflow{};
+  v4_split_scheduler_addi_overflow.name =
+      "v4_split_scheduler_addi_delay_overflow_fallback";
+  v4_split_scheduler_addi_overflow.start_pc = 0xA0010000u;
+  v4_split_scheduler_addi_overflow.initial_gpr[1] = 1u;
+  v4_split_scheduler_addi_overflow.initial_gpr[2] = 0x7FFFFFFFu;
+  v4_split_scheduler_addi_overflow.program = {
+      enc_i(0x04, 1, 1, 1),  // BEQ taken; execute alone in segment 0.
+      enc_i(0x08, 2, 2, 1),  // ADDI overflows in the delay slot.
+      0,
+  };
+  v4_split_scheduler_addi_overflow.instructions = 2u;
+  v4_split_scheduler_addi_overflow.segment_instructions = {1u, 1u};
+  v4_split_scheduler_addi_overflow.compare_segment_states = true;
+  v4_split_scheduler_addi_overflow.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_addi_overflow
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_split_scheduler_addi_overflow);
+
   CpuCompareCase v4_uncached_bne_not_taken{};
   v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
   v4_uncached_bne_not_taken.start_pc = 0xA0010000u;
