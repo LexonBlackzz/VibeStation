@@ -43,6 +43,12 @@ public:
     [[nodiscard]] u64 block_instruction_count() const {
         return block_instruction_count_;
     }
+    [[nodiscard]] u64 block_fastmem_load_count() const {
+        return block_fastmem_load_count_;
+    }
+    [[nodiscard]] u64 block_guard_bailout_count() const {
+        return block_guard_bailout_count_;
+    }
 
 private:
     using Function = void (*)(EeCpuState*);
@@ -59,6 +65,7 @@ private:
         BlockFunction function = nullptr;
         bool control_flow = false;
         bool uses_ram = false;
+        u32 ram_load_mask = 0;
         bool known = false;
     };
     struct Page {
@@ -82,6 +89,8 @@ private:
     u64 block_compiled_count_ = 0;
     u64 block_executed_count_ = 0;
     u64 block_instruction_count_ = 0;
+    u64 block_fastmem_load_count_ = 0;
+    u64 block_guard_bailout_count_ = 0;
 };
 
 } // namespace ps2
