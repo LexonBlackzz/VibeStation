@@ -543,6 +543,26 @@ constexpr u32 kV4RevalidateRefilled = 1u << 1;
 // Bit 0 means the compiled bytes still match; bit 1 means this call performed
 // the architectural line refill that the C++ run_slice path would have done.
 u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
+  if (state != nullptr && block != nullptr &&
+      state->cpu_cycle_base >= 133679000ull &&
+      state->cpu_cycle_base <= 134246000ull &&
+      block->start_pc >= 0x80059C00u && block->start_pc < 0x80059F00u &&
+      std::getenv("VIBESTATION_JIT_REVALIDATE_TRACE") != nullptr) {
+    std::fprintf(stderr,
+                 "JIT_REVALIDATE pc=%08X base=%llu count=%u maxcy=%u control=%u memory=%u second=%u retry2=%u budget_empty=%u idx=%u gen=%u livegen=%u\\n",
+                 block->start_pc,
+                 static_cast<unsigned long long>(state->cpu_cycle_base),
+                 block->instruction_count, block->max_cycles,
+                 block->has_control ? 1u : 0u, block->has_memory ? 1u : 0u,
+                 block->second_icache_line ? 1u : 0u,
+                 block->retry_second_line ? 1u : 0u,
+                 block->budget_requires_empty_chain ? 1u : 0u,
+                 static_cast<unsigned>(block->icache_index),
+                 block->icache_generation,
+                 state->icache_generations != nullptr
+                     ? state->icache_generations[block->icache_index]
+                     : 0u);
+  }
   if (state == nullptr || state->cpu == nullptr || block == nullptr ||
       !block->cacheable || block->retry_second_line ||
       block->second_icache_line || block->budget_requires_empty_chain ||
