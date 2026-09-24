@@ -3777,6 +3777,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_bgez.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_bgez);
 
+  CpuCompareCase v4_uncached_guarded_addi_delay{};
+  v4_uncached_guarded_addi_delay.name =
+      "v4_uncached_native_branch_guarded_addi_delay";
+  v4_uncached_guarded_addi_delay.start_pc = 0xA0010000u;
+  v4_uncached_guarded_addi_delay.initial_gpr[1] = 1u;
+  v4_uncached_guarded_addi_delay.initial_gpr[2] = 40u;
+  v4_uncached_guarded_addi_delay.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken
+      enc_i(0x08, 2, 2, 2), // ADDI r2,r2,2 in the delay slot
+      0,
+  };
+  v4_uncached_guarded_addi_delay.instructions = 2u;
+  v4_uncached_guarded_addi_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_guarded_addi_delay
+      .require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_uncached_guarded_addi_delay);
+
   CpuCompareCase v4_uncached_delay_exception_fallback{};
   v4_uncached_delay_exception_fallback.name =
       "v4_uncached_branch_delay_overflow_fallback";
