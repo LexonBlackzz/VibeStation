@@ -3347,6 +3347,263 @@ bool EeCpu::step_quiet_unchecked_predecoded(
     return step_internal(error, true, &instruction, true);
 }
 
+u32 EeCpu::run_quiet_fast_prefix(
+    u32 block_pc,
+    const u32* instructions,
+    u32 instruction_count,
+    u32 maximum_instructions) {
+    if (halted_ || instructions == nullptr ||
+        instruction_count == 0u ||
+        maximum_instructions == 0u ||
+        state_.pc != block_pc) {
+        return 0u;
+    }
+
+    const u32 limit = std::min(
+        instruction_count, maximum_instructions);
+    u32 retired = 0u;
+
+    for (; retired < limit; ++retired) {
+        const u32 expected_pc = block_pc + retired * 4u;
+        if (state_.pc != expected_pc) break;
+
+        const u32 instruction = instructions[retired];
+        const u32 opcode = instruction >> 26;
+        const u32 rs = (instruction >> 21) & 31u;
+        const u32 rt = (instruction >> 16) & 31u;
+        const u32 rd = (instruction >> 11) & 31u;
+        const u32 sa = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
+        const s16 imm = immediate(instruction);
+
+        bool handled = true;
+        const u32 old_next_pc = state_.next_pc;
+        const bool was_delay_slot = next_is_delay_slot_;
+
+        // Only commit architectural PC/delay state after proving this opcode
+        // belongs to the no-MMIO/no-exception linear fast subset.
+        if (instruction == 0u) {
+            // NOP
+        } else if (opcode == 0x09u) {
+            write_gpr_word(
+                rt,
+                static_cast<u32>(gpr_u64(rs)) +
+                    static_cast<u32>(static_cast<s32>(imm)));
+        } else if (opcode == 0x0Au) {
+            write_gpr64(
+                rt,
+                gpr_s64(rs) < static_cast<s64>(imm) ? 1u : 0u);
+        } else if (opcode == 0x0Bu) {
+            write_gpr64(
+                rt,
+                gpr_u64(rs) <
+                        static_cast<u64>(static_cast<s64>(imm))
+                    ? 1u
+                    : 0u);
+        } else if (opcode == 0x0Cu) {
+            write_gpr64(
+                rt,
+                gpr_u64(rs) &
+                    static_cast<u64>(instruction & 0xFFFFu));
+        } else if (opcode == 0x0Du) {
+            write_gpr64(
+                rt,
+                gpr_u64(rs) |
+                    static_cast<u64>(instruction & 0xFFFFu));
+        } else if (opcode == 0x0Eu) {
+            write_gpr64(
+                rt,
+                gpr_u64(rs) ^
+                    static_cast<u64>(instruction & 0xFFFFu));
+        } else if (opcode == 0x0Fu) {
+            write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
+        } else if (opcode == 0x19u) {
+            write_gpr64(
+                rt,
+                gpr_u64(rs) +
+                    static_cast<u64>(static_cast<s64>(imm)));
+        } else if (opcode == 0x2Fu || opcode == 0x33u) {
+            // CACHE / PREF are bootstrap no-ops.
+        } else if (opcode == 0x01u) {
+            if (rt == 0x18u) { // MTSAB
+                state_.sa =
+                    (static_cast<u32>(gpr_u64(rs)) & 0xFu) ^
+                    (static_cast<u32>(imm) & 0xFu);
+            } else if (rt == 0x19u) { // MTSAH
+                state_.sa =
+                    ((static_cast<u32>(gpr_u64(rs)) & 0x7u) ^
+                     (static_cast<u32>(imm) & 0x7u)) << 1u;
+            } else {
+                handled = false;
+            }
+        } else if (opcode == 0x00u) {
+            switch (funct) {
+            case 0x00u:
+                write_gpr_word(
+                    rd, static_cast<u32>(gpr_u64(rt)) << sa);
+                break;
+            case 0x02u:
+                write_gpr_word(
+                    rd, static_cast<u32>(gpr_u64(rt)) >> sa);
+                break;
+            case 0x03u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(
+                        static_cast<s32>(
+                            static_cast<u32>(gpr_u64(rt))) >> sa));
+                break;
+            case 0x04u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(gpr_u64(rt)) <<
+                        (static_cast<u32>(gpr_u64(rs)) & 31u));
+                break;
+            case 0x06u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(gpr_u64(rt)) >>
+                        (static_cast<u32>(gpr_u64(rs)) & 31u));
+                break;
+            case 0x07u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(
+                        static_cast<s32>(
+                            static_cast<u32>(gpr_u64(rt))) >>
+                        (static_cast<u32>(gpr_u64(rs)) & 31u)));
+                break;
+            case 0x0Au:
+                if (gpr_u64(rt) == 0u) write_gpr64(rd, gpr_u64(rs));
+                break;
+            case 0x0Bu:
+                if (gpr_u64(rt) != 0u) write_gpr64(rd, gpr_u64(rs));
+                break;
+            case 0x0Fu:
+                break; // SYNC
+            case 0x10u:
+                write_gpr64(rd, state_.hi);
+                break;
+            case 0x11u:
+                state_.hi = gpr_u64(rs);
+                break;
+            case 0x12u:
+                write_gpr64(rd, state_.lo);
+                break;
+            case 0x13u:
+                state_.lo = gpr_u64(rs);
+                break;
+            case 0x14u:
+                write_gpr64(
+                    rd, gpr_u64(rt) << (gpr_u64(rs) & 63u));
+                break;
+            case 0x16u:
+                write_gpr64(
+                    rd, gpr_u64(rt) >> (gpr_u64(rs) & 63u));
+                break;
+            case 0x17u:
+                write_gpr64(
+                    rd,
+                    static_cast<u64>(
+                        static_cast<s64>(gpr_u64(rt)) >>
+                        (gpr_u64(rs) & 63u)));
+                break;
+            case 0x21u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(gpr_u64(rs)) +
+                        static_cast<u32>(gpr_u64(rt)));
+                break;
+            case 0x23u:
+                write_gpr_word(
+                    rd,
+                    static_cast<u32>(gpr_u64(rs)) -
+                        static_cast<u32>(gpr_u64(rt)));
+                break;
+            case 0x24u:
+                write_gpr64(rd, gpr_u64(rs) & gpr_u64(rt));
+                break;
+            case 0x25u:
+                write_gpr64(rd, gpr_u64(rs) | gpr_u64(rt));
+                break;
+            case 0x26u:
+                write_gpr64(rd, gpr_u64(rs) ^ gpr_u64(rt));
+                break;
+            case 0x27u:
+                write_gpr64(rd, ~(gpr_u64(rs) | gpr_u64(rt)));
+                break;
+            case 0x28u:
+                write_gpr64(rd, state_.sa);
+                break;
+            case 0x29u:
+                state_.sa = static_cast<u32>(gpr_u64(rs));
+                break;
+            case 0x2Au:
+                write_gpr64(
+                    rd, gpr_s64(rs) < gpr_s64(rt) ? 1u : 0u);
+                break;
+            case 0x2Bu:
+                write_gpr64(
+                    rd, gpr_u64(rs) < gpr_u64(rt) ? 1u : 0u);
+                break;
+            case 0x2Du:
+                write_gpr64(rd, gpr_u64(rs) + gpr_u64(rt));
+                break;
+            case 0x2Fu:
+                write_gpr64(rd, gpr_u64(rs) - gpr_u64(rt));
+                break;
+            case 0x38u:
+                write_gpr64(rd, gpr_u64(rt) << sa);
+                break;
+            case 0x3Au:
+                write_gpr64(rd, gpr_u64(rt) >> sa);
+                break;
+            case 0x3Bu:
+                write_gpr64(
+                    rd,
+                    static_cast<u64>(
+                        static_cast<s64>(gpr_u64(rt)) >> sa));
+                break;
+            case 0x3Cu:
+                write_gpr64(rd, gpr_u64(rt) << (sa + 32u));
+                break;
+            case 0x3Eu:
+                write_gpr64(rd, gpr_u64(rt) >> (sa + 32u));
+                break;
+            case 0x3Fu:
+                write_gpr64(
+                    rd,
+                    static_cast<u64>(
+                        static_cast<s64>(gpr_u64(rt)) >>
+                        (sa + 32u)));
+                break;
+            default:
+                handled = false;
+                break;
+            }
+        } else {
+            handled = false;
+        }
+
+        if (!handled) break;
+
+        current_is_delay_slot_ = was_delay_slot;
+        next_is_delay_slot_ = false;
+        state_.last_pc = expected_pc;
+        state_.last_instruction = instruction;
+        state_.pc = old_next_pc;
+        state_.next_pc = old_next_pc + 4u;
+        state_.gpr[0] = {};
+        ++state_.instructions_executed;
+        ++state_.cop0[9];
+        if (state_.cop0[9] == state_.cop0[11]) {
+            state_.cop0[13] |= 0x00008000u;
+        }
+    }
+
+    return retired;
+}
+
 u32 EeCpu::run_native_block(
     u32 pc,
     u32 page_generation,
