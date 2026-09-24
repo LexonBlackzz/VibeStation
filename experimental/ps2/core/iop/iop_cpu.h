@@ -41,6 +41,7 @@ public:
 
     void reset(u32 entry_point = 0xBFC00000u);
     bool step(std::string& error);
+    [[nodiscard]] bool in_osdsys_idle_loop() const;
     bool skip_osdsys_idle_pair();
     u64 skip_osdsys_idle_pairs(u64 max_pairs);
     u64 run(u64 instruction_budget, std::string& error);
