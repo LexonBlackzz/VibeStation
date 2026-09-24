@@ -1289,7 +1289,7 @@ int main(int argc, char** argv) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
-               "[--ee-jit|--profile|--gs-thread|--audio-only] "
+               "[--ee-jit|--profile|--gs-thread|--detailed-gs-stats|--audio-only] "
                "[--wav=audio.wav]\n";
         return 64;
     }
@@ -1305,6 +1305,7 @@ int main(int argc, char** argv) {
     bool pc_samples = false;
     bool profile = false;
     bool gs_thread = false;
+    bool detailed_gs_stats = false;
     bool audio_only = false;
     const char* display_path = nullptr;
     std::string wav_path;
@@ -1314,6 +1315,7 @@ int main(int argc, char** argv) {
         else if (option == "--pc-samples") pc_samples = true;
         else if (option == "--profile") profile = true;
         else if (option == "--gs-thread") gs_thread = true;
+        else if (option == "--detailed-gs-stats") detailed_gs_stats = true;
         else if (option == "--audio-only") audio_only = true;
         else if (option.starts_with("--wav=") && option.size() > 6u) {
             wav_path = std::string(option.substr(6));
@@ -1329,6 +1331,7 @@ int main(int argc, char** argv) {
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
     system.gs_core().set_async_rasterization(gs_thread);
+    system.gs_core().set_detailed_raster_stats(detailed_gs_stats);
     system.gs_core().set_rasterization_enabled(!audio_only);
     std::string error;
 
@@ -1491,7 +1494,13 @@ int main(int argc, char** argv) {
               << " EE_QUIET_ACTIVE_IOP_INSTRUCTIONS="
               << system.quiet_ee_active_iop_instructions()
               << " EE_QUIET_BATCHES="
-              << system.quiet_ee_batches() << '\n';
+              << system.quiet_ee_batches()
+              << " EE_BLOCK_INSTRUCTIONS="
+              << system.quiet_block_instructions()
+              << " EE_BLOCK_HITS="
+              << system.quiet_block_hits()
+              << " EE_BLOCK_COMPILES="
+              << system.quiet_block_compiles() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;
