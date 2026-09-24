@@ -594,7 +594,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
         }
 
         u64 iterations = std::min<u64>(
-            4096u, safe_cycles / kIdleInstructions);
+            65536u, safe_cycles / kIdleInstructions);
         const u32 distance = cpu.cop0[11] - cpu.cop0[9];
         if (distance != 0u) {
             iterations = std::min<u64>(iterations,
