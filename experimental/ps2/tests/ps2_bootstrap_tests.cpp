@@ -4022,6 +4022,8 @@ bool test_ee_ram_page_generation() {
     constexpr ps2::u32 page0 = 0x1000u;
     constexpr ps2::u32 page1 = 0x2000u;
 
+    system.ram().track_code_page(page0);
+    system.ram().track_code_page(page1);
     const ps2::u32 g0 = system.ram().page_generation(page0);
     const ps2::u32 g1 = system.ram().page_generation(page1);
 
