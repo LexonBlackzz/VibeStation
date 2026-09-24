@@ -710,8 +710,7 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
       0u);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code.inc(code.ebx);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))]);
   code.dec(code.r12d);
@@ -896,8 +895,7 @@ V4NativeFn compile_v4_alu(
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       count * 4u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], count);
+  code.add(code.ebx, count);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       count);
@@ -1010,8 +1008,7 @@ V4NativeFn compile_v4_budget_branch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
         1u);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code.add(code.ebx, 2u);
   } else if (control.op == V4ControlOp::Jr ||
              control.op == V4ControlOp::Jalr) {
     code.mov(code.dword[
@@ -1021,8 +1018,7 @@ V4NativeFn compile_v4_budget_branch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
         1u);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code.add(code.ebx, 2u);
   } else {
     code.test(code.edx, code.edx);
     code.jz(not_taken);
@@ -1033,8 +1029,7 @@ V4NativeFn compile_v4_budget_branch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
         1u);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+    code.add(code.ebx, 2u);
     code.jmp(selected);
 
     code.L(not_taken);
@@ -1045,8 +1040,7 @@ V4NativeFn compile_v4_budget_branch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
         0u);
-    code.inc(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
+    code.inc(code.ebx);
     code.L(selected);
   }
 
@@ -1170,18 +1164,14 @@ V4NativeFn compile_v4_branch(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         jump_target);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count + 3u);
+    code.add(code.ebx, prefix_count + 3u);
     code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
   } else if (control.op == V4ControlOp::Jr ||
              control.op == V4ControlOp::Jalr) {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         code.r8d);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count + 3u);
+    code.add(code.ebx, prefix_count + 3u);
   } else {
     Label not_taken, selected;
     code.test(code.edx, code.edx);
@@ -1189,9 +1179,7 @@ V4NativeFn compile_v4_branch(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         branch_target);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count + 3u);
+    code.add(code.ebx, prefix_count + 3u);
     code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
     code.jmp(selected);
 
@@ -1199,9 +1187,7 @@ V4NativeFn compile_v4_branch(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         fallthrough);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count + 2u);
+    code.add(code.ebx, prefix_count + 2u);
     code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
     code.L(selected);
   }
@@ -1323,16 +1309,14 @@ V4NativeFn compile_v4_guarded_delay_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       branch_target);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 3u);
+  code.add(code.ebx, 3u);
   code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
   code.jmp(selected);
 
   code.L(not_taken);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], fallthrough);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  code.add(code.ebx, 2u);
   code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
   code.L(selected);
   emit_v4_selected_link(code, links);
@@ -1460,10 +1444,8 @@ V4NativeFn compile_v4_store_delay_branch(
   code.L(stored);
   // The store has committed. From this point onward there are no guarded
   // exits. Account its 2-cycle baseline plus the 1-cycle main-RAM penalty.
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], code.r9d);
+  code.add(code.ebx, 2u);
+  code.add(code.ebx, code.r9d);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
 
@@ -1538,15 +1520,13 @@ V4NativeFn compile_v4_store_delay_branch(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
       branch_target);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
+  code.add(code.ebx, 2u);
   code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
   code.jmp(selected);
   code.L(not_taken);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], fallthrough);
-  code.inc(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
+  code.inc(code.ebx);
   code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
   code.L(selected);
   emit_v4_selected_link(code, links);
@@ -1795,9 +1775,7 @@ V4NativeFn compile_v4_load(
       code.L(selected);
     }
 
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        code.r9d);
+    code.add(code.ebx, code.r9d);
   } else {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -1812,9 +1790,7 @@ V4NativeFn compile_v4_load(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         (prefix_count + tail_count + 1u) * 4u);
     code.add(code.r9d, prefix_count + tail_count + 2u);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        code.r9d);
+    code.add(code.ebx, code.r9d);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
         prefix_count + tail_count + 1u);
@@ -1846,9 +1822,7 @@ V4NativeFn compile_v4_load(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         start_pc + prefix_count * 4u);
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count);
+    code.add(code.ebx, prefix_count);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
         prefix_count);
@@ -1896,9 +1870,7 @@ V4NativeFn compile_v4_store(
     }
   }
   if (prefix_count != 0u) {
-    code.add(code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-        prefix_count);
+    code.add(code.ebx, prefix_count);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
         prefix_count);
@@ -2002,11 +1974,8 @@ V4NativeFn compile_v4_store(
 
   // Account timing while the RAM/scratchpad penalty is still in r9d. The C++
   // invalidation helper below may clobber all caller-saved registers.
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], 2u);
-  code.add(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-      code.r9d);
+  code.add(code.ebx, 2u);
+  code.add(code.ebx, code.r9d);
 
   // The translated-line guard above proves this store cannot modify any
   // currently translated instruction bytes. Preserve the emulator's guest
@@ -2129,18 +2098,14 @@ V4NativeFn compile_v4_store(
       code.mov(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
           jump_target);
-      code.add(code.dword[
-          code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-          tail_count + 3u);
+      code.add(code.ebx, tail_count + 3u);
       code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
     } else if (branch.op == V4ControlOp::Jr ||
                branch.op == V4ControlOp::Jalr) {
       code.mov(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
           code.r8d);
-      code.add(code.dword[
-          code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-          tail_count + 3u);
+      code.add(code.ebx, tail_count + 3u);
     } else {
       Label not_taken, selected;
       code.test(code.edx, code.edx);
@@ -2148,9 +2113,7 @@ V4NativeFn compile_v4_store(
       code.mov(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
           branch_target);
-      code.add(code.dword[
-          code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-          tail_count + 3u);
+      code.add(code.ebx, tail_count + 3u);
       code.mov(code.r14, reinterpret_cast<size_t>(links.taken));
       code.jmp(selected);
 
@@ -2158,9 +2121,7 @@ V4NativeFn compile_v4_store(
       code.mov(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
           fallthrough);
-      code.add(code.dword[
-          code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-          tail_count + 2u);
+      code.add(code.ebx, tail_count + 2u);
       code.mov(code.r14, reinterpret_cast<size_t>(links.fallthrough));
       code.L(selected);
     }
@@ -2178,9 +2139,7 @@ V4NativeFn compile_v4_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
         (prefix_count + tail_count + 1u) * 4u);
     if (tail_count != 0u) {
-      code.add(code.dword[
-          code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))],
-          tail_count);
+      code.add(code.ebx, tail_count);
     }
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
@@ -2270,35 +2229,35 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.push(code.r15);
 #if defined(_WIN32)
   code.sub(code.rsp, 32);
-  code.mov(code.rbx, code.rcx);
+  code.mov(code.r11, code.rcx);
 #else
-  code.mov(code.rbx, code.rdi);
+  code.mov(code.r11, code.rdi);
 #endif
 
   // V4 blocks are internal fragments, not ABI-callable functions. Keep the
   // resident state and GPR base pinned for the whole dispatcher lifetime.
-  code.mov(code.r11, code.rbx);
   code.mov(code.r10, code.ptr[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, gpr))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
-  // r12d is the resident instruction downcounter. Native fragments decrement
-  // it as they retire work, including partial memory exits.
+  // Keep hot scheduler counters resident across the native chain. r12d is the
+  // instruction downcounter and ebx mirrors V4NativeState::cycles.
   code.mov(code.r12d, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+  code.xor_(code.ebx, code.ebx);
   code.mov(code.r13d, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
   code.mov(code.r15, code.ptr[
-      code.rbx +
+      code.r11 +
       static_cast<int>(offsetof(V4NativeState, icache_generations))]);
 
   code.L(loop);
   code.xor_(code.r9d, code.r9d);
   code.mov(code.eax, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, pc))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
   code.mov(code.edx, code.eax);
   code.shr(code.eax, 12);
   code.mov(code.r14, code.ptr[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, dispatch_top))]);
   code.mov(code.r14, code.ptr[code.r14 + code.rax * 8]);
   code.test(code.r14, code.r14);
   code.jz(missing);
@@ -2321,7 +2280,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r14 + static_cast<int>(offsetof(V4Block, has_memory))], 0u);
     code.je(memory_ok);
     code.cmp(code.dword[
-        code.rbx +
+        code.r11 +
         static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
         0u);
     code.je(blocked_memory);
@@ -2362,7 +2321,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     // physical-page generation guard.
     code.L(uncached);
     code.mov(code.rax, code.ptr[
-        code.rbx +
+        code.r11 +
         static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
     code.mov(code.ecx, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, phys_page))]);
@@ -2391,20 +2350,17 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     // instruction to overshoot the remaining cycle budget. Preserve that
     // contract for a one-instruction native block instead of rejecting it only
     // to execute the same instruction through the interpreter.
-    code.mov(code.eax, code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
-    code.cmp(code.eax, code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.jb(cycle_ok);
     code.jmp(try_budget_fragment);
 
     code.L(strict_cycle_budget);
-    code.mov(code.eax, code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
+    code.mov(code.eax, code.ebx);
     code.add(code.eax, code.dword[
         code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
     code.cmp(code.eax, code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.ja(try_budget_fragment);
     code.L(cycle_ok);
   }
@@ -2428,15 +2384,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
     code.je(budget_chain_ok);
     code.cmp(code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, instructions))],
+        code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
         0u);
     code.jne(budget_exit);
     code.L(budget_chain_ok);
   }
-  code.mov(code.ecx, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, cycles))]);
-  code.cmp(code.ecx, code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+  code.cmp(code.ebx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
   code.jae(budget_exit);
   code.jmp(code.rax);
 
@@ -2450,7 +2404,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.test(code.r9d, code.r9d);
     code.jz(ordinary_entry);
     code.inc(code.dword[
-        code.rbx + static_cast<int>(offsetof(V4NativeState, direct_links))]);
+        code.r11 + static_cast<int>(offsetof(V4NativeState, direct_links))]);
     code.L(ordinary_entry);
   }
 
@@ -2461,50 +2415,52 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.L(after_block);
   block_return = const_cast<u8 *>(code.getCurr());
   code.cmp(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_entries))]);
   code.cmp(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
       0u);
   code.jne(done);
   code.jmp(loop);
 
   linked_entry = const_cast<u8 *>(code.getCurr());
   code.cmp(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_entries))]);
   code.mov(code.r9d, 1u);
   code.jmp(check_block);
 
   code.L(missing);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, missing_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, missing_exits))]);
   code.jmp(done);
   code.L(stale_epoch);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, epoch_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, epoch_exits))]);
   code.jmp(done);
   code.L(blocked_memory);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, memory_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, memory_exits))]);
   code.jmp(done);
   code.L(stale_generation);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, generation_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, generation_exits))]);
   code.jmp(done);
   code.L(budget_exit);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, budget_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, budget_exits))]);
   code.jmp(done);
   code.L(bail_exit);
   code.inc(code.dword[
-      code.rbx + static_cast<int>(offsetof(V4NativeState, bail_exits))]);
+      code.r11 + static_cast<int>(offsetof(V4NativeState, bail_exits))]);
 
   code.L(done);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))], code.ebx);
 #if defined(_WIN32)
   code.add(code.rsp, 32);
 #endif
