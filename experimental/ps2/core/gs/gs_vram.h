@@ -25,9 +25,13 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
 
     bool write_pixel(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
+    bool write_pixel_untracked(
+        u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_pixel(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
     bool write_depth(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
+    bool write_depth_untracked(
+        u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_depth(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
 
@@ -64,6 +68,7 @@ public:
     }
     [[nodiscard]] const std::vector<u8>& data() const { return data_; }
     [[nodiscard]] u64 generation() const { return generation_; }
+    void mark_modified() { ++generation_; }
 
 private:
     std::vector<u8> data_;
