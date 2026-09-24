@@ -1503,7 +1503,13 @@ int main(int argc, char** argv) {
               << " EE_BLOCK_HITS="
               << system.quiet_block_hits()
               << " EE_BLOCK_COMPILES="
-              << system.quiet_block_compiles() << '\n';
+              << system.quiet_block_compiles()
+              << " EE_FAST_INTERPRETER_INSTRUCTIONS="
+              << system.fast_interpreter_instructions()
+              << " EE_QUIET_SUPERBATCH_CALLS="
+              << system.quiet_superbatch_calls()
+              << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
+              << system.quiet_superbatch_instructions() << '\n';
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
