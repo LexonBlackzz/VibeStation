@@ -286,6 +286,7 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
         block.pc == pc &&
         block.page_generation == generation) {
         ++quiet_block_hits_;
+        ++block.hits;
         return &block;
     }
 
@@ -346,6 +347,24 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     if (block.count == 0u) return nullptr;
     ++quiet_block_compiles_;
     return &block;
+}
+
+std::vector<std::pair<u32, u64>>
+Ps2System::quiet_block_hotspots(std::size_t limit) const {
+    std::vector<std::pair<u32, u64>> out;
+    out.reserve(quiet_ee_blocks_.size());
+    for (const auto& block : quiet_ee_blocks_) {
+        if (block.count != 0u && block.hits != 0u) {
+            out.emplace_back(block.pc, block.hits);
+        }
+    }
+    std::sort(
+        out.begin(), out.end(),
+        [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+    if (out.size() > limit) out.resize(limit);
+    return out;
 }
 
 bool Ps2System::load_bios(const std::string& path,std::string& error){if(!bios_.load_file(path,error))return false;reset();return true;}
