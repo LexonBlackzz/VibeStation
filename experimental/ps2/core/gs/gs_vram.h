@@ -29,11 +29,19 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_pixel(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
+    [[nodiscard]] u32 read_pixel_at_address(
+        u32 psm, u32 address) const;
+    bool write_pixel_at_address_untracked(
+        u32 psm, u32 address, u32 value);
     bool write_depth(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     bool write_depth_untracked(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_depth(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
+    [[nodiscard]] u32 read_depth_at_address(
+        u32 psm, u32 address) const;
+    bool write_depth_at_address_untracked(
+        u32 psm, u32 address, u32 value);
 
     bool write_index(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_index(
