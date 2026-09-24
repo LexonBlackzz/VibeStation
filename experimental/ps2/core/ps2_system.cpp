@@ -302,13 +302,11 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
             break;
         }
 
-        // A store can invalidate this block's code page. End immediately so
-        // the next lookup observes the new generation before executing more
-        // cached words. For control flow, cache one additional sequential
-        // word so the native tier can compile the architectural delay slot.
-        if (quiet_ee_store(instruction)) {
-            break;
-        }
+        // Native stores carry a page-generation write barrier. If a store
+        // targets this code page the generated block exits immediately;
+        // interpreter fallback below also stops after a store. This lets the
+        // cache span ordinary data stores without risking stale self-modified
+        // code. Control flow still caches one architectural delay slot.
         if (quiet_ee_control_flow(instruction)) {
             fetch_delay_slot = true;
         }
@@ -997,7 +995,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     block->words.data(),
                     block->count,
                     static_cast<u32>(maximum - retired),
-                    ram_.data());
+                    ram_.data(),
+                    ram_.page_generation_data());
                 if (native_retired != 0u) {
                     retired += native_retired;
                     quiet_block_instructions_ += native_retired;
@@ -1026,7 +1025,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 ++retired;
                 ++quiet_block_instructions_;
                 progressed = true;
-                if (!error.empty()) break;
+                if (!error.empty() || quiet_ee_store(instruction)) break;
             }
             if (!error.empty()) break;
             if (progressed) continue;
