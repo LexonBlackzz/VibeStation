@@ -1115,18 +1115,23 @@ u64 Ps2System::try_run_quiet_ee_batch(
             }
 
             u32 fast_prefix = 0u;
+            bool fast_store = false;
             if (!ee_.jit_enabled()) {
                 fast_prefix = ee_.run_quiet_fast_prefix(
                     block_pc,
                     block->words.data(),
                     block->count,
-                    static_cast<u32>(maximum - retired));
+                    static_cast<u32>(maximum - retired),
+                    &fast_store);
                 if (fast_prefix != 0u) {
                     retired += fast_prefix;
                     quiet_block_instructions_ += fast_prefix;
                     fast_interpreter_instructions_ += fast_prefix;
                     progressed = true;
-                    if (retired >= maximum) {
+                    // Stores terminate the tight prefix. Re-enter through the
+                    // block cache so a self-modifying write observes the new
+                    // RAM page generation before another cached word runs.
+                    if (fast_store || retired >= maximum) {
                         continue;
                     }
                 }
