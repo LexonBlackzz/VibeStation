@@ -4713,7 +4713,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               !test_case.require_v4_native_icache_revalidation_when_available ||
               (result.stats.native_blocks_compiled == 2u &&
                result.stats.native_dispatch_generation_exits == 0u &&
-               result.stats.native_direct_link_transitions != 0u &&
+               result.stats.recompiler_frame_revalidate_successes >= 3u &&
                result.stats.recompiler_frame_icache_refills >= 3u);
           const bool chain_entered =
               !test_case.require_v4_native_chain_when_available ||
