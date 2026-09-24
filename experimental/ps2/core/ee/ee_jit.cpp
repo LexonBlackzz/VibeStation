@@ -284,6 +284,148 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     return true;
 }
 
+bool emit_guarded_ram_load(
+    u32 instruction,
+    u32 retired_before,
+    Emitter& out) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const s16 immediate =
+        static_cast<s16>(instruction & 0xFFFFu);
+
+    u32 width = 0;
+    switch (opcode) {
+    case 0x20u: // LB
+    case 0x24u: // LBU
+        width = 1u;
+        break;
+    case 0x21u: // LH
+    case 0x25u: // LHU
+        width = 2u;
+        break;
+    case 0x23u: // LW
+    case 0x27u: // LWU
+    case 0x30u: // LL
+        width = 4u;
+        break;
+    case 0x34u: // LLD
+    case 0x37u: // LD
+        width = 8u;
+        break;
+    default:
+        return false;
+    }
+
+    // EE effective addresses use the low 32 bits. The system's quiet block
+    // guard only permits main-RAM aliases, so reproduce EeBus::to_physical()
+    // here and return to the interpreter before the load if the address is
+    // outside that set.
+    out.load_rax(rs, true);
+    out.emit(0x05u); // ADD EAX, imm32
+    out.emit32(static_cast<u32>(static_cast<s32>(immediate)));
+
+    std::vector<std::size_t> fail_jumps;
+    std::vector<std::size_t> direct_jumps;
+    std::vector<std::size_t> alias_jumps;
+
+    out.emit(0x3Du); // CMP EAX, 0xC0000000
+    out.emit32(0xC0000000u);
+    fail_jumps.push_back(out.jcc32(0x83u)); // JAE
+
+    out.emit(0x3Du); // CMP EAX, 0x20000000
+    out.emit32(0x20000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du); // CMP EAX, 0x22000000
+    out.emit32(0x22000000u);
+    alias_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du); // CMP EAX, 0x30000000
+    out.emit32(0x30000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du); // CMP EAX, 0x32000000
+    out.emit32(0x32000000u);
+    alias_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    out.emit(0x3Du); // CMP EAX, 0x80000000
+    out.emit32(0x80000000u);
+    direct_jumps.push_back(out.jcc32(0x82u)); // JB
+
+    // KSEG0/KSEG1.
+    out.emit(0x25u); // AND EAX, imm32
+    out.emit32(0x1FFFFFFFu);
+    direct_jumps.push_back(out.jmp32());
+
+    const std::size_t alias_label = out.bytes.size();
+    out.emit(0x25u); // 0x2/0x3 accelerated aliases use low 25 bits.
+    out.emit32(0x01FFFFFFu);
+
+    const std::size_t mapped_label = out.bytes.size();
+    for (const std::size_t jump : direct_jumps) {
+        out.patch_rel32(jump, mapped_label);
+    }
+    for (const std::size_t jump : alias_jumps) {
+        out.patch_rel32(jump, alias_label);
+    }
+
+    out.emit(0x3Du); // CMP EAX, last legal starting byte
+    out.emit32(kEeRamSize - width);
+    fail_jumps.push_back(out.jcc32(0x87u)); // JA
+
+    if (rt != 0u) {
+        switch (opcode) {
+        case 0x20u: // MOVSX RAX, byte [R11+RAX]
+            out.emit(0x49u); out.emit(0x0Fu); out.emit(0xBEu);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x24u: // MOVZX EAX, byte [R11+RAX]
+            out.emit(0x41u); out.emit(0x0Fu); out.emit(0xB6u);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x21u: // MOVSX RAX, word [R11+RAX]
+            out.emit(0x49u); out.emit(0x0Fu); out.emit(0xBFu);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x25u: // MOVZX EAX, word [R11+RAX]
+            out.emit(0x41u); out.emit(0x0Fu); out.emit(0xB7u);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x23u: // MOVSXD RAX, dword [R11+RAX]
+        case 0x30u:
+            out.emit(0x49u); out.emit(0x63u);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x27u: // MOV EAX, dword [R11+RAX]
+            out.emit(0x41u); out.emit(0x8Bu);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        case 0x34u: // MOV RAX, qword [R11+RAX]
+        case 0x37u:
+            out.emit(0x49u); out.emit(0x8Bu);
+            out.emit(0x04u); out.emit(0x03u);
+            break;
+        default:
+            return false;
+        }
+        out.store_rax(rt);
+    }
+
+    const std::size_t done_jump = out.jmp32();
+    const std::size_t fail_label = out.bytes.size();
+    out.emit(0xB8u); // MOV EAX, retired_before
+    out.emit32(retired_before);
+    out.emit(0xC3u); // RET
+    const std::size_t done_label = out.bytes.size();
+
+    for (const std::size_t jump : fail_jumps) {
+        out.patch_rel32(jump, fail_label);
+    }
+    out.patch_rel32(done_jump, done_label);
+    return true;
+}
+
 bool emit_branch_and_delay(
     u32 branch_pc,
     u32 branch_instruction,
