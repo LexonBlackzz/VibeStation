@@ -4462,6 +4462,86 @@ bool test_ee_native_ram_stores() {
     return ok;
 }
 
+bool test_ee_native_quadword_fastmem() {
+    constexpr ps2::u32 pc = 0x6A00u;
+    constexpr ps2::u32 source = 0xA008u;
+    constexpr ps2::u32 destination = 0xB00Cu;
+    const std::array<ps2::u32, 2> code = {
+        (0x1Eu << 26) | (1u << 21) | (2u << 16), // LQ r2,0(r1)
+        (0x1Fu << 26) | (3u << 21) | (2u << 16), // SQ r2,0(r3)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    constexpr ps2::u64 lo = 0x0123456789ABCDEFull;
+    constexpr ps2::u64 hi = 0xFEDCBA9876543210ull;
+    bool ok = expect(
+        exact.bus().write64(source & ~0xFu, lo) &&
+        exact.bus().write64((source & ~0xFu) + 8u, hi) &&
+        native.bus().write64(source & ~0xFu, lo) &&
+        native.bus().write64((source & ~0xFu) + 8u, hi),
+        "EE native LQ/SQ setup failed");
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = source;
+    native.ee().state().gpr[1].lo = source;
+    exact.ee().state().gpr[3].lo = destination;
+    native.ee().state().gpr[3].lo = destination;
+    exact.ram().track_code_page(destination & ~0xFu);
+    native.ram().track_code_page(destination & ~0xFu);
+
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE native LQ/SQ reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size(),
+        "EE native LQ/SQ block did not retire fully") && ok;
+    ok = expect(
+        exact.ee().state().gpr[2].lo ==
+            native.ee().state().gpr[2].lo &&
+        exact.ee().state().gpr[2].hi ==
+            native.ee().state().gpr[2].hi,
+        "EE native LQ register result diverged") && ok;
+    ps2::u64 exact_lo = 0;
+    ps2::u64 exact_hi = 0;
+    ps2::u64 native_lo = 0;
+    ps2::u64 native_hi = 0;
+    const ps2::u32 aligned_destination =
+        destination & ~0xFu;
+    ok = expect(
+        exact.ram().read64(aligned_destination, exact_lo) &&
+        exact.ram().read64(aligned_destination + 8u, exact_hi) &&
+        native.ram().read64(aligned_destination, native_lo) &&
+        native.ram().read64(aligned_destination + 8u, native_hi) &&
+        exact_lo == native_lo &&
+        exact_hi == native_hi &&
+        exact_lo == lo &&
+        exact_hi == hi,
+        "EE native SQ RAM result diverged") && ok;
+    ok = expect(
+        exact.ram().page_generation(aligned_destination) ==
+            native.ram().page_generation(aligned_destination),
+        "EE native SQ write barrier generation diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE native LQ/SQ unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_fpu_and_sc_fastmem() {
     constexpr ps2::u32 pc = 0x6C00u;
     constexpr ps2::u32 data = 0x9800u;
@@ -4780,6 +4860,7 @@ int main() {
     ok = test_ee_native_chain() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
+    ok = test_ee_native_quadword_fastmem() && ok;
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_quiet_step_matches_exact_execution() && ok;
