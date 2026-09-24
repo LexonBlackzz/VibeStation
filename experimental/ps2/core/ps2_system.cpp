@@ -618,6 +618,15 @@ u64 Ps2System::try_skip_bios_idle_iterations(
             return cycles;
         }
     }
+    // Starting from an off-phase PC is valuable only when we can retire a
+    // real bulk interval. A single eight-cycle specialized skip pays more
+    // scheduler/SIF/IOP bookkeeping than the cached interpreter it replaces.
+    // Keep the old one-iteration fallback only for the canonical 0x81FC0
+    // entry, where it was already a net win before phase-aware skipping.
+    if (idle_offphase) {
+        return 0;
+    }
+
     const u32 ee_completion =
         sif_dma_.ee_completion_cycles();
     if (ee_completion != 0u &&
