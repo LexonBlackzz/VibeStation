@@ -707,7 +707,6 @@ u64 Ps2System::try_skip_bios_literal_iterations(
 u64 Ps2System::try_run_quiet_ee_batch(
     u64 budget, std::string& error) {
     if (budget < 2u || !scheduler_.empty() ||
-        hw_.timer_irq_possible() ||
         hw_.dmac_running_mask() != 0u ||
         sif_dma_.ee_completion_pending() ||
         sif_dma_.iop_completion_pending() ||
@@ -734,12 +733,17 @@ u64 Ps2System::try_run_quiet_ee_batch(
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
 
-    // Stop on the instruction that reaches COP0 Compare. It can set IP7 at
-    // retirement, after which the next outer iteration falls back to the
-    // exact interrupt path before executing another instruction.
-    const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
-    if (compare_distance != 0u) {
-        maximum = std::min<u64>(maximum, compare_distance);
+    // If EE timer IRQs are possible, retain EeCpu::step's instruction-exact
+    // hardware tick/IRQ polling while still batching the much larger system
+    // layer. Otherwise the hardware tick itself can also be coalesced.
+    const bool defer_ee_tick = !hw_.timer_irq_possible();
+    if (defer_ee_tick) {
+        // Stop on the instruction that reaches COP0 Compare. It can set IP7
+        // at retirement; the next outer iteration then takes the exact IRQ.
+        const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
+        if (compare_distance != 0u) {
+            maximum = std::min<u64>(maximum, compare_distance);
+        }
     }
 
     // The IOP idle pair has no architectural side effects, but its timers,
@@ -760,7 +764,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     u64 retired = 0;
     while (retired < maximum && !ee_.halted() &&
            quiet_ee_instruction(ee_.state(), bus_)) {
-        if (!ee_.step_quiet(error)) break;
+        const bool ok = defer_ee_tick
+            ? ee_.step_quiet(error)
+            : ee_.step(error);
+        if (!ok) break;
         ++retired;
         if (!error.empty()) break;
     }
@@ -768,8 +775,9 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     // step_quiet deliberately leaves EE hardware time untouched. Apply the
     // exact number of retired cycles once, before exposing the next MMIO or
-    // event boundary to the guest.
-    bus_.tick(retired);
+    // event boundary to the guest. The timer-IRQ path used step() and has
+    // already advanced this clock instruction by instruction.
+    if (defer_ee_tick) bus_.tick(retired);
     scheduler_.run_until(scheduler_.now() + retired, {});
 
     const u64 fields_before = video_timing_.fields_started();
