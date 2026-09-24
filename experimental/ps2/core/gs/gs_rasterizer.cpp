@@ -835,8 +835,8 @@ u64 GsRasterizer::draw_sprite(
     // on Y. BIOS/OSDSYS draws many textured sprites, so computing both
     // 64-bit divisions for every pixel wastes most of the raster time.
     // Precompute each axis once while preserving the exact integer formula.
-    std::array<s32, 2048> cached_u{};
-    std::array<s32, 2048> cached_v{};
+    std::array<s32, 2048> cached_u;
+    std::array<s32, 2048> cached_v;
     const bool cached_fst = ctx.texture.enabled && ctx.texture.fst;
     if (cached_fst) {
         for (s32 x = left; x < right; ++x) {
