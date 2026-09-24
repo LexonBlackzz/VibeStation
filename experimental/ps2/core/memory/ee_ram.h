@@ -46,12 +46,6 @@ public:
     [[nodiscard]] const u32* page_generation_data() const {
         return page_generation_.data();
     }
-    [[nodiscard]] u8* code_page_tracked_data() {
-        return code_page_tracked_.data();
-    }
-    [[nodiscard]] const u8* code_page_tracked_data() const {
-        return code_page_tracked_.data();
-    }
     [[nodiscard]] u32 page_generation(u32 offset) const {
         return page_generation_[offset / kPageSize];
     }
