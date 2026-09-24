@@ -551,7 +551,7 @@ bool GsRasterizer::draw_pixel(
                 output = (old & mask) | (output & ~mask);
             }
             written_color = output & 0x00FFFFFFu;
-            if (!vram.write_pixel(0, ux, uy, ctx.fbp, ctx.fbw, output))
+            if (!vram.write_pixel_untracked(0, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else if (ctx.psm == 1u) {
             const u32 mask = ctx.fbmask & 0x00FFFFFFu;
@@ -563,7 +563,7 @@ bool GsRasterizer::draw_pixel(
                 output &= 0x00FFFFFFu;
             }
             written_color = output & 0x00FFFFFFu;
-            if (!vram.write_pixel(1, ux, uy, ctx.fbp, ctx.fbw, output))
+            if (!vram.write_pixel_untracked(1, ux, uy, ctx.fbp, ctx.fbw, output))
                 return false;
         } else {
             output = apply_dither(output, ctx, x, y);
@@ -585,7 +585,7 @@ bool GsRasterizer::draw_pixel(
                     (old & mask) | (packed & static_cast<u16>(~mask)));
             }
             written_color = packed & 0x7FFFu;
-            if (!vram.write_pixel(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
+            if (!vram.write_pixel_untracked(ctx.psm, ux, uy, ctx.fbp, ctx.fbw, packed))
                 return false;
         }
         if (ctx.nonzero_colors != nullptr && written_color != 0u) {
@@ -595,7 +595,7 @@ bool GsRasterizer::draw_pixel(
 
     if (write_depth) {
         const u32 source_z = depth_value_for_psm(ctx.zpsm, z);
-        if (!vram.write_depth(ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw, source_z))
+        if (!vram.write_depth_untracked(ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw, source_z))
             return false;
     }
 
