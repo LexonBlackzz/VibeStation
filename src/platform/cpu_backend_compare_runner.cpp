@@ -2752,7 +2752,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0u,
   };
   pending_delay_irq.instructions = 2u;
-  pending_delay_irq.require_v4_pending_delay_native_when_available = true;
+  // The delay slot must enter native execution, while the interrupt entry
+  // itself is still intentionally handled by the architectural helper.
+  pending_delay_irq.require_v4_native_entry_when_available = true;
   cases.push_back(pending_delay_irq);
 
   CpuCompareCase branch_mmio_body{};
