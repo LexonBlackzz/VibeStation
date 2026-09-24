@@ -1111,7 +1111,25 @@ u64 Ps2System::try_run_quiet_ee_batch(
                 }
             }
 
-            for (u32 i = 0;
+            u32 fast_prefix = 0u;
+            if (!ee_.jit_enabled()) {
+                fast_prefix = ee_.run_quiet_fast_prefix(
+                    block_pc,
+                    block->words.data(),
+                    block->count,
+                    static_cast<u32>(maximum - retired));
+                if (fast_prefix != 0u) {
+                    retired += fast_prefix;
+                    quiet_block_instructions_ += fast_prefix;
+                    fast_interpreter_instructions_ += fast_prefix;
+                    progressed = true;
+                    if (retired >= maximum) {
+                        continue;
+                    }
+                }
+            }
+
+            for (u32 i = fast_prefix;
                  i < block->count && retired < maximum;
                  ++i) {
                 if (ee_.state().pc != block_pc + i * 4u) break;
