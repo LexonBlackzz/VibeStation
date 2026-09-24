@@ -3379,6 +3379,7 @@ u32 EeCpu::run_quiet_fast_prefix(
         bool handled = true;
         const u32 old_next_pc = state_.next_pc;
         const bool was_delay_slot = next_is_delay_slot_;
+        next_is_delay_slot_ = false;
 
         // Only commit architectural PC/delay state after proving this opcode
         // belongs to the no-MMIO/no-exception linear fast subset.
