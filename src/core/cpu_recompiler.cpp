@@ -1891,6 +1891,8 @@ struct CpuRecompilerBackend::Impl {
   JitCodePageBitmap<29u, 4u> code_lines;
   std::array<u32, kV4PhysPageCount> page_generations{};
   V4ResidentDispatchFn resident_dispatch = nullptr;
+  V4NativeState native_state{};
+  bool native_state_bound = false;
   std::unordered_map<u32, V4HelperFn> helper_cache;
   void *resident_block_return = nullptr;
   void *resident_linked_entry = nullptr;
@@ -2733,28 +2735,51 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     const u32 remaining_instructions = max_instructions - result.instructions;
 
     const u32 start_pc = cpu_.pc_;
-    V4NativeState native{};
-    native.gpr = cpu_.gpr_;
-    native.dispatch_top = impl_->dispatch_top.get();
-    native.icache_generations = cpu_.icache_generation_.data();
-    native.icache_valid = &cpu_.icache_[0].valid;
-    native.icache_line_stride = sizeof(cpu_.icache_[0]);
-    native.code_page_generations = impl_->page_generations.data();
-    native.code_page_bits = impl_->code_pages.data();
-    native.code_line_bits = impl_->code_lines.data();
-    native.block_return = impl_->resident_block_return;
-    native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
-    native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+    V4NativeState &native = impl_->native_state;
+    if (!impl_->native_state_bound) {
+      native.gpr = cpu_.gpr_;
+      native.dispatch_top = impl_->dispatch_top.get();
+      native.icache_generations = cpu_.icache_generation_.data();
+      native.icache_valid = &cpu_.icache_[0].valid;
+      native.icache_line_stride = sizeof(cpu_.icache_[0]);
+      native.code_page_generations = impl_->page_generations.data();
+      native.code_page_bits = impl_->code_pages.data();
+      native.code_line_bits = impl_->code_lines.data();
+      native.block_return = impl_->resident_block_return;
+      native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      impl_->native_state_bound = true;
+    }
+
+    // Keep the execution context resident across dispatcher entries. Only
+    // architectural values, budgets and per-entry counters need refreshing.
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
         (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
+    native.block_bail = 0u;
+    native.memory_entries = 0u;
+    native.store_entries = 0u;
+    native.store_phys = 0u;
     native.cop0_sr = cpu_.cop0_sr_;
     native.cache_epoch = impl_->cache_epoch;
     native.pc = start_pc;
+    native.last_pc = 0u;
+    native.last_in_delay_slot = 0u;
+    native.active_branch_pc = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
+    native.cycles = 0u;
+    native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
     native.instruction_budget = remaining_instructions;
+    native.block_entries = 0u;
+    native.direct_links = 0u;
+    native.missing_exits = 0u;
+    native.epoch_exits = 0u;
+    native.memory_exits = 0u;
+    native.generation_exits = 0u;
+    native.budget_exits = 0u;
+    native.bail_exits = 0u;
     impl_->resident_dispatch(&native);
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
