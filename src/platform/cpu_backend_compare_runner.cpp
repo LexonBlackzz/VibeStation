@@ -3640,6 +3640,24 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_uncached_beq.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_beq);
 
+  CpuCompareCase v4_split_scheduler_beq{};
+  v4_split_scheduler_beq.name = "v4_split_scheduler_beq_delay_state";
+  v4_split_scheduler_beq.start_pc = 0xA0010000u;
+  v4_split_scheduler_beq.initial_gpr[1] = 0x1234u;
+  v4_split_scheduler_beq.initial_gpr[2] = 0x1234u;
+  v4_split_scheduler_beq.program = {
+      enc_i(0x04, 1, 2, 2),       // BEQ taken; execute alone in segment 0.
+      enc_i(0x09, 0, 5, 0x0055),  // Delay slot executes in segment 1.
+      enc_i(0x09, 0, 6, 0x0066),
+      enc_i(0x09, 0, 7, 0x0077),
+  };
+  v4_split_scheduler_beq.instructions = 2u;
+  v4_split_scheduler_beq.segment_instructions = {1u, 1u};
+  v4_split_scheduler_beq.compare_segment_states = true;
+  v4_split_scheduler_beq.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_beq.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_split_scheduler_beq);
+
   CpuCompareCase v4_uncached_bne_not_taken{};
   v4_uncached_bne_not_taken.name = "v4_uncached_native_bne_not_taken_delay";
   v4_uncached_bne_not_taken.start_pc = 0xA0010000u;
