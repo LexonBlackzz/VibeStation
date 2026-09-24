@@ -1506,7 +1506,11 @@ int main(int argc, char** argv) {
               << " EE_JIT_BLOCK_EXECUTIONS="
               << system.ee().jit().block_executed_count()
               << " EE_JIT_BLOCK_COMPILES="
-              << system.ee().jit().block_compiled_count() << '\n';
+              << system.ee().jit().block_compiled_count()
+              << " EE_JIT_FASTMEM_LOADS="
+              << system.ee().jit().block_fastmem_load_count()
+              << " EE_JIT_GUARD_BAILOUTS="
+              << system.ee().jit().block_guard_bailout_count() << '\n';
     const auto& idle_reasons = system.idle_skip_reasons();
     std::cout << "EE_IDLE_SKIP_REASONS";
     for (auto count : idle_reasons) std::cout << ' ' << count;
