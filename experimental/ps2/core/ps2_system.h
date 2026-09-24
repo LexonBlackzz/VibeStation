@@ -101,6 +101,8 @@ private:
         u32 pc = 0;
         u32 page_generation = 0;
         u8 count = 0;
+        u32 memory_mask = 0;
+        u32 store_mask = 0;
         std::array<u32, 32> words{};
     };
     QuietEeBlock* quiet_ee_block(u32 pc);
