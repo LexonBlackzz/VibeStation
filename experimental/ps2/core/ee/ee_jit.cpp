@@ -393,16 +393,20 @@ EeJit::Function EeJit::compile(u32 instruction) {
 }
 
 EeJit::Function EeJit::compile_block(
+    u32 pc,
     const u32* instructions,
     u32 instruction_count,
-    u32& compiled_instructions) {
+    u32& compiled_instructions,
+    bool& control_flow) {
 #if defined(VIBESTATION_EE_JIT_X64)
     Emitter emitter;
     if (!emit_block(
+            pc,
             instructions,
             instruction_count,
             emitter,
-            compiled_instructions)) {
+            compiled_instructions,
+            control_flow)) {
         return nullptr;
     }
 
@@ -424,9 +428,11 @@ EeJit::Function EeJit::compile_block(
     ++block_compiled_count_;
     return reinterpret_cast<Function>(code);
 #else
+    (void)pc;
     (void)instructions;
     (void)instruction_count;
     compiled_instructions = 0;
+    control_flow = false;
     return nullptr;
 #endif
 }
@@ -437,11 +443,13 @@ u32 EeJit::execute_block(
     u32 page_generation,
     const u32* instructions,
     u32 instruction_count,
-    u32 maximum_instructions) {
+    u32 maximum_instructions,
+    bool& control_flow) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
         instruction_count == 0u ||
         maximum_instructions == 0u) {
+        control_flow = false;
         return 0;
     }
 
@@ -457,25 +465,31 @@ u32 EeJit::execute_block(
         entry.pc != pc ||
         entry.page_generation != page_generation) {
         u32 compiled_instructions = 0;
+        bool compiled_control_flow = false;
         Function function = compile_block(
+            pc,
             instructions,
             instruction_count,
-            compiled_instructions);
+            compiled_instructions,
+            compiled_control_flow);
         entry.pc = pc;
         entry.page_generation = page_generation;
         entry.instruction_count =
             static_cast<u8>(compiled_instructions);
         entry.function = function;
+        entry.control_flow = compiled_control_flow;
         entry.known = true;
     }
 
     if (entry.function == nullptr ||
         entry.instruction_count == 0u ||
         entry.instruction_count > maximum_instructions) {
+        control_flow = false;
         return 0;
     }
 
     entry.function(&state);
+    control_flow = entry.control_flow;
     ++block_executed_count_;
     block_instruction_count_ += entry.instruction_count;
     return entry.instruction_count;
@@ -486,6 +500,7 @@ u32 EeJit::execute_block(
     (void)instructions;
     (void)instruction_count;
     (void)maximum_instructions;
+    control_flow = false;
     return 0;
 #endif
 }
