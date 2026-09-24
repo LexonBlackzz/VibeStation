@@ -73,7 +73,7 @@ public:
     bool step_quiet_predecoded(u32 instruction, std::string& error);
     bool step_quiet_unchecked_predecoded(
         u32 instruction, std::string& error);
-    u32 run_native_linear_block(
+    u32 run_native_block(
         u32 pc,
         u32 page_generation,
         const u32* instructions,
