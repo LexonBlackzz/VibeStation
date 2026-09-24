@@ -103,6 +103,7 @@ public:
     [[nodiscard]] const std::string& halt_reason() const { return halt_reason_; }
     void clear_halt();
     void set_jit_enabled(bool enabled) { jit_enabled_ = enabled; }
+    void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
 
