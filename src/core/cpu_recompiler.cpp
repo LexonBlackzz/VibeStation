@@ -2870,6 +2870,18 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.cmp(code.ebx, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.jae(budget_exit);
+
+    // Preserve the historical C++ refill boundary when four or fewer cycles
+    // remain. The old path can consume the 4-cycle I-cache refill at/through
+    // the scheduler deadline and then apply its existing one-instruction /
+    // unsigned-wrap behavior. Revalidating in-place here would clamp at the
+    // resident deadline instead and change guest-visible slice boundaries.
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.sub(code.eax, code.ebx);
+    code.cmp(code.eax, 4u);
+    code.jbe(stale_generation);
+
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_attempts))]);

@@ -191,6 +191,7 @@ struct CpuCompareCase {
   bool enable_reduced_helper_branch_tail_for_x64 = false;
   bool allow_partial_native_memory_helper = false;
   bool compare_segment_states = false;
+  u32 run_slice_cycle_budget = 100000u;
   bool disable_all_native_for_x64 = false;
   bool disable_memory_native_for_x64 = false;
   bool disable_alu_native_for_x64 = false;
@@ -661,7 +662,9 @@ static CpuCompareRunResult run_cpu_compare_case_once(
       g_cpu_x64_jit_native_memory_cli_value = tiers.memory_native;
       g_cpu_x64_jit_native_alu_cli_value = tiers.alu_native;
     }
-    CpuRunSliceResult segment = sys->cpu().run_slice(100000u, instruction_count);
+    CpuRunSliceResult segment =
+        sys->cpu().run_slice(test_case.run_slice_cycle_budget,
+                             instruction_count);
     out.run.cycles += segment.cycles;
     out.run.instructions += segment.instructions;
     executed += segment.instructions;
@@ -3627,6 +3630,31 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_native_icache_revalidation
       .require_v4_native_icache_revalidation_when_available = true;
   cases.push_back(v4_native_icache_revalidation);
+
+  CpuCompareCase v4_icache_cycle_budget_boundary{};
+  v4_icache_cycle_budget_boundary.name =
+      "v4_icache_alias_preserves_cycle_budget_boundary";
+  v4_icache_cycle_budget_boundary.start_pc = 0x80010000u;
+  v4_icache_cycle_budget_boundary.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, 0x80011000u),
+      0u,
+  };
+  v4_icache_cycle_budget_boundary.memory = {
+      {0x80011000u, enc_i(0x09, 2, 2, 1)},
+      {0x80011004u,
+       enc_j(0x02, v4_icache_cycle_budget_boundary.start_pc)},
+      {0x80011008u, 0u},
+  };
+  // A then B consume exactly enough work that the next aliased A-line refill
+  // reaches the 20-cycle slice deadline. The interpreter and historical
+  // recompiler still execute one architectural instruction after that refill.
+  // Compare the first run_slice boundary, not only the final converged state.
+  v4_icache_cycle_budget_boundary.instructions = 9u;
+  v4_icache_cycle_budget_boundary.run_slice_cycle_budget = 20u;
+  v4_icache_cycle_budget_boundary.compare_segment_states = true;
+  v4_icache_cycle_budget_boundary.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_icache_cycle_budget_boundary);
 
   // Keep uncached KSEG1 smoke gates as a direct no-I-cache baseline. Cacheable
   // native execution is separately gated by native_control_state_icache_cycles.
