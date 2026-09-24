@@ -83,6 +83,12 @@ public:
     u64 fast_interpreter_instructions() const {
         return fast_interpreter_instructions_;
     }
+    u64 quiet_superbatch_calls() const {
+        return quiet_superbatch_calls_;
+    }
+    u64 quiet_superbatch_instructions() const {
+        return quiet_superbatch_instructions_;
+    }
     const std::array<u64, 64>& native_fallback_opcodes() const {
         return native_fallback_opcodes_;
     }
@@ -100,6 +106,7 @@ private:
     u64 try_skip_bios_mmio_poll_iterations(u64 budget, std::string& error);
     u64 try_skip_bios_literal_iterations(u64 budget, std::string& error);
     u64 try_run_quiet_ee_batch(u64 budget, std::string& error);
+    u64 try_run_quiet_ee_superbatch(u64 budget, std::string& error);
     struct QuietEeBlock {
         u32 pc = 0;
         u32 page_generation = 0;
@@ -130,6 +137,8 @@ private:
     u64 quiet_block_hits_=0;
     u64 quiet_block_compiles_=0;
     u64 fast_interpreter_instructions_=0;
+    u64 quiet_superbatch_calls_=0;
+    u64 quiet_superbatch_instructions_=0;
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 64> native_fallback_opcodes_{};
     std::array<u64, 8> idle_skip_reasons_{};
