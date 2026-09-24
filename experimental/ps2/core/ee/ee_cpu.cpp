@@ -3325,6 +3325,14 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
 }
 
 bool EeCpu::step(std::string& error) {
+    return step_internal(error, false);
+}
+
+bool EeCpu::step_quiet(std::string& error) {
+    return step_internal(error, true);
+}
+
+bool EeCpu::step_internal(std::string& error, bool quiet) {
     error.clear();
 
     if (halted_) {
@@ -3337,10 +3345,12 @@ bool EeCpu::step(std::string& error) {
     current_is_delay_slot_ = next_is_delay_slot_;
     next_is_delay_slot_ = false;
 
-    if (bus_.intc_pending()) state_.cop0[13] |= 0x00000400u;
-    else state_.cop0[13] &= ~0x00000400u;
-    if (bus_.dmac_pending()) state_.cop0[13] |= 0x00000800u;
-    else state_.cop0[13] &= ~0x00000800u;
+    if (!quiet) {
+        if (bus_.intc_pending()) state_.cop0[13] |= 0x00000400u;
+        else state_.cop0[13] &= ~0x00000400u;
+        if (bus_.dmac_pending()) state_.cop0[13] |= 0x00000800u;
+        else state_.cop0[13] &= ~0x00000800u;
+    }
 
     const u32 status = state_.cop0[12];
     if ((state_.cop0[13] & status & 0x0000FF00u) != 0 &&
@@ -3352,7 +3362,7 @@ bool EeCpu::step(std::string& error) {
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
         }
-        bus_.tick(1);
+        if (!quiet) bus_.tick(1);
         return true;
     }
 
@@ -3370,7 +3380,7 @@ bool EeCpu::step(std::string& error) {
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
         }
-        bus_.tick(1);
+        if (!quiet) bus_.tick(1);
         return true;
     }
     if (!bus_.fetch32(fetch_address, instruction)) {
@@ -3394,7 +3404,7 @@ bool EeCpu::step(std::string& error) {
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
         }
-        bus_.tick(1);
+        if (!quiet) bus_.tick(1);
         return true;
     }
 
@@ -3438,7 +3448,7 @@ bool EeCpu::step(std::string& error) {
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
         }
-        bus_.tick(1);
+        if (!quiet) bus_.tick(1);
         return true;
     }
 
@@ -3473,7 +3483,7 @@ bool EeCpu::step(std::string& error) {
         ++state_.instructions_executed;
         ++state_.cop0[9];
         if (state_.cop0[9] == state_.cop0[11]) state_.cop0[13] |= 0x00008000u;
-        bus_.tick(1);
+        if (!quiet) bus_.tick(1);
         return true;
     }
 
@@ -4028,7 +4038,7 @@ generic_decode:
     if (state_.cop0[9] == state_.cop0[11]) {
         state_.cop0[13] |= 0x00008000u;
     }
-    bus_.tick(1);
+    if (!quiet) bus_.tick(1);
     return true;
 }
 
