@@ -141,6 +141,7 @@ void EeCpu::reset(u32 entry_point) {
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
     halt_reason_.clear();
+    jit_.clear();
 }
 
 void EeCpu::clear_halt() {
@@ -3345,6 +3346,44 @@ bool EeCpu::step_quiet_predecoded(
 bool EeCpu::step_quiet_unchecked_predecoded(
     u32 instruction, std::string& error) {
     return step_internal(error, true, &instruction, true);
+}
+
+u32 EeCpu::run_native_linear_block(
+    u32 pc,
+    u32 page_generation,
+    const u32* instructions,
+    u32 instruction_count,
+    u32 maximum_instructions) {
+    if (halted_ || next_is_delay_slot_ ||
+        state_.pc != pc ||
+        instructions == nullptr ||
+        instruction_count == 0u ||
+        maximum_instructions == 0u) {
+        return 0u;
+    }
+
+    const u32 retired = jit_.execute_block(
+        state_,
+        pc,
+        page_generation,
+        instructions,
+        instruction_count,
+        maximum_instructions);
+    if (retired == 0u) return 0u;
+
+    state_.last_pc = pc + (retired - 1u) * 4u;
+    state_.last_instruction = instructions[retired - 1u];
+    state_.pc = pc + retired * 4u;
+    state_.next_pc = state_.pc + 4u;
+    state_.gpr[0] = {};
+    state_.instructions_executed += retired;
+    state_.cop0[9] += retired;
+    if (state_.cop0[9] == state_.cop0[11]) {
+        state_.cop0[13] |= 0x00008000u;
+    }
+    current_is_delay_slot_ = false;
+    next_is_delay_slot_ = false;
+    return retired;
 }
 
 bool EeCpu::step_internal(
