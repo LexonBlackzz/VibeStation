@@ -240,6 +240,7 @@ void Ps2System::reset(u32 entry_point) {
     iop_reset_instruction_ = 0;
     ee_iop_phase_ = 0;
     skipped_bios_idle_iterations_ = 0;
+    skipped_bios_idle_offphase_batches_ = 0;
     skipped_bios_zero_iterations_ = 0;
     skipped_bios_nibble_iterations_ = 0;
     skipped_bios_count_wait_iterations_ = 0;
@@ -506,6 +507,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
     u64 budget, std::string& error) {
     constexpr u64 kIdleInstructions = 8u;
     const u32 idle_pc = ee_.state().pc;
+    const bool idle_offphase = idle_pc != 0x00081FC0u;
     if (idle_pc < 0x00081FC0u ||
         idle_pc > 0x00081FDCu ||
         ((idle_pc - 0x00081FC0u) & 3u) != 0u) {
@@ -612,6 +614,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
             video_timing_.tick(cycles, hw_, iop_intc_);
             advance_iop_for_ee_cycles(cycles, error);
             skipped_bios_idle_iterations_ += iterations;
+            if (idle_offphase) ++skipped_bios_idle_offphase_batches_;
             return cycles;
         }
     }
@@ -635,6 +638,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
         ++idle_skip_reasons_[6]; return 0;
     }
     ++skipped_bios_idle_iterations_;
+    if (idle_offphase) ++skipped_bios_idle_offphase_batches_;
 
     sif_dma_.tick_ee_cycles(bus_, kIdleInstructions);
     scheduler_.run_until(scheduler_.now() + kIdleInstructions, {});
