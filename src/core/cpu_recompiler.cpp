@@ -366,10 +366,6 @@ struct V4NativeState {
   u32 instructions = 0;
   u32 cycle_budget = 0;
   u32 instruction_budget = 0;
-  // Remaining instruction budget at the most recent logical dispatcher entry.
-  // Safe resident revalidation models the historical generation-exit ->
-  // redispatch boundary without leaving native execution.
-  u32 dispatch_instruction_budget = 0;
   u32 block_entries = 0;
   u32 direct_links = 0;
   u32 missing_exits = 0;
@@ -549,7 +545,7 @@ constexpr u32 kV4RevalidateRefilled = 1u << 1;
 u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
   if (state == nullptr || state->cpu == nullptr || block == nullptr ||
       !block->cacheable || block->retry_second_line ||
-      block->budget_requires_empty_chain || block->instruction_count == 0u ||
+      block->instruction_count == 0u ||
       block->instruction_count > kV4MaxBlockInstructions) {
     return 0u;
   }
@@ -2875,16 +2871,15 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.jae(budget_exit);
 
-    // Preserve the historical C++ scheduler boundary near the end of a slice.
-    // A generation exit used to redispatch through run_slice(), where refill
-    // and one-instruction tail semantics are resolved independently of the
-    // current native chain. Keep resident revalidation for the hot interior of
-    // the slice, but hand the final 32 cycles back to that exact path so block
-    // shape cannot change guest-visible frame/slice cut points.
+    // Preserve the historical C++ refill boundary when four or fewer cycles
+    // remain. The old path can consume the 4-cycle I-cache refill at/through
+    // the scheduler deadline and then apply its existing one-instruction /
+    // unsigned-wrap behavior. Revalidating in-place here would clamp at the
+    // resident deadline instead and change guest-visible slice boundaries.
     code.mov(code.eax, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.sub(code.eax, code.ebx);
-    code.cmp(code.eax, 32u);
+    code.cmp(code.eax, 4u);
     code.jbe(stale_generation);
 
     code.inc(code.dword[
@@ -2922,15 +2917,14 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
 
-    // The old generation-mismatch path returned to C++ and entered a fresh
-    // resident dispatch here. Preserve that logical boundary for downstream
-    // scheduler-tail eligibility. The block itself has already been screened
-    // out above when it requires an empty-chain branch boundary.
-    code.mov(code.dword[
-        code.r11 + static_cast<int>(
-            offsetof(V4NativeState, dispatch_instruction_budget))],
-        code.r12d);
-    code.xor_(code.r9d, code.r9d);
+    // Branch scheduler-tail fragments are only valid from a fresh dispatcher
+    // entry. Revalidate/refill their cached bytes here so the following C++
+    // pass is a cache hit, but preserve the historical generation boundary
+    // before the branch itself executes.
+    code.cmp(code.byte[
+        code.r14 +
+        static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
+    code.jne(stale_generation);
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
@@ -3001,8 +2995,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.je(budget_chain_ok);
     code.cmp(code.r12d, code.dword[
         code.r11 +
-        static_cast<int>(offsetof(V4NativeState,
-                                  dispatch_instruction_budget))]);
+        static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
     code.jne(budget_exit);
     code.L(budget_chain_ok);
   }
@@ -4164,7 +4157,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
     native.instruction_budget = remaining_instructions;
-    native.dispatch_instruction_budget = remaining_instructions;
     native.block_entries = 0u;
     native.direct_links = 0u;
     native.missing_exits = 0u;
