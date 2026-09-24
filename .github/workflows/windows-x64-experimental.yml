@@ -1,0 +1,42 @@
+name: Windows x64 Experimental
+
+on:
+  push:
+    branches:
+      - perf/recompiler-execution-flow-1
+  workflow_dispatch:
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build-windows
+          -G "Visual Studio 17 2022"
+          -A x64
+          -DVIBESTATION_ENABLE_X64_JIT=ON
+          -DVIBESTATION_ENABLE_DISCORD_RPC=OFF
+          -DVIBESTATION_ENABLE_IPO=OFF
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build-windows --config Release --parallel 4
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build-windows/Release/VibeStation.exe artifact/VibeStation.exe
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeStation-windows-x64-recompiler-experimental
+          path: artifact/VibeStation.exe
+          if-no-files-found: error
+          retention-days: 7
