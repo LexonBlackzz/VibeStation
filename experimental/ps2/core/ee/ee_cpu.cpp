@@ -3328,6 +3328,11 @@ bool EeCpu::step(std::string& error) {
     return step_internal(error, false, nullptr);
 }
 
+bool EeCpu::step_predecoded(
+    u32 instruction, std::string& error) {
+    return step_internal(error, false, &instruction);
+}
+
 bool EeCpu::step_quiet(std::string& error) {
     return step_internal(error, true, nullptr);
 }
