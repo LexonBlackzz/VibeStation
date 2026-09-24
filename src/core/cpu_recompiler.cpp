@@ -544,8 +544,9 @@ constexpr u32 kV4RevalidateRefilled = 1u << 1;
 // the architectural line refill that the C++ run_slice path would have done.
 u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
   if (state == nullptr || state->cpu == nullptr || block == nullptr ||
-      !block->cacheable || block->retry_second_line || block->has_control ||
-      block->budget_requires_empty_chain || block->instruction_count == 0u ||
+      !block->cacheable || block->retry_second_line ||
+      block->second_icache_line || block->budget_requires_empty_chain ||
+      block->instruction_count == 0u ||
       block->instruction_count > kV4MaxBlockInstructions) {
     return 0u;
   }
