@@ -551,6 +551,19 @@ u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
   }
 
   Cpu &cpu = *state->cpu;
+
+  // A generation exit used to return through run_slice(), which re-sampled the
+  // hardware IRQ line before touching the next guest I-cache line. Preserve
+  // that architectural boundary when the IRQ level changed while the resident
+  // chain was running; C++ will synchronize COP0 and decide whether to take
+  // the interrupt before any target-line refill becomes guest-visible.
+  if (state->system != nullptr) {
+    const bool sampled_irq = (state->cop0_cause & (1u << 10)) != 0u;
+    if (state->system->irq_pending() != sampled_irq) {
+      return 0u;
+    }
+  }
+
   u32 result = 0u;
   if (cpu.prepare_instruction_cache_line_for_backend(block->start_pc)) {
     result |= kV4RevalidateRefilled;
