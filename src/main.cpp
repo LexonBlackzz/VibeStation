@@ -1491,6 +1491,7 @@ static int run_frame_test(const std::string &bios_path, int frames,
 
 struct BenchmarkStateHashes {
   u64 state = 0;
+  System::SnapshotComponentHashes components{};
   u64 cpu_state = 0;
   u64 ram = 0;
   u64 cpu_debug = 0;
@@ -1524,6 +1525,9 @@ static bool capture_benchmark_state_hashes(System &sys,
 
   out.state =
       benchmark_hash_bytes(snapshot.data.data(), snapshot.data.size());
+  if (!sys.debug_snapshot_component_hashes(out.components)) {
+    return false;
+  }
   out.cpu_state = benchmark_hash_bytes(snapshot.data.data() + cpu_offset,
                                        cpu_snapshot.size());
   out.ram = benchmark_hash_bytes(snapshot.data.data() + ram_offset,
@@ -1784,6 +1788,23 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     std::printf("CPU_BENCHMARK_RESULT status=error reason=state_capture\n");
     return 1;
   }
+  std::printf(
+      "CPU_BENCHMARK_COMPONENT_HASHES "
+      "cpu=%016llX ram=%016llX gpu=%016llX irq=%016llX "
+      "timers=%016llX dma=%016llX sio=%016llX cdrom=%016llX "
+      "spu=%016llX mdec=%016llX system=%016llX\n",
+      static_cast<unsigned long long>(hashes.components.cpu),
+      static_cast<unsigned long long>(hashes.components.ram),
+      static_cast<unsigned long long>(hashes.components.gpu),
+      static_cast<unsigned long long>(hashes.components.irq),
+      static_cast<unsigned long long>(hashes.components.timers),
+      static_cast<unsigned long long>(hashes.components.dma),
+      static_cast<unsigned long long>(hashes.components.sio),
+      static_cast<unsigned long long>(hashes.components.cdrom),
+      static_cast<unsigned long long>(hashes.components.spu),
+      static_cast<unsigned long long>(hashes.components.mdec),
+      static_cast<unsigned long long>(hashes.components.system));
+
   std::sort(cpu_samples.begin(), cpu_samples.end());
   std::sort(core_samples.begin(), core_samples.end());
   const double measured_divisor = static_cast<double>(measured_frames);
