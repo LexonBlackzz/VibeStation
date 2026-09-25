@@ -1328,7 +1328,7 @@ void draw_settings_section(ImDrawList* draw, const Layout& layout,
 bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w, bool& value) {
-    constexpr float kHeight = 58.0f;
+    constexpr float kHeight = 68.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1371,7 +1371,7 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
 bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w) {
-    constexpr float kHeight = 58.0f;
+    constexpr float kHeight = 68.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1407,7 +1407,7 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w,
     int& current, const char* const items[], int item_count) {
-    constexpr float kHeight = 58.0f;
+    constexpr float kHeight = 68.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1448,8 +1448,27 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
 void definitive_settings_note(
     ImDrawList* draw, const Layout& layout,
     float x, float y, const char* text) {
-    add_text(draw, layout, x, y, 8.7f,
-        rgba(139, 150, 160, 220), text);
+    const float font_size = layout.px(10.6f);
+    const ImVec2 pos = layout.point(x, y);
+
+    // Keep descriptions on the text side of the row. They may wrap to a
+    // second line, but are clipped before the right-aligned slider/combo area.
+    const float wrap_width = layout.px(270.0f);
+    const ImVec4 clip_rect(
+        pos.x,
+        pos.y,
+        pos.x + wrap_width,
+        pos.y + layout.px(30.0f));
+
+    draw->AddText(
+        ImGui::GetFont(),
+        font_size,
+        pos,
+        rgba(171, 181, 191, 235),
+        text,
+        nullptr,
+        wrap_width,
+        &clip_rect);
 }
 
 bool definitive_settings_color(
@@ -1515,7 +1534,7 @@ bool definitive_settings_slider_int(
     float x, float y, float w,
     int& value, int min_value, int max_value,
     const char* format) {
-    constexpr float kHeight = 58.0f;
+    constexpr float kHeight = 68.0f;
     add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         rgba(221, 226, 232, 244), label);
 
@@ -1731,10 +1750,10 @@ void App::panel_definitive_settings() {
     constexpr float right_x = 654.0f;
     constexpr float column_w = 492.0f;
     constexpr float content_y = 216.0f;
-    constexpr float row_step = 58.0f;
+    constexpr float row_step = 68.0f;
 
     const auto note = [&](float x, float y, const char* text) {
-        definitive_settings_note(draw, layout, x + 18.0f, y + 30.0f, text);
+        definitive_settings_note(draw, layout, x + 18.0f, y + 29.0f, text);
     };
 
     const auto apply_audio_settings = [&]() {
@@ -1755,7 +1774,7 @@ void App::panel_definitive_settings() {
     switch (definitive_settings_tab_) {
     case 0: { // Input
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 218.0f, "INPUT");
+            draw, layout, left_x, content_y, column_w, 260.0f, "INPUT");
 
         if (definitive_settings_action(
             draw, layout, "input_bindings", "Configure Keyboard Bindings",
@@ -1804,8 +1823,8 @@ void App::panel_definitive_settings() {
                 ? rgba(178, 221, 190, 245)
                 : rgba(188, 195, 202, 235),
             gamepad_title.c_str());
-        add_text(draw, layout, right_x + 18.0f, content_y + 84.0f, 9.0f,
-            rgba(139, 150, 160, 220),
+        add_text(draw, layout, right_x + 18.0f, content_y + 84.0f, 10.6f,
+            rgba(171, 181, 191, 235),
             input_ && input_->has_gamepad()
                 ? "Connected gamepads are mapped automatically."
                 : "Connect a controller and VibeStation will auto-map it.");
@@ -1814,7 +1833,7 @@ void App::panel_definitive_settings() {
 
     case 1: { // Video
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 218.0f, "DISPLAY");
+            draw, layout, left_x, content_y, column_w, 260.0f, "DISPLAY");
 
         const char* resolution_modes[] = {
             "320x240", "640x480", "1024x768"
@@ -1864,7 +1883,7 @@ void App::panel_definitive_settings() {
             "Smooths the final image when scaling instead of keeping hard pixels.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 160.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 190.0f, "GPU");
 
         if (definitive_settings_switch(
             draw, layout, "video_fast_gpu", "Fast Mode",
@@ -1894,7 +1913,7 @@ void App::panel_definitive_settings() {
 
     case 2: { // Audio
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 276.0f, "LATENCY");
+            draw, layout, left_x, content_y, column_w, 326.0f, "LATENCY");
 
         int target_latency = static_cast<int>(g_spu_audio_target_latency_ms);
         if (definitive_settings_slider_int(
@@ -1958,7 +1977,7 @@ void App::panel_definitive_settings() {
             "Controls buffering for XA and other streamed CD audio.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 276.0f, "PLAYBACK");
+            draw, layout, right_x, content_y, column_w, 326.0f, "PLAYBACK");
 
         if (definitive_settings_switch(
             draw, layout, "audio_queue", "Enable Audio Queue",
@@ -2000,7 +2019,7 @@ void App::panel_definitive_settings() {
 
     case 3: { // System
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 276.0f, "CPU & PERFORMANCE");
+            draw, layout, left_x, content_y, column_w, 326.0f, "CPU & PERFORMANCE");
 
         const char* cpu_backend_labels[] = {
             "Interpreter", "Decoded Block", "x64 JIT"
@@ -2073,7 +2092,7 @@ void App::panel_definitive_settings() {
             "Reduces internal work for slower PCs with some quality tradeoffs.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 334.0f, "PLAYBACK & SERVICES");
+            draw, layout, right_x, content_y, column_w, 394.0f, "PLAYBACK & SERVICES");
 
         if (definitive_settings_switch(
             draw, layout, "system_vsync", "VSync Playback",
@@ -2136,7 +2155,7 @@ void App::panel_definitive_settings() {
 
     case 4: { // Memory Cards
         draw_settings_section(
-            draw, layout, left_x, content_y, 1012.0f, 218.0f, "MEMORY CARDS");
+            draw, layout, left_x, content_y, 1012.0f, 260.0f, "MEMORY CARDS");
 
         const char* memory_modes[] = {
             "Generic", "Per-Game", "Disabled"
@@ -2175,7 +2194,7 @@ void App::panel_definitive_settings() {
 
     case 5: { // Experimental
         draw_settings_section(
-            draw, layout, left_x, content_y, 1012.0f, 276.0f, "EXPERIMENTAL");
+            draw, layout, left_x, content_y, 1012.0f, 326.0f, "EXPERIMENTAL");
 
         if (definitive_settings_switch(
             draw, layout, "experimental_bios_size", "Experimental BIOS Size Mode",
@@ -2220,7 +2239,7 @@ void App::panel_definitive_settings() {
 
     case 6: { // Customize
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 218.0f, "THEME");
+            draw, layout, left_x, content_y, column_w, 260.0f, "THEME");
 
         const int preset_count = ui_theme::theme_preset_count();
         const int safe_preset_count = std::min(preset_count, 64);
@@ -2271,11 +2290,11 @@ void App::panel_definitive_settings() {
             "Restores VibeStation's default theme colors.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 334.0f, "SIMPLE COLORS");
+            draw, layout, right_x, content_y, column_w, 394.0f, "SIMPLE COLORS");
 
         if (!ui_theme::g_theme_settings.simple) {
-            add_text(draw, layout, right_x + 18.0f, content_y + 63.0f, 11.0f,
-                rgba(162, 173, 184, 225),
+            add_text(draw, layout, right_x + 18.0f, content_y + 63.0f, 11.5f,
+                rgba(184, 194, 204, 238),
                 "Enable Simple Customization to edit these colors.");
         }
         else {
@@ -2376,8 +2395,8 @@ void App::panel_definitive_settings() {
     ImGui::PopStyleVar(2);
 
     add_text(draw, layout,
-        panel_x + 190.0f, panel_y + panel_h - 58.0f, 8.8f,
-        rgba(139, 150, 160, 215),
+        panel_x + 190.0f, panel_y + panel_h - 60.0f, 10.0f,
+        rgba(166, 177, 187, 230),
         "Shows logging, diagnostics, profiling and other developer-oriented controls.");
 
     if (detailed_changed) {
