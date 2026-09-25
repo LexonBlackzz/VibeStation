@@ -5,6 +5,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace ps2 {
 
@@ -124,6 +125,18 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
+    [[nodiscard]] u64 quiet_trace_hits() const {
+        return quiet_trace_hits_;
+    }
+    [[nodiscard]] u64 quiet_trace_builds() const {
+        return quiet_trace_builds_;
+    }
+    [[nodiscard]] u64 quiet_trace_side_exits() const {
+        return quiet_trace_side_exits_;
+    }
+    [[nodiscard]] u64 quiet_trace_replayed_instructions() const {
+        return quiet_trace_replayed_instructions_;
+    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -137,6 +150,27 @@ private:
         bool quiet,
         const u32* prefetched_instruction = nullptr,
         bool skip_interrupt_check = false);
+
+    struct QuietTraceOp {
+        u32 pc = 0;
+        u32 instruction = 0;
+        s16 imm = 0;
+        u8 kind = 0;
+        u8 opcode = 0;
+        u8 rs = 0;
+        u8 rt = 0;
+        u8 rd = 0;
+        u8 sa = 0;
+        u8 funct = 0;
+    };
+    struct QuietDecodedTrace {
+        u32 entry_pc = 0;
+        u32 generation = 0;
+        u8 count = 0;
+        bool valid = false;
+        std::array<QuietTraceOp, 64> ops{};
+    };
+
     bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
@@ -175,6 +209,12 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
+    std::vector<QuietDecodedTrace> quiet_traces_ =
+        std::vector<QuietDecodedTrace>(2048);
+    u64 quiet_trace_hits_ = 0;
+    u64 quiet_trace_builds_ = 0;
+    u64 quiet_trace_side_exits_ = 0;
+    u64 quiet_trace_replayed_instructions_ = 0;
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;

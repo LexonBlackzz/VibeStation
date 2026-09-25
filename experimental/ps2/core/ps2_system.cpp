@@ -1324,6 +1324,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
             const u32 physical = EeBus::to_physical(pc);
             if ((pc & 3u) == 0u &&
                 physical <= ram_.size() - sizeof(u32)) {
+                ram_.track_code_page(physical);
                 const u32 trace_retired = ee_.run_quiet_fast_prefix(
                     0u,
                     nullptr,

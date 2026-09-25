@@ -121,6 +121,37 @@ u32 ps2_fpu_result(float value) {
     return bits;
 }
 
+enum QuietTraceKind : u8 {
+    kTraceOther = 0,
+    kTraceNop,
+    kTraceLoad,
+    kTraceStore,
+    kTraceCop1,
+    kTraceRegimm,
+    kTraceSpecial,
+};
+
+u8 classify_quiet_trace(u32 instruction) {
+    if (instruction == 0u) return kTraceNop;
+    switch (instruction >> 26) {
+    case 0x1Eu:
+    case 0x20u: case 0x21u: case 0x23u:
+    case 0x24u: case 0x25u: case 0x27u:
+    case 0x30u: case 0x31u: case 0x34u:
+    case 0x36u: case 0x37u:
+        return kTraceLoad;
+    case 0x1Fu:
+    case 0x28u: case 0x29u: case 0x2Bu:
+    case 0x38u: case 0x39u: case 0x3Cu:
+    case 0x3Eu: case 0x3Fu:
+        return kTraceStore;
+    case 0x11u: return kTraceCop1;
+    case 0x01u: return kTraceRegimm;
+    case 0x00u: return kTraceSpecial;
+    default: return kTraceOther;
+    }
+}
+
 } // namespace
 
 void EeCpu::reset(u32 entry_point) {
@@ -141,6 +172,14 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
+    for (auto& trace : quiet_traces_) {
+        trace.valid = false;
+        trace.count = 0;
+    }
+    quiet_trace_hits_ = 0;
+    quiet_trace_builds_ = 0;
+    quiet_trace_side_exits_ = 0;
+    quiet_trace_replayed_instructions_ = 0;
     halt_reason_.clear();
 }
 
@@ -3426,6 +3465,44 @@ u32 EeCpu::run_quiet_fast_prefix(
     }
     u32 retired = 0u;
 
+    QuietDecodedTrace* replay_trace = nullptr;
+    QuietDecodedTrace* record_trace = nullptr;
+    u32 replay_index = 0u;
+    u32 trace_page = 0u;
+    u32 trace_generation = 0u;
+    bool trace_recording_active = false;
+
+    if (direct_trace && page_generations != nullptr &&
+        state_.pc < 0xC0000000u && (state_.pc & 3u) == 0u) {
+        const u32 physical = EeBus::to_physical(state_.pc);
+        constexpr u32 kTraceRamSize = 32u * 1024u * 1024u;
+        if (physical < kTraceRamSize) {
+            trace_page = physical >> 12;
+            trace_generation = page_generations[trace_page];
+            const u64 hash =
+                static_cast<u64>(state_.pc >> 2) *
+                11400714819323198485ull;
+            const std::size_t index =
+                static_cast<std::size_t>(hash ^ (hash >> 32)) &
+                (quiet_traces_.size() - 1u);
+            QuietDecodedTrace& trace = quiet_traces_[index];
+            if (trace.valid &&
+                trace.entry_pc == state_.pc &&
+                trace.generation == trace_generation &&
+                trace.count != 0u) {
+                replay_trace = &trace;
+                ++quiet_trace_hits_;
+            } else {
+                trace.valid = false;
+                trace.entry_pc = state_.pc;
+                trace.generation = trace_generation;
+                trace.count = 0u;
+                record_trace = &trace;
+                trace_recording_active = true;
+            }
+        }
+    }
+
     constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
     const bool direct_main_ram =
         direct_trace &&
@@ -3528,13 +3605,36 @@ u32 EeCpu::run_quiet_fast_prefix(
     };
 
     for (; retired < limit; ++retired) {
-        const u32 expected_pc = direct_trace
-            ? state_.pc
-            : block_pc + retired * 4u;
+        if (replay_trace != nullptr) {
+            if (replay_index >= replay_trace->count) break;
+            if (page_generations == nullptr ||
+                page_generations[trace_page] !=
+                    replay_trace->generation) {
+                replay_trace->valid = false;
+                break;
+            }
+        }
+
+        const QuietTraceOp* replay_op =
+            replay_trace != nullptr
+                ? &replay_trace->ops[replay_index]
+                : nullptr;
+        const u32 expected_pc =
+            replay_op != nullptr
+                ? replay_op->pc
+                : (direct_trace
+                    ? state_.pc
+                    : block_pc + retired * 4u);
+        if (replay_op != nullptr && state_.pc != expected_pc) {
+            ++quiet_trace_side_exits_;
+            break;
+        }
         if (!direct_trace && state_.pc != expected_pc) break;
 
         u32 instruction = 0u;
-        if (direct_trace) {
+        if (replay_op != nullptr) {
+            instruction = replay_op->instruction;
+        } else if (direct_trace) {
             const u32 physical = EeBus::to_physical(expected_pc);
             constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             if ((expected_pc & 3u) != 0u ||
@@ -3553,7 +3653,18 @@ u32 EeCpu::run_quiet_fast_prefix(
             !next_is_delay_slot_ &&
             state_.next_pc == expected_pc + 4u) {
             u32 run = 1u;
-            if (direct_trace) {
+            if (replay_trace != nullptr) {
+                while (retired + run < limit &&
+                       replay_index + run < replay_trace->count) {
+                    const QuietTraceOp& next =
+                        replay_trace->ops[replay_index + run];
+                    if (next.pc != expected_pc + run * 4u ||
+                        next.instruction != 0u) {
+                        break;
+                    }
+                    ++run;
+                }
+            } else if (direct_trace) {
                 constexpr u32 kMainRamSize =
                     32u * 1024u * 1024u;
                 while (retired + run < limit) {
@@ -3593,17 +3704,56 @@ u32 EeCpu::run_quiet_fast_prefix(
                 state_.cop0[13] |= 0x00008000u;
             }
 
+            if (replay_trace != nullptr) {
+                replay_index += run;
+                quiet_trace_replayed_instructions_ += run;
+            } else if (record_trace != nullptr &&
+                       trace_recording_active) {
+                for (u32 i = 0u;
+                     i < run && record_trace->count < record_trace->ops.size();
+                     ++i) {
+                    const u32 pc = expected_pc + i * 4u;
+                    const u32 physical = EeBus::to_physical(pc);
+                    if ((physical >> 12) != trace_page) {
+                        trace_recording_active = false;
+                        break;
+                    }
+                    QuietTraceOp& op =
+                        record_trace->ops[record_trace->count++];
+                    op = {};
+                    op.pc = pc;
+                    op.kind = kTraceNop;
+                }
+                if (record_trace->count >= record_trace->ops.size()) {
+                    trace_recording_active = false;
+                }
+            }
+
             retired += run - 1u;
             continue;
         }
 
-        const u32 opcode = instruction >> 26;
-        const u32 rs = (instruction >> 21) & 31u;
-        const u32 rt = (instruction >> 16) & 31u;
-        const u32 rd = (instruction >> 11) & 31u;
-        const u32 sa = (instruction >> 6) & 31u;
-        const u32 funct = instruction & 63u;
-        const s16 imm = immediate(instruction);
+        const u32 opcode =
+            replay_op != nullptr ? replay_op->opcode
+                                 : instruction >> 26;
+        const u32 rs =
+            replay_op != nullptr ? replay_op->rs
+                                 : (instruction >> 21) & 31u;
+        const u32 rt =
+            replay_op != nullptr ? replay_op->rt
+                                 : (instruction >> 16) & 31u;
+        const u32 rd =
+            replay_op != nullptr ? replay_op->rd
+                                 : (instruction >> 11) & 31u;
+        const u32 sa =
+            replay_op != nullptr ? replay_op->sa
+                                 : (instruction >> 6) & 31u;
+        const u32 funct =
+            replay_op != nullptr ? replay_op->funct
+                                 : instruction & 63u;
+        const s16 imm =
+            replay_op != nullptr ? replay_op->imm
+                                 : immediate(instruction);
 
         bool handled = true;
         bool stop_after_instruction = false;
@@ -4291,9 +4441,52 @@ u32 EeCpu::run_quiet_fast_prefix(
         if (state_.cop0[9] == state_.cop0[11]) {
             state_.cop0[13] |= 0x00008000u;
         }
+
+        if (replay_trace != nullptr) {
+            ++replay_index;
+            ++quiet_trace_replayed_instructions_;
+        } else if (record_trace != nullptr &&
+                   trace_recording_active) {
+            const u32 physical = EeBus::to_physical(expected_pc);
+            if ((physical >> 12) == trace_page &&
+                record_trace->count < record_trace->ops.size()) {
+                QuietTraceOp& op =
+                    record_trace->ops[record_trace->count++];
+                op.pc = expected_pc;
+                op.instruction = instruction;
+                op.imm = imm;
+                op.kind = classify_quiet_trace(instruction);
+                op.opcode = static_cast<u8>(opcode);
+                op.rs = static_cast<u8>(rs);
+                op.rt = static_cast<u8>(rt);
+                op.rd = static_cast<u8>(rd);
+                op.sa = static_cast<u8>(sa);
+                op.funct = static_cast<u8>(funct);
+                if (record_trace->count >=
+                    record_trace->ops.size()) {
+                    trace_recording_active = false;
+                }
+            } else {
+                trace_recording_active = false;
+            }
+        }
+
         if (stop_after_instruction) {
             ++retired;
             break;
+        }
+    }
+
+    if (record_trace != nullptr) {
+        if (record_trace->count >= 2u &&
+            page_generations != nullptr &&
+            page_generations[trace_page] == trace_generation) {
+            record_trace->generation = trace_generation;
+            record_trace->valid = true;
+            ++quiet_trace_builds_;
+        } else {
+            record_trace->valid = false;
+            record_trace->count = 0u;
         }
     }
 
