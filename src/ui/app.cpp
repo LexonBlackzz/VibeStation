@@ -1055,7 +1055,10 @@ void App::render_ui() {
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
-    if (has_started_emulation_) {
+    if (definitive_grim_reaper_active_) {
+        panel_definitive_grim_reaper();
+    }
+    else if (has_started_emulation_) {
         panel_emulator_screen();
     }
     else {
@@ -1076,8 +1079,8 @@ void App::render_ui() {
             panel_settings();
         }
     }
-    if (show_grim_reaper_)
-        panel_grim_reaper();
+    // The legacy Grim Reaper window remains compiled for migration/debugging,
+    // but normal navigation now uses the full-screen definitive section.
     if (show_about_)
         panel_about();
     if (show_debug_cpu_)
