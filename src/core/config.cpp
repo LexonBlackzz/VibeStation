@@ -52,7 +52,7 @@ CpuExecutionMode parse_cpu_mode(const std::string& v, CpuExecutionMode fallback)
     lower.erase(std::remove(lower.begin(), lower.end(), '_'), lower.end());
     if (lower == "1" || lower == "decoded" || lower == "decodedblock" ||
         lower == "blockinterpreter" || lower == "blockinterp" || lower == "block") {
-        return CpuExecutionMode::Interpreter;
+        return CpuExecutionMode::DecodedBlockInterpreter;
     }
     if (lower == "2" || lower == "3" || lower == "4" || lower == "5" ||
         lower == "x64jit" || lower == "recompiler" || lower == "jit" ||
@@ -71,7 +71,7 @@ CpuExecutionMode parse_cpu_mode(const std::string& v, CpuExecutionMode fallback)
 }
 
 int cpu_mode_to_int(CpuExecutionMode mode) {
-    return mode == CpuExecutionMode::Interpreter ? 0 : 5;
+    return cpu_execution_mode_to_config_value(mode);
 }
 
 } // anonymous namespace
