@@ -439,6 +439,49 @@ u32 GsRasterizer::apply_fog(u32 rgba, u32 fog_color, u32 fog) {
     return out;
 }
 
+bool simple_frame_write(const GsRasterContext& ctx) {
+    const bool depth_noop =
+        !ctx.zte || (((ctx.ztst & 3u) == 1u) && ctx.zmask);
+    const bool dither_noop =
+        !ctx.dither || (ctx.psm != 2u && ctx.psm != 10u);
+    return (ctx.scanmask & 2u) == 0u &&
+           !ctx.ate &&
+           !ctx.date &&
+           depth_noop &&
+           !ctx.alpha_blend &&
+           !ctx.fba &&
+           ctx.fbmask == 0u &&
+           dither_noop &&
+           ctx.nonzero_colors == nullptr &&
+           ctx.nonzero_inputs == nullptr &&
+           ctx.nonzero_input_alpha == nullptr &&
+           ctx.first_input_rgba == nullptr &&
+           ctx.first_alpha_input_rgba == nullptr;
+}
+
+bool draw_simple_frame_pixel(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y,
+    u32 rgba) {
+    const u32 address = GsVram::pixel_address_bytes(
+        ctx.psm,
+        static_cast<u32>(x),
+        static_cast<u32>(y),
+        ctx.fbp,
+        ctx.fbw);
+    if (ctx.psm == 0u) {
+        return vram.write_pixel_at_address_untracked(0u, address, rgba);
+    }
+    if (ctx.psm == 1u) {
+        return vram.write_pixel_at_address_untracked(
+            1u, address, rgba & 0x00FFFFFFu);
+    }
+    return vram.write_pixel_at_address_untracked(
+        ctx.psm, address, rgba32_to_16(rgba));
+}
+
 u32 GsRasterizer::apply_dither(
     u32 rgba,
     const GsRasterContext& ctx,
@@ -921,6 +964,8 @@ u64 GsRasterizer::draw_sprite(
         }
     }
 
+    const bool simple_pixels = simple_frame_write(ctx);
+    const bool simple_pixels = simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         const s32 py = y * 16 + 8;
@@ -976,7 +1021,10 @@ u64 GsRasterizer::draw_sprite(
                     0.0L, 255.0L));
                 rgba = apply_fog(rgba, ctx.fog_color, fog);
             }
-            if (draw_pixel(vram, ctx, x, y, b.z, rgba)) ++pixels;
+            const bool wrote = simple_pixels
+                ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                : draw_pixel(vram, ctx, x, y, b.z, rgba);
+            if (wrote) ++pixels;
         }
     }
     return pixels;
@@ -1102,7 +1150,10 @@ u64 GsRasterizer::draw_triangle(
                 }
                 const u32 z = !ctx.zte ? 0u : constant_z ? a.z
                     : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-                if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
+                const bool wrote = simple_pixels
+                    ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                    : draw_pixel(vram, ctx, x, y, z, rgba);
+                if (wrote) ++pixels;
             }
 
             w0 += w0_dx;
