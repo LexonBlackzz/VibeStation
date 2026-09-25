@@ -95,20 +95,20 @@ bool load_ui_wav_source(
             SDL_RWFromConstMem(
                 embedded.data,
                 static_cast<int>(embedded.size));
-        if (rw != nullptr &&
-            SDL_LoadWAV_RW(
-                rw,
-                1,
-                &source_spec,
-                &source_buffer,
-                &source_length) != nullptr) {
-            return true;
-        }
-
         if (rw != nullptr) {
-            // SDL_LoadWAV_RW only frees the RWops when it is actually called.
-            // On failure after the call, freesrc=1 has already handled it.
-            rw = nullptr;
+            if (SDL_LoadWAV_RW(
+                    rw,
+                    1,
+                    &source_spec,
+                    &source_buffer,
+                    &source_length) != nullptr) {
+                return true;
+            }
+
+            // freesrc=1 releases the RWops even when WAV parsing fails.
+            source_spec = {};
+            source_buffer = nullptr;
+            source_length = 0;
         }
     }
 
