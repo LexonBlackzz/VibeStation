@@ -334,6 +334,7 @@ bool definitive_settings_slider_float(
 } // namespace
 
 void App::open_definitive_settings() {
+    definitive_detailed_settings_ = false;
     show_settings_ = true;
     definitive_settings_transition_ =
         DefinitiveSettingsTransition::Opening;
