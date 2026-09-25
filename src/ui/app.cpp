@@ -313,10 +313,41 @@ bool App::init_runtime() {
     }
     renderer_->set_bilinear_filtering(g_bilinear_filtering);
 
+    // The hardware PS1 rasterizer owns an independent hidden OpenGL 4.3
+    // context. It is optional: unsupported drivers stay on the software
+    // rasterizer without changing emulation behavior.
+    if (g_gpu_hardware_rasterizer) {
+        gpu_hardware_rasterizer_ =
+            std::make_unique<GpuHardwareRasterizer>();
+        if (gpu_hardware_rasterizer_->initialize()) {
+            system_->gpu().set_hardware_rasterizer(
+                gpu_hardware_rasterizer_.get());
+            LOG_INFO("GPU hardware rasterizer: %s",
+                gpu_hardware_rasterizer_->status().c_str());
+        }
+        else {
+            LOG_WARN("GPU hardware rasterizer unavailable: %s",
+                gpu_hardware_rasterizer_->status().c_str());
+            gpu_hardware_rasterizer_.reset();
+        }
+
+        // Creating the hidden compute context changes SDL's current context on
+        // this thread. Restore the UI/presentation context before ImGui draws.
+        SDL_GL_MakeCurrent(window_, gl_context_);
+    }
+
     if (!emu_runner_.start(system_.get())) {
         LOG_ERROR("EmuRunner failed to start");
         printf("[App::init_runtime] EmuRunner FAILED\n");
         fflush(stdout);
+        if (system_) {
+            system_->gpu().set_hardware_rasterizer(nullptr);
+        }
+        if (gpu_hardware_rasterizer_) {
+            gpu_hardware_rasterizer_->shutdown();
+            gpu_hardware_rasterizer_.reset();
+            SDL_GL_MakeCurrent(window_, gl_context_);
+        }
         renderer_.reset();
         input_.reset();
         system_.reset();
@@ -328,6 +359,14 @@ bool App::init_runtime() {
         printf("[App::init_runtime] Presentation worker FAILED\n");
         fflush(stdout);
         emu_runner_.stop();
+        if (system_) {
+            system_->gpu().set_hardware_rasterizer(nullptr);
+        }
+        if (gpu_hardware_rasterizer_) {
+            gpu_hardware_rasterizer_->shutdown();
+            gpu_hardware_rasterizer_.reset();
+            SDL_GL_MakeCurrent(window_, gl_context_);
+        }
         renderer_.reset();
         input_.reset();
         system_.reset();
@@ -2120,6 +2159,18 @@ void App::shutdown() {
     // EmuRunner. The emulation thread remains alive until that worker exits.
     frame_presentation_worker_.stop();
     emu_runner_.stop();
+
+    // EmuRunner releases the compute context before returning from stop().
+    // Tear the optional hardware rasterizer down before the main GL context.
+    if (system_) {
+        system_->gpu().set_hardware_rasterizer(nullptr);
+    }
+    if (gpu_hardware_rasterizer_) {
+        gpu_hardware_rasterizer_->shutdown();
+        gpu_hardware_rasterizer_.reset();
+        SDL_GL_MakeCurrent(window_, gl_context_);
+    }
+
     input_recorder_.shutdown();
     discord_presence_.reset();
     if (renderer_) {
