@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -17,6 +18,8 @@ typedef struct _SDL_GameController SDL_GameController;
 typedef void* SDL_GLContext;
 
 namespace ps2::ui {
+
+class Ps2GlGsBackend;
 
 class Ps2App {
 public:
@@ -59,6 +62,9 @@ private:
 
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_context_ = nullptr;
+    int gl_major_ = 0;
+    int gl_minor_ = 0;
+    std::unique_ptr<Ps2GlGsBackend> gpu_gs_backend_{};
     SDL_GameController* controller_ = nullptr;
     unsigned int audio_device_ = 0;
     std::atomic<bool> lag_stutter_enabled_{true};

@@ -67,6 +67,27 @@ GsCore::~GsCore() {
     stop_raster_helpers();
 }
 
+void GsCore::set_gpu_backend(GsGpuBackend* backend) {
+    flush_pending_draws();
+    gpu_backend_ = backend;
+    if (gpu_backend_ != nullptr) {
+        gpu_backend_->invalidate_cpu_source();
+    }
+}
+
+void GsCore::synchronize_gpu_to_cpu() const {
+    if (gpu_backend_ == nullptr ||
+        !gpu_backend_->available()) {
+        return;
+    }
+    auto& mutable_vram =
+        const_cast<GsVram&>(vram_);
+    if (gpu_backend_->synchronize_to_cpu(
+            mutable_vram)) {
+        ++const_cast<GsStats&>(stats_).gpu_syncs_to_cpu;
+    }
+}
+
 void GsCore::set_async_rasterization(bool enabled) {
     if (async_rasterization_ == enabled) return;
     flush_pending_draws();
@@ -248,12 +269,56 @@ bool GsCore::try_execute_parallel_sprite(
     return true;
 }
 
+bool GsCore::try_execute_gpu_sprite(
+    const RasterCommand& command,
+    u64& pixels) {
+    if (gpu_backend_ == nullptr ||
+        !gpu_backend_->available() ||
+        detailed_raster_stats_ ||
+        raster_timing_enabled_ ||
+        command.primitive != 6u ||
+        command.vertex_count < 2u) {
+        return false;
+    }
+
+    s32 top = 0;
+    s32 bottom = 0;
+    u64 area = 0u;
+    if (!GsRasterizer::parallel_sprite_plan(
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    if (!gpu_backend_->submit_sprite(
+            vram_,
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    pixels = area;
+    ++stats_.gpu_sprite_draws;
+    stats_.gpu_sprite_pixels += area;
+    return true;
+}
+
 void GsCore::flush_pending_draws() const {
-    if (!raster_worker_.joinable()) return;
-    std::unique_lock lock(raster_mutex_);
-    raster_completed_condition_.wait(lock, [this] {
-        return raster_completed_ == raster_enqueued_;
-    });
+    if (raster_worker_.joinable()) {
+        std::unique_lock lock(raster_mutex_);
+        raster_completed_condition_.wait(lock, [this] {
+            return raster_completed_ == raster_enqueued_;
+        });
+    }
+    synchronize_gpu_to_cpu();
 }
 
 void GsCore::raster_worker_main() {
@@ -286,6 +351,9 @@ void GsCore::reset() {
     transfer_ = {};
     stats_ = {};
     vram_.reset();
+    if (gpu_backend_ != nullptr) {
+        gpu_backend_->invalidate_cpu_source();
+    }
     draw_vertices_.fill({});
     draw_vertex_count_ = 0;
 }
@@ -1032,20 +1100,32 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         raster_begin = std::chrono::steady_clock::now();
     }
     u64 pixels = 0;
-    if (prim == 0u && vertex_count >= 1u) {
-        pixels = GsRasterizer::draw_point(vram_, ctx, a);
-    } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
-        pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
-    } else if (prim == 6u && vertex_count >= 2u) {
-        if (!try_execute_parallel_sprite(command, pixels)) {
-            pixels = GsRasterizer::draw_sprite(
-                vram_, ctx, a, b);
-        }
-    } else if ((prim == 3u || prim == 4u || prim == 5u) && vertex_count >= 3u) {
-        pixels = GsRasterizer::draw_triangle(vram_, ctx, a, b, c);
+    bool gpu_raster = false;
+
+    if (prim == 6u && vertex_count >= 2u &&
+        try_execute_gpu_sprite(command, pixels)) {
+        gpu_raster = true;
     } else {
-        ++stats_.skipped_raster_draws;
-        return;
+        // Software rasterization must observe every earlier GPU write.
+        synchronize_gpu_to_cpu();
+
+        if (prim == 0u && vertex_count >= 1u) {
+            pixels = GsRasterizer::draw_point(vram_, ctx, a);
+        } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
+            pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
+        } else if (prim == 6u && vertex_count >= 2u) {
+            if (!try_execute_parallel_sprite(command, pixels)) {
+                pixels = GsRasterizer::draw_sprite(
+                    vram_, ctx, a, b);
+            }
+        } else if ((prim == 3u || prim == 4u || prim == 5u) &&
+                   vertex_count >= 3u) {
+            pixels = GsRasterizer::draw_triangle(
+                vram_, ctx, a, b, c);
+        } else {
+            ++stats_.skipped_raster_draws;
+            return;
+        }
     }
 
     const u64 raster_ns = raster_timing_enabled_
@@ -1132,7 +1212,7 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
             }
         }
     }
-    if (pixels != 0u) {
+    if (pixels != 0u && !gpu_raster) {
         vram_.mark_modified();
     }
     if (detailed_raster_stats_) {

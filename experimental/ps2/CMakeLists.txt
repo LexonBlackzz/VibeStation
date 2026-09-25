@@ -100,6 +100,7 @@ if(VIBESTATION_PS2_ENABLE_UI)
     add_executable(VibeStationPS2Lab
         main.cpp
         ui/ps2_app.cpp
+        ui/ps2_gl_gs_backend.cpp
         ui/theme_settings.cpp
     )
     target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)

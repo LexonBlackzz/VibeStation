@@ -82,6 +82,8 @@ public:
     [[nodiscard]] const std::vector<u8>& data() const { return data_; }
     [[nodiscard]] u64 generation() const { return generation_; }
     void mark_modified() { ++generation_; }
+    [[nodiscard]] const u8* raw_data() const { return data_.data(); }
+    [[nodiscard]] u8* raw_data() { return data_.data(); }
 
 private:
     std::vector<u8> data_;

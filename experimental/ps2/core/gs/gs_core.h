@@ -3,6 +3,7 @@
 #include "common/types.h"
 #include "core/gs/gs_vram.h"
 #include "core/gs/gs_rasterizer.h"
+#include "core/gs/gs_gpu_backend.h"
 
 #include <array>
 #include <condition_variable>
@@ -50,6 +51,9 @@ struct GsStats {
     u64 parallel_sprite_draws = 0;
     u64 parallel_sprite_pixels = 0;
     u64 parallel_sprite_helper_jobs = 0;
+    u64 gpu_sprite_draws = 0;
+    u64 gpu_sprite_pixels = 0;
+    u64 gpu_syncs_to_cpu = 0;
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
     std::array<u64, 8> raster_ns_by_primitive{};
@@ -132,6 +136,13 @@ public:
 
     void reset();
     void set_async_rasterization(bool enabled);
+    void set_gpu_backend(GsGpuBackend* backend);
+    [[nodiscard]] bool gpu_backend_active() const {
+        return gpu_backend_ != nullptr && gpu_backend_->available();
+    }
+    [[nodiscard]] const char* gpu_backend_name() const {
+        return gpu_backend_active() ? gpu_backend_->name() : "software";
+    }
     void set_rasterization_enabled(bool enabled) {
         rasterization_enabled_ = enabled;
     }
@@ -257,6 +268,10 @@ private:
     bool try_execute_parallel_sprite(
         const RasterCommand& command,
         u64& pixels);
+    bool try_execute_gpu_sprite(
+        const RasterCommand& command,
+        u64& pixels);
+    void synchronize_gpu_to_cpu() const;
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
 
@@ -274,6 +289,7 @@ private:
     bool rasterization_enabled_ = true;
     bool detailed_raster_stats_ = false;
     bool raster_timing_enabled_ = false;
+    mutable GsGpuBackend* gpu_backend_ = nullptr;
     mutable std::mutex raster_mutex_{};
     mutable std::condition_variable raster_condition_{};
     mutable std::condition_variable raster_completed_condition_{};

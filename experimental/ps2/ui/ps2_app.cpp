@@ -1,4 +1,5 @@
 #include "ui/ps2_app.h"
+#include "ui/ps2_gl_gs_backend.h"
 #include "ui/theme_settings.h"
 
 #include <SDL.h>
@@ -54,6 +55,7 @@ bool Ps2App::init() {
     };
 
     const GlContextAttempt attempts[] = {
+        {4, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 430", false},
         {3, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 330", false},
         {3, 2, SDL_GL_CONTEXT_PROFILE_CORE, "#version 150", false},
         {2, 1, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY, "#version 120", true},
@@ -89,6 +91,8 @@ bool Ps2App::init() {
         SDL_GL_SetSwapInterval(1);
         imgui_glsl_version_ = attempt.glsl;
         use_imgui_opengl2_backend_ = attempt.use_opengl2;
+        gl_major_ = attempt.major;
+        gl_minor_ = attempt.minor;
         break;
     }
 
@@ -161,6 +165,29 @@ bool Ps2App::init() {
             std::fprintf(stderr, "ImGui OpenGL3 backend initialization failed.\n");
             shutdown();
             return false;
+        }
+    }
+
+    if (gl_major_ > 4 ||
+        (gl_major_ == 4 && gl_minor_ >= 3)) {
+        SDL_GL_SetAttribute(
+            SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+        SDL_GLContext gpu_context =
+            SDL_GL_CreateContext(window_);
+        SDL_GL_SetAttribute(
+            SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+        SDL_GL_MakeCurrent(window_, gl_context_);
+
+        if (gpu_context != nullptr) {
+            gpu_gs_backend_ =
+                std::make_unique<Ps2GlGsBackend>(
+                    window_, gpu_context);
+            if (gpu_gs_backend_->available()) {
+                system_.gs_core().set_gpu_backend(
+                    gpu_gs_backend_.get());
+            } else {
+                gpu_gs_backend_.reset();
+            }
         }
     }
 
@@ -324,6 +351,9 @@ void Ps2App::shutdown() {
         SDL_GameControllerClose(controller_);
         controller_ = nullptr;
     }
+
+    system_.gs_core().set_gpu_backend(nullptr);
+    gpu_gs_backend_.reset();
 
     if (display_texture_ != 0 && gl_context_ != nullptr) {
         glDeleteTextures(1, &display_texture_);
