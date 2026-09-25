@@ -1628,6 +1628,15 @@ int main(int argc, char** argv) {
               << system.sif_poll_stable_returns()
               << " EE_FAST_SIF_GETREG_CALLS="
               << system.fast_sif_getreg_calls() << '\n';
+    std::cout << "EE_FAST_SIF_GETREG_REJECTS";
+    const auto& sif_rejects =
+        system.fast_sif_getreg_rejects();
+    for (ps2::u32 i = 0; i < sif_rejects.size(); ++i) {
+        if (sif_rejects[i] != 0u) {
+            std::cout << " [" << i << "]=" << sif_rejects[i];
+        }
+    }
+    std::cout << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="

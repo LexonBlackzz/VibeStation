@@ -250,6 +250,7 @@ void Ps2System::reset(u32 entry_point) {
     sif_poll_fast_samples_ = 0;
     sif_poll_stable_returns_ = 0;
     fast_sif_getreg_calls_ = 0;
+    fast_sif_getreg_rejects_.fill(0u);
     skipped_iop_idle_pairs_ = 0;
     skipped_bios_literal_iterations_ = 0;
     quiet_ee_batch_instructions_ = 0;
@@ -1114,15 +1115,28 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     std::string& error) {
     constexpr u64 kCycles = 106u;
     if (budget < kCycles ||
-        ee_.state().pc != 0x0024DE74u ||
-        !scheduler_.empty() ||
-        video_timing_.cycles_to_transition() <= kCycles ||
-        sif_dma_.ee_completion_pending() ||
-        sif_dma_.iop_completion_pending() ||
-        vu0_.running() || vu1_.running() ||
+        ee_.state().pc != 0x0024DE74u) {
+        ++fast_sif_getreg_rejects_[0];
+        return 0u;
+    }
+    if (!scheduler_.empty()) {
+        ++fast_sif_getreg_rejects_[1];
+        return 0u;
+    }
+    if (video_timing_.cycles_to_transition() <= kCycles) {
+        ++fast_sif_getreg_rejects_[2];
+        return 0u;
+    }
+    if (sif_dma_.ee_completion_pending() ||
+        sif_dma_.iop_completion_pending()) {
+        ++fast_sif_getreg_rejects_[3];
+        return 0u;
+    }
+    if (vu0_.running() || vu1_.running() ||
         gs_.irq_pending() ||
         bus_.intc_pending() || bus_.dmac_pending() ||
         iop_bus_.interrupt_pending()) {
+        ++fast_sif_getreg_rejects_[4];
         return 0u;
     }
 
@@ -1132,17 +1146,17 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     if ((cause & status & 0x0000FF00u) != 0u &&
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0u) {
+        ++fast_sif_getreg_rejects_[5];
         return 0u;
     }
 
     const u64 timer_room = hw_.cycles_to_timer_irq();
-    if (timer_room != ~u64{0} && timer_room <= kCycles) {
-        return 0u;
-    }
     const u32 compare_distance =
         cpu.cop0[11] - cpu.cop0[9];
-    if (compare_distance != 0u &&
-        compare_distance <= kCycles) {
+    if ((timer_room != ~u64{0} && timer_room <= kCycles) ||
+        (compare_distance != 0u &&
+         compare_distance <= kCycles)) {
+        ++fast_sif_getreg_rejects_[6];
         return 0u;
     }
 
@@ -1150,6 +1164,7 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     const bool iop_idle =
         !iop_halted && iop_.in_osdsys_idle_loop();
     if (!iop_halted && !iop_idle) {
+        ++fast_sif_getreg_rejects_[7];
         return 0u;
     }
 
@@ -1159,6 +1174,7 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     if ((active_dma & ~sif_channels) != 0u ||
         ((active_dma & sif_channels) &
          iop_bus_.sif_dma_ready_mask()) != 0u) {
+        ++fast_sif_getreg_rejects_[8];
         return 0u;
     }
 
@@ -1167,23 +1183,20 @@ u64 Ps2System::try_skip_hot_sif_getreg(
             (static_cast<u64>(ee_iop_phase_) + kCycles) / 8u;
         if (iop_steps != 0u &&
             !iop_bus_.can_tick_event_free(iop_steps)) {
+            ++fast_sif_getreg_rejects_[9];
             return 0u;
         }
     }
 
     u32 smflag = 0u;
-    if (!bus_.read32(0x1000F230u, smflag)) {
-        return 0u;
-    }
-
-    // This hot path is the wait side of the caller. The first observation
-    // that sees BOOTEND is intentionally executed through the real kernel
-    // so the transition and following SifSetReg retain exact ordering.
-    if ((smflag & 0x00040000u) != 0u) {
+    if (!bus_.read32(0x1000F230u, smflag) ||
+        (smflag & 0x00040000u) != 0u) {
+        ++fast_sif_getreg_rejects_[10];
         return 0u;
     }
 
     if (!ee_.skip_hot_sif_getreg(smflag)) {
+        ++fast_sif_getreg_rejects_[11];
         return 0u;
     }
 
