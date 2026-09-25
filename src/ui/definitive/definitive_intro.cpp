@@ -1,4 +1,6 @@
 #include "ui/definitive/definitive_shared.h"
+#include "ui/embedded_resource_ids.h"
+#include "ui/embedded_resources.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -538,20 +540,35 @@ bool ensure_intro_icon_texture_loaded() {
 
     g_intro_icon_load_attempted = true;
 
-    const std::filesystem::path path =
-        find_intro_icon_path();
-    if (path.empty()) {
-        return false;
-    }
-
     int channels = 0;
-    unsigned char* pixels =
-        stbi_load(
-            path.string().c_str(),
+    unsigned char* pixels = nullptr;
+
+    const vibestation::EmbeddedResourceView embedded =
+        vibestation::embedded_resource(
+            vibestation::resource_ids::StartupIcon);
+    if (embedded) {
+        pixels = stbi_load_from_memory(
+            embedded.data,
+            static_cast<int>(embedded.size),
             &g_intro_icon_width,
             &g_intro_icon_height,
             &channels,
             4);
+    }
+
+    if (pixels == nullptr) {
+        const std::filesystem::path path =
+            find_intro_icon_path();
+        if (!path.empty()) {
+            pixels =
+                stbi_load(
+                    path.string().c_str(),
+                    &g_intro_icon_width,
+                    &g_intro_icon_height,
+                    &channels,
+                    4);
+        }
+    }
 
     if (pixels == nullptr ||
         g_intro_icon_width <= 0 ||
