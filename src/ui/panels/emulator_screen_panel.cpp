@@ -25,13 +25,6 @@ namespace {
         More
     };
 
-    ImU32 with_alpha(ImU32 color, int alpha) {
-        const ImU32 a = static_cast<ImU32>(
-            std::clamp(alpha, 0, 255));
-        return (color & ~(0xFFu << IM_COL32_A_SHIFT)) |
-            (a << IM_COL32_A_SHIFT);
-    }
-
     void draw_gameplay_toolbar_icon(
         ImDrawList* draw,
         GameplayToolbarIcon icon,
