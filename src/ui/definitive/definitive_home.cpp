@@ -643,7 +643,7 @@ bool ensure_ui_sounds_loaded() {
         // A tiny attack ramp removes the transient click when cursor.wav is
         // rapidly restarted while moving through menu items.
         apply_ui_sound_fade_in(
-            g_ui_cursor_sound, g_ui_sound_spec, 3.0f);
+            g_ui_cursor_sound, g_ui_sound_spec, 15.0f);
     }
 
     if (!loaded) {
