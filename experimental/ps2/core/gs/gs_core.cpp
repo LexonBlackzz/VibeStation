@@ -1150,7 +1150,24 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
                 (ctx.zmask ? (1u << 14u) : 0u) |
                 (ctx.ate ? (1u << 15u) : 0u) |
                 (ctx.date ? (1u << 16u) : 0u);
-            ++stats_.gpu_candidate_state_draws[key];
+            bool state_recorded = false;
+            for (u32 i = 0u;
+                 i < stats_.gpu_candidate_state_count;
+                 ++i) {
+                if (stats_.gpu_candidate_state_keys[i] == key) {
+                    ++stats_.gpu_candidate_state_counts[i];
+                    state_recorded = true;
+                    break;
+                }
+            }
+            if (!state_recorded &&
+                stats_.gpu_candidate_state_count <
+                    stats_.gpu_candidate_state_keys.size()) {
+                const u32 index =
+                    stats_.gpu_candidate_state_count++;
+                stats_.gpu_candidate_state_keys[index] = key;
+                stats_.gpu_candidate_state_counts[index] = 1u;
+            }
         }
     }
 

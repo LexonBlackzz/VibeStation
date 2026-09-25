@@ -60,9 +60,11 @@ struct GsStats {
     std::array<u64, 64> gpu_candidate_texture_psm_draws{};
     std::array<u64, 64> gpu_candidate_texture_psm_pixels{};
     std::array<u64, 64> gpu_candidate_frame_psm_draws{};
-    // Key: A/B/C/D [7:0], ZTST [9:8], COLCLAMP bit10, PABE bit11,
-    // ABE bit12, ZTE bit13, ZMASK bit14, ATE bit15, DATE bit16.
-    std::array<u64, 131072> gpu_candidate_state_draws{};
+    // Sparse state keys: A/B/C/D [7:0], ZTST [9:8], COLCLAMP bit10,
+    // PABE bit11, ABE bit12, ZTE bit13, ZMASK bit14, ATE bit15, DATE bit16.
+    std::array<u32, 64> gpu_candidate_state_keys{};
+    std::array<u64, 64> gpu_candidate_state_counts{};
+    u32 gpu_candidate_state_count = 0;
     std::array<u64, 4> gpu_candidate_tfx_draws{};
     std::array<u64, 2> gpu_candidate_tcc_draws{};
     std::array<u64, 256> gpu_candidate_fix_draws{};

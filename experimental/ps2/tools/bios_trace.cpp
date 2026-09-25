@@ -1133,13 +1133,11 @@ void print_state(const ps2::Ps2System& system) {
 
     std::cout << "GS_GPU_CANDIDATE_STATE";
     for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_state_draws.size();
+         i < gs_stats.gpu_candidate_state_count;
          ++i) {
-        if (gs_stats.gpu_candidate_state_draws[i] == 0u)
-            continue;
         std::cout
-            << " K" << i
-            << '=' << gs_stats.gpu_candidate_state_draws[i];
+            << " K" << gs_stats.gpu_candidate_state_keys[i]
+            << '=' << gs_stats.gpu_candidate_state_counts[i];
     }
     std::cout << '\n';
 
