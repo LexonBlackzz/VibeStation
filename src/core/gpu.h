@@ -214,7 +214,7 @@ private:
   bool ensure_hardware_vram_current();
   void ensure_cpu_vram_current() const;
   void prepare_software_vram_write();
-  GpuHardwareRasterizer::DrawState hardware_draw_state(
+  GpuHardwareRasterizer::RasterState hardware_draw_state(
       bool raw_texture = false) const;
   static GpuHardwareRasterizer::Vertex hardware_vertex(const Vertex& v);
 
