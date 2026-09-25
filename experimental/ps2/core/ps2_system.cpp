@@ -504,6 +504,43 @@ void Ps2System::advance_iop_for_ee_cycles(
     ee_iop_phase_ = static_cast<u32>(total_phase & 7u);
     const u64 steps = total_phase / 8u;
 
+    // Tiny active-IOP windows dominate ordinary EE execution: usually only
+    // one IOP instruction is due. Event batching cannot amortize its safety
+    // checks there, so keep the original hot path byte-for-byte in spirit.
+    // Only larger skip-generated windows are worth coalescing.
+    if (steps < 4u) {
+        for (u64 i = 0; i < steps;) {
+            if (iop_.halted()) break;
+            if (i + 1u < steps &&
+                !sif_dma_.iop_completion_pending()) {
+                const u64 pairs = iop_.skip_osdsys_idle_pairs(
+                    (steps - i) / 2u);
+                if (pairs != 0u) {
+                    i += pairs * 2u;
+                    skipped_iop_idle_pairs_ += pairs;
+                    continue;
+                }
+            }
+            if (i + 1u < steps &&
+                !sif_dma_.iop_completion_pending() &&
+                iop_.skip_osdsys_idle_pair()) {
+                i += 2u;
+                continue;
+            }
+            if (!iop_.step_hot(iop_step_error_scratch_)) {
+                if (!iop_.halted()) {
+                    error =
+                        "IOP step failed: " +
+                        iop_step_error_scratch_;
+                }
+                break;
+            }
+            sif_dma_.tick_iop(iop_bus_);
+            ++i;
+        }
+        return;
+    }
+
     u64 deferred_device_ticks = 0u;
     auto flush_deferred_device_ticks = [&]() -> bool {
         if (deferred_device_ticks == 0u) return true;
