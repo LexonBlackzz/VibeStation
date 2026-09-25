@@ -450,6 +450,13 @@ void App::run() {
         return;
     }
 
+    // Thread roles:
+    //   UI/OpenGL presentation = normal priority (this thread)
+    //   PS1 emulation          = high priority (EmuRunner)
+    //   frame scaling/ambient  = low priority (FramePresentationWorker)
+    //   host audio playback    = SDL's dedicated audio callback thread
+    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_NORMAL);
+
     bool quit = false;
     last_fps_time_ = SDL_GetTicks();
     const u64 perf_freq = SDL_GetPerformanceFrequency();
