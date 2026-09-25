@@ -1622,6 +1622,10 @@ int main(int argc, char** argv) {
               << system.fast_interpreter_instructions()
               << " EE_FAST_INTERPRETER_CALLS="
               << system.fast_interpreter_calls()
+              << " EE_DECODED_CACHE_HITS="
+              << system.ee().quiet_decoded_cache_hits()
+              << " EE_DECODED_CACHE_REBUILDS="
+              << system.ee().quiet_decoded_cache_rebuilds()
               << " EE_QUIET_SUPERBATCH_CALLS="
               << system.quiet_superbatch_calls()
               << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
