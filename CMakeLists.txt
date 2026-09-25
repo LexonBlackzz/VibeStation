@@ -157,9 +157,10 @@ add_custom_command(
         -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
         -DVIBESTATION_VERSION_HEADER=${VIBESTATION_VERSION_HEADER}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
+    # Do not depend on build_number.txt here: the generator script increments
+    # that file itself, which otherwise makes this command perpetually dirty.
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
-        "${VIBESTATION_BUILD_NUMBER_FILE}"
     VERBATIM
     COMMENT "Updating VibeStation build metadata")
 
@@ -335,7 +336,8 @@ endif()
 
 # High warning level + suppress CRT deprecation warnings
 if(MSVC)
-    target_compile_options(VibeStation PRIVATE /W3 /permissive-)
+    target_compile_options(VibeStation PRIVATE /W3 /permissive- /MP)
+    target_compile_options(imgui_lib PRIVATE /MP)
     target_compile_definitions(VibeStation PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -346,7 +348,10 @@ if(MINGW)
 endif()
 
 option(VIBESTATION_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)
-if(VIBESTATION_ENABLE_IPO)
+option(VIBESTATION_FAST_ITERATION
+    "Favor fast compile/link cycles while developing the definitive UI" ON)
+
+if(VIBESTATION_ENABLE_IPO AND NOT VIBESTATION_FAST_ITERATION)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT VIBESTATION_IPO_SUPPORTED OUTPUT VIBESTATION_IPO_ERROR)
     if(VIBESTATION_IPO_SUPPORTED)
@@ -355,6 +360,9 @@ if(VIBESTATION_ENABLE_IPO)
     else()
         message(STATUS "IPO/LTO not supported: ${VIBESTATION_IPO_ERROR}")
     endif()
+elseif(VIBESTATION_ENABLE_IPO AND VIBESTATION_FAST_ITERATION)
+    message(STATUS
+        "Fast iteration enabled: skipping IPO/LTO to reduce Release link times")
 endif()
 
 
