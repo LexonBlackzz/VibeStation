@@ -123,6 +123,7 @@ struct UiSoundClip {
 SDL_AudioDeviceID g_ui_sound_device = 0;
 SDL_AudioSpec g_ui_sound_spec{};
 bool g_ui_sound_load_attempted = false;
+Uint32 g_ui_action_sound_until_ms = 0;
 UiSoundClip g_ui_cursor_sound;
 UiSoundClip g_ui_open_sound;
 UiSoundClip g_ui_close_sound;
@@ -561,22 +562,44 @@ void play_menu_sound(UiMenuSound sound) {
         return;
     }
 
-    const Uint32 queued_bytes =
-        SDL_GetQueuedAudioSize(g_ui_sound_device);
+    const Uint32 now = SDL_GetTicks();
+    const bool action_sound_active =
+        g_ui_action_sound_until_ms != 0 &&
+        !SDL_TICKS_PASSED(now, g_ui_action_sound_until_ms);
 
     if (sound == UiMenuSound::Cursor) {
-        // Cursor/highlight sounds are intentionally low priority. Returning
-        // from a modal can give a launcher button keyboard focus immediately;
-        // do not let that automatic highlight cut off the close/open sound
-        // that was just started.
-        if (queued_bytes != 0) {
+        // While an explicit open/close effect is playing, automatic focus
+        // changes must not interrupt it. Otherwise cursor ticks are retriggered
+        // immediately so fast navigation feels responsive instead of queued.
+        if (action_sound_active) {
             return;
         }
+        SDL_ClearQueuedAudio(g_ui_sound_device);
     }
     else {
-        // Explicit open/close actions take priority over any lingering cursor
-        // tick and should start immediately.
+        // Open/close effects take priority over cursor ticks and protect their
+        // own playback window from subsequent automatic highlight sounds.
         SDL_ClearQueuedAudio(g_ui_sound_device);
+
+        const int bits_per_sample =
+            SDL_AUDIO_BITSIZE(g_ui_sound_spec.format);
+        const Uint32 bytes_per_second =
+            (g_ui_sound_spec.freq > 0 &&
+             g_ui_sound_spec.channels > 0 &&
+             bits_per_sample > 0)
+                ? static_cast<Uint32>(
+                    g_ui_sound_spec.freq *
+                    g_ui_sound_spec.channels *
+                    (bits_per_sample / 8))
+                : 0u;
+        const Uint32 duration_ms =
+            bytes_per_second > 0
+                ? static_cast<Uint32>(
+                    (static_cast<Uint64>(clip->pcm.size()) * 1000u) /
+                    bytes_per_second)
+                : 250u;
+        g_ui_action_sound_until_ms =
+            now + std::max<Uint32>(duration_ms, 40u);
     }
 
     SDL_QueueAudio(
@@ -2010,6 +2033,7 @@ void App::release_definitive_ui_assets() {
     }
     g_ui_sound_spec = {};
     g_ui_sound_load_attempted = false;
+    g_ui_action_sound_until_ms = 0;
     g_ui_cursor_sound.pcm.clear();
     g_ui_open_sound.pcm.clear();
     g_ui_close_sound.pcm.clear();
