@@ -52,6 +52,16 @@ private:
 	bool show_settings_ = false;
 	bool definitive_detailed_settings_ = false;
 	int definitive_settings_tab_ = 0;
+
+	enum class DefinitiveSettingsTransition {
+		Closed,
+		Opening,
+		Open,
+		Closing
+	};
+	DefinitiveSettingsTransition definitive_settings_transition_ =
+		DefinitiveSettingsTransition::Closed;
+	float definitive_settings_transition_elapsed_ = 0.0f;
 	bool show_about_ = false;
 	bool show_debug_cpu_ = false;
 	bool show_vram_ = false;
@@ -243,6 +253,8 @@ private:
 	void panel_emulator_screen();
 	void panel_definitive_home();
 	void panel_definitive_settings();
+	void open_definitive_settings();
+	void close_definitive_settings();
 	void initialize_definitive_ui_fonts();
 	void play_ui_cursor_sound();
 	void play_ui_open_sound();
