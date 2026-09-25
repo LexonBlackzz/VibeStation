@@ -1225,6 +1225,65 @@ u64 Ps2System::try_run_quiet_ee_batch(
     while (retired < maximum && !ee_.halted()) {
         bool progressed = false;
 
+        // Retail OSDSYS SIF synchronization helper. At 0x80005F5C the
+        // routine takes its second sample of SMFLG (0x1000F230) after the
+        // preceding debounce/NOP interval. Handle that one MMIO read inside
+        // the already event-bounded quiet batch. When it matches the prior
+        // sample in a0, retire the taken BEQ + delay slot + JR + delay slot
+        // as well, avoiding a full system-step round trip for the common
+        // stable-return case without moving either MMIO sample in time.
+        if (ee_.state().pc == 0x80005F5Cu) {
+            static constexpr std::array<u32, 3> kSifStableHead = {
+                0x8C420000u, 0x1082001Cu, 0x00000000u};
+            static constexpr std::array<u32, 2> kSifStableReturn = {
+                0x03E00008u, 0x0080102Du};
+            const bool code_matches =
+                bus_.matches_code(0x80005F5Cu, kSifStableHead) &&
+                bus_.matches_code(0x80005FD4u, kSifStableReturn);
+            const u32 physical =
+                EeBus::to_physical(
+                    static_cast<u32>(ee_.state().gpr[2].lo));
+            if (code_matches &&
+                physical == 0x1000F230u) {
+                const u64 previous =
+                    ee_.state().gpr[4].lo;
+                if (ee_.step_quiet_unchecked_predecoded(
+                        kSifStableHead[0], error)) {
+                    ++retired;
+                    ++quiet_block_instructions_;
+                    progressed = true;
+                    if (!error.empty()) break;
+
+                    const bool stable =
+                        ee_.state().gpr[2].lo == previous;
+                    if (stable && maximum - retired >= 4u) {
+                        const std::array<u32, 4> kStableExit = {
+                            kSifStableHead[1],
+                            kSifStableHead[2],
+                            kSifStableReturn[0],
+                            kSifStableReturn[1]};
+                        bool exit_ok = true;
+                        for (const u32 instruction : kStableExit) {
+                            if (!ee_.step_quiet_unchecked_predecoded(
+                                    instruction, error)) {
+                                exit_ok = false;
+                                break;
+                            }
+                            ++retired;
+                            ++quiet_block_instructions_;
+                            if (!error.empty()) {
+                                exit_ok = false;
+                                break;
+                            }
+                        }
+                        if (!exit_ok || !error.empty()) break;
+                    }
+                    continue;
+                }
+                if (!error.empty()) break;
+            }
+        }
+
         // Interpreter-only RAM trace: bypass cached basic-block lookup and
         // generation validation for the common case. The EE decoder fetches
         // each instruction fresh from RAM and follows supported branches and

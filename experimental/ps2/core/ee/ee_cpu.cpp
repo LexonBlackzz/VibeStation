@@ -3719,20 +3719,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 (opcode == 0x34u || opcode == 0x37u) ? 8u :
                 16u;
             const u32 physical = EeBus::to_physical(aligned);
-            // Retail BIOS SIF synchronization repeatedly samples SMFLG at
-            // 0x1000F230 with long runs of ordinary instructions between
-            // samples. Permit exactly one sampled LW at the *start* of a
-            // direct quiet trace, then force the next sample into a new batch.
-            // This preserves the device/IOP time boundary between consecutive
-            // MMIO observations while avoiding a full step_ee_core round-trip
-            // for every poll load.
-            const bool sampled_sif_smflag =
-                direct_trace &&
-                retired == 0u &&
-                opcode == 0x23u &&
-                physical == 0x1000F230u;
-            if (!sampled_sif_smflag &&
-                !quiet_data_span(
+            if (!quiet_data_span(
                     address,
                     width,
                     (opcode == 0x1Eu || opcode == 0x36u) ? 15u : 0u)) {
@@ -3778,9 +3765,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 case 0x23u:
                 case 0x30u: { // LW / LL
                     u32 value = 0;
-                    access_ok = sampled_sif_smflag
-                        ? bus_.read32(address, value)
-                        : read_ram32(address, physical, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) write_gpr_word(rt, value);
                     break;
                 }
