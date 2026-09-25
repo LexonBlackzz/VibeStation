@@ -1075,9 +1075,7 @@ bool parallel_sprite_vram_safe(
             ctx.texture.first_sample_x != nullptr ||
             ctx.texture.first_sample_y != nullptr ||
             ctx.texture.first_sample_rgba != nullptr ||
-            ctx.texture.nonzero_shaded != nullptr ||
-            ctx.texture.wms > 1u ||
-            ctx.texture.wmt > 1u) {
+            ctx.texture.nonzero_shaded != nullptr) {
             return false;
         }
     }
