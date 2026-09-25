@@ -1781,6 +1781,26 @@ int main(int argc, char** argv) {
     }
     std::cout << '\n';
 
+    std::cout << "EE_FAST_PREFIX_CONTROL_FALLBACKS";
+    const auto& control_keys =
+        system.ee().fast_prefix_control_fallback_keys();
+    const auto& control_counts =
+        system.ee().fast_prefix_control_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_control_fallback_count();
+         ++i) {
+        const ps2::u32 opcode =
+            static_cast<ps2::u32>(control_keys[i] >> 32u);
+        const ps2::u32 word =
+            static_cast<ps2::u32>(control_keys[i]);
+        std::cout
+            << " OP0x" << std::hex << std::uppercase << opcode
+            << "_W0x" << word
+            << std::dec
+            << '=' << control_counts[i];
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
