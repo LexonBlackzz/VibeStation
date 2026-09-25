@@ -17,7 +17,7 @@ EmbeddedResourceView embedded_resource(int resource_id) {
     HRSRC resource = FindResourceW(
         module,
         MAKEINTRESOURCEW(resource_id),
-        RT_RCDATA);
+        MAKEINTRESOURCEW(10));
     if (resource == nullptr) {
         return {};
     }
