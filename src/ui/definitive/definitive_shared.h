@@ -41,11 +41,6 @@ void draw_settings_background(
     ImDrawList* draw,
     const ImVec2& pos,
     const ImVec2& size);
-void draw_intro_handoff_background(
-    ImDrawList* draw,
-    const ImVec2& pos,
-    const ImVec2& size,
-    float opacity);
 
 void update_gameplay_ambient(
     const std::vector<u32>& rgba,
