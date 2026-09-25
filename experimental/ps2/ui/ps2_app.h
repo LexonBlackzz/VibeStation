@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ps2_system.h"
+#include "ui/ps2_gl_gs_backend.h"
 
 #include <array>
 #include <atomic>
@@ -18,8 +19,6 @@ typedef struct _SDL_GameController SDL_GameController;
 typedef void* SDL_GLContext;
 
 namespace ps2::ui {
-
-class Ps2GlGsBackend;
 
 class Ps2App {
 public:
