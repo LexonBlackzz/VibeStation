@@ -25,10 +25,6 @@ namespace {
         More
     };
 
-    int alpha_byte(ImU32 color) {
-        return static_cast<int>((color >> IM_COL32_A_SHIFT) & 0xFFu);
-    }
-
     ImU32 with_alpha(ImU32 color, int alpha) {
         const ImU32 a = static_cast<ImU32>(
             std::clamp(alpha, 0, 255));
@@ -745,10 +741,12 @@ void App::panel_emulator_screen() {
                 1.0f,
                 std::max(0.0f, 1.0f - overscan_v)));
 
-        draw_gameplay_toolbar(image_pos, draw_size);
-
         if (show_perf_) {
             draw_performance_overlay(image_pos, draw_size);
         }
+
+        // Draw the floating controls last so they always sit above optional
+        // diagnostics rather than being obscured by them.
+        draw_gameplay_toolbar(image_pos, draw_size);
     }
 }
