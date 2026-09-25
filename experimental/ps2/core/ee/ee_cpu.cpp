@@ -3398,7 +3398,9 @@ u32 EeCpu::run_quiet_fast_prefix(
     u32 instruction_count,
     u32 maximum_instructions,
     bool* store_executed,
-    const u8* instruction_ram) {
+    const u8* instruction_ram,
+    u8* direct_ram,
+    u32* page_generations) {
     const bool direct_trace =
         instructions == nullptr && instruction_ram != nullptr;
     if (halted_ ||
@@ -3423,6 +3425,87 @@ u32 EeCpu::run_quiet_fast_prefix(
         limit = std::min(limit, compare_distance);
     }
     u32 retired = 0u;
+
+    constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+    const bool direct_main_ram =
+        direct_trace &&
+        direct_ram != nullptr &&
+        std::endian::native == std::endian::little;
+
+    auto mark_direct_write = [&](u32 physical, u32 width) {
+        if (page_generations == nullptr || width == 0u) return;
+        const u32 first = physical >> 12;
+        const u32 last = (physical + width - 1u) >> 12;
+        for (u32 page = first; page <= last; ++page) {
+            ++page_generations[page];
+        }
+    };
+    auto read_ram8 = [&](u32 address, u32 physical, u8& value) {
+        if (direct_main_ram && physical < kMainRamSize) {
+            value = direct_ram[physical];
+            return true;
+        }
+        return bus_.read8(address, value);
+    };
+    auto read_ram16 = [&](u32 address, u32 physical, u16& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read16(address, value);
+    };
+    auto read_ram32 = [&](u32 address, u32 physical, u32& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read32(address, value);
+    };
+    auto read_ram64 = [&](u32 address, u32 physical, u64& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read64(address, value);
+    };
+    auto write_ram8 = [&](u32 address, u32 physical, u8 value) {
+        if (direct_main_ram && physical < kMainRamSize) {
+            direct_ram[physical] = value;
+            mark_direct_write(physical, 1u);
+            return true;
+        }
+        return bus_.write8(address, value);
+    };
+    auto write_ram16 = [&](u32 address, u32 physical, u16 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write16(address, value);
+    };
+    auto write_ram32 = [&](u32 address, u32 physical, u32 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write32(address, value);
+    };
+    auto write_ram64 = [&](u32 address, u32 physical, u64 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write64(address, value);
+    };
 
     auto quiet_data_span = [&](u32 virtual_address,
                                u32 width,
@@ -3621,7 +3704,6 @@ u32 EeCpu::run_quiet_fast_prefix(
             opcode == 0x30u || opcode == 0x31u ||
             opcode == 0x34u || opcode == 0x36u ||
             opcode == 0x37u) {
-            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -3649,8 +3731,9 @@ u32 EeCpu::run_quiet_fast_prefix(
                     u64 lo = 0;
                     u64 hi = 0;
                     access_ok =
-                        bus_.read64(aligned, lo) &&
-                        bus_.read64(aligned + 8u, hi);
+                        read_ram64(aligned, physical, lo) &&
+                        read_ram64(
+                            aligned + 8u, physical + 8u, hi);
                     if (access_ok && rt != 0u) {
                         state_.gpr[rt].lo = lo;
                         state_.gpr[rt].hi = hi;
@@ -3659,7 +3742,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 }
                 case 0x20u: { // LB
                     u8 value = 0;
-                    access_ok = bus_.read8(address, value);
+                    access_ok = read_ram8(address, physical, value);
                     if (access_ok) {
                         write_gpr64(
                             rt,
@@ -3670,7 +3753,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 }
                 case 0x21u: { // LH
                     u16 value = 0;
-                    access_ok = bus_.read16(address, value);
+                    access_ok = read_ram16(address, physical, value);
                     if (access_ok) {
                         write_gpr64(
                             rt,
@@ -3682,38 +3765,38 @@ u32 EeCpu::run_quiet_fast_prefix(
                 case 0x23u:
                 case 0x30u: { // LW / LL
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) write_gpr_word(rt, value);
                     break;
                 }
                 case 0x24u: { // LBU
                     u8 value = 0;
-                    access_ok = bus_.read8(address, value);
+                    access_ok = read_ram8(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x25u: { // LHU
                     u16 value = 0;
-                    access_ok = bus_.read16(address, value);
+                    access_ok = read_ram16(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x27u: { // LWU
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x31u: { // LWC1
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) state_.fpr[rt] = value;
                     break;
                 }
                 case 0x34u:
                 case 0x37u: { // LLD / LD
                     u64 value = 0;
-                    access_ok = bus_.read64(address, value);
+                    access_ok = read_ram64(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
@@ -3721,8 +3804,9 @@ u32 EeCpu::run_quiet_fast_prefix(
                     u64 lo = 0;
                     u64 hi = 0;
                     access_ok =
-                        bus_.read64(aligned, lo) &&
-                        bus_.read64(aligned + 8u, hi);
+                        read_ram64(aligned, physical, lo) &&
+                        read_ram64(
+                            aligned + 8u, physical + 8u, hi);
                     if (access_ok && rt != 0u) {
                         state_.vu_vf[rt].lo = lo;
                         state_.vu_vf[rt].hi = hi;
@@ -3741,7 +3825,6 @@ u32 EeCpu::run_quiet_fast_prefix(
             opcode == 0x2Bu || opcode == 0x38u ||
             opcode == 0x39u || opcode == 0x3Cu ||
             opcode == 0x3Eu || opcode == 0x3Fu) {
-            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -3767,50 +3850,59 @@ u32 EeCpu::run_quiet_fast_prefix(
                 switch (opcode) {
                 case 0x1Fu: // SQ
                     access_ok =
-                        bus_.write64(aligned, state_.gpr[rt].lo) &&
-                        bus_.write64(
-                            aligned + 8u, state_.gpr[rt].hi);
+                        write_ram64(
+                            aligned, physical, state_.gpr[rt].lo) &&
+                        write_ram64(
+                            aligned + 8u,
+                            physical + 8u,
+                            state_.gpr[rt].hi);
                     break;
                 case 0x28u: // SB
-                    access_ok = bus_.write8(
+                    access_ok = write_ram8(
                         address,
+                        physical,
                         static_cast<u8>(gpr_u64(rt)));
                     break;
                 case 0x29u: // SH
-                    access_ok = bus_.write16(
+                    access_ok = write_ram16(
                         address,
+                        physical,
                         static_cast<u16>(gpr_u64(rt)));
                     break;
                 case 0x2Bu: // SW
-                    access_ok = bus_.write32(
+                    access_ok = write_ram32(
                         address,
+                        physical,
                         static_cast<u32>(gpr_u64(rt)));
                     break;
                 case 0x38u: // SC
-                    access_ok = bus_.write32(
+                    access_ok = write_ram32(
                         address,
+                        physical,
                         static_cast<u32>(gpr_u64(rt)));
                     if (access_ok) write_gpr_word(rt, 1u);
                     break;
                 case 0x39u: // SWC1
-                    access_ok = bus_.write32(
-                        address, state_.fpr[rt]);
+                    access_ok = write_ram32(
+                        address, physical, state_.fpr[rt]);
                     break;
                 case 0x3Cu: // SCD
-                    access_ok = bus_.write64(
-                        address, gpr_u64(rt));
+                    access_ok = write_ram64(
+                        address, physical, gpr_u64(rt));
                     if (access_ok) write_gpr64(rt, 1u);
                     break;
                 case 0x3Eu: // SQC2
                     access_ok =
-                        bus_.write64(
-                            aligned, state_.vu_vf[rt].lo) &&
-                        bus_.write64(
-                            aligned + 8u, state_.vu_vf[rt].hi);
+                        write_ram64(
+                            aligned, physical, state_.vu_vf[rt].lo) &&
+                        write_ram64(
+                            aligned + 8u,
+                            physical + 8u,
+                            state_.vu_vf[rt].hi);
                     break;
                 case 0x3Fu: // SD
-                    access_ok = bus_.write64(
-                        address, gpr_u64(rt));
+                    access_ok = write_ram64(
+                        address, physical, gpr_u64(rt));
                     break;
                 default:
                     access_ok = false;

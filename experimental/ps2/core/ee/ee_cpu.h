@@ -84,7 +84,9 @@ public:
         u32 instruction_count,
         u32 maximum_instructions,
         bool* store_executed = nullptr,
-        const u8* instruction_ram = nullptr);
+        const u8* instruction_ram = nullptr,
+        u8* direct_ram = nullptr,
+        u32* page_generations = nullptr);
     u32 run_native_block(
         u32 pc,
         u32 page_generation,
