@@ -1,7 +1,6 @@
 #include "ui/app.h"
 #include "ui/input_bindings.h"
 #include "ui/output_resolution_utils.h"
-#include "ui/screenshot_utils.h"
 #include "ui/theme_settings.h"
 #include <imgui.h>
 #include <algorithm>
@@ -189,24 +188,10 @@ void App::panel_settings() {
                     resolution_index = std::max(0, std::min(2, resolution_index));
                     g_output_resolution_mode =
                         static_cast<OutputResolutionMode>(resolution_index);
-                    if (!latest_frame_rgba_.empty() && latest_frame_width_ > 0 &&
-                        latest_frame_height_ > 0) {
-                        int output_width = 320;
-                        int output_height = 240;
-                        output_resolution_dimensions(g_output_resolution_mode,
-                            output_width, output_height);
-                        if (latest_frame_width_ != output_width ||
-                            latest_frame_height_ != output_height) {
-                            resample_rgba_nearest(latest_frame_rgba_, latest_frame_width_,
-                                latest_frame_height_, scaled_frame_rgba_,
-                                output_width, output_height);
-                            renderer_->upload_frame(scaled_frame_rgba_, output_width,
-                                output_height);
-                            latest_frame_rgba_ = scaled_frame_rgba_;
-                            latest_frame_width_ = output_width;
-                            latest_frame_height_ = output_height;
-                        }
-                    }
+                    // Presentation scaling now happens on the dedicated
+                    // FramePresentationWorker. Do not resample/upload the current
+                    // frame synchronously from the settings/UI thread; the next
+                    // emulated frame will be prepared at the newly selected size.
                 }
                 if (ImGui::Checkbox("Bilinear Presentation Filter",
                         &g_bilinear_filtering)) {
