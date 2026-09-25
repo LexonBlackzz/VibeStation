@@ -245,7 +245,9 @@ u64 g_gpu_test_suite_signature = 1469598103934665603ull;
 GpuHardwareRasterizer* g_test_hardware_rasterizer = nullptr;
 
 std::unique_ptr<Gpu> make_test_gpu() {
-  auto gpu = make_test_gpu();
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
   if (g_test_hardware_rasterizer != nullptr) {
     gpu->set_hardware_rasterizer(g_test_hardware_rasterizer);
   }
