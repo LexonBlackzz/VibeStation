@@ -5,12 +5,510 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
 namespace {
     constexpr float kEmulatorScreenBottomOverscanPixels = 3.0f;
+
+    enum class GameplayToolbarIcon {
+        Pause,
+        Play,
+        Rewind,
+        FastForward,
+        Skull,
+        Camera,
+        Folder,
+        More
+    };
+
+    int alpha_byte(ImU32 color) {
+        return static_cast<int>((color >> IM_COL32_A_SHIFT) & 0xFFu);
+    }
+
+    ImU32 with_alpha(ImU32 color, int alpha) {
+        const ImU32 a = static_cast<ImU32>(
+            std::clamp(alpha, 0, 255));
+        return (color & ~(0xFFu << IM_COL32_A_SHIFT)) |
+            (a << IM_COL32_A_SHIFT);
+    }
+
+    void draw_gameplay_toolbar_icon(
+        ImDrawList* draw,
+        GameplayToolbarIcon icon,
+        const ImVec2& center,
+        float scale,
+        ImU32 color,
+        ImU32 cutout_color) {
+        const float s = scale;
+        const float stroke = std::max(1.4f, 2.0f * s);
+
+        switch (icon) {
+        case GameplayToolbarIcon::Pause: {
+            draw->AddRectFilled(
+                ImVec2(center.x - 7.0f * s, center.y - 10.0f * s),
+                ImVec2(center.x - 2.0f * s, center.y + 10.0f * s),
+                color, 1.5f * s);
+            draw->AddRectFilled(
+                ImVec2(center.x + 2.0f * s, center.y - 10.0f * s),
+                ImVec2(center.x + 7.0f * s, center.y + 10.0f * s),
+                color, 1.5f * s);
+            break;
+        }
+        case GameplayToolbarIcon::Play: {
+            draw->AddTriangleFilled(
+                ImVec2(center.x - 7.0f * s, center.y - 11.0f * s),
+                ImVec2(center.x - 7.0f * s, center.y + 11.0f * s),
+                ImVec2(center.x + 11.0f * s, center.y),
+                color);
+            break;
+        }
+        case GameplayToolbarIcon::Rewind:
+        case GameplayToolbarIcon::FastForward: {
+            const float dir =
+                icon == GameplayToolbarIcon::FastForward ? 1.0f : -1.0f;
+            for (int i = 0; i < 2; ++i) {
+                const float offset =
+                    (static_cast<float>(i) - 0.5f) * 13.0f * s;
+                const float cx = center.x + offset;
+                draw->AddTriangleFilled(
+                    ImVec2(cx - dir * 7.0f * s, center.y),
+                    ImVec2(cx + dir * 6.0f * s, center.y - 9.0f * s),
+                    ImVec2(cx + dir * 6.0f * s, center.y + 9.0f * s),
+                    color);
+            }
+            break;
+        }
+        case GameplayToolbarIcon::Skull: {
+            draw->AddCircleFilled(
+                ImVec2(center.x, center.y - 3.0f * s),
+                10.0f * s, color, 24);
+            draw->AddRectFilled(
+                ImVec2(center.x - 7.0f * s, center.y + 3.0f * s),
+                ImVec2(center.x + 7.0f * s, center.y + 10.0f * s),
+                color, 2.0f * s);
+            draw->AddCircleFilled(
+                ImVec2(center.x - 4.0f * s, center.y - 4.0f * s),
+                2.4f * s, cutout_color, 12);
+            draw->AddCircleFilled(
+                ImVec2(center.x + 4.0f * s, center.y - 4.0f * s),
+                2.4f * s, cutout_color, 12);
+            draw->AddTriangleFilled(
+                ImVec2(center.x, center.y - 0.5f * s),
+                ImVec2(center.x - 2.0f * s, center.y + 3.0f * s),
+                ImVec2(center.x + 2.0f * s, center.y + 3.0f * s),
+                cutout_color);
+            draw->AddLine(
+                ImVec2(center.x - 3.0f * s, center.y + 6.0f * s),
+                ImVec2(center.x - 3.0f * s, center.y + 10.0f * s),
+                cutout_color, std::max(1.0f, 1.5f * s));
+            draw->AddLine(
+                ImVec2(center.x + 3.0f * s, center.y + 6.0f * s),
+                ImVec2(center.x + 3.0f * s, center.y + 10.0f * s),
+                cutout_color, std::max(1.0f, 1.5f * s));
+            break;
+        }
+        case GameplayToolbarIcon::Camera: {
+            draw->AddRect(
+                ImVec2(center.x - 11.0f * s, center.y - 7.0f * s),
+                ImVec2(center.x + 11.0f * s, center.y + 9.0f * s),
+                color, 2.5f * s, 0, stroke);
+            draw->AddRectFilled(
+                ImVec2(center.x - 5.0f * s, center.y - 11.0f * s),
+                ImVec2(center.x + 4.0f * s, center.y - 7.0f * s),
+                color, 1.5f * s);
+            draw->AddCircle(
+                ImVec2(center.x, center.y + 1.0f * s),
+                5.0f * s, color, 18, stroke);
+            break;
+        }
+        case GameplayToolbarIcon::Folder: {
+            draw->AddLine(
+                ImVec2(center.x - 11.0f * s, center.y - 7.0f * s),
+                ImVec2(center.x - 3.0f * s, center.y - 7.0f * s),
+                color, stroke);
+            draw->AddLine(
+                ImVec2(center.x - 3.0f * s, center.y - 7.0f * s),
+                ImVec2(center.x + 1.0f * s, center.y - 3.0f * s),
+                color, stroke);
+            draw->AddLine(
+                ImVec2(center.x + 1.0f * s, center.y - 3.0f * s),
+                ImVec2(center.x + 11.0f * s, center.y - 3.0f * s),
+                color, stroke);
+            draw->AddRect(
+                ImVec2(center.x - 11.0f * s, center.y - 3.0f * s),
+                ImVec2(center.x + 11.0f * s, center.y + 9.0f * s),
+                color, 2.0f * s, 0, stroke);
+            break;
+        }
+        case GameplayToolbarIcon::More: {
+            for (int i = -1; i <= 1; ++i) {
+                draw->AddCircleFilled(
+                    ImVec2(center.x + static_cast<float>(i) * 8.0f * s,
+                        center.y),
+                    2.2f * s, color, 12);
+            }
+            break;
+        }
+        }
+    }
+}
+
+void App::draw_gameplay_toolbar(
+    const ImVec2& image_pos, const ImVec2& image_size) {
+    if (image_size.x < 220.0f || image_size.y < 120.0f) {
+        return;
+    }
+
+    const float scale =
+        std::clamp(image_size.x / 1000.0f, 0.72f, 1.0f);
+    const float button_size = 46.0f * scale;
+    const float gap = 10.0f * scale;
+    const float padding = 14.0f * scale;
+    const float separator_space = 18.0f * scale;
+    const float bar_h = 66.0f * scale;
+    const float bar_w =
+        padding * 2.0f +
+        button_size * 7.0f +
+        gap * 6.0f +
+        separator_space * 3.0f;
+
+    const ImVec2 bar_pos(
+        image_pos.x + (image_size.x - bar_w) * 0.5f,
+        image_pos.y + 14.0f * scale);
+
+    ImGui::SetNextWindowPos(bar_pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(bar_w, bar_h), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBackground;
+
+    ImGui::Begin("##DefinitiveGameplayToolbar", nullptr, flags);
+    ImGui::PopStyleVar(3);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 win_pos = ImGui::GetWindowPos();
+    const ImVec2 win_size = ImGui::GetWindowSize();
+    const ImVec2 win_end(
+        win_pos.x + win_size.x,
+        win_pos.y + win_size.y);
+
+    const float rounding = bar_h * 0.50f;
+    draw->AddRectFilled(
+        ImVec2(win_pos.x, win_pos.y + 6.0f * scale),
+        ImVec2(win_end.x, win_end.y + 6.0f * scale),
+        IM_COL32(0, 0, 0, 76),
+        rounding);
+    draw->AddRectFilled(
+        win_pos, win_end,
+        IM_COL32(17, 21, 27, 238),
+        rounding);
+    draw->AddRect(
+        win_pos, win_end,
+        IM_COL32(89, 101, 116, 96),
+        rounding, 0, std::max(1.0f, 1.0f * scale));
+
+    static std::array<float, 7> hover_mix{};
+    static std::array<bool, 7> was_hovered{};
+    const float dt =
+        std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+
+    struct ButtonResult {
+        bool clicked = false;
+        bool hovered = false;
+        bool active = false;
+    };
+
+    auto button = [&](int index,
+        const char* id,
+        GameplayToolbarIcon icon,
+        float x,
+        bool enabled,
+        bool selected,
+        const char* tooltip) -> ButtonResult {
+        const ImVec2 local_pos(x, (bar_h - button_size) * 0.5f);
+        const ImVec2 screen_pos(
+            win_pos.x + local_pos.x,
+            win_pos.y + local_pos.y);
+
+        ImGui::SetCursorPos(local_pos);
+        ImGui::PushID(id);
+        if (!enabled) {
+            ImGui::BeginDisabled();
+        }
+        const bool clicked =
+            ImGui::InvisibleButton(
+                "##gameplay_toolbar_button",
+                ImVec2(button_size, button_size));
+        const bool hovered =
+            enabled && ImGui::IsItemHovered();
+        const bool active =
+            enabled && ImGui::IsItemActive();
+        if (!enabled) {
+            ImGui::EndDisabled();
+        }
+
+        if (hovered && !was_hovered[static_cast<size_t>(index)]) {
+            play_ui_cursor_sound();
+        }
+        was_hovered[static_cast<size_t>(index)] = hovered;
+
+        const float target = hovered ? 1.0f : 0.0f;
+        float& mix = hover_mix[static_cast<size_t>(index)];
+        mix += (target - mix) *
+            std::clamp(dt * 14.0f, 0.0f, 1.0f);
+
+        const bool primary = index == 0;
+        const bool lit = selected || primary;
+        const float highlight =
+            std::max(mix, lit ? 0.72f : 0.0f);
+
+        const ImVec2 p0 = screen_pos;
+        const ImVec2 p1(
+            screen_pos.x + button_size,
+            screen_pos.y + button_size);
+
+        if (highlight > 0.01f) {
+            const int glow_alpha =
+                static_cast<int>(80.0f * highlight);
+            draw->AddRectFilled(
+                ImVec2(p0.x - 4.0f * scale, p0.y - 4.0f * scale),
+                ImVec2(p1.x + 4.0f * scale, p1.y + 4.0f * scale),
+                IM_COL32(26, 114, 255, glow_alpha / 2),
+                button_size * 0.42f);
+            draw->AddRectFilled(
+                p0, p1,
+                IM_COL32(25, 34, 45,
+                    static_cast<int>(
+                        110.0f + 75.0f * highlight)),
+                button_size * 0.42f);
+            draw->AddRect(
+                p0, p1,
+                IM_COL32(65, 145, 255,
+                    static_cast<int>(
+                        105.0f + 125.0f * highlight)),
+                button_size * 0.42f,
+                0,
+                std::max(1.0f, 1.6f * scale));
+        }
+
+        const ImU32 icon_color = enabled
+            ? IM_COL32(236, 241, 247, 248)
+            : IM_COL32(129, 137, 147, 132);
+        const ImU32 cutout = IM_COL32(
+            17, 21, 27,
+            enabled ? 255 : 180);
+        draw_gameplay_toolbar_icon(
+            draw,
+            icon,
+            ImVec2(
+                screen_pos.x + button_size * 0.5f,
+                screen_pos.y + button_size * 0.5f),
+            scale,
+            icon_color,
+            cutout);
+
+        if (hovered && tooltip != nullptr) {
+            ImGui::SetTooltip("%s", tooltip);
+        }
+
+        ImGui::PopID();
+        return ButtonResult{clicked, hovered, active};
+    };
+
+    auto separator = [&](float x) {
+        const float y0 = win_pos.y + 14.0f * scale;
+        const float y1 = win_end.y - 14.0f * scale;
+        draw->AddLine(
+            ImVec2(win_pos.x + x, y0),
+            ImVec2(win_pos.x + x, y1),
+            IM_COL32(106, 117, 132, 88),
+            std::max(1.0f, scale));
+    };
+
+    float x = padding;
+
+    const bool running = emu_runner_.is_running();
+    const ButtonResult pause = button(
+        0,
+        "pause",
+        running
+            ? GameplayToolbarIcon::Pause
+            : GameplayToolbarIcon::Play,
+        x,
+        true,
+        !running,
+        running ? "Pause emulation" : "Resume emulation");
+    if (pause.clicked) {
+        if (running) {
+            emu_runner_.pause_and_wait_idle();
+            status_message_ = "Emulation paused";
+        }
+        else {
+            emu_runner_.set_running(true);
+            status_message_ = "Emulation resumed";
+        }
+    }
+    x += button_size + separator_space;
+    separator(x - separator_space * 0.5f);
+
+    const bool rewind_enabled =
+        config_rewind_enabled_ && emu_runner_.is_running();
+    const ButtonResult rewind = button(
+        1,
+        "rewind",
+        GameplayToolbarIcon::Rewind,
+        x,
+        rewind_enabled,
+        gameplay_toolbar_rewind_active_,
+        rewind_enabled
+            ? "Hold to rewind"
+            : "Enable Rewind in Settings first");
+    const bool rewind_now =
+        rewind_enabled && rewind.active;
+    if (rewind_now != gameplay_toolbar_rewind_active_) {
+        gameplay_toolbar_rewind_active_ = rewind_now;
+        emu_runner_.set_rewind_active(rewind_now);
+    }
+
+    x += button_size + gap;
+    const ButtonResult turbo = button(
+        2,
+        "turbo",
+        GameplayToolbarIcon::FastForward,
+        x,
+        emu_runner_.is_running(),
+        gameplay_toolbar_turbo_active_ || turbo_hold_active_,
+        "Hold for speedup");
+    const bool turbo_now =
+        emu_runner_.is_running() && turbo.active;
+    if (turbo_now != gameplay_toolbar_turbo_active_) {
+        gameplay_toolbar_turbo_active_ = turbo_now;
+        apply_speed_override();
+    }
+
+    x += button_size + separator_space;
+    separator(x - separator_space * 0.5f);
+
+    const ButtonResult grim = button(
+        3,
+        "grim",
+        GameplayToolbarIcon::Skull,
+        x,
+        true,
+        show_grim_reaper_,
+        "Grim Reaper");
+    if (grim.clicked) {
+        show_grim_reaper_ = true;
+    }
+
+    x += button_size + gap;
+    const ButtonResult snapshot = button(
+        4,
+        "snapshot",
+        GameplayToolbarIcon::Camera,
+        x,
+        !latest_frame_rgba_.empty(),
+        false,
+        "Take snapshot");
+    if (snapshot.clicked) {
+        save_snapshot_png();
+    }
+
+    x += button_size + gap;
+    const ButtonResult load = button(
+        5,
+        "load_game",
+        GameplayToolbarIcon::Folder,
+        x,
+        true,
+        false,
+        "Load game");
+    if (load.clicked) {
+        play_ui_open_sound();
+        std::string path = open_file_dialog(
+            "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
+            "Select PS1 Game");
+        play_ui_close_sound();
+
+        if (!path.empty()) {
+            std::string bin;
+            std::string cue;
+            std::string error;
+            if (!resolve_disc_paths(path, bin, cue, error)) {
+                status_message_ = error;
+            }
+            else {
+                load_disc_from_ui(bin, cue);
+            }
+        }
+    }
+
+    x += button_size + separator_space;
+    separator(x - separator_space * 0.5f);
+
+    const ButtonResult more = button(
+        6,
+        "more",
+        GameplayToolbarIcon::More,
+        x,
+        true,
+        ImGui::IsPopupOpen("##gameplay_toolbar_more"),
+        "More");
+    if (more.clicked) {
+        play_ui_open_sound();
+        ImGui::OpenPopup("##gameplay_toolbar_more");
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        ImVec2(10.0f * scale, 10.0f * scale));
+    ImGui::PushStyleColor(
+        ImGuiCol_PopupBg, IM_COL32(14, 18, 24, 247));
+    ImGui::PushStyleColor(
+        ImGuiCol_Border, IM_COL32(86, 102, 121, 175));
+    ImGui::PushStyleColor(
+        ImGuiCol_Header, IM_COL32(35, 75, 116, 195));
+    ImGui::PushStyleColor(
+        ImGuiCol_HeaderHovered, IM_COL32(43, 92, 141, 220));
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, IM_COL32(232, 237, 243, 250));
+
+    if (ImGui::BeginPopup("##gameplay_toolbar_more")) {
+        if (ImGui::MenuItem(
+                "Performance Overlay", nullptr, show_perf_)) {
+            show_perf_ = !show_perf_;
+        }
+        if (ImGui::MenuItem("Settings")) {
+            play_ui_open_sound();
+            show_settings_ = true;
+        }
+        if (ImGui::MenuItem("Show VRAM", nullptr, show_vram_)) {
+            show_vram_ = !show_vram_;
+        }
+        if (ImGui::MenuItem("About")) {
+            show_about_ = true;
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar(2);
+    ImGui::End();
 }
 
 void App::panel_emulator_screen() {
@@ -204,30 +702,11 @@ void App::panel_emulator_screen() {
         }
     }
     else {
-        if (latest_frame_rgba_.empty()) {
-            ImGui::BeginDisabled();
-        }
-        if (ImGui::Button("Snapshot (F8)", ImVec2(130.0f, 0.0f))) {
-            save_snapshot_png();
-        }
-        if (latest_frame_rgba_.empty()) {
-            ImGui::EndDisabled();
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%dx%d", std::max(0, latest_frame_width_),
-            std::max(0, latest_frame_height_));
-        ImGui::Spacing();
-
-        if (show_fast_mode_notice_) {
-            ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f),
-                "%s",
-                g_gpu_fast_mode
-                ? "Increase in underruns with Fast Mode, disable unnecessary logging!"
-                : "Increase in underruns, enable Fast Mode!");
-            ImGui::Spacing();
-        }
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        // Safe presentation baseline for BIOS/logo recovery: fixed 4:3 letterbox.
+
+        // The gameplay surface is intentionally chrome-free. The only
+        // persistent in-client control is the floating toolbar drawn over the
+        // game image below.
         const float display_aspect = 4.0f / 3.0f;
         const float dst_aspect =
             (avail.y > 0.0f) ? (avail.x / avail.y) : display_aspect;
@@ -236,21 +715,40 @@ void App::panel_emulator_screen() {
             draw_size.x = avail.y * display_aspect;
         }
         else {
-            draw_size.y = (display_aspect > 0.0f) ? (avail.x / display_aspect) : avail.y;
+            draw_size.y =
+                (display_aspect > 0.0f)
+                ? (avail.x / display_aspect)
+                : avail.y;
         }
+
         const float x_pad = (avail.x - draw_size.x) * 0.5f;
         const float y_pad = (avail.y - draw_size.y) * 0.5f;
         ImVec2 cursor = ImGui::GetCursorPos();
-        ImGui::SetCursorPos(ImVec2(cursor.x + x_pad, cursor.y + y_pad));
+        ImGui::SetCursorPos(
+            ImVec2(cursor.x + x_pad, cursor.y + y_pad));
+
         const ImVec2 image_pos = ImGui::GetCursorScreenPos();
         const float overscan_v =
             (latest_frame_height_ > 0)
-            ? std::min(0.02f,
+            ? std::min(
+                0.02f,
                 kEmulatorScreenBottomOverscanPixels /
-                static_cast<float>(std::max(1, latest_frame_height_)))
+                    static_cast<float>(
+                        std::max(1, latest_frame_height_)))
             : 0.0f;
-        ImGui::Image((ImTextureID)(intptr_t)renderer_->get_texture_id(), draw_size,
-            ImVec2(0.0f, 0.0f), ImVec2(1.0f, std::max(0.0f, 1.0f - overscan_v)));
-        draw_performance_overlay(image_pos, draw_size);
+
+        ImGui::Image(
+            (ImTextureID)(intptr_t)renderer_->get_texture_id(),
+            draw_size,
+            ImVec2(0.0f, 0.0f),
+            ImVec2(
+                1.0f,
+                std::max(0.0f, 1.0f - overscan_v)));
+
+        draw_gameplay_toolbar(image_pos, draw_size);
+
+        if (show_perf_) {
+            draw_performance_overlay(image_pos, draw_size);
+        }
     }
 }
