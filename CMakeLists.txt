@@ -216,6 +216,9 @@ add_custom_command(TARGET VibeStation POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${VIBESTATION_UI_SOUND_DIR}/close.wav"
         "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/close.wav"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/logo.wav"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/logo.wav"
     COMMENT "Copying definitive UI sound effects"
     VERBATIM)
 
