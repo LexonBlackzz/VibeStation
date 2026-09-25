@@ -800,6 +800,25 @@ void App::panel_definitive_home() {
                         kLauncherBackgroundFadeDuration,
                     0.0f, 1.0f)));
 
+    const float launcher_ui_progress =
+        g_launcher_ui_intro_complete
+            ? 1.0f
+            : smoothstep01(std::clamp(
+                g_launcher_ui_intro_elapsed /
+                    kLauncherUiIntroDuration,
+                0.0f,
+                1.0f));
+
+    const float launcher_handoff_alpha =
+        launcher_ui_initializing
+            ? (0.58f -
+                0.08f * launcher_ui_progress)
+            : (launcher_background_fading
+                ? 0.50f *
+                    (1.0f -
+                        launcher_background_alpha)
+                : 0.0f);
+
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
             SDL_GetPerformanceCounter() ^
@@ -825,7 +844,22 @@ void App::panel_definitive_home() {
 
     definitive_ui::draw_launcher_background(
         draw, window_pos, window_size, launcher_background_alpha);
-    definitive_ui::draw_launcher_readability_shade(draw, window_pos, window_size);
+
+    // Keep the same blurred/dim photograph visible at the exact opacity used
+    // by the final intro frame. Once the launcher controls finish assembling,
+    // crossfade that handoff layer into the normal launcher photograph.
+    if (launcher_handoff_alpha > 0.001f) {
+        definitive_ui::draw_intro_handoff_background(
+            draw,
+            window_pos,
+            window_size,
+            launcher_handoff_alpha);
+    }
+
+    definitive_ui::draw_launcher_readability_shade(
+        draw,
+        window_pos,
+        window_size);
 
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
     const ImVec2 bottom1(window_pos.x + window_size.x, window_pos.y + window_size.y);
