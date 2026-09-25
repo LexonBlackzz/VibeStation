@@ -3555,6 +3555,20 @@ u32 EeCpu::run_quiet_fast_prefix(
     };
 
     for (; retired < limit; ++retired) {
+        if (hot_sif_getreg_inflight_ &&
+            hot_sif_getreg_return_pc_ != 0u &&
+            state_.pc == hot_sif_getreg_return_pc_) {
+            hot_sif_getreg_inflight_ = false;
+            hot_sif_getreg_path_instructions_ =
+                state_.instructions_executed -
+                hot_sif_getreg_start_instruction_;
+            hot_sif_getreg_return_v0_ =
+                static_cast<u32>(state_.gpr[2].lo);
+            hot_sif_getreg_return_status_ = state_.cop0[12];
+            hot_sif_getreg_return_cause_ = state_.cop0[13];
+            hot_sif_getreg_return_epc_ = state_.cop0[14];
+        }
+
         const u32 expected_pc = direct_trace
             ? state_.pc
             : block_pc + retired * 4u;
