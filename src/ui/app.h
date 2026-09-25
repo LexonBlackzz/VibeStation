@@ -73,6 +73,7 @@ private:
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;
+	bool gameplay_toolbar_popup_was_open_ = false;
 	std::string bios_path_;
 	std::string rom_directory_;
 	std::string game_bin_path_;
@@ -251,6 +252,7 @@ private:
 	// UI panels
 	void menu_bar();
 	void panel_emulator_screen();
+	void draw_gameplay_toolbar(const ImVec2& image_pos, const ImVec2& image_size);
 	void panel_definitive_home();
 	void panel_definitive_settings();
 	void open_definitive_settings();
