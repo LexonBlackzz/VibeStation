@@ -561,9 +561,24 @@ void play_menu_sound(UiMenuSound sound) {
         return;
     }
 
-    // Replace a stale navigation sound rather than queueing several clicks
-    // behind one another when the pointer moves quickly through the menu.
-    SDL_ClearQueuedAudio(g_ui_sound_device);
+    const Uint32 queued_bytes =
+        SDL_GetQueuedAudioSize(g_ui_sound_device);
+
+    if (sound == UiMenuSound::Cursor) {
+        // Cursor/highlight sounds are intentionally low priority. Returning
+        // from a modal can give a launcher button keyboard focus immediately;
+        // do not let that automatic highlight cut off the close/open sound
+        // that was just started.
+        if (queued_bytes != 0) {
+            return;
+        }
+    }
+    else {
+        // Explicit open/close actions take priority over any lingering cursor
+        // tick and should start immediately.
+        SDL_ClearQueuedAudio(g_ui_sound_device);
+    }
+
     SDL_QueueAudio(
         g_ui_sound_device,
         clip->pcm.data(),
