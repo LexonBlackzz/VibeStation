@@ -13,18 +13,17 @@ int main() { return 0; }\n"
     VIBESTATION_COMPILER_TARGETS_X64)
 
 set(VIBESTATION_X64_JIT_DEFAULT OFF)
-if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND
-        VIBESTATION_COMPILER_TARGETS_X64)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND VIBESTATION_COMPILER_TARGETS_X64)
     set(VIBESTATION_X64_JIT_DEFAULT ON)
 endif()
 option(VIBESTATION_ENABLE_X64_JIT
     "Enable the native x64 CPU JIT/recompiler when supported" ${VIBESTATION_X64_JIT_DEFAULT})
 
 if(VIBESTATION_ENABLE_X64_JIT AND
-        (NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+        (NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
          NOT VIBESTATION_COMPILER_TARGETS_X64))
     message(FATAL_ERROR
-        "VIBESTATION_ENABLE_X64_JIT requires a Windows x64 compiler target")
+        "VIBESTATION_ENABLE_X64_JIT requires an x64 compiler target")
 endif()
 
 # ── Fetch Dependencies ──────────────────────────────────────────────
@@ -79,7 +78,12 @@ target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
-target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
+if(WIN32)
+    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static opengl32)
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui_lib PUBLIC SDL2::SDL2-static OpenGL::GL)
+endif()
 
 # ── VibeStation Executable ──────────────────────────────────────────
 set(VIBESTATION_SOURCES
@@ -105,7 +109,6 @@ set(VIBESTATION_SOURCES
     src/core/cpu.cpp
     src/core/component_serialize.cpp
     src/core/cpu_recompiler.cpp
-    src/core/cpu_recompiler_x64.cpp
     src/core/config.cpp
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp
@@ -155,36 +158,32 @@ set(VIBESTATION_SOURCES
 set(VIBESTATION_VERSION_STRING "v0.6.0")
 set(VIBESTATION_BUILD_NUMBER_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
-set(VIBESTATION_VERSION_HEADER
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.h")
+set(VIBESTATION_VERSION_SOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.cpp")
 
 add_custom_command(
-    OUTPUT "${VIBESTATION_VERSION_HEADER}"
+    OUTPUT "${VIBESTATION_VERSION_SOURCE}"
     COMMAND ${CMAKE_COMMAND}
         -DVIBESTATION_VERSION_STRING=${VIBESTATION_VERSION_STRING}
         -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
-        -DVIBESTATION_VERSION_HEADER=${VIBESTATION_VERSION_HEADER}
+        -DVIBESTATION_VERSION_SOURCE=${VIBESTATION_VERSION_SOURCE}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
-    # Do not depend on build_number.txt here: the generator script increments
-    # that file itself, which otherwise makes this command perpetually dirty.
+    # Do not depend on build_number.txt here: the generator increments it,
+    # which would otherwise make this command perpetually dirty.
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
     VERBATIM
     COMMENT "Updating VibeStation build metadata")
 
-add_custom_target(vibestation_version_header
-    DEPENDS "${VIBESTATION_VERSION_HEADER}")
-
-set_source_files_properties(src/ui/panels/about_panel.cpp PROPERTIES
-    OBJECT_DEPENDS "${VIBESTATION_VERSION_HEADER}")
+list(APPEND VIBESTATION_SOURCES "${VIBESTATION_VERSION_SOURCE}")
+set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
+    GENERATED TRUE
+    SKIP_PRECOMPILE_HEADERS ON)
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
 
-add_dependencies(VibeStation vibestation_version_header)
-
 target_include_directories(VibeStation PRIVATE
     src
-    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${stb_SOURCE_DIR}")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
 
