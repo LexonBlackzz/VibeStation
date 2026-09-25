@@ -54,20 +54,17 @@ struct GsStats {
     u64 gpu_sprite_draws = 0;
     u64 gpu_sprite_pixels = 0;
     u64 gpu_syncs_to_cpu = 0;
-    // Large dependency-safe sprite profile used to grow the GPU fast path.
+    // Compact profile for large dependency-safe GPU sprite candidates.
+    // Signature packing:
+    // bit0 texture enabled; [6:1] texture PSM; [12:7] frame PSM;
+    // [14:13] TFX; bit15 TCC; [32:16] blend/depth state key;
+    // [40:33] ALPHA FIX.
     u64 gpu_candidate_sprite_draws = 0;
     u64 gpu_candidate_sprite_pixels = 0;
-    std::array<u64, 64> gpu_candidate_texture_psm_draws{};
-    std::array<u64, 64> gpu_candidate_texture_psm_pixels{};
-    std::array<u64, 64> gpu_candidate_frame_psm_draws{};
-    // Sparse state keys: A/B/C/D [7:0], ZTST [9:8], COLCLAMP bit10,
-    // PABE bit11, ABE bit12, ZTE bit13, ZMASK bit14, ATE bit15, DATE bit16.
-    std::array<u32, 64> gpu_candidate_state_keys{};
-    std::array<u64, 64> gpu_candidate_state_counts{};
-    u32 gpu_candidate_state_count = 0;
-    std::array<u64, 4> gpu_candidate_tfx_draws{};
-    std::array<u64, 2> gpu_candidate_tcc_draws{};
-    std::array<u64, 256> gpu_candidate_fix_draws{};
+    std::array<u64, 16> gpu_candidate_signatures{};
+    std::array<u64, 16> gpu_candidate_signature_draws{};
+    std::array<u64, 16> gpu_candidate_signature_pixels{};
+    u32 gpu_candidate_signature_count = 0;
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
     std::array<u64, 8> raster_ns_by_primitive{};

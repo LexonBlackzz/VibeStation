@@ -1113,34 +1113,13 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
                 candidate_area)) {
             ++stats_.gpu_candidate_sprite_draws;
             stats_.gpu_candidate_sprite_pixels += candidate_area;
-            if (ctx.texture.enabled &&
-                ctx.texture.psm <
-                    stats_.gpu_candidate_texture_psm_draws.size()) {
-                ++stats_.gpu_candidate_texture_psm_draws[
-                    ctx.texture.psm];
-                stats_.gpu_candidate_texture_psm_pixels[
-                    ctx.texture.psm] += candidate_area;
-            }
-            if (ctx.psm <
-                stats_.gpu_candidate_frame_psm_draws.size()) {
-                ++stats_.gpu_candidate_frame_psm_draws[ctx.psm];
-            }
-            if (ctx.texture.tfx <
-                stats_.gpu_candidate_tfx_draws.size()) {
-                ++stats_.gpu_candidate_tfx_draws[ctx.texture.tfx];
-            }
-            ++stats_.gpu_candidate_tcc_draws[
-                ctx.texture.tcc ? 1u : 0u];
-            if ((ctx.alpha_c & 3u) == 2u) {
-                ++stats_.gpu_candidate_fix_draws[
-                    ctx.alpha_fix & 0xFFu];
-            }
+
             const u32 alpha_selectors =
                 (ctx.alpha_a & 3u) |
                 ((ctx.alpha_b & 3u) << 2u) |
                 ((ctx.alpha_c & 3u) << 4u) |
                 ((ctx.alpha_d & 3u) << 6u);
-            const u32 key =
+            const u32 state_key =
                 alpha_selectors |
                 ((ctx.ztst & 3u) << 8u) |
                 (ctx.color_clamp ? (1u << 10u) : 0u) |
@@ -1150,23 +1129,37 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
                 (ctx.zmask ? (1u << 14u) : 0u) |
                 (ctx.ate ? (1u << 15u) : 0u) |
                 (ctx.date ? (1u << 16u) : 0u);
-            bool state_recorded = false;
+
+            const u64 signature =
+                (ctx.texture.enabled ? 1ull : 0ull) |
+                (static_cast<u64>(ctx.texture.psm & 0x3Fu) << 1u) |
+                (static_cast<u64>(ctx.psm & 0x3Fu) << 7u) |
+                (static_cast<u64>(ctx.texture.tfx & 0x3u) << 13u) |
+                (static_cast<u64>(ctx.texture.tcc ? 1u : 0u) << 15u) |
+                (static_cast<u64>(state_key & 0x1FFFFu) << 16u) |
+                (static_cast<u64>(ctx.alpha_fix & 0xFFu) << 33u);
+
+            bool recorded = false;
             for (u32 i = 0u;
-                 i < stats_.gpu_candidate_state_count;
+                 i < stats_.gpu_candidate_signature_count;
                  ++i) {
-                if (stats_.gpu_candidate_state_keys[i] == key) {
-                    ++stats_.gpu_candidate_state_counts[i];
-                    state_recorded = true;
+                if (stats_.gpu_candidate_signatures[i] == signature) {
+                    ++stats_.gpu_candidate_signature_draws[i];
+                    stats_.gpu_candidate_signature_pixels[i] +=
+                        candidate_area;
+                    recorded = true;
                     break;
                 }
             }
-            if (!state_recorded &&
-                stats_.gpu_candidate_state_count <
-                    stats_.gpu_candidate_state_keys.size()) {
+            if (!recorded &&
+                stats_.gpu_candidate_signature_count <
+                    stats_.gpu_candidate_signatures.size()) {
                 const u32 index =
-                    stats_.gpu_candidate_state_count++;
-                stats_.gpu_candidate_state_keys[index] = key;
-                stats_.gpu_candidate_state_counts[index] = 1u;
+                    stats_.gpu_candidate_signature_count++;
+                stats_.gpu_candidate_signatures[index] = signature;
+                stats_.gpu_candidate_signature_draws[index] = 1u;
+                stats_.gpu_candidate_signature_pixels[index] =
+                    candidate_area;
             }
         }
     }

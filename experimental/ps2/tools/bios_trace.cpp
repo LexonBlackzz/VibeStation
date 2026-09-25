@@ -1106,63 +1106,16 @@ void print_state(const ps2::Ps2System& system) {
         << gs_stats.gpu_candidate_sprite_pixels
         << '\n';
 
-    std::cout << "GS_GPU_CANDIDATE_TEXTURE_PSM";
+    std::cout << "GS_GPU_CANDIDATE_SIGNATURES";
     for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_texture_psm_draws.size();
-         ++i) {
-        if (gs_stats.gpu_candidate_texture_psm_draws[i] == 0u)
-            continue;
-        std::cout
-            << " PSM" << i
-            << "_D=" << gs_stats.gpu_candidate_texture_psm_draws[i]
-            << "_P=" << gs_stats.gpu_candidate_texture_psm_pixels[i];
-    }
-    std::cout << '\n';
-
-    std::cout << "GS_GPU_CANDIDATE_FRAME_PSM";
-    for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_frame_psm_draws.size();
-         ++i) {
-        if (gs_stats.gpu_candidate_frame_psm_draws[i] == 0u)
-            continue;
-        std::cout
-            << " PSM" << i
-            << '=' << gs_stats.gpu_candidate_frame_psm_draws[i];
-    }
-    std::cout << '\n';
-
-    std::cout << "GS_GPU_CANDIDATE_STATE";
-    for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_state_count;
+         i < gs_stats.gpu_candidate_signature_count;
          ++i) {
         std::cout
-            << " K" << gs_stats.gpu_candidate_state_keys[i]
-            << '=' << gs_stats.gpu_candidate_state_counts[i];
-    }
-    std::cout << '\n';
-
-    std::cout << "GS_GPU_CANDIDATE_TFX";
-    for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_tfx_draws.size();
-         ++i) {
-        if (gs_stats.gpu_candidate_tfx_draws[i] == 0u) continue;
-        std::cout
-            << " TFX" << i
-            << '=' << gs_stats.gpu_candidate_tfx_draws[i];
-    }
-    std::cout
-        << " TCC0=" << gs_stats.gpu_candidate_tcc_draws[0]
-        << " TCC1=" << gs_stats.gpu_candidate_tcc_draws[1]
-        << '\n';
-
-    std::cout << "GS_GPU_CANDIDATE_FIX";
-    for (ps2::u32 i = 0;
-         i < gs_stats.gpu_candidate_fix_draws.size();
-         ++i) {
-        if (gs_stats.gpu_candidate_fix_draws[i] == 0u) continue;
-        std::cout
-            << " F" << i
-            << '=' << gs_stats.gpu_candidate_fix_draws[i];
+            << " S0x" << std::hex << std::uppercase
+            << gs_stats.gpu_candidate_signatures[i]
+            << std::dec
+            << "_D=" << gs_stats.gpu_candidate_signature_draws[i]
+            << "_P=" << gs_stats.gpu_candidate_signature_pixels[i];
     }
     std::cout << '\n';
 
