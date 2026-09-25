@@ -77,6 +77,7 @@ private:
     std::thread audio_stutter_thread_{};
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
+    bool gpu_gs_enabled_ = true;
     unsigned int display_texture_ = 0;
     u32 display_texture_width_ = 0;
     u32 display_texture_height_ = 0;

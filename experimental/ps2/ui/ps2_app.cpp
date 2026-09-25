@@ -1425,6 +1425,28 @@ void Ps2App::panel_gs_debug() {
         gs.transfer_active() ? "active" : "idle",
         gs.transfer_psm(),
         gs.transfer_pixels_remaining());
+
+    if (gpu_gs_backend_ != nullptr) {
+        bool enabled = gpu_gs_enabled_;
+        if (ImGui::Checkbox(
+                "GPU GS (OpenGL compute)",
+                &enabled)) {
+            gpu_gs_enabled_ = enabled;
+            system_.gs_core().set_gpu_backend(
+                enabled
+                    ? static_cast<GsGpuBackend*>(
+                        gpu_gs_backend_.get())
+                    : nullptr);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled(
+            system_.gs_core().gpu_backend_active()
+                ? "(active)"
+                : "(software fallback)");
+    } else {
+        ImGui::TextDisabled(
+            "GPU GS: unavailable (OpenGL 4.3 compute required)");
+    }
     ImGui::Separator();
 
     if (ImGui::BeginTable("GSStats", 2,
@@ -1459,6 +1481,10 @@ void Ps2App::panel_gs_debug() {
         row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
         row("Raster draws", static_cast<unsigned long long>(stats.raster_draws));
         row("Raster pixels", static_cast<unsigned long long>(stats.raster_pixels));
+        row("GPU sprite draws", static_cast<unsigned long long>(stats.gpu_sprite_draws));
+        row("GPU sprite pixels", static_cast<unsigned long long>(stats.gpu_sprite_pixels));
+        row("GPU->CPU VRAM syncs", static_cast<unsigned long long>(stats.gpu_syncs_to_cpu));
+        row("CPU parallel sprite draws", static_cast<unsigned long long>(stats.parallel_sprite_draws));
         row("Textured raster draws", static_cast<unsigned long long>(stats.textured_raster_draws));
         row("Texture samples", static_cast<unsigned long long>(stats.texture_samples));
         row("Skipped raster draws", static_cast<unsigned long long>(stats.skipped_raster_draws));
