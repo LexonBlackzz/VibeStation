@@ -1765,6 +1765,22 @@ int main(int argc, char** argv) {
     }
     std::cout << '\n';
 
+    std::cout << "EE_FAST_PREFIX_COP2_FALLBACKS";
+    const auto& cop2_words =
+        system.ee().fast_prefix_cop2_fallback_words();
+    const auto& cop2_counts =
+        system.ee().fast_prefix_cop2_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_cop2_fallback_count();
+         ++i) {
+        std::cout
+            << " W0x" << std::hex << std::uppercase
+            << cop2_words[i]
+            << std::dec
+            << '=' << cop2_counts[i];
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="

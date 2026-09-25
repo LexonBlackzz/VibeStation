@@ -134,6 +134,17 @@ public:
     fast_prefix_fallback_opcodes() const {
         return *fast_prefix_fallback_opcodes_;
     }
+    [[nodiscard]] const std::array<u32, 64>&
+    fast_prefix_cop2_fallback_words() const {
+        return *fast_prefix_cop2_fallback_words_;
+    }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_cop2_fallback_counts() const {
+        return *fast_prefix_cop2_fallback_counts_;
+    }
+    [[nodiscard]] u32 fast_prefix_cop2_fallback_count() const {
+        return fast_prefix_cop2_fallback_count_;
+    }
     [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
         return hot_sif_getreg_read_offset_;
     }
@@ -191,6 +202,13 @@ private:
     std::unique_ptr<std::array<u64, 64>>
         fast_prefix_fallback_opcodes_ =
             std::make_unique<std::array<u64, 64>>();
+    std::unique_ptr<std::array<u32, 64>>
+        fast_prefix_cop2_fallback_words_ =
+            std::make_unique<std::array<u32, 64>>();
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_cop2_fallback_counts_ =
+            std::make_unique<std::array<u64, 64>>();
+    u32 fast_prefix_cop2_fallback_count_ = 0u;
 
     bool halted_ = false;
     bool next_is_delay_slot_ = false;

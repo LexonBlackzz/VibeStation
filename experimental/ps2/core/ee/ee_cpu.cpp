@@ -145,6 +145,9 @@ void EeCpu::reset(u32 entry_point) {
     hot_sif_getreg_diag_start_ = 0u;
     hot_sif_getreg_read_offset_ = 0u;
     fast_prefix_fallback_opcodes_->fill(0u);
+    fast_prefix_cop2_fallback_words_->fill(0u);
+    fast_prefix_cop2_fallback_counts_->fill(0u);
+    fast_prefix_cop2_fallback_count_ = 0u;
     halt_reason_.clear();
 }
 
@@ -4638,6 +4641,28 @@ u32 EeCpu::run_quiet_fast_prefix(
 
         if (!handled) {
             ++(*fast_prefix_fallback_opcodes_)[opcode & 63u];
+            if (opcode == 0x12u) {
+                bool found = false;
+                for (u32 i = 0u;
+                     i < fast_prefix_cop2_fallback_count_;
+                     ++i) {
+                    if ((*fast_prefix_cop2_fallback_words_)[i] ==
+                        instruction) {
+                        ++(*fast_prefix_cop2_fallback_counts_)[i];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found &&
+                    fast_prefix_cop2_fallback_count_ <
+                        fast_prefix_cop2_fallback_words_->size()) {
+                    const u32 index =
+                        fast_prefix_cop2_fallback_count_++;
+                    (*fast_prefix_cop2_fallback_words_)[index] =
+                        instruction;
+                    (*fast_prefix_cop2_fallback_counts_)[index] = 1u;
+                }
+            }
             break;
         }
 
