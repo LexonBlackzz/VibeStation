@@ -3772,7 +3772,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                     static_cast<u64>(instruction & 0xFFFFu));
         } else if (opcode == 0x0Fu) {
             write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
-        } else if (opcode == 0x12u) { // COP2/VU0 macro subset
+        } else if (opcode == 0x12u) { // COP2/VU0 register-only fast subset
             const u32 cop_rs = rs;
             const u32 ft = rt;
             const u32 fs = rd;
@@ -3780,68 +3780,207 @@ u32 EeCpu::run_quiet_fast_prefix(
             const u32 cop_funct = funct;
 
             auto vu_lane_read = [&](u32 reg, u32 lane) -> u32 {
-                const EeGpr& value = state_.vu_vf[reg];
+                const EeGpr& value = state_.vu_vf[reg & 31u];
                 const u64 half = lane < 2u ? value.lo : value.hi;
                 return static_cast<u32>(
                     half >> ((lane & 1u) * 32u));
             };
             auto vu_lane_write =
                 [&](u32 reg, u32 lane, u32 value) {
-                    if (reg == 0u) return;
-                    EeGpr& target = state_.vu_vf[reg];
+                    if ((reg & 31u) == 0u) return;
+                    EeGpr& target = state_.vu_vf[reg & 31u];
                     u64& half = lane < 2u ? target.lo : target.hi;
                     const u32 shift = (lane & 1u) * 32u;
                     half =
                         (half & ~(0xFFFFFFFFull << shift)) |
                         (static_cast<u64>(value) << shift);
                 };
+            auto vu_acc_read = [&](u32 lane) -> u32 {
+                const u64 half =
+                    lane < 2u ? state_.vu_acc.lo : state_.vu_acc.hi;
+                return static_cast<u32>(
+                    half >> ((lane & 1u) * 32u));
+            };
+            auto vu_acc_write = [&](u32 lane, u32 value) {
+                u64& half =
+                    lane < 2u ? state_.vu_acc.lo : state_.vu_acc.hi;
+                const u32 shift = (lane & 1u) * 32u;
+                half =
+                    (half & ~(0xFFFFFFFFull << shift)) |
+                    (static_cast<u64>(value) << shift);
+            };
             auto vu_selected = [&](u32 lane) {
                 static constexpr u32 bits[4] = {
                     24u, 23u, 22u, 21u};
                 return ((instruction >> bits[lane]) & 1u) != 0u;
             };
+            auto vu_float = [&](u32 reg, u32 lane) {
+                return ps2_fpu_input(vu_lane_read(reg, lane));
+            };
+            auto vu_write_float =
+                [&](u32 reg, u32 lane, float value) {
+                    vu_lane_write(
+                        reg, lane, ps2_fpu_result(value));
+                };
+            auto acc_float = [&](u32 lane) {
+                return ps2_fpu_input(vu_acc_read(lane));
+            };
+            auto acc_write_float =
+                [&](u32 lane, float value) {
+                    vu_acc_write(
+                        lane, ps2_fpu_result(value));
+                };
+            auto broadcast_binary =
+                [&](u32 source_lane, auto op) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto broadcast_madd =
+                [&](u32 source_lane) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) + product);
+                    }
+                };
+            auto acc_broadcast_binary =
+                [&](u32 source_lane, auto op) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        acc_write_float(
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto acc_broadcast_madd =
+                [&](u32 source_lane) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        acc_write_float(
+                            lane,
+                            acc_float(lane) + product);
+                    }
+                };
 
-            if (cop_rs == 0x02u) { // CFC2
+            if (cop_rs == 0x01u) { // QMFC2
+                if (rt != 0u) state_.gpr[rt] = state_.vu_vf[fs];
+            } else if (cop_rs == 0x02u) { // CFC2
                 if (rt != 0u) {
                     u32 value = state_.vu_vi[fs];
                     if (fs == 20u) value &= 0x007FFFFFu;
                     write_gpr_word(rt, value);
                 }
-            } else if (cop_rs >= 0x10u &&
-                       cop_funct == 0x2Cu) { // VSUB
-                for (u32 lane = 0u; lane < 4u; ++lane) {
-                    if (!vu_selected(lane)) continue;
-                    const float lhs =
-                        ps2_fpu_input(vu_lane_read(fs, lane));
-                    const float rhs =
-                        ps2_fpu_input(vu_lane_read(ft, lane));
-                    vu_lane_write(
-                        fd,
-                        lane,
-                        ps2_fpu_result(lhs - rhs));
-                }
-            } else if (cop_rs >= 0x10u &&
-                       cop_funct >= 0x3Cu) {
-                const u32 special =
-                    (instruction & 3u) |
-                    ((instruction >> 4) & 0x7Cu);
-                if (special == 0x2Fu) { // VNOP
-                    // Architectural no-op.
-                } else if (special == 0x30u) { // VMOVE
-                    // Snapshot the source first: source and destination may
-                    // alias while the lane mask selects a partial move.
-                    const EeGpr source = state_.vu_vf[fs];
-                    auto source_lane = [&](u32 lane) {
-                        const u64 half =
-                            lane < 2u ? source.lo : source.hi;
-                        return static_cast<u32>(
-                            half >> ((lane & 1u) * 32u));
-                    };
-                    for (u32 lane = 0u; lane < 4u; ++lane) {
-                        if (vu_selected(lane)) {
-                            vu_lane_write(
-                                ft, lane, source_lane(lane));
+            } else if (cop_rs == 0x05u) { // QMTC2
+                if (fs != 0u) state_.vu_vf[fs] = state_.gpr[rt];
+            } else if (cop_rs == 0x06u) { // CTC2
+                if (fs == 0u || fs == 17u ||
+                    fs == 26u || fs == 29u) {
+                    // Read-only / ignored control registers.
+                } else {
+                    const u32 value =
+                        static_cast<u32>(gpr_u64(rt));
+                    if (fs < 16u) {
+                        state_.vu_vi[fs] =
+                            static_cast<u16>(value);
+                    } else if (fs == 20u) {
+                        state_.vu_vi[20] =
+                            (value & 0x007FFFFFu) |
+                            0x3F800000u;
+                    } else if (fs == 28u) {
+                        state_.vu_vi[28] =
+                            value & 0x00000C0Cu;
+                        if ((value & 0x2u) != 0u) {
+                            for (u32 i = 1u; i < 32u; ++i) {
+                                state_.vu_vf[i] = {};
+                            }
+                            for (u32 i = 1u; i < 16u; ++i) {
+                                state_.vu_vi[i] = 0u;
+                            }
+                            state_.vu_vi[29] &= ~0xFFu;
                         }
+                        if ((value & 0x200u) != 0u) {
+                            state_.vu_vi[29] &= ~0xFF00u;
+                        }
+                    } else {
+                        state_.vu_vi[fs] = value;
+                    }
+                }
+            } else if (cop_rs >= 0x10u) {
+                const auto add =
+                    [](float lhs, float rhs) {
+                        return lhs + rhs;
+                    };
+                const auto mul =
+                    [](float lhs, float rhs) {
+                        return lhs * rhs;
+                    };
+
+                if (cop_funct >= 0x08u &&
+                    cop_funct <= 0x0Bu) { // VMADDx/y/z/w
+                    broadcast_madd(cop_funct & 3u);
+                } else if (cop_funct >= 0x18u &&
+                           cop_funct <= 0x1Bu) { // VMULx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u, mul);
+                } else if (cop_funct == 0x2Cu) { // VSUB
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            vu_float(fs, lane) -
+                                vu_float(ft, lane));
+                    }
+                } else if (cop_funct >= 0x3Cu) {
+                    const u32 special =
+                        (instruction & 3u) |
+                        ((instruction >> 4) & 0x7Cu);
+                    if (special >= 0x08u &&
+                        special <= 0x0Bu) { // VMADDAx/y/z/w
+                        acc_broadcast_madd(special & 3u);
+                    } else if (special >= 0x18u &&
+                               special <= 0x1Bu) { // VMULAx/y/z/w
+                        acc_broadcast_binary(
+                            special & 3u, mul);
+                    } else if (special == 0x2Fu) { // VNOP
+                        // Architectural no-op.
+                    } else if (special == 0x30u) { // VMOVE
+                        const EeGpr source = state_.vu_vf[fs];
+                        auto source_lane = [&](u32 lane) {
+                            const u64 half =
+                                lane < 2u ? source.lo : source.hi;
+                            return static_cast<u32>(
+                                half >> ((lane & 1u) * 32u));
+                        };
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    source_lane(lane));
+                            }
+                        }
+                    } else {
+                        handled = false;
                     }
                 } else {
                     handled = false;
