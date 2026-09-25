@@ -4,6 +4,7 @@
 #include "core/ee/ee_jit.h"
 
 #include <array>
+#include <memory>
 #include <string>
 
 namespace ps2 {
@@ -131,7 +132,7 @@ public:
     [[nodiscard]] const EeJit& jit() const { return jit_; }
     [[nodiscard]] const std::array<u64, 64>&
     fast_prefix_fallback_opcodes() const {
-        return fast_prefix_fallback_opcodes_;
+        return *fast_prefix_fallback_opcodes_;
     }
     [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
         return hot_sif_getreg_read_offset_;
@@ -187,7 +188,9 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
-    std::array<u64, 64> fast_prefix_fallback_opcodes_{};
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_fallback_opcodes_ =
+            std::make_unique<std::array<u64, 64>>();
 
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
