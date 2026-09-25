@@ -1699,6 +1699,19 @@ int main(int argc, char** argv) {
             << std::dec << '\n';
     }
 
+    std::cout << "EE_VU_HOT_LOOP_DUMP_BEGIN=0x00266FC0 END=0x00267050\n";
+    for (ps2::u32 address = 0x00266FC0u;
+         address < 0x00267050u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_VU_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
     std::cout << "EE_QUIET_HOT_BLOCKS";
     for (const auto& [pc, hits] : system.quiet_block_hotspots(32u)) {
         std::cout
