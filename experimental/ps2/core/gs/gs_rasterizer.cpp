@@ -219,26 +219,26 @@ s32 stq_to_fixed(float coordinate, float q, u32 size) {
         return 0;
     }
 
-    const long double fixed =
-        (static_cast<long double>(coordinate) / static_cast<long double>(q)) *
-        static_cast<long double>(size) * 16.0L;
-    const long double lo =
-        static_cast<long double>(std::numeric_limits<s32>::min());
-    const long double hi =
-        static_cast<long double>(std::numeric_limits<s32>::max());
+    const double fixed =
+        (static_cast<double>(coordinate) / static_cast<double>(q)) *
+        static_cast<double>(size) * 16.0;
+    const double lo =
+        static_cast<double>(std::numeric_limits<s32>::min());
+    const double hi =
+        static_cast<double>(std::numeric_limits<s32>::max());
     return static_cast<s32>(std::clamp(fixed, lo, hi));
 }
 
 s32 st_to_fixed_scaled(
     float coordinate,
-    long double scale) {
+    double scale) {
     if (!std::isfinite(coordinate)) return 0;
-    const long double fixed =
-        static_cast<long double>(coordinate) * scale;
-    const long double lo =
-        static_cast<long double>(std::numeric_limits<s32>::min());
-    const long double hi =
-        static_cast<long double>(std::numeric_limits<s32>::max());
+    const double fixed =
+        static_cast<double>(coordinate) * scale;
+    const double lo =
+        static_cast<double>(std::numeric_limits<s32>::min());
+    const double hi =
+        static_cast<double>(std::numeric_limits<s32>::max());
     return static_cast<s32>(std::clamp(fixed, lo, hi));
 }
 
@@ -250,15 +250,15 @@ u32 interpolate_z(
     u32 a,
     u32 b,
     u32 c) {
-    const long double numerator =
-        static_cast<long double>(w0) * static_cast<long double>(a) +
-        static_cast<long double>(w1) * static_cast<long double>(b) +
-        static_cast<long double>(w2) * static_cast<long double>(c);
-    long double value = numerator / static_cast<long double>(area);
+    const double numerator =
+        static_cast<double>(w0) * static_cast<double>(a) +
+        static_cast<double>(w1) * static_cast<double>(b) +
+        static_cast<double>(w2) * static_cast<double>(c);
+    double value = numerator / static_cast<double>(area);
     value = std::clamp(
         value,
-        static_cast<long double>(0),
-        static_cast<long double>(std::numeric_limits<u32>::max()));
+        0.0,
+        static_cast<double>(std::numeric_limits<u32>::max()));
     return static_cast<u32>(value);
 }
 
@@ -1006,24 +1006,24 @@ u64 GsRasterizer::draw_triangle(
     const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
     const bool constant_z = a.z == b.z && b.z == c.z;
     const bool positive_area = area > 0;
-    const long double inv_area =
-        1.0L / static_cast<long double>(area);
+    const double inv_area =
+        1.0 / static_cast<double>(area);
     const bool scaled_constant_q =
         ctx.texture.enabled &&
         !ctx.texture.fst &&
         constant_q &&
         std::isfinite(a.q) &&
         std::fabs(a.q) >= 1.0e-20f;
-    const long double constant_u_scale =
+    const double constant_u_scale =
         scaled_constant_q
-            ? (static_cast<long double>(ctx.texture.width) *
-               16.0L / static_cast<long double>(a.q))
-            : 0.0L;
-    const long double constant_v_scale =
+            ? (static_cast<double>(ctx.texture.width) *
+               16.0 / static_cast<double>(a.q))
+            : 0.0;
+    const double constant_v_scale =
         scaled_constant_q
-            ? (static_cast<long double>(ctx.texture.height) *
-               16.0L / static_cast<long double>(a.q))
-            : 0.0L;
+            ? (static_cast<double>(ctx.texture.height) *
+               16.0 / static_cast<double>(a.q))
+            : 0.0;
 
     // Edge functions are affine in screen space.  Evaluate them once at the
     // top-left pixel centre, then advance by their exact 16.4 fixed-point
@@ -1061,13 +1061,13 @@ u64 GsRasterizer::draw_triangle(
                             (w0 * a.v + w1 * b.v + w2 * c.v) / area);
                     } else {
                         const float s = static_cast<float>(
-                            (static_cast<long double>(w0) * a.s +
-                             static_cast<long double>(w1) * b.s +
-                             static_cast<long double>(w2) * c.s) * inv_area);
+                            (static_cast<double>(w0) * a.s +
+                             static_cast<double>(w1) * b.s +
+                             static_cast<double>(w2) * c.s) * inv_area);
                         const float t = static_cast<float>(
-                            (static_cast<long double>(w0) * a.t +
-                             static_cast<long double>(w1) * b.t +
-                             static_cast<long double>(w2) * c.t) * inv_area);
+                            (static_cast<double>(w0) * a.t +
+                             static_cast<double>(w1) * b.t +
+                             static_cast<double>(w2) * c.t) * inv_area);
                         if (scaled_constant_q) {
                             u = st_to_fixed_scaled(
                                 s, constant_u_scale);
@@ -1078,9 +1078,9 @@ u64 GsRasterizer::draw_triangle(
                                 constant_q
                                     ? a.q
                                     : static_cast<float>(
-                                        (static_cast<long double>(w0) * a.q +
-                                         static_cast<long double>(w1) * b.q +
-                                         static_cast<long double>(w2) * c.q) *
+                                        (static_cast<double>(w0) * a.q +
+                                         static_cast<double>(w1) * b.q +
+                                         static_cast<double>(w2) * c.q) *
                                         inv_area);
                             u = stq_to_fixed(
                                 s, q, ctx.texture.width);
