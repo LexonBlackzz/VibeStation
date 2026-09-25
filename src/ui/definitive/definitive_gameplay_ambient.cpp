@@ -291,12 +291,15 @@ void draw_vertical_ambilight(
                 10,
                 0.48f);
 
+        // Adjacent zones must meet exactly. The previous +/-1 px overlap
+        // caused alpha to stack at every segment boundary, producing visible
+        // horizontal seam lines in the Ambilight glow.
         const ImVec2 p0(
             std::min(outer_x, inner_x),
-            y0 - 1.0f);
+            y0);
         const ImVec2 p1(
             std::max(outer_x, inner_x),
-            y1 + 1.0f);
+            y1);
 
         if (inner_on_right) {
             draw->AddRectFilledMultiColor(
@@ -364,12 +367,12 @@ void draw_vertical_ambilight(
             std::min(
                 bloom_outer_x,
                 inner_x),
-            y0 - 1.0f);
+            y0);
         const ImVec2 p1(
             std::max(
                 bloom_outer_x,
                 inner_x),
-            y1 + 1.0f);
+            y1);
 
         const ImU32 edge_top =
             ambient_color(
@@ -473,13 +476,15 @@ void draw_horizontal_ambilight(
                 8,
                 0.46f);
 
+        // Keep horizontal zones edge-to-edge as well; overlapping them would
+        // create the same bright seam artifact rotated 90 degrees.
         const ImVec2 p0(
-            x0 - 1.0f,
+            x0,
             std::min(
                 outer_y,
                 inner_y));
         const ImVec2 p1(
-            x1 + 1.0f,
+            x1,
             std::max(
                 outer_y,
                 inner_y));
