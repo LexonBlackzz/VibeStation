@@ -3606,29 +3606,38 @@ u32 EeCpu::run_quiet_fast_prefix(
 
     for (; retired < limit; ++retired) {
         if (replay_trace != nullptr) {
-            if (replay_index >= replay_trace->count) break;
-            if (page_generations == nullptr ||
-                page_generations[trace_page] !=
-                    replay_trace->generation) {
+            if (replay_index >= replay_trace->count) {
+                // Trace was only a cached prefix. Keep executing the current
+                // quiet batch normally instead of bouncing back through the
+                // system dispatcher.
+                replay_trace = nullptr;
+            } else if (page_generations == nullptr ||
+                       page_generations[trace_page] !=
+                           replay_trace->generation) {
                 replay_trace->valid = false;
-                break;
+                replay_trace = nullptr;
             }
         }
 
-        const QuietTraceOp* replay_op =
-            replay_trace != nullptr
-                ? &replay_trace->ops[replay_index]
-                : nullptr;
+        const QuietTraceOp* replay_op = nullptr;
+        if (replay_trace != nullptr) {
+            replay_op = &replay_trace->ops[replay_index];
+            if (state_.pc != replay_op->pc) {
+                // Dynamic branch path diverged. Side-exit into the ordinary
+                // fast interpreter in-place; the architectural delay-slot
+                // state has already been maintained instruction-exactly.
+                ++quiet_trace_side_exits_;
+                replay_trace = nullptr;
+                replay_op = nullptr;
+            }
+        }
+
         const u32 expected_pc =
             replay_op != nullptr
                 ? replay_op->pc
                 : (direct_trace
                     ? state_.pc
                     : block_pc + retired * 4u);
-        if (replay_op != nullptr && state_.pc != expected_pc) {
-            ++quiet_trace_side_exits_;
-            break;
-        }
         if (!direct_trace && state_.pc != expected_pc) break;
 
         u32 instruction = 0u;
