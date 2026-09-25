@@ -1492,6 +1492,10 @@ bool App::start_bios_from_ui() {
     }
     emu_runner_.configure_rewind(config_rewind_enabled_,
         config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
+    gameplay_toolbar_visibility_ = 0.0f;
+    gameplay_toolbar_reveal_hold_ = 0.0f;
+    gameplay_toolbar_turbo_active_ = false;
+    gameplay_toolbar_rewind_active_ = false;
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = "Emulation started (BIOS)";
@@ -1534,6 +1538,10 @@ bool App::boot_disc_from_ui() {
     }
     emu_runner_.configure_rewind(config_rewind_enabled_,
         config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
+    gameplay_toolbar_visibility_ = 0.0f;
+    gameplay_toolbar_reveal_hold_ = 0.0f;
+    gameplay_toolbar_turbo_active_ = false;
+    gameplay_toolbar_rewind_active_ = false;
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = config_direct_disc_boot_
