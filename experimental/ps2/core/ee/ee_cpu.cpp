@@ -141,6 +141,9 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
+    hot_sif_getreg_diag_inflight_ = false;
+    hot_sif_getreg_diag_start_ = 0u;
+    hot_sif_getreg_read_offset_ = 0u;
     halt_reason_.clear();
 }
 
@@ -390,6 +393,15 @@ bool EeCpu::execute_special(
         }
         return true;
     case 0x0C: { // SYSCALL
+        if (pc == 0x0024DE74u &&
+            static_cast<u32>(gpr_u64(3)) == 0x7Au &&
+            static_cast<u32>(gpr_u64(4)) == 4u &&
+            hot_sif_getreg_read_offset_ == 0u) {
+            hot_sif_getreg_diag_inflight_ = true;
+            hot_sif_getreg_diag_start_ =
+                state_.instructions_executed;
+        }
+
         auto& record =
             state_.recent_syscalls[state_.recent_syscall_next];
         record.instruction = state_.instructions_executed;
@@ -4797,6 +4809,15 @@ bool EeCpu::step_internal(
         }
         case 0x23u: { // LW
             u32 value = 0;
+            if (hot_sif_getreg_diag_inflight_ &&
+                hot_sif_getreg_read_offset_ == 0u &&
+                address == 0x1000F230u) {
+                hot_sif_getreg_read_offset_ =
+                    static_cast<u32>(
+                        state_.instructions_executed -
+                        hot_sif_getreg_diag_start_);
+                hot_sif_getreg_diag_inflight_ = false;
+            }
             access_ok = bus_.read32(address, value);
             if (access_ok) write_gpr_word(rt, value);
             break;
@@ -5199,6 +5220,15 @@ generic_decode:
     case 0x23: { // LW
         const u32 address = effective_address();
         u32 value = 0;
+        if (hot_sif_getreg_diag_inflight_ &&
+            hot_sif_getreg_read_offset_ == 0u &&
+            address == 0x1000F230u) {
+            hot_sif_getreg_read_offset_ =
+                static_cast<u32>(
+                    state_.instructions_executed -
+                    hot_sif_getreg_diag_start_);
+            hot_sif_getreg_diag_inflight_ = false;
+        }
         if (!read32_mem(address, value)) {
             ok = load_fault("Load word", address);
         } else {

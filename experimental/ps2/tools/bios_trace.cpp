@@ -202,6 +202,11 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
+    std::cout
+        << "EE_HOT_SIF_GETREG_READ_OFFSET="
+        << system.ee().hot_sif_getreg_read_offset()
+        << '\n';
+
     std::cout << "EE_EXCEPTIONS";
     for (ps2::u32 code = 0; code < ee.exception_counts.size(); ++code) {
         if (ee.exception_counts[code] != 0) {

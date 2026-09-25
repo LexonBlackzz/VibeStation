@@ -128,6 +128,9 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
+    [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
+        return hot_sif_getreg_read_offset_;
+    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -183,6 +186,9 @@ private:
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
+    bool hot_sif_getreg_diag_inflight_ = false;
+    u64 hot_sif_getreg_diag_start_ = 0u;
+    u32 hot_sif_getreg_read_offset_ = 0u;
     std::string halt_reason_;
     EeJit jit_{};
     bool jit_enabled_ = false;
