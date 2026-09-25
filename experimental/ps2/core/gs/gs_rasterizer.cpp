@@ -222,8 +222,23 @@ s32 stq_to_fixed(float coordinate, float q, u32 size) {
     const long double fixed =
         (static_cast<long double>(coordinate) / static_cast<long double>(q)) *
         static_cast<long double>(size) * 16.0L;
-    const long double lo = static_cast<long double>(std::numeric_limits<s32>::min());
-    const long double hi = static_cast<long double>(std::numeric_limits<s32>::max());
+    const long double lo =
+        static_cast<long double>(std::numeric_limits<s32>::min());
+    const long double hi =
+        static_cast<long double>(std::numeric_limits<s32>::max());
+    return static_cast<s32>(std::clamp(fixed, lo, hi));
+}
+
+s32 st_to_fixed_scaled(
+    float coordinate,
+    long double scale) {
+    if (!std::isfinite(coordinate)) return 0;
+    const long double fixed =
+        static_cast<long double>(coordinate) * scale;
+    const long double lo =
+        static_cast<long double>(std::numeric_limits<s32>::min());
+    const long double hi =
+        static_cast<long double>(std::numeric_limits<s32>::max());
     return static_cast<s32>(std::clamp(fixed, lo, hi));
 }
 
@@ -548,13 +563,27 @@ bool GsRasterizer::draw_pixel(
     u32 depth_address = 0;
     u32 source_z = 0;
     if (ctx.zte) {
+        const u32 ztst = ctx.ztst & 3u;
+        if (ztst == 0u) {
+            return false; // NEVER
+        }
+
         source_z = depth_value_for_psm(ctx.zpsm, z);
-        depth_address = GsVram::depth_address_bytes(
-            ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
-        const u32 destination_z = vram.read_depth_at_address(
-            ctx.zpsm, depth_address);
-        if (!depth_test_pass(ctx.ztst, source_z, destination_z)) {
-            return false;
+        if (write_depth || ztst >= 2u) {
+            depth_address = GsVram::depth_address_bytes(
+                ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
+        }
+
+        // ZTST=ALWAYS does not depend on destination Z. Avoid the VRAM read
+        // entirely; keep the address only when a depth write is required.
+        if (ztst >= 2u) {
+            const u32 destination_z =
+                vram.read_depth_at_address(
+                    ctx.zpsm, depth_address);
+            if (!depth_test_pass(
+                    ztst, source_z, destination_z)) {
+                return false;
+            }
         }
     }
 
@@ -979,6 +1008,22 @@ u64 GsRasterizer::draw_triangle(
     const bool positive_area = area > 0;
     const long double inv_area =
         1.0L / static_cast<long double>(area);
+    const bool scaled_constant_q =
+        ctx.texture.enabled &&
+        !ctx.texture.fst &&
+        constant_q &&
+        std::isfinite(a.q) &&
+        std::fabs(a.q) >= 1.0e-20f;
+    const long double constant_u_scale =
+        scaled_constant_q
+            ? (static_cast<long double>(ctx.texture.width) *
+               16.0L / static_cast<long double>(a.q))
+            : 0.0L;
+    const long double constant_v_scale =
+        scaled_constant_q
+            ? (static_cast<long double>(ctx.texture.height) *
+               16.0L / static_cast<long double>(a.q))
+            : 0.0L;
 
     // Edge functions are affine in screen space.  Evaluate them once at the
     // top-left pixel centre, then advance by their exact 16.4 fixed-point
@@ -1023,12 +1068,25 @@ u64 GsRasterizer::draw_triangle(
                             (static_cast<long double>(w0) * a.t +
                              static_cast<long double>(w1) * b.t +
                              static_cast<long double>(w2) * c.t) * inv_area);
-                        const float q = constant_q ? a.q : static_cast<float>(
-                            (static_cast<long double>(w0) * a.q +
-                             static_cast<long double>(w1) * b.q +
-                             static_cast<long double>(w2) * c.q) * inv_area);
-                        u = stq_to_fixed(s, q, ctx.texture.width);
-                        v = stq_to_fixed(t, q, ctx.texture.height);
+                        if (scaled_constant_q) {
+                            u = st_to_fixed_scaled(
+                                s, constant_u_scale);
+                            v = st_to_fixed_scaled(
+                                t, constant_v_scale);
+                        } else {
+                            const float q =
+                                constant_q
+                                    ? a.q
+                                    : static_cast<float>(
+                                        (static_cast<long double>(w0) * a.q +
+                                         static_cast<long double>(w1) * b.q +
+                                         static_cast<long double>(w2) * c.q) *
+                                        inv_area);
+                            u = stq_to_fixed(
+                                s, q, ctx.texture.width);
+                            v = stq_to_fixed(
+                                t, q, ctx.texture.height);
+                        }
                     }
                 }
                 const u32 vertex_rgba = ctx.gouraud && !constant_rgba
