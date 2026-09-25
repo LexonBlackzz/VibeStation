@@ -42,6 +42,9 @@ public:
     // occur during the interval. Returns false without changing state.
     bool tick_event_free(u64 cycles);
     [[nodiscard]] bool can_tick_event_free(u64 cycles) const;
+    // Number of IOP cycles until the next root-counter or DMA/SPU IRQ edge.
+    // Returns ~u64{0} when no modeled edge is reachable.
+    [[nodiscard]] u64 cycles_to_event() const;
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;

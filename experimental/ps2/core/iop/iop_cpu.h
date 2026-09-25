@@ -67,8 +67,10 @@ private:
     bool step_internal(
         std::string& error,
         bool clear_error,
-        bool tick_bus = true);
-    [[nodiscard]] bool current_instruction_event_free() const;
+        bool tick_bus = true,
+        const u32* prefetched_instruction = nullptr);
+    [[nodiscard]] bool current_instruction_event_free(
+        u32& instruction) const;
 
     struct PendingLoad {
         bool valid = false;

@@ -764,21 +764,51 @@ u16 IopBus::sif_dma_ready_mask() const {
     return hw_.sif_dma_ready_mask();
 }
 
-bool IopBus::can_tick_event_free(u64 cycles) const {
-    if (spu2_dma4_irq_cycles_ != 0u &&
-        spu2_dma4_irq_cycles_ <= cycles) return false;
+u64 IopBus::cycles_to_event() const {
+    u64 best = ~u64{0};
+
+    if (spu2_dma4_irq_cycles_ != 0u) {
+        best = std::min(best, spu2_dma4_irq_cycles_);
+    }
+
     for (u32 i = 0; i < root_counters_.size(); ++i) {
         const RootCounter& counter = root_counters_[i];
         const u64 rate = root_counter_rate_cache_[i];
-        const u64 increments = (counter.phase + cycles) / rate;
-        if (increments == 0u) continue;
-        const u64 maximum = i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
-        if ((!counter.target_deferred &&
-             counter.target <= maximum &&
-             counter.count + increments >= counter.target) ||
-            counter.count + increments > maximum) return false;
+        if (rate == 0u) continue;
+
+        const u64 maximum =
+            i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+        u64 increments_to_event =
+            maximum - counter.count + 1u;
+
+        if (!counter.target_deferred &&
+            counter.target <= maximum) {
+            const u64 to_target =
+                counter.target > counter.count
+                    ? counter.target - counter.count
+                    : 1u;
+            increments_to_event =
+                std::min(increments_to_event, to_target);
+        }
+
+        if (increments_to_event == 0u) continue;
+        const u64 first_increment =
+            counter.phase == 0u
+                ? rate
+                : rate - counter.phase;
+        const u64 cycles =
+            first_increment +
+            (increments_to_event - 1u) * rate;
+        best = std::min(best, cycles);
     }
-    return true;
+
+    return best;
+}
+
+bool IopBus::can_tick_event_free(u64 cycles) const {
+    if (cycles == 0u) return true;
+    const u64 edge = cycles_to_event();
+    return edge == ~u64{0} || cycles < edge;
 }
 
 bool IopBus::tick_event_free(u64 cycles) {

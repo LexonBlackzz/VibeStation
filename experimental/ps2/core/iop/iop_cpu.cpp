@@ -519,8 +519,22 @@ bool IopCpu::step_hot(std::string& error) {
     return step_internal(error, false, true);
 }
 
-bool IopCpu::current_instruction_event_free() const {
+bool IopCpu::current_instruction_event_free(
+    u32& instruction) const {
     if (halted_ || bus_.interrupt_pending()) return false;
+
+    // A pending CPU-local software interrupt would redirect before the
+    // prefetched instruction. Leave that case to the normal path.
+    const u32 cause_without_external =
+        state_.cop0[13] & ~0x00000400u;
+    const bool cop0_interrupt_enabled =
+        (state_.cop0[12] & 0x00000001u) != 0u &&
+        (state_.cop0[12] &
+         cause_without_external &
+         0x0000FF00u) != 0u;
+    if (!next_is_delay_slot_ && cop0_interrupt_enabled) {
+        return false;
+    }
 
     const u32 pc = state_.pc;
     const u32 physical_pc = IopBus::to_physical(pc);
@@ -528,10 +542,9 @@ bool IopCpu::current_instruction_event_free() const {
         IopBus::is_ram_address(pc) ||
         (physical_pc >= 0x1FC00000u &&
          physical_pc < 0x20000000u);
-    if (!safe_fetch) return false;
-
-    u32 instruction = 0u;
-    if (!bus_.read32(pc, instruction)) return false;
+    if (!safe_fetch || !bus_.read32(pc, instruction)) {
+        return false;
+    }
 
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;
@@ -542,27 +555,16 @@ bool IopCpu::current_instruction_event_free() const {
     };
 
     switch (opcode) {
-    case 0x20u: // LB
-    case 0x21u: // LH
-    case 0x23u: // LW
-    case 0x24u: // LBU
-    case 0x25u: // LHU
-    case 0x28u: // SB
-    case 0x29u: // SH
-    case 0x2Bu: // SW
-    case 0x32u: // LWC2
-    case 0x3Au: // SWC2
+    case 0x20u: case 0x21u: case 0x23u:
+    case 0x24u: case 0x25u:
+    case 0x28u: case 0x29u: case 0x2Bu:
+    case 0x32u: case 0x3Au:
         return IopBus::is_ram_address(effective_address());
-    case 0x22u: // LWL
-    case 0x26u: // LWR
-    case 0x2Au: // SWL
-    case 0x2Eu: // SWR
+    case 0x22u: case 0x26u:
+    case 0x2Au: case 0x2Eu:
         return IopBus::is_ram_address(
             effective_address() & ~3u);
     default:
-        // Register ALU, branches, COP0/GTE, exceptions and unsupported
-        // opcodes cannot touch shared device state before the ordinary
-        // decoder decides their architectural result.
         return true;
     }
 }
@@ -571,8 +573,12 @@ bool IopCpu::try_step_hot_event_free(
     std::string& error,
     bool& executed) {
     executed = false;
-    if (!current_instruction_event_free()) return true;
-    if (!step_internal(error, false, false)) return false;
+    u32 instruction = 0u;
+    if (!current_instruction_event_free(instruction)) return true;
+    if (!step_internal(
+            error, false, false, &instruction)) {
+        return false;
+    }
     executed = true;
     return true;
 }
@@ -580,7 +586,8 @@ bool IopCpu::try_step_hot_event_free(
 bool IopCpu::step_internal(
     std::string& error,
     bool clear_error,
-    bool tick_bus) {
+    bool tick_bus,
+    const u32* prefetched_instruction) {
     if (clear_error) error.clear();
 
     if (halted_) {
@@ -617,7 +624,9 @@ bool IopCpu::step_internal(
     next_is_delay_slot_ = false;
 
     u32 instruction = 0;
-    if (!bus_.read32(pc, instruction)) {
+    if (prefetched_instruction != nullptr) {
+        instruction = *prefetched_instruction;
+    } else if (!bus_.read32(pc, instruction)) {
         return fail(
             pc,
             0,

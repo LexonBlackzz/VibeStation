@@ -542,6 +542,18 @@ void Ps2System::advance_iop_for_ee_cycles(
     }
 
     u64 deferred_device_ticks = 0u;
+    u64 event_free_remaining = 0u;
+    bool event_horizon_valid = false;
+
+    auto refresh_event_horizon = [&]() {
+        const u64 edge = iop_bus_.cycles_to_event();
+        event_free_remaining =
+            edge == ~u64{0}
+                ? ~u64{0}
+                : (edge > 0u ? edge - 1u : 0u);
+        event_horizon_valid = true;
+    };
+
     auto flush_deferred_device_ticks = [&]() -> bool {
         if (deferred_device_ticks == 0u) return true;
         if (!iop_bus_.tick_event_free(deferred_device_ticks)) {
@@ -554,6 +566,7 @@ void Ps2System::advance_iop_for_ee_cycles(
         iop_event_batch_max_ =
             std::max(iop_event_batch_max_, deferred_device_ticks);
         deferred_device_ticks = 0u;
+        event_horizon_valid = false;
         return true;
     };
 
@@ -591,10 +604,15 @@ void Ps2System::advance_iop_for_ee_cycles(
 
         // A SIF completion countdown is an externally observable IOP event
         // source outside IopBus, so never defer device time across it.
-        const bool can_defer_device_tick =
-            !sif_dma_.iop_completion_pending() &&
-            iop_bus_.can_tick_event_free(
-                deferred_device_ticks + 1u);
+        bool can_defer_device_tick =
+            !sif_dma_.iop_completion_pending();
+        if (can_defer_device_tick) {
+            if (!event_horizon_valid) {
+                refresh_event_horizon();
+            }
+            can_defer_device_tick =
+                event_free_remaining != 0u;
+        }
 
         if (can_defer_device_tick) {
             bool executed = false;
@@ -610,6 +628,9 @@ void Ps2System::advance_iop_for_ee_cycles(
             }
             if (executed) {
                 ++deferred_device_ticks;
+                if (event_free_remaining != ~u64{0}) {
+                    --event_free_remaining;
+                }
                 ++i;
                 continue;
             }
@@ -630,6 +651,7 @@ void Ps2System::advance_iop_for_ee_cycles(
             break;
         }
         sif_dma_.tick_iop(iop_bus_);
+        event_horizon_valid = false;
         ++i;
     }
 
