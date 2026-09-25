@@ -858,37 +858,53 @@ void App::panel_definitive_grim_reaper() {
                 reap_and_reboot_bios_batch();
         }
         else {
-            if (!has_started_emulation_) {
-                success =
-                    start_bios_from_ui();
-            }
-            else {
-                success = true;
-            }
+            // Runtime Reapers are applied around a real emulator restart.
+            // Preserve the user's continuous-mode choices exactly: the restart
+            // helpers intentionally disable all Reapers while resetting the
+            // machine, but Apply & Run must not silently turn them back on.
+            const bool restore_ram_reaper =
+                ram_reaper_enabled_;
+            const bool restore_gpu_reaper =
+                gpu_reaper_enabled_;
+            const bool restore_sound_reaper =
+                sound_reaper_enabled_;
+
+            const bool has_disc =
+                system_->disc_loaded() ||
+                !game_bin_path_.empty() ||
+                !game_cue_path_.empty();
+
+            success =
+                has_disc
+                    ? boot_disc_from_ui()
+                    : start_bios_from_ui();
 
             if (success) {
-                if (style == 2) {
-                    ram_reaper_enabled_ = true;
-                    sync_ram_reaper_config();
-                    status_message_ =
-                        "RAM Reaper enabled";
-                }
-                else if (style == 3) {
-                    gpu_reaper_enabled_ = true;
-                    sync_gpu_reaper_config();
-                    status_message_ =
-                        "GPU Reaper enabled";
-                }
-                else {
-                    sound_reaper_enabled_ = true;
-                    sync_sound_reaper_config();
-                    status_message_ =
-                        "Sound Reaper enabled";
-                }
+                ram_reaper_enabled_ =
+                    restore_ram_reaper;
+                gpu_reaper_enabled_ =
+                    restore_gpu_reaper;
+                sound_reaper_enabled_ =
+                    restore_sound_reaper;
 
-                if (!emu_runner_.is_running()) {
-                    emu_runner_.set_running(true);
-                }
+                sync_ram_reaper_config();
+                sync_gpu_reaper_config();
+                sync_sound_reaper_config();
+
+                const bool selected_continuous =
+                    style == 2
+                        ? ram_reaper_enabled_
+                        : style == 3
+                            ? gpu_reaper_enabled_
+                            : sound_reaper_enabled_;
+
+                status_message_ =
+                    std::string("Emulation restarted; ") +
+                    kReaperStyleNames[
+                        static_cast<size_t>(style)] +
+                    (selected_continuous
+                        ? " continuous mode enabled"
+                        : " continuous mode disabled");
             }
         }
 
