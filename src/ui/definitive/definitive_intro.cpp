@@ -188,7 +188,7 @@ void draw_radial_glow(
             (1.0f - 0.58f * t);
         const float alpha =
             strength *
-            (0.010f + 0.016f * t);
+            (0.008f + 0.012f * t);
 
         draw->AddCircleFilled(
             center,
@@ -796,9 +796,9 @@ void draw_intro_presentation(
         draw_radial_glow(
             overlay,
             glow_center,
-            unit * 0.235f,
+            unit * 0.215f,
             g_intro_ambient_colors[i],
-            0.11f * atmosphere);
+            0.07f * atmosphere);
     }
 
     const float icon_alpha =
@@ -1089,7 +1089,7 @@ void draw_intro_presentation(
                 0.72f,
                 0.86f,
                 1.0f),
-            0.14f *
+            0.10f *
                 (1.0f - handoff));
     }
 
