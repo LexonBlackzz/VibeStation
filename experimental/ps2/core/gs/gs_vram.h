@@ -23,6 +23,9 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
     [[nodiscard]] static u32 depth_address_bytes(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
+    static void color_depth32_addresses(
+        u32 x, u32 y, u32 fbp, u32 zbp, u32 bw,
+        u32& frame_address, u32& depth_address);
 
     bool write_pixel(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     bool write_pixel_untracked(

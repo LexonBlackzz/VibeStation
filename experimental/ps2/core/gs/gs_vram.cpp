@@ -309,6 +309,25 @@ u32 GsVram::depth_address_bytes(
     }
 }
 
+void GsVram::color_depth32_addresses(
+    u32 x, u32 y, u32 fbp, u32 zbp, u32 bw,
+    u32& frame_address, u32& depth_address) {
+    const u32 page_x = x >> 6;
+    const u32 page_y = y >> 5;
+    const u32 page_offset =
+        kPage32Words[(y & 31u) * 64u + (x & 63u)];
+    const u32 page_word =
+        ((page_y * bw + page_x) << 11) + page_offset;
+    constexpr u32 kWordMask =
+        (kSize / 4u) - 1u;
+    const u32 frame_word =
+        ((fbp << 6) + page_word) & kWordMask;
+    const u32 depth_word =
+        (((zbp << 6) + page_word) ^ 0x600u) & kWordMask;
+    frame_address = frame_word * 4u;
+    depth_address = depth_word * 4u;
+}
+
 bool GsVram::write_pixel(
     u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value) {
     if (!supported_color_psm(psm)) return false;

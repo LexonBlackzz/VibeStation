@@ -532,14 +532,15 @@ bool draw_hot_osdsys_psm16_pixel(
     const u32 ux = static_cast<u32>(x);
     const u32 uy = static_cast<u32>(y);
 
-    const u32 depth_address = GsVram::depth_address_bytes(
-        48u, ux, uy, ctx.zbp, ctx.fbw);
+    u32 frame_address = 0u;
+    u32 depth_address = 0u;
+    GsVram::color_depth32_addresses(
+        ux, uy, ctx.fbp, ctx.zbp, ctx.fbw,
+        frame_address, depth_address);
     const u32 destination_z =
         vram.read_depth_at_address(48u, depth_address);
     if (z < destination_z) return false; // GEQUAL
 
-    const u32 frame_address = GsVram::pixel_address_bytes(
-        0u, ux, uy, ctx.fbp, ctx.fbw);
     const u32 destination =
         vram.read_pixel_at_address(0u, frame_address);
 
