@@ -4736,6 +4736,61 @@ u32 EeCpu::run_quiet_fast_prefix(
                     }
                 }
             }
+        } else if (opcode == 0x10u) { // COP0 local-register fast subset
+            const u32 cop_rs = rs;
+            const u32 cop_rd = rd;
+            const u32 cop_sel = instruction & 7u;
+            const u32 cop_funct = funct;
+
+            if (cop_rs == 0x00u && cop_sel == 0u) { // MFC0
+                write_gpr_word(rt, state_.cop0[cop_rd]);
+            } else if (cop_rs == 0x04u && cop_sel == 0u) { // MTC0
+                if (cop_rd != 15u) {
+                    state_.cop0[cop_rd] =
+                        static_cast<u32>(gpr_u64(rt));
+                    if (cop_rd == 11u) {
+                        // Compare write acknowledges timer IP7.
+                        state_.cop0[13] &= ~0x00008000u;
+                    }
+                }
+                // Status/Cause/Compare/TLB register writes can change what
+                // is observable on the very next instruction. Retire this
+                // instruction fast, then return to the system boundary.
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x18u) { // ERET
+                if ((state_.cop0[12] & 0x4u) != 0u) {
+                    state_.pc = state_.cop0[30];
+                    state_.cop0[12] &= ~0x4u;
+                } else {
+                    state_.pc = state_.cop0[14];
+                    state_.cop0[12] &= ~0x2u;
+                }
+                state_.next_pc = state_.pc + 4u;
+                next_is_delay_slot_ = false;
+                current_is_delay_slot_ = false;
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x38u) { // EI
+                const u32 status = state_.cop0[12];
+                if ((status & 0x00020000u) != 0u ||
+                    (status & 0x6u) != 0u ||
+                    (status & 0x18u) == 0u) {
+                    state_.cop0[12] |= 0x00010000u;
+                }
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x39u) { // DI
+                const u32 status = state_.cop0[12];
+                if ((status & 0x00020000u) != 0u ||
+                    (status & 0x6u) != 0u ||
+                    (status & 0x18u) == 0u) {
+                    state_.cop0[12] &= ~0x00010000u;
+                }
+                stop_after_instruction = true;
+            } else {
+                handled = false;
+            }
         } else if (opcode == 0x11u) { // COP1
             const u32 cop_rs = rs;
             const u32 fs = (instruction >> 11) & 31u;
