@@ -151,6 +151,9 @@ void EeCpu::reset(u32 entry_point) {
     fast_prefix_control_fallback_keys_->fill(0u);
     fast_prefix_control_fallback_counts_->fill(0u);
     fast_prefix_control_fallback_count_ = 0u;
+    fast_prefix_memory_fallback_keys_->fill(0u);
+    fast_prefix_memory_fallback_counts_->fill(0u);
+    fast_prefix_memory_fallback_count_ = 0u;
     halt_reason_.clear();
 }
 
@@ -3615,6 +3618,30 @@ u32 EeCpu::run_quiet_fast_prefix(
         return false;
     };
 
+    auto record_memory_fallback =
+        [&](u32 opcode_value, u32 virtual_address) {
+            // Aggregate at 4 KiB page granularity. Preserve the opcode in the
+            // upper half so load/store classes remain distinguishable.
+            const u64 key =
+                (static_cast<u64>(opcode_value & 63u) << 32u) |
+                static_cast<u64>(virtual_address & 0xFFFFF000u);
+            for (u32 i = 0u;
+                 i < fast_prefix_memory_fallback_count_;
+                 ++i) {
+                if ((*fast_prefix_memory_fallback_keys_)[i] == key) {
+                    ++(*fast_prefix_memory_fallback_counts_)[i];
+                    return;
+                }
+            }
+            if (fast_prefix_memory_fallback_count_ <
+                fast_prefix_memory_fallback_keys_->size()) {
+                const u32 index =
+                    fast_prefix_memory_fallback_count_++;
+                (*fast_prefix_memory_fallback_keys_)[index] = key;
+                (*fast_prefix_memory_fallback_counts_)[index] = 1u;
+            }
+        };
+
     for (; retired < limit; ++retired) {
         const u32 expected_pc = direct_trace
             ? state_.pc
@@ -4536,6 +4563,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                     address,
                     width,
                     (opcode == 0x1Eu || opcode == 0x36u) ? 15u : 0u)) {
+                record_memory_fallback(opcode, aligned);
                 handled = false;
             } else {
                 bool access_ok = true;
@@ -4657,6 +4685,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                     address,
                     width,
                     (opcode == 0x1Fu || opcode == 0x3Eu) ? 15u : 0u)) {
+                record_memory_fallback(opcode, aligned);
                 handled = false;
             } else {
                 bool access_ok = true;

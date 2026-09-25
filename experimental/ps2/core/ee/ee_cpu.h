@@ -156,6 +156,17 @@ public:
     [[nodiscard]] u32 fast_prefix_control_fallback_count() const {
         return fast_prefix_control_fallback_count_;
     }
+    [[nodiscard]] const std::array<u64, 128>&
+    fast_prefix_memory_fallback_keys() const {
+        return *fast_prefix_memory_fallback_keys_;
+    }
+    [[nodiscard]] const std::array<u64, 128>&
+    fast_prefix_memory_fallback_counts() const {
+        return *fast_prefix_memory_fallback_counts_;
+    }
+    [[nodiscard]] u32 fast_prefix_memory_fallback_count() const {
+        return fast_prefix_memory_fallback_count_;
+    }
     [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
         return hot_sif_getreg_read_offset_;
     }
@@ -227,6 +238,13 @@ private:
         fast_prefix_control_fallback_counts_ =
             std::make_unique<std::array<u64, 64>>();
     u32 fast_prefix_control_fallback_count_ = 0u;
+    std::unique_ptr<std::array<u64, 128>>
+        fast_prefix_memory_fallback_keys_ =
+            std::make_unique<std::array<u64, 128>>();
+    std::unique_ptr<std::array<u64, 128>>
+        fast_prefix_memory_fallback_counts_ =
+            std::make_unique<std::array<u64, 128>>();
+    u32 fast_prefix_memory_fallback_count_ = 0u;
 
     bool halted_ = false;
     bool next_is_delay_slot_ = false;

@@ -1801,6 +1801,26 @@ int main(int argc, char** argv) {
     }
     std::cout << '\n';
 
+    std::cout << "EE_FAST_PREFIX_MEMORY_FALLBACK_PAGES";
+    const auto& memory_keys =
+        system.ee().fast_prefix_memory_fallback_keys();
+    const auto& memory_counts =
+        system.ee().fast_prefix_memory_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_memory_fallback_count();
+         ++i) {
+        const ps2::u32 opcode =
+            static_cast<ps2::u32>(memory_keys[i] >> 32u);
+        const ps2::u32 page =
+            static_cast<ps2::u32>(memory_keys[i]);
+        std::cout
+            << " OP0x" << std::hex << std::uppercase << opcode
+            << "_P0x" << page
+            << std::dec
+            << '=' << memory_counts[i];
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
