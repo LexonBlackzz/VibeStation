@@ -8,11 +8,10 @@ void App::draw_system_panel() {
                 ImGui::Text("CPU Clock: 33.8688 MHz");
                 const char* cpu_backend_labels[] = {
                     "Interpreter",
-                    "Decoded Block",
-                    "x64 JIT"
+                    "Recompiler (Experimental)"
                 };
                 int cpu_backend_index =
-                    cpu_execution_mode_to_config_value(g_cpu_execution_mode);
+                    g_cpu_execution_mode == CpuExecutionMode::Interpreter ? 0 : 1;
                 if (ImGui::Combo("CPU Backend", &cpu_backend_index,
                     cpu_backend_labels, IM_ARRAYSIZE(cpu_backend_labels))) {
                     const bool was_running = emu_runner_.is_running();
@@ -20,7 +19,8 @@ void App::draw_system_panel() {
                         emu_runner_.pause_and_wait_idle();
                     }
                     g_cpu_execution_mode =
-                        cpu_execution_mode_from_config_value(cpu_backend_index);
+                        cpu_backend_index == 0 ? CpuExecutionMode::Interpreter
+                                               : CpuExecutionMode::Recompiler;
                     if (system_) {
                         system_->cpu().flush_cpu_backend();
                     }
@@ -36,11 +36,6 @@ void App::draw_system_panel() {
                 const CpuBackendStats backend_stats =
                     system_ ? system_->cpu().cpu_backend_stats()
                             : runtime_snapshot_.cpu_backend_stats;
-                if (g_cpu_execution_mode == CpuExecutionMode::X64Jit &&
-                    backend_stats.native_blocks == 0) {
-                    ImGui::TextDisabled(
-                        "x64 JIT currently native-compiles hot ALU/immediate blocks; other blocks use decoded fallback.");
-                }
                 ImGui::Separator();
                 ImGui::Text("Performance");
                 ImGui::Text("Emulation pacing: fixed 60 Hz");

@@ -22,6 +22,13 @@ void App::panel_debug_cpu() {
             static_cast<unsigned long long>(backend_stats.decoded_instructions),
             static_cast<unsigned long long>(backend_stats.native_instructions),
             static_cast<unsigned long long>(backend_stats.fallback_instructions));
+        ImGui::Text("JIT V2 split: inline %llu  helper-backed %llu  helper entries %llu",
+            static_cast<unsigned long long>(
+                backend_stats.jit_v2_inline_instructions),
+            static_cast<unsigned long long>(
+                backend_stats.jit_v2_helper_instructions),
+            static_cast<unsigned long long>(
+                backend_stats.jit_v2_helper_entries));
         if (backend_stats.forced_interpreter_instructions != 0 ||
             backend_stats.forced_interpreter_last_reason !=
                 CpuForcedInterpreterReason::None) {

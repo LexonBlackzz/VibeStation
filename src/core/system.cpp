@@ -345,6 +345,17 @@ void System::sync_spu_to_cpu() {
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
+u32 System::jit_read16_hot_mmio(u32 phys) {
+    phys = psx::mask_address(phys);
+    if (phys >= 0x1F801070u && phys < 0x1F801078u) {
+        return static_cast<u16>(irq_.read(phys - 0x1F801070u));
+    }
+    if (phys >= 0x1F801100u && phys < 0x1F801130u) {
+        return static_cast<u16>(timers_.read(phys - 0x1F801100u));
+    }
+    return 0x10000u;
+}
+
 void System::sync_sio_to_cpu() {
     const u64 target_cycle = cpu_.cycle_count();
     if (target_cycle <= sio_synced_cpu_cycle_) {
@@ -402,8 +413,6 @@ void System::init_hardware() {
     cpu_.init(this);
 
     hw_init_ = true;
-    printf("[System] Hardware initialized\n");
-    fflush(stdout);
 }
 
 bool System::load_bios(const std::string& path) {

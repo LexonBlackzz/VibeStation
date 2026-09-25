@@ -419,7 +419,7 @@ void Spu::reset_audio_output(const char *reason) {
   soft_correction_callback_counter_ = 0;
   audio_ring_buffer_.clear();
   audio_queue_reset_count_.fetch_add(1, std::memory_order_relaxed);
-  if (reason != nullptr) {
+  if (reason != nullptr && !g_cpu_backend_compare_test_active) {
     LOG_INFO("SPU: Audio queue reset (%s)", reason);
   }
 }
