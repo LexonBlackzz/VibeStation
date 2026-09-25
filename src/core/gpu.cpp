@@ -761,6 +761,8 @@ u16* Gpu::vram_mut_data() {
 
 void Gpu::reset() {
     vram_.fill(0);
+    hardware_gpu_vram_newer_ = false;
+    hardware_cpu_vram_dirty_ = true;
     if (gp0_buffer_.capacity() < 12) {
         gp0_buffer_.reserve(12);
     }
@@ -811,6 +813,7 @@ void Gpu::reset() {
 // ── GP0 (Rendering Commands) ──────────────────────────────────────
 
 void Gpu::corrupt_vram_word(u32 index, u16 value) {
+    prepare_software_vram_write();
     const size_t safe_index = static_cast<size_t>(index) % vram_.size();
     vram_[safe_index] = value;
 }
@@ -1431,6 +1434,7 @@ void Gpu::debug_note_polygon(u8 opcode, const Vertex* vertices, int vertex_count
 }
 
 void Gpu::gp0_fill_rect() {
+    prepare_software_vram_write();
     Color c(gp0_buffer_[0]);
     u16 x = gp0_buffer_[1] & 0x3F0; // Rounded down to 16-pixel boundary
     u16 y = (gp0_buffer_[1] >> 16) & 0x1FF;
@@ -1952,6 +1956,7 @@ void Gpu::gp0_irq_request() {
 
 void Gpu::gp0_image_load() {
     // CPU → VRAM transfer
+    prepare_software_vram_write();
     vram_tx_x_ = gp0_buffer_[1] & 0x3FF;
     vram_tx_y_ = (gp0_buffer_[1] >> 16) & 0x1FF;
     vram_tx_w_ = gp0_buffer_[2] & 0x3FF;
@@ -1976,6 +1981,7 @@ void Gpu::gp0_image_load() {
 
 void Gpu::gp0_image_store() {
     // VRAM → CPU transfer
+    ensure_cpu_vram_current();
     vram_tx_x_ = gp0_buffer_[1] & 0x3FF;
     vram_tx_y_ = (gp0_buffer_[1] >> 16) & 0x1FF;
     vram_tx_w_ = gp0_buffer_[2] & 0x3FF;
@@ -1993,6 +1999,7 @@ void Gpu::gp0_image_store() {
 
 void Gpu::gp0_vram_copy() {
     // GP0(80h): VRAM->VRAM block copy
+    prepare_software_vram_write();
     u16 src_x = gp0_buffer_[1] & 0x3FF;
     u16 src_y = (gp0_buffer_[1] >> 16) & 0x1FF;
     u16 dst_x = gp0_buffer_[2] & 0x3FF;
@@ -2229,6 +2236,7 @@ u32 Gpu::gp1_info_value(u32 index) const {
 
 u32 Gpu::read_data() {
     if (gp0_mode_ == Gp0Mode::VramRead && vram_tx_pos_ < vram_tx_total_) {
+        ensure_cpu_vram_current();
         u16 p0 = 0, p1 = 0;
         u16 x = static_cast<u16>((vram_tx_x_ + (vram_tx_pos_ % vram_tx_w_)) &
             (psx::VRAM_WIDTH - 1));
@@ -2347,6 +2355,9 @@ bool Gpu::dma_request() const {
 
 DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
     bool include_stats) const {
+    // Presentation still consumes the canonical CPU VRAM mirror. One download
+    // at VBlank replaces thousands of per-primitive CPU raster writes.
+    ensure_cpu_vram_current();
     DisplaySampleInfo info{};
     info.display_enabled = display_.display_enabled;
     info.is_24bit = display_.is_24bit;
