@@ -334,6 +334,45 @@ float smoothstep01(float value) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+constexpr float kDefinitiveSettingsOpenDuration = 0.34f;
+constexpr float kDefinitiveSettingsCloseDuration = 0.26f;
+
+void animate_draw_vertices(
+    ImDrawList* draw,
+    int vertex_start,
+    const ImVec2& center,
+    float scale,
+    float alpha,
+    float y_offset) {
+    if (draw == nullptr || vertex_start < 0 ||
+        vertex_start >= draw->VtxBuffer.Size) {
+        return;
+    }
+
+    const float clamped_alpha = std::clamp(alpha, 0.0f, 1.0f);
+    for (int i = vertex_start; i < draw->VtxBuffer.Size; ++i) {
+        ImDrawVert& vertex = draw->VtxBuffer[i];
+        vertex.pos.x =
+            center.x + (vertex.pos.x - center.x) * scale;
+        vertex.pos.y =
+            center.y + (vertex.pos.y - center.y) * scale + y_offset;
+
+        const ImU32 old_alpha =
+            (vertex.col >> IM_COL32_A_SHIFT) & 0xFFu;
+        const ImU32 new_alpha = static_cast<ImU32>(
+            std::clamp(
+                static_cast<int>(
+                    std::round(
+                        static_cast<float>(old_alpha) *
+                        clamped_alpha)),
+                0, 255));
+
+        vertex.col =
+            (vertex.col & ~(0xFFu << IM_COL32_A_SHIFT)) |
+            (new_alpha << IM_COL32_A_SHIFT);
+    }
+}
+
 float timeline_progress(float time, float start, float end) {
     if (end <= start) {
         return time >= end ? 1.0f : 0.0f;
@@ -2158,6 +2197,25 @@ void App::play_ui_close_sound() {
     play_menu_sound(UiMenuSound::Close);
 }
 
+void App::open_definitive_settings() {
+    show_settings_ = true;
+    definitive_settings_transition_ =
+        DefinitiveSettingsTransition::Opening;
+    definitive_settings_transition_elapsed_ = 0.0f;
+}
+
+void App::close_definitive_settings() {
+    if (!show_settings_ ||
+        definitive_settings_transition_ ==
+            DefinitiveSettingsTransition::Closing) {
+        return;
+    }
+
+    definitive_settings_transition_ =
+        DefinitiveSettingsTransition::Closing;
+    definitive_settings_transition_elapsed_ = 0.0f;
+}
+
 void App::initialize_definitive_ui_fonts() {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
@@ -2246,10 +2304,67 @@ void App::release_definitive_ui_assets() {
     g_launcher_ui_intro_complete = false;
     g_launcher_background_fade_elapsed = 0.0f;
     g_launcher_background_fade_complete = false;
+    definitive_settings_transition_ =
+        DefinitiveSettingsTransition::Closed;
+    definitive_settings_transition_elapsed_ = 0.0f;
     g_menu_highlight_mix.fill(0.0f);
 }
 
 void App::panel_definitive_settings() {
+    if (definitive_settings_transition_ ==
+        DefinitiveSettingsTransition::Closed) {
+        definitive_settings_transition_ =
+            DefinitiveSettingsTransition::Opening;
+        definitive_settings_transition_elapsed_ = 0.0f;
+    }
+
+    const float dt =
+        std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+
+    if (definitive_settings_transition_ ==
+        DefinitiveSettingsTransition::Opening) {
+        definitive_settings_transition_elapsed_ += dt;
+        if (definitive_settings_transition_elapsed_ >=
+            kDefinitiveSettingsOpenDuration) {
+            definitive_settings_transition_elapsed_ =
+                kDefinitiveSettingsOpenDuration;
+            definitive_settings_transition_ =
+                DefinitiveSettingsTransition::Open;
+        }
+    }
+    else if (definitive_settings_transition_ ==
+        DefinitiveSettingsTransition::Closing) {
+        definitive_settings_transition_elapsed_ += dt;
+        if (definitive_settings_transition_elapsed_ >=
+            kDefinitiveSettingsCloseDuration) {
+            definitive_settings_transition_ =
+                DefinitiveSettingsTransition::Closed;
+            definitive_settings_transition_elapsed_ = 0.0f;
+            show_settings_ = false;
+            definitive_detailed_settings_ = false;
+            return;
+        }
+    }
+
+    float transition_visibility = 1.0f;
+    if (definitive_settings_transition_ ==
+        DefinitiveSettingsTransition::Opening) {
+        transition_visibility = smoothstep01(
+            definitive_settings_transition_elapsed_ /
+            kDefinitiveSettingsOpenDuration);
+    }
+    else if (definitive_settings_transition_ ==
+        DefinitiveSettingsTransition::Closing) {
+        transition_visibility = 1.0f - smoothstep01(
+            definitive_settings_transition_elapsed_ /
+            kDefinitiveSettingsCloseDuration);
+    }
+
+    const float transition_scale =
+        0.972f + 0.028f * transition_visibility;
+    const float transition_y_offset =
+        (1.0f - transition_visibility) * 14.0f;
+
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -2258,7 +2373,7 @@ void App::panel_definitive_settings() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 
-    const ImGuiWindowFlags flags =
+    ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove |
@@ -2268,10 +2383,16 @@ void App::panel_definitive_settings() {
         ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoBackground;
 
+    if (definitive_settings_transition_ !=
+        DefinitiveSettingsTransition::Open) {
+        flags |= ImGuiWindowFlags_NoInputs;
+    }
+
     ImGui::Begin("##DefinitiveSettingsOverlay", nullptr, flags);
     ImGui::PopStyleVar(3);
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
+    const int animation_vertex_start = draw->VtxBuffer.Size;
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
     const ImVec2 window_end(
@@ -2364,12 +2485,12 @@ void App::panel_definitive_settings() {
         ImVec2(close0.x + layout.px(8.0f), close0.y + layout.px(22.0f)),
         close_color, layout.px(1.6f));
 
-    if (close_pressed || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if ((close_pressed ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) &&
+        definitive_settings_transition_ ==
+            DefinitiveSettingsTransition::Open) {
         play_ui_close_sound();
-        show_settings_ = false;
-        definitive_detailed_settings_ = false;
-        ImGui::End();
-        return;
+        close_definitive_settings();
     }
 
     draw->AddLine(
@@ -2434,6 +2555,9 @@ void App::panel_definitive_settings() {
             show_bindings_config_ = true;
             show_settings_ = false;
             definitive_detailed_settings_ = false;
+            definitive_settings_transition_ =
+                DefinitiveSettingsTransition::Closed;
+            definitive_settings_transition_elapsed_ = 0.0f;
             ImGui::End();
             return;
         }
@@ -3035,6 +3159,11 @@ void App::panel_definitive_settings() {
 
     if (detailed_changed) {
         definitive_detailed_settings_ = detailed;
+        if (detailed) {
+            definitive_settings_transition_ =
+                DefinitiveSettingsTransition::Closed;
+            definitive_settings_transition_elapsed_ = 0.0f;
+        }
     }
 
     add_text_right(
@@ -3043,6 +3172,17 @@ void App::panel_definitive_settings() {
         panel_y + panel_h - 59.0f,
         11.5f, rgba(128, 140, 151, 210),
         VIBESTATION_VERSION_STRING);
+
+    const ImVec2 transition_center(
+        window_pos.x + window_size.x * 0.5f,
+        window_pos.y + window_size.y * 0.5f);
+    animate_draw_vertices(
+        draw,
+        animation_vertex_start,
+        transition_center,
+        transition_scale,
+        transition_visibility,
+        layout.px(transition_y_offset));
 
     ImGui::End();
 }
@@ -3296,7 +3436,7 @@ void App::panel_definitive_home() {
     if (settings_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_open_sound();
-        show_settings_ = true;
+        open_definitive_settings();
     }
     if (exit_pressed && launcher_ready &&
         !launcher_transitioning) {
