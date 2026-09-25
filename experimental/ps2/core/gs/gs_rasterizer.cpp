@@ -965,7 +965,6 @@ u64 GsRasterizer::draw_sprite(
     }
 
     const bool simple_pixels = simple_frame_write(ctx);
-    const bool simple_pixels = simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         const s32 py = y * 16 + 8;
@@ -1089,6 +1088,7 @@ u64 GsRasterizer::draw_triangle(
     const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
     const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
+    const bool simple_pixels = simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         s64 w0 = row_w0;
