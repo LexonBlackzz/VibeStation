@@ -146,6 +146,9 @@ uniform uint u_ta0;
 uniform uint u_ta1;
 uniform uint u_aem;
 uniform uint u_tcc;
+uniform uint u_mode;
+uniform uint u_ztst;
+uniform uint u_zwrite;
 
 const uint block32[32] = uint[32](
     0,1,4,5,16,17,20,21,
@@ -246,45 +249,68 @@ void main() {
         vf += ((u_bv - u_av) * (py - u_ay)) / u_dy;
     }
 
-    uint tx = uint(wrap_coord(
-        uf >> 4, u_tw, u_wms, u_minu, u_maxu));
-    uint ty = uint(wrap_coord(
-        vf >> 4, u_th, u_wmt, u_minv, u_maxv));
-    uint tex = read16(address16(tx, ty, u_tbp, u_tbw));
+    uint source = u_vertex_rgba;
+    uint sr = source & 255u;
+    uint sg = (source >> 8u) & 255u;
+    uint sb = (source >> 16u) & 255u;
 
-    uint vr = channel(u_vertex_rgba, 0u);
-    uint vg = channel(u_vertex_rgba, 8u);
-    uint vb = channel(u_vertex_rgba, 16u);
-    uint va = channel(u_vertex_rgba, 24u);
+    if (u_mode == 0u) {
+        uint tx = uint(wrap_coord(
+            uf >> 4, u_tw, u_wms, u_minu, u_maxu));
+        uint ty = uint(wrap_coord(
+            vf >> 4, u_th, u_wmt, u_minv, u_maxv));
+        uint tex = read16(address16(tx, ty, u_tbp, u_tbw));
 
-    uint sr = min(255u, ((tex & 31u) * vr) >> 4u);
-    uint sg = min(255u, (((tex >> 5u) & 31u) * vg) >> 4u);
-    uint sb = min(255u, (((tex >> 10u) & 31u) * vb) >> 4u);
-    uint alpha = (tex & 0x8000u) != 0u
-        ? (u_ta1 & 255u)
-        : ((u_aem != 0u && (tex & 0x7FFFu) == 0u)
-            ? 0u : (u_ta0 & 255u));
-    alpha = u_tcc != 0u ? modulate(alpha, va) : va;
-    uint source = sr | (sg << 8u) | (sb << 16u) | (alpha << 24u);
+        uint vr = channel(u_vertex_rgba, 0u);
+        uint vg = channel(u_vertex_rgba, 8u);
+        uint vb = channel(u_vertex_rgba, 16u);
+        uint va = channel(u_vertex_rgba, 24u);
+
+        sr = min(255u, ((tex & 31u) * vr) >> 4u);
+        sg = min(255u, (((tex >> 5u) & 31u) * vg) >> 4u);
+        sb = min(255u, (((tex >> 10u) & 31u) * vb) >> 4u);
+        uint alpha = (tex & 0x8000u) != 0u
+            ? (u_ta1 & 255u)
+            : ((u_aem != 0u && (tex & 0x7FFFu) == 0u)
+                ? 0u : (u_ta0 & 255u));
+        alpha = u_tcc != 0u ? modulate(alpha, va) : va;
+        source = sr | (sg << 8u) | (sb << 16u) | (alpha << 24u);
+    }
 
     uint frame_address =
         address32(uint(x), uint(y), u_fbp, u_fbw);
     uint frame_word = frame_address >> 2u;
     uint depth_word =
-        (address32(uint(x), uint(y), u_zbp, u_fbw) >> 2u) ^ 0x600u;
-    uint destination_z = words[depth_word & 0xFFFFFu];
-    if (u_z < destination_z) return;
+        ((address32(uint(x), uint(y), u_zbp, u_fbw) >> 2u) ^ 0x600u) &
+        0xFFFFFu;
 
-    uint destination = words[frame_word];
-    uint dr = destination & 255u;
-    uint dg = (destination >> 8u) & 255u;
-    uint db = (destination >> 16u) & 255u;
+    if (u_ztst == 0u) return;
+    if (u_ztst >= 2u) {
+        uint destination_z = words[depth_word];
+        if (u_ztst == 2u) {
+            if (u_z < destination_z) return;
+        } else {
+            if (u_z <= destination_z) return;
+        }
+    }
 
-    uint result_color = source & 0xFF000000u;
-    result_color |= min(255u, dr + ((sr * 20u) >> 7u));
-    result_color |= min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
-    result_color |= min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+    uint result_color = source;
+    if (u_mode == 0u) {
+        uint destination = words[frame_word];
+        uint dr = destination & 255u;
+        uint dg = (destination >> 8u) & 255u;
+        uint db = (destination >> 16u) & 255u;
+
+        result_color = source & 0xFF000000u;
+        result_color |= min(255u, dr + ((sr * 20u) >> 7u));
+        result_color |= min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
+        result_color |= min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+    }
+
     words[frame_word] = result_color;
+    if (u_zwrite != 0u) {
+        words[depth_word] = u_z;
+    }
 }
 )GLSL";
 
@@ -334,33 +360,48 @@ bool Ps2GlGsBackend::sprite_supported(
     s32 top,
     s32 bottom,
     SpriteJob& job) const {
-    if (!ctx.texture.enabled ||
-        !ctx.texture.fst ||
-        ctx.texture.psm != 2u ||
-        ctx.texture.tfx != 0u ||
-        ctx.psm != 0u ||
-        !ctx.zte ||
-        (ctx.ztst & 3u) != 2u ||
-        ctx.zpsm != 48u ||
-        !ctx.zmask ||
-        !ctx.alpha_blend ||
-        ctx.pabe ||
-        (ctx.alpha_a & 3u) != 0u ||
-        (ctx.alpha_b & 3u) != 2u ||
-        (ctx.alpha_c & 3u) != 2u ||
-        (ctx.alpha_d & 3u) != 1u ||
-        (ctx.alpha_fix & 0xFFu) != 20u ||
-        !ctx.color_clamp ||
-        ctx.ate || ctx.date || ctx.fba ||
-        ctx.fbmask != 0u ||
-        (ctx.scanmask & 2u) != 0u ||
-        ctx.fog_enabled ||
-        ctx.nonzero_colors != nullptr ||
-        ctx.nonzero_inputs != nullptr ||
-        ctx.nonzero_input_alpha != nullptr ||
-        ctx.texture.nonzero_samples != nullptr ||
-        ctx.texture.alpha_samples != nullptr ||
-        ctx.texture.nonzero_shaded != nullptr) {
+    const bool common =
+        ctx.psm == 0u &&
+        ctx.zte &&
+        ctx.zpsm == 48u &&
+        !ctx.ate &&
+        !ctx.date &&
+        !ctx.fba &&
+        ctx.fbmask == 0u &&
+        (ctx.scanmask & 2u) == 0u &&
+        !ctx.fog_enabled &&
+        ctx.nonzero_colors == nullptr &&
+        ctx.nonzero_inputs == nullptr &&
+        ctx.nonzero_input_alpha == nullptr;
+
+    if (!common) return false;
+
+    const bool textured_additive =
+        ctx.texture.enabled &&
+        ctx.texture.fst &&
+        ctx.texture.psm == 2u &&
+        ctx.texture.tfx == 0u &&
+        (ctx.ztst & 3u) == 2u &&
+        ctx.zmask &&
+        ctx.alpha_blend &&
+        !ctx.pabe &&
+        (ctx.alpha_a & 3u) == 0u &&
+        (ctx.alpha_b & 3u) == 2u &&
+        (ctx.alpha_c & 3u) == 2u &&
+        (ctx.alpha_d & 3u) == 1u &&
+        (ctx.alpha_fix & 0xFFu) == 20u &&
+        ctx.color_clamp &&
+        ctx.texture.nonzero_samples == nullptr &&
+        ctx.texture.alpha_samples == nullptr &&
+        ctx.texture.nonzero_shaded == nullptr;
+
+    const bool untextured_direct =
+        !ctx.texture.enabled &&
+        (ctx.ztst & 3u) == 1u &&
+        !ctx.zmask &&
+        !ctx.alpha_blend;
+
+    if (!textured_additive && !untextured_direct) {
         return false;
     }
 
@@ -372,29 +413,65 @@ bool Ps2GlGsBackend::sprite_supported(
     bottom = std::min(bottom, ctx.scay1 + 1);
     if (left >= right || top >= bottom) return false;
 
-    const u32 page_x0 =
-        static_cast<u32>(left) >> 6u;
-    const u32 page_x1 =
-        static_cast<u32>(right - 1) >> 6u;
-    const u32 page_y0 =
-        static_cast<u32>(top) >> 5u;
-    const u32 page_y1 =
-        static_cast<u32>(bottom - 1) >> 5u;
-    if (ctx.fbw == 0u || page_x1 >= ctx.fbw) {
+    const auto range32 = [](
+        u32 bp,
+        u32 bw,
+        s32 left,
+        s32 right,
+        s32 top,
+        s32 bottom,
+        u64& begin,
+        u64& end) -> bool {
+        if (bw == 0u ||
+            left < 0 || top < 0 ||
+            right <= left || bottom <= top) {
+            return false;
+        }
+        const u32 page_x0 =
+            static_cast<u32>(left) >> 6u;
+        const u32 page_x1 =
+            static_cast<u32>(right - 1) >> 6u;
+        const u32 page_y0 =
+            static_cast<u32>(top) >> 5u;
+        const u32 page_y1 =
+            static_cast<u32>(bottom - 1) >> 5u;
+        if (page_x1 >= bw) return false;
+
+        const u64 base =
+            static_cast<u64>(bp) * 256u;
+        const u64 first_page =
+            static_cast<u64>(page_y0) * bw + page_x0;
+        const u64 last_page =
+            static_cast<u64>(page_y1) * bw + page_x1;
+        begin = base + first_page * 8192u;
+        end = base + (last_page + 1u) * 8192u;
+        return end <= GsVram::kSize;
+    };
+
+    u64 frame_begin = 0u;
+    u64 frame_end = 0u;
+    if (!range32(
+            ctx.fbp, ctx.fbw,
+            left, right, top, bottom,
+            frame_begin, frame_end)) {
         return false;
     }
 
-    const u64 base =
-        static_cast<u64>(ctx.fbp) * 256u;
-    const u64 first_page =
-        static_cast<u64>(page_y0) * ctx.fbw + page_x0;
-    const u64 last_page =
-        static_cast<u64>(page_y1) * ctx.fbw + page_x1;
-    const u64 dirty_begin =
-        base + first_page * 8192u;
-    const u64 dirty_end =
-        base + (last_page + 1u) * 8192u;
-    if (dirty_end > GsVram::kSize) return false;
+    u64 dirty_begin = frame_begin;
+    u64 dirty_end = frame_end;
+
+    if (!ctx.zmask) {
+        u64 depth_begin = 0u;
+        u64 depth_end = 0u;
+        if (!range32(
+                ctx.zbp, ctx.fbw,
+                left, right, top, bottom,
+                depth_begin, depth_end)) {
+            return false;
+        }
+        dirty_begin = std::min(dirty_begin, depth_begin);
+        dirty_end = std::max(dirty_end, depth_end);
+    }
 
     job.ctx = ctx;
     job.a = a;
@@ -632,6 +709,9 @@ bool Ps2GlGsBackend::execute_sprite(
     uu("u_ta1", c.texture.ta1);
     uu("u_aem", c.texture.aem ? 1u : 0u);
     uu("u_tcc", c.texture.tcc ? 1u : 0u);
+    uu("u_mode", c.texture.enabled ? 0u : 1u);
+    uu("u_ztst", c.ztst & 3u);
+    uu("u_zwrite", (c.zte && !c.zmask) ? 1u : 0u);
 
     const u32 width =
         static_cast<u32>(job.right - job.left);
