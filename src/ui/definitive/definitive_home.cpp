@@ -31,6 +31,65 @@ int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
 
+struct LauncherQuote {
+    const char* line1;
+    const char* line2;
+};
+
+constexpr std::array<LauncherQuote, 48> kLauncherQuotes = {{
+    {"A SMALLER PAST", "STILL PLAYS"},
+    {"OLD DISC", "NEW NIGHT"},
+    {"MEMORY CARD", "STILL WARM"},
+    {"BOOT AGAIN", "STAY A WHILE"},
+    {"PRESS START", "SEE WHAT RETURNS"},
+    {"ONE MORE SAVE", "ONE MORE RUN"},
+    {"THE CRT HUMS", "THE DISC SPINS"},
+    {"NO PATCH NOTES", "JUST MEMORIES"},
+    {"LOAD THE PAST", "PLAY IT FORWARD"},
+    {"PIXELS FADE", "MEMORIES DON'T"},
+    {"THE ROOM IS DARK", "THE SCREEN IS ON"},
+    {"KEEP THE STATIC", "LOSE THE DUST"},
+    {"THE DISC KNOWS", "WHERE YOU LEFT OFF"},
+    {"OLD HARDWARE", "NEW VIBES"},
+    {"WAIT FOR THE CHIME", "THEN BEGIN"},
+    {"INSERT MEMORY", "REMOVE TIME"},
+    {"THE SAVE IS THERE", "GO FIND IT"},
+    {"THE NIGHT IS YOUNG", "THE DISC IS OLD"},
+    {"LOW POLY", "HIGH MEMORY"},
+    {"PAUSE THE WORLD", "LOAD THE GAME"},
+    {"ONE CONSOLE", "MANY NIGHTS"},
+    {"LET IT BOOT", "LET IT BREATHE"},
+    {"THE PAST", "HAS A FRAME RATE"},
+    {"STILL LOADING", "STILL WORTH IT"},
+    {"FROM DISC", "TO MEMORY"},
+    {"NO CLOUD", "JUST CARDS"},
+    {"32 BITS", "ENDLESS NIGHTS"},
+    {"START BUTTON", "SAME FEELING"},
+    {"OLD SAVE", "NEW CHANCE"},
+    {"THE LID CLOSES", "THE WORLD OPENS"},
+    {"ONE MORE BOOT", "ONE MORE MEMORY"},
+    {"THE SCREEN GLOWS", "THE ROOM DISAPPEARS"},
+    {"THEN: YESTERDAY", "NOW: TONIGHT"},
+    {"MOTION BLUR", "MEMORY SHARP"},
+    {"SAME BUTTONS", "DIFFERENT NIGHT"},
+    {"DISC IN", "WORLD OUT"},
+    {"THE LOGO FADES", "THE GAME REMAINS"},
+    {"READY WHEN", "YOU ARE"},
+    {"THE PAST WAITS", "AT 60 FPS"},
+    {"LOAD. SAVE.", "REPEAT."},
+    {"GOOD GAMES", "GOOD TIMES"},
+    {"OLD WORLDS", "STILL OPEN"},
+    {"SAVE OFTEN", "STAY LONGER"},
+    {"ANOTHER BOOT", "ANOTHER STORY"},
+    {"TURN IT ON", "LET TIME STOP"},
+    {"THE DISC TURNS", "THE NIGHT MOVES"},
+    {"SAME START", "NEW MEMORY"},
+    {"WELCOME BACK", "PLAYER ONE"},
+}};
+
+size_t g_launcher_quote_index = 0;
+bool g_launcher_quote_selected = false;
+
 std::array<float, 5> g_menu_highlight_mix = {};
 
 enum class LauncherStartTransition {
@@ -2443,6 +2502,15 @@ void App::panel_definitive_home() {
 
     const bool launcher_intro_active = !g_launcher_intro_complete;
 
+    if (!g_launcher_quote_selected) {
+        const Uint64 entropy =
+            SDL_GetPerformanceCounter() ^
+            (static_cast<Uint64>(SDL_GetTicks()) << 32);
+        g_launcher_quote_index =
+            static_cast<size_t>(entropy % kLauncherQuotes.size());
+        g_launcher_quote_selected = true;
+    }
+
     // Load/soften the photograph while the boot presentation is still on
     // black so the transition into the launcher is hitch-free.
     ensure_background_texture_loaded();
@@ -2495,10 +2563,12 @@ void App::panel_definitive_home() {
     }
     add_text_right(draw, layout, 1235.0f, 34.0f, 11.5f,
         rgba(176, 183, 191, 232), VIBESTATION_VERSION_STRING);
+    const LauncherQuote& launcher_quote =
+        kLauncherQuotes[g_launcher_quote_index];
     add_text_right(draw, layout, 1235.0f, 57.0f, 12.5f,
-        rgba(198, 203, 210, 238), "A SMALLER PAST");
+        rgba(198, 203, 210, 238), launcher_quote.line1);
     add_text_right(draw, layout, 1235.0f, 77.0f, 12.5f,
-        rgba(198, 203, 210, 238), "STILL PLAYS");
+        rgba(198, 203, 210, 238), launcher_quote.line2);
     const ImVec2 dash0 = layout.point(1208.0f, 103.0f);
     const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
