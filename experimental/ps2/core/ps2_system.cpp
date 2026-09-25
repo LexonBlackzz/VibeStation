@@ -1,7 +1,6 @@
 #include "core/ps2_system.h"
 
 #include <algorithm>
-#include <cstdio>
 
 namespace ps2 {
 namespace {
@@ -1480,42 +1479,6 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 executed += skipped;
                 if (!error.empty()) break;
                 continue;
-            }
-        }
-        if (ee_.state().pc == 0x80005F08u ||
-            ee_.state().pc == 0x80005F5Cu) {
-            static bool dumped_f08 = false;
-            static bool dumped_f5c = false;
-            bool& dumped = ee_.state().pc == 0x80005F08u
-                ? dumped_f08 : dumped_f5c;
-            if (!dumped) {
-                dumped = true;
-                const u32 pc = ee_.state().pc;
-                u32 sif = 0;
-                bus_.read32(0x1000F230u, sif);
-                std::fprintf(
-                    stderr,
-                    "SIF_POLL_DIAG PC=0x%08X NPC=0x%08X "
-                    "V0=0x%016llX V1=0x%016llX A0=0x%016llX "
-                    "A1=0x%016llX SIF_F230=0x%08X IOP_PC=0x%08X\n",
-                    pc,
-                    ee_.state().next_pc,
-                    static_cast<unsigned long long>(ee_.state().gpr[2].lo),
-                    static_cast<unsigned long long>(ee_.state().gpr[3].lo),
-                    static_cast<unsigned long long>(ee_.state().gpr[4].lo),
-                    static_cast<unsigned long long>(ee_.state().gpr[5].lo),
-                    sif,
-                    iop_.state().pc);
-                for (s32 offset = -32; offset <= 160; offset += 4) {
-                    u32 word = 0;
-                    const u32 address =
-                        static_cast<u32>(static_cast<s64>(pc) + offset);
-                    if (!bus_.read32(address, word)) word = 0xDEADBEEFu;
-                    std::fprintf(
-                        stderr,
-                        "SIF_POLL_CODE PC=0x%08X OFF=%d WORD=0x%08X\n",
-                        pc, offset, word);
-                }
             }
         }
         if ((ee_.state().pc == 0x8000DAD0u ||
