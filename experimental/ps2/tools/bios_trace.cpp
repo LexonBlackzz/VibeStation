@@ -1070,6 +1070,19 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << '\n';
 
+    std::cout << "GS_RASTER_SIZE_TIME";
+    constexpr const char* kRasterSizeLabels[] = {
+        "LT64", "LT256", "LT1K", "LT4K", "LT16K", "LT64K", "GE64K"};
+    for (std::size_t i = 0; i < gs_stats.raster_ns_by_size.size(); ++i) {
+        if (gs_stats.raster_draws_by_size[i] == 0u) continue;
+        std::cout
+            << ' ' << kRasterSizeLabels[i]
+            << "_D=" << gs_stats.raster_draws_by_size[i]
+            << "_P=" << gs_stats.raster_pixels_by_size[i]
+            << "_NS=" << gs_stats.raster_ns_by_size[i];
+    }
+    std::cout << '\n';
+
     std::cout
         << "GS_TEXTURE_COORD_PIXELS"
         << " SPRITE=" << gs_stats.textured_sprite_pixels

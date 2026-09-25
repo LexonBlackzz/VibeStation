@@ -909,6 +909,16 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
+    const std::size_t size_bin =
+        pixels < 64u ? 0u :
+        pixels < 256u ? 1u :
+        pixels < 1024u ? 2u :
+        pixels < 4096u ? 3u :
+        pixels < 16384u ? 4u :
+        pixels < 65536u ? 5u : 6u;
+    ++stats_.raster_draws_by_size[size_bin];
+    stats_.raster_pixels_by_size[size_bin] += pixels;
+    stats_.raster_ns_by_size[size_bin] += raster_ns;
     if (prim < stats_.raster_draws_by_primitive.size()) {
         ++stats_.raster_draws_by_primitive[prim];
         stats_.raster_pixels_by_primitive[prim] += pixels;

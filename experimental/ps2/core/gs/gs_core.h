@@ -50,6 +50,10 @@ struct GsStats {
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
     std::array<u64, 8> raster_ns_by_primitive{};
+    // Draw-size histogram bins: <64, <256, <1K, <4K, <16K, <64K, >=64K pixels.
+    std::array<u64, 7> raster_draws_by_size{};
+    std::array<u64, 7> raster_pixels_by_size{};
+    std::array<u64, 7> raster_ns_by_size{};
     std::array<u64, 64> texture_draws_by_psm{};
     std::array<u64, 64> texture_ns_by_psm{};
     // PSMCT16-only draw-state profile. Bits:
