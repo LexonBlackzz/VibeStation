@@ -711,9 +711,9 @@ void Gpu::prepare_software_vram_write() {
     hardware_cpu_vram_dirty_ = true;
 }
 
-GpuHardwareRasterizer::DrawState Gpu::hardware_draw_state(
+GpuHardwareRasterizer::RasterState Gpu::hardware_draw_state(
     bool raw_texture) const {
-    GpuHardwareRasterizer::DrawState state{};
+    GpuHardwareRasterizer::RasterState state{};
     state.draw_x_min = draw_x_min_;
     state.draw_y_min = draw_y_min_;
     state.draw_x_max = draw_x_max_;
