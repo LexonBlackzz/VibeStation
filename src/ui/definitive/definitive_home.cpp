@@ -1707,18 +1707,19 @@ void App::panel_definitive_settings() {
         layout.point(panel_x + panel_w - 28.0f, panel_y + 108.0f),
         rgba(82, 97, 111, 155), layout.px(1.0f));
 
-    // Category tabs. The default interface now exposes most user-facing
-    // settings while deliberately leaving diagnostics/logging/debug controls
-    // to Detailed Settings.
-    constexpr std::array<const char*, 6> tab_labels = {
-        "GENERAL", "VIDEO", "AUDIO", "SYSTEM", "MEMORY CARDS", "CONTROLS"
+    // Mirror the legacy Settings page's category names, excluding Logging.
+    constexpr std::array<const char*, 7> tab_labels = {
+        "Input", "Video", "Audio", "System",
+        "Memory Cards", "Experimental", "Customize"
     };
     constexpr float tab_x = 124.0f;
-    constexpr float tab_y = 166.0f;
-    constexpr float tab_w = 164.0f;
+    constexpr float tab_y = 164.0f;
+    constexpr float tab_w = 147.0f;
+
     for (int i = 0; i < static_cast<int>(tab_labels.size()); ++i) {
         if (definitive_settings_tab_button(
-            draw, layout, tab_labels[static_cast<size_t>(i)],
+            draw, layout,
+            tab_labels[static_cast<size_t>(i)],
             tab_labels[static_cast<size_t>(i)],
             tab_x + tab_w * i, tab_y, tab_w,
             definitive_settings_tab_ == i)) {
@@ -1729,7 +1730,12 @@ void App::panel_definitive_settings() {
     constexpr float left_x = 134.0f;
     constexpr float right_x = 654.0f;
     constexpr float column_w = 492.0f;
-    constexpr float content_y = 218.0f;
+    constexpr float content_y = 216.0f;
+    constexpr float row_step = 58.0f;
+
+    const auto note = [&](float x, float y, const char* text) {
+        definitive_settings_note(draw, layout, x + 18.0f, y + 30.0f, text);
+    };
 
     const auto apply_audio_settings = [&]() {
         save_persistent_config();
@@ -1747,99 +1753,73 @@ void App::panel_definitive_settings() {
     };
 
     switch (definitive_settings_tab_) {
-    case 0: { // General
+    case 0: { // Input
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 254.0f, "STARTUP & PRESENTATION");
+            draw, layout, left_x, content_y, column_w, 218.0f, "INPUT");
 
-        if (definitive_settings_switch(
-            draw, layout, "general_direct_boot", "Direct Disc Boot",
-            left_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
-            config_direct_disc_boot_)) {
-            save_persistent_config();
-        }
-        if (definitive_settings_switch(
-            draw, layout, "general_vsync", "VSync",
-            left_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            config_vsync_)) {
-            SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
-            save_persistent_config();
-        }
-        if (definitive_settings_switch(
-            draw, layout, "general_low_spec", "Low-spec Mode",
-            left_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            config_low_spec_mode_)) {
-            g_low_spec_mode = config_low_spec_mode_;
-            save_persistent_config();
-        }
-        if (definitive_settings_switch(
-            draw, layout, "general_discord", "Discord Rich Presence",
-            left_x + 1.0f, content_y + 193.0f, column_w - 2.0f,
-            config_discord_rich_presence_)) {
-            sync_discord_presence_config();
-            save_persistent_config();
-        }
-
-        draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 204.0f, "REWIND");
-
-        if (definitive_settings_switch(
-            draw, layout, "general_rewind", "Enable Rewind",
-            right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
-            config_rewind_enabled_)) {
-            emu_runner_.configure_rewind(
-                config_rewind_enabled_,
-                config_rewind_buffer_seconds_,
-                static_cast<int>(system_ ? system_->target_fps() : 60.0));
-            save_persistent_config();
-        }
-        int rewind_seconds = config_rewind_buffer_seconds_;
-        if (definitive_settings_slider_int(
-            draw, layout, "general_rewind_seconds", "Buffer Length",
-            right_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            rewind_seconds, 1, 10, "%d sec")) {
-            config_rewind_buffer_seconds_ = std::clamp(rewind_seconds, 1, 10);
-            emu_runner_.set_rewind_buffer_seconds(
-                config_rewind_buffer_seconds_,
-                static_cast<int>(system_ ? system_->target_fps() : 60.0));
-            save_persistent_config();
-        }
-
-        draw_settings_section(
-            draw, layout, right_x, content_y + 224.0f,
-            column_w, 104.0f, "BIOS");
-        const std::string bios_status =
-            system_ && system_->bios_loaded() ? "BIOS Loaded" : "Change BIOS";
         if (definitive_settings_action(
-            draw, layout, "general_bios",
-            bios_status.c_str(),
-            right_x + 1.0f, content_y + 267.0f, column_w - 2.0f)) {
-            const std::string path = open_file_dialog(
-                "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0",
-                "Select PS1 BIOS");
-            if (!path.empty()) {
-                emu_runner_.pause_and_wait_idle();
-                if (system_->load_bios(path)) {
-                    bios_path_ = path;
-                    save_persistent_config();
-                    status_message_ = "BIOS loaded: " + system_->bios().get_info();
-                }
-                else {
-                    status_message_ = "Failed to load BIOS.";
-                }
-            }
+            draw, layout, "input_bindings", "Configure Keyboard Bindings",
+            left_x + 1.0f, content_y + 43.0f, column_w - 2.0f)) {
+            show_bindings_config_ = true;
+            show_settings_ = false;
+            definitive_detailed_settings_ = false;
+            ImGui::End();
+            return;
         }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Change the keyboard keys used for PlayStation buttons.");
+
+        if (definitive_settings_switch(
+            draw, layout, "input_stop_eof", "Stop Playback at EOF",
+            left_x + 1.0f, content_y + 43.0f + row_step, column_w - 2.0f,
+            input_movie_stop_at_eof_)) {
+            if (input_movie_stop_at_eof_) {
+                input_movie_loop_ = false;
+            }
+            input_recorder_.set_end_behavior(input_movie_end_behavior());
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Stops an input movie when the recorded frames end.");
+
+        if (definitive_settings_switch(
+            draw, layout, "input_loop", "Loop Playback",
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, input_movie_loop_)) {
+            if (input_movie_loop_) {
+                input_movie_stop_at_eof_ = false;
+            }
+            input_recorder_.set_end_behavior(input_movie_end_behavior());
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Restarts input-movie playback automatically at the end.");
+
+        draw_settings_section(
+            draw, layout, right_x, content_y, column_w, 160.0f, "GAMEPAD");
+        const std::string gamepad_title =
+            input_ && input_->has_gamepad()
+                ? input_->gamepad_name()
+                : "No Gamepad Detected";
+        add_text(draw, layout, right_x + 18.0f, content_y + 58.0f, 13.0f,
+            input_ && input_->has_gamepad()
+                ? rgba(178, 221, 190, 245)
+                : rgba(188, 195, 202, 235),
+            gamepad_title.c_str());
+        add_text(draw, layout, right_x + 18.0f, content_y + 84.0f, 9.0f,
+            rgba(139, 150, 160, 220),
+            input_ && input_->has_gamepad()
+                ? "Connected gamepads are mapped automatically."
+                : "Connect a controller and VibeStation will auto-map it.");
         break;
     }
 
     case 1: { // Video
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 254.0f, "DISPLAY");
+            draw, layout, left_x, content_y, column_w, 218.0f, "DISPLAY");
 
         const char* resolution_modes[] = {
             "320x240", "640x480", "1024x768"
         };
-        int resolution_index =
-            static_cast<int>(g_output_resolution_mode);
+        int resolution_index = static_cast<int>(g_output_resolution_mode);
         if (definitive_settings_combo(
             draw, layout, "video_resolution", "Output Resolution",
             left_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
@@ -1850,15 +1830,17 @@ void App::panel_definitive_settings() {
                 static_cast<OutputResolutionMode>(resolution_index);
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Sets the final framebuffer size shown by VibeStation.");
 
         const char* deinterlace_modes[] = {
             "Weave", "Bob", "Blend"
         };
-        int deinterlace_index =
-            static_cast<int>(g_deinterlace_mode);
+        int deinterlace_index = static_cast<int>(g_deinterlace_mode);
         if (definitive_settings_combo(
             draw, layout, "video_deinterlace", "Deinterlace",
-            left_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
+            left_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f,
             deinterlace_index, deinterlace_modes,
             IM_ARRAYSIZE(deinterlace_modes))) {
             deinterlace_index = std::clamp(deinterlace_index, 0, 2);
@@ -1866,30 +1848,26 @@ void App::panel_definitive_settings() {
                 static_cast<DeinterlaceMode>(deinterlace_index);
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Chooses how interlaced PS1 video fields are combined.");
 
         if (definitive_settings_switch(
-            draw, layout, "video_filter", "Smooth Scaling",
-            left_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            g_bilinear_filtering)) {
+            draw, layout, "video_filter", "Bilinear Presentation Filter",
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, g_bilinear_filtering)) {
             if (renderer_) {
                 renderer_->set_bilinear_filtering(g_bilinear_filtering);
             }
             save_persistent_config();
         }
-
-        if (definitive_settings_switch(
-            draw, layout, "video_vsync", "VSync",
-            left_x + 1.0f, content_y + 193.0f, column_w - 2.0f,
-            config_vsync_)) {
-            SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
-            save_persistent_config();
-        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Smooths the final image when scaling instead of keeping hard pixels.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 154.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 160.0f, "GPU");
 
         if (definitive_settings_switch(
-            draw, layout, "video_fast_gpu", "Fast GPU Mode",
+            draw, layout, "video_fast_gpu", "Fast Mode",
             right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
             g_gpu_fast_mode)) {
             if (!g_gpu_fast_mode) {
@@ -1897,118 +1875,132 @@ void App::panel_definitive_settings() {
             }
             save_persistent_config();
         }
+        note(right_x + 1.0f, content_y + 43.0f,
+            "Uses optimized GPU paths for lower CPU usage with some artifact risk.");
 
         if (definitive_settings_switch(
             draw, layout, "video_extreme_gpu", "Extreme Fast Mode",
-            right_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            g_gpu_extreme_fast_mode)) {
+            right_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, g_gpu_extreme_fast_mode)) {
             if (g_gpu_extreme_fast_mode) {
                 g_gpu_fast_mode = true;
             }
             save_persistent_config();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step,
+            "Trades more shading and transparency accuracy for additional speed.");
         break;
     }
 
     case 2: { // Audio
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 254.0f, "LATENCY");
+            draw, layout, left_x, content_y, column_w, 276.0f, "LATENCY");
 
-        int target_latency =
-            static_cast<int>(g_spu_audio_target_latency_ms);
+        int target_latency = static_cast<int>(g_spu_audio_target_latency_ms);
         if (definitive_settings_slider_int(
             draw, layout, "audio_target", "Target Latency",
             left_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
-            target_latency, 10, 200, "%d ms")) {
+            target_latency, 10, 500, "%d ms")) {
             g_spu_audio_target_latency_ms =
-                static_cast<u32>(std::clamp(target_latency, 10, 200));
+                static_cast<u32>(std::clamp(target_latency, 10, 500));
             g_spu_audio_soft_latency_ms = std::max(
-                g_spu_audio_soft_latency_ms,
-                g_spu_audio_target_latency_ms);
+                g_spu_audio_soft_latency_ms, g_spu_audio_target_latency_ms);
             g_spu_audio_max_latency_ms = std::max(
-                g_spu_audio_max_latency_ms,
-                g_spu_audio_soft_latency_ms);
+                g_spu_audio_max_latency_ms, g_spu_audio_soft_latency_ms);
             apply_audio_settings();
         }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Preferred amount of queued audio before playback.");
 
-        int soft_latency =
-            static_cast<int>(g_spu_audio_soft_latency_ms);
+        int soft_latency = static_cast<int>(g_spu_audio_soft_latency_ms);
         if (definitive_settings_slider_int(
-            draw, layout, "audio_soft", "Soft Correction",
-            left_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            soft_latency,
+            draw, layout, "audio_soft", "Soft Correction Starts",
+            left_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, soft_latency,
             static_cast<int>(g_spu_audio_target_latency_ms),
-            400, "%d ms")) {
+            750, "%d ms")) {
             g_spu_audio_soft_latency_ms =
                 static_cast<u32>(std::clamp(
                     soft_latency,
-                    static_cast<int>(g_spu_audio_target_latency_ms),
-                    400));
+                    static_cast<int>(g_spu_audio_target_latency_ms), 750));
             g_spu_audio_max_latency_ms = std::max(
-                g_spu_audio_max_latency_ms,
-                g_spu_audio_soft_latency_ms);
+                g_spu_audio_max_latency_ms, g_spu_audio_soft_latency_ms);
             apply_audio_settings();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Starts gentle queue correction when latency grows beyond this point.");
 
-        int max_latency =
-            static_cast<int>(g_spu_audio_max_latency_ms);
+        int max_latency = static_cast<int>(g_spu_audio_max_latency_ms);
         if (definitive_settings_slider_int(
             draw, layout, "audio_max", "Maximum Latency",
-            left_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            max_latency,
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, max_latency,
             static_cast<int>(g_spu_audio_soft_latency_ms),
-            750, "%d ms")) {
+            1000, "%d ms")) {
             g_spu_audio_max_latency_ms =
                 static_cast<u32>(std::clamp(
                     max_latency,
-                    static_cast<int>(g_spu_audio_soft_latency_ms),
-                    750));
+                    static_cast<int>(g_spu_audio_soft_latency_ms), 1000));
             apply_audio_settings();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Hard ceiling before excess queued audio is trimmed.");
 
         float xa_buffer = g_spu_xa_buffer_seconds;
         if (definitive_settings_slider_float(
             draw, layout, "audio_xa", "XA Buffer",
-            left_x + 1.0f, content_y + 193.0f, column_w - 2.0f,
-            xa_buffer, 0.0f, 2.0f, "%.2f sec")) {
-            g_spu_xa_buffer_seconds =
-                std::clamp(xa_buffer, 0.0f, 2.0f);
+            left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, xa_buffer, 0.0f, 5.0f, "%.2f sec")) {
+            g_spu_xa_buffer_seconds = std::clamp(xa_buffer, 0.0f, 5.0f);
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Controls buffering for XA and other streamed CD audio.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 254.0f, "PLAYBACK");
+            draw, layout, right_x, content_y, column_w, 276.0f, "PLAYBACK");
 
         if (definitive_settings_switch(
-            draw, layout, "audio_queue", "Audio Queue",
+            draw, layout, "audio_queue", "Enable Audio Queue",
             right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
             g_spu_enable_audio_queue)) {
             apply_audio_settings();
         }
+        note(right_x + 1.0f, content_y + 43.0f,
+            "Uses the bounded host queue for steadier playback.");
+
         if (definitive_settings_switch(
-            draw, layout, "audio_trim", "Smooth Trim",
-            right_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            g_spu_enable_smooth_trim)) {
+            draw, layout, "audio_trim", "Crossfaded Smooth Trim",
+            right_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, g_spu_enable_smooth_trim)) {
             apply_audio_settings();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step,
+            "Crossfades queue corrections to make trims less audible.");
+
         if (definitive_settings_switch(
             draw, layout, "audio_lag_stutter", "Lag Stutter Effect",
-            right_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            g_spu_enable_lag_stutter)) {
+            right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, g_spu_enable_lag_stutter)) {
             apply_audio_settings();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Repeats a short audio fragment when emulation falls behind.");
+
         if (definitive_settings_switch(
             draw, layout, "audio_slow_stutter", "Slowdown Stutter Loop",
-            right_x + 1.0f, content_y + 193.0f, column_w - 2.0f,
-            g_spu_enable_slowdown_stutter)) {
+            right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, g_spu_enable_slowdown_stutter)) {
             apply_audio_settings();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Loops a small audio segment while slowdown mode is active.");
         break;
     }
 
     case 3: { // System
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 254.0f, "CPU & SPEED");
+            draw, layout, left_x, content_y, column_w, 276.0f, "CPU & PERFORMANCE");
 
         const char* cpu_backend_labels[] = {
             "Interpreter", "Decoded Block", "x64 JIT"
@@ -2034,10 +2026,10 @@ void App::panel_definitive_settings() {
                 emu_runner_.set_running(true);
             }
         }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Selects interpreter, decoded blocks, or the x64 JIT CPU core.");
 
-        const char* turbo_modes[] = {
-            "200%", "400%", "Unlimited"
-        };
+        const char* turbo_modes[] = { "200%", "400%", "Unlimited" };
         int turbo_mode = 0;
         if (config_turbo_speed_percent_ <= 0) {
             turbo_mode = 2;
@@ -2047,57 +2039,79 @@ void App::panel_definitive_settings() {
         }
         if (definitive_settings_combo(
             draw, layout, "system_turbo", "Turbo Speed",
-            left_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            turbo_mode, turbo_modes, IM_ARRAYSIZE(turbo_modes))) {
+            left_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, turbo_mode, turbo_modes,
+            IM_ARRAYSIZE(turbo_modes))) {
             config_turbo_speed_percent_ =
                 turbo_mode == 2 ? 0 : (turbo_mode == 1 ? 400 : 200);
             apply_speed_override();
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Sets the emulation speed used while holding the turbo hotkey.");
 
         int slowdown = config_slowdown_speed_percent_;
         if (definitive_settings_slider_int(
             draw, layout, "system_slowdown", "Slowdown Speed",
-            left_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            slowdown, 10, 100, "%d%%")) {
-            config_slowdown_speed_percent_ =
-                std::clamp(slowdown, 10, 100);
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, slowdown, 10, 100, "%d%%")) {
+            config_slowdown_speed_percent_ = std::clamp(slowdown, 10, 100);
             apply_speed_override();
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Sets the emulation speed used while holding the slowdown hotkey.");
 
         if (definitive_settings_switch(
             draw, layout, "system_low_spec", "Low-spec Mode",
-            left_x + 1.0f, content_y + 193.0f, column_w - 2.0f,
-            config_low_spec_mode_)) {
+            left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, config_low_spec_mode_)) {
             g_low_spec_mode = config_low_spec_mode_;
             save_persistent_config();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Reduces internal work for slower PCs with some quality tradeoffs.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 204.0f, "EMULATION");
+            draw, layout, right_x, content_y, column_w, 334.0f, "PLAYBACK & SERVICES");
+
+        if (definitive_settings_switch(
+            draw, layout, "system_vsync", "VSync Playback",
+            right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
+            config_vsync_)) {
+            SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f,
+            "Synchronizes presentation with the display refresh rate.");
 
         if (definitive_settings_switch(
             draw, layout, "system_direct_boot", "Direct Disc Boot",
-            right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
-            config_direct_disc_boot_)) {
+            right_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, config_direct_disc_boot_)) {
             save_persistent_config();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step,
+            "Skips the BIOS intro and starts the inserted game directly.");
+
         if (definitive_settings_switch(
             draw, layout, "system_rewind", "Enable Rewind",
-            right_x + 1.0f, content_y + 93.0f, column_w - 2.0f,
-            config_rewind_enabled_)) {
+            right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, config_rewind_enabled_)) {
             emu_runner_.configure_rewind(
                 config_rewind_enabled_,
                 config_rewind_buffer_seconds_,
                 static_cast<int>(system_ ? system_->target_fps() : 60.0));
             save_persistent_config();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Keeps frame snapshots so gameplay can be rewound with Right Ctrl.");
+
         int rewind_seconds = config_rewind_buffer_seconds_;
         if (definitive_settings_slider_int(
             draw, layout, "system_rewind_seconds", "Rewind Buffer",
-            right_x + 1.0f, content_y + 143.0f, column_w - 2.0f,
-            rewind_seconds, 1, 10, "%d sec")) {
+            right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, rewind_seconds, 1, 10, "%d sec")) {
             config_rewind_buffer_seconds_ =
                 std::clamp(rewind_seconds, 1, 10);
             emu_runner_.set_rewind_buffer_seconds(
@@ -2105,65 +2119,232 @@ void App::panel_definitive_settings() {
                 static_cast<int>(system_ ? system_->target_fps() : 60.0));
             save_persistent_config();
         }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Controls how many seconds of rewind history are retained.");
+
+        if (definitive_settings_switch(
+            draw, layout, "system_discord", "Discord Rich Presence",
+            right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            column_w - 2.0f, config_discord_rich_presence_)) {
+            sync_discord_presence_config();
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            "Shows the current VibeStation session in the Discord desktop app.");
         break;
     }
 
     case 4: { // Memory Cards
         draw_settings_section(
-            draw, layout, left_x, content_y, 1012.0f, 204.0f, "MEMORY CARDS");
+            draw, layout, left_x, content_y, 1012.0f, 218.0f, "MEMORY CARDS");
 
         const char* memory_modes[] = {
             "Generic", "Per-Game", "Disabled"
         };
         int slot1 = std::clamp(config_memory_card_mode_[0], 0, 2);
         if (definitive_settings_combo(
-            draw, layout, "memory_slot1", "Memory Card Slot 1",
+            draw, layout, "memory_slot1", "Slot 1 Mode",
             left_x + 1.0f, content_y + 43.0f, 1010.0f,
             slot1, memory_modes, IM_ARRAYSIZE(memory_modes))) {
             config_memory_card_mode_[0] = slot1;
             apply_memory_card_settings(true);
         }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Generic shares one card; Per-Game creates a card for each disc.");
 
         int slot2 = std::clamp(config_memory_card_mode_[1], 0, 2);
         if (definitive_settings_combo(
-            draw, layout, "memory_slot2", "Memory Card Slot 2",
-            left_x + 1.0f, content_y + 93.0f, 1010.0f,
+            draw, layout, "memory_slot2", "Slot 2 Mode",
+            left_x + 1.0f, content_y + 43.0f + row_step, 1010.0f,
             slot2, memory_modes, IM_ARRAYSIZE(memory_modes))) {
             config_memory_card_mode_[1] = slot2;
             apply_memory_card_settings(true);
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Controls how the second virtual PlayStation memory card is mounted.");
 
         if (definitive_settings_action(
             draw, layout, "memory_apply", "Apply Memory Card Settings",
-            left_x + 1.0f, content_y + 143.0f, 1010.0f)) {
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f, 1010.0f)) {
             apply_memory_card_settings(true);
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Refreshes the currently mounted card files using the selected modes.");
         break;
     }
 
-    case 5: { // Controls
+    case 5: { // Experimental
         draw_settings_section(
-            draw, layout, left_x, content_y, 1012.0f, 154.0f, "INPUT");
+            draw, layout, left_x, content_y, 1012.0f, 276.0f, "EXPERIMENTAL");
+
+        if (definitive_settings_switch(
+            draw, layout, "experimental_bios_size", "Experimental BIOS Size Mode",
+            left_x + 1.0f, content_y + 43.0f, 1010.0f,
+            g_experimental_bios_size_mode)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Accepts KB-aligned BIOS images outside normal PS1 size checks.");
+
+        if (definitive_settings_switch(
+            draw, layout, "experimental_ps2_bios", "Unsafe PS2 BIOS Mode",
+            left_x + 1.0f, content_y + 43.0f + row_step, 1010.0f,
+            g_unsafe_ps2_bios_mode)) {
+            if (g_unsafe_ps2_bios_mode) {
+                g_experimental_bios_size_mode = true;
+            }
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Maps the full BIOS size for PS2 BIOS experiments; instability is expected.");
+
+        if (definitive_settings_switch(
+            draw, layout, "experimental_opcode", "Unhandled Opcode Fallback",
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f, 1010.0f,
+            g_experimental_unhandled_special_returns_zero)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Lets unknown instructions fall back instead of halting immediately.");
+
+        if (definitive_settings_switch(
+            draw, layout, "experimental_dma", "DMA Command Sanitizer",
+            left_x + 1.0f, content_y + 43.0f + row_step * 3.0f, 1010.0f,
+            g_experimental_dma_command_sanitizer)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Coerces malformed DMA channel commands into legal transfer commands.");
+        break;
+    }
+
+    case 6: { // Customize
+        draw_settings_section(
+            draw, layout, left_x, content_y, column_w, 218.0f, "THEME");
+
+        const int preset_count = ui_theme::theme_preset_count();
+        const int safe_preset_count = std::min(preset_count, 64);
+        const char* theme_preset_labels[64] = {};
+        for (int i = 0; i < safe_preset_count; ++i) {
+            theme_preset_labels[i] =
+                ui_theme::theme_preset_by_index(i).label;
+        }
+        ui_theme::g_selected_theme_preset_index =
+            std::clamp(
+                ui_theme::g_selected_theme_preset_index,
+                0, std::max(0, safe_preset_count - 1));
+
+        int preset_index = ui_theme::g_selected_theme_preset_index;
+        if (safe_preset_count > 0 &&
+            definitive_settings_combo(
+                draw, layout, "customize_preset", "Preset",
+                left_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
+                preset_index, theme_preset_labels, safe_preset_count)) {
+            ui_theme::g_selected_theme_preset_index = preset_index;
+            ui_theme::apply_theme_preset_by_index(preset_index);
+            ui_theme::apply_theme_style(ImGui::GetStyle());
+            ui_theme::mark_theme_settings_dirty();
+        }
+        note(left_x + 1.0f, content_y + 43.0f,
+            "Applies a predefined color scheme to the standard and detailed UI.");
+
+        bool simple_theme = ui_theme::g_theme_settings.simple;
+        if (definitive_settings_switch(
+            draw, layout, "customize_simple", "Simple Customization",
+            left_x + 1.0f, content_y + 43.0f + row_step,
+            column_w - 2.0f, simple_theme)) {
+            ui_theme::g_theme_settings.simple = simple_theme;
+            ui_theme::mark_theme_settings_dirty();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step,
+            "Enables the main background, surface, accent, text and list colors.");
 
         if (definitive_settings_action(
-            draw, layout, "controls_bindings", "Configure Keyboard Bindings",
-            left_x + 1.0f, content_y + 43.0f, 1010.0f)) {
-            show_bindings_config_ = true;
-            show_settings_ = false;
-            definitive_detailed_settings_ = false;
-            ImGui::End();
-            return;
+            draw, layout, "customize_reset", "Reset Theme Colors",
+            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f)) {
+            ui_theme::reset_theme_settings();
+            ui_theme::apply_theme_style(ImGui::GetStyle());
+            ui_theme::mark_theme_settings_dirty();
         }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Restores VibeStation's default theme colors.");
 
-        const std::string controller_label =
-            input_ && input_->has_gamepad()
-            ? "Gamepad Connected"
-            : "No Gamepad Detected";
-        add_text(draw, layout, left_x + 18.0f, content_y + 112.0f, 11.5f,
-            input_ && input_->has_gamepad()
-                ? rgba(157, 203, 171, 235)
-                : rgba(155, 164, 173, 220),
-            controller_label.c_str());
+        draw_settings_section(
+            draw, layout, right_x, content_y, column_w, 334.0f, "SIMPLE COLORS");
+
+        if (!ui_theme::g_theme_settings.simple) {
+            add_text(draw, layout, right_x + 18.0f, content_y + 63.0f, 11.0f,
+                rgba(162, 173, 184, 225),
+                "Enable Simple Customization to edit these colors.");
+        }
+        else {
+            bool theme_changed = false;
+
+            ImVec4 background = ui_theme::g_theme_settings.background;
+            if (definitive_settings_color(
+                draw, layout, "customize_background", "Background",
+                right_x + 1.0f, content_y + 43.0f,
+                column_w - 2.0f, background)) {
+                ui_theme::g_theme_settings.background = background;
+                theme_changed = true;
+            }
+            note(right_x + 1.0f, content_y + 43.0f,
+                "Base window background color.");
+
+            ImVec4 surface = ui_theme::g_theme_settings.surface;
+            if (definitive_settings_color(
+                draw, layout, "customize_surface", "Surface",
+                right_x + 1.0f, content_y + 43.0f + row_step,
+                column_w - 2.0f, surface)) {
+                ui_theme::g_theme_settings.surface = surface;
+                theme_changed = true;
+            }
+            note(right_x + 1.0f, content_y + 43.0f + row_step,
+                "Panels, controls and raised surfaces.");
+
+            ImVec4 accent = ui_theme::g_theme_settings.accent;
+            if (definitive_settings_color(
+                draw, layout, "customize_accent", "Accent",
+                right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+                column_w - 2.0f, accent)) {
+                ui_theme::g_theme_settings.accent = accent;
+                theme_changed = true;
+            }
+            note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+                "Highlights, selections and active controls.");
+
+            ImVec4 text_color = ui_theme::g_theme_settings.text;
+            if (definitive_settings_color(
+                draw, layout, "customize_text", "Text",
+                right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+                column_w - 2.0f, text_color)) {
+                ui_theme::g_theme_settings.text = text_color;
+                theme_changed = true;
+            }
+            note(right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+                "Primary text color used by the standard UI.");
+
+            ImVec4 lists = ui_theme::g_theme_settings.lists;
+            if (definitive_settings_color(
+                draw, layout, "customize_lists", "Lists",
+                right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+                column_w - 2.0f, lists)) {
+                ui_theme::g_theme_settings.lists = lists;
+                theme_changed = true;
+            }
+            note(right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+                "Popup and list background color.");
+
+            if (theme_changed) {
+                ui_theme::sync_theme_overall_from_basics(
+                    ui_theme::g_theme_settings);
+                ui_theme::rebuild_theme_colors_from_basics(
+                    ui_theme::g_theme_settings);
+                ui_theme::apply_theme_style(ImGui::GetStyle());
+                ui_theme::mark_theme_settings_dirty();
+            }
+        }
         break;
     }
 
@@ -2172,15 +2353,13 @@ void App::panel_definitive_settings() {
         break;
     }
 
-    // Detailed Settings remains an opt-in escape hatch to the complete legacy
-    // configuration surface, including diagnostics and logging.
     draw->AddLine(
         layout.point(panel_x + 28.0f, panel_y + panel_h - 92.0f),
         layout.point(panel_x + panel_w - 28.0f, panel_y + panel_h - 92.0f),
         rgba(82, 97, 111, 155), layout.px(1.0f));
 
     ImGui::SetCursorScreenPos(
-        layout.point(panel_x + 38.0f, panel_y + panel_h - 62.0f));
+        layout.point(panel_x + 38.0f, panel_y + panel_h - 66.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(
         ImGuiStyleVar_FramePadding, layout.size(4.0f, 4.0f));
@@ -2195,6 +2374,11 @@ void App::panel_definitive_settings() {
 
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(2);
+
+    add_text(draw, layout,
+        panel_x + 190.0f, panel_y + panel_h - 58.0f, 8.8f,
+        rgba(139, 150, 160, 215),
+        "Shows logging, diagnostics, profiling and other developer-oriented controls.");
 
     if (detailed_changed) {
         definitive_detailed_settings_ = detailed;
