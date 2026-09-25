@@ -1225,6 +1225,31 @@ u64 Ps2System::try_run_quiet_ee_batch(
     while (retired < maximum && !ee_.halted()) {
         bool progressed = false;
 
+        // Same helper, first sample. Retire only the MMIO load here; the
+        // following NOP/debounce interval remains subject to the normal quiet
+        // batch event/IOP boundary so device time cannot move across the next
+        // observation.
+        if (ee_.state().pc == 0x80005F08u) {
+            static constexpr std::array<u32, 3> kSifStableEntry = {
+                0x3C02B000u, 0x3442F230u, 0x8C440000u};
+            const bool code_matches =
+                bus_.matches_code(0x80005F00u, kSifStableEntry);
+            const u32 physical =
+                EeBus::to_physical(
+                    static_cast<u32>(ee_.state().gpr[2].lo));
+            if (code_matches &&
+                physical == 0x1000F230u &&
+                ee_.step_quiet_unchecked_predecoded(
+                    kSifStableEntry[2], error)) {
+                ++retired;
+                ++quiet_block_instructions_;
+                progressed = true;
+                if (!error.empty()) break;
+                continue;
+            }
+            if (!error.empty()) break;
+        }
+
         // Retail OSDSYS SIF synchronization helper. At 0x80005F5C the
         // routine takes its second sample of SMFLG (0x1000F230) after the
         // preceding debounce/NOP interval. Handle that one MMIO read inside
