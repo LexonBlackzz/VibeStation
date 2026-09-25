@@ -1035,8 +1035,68 @@ void App::render_ui() {
     // emulation, the gameplay screen uses its own floating toolbar instead of
     // the legacy ImGui main menu bar so the game image stays visually clean.
 
-    // Main dockspace
     ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    // Gameplay -> launcher transition: fade the frozen gameplay frame to black,
+    // switch screens only at full black, then reveal the launcher.
+    float gameplay_exit_alpha = 0.0f;
+    if (gameplay_exit_transition_active_) {
+        constexpr float kGameplayExitFadeOutSeconds = 0.26f;
+        constexpr float kGameplayExitFadeInSeconds = 0.34f;
+        constexpr float kGameplayExitTotalSeconds =
+            kGameplayExitFadeOutSeconds +
+            kGameplayExitFadeInSeconds;
+
+        const float dt =
+            std::clamp(
+                ImGui::GetIO().DeltaTime,
+                0.0f,
+                0.05f);
+        gameplay_exit_transition_elapsed_ += dt;
+
+        const auto smooth =
+            [](float value) {
+                const float t =
+                    std::clamp(
+                        value,
+                        0.0f,
+                        1.0f);
+                return t * t *
+                    (3.0f - 2.0f * t);
+            };
+
+        if (gameplay_exit_transition_elapsed_ <
+            kGameplayExitFadeOutSeconds) {
+            gameplay_exit_alpha =
+                smooth(
+                    gameplay_exit_transition_elapsed_ /
+                    kGameplayExitFadeOutSeconds);
+        }
+        else {
+            if (!gameplay_exit_transition_switched_) {
+                gameplay_exit_transition_switched_ = true;
+                has_started_emulation_ = false;
+                status_message_ = "Emulation stopped";
+            }
+
+            gameplay_exit_alpha =
+                1.0f -
+                smooth(
+                    (gameplay_exit_transition_elapsed_ -
+                        kGameplayExitFadeOutSeconds) /
+                    kGameplayExitFadeInSeconds);
+        }
+
+        if (gameplay_exit_transition_elapsed_ >=
+            kGameplayExitTotalSeconds) {
+            gameplay_exit_transition_active_ = false;
+            gameplay_exit_transition_switched_ = false;
+            gameplay_exit_transition_elapsed_ = 0.0f;
+            gameplay_exit_alpha = 0.0f;
+        }
+    }
+
+    // Main dockspace
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -1050,6 +1110,9 @@ void App::render_ui() {
         ImGuiWindowFlags_NoBackground;
     if (has_started_emulation_) {
         flags |= ImGuiWindowFlags_NoNavFocus;
+    }
+    if (gameplay_exit_transition_active_) {
+        flags |= ImGuiWindowFlags_NoInputs;
     }
 
     ImGui::Begin("DockSpace", nullptr, flags);
@@ -1100,6 +1163,32 @@ void App::render_ui() {
         panel_fmv_diagnostics();
     if (show_corruption_presets_)
         panel_corruption_presets();
+
+    if (gameplay_exit_transition_active_ &&
+        gameplay_exit_alpha > 0.001f) {
+        ImDrawList* overlay =
+            ImGui::GetForegroundDrawList();
+        const ImVec2 p0 =
+            viewport->WorkPos;
+        const ImVec2 p1(
+            viewport->WorkPos.x +
+                viewport->WorkSize.x,
+            viewport->WorkPos.y +
+                viewport->WorkSize.y);
+        overlay->AddRectFilled(
+            p0,
+            p1,
+            IM_COL32(
+                0,
+                0,
+                0,
+                static_cast<int>(
+                    std::clamp(
+                        gameplay_exit_alpha,
+                        0.0f,
+                        1.0f) *
+                    255.0f)));
+    }
 }
 
 void App::menu_bar() {
