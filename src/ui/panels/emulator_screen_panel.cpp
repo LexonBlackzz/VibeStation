@@ -639,8 +639,15 @@ void App::draw_gameplay_toolbar(
         definitive_grim_reaper_active_,
         "Grim Reaper");
     if (grim.clicked) {
-        play_ui_open_sound();
-        open_definitive_grim_reaper();
+        if (definitive_grim_reaper_active_ &&
+            !definitive_grim_reaper_closing_) {
+            play_ui_close_sound();
+            close_definitive_grim_reaper();
+        }
+        else {
+            play_ui_open_sound();
+            open_definitive_grim_reaper();
+        }
     }
 
     x += button_size + gap;
@@ -748,10 +755,18 @@ void App::draw_gameplay_toolbar(
         show_grim_reaper_ = false;
         show_perf_ = false;
 
-        has_started_emulation_ = false;
+        // Fade gameplay to black, switch to the launcher at full black, then
+        // reveal the launcher. Keep has_started_emulation_ true until the
+        // midpoint so the outgoing gameplay frame remains visible.
+        definitive_grim_reaper_active_ = false;
+        definitive_grim_reaper_closing_ = false;
+        definitive_grim_reaper_visibility_ = 0.0f;
+        gameplay_exit_transition_active_ = true;
+        gameplay_exit_transition_switched_ = false;
+        gameplay_exit_transition_elapsed_ = 0.0f;
         gameplay_toolbar_visibility_ = 0.0f;
         gameplay_toolbar_reveal_hold_ = 0.0f;
-        status_message_ = "Emulation stopped";
+        status_message_ = "Returning to launcher...";
     }
 
     x += button_size + separator_space;
