@@ -377,7 +377,7 @@ bool App::launch_disc_from_cli(const std::string& bios_path,
 }
 
 double App::current_speed_override() const {
-    if (turbo_hold_active_) {
+    if (turbo_hold_active_ || gameplay_toolbar_turbo_active_) {
         return turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
     }
     if (slowdown_hold_active_) {
@@ -641,8 +641,9 @@ void App::process_events(bool& quit) {
         }
         if (event.type == SDL_WINDOWEVENT &&
             event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-            if (turbo_hold_active_) {
+            if (turbo_hold_active_ || gameplay_toolbar_turbo_active_) {
                 turbo_hold_active_ = false;
+                gameplay_toolbar_turbo_active_ = false;
                 apply_speed_override();
             }
             if (slowdown_hold_active_) {
