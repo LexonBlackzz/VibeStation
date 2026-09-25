@@ -210,7 +210,7 @@ private:
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
     std::vector<QuietDecodedTrace> quiet_traces_ =
-        std::vector<QuietDecodedTrace>(2048);
+        std::vector<QuietDecodedTrace>(8192);
     u64 quiet_trace_hits_ = 0;
     u64 quiet_trace_builds_ = 0;
     u64 quiet_trace_side_exits_ = 0;
