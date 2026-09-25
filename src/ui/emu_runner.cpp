@@ -353,6 +353,12 @@ void EmuRunner::apply_pending_disc_eject() {
 void EmuRunner::worker_main() {
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
 
+    const bool hardware_raster_bound =
+        system_ != nullptr && system_->gpu().begin_hardware_raster_thread();
+    if (hardware_raster_bound) {
+        LOG_INFO("GPU: compute rasterizer bound to emulation thread");
+    }
+
     using steady_clock = std::chrono::steady_clock;
     auto next_tick = steady_clock::now();
 
@@ -613,6 +619,9 @@ void EmuRunner::worker_main() {
                 next_tick = after;
             }
         }
+    }
+    if (hardware_raster_bound && system_ != nullptr) {
+        system_->gpu().end_hardware_raster_thread();
     }
 
     frame_active_.store(false, std::memory_order_release);
