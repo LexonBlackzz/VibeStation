@@ -175,7 +175,7 @@ const uint column16[128] = uint[128](
     32,34,40,42,48,50,56,58,33,35,41,43,49,51,57,59,
     36,38,44,46,52,54,60,62,37,39,45,47,53,55,61,63,
     64,66,72,74,80,82,88,90,65,67,73,75,81,83,89,91,
-    68,70,76,78,84,86,92,94,69,71,77,79,85,93,95,
+    68,70,76,78,84,86,92,94,69,71,77,79,85,87,93,95,
     96,98,104,106,112,114,120,122,97,99,105,107,113,115,121,123,
     100,102,108,110,116,118,124,126,101,103,109,111,117,119,125,127
 );
@@ -203,9 +203,9 @@ uint address16(uint x, uint y, uint bp, uint bw) {
 }
 
 uint read16(uint address) {
-    uint packed = words[address >> 2u];
-    uint shift = (address & 2u) * 8u;
-    return (packed >> shift) & 0xFFFFu;
+    uint packed_word = words[address >> 2u];
+    uint bit_shift = (address & 2u) * 8u;
+    return (packed_word >> bit_shift) & 0xFFFFu;
 }
 
 int wrap_coord(int c, uint size, uint mode, uint lo_value, uint hi_value) {
@@ -280,11 +280,11 @@ void main() {
     uint dg = (destination >> 8u) & 255u;
     uint db = (destination >> 16u) & 255u;
 
-    uint output = source & 0xFF000000u;
-    output |= min(255u, dr + ((sr * 20u) >> 7u));
-    output |= min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
-    output |= min(255u, db + ((sb * 20u) >> 7u)) << 16u;
-    words[frame_word] = output;
+    uint result_color = source & 0xFF000000u;
+    result_color |= min(255u, dr + ((sr * 20u) >> 7u));
+    result_color |= min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
+    result_color |= min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+    words[frame_word] = result_color;
 }
 )GLSL";
 
