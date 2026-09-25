@@ -3884,6 +3884,118 @@ u32 EeCpu::run_quiet_fast_prefix(
                             acc_float(lane) + product);
                     }
                 };
+            auto vector_binary = [&](auto op) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    vu_write_float(
+                        fd,
+                        lane,
+                        op(vu_float(fs, lane), vu_float(ft, lane)));
+                }
+            };
+            auto vector_madd = [&](bool subtract_product) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    const float product =
+                        vu_float(fs, lane) * vu_float(ft, lane);
+                    vu_write_float(
+                        fd,
+                        lane,
+                        acc_float(lane) +
+                            (subtract_product ? -product : product));
+                }
+            };
+            auto scalar_control_binary =
+                [&](u32 control, auto op) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto control_madd =
+                [&](u32 control, bool subtract_product) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) +
+                                (subtract_product ? -product : product));
+                    }
+                };
+            auto acc_vector_binary = [&](auto op) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    acc_write_float(
+                        lane,
+                        op(vu_float(fs, lane), vu_float(ft, lane)));
+                }
+            };
+            auto acc_vector_madd = [&](bool subtract_product) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    const float product =
+                        vu_float(fs, lane) * vu_float(ft, lane);
+                    acc_write_float(
+                        lane,
+                        acc_float(lane) +
+                            (subtract_product ? -product : product));
+                }
+            };
+            auto acc_control_binary =
+                [&](u32 control, auto op) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        acc_write_float(
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto acc_control_madd =
+                [&](u32 control, bool subtract_product) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        acc_write_float(
+                            lane,
+                            acc_float(lane) +
+                                (subtract_product ? -product : product));
+                    }
+                };
+            auto saturating_float_to_int = [](float value) -> s32 {
+                if (std::isnan(value)) return 0;
+                if (value >=
+                    static_cast<float>(
+                        std::numeric_limits<s32>::max())) {
+                    return std::numeric_limits<s32>::max();
+                }
+                if (value <=
+                    static_cast<float>(
+                        std::numeric_limits<s32>::min())) {
+                    return std::numeric_limits<s32>::min();
+                }
+                return static_cast<s32>(value);
+            };
+            auto write_vi = [&](u32 reg, u32 value) {
+                reg &= 0xFu;
+                if (reg != 0u) {
+                    state_.vu_vi[reg] = static_cast<u16>(value);
+                }
+            };
 
             if (cop_rs == 0x01u) { // QMFC2
                 if (rt != 0u) state_.gpr[rt] = state_.vu_vf[fs];
@@ -3938,33 +4050,299 @@ u32 EeCpu::run_quiet_fast_prefix(
                         return lhs * rhs;
                     };
 
-                if (cop_funct >= 0x08u &&
-                    cop_funct <= 0x0Bu) { // VMADDx/y/z/w
+                if (cop_funct <= 0x03u) { // VADDx/y/z/w
+                    broadcast_binary(cop_funct, add);
+                } else if (cop_funct >= 0x04u &&
+                           cop_funct <= 0x07u) { // VSUBx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct >= 0x08u &&
+                           cop_funct <= 0x0Bu) { // VMADDx/y/z/w
                     broadcast_madd(cop_funct & 3u);
+                } else if (cop_funct >= 0x0Cu &&
+                           cop_funct <= 0x0Fu) { // VMSUBx/y/z/w
+                    const float scalar =
+                        vu_float(ft, cop_funct & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) - product);
+                    }
+                } else if (cop_funct >= 0x10u &&
+                           cop_funct <= 0x13u) { // VMAXx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
+                } else if (cop_funct >= 0x14u &&
+                           cop_funct <= 0x17u) { // VMINIx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
                 } else if (cop_funct >= 0x18u &&
                            cop_funct <= 0x1Bu) { // VMULx/y/z/w
                     broadcast_binary(
                         cop_funct & 3u, mul);
+                } else if (cop_funct == 0x1Cu) { // VMULq
+                    scalar_control_binary(22u, mul);
+                } else if (cop_funct == 0x1Du) { // VMAXi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
+                } else if (cop_funct == 0x1Eu) { // VMULi
+                    scalar_control_binary(21u, mul);
+                } else if (cop_funct == 0x1Fu) { // VMINIi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
+                } else if (cop_funct == 0x20u) { // VADDq
+                    scalar_control_binary(
+                        22u,
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x21u) { // VMADDq
+                    control_madd(22u, false);
+                } else if (cop_funct == 0x22u) { // VADDi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x23u) { // VMADDi
+                    control_madd(21u, false);
+                } else if (cop_funct == 0x24u) { // VSUBq
+                    scalar_control_binary(
+                        22u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x25u) { // VMSUBq
+                    control_madd(22u, true);
+                } else if (cop_funct == 0x26u) { // VSUBi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x27u) { // VMSUBi
+                    control_madd(21u, true);
+                } else if (cop_funct == 0x28u) { // VADD
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x29u) { // VMADD
+                    vector_madd(false);
+                } else if (cop_funct == 0x2Au) { // VMUL
+                    vector_binary(mul);
+                } else if (cop_funct == 0x2Bu) { // VMAX
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
                 } else if (cop_funct == 0x2Cu) { // VSUB
-                    for (u32 lane = 0u; lane < 4u; ++lane) {
-                        if (!vu_selected(lane)) continue;
-                        vu_write_float(
-                            fd,
-                            lane,
-                            vu_float(fs, lane) -
-                                vu_float(ft, lane));
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x2Du) { // VMSUB
+                    vector_madd(true);
+                } else if (cop_funct == 0x2Eu) { // VOPMSUB
+                    const float result[3] = {
+                        acc_float(0u) -
+                            vu_float(fs, 1u) * vu_float(ft, 2u),
+                        acc_float(1u) -
+                            vu_float(fs, 2u) * vu_float(ft, 0u),
+                        acc_float(2u) -
+                            vu_float(fs, 0u) * vu_float(ft, 1u),
+                    };
+                    for (u32 lane = 0u; lane < 3u; ++lane) {
+                        if (vu_selected(lane)) {
+                            vu_write_float(fd, lane, result[lane]);
+                        }
                     }
+                } else if (cop_funct == 0x2Fu) { // VMINI
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
                 } else if (cop_funct >= 0x3Cu) {
                     const u32 special =
                         (instruction & 3u) |
                         ((instruction >> 4) & 0x7Cu);
-                    if (special >= 0x08u &&
-                        special <= 0x0Bu) { // VMADDAx/y/z/w
+                    const u32 it = ft & 0xFu;
+                    const u32 is = fs & 0xFu;
+                    const u32 fsf =
+                        (instruction >> 21) & 3u;
+                    const u32 ftf =
+                        (instruction >> 23) & 3u;
+
+                    if (special <= 0x03u) { // VADDAx/y/z/w
+                        acc_broadcast_binary(
+                            special,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special >= 0x04u &&
+                               special <= 0x07u) { // VSUBAx/y/z/w
+                        acc_broadcast_binary(
+                            special & 3u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special >= 0x08u &&
+                               special <= 0x0Bu) { // VMADDAx/y/z/w
                         acc_broadcast_madd(special & 3u);
+                    } else if (special >= 0x0Cu &&
+                               special <= 0x0Fu) { // VMSUBAx/y/z/w
+                        const float scalar =
+                            vu_float(ft, special & 3u);
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float product =
+                                vu_float(fs, lane) * scalar;
+                            acc_write_float(
+                                lane,
+                                acc_float(lane) - product);
+                        }
+                    } else if (special >= 0x10u &&
+                               special <= 0x13u) { // VITOF0/4/12/15
+                        static constexpr u32 shifts[4] = {
+                            0u, 4u, 12u, 15u};
+                        const u32 shift = shifts[special - 0x10u];
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float value =
+                                static_cast<float>(
+                                    static_cast<s32>(
+                                        vu_lane_read(fs, lane))) /
+                                static_cast<float>(1u << shift);
+                            vu_write_float(ft, lane, value);
+                        }
+                    } else if (special >= 0x14u &&
+                               special <= 0x17u) { // VFTOI0/4/12/15
+                        static constexpr u32 shifts[4] = {
+                            0u, 4u, 12u, 15u};
+                        const u32 shift = shifts[special - 0x14u];
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float scaled =
+                                vu_float(fs, lane) *
+                                static_cast<float>(1u << shift);
+                            vu_lane_write(
+                                ft,
+                                lane,
+                                static_cast<u32>(
+                                    saturating_float_to_int(scaled)));
+                        }
                     } else if (special >= 0x18u &&
                                special <= 0x1Bu) { // VMULAx/y/z/w
                         acc_broadcast_binary(
                             special & 3u, mul);
+                    } else if (special == 0x1Cu) { // VMULAq
+                        acc_control_binary(22u, mul);
+                    } else if (special == 0x1Du) { // VABS
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    vu_lane_read(fs, lane) &
+                                        0x7FFFFFFFu);
+                            }
+                        }
+                    } else if (special == 0x1Eu) { // VMULAi
+                        acc_control_binary(21u, mul);
+                    } else if (special == 0x1Fu) { // VCLIPw
+                        const float w =
+                            std::fabs(vu_float(ft, 3u));
+                        u32 clip =
+                            (state_.vu_vi[18] << 6) & 0xFFFFFFu;
+                        for (u32 lane = 0u; lane < 3u; ++lane) {
+                            const float value =
+                                vu_float(fs, lane);
+                            if (value > w) {
+                                clip |= 1u << (lane * 2u);
+                            }
+                            if (value < -w) {
+                                clip |= 1u << (lane * 2u + 1u);
+                            }
+                        }
+                        state_.vu_vi[18] = clip;
+                    } else if (special == 0x20u) { // VADDAq
+                        acc_control_binary(
+                            22u,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x21u) { // VMADDAq
+                        acc_control_madd(22u, false);
+                    } else if (special == 0x22u) { // VADDAi
+                        acc_control_binary(
+                            21u,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x23u) { // VMADDAi
+                        acc_control_madd(21u, false);
+                    } else if (special == 0x24u) { // VSUBAq
+                        acc_control_binary(
+                            22u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x25u) { // VMSUBAq
+                        acc_control_madd(22u, true);
+                    } else if (special == 0x26u) { // VSUBAi
+                        acc_control_binary(
+                            21u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x27u) { // VMSUBAi
+                        acc_control_madd(21u, true);
+                    } else if (special == 0x28u) { // VADDA
+                        acc_vector_binary(
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x29u) { // VMADDA
+                        acc_vector_madd(false);
+                    } else if (special == 0x2Au) { // VMULA
+                        acc_vector_binary(mul);
+                    } else if (special == 0x2Cu) { // VSUBA
+                        acc_vector_binary(
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x2Du) { // VMSUBA
+                        acc_vector_madd(true);
+                    } else if (special == 0x2Eu) { // VOPMULA
+                        const float values[3] = {
+                            vu_float(fs, 1u) * vu_float(ft, 2u),
+                            vu_float(fs, 2u) * vu_float(ft, 0u),
+                            vu_float(fs, 0u) * vu_float(ft, 1u),
+                        };
+                        for (u32 lane = 0u; lane < 3u; ++lane) {
+                            if (vu_selected(lane)) {
+                                acc_write_float(lane, values[lane]);
+                            }
+                        }
                     } else if (special == 0x2Fu) { // VNOP
                         // Architectural no-op.
                     } else if (special == 0x30u) { // VMOVE
@@ -3981,6 +4359,78 @@ u32 EeCpu::run_quiet_fast_prefix(
                                     ft,
                                     lane,
                                     source_lane(lane));
+                            }
+                        }
+                    } else if (special == 0x31u) { // VMR32
+                        const EeGpr source = state_.vu_vf[fs];
+                        auto source_lane = [&](u32 lane) {
+                            const u32 rotated = (lane + 1u) & 3u;
+                            const u64 half =
+                                rotated < 2u ? source.lo : source.hi;
+                            return static_cast<u32>(
+                                half >> ((rotated & 1u) * 32u));
+                        };
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    source_lane(lane));
+                            }
+                        }
+                    } else if (special == 0x38u) { // VDIV
+                        const float numerator =
+                            vu_float(fs, fsf);
+                        const float denominator =
+                            vu_float(ft, ftf);
+                        if (denominator == 0.0f) {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    std::copysign(
+                                        std::numeric_limits<float>::max(),
+                                        numerator * denominator));
+                        } else {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    numerator / denominator);
+                        }
+                    } else if (special == 0x39u) { // VSQRT
+                        state_.vu_vi[22] =
+                            ps2_fpu_result(
+                                std::sqrt(
+                                    std::fabs(vu_float(ft, ftf))));
+                    } else if (special == 0x3Au) { // VRSQRT
+                        const float numerator =
+                            vu_float(fs, fsf);
+                        const float denominator =
+                            std::sqrt(
+                                std::fabs(vu_float(ft, ftf)));
+                        if (denominator == 0.0f) {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    std::copysign(
+                                        std::numeric_limits<float>::max(),
+                                        numerator));
+                        } else {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    numerator / denominator);
+                        }
+                    } else if (special == 0x3Bu) { // VWAITQ
+                        // Architectural no-op in this synchronous model.
+                    } else if (special == 0x3Cu) { // VMTIR
+                        write_vi(
+                            it,
+                            vu_lane_read(fs, fsf));
+                    } else if (special == 0x3Du) { // VMFIR
+                        const u32 value =
+                            static_cast<u32>(
+                                static_cast<s32>(
+                                    static_cast<s16>(
+                                        state_.vu_vi[is])));
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(ft, lane, value);
                             }
                         }
                     } else {
