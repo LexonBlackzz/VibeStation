@@ -28,7 +28,7 @@ struct CoverUv {
     float v1 = 1.0f;
 };
 
-std::vector<unsigned char> make_blurred_definitive_ui::rgba(
+std::vector<unsigned char> make_blurred_rgba(
     const unsigned char* source, int width, int height, int radius) {
     const size_t pixel_count =
         static_cast<size_t>(width) * static_cast<size_t>(height);
@@ -227,7 +227,7 @@ bool ensure_background_texture_loaded() {
     // A modest one-time blur gives the text zones a glassy backdrop without
     // adding a per-frame render pass.
     const std::vector<unsigned char> blurred =
-        make_blurred_definitive_ui::rgba(pixels, g_background_width, g_background_height, 7);
+        make_blurred_rgba(pixels, g_background_width, g_background_height, 7);
     if (!blurred.empty()) {
         // Keep a fully blurred copy for modal overlays, and a left-softened
         // copy for the normal definitive launcher presentation.
@@ -344,6 +344,39 @@ void definitive_ui::draw_launcher_background(
             pos, ImVec2(pos.x + size.x, pos.y + size.y),
             ImGui::ColorConvertFloat4ToU32(tint));
     }
+}
+
+void definitive_ui::draw_settings_background(
+    ImDrawList* draw,
+    const ImVec2& pos,
+    const ImVec2& size) {
+    if (draw == nullptr) {
+        return;
+    }
+
+    if (!ensure_background_texture_loaded()) {
+        draw->AddRectFilled(
+            pos,
+            ImVec2(pos.x + size.x, pos.y + size.y),
+            definitive_ui::rgba(7, 9, 12, 255));
+        return;
+    }
+
+    const CoverUv uv = cover_uv_for_size(size);
+    const GLuint texture =
+        g_background_blur_texture != 0
+            ? g_background_blur_texture
+            : (g_background_soft_texture != 0
+                ? g_background_soft_texture
+                : g_background_texture);
+
+    draw->AddImage(
+        (ImTextureID)(intptr_t)texture,
+        pos,
+        ImVec2(pos.x + size.x, pos.y + size.y),
+        ImVec2(uv.u0, uv.v0),
+        ImVec2(uv.u1, uv.v1),
+        definitive_ui::rgba(255, 255, 255, 244));
 }
 
 void definitive_ui::draw_launcher_readability_shade(ImDrawList* draw,
