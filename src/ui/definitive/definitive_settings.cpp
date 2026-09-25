@@ -442,18 +442,10 @@ void App::panel_definitive_settings() {
         window_pos.y + window_size.y);
     const Layout layout = make_layout(window_pos, window_size);
 
-    ensure_background_texture_loaded();
-
-    if (g_background_blur_texture != 0) {
-        draw_cover_region(
-            draw, g_background_blur_texture,
-            window_pos, window_size,
-            window_pos, window_end,
-            rgba(255, 255, 255, 244));
-    }
-    else {
-        draw->AddRectFilled(window_pos, window_end, rgba(7, 9, 12, 255));
-    }
+    draw_settings_background(
+        draw,
+        window_pos,
+        window_size);
     draw->AddRectFilled(
         window_pos, window_end,
         background_color(rgba(0, 2, 6, 148), 0.80f));
