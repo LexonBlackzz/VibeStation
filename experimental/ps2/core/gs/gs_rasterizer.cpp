@@ -354,17 +354,9 @@ u32 GsRasterizer::shade_pixel(
             texture.ta1,
             texture.aem);
     } else {
-        const u32 raw = vram.read_pixel(
-            texture.psm, x, y, texture.bp, texture.bw);
-        if (texture.psm == 0u) {
-            texture_rgba = raw;
-        } else if (texture.psm == 1u) {
-            const u32 rgb = raw & 0x00FFFFFFu;
-            const u32 alpha =
-                (texture.aem && rgb == 0) ? 0u : (texture.ta0 & 0xFFu);
-            texture_rgba = rgb | (alpha << 24);
-        } else {
-            const u16 color = static_cast<u16>(raw);
+        if (texture.psm == 2u) {
+            const u16 color = vram.read_psmct16(
+                x, y, texture.bp, texture.bw);
             const u32 alpha =
                 (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
                 (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
@@ -374,6 +366,28 @@ u32 GsRasterizer::shade_pixel(
                 ((static_cast<u32>(color) & 0x7C00u) << 9) |
                 ((static_cast<u32>(color) & 0x03E0u) << 6) |
                 ((static_cast<u32>(color) & 0x001Fu) << 3);
+        } else {
+            const u32 raw = vram.read_pixel(
+                texture.psm, x, y, texture.bp, texture.bw);
+            if (texture.psm == 0u) {
+                texture_rgba = raw;
+            } else if (texture.psm == 1u) {
+            const u32 rgb = raw & 0x00FFFFFFu;
+            const u32 alpha =
+                (texture.aem && rgb == 0) ? 0u : (texture.ta0 & 0xFFu);
+            texture_rgba = rgb | (alpha << 24);
+            } else {
+                const u16 color = static_cast<u16>(raw);
+                const u32 alpha =
+                    (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
+                    (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
+                    (texture.ta0 & 0xFFu);
+                texture_rgba =
+                    (alpha << 24) |
+                    ((static_cast<u32>(color) & 0x7C00u) << 9) |
+                    ((static_cast<u32>(color) & 0x03E0u) << 6) |
+                    ((static_cast<u32>(color) & 0x001Fu) << 3);
+            }
         }
     }
 

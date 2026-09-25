@@ -29,6 +29,8 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_pixel(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
+    [[nodiscard]] u16 read_psmct16(
+        u32 x, u32 y, u32 bp, u32 bw) const;
     [[nodiscard]] u32 read_pixel_at_address(
         u32 psm, u32 address) const;
     bool write_pixel_at_address_untracked(

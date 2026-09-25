@@ -359,6 +359,19 @@ u32 GsVram::read_pixel(
         psm, pixel_address_bytes(psm, x, y, bp, bw));
 }
 
+u16 GsVram::read_psmct16(
+    u32 x, u32 y, u32 bp, u32 bw) const {
+    const u32 a = address16(x, y, bp, bw, false);
+    if constexpr (std::endian::native == std::endian::little) {
+        u16 value = 0;
+        std::memcpy(&value, data_.data() + a, sizeof(value));
+        return value;
+    }
+    return static_cast<u16>(
+        static_cast<u16>(data_[a + 0]) |
+        (static_cast<u16>(data_[a + 1]) << 8));
+}
+
 u32 GsVram::read_pixel_at_address(u32 psm, u32 a) const {
     if (psm == 0u) {
         if constexpr (std::endian::native == std::endian::little) {
