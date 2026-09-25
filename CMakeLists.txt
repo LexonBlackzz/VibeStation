@@ -191,6 +191,27 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg")
         VERBATIM)
 endif()
 
+set(VIBESTATION_UI_SOUND_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/sounds")
+if(EXISTS "${VIBESTATION_UI_SOUND_DIR}/cursor.wav" AND
+   EXISTS "${VIBESTATION_UI_SOUND_DIR}/open.wav" AND
+   EXISTS "${VIBESTATION_UI_SOUND_DIR}/close.wav")
+    add_custom_command(TARGET VibeStation POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VIBESTATION_UI_SOUND_DIR}/cursor.wav"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/cursor.wav"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VIBESTATION_UI_SOUND_DIR}/open.wav"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/open.wav"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VIBESTATION_UI_SOUND_DIR}/close.wav"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/close.wav"
+        COMMENT "Copying definitive UI sound effects"
+        VERBATIM)
+endif()
+
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
         GIT_REPOSITORY https://github.com/herumi/xbyak.git
