@@ -1,7 +1,6 @@
 #include "ui/app.h"
 #include "ui/definitive/definitive_shared.h"
 #include "ui/panels/grim_reaper_panel.h"
-#include "vibestation_version.h"
 
 #include <imgui.h>
 
