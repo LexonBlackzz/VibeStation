@@ -3743,6 +3743,29 @@ u32 EeCpu::run_quiet_fast_prefix(
                 state_.next_pc = expected_pc + 12u;
                 next_is_delay_slot_ = false;
             }
+        } else if (opcode == 0x08u) { // ADDI
+            const s32 lhs =
+                static_cast<s32>(
+                    static_cast<u32>(gpr_u64(rs)));
+            const s32 rhs = static_cast<s32>(imm);
+            const s64 sum =
+                static_cast<s64>(lhs) +
+                static_cast<s64>(rhs);
+            if (sum <
+                    static_cast<s64>(
+                        std::numeric_limits<s32>::min()) ||
+                sum >
+                    static_cast<s64>(
+                        std::numeric_limits<s32>::max())) {
+                // Rare architected overflow: leave PC/state untouched and
+                // let the full interpreter raise the exact exception.
+                handled = false;
+            } else {
+                write_gpr_word(
+                    rt,
+                    static_cast<u32>(
+                        static_cast<s32>(sum)));
+            }
         } else if (opcode == 0x09u) {
             write_gpr_word(
                 rt,
