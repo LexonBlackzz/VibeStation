@@ -800,28 +800,6 @@ void App::panel_definitive_home() {
                         kLauncherBackgroundFadeDuration,
                     0.0f, 1.0f)));
 
-    const float launcher_ui_progress =
-        g_launcher_ui_intro_complete
-            ? 1.0f
-            : smoothstep01(std::clamp(
-                g_launcher_ui_intro_elapsed /
-                    kLauncherUiIntroDuration,
-                0.0f,
-                1.0f));
-
-    // Preserve only a very faint trace of the intro backdrop while the
-    // launcher UI begins assembling. The actual room photograph stays hidden
-    // until the UI reveal is complete, then follows its dedicated fade stage.
-    const float launcher_handoff_alpha =
-        launcher_ui_initializing
-            ? 0.10f *
-                (1.0f -
-                    smoothstep01(std::clamp(
-                        launcher_ui_progress / 0.28f,
-                        0.0f,
-                        1.0f)))
-            : 0.0f;
-
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
             SDL_GetPerformanceCounter() ^
@@ -845,19 +823,12 @@ void App::panel_definitive_home() {
 
     Layout layout = make_layout(window_pos, window_size);
 
+    // Startup sequencing is intentionally strict:
+    //   intro -> black UI assembly -> one photograph fade-in.
+    // launcher_background_alpha stays zero until the UI animation is complete,
+    // preventing any intermediate photograph flash/fade cycle.
     definitive_ui::draw_launcher_background(
         draw, window_pos, window_size, launcher_background_alpha);
-
-    // Keep the same blurred/dim photograph visible at the exact opacity used
-    // by the final intro frame. Once the launcher controls finish assembling,
-    // crossfade that handoff layer into the normal launcher photograph.
-    if (launcher_handoff_alpha > 0.001f) {
-        definitive_ui::draw_intro_handoff_background(
-            draw,
-            window_pos,
-            window_size,
-            launcher_handoff_alpha);
-    }
 
     definitive_ui::draw_launcher_readability_shade(
         draw,
