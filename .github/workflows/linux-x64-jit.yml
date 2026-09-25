@@ -39,7 +39,9 @@ jobs:
             libasound2-dev \
             libpulse-dev \
             libudev-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            xvfb \
+            xauth
 
       - name: Configure
         run: |
@@ -58,6 +60,9 @@ jobs:
 
       - name: GPU self test
         run: ./build-linux/VibeStation --gpu-self-test
+
+      - name: GPU hardware self test
+        run: xvfb-run -a ./build-linux/VibeStation --gpu-hardware-self-test
 
       - name: Upload Linux executable
         if: always()
