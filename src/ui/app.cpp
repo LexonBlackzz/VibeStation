@@ -760,7 +760,18 @@ void App::process_events(bool& quit) {
                 }
             }
             else if (ctrl && key == SDLK_COMMA) {
-                show_settings_ = !show_settings_;
+                if (!has_started_emulation_ &&
+                    !definitive_detailed_settings_) {
+                    if (show_settings_) {
+                        close_definitive_settings();
+                    }
+                    else {
+                        open_definitive_settings();
+                    }
+                }
+                else {
+                    show_settings_ = !show_settings_;
+                }
             }
             else if (ctrl && key == SDLK_F5) {
                 if (system_->bios_loaded() && !emu_runner_.is_running() &&
