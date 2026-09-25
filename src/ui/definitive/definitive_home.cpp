@@ -2276,7 +2276,7 @@ void App::panel_definitive_settings() {
     switch (definitive_settings_tab_) {
     case 0: { // Input
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 260.0f, "INPUT");
+            draw, layout, left_x, content_y, column_w, 160.0f, "INPUT");
 
         if (definitive_settings_action(
             draw, layout, "input_bindings", "Configure Keyboard Bindings",
@@ -2290,30 +2290,6 @@ void App::panel_definitive_settings() {
         }
         note(left_x + 1.0f, content_y + 43.0f,
             "Change the keyboard keys used for PlayStation buttons.");
-
-        if (definitive_settings_switch(
-            draw, layout, "input_stop_eof", "Stop Playback at EOF",
-            left_x + 1.0f, content_y + 43.0f + row_step, column_w - 2.0f,
-            input_movie_stop_at_eof_)) {
-            if (input_movie_stop_at_eof_) {
-                input_movie_loop_ = false;
-            }
-            input_recorder_.set_end_behavior(input_movie_end_behavior());
-        }
-        note(left_x + 1.0f, content_y + 43.0f + row_step,
-            "Stops an input movie when the recorded frames end.");
-
-        if (definitive_settings_switch(
-            draw, layout, "input_loop", "Loop Playback",
-            left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
-            column_w - 2.0f, input_movie_loop_)) {
-            if (input_movie_loop_) {
-                input_movie_stop_at_eof_ = false;
-            }
-            input_recorder_.set_end_behavior(input_movie_end_behavior());
-        }
-        note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
-            "Restarts input-movie playback automatically at the end.");
 
         draw_settings_section(
             draw, layout, right_x, content_y, column_w, 160.0f, "GAMEPAD");
