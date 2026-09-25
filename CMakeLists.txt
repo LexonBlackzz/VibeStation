@@ -120,6 +120,7 @@ set(VIBESTATION_SOURCES
     src/input/input_manager.cpp
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
+    src/ui/embedded_resources.cpp
     src/ui/frame_presentation_worker.cpp
     src/ui/app.cpp
     src/ui/app_discord_presence.cpp
@@ -182,11 +183,22 @@ set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
 
+if(WIN32)
+    # Embed the application icon plus launcher background, startup icon and UI
+    # sounds directly into VibeStation.exe as Windows resources.
+    target_sources(VibeStation PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
+endif()
+
 target_include_directories(VibeStation PRIVATE
     src
     "${stb_SOURCE_DIR}")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
 
+# Windows builds consume these assets from resources/vibestation.rc, so the
+# executable is self-contained. Keep filesystem copies only for non-Windows
+# builds where PE resources are unavailable.
+if(NOT WIN32)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg")
     add_custom_command(TARGET VibeStation POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -228,6 +240,7 @@ add_custom_command(TARGET VibeStation POST_BUILD
         "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/logo.wav"
     COMMENT "Copying definitive UI sound effects"
     VERBATIM)
+endif()
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
@@ -316,8 +329,6 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
                 ${CMAKE_CURRENT_BINARY_DIR}/discord_partner_sdk_embed.rc)
             target_compile_definitions(VibeStation PRIVATE
                 VIBESTATION_HAS_EMBEDDED_DISCORD_DLL=1)
-            target_sources(VibeStation PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
             if(MSVC)
                 target_link_libraries(VibeStation PRIVATE delayimp)
                 target_link_options(VibeStation PRIVATE /DELAYLOAD:discord_partner_sdk.dll)
