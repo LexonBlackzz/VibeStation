@@ -336,6 +336,43 @@ u32 GsRasterizer::shade_pixel(
         texture.psm == 27u || texture.psm == 36u ||
         texture.psm == 44u;
 
+    // Fast common path: PSMCT16 + MODULATE with tracing disabled.
+    // A 5-bit channel expands as c5<<3, so the GS modulation
+    // ((c5<<3) * Cv) >> 7 is exactly (c5 * Cv) >> 4.
+    if (texture.psm == 2u &&
+        texture.tfx == 0u &&
+        texture.nonzero_samples == nullptr &&
+        texture.alpha_samples == nullptr &&
+        texture.first_sample_x == nullptr &&
+        texture.first_sample_y == nullptr &&
+        texture.first_sample_rgba == nullptr &&
+        texture.nonzero_shaded == nullptr) {
+        const u16 color = vram.read_psmct16(
+            x, y, texture.bp, texture.bw);
+        const u32 r5 = color & 0x1Fu;
+        const u32 g5 = (color >> 5u) & 0x1Fu;
+        const u32 b5 = (color >> 10u) & 0x1Fu;
+        const u32 vr = channel(vertex_rgba, 0u);
+        const u32 vg = channel(vertex_rgba, 8u);
+        const u32 vb = channel(vertex_rgba, 16u);
+        const u32 va = channel(vertex_rgba, 24u);
+        u32 out = 0u;
+        out |= std::min(255u, (r5 * vr) >> 4u);
+        out |= std::min(255u, (g5 * vg) >> 4u) << 8u;
+        out |= std::min(255u, (b5 * vb) >> 4u) << 16u;
+        u32 alpha =
+            (color & 0x8000u) != 0u ? (texture.ta1 & 0xFFu) :
+            (texture.aem && (color & 0x7FFFu) == 0u) ? 0u :
+            (texture.ta0 & 0xFFu);
+        if (texture.tcc) {
+            alpha = modulate_channel(alpha, va);
+        } else {
+            alpha = va;
+        }
+        out |= alpha << 24u;
+        return out;
+    }
+
     u32 texture_rgba = 0;
     if (indexed) {
         const u32 index = vram.read_index(
