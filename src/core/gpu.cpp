@@ -621,6 +621,142 @@ u32 Gpu::gp0_command_length(u8 opcode) {
     }
 }
 
+// ── Optional host-GPU raster backend ────────────────────────────────
+
+void Gpu::set_hardware_rasterizer(GpuHardwareRasterizer* rasterizer) {
+    hardware_rasterizer_ = rasterizer;
+    hardware_gpu_vram_newer_ = false;
+    hardware_cpu_vram_dirty_ = true;
+}
+
+bool Gpu::begin_hardware_raster_thread() {
+    if (hardware_rasterizer_ == nullptr ||
+        !hardware_rasterizer_->available()) {
+        return false;
+    }
+    const bool bound = hardware_rasterizer_->bind_to_current_thread();
+    if (bound) {
+        hardware_cpu_vram_dirty_ = true;
+        hardware_gpu_vram_newer_ = false;
+    }
+    return bound;
+}
+
+void Gpu::end_hardware_raster_thread() {
+    if (hardware_rasterizer_ != nullptr) {
+        ensure_cpu_vram_current();
+        hardware_rasterizer_->unbind_from_current_thread();
+    }
+}
+
+bool Gpu::hardware_rasterizer_active() const {
+    return hardware_draw_enabled();
+}
+
+u64 Gpu::hardware_raster_dispatch_count() const {
+    return hardware_rasterizer_ != nullptr
+        ? hardware_rasterizer_->dispatch_count()
+        : 0u;
+}
+
+u64 Gpu::hardware_raster_upload_count() const {
+    return hardware_rasterizer_ != nullptr
+        ? hardware_rasterizer_->upload_count()
+        : 0u;
+}
+
+u64 Gpu::hardware_raster_download_count() const {
+    return hardware_rasterizer_ != nullptr
+        ? hardware_rasterizer_->download_count()
+        : 0u;
+}
+
+bool Gpu::hardware_draw_enabled() const {
+    return g_gpu_hardware_rasterizer &&
+        !g_gpu_fast_mode &&
+        hardware_rasterizer_ != nullptr &&
+        hardware_rasterizer_->available();
+}
+
+bool Gpu::ensure_hardware_vram_current() {
+    if (!hardware_draw_enabled()) {
+        return false;
+    }
+    if (!hardware_cpu_vram_dirty_) {
+        return true;
+    }
+    if (!hardware_rasterizer_->upload_vram(vram_.data(), vram_.size())) {
+        return false;
+    }
+    hardware_cpu_vram_dirty_ = false;
+    hardware_gpu_vram_newer_ = false;
+    return true;
+}
+
+void Gpu::ensure_cpu_vram_current() const {
+    if (!hardware_gpu_vram_newer_ || hardware_rasterizer_ == nullptr) {
+        return;
+    }
+
+    Gpu* self = const_cast<Gpu*>(this);
+    if (hardware_rasterizer_->download_vram(
+            self->vram_.data(), self->vram_.size())) {
+        self->hardware_gpu_vram_newer_ = false;
+        self->hardware_cpu_vram_dirty_ = false;
+    }
+}
+
+void Gpu::prepare_software_vram_write() {
+    ensure_cpu_vram_current();
+    hardware_cpu_vram_dirty_ = true;
+}
+
+GpuHardwareRasterizer::DrawState Gpu::hardware_draw_state(
+    bool raw_texture) const {
+    GpuHardwareRasterizer::DrawState state{};
+    state.draw_x_min = draw_x_min_;
+    state.draw_y_min = draw_y_min_;
+    state.draw_x_max = draw_x_max_;
+    state.draw_y_max = draw_y_max_;
+    state.dither = dither_enabled_;
+    state.semi_transparent = semi_transparency_mode_;
+    state.semi_mode = semi_transparency_;
+    state.force_set_mask_bit = force_set_mask_bit_;
+    state.check_mask_before_draw = check_mask_before_draw_;
+    state.raw_texture = raw_texture;
+    state.rect_x_flip = tex_rect_x_flip_;
+    state.rect_y_flip = tex_rect_y_flip_;
+
+    const TextureSampleState texture = prepare_texture_sample_state();
+    state.texture.keep_x = texture.keep_x;
+    state.texture.keep_y = texture.keep_y;
+    state.texture.replace_x = texture.replace_x;
+    state.texture.replace_y = texture.replace_y;
+    state.texture.depth = texture.depth;
+    state.texture.tex_base_x = texture.tex_base_x;
+    state.texture.tex_base_y = texture.tex_base_y;
+    state.texture.clut_x = texture.clut_x;
+    state.texture.clut_row = static_cast<u32>(texture.clut_row);
+    return state;
+}
+
+GpuHardwareRasterizer::Vertex Gpu::hardware_vertex(const Vertex& v) {
+    GpuHardwareRasterizer::Vertex out{};
+    out.x = v.x;
+    out.y = v.y;
+    out.u = v.u;
+    out.v = v.v;
+    out.r = v.color.r;
+    out.g = v.color.g;
+    out.b = v.color.b;
+    return out;
+}
+
+u16* Gpu::vram_mut_data() {
+    prepare_software_vram_write();
+    return vram_.data();
+}
+
 // ── Reset ──────────────────────────────────────────────────────────
 
 void Gpu::reset() {
