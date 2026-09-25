@@ -947,6 +947,14 @@ void Ps2App::panel_main() {
             display.width(),
             display.height(),
             display.psm());
+        if (emulation_running_ &&
+            guest_fields_per_second_ > 0.0) {
+            ImGui::Text(
+                "%.1f FPS  |  %.0f%% speed  |  %.1f MIPS",
+                guest_frames_per_second_,
+                emulation_speed_percent_,
+                ee_instructions_per_second_ / 1'000'000.0);
+        }
         show_boot_progress();
         return;
     }
@@ -1447,6 +1455,24 @@ void Ps2App::panel_gs_debug() {
         ImGui::TextDisabled(
             "GPU GS: unavailable (OpenGL 4.3 compute required)");
     }
+
+    const float ui_fps = ImGui::GetIO().Framerate;
+    const float ui_ms =
+        ui_fps > 0.0f ? 1000.0f / ui_fps : 0.0f;
+
+    ImGui::Separator();
+    ImGui::Text(
+        "Guest: %.1f FPS   %.1f%% speed   %.1f fields/s",
+        guest_frames_per_second_,
+        emulation_speed_percent_,
+        guest_fields_per_second_);
+    ImGui::Text(
+        "Host UI: %.1f FPS   %.2f ms/frame   EE: %.1f MIPS",
+        static_cast<double>(ui_fps),
+        static_cast<double>(ui_ms),
+        ee_instructions_per_second_ / 1'000'000.0);
+    ImGui::TextDisabled(
+        "100%% = 59.94 fields/s = 29.97 interlaced frames/s.");
     ImGui::Separator();
 
     if (ImGui::BeginTable("GSStats", 2,
@@ -1763,7 +1789,11 @@ bool Ps2App::start_bios() {
     if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     speed_sample_time_ = std::chrono::steady_clock::now();
     speed_sample_instructions_ = system_.ee().state().instructions_executed;
+    speed_sample_fields_ = system_.video_fields_started();
     ee_instructions_per_second_ = 0.0;
+    guest_fields_per_second_ = 0.0;
+    guest_frames_per_second_ = 0.0;
+    emulation_speed_percent_ = 0.0;
 
     char message[160]{};
     std::snprintf(
@@ -1899,11 +1929,29 @@ void Ps2App::update_emulation() {
     const auto sample_seconds =
         std::chrono::duration<double>(sample_time - speed_sample_time_).count();
     if (sample_seconds >= 0.5) {
-        const u64 instructions = system_.ee().state().instructions_executed;
+        constexpr double kNtscFieldsPerSecond = 59.94;
+
+        const u64 instructions =
+            system_.ee().state().instructions_executed;
+        const u64 fields =
+            system_.video_fields_started();
+
         ee_instructions_per_second_ =
-            static_cast<double>(instructions - speed_sample_instructions_) /
+            static_cast<double>(
+                instructions - speed_sample_instructions_) /
             sample_seconds;
+        guest_fields_per_second_ =
+            static_cast<double>(
+                fields - speed_sample_fields_) /
+            sample_seconds;
+        guest_frames_per_second_ =
+            guest_fields_per_second_ * 0.5;
+        emulation_speed_percent_ =
+            (guest_fields_per_second_ /
+             kNtscFieldsPerSecond) * 100.0;
+
         speed_sample_instructions_ = instructions;
+        speed_sample_fields_ = fields;
         speed_sample_time_ = sample_time;
     }
 
