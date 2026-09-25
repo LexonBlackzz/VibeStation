@@ -1712,6 +1712,19 @@ int main(int argc, char** argv) {
             << std::dec << '\n';
     }
 
+    std::cout << "EE_DMA_HOT_ROUTINE_DUMP_BEGIN=0x00266A00 END=0x00266D40\n";
+    for (ps2::u32 address = 0x00266A00u;
+         address < 0x00266D40u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_DMA_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
     std::cout << "EE_QUIET_HOT_BLOCKS";
     for (const auto& [pc, hits] : system.quiet_block_hotspots(32u)) {
         std::cout
