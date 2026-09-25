@@ -2,6 +2,7 @@
 
 #include "core/gs/gs_privileged.h"
 
+#include <algorithm>
 #include <bit>
 #include <chrono>
 #include <utility>
@@ -63,15 +64,188 @@ GsCore::~GsCore() {
     }
     raster_condition_.notify_one();
     if (raster_worker_.joinable()) raster_worker_.join();
+    stop_raster_helpers();
 }
 
 void GsCore::set_async_rasterization(bool enabled) {
     if (async_rasterization_ == enabled) return;
     flush_pending_draws();
     if (enabled && !raster_worker_.joinable()) {
+        start_raster_helpers();
         raster_worker_ = std::thread(&GsCore::raster_worker_main, this);
     }
     async_rasterization_ = enabled;
+}
+
+void GsCore::start_raster_helpers() {
+    if (raster_helper_count_ != 0u) return;
+
+    const unsigned host_threads =
+        std::thread::hardware_concurrency();
+    const u32 desired =
+        host_threads == 0u
+            ? kMaxRasterHelpers
+            : host_threads > 2u
+                ? std::min<u32>(
+                    kMaxRasterHelpers,
+                    static_cast<u32>(host_threads - 2u))
+                : 0u;
+    if (desired == 0u) return;
+
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_stop_ = false;
+    }
+    raster_helper_count_ = desired;
+    for (u32 i = 0u; i < raster_helper_count_; ++i) {
+        raster_helpers_[i] = std::thread(
+            &GsCore::raster_helper_main,
+            this,
+            i + 1u);
+    }
+}
+
+void GsCore::stop_raster_helpers() {
+    if (raster_helper_count_ == 0u) return;
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_stop_ = true;
+        ++raster_parallel_generation_;
+    }
+    raster_parallel_condition_.notify_all();
+    for (u32 i = 0u; i < raster_helper_count_; ++i) {
+        if (raster_helpers_[i].joinable()) {
+            raster_helpers_[i].join();
+        }
+    }
+    raster_helper_count_ = 0u;
+}
+
+void GsCore::raster_helper_main(u32 helper_index) {
+    u64 observed_generation = 0u;
+    for (;;) {
+        const GsRasterContext* ctx = nullptr;
+        const GsRasterVertex* a = nullptr;
+        const GsRasterVertex* b = nullptr;
+        s32 row_begin = 0;
+        s32 row_end = 0;
+        u64 generation = 0u;
+
+        {
+            std::unique_lock lock(raster_parallel_mutex_);
+            raster_parallel_condition_.wait(lock, [&] {
+                return raster_parallel_stop_ ||
+                       raster_parallel_generation_ !=
+                           observed_generation;
+            });
+            if (raster_parallel_stop_) return;
+
+            generation = raster_parallel_generation_;
+            observed_generation = generation;
+            ctx = raster_parallel_context_;
+            a = raster_parallel_a_;
+            b = raster_parallel_b_;
+            row_begin =
+                raster_parallel_boundaries_[helper_index];
+            row_end =
+                raster_parallel_boundaries_[helper_index + 1u];
+        }
+
+        const u64 count = GsRasterizer::draw_sprite_rows(
+            vram_, *ctx, *a, *b, row_begin, row_end);
+
+        {
+            std::lock_guard lock(raster_parallel_mutex_);
+            // Only one raster command can own the pool at a time.
+            if (generation == raster_parallel_generation_) {
+                raster_parallel_counts_[helper_index] = count;
+                if (raster_parallel_pending_ != 0u) {
+                    --raster_parallel_pending_;
+                    if (raster_parallel_pending_ == 0u) {
+                        raster_parallel_done_condition_.notify_one();
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool GsCore::try_execute_parallel_sprite(
+    const RasterCommand& command,
+    u64& pixels) {
+    if (raster_helper_count_ == 0u ||
+        detailed_raster_stats_ ||
+        command.primitive != 6u ||
+        command.vertex_count < 2u) {
+        return false;
+    }
+
+    s32 top = 0;
+    s32 bottom = 0;
+    u64 area = 0u;
+    if (!GsRasterizer::parallel_sprite_plan(
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    const u32 worker_count = raster_helper_count_ + 1u;
+    const s32 rows = bottom - top;
+    if (rows < static_cast<s32>(worker_count * 4u)) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_context_ = &command.context;
+        raster_parallel_a_ = &command.a;
+        raster_parallel_b_ = &command.b;
+        raster_parallel_counts_.fill(0u);
+        raster_parallel_boundaries_[0] = top;
+        for (u32 worker = 1u;
+             worker < worker_count;
+             ++worker) {
+            raster_parallel_boundaries_[worker] =
+                top + static_cast<s32>(
+                    (static_cast<s64>(rows) * worker) /
+                    worker_count);
+        }
+        raster_parallel_boundaries_[worker_count] = bottom;
+        raster_parallel_pending_ = raster_helper_count_;
+        ++raster_parallel_generation_;
+    }
+    raster_parallel_condition_.notify_all();
+
+    raster_parallel_counts_[0] =
+        GsRasterizer::draw_sprite_rows(
+            vram_,
+            command.context,
+            command.a,
+            command.b,
+            raster_parallel_boundaries_[0],
+            raster_parallel_boundaries_[1]);
+
+    {
+        std::unique_lock lock(raster_parallel_mutex_);
+        raster_parallel_done_condition_.wait(lock, [&] {
+            return raster_parallel_pending_ == 0u;
+        });
+    }
+
+    pixels = 0u;
+    for (u32 worker = 0u;
+         worker < worker_count;
+         ++worker) {
+        pixels += raster_parallel_counts_[worker];
+    }
+    ++stats_.parallel_sprite_draws;
+    stats_.parallel_sprite_pixels += pixels;
+    stats_.parallel_sprite_helper_jobs += raster_helper_count_;
+    return true;
 }
 
 void GsCore::flush_pending_draws() const {
@@ -863,7 +1037,10 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
         pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
     } else if (prim == 6u && vertex_count >= 2u) {
-        pixels = GsRasterizer::draw_sprite(vram_, ctx, a, b);
+        if (!try_execute_parallel_sprite(command, pixels)) {
+            pixels = GsRasterizer::draw_sprite(
+                vram_, ctx, a, b);
+        }
     } else if ((prim == 3u || prim == 4u || prim == 5u) && vertex_count >= 3u) {
         pixels = GsRasterizer::draw_triangle(vram_, ctx, a, b, c);
     } else {

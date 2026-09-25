@@ -47,6 +47,9 @@ struct GsStats {
     u64 primitives = 0;
     u64 raster_draws = 0;
     u64 raster_pixels = 0;
+    u64 parallel_sprite_draws = 0;
+    u64 parallel_sprite_pixels = 0;
+    u64 parallel_sprite_helper_jobs = 0;
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
     std::array<u64, 8> raster_ns_by_primitive{};
@@ -248,6 +251,12 @@ private:
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
     void raster_worker_main();
+    void start_raster_helpers();
+    void stop_raster_helpers();
+    void raster_helper_main(u32 helper_index);
+    bool try_execute_parallel_sprite(
+        const RasterCommand& command,
+        u64& pixels);
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
 
@@ -273,6 +282,23 @@ private:
     bool raster_worker_stop_ = false;
     u64 raster_enqueued_ = 0;
     u64 raster_completed_ = 0;
+
+    static constexpr u32 kMaxRasterHelpers = 3u;
+    std::array<std::thread, kMaxRasterHelpers> raster_helpers_{};
+    u32 raster_helper_count_ = 0u;
+    std::mutex raster_parallel_mutex_{};
+    std::condition_variable raster_parallel_condition_{};
+    std::condition_variable raster_parallel_done_condition_{};
+    bool raster_parallel_stop_ = false;
+    u64 raster_parallel_generation_ = 0u;
+    u32 raster_parallel_pending_ = 0u;
+    const GsRasterContext* raster_parallel_context_ = nullptr;
+    const GsRasterVertex* raster_parallel_a_ = nullptr;
+    const GsRasterVertex* raster_parallel_b_ = nullptr;
+    std::array<s32, kMaxRasterHelpers + 2u>
+        raster_parallel_boundaries_{};
+    std::array<u64, kMaxRasterHelpers + 1u>
+        raster_parallel_counts_{};
 };
 
 } // namespace ps2

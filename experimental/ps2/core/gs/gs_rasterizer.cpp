@@ -1046,11 +1046,199 @@ u64 GsRasterizer::draw_line(
     return pixels;
 }
 
+bool parallel_sprite_vram_safe(
+    const GsRasterContext& ctx,
+    s32 left,
+    s32 right,
+    s32 top,
+    s32 bottom) {
+    if ((!simple_frame_write(ctx) &&
+         !hot_osdsys_psm16_pixel_state(ctx)) ||
+        left < 0 || top < 0 ||
+        right <= left || bottom <= top ||
+        ctx.fbw == 0u ||
+        static_cast<u32>(right) > ctx.fbw * 64u) {
+        return false;
+    }
+
+    // Keep the first pool experiment deliberately narrow: direct-color FST
+    // textures only, no CLUT state, no wrap modes that can broaden the source
+    // footprint, and no detailed-stat pointers shared across workers.
+    if (ctx.texture.enabled) {
+        if (!ctx.texture.fst ||
+            (ctx.texture.psm != 0u &&
+             ctx.texture.psm != 1u &&
+             ctx.texture.psm != 2u &&
+             ctx.texture.psm != 10u) ||
+            ctx.texture.nonzero_samples != nullptr ||
+            ctx.texture.alpha_samples != nullptr ||
+            ctx.texture.first_sample_x != nullptr ||
+            ctx.texture.first_sample_y != nullptr ||
+            ctx.texture.first_sample_rgba != nullptr ||
+            ctx.texture.nonzero_shaded != nullptr ||
+            ctx.texture.wms > 1u ||
+            ctx.texture.wmt > 1u) {
+            return false;
+        }
+    }
+
+    auto page_height = [](u32 psm) -> u32 {
+        if (psm == 0u || psm == 1u ||
+            psm == 48u || psm == 49u) {
+            return 32u;
+        }
+        if (psm == 2u || psm == 10u ||
+            psm == 50u || psm == 58u) {
+            return 64u;
+        }
+        return 0u;
+    };
+
+    const auto range_for = [&](
+        u32 bp,
+        u32 bw,
+        u32 psm,
+        u32 width,
+        u32 height,
+        u64& begin,
+        u64& end) -> bool {
+        const u32 ph = page_height(psm);
+        if (ph == 0u || bw == 0u ||
+            width == 0u || height == 0u) {
+            return false;
+        }
+        const u32 pages_x = (width + 63u) >> 6u;
+        const u32 pages_y = (height + ph - 1u) / ph;
+        if (pages_x == 0u || pages_y == 0u || pages_x > bw) {
+            return false;
+        }
+        const u64 base = static_cast<u64>(bp) * 256u;
+        const u64 last_page =
+            static_cast<u64>(pages_y - 1u) * bw +
+            (pages_x - 1u);
+        begin = base;
+        end = base + (last_page + 1u) * 8192u;
+        return end <= GsVram::kSize;
+    };
+
+    const u32 target_ph = page_height(ctx.psm);
+    if (target_ph == 0u) return false;
+    const u32 min_page_x = static_cast<u32>(left) >> 6u;
+    const u32 max_page_x = static_cast<u32>(right - 1) >> 6u;
+    const u32 min_page_y =
+        static_cast<u32>(top) / target_ph;
+    const u32 max_page_y =
+        static_cast<u32>(bottom - 1) / target_ph;
+    if (max_page_x >= ctx.fbw) return false;
+
+    const u64 target_base =
+        static_cast<u64>(ctx.fbp) * 256u;
+    const u64 first_page =
+        static_cast<u64>(min_page_y) * ctx.fbw +
+        min_page_x;
+    const u64 last_page =
+        static_cast<u64>(max_page_y) * ctx.fbw +
+        max_page_x;
+    const u64 target_begin =
+        target_base + first_page * 8192u;
+    const u64 target_end =
+        target_base + (last_page + 1u) * 8192u;
+    if (target_end > GsVram::kSize) return false;
+
+    // The hot OSDSYS path reads depth while writing color. Do not parallelize
+    // a pathological layout where those two ranges alias each other.
+    if (ctx.zte) {
+        u64 depth_begin = 0u;
+        u64 depth_end = 0u;
+        const u32 target_width =
+            static_cast<u32>(right);
+        const u32 target_height =
+            static_cast<u32>(bottom);
+        if (!range_for(
+                ctx.zbp,
+                ctx.fbw,
+                ctx.zpsm,
+                target_width,
+                target_height,
+                depth_begin,
+                depth_end)) {
+            return false;
+        }
+        if (!(depth_end <= target_begin ||
+              target_end <= depth_begin)) {
+            return false;
+        }
+    }
+
+    if (!ctx.texture.enabled) return true;
+
+    u64 source_begin = 0u;
+    u64 source_end = 0u;
+    if (!range_for(
+            ctx.texture.bp,
+            ctx.texture.bw,
+            ctx.texture.psm,
+            ctx.texture.width,
+            ctx.texture.height,
+            source_begin,
+            source_end)) {
+        return false;
+    }
+
+    return source_end <= target_begin ||
+           target_end <= source_begin;
+}
+
+bool GsRasterizer::parallel_sprite_plan(
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    s32& top,
+    s32& bottom,
+    u64& area) {
+    if (!supported_target(ctx) ||
+        !supported_texture(ctx.texture)) {
+        return false;
+    }
+
+    s32 left = ceil_div16(std::min(a.x, b.x));
+    s32 right = ceil_div16(std::max(a.x, b.x));
+    top = ceil_div16(std::min(a.y, b.y));
+    bottom = ceil_div16(std::max(a.y, b.y));
+
+    left = std::max(left, ctx.scax0);
+    right = std::min(right, ctx.scax1 + 1);
+    top = std::max(top, ctx.scay0);
+    bottom = std::min(bottom, ctx.scay1 + 1);
+    if (left >= right || top >= bottom) return false;
+
+    area =
+        static_cast<u64>(right - left) *
+        static_cast<u64>(bottom - top);
+    if (area < 65536u || bottom - top < 16) {
+        return false;
+    }
+
+    return parallel_sprite_vram_safe(
+        ctx, left, right, top, bottom);
+}
+
 u64 GsRasterizer::draw_sprite(
     GsVram& vram,
     const GsRasterContext& ctx,
     const GsRasterVertex& a,
     const GsRasterVertex& b) {
+    return draw_sprite_rows(
+        vram, ctx, a, b, ctx.scay0, ctx.scay1 + 1);
+}
+
+u64 GsRasterizer::draw_sprite_rows(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    s32 row_begin,
+    s32 row_end) {
     if (!supported_target(ctx) || !supported_texture(ctx.texture)) return 0;
 
     const s32 min_x_fp = std::min(a.x, b.x);
@@ -1067,16 +1255,14 @@ u64 GsRasterizer::draw_sprite(
     right = std::min(right, ctx.scax1 + 1);
     top = std::max(top, ctx.scay0);
     bottom = std::min(bottom, ctx.scay1 + 1);
+    top = std::max(top, row_begin);
+    bottom = std::min(bottom, row_end);
 
     if (left >= right || top >= bottom) return 0;
 
     const s64 dx = static_cast<s64>(b.x) - a.x;
     const s64 dy = static_cast<s64>(b.y) - a.y;
 
-    // FST sprite coordinates are separable: U depends only on X and V only
-    // on Y. BIOS/OSDSYS draws many textured sprites, so computing both
-    // 64-bit divisions for every pixel wastes most of the raster time.
-    // Precompute each axis once while preserving the exact integer formula.
     std::array<s32, 2048> cached_u;
     std::array<s32, 2048> cached_v;
     const bool cached_fst = ctx.texture.enabled && ctx.texture.fst;
@@ -1121,10 +1307,12 @@ u64 GsRasterizer::draw_sprite(
                     v = cached_row_v;
                 } else {
                     const long double fx = dx != 0
-                        ? static_cast<long double>(px - a.x) / static_cast<long double>(dx)
+                        ? static_cast<long double>(px - a.x) /
+                          static_cast<long double>(dx)
                         : 0.0L;
                     const long double fy = dy != 0
-                        ? static_cast<long double>(py - a.y) / static_cast<long double>(dy)
+                        ? static_cast<long double>(py - a.y) /
+                          static_cast<long double>(dy)
                         : 0.0L;
                     const float s = static_cast<float>(
                         static_cast<long double>(a.s) +
@@ -1140,32 +1328,38 @@ u64 GsRasterizer::draw_sprite(
                     v = stq_to_fixed(t, q, ctx.texture.height);
                 }
             }
-            u32 rgba = shade_pixel(vram, ctx.texture, u, v, b.rgba);
+            u32 rgba = shade_pixel(
+                vram, ctx.texture, u, v, b.rgba);
             if (ctx.fog_enabled) {
                 const long double fx = dx != 0
                     ? std::clamp(
                         static_cast<long double>(px - a.x) /
-                        static_cast<long double>(dx), 0.0L, 1.0L)
+                        static_cast<long double>(dx),
+                        0.0L, 1.0L)
                     : 0.0L;
                 const long double fy = dy != 0
                     ? std::clamp(
                         static_cast<long double>(py - a.y) /
-                        static_cast<long double>(dy), 0.0L, 1.0L)
+                        static_cast<long double>(dy),
+                        0.0L, 1.0L)
                     : 0.0L;
                 const long double t_fog = (fx + fy) * 0.5L;
-                const u32 fog = static_cast<u32>(std::clamp<long double>(
-                    static_cast<long double>(a.fog) +
-                    (static_cast<long double>(b.fog) -
-                     static_cast<long double>(a.fog)) * t_fog,
-                    0.0L, 255.0L));
+                const u32 fog = static_cast<u32>(
+                    std::clamp<long double>(
+                        static_cast<long double>(a.fog) +
+                        (static_cast<long double>(b.fog) -
+                         static_cast<long double>(a.fog)) * t_fog,
+                        0.0L, 255.0L));
                 rgba = apply_fog(rgba, ctx.fog_color, fog);
             }
             const bool wrote = hot_psm16_pixels
                 ? draw_hot_osdsys_psm16_pixel(
                     vram, ctx, x, y, b.z, rgba)
                 : simple_pixels
-                    ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
-                    : draw_pixel(vram, ctx, x, y, b.z, rgba);
+                    ? draw_simple_frame_pixel(
+                        vram, ctx, x, y, rgba)
+                    : draw_pixel(
+                        vram, ctx, x, y, b.z, rgba);
             if (wrote) ++pixels;
         }
     }

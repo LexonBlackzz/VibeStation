@@ -1047,6 +1047,10 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_UNSUPPORTED_TRANSFERS=" << gs_stats.unsupported_transfers
         << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
         << " GS_SKIPPED_RASTER_DRAWS=" << gs_stats.skipped_raster_draws
+        << " GS_PARALLEL_SPRITE_DRAWS=" << gs_stats.parallel_sprite_draws
+        << " GS_PARALLEL_SPRITE_PIXELS=" << gs_stats.parallel_sprite_pixels
+        << " GS_PARALLEL_SPRITE_HELPER_JOBS="
+        << gs_stats.parallel_sprite_helper_jobs
         << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
         << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';
