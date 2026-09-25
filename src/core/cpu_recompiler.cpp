@@ -3811,8 +3811,10 @@ CpuRecompilerBackend::CpuRecompilerBackend(Cpu &cpu)
 
 CpuRecompilerBackend::~CpuRecompilerBackend() = default;
 
-CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
-                                             u32 max_instructions) {
+CpuRunSliceResult CpuRecompilerBackend::run_slice(
+    u32 max_cycles,
+    u32 max_instructions,
+    CpuExecutionMode requested_mode) {
   CpuRunSliceResult result{};
   if (max_cycles == 0u || max_instructions == 0u) {
     return result;
@@ -3893,6 +3895,70 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.native_cycles += consumed;
     ++stats_.optimized_instructions;
     stats_.executed_cycles += consumed;
+  };
+
+  const bool decoded_block_mode =
+      requested_mode == CpuExecutionMode::DecodedBlockInterpreter;
+
+  const auto run_decoded_block = [&](V4Block* block) {
+    if (block == nullptr || block->instruction_count == 0u) {
+      return false;
+    }
+
+    const u32 block_start_pc = cpu_.pc_;
+    u32 executed = 0u;
+    ++stats_.decoded_block_entries;
+
+    for (u32 i = 0u; i < block->instruction_count; ++i) {
+      if (result.cycles >= max_cycles ||
+          result.instructions >= max_instructions) {
+        break;
+      }
+
+      const u32 expected_pc = block_start_pc + i * 4u;
+      if (cpu_.pc_ != expected_pc) {
+        break;
+      }
+
+      if (cpu_.instruction_cacheable(cpu_.pc_) &&
+          cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
+        constexpr u32 kRefillCycles = 4u;
+        cpu_.cycles_ += kRefillCycles;
+        result.cycles += kRefillCycles;
+        stats_.executed_cycles += kRefillCycles;
+        ++stats_.recompiler_frame_icache_refills;
+
+        if (result.cycles >= max_cycles) {
+          break;
+        }
+      }
+
+      u32 visible = 0u;
+      if (!cpu_.read_visible_instruction_for_backend(cpu_.pc_, visible) ||
+          visible != block->guest_bits[i]) {
+        break;
+      }
+
+      Cpu::CompiledOpcodeFn fn =
+          Cpu::compiled_opcode_fn(visible);
+      const u32 consumed =
+          fn != nullptr
+              ? fn(&cpu_, visible)
+              : cpu_.step();
+
+      result.cycles += consumed;
+      ++result.instructions;
+      ++executed;
+      ++stats_.decoded_instructions;
+      ++stats_.optimized_instructions;
+      stats_.executed_cycles += consumed;
+
+      if (cpu_.sys_->cpu_timing_boundary_requested()) {
+        break;
+      }
+    }
+
+    return executed != 0u;
   };
 
   // Keep diagnostic modes on the interpreter during bring-up. Their callbacks
@@ -4062,6 +4128,22 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           ++stats_.recompiler_frame_compile_failures;
         }
       }
+    }
+
+    if (decoded_block_mode && block != nullptr) {
+      if (run_decoded_block(block)) {
+        continue;
+      }
+
+      // The cached block may have gone stale between lookup and execution.
+      // Fall through to the precise one-instruction path and let the next
+      // iteration rebuild/revalidate the block.
+      u32 instruction = 0u;
+      if (!cpu_.read_visible_instruction_for_backend(cpu_.pc_, instruction)) {
+        instruction = cpu_.read_instruction_for_backend(cpu_.pc_);
+      }
+      run_helper(instruction, V4HelperReason::CompileFailure);
+      continue;
     }
 
     if (block != nullptr && block->helper_fn != nullptr) {
@@ -4296,7 +4378,7 @@ void CpuRecompilerBackend::invalidate_range(u32 phys_or_normalized_addr,
 void CpuRecompilerBackend::begin_frame(u32 frame_index) {
   current_frame_ = frame_index;
   stats_.active =
-      effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
+      effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
 
   stats_.recompiler_frame_compile_ns = 0;
   stats_.recompiler_frame_compile_max_ns = 0;
