@@ -1,12 +1,14 @@
 #pragma once
 
 #include "ui/theme_settings.h"
+#include "core/types.h"
 
 #include <imgui.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <vector>
 
 namespace definitive_ui {
 
@@ -39,6 +41,19 @@ void draw_settings_background(
     ImDrawList* draw,
     const ImVec2& pos,
     const ImVec2& size);
+
+void update_gameplay_ambient(
+    const std::vector<u32>& rgba,
+    int width,
+    int height);
+void draw_gameplay_ambient(
+    ImDrawList* draw,
+    const ImVec2& area_pos,
+    const ImVec2& area_size,
+    const ImVec2& game_pos,
+    const ImVec2& game_size,
+    float bottom_overscan_v = 0.0f);
+void release_gameplay_ambient_assets();
 
 void play_cursor_sound();
 void play_open_sound();
