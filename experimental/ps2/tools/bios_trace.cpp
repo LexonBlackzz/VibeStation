@@ -1061,10 +1061,40 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << '\n';
 
+    std::cout << "GS_RASTER_TIME_NS";
+    for (ps2::u32 i = 0; i < gs_stats.raster_ns_by_primitive.size(); ++i) {
+        if (gs_stats.raster_ns_by_primitive[i] == 0u) continue;
+        std::cout
+            << " P" << i << '='
+            << gs_stats.raster_ns_by_primitive[i];
+    }
+    std::cout << '\n';
+
+    std::cout
+        << "GS_TEXTURE_COORD_PIXELS"
+        << " SPRITE=" << gs_stats.textured_sprite_pixels
+        << " SPRITE_FST=" << gs_stats.textured_sprite_fst_pixels
+        << " SPRITE_CONST_Q=" << gs_stats.textured_sprite_constant_q_pixels
+        << " SPRITE_VAR_Q=" << gs_stats.textured_sprite_variable_q_pixels
+        << " TRI=" << gs_stats.textured_triangle_pixels
+        << " TRI_FST=" << gs_stats.textured_triangle_fst_pixels
+        << " TRI_CONST_Q=" << gs_stats.textured_triangle_constant_q_pixels
+        << " TRI_VAR_Q=" << gs_stats.textured_triangle_variable_q_pixels
+        << '\n';
+
     std::cout << "GS_TEXTURE_PSM_DRAWS";
     for (ps2::u32 i = 0; i < gs_stats.texture_draws_by_psm.size(); ++i) {
         if (gs_stats.texture_draws_by_psm[i] == 0u) continue;
         std::cout << " PSM" << i << '=' << gs_stats.texture_draws_by_psm[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_TEXTURE_PSM_TIME_NS";
+    for (ps2::u32 i = 0; i < gs_stats.texture_ns_by_psm.size(); ++i) {
+        if (gs_stats.texture_ns_by_psm[i] == 0u) continue;
+        std::cout
+            << " PSM" << i << '='
+            << gs_stats.texture_ns_by_psm[i];
     }
     std::cout << '\n';
 

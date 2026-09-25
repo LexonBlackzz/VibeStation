@@ -49,7 +49,17 @@ struct GsStats {
     u64 raster_pixels = 0;
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
+    std::array<u64, 8> raster_ns_by_primitive{};
     std::array<u64, 64> texture_draws_by_psm{};
+    std::array<u64, 64> texture_ns_by_psm{};
+    u64 textured_sprite_pixels = 0;
+    u64 textured_sprite_fst_pixels = 0;
+    u64 textured_sprite_constant_q_pixels = 0;
+    u64 textured_sprite_variable_q_pixels = 0;
+    u64 textured_triangle_pixels = 0;
+    u64 textured_triangle_fst_pixels = 0;
+    u64 textured_triangle_constant_q_pixels = 0;
+    u64 textured_triangle_variable_q_pixels = 0;
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
     u64 nonzero_texture_samples = 0;

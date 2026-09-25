@@ -3,6 +3,7 @@
 #include "core/gs/gs_privileged.h"
 
 #include <bit>
+#include <chrono>
 #include <utility>
 
 namespace ps2 {
@@ -852,6 +853,8 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     const u32 vertex_count = command.vertex_count;
     const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
     const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
+    const auto raster_begin =
+        std::chrono::steady_clock::now();
     u64 pixels = 0;
     if (prim == 0u && vertex_count >= 1u) {
         pixels = GsRasterizer::draw_point(vram_, ctx, a);
@@ -866,15 +869,43 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         return;
     }
 
+    const u64 raster_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - raster_begin).count());
+
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
     if (prim < stats_.raster_draws_by_primitive.size()) {
         ++stats_.raster_draws_by_primitive[prim];
         stats_.raster_pixels_by_primitive[prim] += pixels;
+        stats_.raster_ns_by_primitive[prim] += raster_ns;
     }
     if (ctx.texture.enabled &&
         ctx.texture.psm < stats_.texture_draws_by_psm.size()) {
         ++stats_.texture_draws_by_psm[ctx.texture.psm];
+        stats_.texture_ns_by_psm[ctx.texture.psm] += raster_ns;
+
+        if (prim == 6u && vertex_count >= 2u) {
+            stats_.textured_sprite_pixels += pixels;
+            if (ctx.texture.fst) {
+                stats_.textured_sprite_fst_pixels += pixels;
+            } else if (a.q == b.q) {
+                stats_.textured_sprite_constant_q_pixels += pixels;
+            } else {
+                stats_.textured_sprite_variable_q_pixels += pixels;
+            }
+        } else if (
+            (prim == 3u || prim == 4u || prim == 5u) &&
+            vertex_count >= 3u) {
+            stats_.textured_triangle_pixels += pixels;
+            if (ctx.texture.fst) {
+                stats_.textured_triangle_fst_pixels += pixels;
+            } else if (a.q == b.q && b.q == c.q) {
+                stats_.textured_triangle_constant_q_pixels += pixels;
+            } else {
+                stats_.textured_triangle_variable_q_pixels += pixels;
+            }
+        }
     }
     if (pixels != 0u) {
         vram_.mark_modified();
