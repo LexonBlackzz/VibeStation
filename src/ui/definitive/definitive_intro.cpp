@@ -140,7 +140,7 @@ void compute_intro_ambient_colors(
             r * 0.2126f +
             g * 0.7152f +
             b * 0.0722f;
-        constexpr float kSaturation = 1.22f;
+        constexpr float kSaturation = 1.10f;
 
         r = std::clamp(
             luminance +
@@ -759,7 +759,7 @@ void draw_intro_presentation(
             overlay,
             pos,
             size,
-            0.58f * handoff);
+            0.10f * handoff);
     }
 
     ensure_intro_icon_texture_loaded();
@@ -807,9 +807,9 @@ void draw_intro_presentation(
         draw_radial_glow(
             overlay,
             glow_center,
-            unit * 0.34f,
+            unit * 0.285f,
             g_intro_ambient_colors[i],
-            0.62f * atmosphere);
+            0.26f * atmosphere);
     }
 
     const float icon_alpha =
