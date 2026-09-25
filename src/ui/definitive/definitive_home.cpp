@@ -5,6 +5,7 @@
 #include "ui/app.h"
 #include "ui/output_resolution_utils.h"
 #include "ui/screenshot_utils.h"
+#include "ui/theme_settings.h"
 #include "vibestation_version.h"
 
 #include <SDL.h>
@@ -1327,7 +1328,7 @@ void draw_settings_section(ImDrawList* draw, const Layout& layout,
 bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w, bool& value) {
-    constexpr float kHeight = 50.0f;
+    constexpr float kHeight = 58.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1345,12 +1346,12 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 92), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
         label);
 
-    const ImVec2 track0 = layout.point(x + w - 63.0f, y + 14.0f);
-    const ImVec2 track1 = layout.point(x + w - 19.0f, y + 36.0f);
+    const ImVec2 track0 = layout.point(x + w - 63.0f, y + 18.0f);
+    const ImVec2 track1 = layout.point(x + w - 19.0f, y + 40.0f);
     draw->AddRectFilled(
         track0, track1,
         value ? rgba(78, 126, 166, 235) : rgba(55, 62, 70, 230),
@@ -1358,7 +1359,7 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
 
     const float knob_x = value ? (x + w - 31.0f) : (x + w - 51.0f);
     draw->AddCircleFilled(
-        layout.point(knob_x, y + 25.0f),
+        layout.point(knob_x, y + 29.0f),
         layout.px(8.0f),
         value ? rgba(232, 240, 247, 255) : rgba(178, 184, 191, 245),
         20);
@@ -1370,7 +1371,7 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
 bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w) {
-    constexpr float kHeight = 50.0f;
+    constexpr float kHeight = 58.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1385,17 +1386,17 @@ bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 92), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
         label);
 
     const ImU32 arrow_color =
         hovered ? rgba(226, 237, 247, 250) : rgba(145, 158, 170, 220);
-    const ImVec2 a = layout.point(x + w - 34.0f, y + 19.0f);
-    draw->AddLine(a, layout.point(x + w - 27.0f, y + 25.0f),
+    const ImVec2 a = layout.point(x + w - 34.0f, y + 22.0f);
+    draw->AddLine(a, layout.point(x + w - 27.0f, y + 29.0f),
         arrow_color, layout.px(1.5f));
-    draw->AddLine(layout.point(x + w - 27.0f, y + 25.0f),
-        layout.point(x + w - 34.0f, y + 31.0f),
+    draw->AddLine(layout.point(x + w - 27.0f, y + 29.0f),
+        layout.point(x + w - 34.0f, y + 36.0f),
         arrow_color, layout.px(1.5f));
 
     ImGui::PopID();
@@ -1406,7 +1407,7 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w,
     int& current, const char* const items[], int item_count) {
-    constexpr float kHeight = 50.0f;
+    constexpr float kHeight = 58.0f;
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
@@ -1419,10 +1420,10 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 60), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         rgba(221, 226, 232, 244), label);
 
-    ImGui::SetCursorScreenPos(layout.point(x + w - 196.0f, y + 10.0f));
+    ImGui::SetCursorScreenPos(layout.point(x + w - 196.0f, y + 14.0f));
     ImGui::PushID(id);
     ImGui::SetNextItemWidth(layout.px(176.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
@@ -1443,6 +1444,38 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     return changed;
 }
 
+
+void definitive_settings_note(
+    ImDrawList* draw, const Layout& layout,
+    float x, float y, const char* text) {
+    add_text(draw, layout, x, y, 8.7f,
+        rgba(139, 150, 160, 220), text);
+}
+
+bool definitive_settings_color(
+    ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w, ImVec4& value) {
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+        rgba(221, 226, 232, 244), label);
+
+    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 12.0f));
+    ImGui::PushID(id);
+    ImGui::SetNextItemWidth(layout.px(186.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
+    ImGui::PushStyleColor(ImGuiCol_Border, rgba(96, 118, 138, 195));
+    const bool changed = ImGui::ColorEdit4(
+        "##value", &value.x,
+        ImGuiColorEditFlags_DisplayRGB |
+        ImGuiColorEditFlags_AlphaBar |
+        ImGuiColorEditFlags_NoInputs);
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+    return changed;
+}
 
 bool definitive_settings_tab_button(
     ImDrawList* draw, const Layout& layout,
@@ -1482,11 +1515,11 @@ bool definitive_settings_slider_int(
     float x, float y, float w,
     int& value, int min_value, int max_value,
     const char* format) {
-    constexpr float kHeight = 50.0f;
-    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+    constexpr float kHeight = 58.0f;
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         rgba(221, 226, 232, 244), label);
 
-    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 11.0f));
+    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 14.0f));
     ImGui::PushID(id);
     ImGui::SetNextItemWidth(layout.px(186.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
@@ -1511,10 +1544,10 @@ bool definitive_settings_slider_float(
     float x, float y, float w,
     float& value, float min_value, float max_value,
     const char* format) {
-    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
         rgba(221, 226, 232, 244), label);
 
-    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 11.0f));
+    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 14.0f));
     ImGui::PushID(id);
     ImGui::SetNextItemWidth(layout.px(186.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
