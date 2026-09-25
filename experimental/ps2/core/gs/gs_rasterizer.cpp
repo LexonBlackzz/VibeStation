@@ -153,6 +153,25 @@ u32 select_blend_color(u32 selector, u32 source, u32 destination) {
 }
 
 u32 blend_color(u32 source, u32 destination, const GsRasterContext& ctx) {
+    // OSDSYS heavily uses ALPHA A=ZERO, B=Cs, C=FIX(0x80), D=Cd:
+    //   (0 - Cs) * 128 / 128 + Cd == Cd - Cs.
+    // Preserve the generic clamp semantics while avoiding selector dispatch,
+    // multiplication and signed division for this hot subtractive mode.
+    if (ctx.color_clamp &&
+        (ctx.alpha_a & 3u) == 2u &&
+        (ctx.alpha_b & 3u) == 0u &&
+        (ctx.alpha_c & 3u) == 2u &&
+        (ctx.alpha_d & 3u) == 1u &&
+        (ctx.alpha_fix & 0xFFu) == 0x80u) {
+        u32 output = source & 0xFF000000u;
+        for (u32 shift : {0u, 8u, 16u}) {
+            const u32 cs = channel(source, shift);
+            const u32 cd = channel(destination, shift);
+            output |= (cd > cs ? cd - cs : 0u) << shift;
+        }
+        return output;
+    }
+
     const u32 factor =
         (ctx.alpha_c & 3u) == 0u ? channel(source, 24) :
         (ctx.alpha_c & 3u) == 1u ? channel(destination, 24) :
