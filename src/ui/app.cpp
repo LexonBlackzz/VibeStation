@@ -650,6 +650,7 @@ void App::process_events(bool& quit) {
                 slowdown_hold_active_ = false;
                 apply_speed_override();
             }
+            gameplay_toolbar_rewind_active_ = false;
             if (emu_runner_.is_rewind_active()) {
                 emu_runner_.set_rewind_active(false);
             }
