@@ -74,6 +74,8 @@ public:
     u64 skipped_bios_countdown_iterations() const { return skipped_bios_countdown_iterations_; }
     u64 skipped_bios_copy_iterations() const { return skipped_bios_copy_iterations_; }
     u64 skipped_bios_mmio_poll_iterations() const { return skipped_bios_mmio_poll_iterations_; }
+    u64 sif_poll_fast_samples() const { return sif_poll_fast_samples_; }
+    u64 sif_poll_stable_returns() const { return sif_poll_stable_returns_; }
     u64 skipped_iop_idle_pairs() const { return skipped_iop_idle_pairs_; }
     u64 skipped_bios_literal_iterations() const { return skipped_bios_literal_iterations_; }
     u64 quiet_ee_batch_instructions() const { return quiet_ee_batch_instructions_; }
@@ -140,6 +142,8 @@ private:
     u64 skipped_bios_countdown_iterations_=0;
     u64 skipped_bios_copy_iterations_=0;
     u64 skipped_bios_mmio_poll_iterations_=0;
+    u64 sif_poll_fast_samples_=0;
+    u64 sif_poll_stable_returns_=0;
     u64 skipped_iop_idle_pairs_=0;
     u64 skipped_bios_literal_iterations_=0;
     u64 quiet_ee_batch_instructions_=0;

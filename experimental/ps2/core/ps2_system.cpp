@@ -247,6 +247,8 @@ void Ps2System::reset(u32 entry_point) {
     skipped_bios_countdown_iterations_ = 0;
     skipped_bios_copy_iterations_ = 0;
     skipped_bios_mmio_poll_iterations_ = 0;
+    sif_poll_fast_samples_ = 0;
+    sif_poll_stable_returns_ = 0;
     skipped_iop_idle_pairs_ = 0;
     skipped_bios_literal_iterations_ = 0;
     quiet_ee_batch_instructions_ = 0;
@@ -1243,6 +1245,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     kSifStableEntry[2], error)) {
                 ++retired;
                 ++quiet_block_instructions_;
+                ++sif_poll_fast_samples_;
                 progressed = true;
                 if (!error.empty()) break;
                 continue;
@@ -1276,6 +1279,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                         kSifStableHead[0], error)) {
                     ++retired;
                     ++quiet_block_instructions_;
+                    ++sif_poll_fast_samples_;
                     progressed = true;
                     if (!error.empty()) break;
 
@@ -1302,6 +1306,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                             }
                         }
                         if (!exit_ok || !error.empty()) break;
+                        ++sif_poll_stable_returns_;
                     }
                     continue;
                 }

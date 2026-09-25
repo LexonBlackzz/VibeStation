@@ -1598,6 +1598,10 @@ int main(int argc, char** argv) {
               << system.skipped_bios_copy_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_MMIO_POLL_ITERATIONS="
               << system.skipped_bios_mmio_poll_iterations() << '\n';
+    std::cout << "EE_SIF_POLL_FAST_SAMPLES="
+              << system.sif_poll_fast_samples()
+              << " EE_SIF_POLL_STABLE_RETURNS="
+              << system.sif_poll_stable_returns() << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="
