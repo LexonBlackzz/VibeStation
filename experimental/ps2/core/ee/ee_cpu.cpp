@@ -144,6 +144,7 @@ void EeCpu::reset(u32 entry_point) {
     hot_sif_getreg_diag_inflight_ = false;
     hot_sif_getreg_diag_start_ = 0u;
     hot_sif_getreg_read_offset_ = 0u;
+    fast_prefix_fallback_opcodes_.fill(0u);
     halt_reason_.clear();
 }
 
@@ -4635,7 +4636,10 @@ u32 EeCpu::run_quiet_fast_prefix(
             handled = false;
         }
 
-        if (!handled) break;
+        if (!handled) {
+            ++fast_prefix_fallback_opcodes_[opcode & 63u];
+            break;
+        }
 
         current_is_delay_slot_ = was_delay_slot;
         state_.last_pc = expected_pc;

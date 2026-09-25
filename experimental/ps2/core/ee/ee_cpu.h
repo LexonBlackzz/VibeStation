@@ -129,6 +129,10 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_fallback_opcodes() const {
+        return fast_prefix_fallback_opcodes_;
+    }
     [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
         return hot_sif_getreg_read_offset_;
     }
@@ -183,6 +187,8 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
+    std::array<u64, 64> fast_prefix_fallback_opcodes_{};
+
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;

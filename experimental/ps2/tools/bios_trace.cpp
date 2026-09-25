@@ -1751,6 +1751,20 @@ int main(int argc, char** argv) {
         std::cout << '\n';
     }
 
+    std::cout << "EE_FAST_PREFIX_FALLBACK_OPCODES";
+    const auto& fast_fallbacks =
+        system.ee().fast_prefix_fallback_opcodes();
+    for (ps2::u32 opcode = 0u;
+         opcode < fast_fallbacks.size();
+         ++opcode) {
+        if (fast_fallbacks[opcode] != 0u) {
+            std::cout
+                << " OP0x" << std::hex << std::uppercase << opcode
+                << std::dec << '=' << fast_fallbacks[opcode];
+        }
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="
