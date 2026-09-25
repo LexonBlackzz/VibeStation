@@ -1622,14 +1622,6 @@ int main(int argc, char** argv) {
               << system.fast_interpreter_instructions()
               << " EE_FAST_INTERPRETER_CALLS="
               << system.fast_interpreter_calls()
-              << " EE_TRACE_HITS="
-              << system.ee().quiet_trace_hits()
-              << " EE_TRACE_BUILDS="
-              << system.ee().quiet_trace_builds()
-              << " EE_TRACE_SIDE_EXITS="
-              << system.ee().quiet_trace_side_exits()
-              << " EE_TRACE_REPLAYED_INSTRUCTIONS="
-              << system.ee().quiet_trace_replayed_instructions()
               << " EE_QUIET_SUPERBATCH_CALLS="
               << system.quiet_superbatch_calls()
               << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
