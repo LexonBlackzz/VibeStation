@@ -1479,7 +1479,7 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
 
 bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     MenuIcon icon, const char* title, const char* subtitle,
-    bool sound_enabled = true) {
+    bool interaction_enabled = true) {
     constexpr float kX = 36.0f;
     constexpr float kY = 218.0f;
     constexpr float kWidth = 396.0f;
@@ -1498,14 +1498,17 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     const bool pressed = ImGui::Button("##definitive_menu", size);
     ImGui::PopStyleColor(3);
 
-    const bool hovered = ImGui::IsItemHovered();
-    const bool focused = ImGui::IsItemFocused();
-    const bool active = ImGui::IsItemActive();
+    const bool hovered =
+        interaction_enabled && ImGui::IsItemHovered();
+    const bool focused =
+        interaction_enabled && ImGui::IsItemFocused();
+    const bool active =
+        interaction_enabled && ImGui::IsItemActive();
     const bool engaged = hovered || focused || active;
 
     bool& was_engaged =
         g_menu_was_engaged[static_cast<size_t>(index)];
-    if (sound_enabled && engaged && !was_engaged) {
+    if (interaction_enabled && engaged && !was_engaged) {
         play_menu_sound(UiMenuSound::Cursor);
     }
     was_engaged = engaged;
@@ -1590,7 +1593,7 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         sub_color, subtitle);
 
     ImGui::PopID();
-    return pressed;
+    return interaction_enabled && pressed;
 }
 
 bool small_button(const Layout& layout, const char* id, const char* label,
@@ -2954,17 +2957,16 @@ void App::panel_definitive_home() {
     const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
 
-    const bool menu_sound_enabled = launcher_ready;
     const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
-        "Start Emulation", "Load BIOS and start playing", menu_sound_enabled);
+        "Start Emulation", "Load BIOS and start playing", launcher_ready);
     const bool load_game_pressed = menu_button(layout, draw, 1, MenuIcon::Folder,
-        "Load Game", "Choose a game from your library", menu_sound_enabled);
+        "Load Game", "Choose a game from your library", launcher_ready);
     const bool change_bios_pressed = menu_button(layout, draw, 2, MenuIcon::Chip,
-        "Change BIOS", "Manage BIOS files", menu_sound_enabled);
+        "Change BIOS", "Manage BIOS files", launcher_ready);
     const bool settings_pressed = menu_button(layout, draw, 3, MenuIcon::Settings,
-        "Settings", "Configure emulator options", menu_sound_enabled);
+        "Settings", "Configure emulator options", launcher_ready);
     const bool exit_pressed = menu_button(layout, draw, 4, MenuIcon::Exit,
-        "Exit", "Close VibeStation", menu_sound_enabled);
+        "Exit", "Close VibeStation", launcher_ready);
 
     const auto choose_bios = [this]() -> bool {
         std::string path = open_file_dialog(
@@ -3185,7 +3187,7 @@ void App::panel_definitive_home() {
 
     if (small_button(layout, "set_rom_dir", "Set Directory",
         53.0f, panel_y + 145.0f, 130.0f, 25.0f) &&
-        !launcher_intro_active) {
+        launcher_ready) {
         play_ui_open_sound();
         const std::string selected = open_folder_dialog("Select ROM Directory");
         play_ui_close_sound();
@@ -3199,7 +3201,7 @@ void App::panel_definitive_home() {
     }
     if (small_button(layout, "refresh_rom_dir", "Refresh",
         196.0f, panel_y + 145.0f, 90.0f, 25.0f, rom_directory_valid_) &&
-        !launcher_intro_active) {
+        launcher_ready) {
         game_library_dirty_ = true;
         refresh_game_library();
     }
