@@ -1109,6 +1109,27 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << '\n';
 
+    std::cout << "GS_PSM16_ALPHA_STATE_PROFILE";
+    for (ps2::u32 i = 0; i < gs_stats.psm16_alpha_state_ns.size(); ++i) {
+        if (gs_stats.psm16_alpha_state_ns[i] == 0u) continue;
+        std::cout
+            << " K" << i
+            << "_D=" << gs_stats.psm16_alpha_state_draws[i]
+            << "_P=" << gs_stats.psm16_alpha_state_pixels[i]
+            << "_NS=" << gs_stats.psm16_alpha_state_ns[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_PSM16_FIX_PROFILE";
+    for (ps2::u32 i = 0; i < gs_stats.psm16_fix_ns.size(); ++i) {
+        if (gs_stats.psm16_fix_ns[i] == 0u) continue;
+        std::cout
+            << " F" << i
+            << "_D=" << gs_stats.psm16_fix_draws[i]
+            << "_NS=" << gs_stats.psm16_fix_ns[i];
+    }
+    std::cout << '\n';
+
     std::cout
         << "GS_LAST_UNSUPPORTED PRIM=0x" << std::hex << std::uppercase
         << gs_stats.last_unsupported_prim

@@ -886,6 +886,25 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         ++stats_.psm16_state_draws[state_mask];
         stats_.psm16_state_pixels[state_mask] += pixels;
         stats_.psm16_state_ns[state_mask] += raster_ns;
+
+        const u32 alpha_selectors =
+            (ctx.alpha_a & 3u) |
+            ((ctx.alpha_b & 3u) << 2u) |
+            ((ctx.alpha_c & 3u) << 4u) |
+            ((ctx.alpha_d & 3u) << 6u);
+        const u32 alpha_state =
+            alpha_selectors |
+            ((ctx.ztst & 3u) << 8u) |
+            (ctx.color_clamp ? (1u << 10u) : 0u) |
+            (ctx.pabe ? (1u << 11u) : 0u);
+        ++stats_.psm16_alpha_state_draws[alpha_state];
+        stats_.psm16_alpha_state_pixels[alpha_state] += pixels;
+        stats_.psm16_alpha_state_ns[alpha_state] += raster_ns;
+        if ((ctx.alpha_c & 3u) == 2u) {
+            const u32 fix = ctx.alpha_fix & 0xFFu;
+            ++stats_.psm16_fix_draws[fix];
+            stats_.psm16_fix_ns[fix] += raster_ns;
+        }
     }
 
     ++stats_.raster_draws;

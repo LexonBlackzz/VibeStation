@@ -58,6 +58,14 @@ struct GsStats {
     std::array<u64, 256> psm16_state_draws{};
     std::array<u64, 256> psm16_state_pixels{};
     std::array<u64, 256> psm16_state_ns{};
+    // Exact hot PSMCT16 blend/depth state. Key:
+    // [7:0] ALPHA A/B/C/D selectors, [9:8] ZTST,
+    // bit10 COLCLAMP, bit11 PABE.
+    std::array<u64, 4096> psm16_alpha_state_draws{};
+    std::array<u64, 4096> psm16_alpha_state_pixels{};
+    std::array<u64, 4096> psm16_alpha_state_ns{};
+    std::array<u64, 256> psm16_fix_draws{};
+    std::array<u64, 256> psm16_fix_ns{};
     u64 textured_sprite_pixels = 0;
     u64 textured_sprite_fst_pixels = 0;
     u64 textured_sprite_constant_q_pixels = 0;
