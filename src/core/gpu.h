@@ -9,6 +9,7 @@
 // VRAM is 1024x512 pixels at 16bpp (1MB).
 
 class System;
+class GpuHardwareRasterizer;
 
 // Color type
 struct Color {
@@ -160,6 +161,16 @@ public:
   // VRAM access
   const u16 *vram() const { return vram_.data(); }
   void corrupt_vram_word(u32 index, u16 value);
+
+  // Optional host-GPU raster backend. The OpenGL context is owned by the
+  // platform backend and bound only on EmuRunner's thread.
+  void set_hardware_rasterizer(GpuHardwareRasterizer* rasterizer);
+  bool begin_hardware_raster_thread();
+  void end_hardware_raster_thread();
+  bool hardware_rasterizer_active() const;
+  u64 hardware_raster_dispatch_count() const;
+  u64 hardware_raster_upload_count() const;
+  u64 hardware_raster_download_count() const;
   void corrupt_render_state(u32 selector, u32 value);
   void set_reaper_pulse(u32 geometry_mutations, u32 texture_mutations, u32 seed);
   const DisplayMode &display_mode() const { return display_; }
@@ -194,6 +205,15 @@ public:
 
 private:
   System *sys_ = nullptr;
+
+  GpuHardwareRasterizer* hardware_rasterizer_ = nullptr;
+  mutable bool hardware_gpu_vram_newer_ = false;
+  bool hardware_cpu_vram_dirty_ = true;
+
+  bool hardware_draw_enabled() const;
+  bool ensure_hardware_vram_current();
+  void ensure_cpu_vram_current() const;
+  void prepare_software_vram_write();
 
   // 1MB VRAM: 1024 x 512 x 16bpp
   std::array<u16, psx::VRAM_WIDTH * psx::VRAM_HEIGHT> vram_{};
