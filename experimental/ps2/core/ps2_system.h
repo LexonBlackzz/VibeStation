@@ -77,6 +77,9 @@ public:
     u64 sif_poll_fast_samples() const { return sif_poll_fast_samples_; }
     u64 sif_poll_stable_returns() const { return sif_poll_stable_returns_; }
     u64 fast_sif_getreg_calls() const { return fast_sif_getreg_calls_; }
+    u64 fast_sif_getreg_active_iop_calls() const {
+        return fast_sif_getreg_active_iop_calls_;
+    }
     const std::array<u64, 12>& fast_sif_getreg_rejects() const {
         return fast_sif_getreg_rejects_;
     }
@@ -162,6 +165,7 @@ private:
     u64 sif_poll_fast_samples_=0;
     u64 sif_poll_stable_returns_=0;
     u64 fast_sif_getreg_calls_=0;
+    u64 fast_sif_getreg_active_iop_calls_=0;
     std::array<u64, 12> fast_sif_getreg_rejects_{};
     u64 fast_sif_getreg_active_iop_zero_dma_=0;
     u64 fast_sif_getreg_active_iop_sif_only_=0;

@@ -250,6 +250,7 @@ void Ps2System::reset(u32 entry_point) {
     sif_poll_fast_samples_ = 0;
     sif_poll_stable_returns_ = 0;
     fast_sif_getreg_calls_ = 0;
+    fast_sif_getreg_active_iop_calls_ = 0;
     fast_sif_getreg_rejects_.fill(0u);
     fast_sif_getreg_active_iop_zero_dma_ = 0;
     fast_sif_getreg_active_iop_sif_only_ = 0;
@@ -1167,31 +1168,25 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     const bool iop_halted = iop_.halted();
     const bool iop_idle =
         !iop_halted && iop_.in_osdsys_idle_loop();
-    if (!iop_halted && !iop_idle) {
-        const u16 diag_active_dma =
-            hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
-        const u16 diag_sif_channels = (1u << 5) | (1u << 6);
-        if (diag_active_dma == 0u) {
-            ++fast_sif_getreg_active_iop_zero_dma_;
-        } else if ((diag_active_dma & ~diag_sif_channels) == 0u) {
-            ++fast_sif_getreg_active_iop_sif_only_;
-        } else {
-            ++fast_sif_getreg_active_iop_other_dma_;
-        }
-        if (fast_sif_getreg_active_iop_first_pc_ == 0u) {
-            fast_sif_getreg_active_iop_first_pc_ =
-                iop_.state().pc;
-        }
-        ++fast_sif_getreg_rejects_[7];
-        return 0u;
-    }
+    const bool iop_active =
+        !iop_halted && !iop_idle;
 
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
-    if ((active_dma & ~sif_channels) != 0u ||
-        ((active_dma & sif_channels) &
-         iop_bus_.sif_dma_ready_mask()) != 0u) {
+
+    // The active-IOP fast path is deliberately narrower than the idle path:
+    // no EE DMA may be armed while we let the IOP run to the exact SMFLAG
+    // sample point. Profiling shows this covers virtually every hot call.
+    if (iop_active && active_dma != 0u) {
+        ++fast_sif_getreg_rejects_[7];
+        return 0u;
+    }
+
+    if (!iop_active &&
+        ((active_dma & ~sif_channels) != 0u ||
+         ((active_dma & sif_channels) &
+          iop_bus_.sif_dma_ready_mask()) != 0u)) {
         ++fast_sif_getreg_rejects_[8];
         return 0u;
     }
@@ -1206,8 +1201,36 @@ u64 Ps2System::try_skip_hot_sif_getreg(
         }
     }
 
+    // Validate all EE architectural/code guards before advancing active IOP
+    // state. Once the IOP has moved to the sample point we must be able to
+    // commit the collapsed EE round-trip without falling back.
+    if (!ee_.can_skip_hot_sif_getreg()) {
+        ++fast_sif_getreg_rejects_[11];
+        return 0u;
+    }
+
+    constexpr u64 kSampleOffset = 61u;
+    constexpr u64 kTailCycles = kCycles - kSampleOffset;
+
+    if (iop_active) {
+        // The real kernel reaches the SMFLAG load after 61 retired EE
+        // instructions. Run only the IOP half of time to that exact instant;
+        // video/timers are proven event-free for the entire 106-cycle window
+        // by the guards above, so their bulk update can remain at commit.
+        advance_iop_for_ee_cycles(kSampleOffset, error);
+        if (!error.empty()) return kSampleOffset;
+    }
+
     u32 smflag = 0u;
-    if (!bus_.read32(0x1000F230u, smflag) ||
+    if (!bus_.read32(0x1000F230u, smflag)) {
+        ++fast_sif_getreg_rejects_[10];
+        return 0u;
+    }
+
+    // For the active path the value was sampled at the exact guest load
+    // instant, so even the BOOTEND transition value is safe to return. The
+    // idle path retains the old conservative transition fallback.
+    if (!iop_active &&
         (smflag & 0x00040000u) != 0u) {
         ++fast_sif_getreg_rejects_[10];
         return 0u;
@@ -1221,7 +1244,13 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     scheduler_.run_until(
         scheduler_.now() + kCycles, {});
     video_timing_.tick(kCycles, hw_, iop_intc_);
-    advance_iop_for_ee_cycles(kCycles, error);
+
+    if (iop_active) {
+        advance_iop_for_ee_cycles(kTailCycles, error);
+        ++fast_sif_getreg_active_iop_calls_;
+    } else {
+        advance_iop_for_ee_cycles(kCycles, error);
+    }
     if (!error.empty()) return kCycles;
 
     if (gs_.irq_pending()) hw_.raise_intc(0);

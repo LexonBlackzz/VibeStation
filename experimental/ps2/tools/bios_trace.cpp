@@ -1632,7 +1632,10 @@ int main(int argc, char** argv) {
               << " EE_SIF_POLL_STABLE_RETURNS="
               << system.sif_poll_stable_returns()
               << " EE_FAST_SIF_GETREG_CALLS="
-              << system.fast_sif_getreg_calls() << '\n';
+              << system.fast_sif_getreg_calls()
+              << " EE_FAST_SIF_GETREG_ACTIVE_IOP_CALLS="
+              << system.fast_sif_getreg_active_iop_calls()
+              << '\n';
     std::cout
         << "EE_FAST_SIF_ACTIVE_IOP"
         << " ZERO_DMA=" << system.fast_sif_getreg_active_iop_zero_dma()

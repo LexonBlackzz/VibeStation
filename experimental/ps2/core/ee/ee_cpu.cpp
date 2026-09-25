@@ -3381,10 +3381,9 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
     return completed;
 }
 
-bool EeCpu::skip_hot_sif_getreg(u32 value) {
+bool EeCpu::can_skip_hot_sif_getreg() const {
     constexpr u32 kPc = 0x0024DE74u;
     constexpr u32 kReturnPc = 0x00263338u;
-    constexpr u32 kCycles = 106u;
     constexpr std::array<u32, 4> kWrapper = {
         0x2403007Au, // addiu v1,zero,0x7A
         0x0000000Cu, // syscall
@@ -3392,14 +3391,22 @@ bool EeCpu::skip_hot_sif_getreg(u32 value) {
         0x00000000u, // nop
     };
 
-    if (halted_ ||
-        state_.pc != kPc ||
-        state_.next_pc != kPc + 4u ||
-        next_is_delay_slot_ ||
-        static_cast<u32>(state_.gpr[3].lo) != 0x7Au ||
-        static_cast<u32>(state_.gpr[4].lo) != 4u ||
-        static_cast<u32>(state_.gpr[31].lo) != kReturnPc ||
-        !bus_.matches_code(0x0024DE70u, kWrapper)) {
+    return !halted_ &&
+        state_.pc == kPc &&
+        state_.next_pc == kPc + 4u &&
+        !next_is_delay_slot_ &&
+        static_cast<u32>(state_.gpr[3].lo) == 0x7Au &&
+        static_cast<u32>(state_.gpr[4].lo) == 4u &&
+        static_cast<u32>(state_.gpr[31].lo) == kReturnPc &&
+        bus_.matches_code(0x0024DE70u, kWrapper);
+}
+
+bool EeCpu::skip_hot_sif_getreg(u32 value) {
+    constexpr u32 kPc = 0x0024DE74u;
+    constexpr u32 kReturnPc = 0x00263338u;
+    constexpr u32 kCycles = 106u;
+
+    if (!can_skip_hot_sif_getreg()) {
         return false;
     }
 

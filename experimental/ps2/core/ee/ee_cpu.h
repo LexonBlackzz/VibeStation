@@ -114,9 +114,10 @@ public:
     u32 skip_bios_mmio_poll_iterations(u32 max_iterations);
     bool skip_bios_literal_iteration();
     u32 skip_bios_literal_iterations(u32 max_iterations);
-    // Collapse the retail 0x7A SifGetReg(4) syscall wrapper after the system
-    // has proved that the sampled SMFLAG cannot change during its 106-cycle
-    // kernel round-trip.
+    // Validate/collapse the retail 0x7A SifGetReg(4) syscall wrapper.
+    // The system layer is responsible for sampling SMFLAG at the exact
+    // instruction offset when active IOP execution can change it.
+    [[nodiscard]] bool can_skip_hot_sif_getreg() const;
     bool skip_hot_sif_getreg(u32 value);
 
     [[nodiscard]] const EeCpuState& state() const { return state_; }
