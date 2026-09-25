@@ -154,6 +154,13 @@ void App::panel_settings() {
                 ImGui::Text("Display Area: %ux%u",
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_width),
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
+                if (ImGui::Checkbox("Hardware Rasterizer (Experimental)",
+                        &g_gpu_hardware_rasterizer)) {
+                    save_persistent_config();
+                }
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Uses an OpenGL 4.3 compute backend for accurate PS1 rasterization when supported.");
                 if (ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode)) {
                     if (!g_gpu_fast_mode) {
                         g_gpu_extreme_fast_mode = false;

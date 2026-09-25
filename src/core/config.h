@@ -16,6 +16,7 @@ struct Config {
     DeinterlaceMode deinterlace_mode = DeinterlaceMode::Weave;
     OutputResolutionMode output_resolution_mode = OutputResolutionMode::R320x240;
     bool bilinear_filtering = false;
+    bool gpu_hardware_rasterizer = true;
     bool gpu_fast_mode = false;
     bool gpu_extreme_fast_mode = false;
     bool low_spec_mode = false;

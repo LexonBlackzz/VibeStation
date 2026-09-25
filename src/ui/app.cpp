@@ -316,7 +316,7 @@ bool App::init_runtime() {
     // The hardware PS1 rasterizer owns an independent hidden OpenGL 4.3
     // context. It is optional: unsupported drivers stay on the software
     // rasterizer without changing emulation behavior.
-    if (g_gpu_hardware_rasterizer) {
+    {
         gpu_hardware_rasterizer_ =
             std::make_unique<GpuHardwareRasterizer>();
         if (gpu_hardware_rasterizer_->initialize()) {
@@ -2038,6 +2038,7 @@ void App::save_persistent_config() const {
     out.log_file_path = log_path_;
 
     // Sync from globals that UI panels write to directly
+    out.gpu_hardware_rasterizer = g_gpu_hardware_rasterizer;
     out.gpu_fast_mode = g_gpu_fast_mode;
     out.gpu_extreme_fast_mode = g_gpu_extreme_fast_mode;
     out.bilinear_filtering = g_bilinear_filtering;

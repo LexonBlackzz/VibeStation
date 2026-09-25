@@ -125,6 +125,7 @@ Config Config::load(const std::string& path) {
     // Display
     get_bool("vsync", cfg.vsync);
     get_bool("bilinear_filtering", cfg.bilinear_filtering);
+    get_bool("gpu_hardware_rasterizer", cfg.gpu_hardware_rasterizer);
     get_bool("gpu_fast_mode", cfg.gpu_fast_mode);
     get_bool("gpu_extreme_fast_mode", cfg.gpu_extreme_fast_mode);
     get_bool("low_spec_mode", cfg.low_spec_mode);
@@ -332,6 +333,7 @@ void Config::save(const std::string& path) const {
     // Display
     j["vsync"] = vsync;
     j["bilinear_filtering"] = bilinear_filtering;
+    j["gpu_hardware_rasterizer"] = gpu_hardware_rasterizer;
     j["gpu_fast_mode"] = gpu_fast_mode;
     j["gpu_extreme_fast_mode"] = gpu_fast_mode && gpu_extreme_fast_mode;
     j["low_spec_mode"] = low_spec_mode;
@@ -447,6 +449,7 @@ void Config::apply_to_globals() const {
 
     // Display
     g_low_spec_mode = low_spec_mode;
+    g_gpu_hardware_rasterizer = gpu_hardware_rasterizer;
     g_gpu_fast_mode = gpu_fast_mode;
     g_gpu_extreme_fast_mode = gpu_extreme_fast_mode;
     g_bilinear_filtering = bilinear_filtering;

@@ -670,30 +670,39 @@ void App::panel_definitive_settings() {
             "Smooths the final image when scaling instead of keeping hard pixels.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 190.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 258.0f, "GPU");
+
+        if (definitive_settings_switch(
+            draw, layout, "video_hw_gpu", "Hardware Rasterizer (Experimental)",
+            right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
+            g_gpu_hardware_rasterizer)) {
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f,
+            "Runs accurate PS1 raster work on an OpenGL 4.3 compute backend when supported.");
 
         if (definitive_settings_switch(
             draw, layout, "video_fast_gpu", "Fast Mode",
-            right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
+            right_x + 1.0f, content_y + 43.0f + row_step, column_w - 2.0f,
             g_gpu_fast_mode)) {
             if (!g_gpu_fast_mode) {
                 g_gpu_extreme_fast_mode = false;
             }
             save_persistent_config();
         }
-        note(right_x + 1.0f, content_y + 43.0f,
-            "Uses optimized GPU paths for lower CPU usage with some artifact risk.");
+        note(right_x + 1.0f, content_y + 43.0f + row_step,
+            "Uses optimized software GPU paths for lower CPU usage with some artifact risk.");
 
         if (definitive_settings_switch(
             draw, layout, "video_extreme_gpu", "Extreme Fast Mode",
-            right_x + 1.0f, content_y + 43.0f + row_step,
+            right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
             column_w - 2.0f, g_gpu_extreme_fast_mode)) {
             if (g_gpu_extreme_fast_mode) {
                 g_gpu_fast_mode = true;
             }
             save_persistent_config();
         }
-        note(right_x + 1.0f, content_y + 43.0f + row_step,
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
             "Trades more shading and transparency accuracy for additional speed.");
         break;
     }
