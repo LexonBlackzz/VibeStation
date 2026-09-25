@@ -1308,6 +1308,141 @@ void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
     draw->AddLine(ImVec2(p.x + 9.0f * s, p.y + 9.0f * s),
         ImVec2(p.x + 9.0f * s, p.y + 15.0f * s), c, 1.5f * s);
 }
+void draw_settings_section(ImDrawList* draw, const Layout& layout,
+    float x, float y, float w, float h, const char* title) {
+    const ImVec2 p0 = layout.point(x, y);
+    const ImVec2 p1 = layout.point(x + w, y + h);
+    draw->AddRectFilled(p0, p1, rgba(7, 11, 16, 226), layout.px(4.0f));
+    draw->AddRect(p0, p1, rgba(91, 109, 126, 175),
+        layout.px(4.0f), 0, layout.px(1.0f));
+    add_text(draw, layout, x + 18.0f, y + 14.0f, 12.5f,
+        rgba(209, 218, 227, 235), title);
+    draw->AddLine(
+        layout.point(x + 18.0f, y + 39.0f),
+        layout.point(x + w - 18.0f, y + 39.0f),
+        rgba(78, 92, 106, 145), layout.px(1.0f));
+}
+
+bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w, bool& value) {
+    constexpr float kHeight = 50.0f;
+    const ImVec2 p0 = layout.point(x, y);
+    const ImVec2 row_size = layout.size(w, kHeight);
+
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::PushID(id);
+    const bool pressed = ImGui::InvisibleButton("##settings_switch", row_size);
+    const bool hovered = ImGui::IsItemHovered();
+    if (pressed) {
+        value = !value;
+    }
+
+    if (hovered) {
+        draw->AddRectFilled(
+            p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
+            rgba(31, 43, 55, 92), layout.px(2.0f));
+    }
+
+    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+        hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
+        label);
+
+    const ImVec2 track0 = layout.point(x + w - 63.0f, y + 14.0f);
+    const ImVec2 track1 = layout.point(x + w - 19.0f, y + 36.0f);
+    draw->AddRectFilled(
+        track0, track1,
+        value ? rgba(78, 126, 166, 235) : rgba(55, 62, 70, 230),
+        layout.px(11.0f));
+
+    const float knob_x = value ? (x + w - 31.0f) : (x + w - 51.0f);
+    draw->AddCircleFilled(
+        layout.point(knob_x, y + 25.0f),
+        layout.px(8.0f),
+        value ? rgba(232, 240, 247, 255) : rgba(178, 184, 191, 245),
+        20);
+
+    ImGui::PopID();
+    return pressed;
+}
+
+bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w) {
+    constexpr float kHeight = 50.0f;
+    const ImVec2 p0 = layout.point(x, y);
+    const ImVec2 row_size = layout.size(w, kHeight);
+
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::PushID(id);
+    const bool pressed = ImGui::InvisibleButton("##settings_action", row_size);
+    const bool hovered = ImGui::IsItemHovered();
+
+    if (hovered) {
+        draw->AddRectFilled(
+            p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
+            rgba(31, 43, 55, 92), layout.px(2.0f));
+    }
+
+    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+        hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
+        label);
+
+    const ImU32 arrow_color =
+        hovered ? rgba(226, 237, 247, 250) : rgba(145, 158, 170, 220);
+    const ImVec2 a = layout.point(x + w - 34.0f, y + 19.0f);
+    draw->AddLine(a, layout.point(x + w - 27.0f, y + 25.0f),
+        arrow_color, layout.px(1.5f));
+    draw->AddLine(layout.point(x + w - 27.0f, y + 25.0f),
+        layout.point(x + w - 34.0f, y + 31.0f),
+        arrow_color, layout.px(1.5f));
+
+    ImGui::PopID();
+    return pressed;
+}
+
+bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w,
+    int& current, const char* const items[], int item_count) {
+    constexpr float kHeight = 50.0f;
+    const ImVec2 p0 = layout.point(x, y);
+    const ImVec2 row_size = layout.size(w, kHeight);
+
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::PushID(id);
+    ImGui::InvisibleButton("##settings_combo_row", row_size);
+    const bool row_hovered = ImGui::IsItemHovered();
+
+    if (row_hovered) {
+        draw->AddRectFilled(
+            p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
+            rgba(31, 43, 55, 60), layout.px(2.0f));
+    }
+
+    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+        rgba(221, 226, 232, 244), label);
+
+    ImGui::SetCursorScreenPos(layout.point(x + w - 196.0f, y + 10.0f));
+    ImGui::SetNextItemWidth(layout.px(176.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(8.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, rgba(8, 12, 17, 252));
+    ImGui::PushStyleColor(ImGuiCol_Border, rgba(96, 118, 138, 195));
+    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    ImGui::PushStyleColor(ImGuiCol_Header, rgba(54, 77, 97, 215));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(69, 96, 120, 230));
+    const bool changed =
+        ImGui::Combo("##value", &current, items, item_count);
+    ImGui::PopStyleColor(8);
+    ImGui::PopStyleVar(2);
+    ImGui::PopID();
+    return changed;
+}
+
 }
 
 void App::release_definitive_ui_assets() {
