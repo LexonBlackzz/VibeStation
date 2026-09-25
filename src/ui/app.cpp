@@ -796,8 +796,7 @@ void App::process_events(bool& quit) {
                 }
             }
             else if (ctrl && key == SDLK_COMMA) {
-                if (!has_started_emulation_ &&
-                    !definitive_detailed_settings_) {
+                if (!definitive_detailed_settings_) {
                     if (show_settings_) {
                         close_definitive_settings();
                     }
@@ -1134,11 +1133,15 @@ void App::render_ui() {
 
     // Optional panels
     if (show_logging_) {
+        // Logging is intentionally not part of the streamlined Definitive
+        // settings page, so direct logging requests still use the legacy
+        // detailed settings window.
+        definitive_detailed_settings_ = true;
         show_settings_ = true;
         show_logging_ = false;
     }
     if (show_settings_) {
-        if (!has_started_emulation_ && !definitive_detailed_settings_) {
+        if (!definitive_detailed_settings_) {
             panel_definitive_settings();
         }
         else {
