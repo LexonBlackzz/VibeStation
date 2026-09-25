@@ -77,7 +77,11 @@ void main() {
         float((gl_VertexID << 1) & 2),
         float(gl_VertexID & 2));
 
-    v_uv = p * 0.5;
+    // Full-screen triangle vertices use p in the 0..2 range. The visible
+    // viewport only covers the 0..1 interpolated portion, so passing p
+    // directly yields the correct 0..1 UVs across the screen. Multiplying by
+    // 0.5 here would sample only the upper-left quarter of the source texture.
+    v_uv = p;
     gl_Position = vec4(
         p * 2.0 - 1.0,
         0.0,
