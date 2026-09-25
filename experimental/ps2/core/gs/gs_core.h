@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace ps2 {
 
@@ -80,6 +81,9 @@ struct GsStats {
     u64 textured_triangle_variable_q_pixels = 0;
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
+    u64 address_map_hits = 0;
+    u64 address_map_builds = 0;
+    u64 address_map_pixels_built = 0;
     u64 nonzero_texture_samples = 0;
     u64 texture_alpha_samples = 0;
     u32 first_texture_sample_x = 0xFFFFFFFFu;
@@ -244,6 +248,7 @@ private:
         const GsRasterVertex& c,
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
+    void prepare_address_map(GsRasterContext& ctx);
     void raster_worker_main();
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
@@ -255,6 +260,16 @@ private:
     TransferState transfer_{};
     GsStats stats_{};
     GsVram vram_{};
+    struct AddressMapCache {
+        bool valid = false;
+        u32 fbp = 0;
+        u32 zbp = 0;
+        u32 fbw = 0;
+        u32 width = 0;
+        u32 height = 0;
+        std::vector<u32> frame{};
+        std::vector<u32> depth{};
+    } address_map_cache_{};
     std::array<GsRasterVertex, 3> draw_vertices_{};
     u32 draw_vertex_count_ = 0;
     GsPrivileged* privileged_ = nullptr;
