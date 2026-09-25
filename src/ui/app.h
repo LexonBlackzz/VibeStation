@@ -6,6 +6,7 @@
 #include "../core/config.h"
 #include "../core/renderer.h"
 #include "../core/system.h"
+#include "../platform/gpu_hardware_rasterizer.h"
 #include "../core/types.h"
 #include "../input/input_manager.h"
 #include <filesystem>
@@ -37,6 +38,7 @@ private:
 
 	std::unique_ptr<System> system_;
 	std::unique_ptr<Renderer> renderer_;
+	std::unique_ptr<GpuHardwareRasterizer> gpu_hardware_rasterizer_;
 	std::unique_ptr<InputManager> input_;
 	InputRecorder input_recorder_;
 	InputRecorder::Config input_recorder_config_{};
