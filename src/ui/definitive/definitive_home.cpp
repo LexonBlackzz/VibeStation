@@ -485,6 +485,118 @@ bool convert_ui_sound(
     return true;
 }
 
+void apply_ui_sound_fade_in(
+    UiSoundClip& clip, const SDL_AudioSpec& spec, float fade_ms) {
+    if (clip.pcm.empty() || spec.freq <= 0 || spec.channels == 0 ||
+        fade_ms <= 0.0f) {
+        return;
+    }
+
+    const int bits_per_sample = SDL_AUDIO_BITSIZE(spec.format);
+    if (bits_per_sample <= 0 || (bits_per_sample % 8) != 0) {
+        return;
+    }
+
+    const size_t bytes_per_sample =
+        static_cast<size_t>(bits_per_sample / 8);
+    const size_t bytes_per_frame =
+        bytes_per_sample * static_cast<size_t>(spec.channels);
+    if (bytes_per_frame == 0) {
+        return;
+    }
+
+    const size_t frame_count = clip.pcm.size() / bytes_per_frame;
+    const size_t requested_fade_frames = static_cast<size_t>(
+        std::max(1.0f,
+            static_cast<float>(spec.freq) * fade_ms / 1000.0f));
+    const size_t fade_frames =
+        std::min(frame_count, requested_fade_frames);
+    if (fade_frames == 0) {
+        return;
+    }
+
+    const size_t sample_count =
+        fade_frames * static_cast<size_t>(spec.channels);
+
+    switch (spec.format) {
+    case AUDIO_F32SYS: {
+        float* samples =
+            reinterpret_cast<float*>(clip.pcm.data());
+        for (size_t i = 0; i < sample_count; ++i) {
+            const size_t frame =
+                i / static_cast<size_t>(spec.channels);
+            const float gain =
+                static_cast<float>(frame + 1) /
+                static_cast<float>(fade_frames);
+            samples[i] *= gain;
+        }
+        break;
+    }
+    case AUDIO_S16SYS: {
+        Sint16* samples =
+            reinterpret_cast<Sint16*>(clip.pcm.data());
+        for (size_t i = 0; i < sample_count; ++i) {
+            const size_t frame =
+                i / static_cast<size_t>(spec.channels);
+            const float gain =
+                static_cast<float>(frame + 1) /
+                static_cast<float>(fade_frames);
+            samples[i] = static_cast<Sint16>(
+                static_cast<float>(samples[i]) * gain);
+        }
+        break;
+    }
+    case AUDIO_S32SYS: {
+        Sint32* samples =
+            reinterpret_cast<Sint32*>(clip.pcm.data());
+        for (size_t i = 0; i < sample_count; ++i) {
+            const size_t frame =
+                i / static_cast<size_t>(spec.channels);
+            const float gain =
+                static_cast<float>(frame + 1) /
+                static_cast<float>(fade_frames);
+            samples[i] = static_cast<Sint32>(
+                static_cast<double>(samples[i]) *
+                static_cast<double>(gain));
+        }
+        break;
+    }
+    case AUDIO_S8: {
+        Sint8* samples =
+            reinterpret_cast<Sint8*>(clip.pcm.data());
+        for (size_t i = 0; i < sample_count; ++i) {
+            const size_t frame =
+                i / static_cast<size_t>(spec.channels);
+            const float gain =
+                static_cast<float>(frame + 1) /
+                static_cast<float>(fade_frames);
+            samples[i] = static_cast<Sint8>(
+                static_cast<float>(samples[i]) * gain);
+        }
+        break;
+    }
+    case AUDIO_U8: {
+        Uint8* samples = clip.pcm.data();
+        for (size_t i = 0; i < sample_count; ++i) {
+            const size_t frame =
+                i / static_cast<size_t>(spec.channels);
+            const float gain =
+                static_cast<float>(frame + 1) /
+                static_cast<float>(fade_frames);
+            const float centered =
+                static_cast<float>(samples[i]) - 128.0f;
+            samples[i] = static_cast<Uint8>(std::clamp(
+                128.0f + centered * gain, 0.0f, 255.0f));
+        }
+        break;
+    }
+    default:
+        // The requested device format is float32, so this is only a fallback
+        // for an unusual backend format we do not need to modify.
+        break;
+    }
+}
+
 bool ensure_ui_sounds_loaded() {
     if (g_ui_sound_device != 0) {
         return true;
@@ -526,6 +638,13 @@ bool ensure_ui_sounds_loaded() {
         convert_ui_sound(cursor_path, g_ui_sound_spec, g_ui_cursor_sound) &&
         convert_ui_sound(open_path, g_ui_sound_spec, g_ui_open_sound) &&
         convert_ui_sound(close_path, g_ui_sound_spec, g_ui_close_sound);
+
+    if (loaded) {
+        // A tiny attack ramp removes the transient click when cursor.wav is
+        // rapidly restarted while moving through menu items.
+        apply_ui_sound_fade_in(
+            g_ui_cursor_sound, g_ui_sound_spec, 3.0f);
+    }
 
     if (!loaded) {
         SDL_CloseAudioDevice(g_ui_sound_device);
