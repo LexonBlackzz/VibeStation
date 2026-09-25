@@ -1,4 +1,5 @@
 #include "ui/app.h"
+#include "ui/definitive/definitive_shared.h"
 #include "ui/theme_settings.h"
 
 #include <SDL.h>
@@ -1019,6 +1020,8 @@ void App::panel_emulator_screen() {
     }
     else {
         ImVec2 avail = ImGui::GetContentRegionAvail();
+        const ImVec2 gameplay_area_pos =
+            ImGui::GetCursorScreenPos();
 
         // The gameplay surface is intentionally chrome-free. The only
         // persistent in-client control is the floating toolbar drawn over the
@@ -1052,6 +1055,21 @@ void App::panel_emulator_screen() {
                     static_cast<float>(
                         std::max(1, latest_frame_height_)))
             : 0.0f;
+
+        if (!latest_frame_rgba_.empty()) {
+            definitive_ui::update_gameplay_ambient(
+                latest_frame_rgba_,
+                latest_frame_width_,
+                latest_frame_height_);
+        }
+
+        definitive_ui::draw_gameplay_ambient(
+            ImGui::GetWindowDrawList(),
+            gameplay_area_pos,
+            avail,
+            image_pos,
+            draw_size,
+            overscan_v);
 
         ImGui::Image(
             (ImTextureID)(intptr_t)renderer_->get_texture_id(),
