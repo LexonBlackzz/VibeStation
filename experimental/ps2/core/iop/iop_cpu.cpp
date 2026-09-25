@@ -512,82 +512,16 @@ u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
 }
 
 bool IopCpu::step(std::string& error) {
-    return step_internal(error, true, true);
+    return step_internal(error, true);
 }
 
 bool IopCpu::step_hot(std::string& error) {
-    return step_internal(error, false, true);
-}
-
-bool IopCpu::current_instruction_event_free(
-    u32& instruction) const {
-    if (halted_ || bus_.interrupt_pending()) return false;
-
-    // A pending CPU-local software interrupt would redirect before the
-    // prefetched instruction. Leave that case to the normal path.
-    const u32 cause_without_external =
-        state_.cop0[13] & ~0x00000400u;
-    const bool cop0_interrupt_enabled =
-        (state_.cop0[12] & 0x00000001u) != 0u &&
-        (state_.cop0[12] &
-         cause_without_external &
-         0x0000FF00u) != 0u;
-    if (!next_is_delay_slot_ && cop0_interrupt_enabled) {
-        return false;
-    }
-
-    const u32 pc = state_.pc;
-    const u32 physical_pc = IopBus::to_physical(pc);
-    const bool safe_fetch =
-        IopBus::is_ram_address(pc) ||
-        (physical_pc >= 0x1FC00000u &&
-         physical_pc < 0x20000000u);
-    if (!safe_fetch || !bus_.read32(pc, instruction)) {
-        return false;
-    }
-
-    const u32 opcode = instruction >> 26;
-    const u32 rs = (instruction >> 21) & 31u;
-    const s16 imm = immediate(instruction);
-    const auto effective_address = [&]() {
-        return state_.gpr[rs] +
-               static_cast<u32>(static_cast<s32>(imm));
-    };
-
-    switch (opcode) {
-    case 0x20u: case 0x21u: case 0x23u:
-    case 0x24u: case 0x25u:
-    case 0x28u: case 0x29u: case 0x2Bu:
-    case 0x32u: case 0x3Au:
-        return IopBus::is_ram_address(effective_address());
-    case 0x22u: case 0x26u:
-    case 0x2Au: case 0x2Eu:
-        return IopBus::is_ram_address(
-            effective_address() & ~3u);
-    default:
-        return true;
-    }
-}
-
-bool IopCpu::try_step_hot_event_free(
-    std::string& error,
-    bool& executed) {
-    executed = false;
-    u32 instruction = 0u;
-    if (!current_instruction_event_free(instruction)) return true;
-    if (!step_internal(
-            error, false, false, &instruction)) {
-        return false;
-    }
-    executed = true;
-    return true;
+    return step_internal(error, false);
 }
 
 bool IopCpu::step_internal(
     std::string& error,
-    bool clear_error,
-    bool tick_bus,
-    const u32* prefetched_instruction) {
+    bool clear_error) {
     if (clear_error) error.clear();
 
     if (halted_) {
@@ -624,9 +558,7 @@ bool IopCpu::step_internal(
     next_is_delay_slot_ = false;
 
     u32 instruction = 0;
-    if (prefetched_instruction != nullptr) {
-        instruction = *prefetched_instruction;
-    } else if (!bus_.read32(pc, instruction)) {
+    if (!bus_.read32(pc, instruction)) {
         return fail(
             pc,
             0,
@@ -657,7 +589,7 @@ bool IopCpu::step_internal(
         pending_load_ = {};
         state_.gpr[0] = 0;
         ++state_.instructions_executed;
-        if (tick_bus) bus_.tick(1);
+        bus_.tick(1);
         return true;
     }
 
@@ -999,7 +931,7 @@ bool IopCpu::step_internal(
     pending_load_ = next_load_;
     state_.gpr[0] = 0;
     ++state_.instructions_executed;
-    if (tick_bus) bus_.tick(1);
+    bus_.tick(1);
     return true;
 }
 
