@@ -46,7 +46,7 @@ public:
     u32 clut_row = 0;
   };
 
-  struct DrawState {
+  struct RasterState {
     s16 draw_x_min = 0;
     s16 draw_y_min = 0;
     s16 draw_x_max = 0;
@@ -90,18 +90,18 @@ public:
       Vertex v0,
       Vertex v1,
       Vertex v2,
-      const DrawState& state);
+      const RasterState& state);
 
   bool draw_flat_rect(
       s16 x, s16 y, u16 width, u16 height,
       u8 r, u8 g, u8 b,
-      const DrawState& state);
+      const RasterState& state);
 
   bool draw_textured_rect(
       s16 x, s16 y, u16 width, u16 height,
       u8 u, u8 v,
       u8 r, u8 g, u8 b,
-      const DrawState& state);
+      const RasterState& state);
 
   u64 dispatch_count() const { return dispatch_count_; }
   u64 upload_count() const { return upload_count_; }
@@ -148,7 +148,7 @@ private:
       const Vertex& v0,
       const Vertex& v1,
       const Vertex& v2,
-      const DrawState& state,
+      const RasterState& state,
       int rect_x, int rect_y, int rect_w, int rect_h);
 
   bool dispatch_bounds(int min_x, int min_y, int max_x, int max_y);
