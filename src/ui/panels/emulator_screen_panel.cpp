@@ -636,10 +636,11 @@ void App::draw_gameplay_toolbar(
         GameplayToolbarIcon::Skull,
         x,
         true,
-        show_grim_reaper_,
+        definitive_grim_reaper_active_,
         "Grim Reaper");
     if (grim.clicked) {
-        show_grim_reaper_ = true;
+        play_ui_open_sound();
+        open_definitive_grim_reaper();
     }
 
     x += button_size + gap;
