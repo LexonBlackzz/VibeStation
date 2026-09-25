@@ -24,6 +24,34 @@ namespace {
 constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
+constexpr std::array<float, 18> kDefinitiveFontSizes = {{
+    9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f,
+    16.0f, 18.0f, 20.0f, 22.0f, 24.0f, 28.0f,
+    32.0f, 36.0f, 40.0f, 48.0f, 54.0f, 60.0f
+}};
+std::array<ImFont*, kDefinitiveFontSizes.size()> g_definitive_fonts = {};
+
+ImFont* definitive_font_for_size(float pixel_size) {
+    ImFont* best = nullptr;
+    float best_distance = FLT_MAX;
+
+    for (size_t i = 0; i < g_definitive_fonts.size(); ++i) {
+        ImFont* font = g_definitive_fonts[i];
+        if (font == nullptr) {
+            continue;
+        }
+
+        const float distance =
+            std::abs(kDefinitiveFontSizes[i] - pixel_size);
+        if (distance < best_distance) {
+            best = font;
+            best_distance = distance;
+        }
+    }
+
+    return best != nullptr ? best : ImGui::GetFont();
+}
+
 GLuint g_background_texture = 0;
 GLuint g_background_soft_texture = 0;
 GLuint g_background_blur_texture = 0;
@@ -531,10 +559,11 @@ void draw_readability_shade(ImDrawList* draw,
 void draw_centered_intro_text(
     ImDrawList* draw, const ImVec2& center, float font_size,
     ImU32 color, const char* text) {
-    const ImVec2 text_size = ImGui::GetFont()->CalcTextSizeA(
+    ImFont* font = definitive_font_for_size(font_size);
+    const ImVec2 text_size = font->CalcTextSizeA(
         font_size, FLT_MAX, 0.0f, text);
     draw->AddText(
-        ImGui::GetFont(), font_size,
+        font, font_size,
         ImVec2(center.x - text_size.x * 0.5f,
             center.y - text_size.y * 0.5f),
         color, text);
@@ -957,9 +986,13 @@ void draw_boot_presentation(
     const float status_alpha =
         timeline_progress(elapsed, 0.24f, 0.62f) * boot_fade;
     if (status_alpha > 0.001f) {
+        const float status_font_size =
+            std::max(9.0f, unit * 0.011f);
+        ImFont* status_font =
+            definitive_font_for_size(status_font_size);
         overlay->AddText(
-            ImGui::GetFont(),
-            std::max(9.0f, unit * 0.011f),
+            status_font,
+            status_font_size,
             ImVec2(pos.x + unit * 0.035f,
                 pos.y + size.y - unit * 0.055f),
             rgba(128, 136, 146, glow_alpha(185.0f * status_alpha)),
@@ -967,11 +1000,13 @@ void draw_boot_presentation(
 
         const char* skip_text = "SPACE / ENTER  SKIP";
         const float font_size = std::max(9.0f, unit * 0.011f);
+        ImFont* skip_font =
+            definitive_font_for_size(font_size);
         const ImVec2 skip_size =
-            ImGui::GetFont()->CalcTextSizeA(
+            skip_font->CalcTextSizeA(
                 font_size, FLT_MAX, 0.0f, skip_text);
         overlay->AddText(
-            ImGui::GetFont(),
+            skip_font,
             font_size,
             ImVec2(
                 pos.x + size.x - unit * 0.035f - skip_size.x,
@@ -1107,17 +1142,20 @@ void draw_ui_initialization_overlay(
 
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     float size, ImU32 color, const char* text) {
+    const float font_size = layout.px(size);
+    ImFont* font = definitive_font_for_size(font_size);
     draw->AddText(
-        ImGui::GetFont(), layout.px(size), layout.point(x, y), color, text);
+        font, font_size, layout.point(x, y), color, text);
 }
 
 void add_text_right(ImDrawList* draw, const Layout& layout, float right_x, float y,
     float size, ImU32 color, const char* text) {
     const float font_size = layout.px(size);
-    const ImVec2 text_size = ImGui::GetFont()->CalcTextSizeA(
+    ImFont* font = definitive_font_for_size(font_size);
+    const ImVec2 text_size = font->CalcTextSizeA(
         font_size, FLT_MAX, 0.0f, text);
     const ImVec2 p = layout.point(right_x, y);
-    draw->AddText(ImGui::GetFont(), font_size,
+    draw->AddText(font, font_size,
         ImVec2(p.x - text_size.x, p.y), color, text);
 }
 
@@ -1519,8 +1557,9 @@ void definitive_settings_note(
         pos.x + wrap_width,
         pos.y + layout.px(30.0f));
 
+    ImFont* font = definitive_font_for_size(font_size);
     draw->AddText(
-        ImGui::GetFont(),
+        font,
         font_size,
         pos,
         rgba(171, 181, 191, 235),
@@ -1644,6 +1683,26 @@ bool definitive_settings_slider_float(
     return changed;
 }
 
+}
+
+void App::initialize_definitive_ui_fonts() {
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+
+    for (size_t i = 0; i < kDefinitiveFontSizes.size(); ++i) {
+        ImFontConfig config;
+        config.SizePixels = kDefinitiveFontSizes[i];
+        config.OversampleH = 3;
+        config.OversampleV = 2;
+        config.PixelSnapH = false;
+
+        g_definitive_fonts[i] =
+            io.Fonts->AddFontDefault(&config);
+    }
+
+    // 14 px is a comfortable baseline for legacy ImGui widgets. Definitive
+    // draw-list text picks its own nearest native-size font above.
+    io.FontDefault = g_definitive_fonts[5];
 }
 
 void App::release_definitive_ui_assets() {
