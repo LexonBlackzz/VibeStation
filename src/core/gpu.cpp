@@ -1649,6 +1649,7 @@ Vertex Gpu::decode_vertex_word(u32 word) const {
 }
 
 void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) {
+    prepare_software_vram_write();
     // PS1 hardware rejects lines exceeding 1023x511 span, same as triangles.
     const int dx_span = std::abs(static_cast<int>(b.x) - static_cast<int>(a.x));
     const int dy_span = std::abs(static_cast<int>(b.y) - static_cast<int>(a.y));
@@ -1684,6 +1685,7 @@ void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) 
 
 void Gpu::draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
     bool semi_transparent) {
+    prepare_software_vram_write();
     const int dx_span = std::abs(static_cast<int>(b.x) - static_cast<int>(a.x));
     const int dy_span = std::abs(static_cast<int>(b.y) - static_cast<int>(a.y));
     if (dx_span > 1023 || dy_span > 511) {
@@ -1828,6 +1830,15 @@ void Gpu::gp0_textured_rect() {
         command_debug_.rect_depth[rect_index] =
             static_cast<u8>((texpage_ >> 7) & 0x3u);
     }
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        if (hardware_rasterizer_->draw_textured_rect(
+                x, y, w, h, u, v, c.r, c.g, c.b,
+                hardware_draw_state(raw_texture))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
 
     // Textured rectangle draw path (supports 4/8/15-bit tex fetch via
     // read_texel).
