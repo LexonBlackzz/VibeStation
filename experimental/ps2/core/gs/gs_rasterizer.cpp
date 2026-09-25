@@ -480,6 +480,70 @@ bool simple_frame_write(const GsRasterContext& ctx) {
            ctx.first_alpha_input_rgba == nullptr;
 }
 
+bool hot_osdsys_psm16_pixel_state(const GsRasterContext& ctx) {
+    return ctx.texture.enabled &&
+           ctx.texture.psm == 2u &&
+           ctx.psm == 0u &&
+           ctx.zte &&
+           (ctx.ztst & 3u) == 2u &&
+           ctx.zpsm == 48u &&
+           ctx.zmask &&
+           ctx.alpha_blend &&
+           !ctx.pabe &&
+           (ctx.alpha_a & 3u) == 0u &&
+           (ctx.alpha_b & 3u) == 2u &&
+           (ctx.alpha_c & 3u) == 2u &&
+           (ctx.alpha_d & 3u) == 1u &&
+           (ctx.alpha_fix & 0xFFu) == 20u &&
+           ctx.color_clamp &&
+           !ctx.ate &&
+           !ctx.date &&
+           !ctx.fba &&
+           ctx.fbmask == 0u &&
+           (ctx.scanmask & 2u) == 0u &&
+           ctx.nonzero_colors == nullptr &&
+           ctx.nonzero_inputs == nullptr &&
+           ctx.nonzero_input_alpha == nullptr &&
+           ctx.first_input_rgba == nullptr &&
+           ctx.first_alpha_input_rgba == nullptr;
+}
+
+bool draw_hot_osdsys_psm16_pixel(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y,
+    u32 z,
+    u32 source) {
+    const u32 ux = static_cast<u32>(x);
+    const u32 uy = static_cast<u32>(y);
+
+    const u32 depth_address = GsVram::depth_address_bytes(
+        48u, ux, uy, ctx.zbp, ctx.fbw);
+    const u32 destination_z =
+        vram.read_depth_at_address(48u, depth_address);
+    if (z < destination_z) return false; // GEQUAL
+
+    const u32 frame_address = GsVram::pixel_address_bytes(
+        0u, ux, uy, ctx.fbp, ctx.fbw);
+    const u32 destination =
+        vram.read_pixel_at_address(0u, frame_address);
+
+    u32 output = source & 0xFF000000u;
+    const u32 sr = source & 0xFFu;
+    const u32 sg = (source >> 8u) & 0xFFu;
+    const u32 sb = (source >> 16u) & 0xFFu;
+    const u32 dr = destination & 0xFFu;
+    const u32 dg = (destination >> 8u) & 0xFFu;
+    const u32 db = (destination >> 16u) & 0xFFu;
+    output |= std::min(255u, dr + ((sr * 20u) >> 7u));
+    output |= std::min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
+    output |= std::min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+
+    return vram.write_pixel_at_address_untracked(
+        0u, frame_address, output);
+}
+
 bool draw_simple_frame_pixel(
     GsVram& vram,
     const GsRasterContext& ctx,
@@ -985,7 +1049,10 @@ u64 GsRasterizer::draw_sprite(
         }
     }
 
-    const bool simple_pixels = simple_frame_write(ctx);
+    const bool hot_psm16_pixels =
+        hot_osdsys_psm16_pixel_state(ctx);
+    const bool simple_pixels =
+        !hot_psm16_pixels && simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         const s32 py = y * 16 + 8;
@@ -1041,9 +1108,12 @@ u64 GsRasterizer::draw_sprite(
                     0.0L, 255.0L));
                 rgba = apply_fog(rgba, ctx.fog_color, fog);
             }
-            const bool wrote = simple_pixels
-                ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
-                : draw_pixel(vram, ctx, x, y, b.z, rgba);
+            const bool wrote = hot_psm16_pixels
+                ? draw_hot_osdsys_psm16_pixel(
+                    vram, ctx, x, y, b.z, rgba)
+                : simple_pixels
+                    ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                    : draw_pixel(vram, ctx, x, y, b.z, rgba);
             if (wrote) ++pixels;
         }
     }
@@ -1109,7 +1179,10 @@ u64 GsRasterizer::draw_triangle(
     const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
     const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
-    const bool simple_pixels = simple_frame_write(ctx);
+    const bool hot_psm16_pixels =
+        hot_osdsys_psm16_pixel_state(ctx);
+    const bool simple_pixels =
+        !hot_psm16_pixels && simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         s64 w0 = row_w0;
@@ -1171,9 +1244,12 @@ u64 GsRasterizer::draw_triangle(
                 }
                 const u32 z = !ctx.zte ? 0u : constant_z ? a.z
                     : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-                const bool wrote = simple_pixels
-                    ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
-                    : draw_pixel(vram, ctx, x, y, z, rgba);
+                const bool wrote = hot_psm16_pixels
+                    ? draw_hot_osdsys_psm16_pixel(
+                        vram, ctx, x, y, z, rgba)
+                    : simple_pixels
+                        ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                        : draw_pixel(vram, ctx, x, y, z, rgba);
                 if (wrote) ++pixels;
             }
 
