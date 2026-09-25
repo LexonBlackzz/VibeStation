@@ -1383,6 +1383,16 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
+        // SifGetReg(4) has a system-level exact-timing accelerator that must
+        // advance the active IOP to the real SMFLAG sample point. If a quiet
+        // trace reaches the syscall wrapper mid-batch, yield here so run_ee()
+        // can apply that accelerator instead of interpreting the 106-cycle
+        // kernel round-trip inside this otherwise side-effect-free batch.
+        if (retired != 0u &&
+            ee_.state().pc == 0x0024DE74u) {
+            break;
+        }
+
         bool progressed = false;
 
         // Same helper, first sample. Retire only the MMIO load here; the
