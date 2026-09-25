@@ -390,6 +390,9 @@ void App::panel_settings() {
     }
     ImGui::End();
 
+    if (definitive_settings_was_open && !show_settings_) {
+        play_ui_close_sound();
+    }
     if (!show_settings_) {
         definitive_detailed_settings_ = false;
     }
