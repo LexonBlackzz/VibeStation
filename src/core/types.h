@@ -121,6 +121,8 @@ inline bool g_experimental_dma_command_sanitizer = false;
 inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
+// Experimental OpenGL 4.3 compute rasterizer. Software remains the fallback.
+inline bool g_gpu_hardware_rasterizer = true;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,
