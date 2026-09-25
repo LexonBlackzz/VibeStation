@@ -152,7 +152,7 @@ set(VIBESTATION_SOURCES
     src/ui/panels/vram_panel.cpp
 )
 
-set(VIBESTATION_VERSION_STRING "v0.5.2-definitive")
+set(VIBESTATION_VERSION_STRING "v0.6.0")
 set(VIBESTATION_BUILD_NUMBER_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
 set(VIBESTATION_VERSION_HEADER
