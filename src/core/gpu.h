@@ -159,7 +159,7 @@ public:
   bool dma_request() const;
 
   // VRAM access
-  const u16 *vram() const { return vram_.data(); }
+  const u16 *vram() const;
   void corrupt_vram_word(u32 index, u16 value);
 
   // Optional host-GPU raster backend. The OpenGL context is owned by the
