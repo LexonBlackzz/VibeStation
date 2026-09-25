@@ -124,8 +124,8 @@ inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,
-  // Legacy values are retained only so old config/diagnostic code can migrate
-  // cleanly. Runtime selection exposes only Interpreter and Recompiler.
+  // Legacy numeric values are retained so old configs still migrate cleanly.
+  // Runtime selection exposes Interpreter, Decoded Block, and x64 JIT.
   DecodedBlockInterpreter = 1,
   X64Jit = 2,
   X64JitV2 = 3,
