@@ -299,7 +299,7 @@ void definitive_ui::release_background_assets() {
 
 void definitive_ui::draw_launcher_background(
     ImDrawList* draw, const ImVec2& pos, const ImVec2& size,
-    float opacity = 1.0f) {
+    float opacity) {
     const float alpha = std::clamp(opacity, 0.0f, 1.0f);
 
     // Pure black is the transition canvas. The photo is composited over it
