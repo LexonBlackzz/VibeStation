@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <mutex>
 
 namespace {
 
@@ -22,6 +23,7 @@ VerticalColors g_right_colors{};
 HorizontalColors g_top_colors{};
 HorizontalColors g_bottom_colors{};
 bool g_ambient_initialized = false;
+std::mutex g_ambient_mutex;
 
 ImVec4 sample_region(
     const std::vector<u32>& rgba,
@@ -616,6 +618,8 @@ void definitive_ui::update_gameplay_ambient(
     spatial_smooth(bottom_target);
     spatial_smooth(bottom_target);
 
+    std::lock_guard<std::mutex> lock(g_ambient_mutex);
+
     if (!g_ambient_initialized) {
         g_left_colors = left_target;
         g_right_colors = right_target;
@@ -672,8 +676,19 @@ void definitive_ui::draw_gameplay_ambient(
         area_end,
         IM_COL32(3, 4, 6, 255));
 
-    if (!g_ambient_initialized) {
-        return;
+    VerticalColors left_colors{};
+    VerticalColors right_colors{};
+    HorizontalColors top_colors{};
+    HorizontalColors bottom_colors{};
+    {
+        std::lock_guard<std::mutex> lock(g_ambient_mutex);
+        if (!g_ambient_initialized) {
+            return;
+        }
+        left_colors = g_left_colors;
+        right_colors = g_right_colors;
+        top_colors = g_top_colors;
+        bottom_colors = g_bottom_colors;
     }
 
     const float game_right =
@@ -684,7 +699,7 @@ void definitive_ui::draw_gameplay_ambient(
     if (game_pos.x - area_pos.x > 0.5f) {
         draw_vertical_ambilight(
             draw,
-            g_left_colors,
+            left_colors,
             area_pos.x,
             game_pos.x,
             game_pos.y,
@@ -695,7 +710,7 @@ void definitive_ui::draw_gameplay_ambient(
     if (area_end.x - game_right > 0.5f) {
         draw_vertical_ambilight(
             draw,
-            g_right_colors,
+            right_colors,
             area_end.x,
             game_right,
             game_pos.y,
@@ -706,7 +721,7 @@ void definitive_ui::draw_gameplay_ambient(
     if (game_pos.y - area_pos.y > 0.5f) {
         draw_horizontal_ambilight(
             draw,
-            g_top_colors,
+            top_colors,
             game_pos.x,
             game_size.x,
             area_pos.y,
@@ -717,7 +732,7 @@ void definitive_ui::draw_gameplay_ambient(
     if (area_end.y - game_bottom > 0.5f) {
         draw_horizontal_ambilight(
             draw,
-            g_bottom_colors,
+            bottom_colors,
             game_pos.x,
             game_size.x,
             area_end.y,
@@ -727,6 +742,7 @@ void definitive_ui::draw_gameplay_ambient(
 }
 
 void definitive_ui::release_gameplay_ambient_assets() {
+    std::lock_guard<std::mutex> lock(g_ambient_mutex);
     g_left_colors = {};
     g_right_colors = {};
     g_top_colors = {};
