@@ -995,12 +995,9 @@ void App::update() {
 }
 
 void App::render_ui() {
-    // The definitive launcher owns the full viewport while the emulator is idle.
-    // Keep the legacy menu bar available once emulation starts so existing
-    // diagnostics and advanced tools remain reachable during the transition.
-    if (has_started_emulation_) {
-        menu_bar();
-    }
+    // The definitive launcher owns the full viewport while idle. During
+    // emulation, the gameplay screen uses its own floating toolbar instead of
+    // the legacy ImGui main menu bar so the game image stays visually clean.
 
     // Main dockspace
     ImGuiViewport* viewport = ImGui::GetMainViewport();
