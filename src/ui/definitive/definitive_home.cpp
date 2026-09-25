@@ -1209,8 +1209,7 @@ void draw_boot_presentation(
 
     if (g_intro_icon_blur_texture != 0 && blur_mix > 0.001f) {
         overlay->AddImage(
-            reinterpret_cast<ImTextureID>(
-                static_cast<intptr_t>(g_intro_icon_blur_texture)),
+            (ImTextureID)(intptr_t)g_intro_icon_blur_texture,
             icon0, icon1,
             ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
             rgba(255, 255, 255,
@@ -1219,8 +1218,7 @@ void draw_boot_presentation(
 
     if (g_intro_icon_texture != 0) {
         overlay->AddImage(
-            reinterpret_cast<ImTextureID>(
-                static_cast<intptr_t>(g_intro_icon_texture)),
+            (ImTextureID)(intptr_t)g_intro_icon_texture,
             icon0, icon1,
             ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
             rgba(255, 255, 255,
