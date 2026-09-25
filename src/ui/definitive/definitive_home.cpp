@@ -2854,6 +2854,8 @@ void App::panel_definitive_home() {
             g_launcher_ui_intro_elapsed = 0.0f;
             g_launcher_ui_intro_complete = false;
             ensure_background_texture_loaded();
+            draw_boot_presentation(
+                window_pos, window_size, g_launcher_intro_elapsed);
             return;
         }
 
