@@ -559,6 +559,85 @@ bool hot_osdsys_psm16_pixel_state(const GsRasterContext& ctx) {
            ctx.first_alpha_input_rgba == nullptr;
 }
 
+bool hot_osdsys_psm16_textured_state(const GsRasterContext& ctx) {
+    const auto& texture = ctx.texture;
+    return hot_osdsys_psm16_pixel_state(ctx) &&
+           texture.tfx == 0u &&
+           !ctx.fog_enabled &&
+           texture.nonzero_samples == nullptr &&
+           texture.alpha_samples == nullptr &&
+           texture.first_sample_x == nullptr &&
+           texture.first_sample_y == nullptr &&
+           texture.first_sample_rgba == nullptr &&
+           texture.nonzero_shaded == nullptr;
+}
+
+bool draw_hot_osdsys_psm16_textured_pixel(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y,
+    u32 z,
+    s32 u,
+    s32 v,
+    u32 vertex_rgba) {
+    const auto& texture = ctx.texture;
+    const s32 texel_u = wrap_coordinate(
+        u >> 4, texture.width, texture.wms,
+        texture.minu, texture.maxu);
+    const s32 texel_v = wrap_coordinate(
+        v >> 4, texture.height, texture.wmt,
+        texture.minv, texture.maxv);
+    const u16 color = vram.read_psmct16(
+        static_cast<u32>(texel_u),
+        static_cast<u32>(texel_v),
+        texture.bp,
+        texture.bw);
+
+    const u32 vr = vertex_rgba & 0xFFu;
+    const u32 vg = (vertex_rgba >> 8u) & 0xFFu;
+    const u32 vb = (vertex_rgba >> 16u) & 0xFFu;
+    const u32 va = (vertex_rgba >> 24u) & 0xFFu;
+    const u32 sr = std::min(
+        255u, ((static_cast<u32>(color) & 0x1Fu) * vr) >> 4u);
+    const u32 sg = std::min(
+        255u, (((static_cast<u32>(color) >> 5u) & 0x1Fu) * vg) >> 4u);
+    const u32 sb = std::min(
+        255u, (((static_cast<u32>(color) >> 10u) & 0x1Fu) * vb) >> 4u);
+
+    u32 source_alpha =
+        (color & 0x8000u) != 0u ? (texture.ta1 & 0xFFu) :
+        (texture.aem && (color & 0x7FFFu) == 0u) ? 0u :
+        (texture.ta0 & 0xFFu);
+    source_alpha = texture.tcc
+        ? modulate_channel(source_alpha, va)
+        : va;
+
+    const u32 ux = static_cast<u32>(x);
+    const u32 uy = static_cast<u32>(y);
+    u32 frame_address = 0u;
+    u32 depth_address = 0u;
+    GsVram::color_depth32_addresses(
+        ux, uy, ctx.fbp, ctx.zbp, ctx.fbw,
+        frame_address, depth_address);
+    const u32 destination_z =
+        vram.read_depth_at_address(48u, depth_address);
+    if (z < destination_z) return false;
+
+    const u32 destination =
+        vram.read_pixel_at_address(0u, frame_address);
+    const u32 dr = destination & 0xFFu;
+    const u32 dg = (destination >> 8u) & 0xFFu;
+    const u32 db = (destination >> 16u) & 0xFFu;
+
+    u32 output = source_alpha << 24u;
+    output |= std::min(255u, dr + ((sr * 20u) >> 7u));
+    output |= std::min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
+    output |= std::min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+    return vram.write_pixel_at_address_untracked(
+        0u, frame_address, output);
+}
+
 bool draw_hot_osdsys_psm16_pixel(
     GsVram& vram,
     const GsRasterContext& ctx,
@@ -1101,10 +1180,15 @@ u64 GsRasterizer::draw_sprite(
         }
     }
 
+    const bool hot_psm16_textured =
+        hot_osdsys_psm16_textured_state(ctx);
     const bool hot_psm16_pixels =
+        !hot_psm16_textured &&
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
-        !hot_psm16_pixels && simple_frame_write(ctx);
+        !hot_psm16_textured &&
+        !hot_psm16_pixels &&
+        simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         const s32 py = y * 16 + 8;
@@ -1140,32 +1224,39 @@ u64 GsRasterizer::draw_sprite(
                     v = stq_to_fixed(t, q, ctx.texture.height);
                 }
             }
-            u32 rgba = shade_pixel(vram, ctx.texture, u, v, b.rgba);
-            if (ctx.fog_enabled) {
-                const long double fx = dx != 0
-                    ? std::clamp(
-                        static_cast<long double>(px - a.x) /
-                        static_cast<long double>(dx), 0.0L, 1.0L)
-                    : 0.0L;
-                const long double fy = dy != 0
-                    ? std::clamp(
-                        static_cast<long double>(py - a.y) /
-                        static_cast<long double>(dy), 0.0L, 1.0L)
-                    : 0.0L;
-                const long double t_fog = (fx + fy) * 0.5L;
-                const u32 fog = static_cast<u32>(std::clamp<long double>(
-                    static_cast<long double>(a.fog) +
-                    (static_cast<long double>(b.fog) -
-                     static_cast<long double>(a.fog)) * t_fog,
-                    0.0L, 255.0L));
-                rgba = apply_fog(rgba, ctx.fog_color, fog);
+            bool wrote = false;
+            if (hot_psm16_textured) {
+                wrote = draw_hot_osdsys_psm16_textured_pixel(
+                    vram, ctx, x, y, b.z, u, v, b.rgba);
+            } else {
+                u32 rgba = shade_pixel(
+                    vram, ctx.texture, u, v, b.rgba);
+                if (ctx.fog_enabled) {
+                    const long double fx = dx != 0
+                        ? std::clamp(
+                            static_cast<long double>(px - a.x) /
+                            static_cast<long double>(dx), 0.0L, 1.0L)
+                        : 0.0L;
+                    const long double fy = dy != 0
+                        ? std::clamp(
+                            static_cast<long double>(py - a.y) /
+                            static_cast<long double>(dy), 0.0L, 1.0L)
+                        : 0.0L;
+                    const long double t_fog = (fx + fy) * 0.5L;
+                    const u32 fog = static_cast<u32>(std::clamp<long double>(
+                        static_cast<long double>(a.fog) +
+                        (static_cast<long double>(b.fog) -
+                         static_cast<long double>(a.fog)) * t_fog,
+                        0.0L, 255.0L));
+                    rgba = apply_fog(rgba, ctx.fog_color, fog);
+                }
+                wrote = hot_psm16_pixels
+                    ? draw_hot_osdsys_psm16_pixel(
+                        vram, ctx, x, y, b.z, rgba)
+                    : simple_pixels
+                        ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                        : draw_pixel(vram, ctx, x, y, b.z, rgba);
             }
-            const bool wrote = hot_psm16_pixels
-                ? draw_hot_osdsys_psm16_pixel(
-                    vram, ctx, x, y, b.z, rgba)
-                : simple_pixels
-                    ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
-                    : draw_pixel(vram, ctx, x, y, b.z, rgba);
             if (wrote) ++pixels;
         }
     }
@@ -1247,10 +1338,15 @@ u64 GsRasterizer::draw_triangle(
           static_cast<double>(w2_dx) * c.t
         : 0.0;
 
+    const bool hot_psm16_textured =
+        hot_osdsys_psm16_textured_state(ctx);
     const bool hot_psm16_pixels =
+        !hot_psm16_textured &&
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
-        !hot_psm16_pixels && simple_frame_write(ctx);
+        !hot_psm16_textured &&
+        !hot_psm16_pixels &&
+        simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         s64 w0 = row_w0;
@@ -1317,21 +1413,27 @@ u64 GsRasterizer::draw_triangle(
                     ? interpolate_rgba(
                         w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
                     : c.rgba;
-                u32 rgba = shade_pixel(
-                    vram, ctx.texture, u, v, vertex_rgba);
-                if (ctx.fog_enabled) {
-                    const u32 fog = interpolate_scalar(
-                        w0, w1, w2, area, a.fog, b.fog, c.fog);
-                    rgba = apply_fog(rgba, ctx.fog_color, fog);
-                }
                 const u32 z = !ctx.zte ? 0u : constant_z ? a.z
                     : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-                const bool wrote = hot_psm16_pixels
-                    ? draw_hot_osdsys_psm16_pixel(
-                        vram, ctx, x, y, z, rgba)
-                    : simple_pixels
-                        ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
-                        : draw_pixel(vram, ctx, x, y, z, rgba);
+                bool wrote = false;
+                if (hot_psm16_textured) {
+                    wrote = draw_hot_osdsys_psm16_textured_pixel(
+                        vram, ctx, x, y, z, u, v, vertex_rgba);
+                } else {
+                    u32 rgba = shade_pixel(
+                        vram, ctx.texture, u, v, vertex_rgba);
+                    if (ctx.fog_enabled) {
+                        const u32 fog = interpolate_scalar(
+                            w0, w1, w2, area, a.fog, b.fog, c.fog);
+                        rgba = apply_fog(rgba, ctx.fog_color, fog);
+                    }
+                    wrote = hot_psm16_pixels
+                        ? draw_hot_osdsys_psm16_pixel(
+                            vram, ctx, x, y, z, rgba)
+                        : simple_pixels
+                            ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                            : draw_pixel(vram, ctx, x, y, z, rgba);
+                }
                 if (wrote) ++pixels;
             }
 
