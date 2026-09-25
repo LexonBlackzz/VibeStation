@@ -3,6 +3,8 @@
 #include "core/gpu.h"
 #include "core/types.h"
 
+#include <SDL.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -240,6 +242,16 @@ u64 combine_suite_signature(u64 signature, u64 value) {
 
 u64 g_gpu_test_suite_signature = 1469598103934665603ull;
 
+GpuHardwareRasterizer* g_test_hardware_rasterizer = nullptr;
+
+std::unique_ptr<Gpu> make_test_gpu() {
+  auto gpu = make_test_gpu();
+  if (g_test_hardware_rasterizer != nullptr) {
+    gpu->set_hardware_rasterizer(g_test_hardware_rasterizer);
+  }
+  return gpu;
+}
+
 bool compare_vram(const char *name, const Gpu &gpu,
                   const std::vector<u16> &expected) {
   const u16 *actual = gpu.vram();
@@ -289,9 +301,7 @@ bool compare_vram(const char *name, const Gpu &gpu,
 }
 
 bool test_flat_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
 
@@ -316,9 +326,7 @@ bool test_flat_triangle() {
 }
 
 bool test_flat_span_edge_cases() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u8 r = 196;
@@ -362,9 +370,7 @@ bool test_flat_span_edge_cases() {
 }
 
 bool test_gouraud_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
 
@@ -393,9 +399,7 @@ bool test_gouraud_triangle() {
 }
 
 bool test_gouraud_span_edge_cases() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
 
@@ -469,9 +473,7 @@ void seed_direct_texture(Gpu &gpu, std::vector<u16> &expected, int base_x,
 }
 
 bool test_raw_textured_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0104u; // X page 4 (256px), 15-bit direct.
@@ -507,9 +509,7 @@ bool test_raw_textured_triangle() {
 }
 
 bool test_textured_span_edge_cases() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0104u;
@@ -562,9 +562,7 @@ bool test_textured_span_edge_cases() {
 }
 
 bool test_gouraud_textured_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0105u; // X page 5 (320px), 15-bit direct.
@@ -626,9 +624,7 @@ void seed_palette(Gpu &gpu, std::vector<u16> &expected, u16 clut,
 }
 
 bool test_4bit_clut_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0006u; // X page 6, 4-bit indexed.
@@ -681,9 +677,7 @@ bool test_4bit_clut_triangle() {
 }
 
 bool test_8bit_clut_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0087u; // X page 7, 8-bit indexed.
@@ -734,9 +728,7 @@ bool test_8bit_clut_triangle() {
 }
 
 bool test_texture_window_triangle() {
-  auto gpu = std::make_unique<Gpu>();
-  gpu->init(nullptr);
-  gpu->reset();
+  auto gpu = make_test_gpu();
 
   std::vector<u16> expected(kVramPixels, 0);
   constexpr u16 texpage = 0x0108u; // X page 8, 15-bit direct.
@@ -787,7 +779,7 @@ bool test_texture_window_triangle() {
 
 } // namespace
 
-int run_gpu_correctness_tests() {
+int run_gpu_correctness_tests_impl(const char* backend_label) {
   g_gpu_test_suite_signature = 1469598103934665603ull;
 
   const bool old_fast = g_gpu_fast_mode;
@@ -809,8 +801,9 @@ int run_gpu_correctness_tests() {
   }};
 
   int failed = 0;
-  std::fprintf(stdout, "[GPU TEST] Running %zu deterministic GPU tests...\n",
-               tests.size());
+  std::fprintf(stdout,
+               "[GPU TEST] Running %zu deterministic GPU tests (%s)...\n",
+               tests.size(), backend_label);
   for (const auto &test : tests) {
     if (!test.second()) {
       ++failed;
@@ -830,8 +823,66 @@ int run_gpu_correctness_tests() {
     return 1;
   }
 
-  std::fprintf(stdout, "[GPU TEST] All %zu tests passed.\n", tests.size());
+  std::fprintf(stdout, "[GPU TEST] All %zu tests passed (%s).\n",
+               tests.size(), backend_label);
   return 0;
+}
+
+int run_gpu_correctness_tests() {
+  GpuHardwareRasterizer* const old_backend = g_test_hardware_rasterizer;
+  g_test_hardware_rasterizer = nullptr;
+  const int result = run_gpu_correctness_tests_impl("software");
+  g_test_hardware_rasterizer = old_backend;
+  return result;
+}
+
+int run_gpu_hardware_correctness_tests() {
+  const bool initialized_video_here =
+      (SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) == 0;
+  if (initialized_video_here && SDL_Init(SDL_INIT_VIDEO) != 0) {
+    std::fprintf(stderr, "[GPU HW TEST] SDL video init failed: %s\n",
+                 SDL_GetError());
+    return 1;
+  }
+
+  GpuHardwareRasterizer rasterizer;
+  if (!rasterizer.initialize()) {
+    std::fprintf(stderr, "[GPU HW TEST] backend init failed: %s\n",
+                 rasterizer.status().c_str());
+    if (initialized_video_here) {
+      SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    }
+    return 1;
+  }
+
+  if (!rasterizer.bind_to_current_thread()) {
+    std::fprintf(stderr, "[GPU HW TEST] context bind failed: %s\n",
+                 rasterizer.status().c_str());
+    rasterizer.shutdown();
+    if (initialized_video_here) {
+      SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    }
+    return 1;
+  }
+
+  std::fprintf(stdout, "[GPU HW TEST] %s\n", rasterizer.status().c_str());
+
+  GpuHardwareRasterizer* const old_backend = g_test_hardware_rasterizer;
+  const bool old_hw_enabled = g_gpu_hardware_rasterizer;
+  g_test_hardware_rasterizer = &rasterizer;
+  g_gpu_hardware_rasterizer = true;
+
+  const int result = run_gpu_correctness_tests_impl("OpenGL compute");
+
+  g_gpu_hardware_rasterizer = old_hw_enabled;
+  g_test_hardware_rasterizer = old_backend;
+
+  rasterizer.unbind_from_current_thread();
+  rasterizer.shutdown();
+  if (initialized_video_here) {
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+  }
+  return result;
 }
 
 
