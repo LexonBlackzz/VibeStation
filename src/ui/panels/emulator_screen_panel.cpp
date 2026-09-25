@@ -1056,13 +1056,6 @@ void App::panel_emulator_screen() {
                         std::max(1, latest_frame_height_)))
             : 0.0f;
 
-        if (!latest_frame_rgba_.empty()) {
-            definitive_ui::update_gameplay_ambient(
-                latest_frame_rgba_,
-                latest_frame_width_,
-                latest_frame_height_);
-        }
-
         definitive_ui::draw_gameplay_ambient(
             ImGui::GetWindowDrawList(),
             gameplay_area_pos,
