@@ -1193,6 +1193,22 @@ u64 GsRasterizer::draw_triangle(
     const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
     const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
+    // Constant-Q ST interpolation is affine. Keep exact integer edge
+    // stepping, but advance the double-precision S/T numerators across a row
+    // instead of rebuilding six weighted products for every covered pixel.
+    // Row starts are recomputed from integer edge values, bounding floating
+    // accumulation to one scanline.
+    const double s_num_dx = scaled_constant_q
+        ? static_cast<double>(w0_dx) * a.s +
+          static_cast<double>(w1_dx) * b.s +
+          static_cast<double>(w2_dx) * c.s
+        : 0.0;
+    const double t_num_dx = scaled_constant_q
+        ? static_cast<double>(w0_dx) * a.t +
+          static_cast<double>(w1_dx) * b.t +
+          static_cast<double>(w2_dx) * c.t
+        : 0.0;
+
     const bool hot_psm16_pixels =
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
@@ -1202,6 +1218,16 @@ u64 GsRasterizer::draw_triangle(
         s64 w0 = row_w0;
         s64 w1 = row_w1;
         s64 w2 = row_w2;
+        double s_num = scaled_constant_q
+            ? static_cast<double>(row_w0) * a.s +
+              static_cast<double>(row_w1) * b.s +
+              static_cast<double>(row_w2) * c.s
+            : 0.0;
+        double t_num = scaled_constant_q
+            ? static_cast<double>(row_w0) * a.t +
+              static_cast<double>(row_w1) * b.t +
+              static_cast<double>(row_w2) * c.t
+            : 0.0;
         for (s32 x = left; x < right; ++x) {
             const bool inside =
                 positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
@@ -1216,14 +1242,18 @@ u64 GsRasterizer::draw_triangle(
                         v = static_cast<s32>(
                             (w0 * a.v + w1 * b.v + w2 * c.v) / area);
                     } else {
-                        const float s = static_cast<float>(
-                            (static_cast<double>(w0) * a.s +
-                             static_cast<double>(w1) * b.s +
-                             static_cast<double>(w2) * c.s) * inv_area);
-                        const float t = static_cast<float>(
-                            (static_cast<double>(w0) * a.t +
-                             static_cast<double>(w1) * b.t +
-                             static_cast<double>(w2) * c.t) * inv_area);
+                        const float s = scaled_constant_q
+                            ? static_cast<float>(s_num * inv_area)
+                            : static_cast<float>(
+                                (static_cast<double>(w0) * a.s +
+                                 static_cast<double>(w1) * b.s +
+                                 static_cast<double>(w2) * c.s) * inv_area);
+                        const float t = scaled_constant_q
+                            ? static_cast<float>(t_num * inv_area)
+                            : static_cast<float>(
+                                (static_cast<double>(w0) * a.t +
+                                 static_cast<double>(w1) * b.t +
+                                 static_cast<double>(w2) * c.t) * inv_area);
                         if (scaled_constant_q) {
                             u = st_to_fixed_scaled(
                                 s, constant_u_scale);
@@ -1270,6 +1300,10 @@ u64 GsRasterizer::draw_triangle(
             w0 += w0_dx;
             w1 += w1_dx;
             w2 += w2_dx;
+            if (scaled_constant_q) {
+                s_num += s_num_dx;
+                t_num += t_num_dx;
+            }
         }
         row_w0 += w0_dy;
         row_w1 += w1_dy;
