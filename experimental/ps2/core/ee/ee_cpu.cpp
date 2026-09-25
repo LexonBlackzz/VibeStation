@@ -141,6 +141,8 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
+    hot_sif_getreg_return_pc_ = 0u;
+    hot_sif_getreg_calls_ = 0u;
     halt_reason_.clear();
 }
 
@@ -390,6 +392,18 @@ bool EeCpu::execute_special(
         }
         return true;
     case 0x0C: { // SYSCALL
+        const u32 syscall_number =
+            static_cast<u32>(gpr_u64(3));
+        if (pc == 0x0024DE74u &&
+            syscall_number == 0x7Au &&
+            static_cast<u32>(gpr_u64(4)) == 4u) {
+            ++hot_sif_getreg_calls_;
+            if (hot_sif_getreg_return_pc_ == 0u) {
+                hot_sif_getreg_return_pc_ =
+                    static_cast<u32>(gpr_u64(31));
+            }
+        }
+
         auto& record =
             state_.recent_syscalls[state_.recent_syscall_next];
         record.instruction = state_.instructions_executed;
