@@ -1099,6 +1099,75 @@ void print_state(const ps2::Ps2System& system) {
         << " TRI_VAR_Q=" << gs_stats.textured_triangle_variable_q_pixels
         << '\n';
 
+    std::cout
+        << "GS_GPU_CANDIDATES DRAWS="
+        << gs_stats.gpu_candidate_sprite_draws
+        << " PIXELS="
+        << gs_stats.gpu_candidate_sprite_pixels
+        << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_TEXTURE_PSM";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_texture_psm_draws.size();
+         ++i) {
+        if (gs_stats.gpu_candidate_texture_psm_draws[i] == 0u)
+            continue;
+        std::cout
+            << " PSM" << i
+            << "_D=" << gs_stats.gpu_candidate_texture_psm_draws[i]
+            << "_P=" << gs_stats.gpu_candidate_texture_psm_pixels[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_FRAME_PSM";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_frame_psm_draws.size();
+         ++i) {
+        if (gs_stats.gpu_candidate_frame_psm_draws[i] == 0u)
+            continue;
+        std::cout
+            << " PSM" << i
+            << '=' << gs_stats.gpu_candidate_frame_psm_draws[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_STATE";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_state_draws.size();
+         ++i) {
+        if (gs_stats.gpu_candidate_state_draws[i] == 0u)
+            continue;
+        std::cout
+            << " K" << i
+            << '=' << gs_stats.gpu_candidate_state_draws[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_TFX";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_tfx_draws.size();
+         ++i) {
+        if (gs_stats.gpu_candidate_tfx_draws[i] == 0u) continue;
+        std::cout
+            << " TFX" << i
+            << '=' << gs_stats.gpu_candidate_tfx_draws[i];
+    }
+    std::cout
+        << " TCC0=" << gs_stats.gpu_candidate_tcc_draws[0]
+        << " TCC1=" << gs_stats.gpu_candidate_tcc_draws[1]
+        << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_FIX";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_fix_draws.size();
+         ++i) {
+        if (gs_stats.gpu_candidate_fix_draws[i] == 0u) continue;
+        std::cout
+            << " F" << i
+            << '=' << gs_stats.gpu_candidate_fix_draws[i];
+    }
+    std::cout << '\n';
+
     std::cout << "GS_TEXTURE_PSM_DRAWS";
     for (ps2::u32 i = 0; i < gs_stats.texture_draws_by_psm.size(); ++i) {
         if (gs_stats.texture_draws_by_psm[i] == 0u) continue;

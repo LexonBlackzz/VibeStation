@@ -54,6 +54,18 @@ struct GsStats {
     u64 gpu_sprite_draws = 0;
     u64 gpu_sprite_pixels = 0;
     u64 gpu_syncs_to_cpu = 0;
+    // Large dependency-safe sprite profile used to grow the GPU fast path.
+    u64 gpu_candidate_sprite_draws = 0;
+    u64 gpu_candidate_sprite_pixels = 0;
+    std::array<u64, 64> gpu_candidate_texture_psm_draws{};
+    std::array<u64, 64> gpu_candidate_texture_psm_pixels{};
+    std::array<u64, 64> gpu_candidate_frame_psm_draws{};
+    // Key: A/B/C/D [7:0], ZTST [9:8], COLCLAMP bit10, PABE bit11,
+    // ABE bit12, ZTE bit13, ZMASK bit14, ATE bit15, DATE bit16.
+    std::array<u64, 131072> gpu_candidate_state_draws{};
+    std::array<u64, 4> gpu_candidate_tfx_draws{};
+    std::array<u64, 2> gpu_candidate_tcc_draws{};
+    std::array<u64, 256> gpu_candidate_fix_draws{};
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
     std::array<u64, 8> raster_ns_by_primitive{};

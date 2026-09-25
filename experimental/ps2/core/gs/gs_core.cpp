@@ -1102,6 +1102,58 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     u64 pixels = 0;
     bool gpu_raster = false;
 
+    if (prim == 6u && vertex_count >= 2u) {
+        s32 candidate_top = 0;
+        s32 candidate_bottom = 0;
+        u64 candidate_area = 0u;
+        if (GsRasterizer::parallel_sprite_plan(
+                ctx, a, b,
+                candidate_top,
+                candidate_bottom,
+                candidate_area)) {
+            ++stats_.gpu_candidate_sprite_draws;
+            stats_.gpu_candidate_sprite_pixels += candidate_area;
+            if (ctx.texture.enabled &&
+                ctx.texture.psm <
+                    stats_.gpu_candidate_texture_psm_draws.size()) {
+                ++stats_.gpu_candidate_texture_psm_draws[
+                    ctx.texture.psm];
+                stats_.gpu_candidate_texture_psm_pixels[
+                    ctx.texture.psm] += candidate_area;
+            }
+            if (ctx.psm <
+                stats_.gpu_candidate_frame_psm_draws.size()) {
+                ++stats_.gpu_candidate_frame_psm_draws[ctx.psm];
+            }
+            if (ctx.texture.tfx <
+                stats_.gpu_candidate_tfx_draws.size()) {
+                ++stats_.gpu_candidate_tfx_draws[ctx.texture.tfx];
+            }
+            ++stats_.gpu_candidate_tcc_draws[
+                ctx.texture.tcc ? 1u : 0u];
+            if ((ctx.alpha_c & 3u) == 2u) {
+                ++stats_.gpu_candidate_fix_draws[
+                    ctx.alpha_fix & 0xFFu];
+            }
+            const u32 alpha_selectors =
+                (ctx.alpha_a & 3u) |
+                ((ctx.alpha_b & 3u) << 2u) |
+                ((ctx.alpha_c & 3u) << 4u) |
+                ((ctx.alpha_d & 3u) << 6u);
+            const u32 key =
+                alpha_selectors |
+                ((ctx.ztst & 3u) << 8u) |
+                (ctx.color_clamp ? (1u << 10u) : 0u) |
+                (ctx.pabe ? (1u << 11u) : 0u) |
+                (ctx.alpha_blend ? (1u << 12u) : 0u) |
+                (ctx.zte ? (1u << 13u) : 0u) |
+                (ctx.zmask ? (1u << 14u) : 0u) |
+                (ctx.ate ? (1u << 15u) : 0u) |
+                (ctx.date ? (1u << 16u) : 0u);
+            ++stats_.gpu_candidate_state_draws[key];
+        }
+    }
+
     if (prim == 6u && vertex_count >= 2u &&
         try_execute_gpu_sprite(command, pixels)) {
         gpu_raster = true;
