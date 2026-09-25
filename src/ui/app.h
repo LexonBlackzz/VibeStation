@@ -51,6 +51,7 @@ private:
 	bool show_demo_window_ = false;
 	bool show_settings_ = false;
 	bool definitive_detailed_settings_ = false;
+	int definitive_settings_tab_ = 0;
 	bool show_about_ = false;
 	bool show_debug_cpu_ = false;
 	bool show_vram_ = false;
