@@ -322,6 +322,18 @@ bool App::init_runtime() {
         system_.reset();
         return false;
     }
+
+    if (!frame_presentation_worker_.start(&emu_runner_)) {
+        LOG_ERROR("FramePresentationWorker failed to start");
+        printf("[App::init_runtime] Presentation worker FAILED\n");
+        fflush(stdout);
+        emu_runner_.stop();
+        renderer_.reset();
+        input_.reset();
+        system_.reset();
+        return false;
+    }
+
     emu_runner_.set_speed(1.0);
     apply_speed_override();
     apply_memory_card_settings(false);
@@ -448,44 +460,59 @@ void App::run() {
         process_events(quit);
         update();
 
+        // Emulation, frame post-processing, and UI rendering now run on
+        // separate threads. The emulation worker publishes raw frames; this
+        // main/UI thread only moves them into the presentation mailbox.
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
             game_frame_count_++;
-            const bool turbo_resolution_clamp =
-                turbo_hold_active_ &&
-                g_output_resolution_mode != OutputResolutionMode::R320x240 &&
-                (frame.width > 320 || frame.height > 240);
+
             int output_width = 320;
             int output_height = 240;
-            output_resolution_dimensions(g_output_resolution_mode, output_width, output_height);
+            output_resolution_dimensions(
+                g_output_resolution_mode,
+                output_width,
+                output_height);
+
+            const bool turbo_resolution_clamp =
+                (turbo_hold_active_ ||
+                    gameplay_toolbar_turbo_active_) &&
+                g_output_resolution_mode !=
+                    OutputResolutionMode::R320x240 &&
+                (frame.width > 320 ||
+                    frame.height > 240);
+
             if (turbo_resolution_clamp) {
-                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
-                    turbo_frame_rgba_, 320, 240);
-                renderer_->upload_frame(turbo_frame_rgba_, 320, 240);
-                latest_frame_width_ = 320;
-                latest_frame_height_ = 240;
-                // Swap ownership instead of copying the full scaled framebuffer.
-                // The old latest buffer becomes scratch storage for the next resample.
-                latest_frame_rgba_.swap(turbo_frame_rgba_);
+                output_width = 320;
+                output_height = 240;
             }
-            else if (frame.width != output_width || frame.height != output_height) {
-                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
-                    scaled_frame_rgba_, output_width, output_height);
-                renderer_->upload_frame(scaled_frame_rgba_, output_width, output_height);
-                latest_frame_width_ = output_width;
-                latest_frame_height_ = output_height;
-                // Keep both allocations alive and rotate them instead of copying pixels.
-                latest_frame_rgba_.swap(scaled_frame_rgba_);
-            }
-            else {
-                renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-                latest_frame_width_ = frame.width;
-                latest_frame_height_ = frame.height;
-                // Return the previous UI framebuffer through the runner recycler rather
-                // than destroying its allocation on every unscaled frame.
-                latest_frame_rgba_.swap(frame.rgba);
-            }
-            emu_runner_.recycle_consumed_frame(std::move(frame));
+
+            frame_presentation_worker_.submit(
+                std::move(frame),
+                output_width,
+                output_height);
+        }
+
+        // OpenGL texture upload remains on the window/context thread, but all
+        // CPU scaling and Ambilight analysis is already complete here.
+        PreparedUiFrame prepared_frame;
+        if (frame_presentation_worker_.consume_latest(
+                prepared_frame)) {
+            renderer_->upload_frame(
+                prepared_frame.rgba,
+                prepared_frame.width,
+                prepared_frame.height);
+
+            latest_frame_width_ =
+                prepared_frame.width;
+            latest_frame_height_ =
+                prepared_frame.height;
+
+            latest_frame_rgba_.swap(
+                prepared_frame.rgba);
+
+            frame_presentation_worker_.recycle_consumed(
+                std::move(prepared_frame));
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         u32 now_ms = SDL_GetTicks();
@@ -1983,6 +2010,9 @@ void App::shutdown() {
             ImGui::SaveIniSettingsToDisk(io.IniFilename);
         }
     }
+    // Stop presentation first: it may still recycle raw buffers back to
+    // EmuRunner. The emulation thread remains alive until that worker exits.
+    frame_presentation_worker_.stop();
     emu_runner_.stop();
     input_recorder_.shutdown();
     discord_presence_.reset();
