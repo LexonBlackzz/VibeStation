@@ -676,6 +676,10 @@ void App::panel_definitive_settings() {
             draw, layout, "video_hw_gpu", "Hardware Rasterizer (Experimental)",
             right_x + 1.0f, content_y + 43.0f, column_w - 2.0f,
             g_gpu_hardware_rasterizer)) {
+            if (g_gpu_hardware_rasterizer) {
+                g_gpu_fast_mode = false;
+                g_gpu_extreme_fast_mode = false;
+            }
             save_persistent_config();
         }
         note(right_x + 1.0f, content_y + 43.0f,
@@ -685,7 +689,10 @@ void App::panel_definitive_settings() {
             draw, layout, "video_fast_gpu", "Fast Mode",
             right_x + 1.0f, content_y + 43.0f + row_step, column_w - 2.0f,
             g_gpu_fast_mode)) {
-            if (!g_gpu_fast_mode) {
+            if (g_gpu_fast_mode) {
+                g_gpu_hardware_rasterizer = false;
+            }
+            else {
                 g_gpu_extreme_fast_mode = false;
             }
             save_persistent_config();
@@ -699,6 +706,7 @@ void App::panel_definitive_settings() {
             column_w - 2.0f, g_gpu_extreme_fast_mode)) {
             if (g_gpu_extreme_fast_mode) {
                 g_gpu_fast_mode = true;
+                g_gpu_hardware_rasterizer = false;
             }
             save_persistent_config();
         }

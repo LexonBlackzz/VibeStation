@@ -312,6 +312,10 @@ Config Config::load(const std::string& path) {
         cfg.spu.soft_latency_ms, 1000u);
     cfg.spu.xa_buffer_seconds = std::max(0.0f, std::min(5.0f, cfg.spu.xa_buffer_seconds));
 
+    if (cfg.gpu_hardware_rasterizer) {
+        cfg.gpu_fast_mode = false;
+        cfg.gpu_extreme_fast_mode = false;
+    }
     if (!cfg.gpu_fast_mode) {
         cfg.gpu_extreme_fast_mode = false;
     }

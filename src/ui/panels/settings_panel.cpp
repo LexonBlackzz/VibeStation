@@ -156,13 +156,20 @@ void App::panel_settings() {
                     static_cast<unsigned>(runtime_snapshot_.boot_diag.display_height));
                 if (ImGui::Checkbox("Hardware Rasterizer (Experimental)",
                         &g_gpu_hardware_rasterizer)) {
+                    if (g_gpu_hardware_rasterizer) {
+                        g_gpu_fast_mode = false;
+                        g_gpu_extreme_fast_mode = false;
+                    }
                     save_persistent_config();
                 }
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Uses an OpenGL 4.3 compute backend for accurate PS1 rasterization when supported.");
                 if (ImGui::Checkbox("Fast Mode", &g_gpu_fast_mode)) {
-                    if (!g_gpu_fast_mode) {
+                    if (g_gpu_fast_mode) {
+                        g_gpu_hardware_rasterizer = false;
+                    }
+                    else {
                         g_gpu_extreme_fast_mode = false;
                     }
                     save_persistent_config();
@@ -172,6 +179,10 @@ void App::panel_settings() {
                     "Uses optimized GPU paths for lower CPU usage at the cost of possible artifacting.");
                 ImGui::BeginDisabled(!g_gpu_fast_mode);
                 if (ImGui::Checkbox("Extreme Fast Mode", &g_gpu_extreme_fast_mode)) {
+                    if (g_gpu_extreme_fast_mode) {
+                        g_gpu_fast_mode = true;
+                        g_gpu_hardware_rasterizer = false;
+                    }
                     save_persistent_config();
                 }
                 ImGui::EndDisabled();
