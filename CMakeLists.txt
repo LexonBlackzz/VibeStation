@@ -116,6 +116,7 @@ set(VIBESTATION_SOURCES
     src/core/system_snapshot.cpp
     src/core/rewind.cpp
     src/core/renderer.cpp
+    src/platform/gpu_hardware_rasterizer.cpp
     src/input/controller.cpp
     src/input/input_manager.cpp
     src/integrations/discord_presence.cpp
