@@ -1135,10 +1135,14 @@ void draw_background(
     if (!ensure_background_texture_loaded()) {
         draw->AddRectFilledMultiColor(
             pos, ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(8, 10, 14, glow_alpha(255.0f * alpha)),
-            rgba(17, 19, 23, glow_alpha(255.0f * alpha)),
-            rgba(10, 12, 15, glow_alpha(255.0f * alpha)),
-            rgba(5, 7, 10, glow_alpha(255.0f * alpha)));
+            definitive_background_color(
+                rgba(8, 10, 14, glow_alpha(255.0f * alpha)), 0.94f),
+            definitive_background_color(
+                rgba(17, 19, 23, glow_alpha(255.0f * alpha)), 0.90f),
+            definitive_background_color(
+                rgba(10, 12, 15, glow_alpha(255.0f * alpha)), 0.92f),
+            definitive_background_color(
+                rgba(5, 7, 10, glow_alpha(255.0f * alpha)), 0.96f));
         return;
     }
 
@@ -1751,7 +1755,8 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
 
     const float content_shift = 2.0f * highlight_mix;
     draw_icon(draw, layout, icon,
-        kX + 24.0f + content_shift, y + 18.0f, main_color);
+        kX + 24.0f + content_shift, y + 18.0f,
+        definitive_text_color(main_color));
     add_text(draw, layout, kX + 72.0f + content_shift, y + 10.0f, 20.5f,
         main_color, title);
     add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 12.0f,
@@ -2347,7 +2352,8 @@ void App::panel_definitive_settings() {
             close0,
             ImVec2(close0.x + layout.px(30.0f),
                 close0.y + layout.px(30.0f)),
-            rgba(36, 49, 61, 160), layout.px(3.0f));
+            definitive_surface_color(rgba(36, 49, 61, 160), 0.80f),
+            layout.px(3.0f));
     }
     draw->AddLine(
         ImVec2(close0.x + layout.px(8.0f), close0.y + layout.px(8.0f)),
@@ -3159,8 +3165,10 @@ void App::panel_definitive_home() {
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
     const ImVec2 bottom1(window_pos.x + window_size.x, window_pos.y + window_size.y);
     draw->AddRectFilledMultiColor(bottom0, bottom1,
-        rgba(1, 3, 6, 10), rgba(1, 3, 6, 10),
-        rgba(1, 3, 6, 206), rgba(1, 3, 6, 206));
+        definitive_background_color(rgba(1, 3, 6, 10), 0.76f),
+        definitive_background_color(rgba(1, 3, 6, 10), 0.76f),
+        definitive_background_color(rgba(1, 3, 6, 206), 0.82f),
+        definitive_background_color(rgba(1, 3, 6, 206), 0.82f));
 
     add_text(draw, layout, 48.0f, 36.0f, 54.0f,
         rgba(223, 225, 228, 248), "VibeStation");
