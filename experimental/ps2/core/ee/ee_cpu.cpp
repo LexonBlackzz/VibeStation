@@ -4275,6 +4275,37 @@ u32 EeCpu::run_quiet_fast_prefix(
                         static_cast<s64>(gpr_u64(rt)) >>
                         (gpr_u64(rs) & 63u)));
                 break;
+            case 0x18u: // MULT
+                multiply_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                // R5900 MULT/MULTU also write the low result to rd.
+                write_gpr64(rd, state_.lo);
+                break;
+            case 0x19u: // MULTU
+                multiply_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                write_gpr64(rd, state_.lo);
+                break;
+            case 0x1Au: // DIV
+                divide_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                break;
+            case 0x1Bu: // DIVU
+                divide_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                break;
             case 0x21u:
                 write_gpr_word(
                     rd,
