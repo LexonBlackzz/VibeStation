@@ -1988,6 +1988,18 @@ void App::initialize_definitive_ui_fonts() {
 }
 
 void App::release_definitive_ui_assets() {
+    if (g_ui_sound_device != 0) {
+        SDL_ClearQueuedAudio(g_ui_sound_device);
+        SDL_CloseAudioDevice(g_ui_sound_device);
+        g_ui_sound_device = 0;
+    }
+    g_ui_sound_spec = {};
+    g_ui_sound_load_attempted = false;
+    g_ui_cursor_sound.pcm.clear();
+    g_ui_open_sound.pcm.clear();
+    g_ui_close_sound.pcm.clear();
+    g_menu_was_engaged.fill(false);
+
     if (g_background_texture != 0) {
         glDeleteTextures(1, &g_background_texture);
         g_background_texture = 0;
