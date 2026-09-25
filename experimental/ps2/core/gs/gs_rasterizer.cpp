@@ -1052,18 +1052,18 @@ bool parallel_sprite_vram_safe(
     s32 right,
     s32 top,
     s32 bottom) {
-    if ((!simple_frame_write(ctx) &&
-         !hot_osdsys_psm16_pixel_state(ctx)) ||
-        left < 0 || top < 0 ||
+    if (left < 0 || top < 0 ||
         right <= left || bottom <= top ||
         ctx.fbw == 0u ||
-        static_cast<u32>(right) > ctx.fbw * 64u) {
+        static_cast<u32>(right) > ctx.fbw * 64u ||
+        ctx.nonzero_colors != nullptr ||
+        ctx.nonzero_inputs != nullptr ||
+        ctx.nonzero_input_alpha != nullptr ||
+        ctx.first_input_rgba != nullptr ||
+        ctx.first_alpha_input_rgba != nullptr) {
         return false;
     }
 
-    // Keep the first pool experiment deliberately narrow: direct-color FST
-    // textures only, no CLUT state, no wrap modes that can broaden the source
-    // footprint, and no detailed-stat pointers shared across workers.
     if (ctx.texture.enabled) {
         if (!ctx.texture.fst ||
             (ctx.texture.psm != 0u &&
@@ -1094,78 +1094,99 @@ bool parallel_sprite_vram_safe(
         return 0u;
     };
 
-    const auto range_for = [&](
+    const auto screen_range = [&](
         u32 bp,
         u32 bw,
         u32 psm,
-        u32 width,
-        u32 height,
         u64& begin,
-        u64& end) -> bool {
+        u64& finish) -> bool {
         const u32 ph = page_height(psm);
-        if (ph == 0u || bw == 0u ||
-            width == 0u || height == 0u) {
-            return false;
-        }
-        const u32 pages_x = (width + 63u) >> 6u;
-        const u32 pages_y = (height + ph - 1u) / ph;
-        if (pages_x == 0u || pages_y == 0u || pages_x > bw) {
-            return false;
-        }
+        if (ph == 0u || bw == 0u) return false;
+
+        const u32 min_page_x =
+            static_cast<u32>(left) >> 6u;
+        const u32 max_page_x =
+            static_cast<u32>(right - 1) >> 6u;
+        const u32 min_page_y =
+            static_cast<u32>(top) / ph;
+        const u32 max_page_y =
+            static_cast<u32>(bottom - 1) / ph;
+        if (max_page_x >= bw) return false;
+
         const u64 base = static_cast<u64>(bp) * 256u;
+        const u64 first_page =
+            static_cast<u64>(min_page_y) * bw +
+            min_page_x;
         const u64 last_page =
-            static_cast<u64>(pages_y - 1u) * bw +
-            (pages_x - 1u);
-        begin = base;
-        end = base + (last_page + 1u) * 8192u;
-        return end <= GsVram::kSize;
+            static_cast<u64>(max_page_y) * bw +
+            max_page_x;
+        begin = base + first_page * 8192u;
+        finish = base + (last_page + 1u) * 8192u;
+        return finish <= GsVram::kSize;
     };
 
-    const u32 target_ph = page_height(ctx.psm);
-    if (target_ph == 0u) return false;
-    const u32 min_page_x = static_cast<u32>(left) >> 6u;
-    const u32 max_page_x = static_cast<u32>(right - 1) >> 6u;
-    const u32 min_page_y =
-        static_cast<u32>(top) / target_ph;
-    const u32 max_page_y =
-        static_cast<u32>(bottom - 1) / target_ph;
-    if (max_page_x >= ctx.fbw) return false;
+    const auto texture_range = [&](
+        u64& begin,
+        u64& finish) -> bool {
+        const u32 ph = page_height(ctx.texture.psm);
+        if (ph == 0u ||
+            ctx.texture.bw == 0u ||
+            ctx.texture.width == 0u ||
+            ctx.texture.height == 0u) {
+            return false;
+        }
+        const u32 pages_x =
+            (ctx.texture.width + 63u) >> 6u;
+        const u32 pages_y =
+            (ctx.texture.height + ph - 1u) / ph;
+        if (pages_x == 0u ||
+            pages_y == 0u ||
+            pages_x > ctx.texture.bw) {
+            return false;
+        }
 
-    const u64 target_base =
-        static_cast<u64>(ctx.fbp) * 256u;
-    const u64 first_page =
-        static_cast<u64>(min_page_y) * ctx.fbw +
-        min_page_x;
-    const u64 last_page =
-        static_cast<u64>(max_page_y) * ctx.fbw +
-        max_page_x;
-    const u64 target_begin =
-        target_base + first_page * 8192u;
-    const u64 target_end =
-        target_base + (last_page + 1u) * 8192u;
-    if (target_end > GsVram::kSize) return false;
+        const u64 base =
+            static_cast<u64>(ctx.texture.bp) * 256u;
+        const u64 last_page =
+            static_cast<u64>(pages_y - 1u) *
+                ctx.texture.bw +
+            (pages_x - 1u);
+        begin = base;
+        finish = base + (last_page + 1u) * 8192u;
+        return finish <= GsVram::kSize;
+    };
 
-    // The hot OSDSYS path reads depth while writing color. Do not parallelize
-    // a pathological layout where those two ranges alias each other.
+    const auto disjoint = [](
+        u64 a0, u64 a1, u64 b0, u64 b1) {
+        return a1 <= b0 || b1 <= a0;
+    };
+
+    u64 frame_begin = 0u;
+    u64 frame_end = 0u;
+    if (!screen_range(
+            ctx.fbp,
+            ctx.fbw,
+            ctx.psm,
+            frame_begin,
+            frame_end)) {
+        return false;
+    }
+
+    u64 depth_begin = 0u;
+    u64 depth_end = 0u;
     if (ctx.zte) {
-        u64 depth_begin = 0u;
-        u64 depth_end = 0u;
-        const u32 target_width =
-            static_cast<u32>(right);
-        const u32 target_height =
-            static_cast<u32>(bottom);
-        if (!range_for(
+        if (!screen_range(
                 ctx.zbp,
                 ctx.fbw,
                 ctx.zpsm,
-                target_width,
-                target_height,
                 depth_begin,
                 depth_end)) {
             return false;
         }
-        if (!(depth_end <= target_begin ||
-              target_end <= depth_begin)) {
+        // Frame writes must never perturb another worker's depth test.
+        if (!disjoint(
+                frame_begin, frame_end,
+                depth_begin, depth_end)) {
             return false;
         }
     }
@@ -1174,19 +1195,26 @@ bool parallel_sprite_vram_safe(
 
     u64 source_begin = 0u;
     u64 source_end = 0u;
-    if (!range_for(
-            ctx.texture.bp,
-            ctx.texture.bw,
-            ctx.texture.psm,
-            ctx.texture.width,
-            ctx.texture.height,
-            source_begin,
-            source_end)) {
+    if (!texture_range(source_begin, source_end)) {
         return false;
     }
 
-    return source_end <= target_begin ||
-           target_end <= source_begin;
+    // Texture feedback makes pixel order observable inside the primitive.
+    if (!disjoint(
+            source_begin, source_end,
+            frame_begin, frame_end)) {
+        return false;
+    }
+
+    // A depth-writing primitive can also feed back through a texture.
+    if (ctx.zte && !ctx.zmask &&
+        !disjoint(
+            source_begin, source_end,
+            depth_begin, depth_end)) {
+        return false;
+    }
+
+    return true;
 }
 
 bool GsRasterizer::parallel_sprite_plan(
