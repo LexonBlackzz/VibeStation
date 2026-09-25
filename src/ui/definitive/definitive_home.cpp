@@ -3,7 +3,7 @@
 #include "ui/output_resolution_utils.h"
 #include "ui/screenshot_utils.h"
 #include "ui/theme_settings.h"
-#include "vibestation_version.h"
+#include "version.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -872,7 +872,7 @@ void App::panel_definitive_home() {
         draw->AddRectFilled(p0, p1, accent_colors[static_cast<size_t>(i)]);
     }
     add_text_right(draw, layout, 1235.0f, 34.0f, 11.5f,
-        rgba(176, 183, 191, 232), VIBESTATION_VERSION_STRING);
+        rgba(176, 183, 191, 232), vibestation_version_string());
     const LauncherQuote& launcher_quote =
         kLauncherQuotes[g_launcher_quote_index];
     add_text_right(draw, layout, 1235.0f, 57.0f, 12.5f,
@@ -1164,7 +1164,7 @@ void App::panel_definitive_home() {
     add_text(draw, layout, 875.0f, panel_y + 77.0f, 12.2f,
         label_color, "Version:");
     add_text(draw, layout, 995.0f, panel_y + 77.0f, 12.4f,
-        value_color, VIBESTATION_VERSION_STRING);
+        value_color, vibestation_version_string());
     add_text(draw, layout, 875.0f, panel_y + 96.0f, 12.2f,
         label_color, "BIOS:");
     add_text(draw, layout, 995.0f, panel_y + 96.0f, 12.4f,
