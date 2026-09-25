@@ -71,7 +71,10 @@ private:
 	bool show_perf_profiler_ = false;
 	bool show_logging_ = false;
 	bool show_sound_status_ = false;
-	bool show_grim_reaper_ = false;
+	bool show_grim_reaper_ = false; // Legacy panel; definitive UI uses the page state below.
+	bool definitive_grim_reaper_active_ = false;
+	bool definitive_grim_reaper_advanced_ = false;
+	int definitive_grim_reaper_style_ = 0;
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;
@@ -260,6 +263,9 @@ private:
 	void panel_definitive_settings();
 	void open_definitive_settings();
 	void close_definitive_settings();
+	void panel_definitive_grim_reaper();
+	void open_definitive_grim_reaper();
+	void close_definitive_grim_reaper();
 	void initialize_definitive_ui_fonts();
 	void play_ui_cursor_sound();
 	void play_ui_open_sound();
