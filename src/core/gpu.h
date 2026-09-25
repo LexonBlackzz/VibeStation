@@ -193,7 +193,7 @@ public:
   bool frame_complete() const { return frame_complete_; }
   void clear_frame_flag() { frame_complete_ = false; }
 
-  u16* vram_mut_data() { return vram_.data(); }
+  u16* vram_mut_data();
   static constexpr u32 kVramSize = psx::VRAM_WIDTH * psx::VRAM_HEIGHT * sizeof(u16);
   void save_state(std::vector<u8>& buf) const;
   void restore_state(const u8*& pos, size_t& remaining);
