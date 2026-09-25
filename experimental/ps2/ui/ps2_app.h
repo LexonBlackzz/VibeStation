@@ -32,7 +32,7 @@ private:
     void update_audio();
     void reset_audio_stutter();
     void remember_audio_history(const s16* samples, std::size_t frames);
-    void latch_audio_stutter_loop();
+    void refresh_audio_stutter_loop(bool prefer_clean_entry);
     void queue_lag_stutter_if_needed();
     void render_ui();
     void update_display_texture();

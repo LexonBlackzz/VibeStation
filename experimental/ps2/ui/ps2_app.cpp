@@ -563,7 +563,11 @@ void Ps2App::remember_audio_history(
         std::min(capacity, audio_history_valid_ + sample_count);
 }
 
-void Ps2App::latch_audio_stutter_loop() {
+void Ps2App::refresh_audio_stutter_loop(
+    bool prefer_clean_entry) {
+    const std::size_t old_size = audio_stutter_loop_.size();
+    const std::size_t old_pos = audio_stutter_loop_pos_;
+
     audio_stutter_loop_.clear();
     audio_stutter_loop_pos_ = 0u;
 
@@ -594,9 +598,23 @@ void Ps2App::latch_audio_stutter_loop() {
             audio_stutter_loop_.begin() + first);
     }
 
-    // Start the loop at the frame closest to the most recently heard frame.
-    // This is the same basic trick as the PS1 history loop and greatly
-    // reduces the click when starvation first begins.
+    if (!prefer_clean_entry && old_size != 0u) {
+        // The rolling history is FIFO: new SPU2 frames replace the oldest
+        // frames first. Map the previous loop position into the refreshed
+        // history rather than restarting at sample zero every time new audio
+        // arrives. This makes the audible loop evolve continuously.
+        const std::size_t mapped =
+            (old_pos * audio_stutter_loop_.size()) / old_size;
+        audio_stutter_loop_pos_ =
+            mapped - (mapped % kAudioChannels);
+        if (audio_stutter_loop_pos_ >= audio_stutter_loop_.size()) {
+            audio_stutter_loop_pos_ = 0u;
+        }
+        return;
+    }
+
+    // First entry into stutter: choose a loop start close to the most recently
+    // heard frame to reduce the click at the transition.
     if (audio_stutter_loop_.size() >= kAudioChannels * 2u) {
         const std::size_t last =
             audio_stutter_loop_.size() - kAudioChannels;
@@ -639,7 +657,7 @@ void Ps2App::queue_lag_stutter_if_needed() {
 
     if (!lag_stutter_active_) {
         if (queued_frames >= kStutterEnterFrames) return;
-        latch_audio_stutter_loop();
+        refresh_audio_stutter_loop(true);
         if (audio_stutter_loop_.empty()) return;
         lag_stutter_active_ = true;
     } else if (queued_frames >= kStutterExitFrames) {
@@ -714,6 +732,12 @@ void Ps2App::update_audio() {
             pcm.data() + first_frame * kAudioChannels;
 
         remember_audio_history(data, submit_frames);
+        if (lag_stutter_active_) {
+            // Keep the stutter source genuinely rolling. New SPU2 data enters
+            // at the newest end; once the 400 ms history is full the oldest
+            // frames disappear first, never the newest ones.
+            refresh_audio_stutter_loop(false);
+        }
 
         if (SDL_QueueAudio(
                 audio_device_,
@@ -1638,8 +1662,8 @@ void Ps2App::panel_settings() {
     ImGui::TextDisabled(
         lag_stutter_active_ ? "(stuttering)" : "(Source-style)");
     ImGui::TextDisabled(
-        "Repeats recent SPU2 history during host audio starvation "
-        "instead of emitting tiny silence gaps.");
+        "Loops a rolling 400 ms SPU2 history during starvation; "
+        "new audio replaces the oldest history first.");
     ImGui::TextDisabled(
         "Keyboard: arrows D-pad, Z/X/A/S face, Enter/Backspace Start/Select, "
         "Q/E L1/R1, W/R L2/R2.");
