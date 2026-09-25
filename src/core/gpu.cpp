@@ -2767,6 +2767,21 @@ u16 Gpu::read_texel(const TextureSampleState &state, u8 u, u8 v) const {
 }
 
 void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        auto h0 = hardware_vertex(v0);
+        auto h1 = hardware_vertex(v1);
+        auto h2 = hardware_vertex(v2);
+        h0.r = h1.r = h2.r = c.r;
+        h0.g = h1.g = h2.g = c.g;
+        h0.b = h1.b = h2.b = c.b;
+        if (hardware_rasterizer_->draw_triangle(
+                GpuHardwareRasterizer::TriangleMode::Flat,
+                h0, h1, h2, hardware_draw_state(false))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
     const u16 color15 = c.to_15bit();
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
@@ -2876,6 +2891,16 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
 }
 
 void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        if (hardware_rasterizer_->draw_triangle(
+                GpuHardwareRasterizer::TriangleMode::Gouraud,
+                hardware_vertex(v0), hardware_vertex(v1), hardware_vertex(v2),
+                hardware_draw_state(false))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3042,6 +3067,17 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
 }
 
 void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
+    const bool hw_raw_texture = (gp0_command_ & 0x1u) != 0;
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        if (hardware_rasterizer_->draw_triangle(
+                GpuHardwareRasterizer::TriangleMode::Textured,
+                hardware_vertex(v0), hardware_vertex(v1), hardware_vertex(v2),
+                hardware_draw_state(hw_raw_texture))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3296,6 +3332,17 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
 }
 
 void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    const bool hw_raw_texture = (gp0_command_ & 0x1u) != 0;
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        if (hardware_rasterizer_->draw_triangle(
+                GpuHardwareRasterizer::TriangleMode::GouraudTextured,
+                hardware_vertex(v0), hardware_vertex(v1), hardware_vertex(v2),
+                hardware_draw_state(hw_raw_texture))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3648,6 +3695,16 @@ void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
     if (w == 0 || h == 0) {
         return;
     }
+
+    if (hardware_draw_enabled() && ensure_hardware_vram_current()) {
+        if (hardware_rasterizer_->draw_flat_rect(
+                x, y, w, h, c.r, c.g, c.b,
+                hardware_draw_state(false))) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+    prepare_software_vram_write();
     const u16 color15 = c.to_15bit();
     if (!g_gpu_fast_mode || semi_transparency_mode_) {
         for (u16 dy = 0; dy < h; dy++) {
