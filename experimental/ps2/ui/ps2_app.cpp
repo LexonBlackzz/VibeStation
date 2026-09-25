@@ -30,12 +30,8 @@ namespace {
 constexpr std::size_t kAudioChannels = 2u;
 constexpr std::size_t kStutterHistoryFrames =
     static_cast<std::size_t>(Spu2::kSampleRate) * 400u / 1000u;
-constexpr std::size_t kStutterEnterFrames =
-    static_cast<std::size_t>(Spu2::kSampleRate) * 15u / 1000u;
-constexpr std::size_t kStutterExitFrames =
-    static_cast<std::size_t>(Spu2::kSampleRate) * 60u / 1000u;
-constexpr std::size_t kStutterMinimumHistoryFrames =
-    static_cast<std::size_t>(Spu2::kSampleRate) * 8u / 1000u;
+constexpr std::size_t kStutterQueueTargetFrames =
+    static_cast<std::size_t>(Spu2::kSampleRate) * 80u / 1000u;
 
 } // namespace
 
@@ -126,6 +122,9 @@ bool Ps2App::init() {
     if (audio_device_ != 0) {
         SDL_PauseAudioDevice(audio_device_, 0);
         reset_audio_stutter();
+        audio_stutter_thread_stop_.store(false, std::memory_order_release);
+        audio_stutter_thread_ =
+            std::thread(&Ps2App::audio_stutter_thread_main, this);
     } else {
         std::fprintf(
             stderr,
@@ -312,6 +311,10 @@ bool Ps2App::write_window_ppm(
 }
 
 void Ps2App::shutdown() {
+    audio_stutter_thread_stop_.store(true, std::memory_order_release);
+    if (audio_stutter_thread_.joinable()) {
+        audio_stutter_thread_.join();
+    }
     if (audio_device_ != 0) {
         SDL_ClearQueuedAudio(audio_device_);
         SDL_CloseAudioDevice(audio_device_);
@@ -511,13 +514,16 @@ void Ps2App::update_pad_input() {
 }
 
 void Ps2App::reset_audio_stutter() {
-    lag_stutter_active_ = false;
-    audio_history_.assign(
-        kStutterHistoryFrames * kAudioChannels, 0);
-    audio_history_write_ = 0;
-    audio_history_valid_ = 0;
-    audio_stutter_loop_.clear();
-    audio_stutter_loop_pos_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(audio_history_mutex_);
+        // The tape is always exactly 400 ms long. Before real SPU2 samples
+        // have filled it, the unused portion is intentional silence.
+        audio_history_.assign(
+            kStutterHistoryFrames * kAudioChannels, 0);
+        audio_history_write_frame_ = 0u;
+        audio_history_play_frame_ = 0u;
+    }
+    lag_stutter_active_.store(false, std::memory_order_release);
 }
 
 void Ps2App::remember_audio_history(
@@ -525,181 +531,102 @@ void Ps2App::remember_audio_history(
     std::size_t frames) {
     if (samples == nullptr || frames == 0u) return;
 
-    const std::size_t capacity =
-        kStutterHistoryFrames * kAudioChannels;
-    if (audio_history_.size() != capacity) {
-        reset_audio_stutter();
+    std::lock_guard<std::mutex> lock(audio_history_mutex_);
+    const std::size_t capacity_frames = kStutterHistoryFrames;
+    const std::size_t capacity_samples =
+        capacity_frames * kAudioChannels;
+    if (audio_history_.size() != capacity_samples) {
+        audio_history_.assign(capacity_samples, 0);
+        audio_history_write_frame_ = 0u;
+        audio_history_play_frame_ = 0u;
     }
 
-    std::size_t sample_count = frames * kAudioChannels;
-    const s16* source = samples;
-    if (sample_count >= capacity) {
-        source += sample_count - capacity;
-        sample_count = capacity;
-        std::copy(
-            source,
-            source + sample_count,
-            audio_history_.begin());
-        audio_history_write_ = 0u;
-        audio_history_valid_ = capacity;
-        return;
+    // Literal FIFO rolling tape: producer writes at the oldest slot and then
+    // advances. Once all 400 ms slots contain real audio, each new frame
+    // overwrites exactly the oldest frame. The newest frame is never discarded.
+    for (std::size_t frame = 0u; frame < frames; ++frame) {
+        const std::size_t dst =
+            audio_history_write_frame_ * kAudioChannels;
+        const std::size_t src = frame * kAudioChannels;
+        audio_history_[dst + 0u] = samples[src + 0u];
+        audio_history_[dst + 1u] = samples[src + 1u];
+        audio_history_write_frame_ =
+            (audio_history_write_frame_ + 1u) % capacity_frames;
     }
-
-    const std::size_t first =
-        std::min(sample_count, capacity - audio_history_write_);
-    std::copy(
-        source,
-        source + first,
-        audio_history_.begin() + audio_history_write_);
-    if (first < sample_count) {
-        std::copy(
-            source + first,
-            source + sample_count,
-            audio_history_.begin());
-    }
-    audio_history_write_ =
-        (audio_history_write_ + sample_count) % capacity;
-    audio_history_valid_ =
-        std::min(capacity, audio_history_valid_ + sample_count);
 }
 
-void Ps2App::refresh_audio_stutter_loop(
-    bool prefer_clean_entry) {
-    const std::size_t old_size = audio_stutter_loop_.size();
-    const std::size_t old_pos = audio_stutter_loop_pos_;
+void Ps2App::audio_stutter_thread_main() {
+    std::vector<s16> refill(
+        kStutterQueueTargetFrames * kAudioChannels);
 
-    audio_stutter_loop_.clear();
-    audio_stutter_loop_pos_ = 0u;
-
-    const std::size_t valid_frames =
-        audio_history_valid_ / kAudioChannels;
-    if (valid_frames < kStutterMinimumHistoryFrames ||
-        audio_history_.empty()) {
-        return;
-    }
-
-    const std::size_t capacity = audio_history_.size();
-    const std::size_t start =
-        (audio_history_write_ + capacity - audio_history_valid_) %
-        capacity;
-    audio_stutter_loop_.resize(audio_history_valid_);
-
-    const std::size_t first =
-        std::min(audio_history_valid_, capacity - start);
-    std::copy(
-        audio_history_.begin() + start,
-        audio_history_.begin() + start + first,
-        audio_stutter_loop_.begin());
-    if (first < audio_history_valid_) {
-        std::copy(
-            audio_history_.begin(),
-            audio_history_.begin() +
-                (audio_history_valid_ - first),
-            audio_stutter_loop_.begin() + first);
-    }
-
-    if (!prefer_clean_entry && old_size != 0u) {
-        // The rolling history is FIFO: new SPU2 frames replace the oldest
-        // frames first. Map the previous loop position into the refreshed
-        // history rather than restarting at sample zero every time new audio
-        // arrives. This makes the audible loop evolve continuously.
-        const std::size_t mapped =
-            (old_pos * audio_stutter_loop_.size()) / old_size;
-        audio_stutter_loop_pos_ =
-            mapped - (mapped % kAudioChannels);
-        if (audio_stutter_loop_pos_ >= audio_stutter_loop_.size()) {
-            audio_stutter_loop_pos_ = 0u;
+    while (!audio_stutter_thread_stop_.load(
+        std::memory_order_acquire)) {
+        if (audio_device_ == 0u ||
+            !lag_stutter_enabled_.load(std::memory_order_acquire)) {
+            lag_stutter_active_.store(false, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
         }
-        return;
-    }
 
-    // First entry into stutter: choose a loop start close to the most recently
-    // heard frame to reduce the click at the transition.
-    if (audio_stutter_loop_.size() >= kAudioChannels * 2u) {
-        const std::size_t last =
-            audio_stutter_loop_.size() - kAudioChannels;
-        const s16 last_l = audio_stutter_loop_[last + 0u];
-        const s16 last_r = audio_stutter_loop_[last + 1u];
-        std::size_t best = 0u;
-        long long best_score = std::numeric_limits<long long>::max();
-        for (std::size_t pos = 0u;
-             pos + 1u < audio_stutter_loop_.size();
-             pos += kAudioChannels) {
-            const long long dl =
-                static_cast<long long>(audio_stutter_loop_[pos + 0u]) -
-                static_cast<long long>(last_l);
-            const long long dr =
-                static_cast<long long>(audio_stutter_loop_[pos + 1u]) -
-                static_cast<long long>(last_r);
-            const long long score =
-                std::llabs(dl) + std::llabs(dr);
-            if (score < best_score) {
-                best_score = score;
-                best = pos;
+        const std::size_t queued_frames =
+            SDL_GetQueuedAudioSize(audio_device_) /
+            (kAudioChannels * sizeof(s16));
+        if (queued_frames >= kStutterQueueTargetFrames) {
+            lag_stutter_active_.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        const std::size_t needed_frames =
+            kStutterQueueTargetFrames - queued_frames;
+        {
+            std::lock_guard<std::mutex> lock(audio_history_mutex_);
+            if (audio_history_.size() !=
+                kStutterHistoryFrames * kAudioChannels) {
+                audio_history_.assign(
+                    kStutterHistoryFrames * kAudioChannels, 0);
+                audio_history_write_frame_ = 0u;
+                audio_history_play_frame_ = 0u;
+            }
+
+            // Consumer independently walks the fixed 400 ms tape forever.
+            // If emulation takes 200 ms to produce its next chunk, this host
+            // thread continues reading the existing tape instead of allowing
+            // SDL to underrun. Early in boot, unfilled tape slots are silence,
+            // so the loop length is still 400 ms rather than a tiny buzzing
+            // fragment that grows unpredictably.
+            for (std::size_t frame = 0u;
+                 frame < needed_frames;
+                 ++frame) {
+                const std::size_t src =
+                    audio_history_play_frame_ * kAudioChannels;
+                const std::size_t dst = frame * kAudioChannels;
+                refill[dst + 0u] = audio_history_[src + 0u];
+                refill[dst + 1u] = audio_history_[src + 1u];
+                audio_history_play_frame_ =
+                    (audio_history_play_frame_ + 1u) %
+                    kStutterHistoryFrames;
             }
         }
-        audio_stutter_loop_pos_ = best;
-    }
-}
 
-void Ps2App::queue_lag_stutter_if_needed() {
-    if (audio_device_ == 0u || !lag_stutter_enabled_) {
-        lag_stutter_active_ = false;
-        audio_stutter_loop_.clear();
-        audio_stutter_loop_pos_ = 0u;
-        return;
-    }
-
-    const Uint32 queued_bytes =
-        SDL_GetQueuedAudioSize(audio_device_);
-    const std::size_t queued_frames =
-        queued_bytes / (kAudioChannels * sizeof(s16));
-
-    if (!lag_stutter_active_) {
-        if (queued_frames >= kStutterEnterFrames) return;
-        refresh_audio_stutter_loop(true);
-        if (audio_stutter_loop_.empty()) return;
-        lag_stutter_active_ = true;
-    } else if (queued_frames >= kStutterExitFrames) {
-        lag_stutter_active_ = false;
-        audio_stutter_loop_.clear();
-        audio_stutter_loop_pos_ = 0u;
-        return;
-    }
-
-    if (audio_stutter_loop_.empty()) {
-        lag_stutter_active_ = false;
-        return;
-    }
-
-    const std::size_t target_frames = kStutterExitFrames;
-    if (queued_frames >= target_frames) return;
-
-    std::size_t needed_samples =
-        (target_frames - queued_frames) * kAudioChannels;
-    std::vector<s16> refill;
-    refill.resize(needed_samples);
-
-    for (std::size_t i = 0; i < needed_samples; ++i) {
-        refill[i] =
-            audio_stutter_loop_[audio_stutter_loop_pos_];
-        ++audio_stutter_loop_pos_;
-        if (audio_stutter_loop_pos_ >=
-            audio_stutter_loop_.size()) {
-            audio_stutter_loop_pos_ = 0u;
+        if (SDL_QueueAudio(
+                audio_device_,
+                refill.data(),
+                static_cast<Uint32>(
+                    needed_frames *
+                    kAudioChannels *
+                    sizeof(s16))) != 0) {
+            SDL_ClearQueuedAudio(audio_device_);
+            lag_stutter_active_.store(false, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            continue;
         }
+
+        lag_stutter_active_.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    if (SDL_QueueAudio(
-            audio_device_,
-            refill.data(),
-            static_cast<Uint32>(
-                refill.size() * sizeof(s16))) != 0) {
-        SDL_ClearQueuedAudio(audio_device_);
-        lag_stutter_active_ = false;
-        audio_stutter_loop_.clear();
-        audio_stutter_loop_pos_ = 0u;
-    }
+    lag_stutter_active_.store(false, std::memory_order_release);
 }
 
 void Ps2App::update_audio() {
@@ -708,56 +635,42 @@ void Ps2App::update_audio() {
         ? system_.spu2().take_samples(available)
         : std::vector<s16>{};
 
-    if (audio_device_ == 0u) return;
+    if (audio_device_ == 0u || pcm.empty()) return;
 
-    // Drain the emulated queue every host frame. If emulation temporarily
-    // outruns playback (notably turbo BIOS bootstrap), keep the newest ~85 ms
-    // rather than building seconds of stale latency.
+    const std::size_t frames = pcm.size() / kAudioChannels;
+
+    if (lag_stutter_enabled_.load(std::memory_order_acquire)) {
+        // In rolling-stutter mode fresh SPU2 data never goes directly to SDL.
+        // It only updates the 400 ms tape. The independent host feeder thread
+        // is the sole playback source, so slow EE/GS frames cannot cause
+        // sporadic queue starvation between update_audio() calls.
+        remember_audio_history(pcm.data(), frames);
+        return;
+    }
+
+    // Normal non-stutter path: retain the old low-latency queue behavior.
     constexpr Uint32 kLatencyResetBytes =
         Spu2::kSampleRate * 2u * sizeof(s16) / 8u;
     if (SDL_GetQueuedAudioSize(audio_device_) > kLatencyResetBytes) {
         SDL_ClearQueuedAudio(audio_device_);
-        lag_stutter_active_ = false;
-        audio_stutter_loop_.clear();
-        audio_stutter_loop_pos_ = 0u;
     }
 
-    if (!pcm.empty()) {
-        constexpr std::size_t kMaxSubmitFrames = 4096u;
-        const std::size_t frames = pcm.size() / kAudioChannels;
-        const std::size_t submit_frames =
-            std::min(frames, kMaxSubmitFrames);
-        const std::size_t first_frame = frames - submit_frames;
-        const s16* data =
-            pcm.data() + first_frame * kAudioChannels;
+    constexpr std::size_t kMaxSubmitFrames = 4096u;
+    const std::size_t submit_frames =
+        std::min(frames, kMaxSubmitFrames);
+    const std::size_t first_frame = frames - submit_frames;
+    const s16* data =
+        pcm.data() + first_frame * kAudioChannels;
 
-        remember_audio_history(data, submit_frames);
-        if (lag_stutter_active_) {
-            // Keep the stutter source genuinely rolling. New SPU2 data enters
-            // at the newest end; once the 400 ms history is full the oldest
-            // frames disappear first, never the newest ones.
-            refresh_audio_stutter_loop(false);
-        }
-
-        if (SDL_QueueAudio(
-                audio_device_,
-                data,
-                static_cast<Uint32>(
-                    submit_frames *
-                    kAudioChannels *
-                    sizeof(s16))) != 0) {
-            SDL_ClearQueuedAudio(audio_device_);
-            lag_stutter_active_ = false;
-            audio_stutter_loop_.clear();
-            audio_stutter_loop_pos_ = 0u;
-            return;
-        }
+    if (SDL_QueueAudio(
+            audio_device_,
+            data,
+            static_cast<Uint32>(
+                submit_frames *
+                kAudioChannels *
+                sizeof(s16))) != 0) {
+        SDL_ClearQueuedAudio(audio_device_);
     }
-
-    // Source-engine-style starvation masking: if emulation cannot feed the
-    // host device fast enough, repeat recent *heard* SPU2 audio rather than
-    // allowing tiny SDL queue underruns to become silence/chop.
-    queue_lag_stutter_if_needed();
 }
 
 void Ps2App::process_events(bool& quit) {
@@ -1649,21 +1562,30 @@ void Ps2App::panel_settings() {
         audio_device_ != 0
             ? "48 kHz stereo active"
             : "unavailable");
+    bool lag_stutter_enabled =
+        lag_stutter_enabled_.load(std::memory_order_acquire);
     if (ImGui::Checkbox(
             "Lag Stutter Effect",
-            &lag_stutter_enabled_)) {
-        if (!lag_stutter_enabled_) {
-            lag_stutter_active_ = false;
-            audio_stutter_loop_.clear();
-            audio_stutter_loop_pos_ = 0u;
+            &lag_stutter_enabled)) {
+        lag_stutter_enabled_.store(
+            lag_stutter_enabled,
+            std::memory_order_release);
+        SDL_ClearQueuedAudio(audio_device_);
+        if (lag_stutter_enabled) {
+            std::lock_guard<std::mutex> lock(audio_history_mutex_);
+            // The write position is the oldest slot on a full rolling tape,
+            // so entering here starts with the least-recent audio first.
+            audio_history_play_frame_ = audio_history_write_frame_;
         }
     }
     ImGui::SameLine();
     ImGui::TextDisabled(
-        lag_stutter_active_ ? "(stuttering)" : "(Source-style)");
+        lag_stutter_active_.load(std::memory_order_acquire)
+            ? "(rolling 400 ms)"
+            : "(Source-style)");
     ImGui::TextDisabled(
-        "Loops a rolling 400 ms SPU2 history during starvation; "
-        "new audio replaces the oldest history first.");
+        "Plays one fixed 400 ms rolling tape on a host feeder thread; "
+        "new SPU2 frames overwrite the oldest tape frames first.");
     ImGui::TextDisabled(
         "Keyboard: arrows D-pad, Z/X/A/S face, Enter/Backspace Start/Select, "
         "Q/E L1/R1, W/R L2/R2.");
@@ -1779,8 +1701,8 @@ bool Ps2App::start_bios() {
     }
 
     emulation_running_ = true;
-    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     reset_audio_stutter();
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     speed_sample_time_ = std::chrono::steady_clock::now();
     speed_sample_instructions_ = system_.ee().state().instructions_executed;
     ee_instructions_per_second_ = 0.0;
@@ -1942,8 +1864,8 @@ void Ps2App::update_emulation() {
 void Ps2App::reset_core() {
     emulation_running_ = false;
     ee_instructions_per_second_ = 0.0;
-    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     reset_audio_stutter();
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     system_.reset(0);
     status_message_ =
         system_.bios().loaded()

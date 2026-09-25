@@ -3,9 +3,12 @@
 #include "core/ps2_system.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct SDL_Window;
@@ -32,8 +35,7 @@ private:
     void update_audio();
     void reset_audio_stutter();
     void remember_audio_history(const s16* samples, std::size_t frames);
-    void refresh_audio_stutter_loop(bool prefer_clean_entry);
-    void queue_lag_stutter_if_needed();
+    void audio_stutter_thread_main();
     void render_ui();
     void update_display_texture();
     void menu_bar();
@@ -59,13 +61,14 @@ private:
     SDL_GLContext gl_context_ = nullptr;
     SDL_GameController* controller_ = nullptr;
     unsigned int audio_device_ = 0;
-    bool lag_stutter_enabled_ = true;
-    bool lag_stutter_active_ = false;
+    std::atomic<bool> lag_stutter_enabled_{true};
+    std::atomic<bool> lag_stutter_active_{false};
     std::vector<s16> audio_history_{};
-    std::size_t audio_history_write_ = 0;
-    std::size_t audio_history_valid_ = 0;
-    std::vector<s16> audio_stutter_loop_{};
-    std::size_t audio_stutter_loop_pos_ = 0;
+    std::size_t audio_history_write_frame_ = 0;
+    std::size_t audio_history_play_frame_ = 0;
+    std::mutex audio_history_mutex_{};
+    std::atomic<bool> audio_stutter_thread_stop_{false};
+    std::thread audio_stutter_thread_{};
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
     unsigned int display_texture_ = 0;
