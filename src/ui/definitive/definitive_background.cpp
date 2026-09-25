@@ -4,6 +4,8 @@
 #include <stb_image.h>
 
 #include "ui/definitive/definitive_shared.h"
+#include "ui/embedded_resource_ids.h"
+#include "ui/embedded_resources.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -204,14 +206,37 @@ bool ensure_background_texture_loaded() {
     }
     g_background_load_attempted = true;
 
-    const std::filesystem::path path = find_background_path();
-    if (path.empty()) {
-        return false;
+    int channels = 0;
+    unsigned char* pixels = nullptr;
+
+    // Prefer the copy embedded in VibeStation.exe. Filesystem lookup remains a
+    // fallback for non-Windows builds and developer overrides.
+    const vibestation::EmbeddedResourceView embedded =
+        vibestation::embedded_resource(
+            vibestation::resource_ids::LauncherBackground);
+    if (embedded) {
+        pixels = stbi_load_from_memory(
+            embedded.data,
+            static_cast<int>(embedded.size),
+            &g_background_width,
+            &g_background_height,
+            &channels,
+            4);
     }
 
-    int channels = 0;
-    unsigned char* pixels = stbi_load(
-        path.string().c_str(), &g_background_width, &g_background_height, &channels, 4);
+    if (pixels == nullptr) {
+        const std::filesystem::path path =
+            find_background_path();
+        if (!path.empty()) {
+            pixels = stbi_load(
+                path.string().c_str(),
+                &g_background_width,
+                &g_background_height,
+                &channels,
+                4);
+        }
+    }
+
     if (pixels == nullptr || g_background_width <= 0 || g_background_height <= 0) {
         if (pixels != nullptr) {
             stbi_image_free(pixels);
