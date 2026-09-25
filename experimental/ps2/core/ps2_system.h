@@ -80,6 +80,18 @@ public:
     const std::array<u64, 12>& fast_sif_getreg_rejects() const {
         return fast_sif_getreg_rejects_;
     }
+    u64 fast_sif_getreg_active_iop_zero_dma() const {
+        return fast_sif_getreg_active_iop_zero_dma_;
+    }
+    u64 fast_sif_getreg_active_iop_sif_only() const {
+        return fast_sif_getreg_active_iop_sif_only_;
+    }
+    u64 fast_sif_getreg_active_iop_other_dma() const {
+        return fast_sif_getreg_active_iop_other_dma_;
+    }
+    u32 fast_sif_getreg_active_iop_first_pc() const {
+        return fast_sif_getreg_active_iop_first_pc_;
+    }
     u64 skipped_iop_idle_pairs() const { return skipped_iop_idle_pairs_; }
     u64 skipped_bios_literal_iterations() const { return skipped_bios_literal_iterations_; }
     u64 quiet_ee_batch_instructions() const { return quiet_ee_batch_instructions_; }
@@ -151,6 +163,10 @@ private:
     u64 sif_poll_stable_returns_=0;
     u64 fast_sif_getreg_calls_=0;
     std::array<u64, 12> fast_sif_getreg_rejects_{};
+    u64 fast_sif_getreg_active_iop_zero_dma_=0;
+    u64 fast_sif_getreg_active_iop_sif_only_=0;
+    u64 fast_sif_getreg_active_iop_other_dma_=0;
+    u32 fast_sif_getreg_active_iop_first_pc_=0;
     u64 skipped_iop_idle_pairs_=0;
     u64 skipped_bios_literal_iterations_=0;
     u64 quiet_ee_batch_instructions_=0;

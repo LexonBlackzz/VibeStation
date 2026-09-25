@@ -251,6 +251,10 @@ void Ps2System::reset(u32 entry_point) {
     sif_poll_stable_returns_ = 0;
     fast_sif_getreg_calls_ = 0;
     fast_sif_getreg_rejects_.fill(0u);
+    fast_sif_getreg_active_iop_zero_dma_ = 0;
+    fast_sif_getreg_active_iop_sif_only_ = 0;
+    fast_sif_getreg_active_iop_other_dma_ = 0;
+    fast_sif_getreg_active_iop_first_pc_ = 0;
     skipped_iop_idle_pairs_ = 0;
     skipped_bios_literal_iterations_ = 0;
     quiet_ee_batch_instructions_ = 0;
@@ -1164,6 +1168,20 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     const bool iop_idle =
         !iop_halted && iop_.in_osdsys_idle_loop();
     if (!iop_halted && !iop_idle) {
+        const u16 diag_active_dma =
+            hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
+        const u16 diag_sif_channels = (1u << 5) | (1u << 6);
+        if (diag_active_dma == 0u) {
+            ++fast_sif_getreg_active_iop_zero_dma_;
+        } else if ((diag_active_dma & ~diag_sif_channels) == 0u) {
+            ++fast_sif_getreg_active_iop_sif_only_;
+        } else {
+            ++fast_sif_getreg_active_iop_other_dma_;
+        }
+        if (fast_sif_getreg_active_iop_first_pc_ == 0u) {
+            fast_sif_getreg_active_iop_first_pc_ =
+                iop_.state().pc;
+        }
         ++fast_sif_getreg_rejects_[7];
         return 0u;
     }

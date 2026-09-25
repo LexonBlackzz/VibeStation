@@ -1633,6 +1633,14 @@ int main(int argc, char** argv) {
               << system.sif_poll_stable_returns()
               << " EE_FAST_SIF_GETREG_CALLS="
               << system.fast_sif_getreg_calls() << '\n';
+    std::cout
+        << "EE_FAST_SIF_ACTIVE_IOP"
+        << " ZERO_DMA=" << system.fast_sif_getreg_active_iop_zero_dma()
+        << " SIF_ONLY=" << system.fast_sif_getreg_active_iop_sif_only()
+        << " OTHER_DMA=" << system.fast_sif_getreg_active_iop_other_dma()
+        << " FIRST_PC=0x" << std::hex << std::uppercase
+        << system.fast_sif_getreg_active_iop_first_pc()
+        << std::dec << '\n';
     std::cout << "EE_FAST_SIF_GETREG_REJECTS";
     const auto& sif_rejects =
         system.fast_sif_getreg_rejects();
