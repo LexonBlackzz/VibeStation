@@ -1410,10 +1410,8 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 row_size = layout.size(w, kHeight);
 
-    ImGui::SetCursorScreenPos(p0);
-    ImGui::PushID(id);
-    ImGui::InvisibleButton("##settings_combo_row", row_size);
-    const bool row_hovered = ImGui::IsItemHovered();
+    const bool row_hovered = ImGui::IsMouseHoveringRect(
+        p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y), false);
 
     if (row_hovered) {
         draw->AddRectFilled(
@@ -1425,6 +1423,7 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
         rgba(221, 226, 232, 244), label);
 
     ImGui::SetCursorScreenPos(layout.point(x + w - 196.0f, y + 10.0f));
+    ImGui::PushID(id);
     ImGui::SetNextItemWidth(layout.px(176.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(8.0f, 6.0f));
