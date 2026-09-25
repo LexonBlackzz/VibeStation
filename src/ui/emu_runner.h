@@ -32,6 +32,10 @@ public:
     u32 dma2_base_addr = 0;
     u32 dma2_words = 0;
     bool dma2_from_ram = false;
+    bool gpu_hardware_raster_active = false;
+    u64 gpu_hardware_dispatches = 0;
+    u64 gpu_hardware_uploads = 0;
+    u64 gpu_hardware_downloads = 0;
     Spu::AudioDiag spu_audio{};
     Spu::AudioQueueStats audio_queue{};
     std::array<s16, 24> spu_voice_level_l{};
