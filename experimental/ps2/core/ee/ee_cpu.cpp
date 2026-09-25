@@ -4811,7 +4811,7 @@ bool EeCpu::step_internal(
             u32 value = 0;
             if (hot_sif_getreg_diag_inflight_ &&
                 hot_sif_getreg_read_offset_ == 0u &&
-                address == 0x1000F230u) {
+                EeBus::to_physical(address) == 0x1000F230u) {
                 hot_sif_getreg_read_offset_ =
                     static_cast<u32>(
                         state_.instructions_executed -
@@ -5222,7 +5222,7 @@ generic_decode:
         u32 value = 0;
         if (hot_sif_getreg_diag_inflight_ &&
             hot_sif_getreg_read_offset_ == 0u &&
-            address == 0x1000F230u) {
+            EeBus::to_physical(address) == 0x1000F230u) {
             hot_sif_getreg_read_offset_ =
                 static_cast<u32>(
                     state_.instructions_executed -
