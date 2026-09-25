@@ -212,41 +212,6 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << '\n';
 
-    const ps2::u32 sif_getreg_ra =
-        system.ee().hot_sif_getreg_return_pc();
-    std::cout
-        << "EE_HOT_SIF_GETREG_CALLS="
-        << system.ee().hot_sif_getreg_calls()
-        << " RA=0x" << std::hex << std::uppercase
-        << sif_getreg_ra
-        << " PATH_INS=" << std::dec
-        << system.ee().hot_sif_getreg_path_instructions()
-        << " V0=0x" << std::hex << std::uppercase
-        << system.ee().hot_sif_getreg_return_v0()
-        << " STATUS=0x" << system.ee().hot_sif_getreg_return_status()
-        << " CAUSE=0x" << system.ee().hot_sif_getreg_return_cause()
-        << " EPC=0x" << system.ee().hot_sif_getreg_return_epc()
-        << std::dec << '\n';
-    if (sif_getreg_ra != 0u) {
-        for (ps2::s32 delta = -48; delta <= 96; delta += 4) {
-            const ps2::u32 address =
-                static_cast<ps2::u32>(
-                    static_cast<ps2::s64>(sif_getreg_ra) + delta);
-            ps2::u32 word = 0u;
-            if (system.bus().read32(address, word)) {
-                std::cout
-                    << "EE_HOT_SIF_CALLER"
-                    << " RA=0x" << std::hex << std::uppercase
-                    << sif_getreg_ra
-                    << " OFF=" << std::dec << delta
-                    << " ADDR=0x" << std::hex << std::uppercase
-                    << address
-                    << " WORD=0x" << word
-                    << std::dec << '\n';
-            }
-        }
-    }
-
     for (ps2::u32 offset = 0;
          offset < ee.recent_syscall_count;
          ++offset) {
@@ -1660,7 +1625,9 @@ int main(int argc, char** argv) {
     std::cout << "EE_SIF_POLL_FAST_SAMPLES="
               << system.sif_poll_fast_samples()
               << " EE_SIF_POLL_STABLE_RETURNS="
-              << system.sif_poll_stable_returns() << '\n';
+              << system.sif_poll_stable_returns()
+              << " EE_FAST_SIF_GETREG_CALLS="
+              << system.fast_sif_getreg_calls() << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="

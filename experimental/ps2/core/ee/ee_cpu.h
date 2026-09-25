@@ -114,6 +114,10 @@ public:
     u32 skip_bios_mmio_poll_iterations(u32 max_iterations);
     bool skip_bios_literal_iteration();
     u32 skip_bios_literal_iterations(u32 max_iterations);
+    // Collapse the retail 0x7A SifGetReg(4) syscall wrapper after the system
+    // has proved that the sampled SMFLAG cannot change during its 106-cycle
+    // kernel round-trip.
+    bool skip_hot_sif_getreg(u32 value);
 
     [[nodiscard]] const EeCpuState& state() const { return state_; }
     [[nodiscard]] EeCpuState& state() { return state_; }
@@ -124,27 +128,6 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
-    [[nodiscard]] u32 hot_sif_getreg_return_pc() const {
-        return hot_sif_getreg_return_pc_;
-    }
-    [[nodiscard]] u64 hot_sif_getreg_calls() const {
-        return hot_sif_getreg_calls_;
-    }
-    [[nodiscard]] u64 hot_sif_getreg_path_instructions() const {
-        return hot_sif_getreg_path_instructions_;
-    }
-    [[nodiscard]] u32 hot_sif_getreg_return_v0() const {
-        return hot_sif_getreg_return_v0_;
-    }
-    [[nodiscard]] u32 hot_sif_getreg_return_status() const {
-        return hot_sif_getreg_return_status_;
-    }
-    [[nodiscard]] u32 hot_sif_getreg_return_cause() const {
-        return hot_sif_getreg_return_cause_;
-    }
-    [[nodiscard]] u32 hot_sif_getreg_return_epc() const {
-        return hot_sif_getreg_return_epc_;
-    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -200,15 +183,6 @@ private:
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
-    u32 hot_sif_getreg_return_pc_ = 0u;
-    u64 hot_sif_getreg_calls_ = 0u;
-    bool hot_sif_getreg_inflight_ = false;
-    u64 hot_sif_getreg_start_instruction_ = 0u;
-    u64 hot_sif_getreg_path_instructions_ = 0u;
-    u32 hot_sif_getreg_return_v0_ = 0u;
-    u32 hot_sif_getreg_return_status_ = 0u;
-    u32 hot_sif_getreg_return_cause_ = 0u;
-    u32 hot_sif_getreg_return_epc_ = 0u;
     std::string halt_reason_;
     EeJit jit_{};
     bool jit_enabled_ = false;

@@ -141,15 +141,6 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
-    hot_sif_getreg_return_pc_ = 0u;
-    hot_sif_getreg_calls_ = 0u;
-    hot_sif_getreg_inflight_ = false;
-    hot_sif_getreg_start_instruction_ = 0u;
-    hot_sif_getreg_path_instructions_ = 0u;
-    hot_sif_getreg_return_v0_ = 0u;
-    hot_sif_getreg_return_status_ = 0u;
-    hot_sif_getreg_return_cause_ = 0u;
-    hot_sif_getreg_return_epc_ = 0u;
     halt_reason_.clear();
 }
 
@@ -399,24 +390,6 @@ bool EeCpu::execute_special(
         }
         return true;
     case 0x0C: { // SYSCALL
-        const u32 syscall_number =
-            static_cast<u32>(gpr_u64(3));
-        if (pc == 0x0024DE74u &&
-            syscall_number == 0x7Au &&
-            static_cast<u32>(gpr_u64(4)) == 4u) {
-            ++hot_sif_getreg_calls_;
-            if (hot_sif_getreg_return_pc_ == 0u) {
-                hot_sif_getreg_return_pc_ =
-                    static_cast<u32>(gpr_u64(31));
-            }
-            if (hot_sif_getreg_path_instructions_ == 0u &&
-                !hot_sif_getreg_inflight_) {
-                hot_sif_getreg_inflight_ = true;
-                hot_sif_getreg_start_instruction_ =
-                    state_.instructions_executed;
-            }
-        }
-
         auto& record =
             state_.recent_syscalls[state_.recent_syscall_next];
         record.instruction = state_.instructions_executed;
@@ -3396,6 +3369,68 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
     return completed;
 }
 
+bool EeCpu::skip_hot_sif_getreg(u32 value) {
+    constexpr u32 kPc = 0x0024DE74u;
+    constexpr u32 kReturnPc = 0x00263338u;
+    constexpr u32 kCycles = 106u;
+    constexpr std::array<u32, 4> kWrapper = {
+        0x2403007Au, // addiu v1,zero,0x7A
+        0x0000000Cu, // syscall
+        0x03E00008u, // jr ra
+        0x00000000u, // nop
+    };
+
+    if (halted_ ||
+        state_.pc != kPc ||
+        state_.next_pc != kPc + 4u ||
+        next_is_delay_slot_ ||
+        static_cast<u32>(state_.gpr[3].lo) != 0x7Au ||
+        static_cast<u32>(state_.gpr[4].lo) != 4u ||
+        static_cast<u32>(state_.gpr[31].lo) != kReturnPc ||
+        !bus_.matches_code(0x0024DE70u, kWrapper)) {
+        return false;
+    }
+
+    // Preserve the diagnostic state produced by the real SYSCALL path.
+    auto& record =
+        state_.recent_syscalls[state_.recent_syscall_next];
+    record.instruction = state_.instructions_executed;
+    record.pc = kPc;
+    record.number = 0x7Au;
+    for (u32 i = 0; i < record.args.size(); ++i) {
+        record.args[i] = gpr_u64(4u + i);
+    }
+    state_.recent_syscall_next =
+        (state_.recent_syscall_next + 1u) %
+        static_cast<u32>(state_.recent_syscalls.size());
+    state_.recent_syscall_count = std::min(
+        state_.recent_syscall_count + 1u,
+        static_cast<u32>(state_.recent_syscalls.size()));
+    ++state_.exception_counts[8];
+
+    write_gpr_word(2u, value);
+    state_.gpr[0] = {};
+
+    // SYSCALL records exception code 8, the retail handler advances EPC by
+    // one instruction, returns through ERET, then the wrapper executes JR RA
+    // + its NOP delay slot. Interrupt-pending bits are preserved.
+    state_.cop0[13] =
+        (state_.cop0[13] & ~0x8000007Cu) | 0x20u;
+    state_.cop0[14] = kPc + 4u;
+
+    state_.last_pc = kPc + 8u;
+    state_.last_instruction = 0u;
+    state_.pc = kReturnPc;
+    state_.next_pc = kReturnPc + 4u;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+
+    state_.instructions_executed += kCycles;
+    state_.cop0[9] += kCycles;
+    bus_.tick(kCycles);
+    return true;
+}
+
 bool EeCpu::step(std::string& error) {
     return step_internal(error, false, nullptr, false);
 }
@@ -3555,20 +3590,6 @@ u32 EeCpu::run_quiet_fast_prefix(
     };
 
     for (; retired < limit; ++retired) {
-        if (hot_sif_getreg_inflight_ &&
-            hot_sif_getreg_return_pc_ != 0u &&
-            state_.pc == hot_sif_getreg_return_pc_) {
-            hot_sif_getreg_inflight_ = false;
-            hot_sif_getreg_path_instructions_ =
-                state_.instructions_executed -
-                hot_sif_getreg_start_instruction_;
-            hot_sif_getreg_return_v0_ =
-                static_cast<u32>(state_.gpr[2].lo);
-            hot_sif_getreg_return_status_ = state_.cop0[12];
-            hot_sif_getreg_return_cause_ = state_.cop0[13];
-            hot_sif_getreg_return_epc_ = state_.cop0[14];
-        }
-
         const u32 expected_pc = direct_trace
             ? state_.pc
             : block_pc + retired * 4u;
@@ -4400,19 +4421,6 @@ bool EeCpu::step_internal(
     }
 
     const u32 pc = state_.pc;
-    if (hot_sif_getreg_inflight_ &&
-        hot_sif_getreg_return_pc_ != 0u &&
-        pc == hot_sif_getreg_return_pc_) {
-        hot_sif_getreg_inflight_ = false;
-        hot_sif_getreg_path_instructions_ =
-            state_.instructions_executed -
-            hot_sif_getreg_start_instruction_;
-        hot_sif_getreg_return_v0_ =
-            static_cast<u32>(state_.gpr[2].lo);
-        hot_sif_getreg_return_status_ = state_.cop0[12];
-        hot_sif_getreg_return_cause_ = state_.cop0[13];
-        hot_sif_getreg_return_epc_ = state_.cop0[14];
-    }
     const u32 old_next_pc = state_.next_pc;
     current_is_delay_slot_ = next_is_delay_slot_;
     next_is_delay_slot_ = false;
