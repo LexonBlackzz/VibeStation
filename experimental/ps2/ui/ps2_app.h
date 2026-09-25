@@ -4,7 +4,9 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <string>
+#include <vector>
 
 struct SDL_Window;
 struct _SDL_GameController;
@@ -28,6 +30,10 @@ private:
     void process_events(bool& quit);
     void update_pad_input();
     void update_audio();
+    void reset_audio_stutter();
+    void remember_audio_history(const s16* samples, std::size_t frames);
+    void latch_audio_stutter_loop();
+    void queue_lag_stutter_if_needed();
     void render_ui();
     void update_display_texture();
     void menu_bar();
@@ -53,6 +59,13 @@ private:
     SDL_GLContext gl_context_ = nullptr;
     SDL_GameController* controller_ = nullptr;
     unsigned int audio_device_ = 0;
+    bool lag_stutter_enabled_ = true;
+    bool lag_stutter_active_ = false;
+    std::vector<s16> audio_history_{};
+    std::size_t audio_history_write_ = 0;
+    std::size_t audio_history_valid_ = 0;
+    std::vector<s16> audio_stutter_loop_{};
+    std::size_t audio_stutter_loop_pos_ = 0;
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
     unsigned int display_texture_ = 0;
