@@ -94,6 +94,7 @@ private:
     bool init_finished_ = false;
     bool stop_ = false;
     bool gpu_dirty_ = false;
+    u64 outstanding_draws_ = 0;
     u32 dirty_begin_ = GsVram::kSize;
     u32 dirty_end_ = 0;
     u64 queued_cpu_generation_ = ~u64{0};

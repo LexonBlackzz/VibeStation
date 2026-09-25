@@ -444,6 +444,7 @@ bool Ps2GlGsBackend::submit_sprite(
     draw.type = JobType::Sprite;
     draw.sprite = sprite;
     jobs_.push_back(std::move(draw));
+    ++outstanding_draws_;
     condition_.notify_one();
     return true;
 }
@@ -452,10 +453,13 @@ bool Ps2GlGsBackend::synchronize_to_cpu(
     GsVram& vram) {
     if (!available()) return false;
 
+    const u64 generation_before = vram.generation();
     u64 serial = 0;
     {
         std::unique_lock lock(mutex_);
-        if (!gpu_dirty_ && jobs_.empty()) {
+        if (!gpu_dirty_ &&
+            outstanding_draws_ == 0u &&
+            jobs_.empty()) {
             return false;
         }
         serial = next_sync_serial_++;
@@ -473,7 +477,7 @@ bool Ps2GlGsBackend::synchronize_to_cpu(
         synced_cpu_generation_ = vram.generation();
         queued_cpu_generation_ = synced_cpu_generation_;
     }
-    return true;
+    return vram.generation() != generation_before;
 }
 
 bool Ps2GlGsBackend::initialize_gl() {
@@ -694,28 +698,39 @@ void Ps2GlGsBackend::worker_main() {
                 static_cast<std::ptrdiff_t>(
                     job.upload.size()),
                 job.upload.data());
-            gpu_dirty_ = false;
-            dirty_begin_ = GsVram::kSize;
-            dirty_end_ = 0u;
+            {
+                std::lock_guard lock(mutex_);
+                gpu_dirty_ = false;
+                dirty_begin_ = GsVram::kSize;
+                dirty_end_ = 0u;
+            }
             continue;
         }
 
         if (job.type == JobType::Sprite) {
-            if (!execute_sprite(job.sprite)) {
+            const bool executed =
+                execute_sprite(job.sprite);
+            {
+                std::lock_guard lock(mutex_);
+                if (outstanding_draws_ != 0u) {
+                    --outstanding_draws_;
+                }
+                if (executed) {
+                    gpu_dirty_ = true;
+                    dirty_begin_ = std::min(
+                        dirty_begin_,
+                        job.sprite.dirty_begin);
+                    dirty_end_ = std::max(
+                        dirty_end_,
+                        job.sprite.dirty_end);
+                }
+            }
+            if (!executed) {
                 available_.store(
                     false,
                     std::memory_order_release);
+                sync_condition_.notify_all();
                 break;
-            }
-            {
-                std::lock_guard lock(mutex_);
-                gpu_dirty_ = true;
-                dirty_begin_ = std::min(
-                    dirty_begin_,
-                    job.sprite.dirty_begin);
-                dirty_end_ = std::max(
-                    dirty_end_,
-                    job.sprite.dirty_end);
             }
             continue;
         }
