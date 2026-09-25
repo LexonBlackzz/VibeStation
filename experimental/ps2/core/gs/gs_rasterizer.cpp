@@ -571,20 +571,9 @@ bool draw_hot_osdsys_psm16_pixel(
 
     u32 frame_address = 0u;
     u32 depth_address = 0u;
-    if (ctx.cached_frame32_addresses != nullptr &&
-        ctx.cached_depth32_addresses != nullptr &&
-        ux < ctx.cached_address_stride &&
-        uy < ctx.cached_address_height) {
-        const std::size_t index =
-            static_cast<std::size_t>(uy) *
-                ctx.cached_address_stride + ux;
-        frame_address = ctx.cached_frame32_addresses[index];
-        depth_address = ctx.cached_depth32_addresses[index];
-    } else {
-        GsVram::color_depth32_addresses(
-            ux, uy, ctx.fbp, ctx.zbp, ctx.fbw,
-            frame_address, depth_address);
-    }
+    GsVram::color_depth32_addresses(
+        ux, uy, ctx.fbp, ctx.zbp, ctx.fbw,
+        frame_address, depth_address);
     const u32 destination_z =
         vram.read_depth_at_address(48u, depth_address);
     if (z < destination_z) return false; // GEQUAL
@@ -613,18 +602,12 @@ bool draw_simple_frame_pixel(
     s32 x,
     s32 y,
     u32 rgba) {
-    const u32 ux = static_cast<u32>(x);
-    const u32 uy = static_cast<u32>(y);
-    const u32 address =
-        ctx.cached_frame32_addresses != nullptr &&
-        (ctx.psm == 0u || ctx.psm == 1u) &&
-        ux < ctx.cached_address_stride &&
-        uy < ctx.cached_address_height
-            ? ctx.cached_frame32_addresses[
-                static_cast<std::size_t>(uy) *
-                    ctx.cached_address_stride + ux]
-            : GsVram::pixel_address_bytes(
-                ctx.psm, ux, uy, ctx.fbp, ctx.fbw);
+    const u32 address = GsVram::pixel_address_bytes(
+        ctx.psm,
+        static_cast<u32>(x),
+        static_cast<u32>(y),
+        ctx.fbp,
+        ctx.fbw);
     if (ctx.psm == 0u) {
         return vram.write_pixel_at_address_untracked(0u, address, rgba);
     }
@@ -720,18 +703,8 @@ bool GsRasterizer::draw_pixel(
     bool frame_address_valid = false;
     auto load_frame_address = [&]() -> u32 {
         if (!frame_address_valid) {
-            if (ctx.cached_frame32_addresses != nullptr &&
-                (ctx.psm == 0u || ctx.psm == 1u) &&
-                ux < ctx.cached_address_stride &&
-                uy < ctx.cached_address_height) {
-                frame_address =
-                    ctx.cached_frame32_addresses[
-                        static_cast<std::size_t>(uy) *
-                            ctx.cached_address_stride + ux];
-            } else {
-                frame_address = GsVram::pixel_address_bytes(
-                    ctx.psm, ux, uy, ctx.fbp, ctx.fbw);
-            }
+            frame_address = GsVram::pixel_address_bytes(
+                ctx.psm, ux, uy, ctx.fbp, ctx.fbw);
             frame_address_valid = true;
         }
         return frame_address;
@@ -777,18 +750,8 @@ bool GsRasterizer::draw_pixel(
 
         source_z = depth_value_for_psm(ctx.zpsm, z);
         if (write_depth || ztst >= 2u) {
-            if (ctx.cached_depth32_addresses != nullptr &&
-                (ctx.zpsm == 48u || ctx.zpsm == 49u) &&
-                ux < ctx.cached_address_stride &&
-                uy < ctx.cached_address_height) {
-                depth_address =
-                    ctx.cached_depth32_addresses[
-                        static_cast<std::size_t>(uy) *
-                            ctx.cached_address_stride + ux];
-            } else {
-                depth_address = GsVram::depth_address_bytes(
-                    ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
-            }
+            depth_address = GsVram::depth_address_bytes(
+                ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
         }
 
         // ZTST=ALWAYS does not depend on destination Z. Avoid the VRAM read

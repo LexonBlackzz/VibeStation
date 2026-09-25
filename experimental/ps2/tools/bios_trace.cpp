@@ -1026,10 +1026,6 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_RASTER_PIXELS=" << gs_stats.raster_pixels
         << " GS_TEXTURED_DRAWS=" << gs_stats.textured_raster_draws
         << " GS_TEXTURE_SAMPLES=" << gs_stats.texture_samples
-        << " GS_ADDRESS_MAP_HITS=" << gs_stats.address_map_hits
-        << " GS_ADDRESS_MAP_BUILDS=" << gs_stats.address_map_builds
-        << " GS_ADDRESS_MAP_PIXELS_BUILT="
-        << gs_stats.address_map_pixels_built
         << " GS_NONZERO_TEXTURE_SAMPLES="
         << gs_stats.nonzero_texture_samples
         << " GS_TEXTURE_ALPHA_SAMPLES="

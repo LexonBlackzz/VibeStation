@@ -96,11 +96,6 @@ struct GsRasterContext {
     bool dither = false;
     u64 dimx = 0;
 
-    const u32* cached_frame32_addresses = nullptr;
-    const u32* cached_depth32_addresses = nullptr;
-    u32 cached_address_stride = 0;
-    u32 cached_address_height = 0;
-
     GsTextureState texture{};
     u64* nonzero_colors = nullptr; // Optional trace counter.
     u64* nonzero_inputs = nullptr; // Optional trace counter.

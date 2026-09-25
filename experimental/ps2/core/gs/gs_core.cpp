@@ -112,9 +112,6 @@ void GsCore::reset() {
     transfer_ = {};
     stats_ = {};
     vram_.reset();
-    address_map_cache_.valid = false;
-    address_map_cache_.frame.clear();
-    address_map_cache_.depth.clear();
     draw_vertices_.fill({});
     draw_vertex_count_ = 0;
 }
@@ -847,68 +844,8 @@ void GsCore::emit_primitive(
     }
 }
 
-void GsCore::prepare_address_map(GsRasterContext& ctx) {
-    ctx.cached_frame32_addresses = nullptr;
-    ctx.cached_depth32_addresses = nullptr;
-    ctx.cached_address_stride = 0u;
-    ctx.cached_address_height = 0u;
-
-    if (ctx.fbw == 0u ||
-        (ctx.psm != 0u && ctx.psm != 1u) ||
-        (ctx.zpsm != 48u && ctx.zpsm != 49u) ||
-        ctx.scax1 < 0 || ctx.scay1 < 0) {
-        return;
-    }
-
-    const u32 width = static_cast<u32>(ctx.scax1) + 1u;
-    const u32 height = static_cast<u32>(ctx.scay1) + 1u;
-    const u64 pixels = static_cast<u64>(width) * height;
-    if (width == 0u || height == 0u ||
-        width > 2048u || height > 2048u ||
-        pixels > 2u * 1024u * 1024u) {
-        return;
-    }
-
-    auto& cache = address_map_cache_;
-    if (!cache.valid ||
-        cache.fbp != ctx.fbp ||
-        cache.zbp != ctx.zbp ||
-        cache.fbw != ctx.fbw ||
-        cache.width != width ||
-        cache.height != height) {
-        cache.valid = false;
-        cache.fbp = ctx.fbp;
-        cache.zbp = ctx.zbp;
-        cache.fbw = ctx.fbw;
-        cache.width = width;
-        cache.height = height;
-        cache.frame.resize(static_cast<std::size_t>(pixels));
-        cache.depth.resize(static_cast<std::size_t>(pixels));
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                const std::size_t index =
-                    static_cast<std::size_t>(y) * width + x;
-                GsVram::color_depth32_addresses(
-                    x, y, ctx.fbp, ctx.zbp, ctx.fbw,
-                    cache.frame[index], cache.depth[index]);
-            }
-        }
-        cache.valid = true;
-        ++stats_.address_map_builds;
-        stats_.address_map_pixels_built += pixels;
-    } else {
-        ++stats_.address_map_hits;
-    }
-
-    ctx.cached_frame32_addresses = cache.frame.data();
-    ctx.cached_depth32_addresses = cache.depth.data();
-    ctx.cached_address_stride = cache.width;
-    ctx.cached_address_height = cache.height;
-}
-
 void GsCore::execute_raster_command(const RasterCommand& command) {
-    GsRasterContext ctx = command.context;
-    prepare_address_map(ctx);
+    const auto& ctx = command.context;
     const auto& a = command.a;
     const auto& b = command.b;
     const auto& c = command.c;
