@@ -343,18 +343,61 @@ ReaperRowResult reaper_row(
 } // namespace
 
 void App::open_definitive_grim_reaper() {
+    const bool was_inactive =
+        !definitive_grim_reaper_active_;
     definitive_grim_reaper_active_ = true;
-    definitive_grim_reaper_advanced_ = false;
+    definitive_grim_reaper_closing_ = false;
+    if (was_inactive) {
+        definitive_grim_reaper_visibility_ = 0.0f;
+        definitive_grim_reaper_advanced_ = false;
+    }
     show_grim_reaper_ = false;
 }
 
 void App::close_definitive_grim_reaper() {
-    definitive_grim_reaper_active_ = false;
-    definitive_grim_reaper_advanced_ = false;
+    if (!definitive_grim_reaper_active_) {
+        return;
+    }
+    definitive_grim_reaper_closing_ = true;
 }
 
 void App::panel_definitive_grim_reaper() {
     using namespace definitive_ui;
+
+    const float dt =
+        std::clamp(
+            ImGui::GetIO().DeltaTime,
+            0.0f,
+            0.05f);
+    constexpr float kOpenSeconds = 0.28f;
+    constexpr float kCloseSeconds = 0.22f;
+
+    if (definitive_grim_reaper_closing_) {
+        definitive_grim_reaper_visibility_ =
+            std::max(
+                0.0f,
+                definitive_grim_reaper_visibility_ -
+                    dt / kCloseSeconds);
+
+        if (definitive_grim_reaper_visibility_ <= 0.0f) {
+            definitive_grim_reaper_visibility_ = 0.0f;
+            definitive_grim_reaper_active_ = false;
+            definitive_grim_reaper_closing_ = false;
+            definitive_grim_reaper_advanced_ = false;
+            return;
+        }
+    }
+    else {
+        definitive_grim_reaper_visibility_ =
+            std::min(
+                1.0f,
+                definitive_grim_reaper_visibility_ +
+                    dt / kOpenSeconds);
+    }
+
+    const float panel_visibility =
+        smoothstep01(
+            definitive_grim_reaper_visibility_);
 
     ImGuiViewport* viewport =
         ImGui::GetMainViewport();
@@ -365,10 +408,18 @@ void App::panel_definitive_grim_reaper() {
             360.0f,
             470.0f);
 
-    const ImVec2 panel_pos(
+    const float visible_x =
         viewport->WorkPos.x +
-            viewport->WorkSize.x -
-            panel_width,
+        viewport->WorkSize.x -
+        panel_width;
+    const float hidden_x =
+        viewport->WorkPos.x +
+        viewport->WorkSize.x +
+        22.0f;
+    const ImVec2 panel_pos(
+        hidden_x +
+            (visible_x - hidden_x) *
+                panel_visibility,
         viewport->WorkPos.y);
     const ImVec2 panel_size(
         panel_width,
@@ -396,6 +447,9 @@ void App::panel_definitive_grim_reaper() {
     ImGui::PushStyleVar(
         ImGuiStyleVar_FrameRounding,
         4.0f);
+    ImGui::PushStyleVar(
+        ImGuiStyleVar_Alpha,
+        panel_visibility);
 
     ImGui::PushStyleColor(
         ImGuiCol_WindowBg,
@@ -471,12 +525,15 @@ void App::panel_definitive_grim_reaper() {
         text_color(
             rgba(137, 147, 158, 175)));
 
-    const ImGuiWindowFlags flags =
+    ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoSavedSettings;
+    if (definitive_grim_reaper_closing_) {
+        flags |= ImGuiWindowFlags_NoInputs;
+    }
 
     ImGui::Begin(
         "##DefinitiveGrimReaperPanel",
@@ -548,10 +605,6 @@ void App::panel_definitive_grim_reaper() {
             ImVec2(30.0f, 30.0f))) {
         play_close_sound();
         close_definitive_grim_reaper();
-        ImGui::End();
-        ImGui::PopStyleColor(15);
-        ImGui::PopStyleVar(5);
-        return;
     }
 
     ImGui::SetCursorScreenPos(
@@ -779,6 +832,13 @@ void App::panel_definitive_grim_reaper() {
             sound_reaper_enabled_) {
             sync_sound_reaper_config();
         }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextUnformatted(
+            "SLOWED + REVERB");
+        draw_spu_diagnostic_mode_controls();
     }
 
     // Runtime switch only exists for runtime Reapers.
@@ -1127,9 +1187,6 @@ void App::panel_definitive_grim_reaper() {
                     gpu_preset_name_));
         }
         else {
-            draw_spu_diagnostic_mode_controls();
-            ImGui::Separator();
-
             int writes =
                 static_cast<int>(
                     std::min<u32>(
@@ -1509,6 +1566,6 @@ void App::panel_definitive_grim_reaper() {
     ImGui::End();
 
     ImGui::PopStyleColor(15);
-    ImGui::PopStyleVar(5);
+    ImGui::PopStyleVar(6);
 }
 
