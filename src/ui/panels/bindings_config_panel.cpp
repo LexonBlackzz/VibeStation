@@ -57,8 +57,11 @@ void App::panel_bindings_config() {
         draw_bindings_config_content();
     }
     ImGui::End();
-    if (was_open && !show_bindings_config_ && pending_bind_index_ >= 0) {
-        pending_bind_index_ = -1;
-        status_message_ = "Keyboard rebinding canceled";
+    if (was_open && !show_bindings_config_) {
+        play_ui_close_sound();
+        if (pending_bind_index_ >= 0) {
+            pending_bind_index_ = -1;
+            status_message_ = "Keyboard rebinding canceled";
+        }
     }
 }
