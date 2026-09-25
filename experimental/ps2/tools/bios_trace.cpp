@@ -1644,6 +1644,14 @@ int main(int argc, char** argv) {
         << " FIRST_PC=0x" << std::hex << std::uppercase
         << system.fast_sif_getreg_active_iop_first_pc()
         << std::dec << '\n';
+    std::cout << "EE_FAST_SIF_GETREG_ARGS";
+    const auto& sif_args = system.fast_sif_getreg_args();
+    for (ps2::u32 i = 0; i < sif_args.size(); ++i) {
+        if (sif_args[i] != 0u) {
+            std::cout << " [" << i << "]=" << sif_args[i];
+        }
+    }
+    std::cout << '\n';
     std::cout << "EE_FAST_SIF_GETREG_REJECTS";
     const auto& sif_rejects =
         system.fast_sif_getreg_rejects();

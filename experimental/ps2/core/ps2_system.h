@@ -80,6 +80,9 @@ public:
     u64 fast_sif_getreg_active_iop_calls() const {
         return fast_sif_getreg_active_iop_calls_;
     }
+    const std::array<u64, 16>& fast_sif_getreg_args() const {
+        return fast_sif_getreg_args_;
+    }
     const std::array<u64, 12>& fast_sif_getreg_rejects() const {
         return fast_sif_getreg_rejects_;
     }
@@ -166,6 +169,7 @@ private:
     u64 sif_poll_stable_returns_=0;
     u64 fast_sif_getreg_calls_=0;
     u64 fast_sif_getreg_active_iop_calls_=0;
+    std::array<u64, 16> fast_sif_getreg_args_{};
     std::array<u64, 12> fast_sif_getreg_rejects_{};
     u64 fast_sif_getreg_active_iop_zero_dma_=0;
     u64 fast_sif_getreg_active_iop_sif_only_=0;

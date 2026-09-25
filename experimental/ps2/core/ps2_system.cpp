@@ -251,6 +251,7 @@ void Ps2System::reset(u32 entry_point) {
     sif_poll_stable_returns_ = 0;
     fast_sif_getreg_calls_ = 0;
     fast_sif_getreg_active_iop_calls_ = 0;
+    fast_sif_getreg_args_.fill(0u);
     fast_sif_getreg_rejects_.fill(0u);
     fast_sif_getreg_active_iop_zero_dma_ = 0;
     fast_sif_getreg_active_iop_sif_only_ = 0;
@@ -1119,6 +1120,13 @@ u64 Ps2System::try_skip_hot_sif_getreg(
     u64 budget,
     std::string& error) {
     constexpr u64 kCycles = 106u;
+    if (ee_.state().pc == 0x0024DE74u) {
+        const u32 arg =
+            static_cast<u32>(ee_.state().gpr[4].lo);
+        if (arg < fast_sif_getreg_args_.size()) {
+            ++fast_sif_getreg_args_[arg];
+        }
+    }
     if (budget < kCycles ||
         ee_.state().pc != 0x0024DE74u) {
         ++fast_sif_getreg_rejects_[0];
