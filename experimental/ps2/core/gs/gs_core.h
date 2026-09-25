@@ -9,7 +9,6 @@
 #include <deque>
 #include <mutex>
 #include <thread>
-#include <vector>
 
 namespace ps2 {
 
@@ -81,9 +80,6 @@ struct GsStats {
     u64 textured_triangle_variable_q_pixels = 0;
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
-    u64 psm16_texture_cache_hits = 0;
-    u64 psm16_texture_cache_misses = 0;
-    u64 psm16_texture_cache_texels_built = 0;
     u64 nonzero_texture_samples = 0;
     u64 texture_alpha_samples = 0;
     u32 first_texture_sample_x = 0xFFFFFFFFu;
@@ -169,7 +165,6 @@ public:
     }
     [[nodiscard]] GsVram& vram() {
         flush_pending_draws();
-        clear_psm16_texture_cache();
         return vram_;
     }
     [[nodiscard]] bool packet_active() const { return gif_.active; }
@@ -249,9 +244,6 @@ private:
         const GsRasterVertex& c,
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
-    void clear_psm16_texture_cache();
-    void prepare_psm16_texture_cache(GsRasterContext& ctx);
-    void invalidate_psm16_texture_cache(const GsRasterContext& ctx);
     void raster_worker_main();
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
@@ -263,19 +255,6 @@ private:
     TransferState transfer_{};
     GsStats stats_{};
     GsVram vram_{};
-    struct Psm16TextureCacheEntry {
-        bool valid = false;
-        u32 bp = 0;
-        u32 bw = 0;
-        u32 width = 0;
-        u32 height = 0;
-        u64 source_begin = 0;
-        u64 source_end = 0;
-        u64 last_use = 0;
-        std::vector<u16> texels{};
-    };
-    std::array<Psm16TextureCacheEntry, 8> psm16_texture_cache_{};
-    u64 psm16_texture_cache_clock_ = 0;
     std::array<GsRasterVertex, 3> draw_vertices_{};
     u32 draw_vertex_count_ = 0;
     GsPrivileged* privileged_ = nullptr;

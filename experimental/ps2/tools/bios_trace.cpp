@@ -1026,10 +1026,6 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_RASTER_PIXELS=" << gs_stats.raster_pixels
         << " GS_TEXTURED_DRAWS=" << gs_stats.textured_raster_draws
         << " GS_TEXTURE_SAMPLES=" << gs_stats.texture_samples
-        << " GS_PSM16_CACHE_HITS=" << gs_stats.psm16_texture_cache_hits
-        << " GS_PSM16_CACHE_MISSES=" << gs_stats.psm16_texture_cache_misses
-        << " GS_PSM16_CACHE_TEXELS_BUILT="
-        << gs_stats.psm16_texture_cache_texels_built
         << " GS_NONZERO_TEXTURE_SAMPLES="
         << gs_stats.nonzero_texture_samples
         << " GS_TEXTURE_ALPHA_SAMPLES="

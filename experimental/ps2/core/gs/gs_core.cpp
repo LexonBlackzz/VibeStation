@@ -9,51 +9,6 @@
 namespace ps2 {
 namespace {
 
-bool gs_psm_page_height(u32 psm, u32& height) {
-    if (psm == 0u || psm == 1u || psm == 48u || psm == 49u) {
-        height = 32u;
-        return true;
-    }
-    if (psm == 2u || psm == 10u || psm == 50u || psm == 58u) {
-        height = 64u;
-        return true;
-    }
-    return false;
-}
-
-bool gs_target_byte_range(
-    u32 bp,
-    u32 bw,
-    u32 psm,
-    s32 scax0,
-    s32 scax1,
-    s32 scay0,
-    s32 scay1,
-    u64& begin,
-    u64& end) {
-    u32 page_height = 0;
-    if (bw == 0u || !gs_psm_page_height(psm, page_height)) return false;
-    if (scax1 < 0 || scay1 < 0) return false;
-    const u32 x0 = static_cast<u32>(std::max<s32>(0, scax0));
-    const u32 y0 = static_cast<u32>(std::max<s32>(0, scay0));
-    const u32 x1 = static_cast<u32>(std::max<s32>(0, scax1));
-    const u32 y1 = static_cast<u32>(std::max<s32>(0, scay1));
-    const u32 min_page_x = x0 >> 6u;
-    const u32 max_page_x = x1 >> 6u;
-    if (max_page_x >= bw) return false;
-    const u64 first_page =
-        static_cast<u64>(y0 / page_height) * bw + min_page_x;
-    const u64 last_page =
-        static_cast<u64>(y1 / page_height) * bw + max_page_x;
-    begin = static_cast<u64>(bp) * 256u + first_page * 8192u;
-    end = static_cast<u64>(bp) * 256u + (last_page + 1u) * 8192u;
-    return begin < end && end <= GsVram::kSize;
-}
-
-bool ranges_overlap(u64 a_begin, u64 a_end, u64 b_begin, u64 b_end) {
-    return a_begin < b_end && b_begin < a_end;
-}
-
 constexpr u32 kGifPacked = 0;
 constexpr u32 kGifReglist = 1;
 constexpr u32 kGifImage = 2;
@@ -157,7 +112,6 @@ void GsCore::reset() {
     transfer_ = {};
     stats_ = {};
     vram_.reset();
-    clear_psm16_texture_cache();
     draw_vertices_.fill({});
     draw_vertex_count_ = 0;
 }
@@ -375,7 +329,6 @@ void GsCore::record_unsupported_transfer(u32 reason) {
 
 void GsCore::begin_host_to_local() {
     flush_pending_draws();
-    clear_psm16_texture_cache();
     transfer_ = {};
 
     const u64 blit = registers_[kRegBitbltbuf];
@@ -551,7 +504,6 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
 
 void GsCore::execute_local_to_local() {
     flush_pending_draws();
-    clear_psm16_texture_cache();
     const u64 blit = registers_[kRegBitbltbuf];
     const u64 pos = registers_[kRegTrxpos];
     const u64 reg = registers_[kRegTrxreg];
@@ -892,155 +844,8 @@ void GsCore::emit_primitive(
     }
 }
 
-void GsCore::clear_psm16_texture_cache() {
-    for (auto& entry : psm16_texture_cache_) {
-        entry.valid = false;
-    }
-}
-
-void GsCore::prepare_psm16_texture_cache(GsRasterContext& ctx) {
-    auto& texture = ctx.texture;
-    texture.cached_psmct16 = nullptr;
-    texture.cached_psmct16_stride = 0u;
-    if (!texture.enabled || texture.psm != 2u ||
-        texture.bw == 0u || texture.width == 0u ||
-        texture.height == 0u) {
-        return;
-    }
-
-    const u32 pages_x = (texture.width + 63u) >> 6u;
-    const u32 pages_y = (texture.height + 63u) >> 6u;
-    if (pages_x == 0u || pages_y == 0u || pages_x > texture.bw) return;
-
-    const u64 source_begin =
-        static_cast<u64>(texture.bp) * 256u;
-    const u64 source_last_page =
-        static_cast<u64>(pages_y - 1u) * texture.bw +
-        (pages_x - 1u);
-    const u64 source_end =
-        source_begin + (source_last_page + 1u) * 8192u;
-    if (source_end > GsVram::kSize) return;
-
-    u64 frame_begin = 0;
-    u64 frame_end = 0;
-    if (!gs_target_byte_range(
-            ctx.fbp, ctx.fbw, ctx.psm,
-            ctx.scax0, ctx.scax1, ctx.scay0, ctx.scay1,
-            frame_begin, frame_end)) {
-        return;
-    }
-    if (ranges_overlap(
-            source_begin, source_end,
-            frame_begin, frame_end)) {
-        return;
-    }
-
-    if (ctx.zte && !ctx.zmask) {
-        u64 depth_begin = 0;
-        u64 depth_end = 0;
-        if (!gs_target_byte_range(
-                ctx.zbp, ctx.fbw, ctx.zpsm,
-                ctx.scax0, ctx.scax1, ctx.scay0, ctx.scay1,
-                depth_begin, depth_end) ||
-            ranges_overlap(
-                source_begin, source_end,
-                depth_begin, depth_end)) {
-            return;
-        }
-    }
-
-    ++psm16_texture_cache_clock_;
-    for (auto& entry : psm16_texture_cache_) {
-        if (entry.valid &&
-            entry.bp == texture.bp &&
-            entry.bw == texture.bw &&
-            entry.width == texture.width &&
-            entry.height == texture.height) {
-            entry.last_use = psm16_texture_cache_clock_;
-            texture.cached_psmct16 = entry.texels.data();
-            texture.cached_psmct16_stride = entry.width;
-            ++stats_.psm16_texture_cache_hits;
-            return;
-        }
-    }
-
-    const u64 texel_count =
-        static_cast<u64>(texture.width) * texture.height;
-    if (texel_count == 0u || texel_count > 1024u * 1024u) return;
-
-    Psm16TextureCacheEntry* victim = nullptr;
-    for (auto& entry : psm16_texture_cache_) {
-        if (!entry.valid) {
-            victim = &entry;
-            break;
-        }
-        if (victim == nullptr ||
-            entry.last_use < victim->last_use) {
-            victim = &entry;
-        }
-    }
-    if (victim == nullptr) return;
-
-    victim->valid = false;
-    victim->bp = texture.bp;
-    victim->bw = texture.bw;
-    victim->width = texture.width;
-    victim->height = texture.height;
-    victim->source_begin = source_begin;
-    victim->source_end = source_end;
-    victim->last_use = psm16_texture_cache_clock_;
-    victim->texels.resize(static_cast<std::size_t>(texel_count));
-    for (u32 y = 0; y < texture.height; ++y) {
-        for (u32 x = 0; x < texture.width; ++x) {
-            victim->texels[
-                static_cast<std::size_t>(y) * texture.width + x] =
-                vram_.read_psmct16(
-                    x, y, texture.bp, texture.bw);
-        }
-    }
-    victim->valid = true;
-    texture.cached_psmct16 = victim->texels.data();
-    texture.cached_psmct16_stride = victim->width;
-    ++stats_.psm16_texture_cache_misses;
-    stats_.psm16_texture_cache_texels_built += texel_count;
-}
-
-void GsCore::invalidate_psm16_texture_cache(
-    const GsRasterContext& ctx) {
-    u64 frame_begin = 0;
-    u64 frame_end = 0;
-    const bool frame_range = gs_target_byte_range(
-        ctx.fbp, ctx.fbw, ctx.psm,
-        ctx.scax0, ctx.scax1, ctx.scay0, ctx.scay1,
-        frame_begin, frame_end);
-
-    u64 depth_begin = 0;
-    u64 depth_end = 0;
-    const bool depth_range =
-        ctx.zte && !ctx.zmask &&
-        gs_target_byte_range(
-            ctx.zbp, ctx.fbw, ctx.zpsm,
-            ctx.scax0, ctx.scax1, ctx.scay0, ctx.scay1,
-            depth_begin, depth_end);
-
-    for (auto& entry : psm16_texture_cache_) {
-        if (!entry.valid) continue;
-        if (!frame_range ||
-            ranges_overlap(
-                entry.source_begin, entry.source_end,
-                frame_begin, frame_end) ||
-            (depth_range &&
-             ranges_overlap(
-                 entry.source_begin, entry.source_end,
-                 depth_begin, depth_end))) {
-            entry.valid = false;
-        }
-    }
-}
-
 void GsCore::execute_raster_command(const RasterCommand& command) {
-    GsRasterContext ctx = command.context;
-    prepare_psm16_texture_cache(ctx);
+    const auto& ctx = command.context;
     const auto& a = command.a;
     const auto& b = command.b;
     const auto& c = command.c;
@@ -1148,7 +953,6 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     }
     if (pixels != 0u) {
         vram_.mark_modified();
-        invalidate_psm16_texture_cache(ctx);
     }
     if (detailed_raster_stats_) {
         const u64 new_nonzero_inputs =

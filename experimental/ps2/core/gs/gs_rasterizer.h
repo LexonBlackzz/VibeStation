@@ -47,9 +47,6 @@ struct GsTextureState {
     u32 ta0 = 0;
     u32 ta1 = 0;
     bool aem = false;
-    // Optional draw-time linear cache of raw PSMCT16 texels.
-    const u16* cached_psmct16 = nullptr;
-    u32 cached_psmct16_stride = 0;
     u64* nonzero_samples = nullptr; // Optional trace counter.
     u64* alpha_samples = nullptr; // Optional trace counter.
     u32* first_sample_x = nullptr;
