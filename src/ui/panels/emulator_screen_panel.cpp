@@ -760,6 +760,7 @@ void App::draw_gameplay_toolbar(
         // midpoint so the outgoing gameplay frame remains visible.
         definitive_grim_reaper_active_ = false;
         definitive_grim_reaper_closing_ = false;
+        definitive_grim_reaper_advanced_ = false;
         definitive_grim_reaper_visibility_ = 0.0f;
         gameplay_exit_transition_active_ = true;
         gameplay_exit_transition_switched_ = false;
