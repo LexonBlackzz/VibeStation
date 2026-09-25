@@ -379,77 +379,7 @@ void definitive_ui::draw_settings_background(
         definitive_ui::rgba(255, 255, 255, 244));
 }
 
-void definitive_ui::draw_intro_handoff_background(
-    ImDrawList* draw,
-    const ImVec2& pos,
-    const ImVec2& size,
-    float opacity) {
-    if (draw == nullptr) {
-        return;
-    }
 
-    const float alpha =
-        std::clamp(opacity, 0.0f, 1.0f);
-    if (alpha <= 0.001f) {
-        return;
-    }
-
-    if (!ensure_background_texture_loaded()) {
-        draw->AddRectFilled(
-            pos,
-            ImVec2(pos.x + size.x, pos.y + size.y),
-            definitive_ui::rgba(
-                8, 10, 14,
-                definitive_ui::glow_alpha(
-                    210.0f * alpha)));
-        return;
-    }
-
-    const CoverUv uv =
-        cover_uv_for_size(size);
-    const GLuint texture =
-        g_background_blur_texture != 0
-            ? g_background_blur_texture
-            : (g_background_soft_texture != 0
-                ? g_background_soft_texture
-                : g_background_texture);
-
-    draw->AddImage(
-        (ImTextureID)(intptr_t)texture,
-        pos,
-        ImVec2(pos.x + size.x, pos.y + size.y),
-        ImVec2(uv.u0, uv.v0),
-        ImVec2(uv.u1, uv.v1),
-        definitive_ui::rgba(
-            255, 255, 255,
-            definitive_ui::glow_alpha(
-                255.0f * alpha)));
-
-    // Keep the handoff darker and softer than the finished launcher so the
-    // controls still feel like they are emerging from the startup sequence.
-    draw->AddRectFilled(
-        pos,
-        ImVec2(pos.x + size.x, pos.y + size.y),
-        definitive_ui::rgba(
-            0, 2, 5,
-            definitive_ui::glow_alpha(
-                118.0f * alpha)));
-
-    if (definitive_ui::theme_active()) {
-        ImVec4 tint =
-            ui_theme::g_theme_settings.background;
-        tint.w =
-            std::clamp(
-                0.20f * alpha,
-                0.0f,
-                0.20f);
-        draw->AddRectFilled(
-            pos,
-            ImVec2(pos.x + size.x, pos.y + size.y),
-            ImGui::ColorConvertFloat4ToU32(
-                tint));
-    }
-}
 
 
 void definitive_ui::draw_launcher_readability_shade(ImDrawList* draw,
