@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/gs/gs_gpu_backend.h"
+#include "core/gs/gs_vram.h"
 
 #include <atomic>
 #include <condition_variable>

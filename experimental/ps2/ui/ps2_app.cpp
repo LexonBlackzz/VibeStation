@@ -26,6 +26,8 @@
 
 namespace ps2::ui {
 
+Ps2App::~Ps2App() = default;
+
 namespace {
 
 constexpr std::size_t kAudioChannels = 2u;

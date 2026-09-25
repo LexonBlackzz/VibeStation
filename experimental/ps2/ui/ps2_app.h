@@ -23,6 +23,7 @@ class Ps2GlGsBackend;
 
 class Ps2App {
 public:
+    ~Ps2App();
     bool init();
     int run();
     void shutdown();
