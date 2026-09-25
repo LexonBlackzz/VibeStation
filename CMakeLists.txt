@@ -156,7 +156,7 @@ set(VIBESTATION_SOURCES
     src/ui/panels/vram_panel.cpp
 )
 
-set(VIBESTATION_VERSION_STRING "v0.6.0")
+set(VIBESTATION_VERSION_STRING "v0.6.0-dev")
 set(VIBESTATION_BUILD_NUMBER_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
 set(VIBESTATION_VERSION_SOURCE
@@ -398,7 +398,7 @@ endif()
 
 option(VIBESTATION_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)
 option(VIBESTATION_FAST_ITERATION
-    "Favor fast compile/link cycles while developing the definitive UI" ON)
+    "Favor fast compile/link cycles while developing the definitive UI" OFF)
 
 if(VIBESTATION_ENABLE_IPO AND NOT VIBESTATION_FAST_ITERATION)
     include(CheckIPOSupported)

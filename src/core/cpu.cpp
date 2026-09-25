@@ -2565,8 +2565,7 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
 
   const CpuExecutionMode mode = effective_cpu_execution_mode();
   if (mode != CpuExecutionMode::Interpreter && recompiler_backend_) {
-    return recompiler_backend_->run_slice(
-        max_cycles, max_instructions, mode);
+    return recompiler_backend_->run_slice(max_cycles, max_instructions);
   }
 
   while (result.cycles < max_cycles &&

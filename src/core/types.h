@@ -124,8 +124,8 @@ inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,
-  // Legacy numeric values are retained so old configs still migrate cleanly.
-  // Runtime selection exposes Interpreter, Decoded Block, and x64 JIT.
+  // Legacy values are retained only so old config/diagnostic code can migrate
+  // cleanly. Runtime selection exposes only Interpreter and Recompiler.
   DecodedBlockInterpreter = 1,
   X64Jit = 2,
   X64JitV2 = 3,
@@ -302,19 +302,9 @@ inline CpuExecutionMode effective_cpu_execution_mode() {
 }
 
 inline const char *cpu_execution_mode_name(CpuExecutionMode mode) {
-  switch (mode) {
-  case CpuExecutionMode::Interpreter:
-    return "Interpreter";
-  case CpuExecutionMode::DecodedBlockInterpreter:
-    return "Decoded Block";
-  case CpuExecutionMode::X64Jit:
-  case CpuExecutionMode::X64JitV2:
-  case CpuExecutionMode::X64JitV3:
-  case CpuExecutionMode::Recompiler:
-    return "x64 JIT";
-  default:
-    return "Interpreter";
-  }
+  return mode == CpuExecutionMode::Interpreter
+             ? "Interpreter"
+             : "Recompiler (Experimental)";
 }
 
 inline const char *
@@ -337,33 +327,15 @@ cpu_forced_interpreter_reason_name(CpuForcedInterpreterReason reason) {
 }
 
 inline int cpu_execution_mode_to_config_value(CpuExecutionMode mode) {
-  switch (mode) {
-  case CpuExecutionMode::DecodedBlockInterpreter:
-    return 1;
-  case CpuExecutionMode::X64Jit:
-  case CpuExecutionMode::X64JitV2:
-  case CpuExecutionMode::X64JitV3:
-  case CpuExecutionMode::Recompiler:
-    return 2;
-  case CpuExecutionMode::Interpreter:
-  default:
-    return 0;
-  }
+  return mode == CpuExecutionMode::Interpreter ? 0 : 5;
 }
 
 inline CpuExecutionMode cpu_execution_mode_from_config_value(int value) {
-  // UI/persistence values are stable and compact:
-  //   0 = instruction interpreter
-  //   1 = decoded-block interpreter
-  //   2 = x64 JIT / unified recompiler
-  // Historical JIT values 3-5 migrate to the unified x64 JIT.
-  if (value == 1) {
-    return CpuExecutionMode::DecodedBlockInterpreter;
-  }
-  if (value >= 2 && value <= 5) {
-    return CpuExecutionMode::Recompiler;
-  }
-  return CpuExecutionMode::Interpreter;
+  // 2-5 were the four historical JIT generations. Migrate all of them to the
+  // single supported recompiler. Old decoded-block mode (1) falls back to the
+  // interpreter because that backend no longer exists.
+  return (value >= 2 && value <= 5) ? CpuExecutionMode::Recompiler
+                                    : CpuExecutionMode::Interpreter;
 }
 
 inline constexpr u32 log_category_bit(LogCategory cat) {
