@@ -123,6 +123,7 @@ set(VIBESTATION_SOURCES
     src/ui/output_resolution_utils.cpp
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
+    src/ui/definitive/definitive_audio.cpp
     src/ui/definitive/definitive_fonts.cpp
     src/ui/definitive/definitive_intro.cpp
     src/ui/definitive/definitive_settings.cpp
