@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/input_recorder.h"
 #include "emu_runner.h"
+#include "frame_presentation_worker.h"
 #include "../integrations/discord_presence.h"
 #include "../core/config.h"
 #include "../core/renderer.h"
@@ -40,6 +41,7 @@ private:
 	InputRecorder input_recorder_;
 	InputRecorder::Config input_recorder_config_{};
 	EmuRunner emu_runner_;
+	FramePresentationWorker frame_presentation_worker_;
 	bool runtime_ready_ = false;
 	bool input_movie_cli_pending_ = false;
 	char input_movie_record_path_[260] = "manual_replay";
@@ -133,8 +135,6 @@ private:
 	bool perf_history_has_last_frame_id_ = false;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
-	std::vector<u32> turbo_frame_rgba_{};
-	std::vector<u32> scaled_frame_rgba_{};
 	int latest_frame_width_ = 0;
 	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;
