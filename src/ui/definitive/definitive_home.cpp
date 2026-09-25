@@ -210,6 +210,8 @@ constexpr float kLauncherStartFadeSeconds = 0.42f;
 
 float g_launcher_intro_elapsed = 0.0f;
 bool g_launcher_intro_complete = false;
+float g_launcher_ui_intro_elapsed = 0.0f;
+bool g_launcher_ui_intro_complete = false;
 
 // Vista-inspired startup pacing: a blurred icon resolves while slowly
 // enlarging, then the VibeStation wordmark snaps in blurred and resolves fast.
@@ -221,6 +223,11 @@ constexpr float kIntroWordmarkBegin = 2.52f;
 constexpr float kIntroWordmarkBlurEnd = 2.78f;
 constexpr float kIntroOutroBegin = 3.48f;
 constexpr float kLauncherIntroDuration = 3.82f;
+
+// This animation is deliberately independent from the boot timer. It begins
+// on the frame after the boot sequence ends so the launcher never initializes
+// invisibly behind the startup logo.
+constexpr float kLauncherUiIntroDuration = 1.56f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -1245,6 +1252,127 @@ void draw_boot_presentation(
 }
 
 
+void draw_launcher_initialization_overlay(
+    const ImVec2& pos, const ImVec2& size, float elapsed) {
+    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    const Layout layout = make_layout(pos, size);
+
+    // First reveal the launcher background from black.
+    const float background_reveal =
+        timeline_progress(elapsed, 0.00f, 0.46f);
+    const int global_black =
+        glow_alpha(255.0f * (1.0f - background_reveal));
+    if (global_black > 0) {
+        overlay->AddRectFilled(
+            pos,
+            ImVec2(pos.x + size.x, pos.y + size.y),
+            rgba(0, 0, 0, global_black));
+    }
+
+    // Brand block resolves next with a short vertical wipe.
+    const float brand_reveal =
+        timeline_progress(elapsed, 0.16f, 0.67f);
+    const ImVec2 brand0 = layout.point(24.0f, 18.0f);
+    const ImVec2 brand1 = layout.point(460.0f, 156.0f);
+    if (brand_reveal < 1.0f) {
+        const float wipe_y =
+            brand1.y - (brand1.y - brand0.y) * brand_reveal;
+        overlay->AddRectFilled(
+            brand0,
+            ImVec2(brand1.x, wipe_y),
+            rgba(0, 0, 0, 255));
+        overlay->AddLine(
+            ImVec2(brand0.x, wipe_y),
+            ImVec2(brand1.x, wipe_y),
+            rgba(185, 210, 232,
+                glow_alpha(92.0f * brand_reveal)),
+            layout.px(1.0f));
+    }
+
+    // Version/quote block trails the brand slightly.
+    const float meta_reveal =
+        timeline_progress(elapsed, 0.24f, 0.72f);
+    if (meta_reveal < 1.0f) {
+        overlay->AddRectFilled(
+            layout.point(1010.0f, 18.0f),
+            layout.point(1252.0f, 118.0f),
+            rgba(0, 0, 0,
+                glow_alpha(255.0f * (1.0f - meta_reveal))));
+    }
+
+    // Main actions appear one-by-one from top to bottom.
+    constexpr float kMenuX = 30.0f;
+    constexpr float kMenuY = 212.0f;
+    constexpr float kMenuW = 410.0f;
+    constexpr float kMenuH = 67.0f;
+    constexpr float kMenuStep = 70.0f;
+
+    for (int i = 0; i < 5; ++i) {
+        const float start =
+            0.34f + static_cast<float>(i) * 0.09f;
+        const float reveal =
+            timeline_progress(elapsed, start, start + 0.42f);
+
+        const ImVec2 row0 =
+            layout.point(kMenuX, kMenuY + kMenuStep * i);
+        const ImVec2 row1 =
+            layout.point(
+                kMenuX + kMenuW,
+                kMenuY + kMenuStep * i + kMenuH);
+
+        if (reveal < 1.0f) {
+            const float wipe_x =
+                row0.x + (row1.x - row0.x) * reveal;
+
+            overlay->AddRectFilled(
+                ImVec2(wipe_x, row0.y),
+                row1,
+                rgba(0, 0, 0, 255));
+
+            const int veil =
+                glow_alpha(150.0f * (1.0f - reveal));
+            if (veil > 0) {
+                overlay->AddRectFilled(
+                    row0,
+                    ImVec2(wipe_x, row1.y),
+                    rgba(0, 0, 0, veil));
+            }
+        }
+    }
+
+    // Bottom cards arrive last, with the system card just behind the library.
+    const std::array<ImVec4, 2> panels = {{
+        ImVec4(32.0f, 585.0f, 840.0f, 768.0f),
+        ImVec4(854.0f, 585.0f, 1248.0f, 768.0f),
+    }};
+    for (size_t i = 0; i < panels.size(); ++i) {
+        const float start =
+            0.88f + static_cast<float>(i) * 0.10f;
+        const float reveal =
+            timeline_progress(elapsed, start, start + 0.46f);
+        if (reveal >= 1.0f) {
+            continue;
+        }
+
+        const ImVec4& p = panels[i];
+        const ImVec2 p0 = layout.point(p.x, p.y);
+        const ImVec2 p1 = layout.point(p.z, p.w);
+        const float wipe_y =
+            p1.y - (p1.y - p0.y) * reveal;
+
+        overlay->AddRectFilled(
+            p0,
+            ImVec2(p1.x, wipe_y),
+            rgba(0, 0, 0, 255));
+        overlay->AddRectFilled(
+            ImVec2(p0.x, wipe_y),
+            p1,
+            rgba(0, 0, 0,
+                glow_alpha(145.0f * (1.0f - reveal))));
+    }
+}
+
+
 void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     float size, ImU32 color, const char* text) {
     const float font_size = layout.px(size);
@@ -1890,6 +2018,10 @@ void App::release_definitive_ui_assets() {
     g_background_load_attempted = false;
     g_launcher_start_transition = LauncherStartTransition::None;
     g_launcher_start_transition_elapsed = 0.0f;
+    g_launcher_intro_elapsed = 0.0f;
+    g_launcher_intro_complete = false;
+    g_launcher_ui_intro_elapsed = 0.0f;
+    g_launcher_ui_intro_complete = false;
     g_menu_highlight_mix.fill(0.0f);
 }
 
@@ -2716,6 +2848,8 @@ void App::panel_definitive_home() {
             // cannot also activate a launcher button underneath it.
             g_launcher_intro_elapsed = kLauncherIntroDuration;
             g_launcher_intro_complete = true;
+            g_launcher_ui_intro_elapsed = 0.0f;
+            g_launcher_ui_intro_complete = false;
             ensure_background_texture_loaded();
             return;
         }
@@ -2725,10 +2859,28 @@ void App::panel_definitive_home() {
         if (g_launcher_intro_elapsed >= kLauncherIntroDuration) {
             g_launcher_intro_elapsed = kLauncherIntroDuration;
             g_launcher_intro_complete = true;
+            draw_boot_presentation(
+                window_pos, window_size, g_launcher_intro_elapsed);
+            return;
         }
     }
 
     const bool launcher_intro_active = !g_launcher_intro_complete;
+
+    if (g_launcher_intro_complete && !g_launcher_ui_intro_complete) {
+        const float dt =
+            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+        g_launcher_ui_intro_elapsed += dt;
+        if (g_launcher_ui_intro_elapsed >= kLauncherUiIntroDuration) {
+            g_launcher_ui_intro_elapsed = kLauncherUiIntroDuration;
+            g_launcher_ui_intro_complete = true;
+        }
+    }
+
+    const bool launcher_ui_initializing =
+        g_launcher_intro_complete && !g_launcher_ui_intro_complete;
+    const bool launcher_ready =
+        g_launcher_intro_complete && g_launcher_ui_intro_complete;
 
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
@@ -2802,7 +2954,7 @@ void App::panel_definitive_home() {
     const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
 
-    const bool menu_sound_enabled = !launcher_intro_active;
+    const bool menu_sound_enabled = launcher_ready;
     const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
         "Start Emulation", "Load BIOS and start playing", menu_sound_enabled);
     const bool load_game_pressed = menu_button(layout, draw, 1, MenuIcon::Folder,
@@ -2838,7 +2990,7 @@ void App::panel_definitive_home() {
         return true;
     };
 
-    if (start_pressed && !launcher_intro_active &&
+    if (start_pressed && launcher_ready &&
         g_launcher_start_transition == LauncherStartTransition::None) {
         play_ui_open_sound();
         if (!system_->bios_loaded() && !choose_bios()) {
@@ -2860,7 +3012,7 @@ void App::panel_definitive_home() {
     const bool launcher_transitioning =
         g_launcher_start_transition != LauncherStartTransition::None;
 
-    if (load_game_pressed && !launcher_intro_active &&
+    if (load_game_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_open_sound();
         std::string path = open_file_dialog(
@@ -2880,18 +3032,18 @@ void App::panel_definitive_home() {
         }
     }
 
-    if (change_bios_pressed && !launcher_intro_active &&
+    if (change_bios_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_open_sound();
         choose_bios();
         play_ui_close_sound();
     }
-    if (settings_pressed && !launcher_intro_active &&
+    if (settings_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_open_sound();
         show_settings_ = true;
     }
-    if (exit_pressed && !launcher_intro_active &&
+    if (exit_pressed && launcher_ready &&
         !launcher_transitioning) {
         play_ui_close_sound();
         SDL_Event quit_event{};
@@ -3020,7 +3172,7 @@ void App::panel_definitive_home() {
                 ImGui::PopStyleColor(3);
                 ImGui::PopID();
 
-                if (chosen && !launcher_intro_active) {
+                if (chosen && launcher_ready) {
                     load_disc_from_ui(entry.bin_path, entry.cue_path);
                 }
             }
@@ -3085,6 +3237,11 @@ void App::panel_definitive_home() {
 
     // Launcher-to-emulator transition. Use the viewport foreground draw list
     // so the fade also covers child windows (notably the scrollable game list).
+    if (launcher_ui_initializing) {
+        draw_launcher_initialization_overlay(
+            window_pos, window_size, g_launcher_ui_intro_elapsed);
+    }
+
     if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
         const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
         ImDrawList* fade_draw =
