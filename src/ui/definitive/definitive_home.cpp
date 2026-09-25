@@ -16,6 +16,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -30,6 +31,55 @@ constexpr std::array<float, 18> kDefinitiveFontSizes = {{
     32.0f, 36.0f, 40.0f, 48.0f, 54.0f, 60.0f
 }};
 std::array<ImFont*, kDefinitiveFontSizes.size()> g_definitive_fonts = {};
+
+std::filesystem::path find_definitive_font_path() {
+    std::vector<std::filesystem::path> candidates;
+
+    // Prefer an app-local font if one is added later, then use common clean
+    // monospace system fonts. Windows normally provides Consolas.
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    candidates.push_back(
+        cwd / "resources" / "fonts" / "VibeStationMono.ttf");
+    candidates.push_back(
+        cwd / ".." / "resources" / "fonts" / "VibeStationMono.ttf");
+
+    if (char* base = SDL_GetBasePath()) {
+        const std::filesystem::path base_path(base);
+        candidates.push_back(
+            base_path / "resources" / "fonts" / "VibeStationMono.ttf");
+        candidates.push_back(
+            base_path / ".." / "resources" / "fonts" / "VibeStationMono.ttf");
+        SDL_free(base);
+    }
+
+#ifdef _WIN32
+    if (const char* windir = std::getenv("WINDIR")) {
+        const std::filesystem::path fonts =
+            std::filesystem::path(windir) / "Fonts";
+        candidates.push_back(fonts / "CascadiaMono.ttf");
+        candidates.push_back(fonts / "CascadiaCode.ttf");
+        candidates.push_back(fonts / "consola.ttf");
+        candidates.push_back(fonts / "lucon.ttf");
+    }
+#elif defined(__APPLE__)
+    candidates.push_back("/System/Library/Fonts/SFNSMono.ttf");
+    candidates.push_back("/System/Library/Fonts/Menlo.ttc");
+#else
+    candidates.push_back(
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+    candidates.push_back(
+        "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf");
+#endif
+
+    std::error_code ec;
+    for (const auto& path : candidates) {
+        if (!path.empty() && std::filesystem::exists(path, ec) && !ec) {
+            return path;
+        }
+        ec.clear();
+    }
+    return {};
+}
 
 ImFont* definitive_font_for_size(float pixel_size) {
     ImFont* best = nullptr;
@@ -1689,6 +1739,10 @@ void App::initialize_definitive_ui_fonts() {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
 
+    const std::filesystem::path font_path =
+        find_definitive_font_path();
+    const std::string font_path_utf8 = font_path.string();
+
     for (size_t i = 0; i < kDefinitiveFontSizes.size(); ++i) {
         ImFontConfig config;
         config.SizePixels = kDefinitiveFontSizes[i];
@@ -1696,8 +1750,21 @@ void App::initialize_definitive_ui_fonts() {
         config.OversampleV = 2;
         config.PixelSnapH = false;
 
-        g_definitive_fonts[i] =
-            io.Fonts->AddFontDefault(&config);
+        ImFont* font = nullptr;
+        if (!font_path_utf8.empty()) {
+            font = io.Fonts->AddFontFromFileTTF(
+                font_path_utf8.c_str(),
+                kDefinitiveFontSizes[i],
+                &config);
+        }
+
+        // Keep a no-dependency fallback for systems where no suitable TTF is
+        // present. Even the fallback is baked at native sizes rather than
+        // magnifying a single 13 px font.
+        if (font == nullptr) {
+            font = io.Fonts->AddFontDefault(&config);
+        }
+        g_definitive_fonts[i] = font;
     }
 
     // 14 px is a comfortable baseline for legacy ImGui widgets. Definitive
