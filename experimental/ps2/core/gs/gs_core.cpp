@@ -853,8 +853,10 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     const u32 vertex_count = command.vertex_count;
     const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
     const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
-    const auto raster_begin =
-        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point raster_begin{};
+    if (raster_timing_enabled_) {
+        raster_begin = std::chrono::steady_clock::now();
+    }
     u64 pixels = 0;
     if (prim == 0u && vertex_count >= 1u) {
         pixels = GsRasterizer::draw_point(vram_, ctx, a);
@@ -869,9 +871,11 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         return;
     }
 
-    const u64 raster_ns = static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - raster_begin).count());
+    const u64 raster_ns = raster_timing_enabled_
+        ? static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - raster_begin).count())
+        : 0u;
 
     if (ctx.texture.enabled && ctx.texture.psm == 2u) {
         u32 state_mask = 0u;

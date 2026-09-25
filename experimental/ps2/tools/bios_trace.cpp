@@ -1428,6 +1428,7 @@ int main(int argc, char** argv) {
               << '\n';
     system.gs_core().set_async_rasterization(gs_thread);
     system.gs_core().set_detailed_raster_stats(detailed_gs_stats);
+    system.gs_core().set_raster_timing_enabled(profile);
     system.gs_core().set_rasterization_enabled(!audio_only);
     std::string error;
 

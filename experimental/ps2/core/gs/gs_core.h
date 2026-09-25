@@ -135,6 +135,9 @@ public:
     void set_detailed_raster_stats(bool enabled) {
         detailed_raster_stats_ = enabled;
     }
+    void set_raster_timing_enabled(bool enabled) {
+        raster_timing_enabled_ = enabled;
+    }
     void flush_pending_draws() const;
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
@@ -261,6 +264,7 @@ private:
     bool async_rasterization_ = false;
     bool rasterization_enabled_ = true;
     bool detailed_raster_stats_ = false;
+    bool raster_timing_enabled_ = false;
     mutable std::mutex raster_mutex_{};
     mutable std::condition_variable raster_condition_{};
     mutable std::condition_variable raster_completed_condition_{};
