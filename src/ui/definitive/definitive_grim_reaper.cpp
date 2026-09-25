@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -1424,6 +1425,219 @@ void App::panel_definitive_grim_reaper() {
                     &sound_reaper_seed_);
             }
 
+            ImGui::Separator();
+            ImGui::TextUnformatted(
+                "SPU SAMPLE TOOLS");
+
+            const std::filesystem::path sound_ram_path =
+                std::filesystem::current_path() /
+                "sound.ram";
+
+            sound_ram_voice_index_ =
+                std::clamp(
+                    sound_ram_voice_index_,
+                    0,
+                    23);
+
+            if (sound_ram_multi_voice_export_) {
+                ImGui::BeginDisabled();
+            }
+            ImGui::SliderInt(
+                "Sample Voice",
+                &sound_ram_voice_index_,
+                0,
+                23);
+            if (sound_ram_multi_voice_export_) {
+                ImGui::EndDisabled();
+            }
+
+            if (ImGui::Checkbox(
+                    "Multi-Voice Export",
+                    &sound_ram_multi_voice_export_) &&
+                sound_ram_multi_voice_export_) {
+                sound_ram_voice_selected_.fill(false);
+                sound_ram_voice_selected_[
+                    static_cast<size_t>(
+                        sound_ram_voice_index_)] = true;
+            }
+
+            int selected_voice_count = 0;
+            if (sound_ram_multi_voice_export_) {
+                if (ImGui::Button(
+                        "Current Voice Only")) {
+                    sound_ram_voice_selected_.fill(false);
+                    sound_ram_voice_selected_[
+                        static_cast<size_t>(
+                            sound_ram_voice_index_)] = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Select All")) {
+                    sound_ram_voice_selected_.fill(true);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Selection")) {
+                    sound_ram_voice_selected_.fill(false);
+                }
+
+                if (ImGui::BeginTable(
+                        "##DefinitiveSoundVoiceSelection",
+                        4,
+                        ImGuiTableFlags_SizingStretchSame)) {
+                    for (int voice = 0;
+                         voice < 24;
+                         ++voice) {
+                        ImGui::TableNextColumn();
+                        const std::string label =
+                            "Voice " +
+                            std::to_string(voice);
+                        ImGui::Checkbox(
+                            label.c_str(),
+                            &sound_ram_voice_selected_[
+                                static_cast<size_t>(
+                                    voice)]);
+                        if (sound_ram_voice_selected_[
+                                static_cast<size_t>(
+                                    voice)]) {
+                            ++selected_voice_count;
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+
+                ImGui::Text(
+                    "Selected Voices: %d",
+                    selected_voice_count);
+            }
+
+            const bool replacement_loaded =
+                system_->spu_replacement_sample_loaded();
+            const bool replacement_enabled =
+                system_->spu_replacement_sample_enabled();
+
+            ImGui::Text(
+                "Replacement: %s / %s / %zu bytes",
+                replacement_loaded
+                    ? "Loaded"
+                    : "Not loaded",
+                replacement_enabled
+                    ? "Enabled"
+                    : "Disabled",
+                system_->spu_replacement_sample_bytes());
+            ImGui::TextWrapped(
+                "sound.ram: %s",
+                sound_ram_path.string().c_str());
+
+            auto run_spu_sample_action =
+                [&](const auto& action) {
+                    const bool was_running =
+                        emu_runner_.is_running();
+                    if (was_running) {
+                        emu_runner_.pause_and_wait_idle();
+                    }
+                    action();
+                    if (was_running) {
+                        emu_runner_.set_running(true);
+                    }
+                };
+
+            if (ImGui::Button(
+                    sound_ram_multi_voice_export_
+                        ? "Save Selected Voices"
+                        : "Save Voice To sound.ram")) {
+                run_spu_sample_action([&]() {
+                    std::string error;
+
+                    if (sound_ram_multi_voice_export_) {
+                        std::vector<int> voices;
+                        voices.reserve(
+                            sound_ram_voice_selected_.size());
+
+                        for (int voice = 0;
+                             voice <
+                                static_cast<int>(
+                                    sound_ram_voice_selected_.size());
+                             ++voice) {
+                            if (sound_ram_voice_selected_[
+                                    static_cast<size_t>(
+                                        voice)]) {
+                                voices.push_back(voice);
+                            }
+                        }
+
+                        if (system_->
+                                save_spu_voice_samples_to_file(
+                                    voices,
+                                    sound_ram_path.string(),
+                                    &error)) {
+                            status_message_ =
+                                "Saved combined sound.ram from " +
+                                std::to_string(
+                                    voices.size()) +
+                                " SPU voices.";
+                        }
+                        else {
+                            status_message_ =
+                                error.empty()
+                                    ? "Failed to save combined sound.ram."
+                                    : error;
+                        }
+                    }
+                    else if (system_->
+                            save_spu_voice_sample_to_file(
+                                sound_ram_voice_index_,
+                                sound_ram_path.string(),
+                                &error)) {
+                        status_message_ =
+                            "Saved sound.ram from SPU voice " +
+                            std::to_string(
+                                sound_ram_voice_index_);
+                    }
+                    else {
+                        status_message_ =
+                            error.empty()
+                                ? "Failed to save sound.ram."
+                                : error;
+                    }
+                });
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("Load sound.ram")) {
+                run_spu_sample_action([&]() {
+                    std::string error;
+                    if (system_->
+                            load_spu_replacement_sample_from_file(
+                                sound_ram_path.string(),
+                                &error)) {
+                        status_message_ =
+                            "Loaded sound.ram replacement sample.";
+                    }
+                    else {
+                        status_message_ =
+                            error.empty()
+                                ? "Failed to load sound.ram."
+                                : error;
+                    }
+                });
+            }
+
+            ImGui::SameLine();
+            if (!replacement_loaded) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Clear Replacement")) {
+                run_spu_sample_action([&]() {
+                    system_->
+                        clear_spu_replacement_sample();
+                    status_message_ =
+                        "Cleared SPU replacement sample.";
+                });
+            }
+            if (!replacement_loaded) {
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Separator();
             ImGui::InputText(
                 "Profile Name",
                 sound_preset_name_,
