@@ -3772,11 +3772,124 @@ u32 EeCpu::run_quiet_fast_prefix(
                     static_cast<u64>(instruction & 0xFFFFu));
         } else if (opcode == 0x0Fu) {
             write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
+        } else if (opcode == 0x12u) { // COP2/VU0 macro subset
+            const u32 cop_rs = rs;
+            const u32 ft = rt;
+            const u32 fs = rd;
+            const u32 fd = sa;
+            const u32 cop_funct = funct;
+
+            auto vu_lane_read = [&](u32 reg, u32 lane) -> u32 {
+                const EeGpr& value = state_.vu_vf[reg];
+                const u64 half = lane < 2u ? value.lo : value.hi;
+                return static_cast<u32>(
+                    half >> ((lane & 1u) * 32u));
+            };
+            auto vu_lane_write =
+                [&](u32 reg, u32 lane, u32 value) {
+                    if (reg == 0u) return;
+                    EeGpr& target = state_.vu_vf[reg];
+                    u64& half = lane < 2u ? target.lo : target.hi;
+                    const u32 shift = (lane & 1u) * 32u;
+                    half =
+                        (half & ~(0xFFFFFFFFull << shift)) |
+                        (static_cast<u64>(value) << shift);
+                };
+            auto vu_selected = [&](u32 lane) {
+                static constexpr u32 bits[4] = {
+                    24u, 23u, 22u, 21u};
+                return ((instruction >> bits[lane]) & 1u) != 0u;
+            };
+
+            if (cop_rs == 0x02u) { // CFC2
+                if (rt != 0u) {
+                    u32 value = state_.vu_vi[fs];
+                    if (fs == 20u) value &= 0x007FFFFFu;
+                    write_gpr_word(rt, value);
+                }
+            } else if (cop_rs >= 0x10u &&
+                       cop_funct == 0x2Cu) { // VSUB
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    const float lhs =
+                        ps2_fpu_input(vu_lane_read(fs, lane));
+                    const float rhs =
+                        ps2_fpu_input(vu_lane_read(ft, lane));
+                    vu_lane_write(
+                        fd,
+                        lane,
+                        ps2_fpu_result(lhs - rhs));
+                }
+            } else if (cop_rs >= 0x10u &&
+                       cop_funct >= 0x3Cu) {
+                const u32 special =
+                    (instruction & 3u) |
+                    ((instruction >> 4) & 0x7Cu);
+                if (special == 0x2Fu) { // VNOP
+                    // Architectural no-op.
+                } else if (special == 0x30u) { // VMOVE
+                    // Snapshot the source first: source and destination may
+                    // alias while the lane mask selects a partial move.
+                    const EeGpr source = state_.vu_vf[fs];
+                    auto source_lane = [&](u32 lane) {
+                        const u64 half =
+                            lane < 2u ? source.lo : source.hi;
+                        return static_cast<u32>(
+                            half >> ((lane & 1u) * 32u));
+                    };
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (vu_selected(lane)) {
+                            vu_lane_write(
+                                ft, lane, source_lane(lane));
+                        }
+                    }
+                } else {
+                    handled = false;
+                }
+            } else {
+                handled = false;
+            }
         } else if (opcode == 0x19u) {
             write_gpr64(
                 rt,
                 gpr_u64(rs) +
                     static_cast<u64>(static_cast<s64>(imm)));
+        } else if (opcode == 0x1Cu) { // MMI hot integer multiply/divide subset
+            switch (funct) {
+            case 0x18u: // MULT1
+                multiply_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                write_gpr64(rd, state_.lo1);
+                break;
+            case 0x19u: // MULTU1
+                multiply_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                write_gpr64(rd, state_.lo1);
+                break;
+            case 0x1Au: // DIV1
+                divide_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                break;
+            case 0x1Bu: // DIVU1
+                divide_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                break;
+            default:
+                handled = false;
+                break;
+            }
         } else if (
             opcode == 0x1Eu ||
             opcode == 0x20u || opcode == 0x21u ||
