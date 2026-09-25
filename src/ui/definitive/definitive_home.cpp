@@ -1727,7 +1727,7 @@ void draw_settings_section(ImDrawList* draw, const Layout& layout,
     draw->AddRectFilled(p0, p1, rgba(7, 11, 16, 226), layout.px(4.0f));
     draw->AddRect(p0, p1, rgba(91, 109, 126, 175),
         layout.px(4.0f), 0, layout.px(1.0f));
-    add_text(draw, layout, x + 18.0f, y + 14.0f, 12.5f,
+    add_text(draw, layout, x + 18.0f, y + 11.0f, 15.5f,
         rgba(209, 218, 227, 235), title);
     draw->AddLine(
         layout.point(x + 18.0f, y + 39.0f),
@@ -1756,7 +1756,7 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 92), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
         label);
 
@@ -1796,7 +1796,7 @@ bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 92), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
         label);
 
@@ -1830,7 +1830,7 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
             rgba(31, 43, 55, 60), layout.px(2.0f));
     }
 
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         rgba(221, 226, 232, 244), label);
 
     ImGui::SetCursorScreenPos(layout.point(x + w - 196.0f, y + 14.0f));
@@ -1846,8 +1846,10 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
     ImGui::PushStyleColor(ImGuiCol_Header, rgba(54, 77, 97, 215));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(69, 96, 120, 230));
+    ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::Combo("##value", &current, items, item_count);
+    ImGui::PopFont();
     ImGui::PopStyleColor(8);
     ImGui::PopStyleVar(2);
     ImGui::PopID();
@@ -1858,17 +1860,17 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
 void definitive_settings_note(
     ImDrawList* draw, const Layout& layout,
     float x, float y, const char* text) {
-    const float font_size = layout.px(10.6f);
+    const float font_size = layout.px(13.5f);
     const ImVec2 pos = layout.point(x, y);
 
     // Keep descriptions on the text side of the row. They may wrap to a
     // second line, but are clipped before the right-aligned slider/combo area.
-    const float wrap_width = layout.px(270.0f);
+    const float wrap_width = layout.px(292.0f);
     const ImVec4 clip_rect(
         pos.x,
         pos.y,
         pos.x + wrap_width,
-        pos.y + layout.px(30.0f));
+        pos.y + layout.px(34.0f));
 
     ImFont* font = definitive_font_for_size(font_size);
     draw->AddText(
@@ -1886,7 +1888,7 @@ bool definitive_settings_color(
     ImDrawList* draw, const Layout& layout,
     const char* id, const char* label,
     float x, float y, float w, ImVec4& value) {
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         rgba(221, 226, 232, 244), label);
 
     ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 12.0f));
@@ -1896,11 +1898,13 @@ bool definitive_settings_color(
     ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
     ImGui::PushStyleColor(ImGuiCol_Border, rgba(96, 118, 138, 195));
+    ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed = ImGui::ColorEdit4(
         "##value", &value.x,
         ImGuiColorEditFlags_DisplayRGB |
         ImGuiColorEditFlags_AlphaBar |
         ImGuiColorEditFlags_NoInputs);
+    ImGui::PopFont();
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
     ImGui::PopID();
@@ -1912,7 +1916,7 @@ bool definitive_settings_tab_button(
     const char* id, const char* label,
     float x, float y, float w, bool selected) {
     const ImVec2 p0 = layout.point(x, y);
-    const ImVec2 sz = layout.size(w, 34.0f);
+    const ImVec2 sz = layout.size(w, 40.0f);
     ImGui::SetCursorScreenPos(p0);
     ImGui::PushID(id);
     const bool pressed = ImGui::InvisibleButton("##settings_tab", sz);
@@ -1927,12 +1931,12 @@ bool definitive_settings_tab_button(
     }
     if (selected) {
         draw->AddRectFilled(
-            layout.point(x, y + 32.0f),
-            layout.point(x + w, y + 34.0f),
+            layout.point(x, y + 38.0f),
+            layout.point(x + w, y + 40.0f),
             rgba(175, 210, 238, 235));
     }
 
-    add_text(draw, layout, x + 12.0f, y + 10.0f, 11.5f,
+    add_text(draw, layout, x + 12.0f, y + 10.0f, 14.5f,
         selected ? rgba(239, 244, 248, 255)
                  : rgba(174, 184, 194, hovered ? 244 : 215),
         label);
@@ -1946,7 +1950,7 @@ bool definitive_settings_slider_int(
     int& value, int min_value, int max_value,
     const char* format) {
     constexpr float kHeight = 68.0f;
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         rgba(221, 226, 232, 244), label);
 
     ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 14.0f));
@@ -1960,8 +1964,10 @@ bool definitive_settings_slider_int(
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::SliderInt("##value", &value, min_value, max_value, format);
+    ImGui::PopFont();
     ImGui::PopStyleColor(6);
     ImGui::PopStyleVar(2);
     ImGui::PopID();
@@ -1974,7 +1980,7 @@ bool definitive_settings_slider_float(
     float x, float y, float w,
     float& value, float min_value, float max_value,
     const char* format) {
-    add_text(draw, layout, x + 18.0f, y + 8.0f, 13.0f,
+    add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         rgba(221, 226, 232, 244), label);
 
     ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 14.0f));
@@ -1988,8 +1994,10 @@ bool definitive_settings_slider_float(
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
     ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::SliderFloat("##value", &value, min_value, max_value, format);
+    ImGui::PopFont();
     ImGui::PopStyleColor(6);
     ImGui::PopStyleVar(2);
     ImGui::PopID();
@@ -2161,9 +2169,9 @@ void App::panel_definitive_settings() {
     draw->AddRect(panel0, panel1, rgba(111, 132, 151, 218),
         layout.px(5.0f), 0, layout.px(1.0f));
 
-    add_text(draw, layout, panel_x + 38.0f, panel_y + 25.0f, 31.0f,
+    add_text(draw, layout, panel_x + 38.0f, panel_y + 21.0f, 38.0f,
         rgba(237, 241, 245, 255), "SETTINGS");
-    add_text(draw, layout, panel_x + 40.0f, panel_y + 63.0f, 10.0f,
+    add_text(draw, layout, panel_x + 40.0f, panel_y + 67.0f, 13.5f,
         rgba(143, 154, 165, 228), "DEFINITIVE");
 
     constexpr std::array<ImU32, 4> settings_accents = {
@@ -2313,12 +2321,12 @@ void App::panel_definitive_settings() {
             input_ && input_->has_gamepad()
                 ? input_->gamepad_name()
                 : "No Gamepad Detected";
-        add_text(draw, layout, right_x + 18.0f, content_y + 58.0f, 13.0f,
+        add_text(draw, layout, right_x + 18.0f, content_y + 55.0f, 16.5f,
             input_ && input_->has_gamepad()
                 ? rgba(178, 221, 190, 245)
                 : rgba(188, 195, 202, 235),
             gamepad_title.c_str());
-        add_text(draw, layout, right_x + 18.0f, content_y + 84.0f, 10.6f,
+        add_text(draw, layout, right_x + 18.0f, content_y + 84.0f, 13.5f,
             rgba(171, 181, 191, 235),
             input_ && input_->has_gamepad()
                 ? "Connected gamepads are mapped automatically."
@@ -2788,7 +2796,7 @@ void App::panel_definitive_settings() {
             draw, layout, right_x, content_y, column_w, 394.0f, "SIMPLE COLORS");
 
         if (!ui_theme::g_theme_settings.simple) {
-            add_text(draw, layout, right_x + 18.0f, content_y + 63.0f, 11.5f,
+            add_text(draw, layout, right_x + 18.0f, content_y + 61.0f, 14.5f,
                 rgba(184, 194, 204, 238),
                 "Enable Simple Customization to edit these colors.");
         }
@@ -2883,14 +2891,16 @@ void App::panel_definitive_settings() {
     ImGui::PushStyleColor(ImGuiCol_Text, rgba(220, 226, 232, 245));
 
     bool detailed = definitive_detailed_settings_;
+    ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool detailed_changed =
         ImGui::Checkbox("Detailed Settings", &detailed);
+    ImGui::PopFont();
 
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(2);
 
     add_text(draw, layout,
-        panel_x + 190.0f, panel_y + panel_h - 60.0f, 10.0f,
+        panel_x + 205.0f, panel_y + panel_h - 61.0f, 12.5f,
         rgba(166, 177, 187, 230),
         "Shows logging, diagnostics, profiling and other developer-oriented controls.");
 
@@ -2901,8 +2911,8 @@ void App::panel_definitive_settings() {
     add_text_right(
         draw, layout,
         panel_x + panel_w - 38.0f,
-        panel_y + panel_h - 58.0f,
-        9.5f, rgba(128, 140, 151, 210),
+        panel_y + panel_h - 59.0f,
+        11.5f, rgba(128, 140, 151, 210),
         VIBESTATION_VERSION_STRING);
 
     ImGui::End();
