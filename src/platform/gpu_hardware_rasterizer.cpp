@@ -737,7 +737,7 @@ bool GpuHardwareRasterizer::set_common_uniforms(
     const Vertex& v0,
     const Vertex& v1,
     const Vertex& v2,
-    const DrawState& state,
+    const RasterState& state,
     int rect_x, int rect_y, int rect_w, int rect_h) {
   if (!available_ || !thread_bound_ || program_ == 0) {
     return false;
@@ -824,7 +824,7 @@ bool GpuHardwareRasterizer::draw_triangle(
     Vertex v0,
     Vertex v1,
     Vertex v2,
-    const DrawState& state) {
+    const RasterState& state) {
   if (!available_ || !thread_bound_) {
     return false;
   }
@@ -886,7 +886,7 @@ bool GpuHardwareRasterizer::draw_triangle(
 bool GpuHardwareRasterizer::draw_flat_rect(
     s16 x, s16 y, u16 width, u16 height,
     u8 r, u8 g, u8 b,
-    const DrawState& state) {
+    const RasterState& state) {
   if (!available_ || !thread_bound_) {
     return false;
   }
@@ -935,7 +935,7 @@ bool GpuHardwareRasterizer::draw_textured_rect(
     s16 x, s16 y, u16 width, u16 height,
     u8 u, u8 v,
     u8 r, u8 g, u8 b,
-    const DrawState& state) {
+    const RasterState& state) {
   if (!available_ || !thread_bound_) {
     return false;
   }
