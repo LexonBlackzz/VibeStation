@@ -35,25 +35,6 @@ int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
 
-enum class UiMenuSound {
-    Cursor,
-    Open,
-    Close
-};
-
-struct UiSoundClip {
-    std::vector<Uint8> pcm;
-};
-
-SDL_AudioDeviceID g_ui_sound_device = 0;
-SDL_AudioSpec g_ui_sound_spec{};
-bool g_ui_sound_load_attempted = false;
-Uint32 g_ui_action_sound_until_ms = 0;
-UiSoundClip g_ui_cursor_sound;
-UiSoundClip g_ui_open_sound;
-UiSoundClip g_ui_close_sound;
-UiSoundClip g_ui_logo_sound;
-bool g_launcher_startup_sound_played = false;
 std::array<bool, 5> g_menu_was_engaged = {};
 
 struct LauncherQuote {
@@ -394,385 +375,6 @@ bool upload_rgba_texture(
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
     return true;
-}
-
-std::filesystem::path find_ui_sound_path(const char* filename) {
-    std::array<std::filesystem::path, 4> candidates{};
-
-    std::error_code ec;
-    const std::filesystem::path cwd = std::filesystem::current_path(ec);
-    if (!ec) {
-        candidates[0] =
-            cwd / "resources" / "ui" / "definitive" / "sounds" / filename;
-        candidates[1] =
-            cwd / ".." / "resources" / "ui" / "definitive" / "sounds" / filename;
-    }
-
-    if (char* base = SDL_GetBasePath()) {
-        const std::filesystem::path base_path(base);
-        SDL_free(base);
-        candidates[2] =
-            base_path / "resources" / "ui" / "definitive" / "sounds" / filename;
-        candidates[3] =
-            base_path / ".." / "resources" / "ui" / "definitive" / "sounds" / filename;
-    }
-
-    for (const auto& candidate : candidates) {
-        if (!candidate.empty() && std::filesystem::exists(candidate, ec) && !ec) {
-            return candidate;
-        }
-        ec.clear();
-    }
-    return {};
-}
-
-bool convert_ui_sound(
-    const std::filesystem::path& path,
-    const SDL_AudioSpec& target_spec,
-    UiSoundClip& out_clip) {
-    SDL_AudioSpec source_spec{};
-    Uint8* source_buffer = nullptr;
-    Uint32 source_length = 0;
-
-    if (path.empty() ||
-        SDL_LoadWAV(
-            path.string().c_str(),
-            &source_spec,
-            &source_buffer,
-            &source_length) == nullptr) {
-        return false;
-    }
-
-    SDL_AudioCVT cvt{};
-    const int cvt_result = SDL_BuildAudioCVT(
-        &cvt,
-        source_spec.format,
-        source_spec.channels,
-        source_spec.freq,
-        target_spec.format,
-        target_spec.channels,
-        target_spec.freq);
-
-    if (cvt_result < 0) {
-        SDL_FreeWAV(source_buffer);
-        return false;
-    }
-
-    if (cvt_result == 0) {
-        out_clip.pcm.assign(source_buffer, source_buffer + source_length);
-        SDL_FreeWAV(source_buffer);
-        return true;
-    }
-
-    cvt.len = static_cast<int>(source_length);
-    cvt.buf = static_cast<Uint8*>(
-        SDL_malloc(static_cast<size_t>(source_length) *
-            static_cast<size_t>(cvt.len_mult)));
-    if (cvt.buf == nullptr) {
-        SDL_FreeWAV(source_buffer);
-        return false;
-    }
-
-    std::memcpy(cvt.buf, source_buffer, source_length);
-    SDL_FreeWAV(source_buffer);
-
-    if (SDL_ConvertAudio(&cvt) != 0) {
-        SDL_free(cvt.buf);
-        return false;
-    }
-
-    out_clip.pcm.assign(cvt.buf, cvt.buf + cvt.len_cvt);
-    SDL_free(cvt.buf);
-    return true;
-}
-
-void apply_ui_sound_fade_in(
-    UiSoundClip& clip, const SDL_AudioSpec& spec, float fade_ms) {
-    if (clip.pcm.empty() || spec.freq <= 0 || spec.channels == 0 ||
-        fade_ms <= 0.0f) {
-        return;
-    }
-
-    const int bits_per_sample = SDL_AUDIO_BITSIZE(spec.format);
-    if (bits_per_sample <= 0 || (bits_per_sample % 8) != 0) {
-        return;
-    }
-
-    const size_t bytes_per_sample =
-        static_cast<size_t>(bits_per_sample / 8);
-    const size_t bytes_per_frame =
-        bytes_per_sample * static_cast<size_t>(spec.channels);
-    if (bytes_per_frame == 0) {
-        return;
-    }
-
-    const size_t frame_count = clip.pcm.size() / bytes_per_frame;
-    const size_t requested_fade_frames = static_cast<size_t>(
-        std::max(1.0f,
-            static_cast<float>(spec.freq) * fade_ms / 1000.0f));
-    const size_t fade_frames =
-        std::min(frame_count, requested_fade_frames);
-    if (fade_frames == 0) {
-        return;
-    }
-
-    const size_t sample_count =
-        fade_frames * static_cast<size_t>(spec.channels);
-
-    switch (spec.format) {
-    case AUDIO_F32SYS: {
-        float* samples =
-            reinterpret_cast<float*>(clip.pcm.data());
-        for (size_t i = 0; i < sample_count; ++i) {
-            const size_t frame =
-                i / static_cast<size_t>(spec.channels);
-            const float gain =
-                static_cast<float>(frame + 1) /
-                static_cast<float>(fade_frames);
-            samples[i] *= gain;
-        }
-        break;
-    }
-    case AUDIO_S16SYS: {
-        Sint16* samples =
-            reinterpret_cast<Sint16*>(clip.pcm.data());
-        for (size_t i = 0; i < sample_count; ++i) {
-            const size_t frame =
-                i / static_cast<size_t>(spec.channels);
-            const float gain =
-                static_cast<float>(frame + 1) /
-                static_cast<float>(fade_frames);
-            samples[i] = static_cast<Sint16>(
-                static_cast<float>(samples[i]) * gain);
-        }
-        break;
-    }
-    case AUDIO_S32SYS: {
-        Sint32* samples =
-            reinterpret_cast<Sint32*>(clip.pcm.data());
-        for (size_t i = 0; i < sample_count; ++i) {
-            const size_t frame =
-                i / static_cast<size_t>(spec.channels);
-            const float gain =
-                static_cast<float>(frame + 1) /
-                static_cast<float>(fade_frames);
-            samples[i] = static_cast<Sint32>(
-                static_cast<double>(samples[i]) *
-                static_cast<double>(gain));
-        }
-        break;
-    }
-    case AUDIO_S8: {
-        Sint8* samples =
-            reinterpret_cast<Sint8*>(clip.pcm.data());
-        for (size_t i = 0; i < sample_count; ++i) {
-            const size_t frame =
-                i / static_cast<size_t>(spec.channels);
-            const float gain =
-                static_cast<float>(frame + 1) /
-                static_cast<float>(fade_frames);
-            samples[i] = static_cast<Sint8>(
-                static_cast<float>(samples[i]) * gain);
-        }
-        break;
-    }
-    case AUDIO_U8: {
-        Uint8* samples = clip.pcm.data();
-        for (size_t i = 0; i < sample_count; ++i) {
-            const size_t frame =
-                i / static_cast<size_t>(spec.channels);
-            const float gain =
-                static_cast<float>(frame + 1) /
-                static_cast<float>(fade_frames);
-            const float centered =
-                static_cast<float>(samples[i]) - 128.0f;
-            samples[i] = static_cast<Uint8>(std::clamp(
-                128.0f + centered * gain, 0.0f, 255.0f));
-        }
-        break;
-    }
-    default:
-        // The requested device format is float32, so this is only a fallback
-        // for an unusual backend format we do not need to modify.
-        break;
-    }
-}
-
-bool ensure_ui_sounds_loaded() {
-    if (g_ui_sound_device != 0) {
-        return true;
-    }
-    if (g_ui_sound_load_attempted) {
-        return false;
-    }
-    g_ui_sound_load_attempted = true;
-
-    const std::filesystem::path cursor_path =
-        find_ui_sound_path("cursor.wav");
-    const std::filesystem::path open_path =
-        find_ui_sound_path("open.wav");
-    const std::filesystem::path close_path =
-        find_ui_sound_path("close.wav");
-    const std::filesystem::path logo_path =
-        find_ui_sound_path("logo.wav");
-
-    if (cursor_path.empty() || open_path.empty() || close_path.empty() ||
-        logo_path.empty()) {
-        return false;
-    }
-
-    SDL_AudioSpec desired{};
-    desired.freq = 44100;
-    desired.format = AUDIO_F32SYS;
-    desired.channels = 2;
-    desired.samples = 512;
-    desired.callback = nullptr;
-
-    g_ui_sound_device = SDL_OpenAudioDevice(
-        nullptr,
-        0,
-        &desired,
-        &g_ui_sound_spec,
-        SDL_AUDIO_ALLOW_ANY_CHANGE);
-    if (g_ui_sound_device == 0) {
-        return false;
-    }
-
-    const bool loaded =
-        convert_ui_sound(cursor_path, g_ui_sound_spec, g_ui_cursor_sound) &&
-        convert_ui_sound(open_path, g_ui_sound_spec, g_ui_open_sound) &&
-        convert_ui_sound(close_path, g_ui_sound_spec, g_ui_close_sound) &&
-        convert_ui_sound(logo_path, g_ui_sound_spec, g_ui_logo_sound);
-
-    if (loaded) {
-        // A tiny attack ramp removes the transient click when cursor.wav is
-        // rapidly restarted while moving through menu items.
-        apply_ui_sound_fade_in(
-            g_ui_cursor_sound, g_ui_sound_spec, 15.0f);
-    }
-
-    if (!loaded) {
-        SDL_CloseAudioDevice(g_ui_sound_device);
-        g_ui_sound_device = 0;
-        g_ui_cursor_sound.pcm.clear();
-        g_ui_open_sound.pcm.clear();
-        g_ui_close_sound.pcm.clear();
-        g_ui_logo_sound.pcm.clear();
-        return false;
-    }
-
-    SDL_PauseAudioDevice(g_ui_sound_device, 0);
-    return true;
-}
-
-Uint32 ui_sound_duration_ms(const UiSoundClip& clip) {
-    const int bits_per_sample =
-        SDL_AUDIO_BITSIZE(g_ui_sound_spec.format);
-    const Uint32 bytes_per_second =
-        (g_ui_sound_spec.freq > 0 &&
-         g_ui_sound_spec.channels > 0 &&
-         bits_per_sample > 0)
-            ? static_cast<Uint32>(
-                g_ui_sound_spec.freq *
-                g_ui_sound_spec.channels *
-                (bits_per_sample / 8))
-            : 0u;
-
-    if (bytes_per_second == 0 || clip.pcm.empty()) {
-        return 0;
-    }
-
-    return static_cast<Uint32>(
-        (static_cast<Uint64>(clip.pcm.size()) * 1000u) /
-        bytes_per_second);
-}
-
-void play_startup_logo_sound() {
-    if (g_launcher_startup_sound_played ||
-        !ensure_ui_sounds_loaded() ||
-        g_ui_sound_device == 0 ||
-        g_ui_logo_sound.pcm.empty()) {
-        return;
-    }
-
-    // The startup sound owns the UI audio device until it has naturally
-    // finished. Cursor highlights remain suppressed during this interval.
-    SDL_ClearQueuedAudio(g_ui_sound_device);
-    if (SDL_QueueAudio(
-            g_ui_sound_device,
-            g_ui_logo_sound.pcm.data(),
-            static_cast<Uint32>(g_ui_logo_sound.pcm.size())) == 0) {
-        g_launcher_startup_sound_played = true;
-        const Uint32 duration_ms =
-            std::max<Uint32>(
-                ui_sound_duration_ms(g_ui_logo_sound), 40u);
-        g_ui_action_sound_until_ms =
-            SDL_GetTicks() + duration_ms;
-    }
-}
-
-void stop_startup_logo_sound() {
-    if (!g_launcher_startup_sound_played ||
-        g_ui_sound_device == 0) {
-        return;
-    }
-
-    SDL_ClearQueuedAudio(g_ui_sound_device);
-    g_ui_action_sound_until_ms = 0;
-}
-
-void play_menu_sound(UiMenuSound sound) {
-    if (!ensure_ui_sounds_loaded() || g_ui_sound_device == 0) {
-        return;
-    }
-
-    const UiSoundClip* clip = nullptr;
-    switch (sound) {
-    case UiMenuSound::Cursor:
-        clip = &g_ui_cursor_sound;
-        break;
-    case UiMenuSound::Open:
-        clip = &g_ui_open_sound;
-        break;
-    case UiMenuSound::Close:
-        clip = &g_ui_close_sound;
-        break;
-    }
-
-    if (clip == nullptr || clip->pcm.empty()) {
-        return;
-    }
-
-    const Uint32 now = SDL_GetTicks();
-    const bool action_sound_active =
-        g_ui_action_sound_until_ms != 0 &&
-        !SDL_TICKS_PASSED(now, g_ui_action_sound_until_ms);
-
-    if (sound == UiMenuSound::Cursor) {
-        // While an explicit open/close effect is playing, automatic focus
-        // changes must not interrupt it. Otherwise cursor ticks are retriggered
-        // immediately so fast navigation feels responsive instead of queued.
-        if (action_sound_active) {
-            return;
-        }
-        SDL_ClearQueuedAudio(g_ui_sound_device);
-    }
-    else {
-        // Open/close effects take priority over cursor ticks and protect their
-        // own playback window from subsequent automatic highlight sounds.
-        SDL_ClearQueuedAudio(g_ui_sound_device);
-
-        const Uint32 duration_ms =
-            std::max<Uint32>(
-                ui_sound_duration_ms(*clip), 40u);
-        g_ui_action_sound_until_ms =
-            now + std::max<Uint32>(duration_ms, 40u);
-    }
-
-    SDL_QueueAudio(
-        g_ui_sound_device,
-        clip->pcm.data(),
-        static_cast<Uint32>(clip->pcm.size()));
 }
 
 std::filesystem::path find_background_path() {
@@ -1298,7 +900,7 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     bool& was_engaged =
         g_menu_was_engaged[static_cast<size_t>(index)];
     if (interaction_enabled && engaged && !was_engaged) {
-        play_menu_sound(UiMenuSound::Cursor);
+        definitive_ui::play_cursor_sound();
     }
     was_engaged = engaged;
 
@@ -1456,32 +1058,8 @@ void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
 }
 }
 
-void App::play_ui_cursor_sound() {
-    play_menu_sound(UiMenuSound::Cursor);
-}
-
-void App::play_ui_open_sound() {
-    play_menu_sound(UiMenuSound::Open);
-}
-
-void App::play_ui_close_sound() {
-    play_menu_sound(UiMenuSound::Close);
-}
-
 void App::release_definitive_ui_assets() {
-    if (g_ui_sound_device != 0) {
-        SDL_ClearQueuedAudio(g_ui_sound_device);
-        SDL_CloseAudioDevice(g_ui_sound_device);
-        g_ui_sound_device = 0;
-    }
-    g_ui_sound_spec = {};
-    g_ui_sound_load_attempted = false;
-    g_ui_action_sound_until_ms = 0;
-    g_ui_cursor_sound.pcm.clear();
-    g_ui_open_sound.pcm.clear();
-    g_ui_close_sound.pcm.clear();
-    g_ui_logo_sound.pcm.clear();
-    g_launcher_startup_sound_played = false;
+    definitive_ui::release_audio_assets();
     g_menu_was_engaged.fill(false);
 
     definitive_ui::release_intro_assets();
@@ -1520,9 +1098,7 @@ void App::panel_definitive_home() {
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
 
-    if (!g_launcher_startup_sound_played) {
-        play_startup_logo_sound();
-    }
+    definitive_ui::play_startup_sound();
 
     if (!g_launcher_intro_complete) {
         const bool skip_intro =
@@ -1531,7 +1107,7 @@ void App::panel_definitive_home() {
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
 
         if (skip_intro) {
-            stop_startup_logo_sound();
+            definitive_ui::stop_startup_sound();
 
             // End the intro on this frame and return once so the same keypress
             // cannot also activate a launcher button underneath it.
@@ -1616,7 +1192,7 @@ void App::panel_definitive_home() {
     // black so the transition into the launcher is hitch-free.
     ensure_background_texture_loaded();
     definitive_ui::preload_intro_assets();
-    ensure_ui_sounds_loaded();
+    definitive_ui::preload_audio_assets();
 
     if (launcher_intro_active) {
         definitive_ui::draw_intro_presentation(
