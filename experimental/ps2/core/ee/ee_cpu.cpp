@@ -121,50 +121,6 @@ u32 ps2_fpu_result(float value) {
     return bits;
 }
 
-enum QuietDecodedKind : u8 {
-    kQuietUnsupported = 0,
-    kQuietNop,
-    kQuietJump,
-    kQuietBranch,
-    kQuietBranchLikely,
-    kQuietImmediate,
-    kQuietLoad,
-    kQuietStore,
-    kQuietCop1,
-    kQuietNoopHint,
-    kQuietRegimm,
-    kQuietSpecial,
-};
-
-u8 classify_quiet_decoded(u32 instruction) {
-    if (instruction == 0u) return kQuietNop;
-    const u32 opcode = instruction >> 26;
-    if (opcode == 0x02u || opcode == 0x03u) return kQuietJump;
-    if (opcode >= 0x04u && opcode <= 0x07u) return kQuietBranch;
-    if (opcode >= 0x14u && opcode <= 0x17u) return kQuietBranchLikely;
-    if ((opcode >= 0x09u && opcode <= 0x0Fu) || opcode == 0x19u)
-        return kQuietImmediate;
-    switch (opcode) {
-    case 0x1Eu:
-    case 0x20u: case 0x21u: case 0x23u:
-    case 0x24u: case 0x25u: case 0x27u:
-    case 0x30u: case 0x31u: case 0x34u:
-    case 0x36u: case 0x37u:
-        return kQuietLoad;
-    case 0x1Fu:
-    case 0x28u: case 0x29u: case 0x2Bu:
-    case 0x38u: case 0x39u: case 0x3Cu:
-    case 0x3Eu: case 0x3Fu:
-        return kQuietStore;
-    case 0x11u: return kQuietCop1;
-    case 0x2Fu:
-    case 0x33u: return kQuietNoopHint;
-    case 0x01u: return kQuietRegimm;
-    case 0x00u: return kQuietSpecial;
-    default: return kQuietUnsupported;
-    }
-}
-
 } // namespace
 
 void EeCpu::reset(u32 entry_point) {
@@ -185,11 +141,6 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
-    for (auto& page : quiet_decoded_pages_) {
-        if (page) page->generation = ~u32{0};
-    }
-    quiet_decoded_cache_hits_ = 0;
-    quiet_decoded_cache_rebuilds_ = 0;
     halt_reason_.clear();
 }
 
@@ -3441,65 +3392,6 @@ bool EeCpu::step_quiet_unchecked_predecoded(
     return step_internal(error, true, &instruction, true);
 }
 
-const EeCpu::QuietDecodedInstruction*
-EeCpu::quiet_decoded_instruction(
-    u32 pc,
-    const u8* instruction_ram,
-    const u32* page_generations) {
-    constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
-    constexpr u32 kPageSize = 4096u;
-    constexpr u32 kInstructionsPerPage = kPageSize / sizeof(u32);
-
-    if (instruction_ram == nullptr ||
-        page_generations == nullptr ||
-        (pc & 3u) != 0u ||
-        pc >= 0xC0000000u) {
-        return nullptr;
-    }
-
-    const u32 physical = EeBus::to_physical(pc);
-    if (physical >= kMainRamSize) return nullptr;
-
-    const u32 physical_page = physical >> 12;
-    auto& page_ptr = quiet_decoded_pages_[physical_page];
-    if (!page_ptr) {
-        page_ptr = std::make_unique<QuietDecodedPage>();
-    }
-    QuietDecodedPage& page = *page_ptr;
-    const u32 generation = page_generations[physical_page];
-
-    if (page.generation != generation) {
-        const u32 page_base = physical_page * kPageSize;
-        for (u32 i = 0; i < kInstructionsPerPage; ++i) {
-            u32 instruction = 0u;
-            std::memcpy(
-                &instruction,
-                instruction_ram + page_base + i * sizeof(u32),
-                sizeof(instruction));
-            QuietDecodedInstruction& decoded = page.instructions[i];
-            const u32 rs = (instruction >> 21) & 31u;
-            const u32 rt = (instruction >> 16) & 31u;
-            const u32 rd = (instruction >> 11) & 31u;
-            const u32 sa = (instruction >> 6) & 31u;
-            const u32 funct = instruction & 63u;
-            decoded.instruction = instruction;
-            decoded.metadata =
-                static_cast<u32>(classify_quiet_decoded(instruction)) |
-                (rs << 4) |
-                (rt << 9) |
-                (rd << 14) |
-                (sa << 19) |
-                (funct << 24);
-        }
-        page.generation = generation;
-        ++quiet_decoded_cache_rebuilds_;
-    } else {
-        ++quiet_decoded_cache_hits_;
-    }
-
-    return &page.instructions[(physical & (kPageSize - 1u)) >> 2];
-}
-
 u32 EeCpu::run_quiet_fast_prefix(
     u32 block_pc,
     const u32* instructions,
@@ -3641,17 +3533,8 @@ u32 EeCpu::run_quiet_fast_prefix(
             : block_pc + retired * 4u;
         if (!direct_trace && state_.pc != expected_pc) break;
 
-        const QuietDecodedInstruction* decoded =
-            direct_trace
-                ? quiet_decoded_instruction(
-                    expected_pc,
-                    instruction_ram,
-                    page_generations)
-                : nullptr;
         u32 instruction = 0u;
-        if (decoded != nullptr) {
-            instruction = decoded->instruction;
-        } else if (direct_trace) {
+        if (direct_trace) {
             const u32 physical = EeBus::to_physical(expected_pc);
             constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             if ((expected_pc & 3u) != 0u ||
@@ -3682,20 +3565,11 @@ u32 EeCpu::run_quiet_fast_prefix(
                         kMainRamSize - sizeof(u32)) {
                         break;
                     }
-                    const QuietDecodedInstruction* next_decoded =
-                        quiet_decoded_instruction(
-                            next_pc,
-                            instruction_ram,
-                            page_generations);
                     u32 next_instruction = 0u;
-                    if (next_decoded != nullptr) {
-                        next_instruction = next_decoded->instruction;
-                    } else {
-                        std::memcpy(
-                            &next_instruction,
-                            instruction_ram + next_physical,
-                            sizeof(next_instruction));
-                    }
+                    std::memcpy(
+                        &next_instruction,
+                        instruction_ram + next_physical,
+                        sizeof(next_instruction));
                     if (next_instruction != 0u) break;
                     ++run;
                 }
@@ -3723,29 +3597,13 @@ u32 EeCpu::run_quiet_fast_prefix(
             continue;
         }
 
-        const u32 metadata =
-            decoded != nullptr ? decoded->metadata : 0u;
         const u32 opcode = instruction >> 26;
-        const u32 rs =
-            decoded != nullptr ? (metadata >> 4) & 31u
-                               : (instruction >> 21) & 31u;
-        const u32 rt =
-            decoded != nullptr ? (metadata >> 9) & 31u
-                               : (instruction >> 16) & 31u;
-        const u32 rd =
-            decoded != nullptr ? (metadata >> 14) & 31u
-                               : (instruction >> 11) & 31u;
-        const u32 sa =
-            decoded != nullptr ? (metadata >> 19) & 31u
-                               : (instruction >> 6) & 31u;
-        const u32 funct =
-            decoded != nullptr ? (metadata >> 24) & 63u
-                               : instruction & 63u;
+        const u32 rs = (instruction >> 21) & 31u;
+        const u32 rt = (instruction >> 16) & 31u;
+        const u32 rd = (instruction >> 11) & 31u;
+        const u32 sa = (instruction >> 6) & 31u;
+        const u32 funct = instruction & 63u;
         const s16 imm = immediate(instruction);
-        const u8 decoded_kind =
-            decoded != nullptr
-                ? static_cast<u8>(metadata & 0xFu)
-                : classify_quiet_decoded(instruction);
 
         bool handled = true;
         bool stop_after_instruction = false;
@@ -3755,20 +3613,20 @@ u32 EeCpu::run_quiet_fast_prefix(
 
         // Only commit architectural PC/delay state after proving this opcode
         // belongs to the no-MMIO/no-exception linear fast subset.
-        if (decoded_kind == kQuietNop) {
+        if (instruction == 0u) {
             // NOP
-        } else if (decoded_kind == kQuietJump && opcode == 0x02u) { // J
+        } else if (opcode == 0x02u) { // J
             state_.next_pc =
                 ((expected_pc + 4u) & 0xF0000000u) |
                 ((instruction & 0x03FFFFFFu) << 2);
             next_is_delay_slot_ = true;
-        } else if (decoded_kind == kQuietJump) { // JAL
+        } else if (opcode == 0x03u) { // JAL
             write_gpr_word(31u, expected_pc + 8u);
             state_.next_pc =
                 ((expected_pc + 4u) & 0xF0000000u) |
                 ((instruction & 0x03FFFFFFu) << 2);
             next_is_delay_slot_ = true;
-        } else if (decoded_kind == kQuietBranch) {
+        } else if (opcode >= 0x04u && opcode <= 0x07u) {
             bool take = false;
             switch (opcode) {
             case 0x04u: take = gpr_u64(rs) == gpr_u64(rt); break;
@@ -3783,7 +3641,7 @@ u32 EeCpu::run_quiet_fast_prefix(
             state_.next_pc = expected_pc + 8u;
             if (take) state_.next_pc = branch_target(expected_pc, imm);
             next_is_delay_slot_ = true;
-        } else if (decoded_kind == kQuietBranchLikely) {
+        } else if (opcode >= 0x14u && opcode <= 0x17u) {
             bool take = false;
             switch (opcode) {
             case 0x14u: take = gpr_u64(rs) == gpr_u64(rt); break;
@@ -3838,7 +3696,14 @@ u32 EeCpu::run_quiet_fast_prefix(
                 rt,
                 gpr_u64(rs) +
                     static_cast<u64>(static_cast<s64>(imm)));
-        } else if (decoded_kind == kQuietLoad) {
+        } else if (
+            opcode == 0x1Eu ||
+            opcode == 0x20u || opcode == 0x21u ||
+            opcode == 0x23u || opcode == 0x24u ||
+            opcode == 0x25u || opcode == 0x27u ||
+            opcode == 0x30u || opcode == 0x31u ||
+            opcode == 0x34u || opcode == 0x36u ||
+            opcode == 0x37u) {
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -3954,7 +3819,12 @@ u32 EeCpu::run_quiet_fast_prefix(
                 }
                 if (!access_ok) handled = false;
             }
-        } else if (decoded_kind == kQuietStore) {
+        } else if (
+            opcode == 0x1Fu ||
+            opcode == 0x28u || opcode == 0x29u ||
+            opcode == 0x2Bu || opcode == 0x38u ||
+            opcode == 0x39u || opcode == 0x3Cu ||
+            opcode == 0x3Eu || opcode == 0x3Fu) {
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -4053,7 +3923,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                     }
                 }
             }
-        } else if (decoded_kind == kQuietCop1) { // COP1
+        } else if (opcode == 0x11u) { // COP1
             const u32 cop_rs = rs;
             const u32 fs = (instruction >> 11) & 31u;
             const u32 fd = (instruction >> 6) & 31u;
@@ -4202,9 +4072,9 @@ u32 EeCpu::run_quiet_fast_prefix(
                 cop1_handled = false;
             }
             if (!cop1_handled) handled = false;
-        } else if (decoded_kind == kQuietNoopHint) {
+        } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
-        } else if (decoded_kind == kQuietRegimm) {
+        } else if (opcode == 0x01u) {
             if (rt <= 0x03u || (rt >= 0x10u && rt <= 0x13u)) {
                 const bool less_zero = gpr_s64(rs) < 0;
                 const bool take =
@@ -4241,7 +4111,7 @@ u32 EeCpu::run_quiet_fast_prefix(
             } else {
                 handled = false;
             }
-        } else if (decoded_kind == kQuietSpecial) {
+        } else if (opcode == 0x00u) {
             switch (funct) {
             case 0x00u:
                 write_gpr_word(

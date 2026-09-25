@@ -4,9 +4,7 @@
 #include "core/ee/ee_jit.h"
 
 #include <array>
-#include <memory>
 #include <string>
-#include <vector>
 
 namespace ps2 {
 
@@ -126,12 +124,6 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
-    [[nodiscard]] u64 quiet_decoded_cache_hits() const {
-        return quiet_decoded_cache_hits_;
-    }
-    [[nodiscard]] u64 quiet_decoded_cache_rebuilds() const {
-        return quiet_decoded_cache_rebuilds_;
-    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -145,23 +137,6 @@ private:
         bool quiet,
         const u32* prefetched_instruction = nullptr,
         bool skip_interrupt_check = false);
-
-    struct QuietDecodedInstruction {
-        // Raw word keeps the immediate/jump payload. Metadata packs the hot
-        // decoded fields: kind[3:0], rs[8:4], rt[13:9], rd[18:14],
-        // sa[23:19], funct[29:24]. Exactly 8 bytes per guest instruction.
-        u32 instruction = 0;
-        u32 metadata = 0;
-    };
-    struct QuietDecodedPage {
-        u32 generation = ~u32{0};
-        std::array<QuietDecodedInstruction, 1024> instructions{};
-    };
-    const QuietDecodedInstruction* quiet_decoded_instruction(
-        u32 pc,
-        const u8* instruction_ram,
-        const u32* page_generations);
-
     bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
@@ -200,11 +175,6 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
-    std::vector<std::unique_ptr<QuietDecodedPage>>
-        quiet_decoded_pages_ =
-            std::vector<std::unique_ptr<QuietDecodedPage>>(8192);
-    u64 quiet_decoded_cache_hits_ = 0;
-    u64 quiet_decoded_cache_rebuilds_ = 0;
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;
