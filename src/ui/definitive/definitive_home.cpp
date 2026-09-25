@@ -212,6 +212,8 @@ float g_launcher_intro_elapsed = 0.0f;
 bool g_launcher_intro_complete = false;
 float g_launcher_ui_intro_elapsed = 0.0f;
 bool g_launcher_ui_intro_complete = false;
+float g_launcher_background_fade_elapsed = 0.0f;
+bool g_launcher_background_fade_complete = false;
 
 // Vista-inspired startup pacing: a blurred icon resolves while slowly
 // enlarging, then the VibeStation wordmark snaps in blurred and resolves fast.
@@ -228,6 +230,7 @@ constexpr float kLauncherIntroDuration = 3.82f;
 // on the frame after the boot sequence ends so the launcher never initializes
 // invisibly behind the startup logo.
 constexpr float kLauncherUiIntroDuration = 1.56f;
+constexpr float kLauncherBackgroundFadeDuration = 0.72f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -988,15 +991,28 @@ void draw_cover_region(ImDrawList* draw, GLuint texture,
         region_min, region_max, region_uv0, region_uv1, tint);
 }
 
-void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
-    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-        rgba(7, 9, 12, 255));
+void draw_background(
+    ImDrawList* draw, const ImVec2& pos, const ImVec2& size,
+    float opacity = 1.0f) {
+    const float alpha = std::clamp(opacity, 0.0f, 1.0f);
+
+    // Pure black is the transition canvas. The photo is composited over it
+    // only after the launcher controls have finished their own reveal.
+    draw->AddRectFilled(
+        pos, ImVec2(pos.x + size.x, pos.y + size.y),
+        rgba(0, 0, 0, 255));
+
+    if (alpha <= 0.001f) {
+        return;
+    }
 
     if (!ensure_background_texture_loaded()) {
         draw->AddRectFilledMultiColor(
             pos, ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(8, 10, 14, 255), rgba(17, 19, 23, 255),
-            rgba(10, 12, 15, 255), rgba(5, 7, 10, 255));
+            rgba(8, 10, 14, glow_alpha(255.0f * alpha)),
+            rgba(17, 19, 23, glow_alpha(255.0f * alpha)),
+            rgba(10, 12, 15, glow_alpha(255.0f * alpha)),
+            rgba(5, 7, 10, glow_alpha(255.0f * alpha)));
         return;
     }
 
@@ -1008,7 +1024,8 @@ void draw_background(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
     draw->AddImage(
         (ImTextureID)(intptr_t)display_texture,
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
-        ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1));
+        ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1),
+        rgba(255, 255, 255, glow_alpha(255.0f * alpha)));
 }
 
 void draw_readability_shade(ImDrawList* draw,
@@ -1257,21 +1274,10 @@ void draw_launcher_initialization_overlay(
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
     const Layout layout = make_layout(pos, size);
 
-    // First reveal the launcher background from black.
-    const float background_reveal =
-        timeline_progress(elapsed, 0.00f, 0.46f);
-    const int global_black =
-        glow_alpha(255.0f * (1.0f - background_reveal));
-    if (global_black > 0) {
-        overlay->AddRectFilled(
-            pos,
-            ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(0, 0, 0, global_black));
-    }
-
-    // Brand block resolves next with a short vertical wipe.
+    // UI pieces assemble over a fully black background. The photograph fades
+    // in only after every launcher element has completed this animation.
     const float brand_reveal =
-        timeline_progress(elapsed, 0.16f, 0.67f);
+        timeline_progress(elapsed, 0.08f, 0.59f);
     const ImVec2 brand0 = layout.point(24.0f, 18.0f);
     const ImVec2 brand1 = layout.point(460.0f, 156.0f);
     if (brand_reveal < 1.0f) {
@@ -2025,6 +2031,8 @@ void App::release_definitive_ui_assets() {
     g_launcher_intro_complete = false;
     g_launcher_ui_intro_elapsed = 0.0f;
     g_launcher_ui_intro_complete = false;
+    g_launcher_background_fade_elapsed = 0.0f;
+    g_launcher_background_fade_complete = false;
     g_menu_highlight_mix.fill(0.0f);
 }
 
@@ -2853,6 +2861,8 @@ void App::panel_definitive_home() {
             g_launcher_intro_complete = true;
             g_launcher_ui_intro_elapsed = 0.0f;
             g_launcher_ui_intro_complete = false;
+            g_launcher_background_fade_elapsed = 0.0f;
+            g_launcher_background_fade_complete = false;
             ensure_background_texture_loaded();
             draw_boot_presentation(
                 window_pos, window_size, g_launcher_intro_elapsed);
@@ -2882,10 +2892,38 @@ void App::panel_definitive_home() {
         }
     }
 
+    if (g_launcher_ui_intro_complete &&
+        !g_launcher_background_fade_complete) {
+        const float dt =
+            std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+        g_launcher_background_fade_elapsed += dt;
+        if (g_launcher_background_fade_elapsed >=
+            kLauncherBackgroundFadeDuration) {
+            g_launcher_background_fade_elapsed =
+                kLauncherBackgroundFadeDuration;
+            g_launcher_background_fade_complete = true;
+        }
+    }
+
     const bool launcher_ui_initializing =
         g_launcher_intro_complete && !g_launcher_ui_intro_complete;
+    const bool launcher_background_fading =
+        g_launcher_ui_intro_complete &&
+        !g_launcher_background_fade_complete;
     const bool launcher_ready =
-        g_launcher_intro_complete && g_launcher_ui_intro_complete;
+        g_launcher_intro_complete &&
+        g_launcher_ui_intro_complete &&
+        g_launcher_background_fade_complete;
+
+    const float launcher_background_alpha =
+        !g_launcher_ui_intro_complete
+            ? 0.0f
+            : (g_launcher_background_fade_complete
+                ? 1.0f
+                : smoothstep01(std::clamp(
+                    g_launcher_background_fade_elapsed /
+                        kLauncherBackgroundFadeDuration,
+                    0.0f, 1.0f)));
 
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
@@ -2910,7 +2948,8 @@ void App::panel_definitive_home() {
 
     Layout layout = make_layout(window_pos, window_size);
 
-    draw_background(draw, window_pos, window_size);
+    draw_background(
+        draw, window_pos, window_size, launcher_background_alpha);
     draw_readability_shade(draw, window_pos, window_size);
 
     const ImVec2 bottom0(window_pos.x, window_pos.y + window_size.y * 0.64f);
@@ -3245,6 +3284,8 @@ void App::panel_definitive_home() {
         draw_launcher_initialization_overlay(
             window_pos, window_size, g_launcher_ui_intro_elapsed);
     }
+
+    (void)launcher_background_fading;
 
     if (launcher_fade_alpha > 0.0f || launcher_started_this_frame) {
         const int fade_alpha = glow_alpha(255.0f * launcher_fade_alpha);
