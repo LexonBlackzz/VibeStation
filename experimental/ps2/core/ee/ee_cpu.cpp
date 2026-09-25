@@ -186,7 +186,7 @@ void EeCpu::reset(u32 entry_point) {
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
     for (auto& page : quiet_decoded_pages_) {
-        page.valid = false;
+        if (page) page->generation = ~u32{0};
     }
     quiet_decoded_cache_hits_ = 0;
     quiet_decoded_cache_rebuilds_ = 0;
@@ -3461,15 +3461,14 @@ EeCpu::quiet_decoded_instruction(
     if (physical >= kMainRamSize) return nullptr;
 
     const u32 physical_page = physical >> 12;
+    auto& page_ptr = quiet_decoded_pages_[physical_page];
+    if (!page_ptr) {
+        page_ptr = std::make_unique<QuietDecodedPage>();
+    }
+    QuietDecodedPage& page = *page_ptr;
     const u32 generation = page_generations[physical_page];
-    const std::size_t cache_index =
-        ((physical_page * 2654435761u) >> 26) &
-        (quiet_decoded_pages_.size() - 1u);
-    QuietDecodedPage& page = quiet_decoded_pages_[cache_index];
 
-    if (!page.valid ||
-        page.physical_page != physical_page ||
-        page.generation != generation) {
+    if (page.generation != generation) {
         const u32 page_base = physical_page * kPageSize;
         for (u32 i = 0; i < kInstructionsPerPage; ++i) {
             u32 instruction = 0u;
@@ -3478,19 +3477,21 @@ EeCpu::quiet_decoded_instruction(
                 instruction_ram + page_base + i * sizeof(u32),
                 sizeof(instruction));
             QuietDecodedInstruction& decoded = page.instructions[i];
+            const u32 rs = (instruction >> 21) & 31u;
+            const u32 rt = (instruction >> 16) & 31u;
+            const u32 rd = (instruction >> 11) & 31u;
+            const u32 sa = (instruction >> 6) & 31u;
+            const u32 funct = instruction & 63u;
             decoded.instruction = instruction;
-            decoded.imm = static_cast<s16>(instruction & 0xFFFFu);
-            decoded.kind = classify_quiet_decoded(instruction);
-            decoded.opcode = static_cast<u8>(instruction >> 26);
-            decoded.rs = static_cast<u8>((instruction >> 21) & 31u);
-            decoded.rt = static_cast<u8>((instruction >> 16) & 31u);
-            decoded.rd = static_cast<u8>((instruction >> 11) & 31u);
-            decoded.sa = static_cast<u8>((instruction >> 6) & 31u);
-            decoded.funct = static_cast<u8>(instruction & 63u);
+            decoded.metadata =
+                static_cast<u32>(classify_quiet_decoded(instruction)) |
+                (rs << 4) |
+                (rt << 9) |
+                (rd << 14) |
+                (sa << 19) |
+                (funct << 24);
         }
-        page.physical_page = physical_page;
         page.generation = generation;
-        page.valid = true;
         ++quiet_decoded_cache_rebuilds_;
     } else {
         ++quiet_decoded_cache_hits_;
@@ -3722,23 +3723,28 @@ u32 EeCpu::run_quiet_fast_prefix(
             continue;
         }
 
-        const u32 opcode =
-            decoded != nullptr ? decoded->opcode : instruction >> 26;
+        const u32 metadata =
+            decoded != nullptr ? decoded->metadata : 0u;
+        const u32 opcode = instruction >> 26;
         const u32 rs =
-            decoded != nullptr ? decoded->rs : (instruction >> 21) & 31u;
+            decoded != nullptr ? (metadata >> 4) & 31u
+                               : (instruction >> 21) & 31u;
         const u32 rt =
-            decoded != nullptr ? decoded->rt : (instruction >> 16) & 31u;
+            decoded != nullptr ? (metadata >> 9) & 31u
+                               : (instruction >> 16) & 31u;
         const u32 rd =
-            decoded != nullptr ? decoded->rd : (instruction >> 11) & 31u;
+            decoded != nullptr ? (metadata >> 14) & 31u
+                               : (instruction >> 11) & 31u;
         const u32 sa =
-            decoded != nullptr ? decoded->sa : (instruction >> 6) & 31u;
+            decoded != nullptr ? (metadata >> 19) & 31u
+                               : (instruction >> 6) & 31u;
         const u32 funct =
-            decoded != nullptr ? decoded->funct : instruction & 63u;
-        const s16 imm =
-            decoded != nullptr ? decoded->imm : immediate(instruction);
+            decoded != nullptr ? (metadata >> 24) & 63u
+                               : instruction & 63u;
+        const s16 imm = immediate(instruction);
         const u8 decoded_kind =
             decoded != nullptr
-                ? decoded->kind
+                ? static_cast<u8>(metadata & 0xFu)
                 : classify_quiet_decoded(instruction);
 
         bool handled = true;
