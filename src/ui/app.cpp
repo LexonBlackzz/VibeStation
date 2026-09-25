@@ -1055,16 +1055,19 @@ void App::render_ui() {
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
-    if (definitive_grim_reaper_active_) {
-        panel_definitive_grim_reaper();
-    }
-    else if (has_started_emulation_) {
+    if (has_started_emulation_) {
         panel_emulator_screen();
     }
     else {
         panel_definitive_home();
     }
     ImGui::End();
+
+    // Grim Reaper is a fixed right-side overlay so gameplay/launcher remains
+    // visible and running underneath it.
+    if (definitive_grim_reaper_active_) {
+        panel_definitive_grim_reaper();
+    }
 
     // Optional panels
     if (show_logging_) {
