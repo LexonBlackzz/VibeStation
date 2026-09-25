@@ -826,7 +826,7 @@ void App::draw_gameplay_toolbar(
         }
         if (ImGui::MenuItem("Settings")) {
             play_ui_open_sound();
-            show_settings_ = true;
+            open_definitive_settings();
         }
         if (ImGui::MenuItem(
                 "Show VRAM",
