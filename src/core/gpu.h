@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include "../platform/gpu_hardware_rasterizer.h"
 #include <array>
 #include <deque>
 #include <vector>
@@ -9,7 +10,6 @@
 // VRAM is 1024x512 pixels at 16bpp (1MB).
 
 class System;
-class GpuHardwareRasterizer;
 
 // Color type
 struct Color {
@@ -214,6 +214,9 @@ private:
   bool ensure_hardware_vram_current();
   void ensure_cpu_vram_current() const;
   void prepare_software_vram_write();
+  GpuHardwareRasterizer::DrawState hardware_draw_state(
+      bool raw_texture = false) const;
+  static GpuHardwareRasterizer::Vertex hardware_vertex(const Vertex& v);
 
   // 1MB VRAM: 1024 x 512 x 16bpp
   std::array<u16, psx::VRAM_WIDTH * psx::VRAM_HEIGHT> vram_{};
