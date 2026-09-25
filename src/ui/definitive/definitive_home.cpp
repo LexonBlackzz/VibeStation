@@ -809,15 +809,18 @@ void App::panel_definitive_home() {
                 0.0f,
                 1.0f));
 
+    // Preserve only a very faint trace of the intro backdrop while the
+    // launcher UI begins assembling. The actual room photograph stays hidden
+    // until the UI reveal is complete, then follows its dedicated fade stage.
     const float launcher_handoff_alpha =
         launcher_ui_initializing
-            ? (0.58f -
-                0.08f * launcher_ui_progress)
-            : (launcher_background_fading
-                ? 0.50f *
-                    (1.0f -
-                        launcher_background_alpha)
-                : 0.0f);
+            ? 0.10f *
+                (1.0f -
+                    smoothstep01(std::clamp(
+                        launcher_ui_progress / 0.28f,
+                        0.0f,
+                        1.0f)))
+            : 0.0f;
 
     if (!g_launcher_quote_selected) {
         const Uint64 entropy =
