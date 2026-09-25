@@ -244,6 +244,9 @@ private:
 	void panel_definitive_home();
 	void panel_definitive_settings();
 	void initialize_definitive_ui_fonts();
+	void play_ui_cursor_sound();
+	void play_ui_open_sound();
+	void play_ui_close_sound();
 	void release_definitive_ui_assets();
 	void panel_settings();
 	void panel_about();
