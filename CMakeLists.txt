@@ -55,6 +55,14 @@ FetchContent_Declare(nlohmann_json
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# stb_image (launcher background texture decoding)
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 # ── ImGui static library ────────────────────────────────────────────
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -112,12 +120,22 @@ set(VIBESTATION_SOURCES
     src/input/input_manager.cpp
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
+    src/ui/embedded_resources.cpp
+    src/ui/frame_presentation_worker.cpp
     src/ui/app.cpp
     src/ui/app_discord_presence.cpp
     src/ui/input_bindings.cpp
     src/ui/output_resolution_utils.cpp
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
+    src/ui/definitive/definitive_audio.cpp
+    src/ui/definitive/definitive_background.cpp
+    src/ui/definitive/definitive_fonts.cpp
+    src/ui/definitive/definitive_gameplay_ambient.cpp
+    src/ui/definitive/definitive_grim_reaper.cpp
+    src/ui/definitive/definitive_intro.cpp
+    src/ui/definitive/definitive_settings.cpp
+    src/ui/definitive/definitive_home.cpp
     src/ui/panels/grim_reaper_actions.cpp
     src/ui/panels/grim_reaper_runtime.cpp
     src/ui/panels/cpu_backend_panel.cpp
@@ -151,9 +169,10 @@ add_custom_command(
         -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
         -DVIBESTATION_VERSION_SOURCE=${VIBESTATION_VERSION_SOURCE}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
+    # Do not depend on build_number.txt here: the generator increments it,
+    # which would otherwise make this command perpetually dirty.
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
-        "${VIBESTATION_BUILD_NUMBER_FILE}"
     VERBATIM
     COMMENT "Updating VibeStation build metadata")
 
@@ -164,9 +183,64 @@ set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
 
+if(WIN32)
+    # Embed the application icon plus launcher background, startup icon and UI
+    # sounds directly into VibeStation.exe as Windows resources.
+    target_sources(VibeStation PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
+endif()
+
 target_include_directories(VibeStation PRIVATE
-    src)
+    src
+    "${stb_SOURCE_DIR}")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
+
+# Windows builds consume these assets from resources/vibestation.rc, so the
+# executable is self-contained. Keep filesystem copies only for non-Windows
+# builds where PE resources are unavailable.
+if(NOT WIN32)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg")
+    add_custom_command(TARGET VibeStation POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/background.jpg"
+        COMMENT "Copying definitive launcher background"
+        VERBATIM)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon512x512.png")
+    add_custom_command(TARGET VibeStation POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:VibeStation>/resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon512x512.png"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/icon512x512.png"
+        COMMENT "Copying VibeStation startup icon"
+        VERBATIM)
+endif()
+
+set(VIBESTATION_UI_SOUND_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/sounds")
+add_custom_command(TARGET VibeStation POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/cursor.wav"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/cursor.wav"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/open.wav"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/open.wav"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/close.wav"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/close.wav"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VIBESTATION_UI_SOUND_DIR}/logo.wav"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/ui/definitive/sounds/logo.wav"
+    COMMENT "Copying definitive UI sound effects"
+    VERBATIM)
+endif()
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
@@ -255,8 +329,6 @@ if(VIBESTATION_ENABLE_DISCORD_RPC)
                 ${CMAKE_CURRENT_BINARY_DIR}/discord_partner_sdk_embed.rc)
             target_compile_definitions(VibeStation PRIVATE
                 VIBESTATION_HAS_EMBEDDED_DISCORD_DLL=1)
-            target_sources(VibeStation PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
             if(MSVC)
                 target_link_libraries(VibeStation PRIVATE delayimp)
                 target_link_options(VibeStation PRIVATE /DELAYLOAD:discord_partner_sdk.dll)
@@ -313,7 +385,8 @@ endif()
 
 # High warning level + suppress CRT deprecation warnings
 if(MSVC)
-    target_compile_options(VibeStation PRIVATE /W3 /permissive-)
+    target_compile_options(VibeStation PRIVATE /W3 /permissive- /MP)
+    target_compile_options(imgui_lib PRIVATE /MP)
     target_compile_definitions(VibeStation PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -324,7 +397,10 @@ if(MINGW)
 endif()
 
 option(VIBESTATION_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)
-if(VIBESTATION_ENABLE_IPO)
+option(VIBESTATION_FAST_ITERATION
+    "Favor fast compile/link cycles while developing the definitive UI" OFF)
+
+if(VIBESTATION_ENABLE_IPO AND NOT VIBESTATION_FAST_ITERATION)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT VIBESTATION_IPO_SUPPORTED OUTPUT VIBESTATION_IPO_ERROR)
     if(VIBESTATION_IPO_SUPPORTED)
@@ -333,6 +409,9 @@ if(VIBESTATION_ENABLE_IPO)
     else()
         message(STATUS "IPO/LTO not supported: ${VIBESTATION_IPO_ERROR}")
     endif()
+elseif(VIBESTATION_ENABLE_IPO AND VIBESTATION_FAST_ITERATION)
+    message(STATUS
+        "Fast iteration enabled: skipping IPO/LTO to reduce Release link times")
 endif()
 
 

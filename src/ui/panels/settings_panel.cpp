@@ -1,13 +1,21 @@
 #include "ui/app.h"
 #include "ui/input_bindings.h"
 #include "ui/output_resolution_utils.h"
-#include "ui/screenshot_utils.h"
 #include "ui/theme_settings.h"
 #include <imgui.h>
 #include <algorithm>
 void App::panel_settings() {
+    const bool definitive_settings_was_open = show_settings_;
     ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Settings", &show_settings_)) {
+        if (!has_started_emulation_) {
+            bool detailed = definitive_detailed_settings_;
+            if (ImGui::Checkbox("Detailed Settings", &detailed)) {
+                definitive_detailed_settings_ = detailed;
+            }
+            ImGui::Separator();
+        }
+
         if (ImGui::BeginTabBar("SettingsTabs")) {
             if (ImGui::BeginTabItem("Input")) {
                 ImGui::TextWrapped("Default: Arrows=D-Pad, Z/X/A/S=Face, "
@@ -180,24 +188,10 @@ void App::panel_settings() {
                     resolution_index = std::max(0, std::min(2, resolution_index));
                     g_output_resolution_mode =
                         static_cast<OutputResolutionMode>(resolution_index);
-                    if (!latest_frame_rgba_.empty() && latest_frame_width_ > 0 &&
-                        latest_frame_height_ > 0) {
-                        int output_width = 320;
-                        int output_height = 240;
-                        output_resolution_dimensions(g_output_resolution_mode,
-                            output_width, output_height);
-                        if (latest_frame_width_ != output_width ||
-                            latest_frame_height_ != output_height) {
-                            resample_rgba_nearest(latest_frame_rgba_, latest_frame_width_,
-                                latest_frame_height_, scaled_frame_rgba_,
-                                output_width, output_height);
-                            renderer_->upload_frame(scaled_frame_rgba_, output_width,
-                                output_height);
-                            latest_frame_rgba_ = scaled_frame_rgba_;
-                            latest_frame_width_ = output_width;
-                            latest_frame_height_ = output_height;
-                        }
-                    }
+                    // Presentation scaling now happens on the dedicated
+                    // FramePresentationWorker. Do not resample/upload the current
+                    // frame synchronously from the settings/UI thread; the next
+                    // emulated frame will be prepared at the newly selected size.
                 }
                 if (ImGui::Checkbox("Bilinear Presentation Filter",
                         &g_bilinear_filtering)) {
@@ -381,5 +375,12 @@ void App::panel_settings() {
         }
     }
     ImGui::End();
+
+    if (definitive_settings_was_open && !show_settings_) {
+        play_ui_close_sound();
+    }
+    if (!show_settings_) {
+        definitive_detailed_settings_ = false;
+    }
 }
 

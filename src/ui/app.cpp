@@ -238,6 +238,10 @@ bool App::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = "imgui.ini";
 
+    // Bake the Definitive UI font atlas at the sizes we actually render.
+    // This avoids scaling ImGui's tiny default font up to large text sizes.
+    initialize_definitive_ui_fonts();
+
     // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
     ui_theme::ensure_theme_settings_initialized();
@@ -318,6 +322,18 @@ bool App::init_runtime() {
         system_.reset();
         return false;
     }
+
+    if (!frame_presentation_worker_.start(&emu_runner_)) {
+        LOG_ERROR("FramePresentationWorker failed to start");
+        printf("[App::init_runtime] Presentation worker FAILED\n");
+        fflush(stdout);
+        emu_runner_.stop();
+        renderer_.reset();
+        input_.reset();
+        system_.reset();
+        return false;
+    }
+
     emu_runner_.set_speed(1.0);
     apply_speed_override();
     apply_memory_card_settings(false);
@@ -373,7 +389,7 @@ bool App::launch_disc_from_cli(const std::string& bios_path,
 }
 
 double App::current_speed_override() const {
-    if (turbo_hold_active_) {
+    if (turbo_hold_active_ || gameplay_toolbar_turbo_active_) {
         return turbo_speed_multiplier_from_percent(config_turbo_speed_percent_);
     }
     if (slowdown_hold_active_) {
@@ -434,6 +450,13 @@ void App::run() {
         return;
     }
 
+    // Thread roles:
+    //   UI/OpenGL presentation = normal priority (this thread)
+    //   PS1 emulation          = high priority (EmuRunner)
+    //   frame scaling/ambient  = low priority (FramePresentationWorker)
+    //   host audio playback    = SDL's dedicated audio callback thread
+    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_NORMAL);
+
     bool quit = false;
     last_fps_time_ = SDL_GetTicks();
     const u64 perf_freq = SDL_GetPerformanceFrequency();
@@ -444,44 +467,59 @@ void App::run() {
         process_events(quit);
         update();
 
+        // Emulation, frame post-processing, and UI rendering now run on
+        // separate threads. The emulation worker publishes raw frames; this
+        // main/UI thread only moves them into the presentation mailbox.
         FrameSnapshot frame;
         if (emu_runner_.consume_latest_frame(frame)) {
             game_frame_count_++;
-            const bool turbo_resolution_clamp =
-                turbo_hold_active_ &&
-                g_output_resolution_mode != OutputResolutionMode::R320x240 &&
-                (frame.width > 320 || frame.height > 240);
+
             int output_width = 320;
             int output_height = 240;
-            output_resolution_dimensions(g_output_resolution_mode, output_width, output_height);
+            output_resolution_dimensions(
+                g_output_resolution_mode,
+                output_width,
+                output_height);
+
+            const bool turbo_resolution_clamp =
+                (turbo_hold_active_ ||
+                    gameplay_toolbar_turbo_active_) &&
+                g_output_resolution_mode !=
+                    OutputResolutionMode::R320x240 &&
+                (frame.width > 320 ||
+                    frame.height > 240);
+
             if (turbo_resolution_clamp) {
-                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
-                    turbo_frame_rgba_, 320, 240);
-                renderer_->upload_frame(turbo_frame_rgba_, 320, 240);
-                latest_frame_width_ = 320;
-                latest_frame_height_ = 240;
-                // Swap ownership instead of copying the full scaled framebuffer.
-                // The old latest buffer becomes scratch storage for the next resample.
-                latest_frame_rgba_.swap(turbo_frame_rgba_);
+                output_width = 320;
+                output_height = 240;
             }
-            else if (frame.width != output_width || frame.height != output_height) {
-                resample_rgba_nearest(frame.rgba, frame.width, frame.height,
-                    scaled_frame_rgba_, output_width, output_height);
-                renderer_->upload_frame(scaled_frame_rgba_, output_width, output_height);
-                latest_frame_width_ = output_width;
-                latest_frame_height_ = output_height;
-                // Keep both allocations alive and rotate them instead of copying pixels.
-                latest_frame_rgba_.swap(scaled_frame_rgba_);
-            }
-            else {
-                renderer_->upload_frame(frame.rgba, frame.width, frame.height);
-                latest_frame_width_ = frame.width;
-                latest_frame_height_ = frame.height;
-                // Return the previous UI framebuffer through the runner recycler rather
-                // than destroying its allocation on every unscaled frame.
-                latest_frame_rgba_.swap(frame.rgba);
-            }
-            emu_runner_.recycle_consumed_frame(std::move(frame));
+
+            frame_presentation_worker_.submit(
+                std::move(frame),
+                output_width,
+                output_height);
+        }
+
+        // OpenGL texture upload remains on the window/context thread, but all
+        // CPU scaling and Ambilight analysis is already complete here.
+        PreparedUiFrame prepared_frame;
+        if (frame_presentation_worker_.consume_latest(
+                prepared_frame)) {
+            renderer_->upload_frame(
+                prepared_frame.rgba,
+                prepared_frame.width,
+                prepared_frame.height);
+
+            latest_frame_width_ =
+                prepared_frame.width;
+            latest_frame_height_ =
+                prepared_frame.height;
+
+            latest_frame_rgba_.swap(
+                prepared_frame.rgba);
+
+            frame_presentation_worker_.recycle_consumed(
+                std::move(prepared_frame));
         }
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         u32 now_ms = SDL_GetTicks();
@@ -637,14 +675,16 @@ void App::process_events(bool& quit) {
         }
         if (event.type == SDL_WINDOWEVENT &&
             event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-            if (turbo_hold_active_) {
+            if (turbo_hold_active_ || gameplay_toolbar_turbo_active_) {
                 turbo_hold_active_ = false;
+                gameplay_toolbar_turbo_active_ = false;
                 apply_speed_override();
             }
             if (slowdown_hold_active_) {
                 slowdown_hold_active_ = false;
                 apply_speed_override();
             }
+            gameplay_toolbar_rewind_active_ = false;
             if (emu_runner_.is_rewind_active()) {
                 emu_runner_.set_rewind_active(false);
             }
@@ -756,7 +796,17 @@ void App::process_events(bool& quit) {
                 }
             }
             else if (ctrl && key == SDLK_COMMA) {
-                show_settings_ = !show_settings_;
+                if (!definitive_detailed_settings_) {
+                    if (show_settings_) {
+                        close_definitive_settings();
+                    }
+                    else {
+                        open_definitive_settings();
+                    }
+                }
+                else {
+                    show_settings_ = !show_settings_;
+                }
             }
             else if (ctrl && key == SDLK_F5) {
                 if (system_->bios_loaded() && !emu_runner_.is_running() &&
@@ -979,10 +1029,72 @@ void App::update() {
 }
 
 void App::render_ui() {
-    menu_bar();
+    // The definitive launcher owns the full viewport while idle. During
+    // emulation, the gameplay screen uses its own floating toolbar instead of
+    // the legacy ImGui main menu bar so the game image stays visually clean.
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    // Gameplay -> launcher transition: fade the frozen gameplay frame to black,
+    // switch screens only at full black, then reveal the launcher.
+    float gameplay_exit_alpha = 0.0f;
+    if (gameplay_exit_transition_active_) {
+        constexpr float kGameplayExitFadeOutSeconds = 0.26f;
+        constexpr float kGameplayExitFadeInSeconds = 0.34f;
+        constexpr float kGameplayExitTotalSeconds =
+            kGameplayExitFadeOutSeconds +
+            kGameplayExitFadeInSeconds;
+
+        const float dt =
+            std::clamp(
+                ImGui::GetIO().DeltaTime,
+                0.0f,
+                0.05f);
+        gameplay_exit_transition_elapsed_ += dt;
+
+        const auto smooth =
+            [](float value) {
+                const float t =
+                    std::clamp(
+                        value,
+                        0.0f,
+                        1.0f);
+                return t * t *
+                    (3.0f - 2.0f * t);
+            };
+
+        if (gameplay_exit_transition_elapsed_ <
+            kGameplayExitFadeOutSeconds) {
+            gameplay_exit_alpha =
+                smooth(
+                    gameplay_exit_transition_elapsed_ /
+                    kGameplayExitFadeOutSeconds);
+        }
+        else {
+            if (!gameplay_exit_transition_switched_) {
+                gameplay_exit_transition_switched_ = true;
+                has_started_emulation_ = false;
+                status_message_ = "Emulation stopped";
+            }
+
+            gameplay_exit_alpha =
+                1.0f -
+                smooth(
+                    (gameplay_exit_transition_elapsed_ -
+                        kGameplayExitFadeOutSeconds) /
+                    kGameplayExitFadeInSeconds);
+        }
+
+        if (gameplay_exit_transition_elapsed_ >=
+            kGameplayExitTotalSeconds) {
+            gameplay_exit_transition_active_ = false;
+            gameplay_exit_transition_switched_ = false;
+            gameplay_exit_transition_elapsed_ = 0.0f;
+            gameplay_exit_alpha = 0.0f;
+        }
+    }
 
     // Main dockspace
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -992,24 +1104,51 @@ void App::render_ui() {
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoBackground;
+    if (has_started_emulation_) {
+        flags |= ImGuiWindowFlags_NoNavFocus;
+    }
+    if (gameplay_exit_transition_active_) {
+        flags |= ImGuiWindowFlags_NoInputs;
+    }
 
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
-    panel_emulator_screen();
+    if (has_started_emulation_) {
+        panel_emulator_screen();
+    }
+    else {
+        panel_definitive_home();
+    }
     ImGui::End();
+
+    // Grim Reaper is a fixed right-side overlay so gameplay/launcher remains
+    // visible and running underneath it.
+    if (definitive_grim_reaper_active_) {
+        panel_definitive_grim_reaper();
+    }
 
     // Optional panels
     if (show_logging_) {
+        // Logging is intentionally not part of the streamlined Definitive
+        // settings page, so direct logging requests still use the legacy
+        // detailed settings window.
+        definitive_detailed_settings_ = true;
         show_settings_ = true;
         show_logging_ = false;
     }
-    if (show_settings_)
-        panel_settings();
-    if (show_grim_reaper_)
-        panel_grim_reaper();
+    if (show_settings_) {
+        if (!definitive_detailed_settings_) {
+            panel_definitive_settings();
+        }
+        else {
+            panel_settings();
+        }
+    }
+    // The legacy Grim Reaper window remains compiled for migration/debugging,
+    // but normal navigation now uses the full-screen definitive section.
     if (show_about_)
         panel_about();
     if (show_debug_cpu_)
@@ -1026,6 +1165,32 @@ void App::render_ui() {
         panel_fmv_diagnostics();
     if (show_corruption_presets_)
         panel_corruption_presets();
+
+    if (gameplay_exit_transition_active_ &&
+        gameplay_exit_alpha > 0.001f) {
+        ImDrawList* overlay =
+            ImGui::GetForegroundDrawList();
+        const ImVec2 p0 =
+            viewport->WorkPos;
+        const ImVec2 p1(
+            viewport->WorkPos.x +
+                viewport->WorkSize.x,
+            viewport->WorkPos.y +
+                viewport->WorkSize.y);
+        overlay->AddRectFilled(
+            p0,
+            p1,
+            IM_COL32(
+                0,
+                0,
+                0,
+                static_cast<int>(
+                    std::clamp(
+                        gameplay_exit_alpha,
+                        0.0f,
+                        1.0f) *
+                    255.0f)));
+    }
 }
 
 void App::menu_bar() {
@@ -1172,7 +1337,9 @@ void App::menu_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Grim Reaper")) {
-            ImGui::MenuItem("Open Panel", nullptr, &show_grim_reaper_);
+            if (ImGui::MenuItem("Open Grim Reaper")) {
+                open_definitive_grim_reaper();
+            }
             ImGui::EndMenu();
         }
 
@@ -1458,6 +1625,10 @@ bool App::start_bios_from_ui() {
     }
     emu_runner_.configure_rewind(config_rewind_enabled_,
         config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
+    gameplay_toolbar_visibility_ = 0.0f;
+    gameplay_toolbar_reveal_hold_ = 0.0f;
+    gameplay_toolbar_turbo_active_ = false;
+    gameplay_toolbar_rewind_active_ = false;
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = "Emulation started (BIOS)";
@@ -1500,6 +1671,10 @@ bool App::boot_disc_from_ui() {
     }
     emu_runner_.configure_rewind(config_rewind_enabled_,
         config_rewind_buffer_seconds_, static_cast<int>(system_->target_fps()));
+    gameplay_toolbar_visibility_ = 0.0f;
+    gameplay_toolbar_reveal_hold_ = 0.0f;
+    gameplay_toolbar_turbo_active_ = false;
+    gameplay_toolbar_rewind_active_ = false;
     has_started_emulation_ = true;
     emu_runner_.set_running(true);
     status_message_ = config_direct_disc_boot_
@@ -1941,6 +2116,9 @@ void App::shutdown() {
             ImGui::SaveIniSettingsToDisk(io.IniFilename);
         }
     }
+    // Stop presentation first: it may still recycle raw buffers back to
+    // EmuRunner. The emulation thread remains alive until that worker exits.
+    frame_presentation_worker_.stop();
     emu_runner_.stop();
     input_recorder_.shutdown();
     discord_presence_.reset();
@@ -1954,6 +2132,8 @@ void App::shutdown() {
     }
     system_.reset();
     runtime_ready_ = false;
+
+    release_definitive_ui_assets();
 
     if (vram_debug_texture_ != 0) {
         glDeleteTextures(1, &vram_debug_texture_);

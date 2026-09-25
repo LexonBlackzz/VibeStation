@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/input_recorder.h"
 #include "emu_runner.h"
+#include "frame_presentation_worker.h"
 #include "../integrations/discord_presence.h"
 #include "../core/config.h"
 #include "../core/renderer.h"
@@ -40,6 +41,7 @@ private:
 	InputRecorder input_recorder_;
 	InputRecorder::Config input_recorder_config_{};
 	EmuRunner emu_runner_;
+	FramePresentationWorker frame_presentation_worker_;
 	bool runtime_ready_ = false;
 	bool input_movie_cli_pending_ = false;
 	char input_movie_record_path_[260] = "manual_replay";
@@ -50,6 +52,18 @@ private:
 	// UI State
 	bool show_demo_window_ = false;
 	bool show_settings_ = false;
+	bool definitive_detailed_settings_ = false;
+	int definitive_settings_tab_ = 0;
+
+	enum class DefinitiveSettingsTransition {
+		Closed,
+		Opening,
+		Open,
+		Closing
+	};
+	DefinitiveSettingsTransition definitive_settings_transition_ =
+		DefinitiveSettingsTransition::Closed;
+	float definitive_settings_transition_elapsed_ = 0.0f;
 	bool show_about_ = false;
 	bool show_debug_cpu_ = false;
 	bool show_vram_ = false;
@@ -57,10 +71,22 @@ private:
 	bool show_perf_profiler_ = false;
 	bool show_logging_ = false;
 	bool show_sound_status_ = false;
-	bool show_grim_reaper_ = false;
+	bool show_grim_reaper_ = false; // Legacy panel; definitive UI uses the page state below.
+	bool definitive_grim_reaper_active_ = false;
+	bool definitive_grim_reaper_closing_ = false;
+	bool definitive_grim_reaper_advanced_ = false;
+	float definitive_grim_reaper_visibility_ = 0.0f;
+	int definitive_grim_reaper_style_ = 0;
+	bool gameplay_exit_transition_active_ = false;
+	bool gameplay_exit_transition_switched_ = false;
+	float gameplay_exit_transition_elapsed_ = 0.0f;
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;
+	bool gameplay_toolbar_turbo_active_ = false;
+	bool gameplay_toolbar_rewind_active_ = false;
+	float gameplay_toolbar_visibility_ = 0.0f;
+	float gameplay_toolbar_reveal_hold_ = 0.0f;
 	std::string bios_path_;
 	std::string rom_directory_;
 	std::string game_bin_path_;
@@ -119,8 +145,6 @@ private:
 	bool perf_history_has_last_frame_id_ = false;
 	EmuRunner::RuntimeSnapshot runtime_snapshot_{};
 	std::vector<u32> latest_frame_rgba_{};
-	std::vector<u32> turbo_frame_rgba_{};
-	std::vector<u32> scaled_frame_rgba_{};
 	int latest_frame_width_ = 0;
 	int latest_frame_height_ = 0;
 	unsigned int vram_debug_texture_ = 0;
@@ -241,6 +265,19 @@ private:
 	// UI panels
 	void menu_bar();
 	void panel_emulator_screen();
+	void draw_gameplay_toolbar(const ImVec2& image_pos, const ImVec2& image_size);
+	void panel_definitive_home();
+	void panel_definitive_settings();
+	void open_definitive_settings();
+	void close_definitive_settings();
+	void panel_definitive_grim_reaper();
+	void open_definitive_grim_reaper();
+	void close_definitive_grim_reaper();
+	void initialize_definitive_ui_fonts();
+	void play_ui_cursor_sound();
+	void play_ui_open_sound();
+	void play_ui_close_sound();
+	void release_definitive_ui_assets();
 	void panel_settings();
 	void panel_about();
 	void panel_debug_cpu();
