@@ -1476,6 +1476,8 @@ u64 Ps2System::try_run_quiet_ee_superbatch(
         case 0x8000DAD0u:
         case 0x00082180u:
         case 0x00266118u:
+        case 0x80005F08u:
+        case 0x80005F5Cu:
         case 0x00200D70u:
             return true;
         default:
@@ -1592,7 +1594,11 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
                 continue;
             }
         }
-        const u64 quiet_batch = try_run_quiet_ee_batch(
+        // Keep consecutive exact 8:1 EE/IOP quiet slices inside one
+        // dispatcher call. try_run_quiet_ee_batch() still advances the IOP
+        // at every original boundary, so this removes host control-flow churn
+        // without deferring or reordering IOP-visible events.
+        const u64 quiet_batch = try_run_quiet_ee_superbatch(
             instruction_budget - executed, error);
         if (quiet_batch != 0u) {
             executed += quiet_batch;
