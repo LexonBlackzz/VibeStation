@@ -229,7 +229,7 @@ constexpr float kLauncherIntroDuration = 3.82f;
 // This animation is deliberately independent from the boot timer. It begins
 // on the frame after the boot sequence ends so the launcher never initializes
 // invisibly behind the startup logo.
-constexpr float kLauncherUiIntroDuration = 1.56f;
+constexpr float kLauncherUiIntroDuration = 1.68f;
 constexpr float kLauncherBackgroundFadeDuration = 0.72f;
 
 
@@ -1274,10 +1274,24 @@ void draw_launcher_initialization_overlay(
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
     const Layout layout = make_layout(pos, size);
 
+    // The first launcher frame starts fully black, then the entire UI fades
+    // into view. This is separate from the individual brand/menu/panel wipes,
+    // so nothing can pop in abruptly on the frame after the boot intro ends.
+    const float ui_fade =
+        timeline_progress(elapsed, 0.00f, 0.62f);
+    const int ui_black_alpha =
+        glow_alpha(255.0f * (1.0f - ui_fade));
+    if (ui_black_alpha > 0) {
+        overlay->AddRectFilled(
+            pos,
+            ImVec2(pos.x + size.x, pos.y + size.y),
+            rgba(0, 0, 0, ui_black_alpha));
+    }
+
     // UI pieces assemble over a fully black background. The photograph fades
     // in only after every launcher element has completed this animation.
     const float brand_reveal =
-        timeline_progress(elapsed, 0.08f, 0.59f);
+        timeline_progress(elapsed, 0.10f, 0.68f);
     const ImVec2 brand0 = layout.point(24.0f, 18.0f);
     const ImVec2 brand1 = layout.point(460.0f, 156.0f);
     if (brand_reveal < 1.0f) {
