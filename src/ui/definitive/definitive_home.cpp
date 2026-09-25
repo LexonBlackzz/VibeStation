@@ -1443,6 +1443,96 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     return changed;
 }
 
+
+bool definitive_settings_tab_button(
+    ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w, bool selected) {
+    const ImVec2 p0 = layout.point(x, y);
+    const ImVec2 sz = layout.size(w, 34.0f);
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::PushID(id);
+    const bool pressed = ImGui::InvisibleButton("##settings_tab", sz);
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    if (selected || hovered) {
+        draw->AddRectFilled(
+            p0, ImVec2(p0.x + sz.x, p0.y + sz.y),
+            selected ? rgba(28, 42, 55, 220) : rgba(28, 39, 50, 130),
+            layout.px(2.0f));
+    }
+    if (selected) {
+        draw->AddRectFilled(
+            layout.point(x, y + 32.0f),
+            layout.point(x + w, y + 34.0f),
+            rgba(175, 210, 238, 235));
+    }
+
+    add_text(draw, layout, x + 12.0f, y + 10.0f, 11.5f,
+        selected ? rgba(239, 244, 248, 255)
+                 : rgba(174, 184, 194, hovered ? 244 : 215),
+        label);
+    return pressed;
+}
+
+bool definitive_settings_slider_int(
+    ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w,
+    int& value, int min_value, int max_value,
+    const char* format) {
+    constexpr float kHeight = 50.0f;
+    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+        rgba(221, 226, 232, 244), label);
+
+    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 11.0f));
+    ImGui::PushID(id);
+    ImGui::SetNextItemWidth(layout.px(186.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(7.0f, 5.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    const bool changed =
+        ImGui::SliderInt("##value", &value, min_value, max_value, format);
+    ImGui::PopStyleColor(6);
+    ImGui::PopStyleVar(2);
+    ImGui::PopID();
+    return changed;
+}
+
+bool definitive_settings_slider_float(
+    ImDrawList* draw, const Layout& layout,
+    const char* id, const char* label,
+    float x, float y, float w,
+    float& value, float min_value, float max_value,
+    const char* format) {
+    add_text(draw, layout, x + 18.0f, y + 17.0f, 13.0f,
+        rgba(221, 226, 232, 244), label);
+
+    ImGui::SetCursorScreenPos(layout.point(x + w - 206.0f, y + 11.0f));
+    ImGui::PushID(id);
+    ImGui::SetNextItemWidth(layout.px(186.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(7.0f, 5.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    const bool changed =
+        ImGui::SliderFloat("##value", &value, min_value, max_value, format);
+    ImGui::PopStyleColor(6);
+    ImGui::PopStyleVar(2);
+    ImGui::PopID();
+    return changed;
+}
+
 }
 
 void App::release_definitive_ui_assets() {
