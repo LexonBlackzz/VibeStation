@@ -4132,6 +4132,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(
 
     if (decoded_block_mode && block != nullptr) {
       if (run_decoded_block(block)) {
+        if (cpu_.sys_->cpu_timing_boundary_requested()) {
+          return result;
+        }
         continue;
       }
 
