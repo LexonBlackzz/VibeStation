@@ -23,7 +23,7 @@ namespace {
 constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
-std::array<bool, 5> g_menu_was_engaged = {};
+std::array<bool, 6> g_menu_was_engaged = {};
 
 struct LauncherQuote {
     const char* line1;
@@ -84,7 +84,7 @@ constexpr std::array<LauncherQuote, 48> kLauncherQuotes = {{
 size_t g_launcher_quote_index = 0;
 bool g_launcher_quote_selected = false;
 
-std::array<float, 5> g_menu_highlight_mix = {};
+std::array<float, 6> g_menu_highlight_mix = {};
 
 enum class LauncherStartTransition {
     None,
@@ -304,12 +304,12 @@ void draw_launcher_initialization_overlay(
 
     // Main actions appear one-by-one from top to bottom.
     constexpr float kMenuX = 30.0f;
-    constexpr float kMenuY = 212.0f;
+    constexpr float kMenuY = 194.0f;
     constexpr float kMenuW = 410.0f;
-    constexpr float kMenuH = 67.0f;
-    constexpr float kMenuStep = 70.0f;
+    constexpr float kMenuH = 59.0f;
+    constexpr float kMenuStep = 60.0f;
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         const float start =
             0.34f + static_cast<float>(i) * 0.09f;
         const float reveal =
@@ -400,6 +400,7 @@ enum class MenuIcon {
     Play,
     Folder,
     Chip,
+    Skull,
     Settings,
     Exit
 };
@@ -441,6 +442,26 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
             draw->AddLine(ImVec2(p.x + 22.0f * s, py),
                 ImVec2(p.x + 26.0f * s, py), color, 1.5f * s);
         }
+        break;
+    case MenuIcon::Skull:
+        draw->AddCircleFilled(
+            ImVec2(p.x + 13.0f * s, p.y + 10.0f * s),
+            9.0f * s, color, 20);
+        draw->AddRectFilled(
+            ImVec2(p.x + 7.0f * s, p.y + 15.0f * s),
+            ImVec2(p.x + 19.0f * s, p.y + 23.0f * s),
+            color, 2.0f * s);
+        draw->AddCircleFilled(
+            ImVec2(p.x + 9.5f * s, p.y + 9.0f * s),
+            2.1f * s, rgba(8, 11, 15, 255), 10);
+        draw->AddCircleFilled(
+            ImVec2(p.x + 16.5f * s, p.y + 9.0f * s),
+            2.1f * s, rgba(8, 11, 15, 255), 10);
+        draw->AddTriangleFilled(
+            ImVec2(p.x + 13.0f * s, p.y + 11.0f * s),
+            ImVec2(p.x + 11.0f * s, p.y + 15.0f * s),
+            ImVec2(p.x + 15.0f * s, p.y + 15.0f * s),
+            rgba(8, 11, 15, 255));
         break;
     case MenuIcon::Settings:
         draw->AddCircle(
@@ -485,10 +506,10 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     MenuIcon icon, const char* title, const char* subtitle,
     bool interaction_enabled = true) {
     constexpr float kX = 36.0f;
-    constexpr float kY = 218.0f;
+    constexpr float kY = 198.0f;
     constexpr float kWidth = 396.0f;
-    constexpr float kHeight = 62.0f;
-    constexpr float kGap = 8.0f;
+    constexpr float kHeight = 54.0f;
+    constexpr float kGap = 6.0f;
 
     const float y = kY + index * (kHeight + kGap);
     const ImVec2 p = layout.point(kX, y);
@@ -595,11 +616,11 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
 
     const float content_shift = 2.0f * highlight_mix;
     draw_icon(draw, layout, icon,
-        kX + 24.0f + content_shift, y + 18.0f,
+        kX + 24.0f + content_shift, y + 13.0f,
         definitive_text_color(main_color));
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 10.0f, 20.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 7.0f, 18.5f,
         main_color, title);
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 12.0f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 33.0f, 11.5f,
         sub_color, subtitle);
 
     ImGui::PopID();
@@ -860,9 +881,11 @@ void App::panel_definitive_home() {
         "Load Game", "Choose a game from your library", launcher_ready);
     const bool change_bios_pressed = menu_button(layout, draw, 2, MenuIcon::Chip,
         "Change BIOS", "Manage BIOS files", launcher_ready);
-    const bool settings_pressed = menu_button(layout, draw, 3, MenuIcon::Settings,
+    const bool grim_reaper_pressed = menu_button(layout, draw, 3, MenuIcon::Skull,
+        "Grim Reaper", "Corrupt BIOS, RAM, GPU and audio", launcher_ready);
+    const bool settings_pressed = menu_button(layout, draw, 4, MenuIcon::Settings,
         "Settings", "Configure emulator options", launcher_ready);
-    const bool exit_pressed = menu_button(layout, draw, 4, MenuIcon::Exit,
+    const bool exit_pressed = menu_button(layout, draw, 5, MenuIcon::Exit,
         "Exit", "Close VibeStation", launcher_ready);
 
     const auto choose_bios = [this]() -> bool {
@@ -936,6 +959,11 @@ void App::panel_definitive_home() {
         play_ui_open_sound();
         choose_bios();
         play_ui_close_sound();
+    }
+    if (grim_reaper_pressed && launcher_ready &&
+        !launcher_transitioning) {
+        play_ui_open_sound();
+        open_definitive_grim_reaper();
     }
     if (settings_pressed && launcher_ready &&
         !launcher_transitioning) {
