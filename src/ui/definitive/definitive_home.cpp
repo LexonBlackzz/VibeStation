@@ -4,6 +4,7 @@
 
 #include "ui/app.h"
 #include "ui/output_resolution_utils.h"
+#include "ui/screenshot_utils.h"
 #include "vibestation_version.h"
 
 #include <SDL.h>
