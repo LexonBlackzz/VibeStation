@@ -250,6 +250,10 @@ void Ps2System::reset(u32 entry_point) {
     sif_poll_fast_samples_ = 0;
     sif_poll_stable_returns_ = 0;
     skipped_iop_idle_pairs_ = 0;
+    iop_event_batch_steps_ = 0;
+    iop_event_batch_flushes_ = 0;
+    iop_event_batch_barriers_ = 0;
+    iop_event_batch_max_ = 0;
     skipped_bios_literal_iterations_ = 0;
     quiet_ee_batch_instructions_ = 0;
     quiet_ee_active_iop_instructions_ = 0;
@@ -493,13 +497,45 @@ bool Ps2System::step_ee_core(std::string& error) {
     if (gs_.irq_pending()) hw_.raise_intc(0);
     return advance_iop_for_ee_step(error);
 }
-void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
+void Ps2System::advance_iop_for_ee_cycles(
+    u64 cycles,
+    std::string& error) {
     const u64 total_phase = ee_iop_phase_ + cycles;
     ee_iop_phase_ = static_cast<u32>(total_phase & 7u);
     const u64 steps = total_phase / 8u;
+
+    u64 deferred_device_ticks = 0u;
+    auto flush_deferred_device_ticks = [&]() -> bool {
+        if (deferred_device_ticks == 0u) return true;
+        if (!iop_bus_.tick_event_free(deferred_device_ticks)) {
+            error =
+                "IOP event-free tick window changed while batching";
+            return false;
+        }
+        iop_event_batch_steps_ += deferred_device_ticks;
+        ++iop_event_batch_flushes_;
+        iop_event_batch_max_ =
+            std::max(iop_event_batch_max_, deferred_device_ticks);
+        deferred_device_ticks = 0u;
+        return true;
+    };
+
     for (u64 i = 0; i < steps;) {
-        if (iop_.halted()) break;
-        if (i + 1u < steps && !sif_dma_.iop_completion_pending()) {
+        if (iop_.halted()) {
+            (void)flush_deferred_device_ticks();
+            break;
+        }
+
+        // The dedicated OSDSYS idle skipper advances IOP device time itself.
+        // Flush any preceding active-CPU burst before entering that path.
+        if (deferred_device_ticks != 0u &&
+            iop_.in_osdsys_idle_loop()) {
+            if (!flush_deferred_device_ticks()) break;
+        }
+
+        if (deferred_device_ticks == 0u &&
+            i + 1u < steps &&
+            !sif_dma_.iop_completion_pending()) {
             const u64 pairs = iop_.skip_osdsys_idle_pairs(
                 (steps - i) / 2u);
             if (pairs != 0u) {
@@ -508,20 +544,59 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
                 continue;
             }
         }
-        if (i + 1u < steps && !sif_dma_.iop_completion_pending() &&
+        if (deferred_device_ticks == 0u &&
+            i + 1u < steps &&
+            !sif_dma_.iop_completion_pending() &&
             iop_.skip_osdsys_idle_pair()) {
             i += 2u;
             continue;
         }
+
+        // A SIF completion countdown is an externally observable IOP event
+        // source outside IopBus, so never defer device time across it.
+        const bool can_defer_device_tick =
+            !sif_dma_.iop_completion_pending() &&
+            iop_bus_.can_tick_event_free(
+                deferred_device_ticks + 1u);
+
+        if (can_defer_device_tick) {
+            bool executed = false;
+            if (!iop_.try_step_hot_event_free(
+                    iop_step_error_scratch_, executed)) {
+                if (!flush_deferred_device_ticks()) break;
+                if (!iop_.halted()) {
+                    error =
+                        "IOP step failed: " +
+                        iop_step_error_scratch_;
+                }
+                break;
+            }
+            if (executed) {
+                ++deferred_device_ticks;
+                ++i;
+                continue;
+            }
+        }
+
+        // MMIO/shared-state instruction or a device event edge. Bring all
+        // prior device time current before the instruction is allowed to
+        // observe hardware, then execute the ordinary cycle-exact path.
+        if (!flush_deferred_device_ticks()) break;
+        ++iop_event_batch_barriers_;
+
         if (!iop_.step_hot(iop_step_error_scratch_)) {
             if (!iop_.halted()) {
-                error = "IOP step failed: " + iop_step_error_scratch_;
+                error =
+                    "IOP step failed: " +
+                    iop_step_error_scratch_;
             }
             break;
         }
         sif_dma_.tick_iop(iop_bus_);
         ++i;
     }
+
+    (void)flush_deferred_device_ticks();
 }
 bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(iop_.halted()){error=iop_.halt_reason();return false;}if(!iop_.step(error))return false;sif_dma_.tick_iop(iop_bus_);return true;}
 u64 Ps2System::try_skip_bios_idle_iterations(

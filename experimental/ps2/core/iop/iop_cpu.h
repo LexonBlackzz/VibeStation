@@ -45,6 +45,12 @@ public:
     // Successful instructions never modify it, avoiding millions of
     // redundant std::string::clear() calls during BIOS execution.
     bool step_hot(std::string& error);
+    // Execute one IOP instruction without advancing device time, but only
+    // when the instruction fetch and every data access are confined to
+    // IOP RAM/CPU-local state and no external interrupt is pending.
+    // Returns true for both "executed" and "barrier"; executed tells which.
+    bool try_step_hot_event_free(
+        std::string& error, bool& executed);
     [[nodiscard]] bool in_osdsys_idle_loop() const;
     bool skip_osdsys_idle_pair();
     u64 skip_osdsys_idle_pairs(u64 max_pairs);
@@ -58,7 +64,11 @@ public:
     void clear_halt();
 
 private:
-    bool step_internal(std::string& error, bool clear_error);
+    bool step_internal(
+        std::string& error,
+        bool clear_error,
+        bool tick_bus = true);
+    [[nodiscard]] bool current_instruction_event_free() const;
 
     struct PendingLoad {
         bool valid = false;

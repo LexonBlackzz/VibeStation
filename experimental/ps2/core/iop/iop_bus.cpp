@@ -773,7 +773,9 @@ bool IopBus::can_tick_event_free(u64 cycles) const {
         const u64 increments = (counter.phase + cycles) / rate;
         if (increments == 0u) continue;
         const u64 maximum = i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
-        if (counter.count + increments >= counter.target ||
+        if ((!counter.target_deferred &&
+             counter.target <= maximum &&
+             counter.count + increments >= counter.target) ||
             counter.count + increments > maximum) return false;
     }
     return true;

@@ -512,16 +512,75 @@ u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
 }
 
 bool IopCpu::step(std::string& error) {
-    return step_internal(error, true);
+    return step_internal(error, true, true);
 }
 
 bool IopCpu::step_hot(std::string& error) {
-    return step_internal(error, false);
+    return step_internal(error, false, true);
+}
+
+bool IopCpu::current_instruction_event_free() const {
+    if (halted_ || bus_.interrupt_pending()) return false;
+
+    const u32 pc = state_.pc;
+    const u32 physical_pc = IopBus::to_physical(pc);
+    const bool safe_fetch =
+        IopBus::is_ram_address(pc) ||
+        (physical_pc >= 0x1FC00000u &&
+         physical_pc < 0x20000000u);
+    if (!safe_fetch) return false;
+
+    u32 instruction = 0u;
+    if (!bus_.read32(pc, instruction)) return false;
+
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const s16 imm = immediate(instruction);
+    const auto effective_address = [&]() {
+        return state_.gpr[rs] +
+               static_cast<u32>(static_cast<s32>(imm));
+    };
+
+    switch (opcode) {
+    case 0x20u: // LB
+    case 0x21u: // LH
+    case 0x23u: // LW
+    case 0x24u: // LBU
+    case 0x25u: // LHU
+    case 0x28u: // SB
+    case 0x29u: // SH
+    case 0x2Bu: // SW
+    case 0x32u: // LWC2
+    case 0x3Au: // SWC2
+        return IopBus::is_ram_address(effective_address());
+    case 0x22u: // LWL
+    case 0x26u: // LWR
+    case 0x2Au: // SWL
+    case 0x2Eu: // SWR
+        return IopBus::is_ram_address(
+            effective_address() & ~3u);
+    default:
+        // Register ALU, branches, COP0/GTE, exceptions and unsupported
+        // opcodes cannot touch shared device state before the ordinary
+        // decoder decides their architectural result.
+        return true;
+    }
+}
+
+bool IopCpu::try_step_hot_event_free(
+    std::string& error,
+    bool& executed) {
+    executed = false;
+    if (!current_instruction_event_free()) return true;
+    if (!step_internal(error, false, false)) return false;
+    executed = true;
+    return true;
 }
 
 bool IopCpu::step_internal(
     std::string& error,
-    bool clear_error) {
+    bool clear_error,
+    bool tick_bus) {
     if (clear_error) error.clear();
 
     if (halted_) {
@@ -589,7 +648,7 @@ bool IopCpu::step_internal(
         pending_load_ = {};
         state_.gpr[0] = 0;
         ++state_.instructions_executed;
-        bus_.tick(1);
+        if (tick_bus) bus_.tick(1);
         return true;
     }
 
@@ -931,7 +990,7 @@ bool IopCpu::step_internal(
     pending_load_ = next_load_;
     state_.gpr[0] = 0;
     ++state_.instructions_executed;
-    bus_.tick(1);
+    if (tick_bus) bus_.tick(1);
     return true;
 }
 

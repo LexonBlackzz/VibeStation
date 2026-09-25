@@ -1604,6 +1604,14 @@ int main(int argc, char** argv) {
               << system.sif_poll_stable_returns() << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
+    std::cout << "IOP_EVENT_BATCH_STEPS="
+              << system.iop_event_batch_steps()
+              << " IOP_EVENT_BATCH_FLUSHES="
+              << system.iop_event_batch_flushes()
+              << " IOP_EVENT_BATCH_BARRIERS="
+              << system.iop_event_batch_barriers()
+              << " IOP_EVENT_BATCH_MAX="
+              << system.iop_event_batch_max() << '\n';
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="
               << system.skipped_bios_literal_iterations() << '\n';
     std::cout << "EE_QUIET_BATCH_INSTRUCTIONS="
