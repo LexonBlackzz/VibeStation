@@ -5,9 +5,168 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace {
+    const char* gte_command_name(u32 opcode) {
+        switch (opcode & 0x3Fu) {
+        case 0x01: return "RTPS";
+        case 0x06: return "NCLIP";
+        case 0x0C: return "OP";
+        case 0x10: return "DPCS";
+        case 0x11: return "INTPL";
+        case 0x12: return "MVMVA";
+        case 0x13: return "NCDS";
+        case 0x14: return "CDP";
+        case 0x16: return "NCDT";
+        case 0x1B: return "NCCS";
+        case 0x1C: return "CC";
+        case 0x1E: return "NCS";
+        case 0x20: return "NCT";
+        case 0x28: return "SQR";
+        case 0x29: return "DCPL";
+        case 0x2A: return "DPCT";
+        case 0x2D: return "AVSZ3";
+        case 0x2E: return "AVSZ4";
+        case 0x30: return "RTPT";
+        case 0x3D: return "GPF";
+        case 0x3E: return "GPL";
+        case 0x3F: return "NCCT";
+        default: return "UNKNOWN";
+        }
+    }
+
+    struct FramePhaseDiagnostics {
+        bool valid = false;
+        u32 render_frames = 0;
+        u32 reuse_frames = 0;
+        u32 draw_threshold = 0;
+        double render_cpu_ms = 0.0;
+        double render_gpu_ms = 0.0;
+        double render_core_ms = 0.0;
+        double reuse_cpu_ms = 0.0;
+        double reuse_gpu_ms = 0.0;
+        double reuse_core_ms = 0.0;
+        double render_draws = 0.0;
+        double reuse_draws = 0.0;
+        double alternation_percent = 0.0;
+        std::array<double, 8> render_buckets{};
+        std::array<double, 8> reuse_buckets{};
+    };
+
+    template <size_t N>
+    FramePhaseDiagnostics analyze_frame_phases(
+        const std::array<float, N>& cpu_history,
+        const std::array<float, N>& gpu_history,
+        const std::array<float, N>& core_history,
+        const std::array<u32, N>& draw_history,
+        const std::array<std::array<u32, 8>, N>& bucket_history,
+        int count,
+        int write_index) {
+        FramePhaseDiagnostics out{};
+        if (count < 8) {
+            return out;
+        }
+
+        u32 max_draws = 0;
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            max_draws = std::max(max_draws, draw_history[idx]);
+        }
+        if (max_draws < 16u) {
+            return out;
+        }
+
+        out.draw_threshold = std::max<u32>(8u, max_draws / 8u);
+        bool have_previous_phase = false;
+        bool previous_render_phase = false;
+        u32 phase_transitions = 0;
+        u32 alternating_transitions = 0;
+        for (int i = 0; i < count; ++i) {
+            const int idx =
+                (write_index - count + i + static_cast<int>(N)) %
+                static_cast<int>(N);
+            const bool render_phase = draw_history[idx] >= out.draw_threshold;
+            if (have_previous_phase) {
+                ++phase_transitions;
+                if (render_phase != previous_render_phase) {
+                    ++alternating_transitions;
+                }
+            }
+            previous_render_phase = render_phase;
+            have_previous_phase = true;
+
+            if (render_phase) {
+                ++out.render_frames;
+                out.render_cpu_ms += cpu_history[idx];
+                out.render_gpu_ms += gpu_history[idx];
+                out.render_core_ms += core_history[idx];
+                out.render_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+                    out.render_buckets[bucket] += bucket_history[idx][bucket];
+                }
+            }
+            else {
+                ++out.reuse_frames;
+                out.reuse_cpu_ms += cpu_history[idx];
+                out.reuse_gpu_ms += gpu_history[idx];
+                out.reuse_core_ms += core_history[idx];
+                out.reuse_draws += draw_history[idx];
+                for (size_t bucket = 0; bucket < out.reuse_buckets.size(); ++bucket) {
+                    out.reuse_buckets[bucket] += bucket_history[idx][bucket];
+                }
+            }
+        }
+        if (phase_transitions != 0u) {
+            out.alternation_percent =
+                100.0 * static_cast<double>(alternating_transitions) /
+                static_cast<double>(phase_transitions);
+        }
+
+        if (out.render_frames == 0 || out.reuse_frames == 0) {
+            return out;
+        }
+        out.render_cpu_ms /= static_cast<double>(out.render_frames);
+        out.render_gpu_ms /= static_cast<double>(out.render_frames);
+        out.render_core_ms /= static_cast<double>(out.render_frames);
+        out.reuse_cpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_gpu_ms /= static_cast<double>(out.reuse_frames);
+        out.reuse_core_ms /= static_cast<double>(out.reuse_frames);
+        out.render_draws /= static_cast<double>(out.render_frames);
+        out.reuse_draws /= static_cast<double>(out.reuse_frames);
+        for (size_t bucket = 0; bucket < out.render_buckets.size(); ++bucket) {
+            out.render_buckets[bucket] /= static_cast<double>(out.render_frames);
+            out.reuse_buckets[bucket] /= static_cast<double>(out.reuse_frames);
+        }
+        out.valid = true;
+        return out;
+    }
+
+    const char* gpu_bucket_name(size_t bucket) {
+        static constexpr std::array<const char*, 8> kNames = {
+            "flat", "gouraud", "textured", "gouraud+texture",
+            "rect", "line", "transfer", "other"
+        };
+        return bucket < kNames.size() ? kNames[bucket] : "unknown";
+    }
+
+    size_t dominant_render_bucket(const FramePhaseDiagnostics& phase) {
+        size_t best_bucket = 0;
+        double best_delta = 0.0;
+        for (size_t bucket = 0; bucket < phase.render_buckets.size(); ++bucket) {
+            const double delta =
+                phase.render_buckets[bucket] - phase.reuse_buckets[bucket];
+            if (delta > best_delta) {
+                best_delta = delta;
+                best_bucket = bucket;
+            }
+        }
+        return best_bucket;
+    }
+
     struct GpuDipDiagnostics {
         bool valid = false;
         int dip_count = 0;
@@ -216,23 +375,28 @@ void App::push_performance_history_sample() {
     perf_core_ms_history_[idx] =
         static_cast<float>(std::max(0.0, runtime_snapshot_.core_frame_ms));
     perf_frame_id_history_[idx] = frame_id;
-    if (g_profile_detailed_timing) {
-        perf_gpu_words_history_[idx] = runtime_snapshot_.profiling.gpu_gp0_words;
-        perf_gpu_draw_commands_history_[idx] =
-            runtime_snapshot_.profiling.gpu_draw_commands;
-        perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
-        perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
-        perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
-        perf_display_hash_history_[idx] = runtime_snapshot_.boot_diag.display_hash;
-    }
-    else {
-        perf_gpu_words_history_[idx] = 0;
-        perf_gpu_draw_commands_history_[idx] = 0;
-        perf_cpu_pc_history_[idx] = 0;
-        perf_dma2_words_history_[idx] = 0;
-        perf_dma2_base_history_[idx] = 0;
-        perf_display_hash_history_[idx] = 0;
-    }
+
+    // These are integer-only bookkeeping counters and are intentionally kept
+    // live with detailed timing disabled. That lets the Spyro cadence probe
+    // correlate real frame time with GPU work without clock-sampling overhead.
+    const auto& gpu_stats = runtime_snapshot_.profiling;
+    perf_gpu_words_history_[idx] = gpu_stats.gpu_gp0_words;
+    perf_gpu_draw_commands_history_[idx] = gpu_stats.gpu_draw_commands;
+    perf_gpu_bucket_commands_history_[idx] = {
+        gpu_stats.gpu_flat_commands,
+        gpu_stats.gpu_gouraud_commands,
+        gpu_stats.gpu_textured_commands,
+        gpu_stats.gpu_gouraud_textured_commands,
+        gpu_stats.gpu_rect_commands,
+        gpu_stats.gpu_line_commands,
+        gpu_stats.gpu_transfer_commands,
+        gpu_stats.gpu_other_commands,
+    };
+    perf_cpu_pc_history_[idx] = runtime_snapshot_.cpu_pc;
+    perf_dma2_words_history_[idx] = runtime_snapshot_.dma2_words;
+    perf_dma2_base_history_[idx] = runtime_snapshot_.dma2_base_addr;
+    perf_display_hash_history_[idx] =
+        g_profile_detailed_timing ? runtime_snapshot_.boot_diag.display_hash : 0;
 
     perf_history_write_index_ = (perf_history_write_index_ + 1) % kPerfHistorySamples;
     if (perf_history_count_ < kPerfHistorySamples) {
@@ -328,6 +492,11 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
             perf_history_count_,
             perf_history_write_index_)
         : GpuDipDiagnostics{};
+    const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+        perf_cpu_ms_history_, perf_gpu_ms_history_,
+        perf_core_ms_history_, perf_gpu_draw_commands_history_,
+        perf_gpu_bucket_commands_history_,
+        perf_history_count_, perf_history_write_index_);
     char header[160];
     std::snprintf(header, sizeof(header),
         "CPU %.2f ms  GPU %.2f ms  Core %.2f ms  Game %.1f  Video %.1f",
@@ -352,45 +521,37 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     }
     dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 23.0f), status_color, status_text);
 
-    if (g_profile_detailed_timing && dip_diag.valid) {
+    if (phase_diag.valid) {
+        char cadence_text[96];
+        std::snprintf(cadence_text, sizeof(cadence_text),
+            "GPU cadence alt %.0f%%", phase_diag.alternation_percent);
+        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
+            IM_COL32(180, 180, 200, 255), cadence_text);
+
+        char phase_text[128];
+        std::snprintf(phase_text, sizeof(phase_text),
+            "Draws %.0f/%.0f  Core %.2f/%.2f ms",
+            phase_diag.render_draws, phase_diag.reuse_draws,
+            phase_diag.render_core_ms, phase_diag.reuse_core_ms);
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 36.0f),
+            IM_COL32(170, 170, 185, 255), phase_text);
+
+        const size_t dominant_bucket = dominant_render_bucket(phase_diag);
+        char bucket_text[128];
+        std::snprintf(bucket_text, sizeof(bucket_text),
+            "Main GPU delta: %s %.0f/%.0f cmds",
+            gpu_bucket_name(dominant_bucket),
+            phase_diag.render_buckets[dominant_bucket],
+            phase_diag.reuse_buckets[dominant_bucket]);
+        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 48.0f),
+            IM_COL32(170, 170, 185, 255), bucket_text);
+    }
+    else if (g_profile_detailed_timing && dip_diag.valid) {
         char dip_text[64];
         std::snprintf(dip_text, sizeof(dip_text), "GPU dips ~%.1f frames",
             dip_diag.avg_interval_frames);
         dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
             IM_COL32(180, 180, 200, 255), dip_text);
-    }
-    else if (g_profile_detailed_timing && dip_diag.dip_count > 0) {
-        char dip_text[48];
-        std::snprintf(dip_text, sizeof(dip_text), "GPU dips %d",
-            dip_diag.dip_count);
-        dl->AddText(ImVec2(p0.x + 150.0f, p0.y + 23.0f),
-            IM_COL32(180, 180, 200, 255), dip_text);
-    }
-
-    if (g_profile_detailed_timing &&
-        (dip_diag.valid || dip_diag.dip_count > 0) &&
-        dip_diag.avg_non_dip_words > 0.0) {
-        char dip_work_text[80];
-        std::snprintf(dip_work_text, sizeof(dip_work_text),
-            "GP0@dip %.0fw/%.0fd vs %.0fw/%.0fd",
-            dip_diag.avg_dip_words,
-            dip_diag.avg_dip_draws,
-            dip_diag.avg_non_dip_words,
-            dip_diag.avg_non_dip_draws);
-        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 36.0f),
-            IM_COL32(170, 170, 185, 255), dip_work_text);
-    }
-    if (g_profile_detailed_timing && dip_diag.latest_dip_frame != 0) {
-        char dip_state_text[128];
-        std::snprintf(dip_state_text, sizeof(dip_state_text),
-            "Last dip f%llu pc=%08X dma2=%uw @%08X disp=%s",
-            static_cast<unsigned long long>(dip_diag.latest_dip_frame),
-            dip_diag.latest_dip_pc,
-            dip_diag.latest_dip_dma2_words,
-            dip_diag.latest_dip_dma2_base,
-            dip_diag.latest_dip_display_reused ? "reused" : "changed");
-        dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 48.0f),
-            IM_COL32(170, 170, 185, 255), dip_state_text);
     }
 
     const float gx0 = p0.x + 10.0f;
@@ -457,6 +618,11 @@ void App::panel_performance() {
         }
 
         const auto& stats = runtime_snapshot_.profiling;
+        ImGui::Checkbox("Detailed hot-path timing", &g_profile_detailed_timing);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(adds profiler overhead)");
+        ImGui::TextDisabled(
+            "Leave this off when investigating recompiler spikes; the spike probe below remains active.");
         ImGui::Text("Frame Time Breakdown:");
         ImGui::Separator();
 
@@ -465,6 +631,75 @@ void App::panel_performance() {
             ImGui::SameLine(100);
             ImGui::TextColored(color, "%.3f ms", ms);
             };
+
+        const FramePhaseDiagnostics phase_diag = analyze_frame_phases(
+            perf_cpu_ms_history_, perf_gpu_ms_history_,
+            perf_core_ms_history_, perf_gpu_draw_commands_history_,
+            perf_gpu_bucket_commands_history_,
+            perf_history_count_, perf_history_write_index_);
+
+        ImGui::Text("GPU workload (low-overhead, always on):");
+        ImGui::Text(
+            "GP0 %u words / %u commands / %u draws",
+            stats.gpu_gp0_words, stats.gpu_gp0_commands,
+            stats.gpu_draw_commands);
+        ImGui::Text(
+            "Cmds: flat %u  gouraud %u  tex %u  g+tex %u  rect %u  line %u  xfer %u  other %u",
+            stats.gpu_flat_commands, stats.gpu_gouraud_commands,
+            stats.gpu_textured_commands, stats.gpu_gouraud_textured_commands,
+            stats.gpu_rect_commands, stats.gpu_line_commands,
+            stats.gpu_transfer_commands, stats.gpu_other_commands);
+        if (phase_diag.valid) {
+            const size_t dominant_bucket = dominant_render_bucket(phase_diag);
+            ImGui::Text(
+                "Cadence: %.0f%% alternating  active/light frames %u/%u  threshold %u draws",
+                phase_diag.alternation_percent, phase_diag.render_frames,
+                phase_diag.reuse_frames, phase_diag.draw_threshold);
+            ImGui::Text(
+                "Active avg: %.0f draws  Core %.3f ms   Light avg: %.0f draws  Core %.3f ms",
+                phase_diag.render_draws, phase_diag.render_core_ms,
+                phase_diag.reuse_draws, phase_diag.reuse_core_ms);
+            ImGui::Text(
+                "Largest command delta: %s %.1f active vs %.1f light",
+                gpu_bucket_name(dominant_bucket),
+                phase_diag.render_buckets[dominant_bucket],
+                phase_diag.reuse_buckets[dominant_bucket]);
+            if (phase_diag.alternation_percent >= 80.0 &&
+                phase_diag.render_core_ms > phase_diag.reuse_core_ms * 1.15) {
+                ImGui::TextDisabled(
+                    "Strong alternating GPU workload: frame-time oscillation follows draw cadence.");
+            }
+            if (ImGui::Button("Copy GPU cadence snapshot")) {
+                char cadence_snapshot[1024];
+                std::snprintf(
+                    cadence_snapshot, sizeof(cadence_snapshot),
+                    "frame=%llu core_ms=%.3f gp0_words=%u gp0_commands=%u draws=%u "
+                    "flat=%u gouraud=%u textured=%u gouraud_textured=%u rect=%u line=%u transfer=%u other=%u "
+                    "cadence_alt=%.1f active_frames=%u light_frames=%u threshold=%u "
+                    "active_draws=%.1f light_draws=%.1f active_core_ms=%.3f light_core_ms=%.3f "
+                    "dominant=%s dominant_active=%.1f dominant_light=%.1f detailed=%u",
+                    static_cast<unsigned long long>(runtime_snapshot_.frame_id),
+                    runtime_snapshot_.core_frame_ms,
+                    stats.gpu_gp0_words, stats.gpu_gp0_commands,
+                    stats.gpu_draw_commands,
+                    stats.gpu_flat_commands, stats.gpu_gouraud_commands,
+                    stats.gpu_textured_commands,
+                    stats.gpu_gouraud_textured_commands,
+                    stats.gpu_rect_commands, stats.gpu_line_commands,
+                    stats.gpu_transfer_commands, stats.gpu_other_commands,
+                    phase_diag.alternation_percent,
+                    phase_diag.render_frames, phase_diag.reuse_frames,
+                    phase_diag.draw_threshold,
+                    phase_diag.render_draws, phase_diag.reuse_draws,
+                    phase_diag.render_core_ms, phase_diag.reuse_core_ms,
+                    gpu_bucket_name(dominant_bucket),
+                    phase_diag.render_buckets[dominant_bucket],
+                    phase_diag.reuse_buckets[dominant_bucket],
+                    g_profile_detailed_timing ? 1u : 0u);
+                ImGui::SetClipboardText(cadence_snapshot);
+            }
+        }
+        ImGui::Separator();
 
         if (g_profile_detailed_timing) {
             row("CPU*", stats.cpu_ms, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
@@ -576,6 +811,81 @@ void App::panel_performance() {
             }
 
             draw_performance_gpu_dip_diagnostics();
+
+            ImGui::Separator();
+            ImGui::Text("GTE Command Detail:");
+            if (stats.gte_total_commands == 0) {
+                ImGui::TextDisabled("No GTE commands executed in this frame.");
+            }
+            else {
+                struct GteRow {
+                    u32 opcode = 0;
+                    double ms = 0.0;
+                    u32 count = 0;
+                };
+                std::array<GteRow, 64> rows{};
+                u32 row_count = 0;
+                for (u32 opcode = 0; opcode < 64; ++opcode) {
+                    if (stats.gte_command_counts[opcode] == 0) {
+                        continue;
+                    }
+                    rows[row_count++] = {
+                        opcode,
+                        stats.gte_command_ms[opcode],
+                        stats.gte_command_counts[opcode],
+                    };
+                }
+                std::sort(rows.begin(), rows.begin() + row_count,
+                    [](const GteRow& a, const GteRow& b) {
+                        return a.ms > b.ms;
+                    });
+
+                ImGui::Text(
+                    "Total: %.3f ms / %u commands (inside CPU time)",
+                    stats.gte_total_ms, stats.gte_total_commands);
+                const u32 shown = std::min<u32>(row_count, 12u);
+                for (u32 i = 0; i < shown; ++i) {
+                    const GteRow& row = rows[i];
+                    const double avg_us =
+                        row.count == 0
+                            ? 0.0
+                            : (row.ms * 1000.0) /
+                                  static_cast<double>(row.count);
+                    ImGui::Text(
+                        "%-7s  op=%02X  %7.3f ms  %6u cmds  %6.2f us/cmd",
+                        gte_command_name(row.opcode), row.opcode, row.ms,
+                        row.count, avg_us);
+                }
+
+                if (ImGui::Button("Copy GTE profiler snapshot")) {
+                    std::string snapshot;
+                    snapshot.reserve(2048);
+                    char line[256];
+                    std::snprintf(
+                        line, sizeof(line),
+                        "frame=%llu cpu_ms=%.3f gte_ms=%.3f gte_commands=%u\n",
+                        static_cast<unsigned long long>(
+                            runtime_snapshot_.frame_id),
+                        stats.cpu_ms, stats.gte_total_ms,
+                        stats.gte_total_commands);
+                    snapshot += line;
+                    for (u32 i = 0; i < row_count; ++i) {
+                        const GteRow& row = rows[i];
+                        const double avg_us =
+                            row.count == 0
+                                ? 0.0
+                                : (row.ms * 1000.0) /
+                                      static_cast<double>(row.count);
+                        std::snprintf(
+                            line, sizeof(line),
+                            "%s op=%02X ms=%.3f count=%u avg_us=%.2f\n",
+                            gte_command_name(row.opcode), row.opcode, row.ms,
+                            row.count, avg_us);
+                        snapshot += line;
+                    }
+                    ImGui::SetClipboardText(snapshot.c_str());
+                }
+            }
         }
         else {
             ImGui::TextDisabled("Detailed subsystem timings are disabled.");
@@ -588,11 +898,12 @@ void App::panel_performance() {
         const CpuBackendStats& backend = runtime_snapshot_.cpu_backend_stats;
         ImGui::Separator();
         draw_cpu_backend_mode_summary(backend, runtime_snapshot_.cpu_backend);
-        ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu",
+        ImGui::Text("Decoded blocks: %u  Cache: %llu / %llu  Invalidations: %llu  Flushes: %llu",
             backend.block_count,
             static_cast<unsigned long long>(backend.cache_hits),
             static_cast<unsigned long long>(backend.cache_misses),
-            static_cast<unsigned long long>(backend.invalidations));
+            static_cast<unsigned long long>(backend.invalidations),
+            static_cast<unsigned long long>(backend.flushes));
         ImGui::Text("Invalidation queries: %llu  no-code exits: %llu",
             static_cast<unsigned long long>(backend.invalidation_queries),
             static_cast<unsigned long long>(
@@ -605,6 +916,11 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.decoded_instructions),
             static_cast<unsigned long long>(backend.native_instructions),
             static_cast<unsigned long long>(backend.fallback_instructions));
+        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            ImGui::Text("Recompiler opcode helpers: %llu instructions",
+                static_cast<unsigned long long>(
+                    backend.jit_v4_helper_instructions));
+        }
         if (backend.forced_interpreter_instructions != 0 ||
             backend.forced_interpreter_last_reason !=
                 CpuForcedInterpreterReason::None) {
@@ -625,6 +941,256 @@ void App::panel_performance() {
             static_cast<unsigned long long>(backend.native_block_entries),
             static_cast<unsigned long long>(backend.native_cycles),
             backend.native_code_bytes);
+        ImGui::Text("Native chains: %llu  transitions %llu  max blocks %llu",
+            static_cast<unsigned long long>(backend.native_chain_entries),
+            static_cast<unsigned long long>(backend.native_linked_transitions),
+            static_cast<unsigned long long>(backend.native_chain_max_blocks));
+        if (runtime_snapshot_.cpu_backend == CpuExecutionMode::Recompiler) {
+            const double frame_compile_ms =
+                static_cast<double>(backend.recompiler_frame_compile_ns) / 1000000.0;
+            const double frame_compile_max_ms =
+                static_cast<double>(backend.recompiler_frame_compile_max_ns) / 1000000.0;
+            const double frame_revalidate_ms =
+                static_cast<double>(backend.recompiler_frame_revalidate_ns) / 1000000.0;
+
+            struct SpikeCapture {
+                u64 frame_id = 0;
+                double core_ms = 0.0;
+                double compile_ms = 0.0;
+                double compile_max_ms = 0.0;
+                double revalidate_ms = 0.0;
+                u64 compile_blocks = 0;
+                u64 compile_failures = 0;
+                u64 revalidate_attempts = 0;
+                u64 revalidate_successes = 0;
+                u64 cache_misses = 0;
+                u64 icache_refills = 0;
+                u64 helper_instructions = 0;
+                std::array<u64, 6> helper_reasons{};
+                u64 invalidations = 0;
+                u64 flushes = 0;
+                u64 run_slice_calls = 0;
+                u64 native_dispatches = 0;
+                u64 direct_links = 0;
+                u64 missing_exits = 0;
+                u64 epoch_exits = 0;
+                u64 memory_exits = 0;
+                u64 generation_exits = 0;
+                u64 budget_exits = 0;
+                u64 bail_exits = 0;
+                bool detailed_timing = false;
+            };
+            static SpikeCapture worst_spike{};
+            static u64 last_spike_frame_seen = ~static_cast<u64>(0);
+
+            if (runtime_snapshot_.frame_id != last_spike_frame_seen) {
+                last_spike_frame_seen = runtime_snapshot_.frame_id;
+                if (runtime_snapshot_.core_frame_ms >= worst_spike.core_ms) {
+                    worst_spike.frame_id = runtime_snapshot_.frame_id;
+                    worst_spike.core_ms = runtime_snapshot_.core_frame_ms;
+                    worst_spike.compile_ms = frame_compile_ms;
+                    worst_spike.compile_max_ms = frame_compile_max_ms;
+                    worst_spike.revalidate_ms = frame_revalidate_ms;
+                    worst_spike.compile_blocks =
+                        backend.recompiler_frame_compile_blocks;
+                    worst_spike.compile_failures =
+                        backend.recompiler_frame_compile_failures;
+                    worst_spike.revalidate_attempts =
+                        backend.recompiler_frame_revalidate_attempts;
+                    worst_spike.revalidate_successes =
+                        backend.recompiler_frame_revalidate_successes;
+                    worst_spike.cache_misses =
+                        backend.recompiler_frame_cache_misses;
+                    worst_spike.icache_refills =
+                        backend.recompiler_frame_icache_refills;
+                    worst_spike.helper_instructions =
+                        backend.recompiler_frame_helper_instructions;
+                    worst_spike.helper_reasons =
+                        backend.recompiler_frame_helper_reasons;
+                    worst_spike.invalidations =
+                        backend.recompiler_frame_invalidations;
+                    worst_spike.flushes = backend.recompiler_frame_flushes;
+                    worst_spike.run_slice_calls =
+                        backend.recompiler_frame_run_slice_calls;
+                    worst_spike.native_dispatches =
+                        backend.recompiler_frame_native_dispatches;
+                    worst_spike.direct_links =
+                        backend.recompiler_frame_direct_links;
+                    worst_spike.missing_exits =
+                        backend.recompiler_frame_dispatch_missing_exits;
+                    worst_spike.epoch_exits =
+                        backend.recompiler_frame_dispatch_epoch_exits;
+                    worst_spike.memory_exits =
+                        backend.recompiler_frame_dispatch_memory_exits;
+                    worst_spike.generation_exits =
+                        backend.recompiler_frame_dispatch_generation_exits;
+                    worst_spike.budget_exits =
+                        backend.recompiler_frame_dispatch_budget_exits;
+                    worst_spike.bail_exits =
+                        backend.recompiler_frame_dispatch_bail_exits;
+                    worst_spike.detailed_timing = g_profile_detailed_timing;
+                }
+            }
+
+            if (ImGui::Button("Reset Spike Capture")) {
+                worst_spike = {};
+                last_spike_frame_seen = runtime_snapshot_.frame_id;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy Spike Capture")) {
+                char spike_text[1024];
+                std::snprintf(
+                    spike_text, sizeof(spike_text),
+                    "frame=%llu core_ms=%.3f detailed=%u "
+                    "compile_ms=%.3f compile_max_ms=%.3f compile_blocks=%llu compile_fail=%llu "
+                    "revalidate_ms=%.3f revalidate=%llu/%llu "
+                    "misses=%llu icache_refills=%llu helpers=%llu "
+                    "helper_irq=%llu helper_unaligned=%llu helper_unsafe=%llu helper_opcode=%llu helper_compilefail=%llu helper_budget=%llu "
+                    "invalidations=%llu flushes=%llu "
+                    "run_slice=%llu native_dispatch=%llu direct_links=%llu "
+                    "exits_missing=%llu exits_epoch=%llu exits_memory=%llu exits_generation=%llu "
+                    "exits_budget=%llu exits_bail=%llu",
+                    static_cast<unsigned long long>(worst_spike.frame_id),
+                    worst_spike.core_ms,
+                    worst_spike.detailed_timing ? 1u : 0u,
+                    worst_spike.compile_ms,
+                    worst_spike.compile_max_ms,
+                    static_cast<unsigned long long>(worst_spike.compile_blocks),
+                    static_cast<unsigned long long>(worst_spike.compile_failures),
+                    worst_spike.revalidate_ms,
+                    static_cast<unsigned long long>(worst_spike.revalidate_successes),
+                    static_cast<unsigned long long>(worst_spike.revalidate_attempts),
+                    static_cast<unsigned long long>(worst_spike.cache_misses),
+                    static_cast<unsigned long long>(worst_spike.icache_refills),
+                    static_cast<unsigned long long>(worst_spike.helper_instructions),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                    static_cast<unsigned long long>(worst_spike.helper_reasons[5]),
+                    static_cast<unsigned long long>(worst_spike.invalidations),
+                    static_cast<unsigned long long>(worst_spike.flushes),
+                    static_cast<unsigned long long>(worst_spike.run_slice_calls),
+                    static_cast<unsigned long long>(worst_spike.native_dispatches),
+                    static_cast<unsigned long long>(worst_spike.direct_links),
+                    static_cast<unsigned long long>(worst_spike.missing_exits),
+                    static_cast<unsigned long long>(worst_spike.epoch_exits),
+                    static_cast<unsigned long long>(worst_spike.memory_exits),
+                    static_cast<unsigned long long>(worst_spike.generation_exits),
+                    static_cast<unsigned long long>(worst_spike.budget_exits),
+                    static_cast<unsigned long long>(worst_spike.bail_exits));
+                ImGui::SetClipboardText(spike_text);
+            }
+            ImGui::Text(
+                "Worst captured: frame %llu  core %.3f ms  compile %.3f ms  revalidate %.3f ms%s",
+                static_cast<unsigned long long>(worst_spike.frame_id),
+                worst_spike.core_ms, worst_spike.compile_ms,
+                worst_spike.revalidate_ms,
+                worst_spike.detailed_timing ? "  [detailed timing ON]" : "");
+            ImGui::Text(
+                "Worst activity: misses %llu  refills %llu  helpers %llu  invalidations %llu  flushes %llu  slices %llu",
+                static_cast<unsigned long long>(worst_spike.cache_misses),
+                static_cast<unsigned long long>(worst_spike.icache_refills),
+                static_cast<unsigned long long>(worst_spike.helper_instructions),
+                static_cast<unsigned long long>(worst_spike.invalidations),
+                static_cast<unsigned long long>(worst_spike.flushes),
+                static_cast<unsigned long long>(worst_spike.run_slice_calls));
+            ImGui::Text(
+                "Worst helpers: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(worst_spike.helper_reasons[0]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[1]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[2]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[3]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[4]),
+                static_cast<unsigned long long>(worst_spike.helper_reasons[5]));
+
+            ImGui::Text(
+                "Spike probe: compile %.3f ms (%llu blocks, max %.3f, fail %llu)  revalidate %.3f ms (%llu/%llu)",
+                frame_compile_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_blocks),
+                frame_compile_max_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_compile_failures),
+                frame_revalidate_ms,
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_successes),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_revalidate_attempts));
+            ImGui::Text(
+                "Spike activity: misses %llu  I-cache refills %llu  helpers %llu  invalidations %llu  flushes %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_cache_misses),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_icache_refills),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_instructions),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_invalidations),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_flushes));
+            ImGui::Text(
+                "Spike helper reasons: IRQ %llu  unaligned %llu  unsafe %llu  opcode %llu  compile-fail %llu  budget %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[0]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[1]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[2]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[3]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[4]),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_helper_reasons[5]));
+            ImGui::Text(
+                "Spike scheduling: run_slice %llu  native dispatch %llu  direct links %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_run_slice_calls),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_native_dispatches),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_direct_links));
+            ImGui::Text(
+                "Spike dispatch: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_missing_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_epoch_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_memory_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_generation_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_budget_exits),
+                static_cast<unsigned long long>(
+                    backend.recompiler_frame_dispatch_bail_exits));
+            ImGui::Text("Recompiler chains: %.2f blocks/entry  direct links %llu",
+                backend.native_chain_invocations == 0 ? 0.0 :
+                    static_cast<double>(backend.native_block_entries) /
+                        static_cast<double>(backend.native_chain_invocations),
+                static_cast<unsigned long long>(
+                    backend.native_direct_link_transitions));
+            ImGui::Text("Recompiler compiled size: 1=%llu  2=%llu  3=%llu  4=%llu  5+=%llu",
+                static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[1]),
+                static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[2]),
+                static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[3]),
+                static_cast<unsigned long long>(backend.native_compiled_block_size_histogram[4]),
+                static_cast<unsigned long long>(
+                    backend.native_blocks_compiled -
+                    backend.native_compiled_block_size_histogram[1] -
+                    backend.native_compiled_block_size_histogram[2] -
+                    backend.native_compiled_block_size_histogram[3] -
+                    backend.native_compiled_block_size_histogram[4]));
+            ImGui::Text("Recompiler dispatch exits: missing %llu  epoch %llu  memory %llu  generation %llu  budget %llu  bail %llu",
+                static_cast<unsigned long long>(backend.native_dispatch_missing_exits),
+                static_cast<unsigned long long>(backend.native_dispatch_epoch_exits),
+                static_cast<unsigned long long>(backend.native_dispatch_memory_exits),
+                static_cast<unsigned long long>(backend.native_dispatch_generation_exits),
+                static_cast<unsigned long long>(backend.native_dispatch_budget_exits),
+                static_cast<unsigned long long>(backend.native_dispatch_bail_exits));
+        }
         ImGui::Text("Native fallback: rejected %llu  compile fail %llu  decoded %llu",
             static_cast<unsigned long long>(
                 backend.native_rejected_unsafe_blocks),
@@ -690,6 +1256,182 @@ void App::panel_performance() {
                 backend.native_helper_load_delay_passes),
             static_cast<unsigned long long>(
                 backend.native_helper_load_delay_fallbacks));
+
+        ImGui::Separator();
+        ImGui::Text("CPU Hot Blocks:");
+        if (!g_profile_detailed_timing) {
+            ImGui::TextDisabled(
+                "Enable Detailed hot-path timing above to collect hot-block data.");
+        }
+        else if (backend.hot_block_count == 0) {
+            ImGui::TextDisabled("No decoded block executions collected yet.");
+        }
+        else {
+            const u64 shown_weight = [&]() {
+                u64 total = 0;
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    total += backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                return total;
+            }();
+            const double shown_share =
+                backend.hot_block_total_weight == 0
+                    ? 0.0
+                    : 100.0 * static_cast<double>(shown_weight) /
+                          static_cast<double>(backend.hot_block_total_weight);
+            ImGui::Text(
+                "This frame: top %u of %u blocks cover %.1f%% of estimated guest instructions",
+                backend.hot_block_count, backend.hot_block_total_count,
+                shown_share);
+
+            if (ImGui::BeginTable(
+                    "cpu_hot_blocks", 8,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                        ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit,
+                    ImVec2(-1.0f, 260.0f))) {
+                ImGui::TableSetupColumn("PC");
+                ImGui::TableSetupColumn("Est instr");
+                ImGui::TableSetupColumn("Entries");
+                ImGui::TableSetupColumn("Native %");
+                ImGui::TableSetupColumn("Shape");
+                ImGui::TableSetupColumn("Reject/detail");
+                ImGui::TableSetupColumn("Runtime reject");
+                ImGui::TableSetupColumn("Ops");
+                ImGui::TableHeadersRow();
+
+                for (u32 i = 0; i < backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("0x%08X", hot.start_pc);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%llu",
+                        static_cast<unsigned long long>(hot.entries));
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.1f%%", native_percent);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextUnformatted(hot.shape.data());
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TextUnformatted(hot.reject_detail.data());
+                    ImGui::TableSetColumnIndex(6);
+                    if (hot.runtime_rejects == 0) {
+                        ImGui::TextDisabled("-");
+                    } else {
+                        ImGui::Text("%llu %s (%u), %s (%u), mem=%s (%u)",
+                            static_cast<unsigned long long>(
+                                hot.runtime_rejects),
+                            hot.runtime_reject_detail.data(),
+                            hot.runtime_reject_dominant_count,
+                            hot.runtime_reject_secondary_detail.data(),
+                            hot.runtime_reject_secondary_count,
+                            hot.runtime_memory_region.data(),
+                            hot.runtime_memory_region_count);
+                    }
+                    ImGui::TableSetColumnIndex(7);
+                    ImGui::TextUnformatted(hot.ops.data());
+                }
+                ImGui::EndTable();
+            }
+
+            if (ImGui::Button("Copy CPU hot-block snapshot")) {
+                const EmuRunner::RuntimeSnapshot fresh_snapshot =
+                    emu_runner_.is_running()
+                        ? emu_runner_.runtime_snapshot()
+                        : runtime_snapshot_;
+                const CpuBackendStats& fresh_backend =
+                    fresh_snapshot.cpu_backend_stats;
+
+                u64 fresh_shown_weight = 0;
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    fresh_shown_weight +=
+                        fresh_backend.hot_blocks[i].estimated_guest_instructions;
+                }
+                const double fresh_shown_share =
+                    fresh_backend.hot_block_total_weight == 0
+                        ? 0.0
+                        : 100.0 * static_cast<double>(fresh_shown_weight) /
+                              static_cast<double>(
+                                  fresh_backend.hot_block_total_weight);
+
+                std::string snapshot;
+                snapshot.reserve(8192);
+                char line[768];
+                std::snprintf(
+                    line, sizeof(line),
+                    "frame=%llu core_ms=%.3f cpu_ms=%.3f "
+                    "gpu_ms=%.3f draws=%u decoded=%llu native=%llu fallback=%llu\n"
+                    "hot_blocks=%u/%u shown_share=%.1f%%\n",
+                    static_cast<unsigned long long>(fresh_snapshot.frame_id),
+                    fresh_snapshot.core_frame_ms,
+                    fresh_snapshot.profiling.cpu_ms,
+                    fresh_snapshot.profiling.gpu_ms,
+                    fresh_snapshot.profiling.gpu_draw_commands,
+                    static_cast<unsigned long long>(
+                        fresh_backend.decoded_instructions),
+                    static_cast<unsigned long long>(
+                        fresh_backend.native_instructions),
+                    static_cast<unsigned long long>(
+                        fresh_backend.fallback_instructions),
+                    fresh_backend.hot_block_count,
+                    fresh_backend.hot_block_total_count,
+                    fresh_shown_share);
+                snapshot += line;
+
+                for (u32 i = 0; i < fresh_backend.hot_block_count; ++i) {
+                    const CpuHotBlockStats& hot = fresh_backend.hot_blocks[i];
+                    const double native_percent =
+                        hot.entries == 0
+                            ? 0.0
+                            : 100.0 * static_cast<double>(hot.native_entries) /
+                                  static_cast<double>(hot.entries);
+                    std::snprintf(
+                        line, sizeof(line),
+                        "#%02u pc=%08X weight=%llu entries=%llu instr=%u "
+                        "native_entries=%llu native=%.1f%% compiled=%u "
+                        "runtime_rejects=%llu runtime_reason=%s "
+                        "runtime_reason_count=%u runtime_reason2=%s "
+                        "runtime_reason2_count=%u runtime_mem_region=%s "
+                        "runtime_mem_region_count=%u "
+                        "decoded_only=%u prefix=%u branch=%u mem=%u load=%u "
+                        "store=%u fallback=%u shape=%s reject=%s ops=%s\n",
+                        i + 1u, hot.start_pc,
+                        static_cast<unsigned long long>(
+                            hot.estimated_guest_instructions),
+                        static_cast<unsigned long long>(hot.entries),
+                        hot.instruction_count,
+                        static_cast<unsigned long long>(hot.native_entries),
+                        native_percent, hot.native_compiled ? 1u : 0u,
+                        static_cast<unsigned long long>(hot.runtime_rejects),
+                        hot.runtime_reject_detail.data(),
+                        hot.runtime_reject_dominant_count,
+                        hot.runtime_reject_secondary_detail.data(),
+                        hot.runtime_reject_secondary_count,
+                        hot.runtime_memory_region.data(),
+                        hot.runtime_memory_region_count,
+                        hot.native_decoded_only ? 1u : 0u,
+                        hot.native_prefix_instruction_count,
+                        hot.has_control_flow ? 1u : 0u,
+                        hot.has_memory ? 1u : 0u,
+                        hot.has_load ? 1u : 0u,
+                        hot.has_store ? 1u : 0u,
+                        hot.has_fallback ? 1u : 0u,
+                        hot.shape.data(), hot.reject_detail.data(),
+                        hot.ops.data());
+                    snapshot += line;
+                }
+                ImGui::SetClipboardText(snapshot.c_str());
+            }
+        }
+
         if (config_vsync_ && swap_ms_ > 8.0) {
             ImGui::TextDisabled(
                 "Swap includes VSync/compositor wait. Disable VSync to profile CPU cost.");
