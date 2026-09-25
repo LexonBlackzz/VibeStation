@@ -4237,9 +4237,12 @@ u32 EeCpu::run_native_block(
         control_flow);
     if (retired == 0u) return 0u;
 
-    // execute_block() owns architectural PC/last-instruction state so it
-    // can chain multiple native basic blocks without returning through the
-    // system dispatcher after every branch.
+    state_.last_pc = pc + (retired - 1u) * 4u;
+    state_.last_instruction = instructions[retired - 1u];
+    if (!control_flow) {
+        state_.pc = pc + retired * 4u;
+        state_.next_pc = state_.pc + 4u;
+    }
     state_.gpr[0] = {};
     state_.instructions_executed += retired;
     state_.cop0[9] += retired;

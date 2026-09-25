@@ -1057,199 +1057,102 @@ u32 EeJit::execute_block(
         return 0;
     }
 
-    auto block_entry = [&](u32 block_pc,
-                           u32 generation,
-                           const u32* words,
-                           u32 word_count) -> BlockEntry* {
-        const u32 hash =
-            (block_pc >> 2) * 2654435761u ^
-            generation * 2246822519u;
-        const std::size_t index =
-            (static_cast<std::size_t>(hash) *
-             block_entries_.size()) >> 32;
-        BlockEntry& entry = block_entries_[index];
+    const u32 hash =
+        (pc >> 2) * 2654435761u ^
+        page_generation * 2246822519u;
+    const std::size_t index =
+        (static_cast<std::size_t>(hash) *
+         block_entries_.size()) >> 32;
+    BlockEntry& entry = block_entries_[index];
 
-        if (!entry.known ||
-            entry.pc != block_pc ||
-            entry.page_generation != generation) {
-            u32 compiled_instructions = 0;
-            bool compiled_control_flow = false;
-            bool compiled_uses_ram = false;
-            BlockFunction function = compile_block(
-                block_pc,
-                words,
-                word_count,
-                compiled_instructions,
-                compiled_control_flow,
-                compiled_uses_ram);
-            entry.pc = block_pc;
-            entry.page_generation = generation;
-            entry.instruction_count =
-                static_cast<u8>(compiled_instructions);
-            entry.function = function;
-            entry.control_flow = compiled_control_flow;
-            entry.uses_ram = compiled_uses_ram;
-            entry.ram_load_mask = 0u;
-            entry.ram_store_mask = 0u;
-            for (u32 i = 0;
-                 i < compiled_instructions && i < 32u;
-                 ++i) {
-                switch (words[i] >> 26) {
-                case 0x1Eu:
-                case 0x20u:
-                case 0x21u:
-                case 0x23u:
-                case 0x24u:
-                case 0x25u:
-                case 0x27u:
-                case 0x30u:
-                case 0x31u:
-                case 0x34u:
-                case 0x37u:
-                    entry.ram_load_mask |= 1u << i;
-                    break;
-                case 0x1Fu:
-                case 0x28u:
-                case 0x29u:
-                case 0x2Bu:
-                case 0x38u:
-                case 0x39u:
-                case 0x3Cu:
-                case 0x3Fu:
-                    entry.ram_store_mask |= 1u << i;
-                    break;
-                default:
-                    break;
-                }
-            }
-            entry.known = true;
-        }
-        return &entry;
-    };
-
-    // Keep native execution inside the JIT dispatcher while control flow
-    // remains on the same tracked 4 KiB EE RAM code page. The system quiet
-    // loop already guarantees an event-free instruction budget, so returning
-    // after every 2-5 instruction basic block only adds host dispatch/cache
-    // overhead. Same-page chaining preserves the existing page-generation
-    // self-modifying-code barrier without needing any wider invalidation.
-    const u32 origin_physical = ram_physical_address(pc);
-    const u32 code_page = origin_physical >> 12;
-    u32 total_retired = 0u;
-    u32 current_pc = pc;
-    const u32* current_words = instructions;
-    u32 current_count = instruction_count;
-    u32 fetched_words[32]{};
-    bool final_control_flow = false;
-
-    while (total_retired < maximum_instructions) {
-        BlockEntry* entry = block_entry(
-            current_pc,
-            page_generation,
-            current_words,
-            current_count);
-        if (entry == nullptr ||
-            entry->function == nullptr ||
-            entry->instruction_count == 0u ||
-            entry->instruction_count >
-                maximum_instructions - total_retired ||
-            (entry->uses_ram && ram_data == nullptr) ||
-            (entry->ram_store_mask != 0u &&
-             page_generations == nullptr)) {
-            break;
-        }
-
-        const u32 retired =
-            entry->function(&state, ram_data, page_generations);
-        if (retired == 0u ||
-            retired > entry->instruction_count) {
-            break;
-        }
-
-        const bool full_block =
-            retired == entry->instruction_count;
-        final_control_flow =
-            entry->control_flow && full_block;
-
-        ++block_executed_count_;
-        block_instruction_count_ += retired;
-        if (!full_block) {
-            ++block_guard_bailout_count_;
-            if ((entry->ram_store_mask &
-                 (1u << (retired - 1u))) != 0u) {
-                ++block_code_store_exit_count_;
+    if (!entry.known ||
+        entry.pc != pc ||
+        entry.page_generation != page_generation) {
+        u32 compiled_instructions = 0;
+        bool compiled_control_flow = false;
+        bool compiled_uses_ram = false;
+        BlockFunction function = compile_block(
+            pc,
+            instructions,
+            instruction_count,
+            compiled_instructions,
+            compiled_control_flow,
+            compiled_uses_ram);
+        entry.pc = pc;
+        entry.page_generation = page_generation;
+        entry.instruction_count =
+            static_cast<u8>(compiled_instructions);
+        entry.function = function;
+        entry.control_flow = compiled_control_flow;
+        entry.uses_ram = compiled_uses_ram;
+        entry.ram_load_mask = 0u;
+        entry.ram_store_mask = 0u;
+        for (u32 i = 0; i < compiled_instructions && i < 32u; ++i) {
+            switch (instructions[i] >> 26) {
+            case 0x1Eu:
+            case 0x20u:
+            case 0x21u:
+            case 0x23u:
+            case 0x24u:
+            case 0x25u:
+            case 0x27u:
+            case 0x30u:
+            case 0x31u:
+            case 0x34u:
+            case 0x37u:
+                entry.ram_load_mask |= 1u << i;
+                break;
+            case 0x1Fu:
+            case 0x28u:
+            case 0x29u:
+            case 0x2Bu:
+            case 0x38u:
+            case 0x39u:
+            case 0x3Cu:
+            case 0x3Fu:
+                entry.ram_store_mask |= 1u << i;
+                break;
+            default:
+                break;
             }
         }
-        const u32 retired_mask =
-            retired >= 32u
-                ? 0xFFFFFFFFu
-                : ((1u << retired) - 1u);
-        block_fastmem_load_count_ +=
-            std::popcount(
-                entry->ram_load_mask & retired_mask);
-        block_fastmem_store_count_ +=
-            std::popcount(
-                entry->ram_store_mask & retired_mask);
-
-        state.last_pc =
-            current_pc + (retired - 1u) * 4u;
-        state.last_instruction =
-            current_words[retired - 1u];
-
-        if (!final_control_flow) {
-            state.pc = current_pc + retired * 4u;
-            state.next_pc = state.pc + 4u;
-        }
-
-        total_retired += retired;
-
-        if (!full_block ||
-            total_retired >= maximum_instructions) {
-            break;
-        }
-
-        // A native store to this code page increments its generation and
-        // returns from generated code. Never execute another cached block
-        // from the old generation in the same host dispatch.
-        if (page_generations != nullptr &&
-            page_generations[code_page] != page_generation) {
-            break;
-        }
-
-        const u32 next_pc = state.pc;
-        if (ram_data == nullptr ||
-            next_pc >= 0xC0000000u ||
-            (next_pc & 3u) != 0u) {
-            break;
-        }
-        const u32 next_physical =
-            ram_physical_address(next_pc);
-        if (next_physical >= kEeRamSize ||
-            (next_physical >> 12) != code_page) {
-            break;
-        }
-
-        const u32 words_to_page_end =
-            (4096u - (next_physical & 4095u)) / 4u;
-        const u32 remaining =
-            maximum_instructions - total_retired;
-        current_count = std::min<u32>(
-            32u,
-            std::min(words_to_page_end, remaining));
-        if (current_count == 0u) break;
-
-        for (u32 i = 0; i < current_count; ++i) {
-            std::memcpy(
-                &fetched_words[i],
-                ram_data + next_physical + i * 4u,
-                sizeof(u32));
-        }
-        current_pc = next_pc;
-        current_words = fetched_words;
+        entry.known = true;
     }
 
-    control_flow = final_control_flow;
-    return total_retired;
+    if (entry.function == nullptr ||
+        entry.instruction_count == 0u ||
+        entry.instruction_count > maximum_instructions ||
+        (entry.uses_ram && ram_data == nullptr) ||
+        (entry.ram_store_mask != 0u && page_generations == nullptr)) {
+        control_flow = false;
+        return 0;
+    }
+
+    const u32 retired =
+        entry.function(&state, ram_data, page_generations);
+    if (retired == 0u || retired > entry.instruction_count) {
+        control_flow = false;
+        return 0u;
+    }
+    control_flow =
+        entry.control_flow && retired == entry.instruction_count;
+    ++block_executed_count_;
+    block_instruction_count_ += retired;
+    if (retired < entry.instruction_count) {
+        ++block_guard_bailout_count_;
+        if (retired != 0u &&
+            (entry.ram_store_mask &
+             (1u << (retired - 1u))) != 0u) {
+            ++block_code_store_exit_count_;
+        }
+    }
+    const u32 retired_mask =
+        retired >= 32u ? 0xFFFFFFFFu : ((1u << retired) - 1u);
+    block_fastmem_load_count_ +=
+        std::popcount(entry.ram_load_mask & retired_mask);
+    block_fastmem_store_count_ +=
+        std::popcount(entry.ram_store_mask & retired_mask);
+    return retired;
 #else
     (void)state;
     (void)pc;
