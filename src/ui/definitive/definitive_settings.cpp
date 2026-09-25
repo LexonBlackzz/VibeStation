@@ -2,7 +2,7 @@
 #include "ui/definitive/definitive_shared.h"
 #include "ui/output_resolution_utils.h"
 #include "ui/theme_settings.h"
-#include "vibestation_version.h"
+#include "version.h"
 
 #include <imgui.h>
 
@@ -1206,7 +1206,7 @@ void App::panel_definitive_settings() {
         panel_x + panel_w - 38.0f,
         panel_y + panel_h - 59.0f,
         11.5f, rgba(128, 140, 151, 210),
-        VIBESTATION_VERSION_STRING);
+        vibestation_version_string());
 
     const ImVec2 transition_center(
         window_pos.x + window_size.x * 0.5f,
