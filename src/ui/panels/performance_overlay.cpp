@@ -649,6 +649,20 @@ void App::panel_performance() {
             stats.gpu_textured_commands, stats.gpu_gouraud_textured_commands,
             stats.gpu_rect_commands, stats.gpu_line_commands,
             stats.gpu_transfer_commands, stats.gpu_other_commands);
+        if (runtime_snapshot_.gpu_hardware_raster_active) {
+            ImGui::Text(
+                "Host GPU raster: ACTIVE   dispatch %llu   VRAM upload/download %llu/%llu",
+                static_cast<unsigned long long>(
+                    runtime_snapshot_.gpu_hardware_dispatches),
+                static_cast<unsigned long long>(
+                    runtime_snapshot_.gpu_hardware_uploads),
+                static_cast<unsigned long long>(
+                    runtime_snapshot_.gpu_hardware_downloads));
+        }
+        else if (g_gpu_hardware_rasterizer) {
+            ImGui::TextDisabled(
+                "Host GPU raster: unavailable/fallback (software raster active)");
+        }
         if (phase_diag.valid) {
             const size_t dominant_bucket = dominant_render_bucket(phase_diag);
             ImGui::Text(
