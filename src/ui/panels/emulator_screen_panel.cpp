@@ -196,7 +196,8 @@ void App::draw_gameplay_toolbar(
         std::clamp(image_size.x / 1050.0f, 0.58f, 1.0f);
     const float base_bar_width =
         28.0f + 46.0f * static_cast<float>(kButtonCount) +
-        10.0f * static_cast<float>(kButtonCount - 1) +
+        10.0f * static_cast<float>(
+            kButtonCount - 1 - kSeparatorCount) +
         18.0f * static_cast<float>(kSeparatorCount);
     const float fit_scale =
         std::max(0.50f, (image_size.x - 24.0f) / base_bar_width);
@@ -211,7 +212,8 @@ void App::draw_gameplay_toolbar(
     const float bar_w =
         padding * 2.0f +
         button_size * static_cast<float>(kButtonCount) +
-        gap * static_cast<float>(kButtonCount - 1) +
+        gap * static_cast<float>(
+            kButtonCount - 1 - kSeparatorCount) +
         separator_space * static_cast<float>(kSeparatorCount);
 
     const float image_bottom = image_pos.y + image_size.y;
