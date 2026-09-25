@@ -1243,7 +1243,9 @@ void App::menu_bar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Grim Reaper")) {
-            ImGui::MenuItem("Open Panel", nullptr, &show_grim_reaper_);
+            if (ImGui::MenuItem("Open Grim Reaper")) {
+                open_definitive_grim_reaper();
+            }
             ImGui::EndMenu();
         }
 
