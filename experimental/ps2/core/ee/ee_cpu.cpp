@@ -3466,14 +3466,35 @@ u32 EeCpu::run_quiet_fast_prefix(
             instruction = instructions[retired];
         }
 
-        if (!direct_trace &&
-            instruction == 0u &&
+        if (instruction == 0u &&
             !next_is_delay_slot_ &&
             state_.next_pc == expected_pc + 4u) {
             u32 run = 1u;
-            while (retired + run < limit &&
-                   instructions[retired + run] == 0u) {
-                ++run;
+            if (direct_trace) {
+                constexpr u32 kMainRamSize =
+                    32u * 1024u * 1024u;
+                while (retired + run < limit) {
+                    const u32 next_pc =
+                        expected_pc + run * 4u;
+                    const u32 next_physical =
+                        EeBus::to_physical(next_pc);
+                    if (next_physical >
+                        kMainRamSize - sizeof(u32)) {
+                        break;
+                    }
+                    u32 next_instruction = 0u;
+                    std::memcpy(
+                        &next_instruction,
+                        instruction_ram + next_physical,
+                        sizeof(next_instruction));
+                    if (next_instruction != 0u) break;
+                    ++run;
+                }
+            } else {
+                while (retired + run < limit &&
+                       instructions[retired + run] == 0u) {
+                    ++run;
+                }
             }
 
             state_.last_pc =
