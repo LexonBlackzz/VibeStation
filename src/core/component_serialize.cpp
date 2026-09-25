@@ -828,6 +828,7 @@ void Mdec::restore_state(const u8*& pos, size_t& remaining) {
 // ── Gpu ─────────────────────────────────────────────────────────────
 
 void Gpu::save_state(std::vector<u8>& buf) const {
+  ensure_cpu_vram_current();
   auto write = [&](const void* data, size_t size) {
     const u8* src = static_cast<const u8*>(data);
     buf.insert(buf.end(), src, src + size);
@@ -886,8 +887,9 @@ void Gpu::restore_state(const u8*& pos, size_t& remaining) {
     remaining -= size;
   };
   auto read_val = [&](auto& v) { read(&v, sizeof(v)); };
-
   read(vram_.data(), vram_.size() * sizeof(u16));
+  hardware_gpu_vram_newer_ = false;
+  hardware_cpu_vram_dirty_ = true;
 
   read_val(draw_x_min_);
   read_val(draw_y_min_);
