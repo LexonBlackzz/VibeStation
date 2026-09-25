@@ -265,15 +265,15 @@ uint sample_texel(int u, int v) {
 
     if (depth == 0) {
         int wordX = (texBaseX + (uw >> 2)) & 1023;
-        uint packed = vram[row + wordX] & 0xFFFFu;
-        int index = int((packed >> uint((uw & 3) * 4)) & 15u);
+        uint texWord = vram[row + wordX] & 0xFFFFu;
+        int index = int((texWord >> uint((uw & 3) * 4)) & 15u);
         int cx = (clutX + index) & 1023;
         return vram[uClutRow + cx] & 0xFFFFu;
     }
     if (depth == 1) {
         int wordX = (texBaseX + (uw >> 1)) & 1023;
-        uint packed = vram[row + wordX] & 0xFFFFu;
-        int index = int((packed >> uint((uw & 1) * 8)) & 255u);
+        uint texWord = vram[row + wordX] & 0xFFFFu;
+        int index = int((texWord >> uint((uw & 1) * 8)) & 255u);
         int cx = (clutX + index) & 1023;
         return vram[uClutRow + cx] & 0xFFFFu;
     }
