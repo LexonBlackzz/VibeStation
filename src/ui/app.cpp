@@ -238,6 +238,10 @@ bool App::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = "imgui.ini";
 
+    // Bake the Definitive UI font atlas at the sizes we actually render.
+    // This avoids scaling ImGui's tiny default font up to large text sizes.
+    initialize_definitive_ui_fonts();
+
     // Style â€” Dark with custom colors
     ImGui::StyleColorsDark();
     ui_theme::ensure_theme_settings_initialized();
