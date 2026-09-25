@@ -123,6 +123,9 @@ set(VIBESTATION_SOURCES
     src/ui/output_resolution_utils.cpp
     src/ui/screenshot_utils.cpp
     src/ui/theme_settings.cpp
+    src/ui/definitive/definitive_fonts.cpp
+    src/ui/definitive/definitive_intro.cpp
+    src/ui/definitive/definitive_settings.cpp
     src/ui/definitive/definitive_home.cpp
     src/ui/panels/grim_reaper_actions.cpp
     src/ui/panels/grim_reaper_runtime.cpp
