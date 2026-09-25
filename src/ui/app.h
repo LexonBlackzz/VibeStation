@@ -73,7 +73,7 @@ private:
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;
-	bool gameplay_toolbar_popup_was_open_ = false;
+	bool gameplay_toolbar_turbo_active_ = false;
 	std::string bios_path_;
 	std::string rom_directory_;
 	std::string game_bin_path_;
