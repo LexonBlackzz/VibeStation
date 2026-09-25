@@ -678,6 +678,7 @@ void App::release_definitive_ui_assets() {
     definitive_ui::release_intro_assets();
 
     definitive_ui::release_background_assets();
+    definitive_ui::release_gameplay_ambient_assets();
     g_launcher_start_transition = LauncherStartTransition::None;
     g_launcher_start_transition_elapsed = 0.0f;
     g_launcher_intro_elapsed = 0.0f;
