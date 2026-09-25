@@ -8,7 +8,7 @@
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
 #include "ui/app.h"
-#include "vibestation_version.h"
+#include "version.h"
 #include <SDL.h>
 #include <algorithm>
 #include <chrono>
@@ -3361,7 +3361,7 @@ int main(int argc, char *argv[]) {
   SDL_SetMainReady(); // Tell SDL we handled main() ourselves
 
   printf("========================================\n");
-  printf("  %s\n", VIBESTATION_FULL_VERSION_STRING);
+  printf("  %s\n", vibestation_full_version_string());
   printf("========================================\n");
   printf("Starting up...\n");
   fflush(stdout);
