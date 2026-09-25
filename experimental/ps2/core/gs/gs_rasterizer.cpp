@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <thread>
 
 namespace ps2 {
 namespace {
@@ -1046,6 +1047,102 @@ u64 GsRasterizer::draw_line(
     return pixels;
 }
 
+bool parallel_simple_sprite_safe(
+    const GsRasterContext& ctx,
+    s32 left,
+    s32 right,
+    s32 top,
+    s32 bottom) {
+    if (!simple_frame_write(ctx) ||
+        left < 0 || top < 0 ||
+        right <= left || bottom <= top ||
+        ctx.fbw == 0u ||
+        static_cast<u32>(right) >
+            ctx.fbw * 64u) {
+        return false;
+    }
+
+    auto page_height = [](u32 psm) -> u32 {
+        if (psm == 0u || psm == 1u) return 32u;
+        if (psm == 2u || psm == 10u) return 64u;
+        return 0u;
+    };
+
+    const u32 target_page_height = page_height(ctx.psm);
+    if (target_page_height == 0u) return false;
+
+    const u64 target_base =
+        static_cast<u64>(ctx.fbp) * 256u;
+    const u32 target_min_page_x =
+        static_cast<u32>(left) >> 6u;
+    const u32 target_max_page_x =
+        static_cast<u32>(right - 1) >> 6u;
+    const u32 target_min_page_y =
+        static_cast<u32>(top) / target_page_height;
+    const u32 target_max_page_y =
+        static_cast<u32>(bottom - 1) / target_page_height;
+    if (target_max_page_x >= ctx.fbw) return false;
+
+    const u64 target_first_page =
+        static_cast<u64>(target_min_page_y) * ctx.fbw +
+        target_min_page_x;
+    const u64 target_last_page =
+        static_cast<u64>(target_max_page_y) * ctx.fbw +
+        target_max_page_x;
+    const u64 target_begin =
+        target_base + target_first_page * 8192u;
+    const u64 target_end =
+        target_base + (target_last_page + 1u) * 8192u;
+    if (target_end > GsVram::kSize) return false;
+
+    if (!ctx.texture.enabled) return true;
+
+    if (ctx.texture.nonzero_samples != nullptr ||
+        ctx.texture.alpha_samples != nullptr ||
+        ctx.texture.first_sample_x != nullptr ||
+        ctx.texture.first_sample_y != nullptr ||
+        ctx.texture.first_sample_rgba != nullptr ||
+        ctx.texture.nonzero_shaded != nullptr ||
+        ctx.texture.wms > 1u ||
+        ctx.texture.wmt > 1u) {
+        return false;
+    }
+
+    const u32 source_page_height =
+        page_height(ctx.texture.psm);
+    if (source_page_height == 0u ||
+        ctx.texture.bw == 0u ||
+        ctx.texture.width == 0u ||
+        ctx.texture.height == 0u) {
+        return false;
+    }
+
+    const u32 source_pages_x =
+        (ctx.texture.width + 63u) >> 6u;
+    const u32 source_pages_y =
+        (ctx.texture.height + source_page_height - 1u) /
+        source_page_height;
+    if (source_pages_x == 0u ||
+        source_pages_y == 0u ||
+        source_pages_x > ctx.texture.bw) {
+        return false;
+    }
+
+    const u64 source_base =
+        static_cast<u64>(ctx.texture.bp) * 256u;
+    const u64 source_last_page =
+        static_cast<u64>(source_pages_y - 1u) *
+            ctx.texture.bw +
+        (source_pages_x - 1u);
+    const u64 source_begin = source_base;
+    const u64 source_end =
+        source_base + (source_last_page + 1u) * 8192u;
+    if (source_end > GsVram::kSize) return false;
+
+    return source_end <= target_begin ||
+           target_end <= source_begin;
+}
+
 u64 GsRasterizer::draw_sprite(
     GsVram& vram,
     const GsRasterContext& ctx,
@@ -1105,8 +1202,10 @@ u64 GsRasterizer::draw_sprite(
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
         !hot_psm16_pixels && simple_frame_write(ctx);
-    u64 pixels = 0;
-    for (s32 y = top; y < bottom; ++y) {
+
+    auto draw_rows = [&](s32 row_begin, s32 row_end) -> u64 {
+        u64 row_pixels = 0;
+        for (s32 y = row_begin; y < row_end; ++y) {
         const s32 py = y * 16 + 8;
         const s32 cached_row_v = cached_fst
             ? cached_v[static_cast<std::size_t>(y - top)]
@@ -1166,9 +1265,56 @@ u64 GsRasterizer::draw_sprite(
                 : simple_pixels
                     ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
                     : draw_pixel(vram, ctx, x, y, b.z, rgba);
-            if (wrote) ++pixels;
+            if (wrote) ++row_pixels;
+            }
         }
+        return row_pixels;
+    };
+
+    const u64 area =
+        static_cast<u64>(right - left) *
+        static_cast<u64>(bottom - top);
+    const s32 rows = bottom - top;
+    const bool parallel =
+        simple_pixels &&
+        area >= 65536u &&
+        rows >= 16 &&
+        parallel_simple_sprite_safe(
+            ctx, left, right, top, bottom);
+
+    if (!parallel) {
+        return draw_rows(top, bottom);
     }
+
+    constexpr u32 kWorkers = 4u;
+    std::array<u64, kWorkers> counts{};
+    std::array<s32, kWorkers + 1u> boundaries{};
+    boundaries[0] = top;
+    for (u32 worker = 1u; worker < kWorkers; ++worker) {
+        boundaries[worker] =
+            top + static_cast<s32>(
+                (static_cast<s64>(rows) * worker) /
+                kWorkers);
+    }
+    boundaries[kWorkers] = bottom;
+
+    std::array<std::thread, kWorkers - 1u> threads;
+    for (u32 worker = 1u; worker < kWorkers; ++worker) {
+        threads[worker - 1u] = std::thread(
+            [&, worker] {
+                counts[worker] = draw_rows(
+                    boundaries[worker],
+                    boundaries[worker + 1u]);
+            });
+    }
+    counts[0] = draw_rows(
+        boundaries[0], boundaries[1]);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    u64 pixels = 0u;
+    for (u64 count : counts) pixels += count;
     return pixels;
 }
 
