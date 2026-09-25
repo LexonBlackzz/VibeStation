@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -3396,11 +3397,16 @@ u32 EeCpu::run_quiet_fast_prefix(
     const u32* instructions,
     u32 instruction_count,
     u32 maximum_instructions,
-    bool* store_executed) {
-    if (halted_ || instructions == nullptr ||
-        instruction_count == 0u ||
+    bool* store_executed,
+    const u8* instruction_ram) {
+    const bool direct_trace =
+        instructions == nullptr && instruction_ram != nullptr;
+    if (halted_ ||
         maximum_instructions == 0u ||
-        state_.pc != block_pc) {
+        (!direct_trace &&
+         (instructions == nullptr ||
+          instruction_count == 0u ||
+          state_.pc != block_pc))) {
         return 0u;
     }
 
@@ -3408,8 +3414,9 @@ u32 EeCpu::run_quiet_fast_prefix(
         *store_executed = false;
     }
 
-    u32 limit = std::min(
-        instruction_count, maximum_instructions);
+    u32 limit = direct_trace
+        ? maximum_instructions
+        : std::min(instruction_count, maximum_instructions);
     const u32 compare_distance =
         state_.cop0[11] - state_.cop0[9];
     if (compare_distance != 0u) {
@@ -3418,12 +3425,29 @@ u32 EeCpu::run_quiet_fast_prefix(
     u32 retired = 0u;
 
     for (; retired < limit; ++retired) {
-        const u32 expected_pc = block_pc + retired * 4u;
-        if (state_.pc != expected_pc) break;
+        const u32 expected_pc = direct_trace
+            ? state_.pc
+            : block_pc + retired * 4u;
+        if (!direct_trace && state_.pc != expected_pc) break;
 
-        const u32 instruction = instructions[retired];
+        u32 instruction = 0u;
+        if (direct_trace) {
+            const u32 physical = EeBus::to_physical(expected_pc);
+            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+            if ((expected_pc & 3u) != 0u ||
+                physical > kMainRamSize - sizeof(u32)) {
+                break;
+            }
+            std::memcpy(
+                &instruction,
+                instruction_ram + physical,
+                sizeof(instruction));
+        } else {
+            instruction = instructions[retired];
+        }
 
-        if (instruction == 0u &&
+        if (!direct_trace &&
+            instruction == 0u &&
             !next_is_delay_slot_ &&
             state_.next_pc == expected_pc + 4u) {
             u32 run = 1u;
@@ -3752,8 +3776,14 @@ u32 EeCpu::run_quiet_fast_prefix(
                 if (!access_ok) {
                     handled = false;
                 } else {
-                    stop_after_instruction = true;
-                    if (store_executed != nullptr) {
+                    // Cached prefixes must revalidate after a store because
+                    // the write may have touched their code page. Direct RAM
+                    // traces fetch the next instruction fresh, so they can
+                    // safely continue through ordinary and self-modifying
+                    // stores without returning to the block cache.
+                    stop_after_instruction = !direct_trace;
+                    if (stop_after_instruction &&
+                        store_executed != nullptr) {
                         *store_executed = true;
                     }
                 }

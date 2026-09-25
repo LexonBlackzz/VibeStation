@@ -1225,6 +1225,34 @@ u64 Ps2System::try_run_quiet_ee_batch(
     while (retired < maximum && !ee_.halted()) {
         bool progressed = false;
 
+        // Interpreter-only RAM trace: bypass cached basic-block lookup and
+        // generation validation for the common case. The EE decoder fetches
+        // each instruction fresh from RAM and follows supported branches and
+        // delay slots directly until an unsupported/MMIO opcode or the exact
+        // device/event boundary is reached.
+        if (defer_ee_tick && !ee_.jit_enabled()) {
+            const u32 pc = ee_.state().pc;
+            const u32 physical = EeBus::to_physical(pc);
+            if ((pc & 3u) == 0u &&
+                physical <= ram_.size() - sizeof(u32)) {
+                const u32 trace_retired = ee_.run_quiet_fast_prefix(
+                    0u,
+                    nullptr,
+                    0u,
+                    static_cast<u32>(maximum - retired),
+                    nullptr,
+                    ram_.data());
+                if (trace_retired != 0u) {
+                    retired += trace_retired;
+                    quiet_block_instructions_ += trace_retired;
+                    fast_interpreter_instructions_ += trace_retired;
+                    ++fast_interpreter_calls_;
+                    progressed = true;
+                    continue;
+                }
+            }
+        }
+
         if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
             const u32 block_pc = block->pc;
 
