@@ -134,6 +134,8 @@ Uint32 g_ui_action_sound_until_ms = 0;
 UiSoundClip g_ui_cursor_sound;
 UiSoundClip g_ui_open_sound;
 UiSoundClip g_ui_close_sound;
+UiSoundClip g_ui_logo_sound;
+bool g_launcher_startup_sound_played = false;
 std::array<bool, 5> g_menu_was_engaged = {};
 
 struct LauncherQuote {
@@ -709,8 +711,11 @@ bool ensure_ui_sounds_loaded() {
         find_ui_sound_path("open.wav");
     const std::filesystem::path close_path =
         find_ui_sound_path("close.wav");
+    const std::filesystem::path logo_path =
+        find_ui_sound_path("logo.wav");
 
-    if (cursor_path.empty() || open_path.empty() || close_path.empty()) {
+    if (cursor_path.empty() || open_path.empty() || close_path.empty() ||
+        logo_path.empty()) {
         return false;
     }
 
@@ -734,7 +739,8 @@ bool ensure_ui_sounds_loaded() {
     const bool loaded =
         convert_ui_sound(cursor_path, g_ui_sound_spec, g_ui_cursor_sound) &&
         convert_ui_sound(open_path, g_ui_sound_spec, g_ui_open_sound) &&
-        convert_ui_sound(close_path, g_ui_sound_spec, g_ui_close_sound);
+        convert_ui_sound(close_path, g_ui_sound_spec, g_ui_close_sound) &&
+        convert_ui_sound(logo_path, g_ui_sound_spec, g_ui_logo_sound);
 
     if (loaded) {
         // A tiny attack ramp removes the transient click when cursor.wav is
@@ -749,11 +755,68 @@ bool ensure_ui_sounds_loaded() {
         g_ui_cursor_sound.pcm.clear();
         g_ui_open_sound.pcm.clear();
         g_ui_close_sound.pcm.clear();
+        g_ui_logo_sound.pcm.clear();
         return false;
     }
 
     SDL_PauseAudioDevice(g_ui_sound_device, 0);
     return true;
+}
+
+Uint32 ui_sound_duration_ms(const UiSoundClip& clip) {
+    const int bits_per_sample =
+        SDL_AUDIO_BITSIZE(g_ui_sound_spec.format);
+    const Uint32 bytes_per_second =
+        (g_ui_sound_spec.freq > 0 &&
+         g_ui_sound_spec.channels > 0 &&
+         bits_per_sample > 0)
+            ? static_cast<Uint32>(
+                g_ui_sound_spec.freq *
+                g_ui_sound_spec.channels *
+                (bits_per_sample / 8))
+            : 0u;
+
+    if (bytes_per_second == 0 || clip.pcm.empty()) {
+        return 0;
+    }
+
+    return static_cast<Uint32>(
+        (static_cast<Uint64>(clip.pcm.size()) * 1000u) /
+        bytes_per_second);
+}
+
+void play_startup_logo_sound() {
+    if (g_launcher_startup_sound_played ||
+        !ensure_ui_sounds_loaded() ||
+        g_ui_sound_device == 0 ||
+        g_ui_logo_sound.pcm.empty()) {
+        return;
+    }
+
+    // The startup sound owns the UI audio device until it has naturally
+    // finished. Cursor highlights remain suppressed during this interval.
+    SDL_ClearQueuedAudio(g_ui_sound_device);
+    if (SDL_QueueAudio(
+            g_ui_sound_device,
+            g_ui_logo_sound.pcm.data(),
+            static_cast<Uint32>(g_ui_logo_sound.pcm.size())) == 0) {
+        g_launcher_startup_sound_played = true;
+        const Uint32 duration_ms =
+            std::max<Uint32>(
+                ui_sound_duration_ms(g_ui_logo_sound), 40u);
+        g_ui_action_sound_until_ms =
+            SDL_GetTicks() + duration_ms;
+    }
+}
+
+void stop_startup_logo_sound() {
+    if (!g_launcher_startup_sound_played ||
+        g_ui_sound_device == 0) {
+        return;
+    }
+
+    SDL_ClearQueuedAudio(g_ui_sound_device);
+    g_ui_action_sound_until_ms = 0;
 }
 
 void play_menu_sound(UiMenuSound sound) {
@@ -797,23 +860,9 @@ void play_menu_sound(UiMenuSound sound) {
         // own playback window from subsequent automatic highlight sounds.
         SDL_ClearQueuedAudio(g_ui_sound_device);
 
-        const int bits_per_sample =
-            SDL_AUDIO_BITSIZE(g_ui_sound_spec.format);
-        const Uint32 bytes_per_second =
-            (g_ui_sound_spec.freq > 0 &&
-             g_ui_sound_spec.channels > 0 &&
-             bits_per_sample > 0)
-                ? static_cast<Uint32>(
-                    g_ui_sound_spec.freq *
-                    g_ui_sound_spec.channels *
-                    (bits_per_sample / 8))
-                : 0u;
         const Uint32 duration_ms =
-            bytes_per_second > 0
-                ? static_cast<Uint32>(
-                    (static_cast<Uint64>(clip->pcm.size()) * 1000u) /
-                    bytes_per_second)
-                : 250u;
+            std::max<Uint32>(
+                ui_sound_duration_ms(*clip), 40u);
         g_ui_action_sound_until_ms =
             now + std::max<Uint32>(duration_ms, 40u);
     }
@@ -2010,6 +2059,8 @@ void App::release_definitive_ui_assets() {
     g_ui_cursor_sound.pcm.clear();
     g_ui_open_sound.pcm.clear();
     g_ui_close_sound.pcm.clear();
+    g_ui_logo_sound.pcm.clear();
+    g_launcher_startup_sound_played = false;
     g_menu_was_engaged.fill(false);
 
     if (g_intro_icon_texture != 0) {
@@ -2862,6 +2913,10 @@ void App::panel_definitive_home() {
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
 
+    if (!g_launcher_startup_sound_played) {
+        play_startup_logo_sound();
+    }
+
     if (!g_launcher_intro_complete) {
         const bool skip_intro =
             ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
@@ -2869,6 +2924,8 @@ void App::panel_definitive_home() {
             ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
 
         if (skip_intro) {
+            stop_startup_logo_sound();
+
             // End the intro on this frame and return once so the same keypress
             // cannot also activate a launcher button underneath it.
             g_launcher_intro_elapsed = kLauncherIntroDuration;
