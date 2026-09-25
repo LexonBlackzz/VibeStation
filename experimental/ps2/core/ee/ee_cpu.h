@@ -130,6 +130,21 @@ public:
     [[nodiscard]] u64 hot_sif_getreg_calls() const {
         return hot_sif_getreg_calls_;
     }
+    [[nodiscard]] u64 hot_sif_getreg_path_instructions() const {
+        return hot_sif_getreg_path_instructions_;
+    }
+    [[nodiscard]] u32 hot_sif_getreg_return_v0() const {
+        return hot_sif_getreg_return_v0_;
+    }
+    [[nodiscard]] u32 hot_sif_getreg_return_status() const {
+        return hot_sif_getreg_return_status_;
+    }
+    [[nodiscard]] u32 hot_sif_getreg_return_cause() const {
+        return hot_sif_getreg_return_cause_;
+    }
+    [[nodiscard]] u32 hot_sif_getreg_return_epc() const {
+        return hot_sif_getreg_return_epc_;
+    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -187,6 +202,13 @@ private:
     bool memory_exception_pending_ = false;
     u32 hot_sif_getreg_return_pc_ = 0u;
     u64 hot_sif_getreg_calls_ = 0u;
+    bool hot_sif_getreg_inflight_ = false;
+    u64 hot_sif_getreg_start_instruction_ = 0u;
+    u64 hot_sif_getreg_path_instructions_ = 0u;
+    u32 hot_sif_getreg_return_v0_ = 0u;
+    u32 hot_sif_getreg_return_status_ = 0u;
+    u32 hot_sif_getreg_return_cause_ = 0u;
+    u32 hot_sif_getreg_return_epc_ = 0u;
     std::string halt_reason_;
     EeJit jit_{};
     bool jit_enabled_ = false;

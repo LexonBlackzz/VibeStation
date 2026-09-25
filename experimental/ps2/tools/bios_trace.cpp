@@ -218,7 +218,15 @@ void print_state(const ps2::Ps2System& system) {
         << "EE_HOT_SIF_GETREG_CALLS="
         << system.ee().hot_sif_getreg_calls()
         << " RA=0x" << std::hex << std::uppercase
-        << sif_getreg_ra << std::dec << '\n';
+        << sif_getreg_ra
+        << " PATH_INS=" << std::dec
+        << system.ee().hot_sif_getreg_path_instructions()
+        << " V0=0x" << std::hex << std::uppercase
+        << system.ee().hot_sif_getreg_return_v0()
+        << " STATUS=0x" << system.ee().hot_sif_getreg_return_status()
+        << " CAUSE=0x" << system.ee().hot_sif_getreg_return_cause()
+        << " EPC=0x" << system.ee().hot_sif_getreg_return_epc()
+        << std::dec << '\n';
     if (sif_getreg_ra != 0u) {
         for (ps2::s32 delta = -48; delta <= 96; delta += 4) {
             const ps2::u32 address =

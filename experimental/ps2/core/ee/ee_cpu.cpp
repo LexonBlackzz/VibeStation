@@ -143,6 +143,13 @@ void EeCpu::reset(u32 entry_point) {
     memory_exception_pending_ = false;
     hot_sif_getreg_return_pc_ = 0u;
     hot_sif_getreg_calls_ = 0u;
+    hot_sif_getreg_inflight_ = false;
+    hot_sif_getreg_start_instruction_ = 0u;
+    hot_sif_getreg_path_instructions_ = 0u;
+    hot_sif_getreg_return_v0_ = 0u;
+    hot_sif_getreg_return_status_ = 0u;
+    hot_sif_getreg_return_cause_ = 0u;
+    hot_sif_getreg_return_epc_ = 0u;
     halt_reason_.clear();
 }
 
@@ -401,6 +408,12 @@ bool EeCpu::execute_special(
             if (hot_sif_getreg_return_pc_ == 0u) {
                 hot_sif_getreg_return_pc_ =
                     static_cast<u32>(gpr_u64(31));
+            }
+            if (hot_sif_getreg_path_instructions_ == 0u &&
+                !hot_sif_getreg_inflight_) {
+                hot_sif_getreg_inflight_ = true;
+                hot_sif_getreg_start_instruction_ =
+                    state_.instructions_executed;
             }
         }
 
@@ -4373,6 +4386,19 @@ bool EeCpu::step_internal(
     }
 
     const u32 pc = state_.pc;
+    if (hot_sif_getreg_inflight_ &&
+        hot_sif_getreg_return_pc_ != 0u &&
+        pc == hot_sif_getreg_return_pc_) {
+        hot_sif_getreg_inflight_ = false;
+        hot_sif_getreg_path_instructions_ =
+            state_.instructions_executed -
+            hot_sif_getreg_start_instruction_;
+        hot_sif_getreg_return_v0_ =
+            static_cast<u32>(state_.gpr[2].lo);
+        hot_sif_getreg_return_status_ = state_.cop0[12];
+        hot_sif_getreg_return_cause_ = state_.cop0[13];
+        hot_sif_getreg_return_epc_ = state_.cop0[14];
+    }
     const u32 old_next_pc = state_.next_pc;
     current_is_delay_slot_ = next_is_delay_slot_;
     next_is_delay_slot_ = false;
