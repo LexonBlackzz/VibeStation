@@ -1677,6 +1677,20 @@ int main(int argc, char** argv) {
               << system.quiet_superbatch_calls()
               << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
               << system.quiet_superbatch_instructions() << '\n';
+    // Temporary deep dump of the dominant post-BIOS EE routine.
+    std::cout << "EE_HOT_ROUTINE_DUMP_BEGIN=0x00215400 END=0x00215800\n";
+    for (ps2::u32 address = 0x00215400u;
+         address < 0x00215800u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
     std::cout << "EE_QUIET_HOT_BLOCKS";
     for (const auto& [pc, hits] : system.quiet_block_hotspots(32u)) {
         std::cout
