@@ -1,6 +1,7 @@
 #include "core/gs/gs_vram.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 
@@ -129,36 +130,63 @@ constexpr u8 kColumn16[8][16] = {
     { 100,102,108,110,116,118,124,126,101,103,109,111,117,119,125,127 },
 };
 
+constexpr std::array<u16, 64u * 32u> make_page32_words() {
+    std::array<u16, 64u * 32u> out{};
+    for (u32 y = 0; y < 32u; ++y) {
+        for (u32 x = 0; x < 64u; ++x) {
+            out[y * 64u + x] = static_cast<u16>(
+                static_cast<u32>(kBlock32[y >> 3][x >> 3]) * 64u +
+                static_cast<u32>(kColumn32[y & 7u][x & 7u]));
+        }
+    }
+    return out;
+}
+
+constexpr std::array<u16, 64u * 64u> make_page16_halfwords(
+    bool s_layout) {
+    std::array<u16, 64u * 64u> out{};
+    for (u32 y = 0; y < 64u; ++y) {
+        for (u32 x = 0; x < 64u; ++x) {
+            const u32 block = s_layout
+                ? kBlock16S[y >> 3][x >> 4]
+                : kBlock16[y >> 3][x >> 4];
+            out[y * 64u + x] = static_cast<u16>(
+                block * 128u +
+                static_cast<u32>(kColumn16[y & 7u][x & 15u]));
+        }
+    }
+    return out;
+}
+
+constexpr auto kPage32Words = make_page32_words();
+constexpr auto kPage16Halfwords = make_page16_halfwords(false);
+constexpr auto kPage16SHalfwords = make_page16_halfwords(true);
+
 u32 address32(u32 x, u32 y, u32 bp, u32 bw) {
     const u32 page_x = x >> 6;
     const u32 page_y = y >> 5;
-    const u32 px = x & 63u;
-    const u32 py = y & 31u;
-    const u32 block = kBlock32[py >> 3][px >> 3];
-    const u32 column = kColumn32[py & 7u][px & 7u];
-
+    const u32 page_offset =
+        kPage32Words[(y & 31u) * 64u + (x & 63u)];
     const u32 word =
         (bp << 6) +
         ((page_y * bw + page_x) << 11) +
-        block * 64u +
-        column;
+        page_offset;
     return (word & ((GsVram::kSize / 4u) - 1u)) * 4u;
 }
 
 u32 address16(u32 x, u32 y, u32 bp, u32 bw, bool s_layout) {
     const u32 page_x = x >> 6;
     const u32 page_y = y >> 6;
-    const u32 px = x & 63u;
-    const u32 py = y & 63u;
-    const u32 block =
-        s_layout ? kBlock16S[py >> 3][px >> 4] : kBlock16[py >> 3][px >> 4];
-    const u32 column = kColumn16[py & 7u][px & 15u];
+    const std::size_t index =
+        static_cast<std::size_t>((y & 63u) * 64u + (x & 63u));
+    const u32 page_offset = s_layout
+        ? kPage16SHalfwords[index]
+        : kPage16Halfwords[index];
 
     const u32 halfword =
         (bp << 7) +
         ((page_y * bw + page_x) << 12) +
-        block * 128u +
-        column;
+        page_offset;
     return (halfword & ((GsVram::kSize / 2u) - 1u)) * 2u;
 }
 
