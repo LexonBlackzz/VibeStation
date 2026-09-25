@@ -752,6 +752,11 @@ GpuHardwareRasterizer::Vertex Gpu::hardware_vertex(const Vertex& v) {
     return out;
 }
 
+const u16* Gpu::vram() const {
+    ensure_cpu_vram_current();
+    return vram_.data();
+}
+
 u16* Gpu::vram_mut_data() {
     prepare_software_vram_write();
     return vram_.data();
