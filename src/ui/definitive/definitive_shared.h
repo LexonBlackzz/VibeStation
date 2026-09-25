@@ -21,6 +21,14 @@ void release_intro_assets();
 void draw_intro_presentation(
     const ImVec2& pos, const ImVec2& size, float elapsed);
 
+void preload_audio_assets();
+void release_audio_assets();
+void play_cursor_sound();
+void play_open_sound();
+void play_close_sound();
+void play_startup_sound();
+void stop_startup_sound();
+
 struct Layout {
     ImVec2 origin{};
     float scale = 1.0f;
