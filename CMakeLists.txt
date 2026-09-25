@@ -191,6 +191,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/background.jpg")
         VERBATIM)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon512x512.png")
+    add_custom_command(TARGET VibeStation POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:VibeStation>/resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon512x512.png"
+            "$<TARGET_FILE_DIR:VibeStation>/resources/icon512x512.png"
+        COMMENT "Copying VibeStation startup icon"
+        VERBATIM)
+endif()
+
 set(VIBESTATION_UI_SOUND_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/ui/definitive/sounds")
 add_custom_command(TARGET VibeStation POST_BUILD
