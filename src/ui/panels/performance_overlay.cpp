@@ -309,7 +309,8 @@ void App::draw_performance_overlay(const ImVec2& image_pos, const ImVec2& image_
     const auto& stats = runtime_snapshot_.profiling;
     const double slowdown_percent = current_emulation_slowdown_percent();
     const bool unlimited_turbo_active =
-        turbo_hold_active_ && config_turbo_speed_percent_ <= 0;
+        (turbo_hold_active_ || gameplay_toolbar_turbo_active_) &&
+        config_turbo_speed_percent_ <= 0;
     const double effective_speed_multiplier =
         (measured_emulation_speed_multiplier_ > 0.0)
         ? measured_emulation_speed_multiplier_
