@@ -423,6 +423,14 @@ void EmuRunner::worker_main() {
         snapshot.dma2_base_addr = dma2.base_addr;
         snapshot.dma2_words = dma2.transfer_words;
         snapshot.dma2_from_ram = dma2.from_ram;
+        snapshot.gpu_hardware_raster_active =
+            system_->gpu().hardware_rasterizer_active();
+        snapshot.gpu_hardware_dispatches =
+            system_->gpu().hardware_raster_dispatch_count();
+        snapshot.gpu_hardware_uploads =
+            system_->gpu().hardware_raster_upload_count();
+        snapshot.gpu_hardware_downloads =
+            system_->gpu().hardware_raster_download_count();
         snapshot.spu_audio = system_->spu_audio_diag();
         snapshot.audio_queue = system_->spu().audio_queue_stats(true);
         update_snapshot_display_diag_from_debug(
