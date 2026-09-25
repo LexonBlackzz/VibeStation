@@ -1,5 +1,7 @@
 #include "ui/app.h"
 #include "ui/definitive/definitive_shared.h"
+#include "ui/embedded_resource_ids.h"
+#include "ui/embedded_resources.h"
 
 #include <SDL.h>
 
@@ -76,20 +78,66 @@ std::filesystem::path find_ui_sound_path(
     return {};
 }
 
+bool load_ui_wav_source(
+    int resource_id,
+    const std::filesystem::path& fallback_path,
+    SDL_AudioSpec& source_spec,
+    Uint8*& source_buffer,
+    Uint32& source_length) {
+    source_spec = {};
+    source_buffer = nullptr;
+    source_length = 0;
+
+    const vibestation::EmbeddedResourceView embedded =
+        vibestation::embedded_resource(resource_id);
+    if (embedded) {
+        SDL_RWops* rw =
+            SDL_RWFromConstMem(
+                embedded.data,
+                static_cast<int>(embedded.size));
+        if (rw != nullptr &&
+            SDL_LoadWAV_RW(
+                rw,
+                1,
+                &source_spec,
+                &source_buffer,
+                &source_length) != nullptr) {
+            return true;
+        }
+
+        if (rw != nullptr) {
+            // SDL_LoadWAV_RW only frees the RWops when it is actually called.
+            // On failure after the call, freesrc=1 has already handled it.
+            rw = nullptr;
+        }
+    }
+
+    if (fallback_path.empty()) {
+        return false;
+    }
+
+    return SDL_LoadWAV(
+        fallback_path.string().c_str(),
+        &source_spec,
+        &source_buffer,
+        &source_length) != nullptr;
+}
+
 bool convert_ui_sound(
-    const std::filesystem::path& path,
+    int resource_id,
+    const std::filesystem::path& fallback_path,
     const SDL_AudioSpec& target_spec,
     UiSoundClip& out_clip) {
     SDL_AudioSpec source_spec{};
     Uint8* source_buffer = nullptr;
     Uint32 source_length = 0;
 
-    if (path.empty() ||
-        SDL_LoadWAV(
-            path.string().c_str(),
-            &source_spec,
-            &source_buffer,
-            &source_length) == nullptr) {
+    if (!load_ui_wav_source(
+            resource_id,
+            fallback_path,
+            source_spec,
+            source_buffer,
+            source_length)) {
         return false;
     }
 
@@ -362,13 +410,6 @@ bool ensure_ui_sounds_loaded() {
     const std::filesystem::path logo_path =
         find_ui_sound_path("logo.wav");
 
-    if (cursor_path.empty() ||
-        open_path.empty() ||
-        close_path.empty() ||
-        logo_path.empty()) {
-        return false;
-    }
-
     SDL_AudioSpec desired{};
     desired.freq = 44100;
     desired.format = AUDIO_F32SYS;
@@ -390,18 +431,22 @@ bool ensure_ui_sounds_loaded() {
 
     const bool loaded =
         convert_ui_sound(
+            vibestation::resource_ids::UiCursorWav,
             cursor_path,
             g_ui_sound_spec,
             g_ui_cursor_sound) &&
         convert_ui_sound(
+            vibestation::resource_ids::UiOpenWav,
             open_path,
             g_ui_sound_spec,
             g_ui_open_sound) &&
         convert_ui_sound(
+            vibestation::resource_ids::UiCloseWav,
             close_path,
             g_ui_sound_spec,
             g_ui_close_sound) &&
         convert_ui_sound(
+            vibestation::resource_ids::UiLogoWav,
             logo_path,
             g_ui_sound_spec,
             g_ui_logo_sound);
