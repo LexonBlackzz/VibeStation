@@ -392,8 +392,15 @@ u32 GsRasterizer::shade_pixel(
             texture.aem);
     } else {
         if (texture.psm == 2u) {
-            const u16 color = vram.read_psmct16(
-                x, y, texture.bp, texture.bw);
+            const u16 color =
+                texture.cached_psmct16 != nullptr &&
+                x < texture.width && y < texture.height
+                    ? texture.cached_psmct16[
+                        static_cast<std::size_t>(y) *
+                            texture.cached_psmct16_stride +
+                        x]
+                    : vram.read_psmct16(
+                        x, y, texture.bp, texture.bw);
             const u32 alpha =
                 (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
                 (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
