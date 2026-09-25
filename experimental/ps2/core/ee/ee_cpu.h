@@ -4,6 +4,7 @@
 #include "core/ee/ee_jit.h"
 
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -146,20 +147,14 @@ private:
         bool skip_interrupt_check = false);
 
     struct QuietDecodedInstruction {
+        // Raw word keeps the immediate/jump payload. Metadata packs the hot
+        // decoded fields: kind[3:0], rs[8:4], rt[13:9], rd[18:14],
+        // sa[23:19], funct[29:24]. Exactly 8 bytes per guest instruction.
         u32 instruction = 0;
-        s16 imm = 0;
-        u8 kind = 0;
-        u8 opcode = 0;
-        u8 rs = 0;
-        u8 rt = 0;
-        u8 rd = 0;
-        u8 sa = 0;
-        u8 funct = 0;
+        u32 metadata = 0;
     };
     struct QuietDecodedPage {
-        u32 physical_page = 0;
-        u32 generation = 0;
-        bool valid = false;
+        u32 generation = ~u32{0};
         std::array<QuietDecodedInstruction, 1024> instructions{};
     };
     const QuietDecodedInstruction* quiet_decoded_instruction(
@@ -205,8 +200,9 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
-    std::vector<QuietDecodedPage> quiet_decoded_pages_ =
-        std::vector<QuietDecodedPage>(64);
+    std::vector<std::unique_ptr<QuietDecodedPage>>
+        quiet_decoded_pages_ =
+            std::vector<std::unique_ptr<QuietDecodedPage>>(8192);
     u64 quiet_decoded_cache_hits_ = 0;
     u64 quiet_decoded_cache_rebuilds_ = 0;
     bool halted_ = false;
