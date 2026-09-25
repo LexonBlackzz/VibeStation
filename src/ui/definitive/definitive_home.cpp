@@ -239,6 +239,83 @@ ImU32 rgba(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
 }
 
+bool definitive_theme_color_differs(
+    const ImVec4& a, const ImVec4& b) {
+    constexpr float kEpsilon = 0.0025f;
+    return std::fabs(a.x - b.x) > kEpsilon ||
+        std::fabs(a.y - b.y) > kEpsilon ||
+        std::fabs(a.z - b.z) > kEpsilon ||
+        std::fabs(a.w - b.w) > kEpsilon;
+}
+
+bool definitive_theme_active() {
+    const ui_theme::ThemeSettings& theme = ui_theme::g_theme_settings;
+    return definitive_theme_color_differs(
+               theme.background, ui_theme::kDefaultThemeBackground) ||
+        definitive_theme_color_differs(
+               theme.surface, ui_theme::kDefaultThemeSurface) ||
+        definitive_theme_color_differs(
+               theme.accent, ui_theme::kDefaultThemeAccent) ||
+        definitive_theme_color_differs(
+               theme.text, ui_theme::kDefaultThemeText) ||
+        definitive_theme_color_differs(
+               theme.lists, ui_theme::kDefaultThemeLists);
+}
+
+ImU32 definitive_mix_theme_color(
+    ImU32 fallback, const ImVec4& theme_color, float mix) {
+    if (!definitive_theme_active()) {
+        return fallback;
+    }
+
+    const ImVec4 base = ImGui::ColorConvertU32ToFloat4(fallback);
+    ImVec4 out = ui_theme::theme_lerp(
+        base, theme_color, std::clamp(mix, 0.0f, 1.0f));
+    // Preserve the role-specific opacity from the original Definitive color.
+    out.w = base.w;
+    return ImGui::ColorConvertFloat4ToU32(out);
+}
+
+ImU32 definitive_text_color(ImU32 fallback) {
+    if (!definitive_theme_active()) {
+        return fallback;
+    }
+
+    const ImVec4 base = ImGui::ColorConvertU32ToFloat4(fallback);
+    const float max_rgb = std::max(base.x, std::max(base.y, base.z));
+    const float min_rgb = std::min(base.x, std::min(base.y, base.z));
+
+    // Keep deliberate semantic colors such as warnings and the four-color
+    // VibeStation brand accents intact. Neutral UI text follows Text.
+    if ((max_rgb - min_rgb) > 0.22f) {
+        return fallback;
+    }
+
+    return definitive_mix_theme_color(
+        fallback, ui_theme::g_theme_settings.text, 0.92f);
+}
+
+ImU32 definitive_surface_color(ImU32 fallback, float mix = 0.82f) {
+    return definitive_mix_theme_color(
+        fallback, ui_theme::g_theme_settings.surface, mix);
+}
+
+ImU32 definitive_list_color(ImU32 fallback, float mix = 0.84f) {
+    return definitive_mix_theme_color(
+        fallback, ui_theme::g_theme_settings.lists, mix);
+}
+
+ImU32 definitive_accent_color(ImU32 fallback, float mix = 0.92f) {
+    return definitive_mix_theme_color(
+        fallback, ui_theme::g_theme_settings.accent, mix);
+}
+
+ImU32 definitive_background_color(ImU32 fallback, float mix = 0.82f) {
+    return definitive_mix_theme_color(
+        fallback, ui_theme::g_theme_settings.background, mix);
+}
+
+
 float animate_towards(float current, float target, float response = 13.0f) {
     const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
     if (dt <= 0.0f) {
@@ -1075,6 +1152,14 @@ void draw_background(
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
         ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1),
         rgba(255, 255, 255, glow_alpha(255.0f * alpha)));
+
+    if (definitive_theme_active()) {
+        ImVec4 tint = ui_theme::g_theme_settings.background;
+        tint.w = std::clamp(0.34f * alpha, 0.0f, 0.34f);
+        draw->AddRectFilled(
+            pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            ImGui::ColorConvertFloat4ToU32(tint));
+    }
 }
 
 void draw_readability_shade(ImDrawList* draw,
@@ -1110,10 +1195,14 @@ void draw_readability_shade(ImDrawList* draw,
         const ImVec2 r1(pos.x + size.x * n1, pos.y + size.y);
         draw->AddRectFilledMultiColor(
             r0, r1,
-            rgba(0, 2, 5, glow_alpha(kTopAlpha * s0)),
-            rgba(0, 2, 5, glow_alpha(kTopAlpha * s1)),
-            rgba(0, 2, 5, glow_alpha(kBottomAlpha * s1)),
-            rgba(0, 2, 5, glow_alpha(kBottomAlpha * s0)));
+            definitive_background_color(
+                rgba(0, 2, 5, glow_alpha(kTopAlpha * s0)), 0.72f),
+            definitive_background_color(
+                rgba(0, 2, 5, glow_alpha(kTopAlpha * s1)), 0.72f),
+            definitive_background_color(
+                rgba(0, 2, 5, glow_alpha(kBottomAlpha * s1)), 0.72f),
+            definitive_background_color(
+                rgba(0, 2, 5, glow_alpha(kBottomAlpha * s0)), 0.72f));
     }
 }
 
@@ -1447,7 +1536,8 @@ void add_text(ImDrawList* draw, const Layout& layout, float x, float y,
     const float font_size = layout.px(size);
     ImFont* font = definitive_font_for_size(font_size);
     draw->AddText(
-        font, font_size, layout.point(x, y), color, text);
+        font, font_size, layout.point(x, y),
+        definitive_text_color(color), text);
 }
 
 void add_text_right(ImDrawList* draw, const Layout& layout, float right_x, float y,
@@ -1458,7 +1548,8 @@ void add_text_right(ImDrawList* draw, const Layout& layout, float right_x, float
         font_size, FLT_MAX, 0.0f, text);
     const ImVec2 p = layout.point(right_x, y);
     draw->AddText(font, font_size,
-        ImVec2(p.x - text_size.x, p.y), color, text);
+        ImVec2(p.x - text_size.x, p.y),
+        definitive_text_color(color), text);
 }
 
 enum class MenuIcon {
@@ -1608,10 +1699,12 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         const ImVec2 mid1(p.x + size.x + glow_mid, p.y + size.y + glow_mid);
 
         draw->AddRect(outer0, outer1,
-            rgba(90, 154, 216, glow_alpha(17.0f * glow)),
+            definitive_accent_color(
+                rgba(90, 154, 216, glow_alpha(17.0f * glow))),
             0.0f, 0, layout.px(1.0f));
         draw->AddRect(mid0, mid1,
-            rgba(126, 184, 236, glow_alpha(34.0f * glow)),
+            definitive_accent_color(
+                rgba(126, 184, 236, glow_alpha(34.0f * glow))),
             0.0f, 0, layout.px(1.2f));
     }
 
@@ -1620,17 +1713,19 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
             glow_alpha(116.0f * highlight_mix + (hovered ? 10.0f : 0.0f));
         draw->AddRectFilled(
             p, ImVec2(p.x + size.x, p.y + size.y),
-            rgba(12, 17, 23, fill_alpha));
+            definitive_surface_color(rgba(12, 17, 23, fill_alpha), 0.90f));
 
         draw->AddRect(
             p, ImVec2(p.x + size.x, p.y + size.y),
-            rgba(211, 229, 246, glow_alpha(235.0f * highlight_mix)),
+            definitive_accent_color(
+                rgba(211, 229, 246, glow_alpha(235.0f * highlight_mix))),
             0.0f, 0, layout.px(1.35f));
         draw->AddRect(
             ImVec2(p.x + layout.px(2.0f), p.y + layout.px(2.0f)),
             ImVec2(p.x + size.x - layout.px(2.0f),
                 p.y + size.y - layout.px(2.0f)),
-            rgba(103, 154, 205, glow_alpha(128.0f * highlight_mix)),
+            definitive_accent_color(
+                rgba(103, 154, 205, glow_alpha(128.0f * highlight_mix))),
             0.0f, 0, layout.px(0.8f));
 
         const float rail_half = layout.px(16.0f + 5.0f * highlight_mix);
@@ -1638,7 +1733,8 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
         draw->AddRectFilled(
             ImVec2(p.x - layout.px(2.0f), center_y - rail_half),
             ImVec2(p.x, center_y + rail_half),
-            rgba(205, 231, 255, glow_alpha(235.0f * highlight_mix)));
+            definitive_accent_color(
+                rgba(205, 231, 255, glow_alpha(235.0f * highlight_mix))));
     }
 
     const float emphasis = std::clamp(highlight_mix, 0.0f, 1.0f);
@@ -1673,11 +1769,16 @@ bool small_button(const Layout& layout, const char* id, const char* label,
     }
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, rgba(12, 15, 19, 205));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(24, 31, 39, 225));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(32, 42, 52, 235));
-    ImGui::PushStyleColor(ImGuiCol_Border, rgba(128, 145, 163, 190));
-    ImGui::PushStyleColor(ImGuiCol_Text, rgba(226, 230, 235, 245));
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        definitive_surface_color(rgba(12, 15, 19, 205), 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        definitive_surface_color(rgba(24, 31, 39, 225), 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+        definitive_accent_color(rgba(32, 42, 52, 235), 0.76f));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+        definitive_accent_color(rgba(128, 145, 163, 190), 0.68f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        definitive_text_color(rgba(226, 230, 235, 245)));
     ImGui::PushID(id);
     const bool pressed = ImGui::Button(label, layout.size(w, h));
     ImGui::PopID();
@@ -1693,14 +1794,17 @@ void draw_panel(ImDrawList* draw, const Layout& layout,
     float x, float y, float w, float h) {
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 p1 = layout.point(x + w, y + h);
-    draw->AddRectFilled(p0, p1, rgba(5, 8, 11, 178));
-    draw->AddRect(p0, p1, rgba(102, 116, 130, 205), 0.0f, 0, layout.px(1.0f));
+    draw->AddRectFilled(
+        p0, p1, definitive_list_color(rgba(5, 8, 11, 178), 0.88f));
+    draw->AddRect(
+        p0, p1, definitive_accent_color(rgba(102, 116, 130, 205), 0.58f),
+        0.0f, 0, layout.px(1.0f));
 }
 
 void draw_folder_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
     const ImVec2 p = layout.point(x, y);
     const float s = layout.scale;
-    const ImU32 c = rgba(226, 230, 235, 240);
+    const ImU32 c = definitive_text_color(rgba(226, 230, 235, 240));
     draw->AddLine(ImVec2(p.x, p.y + 4.0f * s),
         ImVec2(p.x + 8.0f * s, p.y + 4.0f * s), c, 1.6f * s);
     draw->AddLine(ImVec2(p.x + 8.0f * s, p.y + 4.0f * s),
@@ -1712,7 +1816,7 @@ void draw_folder_badge(ImDrawList* draw, const Layout& layout, float x, float y)
 void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
     const ImVec2 p = layout.point(x, y);
     const float s = layout.scale;
-    const ImU32 c = rgba(226, 230, 235, 240);
+    const ImU32 c = definitive_text_color(rgba(226, 230, 235, 240));
     draw->AddCircle(ImVec2(p.x + 9.0f * s, p.y + 10.0f * s),
         8.0f * s, c, 16, 1.5f * s);
     draw->AddCircleFilled(ImVec2(p.x + 9.0f * s, p.y + 6.0f * s),
@@ -1724,15 +1828,19 @@ void draw_settings_section(ImDrawList* draw, const Layout& layout,
     float x, float y, float w, float h, const char* title) {
     const ImVec2 p0 = layout.point(x, y);
     const ImVec2 p1 = layout.point(x + w, y + h);
-    draw->AddRectFilled(p0, p1, rgba(7, 11, 16, 226), layout.px(4.0f));
-    draw->AddRect(p0, p1, rgba(91, 109, 126, 175),
+    draw->AddRectFilled(
+        p0, p1, definitive_surface_color(rgba(7, 11, 16, 226), 0.92f),
+        layout.px(4.0f));
+    draw->AddRect(
+        p0, p1, definitive_accent_color(rgba(91, 109, 126, 175), 0.62f),
         layout.px(4.0f), 0, layout.px(1.0f));
     add_text(draw, layout, x + 18.0f, y + 11.0f, 15.5f,
         rgba(209, 218, 227, 235), title);
     draw->AddLine(
         layout.point(x + 18.0f, y + 39.0f),
         layout.point(x + w - 18.0f, y + 39.0f),
-        rgba(78, 92, 106, 145), layout.px(1.0f));
+        definitive_accent_color(rgba(78, 92, 106, 145), 0.52f),
+        layout.px(1.0f));
 }
 
 bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
@@ -1753,7 +1861,7 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
     if (hovered) {
         draw->AddRectFilled(
             p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
-            rgba(31, 43, 55, 92), layout.px(2.0f));
+            definitive_surface_color(rgba(31, 43, 55, 92), 0.78f), layout.px(2.0f));
     }
 
     add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
@@ -1764,7 +1872,9 @@ bool definitive_settings_switch(ImDrawList* draw, const Layout& layout,
     const ImVec2 track1 = layout.point(x + w - 19.0f, y + 40.0f);
     draw->AddRectFilled(
         track0, track1,
-        value ? rgba(78, 126, 166, 235) : rgba(55, 62, 70, 230),
+        value
+            ? definitive_accent_color(rgba(78, 126, 166, 235), 0.90f)
+            : definitive_surface_color(rgba(55, 62, 70, 230), 0.72f),
         layout.px(11.0f));
 
     const float knob_x = value ? (x + w - 31.0f) : (x + w - 51.0f);
@@ -1793,15 +1903,15 @@ bool definitive_settings_action(ImDrawList* draw, const Layout& layout,
     if (hovered) {
         draw->AddRectFilled(
             p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
-            rgba(31, 43, 55, 92), layout.px(2.0f));
+            definitive_surface_color(rgba(31, 43, 55, 92), 0.78f), layout.px(2.0f));
     }
 
     add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
         hovered ? rgba(240, 244, 248, 255) : rgba(221, 226, 232, 244),
         label);
 
-    const ImU32 arrow_color =
-        hovered ? rgba(226, 237, 247, 250) : rgba(145, 158, 170, 220);
+    const ImU32 arrow_color = definitive_text_color(
+        hovered ? rgba(226, 237, 247, 250) : rgba(145, 158, 170, 220));
     const ImVec2 a = layout.point(x + w - 34.0f, y + 22.0f);
     draw->AddLine(a, layout.point(x + w - 27.0f, y + 29.0f),
         arrow_color, layout.px(1.5f));
@@ -1827,7 +1937,7 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     if (row_hovered) {
         draw->AddRectFilled(
             p0, ImVec2(p0.x + row_size.x, p0.y + row_size.y),
-            rgba(31, 43, 55, 60), layout.px(2.0f));
+            definitive_surface_color(rgba(31, 43, 55, 60), 0.78f), layout.px(2.0f));
     }
 
     add_text(draw, layout, x + 18.0f, y + 6.0f, 16.5f,
@@ -1838,14 +1948,22 @@ bool definitive_settings_combo(ImDrawList* draw, const Layout& layout,
     ImGui::SetNextItemWidth(layout.px(176.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(8.0f, 6.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, rgba(8, 12, 17, 252));
-    ImGui::PushStyleColor(ImGuiCol_Border, rgba(96, 118, 138, 195));
-    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
-    ImGui::PushStyleColor(ImGuiCol_Header, rgba(54, 77, 97, 215));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, rgba(69, 96, 120, 230));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+        definitive_surface_color(rgba(14, 20, 27, 245), 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+        definitive_surface_color(rgba(25, 35, 45, 250), 0.74f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,
+        definitive_accent_color(rgba(30, 42, 54, 255), 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,
+        definitive_list_color(rgba(8, 12, 17, 252), 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+        definitive_accent_color(rgba(96, 118, 138, 195), 0.62f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        definitive_text_color(rgba(231, 236, 241, 250)));
+    ImGui::PushStyleColor(ImGuiCol_Header,
+        definitive_accent_color(rgba(54, 77, 97, 215), 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+        definitive_accent_color(rgba(69, 96, 120, 230), 0.84f));
     ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::Combo("##value", &current, items, item_count);
@@ -1877,7 +1995,7 @@ void definitive_settings_note(
         font,
         font_size,
         pos,
-        rgba(171, 181, 191, 235),
+        definitive_text_color(rgba(171, 181, 191, 235)),
         text,
         nullptr,
         wrap_width,
@@ -1895,9 +2013,12 @@ bool definitive_settings_color(
     ImGui::PushID(id);
     ImGui::SetNextItemWidth(layout.px(186.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
-    ImGui::PushStyleColor(ImGuiCol_Border, rgba(96, 118, 138, 195));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+        definitive_surface_color(rgba(14, 20, 27, 245), 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+        definitive_surface_color(rgba(25, 35, 45, 250), 0.74f));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+        definitive_accent_color(rgba(96, 118, 138, 195), 0.62f));
     ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed = ImGui::ColorEdit4(
         "##value", &value.x,
@@ -1926,14 +2047,16 @@ bool definitive_settings_tab_button(
     if (selected || hovered) {
         draw->AddRectFilled(
             p0, ImVec2(p0.x + sz.x, p0.y + sz.y),
-            selected ? rgba(28, 42, 55, 220) : rgba(28, 39, 50, 130),
+            selected
+                ? definitive_surface_color(rgba(28, 42, 55, 220), 0.86f)
+                : definitive_surface_color(rgba(28, 39, 50, 130), 0.72f),
             layout.px(2.0f));
     }
     if (selected) {
         draw->AddRectFilled(
             layout.point(x, y + 38.0f),
             layout.point(x + w, y + 40.0f),
-            rgba(175, 210, 238, 235));
+            definitive_accent_color(rgba(175, 210, 238, 235), 0.92f));
     }
 
     add_text(draw, layout, x + 12.0f, y + 10.0f, 14.5f,
@@ -1958,12 +2081,18 @@ bool definitive_settings_slider_int(
     ImGui::SetNextItemWidth(layout.px(186.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(7.0f, 5.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+        definitive_surface_color(rgba(14, 20, 27, 245), 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+        definitive_surface_color(rgba(25, 35, 45, 250), 0.74f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,
+        definitive_accent_color(rgba(30, 42, 54, 255), 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,
+        definitive_accent_color(rgba(167, 201, 230, 235), 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive,
+        definitive_accent_color(rgba(219, 235, 248, 255), 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        definitive_text_color(rgba(231, 236, 241, 250)));
     ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::SliderInt("##value", &value, min_value, max_value, format);
@@ -1988,12 +2117,18 @@ bool definitive_settings_slider_float(
     ImGui::SetNextItemWidth(layout.px(186.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, layout.size(7.0f, 5.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(14, 20, 27, 245));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(25, 35, 45, 250));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, rgba(30, 42, 54, 255));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, rgba(167, 201, 230, 235));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, rgba(219, 235, 248, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text, rgba(231, 236, 241, 250));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+        definitive_surface_color(rgba(14, 20, 27, 245), 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+        definitive_surface_color(rgba(25, 35, 45, 250), 0.74f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,
+        definitive_accent_color(rgba(30, 42, 54, 255), 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,
+        definitive_accent_color(rgba(167, 201, 230, 235), 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive,
+        definitive_accent_color(rgba(219, 235, 248, 255), 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        definitive_text_color(rgba(231, 236, 241, 250)));
     ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
     const bool changed =
         ImGui::SliderFloat("##value", &value, min_value, max_value, format);
@@ -2151,7 +2286,9 @@ void App::panel_definitive_settings() {
     else {
         draw->AddRectFilled(window_pos, window_end, rgba(7, 9, 12, 255));
     }
-    draw->AddRectFilled(window_pos, window_end, rgba(0, 2, 6, 148));
+    draw->AddRectFilled(
+        window_pos, window_end,
+        definitive_background_color(rgba(0, 2, 6, 148), 0.80f));
 
     constexpr float panel_x = 96.0f;
     constexpr float panel_y = 46.0f;
@@ -2165,8 +2302,13 @@ void App::panel_definitive_settings() {
         layout.point(panel_x - 10.0f, panel_y + 10.0f),
         layout.point(panel_x + panel_w + 10.0f, panel_y + panel_h + 10.0f),
         rgba(0, 0, 0, 76), layout.px(8.0f));
-    draw->AddRectFilled(panel0, panel1, rgba(5, 9, 14, 245), layout.px(5.0f));
-    draw->AddRect(panel0, panel1, rgba(111, 132, 151, 218),
+    draw->AddRectFilled(
+        panel0, panel1,
+        definitive_surface_color(rgba(5, 9, 14, 245), 0.94f),
+        layout.px(5.0f));
+    draw->AddRect(
+        panel0, panel1,
+        definitive_accent_color(rgba(111, 132, 151, 218), 0.64f),
         layout.px(5.0f), 0, layout.px(1.0f));
 
     add_text(draw, layout, panel_x + 38.0f, panel_y + 21.0f, 38.0f,
@@ -2196,9 +2338,10 @@ void App::panel_definitive_settings() {
     const bool close_hovered = ImGui::IsItemHovered();
     ImGui::PopID();
 
-    const ImU32 close_color = close_hovered
-        ? rgba(242, 246, 249, 255)
-        : rgba(165, 176, 187, 230);
+    const ImU32 close_color = definitive_text_color(
+        close_hovered
+            ? rgba(242, 246, 249, 255)
+            : rgba(165, 176, 187, 230));
     if (close_hovered) {
         draw->AddRectFilled(
             close0,
@@ -2226,7 +2369,7 @@ void App::panel_definitive_settings() {
     draw->AddLine(
         layout.point(panel_x + 28.0f, panel_y + 108.0f),
         layout.point(panel_x + panel_w - 28.0f, panel_y + 108.0f),
-        rgba(82, 97, 111, 155), layout.px(1.0f));
+        definitive_accent_color(rgba(82, 97, 111, 155), 0.52f), layout.px(1.0f));
 
     // Mirror the legacy Settings page's category names, excluding Logging.
     constexpr std::array<const char*, 7> tab_labels = {
@@ -2854,17 +2997,21 @@ void App::panel_definitive_settings() {
     draw->AddLine(
         layout.point(panel_x + 28.0f, panel_y + panel_h - 92.0f),
         layout.point(panel_x + panel_w - 28.0f, panel_y + panel_h - 92.0f),
-        rgba(82, 97, 111, 155), layout.px(1.0f));
+        definitive_accent_color(rgba(82, 97, 111, 155), 0.52f), layout.px(1.0f));
 
     ImGui::SetCursorScreenPos(
         layout.point(panel_x + 38.0f, panel_y + panel_h - 66.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
     ImGui::PushStyleVar(
         ImGuiStyleVar_FramePadding, layout.size(4.0f, 4.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(20, 28, 36, 245));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(31, 44, 56, 250));
-    ImGui::PushStyleColor(ImGuiCol_CheckMark, rgba(199, 224, 244, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text, rgba(220, 226, 232, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,
+        definitive_surface_color(rgba(20, 28, 36, 245), 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+        definitive_surface_color(rgba(31, 44, 56, 250), 0.74f));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark,
+        definitive_accent_color(rgba(199, 224, 244, 255), 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        definitive_text_color(rgba(220, 226, 232, 245)));
 
     bool detailed = definitive_detailed_settings_;
     ImGui::PushFont(definitive_font_for_size(layout.px(16.0f)));
@@ -3231,12 +3378,12 @@ void App::panel_definitive_home() {
             ImGuiStyleVar_ItemSpacing, layout.size(5.0f, 2.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, layout.px(7.0f));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, rgba(4, 7, 10, 90));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, rgba(104, 120, 137, 145));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, definitive_list_color(rgba(4, 7, 10, 90), 0.88f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, definitive_accent_color(rgba(104, 120, 137, 145), 0.58f));
         ImGui::PushStyleColor(
-            ImGuiCol_ScrollbarGrabHovered, rgba(150, 172, 194, 190));
+            ImGuiCol_ScrollbarGrabHovered, definitive_accent_color(rgba(150, 172, 194, 190), 0.74f));
         ImGui::PushStyleColor(
-            ImGuiCol_ScrollbarGrabActive, rgba(193, 216, 238, 220));
+            ImGuiCol_ScrollbarGrabActive, definitive_accent_color(rgba(193, 216, 238, 220), 0.88f));
 
         const ImGuiWindowFlags library_flags =
             ImGuiWindowFlags_NoBackground |
@@ -3260,12 +3407,14 @@ void App::panel_definitive_home() {
                 ImGui::PushID(i);
                 ImGui::PushStyleColor(
                     ImGuiCol_Header, is_selected
-                        ? rgba(58, 79, 98, 125)
+                        ? definitive_accent_color(rgba(58, 79, 98, 125), 0.72f)
                         : IM_COL32(0, 0, 0, 0));
                 ImGui::PushStyleColor(
-                    ImGuiCol_HeaderHovered, rgba(53, 68, 83, 150));
+                    ImGuiCol_HeaderHovered,
+                    definitive_surface_color(rgba(53, 68, 83, 150), 0.78f));
                 ImGui::PushStyleColor(
-                    ImGuiCol_HeaderActive, rgba(69, 91, 111, 175));
+                    ImGuiCol_HeaderActive,
+                    definitive_accent_color(rgba(69, 91, 111, 175), 0.76f));
                 const bool chosen = ImGui::Selectable(
                     entry.title.c_str(), is_selected, 0,
                     ImVec2(0.0f, layout.px(19.0f)));
