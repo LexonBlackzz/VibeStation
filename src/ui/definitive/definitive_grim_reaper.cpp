@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cfloat>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -336,11 +337,6 @@ ReaperRowResult reaper_row(
 
     ImGui::PopID();
     return {enabled && clicked, hovered};
-}
-
-std::string target_summary(const App* app, int style) {
-    (void)app;
-    return {};
 }
 
 } // namespace
