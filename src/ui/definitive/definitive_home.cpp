@@ -1246,9 +1246,9 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     const float content_shift = 2.0f * highlight_mix;
     draw_icon(draw, layout, icon,
         kX + 24.0f + content_shift, y + 18.0f, main_color);
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 13.0f, 18.0f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 10.0f, 20.5f,
         main_color, title);
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 10.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 38.0f, 12.0f,
         sub_color, subtitle);
 
     ImGui::PopID();
@@ -2493,24 +2493,14 @@ void App::panel_definitive_home() {
             accent_glow_colors[static_cast<size_t>(i)]);
         draw->AddRectFilled(p0, p1, accent_colors[static_cast<size_t>(i)]);
     }
-    add_text(draw, layout, 185.0f, 112.0f, 14.0f,
-        rgba(190, 193, 199, 238), "PS1 EMULATOR");
-
-    add_text(draw, layout, 49.0f, 149.0f, 11.5f,
-        rgba(184, 187, 193, 220), "GAMES");
-    add_text(draw, layout, 49.0f, 166.0f, 11.5f,
-        rgba(184, 187, 193, 220), "MEMORIES");
-    add_text(draw, layout, 49.0f, 183.0f, 11.5f,
-        rgba(184, 187, 193, 220), "STILL RUN");
-
-    add_text_right(draw, layout, 1235.0f, 36.0f, 9.5f,
-        rgba(152, 158, 166, 215), VIBESTATION_VERSION_STRING);
-    add_text_right(draw, layout, 1235.0f, 55.0f, 10.0f,
-        rgba(173, 177, 184, 220), "A SMALLER PAST");
-    add_text_right(draw, layout, 1235.0f, 70.0f, 10.0f,
-        rgba(173, 177, 184, 220), "STILL PLAYS");
-    const ImVec2 dash0 = layout.point(1217.0f, 93.0f);
-    const ImVec2 dash1 = layout.point(1235.0f, 93.0f);
+    add_text_right(draw, layout, 1235.0f, 34.0f, 11.5f,
+        rgba(176, 183, 191, 232), VIBESTATION_VERSION_STRING);
+    add_text_right(draw, layout, 1235.0f, 57.0f, 12.5f,
+        rgba(198, 203, 210, 238), "A SMALLER PAST");
+    add_text_right(draw, layout, 1235.0f, 77.0f, 12.5f,
+        rgba(198, 203, 210, 238), "STILL PLAYS");
+    const ImVec2 dash0 = layout.point(1208.0f, 103.0f);
+    const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
 
     const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
@@ -2656,8 +2646,8 @@ void App::panel_definitive_home() {
     const std::string rom_label = rom_directory_valid_
         ? "ROM Directory: " + rom_directory_
         : "ROM Directory: not set";
-    add_text(draw, layout, 53.0f, panel_y + 54.0f, 11.0f,
-        rgba(199, 205, 213, 246), rom_label.c_str());
+    add_text(draw, layout, 53.0f, panel_y + 52.0f, 12.8f,
+        rgba(218, 223, 229, 250), rom_label.c_str());
 
     if (!rom_directory_valid_) {
         add_text(draw, layout, 53.0f, panel_y + 87.0f, 10.2f,
@@ -2673,8 +2663,8 @@ void App::panel_definitive_home() {
     else {
         const std::string count_label =
             std::to_string(game_library_.size()) + " games";
-        add_text(draw, layout, 744.0f, panel_y + 54.0f, 10.2f,
-            rgba(188, 196, 206, 242), count_label.c_str());
+        add_text_right(draw, layout, 796.0f, panel_y + 52.0f, 12.0f,
+            rgba(213, 220, 228, 248), count_label.c_str());
 
         ImGui::SetCursorScreenPos(layout.point(53.0f, panel_y + 76.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
@@ -2760,35 +2750,29 @@ void App::panel_definitive_home() {
         layout.point(1232.0f, panel_y + 44.0f),
         rgba(105, 116, 128, 165), layout.px(1.0f));
 
-    const ImU32 label_color = rgba(199, 205, 213, 246);
-    const ImU32 value_color = rgba(236, 239, 243, 252);
-    add_text(draw, layout, 875.0f, panel_y + 58.0f, 10.8f,
+    const ImU32 label_color = rgba(216, 222, 229, 250);
+    const ImU32 value_color = rgba(244, 247, 250, 255);
+    add_text(draw, layout, 875.0f, panel_y + 58.0f, 12.2f,
         label_color, "Emulator:");
-    add_text(draw, layout, 995.0f, panel_y + 58.0f, 11.0f,
+    add_text(draw, layout, 995.0f, panel_y + 58.0f, 12.4f,
         value_color, "VibeStation");
-    add_text(draw, layout, 875.0f, panel_y + 77.0f, 10.8f,
+    add_text(draw, layout, 875.0f, panel_y + 77.0f, 12.2f,
         label_color, "Version:");
-    add_text(draw, layout, 995.0f, panel_y + 77.0f, 11.0f,
+    add_text(draw, layout, 995.0f, panel_y + 77.0f, 12.4f,
         value_color, VIBESTATION_VERSION_STRING);
-    add_text(draw, layout, 875.0f, panel_y + 96.0f, 10.8f,
+    add_text(draw, layout, 875.0f, panel_y + 96.0f, 12.2f,
         label_color, "BIOS:");
-    add_text(draw, layout, 995.0f, panel_y + 96.0f, 11.0f,
+    add_text(draw, layout, 995.0f, panel_y + 96.0f, 12.4f,
         value_color, system_->bios_loaded() ? "Loaded" : "Not loaded");
-    add_text(draw, layout, 875.0f, panel_y + 115.0f, 10.8f,
+    add_text(draw, layout, 875.0f, panel_y + 115.0f, 12.2f,
         label_color, "ROM Directory:");
-    add_text(draw, layout, 995.0f, panel_y + 115.0f, 11.0f,
+    add_text(draw, layout, 995.0f, panel_y + 115.0f, 12.4f,
         value_color, rom_directory_valid_ ? "Set" : "Not set");
-    add_text(draw, layout, 875.0f, panel_y + 134.0f, 10.8f,
+    add_text(draw, layout, 875.0f, panel_y + 134.0f, 12.2f,
         label_color, "Games Found:");
     const std::string games_found = std::to_string(game_library_.size());
-    add_text(draw, layout, 995.0f, panel_y + 134.0f, 11.0f,
+    add_text(draw, layout, 995.0f, panel_y + 134.0f, 12.4f,
         value_color, games_found.c_str());
-
-    draw->AddLine(layout.point(875.0f, panel_y + 155.0f),
-        layout.point(1232.0f, panel_y + 155.0f),
-        rgba(91, 101, 111, 145), layout.px(1.0f));
-    add_text(draw, layout, 875.0f, panel_y + 163.0f, 9.8f,
-        rgba(188, 194, 202, 238), "Same console. Different vibes.");
 
     // Launcher-to-emulator transition. Use the viewport foreground draw list
     // so the fade also covers child windows (notably the scrollable game list).
