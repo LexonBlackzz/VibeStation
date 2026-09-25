@@ -3424,6 +3424,26 @@ u32 EeCpu::run_quiet_fast_prefix(
     }
     u32 retired = 0u;
 
+    auto quiet_data_span = [&](u32 virtual_address,
+                               u32 width,
+                               u32 alignment_mask = 0u) {
+        const u32 aligned = virtual_address & ~alignment_mask;
+        const u32 physical = EeBus::to_physical(aligned);
+        constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+        if (virtual_address < 0xC0000000u &&
+            physical < kMainRamSize &&
+            width <= kMainRamSize - physical) {
+            return true;
+        }
+        if (direct_trace &&
+            aligned >= 0x70000000u &&
+            aligned - 0x70000000u <= 16u * 1024u &&
+            width <= 16u * 1024u - (aligned - 0x70000000u)) {
+            return true;
+        }
+        return false;
+    };
+
     for (; retired < limit; ++retired) {
         const u32 expected_pc = direct_trace
             ? state_.pc
@@ -3596,9 +3616,10 @@ u32 EeCpu::run_quiet_fast_prefix(
                 (opcode == 0x34u || opcode == 0x37u) ? 8u :
                 16u;
             const u32 physical = EeBus::to_physical(aligned);
-            if (address >= 0xC0000000u ||
-                physical >= kMainRamSize ||
-                width > kMainRamSize - physical) {
+            if (!quiet_data_span(
+                    address,
+                    width,
+                    (opcode == 0x1Eu || opcode == 0x36u) ? 15u : 0u)) {
                 handled = false;
             } else {
                 bool access_ok = true;
@@ -3715,9 +3736,10 @@ u32 EeCpu::run_quiet_fast_prefix(
                 (opcode == 0x3Cu || opcode == 0x3Fu) ? 8u :
                 16u;
             const u32 physical = EeBus::to_physical(aligned);
-            if (address >= 0xC0000000u ||
-                physical >= kMainRamSize ||
-                width > kMainRamSize - physical) {
+            if (!quiet_data_span(
+                    address,
+                    width,
+                    (opcode == 0x1Fu || opcode == 0x3Eu) ? 15u : 0u)) {
                 handled = false;
             } else {
                 bool access_ok = true;
@@ -3788,6 +3810,155 @@ u32 EeCpu::run_quiet_fast_prefix(
                     }
                 }
             }
+        } else if (opcode == 0x11u) { // COP1
+            const u32 cop_rs = rs;
+            const u32 fs = (instruction >> 11) & 31u;
+            const u32 fd = (instruction >> 6) & 31u;
+            const u32 cop_funct = instruction & 63u;
+            constexpr u32 kFpuCond = 0x00800000u;
+            bool cop1_handled = true;
+
+            if (cop_rs == 0x00u) { // MFC1
+                write_gpr_word(rt, state_.fpr[fs]);
+            } else if (cop_rs == 0x02u) { // CFC1
+                if (fs == 0u) write_gpr_word(rt, 0x00002E00u);
+                else if (fs == 31u) write_gpr_word(rt, state_.fcr[31]);
+                else write_gpr_word(rt, 0u);
+            } else if (cop_rs == 0x04u) { // MTC1
+                state_.fpr[fs] = static_cast<u32>(gpr_u64(rt));
+            } else if (cop_rs == 0x06u) { // CTC1
+                if (fs == 31u) {
+                    state_.fcr[31] = static_cast<u32>(gpr_u64(rt));
+                }
+            } else if (cop_rs == 0x08u) { // BC1
+                const bool cond =
+                    (state_.fcr[31] & kFpuCond) != 0u;
+                const u32 variant = rt & 3u;
+                const bool take =
+                    (variant & 1u) != 0u ? cond : !cond;
+                const bool likely = (variant & 2u) != 0u;
+                if (take) {
+                    state_.next_pc =
+                        branch_target(expected_pc, imm);
+                    next_is_delay_slot_ = true;
+                } else if (likely) {
+                    state_.pc = expected_pc + 8u;
+                    state_.next_pc = expected_pc + 12u;
+                    next_is_delay_slot_ = false;
+                } else {
+                    state_.next_pc = expected_pc + 8u;
+                    next_is_delay_slot_ = true;
+                }
+            } else if (cop_rs == 0x14u) { // COP1.W
+                if (cop_funct == 0x20u) { // CVT.S.W
+                    const s32 value =
+                        static_cast<s32>(state_.fpr[fs]);
+                    state_.fpr[fd] =
+                        ps2_fpu_result(static_cast<float>(value));
+                } else {
+                    cop1_handled = false;
+                }
+            } else if (cop_rs == 0x10u) { // COP1.S
+                const u32 ft = rt;
+                const float a = ps2_fpu_input(state_.fpr[fs]);
+                const float b = ps2_fpu_input(state_.fpr[ft]);
+                const float acc = ps2_fpu_input(state_.fpu_acc);
+                auto set_fd = [&](float value) {
+                    state_.fpr[fd] = ps2_fpu_result(value);
+                };
+                auto set_acc = [&](float value) {
+                    state_.fpu_acc = ps2_fpu_result(value);
+                };
+                auto set_cond = [&](bool value) {
+                    if (value) state_.fcr[31] |= kFpuCond;
+                    else state_.fcr[31] &= ~kFpuCond;
+                };
+                switch (cop_funct) {
+                case 0x00u: set_fd(a + b); break;
+                case 0x01u: set_fd(a - b); break;
+                case 0x02u: set_fd(a * b); break;
+                case 0x03u:
+                    if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0u) {
+                        const u32 sign =
+                            (state_.fpr[fs] ^ state_.fpr[ft]) &
+                            0x80000000u;
+                        state_.fpr[fd] = sign | 0x7F7FFFFFu;
+                    } else {
+                        set_fd(a / b);
+                    }
+                    break;
+                case 0x04u:
+                    set_fd(std::sqrt(std::fabs(b)));
+                    break;
+                case 0x05u:
+                    state_.fpr[fd] =
+                        state_.fpr[fs] & 0x7FFFFFFFu;
+                    break;
+                case 0x06u:
+                    state_.fpr[fd] = state_.fpr[fs];
+                    break;
+                case 0x07u:
+                    state_.fpr[fd] =
+                        state_.fpr[fs] ^ 0x80000000u;
+                    break;
+                case 0x16u:
+                    if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0u) {
+                        const u32 sign =
+                            (state_.fpr[fs] ^ state_.fpr[ft]) &
+                            0x80000000u;
+                        state_.fpr[fd] = sign | 0x7F7FFFFFu;
+                    } else {
+                        set_fd(a / std::sqrt(std::fabs(b)));
+                    }
+                    break;
+                case 0x18u: set_acc(a + b); break;
+                case 0x19u: set_acc(a - b); break;
+                case 0x1Au: set_acc(a * b); break;
+                case 0x1Cu: set_fd(acc + (a * b)); break;
+                case 0x1Du: set_fd(acc - (a * b)); break;
+                case 0x1Eu: set_acc(acc + (a * b)); break;
+                case 0x1Fu: set_acc(acc - (a * b)); break;
+                case 0x24u: {
+                    if ((state_.fpr[fs] & 0x7F800000u) <=
+                        0x4E800000u) {
+                        const double value =
+                            static_cast<double>(a);
+                        if (value > 2147483647.0) {
+                            state_.fpr[fd] = 0x7FFFFFFFu;
+                        } else if (value < -2147483648.0) {
+                            state_.fpr[fd] = 0x80000000u;
+                        } else {
+                            state_.fpr[fd] = static_cast<u32>(
+                                static_cast<s32>(value));
+                        }
+                    } else {
+                        state_.fpr[fd] =
+                            (state_.fpr[fs] & 0x80000000u)
+                                ? 0x80000000u
+                                : 0x7FFFFFFFu;
+                    }
+                    break;
+                }
+                case 0x28u:
+                    state_.fpr[fd] =
+                        (a >= b) ? state_.fpr[fs] : state_.fpr[ft];
+                    break;
+                case 0x29u:
+                    state_.fpr[fd] =
+                        (a <= b) ? state_.fpr[fs] : state_.fpr[ft];
+                    break;
+                case 0x30u: set_cond(false); break;
+                case 0x32u: set_cond(a == b); break;
+                case 0x34u: set_cond(a < b); break;
+                case 0x36u: set_cond(a <= b); break;
+                default:
+                    cop1_handled = false;
+                    break;
+                }
+            } else {
+                cop1_handled = false;
+            }
+            if (!cop1_handled) handled = false;
         } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
         } else if (opcode == 0x01u) {
