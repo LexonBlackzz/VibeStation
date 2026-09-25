@@ -10,7 +10,10 @@ public:
   explicit CpuRecompilerBackend(Cpu &cpu);
   ~CpuRecompilerBackend();
 
-  CpuRunSliceResult run_slice(u32 max_cycles, u32 max_instructions);
+  CpuRunSliceResult run_slice(
+      u32 max_cycles,
+      u32 max_instructions,
+      CpuExecutionMode requested_mode);
   void invalidate_range(u32 phys_or_normalized_addr, u32 size_bytes);
   void begin_frame(u32 frame_index);
   void flush();
