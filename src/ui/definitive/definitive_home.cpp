@@ -962,8 +962,15 @@ void App::panel_definitive_home() {
     }
     if (grim_reaper_pressed && launcher_ready &&
         !launcher_transitioning) {
-        play_ui_open_sound();
-        open_definitive_grim_reaper();
+        if (definitive_grim_reaper_active_ &&
+            !definitive_grim_reaper_closing_) {
+            play_ui_close_sound();
+            close_definitive_grim_reaper();
+        }
+        else {
+            play_ui_open_sound();
+            open_definitive_grim_reaper();
+        }
     }
     if (settings_pressed && launcher_ready &&
         !launcher_transitioning) {
