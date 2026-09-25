@@ -4978,47 +4978,6 @@ u32 EeCpu::run_quiet_fast_prefix(
             case 0x0Bu:
                 if (gpr_u64(rt) != 0u) write_gpr64(rd, gpr_u64(rs));
                 break;
-            case 0x0Cu: { // SYSCALL
-                if (expected_pc == 0x0024DE74u &&
-                    static_cast<u32>(gpr_u64(3)) == 0x7Au &&
-                    static_cast<u32>(gpr_u64(4)) == 4u &&
-                    hot_sif_getreg_read_offset_ == 0u) {
-                    hot_sif_getreg_diag_inflight_ = true;
-                    hot_sif_getreg_diag_start_ =
-                        state_.instructions_executed;
-                }
-
-                auto& record =
-                    state_.recent_syscalls[
-                        state_.recent_syscall_next];
-                record.instruction =
-                    state_.instructions_executed;
-                record.pc = expected_pc;
-                record.number =
-                    static_cast<u32>(gpr_u64(3));
-                for (u32 i = 0u;
-                     i < record.args.size();
-                     ++i) {
-                    record.args[i] = gpr_u64(4u + i);
-                }
-                state_.recent_syscall_next =
-                    (state_.recent_syscall_next + 1u) %
-                    static_cast<u32>(
-                        state_.recent_syscalls.size());
-                state_.recent_syscall_count = std::min(
-                    state_.recent_syscall_count + 1u,
-                    static_cast<u32>(
-                        state_.recent_syscalls.size()));
-
-                raise_exception(
-                    8u,
-                    expected_pc,
-                    was_delay_slot);
-                // Preserve the original one-instruction exception timing:
-                // system/device time advances before the vector executes.
-                stop_after_instruction = true;
-                break;
-            }
             case 0x0Fu:
                 break; // SYNC
             case 0x10u:
