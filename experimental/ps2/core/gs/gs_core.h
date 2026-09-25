@@ -283,7 +283,10 @@ private:
     u64 raster_enqueued_ = 0;
     u64 raster_completed_ = 0;
 
-    static constexpr u32 kMaxRasterHelpers = 3u;
+    // Keep one emulation thread and spare host capacity outside the raster
+    // pool. Small CI hosts still select only hardware_concurrency()-2 helpers,
+    // while desktop CPUs can use up to six raster lanes total.
+    static constexpr u32 kMaxRasterHelpers = 5u;
     std::array<std::thread, kMaxRasterHelpers> raster_helpers_{};
     u32 raster_helper_count_ = 0u;
     std::mutex raster_parallel_mutex_{};
