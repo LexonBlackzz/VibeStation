@@ -17,6 +17,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -108,6 +109,24 @@ GLuint g_background_blur_texture = 0;
 int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
+
+enum class UiMenuSound {
+    Cursor,
+    Open,
+    Close
+};
+
+struct UiSoundClip {
+    std::vector<Uint8> pcm;
+};
+
+SDL_AudioDeviceID g_ui_sound_device = 0;
+SDL_AudioSpec g_ui_sound_spec{};
+bool g_ui_sound_load_attempted = false;
+UiSoundClip g_ui_cursor_sound;
+UiSoundClip g_ui_open_sound;
+UiSoundClip g_ui_close_sound;
+std::array<bool, 5> g_menu_was_engaged = {};
 
 struct LauncherQuote {
     const char* line1;
@@ -373,6 +392,182 @@ bool upload_rgba_texture(
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
     return true;
+}
+
+std::filesystem::path find_ui_sound_path(const char* filename) {
+    std::array<std::filesystem::path, 4> candidates{};
+
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path(ec);
+    if (!ec) {
+        candidates[0] =
+            cwd / "resources" / "ui" / "definitive" / "sounds" / filename;
+        candidates[1] =
+            cwd / ".." / "resources" / "ui" / "definitive" / "sounds" / filename;
+    }
+
+    if (char* base = SDL_GetBasePath()) {
+        const std::filesystem::path base_path(base);
+        SDL_free(base);
+        candidates[2] =
+            base_path / "resources" / "ui" / "definitive" / "sounds" / filename;
+        candidates[3] =
+            base_path / ".." / "resources" / "ui" / "definitive" / "sounds" / filename;
+    }
+
+    for (const auto& candidate : candidates) {
+        if (!candidate.empty() && std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return {};
+}
+
+bool convert_ui_sound(
+    const std::filesystem::path& path,
+    const SDL_AudioSpec& target_spec,
+    UiSoundClip& out_clip) {
+    SDL_AudioSpec source_spec{};
+    Uint8* source_buffer = nullptr;
+    Uint32 source_length = 0;
+
+    if (path.empty() ||
+        SDL_LoadWAV(
+            path.string().c_str(),
+            &source_spec,
+            &source_buffer,
+            &source_length) == nullptr) {
+        return false;
+    }
+
+    SDL_AudioCVT cvt{};
+    const int cvt_result = SDL_BuildAudioCVT(
+        &cvt,
+        source_spec.format,
+        source_spec.channels,
+        source_spec.freq,
+        target_spec.format,
+        target_spec.channels,
+        target_spec.freq);
+
+    if (cvt_result < 0) {
+        SDL_FreeWAV(source_buffer);
+        return false;
+    }
+
+    if (cvt_result == 0) {
+        out_clip.pcm.assign(source_buffer, source_buffer + source_length);
+        SDL_FreeWAV(source_buffer);
+        return true;
+    }
+
+    cvt.len = static_cast<int>(source_length);
+    cvt.buf = static_cast<Uint8*>(
+        SDL_malloc(static_cast<size_t>(source_length) *
+            static_cast<size_t>(cvt.len_mult)));
+    if (cvt.buf == nullptr) {
+        SDL_FreeWAV(source_buffer);
+        return false;
+    }
+
+    std::memcpy(cvt.buf, source_buffer, source_length);
+    SDL_FreeWAV(source_buffer);
+
+    if (SDL_ConvertAudio(&cvt) != 0) {
+        SDL_free(cvt.buf);
+        return false;
+    }
+
+    out_clip.pcm.assign(cvt.buf, cvt.buf + cvt.len_cvt);
+    SDL_free(cvt.buf);
+    return true;
+}
+
+bool ensure_ui_sounds_loaded() {
+    if (g_ui_sound_device != 0) {
+        return true;
+    }
+    if (g_ui_sound_load_attempted) {
+        return false;
+    }
+    g_ui_sound_load_attempted = true;
+
+    const std::filesystem::path cursor_path =
+        find_ui_sound_path("cursor.wav");
+    const std::filesystem::path open_path =
+        find_ui_sound_path("open.wav");
+    const std::filesystem::path close_path =
+        find_ui_sound_path("close.wav");
+
+    if (cursor_path.empty() || open_path.empty() || close_path.empty()) {
+        return false;
+    }
+
+    SDL_AudioSpec desired{};
+    desired.freq = 44100;
+    desired.format = AUDIO_F32SYS;
+    desired.channels = 2;
+    desired.samples = 512;
+    desired.callback = nullptr;
+
+    g_ui_sound_device = SDL_OpenAudioDevice(
+        nullptr,
+        0,
+        &desired,
+        &g_ui_sound_spec,
+        SDL_AUDIO_ALLOW_ANY_CHANGE);
+    if (g_ui_sound_device == 0) {
+        return false;
+    }
+
+    const bool loaded =
+        convert_ui_sound(cursor_path, g_ui_sound_spec, g_ui_cursor_sound) &&
+        convert_ui_sound(open_path, g_ui_sound_spec, g_ui_open_sound) &&
+        convert_ui_sound(close_path, g_ui_sound_spec, g_ui_close_sound);
+
+    if (!loaded) {
+        SDL_CloseAudioDevice(g_ui_sound_device);
+        g_ui_sound_device = 0;
+        g_ui_cursor_sound.pcm.clear();
+        g_ui_open_sound.pcm.clear();
+        g_ui_close_sound.pcm.clear();
+        return false;
+    }
+
+    SDL_PauseAudioDevice(g_ui_sound_device, 0);
+    return true;
+}
+
+void play_menu_sound(UiMenuSound sound) {
+    if (!ensure_ui_sounds_loaded() || g_ui_sound_device == 0) {
+        return;
+    }
+
+    const UiSoundClip* clip = nullptr;
+    switch (sound) {
+    case UiMenuSound::Cursor:
+        clip = &g_ui_cursor_sound;
+        break;
+    case UiMenuSound::Open:
+        clip = &g_ui_open_sound;
+        break;
+    case UiMenuSound::Close:
+        clip = &g_ui_close_sound;
+        break;
+    }
+
+    if (clip == nullptr || clip->pcm.empty()) {
+        return;
+    }
+
+    // Replace a stale navigation sound rather than queueing several clicks
+    // behind one another when the pointer moves quickly through the menu.
+    SDL_ClearQueuedAudio(g_ui_sound_device);
+    SDL_QueueAudio(
+        g_ui_sound_device,
+        clip->pcm.data(),
+        static_cast<Uint32>(clip->pcm.size()));
 }
 
 std::filesystem::path find_background_path() {
@@ -1295,7 +1490,8 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
 }
 
 bool menu_button(const Layout& layout, ImDrawList* draw, int index,
-    MenuIcon icon, const char* title, const char* subtitle) {
+    MenuIcon icon, const char* title, const char* subtitle,
+    bool sound_enabled = true) {
     constexpr float kX = 36.0f;
     constexpr float kY = 218.0f;
     constexpr float kWidth = 396.0f;
@@ -1318,6 +1514,13 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     const bool focused = ImGui::IsItemFocused();
     const bool active = ImGui::IsItemActive();
     const bool engaged = hovered || focused || active;
+
+    bool& was_engaged =
+        g_menu_was_engaged[static_cast<size_t>(index)];
+    if (sound_enabled && engaged && !was_engaged) {
+        play_menu_sound(UiMenuSound::Cursor);
+    }
+    was_engaged = engaged;
 
     // Every item gets an explicit zero target whenever it is not engaged.
     // This prevents the previous menu item from remaining lit after focus moves.
@@ -1735,6 +1938,18 @@ bool definitive_settings_slider_float(
 
 }
 
+void App::play_ui_cursor_sound() {
+    play_menu_sound(UiMenuSound::Cursor);
+}
+
+void App::play_ui_open_sound() {
+    play_menu_sound(UiMenuSound::Open);
+}
+
+void App::play_ui_close_sound() {
+    play_menu_sound(UiMenuSound::Close);
+}
+
 void App::initialize_definitive_ui_fonts() {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
@@ -1900,6 +2115,7 @@ void App::panel_definitive_settings() {
         close_color, layout.px(1.6f));
 
     if (close_pressed || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        play_ui_close_sound();
         show_settings_ = false;
         definitive_detailed_settings_ = false;
         ImGui::End();
@@ -1964,6 +2180,7 @@ void App::panel_definitive_settings() {
         if (definitive_settings_action(
             draw, layout, "input_bindings", "Configure Keyboard Bindings",
             left_x + 1.0f, content_y + 43.0f, column_w - 2.0f)) {
+            play_ui_open_sound();
             show_bindings_config_ = true;
             show_settings_ = false;
             definitive_detailed_settings_ = false;
@@ -2640,6 +2857,7 @@ void App::panel_definitive_home() {
     // Load/soften the photograph while the boot presentation is still on
     // black so the transition into the launcher is hitch-free.
     ensure_background_texture_loaded();
+    ensure_ui_sounds_loaded();
 
     if (launcher_intro_active &&
         g_launcher_intro_elapsed < kUiBackgroundBegin) {
@@ -2699,16 +2917,17 @@ void App::panel_definitive_home() {
     const ImVec2 dash1 = layout.point(1235.0f, 103.0f);
     draw->AddLine(dash0, dash1, rgba(180, 184, 190, 190), layout.px(1.0f));
 
+    const bool menu_sound_enabled = !launcher_intro_active;
     const bool start_pressed = menu_button(layout, draw, 0, MenuIcon::Play,
-        "Start Emulation", "Load BIOS and start playing");
+        "Start Emulation", "Load BIOS and start playing", menu_sound_enabled);
     const bool load_game_pressed = menu_button(layout, draw, 1, MenuIcon::Folder,
-        "Load Game", "Choose a game from your library");
+        "Load Game", "Choose a game from your library", menu_sound_enabled);
     const bool change_bios_pressed = menu_button(layout, draw, 2, MenuIcon::Chip,
-        "Change BIOS", "Manage BIOS files");
+        "Change BIOS", "Manage BIOS files", menu_sound_enabled);
     const bool settings_pressed = menu_button(layout, draw, 3, MenuIcon::Settings,
-        "Settings", "Configure emulator options");
+        "Settings", "Configure emulator options", menu_sound_enabled);
     const bool exit_pressed = menu_button(layout, draw, 4, MenuIcon::Exit,
-        "Exit", "Close VibeStation");
+        "Exit", "Close VibeStation", menu_sound_enabled);
 
     const auto choose_bios = [this]() -> bool {
         std::string path = open_file_dialog(
@@ -2736,6 +2955,7 @@ void App::panel_definitive_home() {
 
     if (start_pressed && !launcher_intro_active &&
         g_launcher_start_transition == LauncherStartTransition::None) {
+        play_ui_open_sound();
         if (!system_->bios_loaded() && !choose_bios()) {
             // File picker cancelled or BIOS failed to load.
         }
@@ -2757,9 +2977,11 @@ void App::panel_definitive_home() {
 
     if (load_game_pressed && !launcher_intro_active &&
         !launcher_transitioning) {
+        play_ui_open_sound();
         std::string path = open_file_dialog(
             "PS1 Games (*.bin;*.cue)\0*.bin;*.cue\0All Files\0*.*\0",
             "Select PS1 Game");
+        play_ui_close_sound();
         if (!path.empty()) {
             std::string bin;
             std::string cue;
@@ -2775,14 +2997,18 @@ void App::panel_definitive_home() {
 
     if (change_bios_pressed && !launcher_intro_active &&
         !launcher_transitioning) {
+        play_ui_open_sound();
         choose_bios();
+        play_ui_close_sound();
     }
     if (settings_pressed && !launcher_intro_active &&
         !launcher_transitioning) {
+        play_ui_open_sound();
         show_settings_ = true;
     }
     if (exit_pressed && !launcher_intro_active &&
         !launcher_transitioning) {
+        play_ui_close_sound();
         SDL_Event quit_event{};
         quit_event.type = SDL_QUIT;
         SDL_PushEvent(&quit_event);
@@ -2923,7 +3149,9 @@ void App::panel_definitive_home() {
     if (small_button(layout, "set_rom_dir", "Set Directory",
         53.0f, panel_y + 145.0f, 130.0f, 25.0f) &&
         !launcher_intro_active) {
+        play_ui_open_sound();
         const std::string selected = open_folder_dialog("Select ROM Directory");
+        play_ui_close_sound();
         if (!selected.empty()) {
             rom_directory_ = selected;
             game_library_dirty_ = true;
