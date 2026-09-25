@@ -117,6 +117,7 @@ set(VIBESTATION_SOURCES
     src/input/input_manager.cpp
     src/integrations/discord_presence.cpp
     src/ui/emu_runner.cpp
+    src/ui/frame_presentation_worker.cpp
     src/ui/app.cpp
     src/ui/app_discord_presence.cpp
     src/ui/input_bindings.cpp
