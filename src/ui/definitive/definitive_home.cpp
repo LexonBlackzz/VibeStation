@@ -1,5 +1,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
 #include <stb_image.h>
 
 #include "ui/app.h"
@@ -110,6 +111,12 @@ int g_background_width = 0;
 int g_background_height = 0;
 bool g_background_load_attempted = false;
 
+GLuint g_intro_icon_texture = 0;
+GLuint g_intro_icon_blur_texture = 0;
+int g_intro_icon_width = 0;
+int g_intro_icon_height = 0;
+bool g_intro_icon_load_attempted = false;
+
 enum class UiMenuSound {
     Cursor,
     Open,
@@ -204,18 +211,16 @@ constexpr float kLauncherStartFadeSeconds = 0.42f;
 float g_launcher_intro_elapsed = 0.0f;
 bool g_launcher_intro_complete = false;
 
-// Stage 1: a PS1-inspired VibeStation boot presentation on black.
-// Stage 2: the launcher itself initializes in staggered groups.
-constexpr float kBootLogoBegin = 0.28f;
-constexpr float kBootLogoSettle = 1.26f;
-constexpr float kBootWordmarkBegin = 1.30f;
-constexpr float kBootFadeBegin = 2.68f;
-constexpr float kUiBackgroundBegin = 3.00f;
-constexpr float kUiBackgroundReady = 3.64f;
-constexpr float kUiBrandBegin = 3.30f;
-constexpr float kUiMenuBegin = 3.54f;
-constexpr float kUiPanelsBegin = 3.96f;
-constexpr float kLauncherIntroDuration = 4.58f;
+// Vista-inspired startup pacing: a blurred icon resolves while slowly
+// enlarging, then the VibeStation wordmark snaps in blurred and resolves fast.
+constexpr float kIntroIconBegin = 0.18f;
+constexpr float kIntroIconFadeEnd = 0.88f;
+constexpr float kIntroIconBlurEnd = 1.58f;
+constexpr float kIntroIconZoomEnd = 2.92f;
+constexpr float kIntroWordmarkBegin = 2.52f;
+constexpr float kIntroWordmarkBlurEnd = 2.78f;
+constexpr float kIntroOutroBegin = 3.48f;
+constexpr float kLauncherIntroDuration = 3.82f;
 
 
 ImU32 rgba(int r, int g, int b, int a = 255) {
@@ -393,6 +398,88 @@ bool upload_rgba_texture(
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
     return true;
+}
+
+std::filesystem::path find_intro_icon_path() {
+    std::array<std::filesystem::path, 4> candidates{};
+
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path(ec);
+    if (!ec) {
+        candidates[0] = cwd / "resources" / "icon512x512.png";
+        candidates[1] = cwd / ".." / "resources" / "icon512x512.png";
+    }
+
+    if (char* base = SDL_GetBasePath()) {
+        const std::filesystem::path base_path(base);
+        SDL_free(base);
+        candidates[2] = base_path / "resources" / "icon512x512.png";
+        candidates[3] = base_path / ".." / "resources" / "icon512x512.png";
+    }
+
+    for (const auto& candidate : candidates) {
+        if (!candidate.empty() && std::filesystem::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return {};
+}
+
+bool ensure_intro_icon_texture_loaded() {
+    if (g_intro_icon_texture != 0) {
+        return true;
+    }
+    if (g_intro_icon_load_attempted) {
+        return false;
+    }
+    g_intro_icon_load_attempted = true;
+
+    const std::filesystem::path path = find_intro_icon_path();
+    if (path.empty()) {
+        return false;
+    }
+
+    int channels = 0;
+    unsigned char* pixels = stbi_load(
+        path.string().c_str(),
+        &g_intro_icon_width,
+        &g_intro_icon_height,
+        &channels,
+        4);
+    if (pixels == nullptr ||
+        g_intro_icon_width <= 0 ||
+        g_intro_icon_height <= 0) {
+        if (pixels != nullptr) {
+            stbi_image_free(pixels);
+        }
+        g_intro_icon_width = 0;
+        g_intro_icon_height = 0;
+        return false;
+    }
+
+    const bool sharp_uploaded = upload_rgba_texture(
+        g_intro_icon_texture,
+        pixels,
+        g_intro_icon_width,
+        g_intro_icon_height);
+
+    const std::vector<unsigned char> blurred =
+        make_blurred_rgba(
+            pixels,
+            g_intro_icon_width,
+            g_intro_icon_height,
+            16);
+    if (!blurred.empty()) {
+        upload_rgba_texture(
+            g_intro_icon_blur_texture,
+            blurred.data(),
+            g_intro_icon_width,
+            g_intro_icon_height);
+    }
+
+    stbi_image_free(pixels);
+    return sharp_uploaded;
 }
 
 std::filesystem::path find_ui_sound_path(const char* filename) {
@@ -1026,518 +1113,136 @@ void draw_tapered_beam(
     draw->AddQuadFilled(s0, s1, h1, h0, color);
 }
 
+void draw_vista_wordmark(
+    ImDrawList* draw,
+    const ImVec2& center,
+    float font_size,
+    float blur_amount,
+    ImU32 color) {
+    ImFont* font = definitive_font_for_size(font_size);
+    const char* text = "VibeStation";
+    const ImVec2 text_size =
+        font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, text);
+    const ImVec2 base(
+        center.x - text_size.x * 0.5f,
+        center.y - text_size.y * 0.5f);
+
+    const float blur = std::clamp(blur_amount, 0.0f, 1.0f);
+    if (blur <= 0.01f) {
+        draw->AddText(font, font_size, base, color, text);
+        return;
+    }
+
+    const int r = (color >> IM_COL32_R_SHIFT) & 0xFF;
+    const int g = (color >> IM_COL32_G_SHIFT) & 0xFF;
+    const int b = (color >> IM_COL32_B_SHIFT) & 0xFF;
+    const int a = (color >> IM_COL32_A_SHIFT) & 0xFF;
+
+    const float radius = std::max(1.0f, font_size * 0.13f * blur);
+    constexpr std::array<ImVec2, 12> offsets = {{
+        {-1.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, -1.0f}, {0.0f, 1.0f},
+        {-0.72f, -0.72f}, {0.72f, -0.72f},
+        {-0.72f, 0.72f}, {0.72f, 0.72f},
+        {-1.45f, 0.0f}, {1.45f, 0.0f},
+        {0.0f, -1.45f}, {0.0f, 1.45f},
+    }};
+
+    const int halo_alpha =
+        glow_alpha(static_cast<float>(a) * (0.055f + 0.035f * blur));
+    for (const ImVec2& offset : offsets) {
+        draw->AddText(
+            font,
+            font_size,
+            ImVec2(
+                base.x + offset.x * radius,
+                base.y + offset.y * radius),
+            rgba(r, g, b, halo_alpha),
+            text);
+    }
+
+    // Keep total perceived brightness stable: the wordmark appears immediately
+    // at full presence and only its blur collapses, with no opacity fade-in.
+    const int core_alpha =
+        glow_alpha(static_cast<float>(a) * (0.42f + 0.58f * (1.0f - blur)));
+    draw->AddText(
+        font, font_size, base,
+        rgba(r, g, b, core_alpha), text);
+}
+
 void draw_boot_presentation(
     const ImVec2& pos, const ImVec2& size, float elapsed) {
     ImDrawList* overlay = ImGui::GetForegroundDrawList();
     const ImVec2 end(pos.x + size.x, pos.y + size.y);
-
     overlay->AddRectFilled(pos, end, rgba(0, 0, 0, 255));
 
-    const float boot_fade =
-        1.0f - timeline_progress(elapsed, kBootFadeBegin, kUiBackgroundBegin);
-    if (boot_fade <= 0.001f) {
-        return;
-    }
+    ensure_intro_icon_texture_loaded();
 
     const float unit = std::min(size.x, size.y);
-    const ImVec2 convergence(
-        pos.x + size.x * 0.50f,
-        pos.y + size.y * 0.505f);
+    const ImVec2 center(
+        pos.x + size.x * 0.5f,
+        pos.y + size.y * 0.46f);
 
-    constexpr std::array<ImU32, 4> beam_colors = {
-        IM_COL32(194, 44, 56, 255),
-        IM_COL32(52, 128, 125, 255),
-        IM_COL32(177, 145, 72, 255),
-        IM_COL32(52, 93, 157, 255),
-    };
+    const float icon_alpha =
+        timeline_progress(elapsed, kIntroIconBegin, kIntroIconFadeEnd);
+    const float blur_mix =
+        1.0f - timeline_progress(
+            elapsed, kIntroIconBegin + 0.08f, kIntroIconBlurEnd);
+    const float zoom_t =
+        timeline_progress(elapsed, kIntroIconBegin, kIntroIconZoomEnd);
+    const float zoom =
+        0.90f + 0.105f * zoom_t;
 
-    // Sources deliberately begin above the viewport so the mark reads as four
-    // light beams sweeping in, rather than four static sticks already on-screen.
-    const std::array<ImVec2, 4> sources = {
-        ImVec2(pos.x + size.x * 0.31f, pos.y - unit * 0.18f),
-        ImVec2(pos.x + size.x * 0.43f, pos.y - unit * 0.24f),
-        ImVec2(pos.x + size.x * 0.57f, pos.y - unit * 0.21f),
-        ImVec2(pos.x + size.x * 0.69f, pos.y - unit * 0.16f),
-    };
-    const std::array<ImVec2, 4> targets = {
-        ImVec2(convergence.x - unit * 0.030f, convergence.y),
-        ImVec2(convergence.x - unit * 0.010f, convergence.y + unit * 0.006f),
-        ImVec2(convergence.x + unit * 0.010f, convergence.y + unit * 0.006f),
-        ImVec2(convergence.x + unit * 0.030f, convergence.y),
-    };
+    const float base_icon_size =
+        std::clamp(unit * 0.285f, 164.0f, 260.0f);
+    const float icon_size = base_icon_size * zoom;
+    const ImVec2 icon0(
+        center.x - icon_size * 0.5f,
+        center.y - icon_size * 0.5f);
+    const ImVec2 icon1(
+        center.x + icon_size * 0.5f,
+        center.y + icon_size * 0.5f);
 
-    const float source_width = std::max(8.0f, unit * 0.025f);
-    const float destination_width = std::max(1.5f, unit * 0.0040f);
+    const float outro =
+        1.0f - timeline_progress(
+            elapsed, kIntroOutroBegin, kLauncherIntroDuration);
+    const float visible = icon_alpha * outro;
 
-    for (size_t i = 0; i < sources.size(); ++i) {
-        const float start =
-            kBootLogoBegin + static_cast<float>(i) * 0.085f;
-        const float finish =
-            0.93f + static_cast<float>(i) * 0.085f;
-        const float beam_progress =
-            timeline_progress(elapsed, start, finish);
-
-        const ImU32 base = beam_colors[i];
-        const int r = (base >> IM_COL32_R_SHIFT) & 0xFF;
-        const int g = (base >> IM_COL32_G_SHIFT) & 0xFF;
-        const int b = (base >> IM_COL32_B_SHIFT) & 0xFF;
-
-        draw_tapered_beam(
-            overlay,
-            sources[i],
-            targets[i],
-            beam_progress,
-            source_width,
-            destination_width,
-            rgba(r, g, b, glow_alpha(238.0f * boot_fade)),
-            rgba(r, g, b, glow_alpha(42.0f * boot_fade)));
+    if (g_intro_icon_blur_texture != 0 && blur_mix > 0.001f) {
+        overlay->AddImage(
+            reinterpret_cast<ImTextureID>(
+                static_cast<intptr_t>(g_intro_icon_blur_texture)),
+            icon0, icon1,
+            ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+            rgba(255, 255, 255,
+                glow_alpha(255.0f * visible * blur_mix)));
     }
 
-    // The convergence point is the brightest part of the frame. Its glow
-    // swells just as the fourth beam arrives, then settles behind the wordmark.
-    const float convergence_in =
-        timeline_progress(elapsed, 0.82f, 1.16f);
-    const float convergence_settle =
-        1.0f - 0.55f * timeline_progress(elapsed, 1.18f, 1.70f);
-    const float convergence_energy =
-        convergence_in * convergence_settle * boot_fade;
-
-    for (int ring = 10; ring >= 1; --ring) {
-        const float t = static_cast<float>(ring) / 10.0f;
-        const float radius =
-            unit * (0.010f + 0.125f * t) *
-            (0.70f + 0.30f * convergence_in);
-        overlay->AddCircleFilled(
-            convergence,
-            radius,
-            rgba(214, 224, 238,
-                glow_alpha(convergence_energy *
-                    (7.0f + (1.0f - t) * 20.0f))),
-            64);
+    if (g_intro_icon_texture != 0) {
+        overlay->AddImage(
+            reinterpret_cast<ImTextureID>(
+                static_cast<intptr_t>(g_intro_icon_texture)),
+            icon0, icon1,
+            ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+            rgba(255, 255, 255,
+                glow_alpha(255.0f * visible * (1.0f - blur_mix))));
     }
 
-    const float core_pulse =
-        timeline_progress(elapsed, 1.02f, 1.20f) *
-        (1.0f - timeline_progress(elapsed, 1.20f, 1.50f)) *
-        boot_fade;
-    if (core_pulse > 0.001f) {
-        overlay->AddCircleFilled(
-            convergence,
-            unit * (0.012f + 0.020f * core_pulse),
-            rgba(255, 255, 255, glow_alpha(255.0f * core_pulse)),
-            48);
-    }
-
-    // Once converged, retain a compact four-ray mark so the light beams feel
-    // like they assembled into an identity rather than simply disappearing.
-    const float assembled_in =
-        timeline_progress(elapsed, 1.08f, 1.30f) * boot_fade;
-    if (assembled_in > 0.001f) {
-        const float arm = unit * 0.065f;
-        const float stroke = std::max(2.0f, unit * 0.006f);
-        for (size_t i = 0; i < targets.size(); ++i) {
-            const ImVec2 outer = lerp_point(
-                convergence, sources[i], arm /
-                    std::max(1.0f, std::sqrt(
-                        (sources[i].x - convergence.x) *
-                        (sources[i].x - convergence.x) +
-                        (sources[i].y - convergence.y) *
-                        (sources[i].y - convergence.y))));
-            const ImU32 base = beam_colors[i];
-            const int r = (base >> IM_COL32_R_SHIFT) & 0xFF;
-            const int g = (base >> IM_COL32_G_SHIFT) & 0xFF;
-            const int b = (base >> IM_COL32_B_SHIFT) & 0xFF;
-            overlay->AddLine(
-                convergence, outer,
-                rgba(r, g, b, glow_alpha(220.0f * assembled_in)),
-                stroke);
-        }
-    }
-
-    const float wordmark_in =
-        timeline_progress(elapsed, kBootWordmarkBegin, 1.62f);
-    if (wordmark_in > 0.001f) {
-        const float word_alpha = wordmark_in * boot_fade;
-        draw_centered_intro_text(
-            overlay,
-            ImVec2(convergence.x, convergence.y + unit * 0.145f),
-            std::max(20.0f, unit * 0.045f),
-            rgba(224, 227, 233, glow_alpha(238.0f * word_alpha)),
-            "VibeStation");
-        draw_centered_intro_text(
-            overlay,
-            ImVec2(convergence.x, convergence.y + unit * 0.193f),
-            std::max(8.0f, unit * 0.012f),
-            rgba(137, 143, 151, glow_alpha(205.0f * word_alpha)),
-            "PS1 EMULATOR");
-    }
-
-    // Short multi-frame corruption burst. At 60 Hz this spans roughly four
-    // frames; at lower refresh rates it still shows at least a couple of
-    // distinct patterns because the corruption is time-indexed.
-    constexpr float kGlitchStart = 1.66f;
-    constexpr float kGlitchEnd = 1.728f;
-    if (elapsed >= kGlitchStart && elapsed < kGlitchEnd) {
-        const float glitch_alpha = boot_fade;
-        const float glitch_time =
-            (elapsed - kGlitchStart) / (kGlitchEnd - kGlitchStart);
-        const int glitch_pattern = std::clamp(
-            static_cast<int>(glitch_time * 4.0f), 0, 3);
-
-        constexpr std::array<float, 4> x_offsets = {
-            -2.0f, 1.0f, -1.0f, 2.0f
-        };
-        constexpr std::array<float, 4> tear_offsets = {
-            -0.010f, 0.006f, -0.003f, 0.012f
-        };
-        constexpr std::array<float, 4> tear_widths = {
-            0.33f, 0.24f, 0.39f, 0.28f
-        };
-
-        const float px = std::max(1.0f, unit / 800.0f);
-        const float channel_shift =
-            x_offsets[static_cast<size_t>(glitch_pattern)] * px;
-
-        // Chromatic channel separation across the full beam/mark graphic.
-        // Red and cyan copies move in opposite directions by only a few pixels.
-        for (size_t i = 0; i < sources.size(); ++i) {
-            const ImVec2 red_source(
-                sources[i].x + channel_shift, sources[i].y);
-            const ImVec2 red_target(
-                targets[i].x + channel_shift, targets[i].y);
-            const ImVec2 blue_source(
-                sources[i].x - channel_shift, sources[i].y);
-            const ImVec2 blue_target(
-                targets[i].x - channel_shift, targets[i].y);
-
-            draw_tapered_beam(
-                overlay,
-                red_source, red_target, 1.0f,
-                source_width, destination_width,
-                rgba(232, 35, 49, glow_alpha(72.0f * glitch_alpha)),
-                rgba(232, 35, 49, glow_alpha(14.0f * glitch_alpha)));
-            draw_tapered_beam(
-                overlay,
-                blue_source, blue_target, 1.0f,
-                source_width, destination_width,
-                rgba(38, 133, 191, glow_alpha(72.0f * glitch_alpha)),
-                rgba(38, 133, 191, glow_alpha(14.0f * glitch_alpha)));
-        }
-
-        // RGB-split the compact assembled mark too.
-        const float arm = unit * 0.065f;
-        const float stroke = std::max(2.0f, unit * 0.006f);
-        for (size_t i = 0; i < sources.size(); ++i) {
-            const float distance = std::max(
-                1.0f,
-                std::sqrt(
-                    (sources[i].x - convergence.x) *
-                        (sources[i].x - convergence.x) +
-                    (sources[i].y - convergence.y) *
-                        (sources[i].y - convergence.y)));
-            const ImVec2 outer = lerp_point(
-                convergence, sources[i], arm / distance);
-
-            overlay->AddLine(
-                ImVec2(convergence.x + channel_shift, convergence.y),
-                ImVec2(outer.x + channel_shift, outer.y),
-                rgba(235, 38, 52, glow_alpha(132.0f * glitch_alpha)),
-                stroke);
-            overlay->AddLine(
-                ImVec2(convergence.x - channel_shift, convergence.y),
-                ImVec2(outer.x - channel_shift, outer.y),
-                rgba(36, 132, 190, glow_alpha(132.0f * glitch_alpha)),
-                stroke);
-        }
-
-        // Wordmark split uses the same pattern so the glitch feels like one
-        // system-wide corruption event rather than a text-only overlay.
-        draw_centered_intro_text(
+    if (elapsed >= kIntroWordmarkBegin) {
+        const float word_blur =
+            1.0f - timeline_progress(
+                elapsed,
+                kIntroWordmarkBegin,
+                kIntroWordmarkBlurEnd);
+        const int word_alpha =
+            glow_alpha(242.0f * outro);
+        draw_vista_wordmark(
             overlay,
             ImVec2(
-                convergence.x + channel_shift * 1.6f,
-                convergence.y + unit * 0.145f),
-            std::max(20.0f, unit * 0.045f),
-            rgba(232, 35, 49, glow_alpha(138.0f * glitch_alpha)),
-            "VibeStation");
-        draw_centered_intro_text(
-            overlay,
-            ImVec2(
-                convergence.x - channel_shift * 1.6f,
-                convergence.y + unit * 0.145f),
-            std::max(20.0f, unit * 0.045f),
-            rgba(38, 133, 191, glow_alpha(138.0f * glitch_alpha)),
-            "VibeStation");
-
-        // Uneven primary tear: broken sections, per-pattern placement, and
-        // red/blue fringing instead of a single flat horizontal bar.
-        const float tear_y =
-            convergence.y +
-            unit * (0.010f +
-                tear_offsets[static_cast<size_t>(glitch_pattern)]);
-        const float tear_extent =
-            size.x * tear_widths[static_cast<size_t>(glitch_pattern)];
-        const float tear_center =
-            convergence.x + channel_shift * 3.0f;
-        const float tear_h =
-            std::max(2.0f, unit * (0.0030f +
-                0.0008f * static_cast<float>(glitch_pattern)));
-
-        const std::array<ImVec2, 3> tear_segments = {
-            ImVec2(-0.50f, -0.19f),
-            ImVec2(-0.12f,  0.15f),
-            ImVec2( 0.23f,  0.50f),
-        };
-
-        for (size_t i = 0; i < tear_segments.size(); ++i) {
-            const float jitter =
-                ((glitch_pattern + static_cast<int>(i)) & 1) ? px * 4.0f : -px * 3.0f;
-            const float x0 =
-                tear_center + tear_extent * tear_segments[i].x + jitter;
-            const float x1 =
-                tear_center + tear_extent * tear_segments[i].y + jitter;
-
-            // Red fringe above, bright broken core, blue fringe below.
-            overlay->AddRectFilled(
-                ImVec2(x0 - px * 2.0f, tear_y - px * 1.5f),
-                ImVec2(x1, tear_y),
-                rgba(230, 38, 52, glow_alpha(128.0f * glitch_alpha)));
-            overlay->AddRectFilled(
-                ImVec2(x0, tear_y),
-                ImVec2(x1, tear_y + tear_h),
-                rgba(236, 241, 246, glow_alpha(108.0f * glitch_alpha)));
-            overlay->AddRectFilled(
-                ImVec2(x0 + px * 2.0f, tear_y + tear_h),
-                ImVec2(x1 + px * 3.0f, tear_y + tear_h + px * 1.4f),
-                rgba(40, 132, 194, glow_alpha(122.0f * glitch_alpha)));
-        }
-
-        // Secondary thinner tear at a different height/length.
-        const float tear2_y =
-            tear_y + unit * (0.032f +
-                0.004f * static_cast<float>(glitch_pattern));
-        const float tear2_x0 =
-            convergence.x - size.x * (0.11f +
-                0.015f * static_cast<float>(glitch_pattern));
-        const float tear2_x1 =
-            convergence.x + size.x * (0.07f +
-                0.012f * static_cast<float>((glitch_pattern + 1) & 3));
-        overlay->AddRectFilled(
-            ImVec2(tear2_x0, tear2_y),
-            ImVec2(tear2_x1, tear2_y + std::max(1.0f, px)),
-            rgba(218, 224, 231, glow_alpha(78.0f * glitch_alpha)));
-
-        // Simulated content displacement immediately around the primary tear:
-        // clipped chromatic copies of the mark are shifted in opposite
-        // directions above/below the rupture.
-        const float clip_half = std::max(4.0f, unit * 0.012f);
-        overlay->PushClipRect(
-            ImVec2(pos.x, tear_y - clip_half),
-            ImVec2(pos.x + size.x, tear_y),
-            true);
-        for (size_t i = 0; i < sources.size(); ++i) {
-            const float distance = std::max(
-                1.0f,
-                std::sqrt(
-                    (sources[i].x - convergence.x) *
-                        (sources[i].x - convergence.x) +
-                    (sources[i].y - convergence.y) *
-                        (sources[i].y - convergence.y)));
-            const ImVec2 outer = lerp_point(
-                convergence, sources[i], arm / distance);
-            overlay->AddLine(
-                ImVec2(convergence.x + px * 4.0f, convergence.y),
-                ImVec2(outer.x + px * 4.0f, outer.y),
-                rgba(241, 243, 247, glow_alpha(115.0f * glitch_alpha)),
-                stroke);
-        }
-        overlay->PopClipRect();
-
-        overlay->PushClipRect(
-            ImVec2(pos.x, tear_y),
-            ImVec2(pos.x + size.x, tear_y + clip_half),
-            true);
-        for (size_t i = 0; i < sources.size(); ++i) {
-            const float distance = std::max(
-                1.0f,
-                std::sqrt(
-                    (sources[i].x - convergence.x) *
-                        (sources[i].x - convergence.x) +
-                    (sources[i].y - convergence.y) *
-                        (sources[i].y - convergence.y)));
-            const ImVec2 outer = lerp_point(
-                convergence, sources[i], arm / distance);
-            overlay->AddLine(
-                ImVec2(convergence.x - px * 3.0f, convergence.y),
-                ImVec2(outer.x - px * 3.0f, outer.y),
-                rgba(241, 243, 247, glow_alpha(96.0f * glitch_alpha)),
-                stroke);
-        }
-        overlay->PopClipRect();
-    }
-
-    // Small signs of life prevent the black frame from feeling frozen and
-    // make the sequence practical during development.
-    const bool cursor_on =
-        (static_cast<int>(elapsed * 4.0f) & 1) == 0;
-    std::string status = "INITIALIZING VIBESTATION";
-    if (cursor_on) {
-        status += "_";
-    }
-
-    const float status_alpha =
-        timeline_progress(elapsed, 0.24f, 0.62f) * boot_fade;
-    if (status_alpha > 0.001f) {
-        const float status_font_size =
-            std::max(9.0f, unit * 0.011f);
-        ImFont* status_font =
-            definitive_font_for_size(status_font_size);
-        overlay->AddText(
-            status_font,
-            status_font_size,
-            ImVec2(pos.x + unit * 0.035f,
-                pos.y + size.y - unit * 0.055f),
-            rgba(128, 136, 146, glow_alpha(185.0f * status_alpha)),
-            status.c_str());
-
-        const char* skip_text = "SPACE / ENTER  SKIP";
-        const float font_size = std::max(9.0f, unit * 0.011f);
-        ImFont* skip_font =
-            definitive_font_for_size(font_size);
-        const ImVec2 skip_size =
-            skip_font->CalcTextSizeA(
-                font_size, FLT_MAX, 0.0f, skip_text);
-        overlay->AddText(
-            skip_font,
-            font_size,
-            ImVec2(
-                pos.x + size.x - unit * 0.035f - skip_size.x,
-                pos.y + size.y - unit * 0.055f),
-            rgba(105, 112, 122, glow_alpha(165.0f * status_alpha)),
-            skip_text);
-    }
-}
-
-void draw_ui_initialization_overlay(
-    const ImVec2& pos, const ImVec2& size, float elapsed) {
-    ImDrawList* overlay = ImGui::GetForegroundDrawList();
-    const Layout layout = make_layout(pos, size);
-
-    const float background_reveal =
-        timeline_progress(elapsed, kUiBackgroundBegin, kUiBackgroundReady);
-
-    // Overall black veil lets the photographic background arrive first.
-    const int global_black =
-        glow_alpha(255.0f * (1.0f - background_reveal));
-    if (global_black > 0) {
-        overlay->AddRectFilled(
-            pos, ImVec2(pos.x + size.x, pos.y + size.y),
-            rgba(0, 0, 0, global_black));
-    }
-
-    // Branding: short downward-to-upward wipe with a very light scan edge.
-    const float brand_reveal =
-        timeline_progress(elapsed, kUiBrandBegin, kUiBrandBegin + 0.56f);
-    const ImVec2 brand0 = layout.point(28.0f, 22.0f);
-    const ImVec2 brand1 = layout.point(455.0f, 205.0f);
-    if (brand_reveal < 1.0f) {
-        const float wipe_y =
-            brand1.y - (brand1.y - brand0.y) * brand_reveal;
-        overlay->AddRectFilled(
-            ImVec2(brand0.x, brand0.y),
-            ImVec2(brand1.x, wipe_y),
-            rgba(0, 0, 0, 255));
-        overlay->AddLine(
-            ImVec2(brand0.x, wipe_y),
-            ImVec2(brand1.x, wipe_y),
-            rgba(186, 211, 232, glow_alpha(105.0f * brand_reveal)),
-            layout.px(1.0f));
-    }
-
-    // Right-side metadata resolves just after the brand.
-    const float meta_reveal =
-        timeline_progress(
-            elapsed, kUiBrandBegin + 0.12f, kUiBrandBegin + 0.64f);
-    const ImVec2 meta0 = layout.point(1030.0f, 24.0f);
-    const ImVec2 meta1 = layout.point(1248.0f, 116.0f);
-    if (meta_reveal < 1.0f) {
-        overlay->AddRectFilled(
-            meta0, meta1,
-            rgba(0, 0, 0, glow_alpha(255.0f * (1.0f - meta_reveal))));
-    }
-
-    // Primary actions initialize one after another from top to bottom. The
-    // image concept is used here as a placement/timing guide, not as literal
-    // startup artwork.
-    constexpr float kMenuX = 28.0f;
-    constexpr float kMenuY = 210.0f;
-    constexpr float kMenuW = 420.0f;
-    constexpr float kMenuH = 66.0f;
-    constexpr float kMenuStep = 70.0f;
-
-    for (int i = 0; i < 5; ++i) {
-        const float item_start =
-            kUiMenuBegin + static_cast<float>(i) * 0.095f;
-        const float item_reveal =
-            timeline_progress(elapsed, item_start, item_start + 0.46f);
-
-        const ImVec2 row0 =
-            layout.point(kMenuX, kMenuY + kMenuStep * i);
-        const ImVec2 row1 =
-            layout.point(kMenuX + kMenuW,
-                kMenuY + kMenuStep * i + kMenuH);
-
-        if (item_reveal < 1.0f) {
-            const float wipe_x =
-                row0.x + (row1.x - row0.x) * item_reveal;
-
-            overlay->AddRectFilled(
-                ImVec2(wipe_x, row0.y),
-                row1,
-                rgba(0, 0, 0, 255));
-
-            const int veil_alpha =
-                glow_alpha(180.0f * (1.0f - item_reveal));
-            if (veil_alpha > 0) {
-                overlay->AddRectFilled(
-                    row0, ImVec2(wipe_x, row1.y),
-                    rgba(0, 0, 0, veil_alpha));
-            }
-
-            overlay->AddLine(
-                ImVec2(wipe_x, row0.y + layout.px(5.0f)),
-                ImVec2(wipe_x, row1.y - layout.px(5.0f)),
-                rgba(181, 211, 236,
-                    glow_alpha(125.0f * item_reveal)),
-                layout.px(1.0f));
-        }
-    }
-
-    // Bottom cards lift in last. Separate timing makes the right system card
-    // trail the library by a fraction of a second.
-    const std::array<ImVec4, 2> panels = {
-        ImVec4(25.0f, 575.0f, 845.0f, 780.0f),
-        ImVec4(850.0f, 575.0f, 1255.0f, 780.0f),
-    };
-    for (size_t i = 0; i < panels.size(); ++i) {
-        const float start =
-            kUiPanelsBegin + static_cast<float>(i) * 0.11f;
-        const float reveal =
-            timeline_progress(elapsed, start, start + 0.48f);
-        const ImVec2 p0 = layout.point(panels[i].x, panels[i].y);
-        const ImVec2 p1 = layout.point(panels[i].z, panels[i].w);
-
-        if (reveal < 1.0f) {
-            const float wipe_y =
-                p1.y - (p1.y - p0.y) * reveal;
-            overlay->AddRectFilled(
-                p0, ImVec2(p1.x, wipe_y),
-                rgba(0, 0, 0, 255));
-            overlay->AddRectFilled(
-                ImVec2(p0.x, wipe_y), p1,
-                rgba(0, 0, 0,
-                    glow_alpha(155.0f * (1.0f - reveal))));
-        }
+                center.x,
+                center.y + base_icon_size * 0.70f),
+            std::clamp(unit * 0.049f, 30.0f, 44.0f),
+            word_blur,
+            rgba(229, 232, 236, word_alpha));
     }
 }
 
@@ -2157,6 +1862,18 @@ void App::release_definitive_ui_assets() {
     g_ui_open_sound.pcm.clear();
     g_ui_close_sound.pcm.clear();
     g_menu_was_engaged.fill(false);
+
+    if (g_intro_icon_texture != 0) {
+        glDeleteTextures(1, &g_intro_icon_texture);
+        g_intro_icon_texture = 0;
+    }
+    if (g_intro_icon_blur_texture != 0) {
+        glDeleteTextures(1, &g_intro_icon_blur_texture);
+        g_intro_icon_blur_texture = 0;
+    }
+    g_intro_icon_width = 0;
+    g_intro_icon_height = 0;
+    g_intro_icon_load_attempted = false;
 
     if (g_background_texture != 0) {
         glDeleteTextures(1, &g_background_texture);
@@ -3027,10 +2744,10 @@ void App::panel_definitive_home() {
     // Load/soften the photograph while the boot presentation is still on
     // black so the transition into the launcher is hitch-free.
     ensure_background_texture_loaded();
+    ensure_intro_icon_texture_loaded();
     ensure_ui_sounds_loaded();
 
-    if (launcher_intro_active &&
-        g_launcher_intro_elapsed < kUiBackgroundBegin) {
+    if (launcher_intro_active) {
         draw_boot_presentation(
             window_pos, window_size, g_launcher_intro_elapsed);
         return;
@@ -3380,8 +3097,4 @@ void App::panel_definitive_home() {
             rgba(0, 0, 0, fade_alpha));
     }
 
-    if (launcher_intro_active) {
-        draw_ui_initialization_overlay(
-            window_pos, window_size, g_launcher_intro_elapsed);
-    }
 }
