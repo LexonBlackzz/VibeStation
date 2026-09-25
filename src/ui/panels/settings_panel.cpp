@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include <algorithm>
 void App::panel_settings() {
+    const bool definitive_settings_was_open = show_settings_;
     ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Settings", &show_settings_)) {
         if (!has_started_emulation_) {
