@@ -1466,6 +1466,287 @@ void App::release_definitive_ui_assets() {
     g_menu_highlight_mix.fill(0.0f);
 }
 
+void App::panel_definitive_settings() {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBackground;
+
+    ImGui::Begin("##DefinitiveSettingsOverlay", nullptr, flags);
+    ImGui::PopStyleVar(3);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 window_pos = ImGui::GetWindowPos();
+    const ImVec2 window_size = ImGui::GetWindowSize();
+    const ImVec2 window_end(
+        window_pos.x + window_size.x,
+        window_pos.y + window_size.y);
+    const Layout layout = make_layout(window_pos, window_size);
+
+    ensure_background_texture_loaded();
+
+    // Replace the launcher with a fully blurred copy of its photographic
+    // backdrop, then darken it. The old launcher controls are no longer legible
+    // enough to compete with the settings surface beneath this frost layer.
+    if (g_background_blur_texture != 0) {
+        draw_cover_region(
+            draw, g_background_blur_texture,
+            window_pos, window_size,
+            window_pos, window_end,
+            rgba(255, 255, 255, 244));
+    }
+    else {
+        draw->AddRectFilled(window_pos, window_end, rgba(7, 9, 12, 255));
+    }
+    draw->AddRectFilled(window_pos, window_end, rgba(0, 2, 6, 145));
+
+    constexpr float panel_x = 116.0f;
+    constexpr float panel_y = 58.0f;
+    constexpr float panel_w = 1048.0f;
+    constexpr float panel_h = 684.0f;
+
+    const ImVec2 panel0 = layout.point(panel_x, panel_y);
+    const ImVec2 panel1 = layout.point(panel_x + panel_w, panel_y + panel_h);
+
+    // Quiet outer shadow + frosted definitive settings surface.
+    draw->AddRectFilled(
+        layout.point(panel_x - 10.0f, panel_y + 10.0f),
+        layout.point(panel_x + panel_w + 10.0f, panel_y + panel_h + 10.0f),
+        rgba(0, 0, 0, 72), layout.px(8.0f));
+    draw->AddRectFilled(panel0, panel1, rgba(5, 9, 14, 244), layout.px(5.0f));
+    draw->AddRect(panel0, panel1, rgba(111, 132, 151, 218),
+        layout.px(5.0f), 0, layout.px(1.0f));
+
+    // Header.
+    add_text(draw, layout, panel_x + 42.0f, panel_y + 28.0f, 31.0f,
+        rgba(237, 241, 245, 255), "SETTINGS");
+    add_text(draw, layout, panel_x + 44.0f, panel_y + 66.0f, 10.0f,
+        rgba(143, 154, 165, 228), "DEFINITIVE / SIMPLE");
+
+    constexpr std::array<ImU32, 4> settings_accents = {
+        IM_COL32(194, 44, 56, 235),
+        IM_COL32(52, 128, 125, 235),
+        IM_COL32(177, 145, 72, 235),
+        IM_COL32(52, 93, 157, 235),
+    };
+    for (int i = 0; i < 4; ++i) {
+        draw->AddRectFilled(
+            layout.point(panel_x + 43.0f + i * 23.0f, panel_y + 91.0f),
+            layout.point(panel_x + 60.0f + i * 23.0f, panel_y + 96.0f),
+            settings_accents[static_cast<size_t>(i)]);
+    }
+
+    draw->AddLine(
+        layout.point(panel_x + 32.0f, panel_y + 116.0f),
+        layout.point(panel_x + panel_w - 32.0f, panel_y + 116.0f),
+        rgba(82, 97, 111, 155), layout.px(1.0f));
+
+    // Close button.
+    const ImVec2 close0 =
+        layout.point(panel_x + panel_w - 62.0f, panel_y + 29.0f);
+    ImGui::SetCursorScreenPos(close0);
+    ImGui::PushID("definitive_settings_close");
+    const bool close_pressed =
+        ImGui::InvisibleButton("##close", layout.size(30.0f, 30.0f));
+    const bool close_hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    const ImU32 close_color = close_hovered
+        ? rgba(242, 246, 249, 255)
+        : rgba(165, 176, 187, 230);
+    if (close_hovered) {
+        draw->AddRectFilled(
+            close0,
+            ImVec2(close0.x + layout.px(30.0f),
+                close0.y + layout.px(30.0f)),
+            rgba(36, 49, 61, 160), layout.px(3.0f));
+    }
+    draw->AddLine(
+        ImVec2(close0.x + layout.px(8.0f), close0.y + layout.px(8.0f)),
+        ImVec2(close0.x + layout.px(22.0f), close0.y + layout.px(22.0f)),
+        close_color, layout.px(1.6f));
+    draw->AddLine(
+        ImVec2(close0.x + layout.px(22.0f), close0.y + layout.px(8.0f)),
+        ImVec2(close0.x + layout.px(8.0f), close0.y + layout.px(22.0f)),
+        close_color, layout.px(1.6f));
+
+    if (close_pressed || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        show_settings_ = false;
+        definitive_detailed_settings_ = false;
+        ImGui::End();
+        return;
+    }
+
+    constexpr float left_x = 154.0f;
+    constexpr float right_x = 650.0f;
+    constexpr float column_w = 460.0f;
+    constexpr float top_y = 194.0f;
+
+    // VIDEO
+    draw_settings_section(
+        draw, layout, left_x, top_y, column_w, 208.0f, "VIDEO");
+
+    const char* resolution_modes[] = { "320x240", "640x480", "1024x768" };
+    int resolution_index = static_cast<int>(g_output_resolution_mode);
+    if (definitive_settings_combo(
+        draw, layout, "simple_resolution", "Output Resolution",
+        left_x + 1.0f, top_y + 43.0f, column_w - 2.0f,
+        resolution_index, resolution_modes, IM_ARRAYSIZE(resolution_modes))) {
+        resolution_index = std::clamp(resolution_index, 0, 2);
+        g_output_resolution_mode =
+            static_cast<OutputResolutionMode>(resolution_index);
+
+        if (!latest_frame_rgba_.empty() &&
+            latest_frame_width_ > 0 && latest_frame_height_ > 0) {
+            int output_width = 320;
+            int output_height = 240;
+            output_resolution_dimensions(
+                g_output_resolution_mode, output_width, output_height);
+            if (latest_frame_width_ != output_width ||
+                latest_frame_height_ != output_height) {
+                resample_rgba_nearest(
+                    latest_frame_rgba_,
+                    latest_frame_width_, latest_frame_height_,
+                    scaled_frame_rgba_,
+                    output_width, output_height);
+                renderer_->upload_frame(
+                    scaled_frame_rgba_, output_width, output_height);
+                latest_frame_rgba_ = scaled_frame_rgba_;
+                latest_frame_width_ = output_width;
+                latest_frame_height_ = output_height;
+            }
+        }
+        save_persistent_config();
+    }
+
+    if (definitive_settings_switch(
+        draw, layout, "simple_filter", "Smooth Scaling",
+        left_x + 1.0f, top_y + 93.0f, column_w - 2.0f,
+        g_bilinear_filtering)) {
+        if (renderer_) {
+            renderer_->set_bilinear_filtering(g_bilinear_filtering);
+        }
+        save_persistent_config();
+    }
+
+    const char* deinterlace_modes[] = {
+        "Weave", "Bob", "Blend"
+    };
+    int deinterlace_index = static_cast<int>(g_deinterlace_mode);
+    if (definitive_settings_combo(
+        draw, layout, "simple_deinterlace", "Deinterlace",
+        left_x + 1.0f, top_y + 143.0f, column_w - 2.0f,
+        deinterlace_index, deinterlace_modes, IM_ARRAYSIZE(deinterlace_modes))) {
+        deinterlace_index = std::clamp(deinterlace_index, 0, 2);
+        g_deinterlace_mode =
+            static_cast<DeinterlaceMode>(deinterlace_index);
+        save_persistent_config();
+    }
+
+    // PERFORMANCE
+    draw_settings_section(
+        draw, layout, right_x, top_y, column_w, 208.0f, "PERFORMANCE");
+
+    if (definitive_settings_switch(
+        draw, layout, "simple_fast_gpu", "Fast GPU Mode",
+        right_x + 1.0f, top_y + 43.0f, column_w - 2.0f,
+        g_gpu_fast_mode)) {
+        if (!g_gpu_fast_mode) {
+            g_gpu_extreme_fast_mode = false;
+        }
+        save_persistent_config();
+    }
+
+    if (definitive_settings_switch(
+        draw, layout, "simple_vsync", "VSync",
+        right_x + 1.0f, top_y + 93.0f, column_w - 2.0f,
+        config_vsync_)) {
+        SDL_GL_SetSwapInterval(config_vsync_ ? 1 : 0);
+        save_persistent_config();
+    }
+
+    if (definitive_settings_switch(
+        draw, layout, "simple_rewind", "Rewind",
+        right_x + 1.0f, top_y + 143.0f, column_w - 2.0f,
+        config_rewind_enabled_)) {
+        save_persistent_config();
+    }
+
+    constexpr float lower_y = 424.0f;
+
+    // EMULATION
+    draw_settings_section(
+        draw, layout, left_x, lower_y, column_w, 110.0f, "EMULATION");
+    if (definitive_settings_switch(
+        draw, layout, "simple_direct_boot", "Direct Disc Boot",
+        left_x + 1.0f, lower_y + 43.0f, column_w - 2.0f,
+        config_direct_disc_boot_)) {
+        save_persistent_config();
+    }
+
+    // CONTROLS
+    draw_settings_section(
+        draw, layout, right_x, lower_y, column_w, 110.0f, "CONTROLS");
+    if (definitive_settings_action(
+        draw, layout, "simple_bindings", "Configure Bindings",
+        right_x + 1.0f, lower_y + 43.0f, column_w - 2.0f)) {
+        show_bindings_config_ = true;
+        show_settings_ = false;
+        definitive_detailed_settings_ = false;
+        ImGui::End();
+        return;
+    }
+
+    // Footer / opt-in legacy interface.
+    draw->AddLine(
+        layout.point(panel_x + 32.0f, panel_y + panel_h - 118.0f),
+        layout.point(panel_x + panel_w - 32.0f, panel_y + panel_h - 118.0f),
+        rgba(82, 97, 111, 155), layout.px(1.0f));
+
+    ImGui::SetCursorScreenPos(
+        layout.point(panel_x + 42.0f, panel_y + panel_h - 83.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layout.px(2.0f));
+    ImGui::PushStyleVar(
+        ImGuiStyleVar_FramePadding, layout.size(4.0f, 4.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, rgba(20, 28, 36, 245));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, rgba(31, 44, 56, 250));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, rgba(199, 224, 244, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, rgba(220, 226, 232, 245));
+
+    bool detailed = definitive_detailed_settings_;
+    const bool detailed_changed =
+        ImGui::Checkbox("Detailed Settings", &detailed);
+
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+
+    if (detailed_changed) {
+        definitive_detailed_settings_ = detailed;
+    }
+
+    add_text_right(
+        draw, layout,
+        panel_x + panel_w - 42.0f,
+        panel_y + panel_h - 80.0f,
+        9.5f, rgba(128, 140, 151, 210),
+        VIBESTATION_VERSION_STRING);
+
+    ImGui::End();
+}
+
 void App::panel_definitive_home() {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const ImVec2 window_pos = ImGui::GetWindowPos();
