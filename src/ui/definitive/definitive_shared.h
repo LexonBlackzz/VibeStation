@@ -14,7 +14,7 @@ namespace definitive_ui {
 
 inline constexpr float kDesignWidth = 1280.0f;
 inline constexpr float kDesignHeight = 800.0f;
-inline constexpr float kLauncherIntroDuration = 3.82f;
+inline constexpr float kLauncherIntroDuration = 4.12f;
 
 ImFont* font_for_size(float pixel_size);
 
@@ -41,6 +41,11 @@ void draw_settings_background(
     ImDrawList* draw,
     const ImVec2& pos,
     const ImVec2& size);
+void draw_intro_handoff_background(
+    ImDrawList* draw,
+    const ImVec2& pos,
+    const ImVec2& size,
+    float opacity);
 
 void update_gameplay_ambient(
     const std::vector<u32>& rgba,
