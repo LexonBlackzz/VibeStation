@@ -374,8 +374,6 @@ void App::panel_definitive_grim_reaper() {
         panel_width,
         viewport->WorkSize.y);
 
-    ImGui::SetNextWindowViewport(
-        viewport->ID);
     ImGui::SetNextWindowPos(
         panel_pos,
         ImGuiCond_Always);
@@ -478,8 +476,7 @@ void App::panel_definitive_grim_reaper() {
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoDocking;
+        ImGuiWindowFlags_NoSavedSettings;
 
     ImGui::Begin(
         "##DefinitiveGrimReaperPanel",
