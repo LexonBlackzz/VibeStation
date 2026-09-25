@@ -873,6 +873,21 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - raster_begin).count());
 
+    if (ctx.texture.enabled && ctx.texture.psm == 2u) {
+        u32 state_mask = 0u;
+        if (ctx.alpha_blend) state_mask |= 1u << 0;
+        if (ctx.ate) state_mask |= 1u << 1;
+        if (ctx.date) state_mask |= 1u << 2;
+        if (ctx.zte) state_mask |= 1u << 3;
+        if (ctx.zte && !ctx.zmask) state_mask |= 1u << 4;
+        if (ctx.fbmask != 0u) state_mask |= 1u << 5;
+        if (ctx.dither) state_mask |= 1u << 6;
+        if ((ctx.scanmask & 2u) != 0u) state_mask |= 1u << 7;
+        ++stats_.psm16_state_draws[state_mask];
+        stats_.psm16_state_pixels[state_mask] += pixels;
+        stats_.psm16_state_ns[state_mask] += raster_ns;
+    }
+
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
     if (prim < stats_.raster_draws_by_primitive.size()) {

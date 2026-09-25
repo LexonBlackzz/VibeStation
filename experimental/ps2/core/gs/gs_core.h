@@ -52,6 +52,12 @@ struct GsStats {
     std::array<u64, 8> raster_ns_by_primitive{};
     std::array<u64, 64> texture_draws_by_psm{};
     std::array<u64, 64> texture_ns_by_psm{};
+    // PSMCT16-only draw-state profile. Bits:
+    // 0 ABE, 1 ATE, 2 DATE, 3 ZTE, 4 depth write,
+    // 5 FBMSK, 6 dither, 7 active scan mask.
+    std::array<u64, 256> psm16_state_draws{};
+    std::array<u64, 256> psm16_state_pixels{};
+    std::array<u64, 256> psm16_state_ns{};
     u64 textured_sprite_pixels = 0;
     u64 textured_sprite_fst_pixels = 0;
     u64 textured_sprite_constant_q_pixels = 0;
