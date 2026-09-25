@@ -73,8 +73,13 @@ private:
 	bool show_sound_status_ = false;
 	bool show_grim_reaper_ = false; // Legacy panel; definitive UI uses the page state below.
 	bool definitive_grim_reaper_active_ = false;
+	bool definitive_grim_reaper_closing_ = false;
 	bool definitive_grim_reaper_advanced_ = false;
+	float definitive_grim_reaper_visibility_ = 0.0f;
 	int definitive_grim_reaper_style_ = 0;
+	bool gameplay_exit_transition_active_ = false;
+	bool gameplay_exit_transition_switched_ = false;
+	float gameplay_exit_transition_elapsed_ = 0.0f;
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;
