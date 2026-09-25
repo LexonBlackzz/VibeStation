@@ -1434,12 +1434,53 @@ void Gpu::debug_note_polygon(u8 opcode, const Vertex* vertices, int vertex_count
 }
 
 void Gpu::gp0_fill_rect() {
-    prepare_software_vram_write();
     Color c(gp0_buffer_[0]);
     u16 x = gp0_buffer_[1] & 0x3F0; // Rounded down to 16-pixel boundary
     u16 y = (gp0_buffer_[1] >> 16) & 0x1FF;
     u16 w = ((gp0_buffer_[2] & 0x3FF) + 0xF) & ~0xF; // Rounded up to 16 pixels
     u16 h = (gp0_buffer_[2] >> 16) & 0x1FF;
+
+    // GP0(02h) ignores the drawing area and wraps in VRAM. Keep clears/fills
+    // on the host GPU too, otherwise a common clear between hardware
+    // primitives would force a full GPU->CPU->GPU round trip.
+    if (hardware_draw_enabled() && ensure_hardware_vram_current() &&
+        w != 0 && h != 0) {
+        auto state = hardware_draw_state(false);
+        state.draw_x_min = 0;
+        state.draw_y_min = 0;
+        state.draw_x_max = static_cast<s16>(psx::VRAM_WIDTH - 1);
+        state.draw_y_max = static_cast<s16>(psx::VRAM_HEIGHT - 1);
+        state.semi_transparent = false;
+
+        const u16 first_w = static_cast<u16>(
+            std::min<u32>(w, psx::VRAM_WIDTH - x));
+        const u16 second_w = static_cast<u16>(w - first_w);
+        const u16 first_h = static_cast<u16>(
+            std::min<u32>(h, psx::VRAM_HEIGHT - y));
+        const u16 second_h = static_cast<u16>(h - first_h);
+
+        bool ok = true;
+        auto draw_piece = [&](u16 px, u16 py, u16 pw, u16 ph) {
+            if (!ok || pw == 0 || ph == 0) {
+                return;
+            }
+            ok = hardware_rasterizer_->draw_flat_rect(
+                static_cast<s16>(px), static_cast<s16>(py),
+                pw, ph, c.r, c.g, c.b, state);
+        };
+
+        draw_piece(x, y, first_w, first_h);
+        draw_piece(0, y, second_w, first_h);
+        draw_piece(x, 0, first_w, second_h);
+        draw_piece(0, 0, second_w, second_h);
+
+        if (ok) {
+            hardware_gpu_vram_newer_ = true;
+            return;
+        }
+    }
+
+    prepare_software_vram_write();
 
     const u16 color15 = c.to_15bit();
     const u16 out = force_set_mask_bit_ ? static_cast<u16>(color15 | 0x8000u) : color15;
