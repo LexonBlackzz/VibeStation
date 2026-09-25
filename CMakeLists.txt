@@ -128,6 +128,7 @@ set(VIBESTATION_SOURCES
     src/ui/definitive/definitive_background.cpp
     src/ui/definitive/definitive_fonts.cpp
     src/ui/definitive/definitive_gameplay_ambient.cpp
+    src/ui/definitive/definitive_grim_reaper.cpp
     src/ui/definitive/definitive_intro.cpp
     src/ui/definitive/definitive_settings.cpp
     src/ui/definitive/definitive_home.cpp
