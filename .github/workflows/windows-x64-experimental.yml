@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - perf/recompiler-execution-flow-1
+      - integration/pr25-definitive-ui
   workflow_dispatch:
 
 jobs:
