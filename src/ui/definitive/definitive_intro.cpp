@@ -188,7 +188,7 @@ void draw_radial_glow(
             (1.0f - 0.58f * t);
         const float alpha =
             strength *
-            (0.028f + 0.030f * t);
+            (0.010f + 0.016f * t);
 
         draw->AddCircleFilled(
             center,
@@ -751,17 +751,6 @@ void draw_intro_presentation(
         end,
         rgba(0, 0, 0, 255));
 
-    // The blurred launcher photograph begins to exist before the intro ends.
-    // The next launcher frame draws the same backdrop, so there is no black
-    // flash between the startup presentation and the UI reveal.
-    if (handoff > 0.001f) {
-        draw_intro_handoff_background(
-            overlay,
-            pos,
-            size,
-            0.10f * handoff);
-    }
-
     ensure_intro_icon_texture_loaded();
 
     const float unit =
@@ -807,9 +796,9 @@ void draw_intro_presentation(
         draw_radial_glow(
             overlay,
             glow_center,
-            unit * 0.285f,
+            unit * 0.235f,
             g_intro_ambient_colors[i],
-            0.26f * atmosphere);
+            0.11f * atmosphere);
     }
 
     const float icon_alpha =
@@ -1100,7 +1089,7 @@ void draw_intro_presentation(
                 0.72f,
                 0.86f,
                 1.0f),
-            0.34f *
+            0.14f *
                 (1.0f - handoff));
     }
 
