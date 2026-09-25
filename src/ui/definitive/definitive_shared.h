@@ -35,6 +35,10 @@ void draw_launcher_readability_shade(
     ImDrawList* draw,
     const ImVec2& pos,
     const ImVec2& size);
+void draw_settings_background(
+    ImDrawList* draw,
+    const ImVec2& pos,
+    const ImVec2& size);
 
 void play_cursor_sound();
 void play_open_sound();
