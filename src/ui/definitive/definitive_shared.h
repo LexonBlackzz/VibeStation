@@ -23,6 +23,19 @@ void draw_intro_presentation(
 
 void preload_audio_assets();
 void release_audio_assets();
+
+void preload_background_assets();
+void release_background_assets();
+void draw_launcher_background(
+    ImDrawList* draw,
+    const ImVec2& pos,
+    const ImVec2& size,
+    float opacity = 1.0f);
+void draw_launcher_readability_shade(
+    ImDrawList* draw,
+    const ImVec2& pos,
+    const ImVec2& size);
+
 void play_cursor_sound();
 void play_open_sound();
 void play_close_sound();
