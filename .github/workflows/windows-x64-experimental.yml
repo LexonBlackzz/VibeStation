@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - perf/recompiler-execution-flow-1
+      - perf/gpu-hardware-raster-1
   workflow_dispatch:
 
 jobs:
