@@ -23,6 +23,7 @@ namespace {
         Skull,
         Camera,
         Folder,
+        Tv,
         Restart,
         Exit,
         More
@@ -136,6 +137,29 @@ namespace {
                 color, 2.0f * s, 0, stroke);
             break;
         }
+        case GameplayToolbarIcon::Tv: {
+            draw->AddRect(
+                ImVec2(center.x - 11.0f * s, center.y - 8.0f * s),
+                ImVec2(center.x + 11.0f * s, center.y + 8.0f * s),
+                color, 3.0f * s, 0, stroke);
+            draw->AddLine(
+                ImVec2(center.x - 5.0f * s, center.y - 8.0f * s),
+                ImVec2(center.x - 9.0f * s, center.y - 13.0f * s),
+                color, stroke);
+            draw->AddLine(
+                ImVec2(center.x + 5.0f * s, center.y - 8.0f * s),
+                ImVec2(center.x + 9.0f * s, center.y - 13.0f * s),
+                color, stroke);
+            draw->AddLine(
+                ImVec2(center.x - 5.0f * s, center.y + 8.0f * s),
+                ImVec2(center.x - 7.0f * s, center.y + 12.0f * s),
+                color, stroke);
+            draw->AddLine(
+                ImVec2(center.x + 5.0f * s, center.y + 8.0f * s),
+                ImVec2(center.x + 7.0f * s, center.y + 12.0f * s),
+                color, stroke);
+            break;
+        }
         case GameplayToolbarIcon::Restart: {
             constexpr float kPi = 3.14159265358979323846f;
             draw->PathArcTo(
@@ -190,8 +214,8 @@ void App::draw_gameplay_toolbar(
         return;
     }
 
-    constexpr int kButtonCount = 9;
-    constexpr int kSeparatorCount = 4;
+    constexpr int kButtonCount = 10;
+    constexpr int kSeparatorCount = 5;
 
     const float requested_scale =
         std::clamp(image_size.x / 1050.0f, 0.58f, 1.0f);
@@ -257,8 +281,15 @@ void App::draw_gameplay_toolbar(
             io.MousePos,
             ImVec2(bar_x, previous_y),
             ImVec2(bar_x + bar_w, previous_y + bar_h));
+    const bool shader_popup_open =
+        ImGui::IsPopupOpen(
+            "##gameplay_toolbar_shaders");
+    const bool more_popup_open =
+        ImGui::IsPopupOpen(
+            "##gameplay_toolbar_more");
     const bool popup_open =
-        ImGui::IsPopupOpen("##gameplay_toolbar_more");
+        shader_popup_open ||
+        more_popup_open;
 
     if (trigger_hovered || toolbar_hovered || popup_open) {
         gameplay_toolbar_reveal_hold_ = 0.70f;
@@ -698,8 +729,36 @@ void App::draw_gameplay_toolbar(
     separator(
         x - separator_space * 0.5f);
 
-    const ButtonResult restart = button(
+    const Renderer::ShaderMode shader_mode =
+        renderer_->shader_mode();
+    const std::string shader_tooltip =
+        std::string("Shaders: ") +
+        Renderer::shader_mode_name(
+            shader_mode);
+
+    const ButtonResult shaders = button(
         6,
+        "shaders",
+        GameplayToolbarIcon::Tv,
+        x,
+        true,
+        shader_mode !=
+                Renderer::ShaderMode::Off ||
+            shader_popup_open,
+        shader_tooltip.c_str());
+    if (shaders.clicked) {
+        play_ui_open_sound();
+        ImGui::OpenPopup(
+            "##gameplay_toolbar_shaders");
+        gameplay_toolbar_reveal_hold_ = 1.0f;
+    }
+
+    x += button_size + separator_space;
+    separator(
+        x - separator_space * 0.5f);
+
+    const ButtonResult restart = button(
+        7,
         "restart",
         GameplayToolbarIcon::Restart,
         x,
@@ -728,7 +787,7 @@ void App::draw_gameplay_toolbar(
 
     x += button_size + gap;
     const ButtonResult exit = button(
-        7,
+        8,
         "exit",
         GameplayToolbarIcon::Exit,
         x,
@@ -775,7 +834,7 @@ void App::draw_gameplay_toolbar(
         x - separator_space * 0.5f);
 
     const ButtonResult more = button(
-        8,
+        9,
         "more",
         GameplayToolbarIcon::More,
         x,
@@ -813,6 +872,77 @@ void App::draw_gameplay_toolbar(
     ImGui::PushStyleColor(
         ImGuiCol_Text,
         IM_COL32(232, 237, 243, 250));
+
+    if (ImGui::BeginPopup(
+            "##gameplay_toolbar_shaders")) {
+        gameplay_toolbar_reveal_hold_ = 0.8f;
+
+        const Renderer::ShaderMode current_mode =
+            renderer_->shader_mode();
+
+        if (ImGui::MenuItem(
+                "Off",
+                nullptr,
+                current_mode ==
+                    Renderer::ShaderMode::Off)) {
+            renderer_->set_shader_mode(
+                Renderer::ShaderMode::Off);
+            status_message_ =
+                "Shader: Off";
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled(
+            "CRT");
+
+        const bool shader_supported =
+            renderer_->shader_supported();
+
+        if (!shader_supported) {
+            ImGui::BeginDisabled();
+        }
+
+        if (ImGui::MenuItem(
+                "Consumer TV",
+                nullptr,
+                current_mode ==
+                    Renderer::ShaderMode::CrtTv)) {
+            if (renderer_->set_shader_mode(
+                    Renderer::ShaderMode::CrtTv)) {
+                status_message_ =
+                    "Shader: CRT - Consumer TV";
+            }
+            else {
+                status_message_ =
+                    "CRT shaders are unavailable on this OpenGL context";
+            }
+        }
+
+        if (ImGui::MenuItem(
+                "PC Monitor",
+                nullptr,
+                current_mode ==
+                    Renderer::ShaderMode::CrtPc)) {
+            if (renderer_->set_shader_mode(
+                    Renderer::ShaderMode::CrtPc)) {
+                status_message_ =
+                    "Shader: CRT - PC Monitor";
+            }
+            else {
+                status_message_ =
+                    "CRT shaders are unavailable on this OpenGL context";
+            }
+        }
+
+        if (!shader_supported) {
+            ImGui::EndDisabled();
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "OpenGL shader pipeline unavailable");
+        }
+
+        ImGui::EndPopup();
+    }
 
     if (ImGui::BeginPopup(
             "##gameplay_toolbar_more")) {
@@ -1080,6 +1210,21 @@ void App::panel_emulator_screen() {
             image_pos,
             draw_size,
             overscan_v);
+
+        // CRT and future post-process shaders are rendered at the actual
+        // on-screen game size so scanlines and shadow masks track display
+        // pixels instead of the low-resolution PS1 source texture.
+        renderer_->prepare_present(
+            std::max(
+                1,
+                static_cast<int>(
+                    std::lround(
+                        draw_size.x))),
+            std::max(
+                1,
+                static_cast<int>(
+                    std::lround(
+                        draw_size.y))));
 
         ImGui::Image(
             (ImTextureID)(intptr_t)renderer_->get_texture_id(),
