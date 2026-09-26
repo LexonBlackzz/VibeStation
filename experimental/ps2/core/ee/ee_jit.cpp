@@ -1389,9 +1389,16 @@ u32 EeJit::execute_block(
                 static_cast<u8>(compiled_instructions);
             entry.function = function;
             entry.control_flow = compiled_control_flow;
+            entry.annul_capable =
+                compiled_control_flow &&
+                compiled_instructions >= 2u &&
+                branch_likely_instruction(
+                    words[compiled_instructions - 2u]);
             entry.uses_ram = compiled_uses_ram;
             entry.ram_load_mask = 0u;
             entry.ram_store_mask = 0u;
+            entry.guard_bail_streak = 0u;
+            entry.guard_skip_remaining = 0u;
             for (u32 i = 0;
                  i < compiled_instructions && i < 32u;
                  ++i) {
@@ -1469,22 +1476,63 @@ u32 EeJit::execute_block(
             break;
         }
 
+        // A hot block which repeatedly proves that its dynamic memory
+        // operand is MMIO/non-RAM is temporarily kept on the interpreter.
+        // This is the same basic adaptive idea used by the mature PS1 V4
+        // backend: do not pay a native entry + guard + exit on every visit
+        // when the guard has already failed several times in a row.
+        if (entry->guard_skip_remaining != 0u) {
+            --entry->guard_skip_remaining;
+            break;
+        }
+
         const u32 retired =
             entry->function(&state, ram_data, page_generations);
-        if (retired == 0u ||
-            retired > entry->instruction_count) {
+        if (retired > entry->instruction_count) {
+            break;
+        }
+
+        if (retired == 0u) {
+            const bool first_is_guarded_memory =
+                ((entry->ram_load_mask | entry->ram_store_mask) & 1u) != 0u;
+            if (first_is_guarded_memory) {
+                ++block_guard_bailout_count_;
+                if (++entry->guard_bail_streak >= 4u) {
+                    entry->guard_bail_streak = 0u;
+                    entry->guard_skip_remaining = 32u;
+                }
+            }
             break;
         }
 
         const bool full_block =
             retired == entry->instruction_count;
+        const bool annulled_control =
+            entry->control_flow &&
+            entry->annul_capable &&
+            !full_block &&
+            retired + 1u == entry->instruction_count;
         final_control_flow =
-            entry->control_flow && full_block;
+            entry->control_flow && (full_block || annulled_control);
 
         ++block_executed_count_;
         block_instruction_count_ += retired;
-        if (!full_block) {
-            ++block_guard_bailout_count_;
+        if (full_block || annulled_control) {
+            entry->guard_bail_streak = 0u;
+        } else {
+            const bool guard_failure =
+                retired < 32u &&
+                (((entry->ram_load_mask | entry->ram_store_mask) >>
+                  retired) & 1u) != 0u;
+            if (guard_failure) {
+                ++block_guard_bailout_count_;
+                if (++entry->guard_bail_streak >= 4u) {
+                    entry->guard_bail_streak = 0u;
+                    entry->guard_skip_remaining = 32u;
+                }
+            } else {
+                entry->guard_bail_streak = 0u;
+            }
             if ((entry->ram_store_mask &
                  (1u << (retired - 1u))) != 0u) {
                 ++block_code_store_exit_count_;
@@ -1513,7 +1561,7 @@ u32 EeJit::execute_block(
 
         total_retired += retired;
 
-        if (!full_block ||
+        if ((!full_block && !annulled_control) ||
             total_retired >= maximum_instructions) {
             break;
         }
