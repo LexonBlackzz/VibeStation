@@ -4768,6 +4768,269 @@ V4NativeFn compile_v4_pending_delay_store(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_control(
+    V4CodeArena &arena, const V4DecodedControl &control, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 2048u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label not_taken, taken, finish, likely_not_taken;
+
+  const bool likely =
+      control.op == V4ControlOp::Beql ||
+      control.op == V4ControlOp::Bnel ||
+      control.op == V4ControlOp::Blezl ||
+      control.op == V4ControlOp::Bgtzl ||
+      control.op == V4ControlOp::Bltzl ||
+      control.op == V4ControlOp::Bgezl ||
+      control.op == V4ControlOp::Bltzall ||
+      control.op == V4ControlOp::Bgezall;
+  const bool primary_likely =
+      control.op == V4ControlOp::Beql ||
+      control.op == V4ControlOp::Bnel ||
+      control.op == V4ControlOp::Blezl ||
+      control.op == V4ControlOp::Bgtzl;
+  const bool regimm_link =
+      control.op == V4ControlOp::Bltzal ||
+      control.op == V4ControlOp::Bgezal ||
+      control.op == V4ControlOp::Bltzall ||
+      control.op == V4ControlOp::Bgezall;
+
+  // Cpu::step() has already made this instruction an outer branch delay slot.
+  // Capture all guest operands before retiring an older delayed load.
+  if (control.op == V4ControlOp::Beq ||
+      control.op == V4ControlOp::Bne ||
+      control.op == V4ControlOp::Beql ||
+      control.op == V4ControlOp::Bnel) {
+    emit_read_guest(code, code.eax, control.rs);
+    emit_read_guest(code, code.ecx, control.rt);
+    code.cmp(code.eax, code.ecx);
+    if (control.op == V4ControlOp::Beq ||
+        control.op == V4ControlOp::Beql) {
+      code.sete(code.dl);
+    } else {
+      code.setne(code.dl);
+    }
+    code.movzx(code.edx, code.dl);
+  } else if (control.op == V4ControlOp::Blez ||
+             control.op == V4ControlOp::Bgtz ||
+             control.op == V4ControlOp::Bltz ||
+             control.op == V4ControlOp::Bgez ||
+             control.op == V4ControlOp::Bltzal ||
+             control.op == V4ControlOp::Bgezal ||
+             control.op == V4ControlOp::Blezl ||
+             control.op == V4ControlOp::Bgtzl ||
+             control.op == V4ControlOp::Bltzl ||
+             control.op == V4ControlOp::Bgezl ||
+             control.op == V4ControlOp::Bltzall ||
+             control.op == V4ControlOp::Bgezall) {
+    emit_read_guest(code, code.eax, control.rs);
+    code.cmp(code.eax, 0);
+    switch (control.op) {
+    case V4ControlOp::Blez:
+    case V4ControlOp::Blezl: code.setle(code.dl); break;
+    case V4ControlOp::Bgtz:
+    case V4ControlOp::Bgtzl: code.setg(code.dl); break;
+    case V4ControlOp::Bltz:
+    case V4ControlOp::Bltzal:
+    case V4ControlOp::Bltzl:
+    case V4ControlOp::Bltzall: code.setl(code.dl); break;
+    case V4ControlOp::Bgez:
+    case V4ControlOp::Bgezal:
+    case V4ControlOp::Bgezl:
+    case V4ControlOp::Bgezall: code.setge(code.dl); break;
+    default: break;
+    }
+    code.movzx(code.edx, code.dl);
+  } else if (control.op == V4ControlOp::Jr ||
+             control.op == V4ControlOp::Jalr) {
+    emit_read_guest(code, code.r8d, control.rs);
+  }
+
+  // Preserve the outer delay-slot diagnostic state before replacing its
+  // pending-branch fields with the inner control transfer.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+
+  // Link values are based on the pipeline PC after Cpu::step() advances across
+  // the outer branch: outer_target + 4, not inner_instruction_pc + 8.
+  u8 cancel_reg = 0u;
+  if (control.op == V4ControlOp::Jal) {
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+    code.add(code.eax, 4u);
+    emit_write_guest(code, 31u, code.eax);
+    cancel_reg = 31u;
+  } else if (control.op == V4ControlOp::Jalr) {
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+    code.add(code.eax, 4u);
+    emit_write_guest(code, control.rd, code.eax);
+    cancel_reg = control.rd;
+  } else if (regimm_link && !likely) {
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+    code.add(code.eax, 4u);
+    emit_write_guest(code, 31u, code.eax);
+    cancel_reg = 31u;
+  }
+
+  if (likely) {
+    code.test(code.edx, code.edx);
+    code.jz(likely_not_taken);
+    if (control.op == V4ControlOp::Bltzall ||
+        control.op == V4ControlOp::Bgezall) {
+      code.mov(code.eax, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+      code.add(code.eax, 4u);
+      emit_write_guest(code, 31u, code.eax);
+      cancel_reg = 31u;
+    }
+  }
+
+  emit_retire_incoming_load(code, cancel_reg);
+
+  // At opcode entry Cpu::step() has conceptually done:
+  //   pc = outer_target; next_pc = outer_target + 4.
+  // Materialize that state, then let this inner branch arm a fresh delay slot.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      1u);
+
+  if (control.op == V4ControlOp::J ||
+      control.op == V4ControlOp::Jal) {
+    // Jump high bits come from the pipeline PC (outer target), matching op_j().
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+    code.and_(code.eax, 0xF0000000u);
+    code.or_(code.eax, control.imm26 << 2u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        code.eax);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        1u);
+    code.add(code.ebx, 2u);
+    code.jmp(finish);
+  }
+
+  if (control.op == V4ControlOp::Jr ||
+      control.op == V4ControlOp::Jalr) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+        code.r8d);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+        1u);
+    code.add(code.ebx, 2u);
+    code.jmp(finish);
+  }
+
+  // Conditional branch target uses the already-advanced pipeline PC, exactly as
+  // Cpu::op_beq()/op_bcondz() do when a branch itself occupies a delay slot.
+  code.test(code.edx, code.edx);
+  code.jz(not_taken);
+  code.L(taken);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.add(code.eax, static_cast<u32>(control.simm * 4));
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      1u);
+  // Primary branch-likely opcodes 0x14..0x17 are one-cycle in the existing CPU
+  // timing model. REGIMM likely forms share the normal taken-branch cost.
+  if (primary_likely) {
+    code.inc(code.ebx);
+  } else {
+    code.add(code.ebx, 2u);
+  }
+  code.jmp(finish);
+
+  code.L(not_taken);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.inc(code.ebx);
+  code.jmp(finish);
+
+  code.L(likely_not_taken);
+  emit_retire_incoming_load(code, 0u);
+  // The likely branch annuls its own delay slot: advance from outer_target to
+  // outer_target+4 and leave no newly-pending branch.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+
+  code.L(finish);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_budget_branch(
     V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
     u32 &code_size) {
@@ -7512,8 +7775,11 @@ struct CpuRecompilerBackend::Impl {
     V4DecodedCop0 cop0{};
     V4DecodedLoad load{};
     V4DecodedStore store{};
+    V4DecodedControl control{};
 
-    if (decode_v4_alu(instruction, alu)) {
+    if (decode_v4_control(instruction, control)) {
+      fn = compile_v4_pending_delay_control(arena, control, code_size);
+    } else if (decode_v4_alu(instruction, alu)) {
       fn = compile_v4_pending_delay_alu(arena, alu, code_size);
     } else if (decode_v4_overflow_alu(instruction, overflow)) {
       fn = compile_v4_pending_delay_overflow_alu(arena, overflow, code_size);
