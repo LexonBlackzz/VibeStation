@@ -1221,6 +1221,29 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   cop_transfers.require_v4_cop2_native_when_available = true;
   cases.push_back(cop_transfers);
 
+  CpuCompareCase cop0_memory_transfers{};
+  cop0_memory_transfers.name = "v4_lwc0_swc0_native";
+  cop0_memory_transfers.initial_gpr[1] = 0x80011340u;
+  cop0_memory_transfers.initial_gpr[2] = 0x80011344u;
+  cop0_memory_transfers.memory = {
+      {0x00011340u, 0x00000300u},
+      {0x00011344u, 0u},
+  };
+  cop0_memory_transfers.compare_memory_addresses = {
+      0x00011340u, 0x00011344u,
+  };
+  cop0_memory_transfers.program = {
+      enc_i(0x30, 1, 13, 0), // LWC0 Cause <- [r1]
+      enc_i(0x38, 2, 13, 0), // SWC0 [r2] <- Cause
+      0u,
+  };
+  cop0_memory_transfers.instructions = 3u;
+  cop0_memory_transfers.require_v4_native_entry_when_available = true;
+  cop0_memory_transfers.require_v4_native_load_entry_when_available = true;
+  cop0_memory_transfers.require_v4_native_store_entry_when_available = true;
+  cop0_memory_transfers.require_v4_cop0_native_when_available = true;
+  cases.push_back(cop0_memory_transfers);
+
   CpuCompareCase branch_likely_not_taken{};
   branch_likely_not_taken.name = "decoded_beql_not_taken_annuls_delay";
   branch_likely_not_taken.initial_gpr[1] = 1u;
