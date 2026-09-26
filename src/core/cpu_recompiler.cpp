@@ -7652,12 +7652,17 @@ struct CpuRecompilerBackend::Impl {
         control_candidate && read_visible(branch_pc + 4u, delay_bits);
     const bool likely_control =
         count == 0u && control_candidate && v4_control_is_likely(control);
-    const bool split_control =
-        count == 0u && control_pair_cross_line && control_candidate &&
-        !delay_visible && !likely_control;
     const bool simple_control =
         delay_visible && !v4_control_is_likely(control) &&
         decode_v4_alu(delay_bits, delay);
+    // Any branch at the head whose delay slot is not fused into the same ALU
+    // fragment becomes a native branch-head fragment. The delay instruction is
+    // then lowered independently through pending_delay_alu_for(). This is the
+    // general native-only path for HI/LO, MULT/DIV, COP0/2, memory, exceptions,
+    // and other uncommon delay-slot opcodes; the branch itself must never be
+    // misclassified as an unsupported/reserved instruction.
+    const bool split_control =
+        count == 0u && control_candidate && !likely_control && !simple_control;
     V4DecodedOverflowAlu guarded_control_delay{};
     const bool guarded_control =
         count == 0u && delay_visible && v4_nonlink_conditional(control) &&
@@ -7670,9 +7675,7 @@ struct CpuRecompilerBackend::Impl {
     const bool guarded_load_control =
         count == 0u && delay_visible && !v4_control_is_likely(control) &&
         decode_v4_load(delay_bits, guarded_load_delay);
-    if ((simple_control || guarded_control || guarded_store_control ||
-         guarded_load_control) &&
-        control_pair_cross_line) {
+    if (simple_control && control_pair_cross_line) {
       block->second_icache_line = true;
       block->second_icache_index =
           static_cast<u16>(((branch_pc + 4u) >> 4u) & 0xFFu);
