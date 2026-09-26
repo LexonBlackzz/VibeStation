@@ -2425,6 +2425,70 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_cop0(
+    V4CodeArena &arena, const V4DecodedCop0 &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  switch (inst.op) {
+  case V4Cop0Op::Mfc0:
+    emit_read_cop0(code, code.r8d, inst.rd);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop0Op::Mtc0:
+    emit_read_guest(code, code.r8d, inst.rt);
+    emit_retire_incoming_load(code, 0u);
+    emit_write_cop0(code, inst.rd, code.r8d);
+    break;
+
+  case V4Cop0Op::Nop:
+    emit_retire_incoming_load(code, 0u);
+    break;
+
+  case V4Cop0Op::Rfe:
+    emit_retire_incoming_load(code, 0u);
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+    code.mov(code.ecx, code.eax);
+    code.and_(code.ecx, 0x3Fu);
+    code.and_(code.eax, ~0x3Fu);
+    code.shr(code.ecx, 2);
+    code.or_(code.eax, code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+        code.eax);
+    break;
+  }
+
+  // COP0 uses the two-cycle issue cost. Pending-delay retirement also creates
+  // the exact post-delay IRQ sampling point required after SR/Cause/RFE writes.
+  emit_v4_finish_pending_delay(code, 2u);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_cop0(V4CodeArena &arena,
                            const V4DecodedCop0 &inst,
                            u32 start_pc,
