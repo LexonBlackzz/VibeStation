@@ -178,6 +178,7 @@ struct CpuCompareCase {
   bool require_v4_icache_revalidation_when_available = false;
   bool require_v4_native_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
+  bool require_v4_crossline_block_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -910,6 +911,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_multi_register_cache.require_full_native_when_available = true;
   v4_multi_register_cache.require_v4_native_entry_when_available = true;
   cases.push_back(v4_multi_register_cache);
+
+  CpuCompareCase v4_crossline_block{};
+  v4_crossline_block.name = "v4_promoted_crossline_native_block";
+  v4_crossline_block.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_i(0x09, 2, 2, 2),
+      enc_r(1, 2, 3, 0, 0x26),
+      enc_r(3, 2, 4, 0, 0x21),
+      enc_i(0x05, 1, 0, -5),
+      enc_i(0x09, 5, 5, 1),
+  };
+  v4_crossline_block.instructions = 14u;
+  v4_crossline_block.require_full_native_when_available = true;
+  v4_crossline_block.require_v4_native_entry_when_available = true;
+  v4_crossline_block.require_v4_native_chain_when_available = true;
+  v4_crossline_block.require_v4_crossline_block_when_available = true;
+  cases.push_back(v4_crossline_block);
 
   CpuCompareCase jit_v2_bne_not_taken{};
   jit_v2_bne_not_taken.name = "jit_v2_bne_not_taken_delay";
@@ -5238,7 +5256,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_cached_same_page_retention_when_available ||
            test_case.require_v4_icache_revalidation_when_available ||
            test_case.require_v4_native_icache_revalidation_when_available ||
-           test_case.require_v4_native_chain_when_available)) {
+           test_case.require_v4_native_chain_when_available ||
+           test_case.require_v4_crossline_block_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
         } else {
@@ -5337,6 +5356,15 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                result.stats.native_linked_transitions != 0 &&
                result.stats.native_direct_link_transitions != 0 &&
                result.stats.native_chain_max_blocks > 1u);
+          bool crossline_block =
+              !test_case.require_v4_crossline_block_when_available;
+          for (size_t size = 5u;
+               !crossline_block &&
+               size < result.stats.native_compiled_block_size_histogram.size();
+               ++size) {
+            crossline_block =
+                result.stats.native_compiled_block_size_histogram[size] != 0u;
+          }
           if (!native_entered) {
             native_check = "v4_native_missing";
           } else if (!load_entered) {
@@ -5383,6 +5411,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_native_icache_revalidation_missing";
           } else if (!chain_entered) {
             native_check = "v4_chain_missing";
+          } else if (!crossline_block) {
+            native_check = "v4_crossline_block_missing";
           } else {
             native_check = "v4_native_entered";
           }
@@ -5395,7 +5425,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               unaligned_native && exception_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
-              native_icache_revalidated && chain_entered;
+              native_icache_revalidated && chain_entered && crossline_block;
         }
       }
 

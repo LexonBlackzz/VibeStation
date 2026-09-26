@@ -8155,9 +8155,9 @@ struct CpuRecompilerBackend::Impl {
     return fn;
   }
 
-  V4Block *acquire_block(u32 pc, bool &reused) {
+  V4Block *acquire_block(u32 pc, bool &reused, bool force_new = false) {
     V4DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry != nullptr && entry->block != nullptr &&
+    if (!force_new && entry != nullptr && entry->block != nullptr &&
         entry->block->cache_epoch == cache_epoch &&
         entry->block->start_pc == pc) {
       reused = true;
@@ -8176,9 +8176,10 @@ struct CpuRecompilerBackend::Impl {
   }
 
   V4Block *compile_block(Cpu &cpu, CpuBackendStats &stats, u32 start_pc,
-                         bool cacheable, u32 icache_generation) {
+                         bool cacheable, u32 icache_generation,
+                         u32 cached_line_span = 1u, bool force_new = false) {
     bool reused_block = false;
-    V4Block *block = acquire_block(start_pc, reused_block);
+    V4Block *block = acquire_block(start_pc, reused_block, force_new);
     if (block == nullptr) {
       return nullptr;
     }
@@ -8193,11 +8194,15 @@ struct CpuRecompilerBackend::Impl {
     block->phys_page = start_phys >> kV4PhysPageShift;
     block->code_page_generation = page_generations[block->phys_page];
 
-    // Straight-line cached blocks stay within one guest I-cache line. A
-    // branch may include its delay slot from the next line only when that
-    // line is already guest-visible, with a separate generation guard.
+    // Cold straight-line cached blocks stay within one guest I-cache line.
+    // Once the following line has independently become guest-visible, a hot
+    // predecessor may be promoted across it with a separate generation guard.
+    // A branch may also include its already-visible cross-line delay slot.
+    const u32 first_line_instructions =
+        (16u - (start_pc & 0x0Fu)) >> 2u;
     const u32 line_instructions =
-        cacheable ? ((16u - (start_pc & 0x0Fu)) >> 2u)
+        cacheable ? first_line_instructions +
+                        (std::clamp(cached_line_span, 1u, 2u) - 1u) * 4u
                   : kV4MaxBlockInstructions;
     const u32 page_instructions =
         (0x1000u - (start_phys & 0x0FFFu)) >> 2u;
@@ -8655,6 +8660,17 @@ struct CpuRecompilerBackend::Impl {
                                         ? count + store_tail_count +
                                               (store_has_control ? 3u : 1u)
                                         : count))));
+    if (cacheable && translated_count > first_line_instructions) {
+      const u32 second_line_pc = start_pc + first_line_instructions * 4u;
+      block->second_icache_line = true;
+      block->second_icache_index =
+          static_cast<u16>((second_line_pc >> 4u) & 0xFFu);
+      block->second_icache_generation =
+          cpu.instruction_cache_generation_for_backend(second_line_pc);
+      // A promoted block must never refill a not-yet-reached second line while
+      // validating its first line. Discard it and rebuild a one-line block.
+      block->retry_second_line = cached_line_span > 1u;
+    }
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
       if (!read_visible(start_pc + i * 4u, translated_bits)) {
@@ -8694,6 +8710,54 @@ struct CpuRecompilerBackend::Impl {
     stats.native_code_bytes = arena.bytes_used();
     stats.code_bytes = arena.bytes_used();
     return block;
+  }
+
+  void invalidate_candidate(u32 pc) {
+    V4DispatchEntry *entry = dispatch_entry(pc, false);
+    if (entry != nullptr && entry->block != nullptr &&
+        entry->block->cache_epoch == cache_epoch) {
+      entry->block = nullptr;
+    }
+  }
+
+  void promote_visible_predecessor(Cpu &cpu, CpuBackendStats &stats,
+                                   u32 visible_pc) {
+    const u32 line_start = visible_pc & ~0x0Fu;
+    if ((line_start & 0x0FFFu) == 0u) {
+      return;
+    }
+
+    const u32 previous_line = line_start - 16u;
+    for (u32 offset = 0u; offset < 16u; offset += 4u) {
+      const u32 candidate_pc = previous_line + offset;
+      V4DispatchEntry *entry = dispatch_entry(candidate_pc, false);
+      V4Block *candidate = entry != nullptr ? entry->block : nullptr;
+      if (candidate == nullptr || candidate->cache_epoch != cache_epoch ||
+          !candidate->cacheable || candidate->second_icache_line ||
+          candidate->has_control || candidate->has_memory ||
+          candidate_pc + candidate->instruction_count * 4u != line_start ||
+          candidate->icache_generation !=
+              cpu.instruction_cache_generation_for_backend(candidate_pc)) {
+        continue;
+      }
+
+      bool pure_alu = candidate->instruction_count != 0u;
+      for (u32 i = 0u; pure_alu && i < candidate->instruction_count; ++i) {
+        V4DecodedInstruction decoded{};
+        pure_alu = decode_v4_alu(candidate->guest_bits[i], decoded);
+      }
+      if (!pure_alu) {
+        continue;
+      }
+
+      // Allocate a replacement so a rare compilation failure leaves the
+      // working one-line translation installed and executable.
+      (void)compile_block(
+          cpu, stats, candidate_pc, true,
+          cpu.instruction_cache_generation_for_backend(candidate_pc), 2u,
+          true);
+      return;
+    }
   }
 #else
   bool native_available() const { return false; }
@@ -9027,6 +9091,10 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           ++stats_.recompiler_frame_compile_failures;
         }
       }
+
+      if (block != nullptr && cacheable) {
+        impl_->promote_visible_predecessor(cpu_, stats_, cpu_.pc_);
+      }
     }
 
     if (block == nullptr || block->fn == nullptr) {
@@ -9155,7 +9223,20 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
             : 0u;
     stats_.executed_cycles += native.cycles;
 
+    if (native.generation_exits != 0u) {
+      // The resident dispatcher has proved that the translation at native.pc
+      // is stale (or that a promoted second line is no longer safely visible).
+      // Drop only that dispatch-cell target; incoming direct links remain
+      // durable because they resolve through the cell on their next visit.
+      impl_->invalidate_candidate(native.pc);
+    }
+
     if (native.instructions == 0u) {
+      if (native.generation_exits != 0u) {
+        // Recompile the same architectural PC without treating invalidation as
+        // a scheduler-budget exit. No guest instruction has executed.
+        continue;
+      }
       ++stats_.native_reject_budget;
       ++stats_.budget_exits;
       // Native-only invariant: never execute the blocked instruction through a
