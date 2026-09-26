@@ -509,6 +509,45 @@ bool emit_load_and_delay(
     const s16 immediate =
         static_cast<s16>(load_instruction & 0xFFFFu);
 
+    // COP0/COP2 moves into a GPR have the same one-instruction R3000A
+    // load delay as RAM loads. Keep the value hidden in R9D while the next
+    // ordinary instruction executes, then commit unless that instruction
+    // overwrote the destination.
+    if ((opcode == 0x10u || opcode == 0x12u) &&
+        (rs == 0x00u || rs == 0x02u)) {
+        Emitter delay_probe;
+        if (!emit_body(delay_instruction, delay_probe)) {
+            return false;
+        }
+
+        const u32 rd = (load_instruction >> 11) & 31u;
+        u32 offset = 0u;
+        if (opcode == 0x10u) {
+            offset = static_cast<u32>(
+                offsetof(IopCpuState, cop0) +
+                rd * sizeof(u32));
+        } else if (rs == 0x00u) {
+            offset = static_cast<u32>(
+                offsetof(IopCpuState, gte_data) +
+                rd * sizeof(u32));
+        } else {
+            offset = static_cast<u32>(
+                offsetof(IopCpuState, gte_ctrl) +
+                rd * sizeof(u32));
+        }
+
+        out.load_state_eax(offset);
+        out.emit(0x41u); out.emit(0x89u); out.emit(0xC1u); // MOV R9D,EAX
+        if (!emit_body(delay_instruction, out)) {
+            return false;
+        }
+        if (rt != 0u &&
+            !body_writes_register(delay_instruction, rt)) {
+            out.store_r9d(rt);
+        }
+        return true;
+    }
+
     u32 width = 0u;
     switch (opcode) {
     case 0x20u: // LB
