@@ -167,6 +167,7 @@ struct CpuCompareCase {
   bool require_v4_hilo_native_when_available = false;
   bool require_v4_muldiv_native_when_available = false;
   bool require_v4_cop0_native_when_available = false;
+  bool require_v4_unaligned_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -1123,6 +1124,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x2E, 1, 2, 0), // SWR
   };
   pad_cpu_compare_program(unaligned_merge);
+  unaligned_merge.require_v4_native_entry_when_available = true;
+  unaligned_merge.require_v4_native_load_entry_when_available = true;
+  unaligned_merge.require_v4_native_store_entry_when_available = true;
+  unaligned_merge.require_v4_unaligned_native_when_available = true;
   cases.push_back(unaligned_merge);
 
   CpuCompareCase cop_transfers{};
@@ -4719,6 +4724,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_hilo_native_when_available ||
             test_case.require_v4_muldiv_native_when_available ||
             test_case.require_v4_cop0_native_when_available ||
+            test_case.require_v4_unaligned_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4779,6 +4785,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool cop0_native =
               !test_case.require_v4_cop0_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
+          const bool unaligned_native =
+              !test_case.require_v4_unaligned_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4837,6 +4846,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_muldiv_helper";
           } else if (!cop0_native) {
             native_check = "v4_cop0_helper";
+          } else if (!unaligned_native) {
+            native_check = "v4_unaligned_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4857,7 +4868,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              hilo_native && muldiv_native && cop0_native && folded_branch &&
+              hilo_native && muldiv_native && cop0_native && unaligned_native &&
+              folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               native_icache_revalidated && chain_entered;
