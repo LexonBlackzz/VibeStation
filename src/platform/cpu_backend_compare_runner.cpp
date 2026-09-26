@@ -1205,6 +1205,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   pad_cpu_compare_program(cop_transfers);
+  cop_transfers.require_v4_native_entry_when_available = true;
+  cop_transfers.require_v4_native_load_entry_when_available = true;
+  cop_transfers.require_v4_native_store_entry_when_available = true;
+  cop_transfers.require_v4_cop2_native_when_available = true;
   cases.push_back(cop_transfers);
 
   CpuCompareCase branch_likely_not_taken{};
