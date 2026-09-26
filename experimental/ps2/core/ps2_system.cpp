@@ -301,7 +301,6 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     if (physical >= EeRam::kSize) return nullptr;
 
     const u32 page_offset = physical & (EeRam::kPageSize - 1u);
-    ram_.track_code_page(physical);
     const u32 generation = ram_.page_generation(physical);
     const u64 block_hash =
         static_cast<u64>(pc >> 2) * 11400714819323198485ull;
@@ -320,7 +319,6 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
 
     block = {};
     block.pc = pc;
-    block.page_generation = generation;
 
     const u32 instructions_left_in_page =
         (EeRam::kPageSize - page_offset) / 4u;
@@ -373,6 +371,15 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     }
 
     if (block.count == 0u) return nullptr;
+
+    // Mark only the translated 512-byte RAM regions as code. The generation
+    // counter is separate from those region bits, so learning about another
+    // translated region does not invalidate already-compiled blocks.
+    ram_.track_code_range(
+        physical,
+        static_cast<std::size_t>(block.count) * sizeof(u32));
+    block.page_generation = ram_.page_generation(physical);
+
     ++quiet_block_compiles_;
     return &block;
 }
