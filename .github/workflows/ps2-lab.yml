@@ -6,6 +6,7 @@ on:
       - ps2-lab
       - ps2-lab-perf-experiment
       - perf/ps2-ee-scheduler-native-1
+      - perf/ps2-ee-iop-cycle-debt-1
     paths:
       - "experimental/ps2/**"
       - ".github/workflows/ps2-lab.yml"
@@ -39,10 +40,12 @@ jobs:
     if: >-
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/ps2-lab-perf-experiment' ||
-        github.ref == 'refs/heads/perf/ps2-ee-scheduler-native-1') &&
+        github.ref == 'refs/heads/perf/ps2-ee-scheduler-native-1' ||
+        github.ref == 'refs/heads/perf/ps2-ee-iop-cycle-debt-1') &&
        contains(github.event.head_commit.message, '[windows-ui]')) ||
       (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.ref == 'perf/ps2-ee-scheduler-native-1')
+       (github.event.pull_request.head.ref == 'perf/ps2-ee-scheduler-native-1' ||
+        github.event.pull_request.head.ref == 'perf/ps2-ee-iop-cycle-debt-1'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
