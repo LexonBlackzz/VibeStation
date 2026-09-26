@@ -800,6 +800,131 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     return true;
 }
 
+void ee_jit_scratch_memory_helper(
+    EeCpuState* state,
+    u8* scratch,
+    u32 instruction) {
+    if (state == nullptr || scratch == nullptr) return;
+
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const s16 imm = static_cast<s16>(instruction & 0xFFFFu);
+    u32 address =
+        static_cast<u32>(state->gpr[rs].lo) +
+        static_cast<u32>(static_cast<s32>(imm));
+    if (opcode == 0x1Eu || opcode == 0x1Fu) {
+        address &= ~0x0Fu;
+    }
+    const u32 offset = address - kEeScratchBase;
+
+    auto load16 = [&](u32 at) {
+        u16 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto load32 = [&](u32 at) {
+        u32 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto load64 = [&](u32 at) {
+        u64 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto store16 = [&](u32 at, u16 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto store32 = [&](u32 at, u32 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto store64 = [&](u32 at, u64 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto write_word = [&](u32 reg, u32 value) {
+        if (reg != 0u) {
+            state->gpr[reg].lo = static_cast<u64>(
+                static_cast<s64>(static_cast<s32>(value)));
+        }
+    };
+    auto write64 = [&](u32 reg, u64 value) {
+        if (reg != 0u) state->gpr[reg].lo = value;
+    };
+
+    switch (opcode) {
+    case 0x1Eu: // LQ
+        if (rt != 0u) {
+            state->gpr[rt].lo = load64(offset);
+            state->gpr[rt].hi = load64(offset + 8u);
+        }
+        break;
+    case 0x1Fu: // SQ
+        store64(offset, state->gpr[rt].lo);
+        store64(offset + 8u, state->gpr[rt].hi);
+        break;
+    case 0x20u: // LB
+        write64(
+            rt,
+            static_cast<u64>(
+                static_cast<s64>(
+                    static_cast<s8>(scratch[offset]))));
+        break;
+    case 0x21u: // LH
+        write64(
+            rt,
+            static_cast<u64>(
+                static_cast<s64>(
+                    static_cast<s16>(load16(offset)))));
+        break;
+    case 0x23u: // LW
+    case 0x30u: // LL
+        write_word(rt, load32(offset));
+        break;
+    case 0x24u: // LBU
+        write64(rt, scratch[offset]);
+        break;
+    case 0x25u: // LHU
+        write64(rt, load16(offset));
+        break;
+    case 0x27u: // LWU
+        write64(rt, load32(offset));
+        break;
+    case 0x31u: // LWC1
+        state->fpr[rt] = load32(offset);
+        break;
+    case 0x34u: // LLD
+    case 0x37u: // LD
+        write64(rt, load64(offset));
+        break;
+    case 0x28u: // SB
+        scratch[offset] = static_cast<u8>(state->gpr[rt].lo);
+        break;
+    case 0x29u: // SH
+        store16(offset, static_cast<u16>(state->gpr[rt].lo));
+        break;
+    case 0x2Bu: // SW
+        store32(offset, static_cast<u32>(state->gpr[rt].lo));
+        break;
+    case 0x38u: // SC
+        store32(offset, static_cast<u32>(state->gpr[rt].lo));
+        write_word(rt, 1u);
+        break;
+    case 0x39u: // SWC1
+        store32(offset, state->fpr[rt]);
+        break;
+    case 0x3Cu: // SCD
+        store64(offset, state->gpr[rt].lo);
+        write64(rt, 1u);
+        break;
+    case 0x3Fu: // SD
+        store64(offset, state->gpr[rt].lo);
+        break;
+    default:
+        break;
+    }
+}
+
 bool emit_guarded_ram_load(
     u32 instruction,
     u32 retired_before,
@@ -848,6 +973,20 @@ bool emit_guarded_ram_load(
     std::vector<std::size_t> fail_jumps;
     std::vector<std::size_t> direct_jumps;
     std::vector<std::size_t> alias_jumps;
+    std::vector<std::size_t> scratch_jumps;
+
+    // Scratchpad is not part of EeBus::to_physical main RAM. Keep it native
+    // through a tiny bound helper instead of treating it as an MMIO guard
+    // failure and abandoning the entire block.
+    out.emit(0x3Du); out.emit32(kEeScratchBase);
+    const std::size_t below_scratch = out.jcc32(0x82u); // JB
+    out.emit(0x3Du);
+    out.emit32(
+        kEeScratchBase + kEeScratchSize -
+        (opcode == 0x1Eu ? 1u : width));
+    scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
+    const std::size_t main_mapping_label = out.bytes.size();
+    out.patch_rel32(below_scratch, main_mapping_label);
 
     out.emit(0x3Du); // CMP EAX, 0xC0000000
     out.emit32(0xC0000000u);
@@ -964,6 +1103,18 @@ bool emit_guarded_ram_load(
     }
 
     const std::size_t done_jump = out.jmp32();
+
+    const std::size_t scratch_label = out.bytes.size();
+    for (const std::size_t jump : scratch_jumps) {
+        out.patch_rel32(jump, scratch_label);
+    }
+    out.emit(0x4Du); out.emit(0x85u); out.emit(0xC9u); // TEST R9,R9
+    const std::size_t scratch_missing = out.jcc32(0x84u); // JZ
+    out.call_state_scratch_instruction_helper(
+        &ee_jit_scratch_memory_helper,
+        instruction);
+    const std::size_t scratch_done = out.jmp32();
+
     const std::size_t fail_label = out.bytes.size();
     out.emit(0xB8u); // MOV EAX, retired_before
     out.emit32(retired_before);
@@ -973,7 +1124,9 @@ bool emit_guarded_ram_load(
     for (const std::size_t jump : fail_jumps) {
         out.patch_rel32(jump, fail_label);
     }
+    out.patch_rel32(scratch_missing, fail_label);
     out.patch_rel32(done_jump, done_label);
+    out.patch_rel32(scratch_done, done_label);
     return true;
 }
 
@@ -1017,6 +1170,17 @@ bool emit_guarded_ram_store(
     std::vector<std::size_t> fail_jumps;
     std::vector<std::size_t> direct_jumps;
     std::vector<std::size_t> alias_jumps;
+    std::vector<std::size_t> scratch_jumps;
+
+    out.emit(0x3Du); out.emit32(kEeScratchBase);
+    const std::size_t below_scratch = out.jcc32(0x82u); // JB
+    out.emit(0x3Du);
+    out.emit32(
+        kEeScratchBase + kEeScratchSize -
+        (opcode == 0x1Fu ? 1u : width));
+    scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
+    const std::size_t main_mapping_label = out.bytes.size();
+    out.patch_rel32(below_scratch, main_mapping_label);
 
     out.emit(0x3Du);
     out.emit32(0xC0000000u);
@@ -1136,6 +1300,18 @@ bool emit_guarded_ram_store(
     out.patch_rel32(not_code_page, done_label);
 
     const std::size_t continue_jump = out.jmp32();
+
+    const std::size_t scratch_label = out.bytes.size();
+    for (const std::size_t jump : scratch_jumps) {
+        out.patch_rel32(jump, scratch_label);
+    }
+    out.emit(0x4Du); out.emit(0x85u); out.emit(0xC9u); // TEST R9,R9
+    const std::size_t scratch_missing = out.jcc32(0x84u);
+    out.call_state_scratch_instruction_helper(
+        &ee_jit_scratch_memory_helper,
+        instruction);
+    const std::size_t scratch_done = out.jmp32();
+
     const std::size_t fail_label = out.bytes.size();
     out.emit(0xB8u);
     out.emit32(retired_before);
@@ -1145,7 +1321,9 @@ bool emit_guarded_ram_store(
     for (const std::size_t jump : fail_jumps) {
         out.patch_rel32(jump, fail_label);
     }
+    out.patch_rel32(scratch_missing, fail_label);
     out.patch_rel32(continue_jump, continue_label);
+    out.patch_rel32(scratch_done, continue_label);
     return true;
 }
 
@@ -1443,6 +1621,7 @@ bool emit_block(
     uses_ram = false;
     out.preserve_ram_base();
     out.preserve_generation_base();
+    out.preserve_scratch_base();
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
         if (emit_instruction_body(instructions[i], out)) {
