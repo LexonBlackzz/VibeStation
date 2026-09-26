@@ -12,19 +12,94 @@ EeRam::EeRam()
 void EeRam::reset() {
     std::fill(data_.begin(), data_.end(), u8{0});
     page_generation_.fill(0);
-    code_page_tracked_.fill(0);
+}
+
+namespace {
+
+u32 code_region_mask_for_span(
+    u32 page_offset,
+    std::size_t width) {
+    if (width == 0u) return 0u;
+    const u32 first_region =
+        page_offset >> EeRam::kCodeRegionShift;
+    const u32 last_byte = static_cast<u32>(
+        std::min<std::size_t>(
+            EeRam::kPageSize - 1u,
+            static_cast<std::size_t>(page_offset) + width - 1u));
+    const u32 last_region =
+        last_byte >> EeRam::kCodeRegionShift;
+    u32 mask = 0u;
+    for (u32 region = first_region;
+         region <= last_region;
+         ++region) {
+        mask |= 1u << region;
+    }
+    return mask << EeRam::kCodeMaskShift;
+}
+
+void bump_generation_if_tracked(
+    u32& metadata,
+    u32 page_offset,
+    std::size_t width) {
+    const u32 touched =
+        code_region_mask_for_span(page_offset, width);
+    if ((metadata & touched) == 0u) return;
+    const u32 next =
+        ((metadata & EeRam::kGenerationMask) + 1u) &
+        EeRam::kGenerationMask;
+    metadata =
+        (metadata & EeRam::kCodeMask) | next;
+}
+
+} // namespace
+
+void EeRam::track_code_range(
+    u32 offset,
+    std::size_t width) {
+    if (width == 0u || offset >= kSize) return;
+    std::size_t remaining =
+        std::min<std::size_t>(width, kSize - offset);
+    u32 cursor = offset;
+    while (remaining != 0u) {
+        const u32 page = cursor / kPageSize;
+        const u32 page_offset = cursor & (kPageSize - 1u);
+        const std::size_t chunk =
+            std::min<std::size_t>(
+                remaining, kPageSize - page_offset);
+        page_generation_[page] |=
+            code_region_mask_for_span(page_offset, chunk);
+        cursor += static_cast<u32>(chunk);
+        remaining -= chunk;
+    }
+}
+
+void EeRam::mark_jit_written(
+    u32* page_metadata,
+    u32 offset,
+    std::size_t width) {
+    if (page_metadata == nullptr ||
+        width == 0u ||
+        offset >= kSize) {
+        return;
+    }
+    std::size_t remaining =
+        std::min<std::size_t>(width, kSize - offset);
+    u32 cursor = offset;
+    while (remaining != 0u) {
+        const u32 page = cursor / kPageSize;
+        const u32 page_offset = cursor & (kPageSize - 1u);
+        const std::size_t chunk =
+            std::min<std::size_t>(
+                remaining, kPageSize - page_offset);
+        bump_generation_if_tracked(
+            page_metadata[page], page_offset, chunk);
+        cursor += static_cast<u32>(chunk);
+        remaining -= chunk;
+    }
 }
 
 void EeRam::mark_written(u32 offset, std::size_t width) {
-    if (width == 0u) return;
-    const u32 first = offset / kPageSize;
-    const u32 last = static_cast<u32>(
-        (static_cast<std::size_t>(offset) + width - 1u) / kPageSize);
-    for (u32 page = first; page <= last; ++page) {
-        if (code_page_tracked_[page] != 0u) {
-            ++page_generation_[page];
-        }
-    }
+    mark_jit_written(page_generation_.data(), offset, width);
 }
 
 bool EeRam::contains(u32 offset, std::size_t width) const {
