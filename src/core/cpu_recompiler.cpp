@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -3407,6 +3408,88 @@ enum class V4AluResultPolicy : u8 {
   Discard,
 };
 
+struct V4AluConstantState {
+  std::array<u32, 32> value{};
+  std::array<bool, 32> valid{};
+
+  V4AluConstantState() { valid[0] = true; }
+};
+
+std::optional<u32> v4_alu_constant_result(
+    const V4DecodedInstruction &inst, const V4AluConstantState &constants) {
+  const auto get = [&](u8 reg) -> std::optional<u32> {
+    return constants.valid[reg] ? std::optional<u32>(constants.value[reg])
+                                : std::nullopt;
+  };
+  const std::optional<u32> s = get(inst.rs);
+  const std::optional<u32> t = get(inst.rt);
+  switch (inst.op) {
+  case V4AluOp::Nop:
+    return std::nullopt;
+  case V4AluOp::Sll:
+    return t ? std::optional<u32>(*t << inst.shamt) : std::nullopt;
+  case V4AluOp::Srl:
+    return t ? std::optional<u32>(*t >> inst.shamt) : std::nullopt;
+  case V4AluOp::Sra:
+    return t ? std::optional<u32>(
+                   static_cast<u32>(static_cast<s32>(*t) >> inst.shamt))
+             : std::nullopt;
+  case V4AluOp::Sllv:
+    return s && t ? std::optional<u32>(*t << (*s & 31u)) : std::nullopt;
+  case V4AluOp::Srlv:
+    return s && t ? std::optional<u32>(*t >> (*s & 31u)) : std::nullopt;
+  case V4AluOp::Srav:
+    return s && t
+               ? std::optional<u32>(static_cast<u32>(
+                     static_cast<s32>(*t) >> (*s & 31u)))
+               : std::nullopt;
+  case V4AluOp::Addu:
+    return s && t ? std::optional<u32>(*s + *t) : std::nullopt;
+  case V4AluOp::Subu:
+    return s && t ? std::optional<u32>(*s - *t) : std::nullopt;
+  case V4AluOp::And:
+    return s && t ? std::optional<u32>(*s & *t) : std::nullopt;
+  case V4AluOp::Or:
+    return s && t ? std::optional<u32>(*s | *t) : std::nullopt;
+  case V4AluOp::Xor:
+    return s && t ? std::optional<u32>(*s ^ *t) : std::nullopt;
+  case V4AluOp::Nor:
+    return s && t ? std::optional<u32>(~(*s | *t)) : std::nullopt;
+  case V4AluOp::Slt:
+    return s && t
+               ? std::optional<u32>(static_cast<s32>(*s) <
+                                             static_cast<s32>(*t)
+                                         ? 1u
+                                         : 0u)
+               : std::nullopt;
+  case V4AluOp::Sltu:
+    return s && t ? std::optional<u32>(*s < *t ? 1u : 0u) : std::nullopt;
+  case V4AluOp::Addiu:
+    return s ? std::optional<u32>(*s + static_cast<u32>(inst.simm))
+             : std::nullopt;
+  case V4AluOp::Slti:
+    return s ? std::optional<u32>(static_cast<s32>(*s) < inst.simm ? 1u : 0u)
+             : std::nullopt;
+  case V4AluOp::Sltiu:
+    return s ? std::optional<u32>(*s < static_cast<u32>(inst.simm) ? 1u : 0u)
+             : std::nullopt;
+  case V4AluOp::Andi:
+    return s ? std::optional<u32>(*s & static_cast<u32>(inst.imm))
+             : std::nullopt;
+  case V4AluOp::Ori:
+    return s ? std::optional<u32>(*s | static_cast<u32>(inst.imm))
+             : std::nullopt;
+  case V4AluOp::Xori:
+    return s ? std::optional<u32>(*s ^ static_cast<u32>(inst.imm))
+             : std::nullopt;
+  case V4AluOp::Lui:
+    return static_cast<u32>(inst.imm) << 16u;
+  case V4AluOp::Clear:
+    return 0u;
+  }
+  return std::nullopt;
+}
+
 const Xbyak::Reg32 &v4_alu_cache_host(Xbyak::CodeGenerator &code, u32 slot) {
   switch (slot) {
   case 0u:
@@ -3455,6 +3538,57 @@ void emit_v4_alu_cache_flush(Xbyak::CodeGenerator &code,
                              V4AluRegisterCache &cache) {
   for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
     emit_v4_alu_cache_spill(code, cache, i);
+  }
+}
+
+void emit_v4_alu_commit_result(Xbyak::CodeGenerator &code,
+                               V4AluRegisterCache &cache, u8 write_reg,
+                               V4AluResultPolicy result_policy,
+                               const Xbyak::Reg32 *source,
+                               std::optional<u32> constant) {
+  if (write_reg == 0u) {
+    return;
+  }
+  const int existing_slot = v4_alu_cache_find(cache, write_reg);
+  if (result_policy == V4AluResultPolicy::Discard) {
+    if (existing_slot >= 0) {
+      cache.guest[static_cast<u32>(existing_slot)] = 0u;
+    }
+    return;
+  }
+  if (result_policy == V4AluResultPolicy::Immediate) {
+    if (existing_slot >= 0) {
+      cache.guest[static_cast<u32>(existing_slot)] = 0u;
+    }
+    if (constant) {
+      code.mov(code.dword[code.r10 + static_cast<int>(write_reg) * 4],
+               *constant);
+    } else {
+      emit_write_guest(code, write_reg, *source);
+    }
+    return;
+  }
+
+  int slot = existing_slot;
+  if (slot < 0) {
+    for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
+      if (cache.guest[i] == 0u) {
+        slot = static_cast<int>(i);
+        break;
+      }
+    }
+    if (slot < 0) {
+      slot = static_cast<int>(cache.next_victim);
+      emit_v4_alu_cache_spill(code, cache, static_cast<u32>(slot));
+      cache.next_victim =
+          (cache.next_victim + 1u) % V4AluRegisterCache::kSlotCount;
+    }
+  }
+  cache.guest[static_cast<u32>(slot)] = write_reg;
+  if (constant) {
+    code.mov(v4_alu_cache_host(code, static_cast<u32>(slot)), *constant);
+  } else {
+    code.mov(v4_alu_cache_host(code, static_cast<u32>(slot)), *source);
   }
 }
 
@@ -3582,41 +3716,8 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
     }
 
   const u8 write_reg = v4_alu_write_reg(inst);
-  if (write_reg == 0u) {
-    return;
-  }
-  const int existing_slot = v4_alu_cache_find(cache, write_reg);
-  if (result_policy == V4AluResultPolicy::Discard) {
-    if (existing_slot >= 0) {
-      cache.guest[static_cast<u32>(existing_slot)] = 0u;
-    }
-    return;
-  }
-  if (result_policy == V4AluResultPolicy::Immediate) {
-    if (existing_slot >= 0) {
-      cache.guest[static_cast<u32>(existing_slot)] = 0u;
-    }
-    emit_write_guest(code, write_reg, code.eax);
-    return;
-  }
-
-  int slot = existing_slot;
-  if (slot < 0) {
-    for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
-      if (cache.guest[i] == 0u) {
-        slot = static_cast<int>(i);
-        break;
-      }
-    }
-    if (slot < 0) {
-      slot = static_cast<int>(cache.next_victim);
-      emit_v4_alu_cache_spill(code, cache, static_cast<u32>(slot));
-      cache.next_victim =
-          (cache.next_victim + 1u) % V4AluRegisterCache::kSlotCount;
-    }
-  }
-  cache.guest[static_cast<u32>(slot)] = write_reg;
-  code.mov(v4_alu_cache_host(code, static_cast<u32>(slot)), code.eax);
+  emit_v4_alu_commit_result(code, cache, write_reg, result_policy, &code.eax,
+                            std::nullopt);
 }
 
 void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
@@ -3647,13 +3748,26 @@ void emit_v4_alu_sequence_cached(Xbyak::CodeGenerator &code,
                                  const V4DecodedInstruction *instructions,
                                  u32 count, bool retire_after_first,
                                  V4AluRegisterCache &cache) {
+  V4AluConstantState constants{};
   for (u32 i = 0; i < count; ++i) {
     const u8 write_reg = v4_alu_write_reg(instructions[i]);
     const V4AluResultPolicy result_policy =
         write_reg == 0u
             ? V4AluResultPolicy::Immediate
             : v4_alu_result_policy(instructions, i + 1u, count, write_reg);
-    emit_v4_alu_instruction(code, instructions[i], cache, result_policy);
+    const std::optional<u32> constant =
+        v4_alu_constant_result(instructions[i], constants);
+    if (write_reg != 0u && constant) {
+      constants.valid[write_reg] = true;
+      constants.value[write_reg] = *constant;
+      emit_v4_alu_commit_result(code, cache, write_reg, result_policy, nullptr,
+                                constant);
+    } else {
+      if (write_reg != 0u) {
+        constants.valid[write_reg] = false;
+      }
+      emit_v4_alu_instruction(code, instructions[i], cache, result_policy);
+    }
     if (retire_after_first && i == 0u) {
       emit_retire_incoming_load(code, write_reg);
     }
