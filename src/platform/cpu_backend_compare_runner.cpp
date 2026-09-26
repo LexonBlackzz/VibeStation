@@ -3988,6 +3988,61 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_load.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_load);
 
+  CpuCompareCase v4_split_scheduler_hilo{};
+  v4_split_scheduler_hilo.name = "v4_split_scheduler_hilo_delay_native";
+  v4_split_scheduler_hilo.start_pc = 0xA0010000u;
+  v4_split_scheduler_hilo.initial_gpr[1] = 1u;
+  v4_split_scheduler_hilo.initial_gpr[3] = 0x1234ABCDu;
+  v4_split_scheduler_hilo.program = {
+      enc_i(0x05, 1, 0, 1),       // BNE taken.
+      enc_r(3, 0, 0, 0, 0x11),    // MTHI in the delay slot.
+      enc_r(0, 0, 4, 0, 0x10),    // MFHI at the target.
+  };
+  v4_split_scheduler_hilo.instructions = 3u;
+  v4_split_scheduler_hilo.segment_instructions = {1u, 2u};
+  v4_split_scheduler_hilo.compare_segment_states = true;
+  v4_split_scheduler_hilo.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_hilo.require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_hilo.require_v4_hilo_native_when_available = true;
+  cases.push_back(v4_split_scheduler_hilo);
+
+  CpuCompareCase v4_split_scheduler_muldiv{};
+  v4_split_scheduler_muldiv.name = "v4_split_scheduler_muldiv_delay_native";
+  v4_split_scheduler_muldiv.start_pc = 0xA0010000u;
+  v4_split_scheduler_muldiv.initial_gpr[1] = 1u;
+  v4_split_scheduler_muldiv.initial_gpr[2] = 7u;
+  v4_split_scheduler_muldiv.initial_gpr[3] = 9u;
+  v4_split_scheduler_muldiv.program = {
+      enc_i(0x05, 1, 0, 1),       // BNE taken.
+      enc_r(2, 3, 0, 0, 0x19),    // MULTU in the delay slot.
+      enc_r(0, 0, 4, 0, 0x12),    // MFLO at the target.
+  };
+  v4_split_scheduler_muldiv.instructions = 3u;
+  v4_split_scheduler_muldiv.segment_instructions = {1u, 2u};
+  v4_split_scheduler_muldiv.compare_segment_states = true;
+  v4_split_scheduler_muldiv.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_muldiv.require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_muldiv.require_v4_muldiv_native_when_available = true;
+  cases.push_back(v4_split_scheduler_muldiv);
+
+  CpuCompareCase v4_split_scheduler_cop0{};
+  v4_split_scheduler_cop0.name = "v4_split_scheduler_cop0_delay_native";
+  v4_split_scheduler_cop0.start_pc = 0xA0010000u;
+  v4_split_scheduler_cop0.initial_gpr[1] = 1u;
+  v4_split_scheduler_cop0.initial_gpr[2] = 0x00000300u;
+  v4_split_scheduler_cop0.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken.
+      (0x10u << 26) | (4u << 21) | (2u << 16) | (13u << 11), // MTC0 Cause
+      (0x10u << 26) | (0u << 21) | (3u << 16) | (13u << 11), // MFC0 Cause
+  };
+  v4_split_scheduler_cop0.instructions = 3u;
+  v4_split_scheduler_cop0.segment_instructions = {1u, 2u};
+  v4_split_scheduler_cop0.compare_segment_states = true;
+  v4_split_scheduler_cop0.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_cop0.require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_cop0.require_v4_cop0_native_when_available = true;
+  cases.push_back(v4_split_scheduler_cop0);
+
   CpuCompareCase v4_split_scheduler_addi{};
   v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
   v4_split_scheduler_addi.start_pc = 0xA0010000u;
