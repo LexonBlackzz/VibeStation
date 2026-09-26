@@ -169,6 +169,50 @@ struct Emitter {
             ((kGenerationArgumentRegister & 7u) << 3u) |
             2u)); // MOV R10, generation arg
     }
+
+    void call_state_instruction_helper(
+        void (*helper)(IopCpuState*, u32),
+        u32 instruction) {
+#ifdef _WIN32
+        // R9 may hold a pending R3000A load-delay result. Preserve it along
+        // with the resident RAM/generation bases and state pointer.
+        emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x28u);
+        emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
+        emit(0x48u); emit(0xB8u);
+        const u64 target = reinterpret_cast<u64>(helper);
+        for (u32 i = 0u; i < 8u; ++i) {
+            emit(static_cast<u8>(target >> (i * 8u)));
+        }
+        emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x28u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x59u);
+#else
+        emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x08u);
+        emit(0xBEu); emit32(instruction);    // MOV ESI,imm32
+        emit(0x48u); emit(0xB8u);
+        const u64 target = reinterpret_cast<u64>(helper);
+        for (u32 i = 0u; i < 8u; ++i) {
+            emit(static_cast<u8>(target >> (i * 8u)));
+        }
+        emit(0xFFu); emit(0xD0u);
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x08u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x5Fu);
+#endif
+    }
 };
 
 void* allocate_code_page() {
@@ -223,6 +267,40 @@ void flush_code(void* code, std::size_t size) {
     auto* first = static_cast<char*>(code);
     __builtin___clear_cache(first, first + size);
 #endif
+}
+
+void iop_jit_div_helper(
+    IopCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 lhs = state->gpr[rs];
+    const u32 rhs = state->gpr[rt];
+
+    if ((instruction & 63u) == 0x1Bu) { // DIVU
+        if (rhs != 0u) {
+            state->lo = lhs / rhs;
+            state->hi = lhs % rhs;
+        } else {
+            state->lo = 0xFFFFFFFFu;
+            state->hi = lhs;
+        }
+        return;
+    }
+
+    const s32 a = static_cast<s32>(lhs);
+    const s32 b = static_cast<s32>(rhs);
+    if (lhs == 0x80000000u && rhs == 0xFFFFFFFFu) {
+        state->lo = 0x80000000u;
+        state->hi = 0u;
+    } else if (b != 0) {
+        state->lo = static_cast<u32>(a / b);
+        state->hi = static_cast<u32>(a % b);
+    } else {
+        state->lo = a < 0 ? 1u : 0xFFFFFFFFu;
+        state->hi = lhs;
+    }
 }
 
 bool emit_body(u32 instruction, Emitter& out) {
@@ -304,6 +382,13 @@ bool emit_body(u32 instruction, Emitter& out) {
                 static_cast<u32>(offsetof(IopCpuState, lo)));
             out.store_state_edx(
                 static_cast<u32>(offsetof(IopCpuState, hi)));
+            destination = 0u;
+            break;
+        case 0x1Au: // DIV
+        case 0x1Bu: // DIVU
+            out.call_state_instruction_helper(
+                &iop_jit_div_helper,
+                instruction);
             destination = 0u;
             break;
         case 0x21u: // ADDU
