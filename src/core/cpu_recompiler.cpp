@@ -6368,13 +6368,30 @@ struct CpuRecompilerBackend::Impl {
           if (decode_v4_trap(instruction, trap)) {
             fn = compile_v4_pending_delay_trap(arena, trap, code_size);
           } else {
-            V4DecodedLoad load{};
+            V4DecodedException exception_inst{};
+            if (decode_v4_exception(instruction, exception_inst)) {
+              const Exception cause =
+                  exception_inst.op == V4ExceptionOp::Syscall
+                      ? Exception::Syscall
+                      : Exception::Break;
+              fn = compile_v4_pending_delay_fixed_exception(
+                  arena, cause, code_size);
+            } else {
+              V4DecodedCopUnusable cop_unusable{};
+              if (decode_v4_cop_unusable(instruction, cop_unusable)) {
+                fn = compile_v4_pending_delay_fixed_exception(
+                    arena, Exception::CopUnusable, code_size,
+                    cop_unusable.cop);
+              } else {
+                V4DecodedLoad load{};
             if (decode_v4_load(instruction, load)) {
           fn = compile_v4_pending_delay_load(arena, load, code_size);
         } else {
           V4DecodedStore store{};
-              if (decode_v4_store(instruction, store)) {
-                fn = compile_v4_pending_delay_store(arena, store, code_size);
+                  if (decode_v4_store(instruction, store)) {
+                    fn = compile_v4_pending_delay_store(arena, store, code_size);
+                  }
+                }
               }
             }
           }
@@ -6562,6 +6579,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_exception =
         count == 0u && read_visible(start_pc, exception_bits) &&
         decode_v4_exception(exception_bits, exception_inst);
+    V4DecodedCopUnusable cop_unusable{};
+    u32 cop_unusable_bits = 0u;
+    const bool simple_cop_unusable =
+        count == 0u && read_visible(start_pc, cop_unusable_bits) &&
+        decode_v4_cop_unusable(cop_unusable_bits, cop_unusable);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -6624,7 +6646,7 @@ struct CpuRecompilerBackend::Impl {
         !simple_load && !simple_store &&
         !simple_overflow_alu && !simple_cond_move && !simple_trap &&
         !simple_hilo && !simple_muldiv && !simple_cop0 &&
-        !simple_cop2 && !simple_exception) {
+        !simple_cop2 && !simple_exception && !simple_cop_unusable) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -6687,7 +6709,7 @@ struct CpuRecompilerBackend::Impl {
           const u32 translated_count =
               (simple_overflow_alu || simple_cond_move || simple_trap ||
                simple_hilo || simple_muldiv || simple_cop0 ||
-               simple_cop2 || simple_exception)
+               simple_cop2 || simple_exception || simple_cop_unusable)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -6713,6 +6735,10 @@ struct CpuRecompilerBackend::Impl {
       } else if (simple_exception) {
         entry = compile_v4_exception(
             arena, exception_inst, start_pc, block->code_size);
+      } else if (simple_cop_unusable) {
+        entry = compile_v4_fixed_exception(
+            arena, Exception::CopUnusable, start_pc, block->code_size,
+            cop_unusable.cop);
       } else if (simple_cop2) {
         entry = compile_v4_cop2(
             arena, cop2, start_pc, links, block->code_size);
@@ -6789,6 +6815,10 @@ struct CpuRecompilerBackend::Impl {
       } else if (simple_exception) {
         block->budget_fn = compile_v4_exception(
             arena, exception_inst, start_pc, budget_code_size);
+      } else if (simple_cop_unusable) {
+        block->budget_fn = compile_v4_fixed_exception(
+            arena, Exception::CopUnusable, start_pc, budget_code_size,
+            cop_unusable.cop);
       } else if (simple_cop2) {
         block->budget_fn = compile_v4_cop2(
             arena, cop2, start_pc, budget_links, budget_code_size);
@@ -6828,7 +6858,7 @@ struct CpuRecompilerBackend::Impl {
            guarded_store_control || guarded_load_control)
               ? 1u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                  simple_cop0 || simple_cop2 || simple_exception)
+                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
                      ? 1u
                      : ((simple_control || guarded_store_control)
                             ? count + 2u
@@ -6844,7 +6874,7 @@ struct CpuRecompilerBackend::Impl {
            guarded_store_control || guarded_load_control)
               ? 2u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                  simple_cop0 || simple_cop2 || simple_exception)
+                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
                      ? 40u
                      : ((simple_control || guarded_store_control)
                             ? (guarded_store_control ? 5u : count + 3u)
@@ -6875,7 +6905,7 @@ struct CpuRecompilerBackend::Impl {
          guarded_store_control || guarded_load_control)
             ? 1u
             : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                simple_cop0 || simple_cop2 || simple_exception)
+                simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
                    ? 1u
                    : ((simple_control || guarded_store_control)
                           ? count + 2u
@@ -6909,7 +6939,7 @@ struct CpuRecompilerBackend::Impl {
         ++stats.native_memory_blocks_compiled;
       }
     } else if (simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-               simple_cop0 || simple_cop2 || simple_exception) {
+               simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
