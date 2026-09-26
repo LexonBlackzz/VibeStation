@@ -583,6 +583,67 @@ bool body_writes_register(u32 instruction, u32 reg) {
     }
 }
 
+bool instruction_reads_register(u32 instruction, u32 reg) {
+    if (reg == 0u) return false;
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    if (opcode == 0u) {
+        const u32 funct = instruction & 63u;
+        switch (funct) {
+        case 0x00u: case 0x02u: case 0x03u: // fixed shifts
+            return rt == reg;
+        case 0x08u: case 0x09u: // JR/JALR
+        case 0x11u: case 0x13u: // MTHI/MTLO
+            return rs == reg;
+        case 0x10u: case 0x12u: // MFHI/MFLO
+            return false;
+        case 0x04u: case 0x06u: case 0x07u: // variable shifts
+        case 0x18u: case 0x19u: case 0x1Au: case 0x1Bu: // mul/div
+        case 0x20u: case 0x21u: case 0x22u: case 0x23u:
+        case 0x24u: case 0x25u: case 0x26u: case 0x27u:
+        case 0x2Au: case 0x2Bu:
+            return rs == reg || rt == reg;
+        default:
+            return true; // exception/unknown SPECIAL: stay conservative.
+        }
+    }
+
+    switch (opcode) {
+    case 0x01u: // REGIMM
+    case 0x06u: case 0x07u: // BLEZ/BGTZ
+    case 0x08u: case 0x09u: case 0x0Au: case 0x0Bu:
+    case 0x0Cu: case 0x0Du: case 0x0Eu: // immediate ALU
+        return rs == reg;
+    case 0x02u: case 0x03u: // J/JAL
+    case 0x0Fu: // LUI
+        return false;
+    case 0x04u: case 0x05u: // BEQ/BNE
+        return rs == reg || rt == reg;
+    case 0x10u: { // COP0
+        const u32 cop_rs = rs;
+        return (cop_rs == 0x04u) && rt == reg; // MTC0
+    }
+    case 0x12u: { // COP2/GTE
+        const u32 cop_rs = rs;
+        return (cop_rs == 0x04u || cop_rs == 0x06u) && rt == reg;
+    }
+    case 0x20u: case 0x21u: case 0x23u:
+    case 0x24u: case 0x25u: // ordinary loads: address only
+    case 0x32u: // LWC2
+        return rs == reg;
+    case 0x22u: case 0x26u: // LWL/LWR merge with old rt
+        return rs == reg || rt == reg;
+    case 0x28u: case 0x29u: case 0x2Au: case 0x2Bu:
+    case 0x2Eu: // stores
+        return rs == reg || rt == reg;
+    case 0x3Au: // SWC2: GTE data + GPR base
+        return rs == reg;
+    default:
+        return true;
+    }
+}
+
 bool emit_load_and_delay(
     u32 load_instruction,
     u32 delay_instruction,
@@ -1060,6 +1121,7 @@ void IopJit::clear() {
     native_entry_attempt_count_ = 0u;
     native_entry_success_count_ = 0u;
     compile_failure_count_ = 0u;
+    load_delay_entry_retire_count_ = 0u;
     entry_rejects_.fill(0u);
     native_residency_instruction_count_ = 0u;
     native_residency_max_ = 0u;
@@ -1138,8 +1200,34 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
         return 0u;
     }
     if (cpu.pending_load_.valid || cpu.next_load_.valid) {
-        ++entry_rejects_[2];
-        return 0u;
+        bool retired_pending_early = false;
+        // Between interpreter instructions next_load_ mirrors pending_load_.
+        // If the current instruction provably cannot read the delayed
+        // destination, making the value visible now is observationally
+        // identical to committing it after that instruction. A write to the
+        // same register is also safe: the native instruction overwrites it.
+        if (cpu.pending_load_.valid &&
+            (!cpu.next_load_.valid ||
+             (cpu.next_load_.reg == cpu.pending_load_.reg &&
+              cpu.next_load_.value == cpu.pending_load_.value))) {
+            u32 first_instruction = 0u;
+            if (cpu.bus_.read32(cpu.state_.pc, first_instruction) &&
+                !instruction_reads_register(
+                    first_instruction, cpu.pending_load_.reg)) {
+                if (cpu.pending_load_.reg != 0u) {
+                    cpu.state_.gpr[cpu.pending_load_.reg] =
+                        cpu.pending_load_.value;
+                }
+                cpu.pending_load_ = {};
+                cpu.next_load_ = {};
+                retired_pending_early = true;
+                ++load_delay_entry_retire_count_;
+            }
+        }
+        if (!retired_pending_early) {
+            ++entry_rejects_[2];
+            return 0u;
+        }
     }
     if (cpu.next_is_delay_slot_) {
         ++entry_rejects_[3];

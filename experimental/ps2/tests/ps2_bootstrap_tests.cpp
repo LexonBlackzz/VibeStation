@@ -4214,6 +4214,74 @@ bool test_iop_native_load_delay() {
     return ok;
 }
 
+
+bool test_iop_native_entry_with_pending_load() {
+    constexpr ps2::u32 pc = 0x1880u;
+    constexpr ps2::u32 data = 0x2880u;
+    const std::array<ps2::u32, 3> code = {
+        (0x23u << 26) | (7u << 21) | (1u << 16), // LW r1,0(r7)
+        (0x09u << 26) | (0u << 21) | (2u << 16) | 1u, // does not read r1
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x21u, // ADDU sees loaded r1
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP pending-load native-entry code setup failed") && ok;
+    }
+    ok = expect(
+        exact.iop_ram().write32(data, 0x12345678u) &&
+        native.iop_ram().write32(data, 0x12345678u),
+        "IOP pending-load native-entry data setup failed") && ok;
+
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[7] = data;
+    native.iop().state().gpr[7] = data;
+
+    std::string error;
+    // Execute only the load through the interpreter on both machines so the
+    // JIT is entered with an architectural delayed load still pending.
+    ok = expect(
+        exact.iop().step_hot(error) &&
+        native.iop().step_hot(error),
+        "IOP pending-load setup step failed") && ok;
+    ok = expect(
+        exact.iop().step_hot(error) &&
+        exact.iop().step_hot(error),
+        "IOP pending-load reference continuation failed") && ok;
+
+    const ps2::u32 retired = native.iop().run_native_quiet(2u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == 2u &&
+        native.iop().jit_load_delay_entry_retires() != 0u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        b.gpr[1] == 0x12345678u &&
+        b.gpr[2] == 1u &&
+        b.gpr[3] == 0x12345679u,
+        "IOP JIT pending-load entry retirement diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP pending-load entry unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_iop_native_r3000a_block() {
     constexpr ps2::u32 pc = 0x1000u;
     constexpr ps2::u32 data = 0x2000u;
@@ -6507,6 +6575,7 @@ int main() {
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
     ok = test_iop_native_load_delay() && ok;
+    ok = test_iop_native_entry_with_pending_load() && ok;
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_iop_native_cop_load_delay_and_div() && ok;
     ok = test_iop_native_overflow_guard() && ok;

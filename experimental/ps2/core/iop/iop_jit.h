@@ -56,6 +56,9 @@ public:
     [[nodiscard]] u64 compile_failure_count() const {
         return compile_failure_count_;
     }
+    [[nodiscard]] u64 load_delay_entry_retire_count() const {
+        return load_delay_entry_retire_count_;
+    }
     [[nodiscard]] const std::array<u64, 5>& entry_rejects() const {
         return entry_rejects_;
     }
@@ -115,6 +118,7 @@ private:
     u64 native_entry_attempt_count_ = 0;
     u64 native_entry_success_count_ = 0;
     u64 compile_failure_count_ = 0;
+    u64 load_delay_entry_retire_count_ = 0;
     std::array<u64, 5> entry_rejects_{};
     u64 native_residency_instruction_count_ = 0;
     u64 native_residency_max_ = 0;

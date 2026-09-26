@@ -984,6 +984,10 @@ u64 IopCpu::jit_compile_failures() const {
     return jit_ ? jit_->compile_failure_count() : 0u;
 }
 
+u64 IopCpu::jit_load_delay_entry_retires() const {
+    return jit_ ? jit_->load_delay_entry_retire_count() : 0u;
+}
+
 u64 IopCpu::jit_entry_reject(u32 reason) const {
     if (!jit_ || reason >= jit_->entry_rejects().size()) return 0u;
     return jit_->entry_rejects()[reason];

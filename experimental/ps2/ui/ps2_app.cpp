@@ -1557,6 +1557,10 @@ void Ps2App::panel_profiler() {
         static_cast<unsigned long long>(
             system_.iop().jit_compile_failures()));
     ImGui::Text(
+        "IOP load-delay entries rescued: %llu",
+        static_cast<unsigned long long>(
+            system_.iop().jit_load_delay_entry_retires()));
+    ImGui::Text(
         "IOP residency: avg %.1f instr   p50~%llu   p95~%llu   max %llu",
         iop_average_residency,
         static_cast<unsigned long long>(
