@@ -43,6 +43,9 @@ constexpr u32 kEeScratchSize = 16u * 1024u;
 void ee_jit_cop1_register_helper(
     EeCpuState* state,
     u32 instruction);
+void ee_jit_special_div_helper(
+    EeCpuState* state,
+    u32 instruction);
 void ee_jit_scratch_memory_helper(
     EeCpuState* state,
     u8* scratch,
@@ -303,6 +306,48 @@ u32 ee_jit_ps2_fpu_result(float value) {
     return bits;
 }
 
+void ee_jit_special_div_helper(
+    EeCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const bool is_unsigned = (instruction & 63u) == 0x1Bu;
+    const u32 lhs = static_cast<u32>(state->gpr[rs].lo);
+    const u32 rhs = static_cast<u32>(state->gpr[rt].lo);
+    const auto sext32 = [](u32 value) -> u64 {
+        return static_cast<u64>(
+            static_cast<s64>(static_cast<s32>(value)));
+    };
+
+    if (is_unsigned) {
+        if (rhs != 0u) {
+            state->lo = sext32(lhs / rhs);
+            state->hi = sext32(lhs % rhs);
+        } else {
+            state->lo = sext32(0xFFFFFFFFu);
+            state->hi = sext32(lhs);
+        }
+        return;
+    }
+
+    const s32 a = static_cast<s32>(lhs);
+    const s32 b = static_cast<s32>(rhs);
+    if (lhs == 0x80000000u && rhs == 0xFFFFFFFFu) {
+        state->lo = sext32(0x80000000u);
+        state->hi = 0u;
+    } else if (b != 0) {
+        state->lo = sext32(
+            static_cast<u32>(a / b));
+        state->hi = sext32(
+            static_cast<u32>(a % b));
+    } else {
+        state->lo = sext32(
+            static_cast<u32>(a < 0 ? 1 : -1));
+        state->hi = sext32(lhs);
+    }
+}
+
 bool ee_jit_cop1_register_helper_supported(u32 instruction) {
     if ((instruction >> 26) != 0x11u) return false;
     const u32 rs = (instruction >> 21) & 31u;
@@ -558,6 +603,14 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             out.sign_extend_word();
             out.store_state_rax(
                 static_cast<u32>(offsetof(EeCpuState, hi)));
+            destination = 0u;
+            break;
+        case 0x1Au: // DIV
+        case 0x1Bu: // DIVU
+            if (sa != 0u) return false;
+            out.call_state_instruction_helper(
+                &ee_jit_special_div_helper,
+                instruction);
             destination = 0u;
             break;
         case 0x28u: // MFSA
