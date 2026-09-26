@@ -6947,12 +6947,17 @@ struct CpuRecompilerBackend::Impl {
           arena, Exception::CopUnusable, code_size, cop_unusable.cop);
     } else if (decode_v4_hilo(instruction, hilo)) {
       fn = compile_v4_pending_delay_hilo(arena, hilo, code_size);
-    } else if (decode_v4_cop0(instruction, cop0)) {
+    } else {
+      V4DecodedMulDiv muldiv{};
+      if (decode_v4_muldiv(instruction, muldiv)) {
+        fn = compile_v4_pending_delay_muldiv(arena, muldiv, code_size);
+      } else if (decode_v4_cop0(instruction, cop0)) {
       fn = compile_v4_pending_delay_cop0(arena, cop0, code_size);
     } else if (decode_v4_load(instruction, load)) {
       fn = compile_v4_pending_delay_load(arena, load, code_size);
-    } else if (decode_v4_store(instruction, store)) {
-      fn = compile_v4_pending_delay_store(arena, store, code_size);
+      } else if (decode_v4_store(instruction, store)) {
+        fn = compile_v4_pending_delay_store(arena, store, code_size);
+      }
     }
 
     if (fn != nullptr) {
