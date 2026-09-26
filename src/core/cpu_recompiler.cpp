@@ -4234,6 +4234,18 @@ struct CpuRecompilerBackend::Impl {
       if (count != 0u) {
         block->budget_fn = compile_v4_alu(
             arena, decoded, 1u, start_pc, budget_links, budget_code_size);
+      } else if (simple_cop0) {
+        block->budget_fn = compile_v4_cop0(
+            arena, cop0, start_pc, budget_links, budget_code_size);
+      } else if (simple_muldiv) {
+        block->budget_fn = compile_v4_muldiv(
+            arena, muldiv, start_pc, budget_links, budget_code_size);
+      } else if (simple_hilo) {
+        block->budget_fn = compile_v4_hilo(
+            arena, hilo, start_pc, budget_links, budget_code_size);
+      } else if (simple_overflow_alu) {
+        block->budget_fn = compile_v4_overflow_alu(
+            arena, overflow_alu, start_pc, budget_links, budget_code_size);
       } else if (simple_control || guarded_control || guarded_store_control) {
         block->budget_fn = compile_v4_budget_branch(
             arena, control, branch_pc, budget_code_size);
