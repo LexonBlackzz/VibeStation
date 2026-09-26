@@ -168,6 +168,7 @@ struct CpuCompareCase {
   bool require_v4_muldiv_native_when_available = false;
   bool require_v4_cop0_native_when_available = false;
   bool require_v4_unaligned_native_when_available = false;
+  bool require_v4_exception_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -1090,6 +1091,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   overflow_add.initial_gpr[2] = 1u;
   overflow_add.program = {enc_r(1, 2, 3, 0, 0x20)};
   overflow_add.instructions = 1;
+  overflow_add.require_v4_native_entry_when_available = true;
+  overflow_add.require_v4_exception_native_when_available = true;
   cases.push_back(overflow_add);
 
   CpuCompareCase overflow_sub{};
@@ -1098,6 +1101,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   overflow_sub.initial_gpr[2] = 1u;
   overflow_sub.program = {enc_r(1, 2, 3, 0, 0x22)};
   overflow_sub.instructions = 1;
+  overflow_sub.require_v4_native_entry_when_available = true;
+  overflow_sub.require_v4_exception_native_when_available = true;
   cases.push_back(overflow_sub);
 
   CpuCompareCase overflow_addi{};
@@ -1105,6 +1110,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   overflow_addi.initial_gpr[1] = 0x7FFFFFFFu;
   overflow_addi.program = {enc_i(0x08, 1, 2, 1)};
   overflow_addi.instructions = 1;
+  overflow_addi.require_v4_native_entry_when_available = true;
+  overflow_addi.require_v4_exception_native_when_available = true;
   cases.push_back(overflow_addi);
 
   CpuCompareCase unaligned_merge{};
@@ -3426,6 +3433,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   syscall_exception.instructions = 2;
   syscall_exception.require_full_native_when_available = true;
+  syscall_exception.require_v4_native_entry_when_available = true;
+  syscall_exception.require_v4_exception_native_when_available = true;
   cases.push_back(syscall_exception);
 
   CpuCompareCase break_exception{};
@@ -3437,6 +3446,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   break_exception.instructions = 2;
   break_exception.require_full_native_when_available = true;
+  break_exception.require_v4_native_entry_when_available = true;
+  break_exception.require_v4_exception_native_when_available = true;
   cases.push_back(break_exception);
 
   CpuCompareCase unaligned_lw{};
@@ -4725,6 +4736,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             test_case.require_v4_muldiv_native_when_available ||
             test_case.require_v4_cop0_native_when_available ||
             test_case.require_v4_unaligned_native_when_available ||
+            test_case.require_v4_exception_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4788,6 +4800,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool unaligned_native =
               !test_case.require_v4_unaligned_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
+          const bool exception_native =
+              !test_case.require_v4_exception_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4848,6 +4863,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_cop0_helper";
           } else if (!unaligned_native) {
             native_check = "v4_unaligned_helper";
+          } else if (!exception_native) {
+            native_check = "v4_exception_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4869,7 +4886,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
               hilo_native && muldiv_native && cop0_native && unaligned_native &&
-              folded_branch &&
+              exception_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               native_icache_revalidated && chain_entered;
