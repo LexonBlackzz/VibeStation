@@ -5139,64 +5139,6 @@ struct CpuRecompilerBackend::Impl {
 
   void install(u32 pc, V4Block *block) {
     V4DispatchEntry *entry = dispatch_entry(pc, true);
-    if (entry != nullptr) {
-      entry->block = block;
-    }
-  }
-
-  void reset_translations() {
-    if (!initialized) {
-      return;
-    }
-    arena.reset_to(permanent_code_bytes);
-    helper_cache.clear();
-    pending_delay_alu_cache.clear();
-    block_count = 0u;
-    code_pages.clear();
-    code_lines.clear();
-    ++cache_epoch;
-    if (cache_epoch == 0u) {
-      // Epoch wrap is practically unreachable. Clear the allocated sparse
-      // dispatch pages only; the 4 GiB PC space remains sparse.
-      for (auto &page : dispatch_pages) {
-        page->entries = {};
-      }
-      cache_epoch = 1u;
-    }
-  }
-
-  V4NativeFn pending_delay_alu_for(u32 instruction) {
-    const auto found = pending_delay_alu_cache.find(instruction);
-    if (found != pending_delay_alu_cache.end()) {
-      return found->second;
-    }
-
-    u32 code_size = 0u;
-    V4NativeFn fn = nullptr;
-    V4DecodedInstruction decoded{};
-    if (decode_v4_alu(instruction, decoded)) {
-      fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
-    } else {
-      V4DecodedOverflowAlu overflow{};
-      if (decode_v4_overflow_alu(instruction, overflow)) {
-        fn = compile_v4_pending_delay_overflow_alu(
-            arena, overflow, code_size);
-      } else {
-        V4DecodedStore store{};
-        if (decode_v4_store(instruction, store)) {
-          fn = compile_v4_pending_delay_store(arena, store, code_size);
-        }
-      }
-    }
-
-    if (fn != nullptr) {
-      pending_delay_alu_cache.emplace(instruction, fn);
-    }
-    return fn;
-  }
-
-  void install(u32 pc, V4Block *block) {
-    V4DispatchEntry *entry = dispatch_entry(pc, true);
     if (entry == nullptr) {
       return;
     }
