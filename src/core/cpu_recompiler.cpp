@@ -3515,6 +3515,7 @@ V4NativeFn compile_v4_load(
     code.sar(code.r8d, 16);
   }
   code.xor_(code.r9d, code.r9d);
+  code.jmp(loaded);
 
   code.L(device);
   // General MMIO/device access stays native at the CPU level. The generated
