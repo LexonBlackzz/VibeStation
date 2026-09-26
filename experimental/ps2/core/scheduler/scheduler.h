@@ -3,6 +3,7 @@
 #include "common/types.h"
 
 #include <functional>
+#include <optional>
 #include <queue>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +41,10 @@ public:
 
     [[nodiscard]] Tick now() const { return now_; }
     [[nodiscard]] bool empty() const { return events_.empty(); }
+    // Return the next live event boundary after pruning cancelled events.
+    // The EE fast path uses this as a hard native-execution deadline instead
+    // of treating any non-empty scheduler queue as an unconditional bailout.
+    [[nodiscard]] std::optional<Tick> next_event_time();
 
     EventId schedule(EventType type, Tick delay);
     void cancel(EventId id);
@@ -53,6 +58,8 @@ public:
     }
 
 private:
+    void discard_cancelled_front();
+
     struct QueuedEvent {
         Event event{};
         u64 sequence = 0;
