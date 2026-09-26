@@ -5,12 +5,14 @@
 namespace ps2 {
 
 IopRam::IopRam()
-    : data_(kSize, 0) {}
+    : data_(kSize, 0),
+      page_generations_(kPageCount, 1u),
+      tracked_code_pages_(kPageCount, 0u) {}
 
 void IopRam::reset() {
     std::fill(data_.begin(), data_.end(), 0);
-    page_generations_.fill(1u);
-    tracked_code_pages_.fill(0u);
+    std::fill(page_generations_.begin(), page_generations_.end(), 1u);
+    std::fill(tracked_code_pages_.begin(), tracked_code_pages_.end(), 0u);
 }
 
 void IopRam::note_write(u32 offset, std::size_t width) {
