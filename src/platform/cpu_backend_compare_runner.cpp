@@ -165,6 +165,7 @@ struct CpuCompareCase {
   bool require_v4_pending_delay_native_when_available = false;
   bool require_v4_hot_mmio16_native_when_available = false;
   bool require_v4_hilo_native_when_available = false;
+  bool require_v4_muldiv_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -4047,6 +4048,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   v4_mflo_muldiv_stall.instructions = 2u;
   v4_mflo_muldiv_stall.require_v4_native_entry_when_available = true;
+  v4_mflo_muldiv_stall.require_v4_muldiv_native_when_available = true;
   cases.push_back(v4_mflo_muldiv_stall);
 
   CpuCompareCase v4_mfhi_div_stall{};
@@ -4060,7 +4062,35 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   v4_mfhi_div_stall.instructions = 2u;
   v4_mfhi_div_stall.require_v4_native_entry_when_available = true;
+  v4_mfhi_div_stall.require_v4_muldiv_native_when_available = true;
   cases.push_back(v4_mfhi_div_stall);
+
+  CpuCompareCase v4_div_edge_cases{};
+  v4_div_edge_cases.name = "v4_div_edge_cases_native";
+  v4_div_edge_cases.start_pc = 0xA0010000u;
+  v4_div_edge_cases.initial_gpr[1] = 123u;
+  v4_div_edge_cases.initial_gpr[2] = 0u;
+  v4_div_edge_cases.initial_gpr[3] = 0xFFFFFF85u; // -123
+  v4_div_edge_cases.initial_gpr[4] = 0x80000000u;
+  v4_div_edge_cases.initial_gpr[5] = 0xFFFFFFFFu;
+  v4_div_edge_cases.program = {
+      enc_r(1, 2, 0, 0, 0x1A), // DIV +123,0
+      enc_r(0, 0, 6, 0, 0x12), // MFLO = -1
+      enc_r(0, 0, 7, 0, 0x10), // MFHI = +123
+      enc_r(3, 2, 0, 0, 0x1A), // DIV -123,0
+      enc_r(0, 0, 8, 0, 0x12), // MFLO = +1
+      enc_r(0, 0, 9, 0, 0x10), // MFHI = -123
+      enc_r(4, 5, 0, 0, 0x1A), // INT_MIN / -1
+      enc_r(0, 0, 10, 0, 0x12),
+      enc_r(0, 0, 11, 0, 0x10),
+      enc_r(1, 2, 0, 0, 0x1B), // DIVU 123,0
+      enc_r(0, 0, 12, 0, 0x12),
+      enc_r(0, 0, 13, 0, 0x10),
+  };
+  v4_div_edge_cases.instructions = 12u;
+  v4_div_edge_cases.require_v4_native_entry_when_available = true;
+  v4_div_edge_cases.require_v4_muldiv_native_when_available = true;
+  cases.push_back(v4_div_edge_cases);
 
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
@@ -4663,6 +4693,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_pending_delay_native_when_available ||
            test_case.require_v4_hot_mmio16_native_when_available ||
            test_case.require_v4_hilo_native_when_available ||
+            test_case.require_v4_muldiv_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4716,6 +4747,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               result.stats.jit_v4_helper_instructions == 0u;
           const bool hilo_native =
               !test_case.require_v4_hilo_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
+          const bool muldiv_native =
+              !test_case.require_v4_muldiv_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
@@ -4771,6 +4805,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_hot_mmio16_helper";
           } else if (!hilo_native) {
             native_check = "v4_hilo_helper";
+          } else if (!muldiv_native) {
+            native_check = "v4_muldiv_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4791,7 +4827,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              hilo_native && folded_branch &&
+              hilo_native && muldiv_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               native_icache_revalidated && chain_entered;
