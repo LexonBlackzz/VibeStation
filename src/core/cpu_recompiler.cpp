@@ -2743,19 +2743,19 @@ V4NativeFn compile_v4_pending_delay_load(
 V4NativeFn compile_v4_pending_delay_store(
     V4CodeArena &arena, const V4DecodedStore &store, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 1536u;
+  constexpr size_t kReservation = 3072u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, stored, bail;
+  Label ram, device, stored, unaligned, bail;
 
-  // Pending delay-slot stores may stay native only for ordinary RAM and
-  // scratchpad accesses. MMIO, cache isolation, misalignment and writes into
-  // translated code fall back before any architectural side effect so the
-  // regular Cpu::step() path can preserve precise exception/BD semantics.
+  // Pending delay-slot stores preserve branch-delay EPC/BD semantics directly.
+  // RAM/scratchpad use fastmem; genuine device accesses use a narrow bus bridge.
+  // Cache-isolation and translated-code writes remain explicit compiler
+  // boundaries rather than reasons to re-run ordinary stores in the interpreter.
   code.cmp(code.dword[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
@@ -2770,12 +2770,15 @@ V4NativeFn compile_v4_pending_delay_store(
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
   emit_read_guest(code, code.r8d, store.rt);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
+      code.r8d);
   if (store.op == V4StoreOp::Sh) {
     code.test(code.eax, 1u);
-    code.jnz(bail);
+    code.jnz(unaligned);
   } else if (store.op == V4StoreOp::Sw) {
     code.test(code.eax, 3u);
-    code.jnz(bail);
+    code.jnz(unaligned);
   }
 
   code.mov(code.edx, code.eax);
@@ -2823,9 +2826,9 @@ V4NativeFn compile_v4_pending_delay_store(
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
   code.jb(ram);
   code.cmp(code.edx, 0x1F800000u);
-  code.jb(bail);
+  code.jb(device);
   code.cmp(code.edx, 0x1F801000u);
-  code.jae(bail);
+  code.jae(device);
 
   auto emit_unaligned_store = [&]() {
     Label off0, off1, off2, merged;
@@ -2921,6 +2924,7 @@ V4NativeFn compile_v4_pending_delay_store(
         static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
     emit_unaligned_store();
     code.mov(code.dword[code.rcx + code.rdx], code.eax);
+    code.mov(code.r9d, 5u);
   } else {
     switch (store.op) {
     case V4StoreOp::Sb:
@@ -2937,6 +2941,112 @@ V4NativeFn compile_v4_pending_delay_store(
     }
     code.mov(code.r9d, 1u);
   }
+
+  code.L(device);
+  // Preserve the store value and physical address across host ABI calls.
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.r8d, code.eax);
+  } else {
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))]);
+  }
+
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.edx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.mov(code.edx, code.r8d);
+#endif
+  if (store.op == V4StoreOp::Sb) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
+  } else if (store.op == V4StoreOp::Sh) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
+  } else {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
+  }
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+
+  // The bus transaction happened with the old delayed-load value visible.
+  emit_retire_incoming_load(code, 0u);
+  code.add(code.ebx, 2u);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
 
   code.L(stored);
   emit_retire_incoming_load(code, 0u);
@@ -3002,6 +3112,12 @@ V4NativeFn compile_v4_pending_delay_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
       1u);
   emit_v4_block_return(code);
+
+  code.L(unaligned);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+      code.eax);
+  emit_v4_exception_pending_delay(code, Exception::AddrStoreErr);
 
   code.L(bail);
   code.mov(code.dword[
