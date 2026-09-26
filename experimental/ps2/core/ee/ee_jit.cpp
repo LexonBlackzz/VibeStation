@@ -1243,9 +1243,12 @@ u32 EeJit::execute_block(
             (4096u - (next_physical & 4095u)) / 4u;
         const u32 remaining =
             maximum_instructions - total_retired;
-        current_count = std::min<u32>(
-            32u,
-            std::min(words_to_page_end, remaining));
+        const u32 page_limited =
+            words_to_page_end < remaining
+                ? words_to_page_end
+                : remaining;
+        current_count =
+            page_limited < 32u ? page_limited : 32u;
         if (current_count == 0u) break;
 
         for (u32 i = 0; i < current_count; ++i) {
