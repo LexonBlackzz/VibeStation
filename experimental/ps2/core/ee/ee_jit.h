@@ -81,6 +81,7 @@ private:
         bool uses_ram = false;
         u32 ram_load_mask = 0;
         u32 ram_store_mask = 0;
+        std::array<u32, 32> words{};
         u8 guard_bail_streak = 0;
         u8 guard_skip_remaining = 0;
         bool known = false;
