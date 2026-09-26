@@ -53,10 +53,15 @@ void bump_generation_if_tracked(
 
 } // namespace
 
-void EeRam::track_code_range(
+void EeRam::track_jit_code(
+    u32* page_metadata,
     u32 offset,
     std::size_t width) {
-    if (width == 0u || offset >= kSize) return;
+    if (page_metadata == nullptr ||
+        width == 0u ||
+        offset >= kSize) {
+        return;
+    }
     std::size_t remaining =
         std::min<std::size_t>(width, kSize - offset);
     u32 cursor = offset;
@@ -66,11 +71,17 @@ void EeRam::track_code_range(
         const std::size_t chunk =
             std::min<std::size_t>(
                 remaining, kPageSize - page_offset);
-        page_generation_[page] |=
+        page_metadata[page] |=
             code_region_mask_for_span(page_offset, chunk);
         cursor += static_cast<u32>(chunk);
         remaining -= chunk;
     }
+}
+
+void EeRam::track_code_range(
+    u32 offset,
+    std::size_t width) {
+    track_jit_code(page_generation_.data(), offset, width);
 }
 
 void EeRam::mark_jit_written(
