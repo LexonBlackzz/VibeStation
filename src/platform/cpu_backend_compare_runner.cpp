@@ -4096,8 +4096,8 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   CpuCompareCase v4_cop0_transfers{};
   v4_cop0_transfers.name = "v4_cop0_transfers_native";
   v4_cop0_transfers.start_pc = 0xA0010000u;
-  v4_cop0_transfers.initial_gpr[1] = 0xF240FF3Fu;
-  v4_cop0_transfers.initial_gpr[2] = 0x00000300u;
+  v4_cop0_transfers.initial_gpr[1] = 0x0040003Cu;
+  v4_cop0_transfers.initial_gpr[2] = 0x00000000u;
   v4_cop0_transfers.program = {
       (0x10u << 26) | (4u << 21) | (1u << 16) | (12u << 11), // MTC0 r1,SR
       (0x10u << 26) | (0u << 21) | (3u << 16) | (12u << 11), // MFC0 SR,r3
