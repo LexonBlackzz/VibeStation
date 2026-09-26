@@ -4110,6 +4110,79 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_iop_native_r3000a_block() {
+    constexpr ps2::u32 pc = 0x1000u;
+    constexpr ps2::u32 data = 0x2000u;
+    const std::array<ps2::u32, 8> code = {
+        (0x09u << 26) | (1u << 16) | 5u, // ADDIU r1,r0,5
+        (0x09u << 26) | (2u << 16) | 3u, // ADDIU r2,r0,3
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x21u, // ADDU r3,r1,r2
+        (0x05u << 26) | (3u << 21) | (0u << 16) | 2u, // BNE -> index 6
+        (3u << 16) | (4u << 11) | (1u << 6), // delay: SLL r4,r3,1
+        (0x09u << 26) | (6u << 16) | 99u, // skipped
+        (0x0Du << 26) | (4u << 21) | (5u << 16) | 1u, // ORI r5,r4,1
+        (0x2Bu << 26) | (7u << 21) | (5u << 16), // SW r5,0(r7)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP native test code setup failed") && ok;
+    }
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[7] = data;
+    native.iop().state().gpr[7] = data;
+
+    std::string error;
+    for (ps2::u32 i = 0; i < 7u; ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(7u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 7u,
+        "IOP native block did not retire expected path") && ok;
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        a.gpr[4] == b.gpr[4] &&
+        a.gpr[5] == b.gpr[5] &&
+        a.gpr[6] == b.gpr[6] &&
+        a.gpr[7] == b.gpr[7],
+        "IOP native architectural state diverged") && ok;
+    ps2::u32 exact_word = 0u;
+    ps2::u32 native_word = 0u;
+    ok = expect(
+        exact.iop_ram().read32(data, exact_word) &&
+        native.iop_ram().read32(data, native_word) &&
+        exact_word == native_word &&
+        native_word == 17u,
+        "IOP native direct RAM store diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP native block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_linear_block() {
     constexpr ps2::u32 pc = 0x5000u;
     const std::array<ps2::u32, 4> code = {
@@ -5542,6 +5615,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_iop_native_r3000a_block() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
     ok = test_ee_native_ram_loads() && ok;
