@@ -351,6 +351,398 @@ void ee_jit_special_div_helper(
     }
 }
 
+bool ee_jit_mmi_register_helper_supported(u32 instruction) {
+    if ((instruction >> 26) != 0x1Cu) return false;
+    const u32 sa = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    switch (funct) {
+    case 0x08u: // MMI0
+        return sa <= 0x0Au ||
+               sa == 0x12u || sa == 0x13u ||
+               sa == 0x16u || sa == 0x17u ||
+               sa == 0x1Au || sa == 0x1Bu;
+    case 0x09u: // MMI2
+        return sa == 0x02u || sa == 0x03u ||
+               sa == 0x08u || sa == 0x09u || sa == 0x0Au ||
+               sa == 0x0Eu || sa == 0x12u || sa == 0x13u ||
+               sa == 0x1Au || sa == 0x1Bu ||
+               sa == 0x1Eu || sa == 0x1Fu;
+    case 0x10u: // MFHI1
+    case 0x11u: // MTHI1
+    case 0x12u: // MFLO1
+    case 0x13u: // MTLO1
+        return true;
+    case 0x28u: // MMI1
+        return sa == 0x02u || sa == 0x03u || sa == 0x04u ||
+               sa == 0x06u || sa == 0x07u || sa == 0x0Au ||
+               (sa >= 0x10u && sa <= 0x12u) ||
+               (sa >= 0x14u && sa <= 0x16u) ||
+               (sa >= 0x18u && sa <= 0x1Bu);
+    case 0x29u: // MMI3
+        return sa == 0x03u || sa == 0x08u || sa == 0x09u ||
+               sa == 0x0Au || sa == 0x0Eu ||
+               sa == 0x12u || sa == 0x13u ||
+               sa == 0x1Au || sa == 0x1Bu || sa == 0x1Eu;
+    case 0x34u: // PSLLH
+    case 0x36u: // PSRLH
+    case 0x37u: // PSRAH
+    case 0x3Cu: // PSLLW
+    case 0x3Eu: // PSRLW
+    case 0x3Fu: // PSRAW
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ee_jit_mmi_register_helper(EeCpuState* state, u32 instruction) {
+    if (state == nullptr) return;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+    const u32 sa = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    const EeGpr a = state->gpr[rs];
+    const EeGpr b = state->gpr[rt];
+
+    const auto sext32 = [](u32 value) -> u64 {
+        return static_cast<u64>(
+            static_cast<s64>(static_cast<s32>(value)));
+    };
+    const auto get8 = [](const EeGpr& value, u32 lane) -> u8 {
+        const u64 half = lane < 8u ? value.lo : value.hi;
+        return static_cast<u8>(half >> ((lane & 7u) * 8u));
+    };
+    const auto get16 = [](const EeGpr& value, u32 lane) -> u16 {
+        const u64 half = lane < 4u ? value.lo : value.hi;
+        return static_cast<u16>(half >> ((lane & 3u) * 16u));
+    };
+    const auto get32 = [](const EeGpr& value, u32 lane) -> u32 {
+        const u64 half = lane < 2u ? value.lo : value.hi;
+        return static_cast<u32>(half >> ((lane & 1u) * 32u));
+    };
+    const auto set8 = [](EeGpr& value, u32 lane, u8 v) {
+        u64& half = lane < 8u ? value.lo : value.hi;
+        const u32 shift = (lane & 7u) * 8u;
+        half = (half & ~(0xFFull << shift)) |
+               (static_cast<u64>(v) << shift);
+    };
+    const auto set16 = [](EeGpr& value, u32 lane, u16 v) {
+        u64& half = lane < 4u ? value.lo : value.hi;
+        const u32 shift = (lane & 3u) * 16u;
+        half = (half & ~(0xFFFFull << shift)) |
+               (static_cast<u64>(v) << shift);
+    };
+    const auto set32 = [](EeGpr& value, u32 lane, u32 v) {
+        u64& half = lane < 2u ? value.lo : value.hi;
+        const u32 shift = (lane & 1u) * 32u;
+        half = (half & ~(0xFFFFFFFFull << shift)) |
+               (static_cast<u64>(v) << shift);
+    };
+    const auto store = [&](const EeGpr& value) {
+        if (rd != 0u) state->gpr[rd] = value;
+    };
+    const auto write64 = [&](u32 reg, u64 value) {
+        if (reg != 0u) state->gpr[reg].lo = value;
+    };
+
+    if (funct == 0x10u) { write64(rd, state->hi1); return; }
+    if (funct == 0x11u) { state->hi1 = state->gpr[rs].lo; return; }
+    if (funct == 0x12u) { write64(rd, state->lo1); return; }
+    if (funct == 0x13u) { state->lo1 = state->gpr[rs].lo; return; }
+
+    EeGpr out{};
+    if (funct == 0x08u) { // MMI0
+        switch (sa) {
+        case 0x00u: case 0x01u: case 0x02u: case 0x03u:
+            for (u32 i = 0u; i < 4u; ++i) {
+                const u32 av = get32(a, i), bv = get32(b, i);
+                u32 v = 0u;
+                if (sa == 0x00u) v = av + bv;
+                else if (sa == 0x01u) v = av - bv;
+                else if (sa == 0x02u) {
+                    v = static_cast<s32>(av) > static_cast<s32>(bv)
+                        ? 0xFFFFFFFFu : 0u;
+                } else {
+                    v = static_cast<s32>(av) > static_cast<s32>(bv)
+                        ? av : bv;
+                }
+                set32(out, i, v);
+            }
+            store(out); return;
+        case 0x04u: case 0x05u: case 0x06u: case 0x07u:
+            for (u32 i = 0u; i < 8u; ++i) {
+                const u16 av = get16(a, i), bv = get16(b, i);
+                u16 v = 0u;
+                if (sa == 0x04u) v = static_cast<u16>(av + bv);
+                else if (sa == 0x05u) v = static_cast<u16>(av - bv);
+                else if (sa == 0x06u) {
+                    v = static_cast<s16>(av) > static_cast<s16>(bv)
+                        ? 0xFFFFu : 0u;
+                } else {
+                    v = static_cast<s16>(av) > static_cast<s16>(bv)
+                        ? av : bv;
+                }
+                set16(out, i, v);
+            }
+            store(out); return;
+        case 0x08u: case 0x09u: case 0x0Au:
+            for (u32 i = 0u; i < 16u; ++i) {
+                const u8 av = get8(a, i), bv = get8(b, i);
+                const u8 v =
+                    sa == 0x08u ? static_cast<u8>(av + bv) :
+                    sa == 0x09u ? static_cast<u8>(av - bv) :
+                    (static_cast<s8>(av) > static_cast<s8>(bv)
+                        ? 0xFFu : 0u);
+                set8(out, i, v);
+            }
+            store(out); return;
+        case 0x12u: // PEXTLW
+            for (u32 i = 0u; i < 2u; ++i) {
+                set32(out, i * 2u, get32(b, i));
+                set32(out, i * 2u + 1u, get32(a, i));
+            }
+            store(out); return;
+        case 0x13u: // PPACW
+            set32(out, 0u, get32(b, 0u));
+            set32(out, 1u, get32(b, 2u));
+            set32(out, 2u, get32(a, 0u));
+            set32(out, 3u, get32(a, 2u));
+            store(out); return;
+        case 0x16u: // PEXTLH
+            for (u32 i = 0u; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i));
+                set16(out, i * 2u + 1u, get16(a, i));
+            }
+            store(out); return;
+        case 0x17u: // PPACH
+            for (u32 i = 0u; i < 4u; ++i) {
+                set16(out, i, get16(b, i * 2u));
+                set16(out, i + 4u, get16(a, i * 2u));
+            }
+            store(out); return;
+        case 0x1Au: // PEXTLB
+            for (u32 i = 0u; i < 8u; ++i) {
+                set8(out, i * 2u, get8(b, i));
+                set8(out, i * 2u + 1u, get8(a, i));
+            }
+            store(out); return;
+        case 0x1Bu: // PPACB
+            for (u32 i = 0u; i < 8u; ++i) {
+                set8(out, i, get8(b, i * 2u));
+                set8(out, i + 8u, get8(a, i * 2u));
+            }
+            store(out); return;
+        default: return;
+        }
+    }
+
+    if (funct == 0x28u) { // MMI1
+        switch (sa) {
+        case 0x02u: case 0x03u: // PCEQW / PMINW
+            for (u32 i = 0u; i < 4u; ++i) {
+                const u32 av = get32(a, i), bv = get32(b, i);
+                set32(out, i, sa == 0x02u
+                    ? (av == bv ? 0xFFFFFFFFu : 0u)
+                    : (static_cast<s32>(av) < static_cast<s32>(bv)
+                        ? av : bv));
+            }
+            store(out); return;
+        case 0x04u: // PADSBH
+            for (u32 i = 0u; i < 8u; ++i) {
+                const u16 av = get16(a, i), bv = get16(b, i);
+                set16(out, i, i < 4u
+                    ? static_cast<u16>(av - bv)
+                    : static_cast<u16>(av + bv));
+            }
+            store(out); return;
+        case 0x06u: case 0x07u: // PCEQH / PMINH
+            for (u32 i = 0u; i < 8u; ++i) {
+                const u16 av = get16(a, i), bv = get16(b, i);
+                set16(out, i, sa == 0x06u
+                    ? (av == bv ? 0xFFFFu : 0u)
+                    : (static_cast<s16>(av) < static_cast<s16>(bv)
+                        ? av : bv));
+            }
+            store(out); return;
+        case 0x0Au: // PCEQB
+            for (u32 i = 0u; i < 16u; ++i) {
+                set8(out, i, get8(a, i) == get8(b, i) ? 0xFFu : 0u);
+            }
+            store(out); return;
+        case 0x10u: case 0x11u: // PADDUW / PSUBUW
+            for (u32 i = 0u; i < 4u; ++i) {
+                const u64 av = get32(a, i), bv = get32(b, i);
+                const u32 v = sa == 0x10u
+                    ? static_cast<u32>(std::min<u64>(av + bv, 0xFFFFFFFFull))
+                    : (av <= bv ? 0u : static_cast<u32>(av - bv));
+                set32(out, i, v);
+            }
+            store(out); return;
+        case 0x12u: // PEXTUW
+            for (u32 i = 0u; i < 2u; ++i) {
+                set32(out, i * 2u, get32(b, i + 2u));
+                set32(out, i * 2u + 1u, get32(a, i + 2u));
+            }
+            store(out); return;
+        case 0x14u: case 0x15u: // PADDUH / PSUBUH
+            for (u32 i = 0u; i < 8u; ++i) {
+                const u32 av = get16(a, i), bv = get16(b, i);
+                const u16 v = sa == 0x14u
+                    ? static_cast<u16>(std::min<u32>(av + bv, 0xFFFFu))
+                    : (av <= bv ? 0u : static_cast<u16>(av - bv));
+                set16(out, i, v);
+            }
+            store(out); return;
+        case 0x16u: // PEXTUH
+            for (u32 i = 0u; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i + 4u));
+                set16(out, i * 2u + 1u, get16(a, i + 4u));
+            }
+            store(out); return;
+        case 0x18u: case 0x19u: // PADDUB / PSUBUB
+            for (u32 i = 0u; i < 16u; ++i) {
+                const u32 av = get8(a, i), bv = get8(b, i);
+                const u8 v = sa == 0x18u
+                    ? static_cast<u8>(std::min<u32>(av + bv, 0xFFu))
+                    : (av <= bv ? 0u : static_cast<u8>(av - bv));
+                set8(out, i, v);
+            }
+            store(out); return;
+        case 0x1Au: // PEXTUB
+            for (u32 i = 0u; i < 8u; ++i) {
+                set8(out, i * 2u, get8(b, i + 8u));
+                set8(out, i * 2u + 1u, get8(a, i + 8u));
+            }
+            store(out); return;
+        case 0x1Bu: { // QFSRV
+            const u32 shift = (state->sa & 0xFu) << 3u;
+            if (shift == 0u) out = b;
+            else if (shift < 64u) {
+                out.lo = (b.lo >> shift) | (b.hi << (64u - shift));
+                out.hi = (b.hi >> shift) | (a.lo << (64u - shift));
+            } else {
+                const u32 sh = shift - 64u;
+                out.lo = b.hi >> sh;
+                out.hi = a.lo >> sh;
+                if (sh != 0u) {
+                    out.lo |= a.lo << (64u - sh);
+                    out.hi |= a.hi << (64u - sh);
+                }
+            }
+            store(out); return;
+        }
+        default: return;
+        }
+    }
+
+    if (funct == 0x09u) { // MMI2
+        switch (sa) {
+        case 0x02u: // PSLLVW
+            out.lo = sext32(get32(b, 0u) << (get32(a, 0u) & 31u));
+            out.hi = sext32(get32(b, 2u) << (get32(a, 2u) & 31u));
+            store(out); return;
+        case 0x03u: // PSRLVW
+            out.lo = sext32(get32(b, 0u) >> (get32(a, 0u) & 31u));
+            out.hi = sext32(get32(b, 2u) >> (get32(a, 2u) & 31u));
+            store(out); return;
+        case 0x08u: out = {state->hi, state->hi1}; store(out); return;
+        case 0x09u: out = {state->lo, state->lo1}; store(out); return;
+        case 0x0Au: // PINTH
+            for (u32 i = 0u; i < 4u; ++i) {
+                set16(out, i * 2u, get16(b, i));
+                set16(out, i * 2u + 1u, get16(a, i + 4u));
+            }
+            store(out); return;
+        case 0x0Eu: out = {b.lo, a.lo}; store(out); return; // PCPYLD
+        case 0x12u: out = {a.lo & b.lo, a.hi & b.hi}; store(out); return;
+        case 0x13u: out = {a.lo ^ b.lo, a.hi ^ b.hi}; store(out); return;
+        case 0x1Au: { // PEXEH
+            static constexpr u32 order[8] = {0,2,1,3,4,6,5,7};
+            for (u32 i=0;i<8u;++i) set16(out,i,get16(b,order[i]));
+            store(out); return;
+        }
+        case 0x1Bu: { // PREVH
+            static constexpr u32 order[8] = {2,1,0,3,6,5,4,7};
+            for (u32 i=0;i<8u;++i) set16(out,i,get16(b,order[i]));
+            store(out); return;
+        }
+        case 0x1Eu: // PEXEW
+            set32(out,0,get32(b,0)); set32(out,1,get32(b,2));
+            set32(out,2,get32(b,1)); set32(out,3,get32(b,3));
+            store(out); return;
+        case 0x1Fu: // PROT3W
+            set32(out,0,get32(b,1)); set32(out,1,get32(b,2));
+            set32(out,2,get32(b,0)); set32(out,3,get32(b,3));
+            store(out); return;
+        default: return;
+        }
+    }
+
+    if (funct == 0x29u) { // MMI3
+        switch (sa) {
+        case 0x03u: // PSRAVW
+            out.lo = sext32(static_cast<u32>(
+                static_cast<s32>(get32(b,0)) >> (get32(a,0)&31u)));
+            out.hi = sext32(static_cast<u32>(
+                static_cast<s32>(get32(b,2)) >> (get32(a,2)&31u)));
+            store(out); return;
+        case 0x08u: state->hi = a.lo; state->hi1 = a.hi; return;
+        case 0x09u: state->lo = a.lo; state->lo1 = a.hi; return;
+        case 0x0Au: // PINTEH
+            for (u32 i=0;i<4u;++i) {
+                set16(out,i*2u,get16(b,i*2u));
+                set16(out,i*2u+1u,get16(a,i*2u));
+            }
+            store(out); return;
+        case 0x0Eu: out = {a.hi, b.hi}; store(out); return; // PCPYUD
+        case 0x12u: out = {a.lo | b.lo, a.hi | b.hi}; store(out); return;
+        case 0x13u: out = {~(a.lo | b.lo), ~(a.hi | b.hi)}; store(out); return;
+        case 0x1Au: { // PEXCH
+            static constexpr u32 order[8] = {0,2,1,3,4,6,5,7};
+            for (u32 i=0;i<8u;++i) set16(out,i,get16(b,order[i]));
+            store(out); return;
+        }
+        case 0x1Bu: // PCPYH
+            for (u32 i=0;i<4u;++i) {
+                set16(out,i,get16(b,0)); set16(out,i+4u,get16(b,4));
+            }
+            store(out); return;
+        case 0x1Eu: // PEXCW
+            set32(out,0,get32(b,0)); set32(out,1,get32(b,2));
+            set32(out,2,get32(b,1)); set32(out,3,get32(b,3));
+            store(out); return;
+        default: return;
+        }
+    }
+
+    if (funct == 0x34u || funct == 0x36u || funct == 0x37u) {
+        const u32 shift = sa & 0xFu;
+        for (u32 i=0;i<8u;++i) {
+            const u16 value = funct == 0x34u
+                ? static_cast<u16>(get16(b,i) << shift)
+                : funct == 0x36u
+                    ? static_cast<u16>(get16(b,i) >> shift)
+                    : static_cast<u16>(
+                        static_cast<s16>(get16(b,i)) >> shift);
+            set16(out,i,value);
+        }
+        store(out); return;
+    }
+    if (funct == 0x3Cu || funct == 0x3Eu || funct == 0x3Fu) {
+        for (u32 i=0;i<4u;++i) {
+            const u32 value = funct == 0x3Cu
+                ? get32(b,i) << sa
+                : funct == 0x3Eu
+                    ? get32(b,i) >> sa
+                    : static_cast<u32>(
+                        static_cast<s32>(get32(b,i)) >> sa);
+            set32(out,i,value);
+        }
+        store(out);
+    }
+}
+
 bool ee_jit_cop2_register_helper_supported(u32 instruction) {
     if ((instruction >> 26) != 0x12u) return false;
     const u32 rs = (instruction >> 21) & 31u;
@@ -826,6 +1218,16 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             }
             out.store_state_eax(
                 static_cast<u32>(offsetof(EeCpuState, sa)));
+            destination = 0u;
+            break;
+        }
+        case 0x1Cu: { // MMI register/packed subset
+            if (!ee_jit_mmi_register_helper_supported(instruction)) {
+                return false;
+            }
+            out.call_state_instruction_helper(
+                &ee_jit_mmi_register_helper,
+                instruction);
             destination = 0u;
             break;
         }

@@ -4564,6 +4564,90 @@ bool test_ee_native_extended_integer_block() {
 
 
 
+
+bool test_ee_native_mmi_register_helpers() {
+    constexpr ps2::u32 pc = 0x5680u;
+    const std::array<ps2::u32, 8> code = {
+        // PEXTLW r3,r1,r2
+        (0x1Cu << 26) | (1u << 21) | (2u << 16) |
+            (3u << 11) | (0x12u << 6) | 0x08u,
+        // PAND r4,r1,r2
+        (0x1Cu << 26) | (1u << 21) | (2u << 16) |
+            (4u << 11) | (0x12u << 6) | 0x09u,
+        // POR r5,r1,r2
+        (0x1Cu << 26) | (1u << 21) | (2u << 16) |
+            (5u << 11) | (0x12u << 6) | 0x29u,
+        // PADDUH r6,r1,r2
+        (0x1Cu << 26) | (1u << 21) | (2u << 16) |
+            (6u << 11) | (0x14u << 6) | 0x28u,
+        // PSLLW r7,r2,3
+        (0x1Cu << 26) | (2u << 16) | (7u << 11) |
+            (3u << 6) | 0x3Cu,
+        // QFSRV r8,r1,r2
+        (0x1Cu << 26) | (1u << 21) | (2u << 16) |
+            (8u << 11) | (0x1Bu << 6) | 0x28u,
+        // PMTHI r1
+        (0x1Cu << 26) | (1u << 21) | (0x08u << 6) | 0x29u,
+        // PMFHI r9
+        (0x1Cu << 26) | (9u << 11) | (0x08u << 6) | 0x09u,
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    const ps2::EeGpr a{
+        0x2222222211111111ull,
+        0x4444444433333333ull};
+    const ps2::EeGpr b{
+        0xBBBBBBBBAAAAAAAAull,
+        0xDDDDDDDDCCCCCCCCull};
+    exact.ee().state().gpr[1] = a;
+    native.ee().state().gpr[1] = a;
+    exact.ee().state().gpr[2] = b;
+    native.ee().state().gpr[2] = b;
+    exact.ee().state().sa = 8u;
+    native.ee().state().sa = 8u;
+
+    std::string error;
+    bool ok = true;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE MMI native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& astate = exact.ee().state();
+    const auto& bstate = native.ee().state();
+    ok = expect(
+        retired == code.size() &&
+        astate.pc == bstate.pc &&
+        astate.next_pc == bstate.next_pc &&
+        astate.instructions_executed == bstate.instructions_executed &&
+        astate.cop0[9] == bstate.cop0[9] &&
+        astate.hi == bstate.hi &&
+        astate.hi1 == bstate.hi1,
+        "EE native MMI architectural state diverged") && ok;
+    for (ps2::u32 reg = 3u; reg <= 9u; ++reg) {
+        ok = expect(
+            astate.gpr[reg].lo == bstate.gpr[reg].lo &&
+            astate.gpr[reg].hi == bstate.gpr[reg].hi,
+            "EE native MMI register result diverged") && ok;
+    }
+#else
+    ok = expect(
+        retired == 0u,
+        "EE MMI helper block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_compile_blocker_diagnostics() {
     constexpr ps2::u32 pc = 0x5700u;
     // Prefix compiles; MTC0 is deliberately a true system-boundary operation
@@ -6429,6 +6513,7 @@ int main() {
     ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
+    ok = test_ee_native_mmi_register_helpers() && ok;
     ok = test_ee_native_compile_blocker_diagnostics() && ok;
     ok = test_ee_native_cop2_register_transfers() && ok;
     ok = test_ee_native_scratchpad_fastmem() && ok;
