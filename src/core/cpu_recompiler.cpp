@@ -600,6 +600,8 @@ struct V4NativeState {
   u32 scheduler_yield = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
+  // 0 = ordinary dispatch, 1 = Interrupt, 2 = instruction-address AdEL.
+  u32 entry_exception = 0;
   u32 exception_raised = 0;
   u32 exception_return_sr = 0;
   u32 exception_return_bd = 0;
@@ -2901,7 +2903,7 @@ V4NativeFn compile_v4_branch(
     const V4DecodedInstruction &delay, u32 branch_pc,
     const V4LinkTargets &links, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 4096u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -4495,6 +4497,8 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   Label loop, check_block, after_block, done;
   Label missing, stale_epoch, blocked_memory, stale_generation, budget_exit;
   Label revalidate_cached, bail_exit;
+  Label entry_interrupt, entry_adel, entry_exception_common;
+  Label entry_low_vector, entry_vector_ready;
 
   code.push(code.rbx);
   code.push(code.r12);
@@ -4523,6 +4527,126 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.mov(code.r15, code.ptr[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+
+  // Scheduler-visible exceptions enter through the resident dispatcher too.
+  // C++ may synchronize an external device line, but the R3000A exception
+  // state transition itself is generated x64, never Cpu::step()/opcode code.
+  code.cmp(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, entry_exception))],
+      0u);
+  code.je(loop);
+  code.cmp(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, entry_exception))],
+      1u);
+  code.je(entry_interrupt);
+  code.jmp(entry_adel);
+
+  code.L(entry_interrupt);
+  code.mov(code.edx, static_cast<u32>(Exception::Interrupt));
+  code.jmp(entry_exception_common);
+
+  code.L(entry_adel);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+      code.eax);
+  code.mov(code.edx, static_cast<u32>(Exception::AddrLoadErr));
+
+  code.L(entry_exception_common);
+  // Exceptions flush/commit the pending load before the handler observes GPRs.
+  emit_retire_incoming_load(code, 0u);
+
+  // Save the pre-exception mode stack for the exception-return diagnostics.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_sr))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_bd))],
+      0u);
+
+  // R3000A IEc/KUc -> IEp/KUp, enter kernel with interrupts disabled.
+  code.mov(code.ecx, code.eax);
+  code.and_(code.ecx, 0x3Fu);
+  code.and_(code.eax, ~0x3Fu);
+  code.shl(code.ecx, 2);
+  code.and_(code.ecx, 0x3Fu);
+  code.or_(code.eax, code.ecx);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      code.eax);
+
+  // Preserve IP bits, replace ExcCode, clear CE/BD.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+  code.and_(code.eax, ~((0x3u << 28) | 0x7Cu | (1u << 31)));
+  code.mov(code.ecx, code.edx);
+  code.shl(code.ecx, 2);
+  code.or_(code.eax, code.ecx);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
+      code.eax);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_fn))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, exception_raised))],
+      1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, entry_exception))],
+      0u);
+
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 22);
+  code.jz(entry_low_vector);
+  code.mov(code.eax, 0xBFC00180u);
+  code.jmp(entry_vector_ready);
+  code.L(entry_low_vector);
+  code.mov(code.eax, 0x80000080u);
+  code.L(entry_vector_ready);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+
+  // Cpu::step() reports a two-cycle exception entry and one scheduler iteration.
+  code.add(code.ebx, 2u);
+  code.dec(code.r12d);
+  code.jmp(done);
 
   code.L(loop);
   {
@@ -5787,6 +5911,132 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.executed_cycles += consumed;
   };
 
+  const auto run_native_entry_exception = [&](u32 entry_exception) {
+    V4NativeState &native = impl_->native_state;
+    if (!impl_->native_state_bound) {
+      native.gpr = cpu_.gpr_;
+      native.cpu = &cpu_;
+      native.system = cpu_.sys_;
+      native.dispatch_top = impl_->dispatch_top.get();
+      native.cop0_regs = cpu_.cop0_regs_;
+      native.gte = &cpu_.gte;
+      native.icache_generations = cpu_.icache_generation_.data();
+      native.icache_tags = &cpu_.icache_[0].tag;
+      native.icache_words = cpu_.icache_[0].words.data();
+      native.icache_valid = &cpu_.icache_[0].valid;
+      native.icache_line_stride = sizeof(cpu_.icache_[0]);
+      native.code_page_generations = impl_->page_generations.data();
+      native.code_page_bits = impl_->code_pages.data();
+      native.code_line_bits = impl_->code_lines.data();
+      native.block_return = impl_->resident_block_return;
+      native.main_ram = cpu_.sys_->jit_main_ram_data_mut();
+      native.scratchpad = cpu_.sys_->jit_scratchpad_data_mut();
+      impl_->native_state_bound = true;
+    }
+
+    native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
+    native.memory_fastpath_allowed =
+        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
+    native.block_bail = 0u;
+    native.memory_entries = 0u;
+    native.store_entries = 0u;
+    native.store_phys = 0u;
+    native.cop0_jumpdest = cpu_.cop0_jumpdest_;
+    native.cop0_badvaddr = cpu_.cop0_badvaddr_;
+    native.cop0_sr = cpu_.cop0_sr_;
+    native.cop0_cause = cpu_.cop0_cause_;
+    native.cop0_epc = cpu_.cop0_epc_;
+    native.gte_result_ready_cycle = cpu_.gte_result_ready_cycle_;
+    native.gte_input_ready_cycle = cpu_.gte_input_ready_cycle_;
+    native.hi = cpu_.hi_;
+    native.lo = cpu_.lo_;
+    native.muldiv_result_ready_cycle = cpu_.muldiv_result_ready_cycle_;
+    native.cpu_cycle_base = cpu_.cycles_;
+    native.cache_epoch = impl_->cache_epoch;
+    native.pc = cpu_.pc_;
+    native.next_pc = cpu_.pc_ + 4u;
+    native.last_pc = cpu_.pc_;
+    native.last_in_delay_slot = 0u;
+    native.active_branch_pc = 0u;
+    native.pending_delay_slot = 0u;
+    native.pending_branch_taken = 0u;
+    native.pending_branch_pc = 0u;
+    native.pending_delay_fn = nullptr;
+    native.scheduler_yield = 0u;
+    native.pending_load_reg = cpu_.load_.reg;
+    native.pending_load_value = cpu_.load_.value;
+    native.entry_exception = entry_exception;
+    native.exception_raised = 0u;
+    native.exception_return_sr = 0u;
+    native.exception_return_bd = 0u;
+    native.cycles = 0u;
+    native.instructions = 0u;
+    native.cycle_budget = max_cycles - result.cycles;
+    native.instruction_budget = max_instructions - result.instructions;
+    native.block_entries = 0u;
+    native.direct_links = 0u;
+    native.missing_exits = 0u;
+    native.epoch_exits = 0u;
+    native.memory_exits = 0u;
+    native.generation_exits = 0u;
+    native.budget_exits = 0u;
+    native.bail_exits = 0u;
+    native.icache_refills = 0u;
+    native.revalidate_attempts = 0u;
+    native.revalidate_successes = 0u;
+
+    impl_->resident_dispatch(&native);
+    ++stats_.native_chain_invocations;
+    ++stats_.recompiler_frame_native_dispatches;
+
+    cpu_.cycles_ += native.cycles;
+    result.cycles += native.cycles;
+    stats_.native_cycles += native.cycles;
+    stats_.executed_cycles += native.cycles;
+
+    cpu_.current_pc_ = native.last_pc;
+    cpu_.pc_ = native.pc;
+    cpu_.next_pc_ = native.pc + 4u;
+    cpu_.in_delay_slot_ = false;
+    cpu_.active_branch_pc_ = 0u;
+    cpu_.pending_delay_slot_ = false;
+    cpu_.pending_branch_taken_ = false;
+    cpu_.pending_branch_pc_ = 0u;
+    cpu_.load_ = {native.pending_load_reg, native.pending_load_value};
+    cpu_.next_load_ = {0u, 0u};
+    cpu_.exception_raised_ = native.exception_raised != 0u;
+    cpu_.cycle_penalty_ = 0u;
+    cpu_.executing_step_ = false;
+    cpu_.gpr_[0] = 0u;
+    cpu_.hi_ = native.hi;
+    cpu_.lo_ = native.lo;
+    cpu_.muldiv_result_ready_cycle_ = native.muldiv_result_ready_cycle;
+    cpu_.cop0_jumpdest_ = native.cop0_jumpdest;
+    cpu_.cop0_badvaddr_ = native.cop0_badvaddr;
+    cpu_.cop0_sr_ = native.cop0_sr;
+    cpu_.cop0_cause_ = native.cop0_cause;
+    cpu_.cop0_epc_ = native.cop0_epc;
+    cpu_.gte_result_ready_cycle_ = native.gte_result_ready_cycle;
+    cpu_.gte_input_ready_cycle_ = native.gte_input_ready_cycle;
+
+    if (native.exception_raised != 0u) {
+      std::memcpy(cpu_.exception_return_regs_, cpu_.gpr_,
+                  sizeof(cpu_.exception_return_regs_));
+      cpu_.exception_return_hi_ = native.hi;
+      cpu_.exception_return_lo_ = native.lo;
+      cpu_.exception_return_epc_ = native.cop0_epc;
+      cpu_.exception_return_sr_ = native.exception_return_sr;
+      cpu_.exception_return_bd_ = false;
+      cpu_.exception_return_valid_ = true;
+      cpu_.gte_result_ready_cycle_ = cpu_.cycles_;
+      cpu_.gte_input_ready_cycle_ = cpu_.cycles_;
+    }
+
+    result.instructions += native.instructions;
+    stats_.native_instructions += native.instructions;
+    stats_.optimized_instructions += native.instructions;
+  };
+
   // Keep diagnostic modes on the interpreter during bring-up. Their callbacks
   // observe instruction-by-instruction state and are deliberately not a V4 hot
   // path concern.
@@ -5808,10 +6058,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     const bool pending_branch_delay =
         cpu_.pending_delay_slot_ || cpu_.pending_branch_taken_ ||
         cpu_.pending_branch_pc_ != 0u;
-    if ((cpu_.pc_ & 3u) != 0u) {
-      ++stats_.native_reject_pc_state;
-      unsafe_state = true;
-    } else if (!pending_branch_delay && cpu_.next_pc_ != cpu_.pc_ + 4u) {
+    if (!pending_branch_delay && cpu_.next_pc_ != cpu_.pc_ + 4u &&
+        (cpu_.pc_ & 3u) == 0u) {
       ++stats_.native_reject_pc_state;
       unsafe_state = true;
     }
@@ -5830,12 +6078,13 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     const bool irq_entry = !cpu_.pending_delay_slot_ && cpu_.check_irq();
     if (irq_entry) {
       ++stats_.native_reject_irq_state;
-      run_helper(0u, V4HelperReason::Irq);
+      run_native_entry_exception(1u);
       continue;
     }
 
     if ((cpu_.pc_ & 3u) != 0u) {
-      run_helper(0u, V4HelperReason::UnalignedPc);
+      ++stats_.native_reject_pc_state;
+      run_native_entry_exception(2u);
       continue;
     }
 
@@ -6045,6 +6294,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.scheduler_yield = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
+    native.entry_exception = 0u;
     native.exception_raised = 0u;
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
