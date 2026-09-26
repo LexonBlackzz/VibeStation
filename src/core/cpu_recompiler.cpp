@@ -6736,56 +6736,47 @@ struct CpuRecompilerBackend::Impl {
     if (found != pending_delay_alu_cache.end()) {
       return found->second;
     }
+
     u32 code_size = 0u;
     V4NativeFn fn = nullptr;
-    V4DecodedInstruction decoded{};
-    if (decode_v4_alu(instruction, decoded)) {
-      fn = compile_v4_pending_delay_alu(arena, decoded, code_size);
-    } else {
-      V4DecodedOverflowAlu overflow{};
-      if (decode_v4_overflow_alu(instruction, overflow)) {
-        fn = compile_v4_pending_delay_overflow_alu(
-            arena, overflow, code_size);
-      } else {
-        V4DecodedCondMove cond_move{};
-        if (decode_v4_cond_move(instruction, cond_move)) {
-          fn = compile_v4_pending_delay_cond_move(
-              arena, cond_move, code_size);
-        } else {
-          V4DecodedTrap trap{};
-          if (decode_v4_trap(instruction, trap)) {
-            fn = compile_v4_pending_delay_trap(arena, trap, code_size);
-          } else {
-            V4DecodedException exception_inst{};
-            if (decode_v4_exception(instruction, exception_inst)) {
-              const Exception cause =
-                  exception_inst.op == V4ExceptionOp::Syscall
-                      ? Exception::Syscall
-                      : Exception::Break;
-              fn = compile_v4_pending_delay_fixed_exception(
-                  arena, cause, code_size);
-            } else {
-              V4DecodedCopUnusable cop_unusable{};
-              if (decode_v4_cop_unusable(instruction, cop_unusable)) {
-                fn = compile_v4_pending_delay_fixed_exception(
-                    arena, Exception::CopUnusable, code_size,
-                    cop_unusable.cop);
-              } else {
-                V4DecodedLoad load{};
-            if (decode_v4_load(instruction, load)) {
-          fn = compile_v4_pending_delay_load(arena, load, code_size);
-        } else {
-          V4DecodedStore store{};
-                  if (decode_v4_store(instruction, store)) {
-                    fn = compile_v4_pending_delay_store(arena, store, code_size);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+    V4DecodedInstruction alu{};
+    V4DecodedOverflowAlu overflow{};
+    V4DecodedCondMove cond_move{};
+    V4DecodedTrap trap{};
+    V4DecodedException exception_inst{};
+    V4DecodedCopUnusable cop_unusable{};
+    V4DecodedHiLo hilo{};
+    V4DecodedCop0 cop0{};
+    V4DecodedLoad load{};
+    V4DecodedStore store{};
+
+    if (decode_v4_alu(instruction, alu)) {
+      fn = compile_v4_pending_delay_alu(arena, alu, code_size);
+    } else if (decode_v4_overflow_alu(instruction, overflow)) {
+      fn = compile_v4_pending_delay_overflow_alu(arena, overflow, code_size);
+    } else if (decode_v4_cond_move(instruction, cond_move)) {
+      fn = compile_v4_pending_delay_cond_move(arena, cond_move, code_size);
+    } else if (decode_v4_trap(instruction, trap)) {
+      fn = compile_v4_pending_delay_trap(arena, trap, code_size);
+    } else if (decode_v4_exception(instruction, exception_inst)) {
+      const Exception cause =
+          exception_inst.op == V4ExceptionOp::Syscall
+              ? Exception::Syscall
+              : Exception::Break;
+      fn = compile_v4_pending_delay_fixed_exception(arena, cause, code_size);
+    } else if (decode_v4_cop_unusable(instruction, cop_unusable)) {
+      fn = compile_v4_pending_delay_fixed_exception(
+          arena, Exception::CopUnusable, code_size, cop_unusable.cop);
+    } else if (decode_v4_hilo(instruction, hilo)) {
+      fn = compile_v4_pending_delay_hilo(arena, hilo, code_size);
+    } else if (decode_v4_cop0(instruction, cop0)) {
+      fn = compile_v4_pending_delay_cop0(arena, cop0, code_size);
+    } else if (decode_v4_load(instruction, load)) {
+      fn = compile_v4_pending_delay_load(arena, load, code_size);
+    } else if (decode_v4_store(instruction, store)) {
+      fn = compile_v4_pending_delay_store(arena, store, code_size);
     }
+
     if (fn != nullptr) {
       pending_delay_alu_cache.emplace(instruction, fn);
     }
