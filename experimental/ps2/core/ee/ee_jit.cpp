@@ -2856,7 +2856,8 @@ u32 EeJit::execute_block(
         // A native store to this code page increments its generation and
         // returns from generated code. Never execute another cached block
         // from the old generation in the same host dispatch.
-        if (page_generations != nullptr &&
+        if (entry->ram_store_mask != 0u &&
+            page_generations != nullptr &&
             EeRam::generation_from_metadata(
                 page_generations[current_code_page]) !=
                 current_page_generation) {

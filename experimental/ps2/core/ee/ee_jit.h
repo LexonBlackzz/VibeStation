@@ -103,22 +103,25 @@ private:
         bool known = false;
     };
     struct BlockEntry {
+        // Keep the fields touched at every native block boundary compact.
+        // The 128-byte guest snapshot is cold on linked hot-path dispatch and
+        // deliberately lives after the execution/link metadata.
         u32 pc = 0;
         u32 page_generation = 0;
-        u8 instruction_count = 0;
         BlockFunction function = nullptr;
-        bool control_flow = false;
-        bool annul_capable = false;
-        bool uses_ram = false;
-        u32 ram_load_mask = 0;
-        u32 ram_store_mask = 0;
-        std::array<u32, 32> words{};
         BlockEntry* linked_successor = nullptr;
         u32 linked_successor_pc = 0;
         u32 linked_successor_generation = 0;
+        u32 ram_load_mask = 0;
+        u32 ram_store_mask = 0;
+        u8 instruction_count = 0;
+        bool control_flow = false;
+        bool annul_capable = false;
+        bool uses_ram = false;
         u8 guard_bail_streak = 0;
         u8 guard_skip_remaining = 0;
         bool known = false;
+        std::array<u32, 32> words{};
     };
     struct Page {
         void* address = nullptr;
