@@ -66,6 +66,8 @@ public:
     [[nodiscard]] u64 jit_entry_successes() const;
     [[nodiscard]] u64 jit_compile_failures() const;
     [[nodiscard]] u64 jit_load_delay_entry_retires() const;
+    [[nodiscard]] std::array<u64, 64> jit_compile_stop_opcodes() const;
+    [[nodiscard]] std::array<u64, 64> jit_delay_slot_stop_opcodes() const;
     [[nodiscard]] u64 jit_entry_reject(u32 reason) const;
     [[nodiscard]] u64 jit_residency_instructions() const;
     [[nodiscard]] u64 jit_residency_max() const;

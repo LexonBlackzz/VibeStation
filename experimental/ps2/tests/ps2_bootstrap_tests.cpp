@@ -4422,6 +4422,65 @@ bool test_iop_native_cop_load_delay_and_div() {
     return ok;
 }
 
+
+bool test_iop_native_compile_blocker_diagnostics() {
+    constexpr ps2::u32 pc = 0x000018C0u;
+    const std::array<ps2::u32, 2> prefix_stop = {
+        (0x09u << 26) | (1u << 16) | 1u, // ADDIU r1,r0,1
+        (0x10u << 26) | (0x04u << 21) | (1u << 16) |
+            (12u << 11), // MTC0 r1,Status: deliberate system boundary
+    };
+    const std::array<ps2::u32, 2> delay_stop = {
+        (0x04u << 26) | (0u << 21) | (0u << 16), // BEQ r0,r0
+        (0x10u << 26) | (0x04u << 21) | (1u << 16) |
+            (12u << 11), // unsupported MTC0 delay slot
+    };
+
+    bool ok = true;
+    ps2::Ps2System prefix;
+    prefix.iop().reset(pc);
+    for (ps2::u32 i = 0u; i < prefix_stop.size(); ++i) {
+        ok = expect(
+            prefix.iop_ram().write32(pc + i * 4u, prefix_stop[i]),
+            "IOP blocker prefix setup failed") && ok;
+    }
+    const ps2::u32 retired = prefix.iop().run_native_quiet(2u);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto prefix_stops =
+        prefix.iop().jit_compile_stop_opcodes();
+    ok = expect(
+        retired == 1u &&
+        prefix_stops[0x10u] != 0u,
+        "IOP JIT did not attribute prefix stop to COP0") && ok;
+
+    ps2::Ps2System delay;
+    delay.iop().reset(pc);
+    delay.iop().state().gpr[1] = 1u;
+    for (ps2::u32 i = 0u; i < delay_stop.size(); ++i) {
+        ok = expect(
+            delay.iop_ram().write32(pc + i * 4u, delay_stop[i]),
+            "IOP blocker delay-slot setup failed") && ok;
+    }
+    const ps2::u32 delay_retired =
+        delay.iop().run_native_quiet(2u);
+    const auto delay_stops =
+        delay.iop().jit_compile_stop_opcodes();
+    const auto delay_slot_stops =
+        delay.iop().jit_delay_slot_stop_opcodes();
+    ok = expect(
+        delay_retired == 0u &&
+        delay_stops[0x10u] != 0u &&
+        delay_slot_stops[0x10u] != 0u,
+        "IOP JIT did not attribute unsupported branch delay slot") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP blocker diagnostic unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_iop_native_overflow_guard() {
     constexpr ps2::u32 pc = 0x00001900u;
     const std::array<ps2::u32, 2> code = {
@@ -6578,6 +6637,7 @@ int main() {
     ok = test_iop_native_entry_with_pending_load() && ok;
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_iop_native_cop_load_delay_and_div() && ok;
+    ok = test_iop_native_compile_blocker_diagnostics() && ok;
     ok = test_iop_native_overflow_guard() && ok;
     ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;

@@ -59,6 +59,12 @@ public:
     [[nodiscard]] u64 load_delay_entry_retire_count() const {
         return load_delay_entry_retire_count_;
     }
+    [[nodiscard]] const std::array<u64, 64>& compile_stop_opcodes() const {
+        return compile_stop_opcodes_;
+    }
+    [[nodiscard]] const std::array<u64, 64>& delay_slot_stop_opcodes() const {
+        return delay_slot_stop_opcodes_;
+    }
     [[nodiscard]] const std::array<u64, 5>& entry_rejects() const {
         return entry_rejects_;
     }
@@ -101,7 +107,9 @@ private:
         u32& compiled_instructions,
         bool& control_flow,
         bool& uses_ram,
-        u32& ram_store_mask);
+        u32& ram_store_mask,
+        u32& blocker_opcode,
+        bool& blocker_is_delay_slot);
     void release_code_cache();
 
     std::vector<BlockEntry> entries_{32768};
@@ -119,6 +127,8 @@ private:
     u64 native_entry_success_count_ = 0;
     u64 compile_failure_count_ = 0;
     u64 load_delay_entry_retire_count_ = 0;
+    std::array<u64, 64> compile_stop_opcodes_{};
+    std::array<u64, 64> delay_slot_stop_opcodes_{};
     std::array<u64, 5> entry_rejects_{};
     u64 native_residency_instruction_count_ = 0;
     u64 native_residency_max_ = 0;

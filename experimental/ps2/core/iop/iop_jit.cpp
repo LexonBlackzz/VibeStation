@@ -1018,6 +1018,20 @@ bool emit_branch_and_delay(
     return true;
 }
 
+bool iop_native_branch_candidate(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    if (opcode == 0u) {
+        const u32 funct = instruction & 63u;
+        return funct == 0x08u || funct == 0x09u; // JR/JALR
+    }
+    if (opcode == 0x01u) {
+        const u32 rt = (instruction >> 16) & 31u;
+        return rt == 0x00u || rt == 0x01u ||
+               rt == 0x10u || rt == 0x11u;
+    }
+    return opcode >= 0x02u && opcode <= 0x07u;
+}
+
 bool emit_block(
     u32 pc,
     u32 code_page,
@@ -1027,11 +1041,15 @@ bool emit_block(
     u32& compiled,
     bool& control_flow,
     bool& uses_ram,
-    u32& store_mask) {
+    u32& store_mask,
+    u32& blocker_opcode,
+    bool& blocker_is_delay_slot) {
     compiled = 0u;
     control_flow = false;
     uses_ram = false;
     store_mask = 0u;
+    blocker_opcode = 64u;
+    blocker_is_delay_slot = false;
     out.preserve_ram_base();
     out.preserve_generation_base();
 
@@ -1079,6 +1097,19 @@ bool emit_block(
                 out)) {
             compiled += 2u;
             control_flow = true;
+            break;
+        }
+
+        // Attribute the instruction that actually ended native compilation,
+        // rather than the first opcode of the surrounding block. For branch
+        // forms already supported above, a failed pair means the delay slot
+        // was the unsupported instruction.
+        if (i + 1u < word_count &&
+            iop_native_branch_candidate(words[i])) {
+            blocker_opcode = words[i + 1u] >> 26;
+            blocker_is_delay_slot = true;
+        } else {
+            blocker_opcode = words[i] >> 26;
         }
         break;
     }
@@ -1122,6 +1153,8 @@ void IopJit::clear() {
     native_entry_success_count_ = 0u;
     compile_failure_count_ = 0u;
     load_delay_entry_retire_count_ = 0u;
+    compile_stop_opcodes_.fill(0u);
+    delay_slot_stop_opcodes_.fill(0u);
     entry_rejects_.fill(0u);
     native_residency_instruction_count_ = 0u;
     native_residency_max_ = 0u;
@@ -1136,7 +1169,9 @@ IopJit::BlockFunction IopJit::compile_block(
     u32& compiled_instructions,
     bool& control_flow,
     bool& uses_ram,
-    u32& ram_store_mask) {
+    u32& ram_store_mask,
+    u32& blocker_opcode,
+    bool& blocker_is_delay_slot) {
 #if defined(VIBESTATION_IOP_JIT_X64)
     Emitter emitter;
     if (!emit_block(
@@ -1148,7 +1183,9 @@ IopJit::BlockFunction IopJit::compile_block(
             compiled_instructions,
             control_flow,
             uses_ram,
-            ram_store_mask)) {
+            ram_store_mask,
+            blocker_opcode,
+            blocker_is_delay_slot)) {
         return nullptr;
     }
 
@@ -1184,6 +1221,8 @@ IopJit::BlockFunction IopJit::compile_block(
     control_flow = false;
     uses_ram = false;
     ram_store_mask = 0u;
+    blocker_opcode = 64u;
+    blocker_is_delay_slot = false;
     return nullptr;
 #endif
 }
@@ -1307,6 +1346,8 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
             bool control = false;
             bool uses_ram = false;
             u32 store_mask = 0u;
+            u32 blocker_opcode = 64u;
+            bool blocker_is_delay_slot = false;
             BlockFunction function = compile_block(
                 current_pc,
                 code_page,
@@ -1315,7 +1356,15 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
                 compiled,
                 control,
                 uses_ram,
-                store_mask);
+                store_mask,
+                blocker_opcode,
+                blocker_is_delay_slot);
+            if (blocker_opcode < compile_stop_opcodes_.size()) {
+                ++compile_stop_opcodes_[blocker_opcode];
+                if (blocker_is_delay_slot) {
+                    ++delay_slot_stop_opcodes_[blocker_opcode];
+                }
+            }
             if (function == nullptr || compiled == 0u) {
                 ++compile_failure_count_;
             }
