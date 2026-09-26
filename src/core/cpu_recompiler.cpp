@@ -7812,6 +7812,16 @@ struct CpuRecompilerBackend::Impl {
       fn = compile_v4_pending_delay_load(arena, load, code_size);
         } else if (decode_v4_store(instruction, store)) {
           fn = compile_v4_pending_delay_store(arena, store, code_size);
+        } else {
+          // Unknown encodings still have fully-native architectural behavior.
+          // Compatibility mode preserves the emulator's historical unknown-op
+          // semantics; strict mode raises ReservedInst with BD/EPC from the
+          // already-pending outer branch.
+          fn = g_experimental_unhandled_special_returns_zero
+                   ? compile_v4_pending_delay_compat_unknown(
+                         arena, instruction, code_size)
+                   : compile_v4_pending_delay_fixed_exception(
+                         arena, Exception::ReservedInst, code_size);
         }
       }
     }
