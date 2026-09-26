@@ -801,6 +801,84 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     return true;
 }
 
+bool emit_overflow_integer(
+    u32 instruction,
+    u32 retired_before,
+    Emitter& out) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+    const u32 sa = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    const s16 immediate =
+        static_cast<s16>(instruction & 0xFFFFu);
+
+    u32 destination = 0u;
+    bool word = false;
+    bool subtract = false;
+    bool immediate_form = false;
+
+    if (opcode == 0u) {
+        if (sa != 0u) return false;
+        switch (funct) {
+        case 0x20u: // ADD
+            word = true;
+            break;
+        case 0x22u: // SUB
+            word = true;
+            subtract = true;
+            break;
+        case 0x2Cu: // DADD
+            break;
+        case 0x2Eu: // DSUB
+            subtract = true;
+            break;
+        default:
+            return false;
+        }
+        destination = rd;
+    } else if (opcode == 0x08u || opcode == 0x18u) {
+        // ADDI / DADDI
+        word = opcode == 0x08u;
+        immediate_form = true;
+        destination = rt;
+    } else {
+        return false;
+    }
+
+    if (immediate_form) {
+        out.load_rax(rs, word);
+        if (!word) out.emit(0x48u); // REX.W
+        out.emit(0x05u); // ADD EAX/RAX, sign-extended imm32
+        out.emit32(static_cast<u32>(
+            static_cast<s32>(immediate)));
+    } else {
+        out.load_rax(rs, word);
+        out.load_rdx(rt, word);
+        if (!word) out.emit(0x48u); // REX.W
+        out.emit(subtract ? 0x29u : 0x01u);
+        out.emit(0xD0u); // SUB/ADD RAX,RDX
+    }
+
+    const std::size_t overflow = out.jcc32(0x80u); // JO
+    if (word) out.sign_extend_word();
+    if (destination != 0u) {
+        out.store_rax(destination);
+    }
+    const std::size_t done = out.jmp32();
+
+    const std::size_t overflow_label = out.bytes.size();
+    out.emit(0xB8u); // MOV EAX, retired_before
+    out.emit32(retired_before);
+    out.emit(0xC3u); // interpreter raises exact Ov exception
+
+    const std::size_t done_label = out.bytes.size();
+    out.patch_rel32(overflow, overflow_label);
+    out.patch_rel32(done, done_label);
+    return true;
+}
+
 void ee_jit_scratch_memory_helper(
     EeCpuState* state,
     u8* scratch,
@@ -1697,6 +1775,13 @@ bool emit_block(
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
         if (emit_instruction_body(instructions[i], out)) {
+            ++compiled_instructions;
+            continue;
+        }
+
+        out.bytes.resize(before);
+        if (emit_overflow_integer(
+                instructions[i], compiled_instructions, out)) {
             ++compiled_instructions;
             continue;
         }
