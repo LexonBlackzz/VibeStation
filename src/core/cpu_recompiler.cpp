@@ -1650,6 +1650,15 @@ V4NativeFn compile_v4_pending_delay_store(
 
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.ecx, code.edx);
+    code.and_(code.ecx, 3u);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))],
+        code.ecx);
+    code.and_(code.edx, ~3u);
+  }
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
@@ -1687,6 +1696,53 @@ V4NativeFn compile_v4_pending_delay_store(
   code.jb(bail);
   code.cmp(code.edx, 0x1F801000u);
   code.jae(bail);
+
+  auto emit_unaligned_store = [&]() {
+    Label off0, off1, off2, merged;
+    code.test(code.r9d, code.r9d);
+    code.jz(off0);
+    code.cmp(code.r9d, 1u);
+    code.je(off1);
+    code.cmp(code.r9d, 2u);
+    code.je(off2);
+
+    if (store.op == V4StoreOp::Swl) {
+      code.mov(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off0);
+      code.and_(code.eax, 0xFFFFFF00u);
+      code.shr(code.r8d, 24);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off1);
+      code.and_(code.eax, 0xFFFF0000u);
+      code.shr(code.r8d, 16);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off2);
+      code.and_(code.eax, 0xFF000000u);
+      code.shr(code.r8d, 8);
+      code.or_(code.eax, code.r8d);
+    } else {
+      code.and_(code.eax, 0x00FFFFFFu);
+      code.shl(code.r8d, 24);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off0);
+      code.mov(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off1);
+      code.and_(code.eax, 0x000000FFu);
+      code.shl(code.r8d, 8);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off2);
+      code.and_(code.eax, 0x0000FFFFu);
+      code.shl(code.r8d, 16);
+      code.or_(code.eax, code.r8d);
+    }
+    code.L(merged);
+  };
 
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
