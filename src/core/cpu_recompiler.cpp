@@ -5322,9 +5322,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
           code.r14 +
           static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
       code.je(refill_fragment_ready);
-      // A branch-only budget fragment must start from a fresh chain. Yielding
-      // here keeps the same boundary without executing guest semantics in C++.
-      code.jmp(budget_exit);
+      // Empty-chain fragments are legal here when this is still the first
+      // architectural instruction of the dispatcher invocation.
+      code.cmp(code.r12d, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+      code.jne(budget_exit);
       code.L(refill_fragment_ready);
       code.jmp(code.rax);
       code.L(refill_inside_budget);
@@ -5403,9 +5406,17 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.jne(budget_exit);
     code.L(budget_chain_ok);
   }
-  code.cmp(code.ebx, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-  code.jae(budget_exit);
+  {
+    Label first_instruction;
+    code.cmp(code.r12d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
+    code.je(first_instruction);
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jae(budget_exit);
+    code.L(first_instruction);
+  }
   code.jmp(code.rax);
 
   code.L(full_cycle_budget);
@@ -6742,8 +6753,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     if (native.instructions == 0u) {
       ++stats_.native_reject_budget;
       ++stats_.budget_exits;
-      run_helper(block->guest_bits[0], V4HelperReason::Budget);
-      continue;
+      // Native-only invariant: never execute the blocked instruction through a
+      // C++ opcode helper. A zero-progress native dispatch is a scheduler exit.
+      break;
     }
 
     cpu_.current_pc_ = native.last_pc;
