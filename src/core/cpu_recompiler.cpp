@@ -4870,32 +4870,6 @@ struct CpuRecompilerBackend::Impl {
     return block;
   }
 
-  bool crossline_waiting_for_refill(Cpu &cpu, u32 pc, bool cacheable) {
-    if (!cacheable) {
-      return false;
-    }
-    V4DispatchEntry *entry = dispatch_entry(pc, false);
-    if (entry == nullptr || entry->block == nullptr) {
-      return false;
-    }
-    const V4Block *block = entry->block;
-    if (block->cache_epoch != cache_epoch || block->start_pc != pc ||
-        !block->second_icache_line ||
-        block->instruction_count < 2u) {
-      return false;
-    }
-    for (u32 i = 0u; i + 1u < block->instruction_count; ++i) {
-      u32 visible = 0u;
-      if (!cpu.read_visible_instruction_for_backend(pc + i * 4u, visible) ||
-          visible != block->guest_bits[i]) {
-        return false;
-      }
-    }
-    u32 delay_bits = 0u;
-    return !cpu.read_visible_instruction_for_backend(
-        pc + (block->instruction_count - 1u) * 4u, delay_bits);
-  }
-
 
   V4HelperFn helper_for(u32 instruction) {
     const auto found = helper_cache.find(instruction);
@@ -5613,15 +5587,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         }
         icache_generation =
             cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
-      }
-
-      if (impl_->crossline_waiting_for_refill(
-              cpu_, cpu_.pc_, cacheable)) {
-        u32 instruction = 0u;
-        (void)cpu_.read_visible_instruction_for_backend(cpu_.pc_,
-                                                        instruction);
-        run_helper(instruction, V4HelperReason::Opcode);
-        continue;
       }
 
       const auto compile_start = std::chrono::steady_clock::now();
