@@ -39,6 +39,8 @@ public:
     void refresh_display();
     Bios& bios(){return bios_;} const Bios& bios()const{return bios_;}
     EeRam& ram(){return ram_;} const EeRam& ram()const{return ram_;}
+    EeScratchpad& scratchpad(){return scratchpad_;}
+    const EeScratchpad& scratchpad()const{return scratchpad_;}
     IopRam& iop_ram(){return iop_ram_;} const IopRam& iop_ram()const{return iop_ram_;}
     EeBus& bus(){return bus_;} const EeBus& bus()const{return bus_;}
     IopBus& iop_bus(){return iop_bus_;} const IopBus& iop_bus()const{return iop_bus_;}
