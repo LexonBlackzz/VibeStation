@@ -28,15 +28,23 @@ constexpr std::size_t kMaxPages = 256u;
 constexpr u8 kArgumentRegister = 1u; // RCX
 constexpr u8 kRamArgumentRegister = 2u; // RDX
 constexpr u8 kGenerationArgumentRegister = 8u; // R8
+constexpr u8 kScratchArgumentRegister = 9u; // R9
 #else
 constexpr u8 kArgumentRegister = 7u; // RDI
 constexpr u8 kRamArgumentRegister = 6u; // RSI
 constexpr u8 kGenerationArgumentRegister = 2u; // RDX
+constexpr u8 kScratchArgumentRegister = 1u; // RCX
 #endif
 constexpr u32 kEeRamSize = 32u * 1024u * 1024u;
+constexpr u32 kEeScratchBase = 0x70000000u;
+constexpr u32 kEeScratchSize = 16u * 1024u;
 
 void ee_jit_cop1_register_helper(
     EeCpuState* state,
+    u32 instruction);
+void ee_jit_scratch_memory_helper(
+    EeCpuState* state,
+    u8* scratch,
     u32 instruction);
 
 struct Emitter {
@@ -133,6 +141,17 @@ struct Emitter {
             ((kGenerationArgumentRegister & 7u) << 3) |
             2u)); // MOV R10, generation arg
     }
+    void preserve_scratch_base() {
+#ifdef _WIN32
+        // The fourth Win64 argument already arrives in R9.
+        static_assert(kScratchArgumentRegister == 9u);
+#else
+        // SysV's fourth argument is RCX; keep it in caller-saved R9 so the
+        // memory fast path has one stable base on both ABIs.
+        static_assert(kScratchArgumentRegister == 1u);
+        emit(0x49u); emit(0x89u); emit(0xC9u); // MOV R9,RCX
+#endif
+    }
     void patch_rel32(std::size_t displacement, std::size_t target) {
         const s64 rel = static_cast<s64>(target) -
             static_cast<s64>(displacement + 4u);
@@ -148,34 +167,76 @@ struct Emitter {
         void (*helper)(EeCpuState*, u32),
         u32 instruction) {
 #ifdef _WIN32
-        // Preserve the state pointer and the resident RAM/generation bases.
-        // Entry RSP is 8 mod 16. Three pushes realign it; Win64 then needs
-        // the mandatory 32-byte shadow space before CALL.
+        // Preserve state plus all three resident pointer registers. Five
+        // stack slots (4 pushes + 40 bytes) leave CALL 16-byte aligned while
+        // also providing Win64's mandatory 32-byte shadow space.
         emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x51u);           // PUSH R9
         emit(0x41u); emit(0x52u);           // PUSH R10
         emit(0x41u); emit(0x53u);           // PUSH R11
-        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x20u); // SUB RSP,32
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x28u); // SUB RSP,40
         emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
         emit(0x48u); emit(0xB8u);
         emit64(reinterpret_cast<u64>(helper));
         emit(0xFFu); emit(0xD0u);            // CALL RAX
-        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x20u); // ADD RSP,32
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x28u); // ADD RSP,40
         emit(0x41u); emit(0x5Bu);            // POP R11
         emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x41u); emit(0x59u);            // POP R9
         emit(0x59u);                         // POP RCX
 #else
-        // SysV: preserve RDI (state) plus R10/R11. Three pushes transform the
-        // entry 8-mod-16 stack into a 16-byte-aligned call site.
+        // Four pushes retain state + R9/R10/R11; the extra 8-byte adjustment
+        // restores the SysV 16-byte call-site alignment.
         emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x51u);           // PUSH R9
         emit(0x41u); emit(0x52u);           // PUSH R10
         emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x08u); // SUB RSP,8
         emit(0xBEu); emit32(instruction);    // MOV ESI,imm32
         emit(0x48u); emit(0xB8u);
         emit64(reinterpret_cast<u64>(helper));
         emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x08u); // ADD RSP,8
         emit(0x41u); emit(0x5Bu);            // POP R11
         emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x41u); emit(0x59u);            // POP R9
         emit(0x5Fu);                         // POP RDI
+#endif
+    }
+
+    void call_state_scratch_instruction_helper(
+        void (*helper)(EeCpuState*, u8*, u32),
+        u32 instruction) {
+#ifdef _WIN32
+        emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x28u);
+        emit(0x4Cu); emit(0x89u); emit(0xCAu); // MOV RDX,R9
+        emit(0x41u); emit(0xB8u); emit32(instruction); // MOV R8D,imm32
+        emit(0x48u); emit(0xB8u); emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x28u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x59u);
+#else
+        emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x08u);
+        emit(0x4Cu); emit(0x89u); emit(0xCEu); // MOV RSI,R9
+        emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
+        emit(0x48u); emit(0xB8u); emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x08u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x5Fu);
 #endif
     }
 };
