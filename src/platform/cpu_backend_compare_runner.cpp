@@ -166,6 +166,7 @@ struct CpuCompareCase {
   bool require_v4_hot_mmio16_native_when_available = false;
   bool require_v4_hilo_native_when_available = false;
   bool require_v4_muldiv_native_when_available = false;
+  bool require_v4_cop0_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -4092,6 +4093,29 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_div_edge_cases.require_v4_muldiv_native_when_available = true;
   cases.push_back(v4_div_edge_cases);
 
+  CpuCompareCase v4_cop0_transfers{};
+  v4_cop0_transfers.name = "v4_cop0_transfers_native";
+  v4_cop0_transfers.start_pc = 0xA0010000u;
+  v4_cop0_transfers.initial_gpr[1] = 0xF240FF3Fu;
+  v4_cop0_transfers.initial_gpr[2] = 0x00000300u;
+  v4_cop0_transfers.program = {
+      (0x10u << 26) | (4u << 21) | (1u << 16) | (12u << 11), // MTC0 r1,SR
+      (0x10u << 26) | (0u << 21) | (3u << 16) | (12u << 11), // MFC0 SR,r3
+      0,                                                     // retire load
+      (0x10u << 26) | (4u << 21) | (2u << 16) | (13u << 11), // MTC0 r2,Cause
+      (0x10u << 26) | (0u << 21) | (4u << 16) | (13u << 11), // MFC0 Cause,r4
+      0,
+      (0x10u << 26) | (0x10u << 21) | 0x10u,                 // RFE
+      (0x10u << 26) | (0u << 21) | (5u << 16) | (12u << 11), // MFC0 SR,r5
+      0,
+      (0x10u << 26) | (0u << 21) | (6u << 16) | (15u << 11), // MFC0 PRId,r6
+      0,
+  };
+  v4_cop0_transfers.instructions = 11u;
+  v4_cop0_transfers.require_v4_native_entry_when_available = true;
+  v4_cop0_transfers.require_v4_cop0_native_when_available = true;
+  cases.push_back(v4_cop0_transfers);
+
   CpuCompareCase v4_uncached_incoming_load{};
   v4_uncached_incoming_load.name =
       "v4_uncached_native_incoming_load_delay";
@@ -4694,6 +4718,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_hot_mmio16_native_when_available ||
            test_case.require_v4_hilo_native_when_available ||
             test_case.require_v4_muldiv_native_when_available ||
+            test_case.require_v4_cop0_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
            test_case.require_v4_page_local_invalidation_when_available ||
            test_case.require_v4_cached_same_page_retention_when_available ||
@@ -4751,6 +4776,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           const bool muldiv_native =
               !test_case.require_v4_muldiv_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
+          const bool cop0_native =
+              !test_case.require_v4_cop0_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
           const bool folded_branch =
               !test_case.require_v4_folded_branch_block_when_available ||
               (result.stats.native_branch_tail_blocks_compiled != 0 &&
@@ -4807,6 +4835,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_hilo_helper";
           } else if (!muldiv_native) {
             native_check = "v4_muldiv_helper";
+          } else if (!cop0_native) {
+            native_check = "v4_cop0_helper";
           } else if (!folded_branch) {
             native_check = "v4_branch_not_folded";
           } else if (!page_local_invalidation) {
@@ -4827,7 +4857,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              hilo_native && muldiv_native && folded_branch &&
+              hilo_native && muldiv_native && cop0_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               native_icache_revalidated && chain_entered;
