@@ -3888,7 +3888,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_load.compare_segment_states = true;
   v4_split_scheduler_load.require_v4_native_entry_when_available = true;
   v4_split_scheduler_load.require_v4_native_load_entry_when_available = true;
-  v4_split_scheduler_load.require_v4_native_branch_entry_when_available = true;
+  // Branch execution is independently gated by the split-branch cases above.
+  // This case specifically proves that the pending LW itself never uses an
+  // opcode helper after the scheduler split.
   v4_split_scheduler_load.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_load);
 
