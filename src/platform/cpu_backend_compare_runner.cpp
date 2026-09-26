@@ -4163,6 +4163,61 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_nested_likely_annul.require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_nested_likely_annul);
 
+  CpuCompareCase v4_isolated_store{};
+  v4_isolated_store.name = "v4_cache_isolated_store_native";
+  v4_isolated_store.start_pc = 0xA0010000u;
+  v4_isolated_store.initial_cop0_sr_bits = 1u << 16;
+  v4_isolated_store.initial_gpr[1] = 0x80012250u;
+  v4_isolated_store.initial_gpr[2] = 0xDEADBEEFu;
+  v4_isolated_store.memory.push_back({0x00012250u, 0x11223344u});
+  v4_isolated_store.compare_memory_addresses.push_back(0x00012250u);
+  v4_isolated_store.program = {
+      enc_i(0x2B, 1, 2, 0), // SW is discarded while IsC is set.
+      0u,
+  };
+  v4_isolated_store.instructions = 1u;
+  v4_isolated_store.require_v4_native_entry_when_available = true;
+  v4_isolated_store.require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_isolated_store);
+
+  CpuCompareCase v4_isolated_swl{};
+  v4_isolated_swl.name = "v4_cache_isolated_swl_native";
+  v4_isolated_swl.start_pc = 0xA0010000u;
+  v4_isolated_swl.initial_cop0_sr_bits = 1u << 16;
+  v4_isolated_swl.initial_gpr[1] = 0x80012261u;
+  v4_isolated_swl.initial_gpr[2] = 0xAABBCCDDu;
+  v4_isolated_swl.memory.push_back({0x00012260u, 0x55667788u});
+  v4_isolated_swl.compare_memory_addresses.push_back(0x00012260u);
+  v4_isolated_swl.program = {
+      enc_i(0x2A, 1, 2, 0), // SWL still performs its aligned read, no write.
+      0u,
+  };
+  v4_isolated_swl.instructions = 1u;
+  v4_isolated_swl.require_v4_native_entry_when_available = true;
+  v4_isolated_swl.require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_isolated_swl);
+
+  CpuCompareCase v4_isolated_delay_store{};
+  v4_isolated_delay_store.name = "v4_cache_isolated_store_delay_native";
+  v4_isolated_delay_store.start_pc = 0xA0010000u;
+  v4_isolated_delay_store.initial_cop0_sr_bits = 1u << 16;
+  v4_isolated_delay_store.initial_gpr[1] = 1u;
+  v4_isolated_delay_store.initial_gpr[2] = 0x80012270u;
+  v4_isolated_delay_store.initial_gpr[3] = 0xCAFEBABEu;
+  v4_isolated_delay_store.memory.push_back({0x00012270u, 0x01020304u});
+  v4_isolated_delay_store.compare_memory_addresses.push_back(0x00012270u);
+  v4_isolated_delay_store.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken.
+      enc_i(0x2B, 2, 3, 0), // Isolated SW in delay slot.
+      0u,
+  };
+  v4_isolated_delay_store.instructions = 2u;
+  v4_isolated_delay_store.segment_instructions = {1u, 1u};
+  v4_isolated_delay_store.compare_segment_states = true;
+  v4_isolated_delay_store.require_v4_native_entry_when_available = true;
+  v4_isolated_delay_store.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_isolated_delay_store);
+
   CpuCompareCase v4_split_scheduler_addi{};
   v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
   v4_split_scheduler_addi.start_pc = 0xA0010000u;
