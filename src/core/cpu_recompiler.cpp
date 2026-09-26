@@ -208,6 +208,84 @@ bool decode_v4_muldiv(u32 bits, V4DecodedMulDiv &out) {
   }
 }
 
+enum class V4Cop2Op : u8 {
+  Mfc2,
+  Cfc2,
+  Mtc2,
+  Ctc2,
+  Command,
+};
+
+struct V4DecodedCop2 {
+  V4Cop2Op op = V4Cop2Op::Mfc2;
+  u8 rt = 0;
+  u8 rd = 0;
+  u32 bits = 0;
+};
+
+bool decode_v4_cop2(u32 bits, V4DecodedCop2 &out) {
+  if (((bits >> 26) & 0x3Fu) != 0x12u) {
+    return false;
+  }
+  out = {};
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  out.bits = bits;
+  const u32 sub = (bits >> 21) & 0x1Fu;
+  switch (sub) {
+  case 0x00: out.op = V4Cop2Op::Mfc2; return true;
+  case 0x02: out.op = V4Cop2Op::Cfc2; return true;
+  case 0x04: out.op = V4Cop2Op::Mtc2; return true;
+  case 0x06: out.op = V4Cop2Op::Ctc2; return true;
+  default:
+    if ((sub & 0x10u) != 0u) {
+      out.op = V4Cop2Op::Command;
+      return true;
+    }
+    return false;
+  }
+}
+
+bool v4_gte_data_reg_reads_result(u32 reg) {
+  switch (reg) {
+  case 7: case 8: case 9: case 10: case 11: case 12: case 13:
+  case 14: case 15: case 16: case 17: case 18: case 19: case 20:
+  case 21: case 22: case 24: case 25: case 26: case 27: case 28:
+  case 29:
+    return true;
+  default:
+    return false;
+  }
+}
+
+u32 v4_gte_command_cycles(u32 bits) {
+  switch (bits & 0x3Fu) {
+  case 0x01: return 15u;
+  case 0x06: return 8u;
+  case 0x0C: return 6u;
+  case 0x10: return 8u;
+  case 0x11: return 8u;
+  case 0x12: return 8u;
+  case 0x13: return 19u;
+  case 0x14: return 13u;
+  case 0x16: return 44u;
+  case 0x1B: return 17u;
+  case 0x1C: return 11u;
+  case 0x1E: return 14u;
+  case 0x20: return 30u;
+  case 0x28: return 5u;
+  case 0x29: return 8u;
+  case 0x2A: return 17u;
+  case 0x2D: return 5u;
+  case 0x2E: return 6u;
+  case 0x30: return 23u;
+  case 0x3D: return 5u;
+  case 0x3E: return 5u;
+  case 0x3F: return 39u;
+  default: return 2u;
+  }
+}
+
 enum class V4ExceptionOp : u8 {
   Syscall,
   Break,
@@ -450,6 +528,9 @@ struct V4NativeState {
   u32 cop0_sr = 0;
   u32 cop0_cause = 0;
   u32 cop0_epc = 0;
+  Gte *gte = nullptr;
+  u64 gte_result_ready_cycle = 0;
+  u64 gte_input_ready_cycle = 0;
   u32 hi = 0;
   u32 lo = 0;
   u64 muldiv_result_ready_cycle = 0;
@@ -489,6 +570,32 @@ struct V4NativeState {
 using V4NativeFn = void (*)(V4NativeState *);
 using V4ResidentDispatchFn = void (*)(V4NativeState *);
 using V4HelperFn = u32 (*)(Cpu *);
+
+u32 v4_gte_read_data(Gte *gte, u32 reg) {
+  return gte != nullptr ? gte->read_data(reg) : 0u;
+}
+
+u32 v4_gte_read_ctrl(Gte *gte, u32 reg) {
+  return gte != nullptr ? gte->read_ctrl(reg) : 0u;
+}
+
+void v4_gte_write_data(Gte *gte, u32 reg, u32 value) {
+  if (gte != nullptr) {
+    gte->write_data(reg, value);
+  }
+}
+
+void v4_gte_write_ctrl(Gte *gte, u32 reg, u32 value) {
+  if (gte != nullptr) {
+    gte->write_ctrl(reg, value);
+  }
+}
+
+void v4_gte_execute(Gte *gte, u32 command) {
+  if (gte != nullptr) {
+    gte->execute(command);
+  }
+}
 
 enum class V4HelperReason : u8 {
   Irq,
