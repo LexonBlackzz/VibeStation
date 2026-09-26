@@ -370,6 +370,28 @@ u32 v4_gte_command_cycles(u32 bits) {
   }
 }
 
+struct V4DecodedCopUnusable {
+  u8 cop = 0;
+};
+
+bool decode_v4_cop_unusable(u32 bits, V4DecodedCopUnusable &out) {
+  const u32 primary = (bits >> 26) & 0x3Fu;
+  switch (primary) {
+  case 0x11:
+  case 0x31:
+  case 0x39:
+    out.cop = 1u;
+    return true;
+  case 0x13:
+  case 0x33:
+  case 0x3B:
+    out.cop = 3u;
+    return true;
+  default:
+    return false;
+  }
+}
+
 enum class V4ExceptionOp : u8 {
   Syscall,
   Break,
@@ -1051,7 +1073,8 @@ void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
 }
 
 void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
-                                u32 current_pc) {
+                                u32 current_pc,
+                                u32 cop_index = 0xFFFFFFFFu) {
   using namespace Xbyak;
 
   // R3000A exceptions commit the incoming load before entering the handler.
@@ -1085,6 +1108,9 @@ void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
   code.and_(code.eax, ~((0x3u << 28) | 0x7Cu | (1u << 31)));
   code.or_(code.eax, static_cast<u32>(cause) << 2);
+  if (cop_index != 0xFFFFFFFFu) {
+    code.or_(code.eax, (cop_index & 0x3u) << 28);
+  }
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
       code.eax);
@@ -1142,7 +1168,8 @@ void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
 
 
 void emit_v4_exception_pending_delay(Xbyak::CodeGenerator &code,
-                                     Exception cause) {
+                                     Exception cause,
+                                     u32 cop_index = 0xFFFFFFFFu) {
   using namespace Xbyak;
 
   // The faulting instruction is the already-pending branch delay slot.
@@ -1175,6 +1202,9 @@ void emit_v4_exception_pending_delay(Xbyak::CodeGenerator &code,
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
   code.and_(code.eax, ~((0x3u << 28) | 0x7Cu));
   code.or_(code.eax, (static_cast<u32>(cause) << 2) | (1u << 31));
+  if (cop_index != 0xFFFFFFFFu) {
+    code.or_(code.eax, (cop_index & 0x3u) << 28);
+  }
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
       code.eax);
@@ -1240,6 +1270,46 @@ void emit_v4_exception_pending_delay(Xbyak::CodeGenerator &code,
   code.add(code.ebx, 2u);
   code.dec(code.r12d);
   emit_v4_block_return(code);
+}
+
+V4NativeFn compile_v4_fixed_exception(V4CodeArena &arena,
+                                      Exception cause,
+                                      u32 start_pc,
+                                      u32 &code_size,
+                                      u32 cop_index = 0xFFFFFFFFu) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 512u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  emit_v4_exception_no_delay(code, cause, start_pc, cop_index);
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_pending_delay_fixed_exception(
+    V4CodeArena &arena, Exception cause, u32 &code_size,
+    u32 cop_index = 0xFFFFFFFFu) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 512u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  emit_v4_exception_pending_delay(code, cause, cop_index);
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
 }
 
 V4NativeFn compile_v4_exception(V4CodeArena &arena,
