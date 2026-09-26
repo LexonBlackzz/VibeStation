@@ -5244,6 +5244,101 @@ bool test_ee_native_branch_delay() {
     return ok;
 }
 
+
+bool test_ee_native_branch_ram_load_delay() {
+    constexpr ps2::u32 pc = 0x00009000u;
+    constexpr ps2::u32 data = 0x0000A000u;
+    const std::array<ps2::u32, 3> code = {
+        (0x04u << 26) | (1u << 21) | (1u << 16) | 1u,      // BEQ r1,r1,+1
+        (0x23u << 26) | (3u << 21) | (2u << 16),           // delay: LW r2,0(r3)
+        (0x09u << 26) | (4u << 16) | 9u,                   // target: r4=9
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE branch-load-delay code setup failed") && ok;
+    }
+    ok = expect(
+        exact.bus().write32(data, 0x12345678u) &&
+        native.bus().write32(data, 0x12345678u),
+        "EE branch-load-delay data setup failed") && ok;
+
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = 1u;
+    native.ee().state().gpr[1].lo = 1u;
+    exact.ee().state().gpr[3].lo = data;
+    native.ee().state().gpr[3].lo = data;
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    std::string error;
+    ok = expect(
+        exact.ee().step_predecoded(code[0], error) &&
+        exact.ee().step_predecoded(code[1], error) &&
+        exact.ee().step_predecoded(code[2], error),
+        "EE branch-load-delay reference failed") && ok;
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        2u,
+        3u,
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == 3u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        b.gpr[2].lo == 0x12345678u &&
+        a.gpr[4].lo == b.gpr[4].lo,
+        "EE native RAM-load delay slot diverged") && ok;
+
+    ps2::Ps2System guarded;
+    guarded.ee().reset(pc);
+    guarded.ee().state().gpr[1].lo = 1u;
+    guarded.ee().state().gpr[3].lo = 0x10000000u; // MMIO, must bail.
+    for (ps2::u32 i = 0u; i < 2u; ++i) {
+        ok = expect(
+            guarded.bus().write32(pc + i * 4u, code[i]),
+            "EE guarded branch-load-delay code setup failed") && ok;
+    }
+    guarded.ram().track_code_page(pc);
+    const ps2::u32 guarded_generation =
+        guarded.ram().page_generation(pc);
+    const ps2::u32 guarded_retired =
+        guarded.ee().run_native_block(
+            pc,
+            guarded_generation,
+            code.data(),
+            2u,
+            2u,
+            guarded.ram().data(),
+            guarded.ram().page_generation_data());
+    ok = expect(
+        guarded_retired == 0u &&
+        guarded.ee().state().pc == pc &&
+        guarded.ee().state().next_pc == pc + 4u,
+        "EE guarded delay-slot bailout failed to roll branch state back") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE RAM-load delay-slot native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_resident_branch_chain() {
     constexpr ps2::u32 pc = 0x7000u;
     const std::array<ps2::u32, 6> code = {
@@ -6009,6 +6104,7 @@ int main() {
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_special_cop1_and_likely() && ok;
     ok = test_ee_native_branch_delay() && ok;
+    ok = test_ee_native_branch_ram_load_delay() && ok;
     ok = test_ee_native_resident_branch_chain() && ok;
     ok = test_ee_native_cross_page_chain() && ok;
     ok = test_ee_phase_aware_idle_skip() && ok;
