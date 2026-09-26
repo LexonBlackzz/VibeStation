@@ -895,6 +895,21 @@ bool emit_guarded_ram_store(
     return true;
 }
 
+bool branch_likely_instruction(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    if (opcode >= 0x14u && opcode <= 0x17u) return true;
+    if (opcode == 0x01u) {
+        const u32 variant = (instruction >> 16) & 31u;
+        return variant == 0x02u || variant == 0x03u ||
+               variant == 0x12u || variant == 0x13u;
+    }
+    if (opcode == 0x11u &&
+        ((instruction >> 21) & 31u) == 0x08u) {
+        return (((instruction >> 16) & 3u) & 2u) != 0u;
+    }
+    return false;
+}
+
 bool emit_branch_and_delay(
     u32 branch_pc,
     u32 branch_instruction,
@@ -938,29 +953,61 @@ bool emit_branch_and_delay(
     if (opcode == 0x01u) {
         const u32 variant = rt;
         const bool bltz =
-            variant == 0x00u || variant == 0x10u;
+            variant == 0x00u || variant == 0x02u ||
+            variant == 0x10u || variant == 0x12u;
         const bool bgez =
-            variant == 0x01u || variant == 0x11u;
+            variant == 0x01u || variant == 0x03u ||
+            variant == 0x11u || variant == 0x13u;
+        const bool likely =
+            variant == 0x02u || variant == 0x03u ||
+            variant == 0x12u || variant == 0x13u;
+        const bool link =
+            variant == 0x10u || variant == 0x11u ||
+            variant == 0x12u || variant == 0x13u;
         if (!bltz && !bgez) {
             out.bytes.resize(before);
             return false;
         }
 
-        out.store_state_imm32(pc_offset, fallthrough);
         out.load_rax(rs, false);
         out.emit(0x48u);
         out.emit(0x85u);
         out.emit(0xC0u); // TEST RAX,RAX
 
-        // REGIMM link branches test the source before writing r31. MOV/store
-        // preserve flags, so this also handles the architectural rs == r31
-        // case without an extra temporary register.
-        if (variant == 0x10u || variant == 0x11u) {
-            const u64 link = static_cast<u64>(static_cast<s64>(
+        // Link variants write r31 even when a likely branch is annulled,
+        // matching EeCpu::execute_regimm().
+        if (link) {
+            const u64 link_value = static_cast<u64>(static_cast<s64>(
                 static_cast<s32>(branch_pc + 8u)));
-            out.store_gpr_imm64(31u, link);
+            out.store_gpr_imm64(31u, link_value);
         }
 
+        if (likely) {
+            const std::size_t not_taken =
+                out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
+            out.store_state_imm32(pc_offset, target);
+            if (!emit_instruction_body(delay_instruction, out)) {
+                out.bytes.resize(before);
+                return false;
+            }
+            out.load_state_eax(pc_offset);
+            out.emit(0x05u);
+            out.emit32(4u);
+            out.store_state_eax(next_pc_offset);
+            const std::size_t done = out.jmp32();
+
+            const std::size_t not_taken_label = out.bytes.size();
+            out.patch_rel32(not_taken, not_taken_label);
+            out.store_state_imm32(pc_offset, fallthrough);
+            out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+            out.emit(0xB8u); // MOV EAX,1: annulled delay did not retire.
+            out.emit32(1u);
+            out.emit(0xC3u);
+            out.patch_rel32(done, out.bytes.size());
+            return true;
+        }
+
+        out.store_state_imm32(pc_offset, fallthrough);
         const std::size_t skip_target =
             out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
         out.store_state_imm32(pc_offset, target);
@@ -973,6 +1020,52 @@ bool emit_branch_and_delay(
         out.load_state_eax(pc_offset);
         out.emit(0x05u);
         out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        return true;
+    }
+
+    if (opcode == 0x11u && rs == 0x08u) { // BC1F/T/FL/TL
+        const u32 variant = rt & 3u;
+        const bool likely = (variant & 2u) != 0u;
+        const bool take_when_set = (variant & 1u) != 0u;
+        out.load_state_eax(
+            static_cast<u32>(
+                offsetof(EeCpuState, fcr) + 31u * sizeof(u32)));
+        out.emit(0xA9u); // TEST EAX, FPU condition bit
+        out.emit32(0x00800000u);
+
+        if (likely) {
+            const std::size_t not_taken =
+                out.jcc32(take_when_set ? 0x84u : 0x85u);
+            out.store_state_imm32(pc_offset, target);
+            if (!emit_instruction_body(delay_instruction, out)) {
+                out.bytes.resize(before);
+                return false;
+            }
+            out.load_state_eax(pc_offset);
+            out.emit(0x05u); out.emit32(4u);
+            out.store_state_eax(next_pc_offset);
+            const std::size_t done = out.jmp32();
+            const std::size_t not_taken_label = out.bytes.size();
+            out.patch_rel32(not_taken, not_taken_label);
+            out.store_state_imm32(pc_offset, fallthrough);
+            out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+            out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+            out.patch_rel32(done, out.bytes.size());
+            return true;
+        }
+
+        out.store_state_imm32(pc_offset, fallthrough);
+        const std::size_t skip_target =
+            out.jcc32(take_when_set ? 0x84u : 0x85u);
+        out.store_state_imm32(pc_offset, target);
+        out.patch_rel32(skip_target, out.bytes.size());
+        if (!emit_instruction_body(delay_instruction, out)) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
         out.store_state_eax(next_pc_offset);
         return true;
     }
@@ -990,6 +1083,53 @@ bool emit_branch_and_delay(
         }
         out.store_state_imm32(pc_offset, jump_target);
         break;
+    }
+    case 0x14u: // BEQL
+    case 0x15u: { // BNEL
+        out.load_rax(rs, false);
+        out.load_rdx(rt, false);
+        out.emit(0x48u); out.emit(0x39u); out.emit(0xD0u);
+        const std::size_t not_taken =
+            out.jcc32(opcode == 0x14u ? 0x85u : 0x84u);
+        out.store_state_imm32(pc_offset, target);
+        if (!emit_instruction_body(delay_instruction, out)) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        const std::size_t done = out.jmp32();
+        const std::size_t not_taken_label = out.bytes.size();
+        out.patch_rel32(not_taken, not_taken_label);
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+        out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+        out.patch_rel32(done, out.bytes.size());
+        return true;
+    }
+    case 0x16u: // BLEZL
+    case 0x17u: { // BGTZL
+        out.load_rax(rs, false);
+        out.emit(0x48u); out.emit(0x85u); out.emit(0xC0u);
+        const std::size_t not_taken =
+            out.jcc32(opcode == 0x16u ? 0x8Fu : 0x8Eu); // JG / JLE
+        out.store_state_imm32(pc_offset, target);
+        if (!emit_instruction_body(delay_instruction, out)) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        const std::size_t done = out.jmp32();
+        const std::size_t not_taken_label = out.bytes.size();
+        out.patch_rel32(not_taken, not_taken_label);
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+        out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+        out.patch_rel32(done, out.bytes.size());
+        return true;
     }
     case 0x04u: // BEQ
     case 0x05u: { // BNE
