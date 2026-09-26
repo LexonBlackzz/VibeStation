@@ -4392,6 +4392,87 @@ bool test_ee_native_extended_integer_block() {
     return ok;
 }
 
+bool test_ee_native_scratchpad_fastmem() {
+    constexpr ps2::u32 pc = 0x5A00u;
+    constexpr ps2::u32 scratch = ps2::EeScratchpad::kBase + 0x30u;
+    const std::array<ps2::u32, 4> code = {
+        (0x20u << 26) | (1u << 21) | (2u << 16),       // LB r2,0(r1)
+        (0x23u << 26) | (1u << 21) | (3u << 16) | 4u, // LW r3,4(r1)
+        (0x1Eu << 26) | (1u << 21) | (4u << 16),       // LQ r4,0(r1)
+        (0x1Fu << 26) | (1u << 21) | (4u << 16) | 16u,// SQ r4,16(r1)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = scratch;
+    native.ee().state().gpr[1].lo = scratch;
+
+    constexpr ps2::u64 lo = 0x88776655443322F1ull;
+    constexpr ps2::u64 hi = 0x0123456789ABCDEFull;
+    bool ok = expect(
+        exact.bus().write64(scratch, lo) &&
+        exact.bus().write64(scratch + 8u, hi) &&
+        native.bus().write64(scratch, lo) &&
+        native.bus().write64(scratch + 8u, hi),
+        "EE scratchpad native setup failed");
+
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE scratchpad reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        0u,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data(),
+        0u,
+        native.scratchpad().data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size(),
+        "EE scratchpad native block did not retire fully") && ok;
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.gpr[4].hi == b.gpr[4].hi,
+        "EE scratchpad native register state diverged") && ok;
+
+    ps2::u64 exact_lo = 0u;
+    ps2::u64 exact_hi = 0u;
+    ps2::u64 native_lo = 0u;
+    ps2::u64 native_hi = 0u;
+    ok = expect(
+        exact.bus().read64(scratch + 16u, exact_lo) &&
+        exact.bus().read64(scratch + 24u, exact_hi) &&
+        native.bus().read64(scratch + 16u, native_lo) &&
+        native.bus().read64(scratch + 24u, native_hi) &&
+        exact_lo == native_lo &&
+        exact_hi == native_hi &&
+        native_lo == lo &&
+        native_hi == hi,
+        "EE scratchpad native SQ result diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE scratchpad native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_ram_loads() {
     constexpr ps2::u32 pc = 0x5C00u;
     const std::array<ps2::u32, 7> code = {
@@ -5783,6 +5864,7 @@ int main() {
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
+    ok = test_ee_native_scratchpad_fastmem() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_quadword_fastmem() && ok;
