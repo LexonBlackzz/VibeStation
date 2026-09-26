@@ -4707,6 +4707,137 @@ bool test_ee_native_regimm() {
     return ok;
 }
 
+bool test_ee_native_special_cop1_and_likely() {
+    constexpr ps2::u32 pc = 0x6E00u;
+    bool ok = true;
+
+    // SPECIAL coverage used heavily in real EE code and in branch delay slots.
+    const std::array<ps2::u32, 10> special = {
+        (0x09u << 26) | (1u << 16) | 3u, // r1=3
+        (0x09u << 26) | (2u << 16) | 5u, // r2=5
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x04u, // SLLV
+        (1u << 21) | (2u << 16) | (4u << 11) | 0x14u, // DSLLV
+        (1u << 21) | (2u << 16) | (5u << 11) | 0x0Au, // MOVZ (no write)
+        (1u << 21) | (0u << 16) | (5u << 11) | 0x0Au, // MOVZ
+        (1u << 21) | (2u << 16) | (6u << 11) | 0x18u, // MULT
+        (6u << 11) | 0x10u, // MFHI r6 (overwrite with hi)
+        (1u << 21) | (0u << 11) | 0x29u, // MTSA r1
+        (7u << 11) | 0x28u, // MFSA r7
+    };
+    ps2::Ps2System exact_special;
+    ps2::Ps2System native_special;
+    exact_special.ee().reset(pc);
+    native_special.ee().reset(pc);
+    std::string error;
+    for (const ps2::u32 instruction : special) {
+        ok = expect(
+            exact_special.ee().step_predecoded(instruction, error),
+            "EE SPECIAL native reference failed") && ok;
+    }
+    const ps2::u32 special_retired =
+        native_special.ee().run_native_block(
+            pc, 0u, special.data(),
+            static_cast<ps2::u32>(special.size()),
+            static_cast<ps2::u32>(special.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        special_retired == special.size() &&
+        exact_special.ee().state().pc == native_special.ee().state().pc &&
+        exact_special.ee().state().hi == native_special.ee().state().hi &&
+        exact_special.ee().state().lo == native_special.ee().state().lo &&
+        exact_special.ee().state().sa == native_special.ee().state().sa,
+        "EE SPECIAL native control state diverged") && ok;
+    for (ps2::u32 reg = 1u; reg <= 7u; ++reg) {
+        ok = expect(
+            exact_special.ee().state().gpr[reg].lo ==
+                native_special.ee().state().gpr[reg].lo,
+            "EE SPECIAL native register diverged") && ok;
+    }
+#else
+    ok = expect(
+        special_retired == 0u,
+        "EE SPECIAL native block ran on non-x64") && ok;
+#endif
+
+    // Exact-bit COP1 transfers/unary operations.
+    const std::array<ps2::u32, 6> cop1 = {
+        (0x11u << 26) | (0x04u << 21) | (1u << 16) | (2u << 11), // MTC1 r1,f2
+        (0x11u << 26) | (0x10u << 21) | (2u << 11) | (3u << 6) | 0x05u, // ABS.S
+        (0x11u << 26) | (0x10u << 21) | (3u << 11) | (4u << 6) | 0x07u, // NEG.S
+        (0x11u << 26) | (0x10u << 21) | (4u << 11) | (5u << 6) | 0x06u, // MOV.S
+        (0x11u << 26) | (0x00u << 21) | (2u << 16) | (5u << 11), // MFC1 r2,f5
+        (0x11u << 26) | (0x02u << 21) | (3u << 16) | (31u << 11), // CFC1 r3,fcr31
+    };
+    ps2::Ps2System exact_cop1;
+    ps2::Ps2System native_cop1;
+    exact_cop1.ee().reset(pc);
+    native_cop1.ee().reset(pc);
+    exact_cop1.ee().state().gpr[1].lo = 0xBF800000u;
+    native_cop1.ee().state().gpr[1].lo = 0xBF800000u;
+    for (const ps2::u32 instruction : cop1) {
+        ok = expect(
+            exact_cop1.ee().step_predecoded(instruction, error),
+            "EE COP1 native reference failed") && ok;
+    }
+    const ps2::u32 cop1_retired =
+        native_cop1.ee().run_native_block(
+            pc, 0u, cop1.data(),
+            static_cast<ps2::u32>(cop1.size()),
+            static_cast<ps2::u32>(cop1.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        cop1_retired == cop1.size() &&
+        exact_cop1.ee().state().gpr[2].lo ==
+            native_cop1.ee().state().gpr[2].lo &&
+        exact_cop1.ee().state().gpr[3].lo ==
+            native_cop1.ee().state().gpr[3].lo &&
+        exact_cop1.ee().state().fpr[2] == native_cop1.ee().state().fpr[2] &&
+        exact_cop1.ee().state().fpr[3] == native_cop1.ee().state().fpr[3] &&
+        exact_cop1.ee().state().fpr[4] == native_cop1.ee().state().fpr[4] &&
+        exact_cop1.ee().state().fpr[5] == native_cop1.ee().state().fpr[5],
+        "EE COP1 native state diverged") && ok;
+#else
+    ok = expect(
+        cop1_retired == 0u,
+        "EE COP1 native block ran on non-x64") && ok;
+#endif
+
+    // BEQL not taken must annul the delay slot and retire only the branch.
+    const ps2::u32 likely_code[3] = {
+        (0x14u << 26) | (1u << 21) | (2u << 16) | 1u,
+        (0x09u << 26) | (4u << 16) | 0x55u,
+        (0x09u << 26) | (5u << 16) | 0x66u,
+    };
+    ps2::Ps2System exact_likely;
+    ps2::Ps2System native_likely;
+    exact_likely.ee().reset(pc);
+    native_likely.ee().reset(pc);
+    exact_likely.ee().state().gpr[1].lo = 1u;
+    exact_likely.ee().state().gpr[2].lo = 2u;
+    native_likely.ee().state().gpr[1].lo = 1u;
+    native_likely.ee().state().gpr[2].lo = 2u;
+    ok = expect(
+        exact_likely.ee().step_predecoded(likely_code[0], error),
+        "EE BEQL reference branch failed") && ok;
+    const ps2::u32 likely_retired =
+        native_likely.ee().run_native_block(
+            pc, 0u, likely_code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        likely_retired == 1u &&
+        exact_likely.ee().state().pc == native_likely.ee().state().pc &&
+        exact_likely.ee().state().next_pc ==
+            native_likely.ee().state().next_pc &&
+        native_likely.ee().state().gpr[4].lo == 0u,
+        "EE native BEQL annul state diverged") && ok;
+#else
+    ok = expect(
+        likely_retired == 0u,
+        "EE native BEQL ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -5418,6 +5549,7 @@ int main() {
     ok = test_ee_native_quadword_fastmem() && ok;
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_regimm() && ok;
+    ok = test_ee_native_special_cop1_and_likely() && ok;
     ok = test_ee_native_branch_delay() && ok;
     ok = test_ee_native_resident_branch_chain() && ok;
     ok = test_ee_phase_aware_idle_skip() && ok;
