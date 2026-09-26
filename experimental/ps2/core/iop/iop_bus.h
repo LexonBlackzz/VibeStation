@@ -55,6 +55,14 @@ public:
     [[nodiscard]] static bool is_ram_address(u32 address) {
         return to_physical(address) < 0x00800000u;
     }
+    [[nodiscard]] u32 ram_offset(u32 address) const {
+        return to_physical(address) &
+               static_cast<u32>((2u * 1024u * 1024u) - 1u);
+    }
+    [[nodiscard]] u8* jit_ram_data();
+    [[nodiscard]] u32* jit_page_generations();
+    [[nodiscard]] u32 jit_page_generation(u32 address) const;
+    void jit_track_code_page(u32 address);
 
     [[nodiscard]] bool interrupt_pending() const;
     [[nodiscard]] u16 sif_dma_ready_mask() const;
