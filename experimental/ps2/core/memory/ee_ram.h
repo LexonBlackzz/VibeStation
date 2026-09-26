@@ -61,6 +61,10 @@ public:
         return page_generation_[offset / kPageSize] & kGenerationMask;
     }
     void track_code_range(u32 offset, std::size_t width);
+    static void track_jit_code(
+        u32* page_metadata,
+        u32 offset,
+        std::size_t width);
 
     // Native direct stores bypass EeRam::write*. Keep their coherency update
     // identical to mark_written() without forcing a C++ call from generated
