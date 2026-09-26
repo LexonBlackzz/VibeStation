@@ -857,6 +857,9 @@ void Ps2App::render_ui() {
     if (show_gs_debug_) {
         panel_gs_debug();
     }
+    if (show_profiler_) {
+        panel_profiler();
+    }
     if (show_scheduler_) {
         panel_scheduler();
     }
@@ -933,6 +936,7 @@ void Ps2App::menu_bar() {
         ImGui::MenuItem("EE Debug", "F9", &show_ee_debug_);
         ImGui::MenuItem("IOP Debug", "F10", &show_iop_debug_);
         ImGui::MenuItem("GS Debug", "F11", &show_gs_debug_);
+        ImGui::MenuItem("Profiler", nullptr, &show_profiler_);
         ImGui::MenuItem("Scheduler", nullptr, &show_scheduler_);
         ImGui::Separator();
         ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
@@ -1192,10 +1196,10 @@ void Ps2App::panel_main() {
         profile_iop_mips_,
         profile_vu1_mips_);
     ImGui::Text(
-        "Host run thread: EE %.1f%%   IOP %.1f%%   VU %.1f%%   other %.1f%%",
+        "Host run thread: quiet EE %.1f%%   IOP catch-up %.1f%%   slow path %.1f%%   other %.1f%%",
         profile_host_ee_percent_,
         profile_host_iop_percent_,
-        profile_host_vu_percent_,
+        profile_host_slow_percent_,
         profile_host_other_percent_);
     ImGui::TextDisabled(
         "EE coverage = native JIT-retired instructions / all retired EE instructions.");
@@ -1357,6 +1361,102 @@ void Ps2App::panel_system() {
     ImGui::BulletText("GS privileged registers: partial");
     ImGui::BulletText("Scheduler: advancing with EE execution");
     ImGui::BulletText("IOP timers/INTC/DMAC + full CDVD/SPU2: pending");
+
+    ImGui::End();
+}
+
+
+void Ps2App::panel_profiler() {
+    ImGui::SetNextWindowSize(
+        ImVec2(690.0f, 500.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("PS2 Performance Profiler", &show_profiler_)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text(
+        "Guest: %.1f FPS   %.1f%% speed   EE %.1f MIPS",
+        guest_frames_per_second_,
+        emulation_speed_percent_,
+        ee_instructions_per_second_ / 1'000'000.0);
+    ImGui::Text(
+        "Backend: %s",
+        system_.ee().jit_enabled()
+            ? "experimental x64 JIT"
+            : "interpreter");
+    ImGui::Separator();
+
+    ImGui::Text(
+        "Native EE: %.1f MIPS   %.1f%% coverage",
+        profile_native_mips_,
+        profile_native_coverage_percent_);
+    ImGui::Text(
+        "Native blocks: %.0f/s   average %.1f instr/block",
+        profile_native_blocks_per_second_,
+        profile_average_native_block_);
+    ImGui::Text(
+        "Native exits: %.0f guard/s   %.0f code-store/s   %.1f cache flush/s",
+        profile_guard_bailouts_per_second_,
+        profile_code_store_exits_per_second_,
+        profile_cache_flushes_per_second_);
+    ImGui::Text(
+        "IOP throughput: %.1f MIPS   VU1 throughput: %.1f MIPS",
+        profile_iop_mips_,
+        profile_vu1_mips_);
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Host emulation-thread time");
+    if (ImGui::BeginTable(
+            "ProfilerHostTime", 2,
+            ImGuiTableFlags_Borders |
+            ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_SizingStretchProp)) {
+        const auto row = [](const char* label, double value) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(label);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.1f%%", value);
+        };
+        row("Quiet/native EE execution", profile_host_ee_percent_);
+        row("Batched IOP catch-up", profile_host_iop_percent_);
+        row("Sampled full slow path", profile_host_slow_percent_);
+        row("Scheduler/DMA/GS/other", profile_host_other_percent_);
+        ImGui::EndTable();
+    }
+    ImGui::TextDisabled(
+        "Slow-path time is sampled 1/256 to avoid perturbing emulation.");
+
+    std::array<std::pair<double, u32>, 64> fallback_rates{};
+    for (u32 opcode = 0; opcode < 64u; ++opcode) {
+        fallback_rates[opcode] = {
+            profile_fallbacks_per_second_[opcode], opcode};
+    }
+    std::sort(
+        fallback_rates.begin(),
+        fallback_rates.end(),
+        [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        });
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Top native fallback opcode families");
+    bool any_fallback = false;
+    for (std::size_t i = 0; i < 8u; ++i) {
+        if (fallback_rates[i].first <= 0.0) break;
+        any_fallback = true;
+        ImGui::BulletText(
+            "%s (0x%02X): %.0f exits/s",
+            ee_major_opcode_name(fallback_rates[i].second),
+            fallback_rates[i].second,
+            fallback_rates[i].first);
+    }
+    if (!any_fallback) {
+        ImGui::TextDisabled(
+            system_.ee().jit_enabled()
+                ? "No native fallback exits in this sample."
+                : "Enable the EE JIT to collect native fallback data.");
+    }
 
     ImGui::End();
 }
@@ -1924,7 +2024,7 @@ bool Ps2App::start_bios() {
     profile_sample_run_ns_ = system_.profile_run_ns();
     profile_sample_ee_ns_ = system_.profile_ee_ns();
     profile_sample_iop_ns_ = system_.profile_iop_ns();
-    profile_sample_vu_ns_ = system_.profile_vu_ns();
+    profile_sample_slow_path_ns_ = system_.profile_slow_path_ns();
     profile_sample_iop_instructions_ =
         system_.iop().state().instructions_executed;
     profile_sample_vu1_instructions_ =
@@ -2143,13 +2243,14 @@ void Ps2App::update_emulation() {
         const u64 run_ns = system_.profile_run_ns();
         const u64 ee_ns = system_.profile_ee_ns();
         const u64 iop_ns = system_.profile_iop_ns();
-        const u64 vu_ns = system_.profile_vu_ns();
+        const u64 slow_path_ns = system_.profile_slow_path_ns();
         const u64 run_delta = run_ns - profile_sample_run_ns_;
         const u64 ee_ns_delta = ee_ns - profile_sample_ee_ns_;
         const u64 iop_ns_delta = iop_ns - profile_sample_iop_ns_;
-        const u64 vu_ns_delta = vu_ns - profile_sample_vu_ns_;
+        const u64 slow_path_ns_delta =
+            slow_path_ns - profile_sample_slow_path_ns_;
         const u64 accounted_ns =
-            ee_ns_delta + iop_ns_delta + vu_ns_delta;
+            ee_ns_delta + iop_ns_delta + slow_path_ns_delta;
         const u64 other_ns =
             run_delta > accounted_ns
                 ? run_delta - accounted_ns
@@ -2161,14 +2262,14 @@ void Ps2App::update_emulation() {
                 static_cast<double>(ee_ns_delta) * scale;
             profile_host_iop_percent_ =
                 static_cast<double>(iop_ns_delta) * scale;
-            profile_host_vu_percent_ =
-                static_cast<double>(vu_ns_delta) * scale;
+            profile_host_slow_percent_ =
+                static_cast<double>(slow_path_ns_delta) * scale;
             profile_host_other_percent_ =
                 static_cast<double>(other_ns) * scale;
         } else {
             profile_host_ee_percent_ = 0.0;
             profile_host_iop_percent_ = 0.0;
-            profile_host_vu_percent_ = 0.0;
+            profile_host_slow_percent_ = 0.0;
             profile_host_other_percent_ = 0.0;
         }
 
@@ -2192,7 +2293,7 @@ void Ps2App::update_emulation() {
         profile_sample_run_ns_ = run_ns;
         profile_sample_ee_ns_ = ee_ns;
         profile_sample_iop_ns_ = iop_ns;
-        profile_sample_vu_ns_ = vu_ns;
+        profile_sample_slow_path_ns_ = slow_path_ns;
         profile_sample_iop_instructions_ = iop_instructions;
         profile_sample_vu1_instructions_ = vu1_instructions;
 
@@ -2237,7 +2338,7 @@ void Ps2App::reset_core() {
     profile_cache_flushes_per_second_ = 0.0;
     profile_host_ee_percent_ = 0.0;
     profile_host_iop_percent_ = 0.0;
-    profile_host_vu_percent_ = 0.0;
+    profile_host_slow_percent_ = 0.0;
     profile_host_other_percent_ = 0.0;
     profile_fallbacks_per_second_.fill(0.0);
     reset_audio_stutter();
