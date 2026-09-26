@@ -170,6 +170,7 @@ struct CpuCompareCase {
   bool require_v4_cop2_native_when_available = false;
   bool require_v4_unaligned_native_when_available = false;
   bool require_v4_exception_native_when_available = false;
+  bool require_v4_entry_exception_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
   bool require_v4_page_local_invalidation_when_available = false;
   bool require_v4_cached_same_page_retention_when_available = false;
@@ -2791,6 +2792,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0,
   };
   branch_irq_before.instructions = 1;
+  branch_irq_before.require_v4_entry_exception_native_when_available = true;
   cases.push_back(branch_irq_before);
 
   CpuCompareCase branch_irq_delay{};
@@ -2827,9 +2829,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0u,
   };
   pending_delay_irq.instructions = 2u;
-  // The delay slot must enter native execution, while the interrupt entry
-  // itself is still intentionally handled by the architectural helper.
+  // The delay slot and the interrupt sampled after it must both remain in V4.
   pending_delay_irq.require_v4_native_entry_when_available = true;
+  pending_delay_irq.require_v4_pending_delay_native_when_available = true;
   cases.push_back(pending_delay_irq);
 
   CpuCompareCase branch_mmio_body{};
@@ -3504,6 +3506,13 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   break_exception.require_v4_native_entry_when_available = true;
   break_exception.require_v4_exception_native_when_available = true;
   cases.push_back(break_exception);
+
+  CpuCompareCase unaligned_pc_native{};
+  unaligned_pc_native.name = "v4_unaligned_pc_exception_native";
+  unaligned_pc_native.start_pc = 0xA0010001u;
+  unaligned_pc_native.instructions = 1u;
+  unaligned_pc_native.require_v4_entry_exception_native_when_available = true;
+  cases.push_back(unaligned_pc_native);
 
   CpuCompareCase unaligned_lw{};
   unaligned_lw.name = "exception_unaligned_lw";
@@ -4800,6 +4809,21 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check = guarded ? "v4_store_smc_guarded"
                                  : "v4_store_smc_not_guarded";
           native_check_pass = guarded;
+        }
+      } else if (mode == CpuExecutionMode::Recompiler &&
+                 test_case.require_v4_entry_exception_native_when_available) {
+        if (!result.stats.native_available) {
+          native_check = "skip_v4_native_unavailable";
+        } else {
+          const bool native_entry_exception =
+              result.stats.native_instructions >= test_case.instructions &&
+              result.stats.jit_v4_helper_instructions == 0u &&
+              result.stats.fallback_instructions == 0u &&
+              result.stats.interpreter_fallback_steps == 0u;
+          native_check = native_entry_exception
+                             ? "v4_entry_exception_native"
+                             : "v4_entry_exception_helper";
+          native_check_pass = native_entry_exception;
         }
       } else if (mode == CpuExecutionMode::Recompiler &&
           (test_case.require_v4_native_entry_when_available ||
