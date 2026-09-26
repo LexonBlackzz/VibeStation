@@ -263,7 +263,9 @@ struct V4DecodedLoad {
 enum class V4StoreOp : u8 {
   Sb,
   Sh,
+  Swl,
   Sw,
+  Swr,
 };
 
 struct V4DecodedStore {
@@ -277,7 +279,9 @@ bool decode_v4_store(u32 bits, V4DecodedStore &out) {
   switch ((bits >> 26) & 0x3Fu) {
   case 0x28: out.op = V4StoreOp::Sb; break;
   case 0x29: out.op = V4StoreOp::Sh; break;
+  case 0x2A: out.op = V4StoreOp::Swl; break;
   case 0x2B: out.op = V4StoreOp::Sw; break;
+  case 0x2E: out.op = V4StoreOp::Swr; break;
   default: return false;
   }
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
@@ -414,6 +418,7 @@ struct V4NativeState {
   u32 memory_entries = 0;
   u32 store_entries = 0;
   u32 store_phys = 0;
+  u32 store_byte_offset = 0;
   u32 *cop0_regs = nullptr;
   u32 cop0_jumpdest = 0;
   u32 cop0_badvaddr = 0;
@@ -1688,10 +1693,27 @@ V4NativeFn compile_v4_pending_delay_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
   code.jz(bail);
-  switch (store.op) {
-  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
-  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.eax, code.dword[code.rcx + code.rdx]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.dword[code.rcx + code.rdx], code.eax);
+  } else {
+    switch (store.op) {
+    case V4StoreOp::Sb:
+      code.mov(code.byte[code.rcx + code.rdx], code.r8b);
+      break;
+    case V4StoreOp::Sh:
+      code.mov(code.word[code.rcx + code.rdx], code.r8w);
+      break;
+    case V4StoreOp::Sw:
+      code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      break;
+    default:
+      break;
+    }
   }
   code.xor_(code.r9d, code.r9d);
   code.jmp(stored);
@@ -1705,10 +1727,27 @@ V4NativeFn compile_v4_pending_delay_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
   code.jz(bail);
-  switch (store.op) {
-  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
-  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.eax, code.dword[code.rcx + code.rdx]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.dword[code.rcx + code.rdx], code.eax);
+  } else {
+    switch (store.op) {
+    case V4StoreOp::Sb:
+      code.mov(code.byte[code.rcx + code.rdx], code.r8b);
+      break;
+    case V4StoreOp::Sh:
+      code.mov(code.word[code.rcx + code.rdx], code.r8w);
+      break;
+    case V4StoreOp::Sw:
+      code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      break;
+    default:
+      break;
+    }
   }
   code.mov(code.r9d, 1u);
 
@@ -2873,6 +2912,15 @@ V4NativeFn compile_v4_store(
 
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.ecx, code.edx);
+    code.and_(code.ecx, 3u);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))],
+        code.ecx);
+    code.and_(code.edx, ~3u);
+  }
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
@@ -2912,6 +2960,57 @@ V4NativeFn compile_v4_store(
   code.jb(guard_exit);
   code.cmp(code.edx, 0x1F801000u);
   code.jae(guard_exit);
+
+  auto emit_unaligned_store = [&]() {
+    // EAX = old aligned memory word, R8D = guest register value,
+    // R9D = byte offset. Return merged dword in EAX.
+    Label off0, off1, off2, merged;
+    code.test(code.r9d, code.r9d);
+    code.jz(off0);
+    code.cmp(code.r9d, 1u);
+    code.je(off1);
+    code.cmp(code.r9d, 2u);
+    code.je(off2);
+
+    if (store.op == V4StoreOp::Swl) {
+      // offset 3
+      code.mov(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off0);
+      code.and_(code.eax, 0xFFFFFF00u);
+      code.shr(code.r8d, 24);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off1);
+      code.and_(code.eax, 0xFFFF0000u);
+      code.shr(code.r8d, 16);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off2);
+      code.and_(code.eax, 0xFF000000u);
+      code.shr(code.r8d, 8);
+      code.or_(code.eax, code.r8d);
+    } else {
+      // SWR offset 3
+      code.and_(code.eax, 0x00FFFFFFu);
+      code.shl(code.r8d, 24);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off0);
+      code.mov(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off1);
+      code.and_(code.eax, 0x000000FFu);
+      code.shl(code.r8d, 8);
+      code.or_(code.eax, code.r8d);
+      code.jmp(merged);
+      code.L(off2);
+      code.and_(code.eax, 0x0000FFFFu);
+      code.shl(code.r8d, 16);
+      code.or_(code.eax, code.r8d);
+    }
+    code.L(merged);
+  };
 
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
