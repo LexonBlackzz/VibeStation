@@ -164,6 +164,7 @@ struct CpuCompareCase {
   bool require_v4_native_branch_entry_when_available = false;
   bool require_v4_pending_delay_native_when_available = false;
   bool require_v4_hot_mmio16_native_when_available = false;
+  bool require_v4_mmio_native_when_available = false;
   bool require_v4_hilo_native_when_available = false;
   bool require_v4_muldiv_native_when_available = false;
   bool require_v4_cop0_native_when_available = false;
@@ -3435,6 +3436,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   mmio_helper.require_full_native_when_available = true;
   mmio_helper.require_native_memory_helper_when_available = true;
+  mmio_helper.require_v4_native_entry_when_available = true;
+  mmio_helper.require_v4_native_store_entry_when_available = true;
+  mmio_helper.require_v4_mmio_native_when_available = true;
   pad_cpu_compare_program(mmio_helper);
   cases.push_back(mmio_helper);
 
@@ -3450,6 +3454,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   cdrom_status_helper.require_native_memory_helper_when_available = true;
   cdrom_status_helper.require_native_mmio_when_available = true;
   cdrom_status_helper.require_no_native_ram_load_fastpath = true;
+  cdrom_status_helper.require_v4_native_entry_when_available = true;
+  cdrom_status_helper.require_v4_native_load_entry_when_available = true;
+  cdrom_status_helper.require_v4_mmio_native_when_available = true;
   pad_cpu_compare_program(cdrom_status_helper);
   cases.push_back(cdrom_status_helper);
 
@@ -3478,6 +3485,10 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   dma_status_helper.require_full_native_when_available = true;
   dma_status_helper.require_native_memory_helper_when_available = true;
   dma_status_helper.require_native_mmio_when_available = true;
+  dma_status_helper.require_v4_native_entry_when_available = true;
+  dma_status_helper.require_v4_native_load_entry_when_available = true;
+  dma_status_helper.require_v4_native_store_entry_when_available = true;
+  dma_status_helper.require_v4_mmio_native_when_available = true;
   pad_cpu_compare_program(dma_status_helper);
   cases.push_back(dma_status_helper);
 
@@ -4836,6 +4847,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_native_branch_entry_when_available ||
            test_case.require_v4_pending_delay_native_when_available ||
            test_case.require_v4_hot_mmio16_native_when_available ||
+            test_case.require_v4_mmio_native_when_available ||
            test_case.require_v4_hilo_native_when_available ||
             test_case.require_v4_muldiv_native_when_available ||
             test_case.require_v4_cop0_native_when_available ||
@@ -4892,6 +4904,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               result.stats.jit_v4_helper_instructions == 0u;
           const bool hot_mmio16_native =
               !test_case.require_v4_hot_mmio16_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
+          const bool mmio_native =
+              !test_case.require_v4_mmio_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
           const bool hilo_native =
               !test_case.require_v4_hilo_native_when_available ||
@@ -4963,6 +4978,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_pending_delay_helper";
           } else if (!hot_mmio16_native) {
             native_check = "v4_hot_mmio16_helper";
+          } else if (!mmio_native) {
+            native_check = "v4_mmio_helper";
           } else if (!hilo_native) {
             native_check = "v4_hilo_helper";
           } else if (!muldiv_native) {
@@ -4995,7 +5012,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              hilo_native && muldiv_native && cop0_native && cop2_native &&
+              mmio_native && hilo_native && muldiv_native && cop0_native && cop2_native &&
               unaligned_native && exception_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
