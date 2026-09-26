@@ -5901,10 +5901,10 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.cmp(code.byte[
         code.r14 + static_cast<int>(offsetof(V4Block, retry_second_line))], 0u);
     code.jne(stale_generation);
-    code.cmp(code.byte[
-        code.r14 +
-        static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
-    code.jne(stale_generation);
+    // Revalidation itself is side-effect-free with respect to guest execution.
+    // A branch whose one-instruction budget fragment requires a fresh chain may
+    // still have its cached bytes refilled/validated in-place; the later budget
+    // gate decides whether that fragment may actually execute.
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_attempts))]);
