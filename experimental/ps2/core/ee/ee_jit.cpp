@@ -1574,6 +1574,10 @@ bool emit_branch_and_delay(
     switch (opcode) {
     case 0x02u: // J
     case 0x03u: { // JAL
+        if (delay_is_ram_load && opcode == 0x03u) {
+            out.bytes.resize(before);
+            return false;
+        }
         const u32 jump_target =
             ((branch_pc + 4u) & 0xF0000000u) |
             ((branch_instruction & 0x03FFFFFFu) << 2);
