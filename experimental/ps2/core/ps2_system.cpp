@@ -1,6 +1,7 @@
 #include "core/ps2_system.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace ps2 {
 namespace {
@@ -14,6 +15,13 @@ constexpr u64 kQuietEeSuperbatchLimit = 65536u;
 // keeping the first experiment deliberately far below PCSX2-scale windows.
 constexpr u64 kActiveIopEeLeadLimit = 128u;
 constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
+
+u64 elapsed_profile_ns(
+    std::chrono::steady_clock::time_point begin) {
+    return static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - begin).count());
+}
 
 bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
     if (virtual_address >= 0xC0000000u) return false;
@@ -274,6 +282,10 @@ void Ps2System::reset(u32 entry_point) {
     fast_interpreter_calls_ = 0;
     quiet_superbatch_calls_ = 0;
     quiet_superbatch_instructions_ = 0;
+    profile_run_ns_ = 0;
+    profile_ee_ns_ = 0;
+    profile_iop_ns_ = 0;
+    profile_vu_ns_ = 0;
     std::fill(
         quiet_ee_blocks_.begin(),
         quiet_ee_blocks_.end(),
@@ -396,7 +408,9 @@ bool Ps2System::advance_iop_for_ee_step(std::string& error){
         return true;
     }
 
+    const auto profile_begin = std::chrono::steady_clock::now();
     if(!iop_.step_hot(iop_step_error_scratch_)){
+        profile_iop_ns_ += elapsed_profile_ns(profile_begin);
         if(iop_.halted()){
             error.clear();
             return true;
@@ -407,6 +421,7 @@ bool Ps2System::advance_iop_for_ee_step(std::string& error){
     // IopCpu::step already advances the IOP bus root counters. The
     // IopHwWindow's duplicate timer bank is not on the CPU-visible path.
     sif_dma_.tick_iop(iop_bus_);
+    profile_iop_ns_ += elapsed_profile_ns(profile_begin);
     return true;
 }
 void Ps2System::reset_iop_subsystem(){iop_hw_.reset();iop_intc_.reset();cdvd_.reset();iop_ram_.reset();iop_bus_.reset();iop_.reset(Bios::kResetVector);ee_iop_phase_=0;(void)iop_bus_.write32(0x1F801450u,0x8u);(void)iop_intc_.write32(IopIntc::kICtrl,1u);}
@@ -424,7 +439,10 @@ bool Ps2System::step_ee(std::string& error) {
 }
 
 bool Ps2System::step_ee_core(std::string& error) {
-    if (!ee_.step(error)) {
+    const auto ee_profile_begin = std::chrono::steady_clock::now();
+    const bool ee_ok = ee_.step(error);
+    profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
+    if (!ee_ok) {
         error = "EE halted: " + error;
         return false;
     }
@@ -470,9 +488,11 @@ bool Ps2System::step_ee_core(std::string& error) {
         return false;
     }
     if (vu0_.running()) {
+        const auto vu_profile_begin = std::chrono::steady_clock::now();
         ee_.set_vu0_micro_running(true);
         std::string vu_error;
         vu0_.run(256, vu_error);
+        profile_vu_ns_ += elapsed_profile_ns(vu_profile_begin);
         if (!vu_error.empty()) {
             error = "VU0: " + vu_error;
             return false;
@@ -483,8 +503,10 @@ bool Ps2System::step_ee_core(std::string& error) {
         }
     }
     if (vu1_.running()) {
+        const auto vu_profile_begin = std::chrono::steady_clock::now();
         std::string vu_error;
         vu1_.run(kVu1InstructionsPerEeStep, vu_error);
+        profile_vu_ns_ += elapsed_profile_ns(vu_profile_begin);
         if (!vu_error.empty()) {
             error = "VU1: " + vu_error;
             return false;
@@ -510,6 +532,7 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
     const u64 total_phase = ee_iop_phase_ + cycles;
     ee_iop_phase_ = static_cast<u32>(total_phase & 7u);
     const u64 steps = total_phase / 8u;
+    const auto profile_begin = std::chrono::steady_clock::now();
     for (u64 i = 0; i < steps;) {
         if (iop_.halted()) break;
         if (i + 1u < steps && !sif_dma_.iop_completion_pending()) {
@@ -534,6 +557,9 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
         }
         sif_dma_.tick_iop(iop_bus_);
         ++i;
+    }
+    if (steps != 0u) {
+        profile_iop_ns_ += elapsed_profile_ns(profile_begin);
     }
 }
 bool Ps2System::step_iop(std::string& error){error.clear();if(!bios_started_){error="BIOS has not been started.";return false;}if(iop_.halted()){error=iop_.halt_reason();return false;}if(!iop_.step(error))return false;sif_dma_.tick_iop(iop_bus_);return true;}
@@ -1417,6 +1443,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
     }
     if (maximum < 2u) return 0;
 
+    const auto ee_profile_begin = std::chrono::steady_clock::now();
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
         // SifGetReg(4) has a system-level exact-timing accelerator that must
@@ -1630,6 +1657,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
         ++retired;
         if (!error.empty()) break;
     }
+    profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
     if (retired == 0u) return 0;
 
     // step_quiet deliberately leaves EE hardware time untouched. Apply the
@@ -1712,6 +1740,7 @@ u64 Ps2System::try_run_quiet_ee_superbatch(
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
+    const auto profile_begin = std::chrono::steady_clock::now();
     u64 executed=0;
     while(executed<instruction_budget){
         if (instruction_budget - executed >= 8u &&
@@ -1823,6 +1852,7 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
         }
         ++executed;
     }
+    profile_run_ns_ += elapsed_profile_ns(profile_begin);
     return executed;
 }
 void Ps2System::refresh_display(){gs_display_.update(gs_,gs_core_.vram());}
