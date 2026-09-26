@@ -8,6 +8,11 @@ namespace {
 constexpr u64 kVu1InstructionsPerEeStep = 1;
 constexpr u64 kQuietEeBatchLimit = 4096u;
 constexpr u64 kQuietEeSuperbatchLimit = 65536u;
+// Let the EE run ahead of an active IOP by a small bounded interval, then
+// repay the accumulated 8:1 cycle debt in one catch-up burst. This removes
+// the pathological "return to C++ every IOP instruction" behavior while
+// keeping the first experiment deliberately far below PCSX2-scale windows.
+constexpr u64 kActiveIopEeLeadLimit = 128u;
 constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
 
 bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
@@ -1350,13 +1355,34 @@ u64 Ps2System::try_run_quiet_ee_batch(
         maximum = std::min<u64>(maximum, iop_room);
     }
 
-    // Preserve the current 8:1 EE/IOP interleave exactly while the IOP is
-    // doing real work. We may batch several EE instructions, but never cross
-    // the point where the next IOP instruction is due.
+    // Active IOP execution no longer forces an EE dispatcher round-trip
+    // every eight cycles. Allow a bounded EE lead, then repay the accumulated
+    // 8:1 IOP cycle debt in advance_iop_for_ee_cycles() after this batch.
+    //
+    // Pending IOP interrupts remain tightly interleaved so an already-visible
+    // interrupt is not delayed by the lead window. Likewise, if an IOP-side
+    // timer/SPU/DMA event can occur inside the proposed catch-up interval,
+    // shrink the window until the IOP bus reports the whole interval event-
+    // free. SIF completion has already installed its own exact deadline above.
     if (!iop_halted && !iop_idle) {
-        const u64 until_iop_step =
-            ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
-        maximum = std::min<u64>(maximum, until_iop_step);
+        maximum = std::min<u64>(
+            maximum, kActiveIopEeLeadLimit);
+
+        if (iop_bus_.interrupt_pending()) {
+            const u64 until_iop_step =
+                ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
+            maximum = std::min<u64>(maximum, until_iop_step);
+        } else {
+            while (maximum > 1u) {
+                const u64 iop_steps =
+                    (static_cast<u64>(ee_iop_phase_) + maximum) / 8u;
+                if (iop_steps == 0u ||
+                    iop_bus_.can_tick_event_free(iop_steps)) {
+                    break;
+                }
+                maximum >>= 1u;
+            }
+        }
     }
 
     // Device time can be coalesced as long as the block ends no later than
