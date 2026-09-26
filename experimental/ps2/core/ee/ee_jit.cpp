@@ -1048,7 +1048,8 @@ u32 EeJit::execute_block(
     u32 maximum_instructions,
     const u8* ram_data,
     u32* page_generations,
-    bool& control_flow) {
+    bool& control_flow,
+    u32 yield_pc) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
         instruction_count == 0u ||
@@ -1146,6 +1147,12 @@ u32 EeJit::execute_block(
     bool final_control_flow = false;
 
     while (total_retired < maximum_instructions) {
+        if (total_retired != 0u &&
+            yield_pc != 0u &&
+            current_pc == yield_pc) {
+            break;
+        }
+
         BlockEntry* entry = block_entry(
             current_pc,
             page_generation,
@@ -1262,6 +1269,7 @@ u32 EeJit::execute_block(
     (void)maximum_instructions;
     (void)ram_data;
     (void)page_generations;
+    (void)yield_pc;
     control_flow = false;
     return 0;
 #endif
