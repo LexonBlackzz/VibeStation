@@ -4034,21 +4034,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_native_branch_entry_when_available = true;
   cases.push_back(v4_uncached_branch_store_delay);
 
-  CpuCompareCase v4_uncached_delay_exception_fallback{};
-  v4_uncached_delay_exception_fallback.name =
-      "v4_uncached_branch_delay_overflow_fallback";
-  v4_uncached_delay_exception_fallback.start_pc = 0xA0010000u;
-  v4_uncached_delay_exception_fallback.initial_gpr[1] = 1u;
-  v4_uncached_delay_exception_fallback.initial_gpr[2] = 0x7FFFFFFFu;
-  v4_uncached_delay_exception_fallback.program = {
+  CpuCompareCase v4_uncached_delay_exception_native{};
+  v4_uncached_delay_exception_native.name =
+      "v4_uncached_branch_delay_overflow_native";
+  v4_uncached_delay_exception_native.start_pc = 0xA0010000u;
+  v4_uncached_delay_exception_native.initial_gpr[1] = 1u;
+  v4_uncached_delay_exception_native.initial_gpr[2] = 0x7FFFFFFFu;
+  v4_uncached_delay_exception_native.program = {
       enc_i(0x05, 1, 0, 1), // BNE taken
       enc_i(0x08, 2, 2, 1), // ADDI overflow in the delay slot
       0,
   };
-  v4_uncached_delay_exception_fallback.instructions = 2u;
-  v4_uncached_delay_exception_fallback.require_v4_clean_fallback_when_available =
+  v4_uncached_delay_exception_native.instructions = 2u;
+  v4_uncached_delay_exception_native.require_v4_native_entry_when_available =
       true;
-  cases.push_back(v4_uncached_delay_exception_fallback);
+  v4_uncached_delay_exception_native
+      .require_v4_native_branch_entry_when_available = true;
+  v4_uncached_delay_exception_native
+      .require_v4_pending_delay_native_when_available = true;
+  v4_uncached_delay_exception_native
+      .require_v4_exception_native_when_available = true;
+  cases.push_back(v4_uncached_delay_exception_native);
 
   CpuCompareCase v4_hot_timer_lhu{};
   v4_hot_timer_lhu.name = "v4_hot_timer_lhu_native";
