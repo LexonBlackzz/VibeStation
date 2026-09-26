@@ -4975,6 +4975,66 @@ bool test_ee_native_special_cop1_and_likely() {
         "EE COP1 native block ran on non-x64") && ok;
 #endif
 
+    // Arithmetic COP1 is kept inside the native block through a small bound
+    // helper. Differential-check the helper against the interpreter's PS2
+    // denormal/overflow canonicalization rather than host IEEE defaults.
+    const std::array<ps2::u32, 8> cop1_arith = {
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (3u << 6) | 0x00u, // ADD.S f3,f1,f2
+        (0x11u << 26) | (0x10u << 21) | (1u << 16) |
+            (3u << 11) | (4u << 6) | 0x02u, // MUL.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (4u << 11) | (5u << 6) | 0x03u, // DIV.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (0u << 6) | 0x1Au, // MULA.S
+        (0x11u << 26) | (0x10u << 21) | (1u << 16) |
+            (2u << 11) | (6u << 6) | 0x1Cu, // MADD.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (0u << 6) | 0x34u, // C.LT.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 11) |
+            (7u << 6) | 0x24u, // CVT.W.S
+        (0x11u << 26) | (0x14u << 21) | (7u << 11) |
+            (8u << 6) | 0x20u, // CVT.S.W
+    };
+    ps2::Ps2System exact_arith;
+    ps2::Ps2System native_arith;
+    exact_arith.ee().reset(pc);
+    native_arith.ee().reset(pc);
+    exact_arith.ee().state().fpr[1] = 0x3FC00000u; // 1.5
+    exact_arith.ee().state().fpr[2] = 0x40000000u; // 2.0
+    native_arith.ee().state().fpr[1] = 0x3FC00000u;
+    native_arith.ee().state().fpr[2] = 0x40000000u;
+    for (const ps2::u32 instruction : cop1_arith) {
+        ok = expect(
+            exact_arith.ee().step_predecoded(instruction, error),
+            "EE COP1 arithmetic reference failed") && ok;
+    }
+    const ps2::u32 arith_retired =
+        native_arith.ee().run_native_block(
+            pc, 0u, cop1_arith.data(),
+            static_cast<ps2::u32>(cop1_arith.size()),
+            static_cast<ps2::u32>(cop1_arith.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        arith_retired == cop1_arith.size() &&
+        exact_arith.ee().state().pc == native_arith.ee().state().pc &&
+        exact_arith.ee().state().fpu_acc ==
+            native_arith.ee().state().fpu_acc &&
+        exact_arith.ee().state().fcr[31] ==
+            native_arith.ee().state().fcr[31],
+        "EE COP1 arithmetic native control state diverged") && ok;
+    for (ps2::u32 reg = 3u; reg <= 8u; ++reg) {
+        ok = expect(
+            exact_arith.ee().state().fpr[reg] ==
+                native_arith.ee().state().fpr[reg],
+            "EE COP1 arithmetic native FPR diverged") && ok;
+    }
+#else
+    ok = expect(
+        arith_retired == 0u,
+        "EE COP1 arithmetic native helper ran on non-x64") && ok;
+#endif
+
     // BEQL not taken must annul the delay slot and retire only the branch.
     const ps2::u32 likely_code[3] = {
         (0x14u << 26) | (1u << 21) | (2u << 16) | 1u,
