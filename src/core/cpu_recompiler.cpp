@@ -132,6 +132,14 @@ enum class V4ControlOp : u8 {
   Bgez,
   Bltzal,
   Bgezal,
+  Beql,
+  Bnel,
+  Blezl,
+  Bgtzl,
+  Bltzl,
+  Bgezl,
+  Bltzall,
+  Bgezall,
 };
 
 struct V4DecodedControl {
@@ -541,9 +549,13 @@ bool decode_v4_control(u32 bits, V4DecodedControl &out) {
     switch (out.rt) {
     case 0x00: out.op = V4ControlOp::Bltz; return true;
     case 0x01: out.op = V4ControlOp::Bgez; return true;
+    case 0x02: out.op = V4ControlOp::Bltzl; return true;
+    case 0x03: out.op = V4ControlOp::Bgezl; return true;
     case 0x10: out.op = V4ControlOp::Bltzal; return true;
     case 0x11: out.op = V4ControlOp::Bgezal; return true;
-    default: return false; // branch-likely/legacy REGIMM stays on the oracle
+    case 0x12: out.op = V4ControlOp::Bltzall; return true;
+    case 0x13: out.op = V4ControlOp::Bgezall; return true;
+    default: return false;
     }
   case 0x02: out.op = V4ControlOp::J; return true;
   case 0x03: out.op = V4ControlOp::Jal; return true;
@@ -551,6 +563,10 @@ bool decode_v4_control(u32 bits, V4DecodedControl &out) {
   case 0x05: out.op = V4ControlOp::Bne; return true;
   case 0x06: out.op = V4ControlOp::Blez; return true;
   case 0x07: out.op = V4ControlOp::Bgtz; return true;
+  case 0x14: out.op = V4ControlOp::Beql; return true;
+  case 0x15: out.op = V4ControlOp::Bnel; return true;
+  case 0x16: out.op = V4ControlOp::Blezl; return true;
+  case 0x17: out.op = V4ControlOp::Bgtzl; return true;
   default: return false;
   }
 }
@@ -3686,6 +3702,134 @@ V4NativeFn compile_v4_budget_branch(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_likely_branch_head(
+    V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
+    u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1280u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label not_taken, taken_ready;
+
+  const u32 fallthrough = branch_pc + 8u;
+  const u32 branch_target =
+      branch_pc + 4u + static_cast<u32>(control.simm * 4);
+
+  // Capture the condition before retiring the incoming delayed load.
+  if (control.op == V4ControlOp::Beql ||
+      control.op == V4ControlOp::Bnel) {
+    emit_read_guest(code, code.eax, control.rs);
+    emit_read_guest(code, code.ecx, control.rt);
+    code.cmp(code.eax, code.ecx);
+    if (control.op == V4ControlOp::Beql) {
+      code.sete(code.dl);
+    } else {
+      code.setne(code.dl);
+    }
+    code.movzx(code.edx, code.dl);
+  } else {
+    emit_read_guest(code, code.eax, control.rs);
+    code.cmp(code.eax, 0);
+    switch (control.op) {
+    case V4ControlOp::Blezl: code.setle(code.dl); break;
+    case V4ControlOp::Bgtzl: code.setg(code.dl); break;
+    case V4ControlOp::Bltzl:
+    case V4ControlOp::Bltzall: code.setl(code.dl); break;
+    case V4ControlOp::Bgezl:
+    case V4ControlOp::Bgezall: code.setge(code.dl); break;
+    default: code.xor_(code.edx, code.edx); break;
+    }
+    code.movzx(code.edx, code.dl);
+  }
+
+  code.test(code.edx, code.edx);
+  code.jz(not_taken);
+
+  // Likely-link variants write RA only on the taken path in the current core.
+  if (control.op == V4ControlOp::Bltzall ||
+      control.op == V4ControlOp::Bgezall) {
+    code.mov(code.eax, branch_pc + 8u);
+    emit_write_guest(code, 31u, code.eax);
+    emit_retire_incoming_load(code, 31u);
+  } else {
+    emit_retire_incoming_load(code, 0u);
+  }
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      branch_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      branch_pc + 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      branch_target);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      1u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      1u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      branch_pc);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+
+  code.L(not_taken);
+  emit_retire_incoming_load(code, 0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      branch_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      fallthrough);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      fallthrough + 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_block_return(code);
+
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_branch(
     V4CodeArena &arena,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &prefix,
@@ -3830,6 +3974,22 @@ V4NativeFn compile_v4_branch(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+
+bool v4_control_is_likely(const V4DecodedControl &control) {
+  switch (control.op) {
+  case V4ControlOp::Beql:
+  case V4ControlOp::Bnel:
+  case V4ControlOp::Blezl:
+  case V4ControlOp::Bgtzl:
+  case V4ControlOp::Bltzl:
+  case V4ControlOp::Bgezl:
+  case V4ControlOp::Bltzall:
+  case V4ControlOp::Bgezall:
+    return true;
+  default:
+    return false;
+  }
+}
 
 bool v4_nonlink_conditional(const V4DecodedControl &control) {
   switch (control.op) {
