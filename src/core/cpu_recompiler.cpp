@@ -2473,6 +2473,273 @@ V4NativeFn compile_v4_pending_delay_overflow_alu(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+
+V4NativeFn compile_v4_pending_delay_load(
+    V4CodeArena &arena, const V4DecodedLoad &load, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 2048u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label ram, scratch, device, loaded, unaligned, bail;
+
+  code.cmp(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
+      0u);
+  code.je(bail);
+
+  // Capture the delay-slot load address from the pre-retirement register view.
+  emit_read_guest(code, code.eax, load.rs);
+  code.add(code.eax, static_cast<u32>(load.simm));
+  if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    code.test(code.eax, 1u);
+    code.jnz(unaligned);
+  } else if (load.op == V4LoadOp::Lw) {
+    code.test(code.eax, 3u);
+    code.jnz(unaligned);
+  }
+
+  code.mov(code.edx, code.eax);
+  code.and_(code.edx, 0x1FFFFFFFu);
+  if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    code.mov(code.ecx, code.edx);
+    code.and_(code.ecx, 3u);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, load_byte_offset))],
+        code.ecx);
+    code.and_(code.edx, ~3u);
+  }
+
+  auto emit_memory_read = [&]() {
+    switch (load.op) {
+    case V4LoadOp::Lb:
+      code.movzx(code.r8d, code.byte[code.rcx + code.rdx]);
+      code.shl(code.r8d, 24);
+      code.sar(code.r8d, 24);
+      break;
+    case V4LoadOp::Lh:
+      code.movzx(code.r8d, code.word[code.rcx + code.rdx]);
+      code.shl(code.r8d, 16);
+      code.sar(code.r8d, 16);
+      break;
+    case V4LoadOp::Lwl:
+    case V4LoadOp::Lw:
+    case V4LoadOp::Lwr:
+      code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+      break;
+    case V4LoadOp::Lbu:
+      code.movzx(code.r8d, code.byte[code.rcx + code.rdx]);
+      break;
+    case V4LoadOp::Lhu:
+      code.movzx(code.r8d, code.word[code.rcx + code.rdx]);
+      break;
+    }
+  };
+
+  code.cmp(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+  code.jb(ram);
+  code.cmp(code.edx, 0x1F800000u);
+  code.jb(device);
+  code.cmp(code.edx, 0x1F801000u);
+  code.jae(device);
+
+  code.L(scratch);
+  code.sub(code.edx, 0x1F800000u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  emit_memory_read();
+  code.xor_(code.r9d, code.r9d);
+  code.jmp(loaded);
+
+  code.L(ram);
+  code.and_(code.edx, psx::RAM_SIZE - 1u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+  code.test(code.rcx, code.rcx);
+  code.jz(bail);
+  emit_memory_read();
+  code.mov(code.r9d, 4u);
+  code.jmp(loaded);
+
+  code.L(device);
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.edx);
+#endif
+  if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
+  } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
+  } else {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+  }
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+  code.mov(code.r8d, code.eax);
+  if (load.op == V4LoadOp::Lb) {
+    code.shl(code.r8d, 24);
+    code.sar(code.r8d, 24);
+  } else if (load.op == V4LoadOp::Lh) {
+    code.shl(code.r8d, 16);
+    code.sar(code.r8d, 16);
+  }
+  code.xor_(code.r9d, code.r9d);
+
+  code.L(loaded);
+  if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    emit_read_guest(code, code.ecx, load.rt);
+    {
+      Label use_gpr_value;
+      code.cmp(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(load.rt));
+      code.jne(use_gpr_value);
+      code.mov(code.ecx, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))]);
+      code.L(use_gpr_value);
+    }
+
+    Label merge0, merge1, merge2, merge_done;
+    code.mov(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, load_byte_offset))]);
+    code.test(code.edx, code.edx);
+    code.jz(merge0);
+    code.cmp(code.edx, 1u);
+    code.je(merge1);
+    code.cmp(code.edx, 2u);
+    code.je(merge2);
+    if (load.op == V4LoadOp::Lwl) {
+      code.jmp(merge_done);
+      code.L(merge0);
+      code.and_(code.ecx, 0x00FFFFFFu);
+      code.shl(code.r8d, 24);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.and_(code.ecx, 0x0000FFFFu);
+      code.shl(code.r8d, 16);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.and_(code.ecx, 0x000000FFu);
+      code.shl(code.r8d, 8);
+      code.or_(code.r8d, code.ecx);
+    } else {
+      code.shr(code.r8d, 24);
+      code.and_(code.ecx, 0xFFFFFF00u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge0);
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.shr(code.r8d, 8);
+      code.and_(code.ecx, 0xFF000000u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.shr(code.r8d, 16);
+      code.and_(code.ecx, 0xFFFF0000u);
+      code.or_(code.r8d, code.ecx);
+    }
+    code.L(merge_done);
+  }
+
+  emit_retire_incoming_load(code, load.rt);
+  if (load.rt != 0u) {
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+        static_cast<u32>(load.rt));
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+        code.r8d);
+  }
+
+  code.add(code.ebx, 2u);
+  code.add(code.ebx, code.r9d);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+
+  // Consume the pending branch exactly like the other native delay-slot
+  // fragments. The loaded CPU register remains delayed until the target's
+  // following instruction boundary.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+
+  code.L(unaligned);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+      code.eax);
+  emit_v4_exception_pending_delay(code, Exception::AddrLoadErr);
+
+  code.L(bail);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_pending_delay_store(
     V4CodeArena &arena, const V4DecodedStore &store, u32 &code_size) {
   using namespace Xbyak;
@@ -5306,9 +5573,14 @@ struct CpuRecompilerBackend::Impl {
         fn = compile_v4_pending_delay_overflow_alu(
             arena, overflow, code_size);
       } else {
-        V4DecodedStore store{};
-        if (decode_v4_store(instruction, store)) {
-          fn = compile_v4_pending_delay_store(arena, store, code_size);
+        V4DecodedLoad load{};
+        if (decode_v4_load(instruction, load)) {
+          fn = compile_v4_pending_delay_load(arena, load, code_size);
+        } else {
+          V4DecodedStore store{};
+          if (decode_v4_store(instruction, store)) {
+            fn = compile_v4_pending_delay_store(arena, store, code_size);
+          }
         }
       }
     }
