@@ -545,18 +545,25 @@ bool decode_v4_control(u32 bits, V4DecodedControl &out) {
     }
   }
   switch (primary) {
-  case 0x01:
-    switch (out.rt) {
-    case 0x00: out.op = V4ControlOp::Bltz; return true;
-    case 0x01: out.op = V4ControlOp::Bgez; return true;
-    case 0x02: out.op = V4ControlOp::Bltzl; return true;
-    case 0x03: out.op = V4ControlOp::Bgezl; return true;
-    case 0x10: out.op = V4ControlOp::Bltzal; return true;
-    case 0x11: out.op = V4ControlOp::Bgezal; return true;
-    case 0x12: out.op = V4ControlOp::Bltzall; return true;
-    case 0x13: out.op = V4ControlOp::Bgezall; return true;
-    default: return false;
+  case 0x01: {
+    const bool bgez = (out.rt & 0x01u) != 0u;
+    const bool likely = (out.rt & 0x02u) != 0u;
+    const bool link = (out.rt & 0x10u) != 0u;
+    if (link) {
+      if (likely) {
+        out.op = bgez ? V4ControlOp::Bgezall : V4ControlOp::Bltzall;
+      } else {
+        out.op = bgez ? V4ControlOp::Bgezal : V4ControlOp::Bltzal;
+      }
+    } else {
+      if (likely) {
+        out.op = bgez ? V4ControlOp::Bgezl : V4ControlOp::Bltzl;
+      } else {
+        out.op = bgez ? V4ControlOp::Bgez : V4ControlOp::Bltz;
+      }
     }
+    return true;
+  }
   case 0x02: out.op = V4ControlOp::J; return true;
   case 0x03: out.op = V4ControlOp::Jal; return true;
   case 0x04: out.op = V4ControlOp::Beq; return true;
@@ -2697,6 +2704,111 @@ V4NativeFn compile_v4_pending_delay_trap(
       code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
       0u);
   code.inc(code.ebx);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_compat_unknown(
+    V4CodeArena &arena, u32 instruction, u32 start_pc,
+    const V4LinkTargets &links, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 640u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+
+  const u32 primary = (instruction >> 26) & 0x3Fu;
+  const u8 clear_reg =
+      primary == 0u ? static_cast<u8>((instruction >> 11) & 0x1Fu) : 0u;
+  if (primary == 0u && clear_reg != 0u) {
+    code.xor_(code.eax, code.eax);
+    emit_write_guest(code, clear_reg, code.eax);
+  }
+  emit_retire_incoming_load(code, clear_reg);
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.add(code.ebx, (primary == 0x10u || primary == 0x12u) ? 2u : 1u);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_pending_delay_compat_unknown(
+    V4CodeArena &arena, u32 instruction, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 896u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+
+  const u32 primary = (instruction >> 26) & 0x3Fu;
+  const u8 clear_reg =
+      primary == 0u ? static_cast<u8>((instruction >> 11) & 0x1Fu) : 0u;
+  if (primary == 0u && clear_reg != 0u) {
+    code.xor_(code.eax, code.eax);
+    emit_write_guest(code, clear_reg, code.eax);
+  }
+  emit_retire_incoming_load(code, clear_reg);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.add(code.ebx, (primary == 0x10u || primary == 0x12u) ? 2u : 1u);
   code.dec(code.r12d);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
