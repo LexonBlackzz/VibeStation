@@ -110,6 +110,9 @@ struct Emitter {
     void load_state_rax(u32 offset) {
         memory(0x48u, 0x8Bu, 0u, offset);
     }
+    void load_state_rdx(u32 offset) {
+        memory(0x48u, 0x8Bu, 2u, offset);
+    }
     void store_state_eax(u32 offset) {
         memory(0u, 0x89u, 0u, offset);
     }
@@ -763,6 +766,21 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             destination = 0u;
             break;
         }
+        case 0x10u: { // COP0 local register read
+            const u32 cop_rd = (instruction >> 11) & 31u;
+            const u32 cop_sel = instruction & 7u;
+            if (rs != 0x00u || cop_sel != 0u) return false;
+            if (rt != 0u) {
+                out.load_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, cop0) +
+                        cop_rd * sizeof(u32)));
+                out.sign_extend_word();
+                out.store_rax(rt);
+            }
+            destination = 0u;
+            break;
+        }
         case 0x11u: { // COP1
             const u32 cop_rs = rs;
             const u32 fs = (instruction >> 11) & 31u;
@@ -945,7 +963,8 @@ void ee_jit_scratch_memory_helper(
     u32 address =
         static_cast<u32>(state->gpr[rs].lo) +
         static_cast<u32>(static_cast<s32>(imm));
-    if (opcode == 0x1Eu || opcode == 0x1Fu) {
+    if (opcode == 0x1Eu || opcode == 0x1Fu ||
+        opcode == 0x36u || opcode == 0x3Eu) {
         address &= ~0x0Fu;
     }
     const u32 offset = address - kEeScratchBase;
@@ -994,6 +1013,16 @@ void ee_jit_scratch_memory_helper(
     case 0x1Fu: // SQ
         store64(offset, state->gpr[rt].lo);
         store64(offset + 8u, state->gpr[rt].hi);
+        break;
+    case 0x36u: // LQC2
+        if (rt != 0u) {
+            state->vu_vf[rt].lo = load64(offset);
+            state->vu_vf[rt].hi = load64(offset + 8u);
+        }
+        break;
+    case 0x3Eu: // SQC2
+        store64(offset, state->vu_vf[rt].lo);
+        store64(offset + 8u, state->vu_vf[rt].hi);
         break;
     case 0x20u: // LB
         write64(
@@ -1090,6 +1119,7 @@ bool emit_guarded_ram_load(
         width = 8u;
         break;
     case 0x1Eu: // LQ
+    case 0x36u: // LQC2
         width = 16u;
         break;
     default:
@@ -1117,7 +1147,7 @@ bool emit_guarded_ram_load(
     out.emit(0x3Du);
     out.emit32(
         kEeScratchBase + kEeScratchSize -
-        (opcode == 0x1Eu ? 1u : width));
+        ((opcode == 0x1Eu || opcode == 0x36u) ? 1u : width));
     scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
     const std::size_t main_mapping_label = out.bytes.size();
     out.patch_rel32(below_scratch, main_mapping_label);
@@ -1163,8 +1193,8 @@ bool emit_guarded_ram_load(
         out.patch_rel32(jump, alias_label);
     }
 
-    if (opcode == 0x1Eu) {
-        out.emit(0x25u); // LQ aligns the effective address down to 16 bytes.
+    if (opcode == 0x1Eu || opcode == 0x36u) {
+        out.emit(0x25u); // LQ/LQC2 align the effective address down to 16 bytes.
         out.emit32(0xFFFFFFF0u);
     }
 
@@ -1197,6 +1227,22 @@ bool emit_guarded_ram_load(
             out.emit(0x49u); out.emit(0x8Bu);
             out.emit(0x44u); out.emit(0x03u); out.emit(0x08u);
             out.store_rax_hi(rt);
+        }
+    } else if (opcode == 0x36u) {
+        if (rt != 0u) {
+            const u32 vu_offset = static_cast<u32>(
+                offsetof(EeCpuState, vu_vf) + rt * sizeof(EeGpr));
+            out.emit(0x49u); out.emit(0x8Bu);
+            out.emit(0x04u); out.emit(0x03u);
+            out.store_state_rax(vu_offset);
+            out.load_rax(rs, true);
+            out.emit(0x05u);
+            out.emit32(static_cast<u32>(static_cast<s32>(immediate)));
+            out.emit(0x25u); out.emit32(0xFFFFFFF0u);
+            out.emit(0x25u); out.emit32(0x01FFFFFFu);
+            out.emit(0x49u); out.emit(0x8Bu);
+            out.emit(0x44u); out.emit(0x03u); out.emit(0x08u);
+            out.store_state_rax(vu_offset + sizeof(u64));
         }
     } else if (rt != 0u) {
         switch (opcode) {
@@ -1302,6 +1348,7 @@ bool emit_guarded_ram_store(
     case 0x3Cu: width = 8u; break; // SCD
     case 0x3Fu: width = 8u; break; // SD
     case 0x1Fu: width = 16u; break; // SQ
+    case 0x3Eu: width = 16u; break; // SQC2
     default: return false;
     }
 
@@ -1319,7 +1366,7 @@ bool emit_guarded_ram_store(
     out.emit(0x3Du);
     out.emit32(
         kEeScratchBase + kEeScratchSize -
-        (opcode == 0x1Fu ? 1u : width));
+        ((opcode == 0x1Fu || opcode == 0x3Eu) ? 1u : width));
     scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
     const std::size_t main_mapping_label = out.bytes.size();
     out.patch_rel32(below_scratch, main_mapping_label);
@@ -1368,8 +1415,8 @@ bool emit_guarded_ram_store(
     out.emit32(kEeRamSize - width);
     fail_jumps.push_back(out.jcc32(0x87u)); // JA
 
-    // SQ/LQ semantics align down; scalar stores retain alignment checks.
-    if (opcode == 0x1Fu) {
+    // SQ/SQC2 semantics align down; scalar stores retain alignment checks.
+    if (opcode == 0x1Fu || opcode == 0x3Eu) {
         out.emit(0x25u);
         out.emit32(0xFFFFFFF0u);
     } else if (width > 1u) {
@@ -1391,6 +1438,15 @@ bool emit_guarded_ram_store(
         out.emit(0x4Bu); out.emit(0x89u);
         out.emit(0x14u); out.emit(0x03u); // MOV [R11+R8],RDX
         out.load_rdx_hi(rt);
+        out.emit(0x4Bu); out.emit(0x89u);
+        out.emit(0x54u); out.emit(0x03u); out.emit(0x08u);
+    } else if (opcode == 0x3Eu) {
+        const u32 vu_offset = static_cast<u32>(
+            offsetof(EeCpuState, vu_vf) + rt * sizeof(EeGpr));
+        out.load_state_rdx(vu_offset);
+        out.emit(0x4Bu); out.emit(0x89u);
+        out.emit(0x14u); out.emit(0x03u);
+        out.load_state_rdx(vu_offset + sizeof(u64));
         out.emit(0x4Bu); out.emit(0x89u);
         out.emit(0x54u); out.emit(0x03u); out.emit(0x08u);
     } else {
@@ -1444,8 +1500,9 @@ bool emit_guarded_ram_store(
 
     out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
     out.emit(0x82u);
-    out.emit(opcode == 0x1Fu ? 0x02u : 0x01u);
-    // SQ mirrors the interpreter's two write64 calls, hence +2 generation.
+    out.emit(
+        (opcode == 0x1Fu || opcode == 0x3Eu) ? 0x02u : 0x01u);
+    // SQ/SQC2 mirror two interpreter write64 calls, hence +2 generation.
 
     // Only a write which actually overlaps translated code on this page can
     // require an immediate exit from the current translation.

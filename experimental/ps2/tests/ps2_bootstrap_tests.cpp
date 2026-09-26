@@ -4499,7 +4499,7 @@ bool test_ee_native_linear_block() {
 
 bool test_ee_native_extended_integer_block() {
     constexpr ps2::u32 pc = 0x5400u;
-    const std::array<ps2::u32, 9> code = {
+    const std::array<ps2::u32, 10> code = {
         (0x09u << 26) | (1u << 16) | 0x1234u, // ADDIU r1,r0,0x1234
         (1u << 21) | 0x11u,                   // MTHI r1
         (2u << 11) | 0x10u,                   // MFHI r2
@@ -4509,12 +4509,15 @@ bool test_ee_native_extended_integer_block() {
         (2u << 16) | (6u << 11) | (4u << 6) | 0x3Cu,  // DSLL32
         (0x2Fu << 26) | (1u << 21),            // CACHE
         (0x33u << 26) | (1u << 21),            // PREF
+        (0x10u << 26) | (7u << 16) | (12u << 11), // MFC0 r7,Status
     };
 
     ps2::Ps2System exact;
     ps2::Ps2System native;
     exact.ee().reset(pc);
     native.ee().reset(pc);
+    exact.ee().state().cop0[12] = 0x81234567u;
+    native.ee().state().cop0[12] = 0x81234567u;
 
     std::string error;
     bool ok = true;
@@ -4544,7 +4547,12 @@ bool test_ee_native_extended_integer_block() {
         a.gpr[3].lo == b.gpr[3].lo &&
         a.gpr[4].lo == b.gpr[4].lo &&
         a.gpr[5].lo == b.gpr[5].lo &&
-        a.gpr[6].lo == b.gpr[6].lo,
+        a.gpr[6].lo == b.gpr[6].lo &&
+        a.gpr[7].lo == b.gpr[7].lo &&
+        b.gpr[7].lo ==
+            static_cast<ps2::u64>(
+                static_cast<ps2::s64>(
+                    static_cast<ps2::s32>(0x81234567u))),
         "EE extended native integer state diverged") && ok;
 #else
     ok = expect(
@@ -4845,9 +4853,11 @@ bool test_ee_native_quadword_fastmem() {
     constexpr ps2::u32 pc = 0x6A00u;
     constexpr ps2::u32 source = 0xA008u;
     constexpr ps2::u32 destination = 0xB00Cu;
-    const std::array<ps2::u32, 2> code = {
+    const std::array<ps2::u32, 4> code = {
         (0x1Eu << 26) | (1u << 21) | (2u << 16), // LQ r2,0(r1)
         (0x1Fu << 26) | (3u << 21) | (2u << 16), // SQ r2,0(r3)
+        (0x36u << 26) | (1u << 21) | (4u << 16), // LQC2 vf4,0(r1)
+        (0x3Eu << 26) | (3u << 21) | (4u << 16) | 0x20u, // SQC2 vf4,0x20(r3)
     };
 
     ps2::Ps2System exact;
@@ -4893,6 +4903,14 @@ bool test_ee_native_quadword_fastmem() {
         exact.ee().state().gpr[2].hi ==
             native.ee().state().gpr[2].hi,
         "EE native LQ register result diverged") && ok;
+    ok = expect(
+        exact.ee().state().vu_vf[4].lo ==
+            native.ee().state().vu_vf[4].lo &&
+        exact.ee().state().vu_vf[4].hi ==
+            native.ee().state().vu_vf[4].hi &&
+        native.ee().state().vu_vf[4].lo == lo &&
+        native.ee().state().vu_vf[4].hi == hi,
+        "EE native LQC2 vector result diverged") && ok;
     ps2::u64 exact_lo = 0;
     ps2::u64 exact_hi = 0;
     ps2::u64 native_lo = 0;
@@ -4909,10 +4927,26 @@ bool test_ee_native_quadword_fastmem() {
         exact_lo == lo &&
         exact_hi == hi,
         "EE native SQ RAM result diverged") && ok;
+    ps2::u64 exact_vu_lo = 0;
+    ps2::u64 exact_vu_hi = 0;
+    ps2::u64 native_vu_lo = 0;
+    ps2::u64 native_vu_hi = 0;
+    const ps2::u32 vu_destination =
+        (destination + 0x20u) & ~0xFu;
+    ok = expect(
+        exact.ram().read64(vu_destination, exact_vu_lo) &&
+        exact.ram().read64(vu_destination + 8u, exact_vu_hi) &&
+        native.ram().read64(vu_destination, native_vu_lo) &&
+        native.ram().read64(vu_destination + 8u, native_vu_hi) &&
+        exact_vu_lo == native_vu_lo &&
+        exact_vu_hi == native_vu_hi &&
+        native_vu_lo == lo &&
+        native_vu_hi == hi,
+        "EE native SQC2 RAM result diverged") && ok;
     ok = expect(
         exact.ram().page_generation(aligned_destination) ==
             native.ram().page_generation(aligned_destination),
-        "EE native SQ write barrier generation diverged") && ok;
+        "EE native SQ/SQC2 write barrier generation diverged") && ok;
 #else
     ok = expect(
         retired == 0u,
