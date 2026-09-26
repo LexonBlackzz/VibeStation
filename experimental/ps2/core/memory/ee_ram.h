@@ -61,6 +61,13 @@ public:
         return page_generation_[offset / kPageSize] & kGenerationMask;
     }
     void track_code_range(u32 offset, std::size_t width);
+    // Compatibility/debug helper: explicitly mark the whole 4 KiB page.
+    // Production JIT paths use track_code_range() for finer invalidation.
+    void track_code_page(u32 offset) {
+        track_code_range(
+            offset & ~(kPageSize - 1u),
+            kPageSize);
+    }
     static void track_jit_code(
         u32* page_metadata,
         u32 offset,
