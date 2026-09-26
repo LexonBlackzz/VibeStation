@@ -246,9 +246,11 @@ bool decode_v4_cop0(u32 bits, V4DecodedCop0 &out) {
 enum class V4LoadOp : u8 {
   Lb,
   Lh,
+  Lwl,
   Lw,
   Lbu,
   Lhu,
+  Lwr,
 };
 
 struct V4DecodedLoad {
@@ -288,9 +290,11 @@ bool decode_v4_load(u32 bits, V4DecodedLoad &out) {
   switch ((bits >> 26) & 0x3Fu) {
   case 0x20: out.op = V4LoadOp::Lb; break;
   case 0x21: out.op = V4LoadOp::Lh; break;
+  case 0x22: out.op = V4LoadOp::Lwl; break;
   case 0x23: out.op = V4LoadOp::Lw; break;
   case 0x24: out.op = V4LoadOp::Lbu; break;
   case 0x25: out.op = V4LoadOp::Lhu; break;
+  case 0x26: out.op = V4LoadOp::Lwr; break;
   default: return false;
   }
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
@@ -2459,7 +2463,9 @@ V4NativeFn compile_v4_load(
       code.shl(code.r8d, 16);
       code.sar(code.r8d, 16);
       break;
+    case V4LoadOp::Lwl:
     case V4LoadOp::Lw:
+    case V4LoadOp::Lwr:
       code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
       break;
     case V4LoadOp::Lbu:
@@ -2473,6 +2479,9 @@ V4NativeFn compile_v4_load(
 
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
+  if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    code.and_(code.edx, ~3u);
+  }
   code.cmp(code.edx, code.dword[
       code.r11 +
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
@@ -2544,6 +2553,72 @@ V4NativeFn compile_v4_load(
   code.xor_(code.r9d, code.r9d);
 
   code.L(loaded);
+  if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    // LWL/LWR merge against the architecturally visible target value. If the
+    // previous instruction scheduled a load to the same register, that pending
+    // value is the merge source even though it has not retired yet.
+    emit_read_guest(code, code.ecx, load.rt);
+    {
+      Label use_gpr_value;
+      code.cmp(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(load.rt));
+      code.jne(use_gpr_value);
+      code.mov(code.ecx, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))]);
+      code.L(use_gpr_value);
+    }
+
+    Label merge0, merge1, merge2, merge_done;
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 3u);
+    code.test(code.edx, code.edx);
+    code.jz(merge0);
+    code.cmp(code.edx, 1u);
+    code.je(merge1);
+    code.cmp(code.edx, 2u);
+    code.je(merge2);
+
+    if (load.op == V4LoadOp::Lwl) {
+      // offset 3: entire aligned word becomes visible.
+      code.jmp(merge_done);
+      code.L(merge0);
+      code.and_(code.ecx, 0x00FFFFFFu);
+      code.shl(code.r8d, 24);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.and_(code.ecx, 0x0000FFFFu);
+      code.shl(code.r8d, 16);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.and_(code.ecx, 0x000000FFu);
+      code.shl(code.r8d, 8);
+      code.or_(code.r8d, code.ecx);
+    } else {
+      // LWR offset 3 preserves the high 24 bits and imports val >> 24.
+      code.shr(code.r8d, 24);
+      code.and_(code.ecx, 0xFFFFFF00u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge0);
+      // offset 0: entire aligned word becomes visible.
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.shr(code.r8d, 8);
+      code.and_(code.ecx, 0xFF000000u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.shr(code.r8d, 16);
+      code.and_(code.ecx, 0xFFFF0000u);
+      code.or_(code.r8d, code.ecx);
+    }
+    code.L(merge_done);
+  }
   // A prefix already retired the incoming load. Otherwise the load retires or
   // cancels it now, after address operands were captured.
   if (prefix_count == 0u) {
