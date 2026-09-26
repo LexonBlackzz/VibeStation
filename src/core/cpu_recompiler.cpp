@@ -1489,6 +1489,220 @@ V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
 }
 
 
+
+V4NativeFn compile_v4_cop2(V4CodeArena &arena,
+                           const V4DecodedCop2 &inst,
+                           u32 start_pc,
+                           const V4LinkTargets &links,
+                           u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1536u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  auto emit_result_stall = [&]() {
+    Label ready;
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.rax, code.rcx);
+    code.jbe(ready);
+    code.sub(code.rax, code.rcx);
+    code.add(code.ebx, code.eax);
+    code.L(ready);
+  };
+
+  auto emit_command_stall = [&]() {
+    Label selected, ready;
+    code.mov(code.r8, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))]);
+    code.cmp(code.r8, code.rax);
+    code.jae(selected);
+    code.mov(code.r8, code.rax);
+    code.L(selected);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.r8, code.rcx);
+    code.jbe(ready);
+    code.sub(code.r8, code.rcx);
+    code.add(code.ebx, code.r8d);
+    code.L(ready);
+  };
+
+  auto emit_read_call = [&](size_t fn, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  auto emit_write_call = [&](size_t fn, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+    // R8D already carries the captured guest value.
+#else
+    code.mov(code.edx, code.r8d);
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  switch (inst.op) {
+  case V4Cop2Op::Mfc2:
+    if (v4_gte_data_reg_reads_result(inst.rd)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop2Op::Cfc2:
+    if (inst.rd == 31u) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_ctrl), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop2Op::Mtc2:
+  case V4Cop2Op::Ctc2:
+    emit_read_guest(code, code.r8d, inst.rt);
+    emit_retire_incoming_load(code, 0u);
+    emit_write_call(
+        inst.op == V4Cop2Op::Mtc2
+            ? reinterpret_cast<size_t>(&v4_gte_write_data)
+            : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
+        inst.rd);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, 6u);
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+        code.rax);
+    break;
+
+  case V4Cop2Op::Command:
+    emit_command_stall();
+    emit_retire_incoming_load(code, 0u);
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, inst.bits);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, inst.bits);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_gte_execute));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, v4_gte_command_cycles(inst.bits));
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))],
+        code.rax);
+    break;
+  }
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.add(code.ebx, 2u);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_cop0(V4CodeArena &arena,
                            const V4DecodedCop0 &inst,
                            u32 start_pc,
@@ -5307,6 +5521,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
       native.cop0_regs = cpu_.cop0_regs_;
+      native.gte = &cpu_.gte;
       native.icache_generations = cpu_.icache_generation_.data();
       native.icache_tags = &cpu_.icache_[0].tag;
       native.icache_words = cpu_.icache_[0].words.data();
@@ -5335,6 +5550,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.cop0_sr = cpu_.cop0_sr_;
     native.cop0_cause = cpu_.cop0_cause_;
     native.cop0_epc = cpu_.cop0_epc_;
+    native.gte_result_ready_cycle = cpu_.gte_result_ready_cycle_;
+    native.gte_input_ready_cycle = cpu_.gte_input_ready_cycle_;
     native.hi = cpu_.hi_;
     native.lo = cpu_.lo_;
     native.muldiv_result_ready_cycle = cpu_.muldiv_result_ready_cycle_;
@@ -5440,6 +5657,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.cop0_sr_ = native.cop0_sr;
     cpu_.cop0_cause_ = native.cop0_cause;
     cpu_.cop0_epc_ = native.cop0_epc;
+    cpu_.gte_result_ready_cycle_ = native.gte_result_ready_cycle;
+    cpu_.gte_input_ready_cycle_ = native.gte_input_ready_cycle;
     if (native.exception_raised != 0u) {
       std::memcpy(cpu_.exception_return_regs_, cpu_.gpr_,
                   sizeof(cpu_.exception_return_regs_));
