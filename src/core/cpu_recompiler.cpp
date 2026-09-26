@@ -4151,42 +4151,28 @@ struct CpuRecompilerBackend::Impl {
     return &page->entries[(pc >> 2u) & 0x3FFu];
   }
 
-  V4Block *lookup(Cpu &cpu, u32 pc, bool cacheable,
-                  u32 icache_generation) {
+  V4Block *lookup_candidate(u32 pc, bool cacheable) {
     V4DispatchEntry *entry = dispatch_entry(pc, false);
     if (entry == nullptr || entry->block == nullptr) {
       return nullptr;
     }
     V4Block *block = entry->block;
-    if (block->cache_epoch != cache_epoch) {
+    if (block->cache_epoch != cache_epoch || block->cacheable != cacheable) {
       return nullptr;
     }
-    if (block->cacheable != cacheable) {
-      return nullptr;
-    }
-    if (block->retry_second_line) {
-      u32 delay_bits = 0u;
-      if (cpu.read_visible_instruction_for_backend(pc + 4u, delay_bits)) {
-        return nullptr;
-      }
-    }
+
     if (cacheable) {
-      // Cached translations are tied to the exact 16-byte guest-visible
-      // I-cache snapshot. A write elsewhere in the same 4 KiB RAM page must
-      // not evict them.
-      if (block->icache_generation != icache_generation) {
-        return nullptr;
-      }
-      if (block->second_icache_line &&
-          block->second_icache_generation !=
-              cpu.instruction_cache_generation_for_backend(
-                  static_cast<u32>(block->second_icache_index) << 4u)) {
-        return nullptr;
-      }
-    } else if (block->phys_page >= kV4PhysPageCount ||
-               block->code_page_generation != page_generations[block->phys_page]) {
-      // Uncached/KSEG1 execution observes RAM directly, so page generations
-      // remain the conservative SMC guard for those blocks.
+      // Do not inspect guest I-cache generations here. The resident x64
+      // dispatcher owns refill + byte validation, so a hot block never crosses
+      // back into C++ merely because an alias changed its direct-mapped line.
+      return block;
+    }
+
+    // KSEG1/uncached code observes RAM directly. A page-generation mismatch
+    // means the old translation is stale; compile a replacement rather than
+    // byte-comparing it in C++.
+    if (block->phys_page >= kV4PhysPageCount ||
+        block->code_page_generation != page_generations[block->phys_page]) {
       return nullptr;
     }
     return block;
@@ -4933,20 +4919,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     }
 
     const bool cacheable = cpu_.instruction_cacheable(cpu_.pc_);
-    u32 icache_generation = 0u;
-    if (cacheable) {
-      // Refill only the line containing the instruction about to execute.
-      // The JIT compiler consumes that guest-visible snapshot rather than RAM.
-      if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
-        ++stats_.recompiler_frame_icache_refills;
-        constexpr u32 kRefillCycles = 4u;
-        cpu_.cycles_ += kRefillCycles;
-        result.cycles += kRefillCycles;
-        stats_.executed_cycles += kRefillCycles;
-      }
-      icache_generation =
-          cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
-    }
+    u32 icache_generation =
+        cacheable ? cpu_.instruction_cache_generation_for_backend(cpu_.pc_) : 0u;
+
+    // First ask only whether a translation exists. Existing cached blocks enter
+    // resident x64 immediately; generation/tag/refill validation happens there.
+    V4Block *block = impl_->lookup_candidate(cpu_.pc_, cacheable);
 
     V4NativeFn pending_delay_fn = nullptr;
     if (pending_branch_delay && !unsafe_state && cpu_.pending_delay_slot_ &&
@@ -4975,13 +4953,26 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       continue;
     }
 
-    V4Block *block =
-        impl_->lookup(cpu_, cpu_.pc_, cacheable, icache_generation);
     if (block != nullptr) {
       ++stats_.cache_hits;
     } else {
       ++stats_.cache_misses;
       ++stats_.recompiler_frame_cache_misses;
+
+      if (cacheable) {
+        // Compilation needs an architectural guest-visible snapshot. This is
+        // the cold compile path only; hot validation stays entirely resident.
+        if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
+          ++stats_.recompiler_frame_icache_refills;
+          constexpr u32 kRefillCycles = 4u;
+          cpu_.cycles_ += kRefillCycles;
+          result.cycles += kRefillCycles;
+          stats_.executed_cycles += kRefillCycles;
+        }
+        icache_generation =
+            cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
+      }
+
       if (impl_->crossline_waiting_for_refill(
               cpu_, cpu_.pc_, cacheable)) {
         u32 instruction = 0u;
@@ -4990,37 +4981,24 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         run_helper(instruction, V4HelperReason::Opcode);
         continue;
       }
-      ++stats_.recompiler_frame_revalidate_attempts;
-      const auto revalidate_start = std::chrono::steady_clock::now();
-      block = impl_->try_revalidate(
-          cpu_, cpu_.pc_, cacheable, icache_generation);
-      const auto revalidate_elapsed =
-          std::chrono::steady_clock::now() - revalidate_start;
-      stats_.recompiler_frame_revalidate_ns +=
+
+      const auto compile_start = std::chrono::steady_clock::now();
+      block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
+                                   icache_generation);
+      const auto compile_elapsed =
+          std::chrono::steady_clock::now() - compile_start;
+      const u64 compile_ns =
           static_cast<u64>(std::chrono::duration_cast<
-                               std::chrono::nanoseconds>(revalidate_elapsed)
+                               std::chrono::nanoseconds>(compile_elapsed)
                                .count());
-      if (block != nullptr) {
-        ++stats_.cache_hits;
-        ++stats_.recompiler_frame_revalidate_successes;
-      } else {
-        const auto compile_start = std::chrono::steady_clock::now();
-        block = impl_->compile_block(cpu_, stats_, cpu_.pc_, cacheable,
-                                     icache_generation);
-        const auto compile_elapsed =
-            std::chrono::steady_clock::now() - compile_start;
-        const u64 compile_ns =
-            static_cast<u64>(std::chrono::duration_cast<
-                                 std::chrono::nanoseconds>(compile_elapsed)
-                                 .count());
-        stats_.recompiler_frame_compile_ns += compile_ns;
-        stats_.recompiler_frame_compile_max_ns =
-            std::max(stats_.recompiler_frame_compile_max_ns, compile_ns);
-        ++stats_.recompiler_frame_compile_blocks;
-        if (block == nullptr) {
-          ++stats_.recompiler_frame_compile_failures;
-        }
+      stats_.recompiler_frame_compile_ns += compile_ns;
+      stats_.recompiler_frame_compile_max_ns =
+          std::max(stats_.recompiler_frame_compile_max_ns, compile_ns);
+      ++stats_.recompiler_frame_compile_blocks;
+      if (block == nullptr) {
+        ++stats_.recompiler_frame_compile_failures;
       }
+
       if (block == nullptr) {
         // A full arena/metadata slab is recycled in bulk; no per-block
         // executable allocations or frees are needed.
