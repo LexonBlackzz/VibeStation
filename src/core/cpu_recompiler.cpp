@@ -5321,6 +5321,14 @@ V4NativeFn compile_v4_store(
         0u);
     code.jne(stop_after_store);
     if (cacheable) {
+      // The native JIT page-generation update above uses EAX as scratch.
+      // Reconstruct the written direct-mapped I-cache index before deciding
+      // whether a fused tail may continue. If the store aliases this code
+      // slot, the next guest fetch must pay the architectural 4-cycle refill.
+      code.mov(code.eax, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+      code.shr(code.eax, 4u);
+      code.and_(code.eax, 0xFFu);
       code.cmp(code.eax, (start_pc >> 4u) & 0xFFu);
       code.je(stop_after_store);
     }
