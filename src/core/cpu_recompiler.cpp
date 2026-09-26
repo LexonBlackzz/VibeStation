@@ -2364,6 +2364,257 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
     }
 }
 
+
+V4NativeFn compile_v4_cond_move(V4CodeArena &arena,
+                                const V4DecodedCondMove &inst,
+                                u32 start_pc,
+                                const V4LinkTargets &links,
+                                u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 768u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label no_write, retired;
+
+  // Capture both operands before the previous delayed load retires.
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+  code.test(code.ecx, code.ecx);
+  if (inst.op == V4CondMoveOp::Movz) {
+    code.jne(no_write);
+  } else {
+    code.je(no_write);
+  }
+
+  emit_write_guest(code, inst.rd, code.eax);
+  emit_retire_incoming_load(code, inst.rd);
+  code.jmp(retired);
+
+  code.L(no_write);
+  emit_retire_incoming_load(code, 0u);
+  code.L(retired);
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_pending_delay_cond_move(
+    V4CodeArena &arena, const V4DecodedCondMove &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 896u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label no_write, retired;
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+  code.test(code.ecx, code.ecx);
+  if (inst.op == V4CondMoveOp::Movz) {
+    code.jne(no_write);
+  } else {
+    code.je(no_write);
+  }
+  emit_write_guest(code, inst.rd, code.eax);
+  emit_retire_incoming_load(code, inst.rd);
+  code.jmp(retired);
+
+  code.L(no_write);
+  emit_retire_incoming_load(code, 0u);
+  code.L(retired);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_trap(V4CodeArena &arena,
+                           const V4DecodedTrap &inst,
+                           u32 start_pc,
+                           const V4LinkTargets &links,
+                           u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 896u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label no_trap;
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+  code.cmp(code.eax, code.ecx);
+  switch (inst.op) {
+  case V4TrapOp::Tge: code.jl(no_trap); break;
+  case V4TrapOp::Tgeu: code.jb(no_trap); break;
+  case V4TrapOp::Tlt: code.jge(no_trap); break;
+  case V4TrapOp::Tltu: code.jae(no_trap); break;
+  case V4TrapOp::Teq: code.jne(no_trap); break;
+  case V4TrapOp::Tne: code.je(no_trap); break;
+  }
+  emit_v4_exception_no_delay(code, Exception::Trap, start_pc);
+
+  code.L(no_trap);
+  emit_retire_incoming_load(code, 0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+V4NativeFn compile_v4_pending_delay_trap(
+    V4CodeArena &arena, const V4DecodedTrap &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+  Label no_trap;
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+  code.cmp(code.eax, code.ecx);
+  switch (inst.op) {
+  case V4TrapOp::Tge: code.jl(no_trap); break;
+  case V4TrapOp::Tgeu: code.jb(no_trap); break;
+  case V4TrapOp::Tlt: code.jge(no_trap); break;
+  case V4TrapOp::Tltu: code.jae(no_trap); break;
+  case V4TrapOp::Teq: code.jne(no_trap); break;
+  case V4TrapOp::Tne: code.je(no_trap); break;
+  }
+  emit_v4_exception_pending_delay(code, Exception::Trap);
+
+  code.L(no_trap);
+  emit_retire_incoming_load(code, 0u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      1u);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+      1u);
+  emit_v4_block_return(code);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_alu(
     V4CodeArena &arena,
     const std::array<V4DecodedInstruction, kV4MaxBlockInstructions> &decoded,
