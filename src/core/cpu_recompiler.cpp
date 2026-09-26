@@ -421,6 +421,7 @@ enum class V4Cop0Op : u8 {
   Mfc0,
   Mtc0,
   Rfe,
+  Nop,
 };
 
 struct V4DecodedCop0 {
@@ -447,6 +448,10 @@ bool decode_v4_cop0(u32 bits, V4DecodedCop0 &out) {
   }
   if (sub == 0x10u && (bits & 0x3Fu) == 0x10u) {
     out.op = V4Cop0Op::Rfe;
+    return true;
+  }
+  if (sub == 0x0Au) {
+    out.op = V4Cop0Op::Nop;
     return true;
   }
   return false;
@@ -2251,6 +2256,10 @@ V4NativeFn compile_v4_cop0(V4CodeArena &arena,
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
         1u);
+    break;
+
+  case V4Cop0Op::Nop:
+    emit_retire_incoming_load(code, 0u);
     break;
 
   case V4Cop0Op::Rfe:
