@@ -2716,6 +2716,19 @@ u32 EeJit::execute_block(
     BlockEntry* current_entry = nullptr;
     bool final_control_flow = false;
 
+    // These are intentionally local: the BIOS can execute millions of tiny
+    // native blocks per host second, so touching EeJit's profiler members on
+    // every basic-block boundary becomes measurable dispatcher traffic.
+    // Flush once when this native residency ends instead.
+    u64 local_blocks = 0u;
+    u64 local_instructions = 0u;
+    u64 local_guard_bailouts = 0u;
+    u64 local_fastmem_loads = 0u;
+    u64 local_fastmem_stores = 0u;
+    u64 local_code_store_exits = 0u;
+    u64 local_link_attempts = 0u;
+    u64 local_link_hits = 0u;
+
     while (total_retired < maximum_instructions) {
         if (total_retired != 0u &&
             yield_pc != 0u &&
@@ -2770,7 +2783,7 @@ u32 EeJit::execute_block(
             const bool first_is_guarded_memory =
                 ((entry->ram_load_mask | entry->ram_store_mask) & 1u) != 0u;
             if (first_is_guarded_memory) {
-                ++block_guard_bailout_count_;
+                ++local_guard_bailouts;
                 if (++entry->guard_bail_streak >= 4u) {
                     entry->guard_bail_streak = 0u;
                     entry->guard_skip_remaining = 32u;
@@ -2789,8 +2802,8 @@ u32 EeJit::execute_block(
         final_control_flow =
             entry->control_flow && (full_block || annulled_control);
 
-        ++block_executed_count_;
-        block_instruction_count_ += retired;
+        ++local_blocks;
+        local_instructions += retired;
         if (full_block || annulled_control) {
             entry->guard_bail_streak = 0u;
         } else {
@@ -2799,7 +2812,7 @@ u32 EeJit::execute_block(
                 (((entry->ram_load_mask | entry->ram_store_mask) >>
                   retired) & 1u) != 0u;
             if (guard_failure) {
-                ++block_guard_bailout_count_;
+                ++local_guard_bailouts;
                 if (++entry->guard_bail_streak >= 4u) {
                     entry->guard_bail_streak = 0u;
                     entry->guard_skip_remaining = 32u;
@@ -2809,17 +2822,17 @@ u32 EeJit::execute_block(
             }
             if ((entry->ram_store_mask &
                  (1u << (retired - 1u))) != 0u) {
-                ++block_code_store_exit_count_;
+                ++local_code_store_exits;
             }
         }
         const u32 retired_mask =
             retired >= 32u
                 ? 0xFFFFFFFFu
                 : ((1u << retired) - 1u);
-        block_fastmem_load_count_ +=
+        local_fastmem_loads +=
             std::popcount(
                 entry->ram_load_mask & retired_mask);
-        block_fastmem_store_count_ +=
+        local_fastmem_stores +=
             std::popcount(
                 entry->ram_store_mask & retired_mask);
 
@@ -2880,7 +2893,7 @@ u32 EeJit::execute_block(
         // common chain avoids re-hashing the guest PC every few instructions.
         // block_entries_ never reallocates; validating PC + generation keeps
         // hash collisions and self-modifying code safe.
-        ++successor_link_attempt_count_;
+        ++local_link_attempts;
         BlockEntry* cached = entry->linked_successor;
         if (cached != nullptr &&
             entry->linked_successor_pc == next_pc &&
@@ -2888,7 +2901,7 @@ u32 EeJit::execute_block(
             cached->known &&
             cached->pc == next_pc &&
             cached->page_generation == current_page_generation) {
-            ++successor_link_hit_count_;
+            ++local_link_hits;
         } else {
             cached = block_entry(
                 next_pc,
@@ -2933,6 +2946,15 @@ u32 EeJit::execute_block(
         current_pc = next_pc;
         current_words = fetched_words;
     }
+
+    block_executed_count_ += local_blocks;
+    block_instruction_count_ += local_instructions;
+    block_guard_bailout_count_ += local_guard_bailouts;
+    block_fastmem_load_count_ += local_fastmem_loads;
+    block_fastmem_store_count_ += local_fastmem_stores;
+    block_code_store_exit_count_ += local_code_store_exits;
+    successor_link_attempt_count_ += local_link_attempts;
+    successor_link_hit_count_ += local_link_hits;
 
     if (total_retired != 0u) {
         ++native_entry_success_count_;
