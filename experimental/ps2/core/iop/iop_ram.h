@@ -2,7 +2,6 @@
 
 #include "common/types.h"
 
-#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -47,8 +46,8 @@ private:
     [[nodiscard]] bool contains(u32 offset, std::size_t width) const;
 
     std::vector<u8> data_;
-    std::array<u32, kPageCount> page_generations_{};
-    std::array<u8, kPageCount> tracked_code_pages_{};
+    std::vector<u32> page_generations_;
+    std::vector<u8> tracked_code_pages_;
 };
 
 } // namespace ps2
