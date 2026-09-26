@@ -517,6 +517,18 @@ u32 v4_hot_mmio_read16(System *sys, u32 phys) {
   return sys != nullptr ? sys->jit_read16_hot_mmio(phys) : 0x10000u;
 }
 
+u32 v4_bus_read8(System *sys, u32 phys) {
+  return sys != nullptr ? static_cast<u32>(sys->read8(phys)) : 0u;
+}
+
+u32 v4_bus_read16(System *sys, u32 phys) {
+  return sys != nullptr ? static_cast<u32>(sys->read16(phys)) : 0u;
+}
+
+u32 v4_bus_read32(System *sys, u32 phys) {
+  return sys != nullptr ? sys->read32(phys) : 0u;
+}
+
 struct V4DispatchPage;
 
 struct V4NativeState {
@@ -543,6 +555,7 @@ struct V4NativeState {
   u32 store_entries = 0;
   u32 store_phys = 0;
   u32 store_byte_offset = 0;
+  u32 load_byte_offset = 0;
   u32 *cop0_regs = nullptr;
   u32 cop0_jumpdest = 0;
   u32 cop0_badvaddr = 0;
@@ -3355,7 +3368,7 @@ V4NativeFn compile_v4_load(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, hot_mmio16, loaded, unaligned, slow_after_prefix, bail;
+  Label ram, scratch, hot_mmio16, device, loaded, unaligned, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -3406,6 +3419,12 @@ V4NativeFn compile_v4_load(
   code.mov(code.edx, code.eax);
   code.and_(code.edx, 0x1FFFFFFFu);
   if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    code.mov(code.ecx, code.edx);
+    code.and_(code.ecx, 3u);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, load_byte_offset))],
+        code.ecx);
     code.and_(code.edx, ~3u);
   }
   code.cmp(code.edx, code.dword[
@@ -3426,7 +3445,7 @@ V4NativeFn compile_v4_load(
     code.cmp(code.edx, 0x1F801130u);
     code.jb(hot_mmio16);
   }
-  code.jmp(slow_exit);
+  code.jmp(device);
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
@@ -3478,6 +3497,141 @@ V4NativeFn compile_v4_load(
   }
   code.xor_(code.r9d, code.r9d);
 
+  code.L(device);
+  // General MMIO/device access stays native at the CPU level. The generated
+  // fragment owns address/alignment/load-delay/timing semantics and calls C++
+  // only for the actual device bus transaction.
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  // EDX already carries the physical/aligned address.
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.edx);
+#endif
+  if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
+  } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
+  } else {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+  }
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+
+  code.mov(code.r8d, code.eax);
+  if (load.op == V4LoadOp::Lb) {
+    code.shl(code.r8d, 24);
+    code.sar(code.r8d, 24);
+  } else if (load.op == V4LoadOp::Lh) {
+    code.shl(code.r8d, 16);
+    code.sar(code.r8d, 16);
+  }
+
+  if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
+    emit_read_guest(code, code.ecx, load.rt);
+    {
+      Label use_gpr_value;
+      code.cmp(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(load.rt));
+      code.jne(use_gpr_value);
+      code.mov(code.ecx, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))]);
+      code.L(use_gpr_value);
+    }
+
+    Label merge0, merge1, merge2, merge_done;
+    code.mov(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, load_byte_offset))]);
+    code.test(code.edx, code.edx);
+    code.jz(merge0);
+    code.cmp(code.edx, 1u);
+    code.je(merge1);
+    code.cmp(code.edx, 2u);
+    code.je(merge2);
+    if (load.op == V4LoadOp::Lwl) {
+      code.jmp(merge_done);
+      code.L(merge0);
+      code.and_(code.ecx, 0x00FFFFFFu);
+      code.shl(code.r8d, 24);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.and_(code.ecx, 0x0000FFFFu);
+      code.shl(code.r8d, 16);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.and_(code.ecx, 0x000000FFu);
+      code.shl(code.r8d, 8);
+      code.or_(code.r8d, code.ecx);
+    } else {
+      code.shr(code.r8d, 24);
+      code.and_(code.ecx, 0xFFFFFF00u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge0);
+      code.jmp(merge_done);
+      code.L(merge1);
+      code.shr(code.r8d, 8);
+      code.and_(code.ecx, 0xFF000000u);
+      code.or_(code.r8d, code.ecx);
+      code.jmp(merge_done);
+      code.L(merge2);
+      code.shr(code.r8d, 16);
+      code.and_(code.ecx, 0xFFFF0000u);
+      code.or_(code.r8d, code.ecx);
+    }
+    code.L(merge_done);
+  }
+
+  if (prefix_count == 0u) {
+    emit_retire_incoming_load(code, load.rt);
+  }
+  if (load.rt != 0u) {
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+        static_cast<u32>(load.rt));
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+        code.r8d);
+  }
+
+  // Device accesses are a real host scheduling boundary. Stop immediately
+  // after the memory instruction rather than executing a fused tail across a
+  // possibly side-effectful register access.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc + prefix_count * 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      start_pc + (prefix_count + 1u) * 4u);
+  code.add(code.ebx, prefix_count + 2u);
+  code.sub(code.r12d, prefix_count + 1u);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+  emit_v4_block_return(code);
+
   code.L(loaded);
   if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
     // LWL/LWR merge against the architecturally visible target value. If the
@@ -3498,8 +3652,9 @@ V4NativeFn compile_v4_load(
     }
 
     Label merge0, merge1, merge2, merge_done;
-    code.mov(code.edx, code.eax);
-    code.and_(code.edx, 3u);
+    code.mov(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, load_byte_offset))]);
     code.test(code.edx, code.edx);
     code.jz(merge0);
     code.cmp(code.edx, 1u);
