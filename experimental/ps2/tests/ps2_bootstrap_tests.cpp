@@ -4562,6 +4562,66 @@ bool test_ee_native_extended_integer_block() {
     return ok;
 }
 
+
+bool test_ee_native_cop2_register_transfers() {
+    constexpr ps2::u32 pc = 0x5800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x12u << 26) | (0x05u << 21) | (1u << 16) | (2u << 11), // QMTC2 vf2,r1
+        (0x12u << 26) | (0x01u << 21) | (3u << 16) | (2u << 11), // QMFC2 r3,vf2
+        (0x12u << 26) | (0x06u << 21) | (4u << 16) | (5u << 11), // CTC2 vi5,r4
+        (0x12u << 26) | (0x02u << 21) | (6u << 16) | (5u << 11), // CFC2 r6,vi5
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+
+    const ps2::EeGpr vector{
+        0x0123456789ABCDEFull,
+        0xFFEEDDCCBBAA9988ull,
+    };
+    exact.ee().state().gpr[1] = vector;
+    native.ee().state().gpr[1] = vector;
+    exact.ee().state().gpr[4].lo = 0x12345678u;
+    native.ee().state().gpr[4].lo = 0x12345678u;
+
+    std::string error;
+    bool ok = true;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE COP2 native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == code.size() &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.vu_vf[2].lo == b.vu_vf[2].lo &&
+        a.vu_vf[2].hi == b.vu_vf[2].hi &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[3].hi == b.gpr[3].hi &&
+        a.vu_vi[5] == b.vu_vi[5] &&
+        a.gpr[6].lo == b.gpr[6].lo &&
+        b.vu_vi[5] == 0x5678u,
+        "EE native COP2 register-transfer state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE COP2 register-transfer block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_scratchpad_fastmem() {
     constexpr ps2::u32 pc = 0x5A00u;
     constexpr ps2::u32 scratch = ps2::EeScratchpad::kBase + 0x30u;
@@ -6340,6 +6400,7 @@ int main() {
     ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
+    ok = test_ee_native_cop2_register_transfers() && ok;
     ok = test_ee_native_scratchpad_fastmem() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;

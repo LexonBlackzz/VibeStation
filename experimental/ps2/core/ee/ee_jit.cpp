@@ -351,6 +351,69 @@ void ee_jit_special_div_helper(
     }
 }
 
+bool ee_jit_cop2_register_helper_supported(u32 instruction) {
+    if ((instruction >> 26) != 0x12u) return false;
+    const u32 rs = (instruction >> 21) & 31u;
+    return rs == 0x01u || // QMFC2
+           rs == 0x02u || // CFC2
+           rs == 0x05u || // QMTC2
+           rs == 0x06u;   // CTC2
+}
+
+void ee_jit_cop2_register_helper(
+    EeCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 fs = (instruction >> 11) & 31u;
+    const auto write_word = [&](u32 reg, u32 value) {
+        if (reg == 0u) return;
+        state->gpr[reg].lo = static_cast<u64>(
+            static_cast<s64>(static_cast<s32>(value)));
+    };
+
+    switch (rs) {
+    case 0x01u: // QMFC2
+        if (rt != 0u) state->gpr[rt] = state->vu_vf[fs];
+        break;
+    case 0x02u: { // CFC2
+        u32 value = state->vu_vi[fs];
+        if (fs == 20u) value &= 0x007FFFFFu;
+        write_word(rt, value);
+        break;
+    }
+    case 0x05u: // QMTC2
+        if (fs != 0u) state->vu_vf[fs] = state->gpr[rt];
+        break;
+    case 0x06u: { // CTC2
+        if (fs == 0u || fs == 17u || fs == 26u || fs == 29u) break;
+        const u32 value = static_cast<u32>(state->gpr[rt].lo);
+        if (fs < 16u) {
+            state->vu_vi[fs] = static_cast<u16>(value);
+        } else if (fs == 20u) {
+            state->vu_vi[20] =
+                (value & 0x007FFFFFu) | 0x3F800000u;
+        } else if (fs == 28u) {
+            state->vu_vi[28] = value & 0x00000C0Cu;
+            if ((value & 0x2u) != 0u) {
+                for (u32 i = 1u; i < 32u; ++i) state->vu_vf[i] = {};
+                for (u32 i = 1u; i < 16u; ++i) state->vu_vi[i] = 0u;
+                state->vu_vi[29] &= ~0xFFu;
+            }
+            if ((value & 0x200u) != 0u) {
+                state->vu_vi[29] &= ~0xFF00u;
+            }
+        } else {
+            state->vu_vi[fs] = value;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 bool ee_jit_cop1_register_helper_supported(u32 instruction) {
     if ((instruction >> 26) != 0x11u) return false;
     const u32 rs = (instruction >> 21) & 31u;
@@ -850,6 +913,16 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             } else {
                 return false;
             }
+            destination = 0u;
+            break;
+        }
+        case 0x12u: { // COP2/VU0 register transfers
+            if (!ee_jit_cop2_register_helper_supported(instruction)) {
+                return false;
+            }
+            out.call_state_instruction_helper(
+                &ee_jit_cop2_register_helper,
+                instruction);
             destination = 0u;
             break;
         }
