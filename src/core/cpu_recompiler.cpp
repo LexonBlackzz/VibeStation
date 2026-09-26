@@ -78,6 +78,7 @@ enum class V4AluOp : u8 {
   Ori,
   Xori,
   Lui,
+  Clear,
 };
 
 struct V4DecodedInstruction {
@@ -89,6 +90,33 @@ struct V4DecodedInstruction {
   u16 imm = 0;
   s32 simm = 0;
 };
+
+enum class V4CondMoveOp : u8 {
+  Movz,
+  Movn,
+};
+
+struct V4DecodedCondMove {
+  V4CondMoveOp op = V4CondMoveOp::Movz;
+  u8 rs = 0;
+  u8 rt = 0;
+  u8 rd = 0;
+};
+
+bool decode_v4_cond_move(u32 bits, V4DecodedCondMove &out) {
+  if (((bits >> 26) & 0x3Fu) != 0u) {
+    return false;
+  }
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  switch (bits & 0x3Fu) {
+  case 0x0A: out.op = V4CondMoveOp::Movz; return true;
+  case 0x0B: out.op = V4CondMoveOp::Movn; return true;
+  default: return false;
+  }
+}
 
 enum class V4ControlOp : u8 {
   None,
@@ -138,8 +166,10 @@ bool decode_v4_overflow_alu(u32 bits, V4DecodedOverflowAlu &out) {
   const u32 primary = (bits >> 26) & 0x3Fu;
   if (primary == 0u) {
     switch (bits & 0x3Fu) {
-    case 0x20: out.op = V4OverflowAluOp::Add; return true;
-    case 0x22: out.op = V4OverflowAluOp::Sub; return true;
+    case 0x20:
+    case 0x2C: out.op = V4OverflowAluOp::Add; return true;
+    case 0x22:
+    case 0x2E: out.op = V4OverflowAluOp::Sub; return true;
     default: return false;
     }
   }
@@ -148,6 +178,39 @@ bool decode_v4_overflow_alu(u32 bits, V4DecodedOverflowAlu &out) {
     return true;
   }
   return false;
+}
+
+enum class V4TrapOp : u8 {
+  Tge,
+  Tgeu,
+  Tlt,
+  Tltu,
+  Teq,
+  Tne,
+};
+
+struct V4DecodedTrap {
+  V4TrapOp op = V4TrapOp::Tge;
+  u8 rs = 0;
+  u8 rt = 0;
+};
+
+bool decode_v4_trap(u32 bits, V4DecodedTrap &out) {
+  if (((bits >> 26) & 0x3Fu) != 0u) {
+    return false;
+  }
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  switch (bits & 0x3Fu) {
+  case 0x30: out.op = V4TrapOp::Tge; return true;
+  case 0x31: out.op = V4TrapOp::Tgeu; return true;
+  case 0x32: out.op = V4TrapOp::Tlt; return true;
+  case 0x33: out.op = V4TrapOp::Tltu; return true;
+  case 0x34: out.op = V4TrapOp::Teq; return true;
+  case 0x36: out.op = V4TrapOp::Tne; return true;
+  default: return false;
+  }
 }
 
 enum class V4HiLoOp : u8 {
@@ -487,14 +550,22 @@ bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
     case 0x04: out.op = V4AluOp::Sllv; return true;
     case 0x06: out.op = V4AluOp::Srlv; return true;
     case 0x07: out.op = V4AluOp::Srav; return true;
+    case 0x0F: out.op = V4AluOp::Nop; return true; // SYNC
+    case 0x14: out.op = V4AluOp::Nop; return true; // compatibility nop
+    case 0x1C: out.op = V4AluOp::Nop; return true; // compatibility nop
     case 0x21: out.op = V4AluOp::Addu; return true;
     case 0x23: out.op = V4AluOp::Subu; return true;
     case 0x24: out.op = V4AluOp::And; return true;
     case 0x25: out.op = V4AluOp::Or; return true;
     case 0x26: out.op = V4AluOp::Xor; return true;
     case 0x27: out.op = V4AluOp::Nor; return true;
+    case 0x28: out.op = V4AluOp::Nop; return true;
+    case 0x29: out.op = V4AluOp::Nop; return true;
     case 0x2A: out.op = V4AluOp::Slt; return true;
     case 0x2B: out.op = V4AluOp::Sltu; return true;
+    case 0x2D: out.op = V4AluOp::Addu; return true; // DADDU compat
+    case 0x2F: out.op = V4AluOp::Subu; return true; // DSUBU compat
+    case 0x38: out.op = V4AluOp::Clear; return true; // DSLL32 low 32 bits
     default: return false;
     }
   }
@@ -920,6 +991,7 @@ u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
   case V4AluOp::Nor:
   case V4AluOp::Slt:
   case V4AluOp::Sltu:
+  case V4AluOp::Clear:
     return inst.rd;
   case V4AluOp::Addiu:
   case V4AluOp::Slti:
@@ -2284,6 +2356,10 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
     case V4AluOp::Lui:
       code.mov(code.eax, static_cast<u32>(inst.imm) << 16u);
       emit_write_guest(code, inst.rt, code.eax);
+      break;
+    case V4AluOp::Clear:
+      code.xor_(code.eax, code.eax);
+      emit_write_guest(code, inst.rd, code.eax);
       break;
     }
 }
