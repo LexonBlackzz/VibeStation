@@ -442,6 +442,8 @@ static void log_cpu_compare_failure_summary(
       "CPU_COMPARE_FAIL name=%s ref=Interpreter mode=%s state=%u segment=%u irq=%u mem=%u "
       "periph=%u seg_periph=%u expected=%u native=%u native_check=%s "
       "pc=%08X/%08X next=%08X/%08X current=%08X/%08X cyc=%llu/%llu "
+      "cause=%08X/%08X epc=%08X/%08X bad=%08X/%08X "
+      "delay=%u/%u branch_pc=%08X/%08X "
       "first_reg=%d:%08X/%08X native_instr=%llu decoded_instr=%llu "
       "fallback_instr=%llu icache_refills=%llu helper_instr=%llu "
       "dispatch=%llu missing=%llu generation=%llu budget=%llu bail=%llu",
@@ -457,6 +459,12 @@ static void log_cpu_compare_failure_summary(
       reference.state.current_pc, actual.state.current_pc,
       static_cast<unsigned long long>(reference.state.cycles),
       static_cast<unsigned long long>(actual.state.cycles),
+      reference.state.cop0_cause, actual.state.cop0_cause,
+      reference.state.cop0_epc, actual.state.cop0_epc,
+      reference.state.cop0_badvaddr, actual.state.cop0_badvaddr,
+      reference.state.pending_delay_slot ? 1u : 0u,
+      actual.state.pending_delay_slot ? 1u : 0u,
+      reference.state.pending_branch_pc, actual.state.pending_branch_pc,
       first_reg, first_reg_ref, first_reg_actual,
       static_cast<unsigned long long>(actual.stats.native_instructions),
       static_cast<unsigned long long>(actual.stats.decoded_instructions),
