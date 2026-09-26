@@ -6858,36 +6858,9 @@ struct CpuRecompilerBackend::Impl {
         !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_cop2 && !simple_exception && !simple_cop_unusable) {
       (void)read_visible(start_pc, native_unknown_bits);
-      const u32 primary = (native_unknown_bits >> 26) & 0x3Fu;
-
-      // LWC0/SWC0 are the last architecturally valid memory opcodes still
-      // awaiting dedicated native memory lowering. Everything else that reaches
-      // here is either ReservedInst or the explicit compatibility-unknown mode.
-      if (primary == 0x30u || primary == 0x38u) {
-        ++stats.native_compile_attempts;
-        block->reject_kind = classify_v4_reject(native_unknown_bits);
-        block->instruction_count = 1u;
-        block->guest_bits[0] = native_unknown_bits;
-        block->helper_fn = helper_for(native_unknown_bits);
-        if (block->helper_fn == nullptr) {
-          if (!reused_block) {
-            --block_count;
-          }
-          ++stats.native_compile_failures;
-          return nullptr;
-        }
-        code_pages.mark_address(start_phys);
-        code_lines.mark_address(start_phys);
-        install(start_pc, block);
-        ++stats.native_compile_successes;
-        ++stats.native_blocks_compiled;
-        ++stats.native_compiled_block_size_histogram[1];
-        ++stats.native_blocks;
-        stats.block_count = static_cast<u32>(block_count);
-        stats.native_code_bytes = arena.bytes_used();
-        stats.code_bytes = arena.bytes_used();
-        return block;
-      }
+      // All architecturally supported memory/system opcodes are decoded before
+      // this point. Anything left is either ReservedInst or the explicit
+      // compatibility-unknown behavior, and both are emitted as native x64.
       simple_native_unknown = true;
     }
 
@@ -7578,31 +7551,13 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       }
     }
 
-    if (block != nullptr && block->helper_fn != nullptr) {
-      run_helper(block->guest_bits[0], V4HelperReason::Opcode);
-      continue;
-    }
     if (block == nullptr || block->fn == nullptr) {
+      // A host JIT compilation/allocation failure is not permission to execute
+      // the guest instruction through the interpreter. Leave the slice without
+      // architectural progress; the caller may retry after cache maintenance.
       ++stats_.native_reject_unsupported_instruction;
-      if (block != nullptr && block->interpreter_only) {
-        switch (block->reject_kind) {
-        case V4RejectKind::Branch: ++stats_.native_reject_branch; break;
-        case V4RejectKind::Memory: ++stats_.native_reject_memory; break;
-        case V4RejectKind::Cop0: ++stats_.native_reject_cop0; break;
-        case V4RejectKind::Cop2: ++stats_.native_reject_cop2; break;
-        case V4RejectKind::Exception:
-          ++stats_.native_reject_exception_unknown;
-          break;
-        case V4RejectKind::Other: break;
-        }
-      }
-      u32 instruction = 0u;
-      if (!cpu_.read_visible_instruction_for_backend(cpu_.pc_,
-                                                     instruction)) {
-        instruction = cpu_.read_instruction_for_backend(cpu_.pc_);
-      }
-      run_helper(instruction, V4HelperReason::CompileFailure);
-      continue;
+      ++stats_.recompiler_frame_compile_failures;
+      break;
     }
 
     const u32 remaining_cycles = max_cycles - result.cycles;
