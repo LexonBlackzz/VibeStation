@@ -1416,7 +1416,19 @@ void Ps2App::panel_profiler() {
         profile_vu1_mips_);
 
     ImGui::Spacing();
+    bool host_timing_enabled =
+        system_.profile_timing_enabled();
+    if (ImGui::Checkbox(
+            "Enable host-time sampling (slower)",
+            &host_timing_enabled)) {
+        system_.set_profile_timing_enabled(
+            host_timing_enabled);
+    }
     ImGui::TextUnformatted("Host emulation-thread time");
+    if (!host_timing_enabled) {
+        ImGui::TextDisabled(
+            "Disabled for performance; native/IOP counters above remain active.");
+    }
     if (ImGui::BeginTable(
             "ProfilerHostTime", 2,
             ImGuiTableFlags_Borders |
@@ -1436,7 +1448,9 @@ void Ps2App::panel_profiler() {
         ImGui::EndTable();
     }
     ImGui::TextDisabled(
-        "Slow-path time is sampled 1/256 to avoid perturbing emulation.");
+        host_timing_enabled
+            ? "Slow-path time is sampled 1/256; timing itself still perturbs emulation."
+            : "Turn host-time sampling on only when diagnosing where host time goes.");
 
     std::array<std::pair<double, u32>, 64> fallback_rates{};
     for (u32 opcode = 0; opcode < 64u; ++opcode) {
