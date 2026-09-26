@@ -5291,7 +5291,8 @@ u32 EeCpu::run_native_block(
     u32 maximum_instructions,
     const u8* ram_data,
     u32* page_generations,
-    u32 yield_pc) {
+    u32 yield_pc,
+    u8* scratchpad_data) {
     if (halted_ || next_is_delay_slot_ ||
         state_.pc != pc ||
         instructions == nullptr ||
@@ -5311,7 +5312,8 @@ u32 EeCpu::run_native_block(
         ram_data,
         page_generations,
         control_flow,
-        yield_pc);
+        yield_pc,
+        scratchpad_data);
     if (retired == 0u) return 0u;
 
     // The resident JIT owns PC/next-PC/last-instruction state for the
