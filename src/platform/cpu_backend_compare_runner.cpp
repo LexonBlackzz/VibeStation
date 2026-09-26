@@ -4121,6 +4121,46 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_swc2.require_v4_cop2_native_when_available = true;
   cases.push_back(v4_split_scheduler_swc2);
 
+  CpuCompareCase v4_nested_branch_delay{};
+  v4_nested_branch_delay.name = "v4_nested_branch_in_delay_slot_native";
+  v4_nested_branch_delay.start_pc = 0xA0010000u;
+  v4_nested_branch_delay.initial_gpr[1] = 1u;
+  v4_nested_branch_delay.initial_gpr[2] = 1u;
+  v4_nested_branch_delay.program = {
+      enc_i(0x05, 1, 0, 1),       // Outer BNE -> 0xA0010008.
+      enc_i(0x05, 2, 0, 1),       // Inner BNE occupies outer delay slot.
+      enc_i(0x09, 0, 4, 0x0044),  // Inner delay slot at outer target.
+      enc_i(0x09, 0, 5, 0x0055),  // Inner target.
+  };
+  v4_nested_branch_delay.instructions = 4u;
+  v4_nested_branch_delay.segment_instructions = {1u, 1u, 2u};
+  v4_nested_branch_delay.compare_segment_states = true;
+  v4_nested_branch_delay.require_v4_native_entry_when_available = true;
+  v4_nested_branch_delay.require_v4_pending_delay_native_when_available = true;
+  v4_nested_branch_delay.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_nested_branch_delay);
+
+  CpuCompareCase v4_nested_likely_annul{};
+  v4_nested_likely_annul.name = "v4_nested_branch_likely_annul_native";
+  v4_nested_likely_annul.start_pc = 0xA0010000u;
+  v4_nested_likely_annul.initial_gpr[1] = 1u;
+  v4_nested_likely_annul.initial_gpr[2] = 1u;
+  v4_nested_likely_annul.initial_gpr[3] = 2u;
+  v4_nested_likely_annul.program = {
+      enc_i(0x05, 1, 0, 1),       // Outer BNE -> 0xA0010008.
+      enc_i(0x14, 2, 3, 1),       // BEQL not taken; annul its own delay.
+      enc_i(0x09, 0, 4, 0x0044),  // Must be annulled.
+      enc_i(0x09, 0, 5, 0x0055),  // Execution resumes here.
+      0u,
+  };
+  v4_nested_likely_annul.instructions = 3u;
+  v4_nested_likely_annul.segment_instructions = {1u, 1u, 1u};
+  v4_nested_likely_annul.compare_segment_states = true;
+  v4_nested_likely_annul.require_v4_native_entry_when_available = true;
+  v4_nested_likely_annul.require_v4_pending_delay_native_when_available = true;
+  v4_nested_likely_annul.require_v4_native_branch_entry_when_available = true;
+  cases.push_back(v4_nested_likely_annul);
+
   CpuCompareCase v4_split_scheduler_addi{};
   v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
   v4_split_scheduler_addi.start_pc = 0xA0010000u;
