@@ -9,6 +9,7 @@ on:
       - perf/recompiler-spike-profiling
       - perf/gpu-oscillation-probe
       - perf/recompiler-execution-flow-1
+      - perf/recompiler-native-only-1
   workflow_dispatch:
 
 jobs:
