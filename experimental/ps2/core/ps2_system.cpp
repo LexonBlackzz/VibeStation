@@ -553,6 +553,7 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
         if (i + 1u < steps && !sif_dma_.iop_completion_pending() &&
             iop_.skip_osdsys_idle_pair()) {
             i += 2u;
+            ++skipped_iop_idle_pairs_;
             continue;
         }
 

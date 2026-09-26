@@ -114,6 +114,7 @@ private:
     u64 profile_sample_iop_ns_ = 0;
     u64 profile_sample_slow_path_ns_ = 0;
     u64 profile_sample_iop_instructions_ = 0;
+    u64 profile_sample_iop_idle_pairs_ = 0;
     u64 profile_sample_iop_native_instructions_ = 0;
     u64 profile_sample_iop_native_blocks_ = 0;
     u64 profile_sample_iop_native_chains_ = 0;
@@ -125,7 +126,10 @@ private:
     double profile_native_mips_ = 0.0;
     double profile_iop_mips_ = 0.0;
     double profile_iop_native_mips_ = 0.0;
+    double profile_iop_idle_mips_ = 0.0;
+    double profile_iop_slow_mips_ = 0.0;
     double profile_iop_native_coverage_percent_ = 0.0;
+    double profile_iop_active_native_coverage_percent_ = 0.0;
     double profile_iop_native_blocks_per_second_ = 0.0;
     double profile_iop_average_native_block_ = 0.0;
     double profile_iop_native_chains_per_second_ = 0.0;

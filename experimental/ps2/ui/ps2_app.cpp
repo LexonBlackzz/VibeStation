@@ -1518,10 +1518,16 @@ void Ps2App::panel_profiler() {
     }
 
     ImGui::Text(
-        "IOP: %.1f MIPS   native %.1f MIPS (%.1f%% coverage)",
+        "IOP: %.1f MIPS   native %.1f MIPS (%.1f%% raw / %.1f%% active)",
         profile_iop_mips_,
         profile_iop_native_mips_,
-        profile_iop_native_coverage_percent_);
+        profile_iop_native_coverage_percent_,
+        profile_iop_active_native_coverage_percent_);
+    ImGui::Text(
+        "IOP execution split: %.1f MIPS native   %.1f idle-skip   %.1f slow path",
+        profile_iop_native_mips_,
+        profile_iop_idle_mips_,
+        profile_iop_slow_mips_);
     ImGui::Text(
         "IOP native: %.0f blocks/s   %.1f instr/block   %.0f chains/s",
         profile_iop_native_blocks_per_second_,
@@ -2220,6 +2226,8 @@ bool Ps2App::start_bios() {
     profile_sample_slow_path_ns_ = system_.profile_slow_path_ns();
     profile_sample_iop_instructions_ =
         system_.iop().state().instructions_executed;
+    profile_sample_iop_idle_pairs_ =
+        system_.skipped_iop_idle_pairs();
     profile_sample_iop_native_instructions_ =
         system_.iop().jit_native_instructions();
     profile_sample_iop_native_blocks_ =
@@ -2456,10 +2464,37 @@ void Ps2App::update_emulation() {
         profile_iop_native_mips_ =
             static_cast<double>(iop_native_delta) /
             sample_seconds / 1'000'000.0;
+        const u64 iop_idle_pairs =
+            system_.skipped_iop_idle_pairs();
+        const u64 iop_idle_instructions_delta =
+            (iop_idle_pairs - profile_sample_iop_idle_pairs_) * 2u;
+        const u64 iop_active_delta =
+            iop_delta > iop_idle_instructions_delta
+                ? iop_delta - iop_idle_instructions_delta
+                : 0u;
+        const u64 iop_slow_delta =
+            iop_active_delta > iop_native_delta
+                ? iop_active_delta - iop_native_delta
+                : 0u;
+        profile_iop_idle_mips_ =
+            static_cast<double>(iop_idle_instructions_delta) /
+            sample_seconds / 1'000'000.0;
+        profile_iop_slow_mips_ =
+            static_cast<double>(iop_slow_delta) /
+            sample_seconds / 1'000'000.0;
+        // Raw coverage is retained for continuity with older profiler
+        // screenshots. Active coverage excludes the explicit OSDSYS J/NOP
+        // idle accelerator because those instructions never touched the
+        // interpreter and should not be counted as failed JIT work.
         profile_iop_native_coverage_percent_ =
             iop_delta != 0u
                 ? static_cast<double>(iop_native_delta) * 100.0 /
                     static_cast<double>(iop_delta)
+                : 0.0;
+        profile_iop_active_native_coverage_percent_ =
+            iop_active_delta != 0u
+                ? static_cast<double>(iop_native_delta) * 100.0 /
+                    static_cast<double>(iop_active_delta)
                 : 0.0;
         profile_iop_native_blocks_per_second_ =
             static_cast<double>(iop_native_block_delta) /
@@ -2547,6 +2582,8 @@ void Ps2App::update_emulation() {
         profile_sample_iop_ns_ = iop_ns;
         profile_sample_slow_path_ns_ = slow_path_ns;
         profile_sample_iop_instructions_ = iop_instructions;
+        profile_sample_iop_idle_pairs_ =
+            system_.skipped_iop_idle_pairs();
         profile_sample_iop_native_instructions_ =
             iop_native_instructions;
         profile_sample_iop_native_blocks_ = iop_native_blocks;
