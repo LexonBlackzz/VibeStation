@@ -1910,7 +1910,8 @@ u32 EeJit::execute_block(
     // page: EeRam's generation tracking makes that page a safe coherency
     // domain without widening the invalidation contract.
     const u32 origin_physical = ram_physical_address(pc);
-    const u32 code_page = origin_physical >> 12;
+    u32 current_code_page = origin_physical >> 12;
+    u32 current_page_generation = page_generation;
     u32 total_retired = 0u;
     u32 current_pc = pc;
     const u32* current_words = instructions;
@@ -1927,7 +1928,7 @@ u32 EeJit::execute_block(
 
         BlockEntry* entry = block_entry(
             current_pc,
-            page_generation,
+            current_page_generation,
             current_words,
             current_count);
         if (entry == nullptr ||
@@ -2040,7 +2041,8 @@ u32 EeJit::execute_block(
         // from the old generation in the same host dispatch.
         if (page_generations != nullptr &&
             EeRam::generation_from_metadata(
-                page_generations[code_page]) != page_generation) {
+                page_generations[current_code_page]) !=
+                current_page_generation) {
             break;
         }
 
@@ -2052,9 +2054,21 @@ u32 EeJit::execute_block(
         }
         const u32 next_physical =
             ram_physical_address(next_pc);
-        if (next_physical >= kEeRamSize ||
-            (next_physical >> 12) != code_page) {
+        if (next_physical >= kEeRamSize) {
             break;
+        }
+
+        const u32 next_code_page = next_physical >> 12;
+        if (next_code_page != current_code_page) {
+            // Cross-page chaining is safe when page-generation metadata is
+            // available: each compiled block is keyed by its own generation
+            // and track_jit_code() marks only the translated regions on that
+            // page. This removes an arbitrary 4 KiB dispatcher boundary.
+            if (page_generations == nullptr) break;
+            current_code_page = next_code_page;
+            current_page_generation =
+                EeRam::generation_from_metadata(
+                    page_generations[current_code_page]);
         }
 
         const u32 words_to_page_end =
