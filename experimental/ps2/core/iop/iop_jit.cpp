@@ -83,6 +83,17 @@ struct Emitter {
                 offsetof(IopCpuState, gpr) + reg * sizeof(u32)));
     }
 
+    void store_r9d(u32 reg) {
+        if (reg == 0u) return;
+        emit(0x44u); // REX.R for R9D
+        emit(0x89u);
+        emit(static_cast<u8>(
+            0x80u | (1u << 3u) |
+            (kStateArgumentRegister & 7u)));
+        emit32(static_cast<u32>(
+            offsetof(IopCpuState, gpr) + reg * sizeof(u32)));
+    }
+
     void load_state_eax(u32 offset) {
         memory(0x8Bu, 0u, offset);
     }
@@ -382,6 +393,162 @@ bool emit_body(u32 instruction, Emitter& out) {
     return true;
 }
 
+bool body_writes_register(u32 instruction, u32 reg) {
+    if (reg == 0u) return false;
+    const u32 opcode = instruction >> 26;
+    if (opcode == 0u) {
+        const u32 funct = instruction & 63u;
+        const u32 rd = (instruction >> 11) & 31u;
+        switch (funct) {
+        case 0x00u:
+        case 0x02u:
+        case 0x03u:
+        case 0x04u:
+        case 0x06u:
+        case 0x07u:
+        case 0x10u:
+        case 0x12u:
+        case 0x21u:
+        case 0x23u:
+        case 0x24u:
+        case 0x25u:
+        case 0x26u:
+        case 0x27u:
+        case 0x2Au:
+        case 0x2Bu:
+            return rd == reg;
+        default:
+            return false;
+        }
+    }
+
+    switch (opcode) {
+    case 0x09u:
+    case 0x0Au:
+    case 0x0Bu:
+    case 0x0Cu:
+    case 0x0Du:
+    case 0x0Eu:
+    case 0x0Fu:
+        return ((instruction >> 16) & 31u) == reg;
+    default:
+        return false;
+    }
+}
+
+bool emit_load_and_delay(
+    u32 load_instruction,
+    u32 delay_instruction,
+    u32 retired_before,
+    Emitter& out) {
+    const u32 opcode = load_instruction >> 26;
+    const u32 rs = (load_instruction >> 21) & 31u;
+    const u32 rt = (load_instruction >> 16) & 31u;
+    const s16 immediate =
+        static_cast<s16>(load_instruction & 0xFFFFu);
+
+    u32 width = 0u;
+    switch (opcode) {
+    case 0x20u: // LB
+    case 0x24u: // LBU
+        width = 1u;
+        break;
+    case 0x21u: // LH
+    case 0x25u: // LHU
+        width = 2u;
+        break;
+    case 0x23u: // LW
+        width = 4u;
+        break;
+    default:
+        return false;
+    }
+
+    // The delay instruction must stay entirely native while the load result
+    // remains hidden in R9D. emit_body never uses R9/R10/R11.
+    Emitter delay_probe;
+    if (!emit_body(delay_instruction, delay_probe)) {
+        return false;
+    }
+
+    out.load_eax(rs);
+    out.emit(0x05u);
+    out.emit32(static_cast<u32>(static_cast<s32>(immediate)));
+
+    // KSEG0/KSEG1 -> 29-bit physical. KUSEG physical addresses pass through.
+    out.emit(0x3Du); out.emit32(0x80000000u);
+    const std::size_t below_kseg = out.jcc32(0x82u); // JB
+    out.emit(0x3Du); out.emit32(0xC0000000u);
+    const std::size_t outside_kseg = out.jcc32(0x83u); // JAE
+    out.emit(0x25u); out.emit32(0x1FFFFFFFu);
+    const std::size_t mapped = out.jmp32();
+
+    const std::size_t physical_label = out.bytes.size();
+    out.patch_rel32(below_kseg, physical_label);
+    out.patch_rel32(mapped, physical_label);
+
+    std::vector<std::size_t> fail_jumps;
+    fail_jumps.push_back(outside_kseg);
+    out.emit(0x3Du); out.emit32(0x00800000u);
+    fail_jumps.push_back(out.jcc32(0x83u)); // JAE
+
+    // 8 MiB physical mirror -> 2 MiB backing.
+    out.emit(0x25u); out.emit32(0x001FFFFFu);
+    out.emit(0x3Du);
+    out.emit32(static_cast<u32>(IopRam::kSize - width));
+    fail_jumps.push_back(out.jcc32(0x87u)); // JA
+
+    // Keep the loaded result in R9D until after the architectural load-delay
+    // instruction has consumed the old GPR value.
+    switch (opcode) {
+    case 0x20u: // MOVSX R9D, byte [R11+RAX]
+        out.emit(0x45u); out.emit(0x0Fu); out.emit(0xBEu);
+        out.emit(0x0Cu); out.emit(0x03u);
+        break;
+    case 0x24u: // MOVZX R9D, byte [R11+RAX]
+        out.emit(0x45u); out.emit(0x0Fu); out.emit(0xB6u);
+        out.emit(0x0Cu); out.emit(0x03u);
+        break;
+    case 0x21u: // MOVSX R9D, word [R11+RAX]
+        out.emit(0x45u); out.emit(0x0Fu); out.emit(0xBFu);
+        out.emit(0x0Cu); out.emit(0x03u);
+        break;
+    case 0x25u: // MOVZX R9D, word [R11+RAX]
+        out.emit(0x45u); out.emit(0x0Fu); out.emit(0xB7u);
+        out.emit(0x0Cu); out.emit(0x03u);
+        break;
+    case 0x23u: // MOV R9D, dword [R11+RAX]
+        out.emit(0x45u); out.emit(0x8Bu);
+        out.emit(0x0Cu); out.emit(0x03u);
+        break;
+    default:
+        return false;
+    }
+
+    if (!emit_body(delay_instruction, out)) {
+        return false;
+    }
+
+    // A direct write by the delay instruction suppresses the older pending
+    // load, matching IopCpu::step_internal's direct_write_mask_ rule.
+    if (rt != 0u &&
+        !body_writes_register(delay_instruction, rt)) {
+        out.store_r9d(rt);
+    }
+
+    const std::size_t done = out.jmp32();
+    const std::size_t fail_label = out.bytes.size();
+    out.emit(0xB8u);
+    out.emit32(retired_before);
+    out.emit(0xC3u);
+    const std::size_t end = out.bytes.size();
+    for (const std::size_t jump : fail_jumps) {
+        out.patch_rel32(jump, fail_label);
+    }
+    out.patch_rel32(done, end);
+    return true;
+}
+
 bool emit_store(
     u32 instruction,
     u32 retired_before,
@@ -625,6 +792,19 @@ bool emit_block(
         const std::size_t before = out.bytes.size();
         if (emit_body(words[i], out)) {
             ++compiled;
+            continue;
+        }
+
+        out.bytes.resize(before);
+        if (i + 1u < word_count &&
+            emit_load_and_delay(
+                words[i],
+                words[i + 1u],
+                compiled,
+                out)) {
+            uses_ram = true;
+            compiled += 2u;
+            ++i;
             continue;
         }
 
