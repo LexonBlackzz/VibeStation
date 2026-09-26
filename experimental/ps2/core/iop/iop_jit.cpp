@@ -958,7 +958,7 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
     u32 initial_generation = 0u;
     u32 initial_code_page = 0xFFFFFFFFu;
     bool initial_ram = false;
-    const u32 domain = code_domain(
+    (void)code_domain(
         cpu.state_.pc,
         initial_generation,
         initial_code_page,
@@ -1087,12 +1087,15 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
         u32 next_generation = 0u;
         u32 next_code_page = 0xFFFFFFFFu;
         bool next_ram = false;
-        const u32 next_domain = code_domain(
+        // Keep the R3000A resident across code-page and ROM/RAM
+        // boundaries. Every RAM block is independently keyed by its backing
+        // page generation; ROM is immutable. Returning merely because a
+        // branch crossed 4 KiB was pure dispatcher overhead.
+        (void)code_domain(
             next_pc,
             next_generation,
             next_code_page,
             next_ram);
-        if (next_domain != domain) break;
 
         current_pc = next_pc;
         generation = next_generation;
