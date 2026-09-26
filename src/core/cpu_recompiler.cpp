@@ -4669,7 +4669,7 @@ struct CpuRecompilerBackend::Impl {
         }
       };
       if (direct_links_enabled) {
-        if (simple_control || guarded_control || guarded_store_control) {
+        if (simple_control || guarded_store_control) {
           link_control(control, branch_pc);
         } else if (simple_load && load_has_control) {
           link_control(load_control, load_branch_pc);
@@ -4713,9 +4713,8 @@ struct CpuRecompilerBackend::Impl {
         entry = compile_v4_overflow_alu(
             arena, overflow_alu, start_pc, links, block->code_size);
       } else if (guarded_control) {
-        entry = compile_v4_guarded_delay_branch(
-            arena, control, guarded_control_delay, branch_pc, links,
-            block->code_size);
+        entry = compile_v4_budget_branch(
+            arena, control, branch_pc, block->code_size);
       } else if (guarded_store_control) {
         entry = compile_v4_store_delay_branch(
             arena, control, guarded_store_delay, branch_pc, links,
@@ -4757,7 +4756,7 @@ struct CpuRecompilerBackend::Impl {
       // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
-      if (split_control) {
+      if (split_control || guarded_control) {
         block->budget_fn = entry;
         block->budget_requires_empty_chain = true;
       } else if (count != 0u) {
@@ -4792,13 +4791,12 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          split_control
+          (split_control || guarded_control)
               ? 1u
               : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_exception)
                      ? 1u
-                     : ((simple_control || guarded_control ||
-                         guarded_store_control)
+                     : ((simple_control || guarded_store_control)
                             ? count + 2u
                             : (simple_load
                                    ? count + load_tail_count +
@@ -4808,13 +4806,12 @@ struct CpuRecompilerBackend::Impl {
                                                 (store_has_control ? 3u : 1u)
                                           : count))));
       block->max_cycles =
-          split_control
+          (split_control || guarded_control)
               ? 2u
               : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_exception)
                      ? 40u
-                     : ((simple_control || guarded_control ||
-                         guarded_store_control)
+                     : ((simple_control || guarded_store_control)
                             ? (guarded_store_control ? 5u : count + 3u)
                             : (simple_load
                                    ? count + load_tail_count +
@@ -4837,13 +4834,12 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        split_control
+        (split_control || guarded_control)
             ? 1u
             : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
                 simple_cop0 || simple_exception)
                    ? 1u
-                   : ((simple_control || guarded_control ||
-                       guarded_store_control)
+                   : ((simple_control || guarded_store_control)
                           ? count + 2u
                           : (simple_load
                                  ? count + load_tail_count +
