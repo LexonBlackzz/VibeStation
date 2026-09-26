@@ -523,7 +523,10 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
     const u64 total_phase = ee_iop_phase_ + cycles;
     ee_iop_phase_ = static_cast<u32>(total_phase & 7u);
     const u64 steps = total_phase / 8u;
-    const auto profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point profile_begin{};
+    if (profile_timing_enabled_) {
+        profile_begin = std::chrono::steady_clock::now();
+    }
     for (u64 i = 0; i < steps;) {
         if (iop_.halted()) break;
         if (i + 1u < steps && !sif_dma_.iop_completion_pending()) {
@@ -577,7 +580,7 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
         sif_dma_.tick_iop(iop_bus_);
         ++i;
     }
-    if (steps != 0u) {
+    if (profile_timing_enabled_ && steps != 0u) {
         profile_iop_ns_ += elapsed_profile_ns(profile_begin);
     }
 }
@@ -1462,7 +1465,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     }
     if (maximum < 2u) return 0;
 
-    const auto ee_profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point ee_profile_begin{};
+    if (profile_timing_enabled_) {
+        ee_profile_begin = std::chrono::steady_clock::now();
+    }
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
         // SifGetReg(4) has a system-level exact-timing accelerator that must
@@ -1677,7 +1683,9 @@ u64 Ps2System::try_run_quiet_ee_batch(
         ++retired;
         if (!error.empty()) break;
     }
-    profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
+    if (profile_timing_enabled_) {
+        profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
+    }
     if (retired == 0u) return 0;
 
     // step_quiet deliberately leaves EE hardware time untouched. Apply the
@@ -1760,7 +1768,10 @@ u64 Ps2System::try_run_quiet_ee_superbatch(
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
-    const auto profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point profile_begin{};
+    if (profile_timing_enabled_) {
+        profile_begin = std::chrono::steady_clock::now();
+    }
     u64 executed=0;
     while(executed<instruction_budget){
         if (instruction_budget - executed >= 8u &&
@@ -1867,6 +1878,7 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
 
         const u64 before=ee_.state().instructions_executed;
         const bool profile_this_slow_step =
+            profile_timing_enabled_ &&
             ((profile_slow_path_samples_++ & 255u) == 0u);
         std::chrono::steady_clock::time_point slow_profile_begin{};
         if (profile_this_slow_step) {
@@ -1883,7 +1895,9 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
         }
         ++executed;
     }
-    profile_run_ns_ += elapsed_profile_ns(profile_begin);
+    if (profile_timing_enabled_) {
+        profile_run_ns_ += elapsed_profile_ns(profile_begin);
+    }
     return executed;
 }
 void Ps2System::refresh_display(){gs_display_.update(gs_,gs_core_.vram());}
