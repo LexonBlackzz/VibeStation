@@ -61,6 +61,14 @@ public:
     [[nodiscard]] u64 jit_native_chains() const;
     [[nodiscard]] u64 jit_guard_exits() const;
     [[nodiscard]] u64 jit_code_store_exits() const;
+    [[nodiscard]] u64 jit_run_calls() const;
+    [[nodiscard]] u64 jit_entry_attempts() const;
+    [[nodiscard]] u64 jit_entry_successes() const;
+    [[nodiscard]] u64 jit_compile_failures() const;
+    [[nodiscard]] u64 jit_entry_reject(u32 reason) const;
+    [[nodiscard]] u64 jit_residency_instructions() const;
+    [[nodiscard]] u64 jit_residency_max() const;
+    [[nodiscard]] std::array<u64, 16> jit_residency_histogram() const;
 
     [[nodiscard]] const IopCpuState& state() const { return state_; }
     [[nodiscard]] IopCpuState& state() { return state_; }

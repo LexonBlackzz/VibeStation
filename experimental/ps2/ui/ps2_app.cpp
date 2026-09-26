@@ -1403,6 +1403,88 @@ void Ps2App::panel_profiler() {
         profile_guard_bailouts_per_second_,
         profile_code_store_exits_per_second_,
         profile_cache_flushes_per_second_);
+
+    const auto percentile_floor =
+        [](const std::array<u64, 16>& histogram, double fraction) -> u64 {
+            u64 total = 0u;
+            for (const u64 count : histogram) total += count;
+            if (total == 0u) return 0u;
+            const u64 target = std::max<u64>(
+                1u, static_cast<u64>(
+                    static_cast<double>(total) * fraction + 0.999999));
+            u64 cumulative = 0u;
+            for (u32 bucket = 0u; bucket < histogram.size(); ++bucket) {
+                cumulative += histogram[bucket];
+                if (cumulative >= target) {
+                    return u64{1} << bucket;
+                }
+            }
+            return u64{1} << (histogram.size() - 1u);
+        };
+
+    const auto& ee_jit = system_.ee().jit();
+    const u64 ee_entry_attempts =
+        ee_jit.native_entry_attempt_count();
+    const u64 ee_entry_successes =
+        ee_jit.native_entry_success_count();
+    const double ee_entry_success_percent =
+        ee_entry_attempts != 0u
+            ? static_cast<double>(ee_entry_successes) * 100.0 /
+                static_cast<double>(ee_entry_attempts)
+            : 0.0;
+    const double ee_average_residency =
+        ee_entry_successes != 0u
+            ? static_cast<double>(
+                  ee_jit.native_residency_instruction_count()) /
+                static_cast<double>(ee_entry_successes)
+            : 0.0;
+    const auto& ee_residency =
+        ee_jit.native_residency_histogram();
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("EE native-entry diagnosis");
+    ImGui::Text(
+        "JIT entries: %llu attempts   %llu success (%.1f%%)   %llu compile failures",
+        static_cast<unsigned long long>(ee_entry_attempts),
+        static_cast<unsigned long long>(ee_entry_successes),
+        ee_entry_success_percent,
+        static_cast<unsigned long long>(
+            ee_jit.block_compile_failure_count()));
+    ImGui::Text(
+        "Direct-RAM system entry: %llu attempts   %llu success   %llu failed",
+        static_cast<unsigned long long>(
+            system_.direct_native_entry_attempts()),
+        static_cast<unsigned long long>(
+            system_.direct_native_entry_successes()),
+        static_cast<unsigned long long>(
+            system_.direct_native_entry_failures()));
+    ImGui::Text(
+        "Residency: avg %.1f instr   p50~%llu   p95~%llu   max %llu",
+        ee_average_residency,
+        static_cast<unsigned long long>(
+            percentile_floor(ee_residency, 0.50)),
+        static_cast<unsigned long long>(
+            percentile_floor(ee_residency, 0.95)),
+        static_cast<unsigned long long>(
+            ee_jit.native_residency_max()));
+    ImGui::TextDisabled(
+        "p50/p95 are low-overhead log2 histogram estimates; max is exact.");
+
+    const auto& ee_rejects = system_.quiet_ee_rejects();
+    static constexpr std::array<const char*, 9> kEeRejectNames = {
+        "budget<2", "SIF completion", "VU running", "GS IRQ",
+        "DMA/SIF service", "pending EE IRQ", "video edge",
+        "scheduler due", "deadline<2"};
+    if (ImGui::TreeNode("System refusals before JIT entry")) {
+        for (u32 i = 0u; i < ee_rejects.size(); ++i) {
+            ImGui::BulletText(
+                "%s: %llu",
+                kEeRejectNames[i],
+                static_cast<unsigned long long>(ee_rejects[i]));
+        }
+        ImGui::TreePop();
+    }
+
     ImGui::Text(
         "IOP: %.1f MIPS   native %.1f MIPS (%.1f%% coverage)",
         profile_iop_mips_,
@@ -1418,6 +1500,52 @@ void Ps2App::panel_profiler() {
         profile_iop_guard_exits_per_second_,
         profile_iop_code_store_exits_per_second_,
         profile_vu1_mips_);
+
+    const u64 iop_entries = system_.iop().jit_entry_attempts();
+    const u64 iop_successes = system_.iop().jit_entry_successes();
+    const double iop_entry_success_percent =
+        iop_entries != 0u
+            ? static_cast<double>(iop_successes) * 100.0 /
+                static_cast<double>(iop_entries)
+            : 0.0;
+    const double iop_average_residency =
+        iop_successes != 0u
+            ? static_cast<double>(
+                  system_.iop().jit_residency_instructions()) /
+                static_cast<double>(iop_successes)
+            : 0.0;
+    const auto iop_residency =
+        system_.iop().jit_residency_histogram();
+    ImGui::Text(
+        "IOP JIT entries: %llu run calls   %llu attempts   %llu success (%.1f%%)   %llu compile failures",
+        static_cast<unsigned long long>(system_.iop().jit_run_calls()),
+        static_cast<unsigned long long>(iop_entries),
+        static_cast<unsigned long long>(iop_successes),
+        iop_entry_success_percent,
+        static_cast<unsigned long long>(
+            system_.iop().jit_compile_failures()));
+    ImGui::Text(
+        "IOP residency: avg %.1f instr   p50~%llu   p95~%llu   max %llu",
+        iop_average_residency,
+        static_cast<unsigned long long>(
+            percentile_floor(iop_residency, 0.50)),
+        static_cast<unsigned long long>(
+            percentile_floor(iop_residency, 0.95)),
+        static_cast<unsigned long long>(
+            system_.iop().jit_residency_max()));
+    if (ImGui::TreeNode("IOP entry refusals")) {
+        static constexpr std::array<const char*, 5> kIopRejectNames = {
+            "zero budget", "halted", "pending load",
+            "delay slot", "pending IRQ"};
+        for (u32 i = 0u; i < kIopRejectNames.size(); ++i) {
+            ImGui::BulletText(
+                "%s: %llu",
+                kIopRejectNames[i],
+                static_cast<unsigned long long>(
+                    system_.iop().jit_entry_reject(i)));
+        }
+        ImGui::TreePop();
+    }
 
     ImGui::Spacing();
     bool host_timing_enabled =

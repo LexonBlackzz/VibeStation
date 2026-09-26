@@ -968,6 +968,40 @@ u64 IopCpu::jit_code_store_exits() const {
     return jit_ ? jit_->code_store_exit_count() : 0u;
 }
 
+u64 IopCpu::jit_run_calls() const {
+    return jit_ ? jit_->run_call_count() : 0u;
+}
+
+u64 IopCpu::jit_entry_attempts() const {
+    return jit_ ? jit_->native_entry_attempt_count() : 0u;
+}
+
+u64 IopCpu::jit_entry_successes() const {
+    return jit_ ? jit_->native_entry_success_count() : 0u;
+}
+
+u64 IopCpu::jit_compile_failures() const {
+    return jit_ ? jit_->compile_failure_count() : 0u;
+}
+
+u64 IopCpu::jit_entry_reject(u32 reason) const {
+    if (!jit_ || reason >= jit_->entry_rejects().size()) return 0u;
+    return jit_->entry_rejects()[reason];
+}
+
+u64 IopCpu::jit_residency_instructions() const {
+    return jit_ ? jit_->native_residency_instruction_count() : 0u;
+}
+
+u64 IopCpu::jit_residency_max() const {
+    return jit_ ? jit_->native_residency_max() : 0u;
+}
+
+std::array<u64, 16> IopCpu::jit_residency_histogram() const {
+    return jit_ ? jit_->native_residency_histogram()
+                : std::array<u64, 16>{};
+}
+
 u64 IopCpu::run(
     u64 instruction_budget,
     std::string& error) {
