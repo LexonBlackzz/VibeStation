@@ -178,7 +178,6 @@ struct CpuCompareCase {
   bool require_v4_icache_revalidation_when_available = false;
   bool require_v4_native_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
-  bool require_v4_clean_fallback_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -5169,21 +5168,6 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       const char *native_check = "not_required";
 
       if (mode == CpuExecutionMode::Recompiler &&
-          test_case.require_v4_clean_fallback_when_available) {
-        if (!result.stats.native_available) {
-          native_check = "skip_v4_native_unavailable";
-        } else {
-          const bool clean_fallback =
-              result.stats.native_block_entries == 0 &&
-              result.stats.jit_v4_helper_instructions >=
-                  test_case.instructions &&
-              result.stats.fallback_instructions == 0 &&
-              result.stats.interpreter_fallback_steps == 0;
-          native_check = clean_fallback ? "v4_compiled_helper"
-                                        : "v4_helper_missing";
-          native_check_pass = clean_fallback;
-        }
-      } else if (mode == CpuExecutionMode::Recompiler &&
                   test_case.require_v4_store_smc_native_when_available) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
@@ -5399,9 +5383,12 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
 
       if (mode == CpuExecutionMode::Recompiler &&
           result.stats.native_available &&
-          (result.stats.fallback_instructions != 0u ||
+          (result.stats.jit_v4_helper_instructions != 0u ||
+           result.stats.fallback_instructions != 0u ||
            result.stats.interpreter_fallback_steps != 0u)) {
-        native_check = "v4_interpreter_fallback";
+        native_check = result.stats.jit_v4_helper_instructions != 0u
+                           ? "v4_semantic_helper"
+                           : "v4_interpreter_fallback";
         native_check_pass = false;
       }
 
