@@ -2941,6 +2941,7 @@ V4NativeFn compile_v4_pending_delay_store(
     }
     code.mov(code.r9d, 1u);
   }
+  code.jmp(stored);
 
   code.L(device);
   // Preserve the store value and physical address across host ABI calls.
