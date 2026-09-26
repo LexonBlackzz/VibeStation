@@ -1114,6 +1114,29 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   overflow_addi.require_v4_exception_native_when_available = true;
   cases.push_back(overflow_addi);
 
+  CpuCompareCase v4_misaligned_lw_exception{};
+  v4_misaligned_lw_exception.name = "v4_misaligned_lw_exception_native";
+  v4_misaligned_lw_exception.start_pc = 0xA0010000u;
+  v4_misaligned_lw_exception.initial_gpr[1] = 0x80012001u;
+  v4_misaligned_lw_exception.program = {enc_i(0x23, 1, 2, 0)};
+  v4_misaligned_lw_exception.instructions = 1u;
+  v4_misaligned_lw_exception.require_v4_native_entry_when_available = true;
+  v4_misaligned_lw_exception.require_v4_exception_native_when_available = true;
+  cases.push_back(v4_misaligned_lw_exception);
+
+  CpuCompareCase v4_misaligned_sw_exception{};
+  v4_misaligned_sw_exception.name = "v4_misaligned_sw_exception_native";
+  v4_misaligned_sw_exception.start_pc = 0xA0010000u;
+  v4_misaligned_sw_exception.initial_gpr[1] = 0x80012001u;
+  v4_misaligned_sw_exception.initial_gpr[2] = 0x12345678u;
+  v4_misaligned_sw_exception.memory.push_back({0x00012000u, 0xAABBCCDDu});
+  v4_misaligned_sw_exception.compare_memory_addresses.push_back(0x00012000u);
+  v4_misaligned_sw_exception.program = {enc_i(0x2B, 1, 2, 0)};
+  v4_misaligned_sw_exception.instructions = 1u;
+  v4_misaligned_sw_exception.require_v4_native_entry_when_available = true;
+  v4_misaligned_sw_exception.require_v4_exception_native_when_available = true;
+  cases.push_back(v4_misaligned_sw_exception);
+
   CpuCompareCase unaligned_merge{};
   unaligned_merge.name = "decoded_unaligned_load_store_merge";
   unaligned_merge.initial_gpr[1] = 0x80011201u;
