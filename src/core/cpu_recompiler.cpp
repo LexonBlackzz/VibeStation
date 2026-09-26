@@ -756,7 +756,6 @@ struct V4NativeState {
 
 using V4NativeFn = void (*)(V4NativeState *);
 using V4ResidentDispatchFn = void (*)(V4NativeState *);
-using V4HelperFn = u32 (*)(Cpu *);
 
 u32 v4_gte_read_data(Gte *gte, u32 reg) {
   return gte != nullptr ? gte->read_data(reg) : 0u;
@@ -783,15 +782,6 @@ void v4_gte_execute(Gte *gte, u32 command) {
     gte->execute(command);
   }
 }
-
-enum class V4HelperReason : u8 {
-  Irq,
-  UnalignedPc,
-  UnsafeState,
-  Opcode,
-  CompileFailure,
-  Budget,
-};
 
 class V4CodeArena {
 public:
@@ -924,7 +914,6 @@ struct V4Block {
   // fresh dispatcher entry so they cannot cross a System scheduling boundary
   // that an earlier native chain would otherwise have returned at.
   V4NativeFn budget_fn = nullptr;
-  V4HelperFn helper_fn = nullptr;
   bool budget_requires_empty_chain = false;
   V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
@@ -947,37 +936,6 @@ static_assert(sizeof(V4DispatchEntry) == 8u);
 struct V4DispatchPage {
   std::array<V4DispatchEntry, kV4DispatchEntriesPerPage> entries{};
 };
-
-V4HelperFn compile_v4_helper(V4CodeArena &arena, u32 instruction) {
-  using namespace Xbyak;
-  constexpr size_t kReservation = 64u;
-  void *buffer = arena.begin_emit(kReservation);
-  if (buffer == nullptr) {
-    return nullptr;
-  }
-  CodeGenerator code(kReservation, buffer);
-#if defined(_WIN32)
-  code.mov(code.edx, instruction);
-  code.sub(code.rsp, 40);
-#else
-  code.mov(code.esi, instruction);
-  code.sub(code.rsp, 8);
-#endif
-  code.mov(code.rax,
-           reinterpret_cast<size_t>(Cpu::compiled_opcode_fn(instruction)));
-  code.call(code.rax);
-#if defined(_WIN32)
-  code.add(code.rsp, 40);
-#else
-  code.add(code.rsp, 8);
-#endif
-  code.ret();
-  code.ready();
-  if (!arena.commit_emit(buffer, code.getSize())) {
-    return nullptr;
-  }
-  return reinterpret_cast<V4HelperFn>(buffer);
-}
 
 // Dispatch pages survive arena resets. An edge embeds the address of a cell,
 // never a V4Block or code pointer, so recompilation updates every incoming
@@ -7629,13 +7587,11 @@ struct CpuRecompilerBackend::Impl {
   V4NativeState native_state{};
   bool native_state_bound = false;
   std::unordered_map<u32, V4NativeFn> pending_delay_alu_cache;
-  std::unordered_map<u32, V4HelperFn> helper_cache;
   void *resident_block_return = nullptr;
   void *resident_linked_entry = nullptr;
   size_t permanent_code_bytes = 0u;
   bool direct_links_enabled = true;
   bool crossline_branch_enabled = true;
-  bool helper_profile_enabled = false;
   bool initialization_attempted = false;
   bool initialized = false;
 
@@ -7666,10 +7622,6 @@ struct CpuRecompilerBackend::Impl {
         std::getenv("VIBESTATION_V4_DISABLE_CROSSLINE_BRANCH");
     crossline_branch_enabled =
         disable_crossline == nullptr || disable_crossline[0] != '1';
-    const char *profile_helpers =
-        std::getenv("VIBESTATION_V4_PROFILE_HELPERS");
-    helper_profile_enabled =
-        profile_helpers != nullptr && profile_helpers[0] == '1';
     resident_dispatch =
         install_v4_resident_dispatch(arena, &native_state,
                                      resident_block_return,
@@ -7743,7 +7695,6 @@ struct CpuRecompilerBackend::Impl {
       return;
     }
     arena.reset_to(permanent_code_bytes);
-    helper_cache.clear();
     pending_delay_alu_cache.clear();
     block_count = 0u;
     code_pages.clear();
@@ -7828,18 +7779,6 @@ struct CpuRecompilerBackend::Impl {
 
     if (fn != nullptr) {
       pending_delay_alu_cache.emplace(instruction, fn);
-    }
-    return fn;
-  }
-
-  V4HelperFn helper_for(u32 instruction) {
-    const auto found = helper_cache.find(instruction);
-    if (found != helper_cache.end()) {
-      return found->second;
-    }
-    V4HelperFn fn = compile_v4_helper(arena, instruction);
-    if (fn != nullptr) {
-      helper_cache.emplace(instruction, fn);
     }
     return fn;
   }
@@ -8434,54 +8373,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     return result;
   }
 
-  const auto run_helper = [&](u32 instruction, V4HelperReason reason) {
-    ++stats_.recompiler_frame_helper_reasons[static_cast<size_t>(reason)];
-    V4HelperFn fn = impl_->helper_for(instruction);
-    if (fn == nullptr) {
-      impl_->reset_translations();
-      ++stats_.flushes;
-      ++stats_.recompiler_frame_flushes;
-      fn = impl_->helper_for(instruction);
-    }
-    const bool profile = impl_->helper_profile_enabled;
-    const u32 primary = (instruction >> 26) & 0x3Fu;
-    if (profile) {
-      const size_t reason_index = static_cast<size_t>(reason);
-      ++stats_.jit_v4_helper_reasons[reason_index];
-      ++stats_.jit_v4_helper_primary_counts[primary];
-      ++stats_.jit_v4_helper_primary_by_reason[reason_index][primary];
-      if (primary == 0u) {
-        const u32 special = instruction & 0x3Fu;
-        ++stats_.jit_v4_helper_special_counts[special];
-        ++stats_.jit_v4_helper_special_by_reason[reason_index][special];
-      }
-    }
-    const bool sample =
-        profile && (stats_.jit_v4_helper_instructions & 511u) == 0u;
-    const auto sample_start = sample ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{};
-    const u32 consumed = fn != nullptr
-                             ? fn(&cpu_)
-                             : Cpu::compiled_opcode_fn(instruction)(
-                                   &cpu_, instruction);
-    if (sample) {
-      const auto elapsed = std::chrono::steady_clock::now() - sample_start;
-      ++stats_.jit_v4_helper_primary_samples[primary];
-      stats_.jit_v4_helper_primary_sample_ns[primary] +=
-          static_cast<u64>(std::chrono::duration_cast<
-                               std::chrono::nanoseconds>(elapsed)
-                               .count());
-    }
-    result.cycles += consumed;
-    ++result.instructions;
-    ++stats_.native_instructions;
-    ++stats_.jit_v4_helper_instructions;
-    ++stats_.recompiler_frame_helper_instructions;
-    stats_.native_cycles += consumed;
-    ++stats_.optimized_instructions;
-    stats_.executed_cycles += consumed;
-  };
-
   const auto run_native_entry_exception = [&](u32 entry_exception) {
     V4NativeState &native = impl_->native_state;
     if (!impl_->native_state_bound) {
@@ -8692,6 +8583,18 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       }
       if (delay_visible) {
         pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
+        if (pending_delay_fn == nullptr) {
+          // Code-arena exhaustion is a host JIT resource event, not permission
+          // to execute the delay-slot opcode in C++. Recycle translations and
+          // regenerate the native one-instruction fragment.
+          impl_->reset_translations();
+          block = nullptr;
+          stats_.native_blocks = 0u;
+          stats_.block_count = 0u;
+          ++stats_.flushes;
+          ++stats_.recompiler_frame_flushes;
+          pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
+        }
       }
     }
     if (pending_branch_delay && pending_delay_fn == nullptr) {
@@ -8703,13 +8606,10 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     }
 
     if (unsafe_state) {
-      u32 instruction = 0u;
-      if (!cpu_.read_visible_instruction_for_backend(cpu_.pc_,
-                                                     instruction)) {
-        instruction = cpu_.read_instruction_for_backend(cpu_.pc_);
-      }
-      run_helper(instruction, V4HelperReason::UnsafeState);
-      continue;
+      // next_load_ and a non-sequential next_pc without pending branch metadata
+      // are not valid instruction-boundary states. Do not hide an internal
+      // pipeline bug by interpreting an instruction; leave the slice unchanged.
+      break;
     }
 
     if (block != nullptr) {
