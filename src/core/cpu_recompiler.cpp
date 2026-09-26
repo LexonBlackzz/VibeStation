@@ -3409,11 +3409,33 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
-    // A refill is itself guest-visible time. If it reaches the scheduler
-    // deadline, leave before retiring another guest instruction.
-    code.cmp(code.ebx, code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-    code.jae(budget_exit);
+    // Cpu::step() begins the instruction while the pre-fetch cycle count is
+    // still inside the slice. If the architectural 4-cycle I-cache refill then
+    // reaches or crosses the deadline, that already-started instruction still
+    // retires. Reproduce that rule with the one-instruction native budget
+    // fragment instead of returning to C++ for the boundary case.
+    {
+      Label refill_inside_budget, refill_fragment_ready;
+      code.cmp(code.ebx, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+      code.jb(refill_inside_budget);
+      code.test(code.r12d, code.r12d);
+      code.jz(budget_exit);
+      code.mov(code.rax, code.ptr[
+          code.r14 + static_cast<int>(offsetof(V4Block, budget_fn))]);
+      code.test(code.rax, code.rax);
+      code.jz(budget_exit);
+      code.cmp(code.byte[
+          code.r14 +
+          static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
+      code.je(refill_fragment_ready);
+      // A branch-only budget fragment must start from a fresh chain. Yielding
+      // here keeps the same boundary without executing guest semantics in C++.
+      code.jmp(budget_exit);
+      code.L(refill_fragment_ready);
+      code.jmp(code.rax);
+      code.L(refill_inside_budget);
+    }
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
