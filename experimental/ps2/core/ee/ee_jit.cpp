@@ -1,5 +1,6 @@
 #include "core/ee/ee_jit.h"
 #include "core/ee/ee_cpu.h"
+#include "core/memory/ee_ram.h"
 
 #include <algorithm>
 #include <bit>
@@ -1279,25 +1280,43 @@ bool emit_guarded_ram_store(
         out.store_gpr_imm64(rt, 1u);
     }
 
-    // Conservative write barrier: every native RAM store advances the page
-    // generation. Cached code on that page will be recompiled on next entry.
+    // Fine-grained self-modifying-code barrier. EeRam packs an 8-bit
+    // translated-region mask into the high byte of each 4 KiB page metadata
+    // word. Only stores touching one of those 512-byte regions advance the
+    // generation; ordinary data/stack writes on the same page remain native.
+    //
+    // R8D still contains the physical byte address. Recreate it in EAX even
+    // for SWC1, whose data load used EAX above.
+    out.emit(0x44u); out.emit(0x89u); out.emit(0xC0u); // MOV EAX,R8D
+    out.emit(0xC1u); out.emit(0xE8u);
+    out.emit(static_cast<u8>(EeRam::kCodeRegionShift)); // SHR EAX,9
+    out.emit(0x83u); out.emit(0xE0u);
+    out.emit(static_cast<u8>(EeRam::kCodeRegionCount - 1u)); // AND EAX,7
+    out.emit(0x83u); out.emit(0xC0u);
+    out.emit(static_cast<u8>(EeRam::kCodeMaskShift)); // ADD EAX,24
+
     out.emit(0x41u); out.emit(0xC1u); out.emit(0xE8u); out.emit(0x0Cu);
+    out.emit(0x43u); out.emit(0x8Bu); out.emit(0x14u);
+    out.emit(0x82u); // MOV EDX,[R10+R8*4]
+    out.emit(0x0Fu); out.emit(0xA3u); out.emit(0xC2u); // BT EDX,EAX
+    const std::size_t not_tracked_region = out.jcc32(0x83u); // JNC
+
     out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
     out.emit(0x82u);
     out.emit(opcode == 0x1Fu ? 0x02u : 0x01u);
-    // SQ mirrors the interpreter's two write64 calls, so a tracked code page
-    // advances twice. Scalar stores advance it once.
+    // SQ mirrors the interpreter's two write64 calls, hence +2 generation.
 
-    // A self-modifying store must end this block immediately. The caller will
-    // observe the bumped generation before fetching any later cached word.
+    // Only a write which actually overlaps translated code on this page can
+    // require an immediate exit from the current translation.
     out.emit(0x41u); out.emit(0x81u); out.emit(0xF8u);
     out.emit32(code_page);
     const std::size_t not_code_page = out.jcc32(0x85u); // JNE
     out.emit(0xB8u);
     out.emit32(retired_before + 1u);
     out.emit(0xC3u);
-    const std::size_t done_label = out.bytes.size();
-    out.patch_rel32(not_code_page, done_label);
+    const std::size_t barrier_done = out.bytes.size();
+    out.patch_rel32(not_code_page, barrier_done);
+    out.patch_rel32(not_tracked_region, barrier_done);
 
     const std::size_t continue_jump = out.jmp32();
 
@@ -1817,6 +1836,18 @@ u32 EeJit::execute_block(
                 compiled_instructions,
                 compiled_control_flow,
                 compiled_uses_ram);
+            if (page_generations != nullptr &&
+                compiled_instructions != 0u) {
+                const u32 block_physical =
+                    ram_physical_address(block_pc);
+                if (block_physical < kEeRamSize) {
+                    EeRam::track_jit_code(
+                        page_generations,
+                        block_physical,
+                        static_cast<std::size_t>(
+                            compiled_instructions) * sizeof(u32));
+                }
+            }
             entry.pc = block_pc;
             entry.page_generation = generation;
             entry.instruction_count =
@@ -2008,7 +2039,8 @@ u32 EeJit::execute_block(
         // returns from generated code. Never execute another cached block
         // from the old generation in the same host dispatch.
         if (page_generations != nullptr &&
-            page_generations[code_page] != page_generation) {
+            EeRam::generation_from_metadata(
+                page_generations[code_page]) != page_generation) {
             break;
         }
 
