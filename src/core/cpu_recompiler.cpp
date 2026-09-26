@@ -480,6 +480,7 @@ struct V4DecodedLoad {
   u8 rs = 0;
   u8 rt = 0;
   s32 simm = 0;
+  bool dest_cop0 = false;
 };
 
 enum class V4StoreOp : u8 {
@@ -495,6 +496,7 @@ struct V4DecodedStore {
   u8 rs = 0;
   u8 rt = 0;
   s32 simm = 0;
+  bool source_cop0 = false;
 };
 
 bool decode_v4_store(u32 bits, V4DecodedStore &out) {
@@ -504,6 +506,10 @@ bool decode_v4_store(u32 bits, V4DecodedStore &out) {
   case 0x2A: out.op = V4StoreOp::Swl; break;
   case 0x2B: out.op = V4StoreOp::Sw; break;
   case 0x2E: out.op = V4StoreOp::Swr; break;
+  case 0x38:
+    out.op = V4StoreOp::Sw;
+    out.source_cop0 = true;
+    break;
   default: return false;
   }
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
@@ -521,6 +527,10 @@ bool decode_v4_load(u32 bits, V4DecodedLoad &out) {
   case 0x24: out.op = V4LoadOp::Lbu; break;
   case 0x25: out.op = V4LoadOp::Lhu; break;
   case 0x26: out.op = V4LoadOp::Lwr; break;
+  case 0x30:
+    out.op = V4LoadOp::Lw;
+    out.dest_cop0 = true;
+    break;
   default: return false;
   }
   out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
@@ -1022,6 +1032,86 @@ void emit_write_guest(Xbyak::CodeGenerator &code, u8 guest_reg,
     return;
   }
   code.mov(code.dword[code.r10 + static_cast<int>(guest_reg) * 4], src);
+}
+
+void emit_read_cop0(Xbyak::CodeGenerator &code,
+                    const Xbyak::Reg32 &dst, u8 reg) {
+  switch (reg & 31u) {
+  case 6:
+    code.mov(dst, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_jumpdest))]);
+    break;
+  case 8:
+    code.mov(dst, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))]);
+    break;
+  case 12:
+    code.mov(dst, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+    break;
+  case 13:
+    code.mov(dst, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+    break;
+  case 14:
+    code.mov(dst, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))]);
+    break;
+  case 15:
+    code.mov(dst, 0x00000002u);
+    break;
+  default:
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_regs))]);
+    code.mov(dst, code.dword[code.rax + static_cast<int>(reg & 31u) * 4]);
+    break;
+  }
+}
+
+void emit_write_cop0(Xbyak::CodeGenerator &code, u8 reg,
+                     const Xbyak::Reg32 &src) {
+  switch (reg & 31u) {
+  case 6:
+  case 8:
+  case 14:
+    break;
+  case 12: {
+    constexpr u32 kSRWriteMask =
+        0b1111'0010'0111'1111'1111'1111'0011'1111u;
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+    code.and_(code.eax, ~kSRWriteMask);
+    if (src.getIdx() == code.r8d.getIdx()) {
+      code.mov(code.ecx, src);
+      code.and_(code.ecx, kSRWriteMask);
+      code.or_(code.eax, code.ecx);
+    } else {
+      code.mov(code.ecx, src);
+      code.and_(code.ecx, kSRWriteMask);
+      code.or_(code.eax, code.ecx);
+    }
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+        code.eax);
+    break;
+  }
+  case 13:
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+    code.and_(code.eax, ~0x300u);
+    code.mov(code.ecx, src);
+    code.and_(code.ecx, 0x300u);
+    code.or_(code.eax, code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
+        code.eax);
+    break;
+  default:
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_regs))]);
+    code.mov(code.dword[code.rax + static_cast<int>(reg & 31u) * 4], src);
+    break;
+  }
 }
 
 u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
