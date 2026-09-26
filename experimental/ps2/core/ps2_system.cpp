@@ -7,13 +7,14 @@ namespace ps2 {
 namespace {
 // Keep independent VU1 execution synchronized to EE instruction steps.
 constexpr u64 kVu1InstructionsPerEeStep = 1;
-constexpr u64 kQuietEeBatchLimit = 4096u;
+constexpr u64 kQuietEeBatchLimit = 65536u;
 constexpr u64 kQuietEeSuperbatchLimit = 65536u;
-// Let the EE run ahead of an active IOP by a small bounded interval, then
-// repay the accumulated 8:1 cycle debt in one catch-up burst. This removes
-// the pathological "return to C++ every IOP instruction" behavior while
-// keeping the first experiment deliberately far below PCSX2-scale windows.
-constexpr u64 kActiveIopEeLeadLimit = 128u;
+// EE/IOP synchronization is deadline-driven. The EE may consume the whole
+// quiet slice while every IOP-visible event is proven to lie beyond it; the
+// accumulated 8:1 cycle debt is then repaid in one catch-up pass. Do not add
+// an arbitrary lead cap here: MMIO/shared-memory observations terminate the
+// quiet EE path before the access, and the event checks below establish the
+// real guest-visible boundary.
 constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
 
 u64 elapsed_profile_ns(
@@ -564,8 +565,11 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
         if (i + 1u < steps &&
             !sif_dma_.iop_completion_pending() &&
             !iop_bus_.interrupt_pending()) {
-            u64 native_budget =
-                std::min<u64>(steps - i, 256u);
+            // The outer EE slice has already accumulated a bounded amount
+            // of IOP cycle debt. Offer the entire remaining catch-up interval
+            // to the recompiler; can_tick_event_free() shrinks it only when
+            // a real timer/SPU/DMA observation lies inside the interval.
+            u64 native_budget = steps - i;
             while (native_budget >= 2u &&
                    !iop_bus_.can_tick_event_free(native_budget)) {
                 native_budget >>= 1u;
@@ -1433,9 +1437,9 @@ u64 Ps2System::try_run_quiet_ee_batch(
         maximum = std::min<u64>(maximum, iop_room);
     }
 
-    // Active IOP execution no longer forces an EE dispatcher round-trip
-    // every eight cycles. Allow a bounded EE lead, then repay the accumulated
-    // 8:1 IOP cycle debt in advance_iop_for_ee_cycles() after this batch.
+    // Active IOP execution no longer imposes an arbitrary EE lead cap.
+    // Run until the next actual event/shared-observation boundary, then repay
+    // the accumulated 8:1 IOP cycle debt in advance_iop_for_ee_cycles().
     //
     // Pending IOP interrupts remain tightly interleaved so an already-visible
     // interrupt is not delayed by the lead window. Likewise, if an IOP-side
@@ -1443,9 +1447,6 @@ u64 Ps2System::try_run_quiet_ee_batch(
     // shrink the window until the IOP bus reports the whole interval event-
     // free. SIF completion has already installed its own exact deadline above.
     if (!iop_halted && !iop_idle) {
-        maximum = std::min<u64>(
-            maximum, kActiveIopEeLeadLimit);
-
         if (iop_bus_.interrupt_pending()) {
             const u64 until_iop_step =
                 ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
