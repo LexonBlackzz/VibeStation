@@ -2880,6 +2880,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_irq_delay.allow_partial_native_branch_tail = true;
   branch_irq_delay.compare_segment_states = true;
   branch_irq_delay.native_branch_should_be_taken = true;
+  branch_irq_delay.require_v4_native_entry_when_available = true;
+  branch_irq_delay.require_v4_native_branch_entry_when_available = true;
+  branch_irq_delay.require_v4_pending_delay_native_when_available = true;
   cases.push_back(branch_irq_delay);
 
   CpuCompareCase pending_delay_irq{};
@@ -5396,7 +5399,6 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
 
       if (mode == CpuExecutionMode::Recompiler &&
           result.stats.native_available &&
-          !test_case.request_irq_on_branch &&
           (result.stats.fallback_instructions != 0u ||
            result.stats.interpreter_fallback_steps != 0u)) {
         native_check = "v4_interpreter_fallback";

@@ -8439,28 +8439,21 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
   stats_.native_available = impl_->native_available();
   ++stats_.recompiler_frame_run_slice_calls;
 
-  const auto fallback_one = [&]() {
+#if !VIBESTATION_JIT_V4_X64
+  while (result.cycles < max_cycles &&
+         result.instructions < max_instructions) {
     const u32 consumed = cpu_.step();
     result.cycles += consumed;
     ++result.instructions;
     ++stats_.fallback_instructions;
     ++stats_.interpreter_fallback_steps;
     ++stats_.fallback_exits;
-  };
-
-#if !VIBESTATION_JIT_V4_X64
-  while (result.cycles < max_cycles &&
-         result.instructions < max_instructions) {
-    fallback_one();
   }
   return result;
 #else
   if (!impl_->ensure_initialized()) {
     stats_.native_available = false;
-    while (result.cycles < max_cycles &&
-           result.instructions < max_instructions) {
-      fallback_one();
-    }
+    ++stats_.recompiler_frame_compile_failures;
     return result;
   }
 
@@ -8590,19 +8583,6 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.native_instructions += native.instructions;
     stats_.optimized_instructions += native.instructions;
   };
-
-  // Keep diagnostic modes on the interpreter during bring-up. Their callbacks
-  // observe instruction-by-instruction state and are deliberately not a V4 hot
-  // path concern.
-  if (g_trace_cpu || g_cpu_deep_diagnostics || g_log_fmv_diagnostics ||
-      g_cpu_backend_compare_test_force_interpreter ||
-      g_cpu_backend_compare_irq_on_branch) {
-    while (result.cycles < max_cycles &&
-           result.instructions < max_instructions) {
-      fallback_one();
-    }
-    return result;
-  }
 
   while (result.cycles < max_cycles &&
          result.instructions < max_instructions) {
@@ -8912,6 +8892,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.pending_delay_slot_ = native.pending_delay_slot != 0u;
     cpu_.pending_branch_taken_ = native.pending_branch_taken != 0u;
     cpu_.pending_branch_pc_ = native.pending_branch_pc;
+    if (g_cpu_backend_compare_irq_on_branch && cpu_.pending_delay_slot_) {
+      // Test-only device stimulus: request the IRQ after the generated branch
+      // has established its pending delay-slot state. The delay instruction
+      // itself remains native and observes the same boundary as Cpu::step().
+      cpu_.sys_->irq().request(Interrupt::VBlank);
+    }
     cpu_.load_ = {native.pending_load_reg, native.pending_load_value};
     cpu_.next_load_ = {0u, 0u};
     cpu_.exception_raised_ = native.exception_raised != 0u;
