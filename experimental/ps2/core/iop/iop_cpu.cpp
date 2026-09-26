@@ -948,6 +948,26 @@ u32 IopCpu::run_native_quiet(u32 maximum_instructions) {
     return jit_->run(*this, maximum_instructions);
 }
 
+u64 IopCpu::jit_native_instructions() const {
+    return jit_ ? jit_->instruction_count() : 0u;
+}
+
+u64 IopCpu::jit_native_blocks() const {
+    return jit_ ? jit_->block_executed_count() : 0u;
+}
+
+u64 IopCpu::jit_native_chains() const {
+    return jit_ ? jit_->chain_count() : 0u;
+}
+
+u64 IopCpu::jit_guard_exits() const {
+    return jit_ ? jit_->guard_exit_count() : 0u;
+}
+
+u64 IopCpu::jit_code_store_exits() const {
+    return jit_ ? jit_->code_store_exit_count() : 0u;
+}
+
 u64 IopCpu::run(
     u64 instruction_budget,
     std::string& error) {
