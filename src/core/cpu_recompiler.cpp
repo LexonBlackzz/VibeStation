@@ -529,6 +529,24 @@ u32 v4_bus_read32(System *sys, u32 phys) {
   return sys != nullptr ? sys->read32(phys) : 0u;
 }
 
+void v4_bus_write8(System *sys, u32 phys, u32 value) {
+  if (sys != nullptr) {
+    sys->write8(phys, static_cast<u8>(value));
+  }
+}
+
+void v4_bus_write16(System *sys, u32 phys, u32 value) {
+  if (sys != nullptr) {
+    sys->write16(phys, static_cast<u16>(value));
+  }
+}
+
+void v4_bus_write32(System *sys, u32 phys, u32 value) {
+  if (sys != nullptr) {
+    sys->write32(phys, value);
+  }
+}
+
 struct V4DispatchPage;
 
 struct V4NativeState {
@@ -555,6 +573,7 @@ struct V4NativeState {
   u32 store_entries = 0;
   u32 store_phys = 0;
   u32 store_byte_offset = 0;
+  u32 store_value = 0;
   u32 load_byte_offset = 0;
   u32 *cop0_regs = nullptr;
   u32 cop0_jumpdest = 0;
@@ -3928,7 +3947,7 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, stored, stop_after_store, unaligned, slow_after_prefix, bail;
+  Label ram, scratch, device, stored, stop_after_store, unaligned, slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -3954,6 +3973,9 @@ V4NativeFn compile_v4_store(
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
   emit_read_guest(code, code.r8d, store.rt);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
+      code.r8d);
 
   if (store.op == V4StoreOp::Sh) {
     code.test(code.eax, 1u);
@@ -4010,9 +4032,9 @@ V4NativeFn compile_v4_store(
       static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
   code.jb(ram);
   code.cmp(code.edx, 0x1F800000u);
-  code.jb(guard_exit);
+  code.jb(device);
   code.cmp(code.edx, 0x1F801000u);
-  code.jae(guard_exit);
+  code.jae(device);
 
   auto emit_unaligned_store = [&]() {
     // EAX = old aligned memory word, R8D = guest register value,
@@ -4130,6 +4152,95 @@ V4NativeFn compile_v4_store(
     }
     code.mov(code.r9d, 1u);
   }
+
+  code.L(device);
+  // Device/MMIO stores are a host scheduling boundary, but CPU semantics stay
+  // in generated x64. C++ is used only to perform the actual bus transaction.
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    // Read-modify-write unaligned stores against the device bus without
+    // delegating the merge semantics to a CPU opcode helper.
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.r8d, code.eax);
+  } else {
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))]);
+  }
+
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.edx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  // R8D carries the value.
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+  code.mov(code.esi, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.mov(code.edx, code.r8d);
+#endif
+  if (store.op == V4StoreOp::Sb) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
+  } else if (store.op == V4StoreOp::Sh) {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
+  } else {
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
+  }
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+
+  emit_retire_incoming_load(code, 0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc + prefix_count * 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      start_pc + (prefix_count + 1u) * 4u);
+  code.add(code.ebx, 2u);
+  code.dec(code.r12d);
+  code.inc(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+  emit_v4_block_return(code);
 
   code.L(stored);
 
