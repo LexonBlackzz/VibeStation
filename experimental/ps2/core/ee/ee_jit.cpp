@@ -912,6 +912,7 @@ bool branch_likely_instruction(u32 instruction) {
 
 bool emit_branch_and_delay(
     u32 branch_pc,
+    u32 retired_before,
     u32 branch_instruction,
     u32 delay_instruction,
     Emitter& out) {
@@ -1001,7 +1002,7 @@ bool emit_branch_and_delay(
             out.store_state_imm32(pc_offset, fallthrough);
             out.store_state_imm32(next_pc_offset, fallthrough + 4u);
             out.emit(0xB8u); // MOV EAX,1: annulled delay did not retire.
-            out.emit32(1u);
+            out.emit32(retired_before + 1u);
             out.emit(0xC3u);
             out.patch_rel32(done, out.bytes.size());
             return true;
@@ -1050,7 +1051,7 @@ bool emit_branch_and_delay(
             out.patch_rel32(not_taken, not_taken_label);
             out.store_state_imm32(pc_offset, fallthrough);
             out.store_state_imm32(next_pc_offset, fallthrough + 4u);
-            out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+            out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
             out.patch_rel32(done, out.bytes.size());
             return true;
         }
@@ -1104,7 +1105,7 @@ bool emit_branch_and_delay(
         out.patch_rel32(not_taken, not_taken_label);
         out.store_state_imm32(pc_offset, fallthrough);
         out.store_state_imm32(next_pc_offset, fallthrough + 4u);
-        out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+        out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
         out.patch_rel32(done, out.bytes.size());
         return true;
     }
@@ -1127,7 +1128,7 @@ bool emit_branch_and_delay(
         out.patch_rel32(not_taken, not_taken_label);
         out.store_state_imm32(pc_offset, fallthrough);
         out.store_state_imm32(next_pc_offset, fallthrough + 4u);
-        out.emit(0xB8u); out.emit32(1u); out.emit(0xC3u);
+        out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
         out.patch_rel32(done, out.bytes.size());
         return true;
     }
@@ -1220,6 +1221,7 @@ bool emit_block(
         if (i + 1u < instruction_count &&
             emit_branch_and_delay(
                 pc + i * 4u,
+                i,
                 instructions[i],
                 instructions[i + 1u],
                 out)) {
