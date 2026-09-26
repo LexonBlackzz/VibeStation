@@ -4563,6 +4563,35 @@ bool test_ee_native_extended_integer_block() {
 }
 
 
+
+bool test_ee_native_compile_blocker_diagnostics() {
+    constexpr ps2::u32 pc = 0x5700u;
+    // Prefix compiles; MTC0 is deliberately a true system-boundary operation
+    // and therefore remains a compile stopper for the resident block.
+    const std::array<ps2::u32, 2> code = {
+        (0x09u << 26) | (1u << 16) | 1u, // ADDIU r1,r0,1
+        (0x10u << 26) | (0x04u << 21) | (1u << 16) | (12u << 11), // MTC0 Status
+    };
+
+    ps2::Ps2System native;
+    native.ee().reset(pc);
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc, 0u, code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()));
+
+#if defined(_M_X64) || defined(__x86_64__)
+    return expect(
+        retired == 1u &&
+        native.ee().jit().compile_stop_opcodes()[0x10u] != 0u,
+        "EE JIT did not attribute prefix stop to the real COP0 blocker");
+#else
+    return expect(
+        retired == 0u,
+        "EE compile-blocker diagnostic unexpectedly ran on non-x64");
+#endif
+}
+
 bool test_ee_native_cop2_register_transfers() {
     constexpr ps2::u32 pc = 0x5800u;
     const std::array<ps2::u32, 4> code = {
@@ -6400,6 +6429,7 @@ int main() {
     ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
+    ok = test_ee_native_compile_blocker_diagnostics() && ok;
     ok = test_ee_native_cop2_register_transfers() && ok;
     ok = test_ee_native_scratchpad_fastmem() && ok;
     ok = test_ee_native_ram_loads() && ok;

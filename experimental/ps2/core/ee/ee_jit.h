@@ -70,6 +70,12 @@ public:
     [[nodiscard]] u64 block_compile_failure_count() const {
         return block_compile_failure_count_;
     }
+    [[nodiscard]] const std::array<u64, 64>& compile_stop_opcodes() const {
+        return compile_stop_opcodes_;
+    }
+    [[nodiscard]] const std::array<u64, 64>& delay_slot_stop_opcodes() const {
+        return delay_slot_stop_opcodes_;
+    }
     [[nodiscard]] u64 native_residency_instruction_count() const {
         return native_residency_instruction_count_;
     }
@@ -118,7 +124,9 @@ private:
         u32 instruction_count,
         u32& compiled_instructions,
         bool& control_flow,
-        bool& uses_ram);
+        bool& uses_ram,
+        u32& blocker_opcode,
+        bool& blocker_is_delay_slot);
     std::array<Entry, 4096> entries_{};
     std::vector<BlockEntry> block_entries_{32768};
     std::vector<Page> pages_{};
@@ -135,6 +143,8 @@ private:
     u64 native_entry_attempt_count_ = 0;
     u64 native_entry_success_count_ = 0;
     u64 block_compile_failure_count_ = 0;
+    std::array<u64, 64> compile_stop_opcodes_{};
+    std::array<u64, 64> delay_slot_stop_opcodes_{};
     u64 native_residency_instruction_count_ = 0;
     u64 native_residency_max_ = 0;
     std::array<u64, 16> native_residency_histogram_{};

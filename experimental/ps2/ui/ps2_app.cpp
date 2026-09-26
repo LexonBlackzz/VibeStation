@@ -1485,6 +1485,38 @@ void Ps2App::panel_profiler() {
         ImGui::TreePop();
     }
 
+    std::array<std::pair<u64, u32>, 64> compile_stops{};
+    const auto& compile_stop_counts = ee_jit.compile_stop_opcodes();
+    const auto& delay_stop_counts = ee_jit.delay_slot_stop_opcodes();
+    for (u32 opcode = 0u; opcode < 64u; ++opcode) {
+        compile_stops[opcode] = {compile_stop_counts[opcode], opcode};
+    }
+    std::sort(
+        compile_stops.begin(),
+        compile_stops.end(),
+        [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        });
+    if (ImGui::TreeNode("Actual JIT compile stoppers")) {
+        bool any = false;
+        for (std::size_t i = 0u; i < 10u; ++i) {
+            const auto [count, opcode] = compile_stops[i];
+            if (count == 0u) break;
+            any = true;
+            ImGui::BulletText(
+                "%s (0x%02X): %llu stops (%llu in delay slots)",
+                ee_major_opcode_name(opcode),
+                opcode,
+                static_cast<unsigned long long>(count),
+                static_cast<unsigned long long>(
+                    delay_stop_counts[opcode]));
+        }
+        if (!any) {
+            ImGui::TextDisabled("No compile stoppers recorded yet.");
+        }
+        ImGui::TreePop();
+    }
+
     ImGui::Text(
         "IOP: %.1f MIPS   native %.1f MIPS (%.1f%% coverage)",
         profile_iop_mips_,

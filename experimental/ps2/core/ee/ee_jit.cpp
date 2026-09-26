@@ -1941,6 +1941,23 @@ bool emit_branch_and_delay(
     return true;
 }
 
+bool native_branch_candidate(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    if (opcode == 0u) {
+        const u32 funct = instruction & 63u;
+        return funct == 0x08u || funct == 0x09u; // JR/JALR
+    }
+    if (opcode == 0x01u) {
+        return rt <= 0x03u || (rt >= 0x10u && rt <= 0x13u);
+    }
+    if (opcode == 0x11u && rs == 0x08u) return true; // BC1*
+    return opcode == 0x02u || opcode == 0x03u ||
+           (opcode >= 0x04u && opcode <= 0x07u) ||
+           (opcode >= 0x14u && opcode <= 0x17u);
+}
+
 bool emit_block(
     u32 pc,
     const u32* instructions,
@@ -1948,10 +1965,14 @@ bool emit_block(
     Emitter& out,
     u32& compiled_instructions,
     bool& control_flow,
-    bool& uses_ram) {
+    bool& uses_ram,
+    u32& blocker_opcode,
+    bool& blocker_is_delay_slot) {
     compiled_instructions = 0;
     control_flow = false;
     uses_ram = false;
+    blocker_opcode = 64u;
+    blocker_is_delay_slot = false;
     out.preserve_ram_base();
     out.preserve_generation_base();
     out.preserve_scratch_base();
@@ -2000,6 +2021,19 @@ bool emit_block(
                 out)) {
             compiled_instructions += 2u;
             control_flow = true;
+            break;
+        }
+
+        // Record the actual instruction that stopped native compilation.
+        // For a branch family we already know how to lower, a failed
+        // branch+delay emission is overwhelmingly a delay-slot restriction;
+        // report the delay instruction rather than blaming the block head.
+        if (i + 1u < instruction_count &&
+            native_branch_candidate(instructions[i])) {
+            blocker_opcode = instructions[i + 1u] >> 26;
+            blocker_is_delay_slot = true;
+        } else {
+            blocker_opcode = instructions[i] >> 26;
         }
         break;
     }
@@ -2039,6 +2073,8 @@ void EeJit::clear() {
     native_entry_attempt_count_ = 0;
     native_entry_success_count_ = 0;
     block_compile_failure_count_ = 0;
+    compile_stop_opcodes_.fill(0u);
+    delay_slot_stop_opcodes_.fill(0u);
     native_residency_instruction_count_ = 0;
     native_residency_max_ = 0;
     native_residency_histogram_.fill(0u);
@@ -2076,7 +2112,9 @@ EeJit::BlockFunction EeJit::compile_block(
     u32 instruction_count,
     u32& compiled_instructions,
     bool& control_flow,
-    bool& uses_ram) {
+    bool& uses_ram,
+    u32& blocker_opcode,
+    bool& blocker_is_delay_slot) {
 #if defined(VIBESTATION_EE_JIT_X64)
     Emitter emitter;
     if (!emit_block(
@@ -2086,7 +2124,9 @@ EeJit::BlockFunction EeJit::compile_block(
             emitter,
             compiled_instructions,
             control_flow,
-            uses_ram)) {
+            uses_ram,
+            blocker_opcode,
+            blocker_is_delay_slot)) {
         return nullptr;
     }
 
@@ -2114,6 +2154,8 @@ EeJit::BlockFunction EeJit::compile_block(
     compiled_instructions = 0;
     control_flow = false;
     uses_ram = false;
+    blocker_opcode = 64u;
+    blocker_is_delay_slot = false;
     return nullptr;
 #endif
 }
@@ -2161,13 +2203,23 @@ u32 EeJit::execute_block(
             u32 compiled_instructions = 0;
             bool compiled_control_flow = false;
             bool compiled_uses_ram = false;
+            u32 blocker_opcode = 64u;
+            bool blocker_is_delay_slot = false;
             BlockFunction function = compile_block(
                 block_pc,
                 words,
                 word_count,
                 compiled_instructions,
                 compiled_control_flow,
-                compiled_uses_ram);
+                compiled_uses_ram,
+                blocker_opcode,
+                blocker_is_delay_slot);
+            if (blocker_opcode < compile_stop_opcodes_.size()) {
+                ++compile_stop_opcodes_[blocker_opcode];
+                if (blocker_is_delay_slot) {
+                    ++delay_slot_stop_opcodes_[blocker_opcode];
+                }
+            }
             if (function == nullptr || compiled_instructions == 0u) {
                 ++block_compile_failure_count_;
             }
