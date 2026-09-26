@@ -1081,15 +1081,9 @@ void emit_write_cop0(Xbyak::CodeGenerator &code, u8 reg,
     code.mov(code.eax, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
     code.and_(code.eax, ~kSRWriteMask);
-    if (src.getIdx() == code.r8d.getIdx()) {
-      code.mov(code.ecx, src);
-      code.and_(code.ecx, kSRWriteMask);
-      code.or_(code.eax, code.ecx);
-    } else {
-      code.mov(code.ecx, src);
-      code.and_(code.ecx, kSRWriteMask);
-      code.or_(code.eax, code.ecx);
-    }
+    code.mov(code.ecx, src);
+    code.and_(code.ecx, kSRWriteMask);
+    code.or_(code.eax, code.ecx);
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
         code.eax);
@@ -1123,6 +1117,8 @@ void emit_read_store_value(Xbyak::CodeGenerator &code,
     emit_read_guest(code, dst, store.rt);
   }
 }
+
+void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg);
 
 void emit_finish_load_value(Xbyak::CodeGenerator &code,
                             const V4DecodedLoad &load,
