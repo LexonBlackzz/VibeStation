@@ -1352,7 +1352,7 @@ void Ps2App::panel_system() {
     ImGui::BulletText("EE scratchpad: available");
     ImGui::BulletText("Early EE SIO/SBUS/RDRAM/DMAC registers: available");
     ImGui::BulletText("IOP RAM: 2 MiB shared with EE");
-    ImGui::BulletText("IOP R3000A interpreter/COP0: running");
+    ImGui::BulletText("IOP R3000A interpreter + native x64 tier: running");
     ImGui::BulletText("IOP INTC I_STAT/I_MASK/I_CTRL + IRQ2: available");
     ImGui::BulletText("EE/IOP clock interleave: 8:1 startup model");
     ImGui::BulletText("IOP hardware register window: partial");
@@ -1384,6 +1384,10 @@ void Ps2App::panel_profiler() {
         system_.ee().jit_enabled()
             ? "experimental x64 JIT"
             : "interpreter");
+    ImGui::TextDisabled(
+        system_.profile_timing_enabled()
+            ? "Profiler host timing ON: diagnostic mode; benchmark numbers are perturbed."
+            : "Benchmark mode: host timing OFF; cheap execution counters remain active.");
     ImGui::Separator();
 
     ImGui::Text(
