@@ -2,6 +2,7 @@
 
 #include "common/types.h"
 
+#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -26,10 +27,28 @@ public:
     [[nodiscard]] bool write32(u32 offset, u32 value);
     [[nodiscard]] bool write64(u32 offset, u64 value);
 
+    static constexpr u32 kPageSize = 4096u;
+    static constexpr u32 kPageCount =
+        static_cast<u32>(kSize) / kPageSize;
+    [[nodiscard]] u8* data() { return data_.data(); }
+    [[nodiscard]] const u8* data() const { return data_.data(); }
+    [[nodiscard]] u32 page_generation(u32 offset) const {
+        return page_generations_[(offset & (kSize - 1u)) / kPageSize];
+    }
+    [[nodiscard]] u32* page_generation_data() {
+        return page_generations_.data();
+    }
+    void track_code_page(u32 offset) {
+        tracked_code_pages_[(offset & (kSize - 1u)) / kPageSize] = 1u;
+    }
+
 private:
+    void note_write(u32 offset, std::size_t width);
     [[nodiscard]] bool contains(u32 offset, std::size_t width) const;
 
     std::vector<u8> data_;
+    std::array<u32, kPageCount> page_generations_{};
+    std::array<u8, kPageCount> tracked_code_pages_{};
 };
 
 } // namespace ps2
