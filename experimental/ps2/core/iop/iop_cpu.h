@@ -56,6 +56,11 @@ public:
     // deliberately does not advance IOP hardware time; Ps2System batches the
     // exact retired cycle count at a verified event-free boundary.
     u32 run_native_quiet(u32 maximum_instructions);
+    [[nodiscard]] u64 jit_native_instructions() const;
+    [[nodiscard]] u64 jit_native_blocks() const;
+    [[nodiscard]] u64 jit_native_chains() const;
+    [[nodiscard]] u64 jit_guard_exits() const;
+    [[nodiscard]] u64 jit_code_store_exits() const;
 
     [[nodiscard]] const IopCpuState& state() const { return state_; }
     [[nodiscard]] IopCpuState& state() { return state_; }
