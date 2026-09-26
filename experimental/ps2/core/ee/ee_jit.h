@@ -30,7 +30,8 @@ public:
         u32 maximum_instructions,
         const u8* ram_data,
         u32* page_generations,
-        bool& control_flow);
+        bool& control_flow,
+        u32 yield_pc = 0u);
     void clear();
 
     [[nodiscard]] u64 compiled_count() const { return compiled_count_; }
