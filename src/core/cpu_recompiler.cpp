@@ -3410,11 +3410,11 @@ enum class V4AluResultPolicy : u8 {
 const Xbyak::Reg32 &v4_alu_cache_host(Xbyak::CodeGenerator &code, u32 slot) {
   switch (slot) {
   case 0u:
-    return code.edx;
+    return code.esi;
   case 1u:
-    return code.r8d;
+    return code.edi;
   default:
-    return code.r9d;
+    return code.ebp;
   }
 }
 
@@ -3428,6 +3428,17 @@ int v4_alu_cache_find(const V4AluRegisterCache &cache, u8 guest_reg) {
     }
   }
   return -1;
+}
+
+void emit_v4_alu_cache_read(Xbyak::CodeGenerator &code,
+                            const V4AluRegisterCache &cache,
+                            const Xbyak::Reg32 &dst, u8 guest_reg) {
+  const int slot = v4_alu_cache_find(cache, guest_reg);
+  if (slot >= 0) {
+    code.mov(dst, v4_alu_cache_host(code, static_cast<u32>(slot)));
+  } else {
+    emit_read_guest(code, dst, guest_reg);
+  }
 }
 
 void emit_v4_alu_cache_spill(Xbyak::CodeGenerator &code,
@@ -3453,12 +3464,7 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
                              V4AluResultPolicy result_policy =
                                  V4AluResultPolicy::Cache) {
   const auto read_guest = [&](const Xbyak::Reg32 &dst, u8 guest_reg) {
-    const int slot = v4_alu_cache_find(cache, guest_reg);
-    if (slot >= 0) {
-      code.mov(dst, v4_alu_cache_host(code, static_cast<u32>(slot)));
-    } else {
-      emit_read_guest(code, dst, guest_reg);
-    }
+    emit_v4_alu_cache_read(code, cache, dst, guest_reg);
   };
 
   switch (inst.op) {
@@ -3616,9 +3622,8 @@ void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
 void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
                              const V4DecodedInstruction &inst) {
   V4AluRegisterCache cache{};
-  // Single-instruction fragments frequently keep a branch decision or dynamic
-  // target in EDX/R8D across the delay instruction. Do not claim the sequence
-  // cache registers in that ABI: write the result immediately, as before.
+  // A one-instruction fragment has no later consumer, so avoid claiming a
+  // resident cache slot and write the architectural result immediately.
   emit_v4_alu_instruction(code, inst, cache, V4AluResultPolicy::Immediate);
 }
 
@@ -3638,10 +3643,10 @@ V4AluResultPolicy v4_alu_result_policy(
   return V4AluResultPolicy::Immediate;
 }
 
-void emit_v4_alu_sequence(Xbyak::CodeGenerator &code,
-                          const V4DecodedInstruction *instructions,
-                          u32 count, bool retire_after_first) {
-  V4AluRegisterCache cache{};
+void emit_v4_alu_sequence_cached(Xbyak::CodeGenerator &code,
+                                 const V4DecodedInstruction *instructions,
+                                 u32 count, bool retire_after_first,
+                                 V4AluRegisterCache &cache) {
   for (u32 i = 0; i < count; ++i) {
     const u8 write_reg = v4_alu_write_reg(instructions[i]);
     const V4AluResultPolicy result_policy =
@@ -3653,6 +3658,14 @@ void emit_v4_alu_sequence(Xbyak::CodeGenerator &code,
       emit_retire_incoming_load(code, write_reg);
     }
   }
+}
+
+void emit_v4_alu_sequence(Xbyak::CodeGenerator &code,
+                          const V4DecodedInstruction *instructions,
+                          u32 count, bool retire_after_first) {
+  V4AluRegisterCache cache{};
+  emit_v4_alu_sequence_cached(code, instructions, count, retire_after_first,
+                              cache);
   emit_v4_alu_cache_flush(code, cache);
 }
 
@@ -5477,7 +5490,9 @@ V4NativeFn compile_v4_branch(
   }
   CodeGenerator code(kReservation, buffer);
 
-  emit_v4_alu_sequence(code, prefix.data(), prefix_count, true);
+  V4AluRegisterCache prefix_cache{};
+  emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
+                              prefix_cache);
 
   const u32 fallthrough = branch_pc + 8u;
   const u32 jump_target =
@@ -5487,8 +5502,8 @@ V4NativeFn compile_v4_branch(
 
   if (control.op == V4ControlOp::Beq ||
       control.op == V4ControlOp::Bne) {
-    emit_read_guest(code, code.eax, control.rs);
-    emit_read_guest(code, code.ecx, control.rt);
+    emit_v4_alu_cache_read(code, prefix_cache, code.eax, control.rs);
+    emit_v4_alu_cache_read(code, prefix_cache, code.ecx, control.rt);
     code.cmp(code.eax, code.ecx);
     if (control.op == V4ControlOp::Beq) {
       code.sete(code.dl);
@@ -5502,7 +5517,7 @@ V4NativeFn compile_v4_branch(
              control.op == V4ControlOp::Bgez ||
              control.op == V4ControlOp::Bltzal ||
              control.op == V4ControlOp::Bgezal) {
-    emit_read_guest(code, code.eax, control.rs);
+    emit_v4_alu_cache_read(code, prefix_cache, code.eax, control.rs);
     code.cmp(code.eax, 0);
     switch (control.op) {
     case V4ControlOp::Blez: code.setle(code.dl); break;
@@ -5514,25 +5529,25 @@ V4NativeFn compile_v4_branch(
     default: break;
     }
     code.movzx(code.edx, code.dl);
-    // Match the interpreter's broad REGIMM behavior: link variants write RA
-    // regardless of whether the branch is taken, before the delay slot.
-    if (control.op == V4ControlOp::Bltzal ||
-        control.op == V4ControlOp::Bgezal) {
-      code.mov(code.eax, branch_pc + 8u);
-      emit_write_guest(code, 31u, code.eax);
-    }
   } else if (control.op == V4ControlOp::Jr ||
              control.op == V4ControlOp::Jalr) {
     // Capture the dynamic target before either the link write or the delay slot.
     // This is observable when rs == rd or the delay slot rewrites rs.
-    emit_read_guest(code, code.r8d, control.rs);
-    if (control.op == V4ControlOp::Jalr) {
-      code.mov(code.eax, branch_pc + 8u);
-      emit_write_guest(code, control.rd, code.eax);
-    }
-  } else if (control.op == V4ControlOp::Jal) {
+    emit_v4_alu_cache_read(code, prefix_cache, code.r8d, control.rs);
+  }
+
+  // The condition/target has been captured in scratch registers. Commit any
+  // dirty prefix values before link writes or the independently lowered delay
+  // instruction can make architectural GPR state observable.
+  emit_v4_alu_cache_flush(code, prefix_cache);
+  if (control.op == V4ControlOp::Jal ||
+      control.op == V4ControlOp::Bltzal ||
+      control.op == V4ControlOp::Bgezal) {
     code.mov(code.eax, branch_pc + 8u);
     emit_write_guest(code, 31u, code.eax);
+  } else if (control.op == V4ControlOp::Jalr) {
+    code.mov(code.eax, branch_pc + 8u);
+    emit_write_guest(code, control.rd, code.eax);
   }
 
   // If the branch starts the block, it captured operands before the incoming
@@ -5970,12 +5985,15 @@ V4NativeFn compile_v4_load(
   Label ram, scratch, hot_mmio16, device, loaded, unaligned, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
-  emit_v4_alu_sequence(code, prefix.data(), prefix_count, true);
+  V4AluRegisterCache prefix_cache{};
+  emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
+                              prefix_cache);
 
   // Without a prefix the load itself is the load-delay instruction and must
   // capture its source before the incoming delayed load retires.
-  emit_read_guest(code, code.eax, load.rs);
+  emit_v4_alu_cache_read(code, prefix_cache, code.eax, load.rs);
   code.add(code.eax, static_cast<u32>(load.simm));
+  emit_v4_alu_cache_flush(code, prefix_cache);
   if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     code.test(code.eax, 1u);
     code.jnz(unaligned);
@@ -6498,7 +6516,9 @@ V4NativeFn compile_v4_store(
       slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
-  emit_v4_alu_sequence(code, prefix.data(), prefix_count, true);
+  V4AluRegisterCache prefix_cache{};
+  emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
+                              prefix_cache);
   if (prefix_count != 0u) {
     code.add(code.ebx, prefix_count);
     code.sub(code.r12d, prefix_count);
@@ -6506,9 +6526,14 @@ V4NativeFn compile_v4_store(
 
 
   // Capture both operands before retiring an incoming delayed load.
-  emit_read_guest(code, code.eax, store.rs);
+  emit_v4_alu_cache_read(code, prefix_cache, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
-  emit_read_store_value(code, store, code.r8d);
+  if (store.source_cop0) {
+    emit_read_cop0(code, code.r8d, store.rt);
+  } else {
+    emit_v4_alu_cache_read(code, prefix_cache, code.r8d, store.rt);
+  }
+  emit_v4_alu_cache_flush(code, prefix_cache);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
       code.r8d);
@@ -7142,10 +7167,16 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.push(code.r13);
   code.push(code.r14);
   code.push(code.r15);
+  code.push(code.rsi);
+  code.push(code.rdi);
+  code.push(code.rbp);
 #if defined(_WIN32)
-  code.sub(code.rsp, 32);
+  // 32-byte shadow space plus an eight-byte alignment pad after eight pushes.
+  code.sub(code.rsp, 40);
   code.mov(code.r11, code.rcx);
 #else
+  // Eight saved registers leave the SysV stack eight bytes off call alignment.
+  code.sub(code.rsp, 8);
   code.mov(code.r11, code.rdi);
 #endif
 
@@ -7774,8 +7805,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.r11 + static_cast<int>(offsetof(V4NativeState, instructions))],
       code.eax);
 #if defined(_WIN32)
-  code.add(code.rsp, 32);
+  code.add(code.rsp, 40);
+#else
+  code.add(code.rsp, 8);
 #endif
+  code.pop(code.rbp);
+  code.pop(code.rdi);
+  code.pop(code.rsi);
   code.pop(code.r15);
   code.pop(code.r14);
   code.pop(code.r13);
