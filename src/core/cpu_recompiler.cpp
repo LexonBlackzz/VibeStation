@@ -1270,7 +1270,8 @@ V4NativeFn compile_v4_cop0(V4CodeArena &arena,
       0u);
   code.add(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-  code.inc(code.ebx);
+  // COP0 instructions use the core's 2-cycle issue cost.
+  code.add(code.ebx, 2u);
   code.dec(code.r12d);
   emit_v4_link(code, links.fallthrough, links);
   code.ready();
