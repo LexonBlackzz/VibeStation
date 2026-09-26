@@ -1510,7 +1510,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     nullptr,
                     ram_.data(),
                     ram_.data(),
-                    ram_.page_generation_data());
+                    ram_.page_generation_data(),
+                    0x0024DE74u);
                 if (trace_retired != 0u) {
                     retired += trace_retired;
                     quiet_block_instructions_ += trace_retired;
