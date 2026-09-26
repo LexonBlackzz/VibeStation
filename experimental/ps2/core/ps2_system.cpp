@@ -1268,7 +1268,7 @@ u64 Ps2System::try_skip_hot_sif_getreg(
 
 u64 Ps2System::try_run_quiet_ee_batch(
     u64 budget, std::string& error) {
-    if (budget < 2u || !scheduler_.empty() ||
+    if (budget < 2u ||
         sif_dma_.ee_completion_pending() ||
         vu0_.running() || vu1_.running() || gs_.irq_pending()) {
         return 0;
@@ -1323,6 +1323,16 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
+
+    // A queued scheduler event is a deadline, not a reason to abandon the
+    // quiet/native path completely. Retire up to the exact event edge, then
+    // return to the system layer before the next EE instruction can observe
+    // post-event state.
+    if (const auto next_event = scheduler_.next_event_time()) {
+        if (*next_event <= scheduler_.now()) return 0;
+        maximum = std::min<u64>(
+            maximum, *next_event - scheduler_.now());
+    }
 
     const u32 sif_ee_completion =
         sif_dma_.ee_completion_cycles();
