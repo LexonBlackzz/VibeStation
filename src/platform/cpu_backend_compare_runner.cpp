@@ -3872,6 +3872,69 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_store.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_store);
 
+  CpuCompareCase v4_split_scheduler_store_fault{};
+  v4_split_scheduler_store_fault.name =
+      "v4_split_scheduler_store_delay_addr_error_native";
+  v4_split_scheduler_store_fault.start_pc = 0xA0010000u;
+  v4_split_scheduler_store_fault.initial_gpr[1] = 1u;
+  v4_split_scheduler_store_fault.initial_gpr[2] = 0x80012202u;
+  v4_split_scheduler_store_fault.initial_gpr[3] = 0x13579BDFu;
+  v4_split_scheduler_store_fault.program = {
+      enc_i(0x04, 1, 1, 1), // BEQ taken; execute alone in segment 0.
+      enc_i(0x2B, 2, 3, 0), // Misaligned SW faults in the delay slot.
+      0,
+  };
+  v4_split_scheduler_store_fault.instructions = 2u;
+  v4_split_scheduler_store_fault.segment_instructions = {1u, 1u};
+  v4_split_scheduler_store_fault.compare_segment_states = true;
+  v4_split_scheduler_store_fault.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_store_fault
+      .require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_store_fault
+      .require_v4_exception_native_when_available = true;
+  cases.push_back(v4_split_scheduler_store_fault);
+
+  CpuCompareCase v4_split_scheduler_store_mmio{};
+  v4_split_scheduler_store_mmio.name =
+      "v4_split_scheduler_store_delay_mmio_native";
+  v4_split_scheduler_store_mmio.start_pc = 0xA0010000u;
+  v4_split_scheduler_store_mmio.initial_gpr[1] = 1u;
+  v4_split_scheduler_store_mmio.initial_gpr[2] = 0x1F801074u;
+  v4_split_scheduler_store_mmio.initial_gpr[3] = 1u;
+  v4_split_scheduler_store_mmio.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken; execute alone in segment 0.
+      enc_i(0x2B, 2, 3, 0), // SW I_MASK through the native device bridge.
+      0,
+  };
+  v4_split_scheduler_store_mmio.instructions = 2u;
+  v4_split_scheduler_store_mmio.segment_instructions = {1u, 1u};
+  v4_split_scheduler_store_mmio.compare_segment_states = true;
+  v4_split_scheduler_store_mmio.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_store_mmio
+      .require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_store_mmio.require_v4_mmio_native_when_available = true;
+  cases.push_back(v4_split_scheduler_store_mmio);
+
+  CpuCompareCase v4_split_scheduler_swl{};
+  v4_split_scheduler_swl.name = "v4_split_scheduler_swl_delay_native";
+  v4_split_scheduler_swl.start_pc = 0xA0010000u;
+  v4_split_scheduler_swl.initial_gpr[1] = 1u;
+  v4_split_scheduler_swl.initial_gpr[2] = 0x80012222u;
+  v4_split_scheduler_swl.initial_gpr[3] = 0x89ABCDEFu;
+  v4_split_scheduler_swl.memory.push_back({0x00012220u, 0x11223344u});
+  v4_split_scheduler_swl.compare_memory_addresses.push_back(0x00012220u);
+  v4_split_scheduler_swl.program = {
+      enc_i(0x04, 1, 1, 1), // BEQ taken.
+      enc_i(0x2A, 2, 3, 0), // SWL offset 2 in the delay slot.
+      0,
+  };
+  v4_split_scheduler_swl.instructions = 2u;
+  v4_split_scheduler_swl.segment_instructions = {1u, 1u};
+  v4_split_scheduler_swl.compare_segment_states = true;
+  v4_split_scheduler_swl.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_swl.require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_split_scheduler_swl);
+
   CpuCompareCase v4_split_scheduler_load{};
   v4_split_scheduler_load.name = "v4_split_scheduler_load_delay_native";
   v4_split_scheduler_load.start_pc = 0xA0010000u;
