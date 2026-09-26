@@ -618,6 +618,26 @@ u32 IopBus::to_physical(u32 address) {
     return address;
 }
 
+u8* IopBus::jit_ram_data() {
+    return ram_.data();
+}
+
+u32* IopBus::jit_page_generations() {
+    return ram_.page_generation_data();
+}
+
+u32 IopBus::jit_page_generation(u32 address) const {
+    return ram_.page_generation(
+        to_physical(address) &
+        static_cast<u32>(IopRam::kSize - 1u));
+}
+
+void IopBus::jit_track_code_page(u32 address) {
+    ram_.track_code_page(
+        to_physical(address) &
+        static_cast<u32>(IopRam::kSize - 1u));
+}
+
 bool IopBus::interrupt_pending() const {
     return intc_.pending();
 }
