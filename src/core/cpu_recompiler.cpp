@@ -1658,10 +1658,10 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
 
     code.L(loaded);
     emit_retire_incoming_load(code, 0u);
-    emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
 
     // LWC2 marks the written GTE input unavailable for six cycles after the
-    // data-memory penalty, matching Cpu::op_lwc2().
+    // data-memory penalty, matching Cpu::op_lwc2(). R9 is caller-saved, so
+    // finish both timing calculations before invoking the GTE bridge.
     code.mov(code.rax, code.qword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
     code.add(code.rax, code.rbx);
@@ -1671,6 +1671,10 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
         code.rax);
+    code.add(code.r9d, 2u);
+    code.add(code.ebx, code.r9d);
+
+    emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
 
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -1683,8 +1687,6 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
         0u);
     code.add(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
-    code.add(code.r9d, 2u);
-    code.add(code.ebx, code.r9d);
     code.dec(code.r12d);
     code.inc(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
@@ -1723,6 +1725,9 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
 
     code.mov(code.edx, code.eax);
     code.and_(code.edx, 0x1FFFFFFFu);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
 
     // Do not bypass JIT invalidation for stores into translated code.
     code.mov(code.r9d, code.edx);
@@ -1768,6 +1773,8 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.mov(code.r8d, code.eax);
 
     code.L(scratch);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
     code.sub(code.edx, 0x1F800000u);
     code.mov(code.rcx, code.ptr[
         code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
@@ -1785,6 +1792,8 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     }
     emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rt);
     code.mov(code.r8d, code.eax);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
     code.and_(code.edx, psx::RAM_SIZE - 1u);
     code.mov(code.rcx, code.ptr[
         code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
@@ -1794,6 +1803,33 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.mov(code.r9d, 1u);
 
     code.L(stored);
+
+    // System::write32() invalidates the corresponding direct-mapped I-cache
+    // line. Fastmem SWC2 must do the same even when no translated code bytes
+    // overlap the store.
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.shr(code.eax, 4u);
+    code.and_(code.eax, 0xFFu);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+    code.mov(code.edx, code.eax);
+    code.imul(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+    code.mov(code.byte[code.rcx + code.rdx], 0u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+    code.inc(code.dword[code.rcx + code.rax * 4]);
+    {
+      Label generation_ok;
+      code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
+      code.jne(generation_ok);
+      code.mov(code.dword[code.rcx + code.rax * 4], 1u);
+      code.L(generation_ok);
+    }
+
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
         start_pc);
