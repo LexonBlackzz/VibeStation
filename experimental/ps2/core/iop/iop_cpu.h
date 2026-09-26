@@ -3,11 +3,13 @@
 #include "common/types.h"
 
 #include <array>
+#include <memory>
 #include <string>
 
 namespace ps2 {
 
 class IopBus;
+class IopJit;
 
 struct IopSyscallRecord {
     u64 instruction = 0;
@@ -37,7 +39,8 @@ struct IopCpuState {
 
 class IopCpu {
 public:
-    explicit IopCpu(IopBus& bus) : bus_(bus) {}
+    explicit IopCpu(IopBus& bus);
+    ~IopCpu();
 
     void reset(u32 entry_point = 0xBFC00000u);
     bool step(std::string& error);
@@ -49,6 +52,15 @@ public:
     bool skip_osdsys_idle_pair();
     u64 skip_osdsys_idle_pairs(u64 max_pairs);
     u64 run(u64 instruction_budget, std::string& error);
+    // Execute only side-effect-free/native-safe R3000A blocks. This path
+    // deliberately does not advance IOP hardware time; Ps2System batches the
+    // exact retired cycle count at a verified event-free boundary.
+    u32 run_native_quiet(u32 maximum_instructions);
+    [[nodiscard]] u64 jit_native_instructions() const;
+    [[nodiscard]] u64 jit_native_blocks() const;
+    [[nodiscard]] u64 jit_native_chains() const;
+    [[nodiscard]] u64 jit_guard_exits() const;
+    [[nodiscard]] u64 jit_code_store_exits() const;
 
     [[nodiscard]] const IopCpuState& state() const { return state_; }
     [[nodiscard]] IopCpuState& state() { return state_; }
@@ -58,6 +70,7 @@ public:
     void clear_halt();
 
 private:
+    friend class IopJit;
     bool step_internal(std::string& error, bool clear_error);
 
     struct PendingLoad {
@@ -100,6 +113,7 @@ private:
 
     IopBus& bus_;
     IopCpuState state_{};
+    std::unique_ptr<IopJit> jit_;
 
     PendingLoad pending_load_{};
     PendingLoad next_load_{};

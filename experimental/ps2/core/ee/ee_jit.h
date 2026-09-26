@@ -31,7 +31,8 @@ public:
         const u8* ram_data,
         u32* page_generations,
         bool& control_flow,
-        u32 yield_pc = 0u);
+        u32 yield_pc = 0u,
+        u8* scratchpad_data = nullptr);
     void clear();
 
     [[nodiscard]] u64 compiled_count() const { return compiled_count_; }
@@ -63,7 +64,8 @@ public:
 
 private:
     using Function = void (*)(EeCpuState*);
-    using BlockFunction = u32 (*)(EeCpuState*, const u8*, u32*);
+    using BlockFunction =
+        u32 (*)(EeCpuState*, const u8*, u32*, u8*);
     struct Entry {
         u32 instruction = 0;
         Function function = nullptr;
@@ -75,9 +77,13 @@ private:
         u8 instruction_count = 0;
         BlockFunction function = nullptr;
         bool control_flow = false;
+        bool annul_capable = false;
         bool uses_ram = false;
         u32 ram_load_mask = 0;
         u32 ram_store_mask = 0;
+        std::array<u32, 32> words{};
+        u8 guard_bail_streak = 0;
+        u8 guard_skip_remaining = 0;
         bool known = false;
     };
     struct Page {

@@ -1,6 +1,7 @@
 #include "core/iop/iop_cpu.h"
 
 #include "core/iop/iop_bus.h"
+#include "core/iop/iop_jit.h"
 
 #include <algorithm>
 #include <iomanip>
@@ -33,6 +34,12 @@ bool sub_overflow(s32 lhs, s32 rhs, s32& result) {
 
 } // namespace
 
+IopCpu::IopCpu(IopBus& bus)
+    : bus_(bus),
+      jit_(std::make_unique<IopJit>()) {}
+
+IopCpu::~IopCpu() = default;
+
 void IopCpu::reset(u32 entry_point) {
     state_ = {};
     state_.pc = entry_point;
@@ -46,6 +53,7 @@ void IopCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     halted_ = false;
     halt_reason_.clear();
+    if (jit_) jit_->clear();
 }
 
 void IopCpu::clear_halt() {
@@ -933,6 +941,31 @@ bool IopCpu::step_internal(
     ++state_.instructions_executed;
     bus_.tick(1);
     return true;
+}
+
+u32 IopCpu::run_native_quiet(u32 maximum_instructions) {
+    if (!jit_ || maximum_instructions == 0u) return 0u;
+    return jit_->run(*this, maximum_instructions);
+}
+
+u64 IopCpu::jit_native_instructions() const {
+    return jit_ ? jit_->instruction_count() : 0u;
+}
+
+u64 IopCpu::jit_native_blocks() const {
+    return jit_ ? jit_->block_executed_count() : 0u;
+}
+
+u64 IopCpu::jit_native_chains() const {
+    return jit_ ? jit_->chain_count() : 0u;
+}
+
+u64 IopCpu::jit_guard_exits() const {
+    return jit_ ? jit_->guard_exit_count() : 0u;
+}
+
+u64 IopCpu::jit_code_store_exits() const {
+    return jit_ ? jit_->code_store_exit_count() : 0u;
 }
 
 u64 IopCpu::run(

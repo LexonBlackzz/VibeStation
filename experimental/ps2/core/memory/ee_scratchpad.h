@@ -25,6 +25,9 @@ public:
     [[nodiscard]] bool write32(u32 address, u32 value);
     [[nodiscard]] bool write64(u32 address, u64 value);
 
+    [[nodiscard]] u8* data() { return data_.data(); }
+    [[nodiscard]] const u8* data() const { return data_.data(); }
+
 private:
     std::array<u8, kSize> data_{};
 };

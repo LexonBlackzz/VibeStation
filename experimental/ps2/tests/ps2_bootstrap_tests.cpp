@@ -4110,6 +4110,345 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_iop_native_load_delay() {
+    constexpr ps2::u32 pc = 0x1800u;
+    constexpr ps2::u32 data = 0x2800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x23u << 26) | (7u << 21) | (1u << 16), // LW r1,0(r7)
+        (0x09u << 26) | (1u << 21) | (2u << 16) | 1u, // delay sees old r1
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x21u, // ADDU sees new r1
+        (0x23u << 26) | (7u << 21) | (4u << 16) | 4u, // second LW
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP load-delay test code setup failed") && ok;
+    }
+    ok = expect(
+        exact.iop_ram().write32(data, 0x12345678u) &&
+        native.iop_ram().write32(data, 0x12345678u) &&
+        exact.iop_ram().write32(data + 4u, 0xCAFEBABEu) &&
+        native.iop_ram().write32(data + 4u, 0xCAFEBABEu),
+        "IOP load-delay data setup failed") && ok;
+
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[1] = 10u;
+    native.iop().state().gpr[1] = 10u;
+    exact.iop().state().gpr[7] = data;
+    native.iop().state().gpr[7] = data;
+
+    std::string error;
+    // Only the first three instructions are compared here: the final load
+    // has no following delay instruction in the supplied native budget, so it
+    // intentionally remains an interpreter fallback boundary.
+    for (ps2::u32 i = 0; i < 3u; ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP load-delay reference step failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(3u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == 3u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        b.gpr[1] == 0x12345678u &&
+        b.gpr[2] == 11u &&
+        b.gpr[3] == 0x12345683u,
+        "IOP native load-delay state diverged") && ok;
+
+    // If the delay instruction directly overwrites the load destination, the
+    // older load must be discarded.
+    const ps2::u32 overwrite[2] = {
+        (0x23u << 26) | (7u << 21) | (1u << 16),
+        (0x09u << 26) | (0u << 21) | (1u << 16) | 77u,
+    };
+    ps2::Ps2System exact_overwrite;
+    ps2::Ps2System native_overwrite;
+    exact_overwrite.iop().reset(pc);
+    native_overwrite.iop().reset(pc);
+    exact_overwrite.iop().state().gpr[7] = data;
+    native_overwrite.iop().state().gpr[7] = data;
+    ok = expect(
+        exact_overwrite.iop_ram().write32(pc, overwrite[0]) &&
+        exact_overwrite.iop_ram().write32(pc + 4u, overwrite[1]) &&
+        native_overwrite.iop_ram().write32(pc, overwrite[0]) &&
+        native_overwrite.iop_ram().write32(pc + 4u, overwrite[1]) &&
+        exact_overwrite.iop_ram().write32(data, 0xDEADBEEFu) &&
+        native_overwrite.iop_ram().write32(data, 0xDEADBEEFu),
+        "IOP load overwrite setup failed") && ok;
+    ok = expect(
+        exact_overwrite.iop().step_hot(error) &&
+        exact_overwrite.iop().step_hot(error),
+        "IOP load overwrite reference failed") && ok;
+    const ps2::u32 overwrite_retired =
+        native_overwrite.iop().run_native_quiet(2u);
+    native_overwrite.iop_bus().tick(overwrite_retired);
+    ok = expect(
+        overwrite_retired == 2u &&
+        exact_overwrite.iop().state().gpr[1] ==
+            native_overwrite.iop().state().gpr[1] &&
+        native_overwrite.iop().state().gpr[1] == 77u,
+        "IOP native load-delay overwrite suppression diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP native load-delay block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_iop_native_r3000a_block() {
+    constexpr ps2::u32 pc = 0x1000u;
+    constexpr ps2::u32 data = 0x2000u;
+    const std::array<ps2::u32, 8> code = {
+        (0x09u << 26) | (1u << 16) | 5u, // ADDIU r1,r0,5
+        (0x09u << 26) | (2u << 16) | 3u, // ADDIU r2,r0,3
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x21u, // ADDU r3,r1,r2
+        (0x05u << 26) | (3u << 21) | (0u << 16) | 2u, // BNE -> index 6
+        (3u << 16) | (4u << 11) | (1u << 6), // delay: SLL r4,r3,1
+        (0x09u << 26) | (6u << 16) | 99u, // skipped
+        (0x0Du << 26) | (4u << 21) | (5u << 16) | 1u, // ORI r5,r4,1
+        (0x2Bu << 26) | (7u << 21) | (5u << 16), // SW r5,0(r7)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP native test code setup failed") && ok;
+    }
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[7] = data;
+    native.iop().state().gpr[7] = data;
+
+    std::string error;
+    for (ps2::u32 i = 0; i < 7u; ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP native reference step failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(7u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 7u,
+        "IOP native block did not retire expected path") && ok;
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        a.gpr[4] == b.gpr[4] &&
+        a.gpr[5] == b.gpr[5] &&
+        a.gpr[6] == b.gpr[6] &&
+        a.gpr[7] == b.gpr[7],
+        "IOP native architectural state diverged") && ok;
+    ps2::u32 exact_word = 0u;
+    ps2::u32 native_word = 0u;
+    ok = expect(
+        exact.iop_ram().read32(data, exact_word) &&
+        native.iop_ram().read32(data, native_word) &&
+        exact_word == native_word &&
+        native_word == 17u,
+        "IOP native direct RAM store diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP native block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+
+
+bool test_iop_native_cop_load_delay_and_div() {
+    constexpr ps2::u32 pc = 0x00001800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x10u << 26) | (1u << 16) | (12u << 11),           // MFC0 r1,Status
+        (0x09u << 26) | (1u << 21) | (2u << 16) | 1u,      // delay: r2=r1(old)+1
+        (3u << 21) | (4u << 16) | 0x1Au,                   // DIV r3,r4
+        (5u << 11) | 0x12u,                                // MFLO r5
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP COP-load/DIV native code setup failed") && ok;
+    }
+
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[1] = 5u;
+    native.iop().state().gpr[1] = 5u;
+    exact.iop().state().cop0[12] = 0x00001234u;
+    native.iop().state().cop0[12] = 0x00001234u;
+    exact.iop().state().gpr[3] =
+        static_cast<ps2::u32>(static_cast<ps2::s32>(-12345));
+    native.iop().state().gpr[3] = exact.iop().state().gpr[3];
+    exact.iop().state().gpr[4] = 37u;
+    native.iop().state().gpr[4] = 37u;
+
+    std::string error;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP COP-load/DIV reference execution failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(
+            static_cast<ps2::u32>(code.size()));
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == code.size() &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        b.gpr[2] == 6u &&
+        a.lo == b.lo &&
+        a.hi == b.hi &&
+        a.gpr[5] == b.gpr[5],
+        "IOP native COP load-delay or DIV state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP COP-load/DIV native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_iop_native_overflow_guard() {
+    constexpr ps2::u32 pc = 0x00001900u;
+    const std::array<ps2::u32, 2> code = {
+        (0x09u << 26) | (3u << 16) | 7u,                    // ADDIU r3,r0,7
+        (0x08u << 26) | (1u << 21) | (2u << 16) | 1u,      // ADDI r2,r1,1
+    };
+
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP overflow-guard code setup failed") && ok;
+    }
+    native.iop().reset(pc);
+    native.iop().state().gpr[1] = 0x7FFFFFFFu;
+
+    const ps2::u32 retired = native.iop().run_native_quiet(2u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native.iop().state().pc == pc + 4u &&
+        native.iop().state().next_pc == pc + 8u &&
+        native.iop().state().gpr[3] == 7u &&
+        native.iop().state().gpr[2] == 0u,
+        "IOP native overflow guard did not stop before ADDI") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP overflow-guard native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_iop_native_cross_page_chain() {
+    constexpr ps2::u32 pc = 0x00001FF0u;
+    const std::array<ps2::u32, 7> code = {
+        (0x09u << 26) | (1u << 16) | 1u,                    // ADDIU r1,r0,1
+        (0x04u << 26) | (1u << 21) | (1u << 16) | 3u,      // BEQ -> 0x2004
+        (0x09u << 26) | (2u << 16) | 2u,                    // delay: r2=2
+        (0x09u << 26) | (3u << 16) | 3u,                    // skipped
+        (0x09u << 26) | (4u << 16) | 4u,                    // skipped, next page
+        (0x09u << 26) | (5u << 16) | 5u,                    // target
+        (0x09u << 26) | (5u << 21) | (6u << 16) | 1u,       // r6=r5+1
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP cross-page native code setup failed") && ok;
+    }
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+
+    std::string error;
+    for (ps2::u32 index : {0u, 1u, 2u, 5u, 6u}) {
+        (void)index;
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP cross-page reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.iop().run_native_quiet(5u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == 5u &&
+        native.iop().jit_native_blocks() >= 2u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        a.gpr[4] == b.gpr[4] &&
+        a.gpr[5] == b.gpr[5] &&
+        a.gpr[6] == b.gpr[6],
+        "IOP native resident dispatch did not cross the 4 KiB page") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP cross-page native chain unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_linear_block() {
     constexpr ps2::u32 pc = 0x5000u;
     const std::array<ps2::u32, 4> code = {
@@ -4211,6 +4550,87 @@ bool test_ee_native_extended_integer_block() {
     ok = expect(
         retired == 0u,
         "EE extended native block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_ee_native_scratchpad_fastmem() {
+    constexpr ps2::u32 pc = 0x5A00u;
+    constexpr ps2::u32 scratch = ps2::EeScratchpad::kBase + 0x30u;
+    const std::array<ps2::u32, 4> code = {
+        (0x20u << 26) | (1u << 21) | (2u << 16),       // LB r2,0(r1)
+        (0x23u << 26) | (1u << 21) | (3u << 16) | 4u, // LW r3,4(r1)
+        (0x1Eu << 26) | (1u << 21) | (4u << 16),       // LQ r4,0(r1)
+        (0x1Fu << 26) | (1u << 21) | (4u << 16) | 16u,// SQ r4,16(r1)
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = scratch;
+    native.ee().state().gpr[1].lo = scratch;
+
+    constexpr ps2::u64 lo = 0x88776655443322F1ull;
+    constexpr ps2::u64 hi = 0x0123456789ABCDEFull;
+    bool ok = expect(
+        exact.bus().write64(scratch, lo) &&
+        exact.bus().write64(scratch + 8u, hi) &&
+        native.bus().write64(scratch, lo) &&
+        native.bus().write64(scratch + 8u, hi),
+        "EE scratchpad native setup failed");
+
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE scratchpad reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        0u,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data(),
+        0u,
+        native.scratchpad().data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size(),
+        "EE scratchpad native block did not retire fully") && ok;
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.gpr[4].hi == b.gpr[4].hi,
+        "EE scratchpad native register state diverged") && ok;
+
+    ps2::u64 exact_lo = 0u;
+    ps2::u64 exact_hi = 0u;
+    ps2::u64 native_lo = 0u;
+    ps2::u64 native_hi = 0u;
+    ok = expect(
+        exact.bus().read64(scratch + 16u, exact_lo) &&
+        exact.bus().read64(scratch + 24u, exact_hi) &&
+        native.bus().read64(scratch + 16u, native_lo) &&
+        native.bus().read64(scratch + 24u, native_hi) &&
+        exact_lo == native_lo &&
+        exact_hi == native_hi &&
+        native_lo == lo &&
+        native_hi == hi,
+        "EE scratchpad native SQ result diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE scratchpad native block ran on non-x64") && ok;
 #endif
     return ok;
 }
@@ -4707,6 +5127,197 @@ bool test_ee_native_regimm() {
     return ok;
 }
 
+bool test_ee_native_special_cop1_and_likely() {
+    constexpr ps2::u32 pc = 0x6E00u;
+    bool ok = true;
+
+    // SPECIAL coverage used heavily in real EE code and in branch delay slots.
+    const std::array<ps2::u32, 10> special = {
+        (0x09u << 26) | (1u << 16) | 3u, // r1=3
+        (0x09u << 26) | (2u << 16) | 5u, // r2=5
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x04u, // SLLV
+        (1u << 21) | (2u << 16) | (4u << 11) | 0x14u, // DSLLV
+        (1u << 21) | (2u << 16) | (5u << 11) | 0x0Au, // MOVZ (no write)
+        (1u << 21) | (0u << 16) | (5u << 11) | 0x0Au, // MOVZ
+        (1u << 21) | (2u << 16) | (6u << 11) | 0x18u, // MULT
+        (6u << 11) | 0x10u, // MFHI r6 (overwrite with hi)
+        (1u << 21) | (0u << 11) | 0x29u, // MTSA r1
+        (7u << 11) | 0x28u, // MFSA r7
+    };
+    ps2::Ps2System exact_special;
+    ps2::Ps2System native_special;
+    exact_special.ee().reset(pc);
+    native_special.ee().reset(pc);
+    std::string error;
+    for (const ps2::u32 instruction : special) {
+        ok = expect(
+            exact_special.ee().step_predecoded(instruction, error),
+            "EE SPECIAL native reference failed") && ok;
+    }
+    const ps2::u32 special_retired =
+        native_special.ee().run_native_block(
+            pc, 0u, special.data(),
+            static_cast<ps2::u32>(special.size()),
+            static_cast<ps2::u32>(special.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        special_retired == special.size() &&
+        exact_special.ee().state().pc == native_special.ee().state().pc &&
+        exact_special.ee().state().hi == native_special.ee().state().hi &&
+        exact_special.ee().state().lo == native_special.ee().state().lo &&
+        exact_special.ee().state().sa == native_special.ee().state().sa,
+        "EE SPECIAL native control state diverged") && ok;
+    for (ps2::u32 reg = 1u; reg <= 7u; ++reg) {
+        ok = expect(
+            exact_special.ee().state().gpr[reg].lo ==
+                native_special.ee().state().gpr[reg].lo,
+            "EE SPECIAL native register diverged") && ok;
+    }
+#else
+    ok = expect(
+        special_retired == 0u,
+        "EE SPECIAL native block ran on non-x64") && ok;
+#endif
+
+    // Exact-bit COP1 transfers/unary operations.
+    const std::array<ps2::u32, 6> cop1 = {
+        (0x11u << 26) | (0x04u << 21) | (1u << 16) | (2u << 11), // MTC1 r1,f2
+        (0x11u << 26) | (0x10u << 21) | (2u << 11) | (3u << 6) | 0x05u, // ABS.S
+        (0x11u << 26) | (0x10u << 21) | (3u << 11) | (4u << 6) | 0x07u, // NEG.S
+        (0x11u << 26) | (0x10u << 21) | (4u << 11) | (5u << 6) | 0x06u, // MOV.S
+        (0x11u << 26) | (0x00u << 21) | (2u << 16) | (5u << 11), // MFC1 r2,f5
+        (0x11u << 26) | (0x02u << 21) | (3u << 16) | (31u << 11), // CFC1 r3,fcr31
+    };
+    ps2::Ps2System exact_cop1;
+    ps2::Ps2System native_cop1;
+    exact_cop1.ee().reset(pc);
+    native_cop1.ee().reset(pc);
+    exact_cop1.ee().state().gpr[1].lo = 0xBF800000u;
+    native_cop1.ee().state().gpr[1].lo = 0xBF800000u;
+    for (const ps2::u32 instruction : cop1) {
+        ok = expect(
+            exact_cop1.ee().step_predecoded(instruction, error),
+            "EE COP1 native reference failed") && ok;
+    }
+    const ps2::u32 cop1_retired =
+        native_cop1.ee().run_native_block(
+            pc, 0u, cop1.data(),
+            static_cast<ps2::u32>(cop1.size()),
+            static_cast<ps2::u32>(cop1.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        cop1_retired == cop1.size() &&
+        exact_cop1.ee().state().gpr[2].lo ==
+            native_cop1.ee().state().gpr[2].lo &&
+        exact_cop1.ee().state().gpr[3].lo ==
+            native_cop1.ee().state().gpr[3].lo &&
+        exact_cop1.ee().state().fpr[2] == native_cop1.ee().state().fpr[2] &&
+        exact_cop1.ee().state().fpr[3] == native_cop1.ee().state().fpr[3] &&
+        exact_cop1.ee().state().fpr[4] == native_cop1.ee().state().fpr[4] &&
+        exact_cop1.ee().state().fpr[5] == native_cop1.ee().state().fpr[5],
+        "EE COP1 native state diverged") && ok;
+#else
+    ok = expect(
+        cop1_retired == 0u,
+        "EE COP1 native block ran on non-x64") && ok;
+#endif
+
+    // Arithmetic COP1 is kept inside the native block through a small bound
+    // helper. Differential-check the helper against the interpreter's PS2
+    // denormal/overflow canonicalization rather than host IEEE defaults.
+    const std::array<ps2::u32, 8> cop1_arith = {
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (3u << 6) | 0x00u, // ADD.S f3,f1,f2
+        (0x11u << 26) | (0x10u << 21) | (1u << 16) |
+            (3u << 11) | (4u << 6) | 0x02u, // MUL.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (4u << 11) | (5u << 6) | 0x03u, // DIV.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (0u << 6) | 0x1Au, // MULA.S
+        (0x11u << 26) | (0x10u << 21) | (1u << 16) |
+            (2u << 11) | (6u << 6) | 0x1Cu, // MADD.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 16) |
+            (1u << 11) | (0u << 6) | 0x34u, // C.LT.S
+        (0x11u << 26) | (0x10u << 21) | (2u << 11) |
+            (7u << 6) | 0x24u, // CVT.W.S
+        (0x11u << 26) | (0x14u << 21) | (7u << 11) |
+            (8u << 6) | 0x20u, // CVT.S.W
+    };
+    ps2::Ps2System exact_arith;
+    ps2::Ps2System native_arith;
+    exact_arith.ee().reset(pc);
+    native_arith.ee().reset(pc);
+    exact_arith.ee().state().fpr[1] = 0x3FC00000u; // 1.5
+    exact_arith.ee().state().fpr[2] = 0x40000000u; // 2.0
+    native_arith.ee().state().fpr[1] = 0x3FC00000u;
+    native_arith.ee().state().fpr[2] = 0x40000000u;
+    for (const ps2::u32 instruction : cop1_arith) {
+        ok = expect(
+            exact_arith.ee().step_predecoded(instruction, error),
+            "EE COP1 arithmetic reference failed") && ok;
+    }
+    const ps2::u32 arith_retired =
+        native_arith.ee().run_native_block(
+            pc, 0u, cop1_arith.data(),
+            static_cast<ps2::u32>(cop1_arith.size()),
+            static_cast<ps2::u32>(cop1_arith.size()));
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        arith_retired == cop1_arith.size() &&
+        exact_arith.ee().state().pc == native_arith.ee().state().pc &&
+        exact_arith.ee().state().fpu_acc ==
+            native_arith.ee().state().fpu_acc &&
+        exact_arith.ee().state().fcr[31] ==
+            native_arith.ee().state().fcr[31],
+        "EE COP1 arithmetic native control state diverged") && ok;
+    for (ps2::u32 reg = 3u; reg <= 8u; ++reg) {
+        ok = expect(
+            exact_arith.ee().state().fpr[reg] ==
+                native_arith.ee().state().fpr[reg],
+            "EE COP1 arithmetic native FPR diverged") && ok;
+    }
+#else
+    ok = expect(
+        arith_retired == 0u,
+        "EE COP1 arithmetic native helper ran on non-x64") && ok;
+#endif
+
+    // BEQL not taken must annul the delay slot and retire only the branch.
+    const ps2::u32 likely_code[3] = {
+        (0x14u << 26) | (1u << 21) | (2u << 16) | 1u,
+        (0x09u << 26) | (4u << 16) | 0x55u,
+        (0x09u << 26) | (5u << 16) | 0x66u,
+    };
+    ps2::Ps2System exact_likely;
+    ps2::Ps2System native_likely;
+    exact_likely.ee().reset(pc);
+    native_likely.ee().reset(pc);
+    exact_likely.ee().state().gpr[1].lo = 1u;
+    exact_likely.ee().state().gpr[2].lo = 2u;
+    native_likely.ee().state().gpr[1].lo = 1u;
+    native_likely.ee().state().gpr[2].lo = 2u;
+    ok = expect(
+        exact_likely.ee().step_predecoded(likely_code[0], error),
+        "EE BEQL reference branch failed") && ok;
+    const ps2::u32 likely_retired =
+        native_likely.ee().run_native_block(
+            pc, 0u, likely_code, 2u, 2u);
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        likely_retired == 1u &&
+        exact_likely.ee().state().pc == native_likely.ee().state().pc &&
+        exact_likely.ee().state().next_pc ==
+            native_likely.ee().state().next_pc &&
+        native_likely.ee().state().gpr[4].lo == 0u,
+        "EE native BEQL annul state diverged") && ok;
+#else
+    ok = expect(
+        likely_retired == 0u,
+        "EE native BEQL ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_delay() {
     constexpr ps2::u32 pc = 0x5800u;
     const ps2::u32 code[2] = {
@@ -4731,6 +5342,207 @@ bool test_ee_native_branch_delay() {
                 "EE native branch-delay state diverged") && ok;
 #else
     ok = expect(retired == 0u, "EE native branch ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+
+
+bool test_ee_native_guarded_overflow_arithmetic() {
+    constexpr ps2::u32 pc = 0x00008C00u;
+    const std::array<ps2::u32, 2> code = {
+        (0x09u << 26) | (3u << 16) | 7u,                    // ADDIU r3,r0,7
+        (0x08u << 26) | (1u << 21) | (2u << 16) | 1u,      // ADDI r2,r1,1
+    };
+
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE overflow-guard code setup failed") && ok;
+    }
+    native.ee().reset(pc);
+    native.ee().state().gpr[1].lo = 0x000000007FFFFFFFull;
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native.ee().state().pc == pc + 4u &&
+        native.ee().state().next_pc == pc + 8u &&
+        native.ee().state().gpr[3].lo == 7u &&
+        native.ee().state().gpr[2].lo == 0u,
+        "EE native overflow guard did not stop exactly before ADDI") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE overflow-guard native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_ee_native_division_helper() {
+    constexpr ps2::u32 pc = 0x00008D00u;
+    const std::array<ps2::u32, 3> code = {
+        (1u << 21) | (2u << 16) | 0x1Au,                   // DIV r1,r2
+        (3u << 11) | 0x12u,                                // MFLO r3
+        (4u << 11) | 0x10u,                                // MFHI r4
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo =
+        static_cast<ps2::u64>(static_cast<ps2::s64>(-12345));
+    native.ee().state().gpr[1].lo = exact.ee().state().gpr[1].lo;
+    exact.ee().state().gpr[2].lo = 37u;
+    native.ee().state().gpr[2].lo = 37u;
+
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE native DIV code setup failed") && ok;
+    }
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE DIV reference execution failed") && ok;
+    }
+
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == code.size() &&
+        a.lo == b.lo &&
+        a.hi == b.hi &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo,
+        "EE native DIV helper diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE native DIV helper ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_ee_native_branch_ram_load_delay() {
+    constexpr ps2::u32 pc = 0x00009000u;
+    constexpr ps2::u32 data = 0x0000A000u;
+    const std::array<ps2::u32, 3> code = {
+        (0x04u << 26) | (1u << 21) | (1u << 16) | 1u,      // BEQ r1,r1,+1
+        (0x23u << 26) | (3u << 21) | (2u << 16),           // delay: LW r2,0(r3)
+        (0x09u << 26) | (4u << 16) | 9u,                   // target: r4=9
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE branch-load-delay code setup failed") && ok;
+    }
+    ok = expect(
+        exact.bus().write32(data, 0x12345678u) &&
+        native.bus().write32(data, 0x12345678u),
+        "EE branch-load-delay data setup failed") && ok;
+
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo = 1u;
+    native.ee().state().gpr[1].lo = 1u;
+    exact.ee().state().gpr[3].lo = data;
+    native.ee().state().gpr[3].lo = data;
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    std::string error;
+    ok = expect(
+        exact.ee().step_predecoded(code[0], error) &&
+        exact.ee().step_predecoded(code[1], error) &&
+        exact.ee().step_predecoded(code[2], error),
+        "EE branch-load-delay reference failed") && ok;
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        2u,
+        3u,
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == 3u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        b.gpr[2].lo == 0x12345678u &&
+        a.gpr[4].lo == b.gpr[4].lo,
+        "EE native RAM-load delay slot diverged") && ok;
+
+    ps2::Ps2System guarded;
+    guarded.ee().reset(pc);
+    guarded.ee().state().gpr[1].lo = 1u;
+    guarded.ee().state().gpr[3].lo = 0x10000000u; // MMIO, must bail.
+    for (ps2::u32 i = 0u; i < 2u; ++i) {
+        ok = expect(
+            guarded.bus().write32(pc + i * 4u, code[i]),
+            "EE guarded branch-load-delay code setup failed") && ok;
+    }
+    guarded.ram().track_code_page(pc);
+    const ps2::u32 guarded_generation =
+        guarded.ram().page_generation(pc);
+    const ps2::u32 guarded_retired =
+        guarded.ee().run_native_block(
+            pc,
+            guarded_generation,
+            code.data(),
+            2u,
+            2u,
+            guarded.ram().data(),
+            guarded.ram().page_generation_data());
+    ok = expect(
+        guarded_retired == 0u &&
+        guarded.ee().state().pc == pc &&
+        guarded.ee().state().next_pc == pc + 4u,
+        "EE guarded delay-slot bailout failed to roll branch state back") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE RAM-load delay-slot native block ran on non-x64") && ok;
 #endif
     return ok;
 }
@@ -4798,6 +5610,74 @@ bool test_ee_native_resident_branch_chain() {
     ok = expect(
         retired == 0u,
         "EE resident chain unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+
+bool test_ee_native_cross_page_chain() {
+    constexpr ps2::u32 pc = 0x00007FF0u;
+    const std::array<ps2::u32, 7> code = {
+        (0x09u << 26) | (1u << 16) | 1u,                    // ADDIU r1,r0,1
+        (0x04u << 26) | (1u << 21) | (1u << 16) | 3u,      // BEQ -> 0x8004
+        (0x09u << 26) | (2u << 16) | 2u,                    // delay: r2=2
+        (0x09u << 26) | (3u << 16) | 3u,                    // skipped
+        (0x09u << 26) | (4u << 16) | 4u,                    // skipped, next page
+        (0x09u << 26) | (5u << 16) | 5u,                    // target
+        (0x09u << 26) | (5u << 21) | (6u << 16) | 1u,       // r6=r5+1
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE cross-page native code setup failed") && ok;
+    }
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    std::string error;
+    for (ps2::u32 index : {0u, 1u, 2u, 5u, 6u}) {
+        ok = expect(
+            exact.ee().step_predecoded(code[index], error),
+            "EE cross-page reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        4u,
+        5u,
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == 5u &&
+        native.ee().jit().block_executed_count() >= 2u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.cop0[9] == b.cop0[9] &&
+        a.gpr[1].lo == b.gpr[1].lo &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.gpr[5].lo == b.gpr[5].lo &&
+        a.gpr[6].lo == b.gpr[6].lo,
+        "EE native resident dispatch did not cross the 4 KiB page") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE cross-page native chain unexpectedly ran on non-x64") && ok;
 #endif
     return ok;
 }
@@ -5270,19 +6150,27 @@ bool test_ee_ram_page_generation() {
     constexpr ps2::u32 page0 = 0x1000u;
     constexpr ps2::u32 page1 = 0x2000u;
 
-    system.ram().track_code_page(page0);
-    system.ram().track_code_page(page1);
+    // Translating a small code span must not make unrelated data in the same
+    // 4 KiB page self-modifying code.
+    system.ram().track_code_range(page0 + 0x20u, 32u);
     const ps2::u32 g0 = system.ram().page_generation(page0);
-    const ps2::u32 g1 = system.ram().page_generation(page1);
-
     bool ok = expect(
-        system.bus().write32(page0 + 0x20u, 0x12345678u),
-        "EE RAM generation write setup failed");
+        system.bus().write32(page0 + 0x600u, 0xCAFEBABEu),
+        "EE RAM unrelated-region write setup failed");
     ok = expect(
-        system.ram().page_generation(page0) == g0 + 1u &&
-        system.ram().page_generation(page1) == g1,
-        "EE RAM page generation changed the wrong page") && ok;
+        system.ram().page_generation(page0) == g0,
+        "EE RAM unrelated same-page data write invalidated code") && ok;
 
+    ok = expect(
+        system.bus().write32(page0 + 0x20u, 0x12345678u),
+        "EE RAM translated-region write setup failed") && ok;
+    ok = expect(
+        system.ram().page_generation(page0) == g0 + 1u,
+        "EE RAM translated-region write did not invalidate code") && ok;
+
+    // A write crossing a page boundary must invalidate both pages when both
+    // touched regions contain translated code.
+    system.ram().track_code_range(page1 - 8u, 16u);
     const ps2::u32 g0_cross = system.ram().page_generation(page0);
     const ps2::u32 g1_cross = system.ram().page_generation(page1);
     ok = expect(
@@ -5291,7 +6179,7 @@ bool test_ee_ram_page_generation() {
     ok = expect(
         system.ram().page_generation(page0) == g0_cross + 1u &&
         system.ram().page_generation(page1) == g1_cross + 1u,
-        "EE RAM cross-page write did not invalidate both pages") && ok;
+        "EE RAM cross-page write did not invalidate both translated regions") && ok;
     return ok;
 }
 
@@ -5411,15 +6299,26 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_iop_native_load_delay() && ok;
+    ok = test_iop_native_r3000a_block() && ok;
+    ok = test_iop_native_cop_load_delay_and_div() && ok;
+    ok = test_iop_native_overflow_guard() && ok;
+    ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
+    ok = test_ee_native_scratchpad_fastmem() && ok;
     ok = test_ee_native_ram_loads() && ok;
     ok = test_ee_native_ram_stores() && ok;
     ok = test_ee_native_quadword_fastmem() && ok;
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_regimm() && ok;
+    ok = test_ee_native_special_cop1_and_likely() && ok;
     ok = test_ee_native_branch_delay() && ok;
+    ok = test_ee_native_guarded_overflow_arithmetic() && ok;
+    ok = test_ee_native_division_helper() && ok;
+    ok = test_ee_native_branch_ram_load_delay() && ok;
     ok = test_ee_native_resident_branch_chain() && ok;
+    ok = test_ee_native_cross_page_chain() && ok;
     ok = test_ee_phase_aware_idle_skip() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
     ok = test_ee_quiet_fast_ram_store_barrier() && ok;

@@ -39,6 +39,8 @@ public:
     void refresh_display();
     Bios& bios(){return bios_;} const Bios& bios()const{return bios_;}
     EeRam& ram(){return ram_;} const EeRam& ram()const{return ram_;}
+    EeScratchpad& scratchpad(){return scratchpad_;}
+    const EeScratchpad& scratchpad()const{return scratchpad_;}
     IopRam& iop_ram(){return iop_ram_;} const IopRam& iop_ram()const{return iop_ram_;}
     EeBus& bus(){return bus_;} const EeBus& bus()const{return bus_;}
     IopBus& iop_bus(){return iop_bus_;} const IopBus& iop_bus()const{return iop_bus_;}
@@ -124,6 +126,12 @@ public:
     u64 profile_ee_ns() const { return profile_ee_ns_; }
     u64 profile_iop_ns() const { return profile_iop_ns_; }
     u64 profile_slow_path_ns() const { return profile_slow_path_ns_; }
+    void set_profile_timing_enabled(bool enabled) {
+        profile_timing_enabled_ = enabled;
+    }
+    bool profile_timing_enabled() const {
+        return profile_timing_enabled_;
+    }
     const std::array<u64, 64>& native_fallback_opcodes() const {
         return native_fallback_opcodes_;
     }
@@ -196,6 +204,7 @@ private:
     u64 profile_iop_ns_=0;
     u64 profile_slow_path_ns_=0;
     u64 profile_slow_path_samples_=0;
+    bool profile_timing_enabled_=false;
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 64> native_fallback_opcodes_{};
     std::array<u64, 8> idle_skip_reasons_{};

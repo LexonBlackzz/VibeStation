@@ -301,7 +301,6 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     if (physical >= EeRam::kSize) return nullptr;
 
     const u32 page_offset = physical & (EeRam::kPageSize - 1u);
-    ram_.track_code_page(physical);
     const u32 generation = ram_.page_generation(physical);
     const u64 block_hash =
         static_cast<u64>(pc >> 2) * 11400714819323198485ull;
@@ -320,7 +319,6 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
 
     block = {};
     block.pc = pc;
-    block.page_generation = generation;
 
     const u32 instructions_left_in_page =
         (EeRam::kPageSize - page_offset) / 4u;
@@ -373,6 +371,15 @@ Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
     }
 
     if (block.count == 0u) return nullptr;
+
+    // Mark only the translated 512-byte RAM regions as code. The generation
+    // counter is separate from those region bits, so learning about another
+    // translated region does not invalidate already-compiled blocks.
+    ram_.track_code_range(
+        physical,
+        static_cast<std::size_t>(block.count) * sizeof(u32));
+    block.page_generation = ram_.page_generation(physical);
+
     ++quiet_block_compiles_;
     return &block;
 }
@@ -523,7 +530,10 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
     const u64 total_phase = ee_iop_phase_ + cycles;
     ee_iop_phase_ = static_cast<u32>(total_phase & 7u);
     const u64 steps = total_phase / 8u;
-    const auto profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point profile_begin{};
+    if (profile_timing_enabled_) {
+        profile_begin = std::chrono::steady_clock::now();
+    }
     for (u64 i = 0; i < steps;) {
         if (iop_.halted()) break;
         if (i + 1u < steps && !sif_dma_.iop_completion_pending()) {
@@ -540,6 +550,34 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
             i += 2u;
             continue;
         }
+
+        // The IOP recompiler only executes ALU/control/direct-RAM blocks and
+        // does not advance device time itself. Run it only across an interval
+        // which the IOP bus proves event-free, then repay the exact retired
+        // cycle count in one hardware tick. This mirrors the PS1 V4
+        // run-slice model without allowing native code to skip observable IOP
+        // timer/SIF/IRQ boundaries.
+        if (i + 1u < steps &&
+            !sif_dma_.iop_completion_pending() &&
+            !iop_bus_.interrupt_pending()) {
+            u64 native_budget =
+                std::min<u64>(steps - i, 256u);
+            while (native_budget >= 2u &&
+                   !iop_bus_.can_tick_event_free(native_budget)) {
+                native_budget >>= 1u;
+            }
+            if (native_budget >= 2u) {
+                const u32 native_retired =
+                    iop_.run_native_quiet(
+                        static_cast<u32>(native_budget));
+                if (native_retired != 0u) {
+                    iop_bus_.tick(native_retired);
+                    i += native_retired;
+                    continue;
+                }
+            }
+        }
+
         if (!iop_.step_hot(iop_step_error_scratch_)) {
             if (!iop_.halted()) {
                 error = "IOP step failed: " + iop_step_error_scratch_;
@@ -549,7 +587,7 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
         sif_dma_.tick_iop(iop_bus_);
         ++i;
     }
-    if (steps != 0u) {
+    if (profile_timing_enabled_ && steps != 0u) {
         profile_iop_ns_ += elapsed_profile_ns(profile_begin);
     }
 }
@@ -1434,7 +1472,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     }
     if (maximum < 2u) return 0;
 
-    const auto ee_profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point ee_profile_begin{};
+    if (profile_timing_enabled_) {
+        ee_profile_begin = std::chrono::steady_clock::now();
+    }
     u64 retired = 0;
     while (retired < maximum && !ee_.halted()) {
         // SifGetReg(4) has a system-level exact-timing accelerator that must
@@ -1578,7 +1619,8 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     static_cast<u32>(maximum - retired),
                     ram_.data(),
                     ram_.page_generation_data(),
-                    0x0024DE74u);
+                    0x0024DE74u,
+                    scratchpad_.data());
                 if (native_retired != 0u) {
                     retired += native_retired;
                     quiet_block_instructions_ += native_retired;
@@ -1648,7 +1690,9 @@ u64 Ps2System::try_run_quiet_ee_batch(
         ++retired;
         if (!error.empty()) break;
     }
-    profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
+    if (profile_timing_enabled_) {
+        profile_ee_ns_ += elapsed_profile_ns(ee_profile_begin);
+    }
     if (retired == 0u) return 0;
 
     // step_quiet deliberately leaves EE hardware time untouched. Apply the
@@ -1731,7 +1775,10 @@ u64 Ps2System::try_run_quiet_ee_superbatch(
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
-    const auto profile_begin = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point profile_begin{};
+    if (profile_timing_enabled_) {
+        profile_begin = std::chrono::steady_clock::now();
+    }
     u64 executed=0;
     while(executed<instruction_budget){
         if (instruction_budget - executed >= 8u &&
@@ -1838,6 +1885,7 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
 
         const u64 before=ee_.state().instructions_executed;
         const bool profile_this_slow_step =
+            profile_timing_enabled_ &&
             ((profile_slow_path_samples_++ & 255u) == 0u);
         std::chrono::steady_clock::time_point slow_profile_begin{};
         if (profile_this_slow_step) {
@@ -1854,7 +1902,9 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
         }
         ++executed;
     }
-    profile_run_ns_ += elapsed_profile_ns(profile_begin);
+    if (profile_timing_enabled_) {
+        profile_run_ns_ += elapsed_profile_ns(profile_begin);
+    }
     return executed;
 }
 void Ps2System::refresh_display(){gs_display_.update(gs_,gs_core_.vram());}

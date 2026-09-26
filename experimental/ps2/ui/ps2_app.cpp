@@ -1352,7 +1352,7 @@ void Ps2App::panel_system() {
     ImGui::BulletText("EE scratchpad: available");
     ImGui::BulletText("Early EE SIO/SBUS/RDRAM/DMAC registers: available");
     ImGui::BulletText("IOP RAM: 2 MiB shared with EE");
-    ImGui::BulletText("IOP R3000A interpreter/COP0: running");
+    ImGui::BulletText("IOP R3000A interpreter + native x64 tier: running");
     ImGui::BulletText("IOP INTC I_STAT/I_MASK/I_CTRL + IRQ2: available");
     ImGui::BulletText("EE/IOP clock interleave: 8:1 startup model");
     ImGui::BulletText("IOP hardware register window: partial");
@@ -1384,6 +1384,10 @@ void Ps2App::panel_profiler() {
         system_.ee().jit_enabled()
             ? "experimental x64 JIT"
             : "interpreter");
+    ImGui::TextDisabled(
+        system_.profile_timing_enabled()
+            ? "Profiler host timing ON: diagnostic mode; benchmark numbers are perturbed."
+            : "Benchmark mode: host timing OFF; cheap execution counters remain active.");
     ImGui::Separator();
 
     ImGui::Text(
@@ -1400,12 +1404,35 @@ void Ps2App::panel_profiler() {
         profile_code_store_exits_per_second_,
         profile_cache_flushes_per_second_);
     ImGui::Text(
-        "IOP throughput: %.1f MIPS   VU1 throughput: %.1f MIPS",
+        "IOP: %.1f MIPS   native %.1f MIPS (%.1f%% coverage)",
         profile_iop_mips_,
+        profile_iop_native_mips_,
+        profile_iop_native_coverage_percent_);
+    ImGui::Text(
+        "IOP native: %.0f blocks/s   %.1f instr/block   %.0f chains/s",
+        profile_iop_native_blocks_per_second_,
+        profile_iop_average_native_block_,
+        profile_iop_native_chains_per_second_);
+    ImGui::Text(
+        "IOP native exits: %.0f guard/s   %.0f code-store/s   VU1 %.1f MIPS",
+        profile_iop_guard_exits_per_second_,
+        profile_iop_code_store_exits_per_second_,
         profile_vu1_mips_);
 
     ImGui::Spacing();
+    bool host_timing_enabled =
+        system_.profile_timing_enabled();
+    if (ImGui::Checkbox(
+            "Enable host-time sampling (slower)",
+            &host_timing_enabled)) {
+        system_.set_profile_timing_enabled(
+            host_timing_enabled);
+    }
     ImGui::TextUnformatted("Host emulation-thread time");
+    if (!host_timing_enabled) {
+        ImGui::TextDisabled(
+            "Disabled for performance; native/IOP counters above remain active.");
+    }
     if (ImGui::BeginTable(
             "ProfilerHostTime", 2,
             ImGuiTableFlags_Borders |
@@ -1425,7 +1452,9 @@ void Ps2App::panel_profiler() {
         ImGui::EndTable();
     }
     ImGui::TextDisabled(
-        "Slow-path time is sampled 1/256 to avoid perturbing emulation.");
+        host_timing_enabled
+            ? "Slow-path time is sampled 1/256; timing itself still perturbs emulation."
+            : "Turn host-time sampling on only when diagnosing where host time goes.");
 
     std::array<std::pair<double, u32>, 64> fallback_rates{};
     for (u32 opcode = 0; opcode < 64u; ++opcode) {
@@ -2027,6 +2056,16 @@ bool Ps2App::start_bios() {
     profile_sample_slow_path_ns_ = system_.profile_slow_path_ns();
     profile_sample_iop_instructions_ =
         system_.iop().state().instructions_executed;
+    profile_sample_iop_native_instructions_ =
+        system_.iop().jit_native_instructions();
+    profile_sample_iop_native_blocks_ =
+        system_.iop().jit_native_blocks();
+    profile_sample_iop_native_chains_ =
+        system_.iop().jit_native_chains();
+    profile_sample_iop_guard_exits_ =
+        system_.iop().jit_guard_exits();
+    profile_sample_iop_code_store_exits_ =
+        system_.iop().jit_code_store_exits();
     profile_sample_vu1_instructions_ =
         system_.vu1().stats().instructions;
     profile_sample_fallback_opcodes_ =
@@ -2228,10 +2267,59 @@ void Ps2App::update_emulation() {
 
         const u64 iop_instructions =
             system_.iop().state().instructions_executed;
+        const u64 iop_delta =
+            iop_instructions - profile_sample_iop_instructions_;
         profile_iop_mips_ =
-            static_cast<double>(
-                iop_instructions - profile_sample_iop_instructions_) /
+            static_cast<double>(iop_delta) /
             sample_seconds / 1'000'000.0;
+
+        const u64 iop_native_instructions =
+            system_.iop().jit_native_instructions();
+        const u64 iop_native_blocks =
+            system_.iop().jit_native_blocks();
+        const u64 iop_native_chains =
+            system_.iop().jit_native_chains();
+        const u64 iop_guard_exits =
+            system_.iop().jit_guard_exits();
+        const u64 iop_code_store_exits =
+            system_.iop().jit_code_store_exits();
+        const u64 iop_native_delta =
+            iop_native_instructions -
+            profile_sample_iop_native_instructions_;
+        const u64 iop_native_block_delta =
+            iop_native_blocks -
+            profile_sample_iop_native_blocks_;
+        profile_iop_native_mips_ =
+            static_cast<double>(iop_native_delta) /
+            sample_seconds / 1'000'000.0;
+        profile_iop_native_coverage_percent_ =
+            iop_delta != 0u
+                ? static_cast<double>(iop_native_delta) * 100.0 /
+                    static_cast<double>(iop_delta)
+                : 0.0;
+        profile_iop_native_blocks_per_second_ =
+            static_cast<double>(iop_native_block_delta) /
+            sample_seconds;
+        profile_iop_average_native_block_ =
+            iop_native_block_delta != 0u
+                ? static_cast<double>(iop_native_delta) /
+                    static_cast<double>(iop_native_block_delta)
+                : 0.0;
+        profile_iop_native_chains_per_second_ =
+            static_cast<double>(
+                iop_native_chains -
+                profile_sample_iop_native_chains_) /
+            sample_seconds;
+        profile_iop_guard_exits_per_second_ =
+            static_cast<double>(
+                iop_guard_exits -
+                profile_sample_iop_guard_exits_) /
+            sample_seconds;
+        profile_iop_code_store_exits_per_second_ =
+            static_cast<double>(
+                iop_code_store_exits -
+                profile_sample_iop_code_store_exits_) /
+            sample_seconds;
 
         const u64 vu1_instructions =
             system_.vu1().stats().instructions;
@@ -2295,6 +2383,13 @@ void Ps2App::update_emulation() {
         profile_sample_iop_ns_ = iop_ns;
         profile_sample_slow_path_ns_ = slow_path_ns;
         profile_sample_iop_instructions_ = iop_instructions;
+        profile_sample_iop_native_instructions_ =
+            iop_native_instructions;
+        profile_sample_iop_native_blocks_ = iop_native_blocks;
+        profile_sample_iop_native_chains_ = iop_native_chains;
+        profile_sample_iop_guard_exits_ = iop_guard_exits;
+        profile_sample_iop_code_store_exits_ =
+            iop_code_store_exits;
         profile_sample_vu1_instructions_ = vu1_instructions;
 
         guest_fields_per_second_ =
@@ -2329,6 +2424,13 @@ void Ps2App::reset_core() {
     ee_instructions_per_second_ = 0.0;
     profile_native_mips_ = 0.0;
     profile_iop_mips_ = 0.0;
+    profile_iop_native_mips_ = 0.0;
+    profile_iop_native_coverage_percent_ = 0.0;
+    profile_iop_native_blocks_per_second_ = 0.0;
+    profile_iop_average_native_block_ = 0.0;
+    profile_iop_native_chains_per_second_ = 0.0;
+    profile_iop_guard_exits_per_second_ = 0.0;
+    profile_iop_code_store_exits_per_second_ = 0.0;
     profile_vu1_mips_ = 0.0;
     profile_native_coverage_percent_ = 0.0;
     profile_native_blocks_per_second_ = 0.0;

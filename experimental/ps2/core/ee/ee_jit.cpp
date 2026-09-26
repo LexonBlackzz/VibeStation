@@ -1,11 +1,13 @@
 #include "core/ee/ee_jit.h"
 #include "core/ee/ee_cpu.h"
+#include "core/memory/ee_ram.h"
 
 #include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -27,12 +29,27 @@ constexpr std::size_t kMaxPages = 256u;
 constexpr u8 kArgumentRegister = 1u; // RCX
 constexpr u8 kRamArgumentRegister = 2u; // RDX
 constexpr u8 kGenerationArgumentRegister = 8u; // R8
+constexpr u8 kScratchArgumentRegister = 9u; // R9
 #else
 constexpr u8 kArgumentRegister = 7u; // RDI
 constexpr u8 kRamArgumentRegister = 6u; // RSI
 constexpr u8 kGenerationArgumentRegister = 2u; // RDX
+constexpr u8 kScratchArgumentRegister = 1u; // RCX
 #endif
 constexpr u32 kEeRamSize = 32u * 1024u * 1024u;
+constexpr u32 kEeScratchBase = 0x70000000u;
+constexpr u32 kEeScratchSize = 16u * 1024u;
+
+void ee_jit_cop1_register_helper(
+    EeCpuState* state,
+    u32 instruction);
+void ee_jit_special_div_helper(
+    EeCpuState* state,
+    u32 instruction);
+void ee_jit_scratch_memory_helper(
+    EeCpuState* state,
+    u8* scratch,
+    u32 instruction);
 
 struct Emitter {
     std::vector<u8> bytes;
@@ -128,6 +145,17 @@ struct Emitter {
             ((kGenerationArgumentRegister & 7u) << 3) |
             2u)); // MOV R10, generation arg
     }
+    void preserve_scratch_base() {
+#ifdef _WIN32
+        // The fourth Win64 argument already arrives in R9.
+        static_assert(kScratchArgumentRegister == 9u);
+#else
+        // SysV's fourth argument is RCX; keep it in caller-saved R9 so the
+        // memory fast path has one stable base on both ABIs.
+        static_assert(kScratchArgumentRegister == 1u);
+        emit(0x49u); emit(0x89u); emit(0xC9u); // MOV R9,RCX
+#endif
+    }
     void patch_rel32(std::size_t displacement, std::size_t target) {
         const s64 rel = static_cast<s64>(target) -
             static_cast<s64>(displacement + 4u);
@@ -138,6 +166,83 @@ struct Emitter {
         }
     }
     void sign_extend_word() { emit(0x48u); emit(0x98u); } // CDQE
+
+    void call_state_instruction_helper(
+        void (*helper)(EeCpuState*, u32),
+        u32 instruction) {
+#ifdef _WIN32
+        // Preserve state plus all three resident pointer registers. Five
+        // stack slots (4 pushes + 40 bytes) leave CALL 16-byte aligned while
+        // also providing Win64's mandatory 32-byte shadow space.
+        emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x28u); // SUB RSP,40
+        emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
+        emit(0x48u); emit(0xB8u);
+        emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x28u); // ADD RSP,40
+        emit(0x41u); emit(0x5Bu);            // POP R11
+        emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x41u); emit(0x59u);            // POP R9
+        emit(0x59u);                         // POP RCX
+#else
+        // Four pushes retain state + R9/R10/R11; the extra 8-byte adjustment
+        // restores the SysV 16-byte call-site alignment.
+        emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x08u); // SUB RSP,8
+        emit(0xBEu); emit32(instruction);    // MOV ESI,imm32
+        emit(0x48u); emit(0xB8u);
+        emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x08u); // ADD RSP,8
+        emit(0x41u); emit(0x5Bu);            // POP R11
+        emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x41u); emit(0x59u);            // POP R9
+        emit(0x5Fu);                         // POP RDI
+#endif
+    }
+
+    void call_state_scratch_instruction_helper(
+        void (*helper)(EeCpuState*, u8*, u32),
+        u32 instruction) {
+#ifdef _WIN32
+        emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x28u);
+        emit(0x4Cu); emit(0x89u); emit(0xCAu); // MOV RDX,R9
+        emit(0x41u); emit(0xB8u); emit32(instruction); // MOV R8D,imm32
+        emit(0x48u); emit(0xB8u); emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x28u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x59u);
+#else
+        emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x51u);           // PUSH R9
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x08u);
+        emit(0x4Cu); emit(0x89u); emit(0xCEu); // MOV RSI,R9
+        emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
+        emit(0x48u); emit(0xB8u); emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x08u);
+        emit(0x41u); emit(0x5Bu);
+        emit(0x41u); emit(0x5Au);
+        emit(0x41u); emit(0x59u);
+        emit(0x5Fu);
+#endif
+    }
 };
 
 void* allocate_page() {
@@ -181,6 +286,196 @@ void flush_code(void* code, std::size_t size) {
 #endif
 }
 
+float ee_jit_ps2_fpu_input(u32 bits) {
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0u) {
+        bits &= 0x80000000u;
+    } else if (exponent == 0x7F800000u) {
+        bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+    }
+    return std::bit_cast<float>(bits);
+}
+
+u32 ee_jit_ps2_fpu_result(float value) {
+    u32 bits = std::bit_cast<u32>(value);
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0u) return bits & 0x80000000u;
+    if (exponent == 0x7F800000u) {
+        return (bits & 0x80000000u) | 0x7F7FFFFFu;
+    }
+    return bits;
+}
+
+void ee_jit_special_div_helper(
+    EeCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const bool is_unsigned = (instruction & 63u) == 0x1Bu;
+    const u32 lhs = static_cast<u32>(state->gpr[rs].lo);
+    const u32 rhs = static_cast<u32>(state->gpr[rt].lo);
+    const auto sext32 = [](u32 value) -> u64 {
+        return static_cast<u64>(
+            static_cast<s64>(static_cast<s32>(value)));
+    };
+
+    if (is_unsigned) {
+        if (rhs != 0u) {
+            state->lo = sext32(lhs / rhs);
+            state->hi = sext32(lhs % rhs);
+        } else {
+            state->lo = sext32(0xFFFFFFFFu);
+            state->hi = sext32(lhs);
+        }
+        return;
+    }
+
+    const s32 a = static_cast<s32>(lhs);
+    const s32 b = static_cast<s32>(rhs);
+    if (lhs == 0x80000000u && rhs == 0xFFFFFFFFu) {
+        state->lo = sext32(0x80000000u);
+        state->hi = 0u;
+    } else if (b != 0) {
+        state->lo = sext32(
+            static_cast<u32>(a / b));
+        state->hi = sext32(
+            static_cast<u32>(a % b));
+    } else {
+        state->lo = sext32(
+            static_cast<u32>(a < 0 ? 1 : -1));
+        state->hi = sext32(lhs);
+    }
+}
+
+bool ee_jit_cop1_register_helper_supported(u32 instruction) {
+    if ((instruction >> 26) != 0x11u) return false;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 funct = instruction & 63u;
+    if (rs == 0x14u) {
+        return funct == 0x20u; // CVT.S.W
+    }
+    if (rs != 0x10u) return false;
+    switch (funct) {
+    case 0x00u: // ADD.S
+    case 0x01u: // SUB.S
+    case 0x02u: // MUL.S
+    case 0x03u: // DIV.S
+    case 0x04u: // SQRT.S
+    case 0x16u: // RSQRT.S
+    case 0x18u: // ADDA.S
+    case 0x19u: // SUBA.S
+    case 0x1Au: // MULA.S
+    case 0x1Cu: // MADD.S
+    case 0x1Du: // MSUB.S
+    case 0x1Eu: // MADDA.S
+    case 0x1Fu: // MSUBA.S
+    case 0x24u: // CVT.W.S
+    case 0x28u: // MAX.S
+    case 0x29u: // MIN.S
+    case 0x30u: // C.F.S
+    case 0x32u: // C.EQ.S
+    case 0x34u: // C.LT.S
+    case 0x36u: // C.LE.S
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ee_jit_cop1_register_helper(
+    EeCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 ft = (instruction >> 16) & 31u;
+    const u32 fs = (instruction >> 11) & 31u;
+    const u32 fd = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    constexpr u32 kCond = 0x00800000u;
+
+    if (rs == 0x14u) { // COP1.W: CVT.S.W
+        const s32 value = static_cast<s32>(state->fpr[fs]);
+        state->fpr[fd] =
+            ee_jit_ps2_fpu_result(static_cast<float>(value));
+        return;
+    }
+
+    const float a = ee_jit_ps2_fpu_input(state->fpr[fs]);
+    const float b = ee_jit_ps2_fpu_input(state->fpr[ft]);
+    const float acc = ee_jit_ps2_fpu_input(state->fpu_acc);
+    auto set_fd = [&](float value) {
+        state->fpr[fd] = ee_jit_ps2_fpu_result(value);
+    };
+    auto set_acc = [&](float value) {
+        state->fpu_acc = ee_jit_ps2_fpu_result(value);
+    };
+    auto set_cond = [&](bool value) {
+        if (value) state->fcr[31] |= kCond;
+        else state->fcr[31] &= ~kCond;
+    };
+
+    switch (funct) {
+    case 0x00u: set_fd(a + b); break;
+    case 0x01u: set_fd(a - b); break;
+    case 0x02u: set_fd(a * b); break;
+    case 0x03u:
+        if ((state->fpr[ft] & 0x7FFFFFFFu) == 0u) {
+            const u32 sign =
+                (state->fpr[fs] ^ state->fpr[ft]) & 0x80000000u;
+            state->fpr[fd] = sign | 0x7F7FFFFFu;
+        } else {
+            set_fd(a / b);
+        }
+        break;
+    case 0x04u: set_fd(std::sqrt(std::fabs(b))); break;
+    case 0x16u:
+        if ((state->fpr[ft] & 0x7FFFFFFFu) == 0u) {
+            const u32 sign =
+                (state->fpr[fs] ^ state->fpr[ft]) & 0x80000000u;
+            state->fpr[fd] = sign | 0x7F7FFFFFu;
+        } else {
+            set_fd(a / std::sqrt(std::fabs(b)));
+        }
+        break;
+    case 0x18u: set_acc(a + b); break;
+    case 0x19u: set_acc(a - b); break;
+    case 0x1Au: set_acc(a * b); break;
+    case 0x1Cu: set_fd(acc + (a * b)); break;
+    case 0x1Du: set_fd(acc - (a * b)); break;
+    case 0x1Eu: set_acc(acc + (a * b)); break;
+    case 0x1Fu: set_acc(acc - (a * b)); break;
+    case 0x24u:
+        if ((state->fpr[fs] & 0x7F800000u) <= 0x4E800000u) {
+            const double value = static_cast<double>(a);
+            if (value > 2147483647.0) state->fpr[fd] = 0x7FFFFFFFu;
+            else if (value < -2147483648.0) state->fpr[fd] = 0x80000000u;
+            else state->fpr[fd] =
+                static_cast<u32>(static_cast<s32>(value));
+        } else {
+            state->fpr[fd] =
+                (state->fpr[fs] & 0x80000000u)
+                    ? 0x80000000u
+                    : 0x7FFFFFFFu;
+        }
+        break;
+    case 0x28u:
+        state->fpr[fd] =
+            (a >= b) ? state->fpr[fs] : state->fpr[ft];
+        break;
+    case 0x29u:
+        state->fpr[fd] =
+            (a <= b) ? state->fpr[fs] : state->fpr[ft];
+        break;
+    case 0x30u: set_cond(false); break;
+    case 0x32u: set_cond(a == b); break;
+    case 0x34u: set_cond(a < b); break;
+    case 0x36u: set_cond(a <= b); break;
+    default: break;
+    }
+}
+
 bool emit_instruction_body(u32 instruction, Emitter& out) {
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;
@@ -207,6 +502,46 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                 out.sign_extend_word();
             }
             break;
+        case 0x04u: // SLLV
+        case 0x06u: // SRLV
+        case 0x07u: // SRAV
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rdx(rs, true);
+                out.load_rax(rt, true);
+                // x86 variable shifts use CL. On Win64 RCX holds the state
+                // pointer, so preserve it across the shift; SysV uses RDI.
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x51u); // PUSH RCX
+                }
+                out.emit(0x89u); out.emit(0xD1u); // MOV ECX,EDX
+                out.emit(0xD3u);
+                out.emit(
+                    funct == 0x04u ? 0xE0u :
+                    funct == 0x06u ? 0xE8u : 0xF8u);
+                out.sign_extend_word();
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x59u); // POP RCX
+                }
+            }
+            break;
+        case 0x0Au: // MOVZ
+        case 0x0Bu: // MOVN
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rax(rs, false);
+                out.load_rdx(rt, false);
+                out.emit(0x48u); out.emit(0x85u); out.emit(0xD2u);
+                const std::size_t skip =
+                    out.jcc32(funct == 0x0Au ? 0x85u : 0x84u);
+                out.store_rax(destination);
+                out.patch_rel32(skip, out.bytes.size());
+            }
+            destination = 0u;
+            break;
+        case 0x0Fu: // SYNC
+            destination = 0u;
+            break;
         case 0x10u: // MFHI
             if (destination != 0u) {
                 out.load_state_rax(
@@ -229,6 +564,65 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             out.load_rax(rs, false);
             out.store_state_rax(
                 static_cast<u32>(offsetof(EeCpuState, lo)));
+            destination = 0u;
+            break;
+        case 0x14u: // DSLLV
+        case 0x16u: // DSRLV
+        case 0x17u: // DSRAV
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rdx(rs, true);
+                out.load_rax(rt, false);
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x51u); // PUSH RCX
+                }
+                out.emit(0x89u); out.emit(0xD1u); // MOV ECX,EDX
+                out.emit(0x48u); out.emit(0xD3u);
+                out.emit(
+                    funct == 0x14u ? 0xE0u :
+                    funct == 0x16u ? 0xE8u : 0xF8u);
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x59u); // POP RCX
+                }
+            }
+            break;
+        case 0x18u: // MULT
+        case 0x19u: // MULTU
+            if (sa != 0u) return false;
+            out.load_rax(rs, true);
+            out.load_rdx(rt, true);
+            out.emit(0xF7u);
+            out.emit(funct == 0x18u ? 0xEAu : 0xE2u); // IMUL/MUL EDX
+            out.sign_extend_word();
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, lo)));
+            if (destination != 0u) {
+                out.store_rax(destination);
+            }
+            out.emit(0x89u); out.emit(0xD0u); // MOV EAX,EDX
+            out.sign_extend_word();
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, hi)));
+            destination = 0u;
+            break;
+        case 0x1Au: // DIV
+        case 0x1Bu: // DIVU
+            if (sa != 0u) return false;
+            out.call_state_instruction_helper(
+                &ee_jit_special_div_helper,
+                instruction);
+            destination = 0u;
+            break;
+        case 0x28u: // MFSA
+            if (destination != 0u) {
+                out.load_state_eax(
+                    static_cast<u32>(offsetof(EeCpuState, sa)));
+            }
+            break;
+        case 0x29u: // MTSA
+            out.load_rax(rs, true);
+            out.store_state_eax(
+                static_cast<u32>(offsetof(EeCpuState, sa)));
             destination = 0u;
             break;
         case 0x21u: // ADDU
@@ -369,6 +763,78 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             destination = 0u;
             break;
         }
+        case 0x11u: { // COP1
+            const u32 cop_rs = rs;
+            const u32 fs = (instruction >> 11) & 31u;
+            const u32 fd = (instruction >> 6) & 31u;
+            const u32 cop_funct = instruction & 63u;
+            if (cop_rs == 0x00u) { // MFC1
+                if (rt != 0u) {
+                    out.load_state_eax(
+                        static_cast<u32>(
+                            offsetof(EeCpuState, fpr) +
+                            fs * sizeof(u32)));
+                    out.sign_extend_word();
+                    out.store_rax(rt);
+                }
+            } else if (cop_rs == 0x02u) { // CFC1
+                if (rt != 0u) {
+                    if (fs == 0u) {
+                        out.emit(0xB8u);
+                        out.emit32(0x00002E00u);
+                    } else if (fs == 31u) {
+                        out.load_state_eax(
+                            static_cast<u32>(
+                                offsetof(EeCpuState, fcr) +
+                                31u * sizeof(u32)));
+                    } else {
+                        out.emit(0x31u); out.emit(0xC0u); // XOR EAX,EAX
+                    }
+                    out.sign_extend_word();
+                    out.store_rax(rt);
+                }
+            } else if (cop_rs == 0x04u) { // MTC1
+                out.load_rax(rt, true);
+                out.store_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fs * sizeof(u32)));
+            } else if (cop_rs == 0x06u) { // CTC1
+                if (fs == 31u) {
+                    out.load_rax(rt, true);
+                    out.store_state_eax(
+                        static_cast<u32>(
+                            offsetof(EeCpuState, fcr) +
+                            31u * sizeof(u32)));
+                }
+            } else if (cop_rs == 0x10u &&
+                       (cop_funct == 0x05u ||
+                        cop_funct == 0x06u ||
+                        cop_funct == 0x07u)) {
+                out.load_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fs * sizeof(u32)));
+                if (cop_funct == 0x05u) {
+                    out.emit(0x25u); out.emit32(0x7FFFFFFFu); // AND EAX
+                } else if (cop_funct == 0x07u) {
+                    out.emit(0x35u); out.emit32(0x80000000u); // XOR EAX
+                }
+                out.store_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fd * sizeof(u32)));
+            } else if (
+                ee_jit_cop1_register_helper_supported(instruction)) {
+                out.call_state_instruction_helper(
+                    &ee_jit_cop1_register_helper,
+                    instruction);
+            } else {
+                return false;
+            }
+            destination = 0u;
+            break;
+        }
         case 0x2Fu: // CACHE
         case 0x33u: // PREF
             destination = 0u;
@@ -388,10 +854,215 @@ bool emit_instruction(u32 instruction, Emitter& out) {
     return true;
 }
 
-bool emit_guarded_ram_load(
+bool emit_overflow_integer(
     u32 instruction,
     u32 retired_before,
     Emitter& out) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+    const u32 sa = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    const s16 immediate =
+        static_cast<s16>(instruction & 0xFFFFu);
+
+    u32 destination = 0u;
+    bool word = false;
+    bool subtract = false;
+    bool immediate_form = false;
+
+    if (opcode == 0u) {
+        if (sa != 0u) return false;
+        switch (funct) {
+        case 0x20u: // ADD
+            word = true;
+            break;
+        case 0x22u: // SUB
+            word = true;
+            subtract = true;
+            break;
+        case 0x2Cu: // DADD
+            break;
+        case 0x2Eu: // DSUB
+            subtract = true;
+            break;
+        default:
+            return false;
+        }
+        destination = rd;
+    } else if (opcode == 0x08u || opcode == 0x18u) {
+        // ADDI / DADDI
+        word = opcode == 0x08u;
+        immediate_form = true;
+        destination = rt;
+    } else {
+        return false;
+    }
+
+    if (immediate_form) {
+        out.load_rax(rs, word);
+        if (!word) out.emit(0x48u); // REX.W
+        out.emit(0x05u); // ADD EAX/RAX, sign-extended imm32
+        out.emit32(static_cast<u32>(
+            static_cast<s32>(immediate)));
+    } else {
+        out.load_rax(rs, word);
+        out.load_rdx(rt, word);
+        if (!word) out.emit(0x48u); // REX.W
+        out.emit(subtract ? 0x29u : 0x01u);
+        out.emit(0xD0u); // SUB/ADD RAX,RDX
+    }
+
+    const std::size_t overflow = out.jcc32(0x80u); // JO
+    if (word) out.sign_extend_word();
+    if (destination != 0u) {
+        out.store_rax(destination);
+    }
+    const std::size_t done = out.jmp32();
+
+    const std::size_t overflow_label = out.bytes.size();
+    out.emit(0xB8u); // MOV EAX, retired_before
+    out.emit32(retired_before);
+    out.emit(0xC3u); // interpreter raises exact Ov exception
+
+    const std::size_t done_label = out.bytes.size();
+    out.patch_rel32(overflow, overflow_label);
+    out.patch_rel32(done, done_label);
+    return true;
+}
+
+void ee_jit_scratch_memory_helper(
+    EeCpuState* state,
+    u8* scratch,
+    u32 instruction) {
+    if (state == nullptr || scratch == nullptr) return;
+
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rt = (instruction >> 16) & 31u;
+    const s16 imm = static_cast<s16>(instruction & 0xFFFFu);
+    u32 address =
+        static_cast<u32>(state->gpr[rs].lo) +
+        static_cast<u32>(static_cast<s32>(imm));
+    if (opcode == 0x1Eu || opcode == 0x1Fu) {
+        address &= ~0x0Fu;
+    }
+    const u32 offset = address - kEeScratchBase;
+
+    auto load16 = [&](u32 at) {
+        u16 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto load32 = [&](u32 at) {
+        u32 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto load64 = [&](u32 at) {
+        u64 value = 0u;
+        std::memcpy(&value, scratch + at, sizeof(value));
+        return value;
+    };
+    auto store16 = [&](u32 at, u16 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto store32 = [&](u32 at, u32 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto store64 = [&](u32 at, u64 value) {
+        std::memcpy(scratch + at, &value, sizeof(value));
+    };
+    auto write_word = [&](u32 reg, u32 value) {
+        if (reg != 0u) {
+            state->gpr[reg].lo = static_cast<u64>(
+                static_cast<s64>(static_cast<s32>(value)));
+        }
+    };
+    auto write64 = [&](u32 reg, u64 value) {
+        if (reg != 0u) state->gpr[reg].lo = value;
+    };
+
+    switch (opcode) {
+    case 0x1Eu: // LQ
+        if (rt != 0u) {
+            state->gpr[rt].lo = load64(offset);
+            state->gpr[rt].hi = load64(offset + 8u);
+        }
+        break;
+    case 0x1Fu: // SQ
+        store64(offset, state->gpr[rt].lo);
+        store64(offset + 8u, state->gpr[rt].hi);
+        break;
+    case 0x20u: // LB
+        write64(
+            rt,
+            static_cast<u64>(
+                static_cast<s64>(
+                    static_cast<s8>(scratch[offset]))));
+        break;
+    case 0x21u: // LH
+        write64(
+            rt,
+            static_cast<u64>(
+                static_cast<s64>(
+                    static_cast<s16>(load16(offset)))));
+        break;
+    case 0x23u: // LW
+    case 0x30u: // LL
+        write_word(rt, load32(offset));
+        break;
+    case 0x24u: // LBU
+        write64(rt, scratch[offset]);
+        break;
+    case 0x25u: // LHU
+        write64(rt, load16(offset));
+        break;
+    case 0x27u: // LWU
+        write64(rt, load32(offset));
+        break;
+    case 0x31u: // LWC1
+        state->fpr[rt] = load32(offset);
+        break;
+    case 0x34u: // LLD
+    case 0x37u: // LD
+        write64(rt, load64(offset));
+        break;
+    case 0x28u: // SB
+        scratch[offset] = static_cast<u8>(state->gpr[rt].lo);
+        break;
+    case 0x29u: // SH
+        store16(offset, static_cast<u16>(state->gpr[rt].lo));
+        break;
+    case 0x2Bu: // SW
+        store32(offset, static_cast<u32>(state->gpr[rt].lo));
+        break;
+    case 0x38u: // SC
+        store32(offset, static_cast<u32>(state->gpr[rt].lo));
+        write_word(rt, 1u);
+        break;
+    case 0x39u: // SWC1
+        store32(offset, state->fpr[rt]);
+        break;
+    case 0x3Cu: // SCD
+        store64(offset, state->gpr[rt].lo);
+        write64(rt, 1u);
+        break;
+    case 0x3Fu: // SD
+        store64(offset, state->gpr[rt].lo);
+        break;
+    default:
+        break;
+    }
+}
+
+bool emit_guarded_ram_load(
+    u32 instruction,
+    u32 retired_before,
+    Emitter& out,
+    bool rollback_branch = false,
+    u32 rollback_pc = 0u) {
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
@@ -436,6 +1107,20 @@ bool emit_guarded_ram_load(
     std::vector<std::size_t> fail_jumps;
     std::vector<std::size_t> direct_jumps;
     std::vector<std::size_t> alias_jumps;
+    std::vector<std::size_t> scratch_jumps;
+
+    // Scratchpad is not part of EeBus::to_physical main RAM. Keep it native
+    // through a tiny bound helper instead of treating it as an MMIO guard
+    // failure and abandoning the entire block.
+    out.emit(0x3Du); out.emit32(kEeScratchBase);
+    const std::size_t below_scratch = out.jcc32(0x82u); // JB
+    out.emit(0x3Du);
+    out.emit32(
+        kEeScratchBase + kEeScratchSize -
+        (opcode == 0x1Eu ? 1u : width));
+    scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
+    const std::size_t main_mapping_label = out.bytes.size();
+    out.patch_rel32(below_scratch, main_mapping_label);
 
     out.emit(0x3Du); // CMP EAX, 0xC0000000
     out.emit32(0xC0000000u);
@@ -552,7 +1237,27 @@ bool emit_guarded_ram_load(
     }
 
     const std::size_t done_jump = out.jmp32();
+
+    const std::size_t scratch_label = out.bytes.size();
+    for (const std::size_t jump : scratch_jumps) {
+        out.patch_rel32(jump, scratch_label);
+    }
+    out.emit(0x4Du); out.emit(0x85u); out.emit(0xC9u); // TEST R9,R9
+    const std::size_t scratch_missing = out.jcc32(0x84u); // JZ
+    out.call_state_scratch_instruction_helper(
+        &ee_jit_scratch_memory_helper,
+        instruction);
+    const std::size_t scratch_done = out.jmp32();
+
     const std::size_t fail_label = out.bytes.size();
+    if (rollback_branch) {
+        out.store_state_imm32(
+            static_cast<u32>(offsetof(EeCpuState, pc)),
+            rollback_pc);
+        out.store_state_imm32(
+            static_cast<u32>(offsetof(EeCpuState, next_pc)),
+            rollback_pc + 4u);
+    }
     out.emit(0xB8u); // MOV EAX, retired_before
     out.emit32(retired_before);
     out.emit(0xC3u); // RET
@@ -561,7 +1266,9 @@ bool emit_guarded_ram_load(
     for (const std::size_t jump : fail_jumps) {
         out.patch_rel32(jump, fail_label);
     }
+    out.patch_rel32(scratch_missing, fail_label);
     out.patch_rel32(done_jump, done_label);
+    out.patch_rel32(scratch_done, done_label);
     return true;
 }
 
@@ -605,6 +1312,17 @@ bool emit_guarded_ram_store(
     std::vector<std::size_t> fail_jumps;
     std::vector<std::size_t> direct_jumps;
     std::vector<std::size_t> alias_jumps;
+    std::vector<std::size_t> scratch_jumps;
+
+    out.emit(0x3Du); out.emit32(kEeScratchBase);
+    const std::size_t below_scratch = out.jcc32(0x82u); // JB
+    out.emit(0x3Du);
+    out.emit32(
+        kEeScratchBase + kEeScratchSize -
+        (opcode == 0x1Fu ? 1u : width));
+    scratch_jumps.push_back(out.jcc32(0x86u)); // JBE
+    const std::size_t main_mapping_label = out.bytes.size();
+    out.patch_rel32(below_scratch, main_mapping_label);
 
     out.emit(0x3Du);
     out.emit32(0xC0000000u);
@@ -703,27 +1421,57 @@ bool emit_guarded_ram_store(
         out.store_gpr_imm64(rt, 1u);
     }
 
-    // Conservative write barrier: every native RAM store advances the page
-    // generation. Cached code on that page will be recompiled on next entry.
+    // Fine-grained self-modifying-code barrier. EeRam packs an 8-bit
+    // translated-region mask into the high byte of each 4 KiB page metadata
+    // word. Only stores touching one of those 512-byte regions advance the
+    // generation; ordinary data/stack writes on the same page remain native.
+    //
+    // R8D still contains the physical byte address. Recreate it in EAX even
+    // for SWC1, whose data load used EAX above.
+    out.emit(0x44u); out.emit(0x89u); out.emit(0xC0u); // MOV EAX,R8D
+    out.emit(0xC1u); out.emit(0xE8u);
+    out.emit(static_cast<u8>(EeRam::kCodeRegionShift)); // SHR EAX,9
+    out.emit(0x83u); out.emit(0xE0u);
+    out.emit(static_cast<u8>(EeRam::kCodeRegionCount - 1u)); // AND EAX,7
+    out.emit(0x83u); out.emit(0xC0u);
+    out.emit(static_cast<u8>(EeRam::kCodeMaskShift)); // ADD EAX,24
+
     out.emit(0x41u); out.emit(0xC1u); out.emit(0xE8u); out.emit(0x0Cu);
+    out.emit(0x43u); out.emit(0x8Bu); out.emit(0x14u);
+    out.emit(0x82u); // MOV EDX,[R10+R8*4]
+    out.emit(0x0Fu); out.emit(0xA3u); out.emit(0xC2u); // BT EDX,EAX
+    const std::size_t not_tracked_region = out.jcc32(0x83u); // JNC
+
     out.emit(0x43u); out.emit(0x83u); out.emit(0x04u);
     out.emit(0x82u);
     out.emit(opcode == 0x1Fu ? 0x02u : 0x01u);
-    // SQ mirrors the interpreter's two write64 calls, so a tracked code page
-    // advances twice. Scalar stores advance it once.
+    // SQ mirrors the interpreter's two write64 calls, hence +2 generation.
 
-    // A self-modifying store must end this block immediately. The caller will
-    // observe the bumped generation before fetching any later cached word.
+    // Only a write which actually overlaps translated code on this page can
+    // require an immediate exit from the current translation.
     out.emit(0x41u); out.emit(0x81u); out.emit(0xF8u);
     out.emit32(code_page);
     const std::size_t not_code_page = out.jcc32(0x85u); // JNE
     out.emit(0xB8u);
     out.emit32(retired_before + 1u);
     out.emit(0xC3u);
-    const std::size_t done_label = out.bytes.size();
-    out.patch_rel32(not_code_page, done_label);
+    const std::size_t barrier_done = out.bytes.size();
+    out.patch_rel32(not_code_page, barrier_done);
+    out.patch_rel32(not_tracked_region, barrier_done);
 
     const std::size_t continue_jump = out.jmp32();
+
+    const std::size_t scratch_label = out.bytes.size();
+    for (const std::size_t jump : scratch_jumps) {
+        out.patch_rel32(jump, scratch_label);
+    }
+    out.emit(0x4Du); out.emit(0x85u); out.emit(0xC9u); // TEST R9,R9
+    const std::size_t scratch_missing = out.jcc32(0x84u);
+    out.call_state_scratch_instruction_helper(
+        &ee_jit_scratch_memory_helper,
+        instruction);
+    const std::size_t scratch_done = out.jmp32();
+
     const std::size_t fail_label = out.bytes.size();
     out.emit(0xB8u);
     out.emit32(retired_before);
@@ -733,16 +1481,65 @@ bool emit_guarded_ram_store(
     for (const std::size_t jump : fail_jumps) {
         out.patch_rel32(jump, fail_label);
     }
+    out.patch_rel32(scratch_missing, fail_label);
     out.patch_rel32(continue_jump, continue_label);
+    out.patch_rel32(scratch_done, continue_label);
     return true;
+}
+
+bool branch_likely_instruction(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    if (opcode >= 0x14u && opcode <= 0x17u) return true;
+    if (opcode == 0x01u) {
+        const u32 variant = (instruction >> 16) & 31u;
+        return variant == 0x02u || variant == 0x03u ||
+               variant == 0x12u || variant == 0x13u;
+    }
+    if (opcode == 0x11u &&
+        ((instruction >> 21) & 31u) == 0x08u) {
+        return (((instruction >> 16) & 3u) & 2u) != 0u;
+    }
+    return false;
 }
 
 bool emit_branch_and_delay(
     u32 branch_pc,
+    u32 retired_before,
     u32 branch_instruction,
     u32 delay_instruction,
     Emitter& out) {
     const std::size_t before = out.bytes.size();
+
+    Emitter delay_probe;
+    const bool delay_is_body =
+        emit_instruction_body(delay_instruction, delay_probe);
+    if (!delay_is_body) {
+        delay_probe.bytes.clear();
+    }
+    const bool delay_is_ram_load =
+        !delay_is_body &&
+        emit_guarded_ram_load(
+            delay_instruction,
+            retired_before,
+            delay_probe,
+            true,
+            branch_pc);
+    if (!delay_is_body && !delay_is_ram_load) {
+        return false;
+    }
+
+    const auto emit_delay = [&]() -> bool {
+        if (delay_is_body) {
+            return emit_instruction_body(delay_instruction, out);
+        }
+        return emit_guarded_ram_load(
+            delay_instruction,
+            retired_before,
+            out,
+            true,
+            branch_pc);
+    };
+
     const u32 opcode = branch_instruction >> 26;
     const u32 rs = (branch_instruction >> 21) & 31u;
     const u32 rt = (branch_instruction >> 16) & 31u;
@@ -758,6 +1555,10 @@ bool emit_branch_and_delay(
         const u32 funct = branch_instruction & 63u;
         if (funct == 0x08u || funct == 0x09u) { // JR / JALR
             const u32 rd = (branch_instruction >> 11) & 31u;
+            if (delay_is_ram_load && funct == 0x09u) {
+                out.bytes.resize(before);
+                return false;
+            }
             out.load_rax(rs, true);
             out.store_state_eax(pc_offset);
             if (funct == 0x09u && rd != 0u) {
@@ -765,7 +1566,7 @@ bool emit_branch_and_delay(
                     static_cast<s32>(branch_pc + 8u)));
                 out.store_gpr_imm64(rd, link);
             }
-            if (!emit_instruction_body(delay_instruction, out)) {
+            if (!emit_delay()) {
                 out.bytes.resize(before);
                 return false;
             }
@@ -780,35 +1581,71 @@ bool emit_branch_and_delay(
     if (opcode == 0x01u) {
         const u32 variant = rt;
         const bool bltz =
-            variant == 0x00u || variant == 0x10u;
+            variant == 0x00u || variant == 0x02u ||
+            variant == 0x10u || variant == 0x12u;
         const bool bgez =
-            variant == 0x01u || variant == 0x11u;
+            variant == 0x01u || variant == 0x03u ||
+            variant == 0x11u || variant == 0x13u;
+        const bool likely =
+            variant == 0x02u || variant == 0x03u ||
+            variant == 0x12u || variant == 0x13u;
+        const bool link =
+            variant == 0x10u || variant == 0x11u ||
+            variant == 0x12u || variant == 0x13u;
         if (!bltz && !bgez) {
             out.bytes.resize(before);
             return false;
         }
 
-        out.store_state_imm32(pc_offset, fallthrough);
         out.load_rax(rs, false);
         out.emit(0x48u);
         out.emit(0x85u);
         out.emit(0xC0u); // TEST RAX,RAX
 
-        // REGIMM link branches test the source before writing r31. MOV/store
-        // preserve flags, so this also handles the architectural rs == r31
-        // case without an extra temporary register.
-        if (variant == 0x10u || variant == 0x11u) {
-            const u64 link = static_cast<u64>(static_cast<s64>(
+        // Link variants write r31 even when a likely branch is annulled,
+        // matching EeCpu::execute_regimm().
+        if (link && delay_is_ram_load) {
+            out.bytes.resize(before);
+            return false;
+        }
+        if (link) {
+            const u64 link_value = static_cast<u64>(static_cast<s64>(
                 static_cast<s32>(branch_pc + 8u)));
-            out.store_gpr_imm64(31u, link);
+            out.store_gpr_imm64(31u, link_value);
         }
 
+        if (likely) {
+            const std::size_t not_taken =
+                out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
+            out.store_state_imm32(pc_offset, target);
+            if (!emit_delay()) {
+                out.bytes.resize(before);
+                return false;
+            }
+            out.load_state_eax(pc_offset);
+            out.emit(0x05u);
+            out.emit32(4u);
+            out.store_state_eax(next_pc_offset);
+            const std::size_t done = out.jmp32();
+
+            const std::size_t not_taken_label = out.bytes.size();
+            out.patch_rel32(not_taken, not_taken_label);
+            out.store_state_imm32(pc_offset, fallthrough);
+            out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+            out.emit(0xB8u); // MOV EAX,1: annulled delay did not retire.
+            out.emit32(retired_before + 1u);
+            out.emit(0xC3u);
+            out.patch_rel32(done, out.bytes.size());
+            return true;
+        }
+
+        out.store_state_imm32(pc_offset, fallthrough);
         const std::size_t skip_target =
             out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
         out.store_state_imm32(pc_offset, target);
         out.patch_rel32(skip_target, out.bytes.size());
 
-        if (!emit_instruction_body(delay_instruction, out)) {
+        if (!emit_delay()) {
             out.bytes.resize(before);
             return false;
         }
@@ -819,9 +1656,59 @@ bool emit_branch_and_delay(
         return true;
     }
 
+    if (opcode == 0x11u && rs == 0x08u) { // BC1F/T/FL/TL
+        const u32 variant = rt & 3u;
+        const bool likely = (variant & 2u) != 0u;
+        const bool take_when_set = (variant & 1u) != 0u;
+        out.load_state_eax(
+            static_cast<u32>(
+                offsetof(EeCpuState, fcr) + 31u * sizeof(u32)));
+        out.emit(0xA9u); // TEST EAX, FPU condition bit
+        out.emit32(0x00800000u);
+
+        if (likely) {
+            const std::size_t not_taken =
+                out.jcc32(take_when_set ? 0x84u : 0x85u);
+            out.store_state_imm32(pc_offset, target);
+            if (!emit_delay()) {
+                out.bytes.resize(before);
+                return false;
+            }
+            out.load_state_eax(pc_offset);
+            out.emit(0x05u); out.emit32(4u);
+            out.store_state_eax(next_pc_offset);
+            const std::size_t done = out.jmp32();
+            const std::size_t not_taken_label = out.bytes.size();
+            out.patch_rel32(not_taken, not_taken_label);
+            out.store_state_imm32(pc_offset, fallthrough);
+            out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+            out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
+            out.patch_rel32(done, out.bytes.size());
+            return true;
+        }
+
+        out.store_state_imm32(pc_offset, fallthrough);
+        const std::size_t skip_target =
+            out.jcc32(take_when_set ? 0x84u : 0x85u);
+        out.store_state_imm32(pc_offset, target);
+        out.patch_rel32(skip_target, out.bytes.size());
+        if (!emit_delay()) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        return true;
+    }
+
     switch (opcode) {
     case 0x02u: // J
     case 0x03u: { // JAL
+        if (delay_is_ram_load && opcode == 0x03u) {
+            out.bytes.resize(before);
+            return false;
+        }
         const u32 jump_target =
             ((branch_pc + 4u) & 0xF0000000u) |
             ((branch_instruction & 0x03FFFFFFu) << 2);
@@ -832,6 +1719,53 @@ bool emit_branch_and_delay(
         }
         out.store_state_imm32(pc_offset, jump_target);
         break;
+    }
+    case 0x14u: // BEQL
+    case 0x15u: { // BNEL
+        out.load_rax(rs, false);
+        out.load_rdx(rt, false);
+        out.emit(0x48u); out.emit(0x39u); out.emit(0xD0u);
+        const std::size_t not_taken =
+            out.jcc32(opcode == 0x14u ? 0x85u : 0x84u);
+        out.store_state_imm32(pc_offset, target);
+        if (!emit_delay()) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        const std::size_t done = out.jmp32();
+        const std::size_t not_taken_label = out.bytes.size();
+        out.patch_rel32(not_taken, not_taken_label);
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+        out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
+        out.patch_rel32(done, out.bytes.size());
+        return true;
+    }
+    case 0x16u: // BLEZL
+    case 0x17u: { // BGTZL
+        out.load_rax(rs, false);
+        out.emit(0x48u); out.emit(0x85u); out.emit(0xC0u);
+        const std::size_t not_taken =
+            out.jcc32(opcode == 0x16u ? 0x8Fu : 0x8Eu); // JG / JLE
+        out.store_state_imm32(pc_offset, target);
+        if (!emit_delay()) {
+            out.bytes.resize(before);
+            return false;
+        }
+        out.load_state_eax(pc_offset);
+        out.emit(0x05u); out.emit32(4u);
+        out.store_state_eax(next_pc_offset);
+        const std::size_t done = out.jmp32();
+        const std::size_t not_taken_label = out.bytes.size();
+        out.patch_rel32(not_taken, not_taken_label);
+        out.store_state_imm32(pc_offset, fallthrough);
+        out.store_state_imm32(next_pc_offset, fallthrough + 4u);
+        out.emit(0xB8u); out.emit32(retired_before + 1u); out.emit(0xC3u);
+        out.patch_rel32(done, out.bytes.size());
+        return true;
     }
     case 0x04u: // BEQ
     case 0x05u: { // BNE
@@ -865,7 +1799,7 @@ bool emit_branch_and_delay(
         return false;
     }
 
-    if (!emit_instruction_body(delay_instruction, out)) {
+    if (!emit_delay()) {
         out.bytes.resize(before);
         return false;
     }
@@ -890,9 +1824,17 @@ bool emit_block(
     uses_ram = false;
     out.preserve_ram_base();
     out.preserve_generation_base();
+    out.preserve_scratch_base();
     for (u32 i = 0; i < instruction_count; ++i) {
         const std::size_t before = out.bytes.size();
         if (emit_instruction_body(instructions[i], out)) {
+            ++compiled_instructions;
+            continue;
+        }
+
+        out.bytes.resize(before);
+        if (emit_overflow_integer(
+                instructions[i], compiled_instructions, out)) {
             ++compiled_instructions;
             continue;
         }
@@ -922,6 +1864,7 @@ bool emit_block(
         if (i + 1u < instruction_count &&
             emit_branch_and_delay(
                 pc + i * 4u,
+                i,
                 instructions[i],
                 instructions[i + 1u],
                 out)) {
@@ -1049,7 +1992,8 @@ u32 EeJit::execute_block(
     const u8* ram_data,
     u32* page_generations,
     bool& control_flow,
-    u32 yield_pc) {
+    u32 yield_pc,
+    u8* scratchpad_data) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
         instruction_count == 0u ||
@@ -1073,6 +2017,9 @@ u32 EeJit::execute_block(
         if (!entry.known ||
             entry.pc != block_pc ||
             entry.page_generation != generation) {
+            if (words == nullptr || word_count == 0u) {
+                return nullptr;
+            }
             u32 compiled_instructions = 0;
             bool compiled_control_flow = false;
             bool compiled_uses_ram = false;
@@ -1083,18 +2030,39 @@ u32 EeJit::execute_block(
                 compiled_instructions,
                 compiled_control_flow,
                 compiled_uses_ram);
+            if (page_generations != nullptr &&
+                compiled_instructions != 0u) {
+                const u32 block_physical =
+                    ram_physical_address(block_pc);
+                if (block_physical < kEeRamSize) {
+                    EeRam::track_jit_code(
+                        page_generations,
+                        block_physical,
+                        static_cast<std::size_t>(
+                            compiled_instructions) * sizeof(u32));
+                }
+            }
             entry.pc = block_pc;
             entry.page_generation = generation;
             entry.instruction_count =
                 static_cast<u8>(compiled_instructions);
             entry.function = function;
             entry.control_flow = compiled_control_flow;
+            entry.annul_capable =
+                compiled_control_flow &&
+                compiled_instructions >= 2u &&
+                branch_likely_instruction(
+                    words[compiled_instructions - 2u]);
             entry.uses_ram = compiled_uses_ram;
             entry.ram_load_mask = 0u;
             entry.ram_store_mask = 0u;
+            entry.words = {};
+            entry.guard_bail_streak = 0u;
+            entry.guard_skip_remaining = 0u;
             for (u32 i = 0;
                  i < compiled_instructions && i < 32u;
                  ++i) {
+                entry.words[i] = words[i];
                 switch (words[i] >> 26) {
                 case 0x1Eu:
                 case 0x20u:
@@ -1138,7 +2106,8 @@ u32 EeJit::execute_block(
     // page: EeRam's generation tracking makes that page a safe coherency
     // domain without widening the invalidation contract.
     const u32 origin_physical = ram_physical_address(pc);
-    const u32 code_page = origin_physical >> 12;
+    u32 current_code_page = origin_physical >> 12;
+    u32 current_page_generation = page_generation;
     u32 total_retired = 0u;
     u32 current_pc = pc;
     const u32* current_words = instructions;
@@ -1155,7 +2124,7 @@ u32 EeJit::execute_block(
 
         BlockEntry* entry = block_entry(
             current_pc,
-            page_generation,
+            current_page_generation,
             current_words,
             current_count);
         if (entry == nullptr ||
@@ -1169,22 +2138,67 @@ u32 EeJit::execute_block(
             break;
         }
 
+        // A hot block which repeatedly proves that its dynamic memory
+        // operand is MMIO/non-RAM is temporarily kept on the interpreter.
+        // This is the same basic adaptive idea used by the mature PS1 V4
+        // backend: do not pay a native entry + guard + exit on every visit
+        // when the guard has already failed several times in a row.
+        if (entry->guard_skip_remaining != 0u) {
+            --entry->guard_skip_remaining;
+            break;
+        }
+
         const u32 retired =
-            entry->function(&state, ram_data, page_generations);
-        if (retired == 0u ||
-            retired > entry->instruction_count) {
+            entry->function(
+                &state,
+                ram_data,
+                page_generations,
+                scratchpad_data);
+        if (retired > entry->instruction_count) {
+            break;
+        }
+
+        if (retired == 0u) {
+            const bool first_is_guarded_memory =
+                ((entry->ram_load_mask | entry->ram_store_mask) & 1u) != 0u;
+            if (first_is_guarded_memory) {
+                ++block_guard_bailout_count_;
+                if (++entry->guard_bail_streak >= 4u) {
+                    entry->guard_bail_streak = 0u;
+                    entry->guard_skip_remaining = 32u;
+                }
+            }
             break;
         }
 
         const bool full_block =
             retired == entry->instruction_count;
+        const bool annulled_control =
+            entry->control_flow &&
+            entry->annul_capable &&
+            !full_block &&
+            retired + 1u == entry->instruction_count;
         final_control_flow =
-            entry->control_flow && full_block;
+            entry->control_flow && (full_block || annulled_control);
 
         ++block_executed_count_;
         block_instruction_count_ += retired;
-        if (!full_block) {
-            ++block_guard_bailout_count_;
+        if (full_block || annulled_control) {
+            entry->guard_bail_streak = 0u;
+        } else {
+            const bool guard_failure =
+                retired < 32u &&
+                (((entry->ram_load_mask | entry->ram_store_mask) >>
+                  retired) & 1u) != 0u;
+            if (guard_failure) {
+                ++block_guard_bailout_count_;
+                if (++entry->guard_bail_streak >= 4u) {
+                    entry->guard_bail_streak = 0u;
+                    entry->guard_skip_remaining = 32u;
+                }
+            } else {
+                entry->guard_bail_streak = 0u;
+            }
             if ((entry->ram_store_mask &
                  (1u << (retired - 1u))) != 0u) {
                 ++block_code_store_exit_count_;
@@ -1204,7 +2218,7 @@ u32 EeJit::execute_block(
         state.last_pc =
             current_pc + (retired - 1u) * 4u;
         state.last_instruction =
-            current_words[retired - 1u];
+            entry->words[retired - 1u];
 
         if (!final_control_flow) {
             state.pc = current_pc + retired * 4u;
@@ -1213,7 +2227,7 @@ u32 EeJit::execute_block(
 
         total_retired += retired;
 
-        if (!full_block ||
+        if ((!full_block && !annulled_control) ||
             total_retired >= maximum_instructions) {
             break;
         }
@@ -1222,7 +2236,9 @@ u32 EeJit::execute_block(
         // returns from generated code. Never execute another cached block
         // from the old generation in the same host dispatch.
         if (page_generations != nullptr &&
-            page_generations[code_page] != page_generation) {
+            EeRam::generation_from_metadata(
+                page_generations[current_code_page]) !=
+                current_page_generation) {
             break;
         }
 
@@ -1234,9 +2250,35 @@ u32 EeJit::execute_block(
         }
         const u32 next_physical =
             ram_physical_address(next_pc);
-        if (next_physical >= kEeRamSize ||
-            (next_physical >> 12) != code_page) {
+        if (next_physical >= kEeRamSize) {
             break;
+        }
+
+        const u32 next_code_page = next_physical >> 12;
+        if (next_code_page != current_code_page) {
+            // Cross-page chaining is safe when page-generation metadata is
+            // available: each compiled block is keyed by its own generation
+            // and track_jit_code() marks only the translated regions on that
+            // page. This removes an arbitrary 4 KiB dispatcher boundary.
+            if (page_generations == nullptr) break;
+            current_code_page = next_code_page;
+            current_page_generation =
+                EeRam::generation_from_metadata(
+                    page_generations[current_code_page]);
+        }
+
+        // Hot cache hit: jump straight to the existing translation.
+        // Do not re-read up to 32 guest words on every native block boundary.
+        if (BlockEntry* cached = block_entry(
+                next_pc,
+                current_page_generation,
+                nullptr,
+                0u)) {
+            current_pc = next_pc;
+            current_words = cached->words.data();
+            current_count = cached->instruction_count;
+            if (current_count == 0u) break;
+            continue;
         }
 
         const u32 words_to_page_end =
