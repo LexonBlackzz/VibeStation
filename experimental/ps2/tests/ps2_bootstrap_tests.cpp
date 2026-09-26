@@ -4186,9 +4186,13 @@ bool test_iop_native_load_delay() {
     exact_overwrite.iop().state().gpr[7] = data;
     native_overwrite.iop().state().gpr[7] = data;
     ok = expect(
+        exact_overwrite.iop_ram().write32(pc, overwrite[0]) &&
+        exact_overwrite.iop_ram().write32(pc + 4u, overwrite[1]) &&
+        native_overwrite.iop_ram().write32(pc, overwrite[0]) &&
+        native_overwrite.iop_ram().write32(pc + 4u, overwrite[1]) &&
         exact_overwrite.iop_ram().write32(data, 0xDEADBEEFu) &&
         native_overwrite.iop_ram().write32(data, 0xDEADBEEFu),
-        "IOP load overwrite data setup failed") && ok;
+        "IOP load overwrite setup failed") && ok;
     ok = expect(
         exact_overwrite.iop().step_hot(error) &&
         exact_overwrite.iop().step_hot(error),
