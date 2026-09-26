@@ -216,3 +216,5 @@ Until the PS2 core reaches a stable execution milestone:
 - do not require the repository root `CMakeLists.txt` to build this project.
 
 Shared abstractions should be extracted only after both implementations make the common boundary obvious.
+
+<!-- windows-ui candidate: scheduler-aware resident EE native execution -->
