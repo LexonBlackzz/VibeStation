@@ -47,6 +47,7 @@ private:
     void panel_ee_debug();
     void panel_iop_debug();
     void panel_gs_debug();
+    void panel_profiler();
     void panel_scheduler();
     void panel_settings();
     void panel_about();
@@ -89,6 +90,7 @@ private:
     bool show_ee_debug_ = false;
     bool show_iop_debug_ = false;
     bool show_gs_debug_ = false;
+    bool show_profiler_ = true;
     bool show_scheduler_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;
@@ -101,6 +103,35 @@ private:
     double guest_fields_per_second_ = 0.0;
     double guest_frames_per_second_ = 0.0;
     double emulation_speed_percent_ = 0.0;
+
+    u64 profile_sample_native_instructions_ = 0;
+    u64 profile_sample_native_blocks_ = 0;
+    u64 profile_sample_guard_bailouts_ = 0;
+    u64 profile_sample_code_store_exits_ = 0;
+    u64 profile_sample_cache_flushes_ = 0;
+    u64 profile_sample_run_ns_ = 0;
+    u64 profile_sample_ee_ns_ = 0;
+    u64 profile_sample_iop_ns_ = 0;
+    u64 profile_sample_slow_path_ns_ = 0;
+    u64 profile_sample_iop_instructions_ = 0;
+    u64 profile_sample_vu1_instructions_ = 0;
+    std::array<u64, 64> profile_sample_fallback_opcodes_{};
+
+    double profile_native_mips_ = 0.0;
+    double profile_iop_mips_ = 0.0;
+    double profile_vu1_mips_ = 0.0;
+    double profile_native_coverage_percent_ = 0.0;
+    double profile_native_blocks_per_second_ = 0.0;
+    double profile_average_native_block_ = 0.0;
+    double profile_guard_bailouts_per_second_ = 0.0;
+    double profile_code_store_exits_per_second_ = 0.0;
+    double profile_cache_flushes_per_second_ = 0.0;
+    double profile_host_ee_percent_ = 0.0;
+    double profile_host_iop_percent_ = 0.0;
+    double profile_host_slow_percent_ = 0.0;
+    double profile_host_other_percent_ = 0.0;
+    std::array<double, 64> profile_fallbacks_per_second_{};
+
     std::string visible_capture_path_{};
     unsigned long long visible_capture_minimum_ee_ = 0;
 
