@@ -167,6 +167,7 @@ struct CpuCompareCase {
   bool require_v4_hilo_native_when_available = false;
   bool require_v4_muldiv_native_when_available = false;
   bool require_v4_cop0_native_when_available = false;
+  bool require_v4_cop2_native_when_available = false;
   bool require_v4_unaligned_native_when_available = false;
   bool require_v4_exception_native_when_available = false;
   bool require_v4_folded_branch_block_when_available = false;
@@ -1159,6 +1160,33 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   unaligned_merge.require_v4_native_store_entry_when_available = true;
   unaligned_merge.require_v4_unaligned_native_when_available = true;
   cases.push_back(unaligned_merge);
+
+  CpuCompareCase v4_cop2_native{};
+  v4_cop2_native.name = "v4_cop2_transfers_command_native";
+  v4_cop2_native.start_pc = 0xA0010000u;
+  v4_cop2_native.initial_gpr[1] = 0x44332211u;
+  v4_cop2_native.initial_gpr[3] = 0x12345678u;
+  v4_cop2_native.initial_gpr[8] = 0x00020001u;
+  v4_cop2_native.initial_gpr[9] = 0x00040003u;
+  v4_cop2_native.initial_gpr[10] = 0x00060005u;
+  v4_cop2_native.program = {
+      (0x12u << 26) | (4u << 21) | (1u << 16) | (6u << 11),
+      (0x12u << 26) | (0u << 21) | (2u << 16) | (6u << 11),
+      0u,
+      (0x12u << 26) | (6u << 21) | (3u << 16) | (5u << 11),
+      (0x12u << 26) | (2u << 21) | (4u << 16) | (5u << 11),
+      0u,
+      (0x12u << 26) | (4u << 21) | (8u << 16) | (12u << 11),
+      (0x12u << 26) | (4u << 21) | (9u << 16) | (13u << 11),
+      (0x12u << 26) | (4u << 21) | (10u << 16) | (14u << 11),
+      (0x12u << 26) | (0x10u << 21) | 0x06u,
+      (0x12u << 26) | (0u << 21) | (5u << 16) | (24u << 11),
+      0u,
+  };
+  v4_cop2_native.instructions = 12u;
+  v4_cop2_native.require_v4_native_entry_when_available = true;
+  v4_cop2_native.require_v4_cop2_native_when_available = true;
+  cases.push_back(v4_cop2_native);
 
   CpuCompareCase cop_transfers{};
   cop_transfers.name = "decoded_cop0_cop2_lwc2_swc2";
@@ -4783,6 +4811,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_hilo_native_when_available ||
             test_case.require_v4_muldiv_native_when_available ||
             test_case.require_v4_cop0_native_when_available ||
+             test_case.require_v4_cop2_native_when_available ||
             test_case.require_v4_unaligned_native_when_available ||
             test_case.require_v4_exception_native_when_available ||
            test_case.require_v4_folded_branch_block_when_available ||
@@ -4844,6 +4873,9 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               result.stats.jit_v4_helper_instructions == 0u;
           const bool cop0_native =
               !test_case.require_v4_cop0_native_when_available ||
+              result.stats.jit_v4_helper_instructions == 0u;
+          const bool cop2_native =
+              !test_case.require_v4_cop2_native_when_available ||
               result.stats.jit_v4_helper_instructions == 0u;
           const bool unaligned_native =
               !test_case.require_v4_unaligned_native_when_available ||
@@ -4909,6 +4941,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_muldiv_helper";
           } else if (!cop0_native) {
             native_check = "v4_cop0_helper";
+          } else if (!cop2_native) {
+            native_check = "v4_cop2_helper";
           } else if (!unaligned_native) {
             native_check = "v4_unaligned_helper";
           } else if (!exception_native) {
@@ -4933,8 +4967,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               store_tail_folded && store_branch_fused &&
               load_tail_folded && load_branch_fused &&
               branch_entered && pending_delay_native && hot_mmio16_native &&
-              hilo_native && muldiv_native && cop0_native && unaligned_native &&
-              exception_native && folded_branch &&
+              hilo_native && muldiv_native && cop0_native && cop2_native &&
+              unaligned_native && exception_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
               native_icache_revalidated && chain_entered;
