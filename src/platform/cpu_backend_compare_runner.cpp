@@ -893,6 +893,24 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   jit_v2_native_smoke.require_v2_native_entry_when_available = true;
   cases.push_back(jit_v2_native_smoke);
 
+  CpuCompareCase v4_multi_register_cache{};
+  v4_multi_register_cache.name = "v4_multi_register_cache_interleaved";
+  v4_multi_register_cache.program = {
+      enc_i(0x09, 0, 1, 1),
+      enc_i(0x09, 0, 2, 2),
+      enc_i(0x09, 1, 3, 3),
+      enc_r(2, 3, 4, 0, 0x21),
+      enc_i(0x09, 0, 5, 1),
+      enc_i(0x09, 0, 5, 2),
+      enc_i(0x09, 5, 5, 3),
+      enc_r(4, 5, 6, 0, 0x21),
+  };
+  v4_multi_register_cache.instructions =
+      static_cast<u32>(v4_multi_register_cache.program.size());
+  v4_multi_register_cache.require_full_native_when_available = true;
+  v4_multi_register_cache.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_multi_register_cache);
+
   CpuCompareCase jit_v2_bne_not_taken{};
   jit_v2_bne_not_taken.name = "jit_v2_bne_not_taken_delay";
   jit_v2_bne_not_taken.initial_gpr[1] = 7u;

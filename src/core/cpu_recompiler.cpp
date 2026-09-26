@@ -3395,13 +3395,67 @@ V4NativeFn compile_v4_cop0(V4CodeArena &arena,
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
-u8 emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
-                           const V4DecodedInstruction &inst,
-                           u8 cached_reg = 0u,
-                           bool retain_result = false) {
+struct V4AluRegisterCache {
+  static constexpr u32 kSlotCount = 3u;
+  std::array<u8, kSlotCount> guest{};
+  u32 next_victim = 0u;
+};
+
+enum class V4AluResultPolicy : u8 {
+  Immediate,
+  Cache,
+  Discard,
+};
+
+const Xbyak::Reg32 &v4_alu_cache_host(Xbyak::CodeGenerator &code, u32 slot) {
+  switch (slot) {
+  case 0u:
+    return code.edx;
+  case 1u:
+    return code.r8d;
+  default:
+    return code.r9d;
+  }
+}
+
+int v4_alu_cache_find(const V4AluRegisterCache &cache, u8 guest_reg) {
+  if (guest_reg == 0u) {
+    return -1;
+  }
+  for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
+    if (cache.guest[i] == guest_reg) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+void emit_v4_alu_cache_spill(Xbyak::CodeGenerator &code,
+                             V4AluRegisterCache &cache, u32 slot) {
+  const u8 guest_reg = cache.guest[slot];
+  if (guest_reg == 0u) {
+    return;
+  }
+  emit_write_guest(code, guest_reg, v4_alu_cache_host(code, slot));
+  cache.guest[slot] = 0u;
+}
+
+void emit_v4_alu_cache_flush(Xbyak::CodeGenerator &code,
+                             V4AluRegisterCache &cache) {
+  for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
+    emit_v4_alu_cache_spill(code, cache, i);
+  }
+}
+
+void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
+                             const V4DecodedInstruction &inst,
+                             V4AluRegisterCache &cache,
+                             V4AluResultPolicy result_policy =
+                                 V4AluResultPolicy::Cache) {
   const auto read_guest = [&](const Xbyak::Reg32 &dst, u8 guest_reg) {
-    if (guest_reg != 0u && guest_reg == cached_reg) {
-      code.mov(dst, code.edx);
+    const int slot = v4_alu_cache_find(cache, guest_reg);
+    if (slot >= 0) {
+      code.mov(dst, v4_alu_cache_host(code, static_cast<u32>(slot)));
     } else {
       emit_read_guest(code, dst, guest_reg);
     }
@@ -3414,73 +3468,61 @@ u8 emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
     case V4AluOp::Sll:
       read_guest(code.eax, inst.rt);
       code.shl(code.eax, inst.shamt);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Srl:
       read_guest(code.eax, inst.rt);
       code.shr(code.eax, inst.shamt);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Sra:
       read_guest(code.eax, inst.rt);
       code.sar(code.eax, inst.shamt);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Sllv:
       read_guest(code.eax, inst.rt);
       read_guest(code.ecx, inst.rs);
       code.shl(code.eax, code.cl);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Srlv:
       read_guest(code.eax, inst.rt);
       read_guest(code.ecx, inst.rs);
       code.shr(code.eax, code.cl);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Srav:
       read_guest(code.eax, inst.rt);
       read_guest(code.ecx, inst.rs);
       code.sar(code.eax, code.cl);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addu:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.add(code.eax, code.ecx);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Subu:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.sub(code.eax, code.ecx);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::And:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.and_(code.eax, code.ecx);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Or:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.or_(code.eax, code.ecx);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Xor:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.xor_(code.eax, code.ecx);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Nor:
       read_guest(code.eax, inst.rs);
       read_guest(code.ecx, inst.rt);
       code.or_(code.eax, code.ecx);
       code.not_(code.eax);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Slt:
       read_guest(code.eax, inst.rs);
@@ -3488,7 +3530,6 @@ u8 emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
       code.cmp(code.eax, code.ecx);
       code.setl(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     case V4AluOp::Sltu:
       read_guest(code.eax, inst.rs);
@@ -3496,79 +3537,123 @@ u8 emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
       code.cmp(code.eax, code.ecx);
       code.setb(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
 
     case V4AluOp::Addiu:
       read_guest(code.eax, inst.rs);
       code.add(code.eax, static_cast<u32>(inst.simm));
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Slti:
       read_guest(code.eax, inst.rs);
       code.cmp(code.eax, static_cast<u32>(inst.simm));
       code.setl(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Sltiu:
       read_guest(code.eax, inst.rs);
       code.cmp(code.eax, static_cast<u32>(inst.simm));
       code.setb(code.al);
       code.movzx(code.eax, code.al);
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Andi:
       read_guest(code.eax, inst.rs);
       code.and_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Ori:
       read_guest(code.eax, inst.rs);
       code.or_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Xori:
       read_guest(code.eax, inst.rs);
       code.xor_(code.eax, static_cast<u32>(inst.imm));
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Lui:
       code.mov(code.eax, static_cast<u32>(inst.imm) << 16u);
-      emit_write_guest(code, inst.rt, code.eax);
       break;
     case V4AluOp::Clear:
       code.xor_(code.eax, code.eax);
-      emit_write_guest(code, inst.rd, code.eax);
       break;
     }
 
   const u8 write_reg = v4_alu_write_reg(inst);
-  if (write_reg != 0u) {
-    if (retain_result) {
-      code.mov(code.edx, code.eax);
-      return write_reg;
-    }
-    return 0u;
+  if (write_reg == 0u) {
+    return;
   }
-  return cached_reg;
+  const int existing_slot = v4_alu_cache_find(cache, write_reg);
+  if (result_policy == V4AluResultPolicy::Discard) {
+    if (existing_slot >= 0) {
+      cache.guest[static_cast<u32>(existing_slot)] = 0u;
+    }
+    return;
+  }
+  if (result_policy == V4AluResultPolicy::Immediate) {
+    if (existing_slot >= 0) {
+      cache.guest[static_cast<u32>(existing_slot)] = 0u;
+    }
+    emit_write_guest(code, write_reg, code.eax);
+    return;
+  }
+
+  int slot = existing_slot;
+  if (slot < 0) {
+    for (u32 i = 0; i < V4AluRegisterCache::kSlotCount; ++i) {
+      if (cache.guest[i] == 0u) {
+        slot = static_cast<int>(i);
+        break;
+      }
+    }
+    if (slot < 0) {
+      slot = static_cast<int>(cache.next_victim);
+      emit_v4_alu_cache_spill(code, cache, static_cast<u32>(slot));
+      cache.next_victim =
+          (cache.next_victim + 1u) % V4AluRegisterCache::kSlotCount;
+    }
+  }
+  cache.guest[static_cast<u32>(slot)] = write_reg;
+  code.mov(v4_alu_cache_host(code, static_cast<u32>(slot)), code.eax);
+}
+
+void emit_v4_alu_instruction(Xbyak::CodeGenerator &code,
+                             const V4DecodedInstruction &inst) {
+  V4AluRegisterCache cache{};
+  // Single-instruction fragments frequently keep a branch decision or dynamic
+  // target in EDX/R8D across the delay instruction. Do not claim the sequence
+  // cache registers in that ABI: write the result immediately, as before.
+  emit_v4_alu_instruction(code, inst, cache, V4AluResultPolicy::Immediate);
+}
+
+V4AluResultPolicy v4_alu_result_policy(
+    const V4DecodedInstruction *instructions, u32 next, u32 count,
+    u8 guest_reg) {
+  for (u32 i = next; i < count; ++i) {
+    if (v4_alu_reads_reg(instructions[i], guest_reg)) {
+      return V4AluResultPolicy::Cache;
+    }
+    if (v4_alu_write_reg(instructions[i]) == guest_reg) {
+      // No exception or externally observable boundary exists inside these
+      // fused ALU regions, so this value is dead before it reaches memory.
+      return V4AluResultPolicy::Discard;
+    }
+  }
+  return V4AluResultPolicy::Immediate;
 }
 
 void emit_v4_alu_sequence(Xbyak::CodeGenerator &code,
                           const V4DecodedInstruction *instructions,
                           u32 count, bool retire_after_first) {
-  u8 cached_reg = 0u;
+  V4AluRegisterCache cache{};
   for (u32 i = 0; i < count; ++i) {
     const u8 write_reg = v4_alu_write_reg(instructions[i]);
-    const bool retain_result =
-        write_reg != 0u && i + 1u < count &&
-        v4_alu_reads_reg(instructions[i + 1u], write_reg);
-    cached_reg = emit_v4_alu_instruction(code, instructions[i], cached_reg,
-                                         retain_result);
+    const V4AluResultPolicy result_policy =
+        write_reg == 0u
+            ? V4AluResultPolicy::Immediate
+            : v4_alu_result_policy(instructions, i + 1u, count, write_reg);
+    emit_v4_alu_instruction(code, instructions[i], cache, result_policy);
     if (retire_after_first && i == 0u) {
       emit_retire_incoming_load(code, write_reg);
     }
   }
+  emit_v4_alu_cache_flush(code, cache);
 }
 
 
