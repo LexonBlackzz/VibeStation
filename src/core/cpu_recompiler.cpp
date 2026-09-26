@@ -4155,6 +4155,7 @@ V4NativeFn compile_v4_store(
     }
     code.mov(code.r9d, 1u);
   }
+  code.jmp(stored);
 
   code.L(device);
   // Device/MMIO stores are a host scheduling boundary, but CPU semantics stay
