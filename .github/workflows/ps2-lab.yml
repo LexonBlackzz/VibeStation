@@ -36,7 +36,8 @@ jobs:
     # Perf iteration is headless-only. Build the Windows UI once a candidate
     # is ready to hand off by tagging that commit message with [windows-ui].
     if: >-
-      github.ref == 'refs/heads/ps2-lab-perf-experiment' &&
+      (github.ref == 'refs/heads/ps2-lab-perf-experiment' ||
+       github.ref == 'refs/heads/perf/ps2-ee-scheduler-native-1') &&
       contains(github.event.head_commit.message, '[windows-ui]')
     runs-on: windows-latest
     steps:
