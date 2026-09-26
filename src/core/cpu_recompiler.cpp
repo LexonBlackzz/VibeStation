@@ -6823,7 +6823,10 @@ struct CpuRecompilerBackend::Impl {
 
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> load_tail{};
     u32 load_tail_count = 0u;
-    if (simple_load) {
+    if (simple_load && !load.dest_cop0) {
+      // LWC0 can change SR/Cause and therefore the next IRQ sampling result.
+      // Keep it as a one-instruction native block rather than fusing past that
+      // architectural boundary.
       for (u32 i = count + 1u; i < decode_limit; ++i) {
         V4DecodedInstruction inst{};
         u32 bits = 0u;
