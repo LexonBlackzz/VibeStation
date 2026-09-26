@@ -6487,9 +6487,14 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_overflow_alu(delay_bits, guarded_control_delay);
     V4DecodedStore guarded_store_delay{};
     const bool guarded_store_control =
-        count == 0u && delay_visible && v4_nonlink_conditional(control) &&
+        count == 0u && delay_visible && !v4_control_is_likely(control) &&
         decode_v4_store(delay_bits, guarded_store_delay);
-    if ((simple_control || guarded_control || guarded_store_control) &&
+    V4DecodedLoad guarded_load_delay{};
+    const bool guarded_load_control =
+        count == 0u && delay_visible && !v4_control_is_likely(control) &&
+        decode_v4_load(delay_bits, guarded_load_delay);
+    if ((simple_control || guarded_control || guarded_store_control ||
+         guarded_load_control) &&
         control_pair_cross_line) {
       block->second_icache_line = true;
       block->second_icache_index =
@@ -6607,7 +6612,8 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_alu(load_delay_bits, load_delay);
 
     if (count == 0u && !likely_control && !split_control && !simple_control &&
-        !guarded_control && !guarded_store_control && !simple_load && !simple_store &&
+        !guarded_control && !guarded_store_control && !guarded_load_control &&
+        !simple_load && !simple_store &&
         !simple_overflow_alu && !simple_cond_move && !simple_trap &&
         !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_cop2 && !simple_exception) {
@@ -6723,10 +6729,9 @@ struct CpuRecompilerBackend::Impl {
       } else if (guarded_control) {
         entry = compile_v4_budget_branch(
             arena, control, branch_pc, block->code_size);
-      } else if (guarded_store_control) {
-        // A store delay slot is kept as a native pending-delay fragment. Split
-        // at the branch so MMIO, SMC, alignment faults and incoming load-delay
-        // state never require a semantic bailout/helper.
+      } else if (guarded_store_control || guarded_load_control) {
+        // Memory delay slots stay as native pending-delay fragments. Splitting
+        // at the branch keeps address faults/MMIO/load-delay state out of C++.
         entry = compile_v4_budget_branch(
             arena, control, branch_pc, block->code_size);
       } else if (simple_control) {
@@ -6767,7 +6772,7 @@ struct CpuRecompilerBackend::Impl {
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
       if (likely_control || split_control || guarded_control ||
-          guarded_store_control) {
+          guarded_store_control || guarded_load_control) {
         block->budget_fn = entry;
         block->budget_requires_empty_chain = true;
       } else if (count != 0u) {
@@ -6812,7 +6817,7 @@ struct CpuRecompilerBackend::Impl {
       }
       block->instruction_count =
           (likely_control || split_control || guarded_control ||
-           guarded_store_control)
+           guarded_store_control || guarded_load_control)
               ? 1u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6828,7 +6833,7 @@ struct CpuRecompilerBackend::Impl {
                                           : count))));
       block->max_cycles =
           (likely_control || split_control || guarded_control ||
-           guarded_store_control)
+           guarded_store_control || guarded_load_control)
               ? 2u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6844,10 +6849,11 @@ struct CpuRecompilerBackend::Impl {
                                           : count))));
       block->has_control =
           likely_control || split_control || simple_control || guarded_control ||
-          guarded_store_control || load_has_control || store_has_control;
+          guarded_store_control || guarded_load_control ||
+          load_has_control || store_has_control;
       block->has_memory =
           simple_load || simple_store || guarded_store_control ||
-          (simple_cop2 && v4_cop2_is_memory(cop2));
+          guarded_load_control || (simple_cop2 && v4_cop2_is_memory(cop2));
     } catch (...) {
       if (!reused_block) {
         --block_count;
@@ -6858,7 +6864,7 @@ struct CpuRecompilerBackend::Impl {
 
     const u32 translated_count =
         (likely_control || split_control || guarded_control ||
-         guarded_store_control)
+         guarded_store_control || guarded_load_control)
             ? 1u
             : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                 simple_cop0 || simple_cop2 || simple_exception)
