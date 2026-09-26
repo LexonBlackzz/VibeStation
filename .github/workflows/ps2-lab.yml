@@ -9,6 +9,7 @@ on:
       - perf/ps2-ee-iop-cycle-debt-1
       - perf/ps2-profiler-1
       - perf/ps2-core-overhaul-1
+      - perf/ps2-ee-native-dominance-1
     paths:
       - "experimental/ps2/**"
       - ".github/workflows/ps2-lab.yml"
@@ -45,13 +46,15 @@ jobs:
         github.ref == 'refs/heads/perf/ps2-ee-scheduler-native-1' ||
         github.ref == 'refs/heads/perf/ps2-ee-iop-cycle-debt-1' ||
         github.ref == 'refs/heads/perf/ps2-profiler-1' ||
-        github.ref == 'refs/heads/perf/ps2-core-overhaul-1') &&
+        github.ref == 'refs/heads/perf/ps2-core-overhaul-1' ||
+        github.ref == 'refs/heads/perf/ps2-ee-native-dominance-1') &&
        contains(github.event.head_commit.message, '[windows-ui]')) ||
       (github.event_name == 'pull_request' &&
        (github.event.pull_request.head.ref == 'perf/ps2-ee-scheduler-native-1' ||
         github.event.pull_request.head.ref == 'perf/ps2-ee-iop-cycle-debt-1' ||
         github.event.pull_request.head.ref == 'perf/ps2-profiler-1' ||
-        github.event.pull_request.head.ref == 'perf/ps2-core-overhaul-1'))
+        github.event.pull_request.head.ref == 'perf/ps2-core-overhaul-1' ||
+        github.event.pull_request.head.ref == 'perf/ps2-ee-native-dominance-1'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
