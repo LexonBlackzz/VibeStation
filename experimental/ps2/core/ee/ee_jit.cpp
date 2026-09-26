@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -33,6 +34,10 @@ constexpr u8 kRamArgumentRegister = 6u; // RSI
 constexpr u8 kGenerationArgumentRegister = 2u; // RDX
 #endif
 constexpr u32 kEeRamSize = 32u * 1024u * 1024u;
+
+void ee_jit_cop1_register_helper(
+    EeCpuState* state,
+    u32 instruction);
 
 struct Emitter {
     std::vector<u8> bytes;
@@ -138,6 +143,41 @@ struct Emitter {
         }
     }
     void sign_extend_word() { emit(0x48u); emit(0x98u); } // CDQE
+
+    void call_state_instruction_helper(
+        void (*helper)(EeCpuState*, u32),
+        u32 instruction) {
+#ifdef _WIN32
+        // Preserve the state pointer and the resident RAM/generation bases.
+        // Entry RSP is 8 mod 16. Three pushes realign it; Win64 then needs
+        // the mandatory 32-byte shadow space before CALL.
+        emit(0x51u);                         // PUSH RCX
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0x48u); emit(0x83u); emit(0xECu); emit(0x20u); // SUB RSP,32
+        emit(0xBAu); emit32(instruction);    // MOV EDX,imm32
+        emit(0x48u); emit(0xB8u);
+        emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x48u); emit(0x83u); emit(0xC4u); emit(0x20u); // ADD RSP,32
+        emit(0x41u); emit(0x5Bu);            // POP R11
+        emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x59u);                         // POP RCX
+#else
+        // SysV: preserve RDI (state) plus R10/R11. Three pushes transform the
+        // entry 8-mod-16 stack into a 16-byte-aligned call site.
+        emit(0x57u);                         // PUSH RDI
+        emit(0x41u); emit(0x52u);           // PUSH R10
+        emit(0x41u); emit(0x53u);           // PUSH R11
+        emit(0xBEu); emit32(instruction);    // MOV ESI,imm32
+        emit(0x48u); emit(0xB8u);
+        emit64(reinterpret_cast<u64>(helper));
+        emit(0xFFu); emit(0xD0u);            // CALL RAX
+        emit(0x41u); emit(0x5Bu);            // POP R11
+        emit(0x41u); emit(0x5Au);            // POP R10
+        emit(0x5Fu);                         // POP RDI
+#endif
+    }
 };
 
 void* allocate_page() {
@@ -179,6 +219,154 @@ void flush_code(void* code, std::size_t size) {
     auto* first = static_cast<char*>(code);
     __builtin___clear_cache(first, first + size);
 #endif
+}
+
+float ee_jit_ps2_fpu_input(u32 bits) {
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0u) {
+        bits &= 0x80000000u;
+    } else if (exponent == 0x7F800000u) {
+        bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+    }
+    return std::bit_cast<float>(bits);
+}
+
+u32 ee_jit_ps2_fpu_result(float value) {
+    u32 bits = std::bit_cast<u32>(value);
+    const u32 exponent = bits & 0x7F800000u;
+    if (exponent == 0u) return bits & 0x80000000u;
+    if (exponent == 0x7F800000u) {
+        return (bits & 0x80000000u) | 0x7F7FFFFFu;
+    }
+    return bits;
+}
+
+bool ee_jit_cop1_register_helper_supported(u32 instruction) {
+    if ((instruction >> 26) != 0x11u) return false;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 funct = instruction & 63u;
+    if (rs == 0x14u) {
+        return funct == 0x20u; // CVT.S.W
+    }
+    if (rs != 0x10u) return false;
+    switch (funct) {
+    case 0x00u: // ADD.S
+    case 0x01u: // SUB.S
+    case 0x02u: // MUL.S
+    case 0x03u: // DIV.S
+    case 0x04u: // SQRT.S
+    case 0x16u: // RSQRT.S
+    case 0x18u: // ADDA.S
+    case 0x19u: // SUBA.S
+    case 0x1Au: // MULA.S
+    case 0x1Cu: // MADD.S
+    case 0x1Du: // MSUB.S
+    case 0x1Eu: // MADDA.S
+    case 0x1Fu: // MSUBA.S
+    case 0x24u: // CVT.W.S
+    case 0x28u: // MAX.S
+    case 0x29u: // MIN.S
+    case 0x30u: // C.F.S
+    case 0x32u: // C.EQ.S
+    case 0x34u: // C.LT.S
+    case 0x36u: // C.LE.S
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ee_jit_cop1_register_helper(
+    EeCpuState* state,
+    u32 instruction) {
+    if (state == nullptr) return;
+
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 ft = (instruction >> 16) & 31u;
+    const u32 fs = (instruction >> 11) & 31u;
+    const u32 fd = (instruction >> 6) & 31u;
+    const u32 funct = instruction & 63u;
+    constexpr u32 kCond = 0x00800000u;
+
+    if (rs == 0x14u) { // COP1.W: CVT.S.W
+        const s32 value = static_cast<s32>(state->fpr[fs]);
+        state->fpr[fd] =
+            ee_jit_ps2_fpu_result(static_cast<float>(value));
+        return;
+    }
+
+    const float a = ee_jit_ps2_fpu_input(state->fpr[fs]);
+    const float b = ee_jit_ps2_fpu_input(state->fpr[ft]);
+    const float acc = ee_jit_ps2_fpu_input(state->fpu_acc);
+    auto set_fd = [&](float value) {
+        state->fpr[fd] = ee_jit_ps2_fpu_result(value);
+    };
+    auto set_acc = [&](float value) {
+        state->fpu_acc = ee_jit_ps2_fpu_result(value);
+    };
+    auto set_cond = [&](bool value) {
+        if (value) state->fcr[31] |= kCond;
+        else state->fcr[31] &= ~kCond;
+    };
+
+    switch (funct) {
+    case 0x00u: set_fd(a + b); break;
+    case 0x01u: set_fd(a - b); break;
+    case 0x02u: set_fd(a * b); break;
+    case 0x03u:
+        if ((state->fpr[ft] & 0x7FFFFFFFu) == 0u) {
+            const u32 sign =
+                (state->fpr[fs] ^ state->fpr[ft]) & 0x80000000u;
+            state->fpr[fd] = sign | 0x7F7FFFFFu;
+        } else {
+            set_fd(a / b);
+        }
+        break;
+    case 0x04u: set_fd(std::sqrt(std::fabs(b))); break;
+    case 0x16u:
+        if ((state->fpr[ft] & 0x7FFFFFFFu) == 0u) {
+            const u32 sign =
+                (state->fpr[fs] ^ state->fpr[ft]) & 0x80000000u;
+            state->fpr[fd] = sign | 0x7F7FFFFFu;
+        } else {
+            set_fd(a / std::sqrt(std::fabs(b)));
+        }
+        break;
+    case 0x18u: set_acc(a + b); break;
+    case 0x19u: set_acc(a - b); break;
+    case 0x1Au: set_acc(a * b); break;
+    case 0x1Cu: set_fd(acc + (a * b)); break;
+    case 0x1Du: set_fd(acc - (a * b)); break;
+    case 0x1Eu: set_acc(acc + (a * b)); break;
+    case 0x1Fu: set_acc(acc - (a * b)); break;
+    case 0x24u:
+        if ((state->fpr[fs] & 0x7F800000u) <= 0x4E800000u) {
+            const double value = static_cast<double>(a);
+            if (value > 2147483647.0) state->fpr[fd] = 0x7FFFFFFFu;
+            else if (value < -2147483648.0) state->fpr[fd] = 0x80000000u;
+            else state->fpr[fd] =
+                static_cast<u32>(static_cast<s32>(value));
+        } else {
+            state->fpr[fd] =
+                (state->fpr[fs] & 0x80000000u)
+                    ? 0x80000000u
+                    : 0x7FFFFFFFu;
+        }
+        break;
+    case 0x28u:
+        state->fpr[fd] =
+            (a >= b) ? state->fpr[fs] : state->fpr[ft];
+        break;
+    case 0x29u:
+        state->fpr[fd] =
+            (a <= b) ? state->fpr[fs] : state->fpr[ft];
+        break;
+    case 0x30u: set_cond(false); break;
+    case 0x32u: set_cond(a == b); break;
+    case 0x34u: set_cond(a < b); break;
+    case 0x36u: set_cond(a <= b); break;
+    default: break;
+    }
 }
 
 bool emit_instruction_body(u32 instruction, Emitter& out) {
@@ -521,6 +709,11 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                     static_cast<u32>(
                         offsetof(EeCpuState, fpr) +
                         fd * sizeof(u32)));
+            } else if (
+                ee_jit_cop1_register_helper_supported(instruction)) {
+                out.call_state_instruction_helper(
+                    &ee_jit_cop1_register_helper,
+                    instruction);
             } else {
                 return false;
             }
