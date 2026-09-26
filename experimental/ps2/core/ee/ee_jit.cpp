@@ -929,7 +929,9 @@ void ee_jit_scratch_memory_helper(
 bool emit_guarded_ram_load(
     u32 instruction,
     u32 retired_before,
-    Emitter& out) {
+    Emitter& out,
+    bool rollback_branch = false,
+    u32 rollback_pc = 0u) {
     const u32 opcode = instruction >> 26;
     const u32 rs = (instruction >> 21) & 31u;
     const u32 rt = (instruction >> 16) & 31u;
@@ -1117,6 +1119,14 @@ bool emit_guarded_ram_load(
     const std::size_t scratch_done = out.jmp32();
 
     const std::size_t fail_label = out.bytes.size();
+    if (rollback_branch) {
+        out.store_state_imm32(
+            static_cast<u32>(offsetof(EeCpuState, pc)),
+            rollback_pc);
+        out.store_state_imm32(
+            static_cast<u32>(offsetof(EeCpuState, next_pc)),
+            rollback_pc + 4u);
+    }
     out.emit(0xB8u); // MOV EAX, retired_before
     out.emit32(retired_before);
     out.emit(0xC3u); // RET
@@ -1368,6 +1378,37 @@ bool emit_branch_and_delay(
     u32 delay_instruction,
     Emitter& out) {
     const std::size_t before = out.bytes.size();
+
+    Emitter delay_probe;
+    const bool delay_is_body =
+        emit_instruction_body(delay_instruction, delay_probe);
+    if (!delay_is_body) {
+        delay_probe.bytes.clear();
+    }
+    const bool delay_is_ram_load =
+        !delay_is_body &&
+        emit_guarded_ram_load(
+            delay_instruction,
+            retired_before,
+            delay_probe,
+            true,
+            branch_pc);
+    if (!delay_is_body && !delay_is_ram_load) {
+        return false;
+    }
+
+    const auto emit_delay = [&]() -> bool {
+        if (delay_is_body) {
+            return emit_instruction_body(delay_instruction, out);
+        }
+        return emit_guarded_ram_load(
+            delay_instruction,
+            retired_before,
+            out,
+            true,
+            branch_pc);
+    };
+
     const u32 opcode = branch_instruction >> 26;
     const u32 rs = (branch_instruction >> 21) & 31u;
     const u32 rt = (branch_instruction >> 16) & 31u;
@@ -1383,6 +1424,10 @@ bool emit_branch_and_delay(
         const u32 funct = branch_instruction & 63u;
         if (funct == 0x08u || funct == 0x09u) { // JR / JALR
             const u32 rd = (branch_instruction >> 11) & 31u;
+            if (delay_is_ram_load && funct == 0x09u) {
+                out.bytes.resize(before);
+                return false;
+            }
             out.load_rax(rs, true);
             out.store_state_eax(pc_offset);
             if (funct == 0x09u && rd != 0u) {
@@ -1390,7 +1435,7 @@ bool emit_branch_and_delay(
                     static_cast<s32>(branch_pc + 8u)));
                 out.store_gpr_imm64(rd, link);
             }
-            if (!emit_instruction_body(delay_instruction, out)) {
+            if (!emit_delay()) {
                 out.bytes.resize(before);
                 return false;
             }
@@ -1428,6 +1473,10 @@ bool emit_branch_and_delay(
 
         // Link variants write r31 even when a likely branch is annulled,
         // matching EeCpu::execute_regimm().
+        if (link && delay_is_ram_load) {
+            out.bytes.resize(before);
+            return false;
+        }
         if (link) {
             const u64 link_value = static_cast<u64>(static_cast<s64>(
                 static_cast<s32>(branch_pc + 8u)));
@@ -1438,7 +1487,7 @@ bool emit_branch_and_delay(
             const std::size_t not_taken =
                 out.jcc32(bltz ? 0x89u : 0x88u); // JNS / JS
             out.store_state_imm32(pc_offset, target);
-            if (!emit_instruction_body(delay_instruction, out)) {
+            if (!emit_delay()) {
                 out.bytes.resize(before);
                 return false;
             }
@@ -1465,7 +1514,7 @@ bool emit_branch_and_delay(
         out.store_state_imm32(pc_offset, target);
         out.patch_rel32(skip_target, out.bytes.size());
 
-        if (!emit_instruction_body(delay_instruction, out)) {
+        if (!emit_delay()) {
             out.bytes.resize(before);
             return false;
         }
@@ -1490,7 +1539,7 @@ bool emit_branch_and_delay(
             const std::size_t not_taken =
                 out.jcc32(take_when_set ? 0x84u : 0x85u);
             out.store_state_imm32(pc_offset, target);
-            if (!emit_instruction_body(delay_instruction, out)) {
+            if (!emit_delay()) {
                 out.bytes.resize(before);
                 return false;
             }
@@ -1512,7 +1561,7 @@ bool emit_branch_and_delay(
             out.jcc32(take_when_set ? 0x84u : 0x85u);
         out.store_state_imm32(pc_offset, target);
         out.patch_rel32(skip_target, out.bytes.size());
-        if (!emit_instruction_body(delay_instruction, out)) {
+        if (!emit_delay()) {
             out.bytes.resize(before);
             return false;
         }
@@ -1544,7 +1593,7 @@ bool emit_branch_and_delay(
         const std::size_t not_taken =
             out.jcc32(opcode == 0x14u ? 0x85u : 0x84u);
         out.store_state_imm32(pc_offset, target);
-        if (!emit_instruction_body(delay_instruction, out)) {
+        if (!emit_delay()) {
             out.bytes.resize(before);
             return false;
         }
@@ -1567,7 +1616,7 @@ bool emit_branch_and_delay(
         const std::size_t not_taken =
             out.jcc32(opcode == 0x16u ? 0x8Fu : 0x8Eu); // JG / JLE
         out.store_state_imm32(pc_offset, target);
-        if (!emit_instruction_body(delay_instruction, out)) {
+        if (!emit_delay()) {
             out.bytes.resize(before);
             return false;
         }
@@ -1615,7 +1664,7 @@ bool emit_branch_and_delay(
         return false;
     }
 
-    if (!emit_instruction_body(delay_instruction, out)) {
+    if (!emit_delay()) {
         out.bytes.resize(before);
         return false;
     }
