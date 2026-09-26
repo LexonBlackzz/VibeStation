@@ -4110,6 +4110,106 @@ bool test_vif1_reverse_dma() {
     return ok;
 }
 
+bool test_iop_native_load_delay() {
+    constexpr ps2::u32 pc = 0x1800u;
+    constexpr ps2::u32 data = 0x2800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x23u << 26) | (7u << 21) | (1u << 16), // LW r1,0(r7)
+        (0x09u << 26) | (1u << 21) | (2u << 16) | 1u, // delay sees old r1
+        (1u << 21) | (2u << 16) | (3u << 11) | 0x21u, // ADDU sees new r1
+        (0x23u << 26) | (7u << 21) | (4u << 16) | 4u, // second LW
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP load-delay test code setup failed") && ok;
+    }
+    ok = expect(
+        exact.iop_ram().write32(data, 0x12345678u) &&
+        native.iop_ram().write32(data, 0x12345678u) &&
+        exact.iop_ram().write32(data + 4u, 0xCAFEBABEu) &&
+        native.iop_ram().write32(data + 4u, 0xCAFEBABEu),
+        "IOP load-delay data setup failed") && ok;
+
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[1] = 10u;
+    native.iop().state().gpr[1] = 10u;
+    exact.iop().state().gpr[7] = data;
+    native.iop().state().gpr[7] = data;
+
+    std::string error;
+    // Only the first three instructions are compared here: the final load
+    // has no following delay instruction in the supplied native budget, so it
+    // intentionally remains an interpreter fallback boundary.
+    for (ps2::u32 i = 0; i < 3u; ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP load-delay reference step failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(3u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == 3u &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        a.gpr[3] == b.gpr[3] &&
+        b.gpr[1] == 0x12345678u &&
+        b.gpr[2] == 11u &&
+        b.gpr[3] == 0x12345683u,
+        "IOP native load-delay state diverged") && ok;
+
+    // If the delay instruction directly overwrites the load destination, the
+    // older load must be discarded.
+    const ps2::u32 overwrite[2] = {
+        (0x23u << 26) | (7u << 21) | (1u << 16),
+        (0x09u << 26) | (0u << 21) | (1u << 16) | 77u,
+    };
+    ps2::Ps2System exact_overwrite;
+    ps2::Ps2System native_overwrite;
+    exact_overwrite.iop().reset(pc);
+    native_overwrite.iop().reset(pc);
+    exact_overwrite.iop().state().gpr[7] = data;
+    native_overwrite.iop().state().gpr[7] = data;
+    ok = expect(
+        exact_overwrite.iop_ram().write32(data, 0xDEADBEEFu) &&
+        native_overwrite.iop_ram().write32(data, 0xDEADBEEFu),
+        "IOP load overwrite data setup failed") && ok;
+    ok = expect(
+        exact_overwrite.iop().step_hot(error) &&
+        exact_overwrite.iop().step_hot(error),
+        "IOP load overwrite reference failed") && ok;
+    const ps2::u32 overwrite_retired =
+        native_overwrite.iop().run_native_quiet(2u);
+    native_overwrite.iop_bus().tick(overwrite_retired);
+    ok = expect(
+        overwrite_retired == 2u &&
+        exact_overwrite.iop().state().gpr[1] ==
+            native_overwrite.iop().state().gpr[1] &&
+        native_overwrite.iop().state().gpr[1] == 77u,
+        "IOP native load-delay overwrite suppression diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP native load-delay block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_iop_native_r3000a_block() {
     constexpr ps2::u32 pc = 0x1000u;
     constexpr ps2::u32 data = 0x2000u;
@@ -5615,6 +5715,7 @@ int main() {
     ok = test_gs_signal_finish_label_and_imr() && ok;
     ok = test_gs_local_to_host_transfer() && ok;
     ok = test_vif1_reverse_dma() && ok;
+    ok = test_iop_native_load_delay() && ok;
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
