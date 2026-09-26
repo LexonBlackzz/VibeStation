@@ -2344,6 +2344,387 @@ V4NativeFn compile_v4_pending_delay_cop2_register(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_cop2(
+    V4CodeArena &arena, const V4DecodedCop2 &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 4096u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  auto emit_result_stall = [&]() {
+    Label ready;
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.rax, code.rcx);
+    code.jbe(ready);
+    code.sub(code.rax, code.rcx);
+    code.add(code.ebx, code.eax);
+    code.L(ready);
+  };
+
+  auto emit_command_stall = [&]() {
+    Label selected, ready;
+    code.mov(code.r8, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))]);
+    code.cmp(code.r8, code.rax);
+    code.jae(selected);
+    code.mov(code.r8, code.rax);
+    code.L(selected);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.r8, code.rcx);
+    code.jbe(ready);
+    code.sub(code.r8, code.rcx);
+    code.add(code.ebx, code.r8d);
+    code.L(ready);
+  };
+
+  auto emit_read_call = [&](size_t fn_ptr, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn_ptr);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  auto emit_write_call = [&](size_t fn_ptr, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.edx, code.r8d);
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn_ptr);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  switch (inst.op) {
+  case V4Cop2Op::Lwc2: {
+    Label aligned, no_ram_penalty;
+
+    // Capture the delay-slot address from the pre-retirement GPR view.
+    emit_read_guest(code, code.eax, inst.rs);
+    code.add(code.eax, static_cast<u32>(inst.simm));
+    code.test(code.eax, 3u);
+    code.jz(aligned);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+        code.eax);
+    emit_v4_exception_pending_delay(code, Exception::AddrLoadErr);
+    code.L(aligned);
+
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
+
+    // The CPU semantics stay generated; this call is only the memory/device bus
+    // transaction. This also covers deliberately disabled fastmem modes.
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.mov(code.r8d, code.eax);
+
+    code.xor_(code.r9d, code.r9d);
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.cmp(code.eax, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jae(no_ram_penalty);
+    code.mov(code.r9d, 4u);
+    code.L(no_ram_penalty);
+
+    emit_retire_incoming_load(code, 0u);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, code.r9);
+    code.add(code.rax, 6u);
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+        code.rax);
+    code.add(code.ebx, code.r9d);
+    emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+  }
+
+  case V4Cop2Op::Swc2: {
+    Label aligned, ordinary_store, isolated_done, no_ram_penalty;
+
+    // Address uses the old GPR view. GTE read/stall occurs before store-address
+    // exceptions in Cpu::op_swc2(), so preserve that ordering explicitly.
+    emit_read_guest(code, code.eax, inst.rs);
+    code.add(code.eax, static_cast<u32>(inst.simm));
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, load_byte_offset))],
+        code.eax);
+
+    if (v4_gte_data_reg_reads_result(inst.rt)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rt);
+    code.mov(code.r8d, code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
+        code.r8d);
+
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, load_byte_offset))]);
+    code.test(code.eax, 3u);
+    code.jz(aligned);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+        code.eax);
+    emit_v4_exception_pending_delay(code, Exception::AddrStoreErr);
+    code.L(aligned);
+
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
+
+    // Isolated-cache stores invalidate the guest I-cache only; RAM is untouched.
+    code.test(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+        1u << 16);
+    code.jz(ordinary_store);
+    code.mov(code.eax, code.edx);
+    code.shr(code.eax, 4u);
+    code.and_(code.eax, 0xFFu);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+    code.mov(code.edx, code.eax);
+    code.imul(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+    code.mov(code.byte[code.rcx + code.rdx], 0u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+    code.inc(code.dword[code.rcx + code.rax * 4]);
+    {
+      Label generation_ok;
+      code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
+      code.jne(generation_ok);
+      code.mov(code.dword[code.rcx + code.rax * 4], 1u);
+      code.L(generation_ok);
+    }
+    emit_retire_incoming_load(code, 0u);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+    emit_v4_finish_pending_delay(code, 2u);
+
+    code.L(ordinary_store);
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))]);
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.mov(code.edx, code.r8d);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+
+    code.xor_(code.r9d, code.r9d);
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.cmp(code.eax, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jae(no_ram_penalty);
+    code.mov(code.r9d, 1u);
+    code.L(no_ram_penalty);
+    code.add(code.ebx, code.r9d);
+    emit_retire_incoming_load(code, 0u);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+  }
+
+  case V4Cop2Op::Mfc2:
+    if (v4_gte_data_reg_reads_result(inst.rd)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+
+  case V4Cop2Op::Cfc2:
+    if (inst.rd == 31u) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_ctrl), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+
+  case V4Cop2Op::Mtc2:
+  case V4Cop2Op::Ctc2:
+    emit_read_guest(code, code.r8d, inst.rt);
+    emit_retire_incoming_load(code, 0u);
+    emit_write_call(
+        inst.op == V4Cop2Op::Mtc2
+            ? reinterpret_cast<size_t>(&v4_gte_write_data)
+            : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
+        inst.rd);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, 6u);
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+        code.rax);
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+
+  case V4Cop2Op::Command:
+    emit_command_stall();
+    emit_retire_incoming_load(code, 0u);
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, inst.bits);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, inst.bits);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_gte_execute));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, v4_gte_command_cycles(inst.bits));
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))],
+        code.rax);
+    emit_v4_finish_pending_delay(code, 2u);
+    break;
+  }
+
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_cop2(V4CodeArena &arena,
                            const V4DecodedCop2 &inst,
                            u32 start_pc,
