@@ -906,6 +906,108 @@ void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
   emit_v4_block_return(code);
 }
 
+
+void emit_v4_exception_pending_delay(Xbyak::CodeGenerator &code,
+                                     Exception cause) {
+  using namespace Xbyak;
+
+  // The faulting instruction is the already-pending branch delay slot.
+  // Commit an older delayed load, then build EPC/BD directly from the resident
+  // branch state without re-executing the opcode through Cpu::step().
+  emit_retire_incoming_load(code, 0u);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_sr))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_bd))],
+      1u);
+
+  code.mov(code.ecx, code.eax);
+  code.and_(code.ecx, 0x3Fu);
+  code.and_(code.eax, ~0x3Fu);
+  code.shl(code.ecx, 2);
+  code.and_(code.ecx, 0x3Fu);
+  code.or_(code.eax, code.ecx);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      code.eax);
+
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+  code.and_(code.eax, ~((0x3u << 28) | 0x7Cu));
+  code.or_(code.eax, (static_cast<u32>(cause) << 2) | (1u << 31));
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
+      code.eax);
+
+  // EPC identifies the branch; TAR/JumpDest identifies the instruction after
+  // the faulting delay slot, matching Cpu::exception().
+  code.mov(code.eax, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))],
+      code.eax);
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_jumpdest))],
+      code.eax);
+
+  // Cpu::exception() clears active delay state before the handler begins.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, exception_raised))],
+      1u);
+
+  Label low_vector, vector_ready;
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 22);
+  code.jz(low_vector);
+  code.mov(code.eax, 0xBFC00180u);
+  code.jmp(vector_ready);
+  code.L(low_vector);
+  code.mov(code.eax, 0x80000080u);
+  code.L(vector_ready);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+
+  code.add(code.ebx, 2u);
+  code.dec(code.r12d);
+  emit_v4_block_return(code);
+}
+
 V4NativeFn compile_v4_exception(V4CodeArena &arena,
                                 const V4DecodedException &inst,
                                 u32 start_pc, u32 &code_size) {
@@ -1735,9 +1837,7 @@ V4NativeFn compile_v4_pending_delay_overflow_alu(
   emit_v4_block_return(code);
 
   code.L(overflow);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
-  emit_v4_block_return(code);
+  emit_v4_exception_pending_delay(code, Exception::Overflow);
   code.ready();
 
   code_size = static_cast<u32>(code.getSize());
