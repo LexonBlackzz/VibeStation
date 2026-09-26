@@ -2663,7 +2663,7 @@ V4NativeFn compile_v4_load(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, hot_mmio16, loaded, slow_after_prefix, bail;
+  Label ram, scratch, hot_mmio16, loaded, unaligned, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -2679,10 +2679,10 @@ V4NativeFn compile_v4_load(
   code.add(code.eax, static_cast<u32>(load.simm));
   if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     code.test(code.eax, 1u);
-    code.jnz(slow_exit);
+    code.jnz(unaligned);
   } else if (load.op == V4LoadOp::Lw) {
     code.test(code.eax, 3u);
-    code.jnz(slow_exit);
+    code.jnz(unaligned);
   }
 
   auto emit_memory_read = [&]() {
@@ -3020,6 +3020,18 @@ V4NativeFn compile_v4_load(
     emit_v4_selected_link(code, links);
   }
 
+  code.L(unaligned);
+  // EAX still carries the virtual effective address from the faulting load.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+      code.eax);
+  if (prefix_count != 0u) {
+    code.add(code.ebx, prefix_count);
+    code.sub(code.r12d, prefix_count);
+  }
+  emit_v4_exception_no_delay(code, Exception::AddrLoadErr,
+                             start_pc + prefix_count * 4u);
+
   code.L(slow_after_prefix);
   if (prefix_count != 0u) {
     code.mov(code.dword[
@@ -3069,7 +3081,7 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, stored, stop_after_store, slow_after_prefix, bail;
+  Label ram, scratch, stored, stop_after_store, unaligned, slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -3098,10 +3110,10 @@ V4NativeFn compile_v4_store(
 
   if (store.op == V4StoreOp::Sh) {
     code.test(code.eax, 1u);
-    code.jnz(guard_exit);
+    code.jnz(unaligned);
   } else if (store.op == V4StoreOp::Sw) {
     code.test(code.eax, 3u);
-    code.jnz(guard_exit);
+    code.jnz(unaligned);
   }
 
   code.mov(code.edx, code.eax);
@@ -3471,6 +3483,14 @@ V4NativeFn compile_v4_store(
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
   emit_v4_link(code, links.after_store, links);
+
+  code.L(unaligned);
+  // EAX still carries the virtual effective address from the faulting store.
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+      code.eax);
+  emit_v4_exception_no_delay(code, Exception::AddrStoreErr,
+                             start_pc + prefix_count * 4u);
 
   code.L(slow_after_prefix);
   if (prefix_count != 0u) {
