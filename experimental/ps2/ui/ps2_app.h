@@ -47,6 +47,7 @@ private:
     void panel_ee_debug();
     void panel_iop_debug();
     void panel_gs_debug();
+    void panel_profiler();
     void panel_scheduler();
     void panel_settings();
     void panel_about();
@@ -89,6 +90,7 @@ private:
     bool show_ee_debug_ = false;
     bool show_iop_debug_ = false;
     bool show_gs_debug_ = false;
+    bool show_profiler_ = true;
     bool show_scheduler_ = false;
     bool show_settings_ = false;
     bool show_about_ = false;
@@ -110,7 +112,7 @@ private:
     u64 profile_sample_run_ns_ = 0;
     u64 profile_sample_ee_ns_ = 0;
     u64 profile_sample_iop_ns_ = 0;
-    u64 profile_sample_vu_ns_ = 0;
+    u64 profile_sample_slow_path_ns_ = 0;
     u64 profile_sample_iop_instructions_ = 0;
     u64 profile_sample_vu1_instructions_ = 0;
     std::array<u64, 64> profile_sample_fallback_opcodes_{};
@@ -126,7 +128,7 @@ private:
     double profile_cache_flushes_per_second_ = 0.0;
     double profile_host_ee_percent_ = 0.0;
     double profile_host_iop_percent_ = 0.0;
-    double profile_host_vu_percent_ = 0.0;
+    double profile_host_slow_percent_ = 0.0;
     double profile_host_other_percent_ = 0.0;
     std::array<double, 64> profile_fallbacks_per_second_{};
 
