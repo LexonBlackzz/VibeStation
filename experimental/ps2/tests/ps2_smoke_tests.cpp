@@ -626,6 +626,26 @@ bool test_scheduler_ordering() {
            expect(scheduler.now() == 20, "scheduler time mismatch");
 }
 
+bool test_scheduler_next_event_boundary() {
+    ps2::Scheduler scheduler;
+    const auto cancelled =
+        scheduler.schedule(ps2::EventType::Vif0, 4);
+    scheduler.schedule(ps2::EventType::Gs, 9);
+    scheduler.cancel(cancelled);
+
+    const auto next = scheduler.next_event_time();
+    bool ok = expect(
+        next.has_value() && *next == 9u,
+        "scheduler next-event boundary did not skip cancelled event");
+
+    scheduler.run_until(9, {});
+    ok = expect(
+        scheduler.now() == 9u &&
+        !scheduler.next_event_time().has_value(),
+        "scheduler next-event boundary did not clear at deadline") && ok;
+    return ok;
+}
+
 bool test_scheduler_single_step() {
     ps2::Scheduler scheduler;
     scheduler.advance_one();
@@ -2624,6 +2644,7 @@ int main() {
     ok = test_dmac_running_mask() && ok;
     ok = test_ee_jit_matches_interpreter() && ok;
     ok = test_scheduler_ordering() && ok;
+    ok = test_scheduler_next_event_boundary() && ok;
     ok = test_scheduler_single_step() && ok;
     ok = test_scheduler_cancel() && ok;
     ok = test_ee_reset_state() && ok;

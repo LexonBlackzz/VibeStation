@@ -5290,7 +5290,8 @@ u32 EeCpu::run_native_block(
     u32 instruction_count,
     u32 maximum_instructions,
     const u8* ram_data,
-    u32* page_generations) {
+    u32* page_generations,
+    u32 yield_pc) {
     if (halted_ || next_is_delay_slot_ ||
         state_.pc != pc ||
         instructions == nullptr ||
@@ -5309,15 +5310,13 @@ u32 EeCpu::run_native_block(
         maximum_instructions,
         ram_data,
         page_generations,
-        control_flow);
+        control_flow,
+        yield_pc);
     if (retired == 0u) return 0u;
 
-    state_.last_pc = pc + (retired - 1u) * 4u;
-    state_.last_instruction = instructions[retired - 1u];
-    if (!control_flow) {
-        state_.pc = pc + retired * 4u;
-        state_.next_pc = state_.pc + 4u;
-    }
+    // The resident JIT owns PC/next-PC/last-instruction state for the
+    // entire chained run. Updating those fields here from the entry block
+    // would destroy branch targets reached later in the same native dispatch.
     state_.gpr[0] = {};
     state_.instructions_executed += retired;
     state_.cop0[9] += retired;

@@ -4735,6 +4735,73 @@ bool test_ee_native_branch_delay() {
     return ok;
 }
 
+bool test_ee_native_resident_branch_chain() {
+    constexpr ps2::u32 pc = 0x7000u;
+    const std::array<ps2::u32, 6> code = {
+        (0x09u << 26) | (1u << 16) | 1u,                    // ADDIU r1,r0,1
+        (0x04u << 26) | (1u << 21) | (1u << 16) | 2u,      // BEQ r1,r1,+2
+        (0x09u << 26) | (2u << 16) | 2u,                    // delay: r2=2
+        (0x09u << 26) | (3u << 16) | 3u,                    // skipped
+        (0x09u << 26) | (4u << 16) | 4u,                    // target: r4=4
+        (0x09u << 26) | (4u << 21) | (5u << 16) | 1u,       // r5=r4+1
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE resident-chain code setup failed") && ok;
+    }
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    std::string error;
+    for (ps2::u32 index : {0u, 1u, 2u, 4u, 5u}) {
+        ok = expect(
+            exact.ee().step_predecoded(code[index], error),
+            "EE resident-chain reference step failed") && ok;
+    }
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        3u,
+        5u,
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == 5u &&
+        native.ee().jit().block_executed_count() >= 2u,
+        "EE resident JIT did not chain across the branch target") && ok;
+    ok = expect(
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.instructions_executed == b.instructions_executed &&
+        a.cop0[9] == b.cop0[9] &&
+        a.gpr[1].lo == b.gpr[1].lo &&
+        a.gpr[2].lo == b.gpr[2].lo &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo &&
+        a.gpr[5].lo == b.gpr[5].lo,
+        "EE resident chained state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE resident chain unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_phase_aware_idle_skip() {
     constexpr ps2::u32 pc = 0x00081FC0u;
     const std::array<ps2::u32, 8> code = {
@@ -5352,6 +5419,7 @@ int main() {
     ok = test_ee_native_fpu_and_sc_fastmem() && ok;
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_branch_delay() && ok;
+    ok = test_ee_native_resident_branch_chain() && ok;
     ok = test_ee_phase_aware_idle_skip() && ok;
     ok = test_ee_quiet_fast_prefix() && ok;
     ok = test_ee_quiet_fast_ram_store_barrier() && ok;

@@ -32,6 +32,21 @@ void Scheduler::cancel(EventId id) {
     }
 }
 
+void Scheduler::discard_cancelled_front() {
+    while (!events_.empty()) {
+        const auto it = cancelled_.find(events_.top().event.id);
+        if (it == cancelled_.end()) break;
+        cancelled_.erase(it);
+        events_.pop();
+    }
+}
+
+std::optional<Scheduler::Tick> Scheduler::next_event_time() {
+    discard_cancelled_front();
+    if (events_.empty()) return std::nullopt;
+    return events_.top().event.time;
+}
+
 void Scheduler::run_until(Tick target, const Handler& handler) {
     if (target < now_) {
         throw std::invalid_argument("PS2 scheduler cannot run backwards");

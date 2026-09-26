@@ -95,7 +95,8 @@ public:
         u32 instruction_count,
         u32 maximum_instructions,
         const u8* ram_data = nullptr,
-        u32* page_generations = nullptr);
+        u32* page_generations = nullptr,
+        u32 yield_pc = 0u);
     u64 run(u64 instruction_budget, std::string& error);
     // Retire verified instructions from the OSDSYS eight-instruction idle
     // loop. The current PC may be at any phase of the loop. The caller is
