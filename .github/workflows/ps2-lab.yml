@@ -5,6 +5,7 @@ on:
     branches:
       - ps2-lab
       - ps2-lab-perf-experiment
+      - perf/ps2-ee-scheduler-native-1
     paths:
       - "experimental/ps2/**"
       - ".github/workflows/ps2-lab.yml"
