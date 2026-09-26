@@ -7540,8 +7540,8 @@ struct CpuRecompilerBackend::Impl {
         fn = compile_v4_pending_delay_cop0(arena, cop0, code_size);
       } else {
         V4DecodedCop2 cop2{};
-        if (decode_v4_cop2(instruction, cop2) && !v4_cop2_is_memory(cop2)) {
-          fn = compile_v4_pending_delay_cop2_register(arena, cop2, code_size);
+        if (decode_v4_cop2(instruction, cop2)) {
+          fn = compile_v4_pending_delay_cop2(arena, cop2, code_size);
         } else if (decode_v4_load(instruction, load)) {
       fn = compile_v4_pending_delay_load(arena, load, code_size);
         } else if (decode_v4_store(instruction, store)) {
