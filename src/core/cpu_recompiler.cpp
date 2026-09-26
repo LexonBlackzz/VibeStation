@@ -214,23 +214,40 @@ enum class V4Cop2Op : u8 {
   Mtc2,
   Ctc2,
   Command,
+  Lwc2,
+  Swc2,
 };
 
 struct V4DecodedCop2 {
   V4Cop2Op op = V4Cop2Op::Mfc2;
+  u8 rs = 0;
   u8 rt = 0;
   u8 rd = 0;
+  s32 simm = 0;
   u32 bits = 0;
 };
 
 bool decode_v4_cop2(u32 bits, V4DecodedCop2 &out) {
-  if (((bits >> 26) & 0x3Fu) != 0x12u) {
-    return false;
-  }
+  const u32 primary = (bits >> 26) & 0x3Fu;
   out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
   out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
   out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  out.simm = static_cast<s32>(static_cast<s16>(bits & 0xFFFFu));
   out.bits = bits;
+
+  if (primary == 0x32u) {
+    out.op = V4Cop2Op::Lwc2;
+    return true;
+  }
+  if (primary == 0x3Au) {
+    out.op = V4Cop2Op::Swc2;
+    return true;
+  }
+  if (primary != 0x12u) {
+    return false;
+  }
+
   const u32 sub = (bits >> 21) & 0x1Fu;
   switch (sub) {
   case 0x00: out.op = V4Cop2Op::Mfc2; return true;
@@ -244,6 +261,10 @@ bool decode_v4_cop2(u32 bits, V4DecodedCop2 &out) {
     }
     return false;
   }
+}
+
+bool v4_cop2_is_memory(const V4DecodedCop2 &inst) {
+  return inst.op == V4Cop2Op::Lwc2 || inst.op == V4Cop2Op::Swc2;
 }
 
 bool v4_gte_data_reg_reads_result(u32 reg) {
@@ -1590,6 +1611,220 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
   };
 
   switch (inst.op) {
+  case V4Cop2Op::Lwc2: {
+    Label ram, scratch, loaded, unaligned, bail;
+
+    code.cmp(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
+        0u);
+    code.je(bail);
+
+    // Capture the effective-address source before retiring an incoming load.
+    emit_read_guest(code, code.eax, inst.rs);
+    code.add(code.eax, static_cast<u32>(inst.simm));
+    code.test(code.eax, 3u);
+    code.jnz(unaligned);
+
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+    code.cmp(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jb(ram);
+    code.cmp(code.edx, 0x1F800000u);
+    code.jb(bail);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jae(bail);
+
+    code.L(scratch);
+    code.sub(code.edx, 0x1F800000u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+    code.test(code.rcx, code.rcx);
+    code.jz(bail);
+    code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+    code.xor_(code.r9d, code.r9d);
+    code.jmp(loaded);
+
+    code.L(ram);
+    code.and_(code.edx, psx::RAM_SIZE - 1u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+    code.test(code.rcx, code.rcx);
+    code.jz(bail);
+    code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+    code.mov(code.r9d, 4u);
+
+    code.L(loaded);
+    emit_retire_incoming_load(code, 0u);
+    emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
+
+    // LWC2 marks the written GTE input unavailable for six cycles after the
+    // data-memory penalty, matching Cpu::op_lwc2().
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, code.r9);
+    code.add(code.rax, 6u);
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+        code.rax);
+
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        start_pc);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        0u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+    code.add(code.r9d, 2u);
+    code.add(code.ebx, code.r9d);
+    code.dec(code.r12d);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
+    emit_v4_link(code, links.fallthrough, links);
+
+    code.L(unaligned);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+        code.eax);
+    emit_v4_exception_no_delay(code, Exception::AddrLoadErr, start_pc);
+
+    code.L(bail);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+    emit_v4_block_return(code);
+    break;
+  }
+
+  case V4Cop2Op::Swc2: {
+    Label ram, scratch, stored, unaligned, bail;
+
+    code.cmp(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
+        0u);
+    code.je(bail);
+    code.test(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+        1u << 16);
+    code.jnz(bail);
+
+    emit_read_guest(code, code.eax, inst.rs);
+    code.add(code.eax, static_cast<u32>(inst.simm));
+    code.test(code.eax, 3u);
+    code.jnz(unaligned);
+
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+
+    // Do not bypass JIT invalidation for stores into translated code.
+    code.mov(code.r9d, code.edx);
+    {
+      Label line_key_ready;
+      code.cmp(code.r9d, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+      code.jae(line_key_ready);
+      code.and_(code.r9d, psx::RAM_SIZE - 1u);
+      code.L(line_key_ready);
+    }
+    code.shr(code.r9d, 4u);
+    code.mov(code.ecx, code.r9d);
+    code.shr(code.r9d, 6u);
+    code.and_(code.ecx, 63u);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
+    code.test(code.rax, code.rax);
+    code.jz(bail);
+    code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+    code.shr(code.rax, code.cl);
+    code.test(code.al, 1u);
+    code.jnz(bail);
+
+    code.cmp(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jb(ram);
+    code.cmp(code.edx, 0x1F800000u);
+    code.jb(bail);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jae(bail);
+
+    // The effective address is now fixed. Retire the incoming CPU load before
+    // observing COP2 state, then honor the GTE result scoreboard for readable
+    // result registers.
+    emit_retire_incoming_load(code, 0u);
+    if (v4_gte_data_reg_reads_result(inst.rt)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rt);
+    code.mov(code.r8d, code.eax);
+
+    code.L(scratch);
+    code.sub(code.edx, 0x1F800000u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+    code.test(code.rcx, code.rcx);
+    code.jz(bail);
+    code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+    code.xor_(code.r9d, code.r9d);
+    code.jmp(stored);
+
+    code.L(ram);
+    // RAM path must also perform the GTE read after the preflight above.
+    emit_retire_incoming_load(code, 0u);
+    if (v4_gte_data_reg_reads_result(inst.rt)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rt);
+    code.mov(code.r8d, code.eax);
+    code.and_(code.edx, psx::RAM_SIZE - 1u);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+    code.test(code.rcx, code.rcx);
+    code.jz(bail);
+    code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+    code.mov(code.r9d, 1u);
+
+    code.L(stored);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+        start_pc);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+        0u);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+        0u);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+    code.add(code.r9d, 2u);
+    code.add(code.ebx, code.r9d);
+    code.dec(code.r12d);
+    code.inc(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
+    emit_v4_link(code, links.fallthrough, links);
+
+    code.L(unaligned);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))],
+        code.eax);
+    emit_v4_exception_no_delay(code, Exception::AddrStoreErr, start_pc);
+
+    code.L(bail);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
+    emit_v4_block_return(code);
+    break;
+  }
+
   case V4Cop2Op::Mfc2:
     if (v4_gte_data_reg_reads_result(inst.rd)) {
       emit_result_stall();
@@ -5157,7 +5392,8 @@ struct CpuRecompilerBackend::Impl {
           split_control || simple_control || guarded_control ||
           guarded_store_control || load_has_control || store_has_control;
       block->has_memory =
-          simple_load || simple_store || guarded_store_control;
+          simple_load || simple_store || guarded_store_control ||
+          (simple_cop2 && v4_cop2_is_memory(cop2));
     } catch (...) {
       if (!reused_block) {
         --block_count;
