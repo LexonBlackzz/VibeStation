@@ -158,7 +158,7 @@ struct CpuCompareCase {
   bool require_v4_native_store_entry_when_available = false;
   bool require_v4_store_tail_block_when_available = false;
   bool require_v4_store_branch_fusion_when_available = false;
-  bool require_v4_store_smc_fallback_when_available = false;
+  bool require_v4_store_smc_native_when_available = false;
   bool require_v4_load_tail_block_when_available = false;
   bool require_v4_load_branch_fusion_when_available = false;
   bool require_v4_native_branch_entry_when_available = false;
@@ -443,7 +443,8 @@ static void log_cpu_compare_failure_summary(
       "periph=%u seg_periph=%u expected=%u native=%u native_check=%s "
       "pc=%08X/%08X next=%08X/%08X current=%08X/%08X cyc=%llu/%llu "
       "first_reg=%d:%08X/%08X native_instr=%llu decoded_instr=%llu "
-      "fallback_instr=%llu",
+      "fallback_instr=%llu icache_refills=%llu helper_instr=%llu "
+      "dispatch=%llu missing=%llu generation=%llu budget=%llu bail=%llu",
       test_case.name, cpu_compare_mode_name(mode),
       state_pass ? 1u : 0u, segment_state_pass ? 1u : 0u,
       irq_state_pass ? 1u : 0u, memory_state_pass ? 1u : 0u,
@@ -459,7 +460,14 @@ static void log_cpu_compare_failure_summary(
       first_reg, first_reg_ref, first_reg_actual,
       static_cast<unsigned long long>(actual.stats.native_instructions),
       static_cast<unsigned long long>(actual.stats.decoded_instructions),
-      static_cast<unsigned long long>(actual.stats.fallback_instructions));
+      static_cast<unsigned long long>(actual.stats.fallback_instructions),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_icache_refills),
+      static_cast<unsigned long long>(actual.stats.jit_v4_helper_instructions),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_native_dispatches),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_dispatch_missing_exits),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_dispatch_generation_exits),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_dispatch_budget_exits),
+      static_cast<unsigned long long>(actual.stats.recompiler_frame_dispatch_bail_exits));
 }
 
 static bool cpu_debug_states_equal(const CpuDebugState &a,
@@ -4637,7 +4645,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   cases.push_back(v4_uncached_store_branch);
 
   CpuCompareCase v4_uncached_store_smc{};
-  v4_uncached_store_smc.name = "v4_uncached_store_code_page_fallback";
+  v4_uncached_store_smc.name = "v4_uncached_store_code_page_native";
   v4_uncached_store_smc.start_pc = 0xA0010000u;
   v4_uncached_store_smc.initial_gpr[1] =
       v4_uncached_store_smc.start_pc + 0x0Cu;
@@ -4648,7 +4656,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x2B, 1, 2, 0),
   };
   v4_uncached_store_smc.instructions = 1u;
-  v4_uncached_store_smc.require_v4_store_smc_fallback_when_available = true;
+  v4_uncached_store_smc.require_v4_store_smc_native_when_available = true;
   cases.push_back(v4_uncached_store_smc);
 
   CpuCompareCase v4_uncached_store_same_page_other_line{};
@@ -4892,19 +4900,19 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
           native_check_pass = clean_fallback;
         }
       } else if (mode == CpuExecutionMode::Recompiler &&
-                 test_case.require_v4_store_smc_fallback_when_available) {
+                  test_case.require_v4_store_smc_native_when_available) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
         } else {
-          const bool guarded =
+          const bool native_smc =
               result.stats.native_memory_blocks_compiled != 0u &&
-              result.stats.native_memory_fastpath_stores == 0u &&
-              result.stats.jit_v4_helper_instructions != 0u &&
+              result.stats.native_memory_fastpath_stores != 0u &&
+              result.stats.jit_v4_helper_instructions == 0u &&
               result.stats.fallback_instructions == 0u &&
               result.stats.interpreter_fallback_steps == 0u;
-          native_check = guarded ? "v4_store_smc_guarded"
-                                 : "v4_store_smc_not_guarded";
-          native_check_pass = guarded;
+          native_check = native_smc ? "v4_store_smc_native"
+                                    : "v4_store_smc_helper";
+          native_check_pass = native_smc;
         }
       } else if (mode == CpuExecutionMode::Recompiler &&
                  test_case.require_v4_entry_exception_native_when_available) {
