@@ -207,6 +207,46 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
                 out.sign_extend_word();
             }
             break;
+        case 0x04u: // SLLV
+        case 0x06u: // SRLV
+        case 0x07u: // SRAV
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rdx(rs, true);
+                out.load_rax(rt, true);
+                // x86 variable shifts use CL. On Win64 RCX holds the state
+                // pointer, so preserve it across the shift; SysV uses RDI.
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x51u); // PUSH RCX
+                }
+                out.emit(0x89u); out.emit(0xD1u); // MOV ECX,EDX
+                out.emit(0xD3u);
+                out.emit(
+                    funct == 0x04u ? 0xE0u :
+                    funct == 0x06u ? 0xE8u : 0xF8u);
+                out.sign_extend_word();
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x59u); // POP RCX
+                }
+            }
+            break;
+        case 0x0Au: // MOVZ
+        case 0x0Bu: // MOVN
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rax(rs, false);
+                out.load_rdx(rt, false);
+                out.emit(0x48u); out.emit(0x85u); out.emit(0xD2u);
+                const std::size_t skip =
+                    out.jcc32(funct == 0x0Au ? 0x85u : 0x84u);
+                out.store_rax(destination);
+                out.patch_rel32(skip, out.bytes.size());
+            }
+            destination = 0u;
+            break;
+        case 0x0Fu: // SYNC
+            destination = 0u;
+            break;
         case 0x10u: // MFHI
             if (destination != 0u) {
                 out.load_state_rax(
@@ -229,6 +269,57 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             out.load_rax(rs, false);
             out.store_state_rax(
                 static_cast<u32>(offsetof(EeCpuState, lo)));
+            destination = 0u;
+            break;
+        case 0x14u: // DSLLV
+        case 0x16u: // DSRLV
+        case 0x17u: // DSRAV
+            if (sa != 0u) return false;
+            if (destination != 0u) {
+                out.load_rdx(rs, true);
+                out.load_rax(rt, false);
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x51u); // PUSH RCX
+                }
+                out.emit(0x89u); out.emit(0xD1u); // MOV ECX,EDX
+                out.emit(0x48u); out.emit(0xD3u);
+                out.emit(
+                    funct == 0x14u ? 0xE0u :
+                    funct == 0x16u ? 0xE8u : 0xF8u);
+                if constexpr (kArgumentRegister == 1u) {
+                    out.emit(0x59u); // POP RCX
+                }
+            }
+            break;
+        case 0x18u: // MULT
+        case 0x19u: // MULTU
+            if (sa != 0u) return false;
+            out.load_rax(rs, true);
+            out.load_rdx(rt, true);
+            out.emit(0xF7u);
+            out.emit(funct == 0x18u ? 0xEAu : 0xE2u); // IMUL/MUL EDX
+            out.sign_extend_word();
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, lo)));
+            if (destination != 0u) {
+                out.store_rax(destination);
+            }
+            out.emit(0x89u); out.emit(0xD0u); // MOV EAX,EDX
+            out.sign_extend_word();
+            out.store_state_rax(
+                static_cast<u32>(offsetof(EeCpuState, hi)));
+            destination = 0u;
+            break;
+        case 0x28u: // MFSA
+            if (destination != 0u) {
+                out.load_state_eax(
+                    static_cast<u32>(offsetof(EeCpuState, sa)));
+            }
+            break;
+        case 0x29u: // MTSA
+            out.load_rax(rs, true);
+            out.store_state_eax(
+                static_cast<u32>(offsetof(EeCpuState, sa)));
             destination = 0u;
             break;
         case 0x21u: // ADDU
@@ -366,6 +457,73 @@ bool emit_instruction_body(u32 instruction, Emitter& out) {
             }
             out.store_state_eax(
                 static_cast<u32>(offsetof(EeCpuState, sa)));
+            destination = 0u;
+            break;
+        }
+        case 0x11u: { // COP1
+            const u32 cop_rs = rs;
+            const u32 fs = (instruction >> 11) & 31u;
+            const u32 fd = (instruction >> 6) & 31u;
+            const u32 cop_funct = instruction & 63u;
+            if (cop_rs == 0x00u) { // MFC1
+                if (rt != 0u) {
+                    out.load_state_eax(
+                        static_cast<u32>(
+                            offsetof(EeCpuState, fpr) +
+                            fs * sizeof(u32)));
+                    out.sign_extend_word();
+                    out.store_rax(rt);
+                }
+            } else if (cop_rs == 0x02u) { // CFC1
+                if (rt != 0u) {
+                    if (fs == 0u) {
+                        out.emit(0xB8u);
+                        out.emit32(0x00002E00u);
+                    } else if (fs == 31u) {
+                        out.load_state_eax(
+                            static_cast<u32>(
+                                offsetof(EeCpuState, fcr) +
+                                31u * sizeof(u32)));
+                    } else {
+                        out.emit(0x31u); out.emit(0xC0u); // XOR EAX,EAX
+                    }
+                    out.sign_extend_word();
+                    out.store_rax(rt);
+                }
+            } else if (cop_rs == 0x04u) { // MTC1
+                out.load_rax(rt, true);
+                out.store_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fs * sizeof(u32)));
+            } else if (cop_rs == 0x06u) { // CTC1
+                if (fs == 31u) {
+                    out.load_rax(rt, true);
+                    out.store_state_eax(
+                        static_cast<u32>(
+                            offsetof(EeCpuState, fcr) +
+                            31u * sizeof(u32)));
+                }
+            } else if (cop_rs == 0x10u &&
+                       (cop_funct == 0x05u ||
+                        cop_funct == 0x06u ||
+                        cop_funct == 0x07u)) {
+                out.load_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fs * sizeof(u32)));
+                if (cop_funct == 0x05u) {
+                    out.emit(0x25u); out.emit32(0x7FFFFFFFu); // AND EAX
+                } else if (cop_funct == 0x07u) {
+                    out.emit(0x35u); out.emit32(0x80000000u); // XOR EAX
+                }
+                out.store_state_eax(
+                    static_cast<u32>(
+                        offsetof(EeCpuState, fpr) +
+                        fd * sizeof(u32)));
+            } else {
+                return false;
+            }
             destination = 0u;
             break;
         }
