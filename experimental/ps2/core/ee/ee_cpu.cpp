@@ -1,6 +1,7 @@
 #include "core/ee/ee_cpu.h"
 
 #include "core/memory/ee_bus.h"
+#include "core/memory/ee_ram.h"
 #include "core/vu/vu1.h"
 
 #include <algorithm>
@@ -3524,12 +3525,8 @@ u32 EeCpu::run_quiet_fast_prefix(
         std::endian::native == std::endian::little;
 
     auto mark_direct_write = [&](u32 physical, u32 width) {
-        if (page_generations == nullptr || width == 0u) return;
-        const u32 first = physical >> 12;
-        const u32 last = (physical + width - 1u) >> 12;
-        for (u32 page = first; page <= last; ++page) {
-            ++page_generations[page];
-        }
+        EeRam::mark_jit_written(
+            page_generations, physical, width);
     };
     auto read_ram8 = [&](u32 address, u32 physical, u8& value) {
         if (direct_main_ram && physical < kMainRamSize) {
