@@ -6724,9 +6724,11 @@ struct CpuRecompilerBackend::Impl {
         entry = compile_v4_budget_branch(
             arena, control, branch_pc, block->code_size);
       } else if (guarded_store_control) {
-        entry = compile_v4_store_delay_branch(
-            arena, control, guarded_store_delay, branch_pc, links,
-            block->code_size);
+        // A store delay slot is kept as a native pending-delay fragment. Split
+        // at the branch so MMIO, SMC, alignment faults and incoming load-delay
+        // state never require a semantic bailout/helper.
+        entry = compile_v4_budget_branch(
+            arena, control, branch_pc, block->code_size);
       } else if (simple_control) {
         entry = compile_v4_branch(
             arena, decoded, count, control, delay, branch_pc,
@@ -6764,7 +6766,8 @@ struct CpuRecompilerBackend::Impl {
       // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
-      if (likely_control || split_control || guarded_control) {
+      if (likely_control || split_control || guarded_control ||
+          guarded_store_control) {
         block->budget_fn = entry;
         block->budget_requires_empty_chain = true;
       } else if (count != 0u) {
@@ -6808,7 +6811,8 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (likely_control || split_control || guarded_control)
+          (likely_control || split_control || guarded_control ||
+           guarded_store_control)
               ? 1u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6823,7 +6827,8 @@ struct CpuRecompilerBackend::Impl {
                                                 (store_has_control ? 3u : 1u)
                                           : count))));
       block->max_cycles =
-          (likely_control || split_control || guarded_control)
+          (likely_control || split_control || guarded_control ||
+           guarded_store_control)
               ? 2u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6852,7 +6857,8 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (likely_control || split_control || guarded_control)
+        (likely_control || split_control || guarded_control ||
+         guarded_store_control)
             ? 1u
             : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                 simple_cop0 || simple_cop2 || simple_exception)
