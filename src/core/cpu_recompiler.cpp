@@ -1593,6 +1593,84 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+V4NativeFn compile_v4_pending_delay_hilo(
+    V4CodeArena &arena, const V4DecodedHiLo &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  Label ready;
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))]);
+  code.mov(code.rcx, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rcx, code.rbx);
+  code.inc(code.rcx);
+  code.cmp(code.rax, code.rcx);
+  code.jbe(ready);
+  code.sub(code.rax, code.rcx);
+  code.add(code.ebx, code.eax);
+  code.L(ready);
+
+  u8 cancel_reg = 0u;
+  switch (inst.op) {
+  case V4HiLoOp::Mfhi:
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))]);
+    emit_write_guest(code, inst.rd, code.eax);
+    cancel_reg = inst.rd;
+    break;
+  case V4HiLoOp::Mflo:
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))]);
+    emit_write_guest(code, inst.rd, code.eax);
+    cancel_reg = inst.rd;
+    break;
+  case V4HiLoOp::Mthi:
+    emit_read_guest(code, code.eax, inst.rs);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.eax);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.inc(code.rax);
+    code.mov(code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                             muldiv_result_ready_cycle))],
+        code.rax);
+    break;
+  case V4HiLoOp::Mtlo:
+    emit_read_guest(code, code.eax, inst.rs);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.inc(code.rax);
+    code.mov(code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                             muldiv_result_ready_cycle))],
+        code.rax);
+    break;
+  }
+
+  emit_retire_incoming_load(code, cancel_reg);
+  emit_v4_finish_pending_delay(code, 1u);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_hilo(V4CodeArena &arena,
                                const V4DecodedHiLo &inst,
                                u32 start_pc,
