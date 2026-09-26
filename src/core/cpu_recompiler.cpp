@@ -4306,7 +4306,7 @@ V4NativeFn compile_v4_pending_delay_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, device, stored, unaligned, bail;
+  Label ram, device, isolated, stored, unaligned, bail;
 
   // Pending delay-slot stores preserve branch-delay EPC/BD semantics directly.
   // RAM/scratchpad use fastmem; genuine device accesses use a narrow bus bridge.
@@ -4317,11 +4317,8 @@ V4NativeFn compile_v4_pending_delay_store(
       static_cast<int>(offsetof(V4NativeState, memory_fastpath_allowed))],
       0u);
   code.je(bail);
-  code.test(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
-      1u << 16);
-  code.jnz(bail);
-
+  // Cache isolation is handled after effective-address/alignment formation so
+  // misaligned SH/SW still raise precise delay-slot exceptions.
   // Capture both store operands before retiring any incoming delayed load.
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
@@ -4351,6 +4348,11 @@ V4NativeFn compile_v4_pending_delay_store(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
+
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 16);
+  code.jnz(isolated);
 
   // Do not fast-store into a translated 16-byte code line. Normalize RAM
   // mirrors to the same 2 MiB backing address before consulting the bitmap.
@@ -4442,6 +4444,48 @@ V4NativeFn compile_v4_pending_delay_store(
     }
     code.L(merged);
   };
+
+  code.L(isolated);
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    {
+      Label no_ram_read_penalty, isolated_penalty_ready;
+      code.mov(code.edx, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+      code.cmp(code.edx, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+      code.jae(no_ram_read_penalty);
+      code.mov(code.r9d, 4u);
+      code.jmp(isolated_penalty_ready);
+      code.L(no_ram_read_penalty);
+      code.xor_(code.r9d, code.r9d);
+      code.L(isolated_penalty_ready);
+    }
+  } else {
+    code.xor_(code.r9d, code.r9d);
+  }
+  code.jmp(stored);
 
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
@@ -6310,7 +6354,8 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, device, stored, stop_after_store, unaligned, slow_after_prefix, bail;
+  Label ram, scratch, device, isolated, stored, stop_after_store, unaligned,
+      slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   for (u32 i = 0; i < prefix_count; ++i) {
@@ -6323,13 +6368,6 @@ V4NativeFn compile_v4_store(
     code.add(code.ebx, prefix_count);
     code.sub(code.r12d, prefix_count);
   }
-
-
-  // Cache-isolated stores target the guest I-cache rather than RAM.
-  code.test(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
-      1u << 16);
-  code.jnz(guard_exit);
 
 
   // Capture both operands before retiring an incoming delayed load.
@@ -6363,6 +6401,12 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
 
+  // Isolated-cache stores do not write RAM. They invalidate the selected guest
+  // I-cache line (and any matching JIT page) entirely in native code below.
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 16);
+  code.jnz(isolated);
 
   // Never directly write a translated 16-byte code line. A different line on
   // the same 4 KiB page is safe for cached code and should stay on fastmem.
@@ -6459,6 +6503,50 @@ V4NativeFn compile_v4_store(
     }
     code.L(merged);
   };
+
+  code.L(isolated);
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    // SWL/SWR still perform their aligned read before the isolated store is
+    // discarded. Preserve bus side effects and the main-RAM read penalty.
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.edx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
+    code.mov(code.esi, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    {
+      Label no_ram_read_penalty, isolated_penalty_ready;
+      code.mov(code.edx, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+      code.cmp(code.edx, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+      code.jae(no_ram_read_penalty);
+      code.mov(code.r9d, 4u);
+      code.jmp(isolated_penalty_ready);
+      code.L(no_ram_read_penalty);
+      code.xor_(code.r9d, code.r9d);
+      code.L(isolated_penalty_ready);
+    }
+  } else {
+    code.xor_(code.r9d, code.r9d);
+  }
+  code.jmp(stored);
 
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
