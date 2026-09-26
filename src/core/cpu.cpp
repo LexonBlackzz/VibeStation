@@ -3262,15 +3262,15 @@ void Cpu::op_bcondz(u32 i) {
 // ── Arithmetic Instructions ────────────────────────────────────────
 
 void Cpu::op_addi(u32 i) {
-  s32 s = static_cast<s32>(gpr_[rs(i)]);
-  s32 imm = simm(i);
-  s32 result = s + imm;
-  // Check overflow
-  if ((s > 0 && imm > 0 && result < 0) || (s < 0 && imm < 0 && result > 0)) {
+  const s64 lhs = static_cast<s64>(static_cast<s32>(gpr_[rs(i)]));
+  const s64 rhs = static_cast<s64>(simm(i));
+  const s64 result = lhs + rhs;
+  if (result > static_cast<s64>(INT32_MAX) ||
+      result < static_cast<s64>(INT32_MIN)) {
     exception(Exception::Overflow);
     return;
   }
-  set_reg(rt(i), static_cast<u32>(result));
+  set_reg(rt(i), static_cast<u32>(static_cast<s32>(result)));
 }
 
 void Cpu::op_addiu(u32 i) {
@@ -3288,27 +3288,29 @@ void Cpu::op_xori(u32 i) { set_reg(rt(i), gpr_[rs(i)] ^ imm16(i)); }
 void Cpu::op_lui(u32 i) { set_reg(rt(i), static_cast<u32>(imm16(i)) << 16); }
 
 void Cpu::op_add(u32 i) {
-  s32 a = static_cast<s32>(gpr_[rs(i)]);
-  s32 b = static_cast<s32>(gpr_[rt(i)]);
-  s32 result = a + b;
-  if ((a > 0 && b > 0 && result < 0) || (a < 0 && b < 0 && result > 0)) {
+  const s64 lhs = static_cast<s64>(static_cast<s32>(gpr_[rs(i)]));
+  const s64 rhs = static_cast<s64>(static_cast<s32>(gpr_[rt(i)]));
+  const s64 result = lhs + rhs;
+  if (result > static_cast<s64>(INT32_MAX) ||
+      result < static_cast<s64>(INT32_MIN)) {
     exception(Exception::Overflow);
     return;
   }
-  set_reg(rd(i), static_cast<u32>(result));
+  set_reg(rd(i), static_cast<u32>(static_cast<s32>(result)));
 }
 
 void Cpu::op_addu(u32 i) { set_reg(rd(i), gpr_[rs(i)] + gpr_[rt(i)]); }
 
 void Cpu::op_sub(u32 i) {
-  s32 a = static_cast<s32>(gpr_[rs(i)]);
-  s32 b = static_cast<s32>(gpr_[rt(i)]);
-  s32 result = a - b;
-  if ((a > 0 && b < 0 && result < 0) || (a < 0 && b > 0 && result > 0)) {
+  const s64 lhs = static_cast<s64>(static_cast<s32>(gpr_[rs(i)]));
+  const s64 rhs = static_cast<s64>(static_cast<s32>(gpr_[rt(i)]));
+  const s64 result = lhs - rhs;
+  if (result > static_cast<s64>(INT32_MAX) ||
+      result < static_cast<s64>(INT32_MIN)) {
     exception(Exception::Overflow);
     return;
   }
-  set_reg(rd(i), static_cast<u32>(result));
+  set_reg(rd(i), static_cast<u32>(static_cast<s32>(result)));
 }
 
 void Cpu::op_subu(u32 i) { set_reg(rd(i), gpr_[rs(i)] - gpr_[rt(i)]); }
