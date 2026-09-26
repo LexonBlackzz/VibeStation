@@ -540,6 +540,34 @@ void Ps2System::advance_iop_for_ee_cycles(u64 cycles, std::string& error) {
             i += 2u;
             continue;
         }
+
+        // The IOP recompiler only executes ALU/control/direct-RAM blocks and
+        // does not advance device time itself. Run it only across an interval
+        // which the IOP bus proves event-free, then repay the exact retired
+        // cycle count in one hardware tick. This mirrors the PS1 V4
+        // run-slice model without allowing native code to skip observable IOP
+        // timer/SIF/IRQ boundaries.
+        if (i + 1u < steps &&
+            !sif_dma_.iop_completion_pending() &&
+            !iop_bus_.interrupt_pending()) {
+            u64 native_budget =
+                std::min<u64>(steps - i, 256u);
+            while (native_budget >= 2u &&
+                   !iop_bus_.can_tick_event_free(native_budget)) {
+                native_budget >>= 1u;
+            }
+            if (native_budget >= 2u) {
+                const u32 native_retired =
+                    iop_.run_native_quiet(
+                        static_cast<u32>(native_budget));
+                if (native_retired != 0u) {
+                    iop_bus_.tick(native_retired);
+                    i += native_retired;
+                    continue;
+                }
+            }
+        }
+
         if (!iop_.step_hot(iop_step_error_scratch_)) {
             if (!iop_.halted()) {
                 error = "IOP step failed: " + iop_step_error_scratch_;
