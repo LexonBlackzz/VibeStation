@@ -6753,39 +6753,46 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(load_control_bits, load_control) &&
         decode_v4_alu(load_delay_bits, load_delay);
 
+    bool simple_native_unknown = false;
+    u32 native_unknown_bits = 0u;
     if (count == 0u && !likely_control && !split_control && !simple_control &&
         !guarded_control && !guarded_store_control && !guarded_load_control &&
         !simple_load && !simple_store &&
         !simple_overflow_alu && !simple_cond_move && !simple_trap &&
         !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_cop2 && !simple_exception && !simple_cop_unusable) {
-      ++stats.native_compile_attempts;
-      u32 rejected_bits = 0u;
-      (void)read_visible(start_pc, rejected_bits);
-      block->reject_kind = classify_v4_reject(rejected_bits);
-      block->instruction_count = 1u;
-      block->guest_bits[0] = rejected_bits;
-      block->retry_second_line =
-          control_pair_cross_line && control_candidate && !delay_visible;
-      block->helper_fn = helper_for(rejected_bits);
-      if (block->helper_fn == nullptr) {
-        if (!reused_block) {
-          --block_count;
+      (void)read_visible(start_pc, native_unknown_bits);
+      const u32 primary = (native_unknown_bits >> 26) & 0x3Fu;
+
+      // LWC0/SWC0 are the last architecturally valid memory opcodes still
+      // awaiting dedicated native memory lowering. Everything else that reaches
+      // here is either ReservedInst or the explicit compatibility-unknown mode.
+      if (primary == 0x30u || primary == 0x38u) {
+        ++stats.native_compile_attempts;
+        block->reject_kind = classify_v4_reject(native_unknown_bits);
+        block->instruction_count = 1u;
+        block->guest_bits[0] = native_unknown_bits;
+        block->helper_fn = helper_for(native_unknown_bits);
+        if (block->helper_fn == nullptr) {
+          if (!reused_block) {
+            --block_count;
+          }
+          ++stats.native_compile_failures;
+          return nullptr;
         }
-        ++stats.native_compile_failures;
-        return nullptr;
+        code_pages.mark_address(start_phys);
+        code_lines.mark_address(start_phys);
+        install(start_pc, block);
+        ++stats.native_compile_successes;
+        ++stats.native_blocks_compiled;
+        ++stats.native_compiled_block_size_histogram[1];
+        ++stats.native_blocks;
+        stats.block_count = static_cast<u32>(block_count);
+        stats.native_code_bytes = arena.bytes_used();
+        stats.code_bytes = arena.bytes_used();
+        return block;
       }
-      code_pages.mark_address(start_phys);
-      code_lines.mark_address(start_phys);
-      install(start_pc, block);
-      ++stats.native_compile_successes;
-      ++stats.native_blocks_compiled;
-      ++stats.native_compiled_block_size_histogram[1];
-      ++stats.native_blocks;
-      stats.block_count = static_cast<u32>(block_count);
-      stats.native_code_bytes = arena.bytes_used();
-      stats.code_bytes = arena.bytes_used();
-      return block;
+      simple_native_unknown = true;
     }
 
     ++stats.native_compile_attempts;
@@ -6821,7 +6828,8 @@ struct CpuRecompilerBackend::Impl {
           const u32 translated_count =
               (simple_overflow_alu || simple_cond_move || simple_trap ||
                simple_hilo || simple_muldiv || simple_cop0 ||
-               simple_cop2 || simple_exception || simple_cop_unusable)
+               simple_cop2 || simple_exception || simple_cop_unusable ||
+               simple_native_unknown)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -6838,7 +6846,15 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (likely_control) {
+      if (simple_native_unknown) {
+        entry = g_experimental_unhandled_special_returns_zero
+                    ? compile_v4_compat_unknown(
+                          arena, native_unknown_bits, start_pc, links,
+                          block->code_size)
+                    : compile_v4_fixed_exception(
+                          arena, Exception::ReservedInst, start_pc,
+                          block->code_size);
+      } else if (likely_control) {
         entry = compile_v4_likely_branch_head(
             arena, control, branch_pc, block->code_size);
       } else if (split_control) {
@@ -6917,7 +6933,9 @@ struct CpuRecompilerBackend::Impl {
       // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
-      if (likely_control || split_control || guarded_control ||
+      if (simple_native_unknown) {
+        block->budget_fn = entry;
+      } else if (likely_control || split_control || guarded_control ||
           guarded_store_control || guarded_load_control) {
         block->budget_fn = entry;
         block->budget_requires_empty_chain = true;
@@ -6970,7 +6988,8 @@ struct CpuRecompilerBackend::Impl {
            guarded_store_control || guarded_load_control)
               ? 1u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
+                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable ||
+                   simple_native_unknown)
                      ? 1u
                      : ((simple_control || guarded_store_control)
                             ? count + 2u
@@ -6986,7 +7005,8 @@ struct CpuRecompilerBackend::Impl {
            guarded_store_control || guarded_load_control)
               ? 2u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
+                  simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable ||
+                   simple_native_unknown)
                      ? 40u
                      : ((simple_control || guarded_store_control)
                             ? (guarded_store_control ? 5u : count + 3u)
@@ -7017,7 +7037,8 @@ struct CpuRecompilerBackend::Impl {
          guarded_store_control || guarded_load_control)
             ? 1u
             : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-                simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable)
+                simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable ||
+                   simple_native_unknown)
                    ? 1u
                    : ((simple_control || guarded_store_control)
                           ? count + 2u
@@ -7051,7 +7072,8 @@ struct CpuRecompilerBackend::Impl {
         ++stats.native_memory_blocks_compiled;
       }
     } else if (simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
-               simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable) {
+               simple_cop0 || simple_cop2 || simple_exception || simple_cop_unusable ||
+                   simple_native_unknown) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
