@@ -2471,6 +2471,8 @@ void EeJit::clear() {
     block_guard_bailout_count_ = 0;
     block_fastmem_store_count_ = 0;
     block_code_store_exit_count_ = 0;
+    successor_link_attempt_count_ = 0;
+    successor_link_hit_count_ = 0;
     cache_flush_count_ = 0;
     native_entry_attempt_count_ = 0;
     native_entry_success_count_ = 0;
@@ -2652,6 +2654,9 @@ u32 EeJit::execute_block(
             entry.ram_load_mask = 0u;
             entry.ram_store_mask = 0u;
             entry.words = {};
+            entry.linked_successor = nullptr;
+            entry.linked_successor_pc = 0u;
+            entry.linked_successor_generation = 0u;
             entry.guard_bail_streak = 0u;
             entry.guard_skip_remaining = 0u;
             for (u32 i = 0;
@@ -2708,6 +2713,7 @@ u32 EeJit::execute_block(
     const u32* current_words = instructions;
     u32 current_count = instruction_count;
     u32 fetched_words[32]{};
+    BlockEntry* current_entry = nullptr;
     bool final_control_flow = false;
 
     while (total_retired < maximum_instructions) {
@@ -2717,11 +2723,18 @@ u32 EeJit::execute_block(
             break;
         }
 
-        BlockEntry* entry = block_entry(
-            current_pc,
-            current_page_generation,
-            current_words,
-            current_count);
+        BlockEntry* entry = current_entry;
+        current_entry = nullptr;
+        if (entry == nullptr ||
+            !entry->known ||
+            entry->pc != current_pc ||
+            entry->page_generation != current_page_generation) {
+            entry = block_entry(
+                current_pc,
+                current_page_generation,
+                current_words,
+                current_count);
+        }
         if (entry == nullptr ||
             entry->function == nullptr ||
             entry->instruction_count == 0u ||
@@ -2862,16 +2875,39 @@ u32 EeJit::execute_block(
                     page_generations[current_code_page]);
         }
 
-        // Hot cache hit: jump straight to the existing translation.
-        // Do not re-read up to 32 guest words on every native block boundary.
-        if (BlockEntry* cached = block_entry(
+        // Hot successor link: BIOS loops repeatedly take the same edge.
+        // Cache the resolved block-table cell on the source block so the
+        // common chain avoids re-hashing the guest PC every few instructions.
+        // block_entries_ never reallocates; validating PC + generation keeps
+        // hash collisions and self-modifying code safe.
+        ++successor_link_attempt_count_;
+        BlockEntry* cached = entry->linked_successor;
+        if (cached != nullptr &&
+            entry->linked_successor_pc == next_pc &&
+            entry->linked_successor_generation == current_page_generation &&
+            cached->known &&
+            cached->pc == next_pc &&
+            cached->page_generation == current_page_generation) {
+            ++successor_link_hit_count_;
+        } else {
+            cached = block_entry(
                 next_pc,
                 current_page_generation,
                 nullptr,
-                0u)) {
+                0u);
+            if (cached != nullptr) {
+                entry->linked_successor = cached;
+                entry->linked_successor_pc = next_pc;
+                entry->linked_successor_generation =
+                    current_page_generation;
+            }
+        }
+
+        if (cached != nullptr) {
             current_pc = next_pc;
             current_words = cached->words.data();
             current_count = cached->instruction_count;
+            current_entry = cached;
             if (current_count == 0u) break;
             continue;
         }

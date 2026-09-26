@@ -58,6 +58,12 @@ public:
     [[nodiscard]] u64 block_code_store_exit_count() const {
         return block_code_store_exit_count_;
     }
+    [[nodiscard]] u64 successor_link_attempt_count() const {
+        return successor_link_attempt_count_;
+    }
+    [[nodiscard]] u64 successor_link_hit_count() const {
+        return successor_link_hit_count_;
+    }
     [[nodiscard]] u64 cache_flush_count() const {
         return cache_flush_count_;
     }
@@ -107,6 +113,9 @@ private:
         u32 ram_load_mask = 0;
         u32 ram_store_mask = 0;
         std::array<u32, 32> words{};
+        BlockEntry* linked_successor = nullptr;
+        u32 linked_successor_pc = 0;
+        u32 linked_successor_generation = 0;
         u8 guard_bail_streak = 0;
         u8 guard_skip_remaining = 0;
         bool known = false;
@@ -139,6 +148,8 @@ private:
     u64 block_guard_bailout_count_ = 0;
     u64 block_fastmem_store_count_ = 0;
     u64 block_code_store_exit_count_ = 0;
+    u64 successor_link_attempt_count_ = 0;
+    u64 successor_link_hit_count_ = 0;
     u64 cache_flush_count_ = 0;
     u64 native_entry_attempt_count_ = 0;
     u64 native_entry_success_count_ = 0;

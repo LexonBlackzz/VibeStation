@@ -1467,6 +1467,20 @@ void Ps2App::panel_profiler() {
             percentile_floor(ee_residency, 0.95)),
         static_cast<unsigned long long>(
             ee_jit.native_residency_max()));
+    const u64 ee_link_attempts =
+        ee_jit.successor_link_attempt_count();
+    const u64 ee_link_hits =
+        ee_jit.successor_link_hit_count();
+    const double ee_link_percent =
+        ee_link_attempts != 0u
+            ? static_cast<double>(ee_link_hits) * 100.0 /
+                static_cast<double>(ee_link_attempts)
+            : 0.0;
+    ImGui::Text(
+        "Hot successor links: %llu / %llu hits (%.1f%%)",
+        static_cast<unsigned long long>(ee_link_hits),
+        static_cast<unsigned long long>(ee_link_attempts),
+        ee_link_percent);
     ImGui::TextDisabled(
         "p50/p95 are low-overhead log2 histogram estimates; max is exact.");
 
