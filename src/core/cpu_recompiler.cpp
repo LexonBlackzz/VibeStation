@@ -179,6 +179,35 @@ bool decode_v4_hilo(u32 bits, V4DecodedHiLo &out) {
   }
 }
 
+enum class V4MulDivOp : u8 {
+  Mult,
+  Multu,
+  Div,
+  Divu,
+};
+
+struct V4DecodedMulDiv {
+  V4MulDivOp op = V4MulDivOp::Mult;
+  u8 rs = 0;
+  u8 rt = 0;
+};
+
+bool decode_v4_muldiv(u32 bits, V4DecodedMulDiv &out) {
+  if (((bits >> 26) & 0x3Fu) != 0u) {
+    return false;
+  }
+  out = {};
+  out.rs = static_cast<u8>((bits >> 21) & 0x1Fu);
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  switch (bits & 0x3Fu) {
+  case 0x18: out.op = V4MulDivOp::Mult; return true;
+  case 0x19: out.op = V4MulDivOp::Multu; return true;
+  case 0x1A: out.op = V4MulDivOp::Div; return true;
+  case 0x1B: out.op = V4MulDivOp::Divu; return true;
+  default: return false;
+  }
+}
+
 enum class V4LoadOp : u8 {
   Lb,
   Lh,
@@ -886,6 +915,194 @@ V4NativeFn compile_v4_hilo(V4CodeArena &arena,
   }
 
   emit_retire_incoming_load(code, cancel_reg);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+
+V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
+                             const V4DecodedMulDiv &inst,
+                             u32 start_pc,
+                             const V4LinkTargets &links,
+                             u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  // MULT/DIV share the same asynchronous HI/LO scoreboard as MFHI/MFLO.
+  // Keep the complete operation in generated x64 so a normal guest opcode
+  // never needs Cpu::run_compiled_opcode() just to preserve timing.
+  Label muldiv_ready;
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))]);
+  code.mov(code.rcx, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rcx, code.rbx);
+  code.inc(code.rcx);
+  code.cmp(code.rax, code.rcx);
+  code.jbe(muldiv_ready);
+  code.sub(code.rax, code.rcx);
+  code.add(code.ebx, code.eax);
+  code.L(muldiv_ready);
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+
+  Label result_ready, div_zero, div_overflow;
+  u32 fixed_ticks = 0u;
+  switch (inst.op) {
+  case V4MulDivOp::Mult: {
+    code.mov(code.r8d, code.eax);
+    code.imul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label negative, ticks6, ticks9, ticks13, ticks_done;
+    code.test(code.r8d, code.r8d);
+    code.js(negative);
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.jmp(ticks13);
+    code.L(negative);
+    code.cmp(code.r8d, static_cast<u32>(-2048));
+    code.jae(ticks6);
+    code.cmp(code.r8d, static_cast<u32>(-1048576));
+    code.jae(ticks9);
+    code.L(ticks13);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Multu: {
+    code.mov(code.r8d, code.eax);
+    code.mul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label ticks6, ticks9, ticks_done;
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Div:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.cmp(code.eax, 0x80000000u);
+    code.jne(div_overflow);
+    code.cmp(code.ecx, 0xFFFFFFFFu);
+    code.je(result_ready);
+    code.L(div_overflow);
+    code.cdq();
+    code.idiv(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    code.mov(code.edx, code.eax);
+    code.mov(code.ecx, 1u);
+    code.test(code.eax, code.eax);
+    code.cmovns(code.eax, code.ecx);
+    code.not_(code.ecx);
+    code.cmovs(code.eax, code.ecx);
+    code.jmp(result_ready);
+    // Signed overflow: quotient = INT_MIN, remainder = 0.
+    code.L(result_ready);
+    // If divisor was -1 with INT_MIN dividend EAX already contains INT_MIN;
+    // EDX is made zero below before committing the architectural result.
+    break;
+  case V4MulDivOp::Divu:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.xor_(code.edx, code.edx);
+    code.div(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    code.mov(code.edx, code.eax);
+    code.mov(code.eax, 0xFFFFFFFFu);
+    code.L(result_ready);
+    break;
+  }
+
+  if (inst.op == V4MulDivOp::Div) {
+    // Repair the INT_MIN / -1 special case without relying on host #DE.
+    Label not_overflow_commit;
+    emit_read_guest(code, code.r8d, inst.rs);
+    emit_read_guest(code, code.r9d, inst.rt);
+    code.cmp(code.r8d, 0x80000000u);
+    code.jne(not_overflow_commit);
+    code.cmp(code.r9d, 0xFFFFFFFFu);
+    code.jne(not_overflow_commit);
+    code.mov(code.eax, 0x80000000u);
+    code.xor_(code.edx, code.edx);
+    code.L(not_overflow_commit);
+  }
+
+  if (inst.op == V4MulDivOp::Div || inst.op == V4MulDivOp::Divu) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+    code.mov(code.edx, fixed_ticks);
+  }
+
+  // ready_cycle = current issue cycle (including an older HI/LO stall) + latency.
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rax, code.rbx);
+  code.add(code.rax, code.rdx);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))],
+      code.rax);
+
+  emit_retire_incoming_load(code, 0u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
       start_pc);
@@ -3507,6 +3724,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_hilo =
         count == 0u && read_visible(start_pc, hilo_bits) &&
         decode_v4_hilo(hilo_bits, hilo);
+    V4DecodedMulDiv muldiv{};
+    u32 muldiv_bits = 0u;
+    const bool simple_muldiv =
+        count == 0u && read_visible(start_pc, muldiv_bits) &&
+        decode_v4_muldiv(muldiv_bits, muldiv);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -3566,7 +3788,7 @@ struct CpuRecompilerBackend::Impl {
 
     if (count == 0u && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
-        !simple_overflow_alu && !simple_hilo) {
+        !simple_overflow_alu && !simple_hilo && !simple_muldiv) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -3627,7 +3849,7 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              (simple_overflow_alu || simple_hilo)
+              (simple_overflow_alu || simple_hilo || simple_muldiv)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -3644,7 +3866,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_hilo) {
+      if (simple_muldiv) {
+        entry = compile_v4_muldiv(
+            arena, muldiv, start_pc, links, block->code_size);
+      } else if (simple_hilo) {
         entry = compile_v4_hilo(
             arena, hilo, start_pc, links, block->code_size);
       } else if (simple_overflow_alu) {
@@ -3712,7 +3937,7 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (simple_overflow_alu || simple_hilo)
+          (simple_overflow_alu || simple_hilo || simple_muldiv)
               ? 1u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? count + 2u
@@ -3724,7 +3949,7 @@ struct CpuRecompilerBackend::Impl {
                                          (store_has_control ? 3u : 1u)
                                    : count)));
       block->max_cycles =
-          (simple_overflow_alu || simple_hilo)
+          (simple_overflow_alu || simple_hilo || simple_muldiv)
               ? 40u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? (guarded_store_control ? 5u : count + 3u)
@@ -3749,7 +3974,7 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (simple_overflow_alu || simple_hilo)
+        (simple_overflow_alu || simple_hilo || simple_muldiv)
             ? 1u
             : ((simple_control || guarded_control || guarded_store_control)
                    ? count + 2u
@@ -3781,7 +4006,7 @@ struct CpuRecompilerBackend::Impl {
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
       }
-    } else if (simple_overflow_alu || simple_hilo) {
+    } else if (simple_overflow_alu || simple_hilo || simple_muldiv) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
