@@ -911,7 +911,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
 
   CpuCompareCase jit_v2_scratch_store_branch{};
   jit_v2_scratch_store_branch.name =
-      "jit_v2_scratchpad_sw_sw_bne_delay_loop";
+      "native_scratchpad_sw_sw_bne_delay_loop";
   jit_v2_scratch_store_branch.initial_gpr[1] = 0x1F800000u;
   jit_v2_scratch_store_branch.initial_gpr[2] = 0x11223344u;
   jit_v2_scratch_store_branch.initial_gpr[3] = 0x55667788u;
@@ -928,6 +928,11 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       0x1F800000u, 0x1F800004u,
   };
   jit_v2_scratch_store_branch.require_v2_store_branch_entry_when_available =
+      true;
+  jit_v2_scratch_store_branch.require_v4_native_entry_when_available = true;
+  jit_v2_scratch_store_branch.require_v4_native_store_entry_when_available =
+      true;
+  jit_v2_scratch_store_branch.require_v4_native_branch_entry_when_available =
       true;
   cases.push_back(jit_v2_scratch_store_branch);
 
@@ -1996,7 +2001,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
 
   CpuCompareCase aggressive_sw_scratchpad_reject{};
   aggressive_sw_scratchpad_reject.name =
-      "native_aggressive_reduced_helper_branch_tail_sw_scratchpad_rejected";
+      "native_scratchpad_sw_branch_tail";
   aggressive_sw_scratchpad_reject.initial_gpr[1] = 0x1F800000u;
   aggressive_sw_scratchpad_reject.initial_gpr[2] = 0x55667788u;
   aggressive_sw_scratchpad_reject.initial_gpr[3] = 1u;
@@ -2014,7 +2019,11 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   aggressive_sw_scratchpad_reject.enable_ram_load_fastpath_for_x64 = true;
   aggressive_sw_scratchpad_reject
       .enable_aggressive_reduced_helper_branch_tail_for_x64 = true;
-  aggressive_sw_scratchpad_reject.expect_x64_fallback = true;
+  aggressive_sw_scratchpad_reject.require_v4_native_entry_when_available = true;
+  aggressive_sw_scratchpad_reject
+      .require_v4_native_store_entry_when_available = true;
+  aggressive_sw_scratchpad_reject
+      .require_v4_native_branch_entry_when_available = true;
   aggressive_sw_scratchpad_reject
       .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available =
       true;
@@ -2022,7 +2031,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
 
   CpuCompareCase aggressive_sw_scratchpad_adaptive{};
   aggressive_sw_scratchpad_adaptive.name =
-      "native_aggressive_reduced_helper_branch_tail_sw_scratchpad_adaptive";
+      "native_scratchpad_sw_branch_loop";
   aggressive_sw_scratchpad_adaptive.initial_gpr[1] = 0x1F800000u;
   aggressive_sw_scratchpad_adaptive.initial_gpr[2] = 0x55667788u;
   aggressive_sw_scratchpad_adaptive.initial_gpr[3] = 1u;
@@ -2039,7 +2048,12 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   aggressive_sw_scratchpad_adaptive.enable_ram_load_fastpath_for_x64 = true;
   aggressive_sw_scratchpad_adaptive
       .enable_aggressive_reduced_helper_branch_tail_for_x64 = true;
-  aggressive_sw_scratchpad_adaptive.expect_x64_fallback = true;
+  aggressive_sw_scratchpad_adaptive.require_v4_native_entry_when_available =
+      true;
+  aggressive_sw_scratchpad_adaptive
+      .require_v4_native_store_entry_when_available = true;
+  aggressive_sw_scratchpad_adaptive
+      .require_v4_native_branch_entry_when_available = true;
   aggressive_sw_scratchpad_adaptive
       .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available =
       true;
@@ -2053,7 +2067,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
 
   CpuCompareCase aggressive_sb_scratchpad_reject{};
   aggressive_sb_scratchpad_reject.name =
-      "native_aggressive_reduced_helper_branch_tail_sb_scratchpad_rejected";
+      "native_scratchpad_sb_branch_tail";
   aggressive_sb_scratchpad_reject.initial_gpr[1] = 0x1F800004u;
   aggressive_sb_scratchpad_reject.initial_gpr[2] = 0x000000AAu;
   aggressive_sb_scratchpad_reject.initial_gpr[3] = 1u;
@@ -2072,7 +2086,11 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   aggressive_sb_scratchpad_reject.enable_ram_load_fastpath_for_x64 = true;
   aggressive_sb_scratchpad_reject
       .enable_aggressive_reduced_helper_branch_tail_for_x64 = true;
-  aggressive_sb_scratchpad_reject.expect_x64_fallback = true;
+  aggressive_sb_scratchpad_reject.require_v4_native_entry_when_available = true;
+  aggressive_sb_scratchpad_reject
+      .require_v4_native_store_entry_when_available = true;
+  aggressive_sb_scratchpad_reject
+      .require_v4_native_branch_entry_when_available = true;
   aggressive_sb_scratchpad_reject
       .require_aggressive_reduced_helper_branch_tail_preflight_non_ram_when_available =
       true;
@@ -3921,6 +3939,16 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_store.require_v4_native_branch_entry_when_available = true;
   v4_split_scheduler_store.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_split_scheduler_store);
+
+  CpuCompareCase v4_split_scheduler_scratch_store = v4_split_scheduler_store;
+  v4_split_scheduler_scratch_store.name =
+      "v4_split_scheduler_scratchpad_store_delay_native";
+  v4_split_scheduler_scratch_store.initial_gpr[2] = 0x1F800200u;
+  v4_split_scheduler_scratch_store.memory = {{0x1F800200u, 0u}};
+  v4_split_scheduler_scratch_store.compare_memory_addresses = {0x1F800200u};
+  v4_split_scheduler_scratch_store
+      .require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_split_scheduler_scratch_store);
 
   CpuCompareCase v4_split_scheduler_store_fault{};
   v4_split_scheduler_store_fault.name =

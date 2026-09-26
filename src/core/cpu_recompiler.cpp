@@ -4306,7 +4306,7 @@ V4NativeFn compile_v4_pending_delay_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, device, isolated, stored, unaligned, bail;
+  Label ram, scratch, device, isolated, stored, unaligned, bail;
 
   // Pending delay-slot stores preserve branch-delay EPC/BD semantics directly.
   // RAM/scratchpad use fastmem; genuine device accesses use a narrow bus bridge.
@@ -4397,6 +4397,7 @@ V4NativeFn compile_v4_pending_delay_store(
   code.jb(device);
   code.cmp(code.edx, 0x1F801000u);
   code.jae(device);
+  code.jmp(scratch);
 
   auto emit_unaligned_store = [&]() {
     Label off0, off1, off2, merged;
@@ -4487,6 +4488,7 @@ V4NativeFn compile_v4_pending_delay_store(
   }
   code.jmp(stored);
 
+  code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
@@ -6452,6 +6454,7 @@ V4NativeFn compile_v4_store(
   code.jb(device);
   code.cmp(code.edx, 0x1F801000u);
   code.jae(device);
+  code.jmp(scratch);
 
   auto emit_unaligned_store = [&]() {
     // EAX = old aligned memory word, R8D = guest register value,
