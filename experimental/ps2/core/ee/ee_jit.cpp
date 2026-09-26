@@ -1782,7 +1782,8 @@ u32 EeJit::execute_block(
     const u8* ram_data,
     u32* page_generations,
     bool& control_flow,
-    u32 yield_pc) {
+    u32 yield_pc,
+    u8* scratchpad_data) {
 #if defined(VIBESTATION_EE_JIT_X64)
     if (instructions == nullptr ||
         instruction_count == 0u ||
@@ -1920,7 +1921,11 @@ u32 EeJit::execute_block(
         }
 
         const u32 retired =
-            entry->function(&state, ram_data, page_generations);
+            entry->function(
+                &state,
+                ram_data,
+                page_generations,
+                scratchpad_data);
         if (retired > entry->instruction_count) {
             break;
         }
