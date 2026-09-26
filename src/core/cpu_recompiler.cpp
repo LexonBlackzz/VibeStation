@@ -358,6 +358,8 @@ struct V4NativeState {
   System *system = nullptr;
   V4DispatchPage **dispatch_top = nullptr;
   u32 *icache_generations = nullptr;
+  u32 *icache_tags = nullptr;
+  u32 *icache_words = nullptr;
   bool *icache_valid = nullptr;
   u32 icache_line_stride = 0;
   const u32 *code_page_generations = nullptr;
@@ -563,48 +565,9 @@ struct V4Block {
   bool retry_second_line = false;
 };
 
-constexpr u32 kV4RevalidateValid = 1u << 0;
-constexpr u32 kV4RevalidateRefilled = 1u << 1;
-
-// Cold generation-mismatch path. Keep the resident dispatcher compact and let
-// Cpu's existing guest-visible I-cache helpers remain the single source of
-// truth for direct-mapped tags, refill visibility and instruction snapshots.
-// Bit 0 means the compiled bytes still match; bit 1 means this call performed
-// the architectural line refill that the C++ run_slice path would have done.
-u32 v4_revalidate_cached_block(V4NativeState *state, V4Block *block) {
-  if (state == nullptr || state->cpu == nullptr || block == nullptr ||
-      !block->cacheable || block->retry_second_line ||
-      block->budget_requires_empty_chain || block->instruction_count == 0u ||
-      block->instruction_count > kV4MaxBlockInstructions) {
-    return 0u;
-  }
-
-  Cpu &cpu = *state->cpu;
-
-  u32 result = 0u;
-  if (cpu.prepare_instruction_cache_line_for_backend(block->start_pc)) {
-    result |= kV4RevalidateRefilled;
-  }
-
-  for (u32 i = 0u; i < block->instruction_count; ++i) {
-    u32 visible = 0u;
-    if (!cpu.read_visible_instruction_for_backend(
-            block->start_pc + i * 4u, visible) ||
-        visible != block->guest_bits[i]) {
-      return result;
-    }
-  }
-
-  block->icache_generation =
-      cpu.instruction_cache_generation_for_backend(block->start_pc);
-  if (block->second_icache_line) {
-    block->second_icache_generation =
-        cpu.instruction_cache_generation_for_backend(
-            static_cast<u32>(block->second_icache_index) << 4u);
-  }
-  return result | kV4RevalidateValid;
-}
-
+// Cached-code validation is deliberately performed inside the resident x64
+// dispatcher. A generation mismatch is an architectural I-cache event, not a
+// reason to bounce through C++ or an interpreter opcode path.
 struct V4DispatchEntry {
   V4Block *block = nullptr;
 };
@@ -3078,66 +3041,195 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     }
     code.jmp(validity_ok);
 
-    // Generation mismatches are common with the PS1's direct-mapped I-cache,
-    // but the compiled bytes are usually still identical after the next guest
-    // line refill. Call one compact C++ validator instead of returning through
-    // run_slice(), lookup() and try_revalidate(). The equal-generation path
-    // above remains call-free.
+    // Generation mismatches are common with the PS1's direct-mapped I-cache.
+    // Handle the complete line-refill + byte-validation path in resident x64.
+    // This is a fundamental native-only invariant: a hot cached block never
+    // calls C++ merely to prove that its guest-visible instruction bytes match.
     code.L(revalidate_cached);
-    // A direct-linked block can be reached exactly as the scheduler instruction
-    // budget becomes empty. Do not make the next guest I-cache refill visible
-    // after the requested instruction count has already retired.
     code.test(code.r12d, code.r12d);
     code.jz(budget_exit);
     code.cmp(code.ebx, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
     code.jae(budget_exit);
-
-    // Preserve the historical C++ refill boundary when four or fewer cycles
-    // remain. The old path can consume the 4-cycle I-cache refill at/through
-    // the scheduler deadline and then apply its existing one-instruction /
-    // unsigned-wrap behavior. Revalidating in-place here would clamp at the
-    // resident deadline instead and change guest-visible slice boundaries.
-    code.mov(code.eax, code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-    code.sub(code.eax, code.ebx);
-    code.cmp(code.eax, 4u);
-    code.jbe(stale_generation);
-
+    code.cmp(code.byte[
+        code.r14 + static_cast<int>(offsetof(V4Block, retry_second_line))], 0u);
+    code.jne(stale_generation);
+    code.cmp(code.byte[
+        code.r14 +
+        static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
+    code.jne(stale_generation);
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_attempts))]);
-#if defined(_WIN32)
-    code.mov(code.rcx, code.r11);
-    code.mov(code.rdx, code.r14);
-#else
-    code.mov(code.rdi, code.r11);
-    code.mov(code.rsi, code.r14);
-#endif
-    code.mov(code.rax,
-             reinterpret_cast<size_t>(&v4_revalidate_cached_block));
-    code.call(code.rax);
 
-    // r10/r11 are volatile in both x64 ABIs. The dispatcher is permanently
-    // bound to Impl::native_state, so restore those pinned bases after the
-    // cold helper call. r12-r15/rbx remain callee-saved.
-    code.mov(code.r11, reinterpret_cast<size_t>(bound_state));
-    code.mov(code.r10, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
     {
-      Label no_refill;
-      code.test(code.eax, kV4RevalidateRefilled);
-      code.jz(no_refill);
+      Label compare_loop, refill_line, refill_ram, refill_scratch;
+      Label refill_source_ready, refill_generation_ok, line_ready;
+      Label revalidate_done, no_second_generation, refill_invalid_region;
+
+      // r9d is the translated instruction index. r8/rax/rcx/rdx are volatile
+      // scratch registers; the resident bases in r10-r15/rbx remain untouched.
+      code.xor_(code.r9d, code.r9d);
+      code.L(compare_loop);
+      code.cmp(code.r9d, code.dword[
+          code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
+      code.jae(revalidate_done);
+
+      // edx = guest PC for this translated instruction.
+      code.mov(code.edx, code.dword[
+          code.r14 + static_cast<int>(offsetof(V4Block, start_pc))]);
+      code.mov(code.eax, code.r9d);
+      code.shl(code.eax, 2);
+      code.add(code.edx, code.eax);
+
+      // eax/rax = byte offset of this direct-mapped I-cache line.
+      code.mov(code.ecx, code.edx);
+      code.shr(code.ecx, 4);
+      code.and_(code.ecx, 0xFFu);
+      code.mov(code.eax, code.ecx);
+      code.imul(code.eax, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+      code.movsxd(code.rax, code.eax);
+
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+      code.cmp(code.byte[code.r8 + code.rax], 0u);
+      code.je(refill_line);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
+      code.mov(code.ecx, code.edx);
+      code.and_(code.ecx, 0x1FFFFFF0u);
+      code.cmp(code.dword[code.r8 + code.rax], code.ecx);
+      code.je(line_ready);
+
+      code.L(refill_line);
+      // Recompute line index/offset and convert EDX to its physical line tag.
+      code.mov(code.ecx, code.edx);
+      code.shr(code.ecx, 4);
+      code.and_(code.ecx, 0xFFu);
+      code.mov(code.eax, code.ecx);
+      code.imul(code.eax, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+      code.movsxd(code.rax, code.eax);
+      code.and_(code.edx, 0x1FFFFFF0u);
+
+      // Publish the architectural tag/valid state and generation exactly once
+      // for the refill. Source bytes come directly from RAM or scratchpad; those
+      // are the only regions Cpu::instruction_cacheable() admits.
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
+      code.mov(code.dword[code.r8 + code.rax], code.edx);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+      code.mov(code.byte[code.r8 + code.rax], 1u);
+      code.inc(code.dword[code.r15 + code.rcx * 4]);
+      code.jnz(refill_generation_ok);
+      code.mov(code.dword[code.r15 + code.rcx * 4], 1u);
+      code.L(refill_generation_ok);
+
+      // rcx = destination word array for the selected line.
+      code.mov(code.rcx, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
+      code.add(code.rcx, code.rax);
+
+      code.cmp(code.edx, 0x00800000u);
+      code.jb(refill_ram);
+      code.cmp(code.edx, 0x1F800000u);
+      code.jb(refill_invalid_region);
+      code.cmp(code.edx, 0x1F801000u);
+      code.jae(refill_invalid_region);
+      code.L(refill_scratch);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
+      code.mov(code.eax, code.edx);
+      code.sub(code.eax, 0x1F800000u);
+      code.add(code.r8, code.rax);
+      code.jmp(refill_source_ready);
+
+      code.L(refill_ram);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
+      code.mov(code.eax, code.edx);
+      code.and_(code.eax, 0x001FFFFFu);
+      code.add(code.r8, code.rax);
+
+      code.L(refill_source_ready);
+      code.mov(code.eax, code.dword[code.r8 + 0]);
+      code.mov(code.dword[code.rcx + 0], code.eax);
+      code.mov(code.eax, code.dword[code.r8 + 4]);
+      code.mov(code.dword[code.rcx + 4], code.eax);
+      code.mov(code.eax, code.dword[code.r8 + 8]);
+      code.mov(code.dword[code.rcx + 8], code.eax);
+      code.mov(code.eax, code.dword[code.r8 + 12]);
+      code.mov(code.dword[code.rcx + 12], code.eax);
       code.add(code.ebx, 4u);
       code.inc(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, icache_refills))]);
-      code.L(no_refill);
+
+      code.L(line_ready);
+      // Reconstruct the guest PC, locate the guest-visible word, and compare it
+      // to the byte snapshot used to compile the block.
+      code.mov(code.edx, code.dword[
+          code.r14 + static_cast<int>(offsetof(V4Block, start_pc))]);
+      code.mov(code.eax, code.r9d);
+      code.shl(code.eax, 2);
+      code.add(code.edx, code.eax);
+      code.mov(code.ecx, code.edx);
+      code.shr(code.ecx, 4);
+      code.and_(code.ecx, 0xFFu);
+      code.mov(code.eax, code.ecx);
+      code.imul(code.eax, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+      code.movsxd(code.rax, code.eax);
+      code.mov(code.r8, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
+      code.add(code.r8, code.rax);
+      code.mov(code.eax, code.edx);
+      code.shr(code.eax, 2);
+      code.and_(code.eax, 3u);
+      code.mov(code.ecx, code.dword[code.r8 + code.rax * 4]);
+      code.cmp(code.ecx, code.dword[
+          code.r14 + code.r9 * 4 +
+          static_cast<int>(offsetof(V4Block, guest_bits))]);
+      code.jne(stale_generation);
+      code.inc(code.r9d);
+      code.jmp(compare_loop);
+
+      code.L(refill_invalid_region);
+      code.jmp(stale_generation);
+
+      code.L(revalidate_done);
+      code.movzx(code.ecx, code.word[
+          code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
+      code.mov(code.eax, code.dword[code.r15 + code.rcx * 4]);
+      code.mov(code.dword[
+          code.r14 + static_cast<int>(offsetof(V4Block, icache_generation))],
+          code.eax);
+      code.cmp(code.byte[
+          code.r14 + static_cast<int>(offsetof(V4Block, second_icache_line))],
+          0u);
+      code.je(no_second_generation);
+      code.movzx(code.ecx, code.word[
+          code.r14 + static_cast<int>(offsetof(V4Block, second_icache_index))]);
+      code.mov(code.eax, code.dword[code.r15 + code.rcx * 4]);
+      code.mov(code.dword[
+          code.r14 +
+          static_cast<int>(offsetof(V4Block, second_icache_generation))],
+          code.eax);
+      code.L(no_second_generation);
     }
-    code.test(code.eax, kV4RevalidateValid);
-    code.jz(stale_generation);
+
     code.inc(code.dword[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, revalidate_successes))]);
+    // A refill is itself guest-visible time. If it reaches the scheduler
+    // deadline, leave before retiring another guest instruction.
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jae(budget_exit);
     code.jmp(validity_ok);
 
     // Uncached code: RAM writes are observed immediately, so retain the
@@ -4332,6 +4424,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
       native.icache_generations = cpu_.icache_generation_.data();
+      native.icache_tags = &cpu_.icache_[0].tag;
+      native.icache_words = cpu_.icache_[0].words.data();
       native.icache_valid = &cpu_.icache_[0].valid;
       native.icache_line_stride = sizeof(cpu_.icache_[0]);
       native.code_page_generations = impl_->page_generations.data();
@@ -4411,9 +4505,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.recompiler_frame_revalidate_successes += native.revalidate_successes;
     stats_.cache_hits += native.revalidate_successes;
 
-    // The mismatch helper may refill the guest I-cache before discovering that
-    // a block is genuinely stale. Commit those cycles even if no guest
-    // instruction retired, so the C++ fallback sees identical timing.
+    // Resident I-cache revalidation may refill a line before discovering that
+    // a translation is genuinely stale. Commit those cycles even if no guest
+    // instruction retired.
     constexpr u32 kIcacheRefillCycles = 4u;
     const u32 native_refill_cycles =
         native.icache_refills * kIcacheRefillCycles;
