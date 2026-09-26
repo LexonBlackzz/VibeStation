@@ -1124,6 +1124,37 @@ void emit_read_store_value(Xbyak::CodeGenerator &code,
   }
 }
 
+void emit_finish_load_value(Xbyak::CodeGenerator &code,
+                            const V4DecodedLoad &load,
+                            bool retire_incoming) {
+  if (load.dest_cop0) {
+    // LWC0 writes COP0 immediately; it is not a delayed GPR load. The old GPR
+    // load delay retires only after the COP0 write, matching Cpu::step().
+    emit_write_cop0(code, load.rt, code.r8d);
+    if (retire_incoming) {
+      emit_retire_incoming_load(code, 0u);
+    }
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        1u);
+    return;
+  }
+
+  if (retire_incoming) {
+    emit_retire_incoming_load(code, load.rt);
+  }
+  if (load.rt != 0u) {
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+        static_cast<u32>(load.rt));
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+        code.r8d);
+  }
+}
+
 u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
   switch (inst.op) {
   case V4AluOp::Nop:
@@ -3302,17 +3333,7 @@ V4NativeFn compile_v4_pending_delay_load(
     code.L(merge_done);
   }
 
-  emit_retire_incoming_load(code, load.rt);
-  if (load.rt != 0u) {
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
-        static_cast<u32>(load.rt));
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
-        code.r8d);
-  }
+  emit_finish_load_value(code, load, true);
 
   code.add(code.ebx, 2u);
   code.add(code.ebx, code.r9d);
@@ -4819,19 +4840,7 @@ V4NativeFn compile_v4_load(
     code.L(merge_done);
   }
 
-  if (prefix_count == 0u) {
-    emit_retire_incoming_load(code, load.rt);
-  }
-  if (load.rt != 0u) {
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
-        static_cast<u32>(load.rt));
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
-        code.r8d);
-  }
+  emit_finish_load_value(code, load, prefix_count == 0u);
 
   // Device accesses are a real host scheduling boundary. Stop immediately
   // after the memory instruction rather than executing a fused tail across a
@@ -4922,21 +4931,9 @@ V4NativeFn compile_v4_load(
     }
     code.L(merge_done);
   }
-  // A prefix already retired the incoming load. Otherwise the load retires or
-  // cancels it now, after address operands were captured.
-  if (prefix_count == 0u) {
-    emit_retire_incoming_load(code, load.rt);
-  }
-  if (load.rt != 0u) {
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
-        static_cast<u32>(load.rt));
-    code.mov(code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, pending_load_value))],
-        code.r8d);
-  }
+  // A prefix already retired the incoming load. Otherwise retire/cancel it
+  // after address operands were captured. LWC0 writes COP0 immediately.
+  emit_finish_load_value(code, load, prefix_count == 0u);
 
   // Keep executing through a safe ALU tail instead of turning every load into
   // a one-instruction native island. The first following instruction captures
