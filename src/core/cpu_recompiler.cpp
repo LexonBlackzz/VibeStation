@@ -2140,6 +2140,210 @@ V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
 
 
 
+V4NativeFn compile_v4_pending_delay_cop2_register(
+    V4CodeArena &arena, const V4DecodedCop2 &inst, u32 &code_size) {
+  using namespace Xbyak;
+  if (v4_cop2_is_memory(inst)) {
+    return nullptr;
+  }
+
+  constexpr size_t kReservation = 1536u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  auto emit_result_stall = [&]() {
+    Label ready;
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.rax, code.rcx);
+    code.jbe(ready);
+    code.sub(code.rax, code.rcx);
+    code.add(code.ebx, code.eax);
+    code.L(ready);
+  };
+
+  auto emit_command_stall = [&]() {
+    Label selected, ready;
+    code.mov(code.r8, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))]);
+    code.mov(code.rax, code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))]);
+    code.cmp(code.r8, code.rax);
+    code.jae(selected);
+    code.mov(code.r8, code.rax);
+    code.L(selected);
+    code.mov(code.rcx, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rcx, code.rbx);
+    code.add(code.rcx, 2u);
+    code.cmp(code.r8, code.rcx);
+    code.jbe(ready);
+    code.sub(code.r8, code.rcx);
+    code.add(code.ebx, code.r8d);
+    code.L(ready);
+  };
+
+  auto emit_read_call = [&](size_t fn_addr, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn_addr);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  auto emit_write_call = [&](size_t fn_addr, u32 reg) {
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, reg);
+#else
+    code.mov(code.edx, code.r8d);
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, reg);
+#endif
+    code.mov(code.rax, fn_addr);
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+  };
+
+  switch (inst.op) {
+  case V4Cop2Op::Mfc2:
+    if (v4_gte_data_reg_reads_result(inst.rd)) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop2Op::Cfc2:
+    if (inst.rd == 31u) {
+      emit_result_stall();
+    }
+    emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_ctrl), inst.rd);
+    code.mov(code.r8d, code.eax);
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop2Op::Mtc2:
+  case V4Cop2Op::Ctc2:
+    // Capture the guest operand before the older delayed load retires.
+    emit_read_guest(code, code.r8d, inst.rt);
+    emit_retire_incoming_load(code, 0u);
+    emit_write_call(
+        inst.op == V4Cop2Op::Mtc2
+            ? reinterpret_cast<size_t>(&v4_gte_write_data)
+            : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
+        inst.rd);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, 6u);
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_input_ready_cycle))],
+        code.rax);
+    break;
+
+  case V4Cop2Op::Command:
+    emit_command_stall();
+    emit_retire_incoming_load(code, 0u);
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.edx, inst.bits);
+#else
+    code.mov(code.rdi, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+    code.mov(code.esi, inst.bits);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_gte_execute));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.mov(code.rax, code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+    code.add(code.rax, code.rbx);
+    code.add(code.rax, v4_gte_command_cycles(inst.bits));
+    code.mov(code.qword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, gte_result_ready_cycle))],
+        code.rax);
+    break;
+
+  case V4Cop2Op::Lwc2:
+  case V4Cop2Op::Swc2:
+    return nullptr;
+  }
+
+  emit_v4_finish_pending_delay(code, 2u);
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_cop2(V4CodeArena &arena,
                            const V4DecodedCop2 &inst,
                            u32 start_pc,
@@ -6952,11 +7156,16 @@ struct CpuRecompilerBackend::Impl {
       if (decode_v4_muldiv(instruction, muldiv)) {
         fn = compile_v4_pending_delay_muldiv(arena, muldiv, code_size);
       } else if (decode_v4_cop0(instruction, cop0)) {
-      fn = compile_v4_pending_delay_cop0(arena, cop0, code_size);
-    } else if (decode_v4_load(instruction, load)) {
+        fn = compile_v4_pending_delay_cop0(arena, cop0, code_size);
+      } else {
+        V4DecodedCop2 cop2{};
+        if (decode_v4_cop2(instruction, cop2) && !v4_cop2_is_memory(cop2)) {
+          fn = compile_v4_pending_delay_cop2_register(arena, cop2, code_size);
+        } else if (decode_v4_load(instruction, load)) {
       fn = compile_v4_pending_delay_load(arena, load, code_size);
-      } else if (decode_v4_store(instruction, store)) {
-        fn = compile_v4_pending_delay_store(arena, store, code_size);
+        } else if (decode_v4_store(instruction, store)) {
+          fn = compile_v4_pending_delay_store(arena, store, code_size);
+        }
       }
     }
 
