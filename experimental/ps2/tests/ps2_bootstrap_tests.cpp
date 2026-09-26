@@ -5245,6 +5245,112 @@ bool test_ee_native_branch_delay() {
 }
 
 
+
+bool test_ee_native_guarded_overflow_arithmetic() {
+    constexpr ps2::u32 pc = 0x00008C00u;
+    const std::array<ps2::u32, 2> code = {
+        (0x09u << 26) | (3u << 16) | 7u,                    // ADDIU r3,r0,7
+        (0x08u << 26) | (1u << 21) | (2u << 16) | 1u,      // ADDI r2,r1,1
+    };
+
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE overflow-guard code setup failed") && ok;
+    }
+    native.ee().reset(pc);
+    native.ee().state().gpr[1].lo = 0x000000007FFFFFFFull;
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native.ee().state().pc == pc + 4u &&
+        native.ee().state().next_pc == pc + 8u &&
+        native.ee().state().gpr[3].lo == 7u &&
+        native.ee().state().gpr[2].lo == 0u,
+        "EE native overflow guard did not stop exactly before ADDI") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE overflow-guard native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_ee_native_division_helper() {
+    constexpr ps2::u32 pc = 0x00008D00u;
+    const std::array<ps2::u32, 3> code = {
+        (1u << 21) | (2u << 16) | 0x1Au,                   // DIV r1,r2
+        (3u << 11) | 0x12u,                                // MFLO r3
+        (4u << 11) | 0x10u,                                // MFHI r4
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    exact.ee().reset(pc);
+    native.ee().reset(pc);
+    exact.ee().state().gpr[1].lo =
+        static_cast<ps2::u64>(static_cast<ps2::s64>(-12345));
+    native.ee().state().gpr[1].lo = exact.ee().state().gpr[1].lo;
+    exact.ee().state().gpr[2].lo = 37u;
+    native.ee().state().gpr[2].lo = 37u;
+
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.bus().write32(pc + i * 4u, code[i]) &&
+            native.bus().write32(pc + i * 4u, code[i]),
+            "EE native DIV code setup failed") && ok;
+    }
+    std::string error;
+    for (const ps2::u32 instruction : code) {
+        ok = expect(
+            exact.ee().step_predecoded(instruction, error),
+            "EE DIV reference execution failed") && ok;
+    }
+
+    native.ram().track_code_page(pc);
+    const ps2::u32 generation = native.ram().page_generation(pc);
+    const ps2::u32 retired = native.ee().run_native_block(
+        pc,
+        generation,
+        code.data(),
+        static_cast<ps2::u32>(code.size()),
+        static_cast<ps2::u32>(code.size()),
+        native.ram().data(),
+        native.ram().page_generation_data());
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.ee().state();
+    const auto& b = native.ee().state();
+    ok = expect(
+        retired == code.size() &&
+        a.lo == b.lo &&
+        a.hi == b.hi &&
+        a.gpr[3].lo == b.gpr[3].lo &&
+        a.gpr[4].lo == b.gpr[4].lo,
+        "EE native DIV helper diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "EE native DIV helper ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_ee_native_branch_ram_load_delay() {
     constexpr ps2::u32 pc = 0x00009000u;
     constexpr ps2::u32 data = 0x0000A000u;
@@ -6104,6 +6210,8 @@ int main() {
     ok = test_ee_native_regimm() && ok;
     ok = test_ee_native_special_cop1_and_likely() && ok;
     ok = test_ee_native_branch_delay() && ok;
+    ok = test_ee_native_guarded_overflow_arithmetic() && ok;
+    ok = test_ee_native_division_helper() && ok;
     ok = test_ee_native_branch_ram_load_delay() && ok;
     ok = test_ee_native_resident_branch_chain() && ok;
     ok = test_ee_native_cross_page_chain() && ok;
