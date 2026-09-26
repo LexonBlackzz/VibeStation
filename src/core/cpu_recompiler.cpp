@@ -4398,6 +4398,9 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(control_bits, control);
     const bool delay_visible =
         control_candidate && read_visible(branch_pc + 4u, delay_bits);
+    const bool split_control =
+        count == 0u && control_pair_cross_line && control_candidate &&
+        !delay_visible;
     const bool simple_control =
         delay_visible && decode_v4_alu(delay_bits, delay);
     V4DecodedOverflowAlu guarded_control_delay{};
@@ -4510,7 +4513,7 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(load_control_bits, load_control) &&
         decode_v4_alu(load_delay_bits, load_delay);
 
-    if (count == 0u && !simple_control && !guarded_control &&
+    if (count == 0u && !split_control && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
         !simple_overflow_alu && !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_exception) {
@@ -4591,7 +4594,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_exception) {
+      if (split_control) {
+        entry = compile_v4_budget_branch(
+            arena, control, branch_pc, block->code_size);
+      } else if (simple_exception) {
         entry = compile_v4_exception(
             arena, exception_inst, start_pc, block->code_size);
       } else if (simple_cop0) {
@@ -4651,7 +4657,10 @@ struct CpuRecompilerBackend::Impl {
       // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
-      if (count != 0u) {
+      if (split_control) {
+        block->budget_fn = entry;
+        block->budget_requires_empty_chain = true;
+      } else if (count != 0u) {
         block->budget_fn = compile_v4_alu(
             arena, decoded, 1u, start_pc, budget_links, budget_code_size);
       } else if (simple_exception) {
@@ -4683,32 +4692,40 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
+          split_control
               ? 1u
-              : ((simple_control || guarded_control || guarded_store_control)
-                     ? count + 2u
-                     : (simple_load
-                            ? count + load_tail_count +
-                                  (load_has_control ? 3u : 1u)
-                            : (simple_store
-                                   ? count + store_tail_count +
-                                         (store_has_control ? 3u : 1u)
-                                   : count)));
+              : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+                  simple_cop0 || simple_exception)
+                     ? 1u
+                     : ((simple_control || guarded_control ||
+                         guarded_store_control)
+                            ? count + 2u
+                            : (simple_load
+                                   ? count + load_tail_count +
+                                         (load_has_control ? 3u : 1u)
+                                   : (simple_store
+                                          ? count + store_tail_count +
+                                                (store_has_control ? 3u : 1u)
+                                          : count))));
       block->max_cycles =
-          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
-              ? 40u
-              : ((simple_control || guarded_control || guarded_store_control)
-                     ? (guarded_store_control ? 5u : count + 3u)
-                     : (simple_load
-                            ? count + load_tail_count +
-                                  (load_has_control ? 9u : 6u)
-                            : (simple_store
-                                   ? count + store_tail_count +
-                                         (store_has_control ? 6u : 3u)
-                                   : count)));
+          split_control
+              ? 2u
+              : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+                  simple_cop0 || simple_exception)
+                     ? 40u
+                     : ((simple_control || guarded_control ||
+                         guarded_store_control)
+                            ? (guarded_store_control ? 5u : count + 3u)
+                            : (simple_load
+                                   ? count + load_tail_count +
+                                         (load_has_control ? 9u : 6u)
+                                   : (simple_store
+                                          ? count + store_tail_count +
+                                                (store_has_control ? 6u : 3u)
+                                          : count))));
       block->has_control =
-          simple_control || guarded_control || guarded_store_control ||
-          load_has_control || store_has_control;
+          split_control || simple_control || guarded_control ||
+          guarded_store_control || load_has_control || store_has_control;
       block->has_memory =
           simple_load || simple_store || guarded_store_control;
     } catch (...) {
@@ -4720,17 +4737,21 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
+        split_control
             ? 1u
-            : ((simple_control || guarded_control || guarded_store_control)
-                   ? count + 2u
-                   : (simple_load
-                          ? count + load_tail_count +
-                                (load_has_control ? 3u : 1u)
-                          : (simple_store
-                                 ? count + store_tail_count +
-                                       (store_has_control ? 3u : 1u)
-                                 : count)));
+            : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+                simple_cop0 || simple_exception)
+                   ? 1u
+                   : ((simple_control || guarded_control ||
+                       guarded_store_control)
+                          ? count + 2u
+                          : (simple_load
+                                 ? count + load_tail_count +
+                                       (load_has_control ? 3u : 1u)
+                                 : (simple_store
+                                        ? count + store_tail_count +
+                                              (store_has_control ? 3u : 1u)
+                                        : count))));
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
       if (!read_visible(start_pc + i * 4u, translated_bits)) {
@@ -4747,7 +4768,8 @@ struct CpuRecompilerBackend::Impl {
     ++stats.native_compile_successes;
     ++stats.native_blocks_compiled;
     ++stats.native_compiled_block_size_histogram[block->instruction_count];
-    if (simple_control || guarded_control || guarded_store_control) {
+    if (split_control || simple_control || guarded_control ||
+        guarded_store_control) {
       ++stats.native_branch_tail_blocks_compiled;
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
@@ -4930,8 +4952,25 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     if (pending_branch_delay && !unsafe_state && cpu_.pending_delay_slot_ &&
         cpu_.pending_branch_pc_ != 0u) {
       u32 delay_instruction = 0u;
-      if (cpu_.read_visible_instruction_for_backend(cpu_.pc_,
-                                                    delay_instruction)) {
+      bool delay_visible =
+          cpu_.read_visible_instruction_for_backend(cpu_.pc_,
+                                                    delay_instruction);
+      if (!delay_visible && cacheable) {
+        // The branch already executed natively. Fetching its not-yet-visible
+        // delay-slot line here is an architectural cold fetch, not a semantic
+        // fallback or validation probe.
+        if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
+          ++stats_.recompiler_frame_icache_refills;
+          constexpr u32 kRefillCycles = 4u;
+          cpu_.cycles_ += kRefillCycles;
+          result.cycles += kRefillCycles;
+          stats_.executed_cycles += kRefillCycles;
+        }
+        delay_visible =
+            cpu_.read_visible_instruction_for_backend(cpu_.pc_,
+                                                      delay_instruction);
+      }
+      if (delay_visible) {
         pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
       }
     }
