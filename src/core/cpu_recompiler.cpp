@@ -208,6 +208,41 @@ bool decode_v4_muldiv(u32 bits, V4DecodedMulDiv &out) {
   }
 }
 
+enum class V4Cop0Op : u8 {
+  Mfc0,
+  Mtc0,
+  Rfe,
+};
+
+struct V4DecodedCop0 {
+  V4Cop0Op op = V4Cop0Op::Mfc0;
+  u8 rt = 0;
+  u8 rd = 0;
+};
+
+bool decode_v4_cop0(u32 bits, V4DecodedCop0 &out) {
+  if (((bits >> 26) & 0x3Fu) != 0x10u) {
+    return false;
+  }
+  out = {};
+  out.rt = static_cast<u8>((bits >> 16) & 0x1Fu);
+  out.rd = static_cast<u8>((bits >> 11) & 0x1Fu);
+  const u32 sub = (bits >> 21) & 0x1Fu;
+  if (sub == 0x00u) {
+    out.op = V4Cop0Op::Mfc0;
+    return true;
+  }
+  if (sub == 0x04u) {
+    out.op = V4Cop0Op::Mtc0;
+    return true;
+  }
+  if (sub == 0x10u && (bits & 0x3Fu) == 0x10u) {
+    out.op = V4Cop0Op::Rfe;
+    return true;
+  }
+  return false;
+}
+
 enum class V4LoadOp : u8 {
   Lb,
   Lh,
@@ -375,8 +410,12 @@ struct V4NativeState {
   u32 memory_entries = 0;
   u32 store_entries = 0;
   u32 store_phys = 0;
+  u32 *cop0_regs = nullptr;
+  u32 cop0_jumpdest = 0;
+  u32 cop0_badvaddr = 0;
   u32 cop0_sr = 0;
   u32 cop0_cause = 0;
+  u32 cop0_epc = 0;
   u32 hi = 0;
   u32 lo = 0;
   u64 muldiv_result_ready_cycle = 0;
@@ -1071,6 +1110,151 @@ V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
       code.rax);
 
   emit_retire_incoming_load(code, 0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      start_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.add(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))], 4u);
+  code.inc(code.ebx);
+  code.dec(code.r12d);
+  emit_v4_link(code, links.fallthrough, links);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+
+V4NativeFn compile_v4_cop0(V4CodeArena &arena,
+                           const V4DecodedCop0 &inst,
+                           u32 start_pc,
+                           const V4LinkTargets &links,
+                           u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  switch (inst.op) {
+  case V4Cop0Op::Mfc0:
+    switch (inst.rd) {
+    case 6:
+      code.mov(code.r8d, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_jumpdest))]);
+      break;
+    case 8:
+      code.mov(code.r8d, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_badvaddr))]);
+      break;
+    case 12:
+      code.mov(code.r8d, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+      break;
+    case 13:
+      code.mov(code.r8d, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+      break;
+    case 14:
+      code.mov(code.r8d, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))]);
+      break;
+    case 15:
+      code.mov(code.r8d, 0x00000002u);
+      break;
+    default:
+      code.mov(code.rax, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_regs))]);
+      code.mov(code.r8d, code.dword[code.rax + static_cast<int>(inst.rd) * 4]);
+      break;
+    }
+    emit_retire_incoming_load(code, inst.rt);
+    if (inst.rt != 0u) {
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_reg))],
+          static_cast<u32>(inst.rt));
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, pending_load_value))],
+          code.r8d);
+    }
+    break;
+
+  case V4Cop0Op::Mtc0:
+    emit_read_guest(code, code.r8d, inst.rt);
+    emit_retire_incoming_load(code, 0u);
+    switch (inst.rd) {
+    case 6:
+    case 8:
+    case 14:
+      // JumpDest, BadVAddr and EPC are not guest-writable on this R3000A model.
+      break;
+    case 12: {
+      constexpr u32 kSRWriteMask =
+          0b1111'0010'0111'1111'1111'1111'0011'1111u;
+      code.mov(code.eax, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+      code.and_(code.eax, ~kSRWriteMask);
+      code.and_(code.r8d, kSRWriteMask);
+      code.or_(code.eax, code.r8d);
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+          code.eax);
+      break;
+    }
+    case 13:
+      code.mov(code.eax, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+      code.and_(code.eax, ~0x300u);
+      code.and_(code.r8d, 0x300u);
+      code.or_(code.eax, code.r8d);
+      code.mov(code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
+          code.eax);
+      break;
+    default:
+      code.mov(code.rax, code.ptr[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_regs))]);
+      code.mov(code.dword[code.rax + static_cast<int>(inst.rd) * 4], code.r8d);
+      break;
+    }
+    // An SR/Cause write can make a pending IRQ immediately eligible.
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        1u);
+    break;
+
+  case V4Cop0Op::Rfe:
+    emit_retire_incoming_load(code, 0u);
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+    code.mov(code.ecx, code.eax);
+    code.and_(code.ecx, 0x3Fu);
+    code.and_(code.eax, ~0x3Fu);
+    code.shr(code.ecx, 2);
+    code.or_(code.eax, code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+        code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        1u);
+    break;
+  }
+
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
       start_pc);
@@ -3826,6 +4010,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_muldiv =
         count == 0u && read_visible(start_pc, muldiv_bits) &&
         decode_v4_muldiv(muldiv_bits, muldiv);
+    V4DecodedCop0 cop0{};
+    u32 cop0_bits = 0u;
+    const bool simple_cop0 =
+        count == 0u && read_visible(start_pc, cop0_bits) &&
+        decode_v4_cop0(cop0_bits, cop0);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -3885,7 +4074,7 @@ struct CpuRecompilerBackend::Impl {
 
     if (count == 0u && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
-        !simple_overflow_alu && !simple_hilo && !simple_muldiv) {
+        !simple_overflow_alu && !simple_hilo && !simple_muldiv && !simple_cop0) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -3946,7 +4135,7 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              (simple_overflow_alu || simple_hilo || simple_muldiv)
+              (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -3963,7 +4152,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_muldiv) {
+      if (simple_cop0) {
+        entry = compile_v4_cop0(
+            arena, cop0, start_pc, links, block->code_size);
+      } else if (simple_muldiv) {
         entry = compile_v4_muldiv(
             arena, muldiv, start_pc, links, block->code_size);
       } else if (simple_hilo) {
@@ -4034,7 +4226,7 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (simple_overflow_alu || simple_hilo || simple_muldiv)
+          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
               ? 1u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? count + 2u
@@ -4046,7 +4238,7 @@ struct CpuRecompilerBackend::Impl {
                                          (store_has_control ? 3u : 1u)
                                    : count)));
       block->max_cycles =
-          (simple_overflow_alu || simple_hilo || simple_muldiv)
+          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
               ? 40u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? (guarded_store_control ? 5u : count + 3u)
@@ -4071,7 +4263,7 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (simple_overflow_alu || simple_hilo || simple_muldiv)
+        (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
             ? 1u
             : ((simple_control || guarded_control || guarded_store_control)
                    ? count + 2u
@@ -4103,7 +4295,7 @@ struct CpuRecompilerBackend::Impl {
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
       }
-    } else if (simple_overflow_alu || simple_hilo || simple_muldiv) {
+    } else if (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
@@ -4423,6 +4615,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       native.cpu = &cpu_;
       native.system = cpu_.sys_;
       native.dispatch_top = impl_->dispatch_top.get();
+      native.cop0_regs = cpu_.cop0_regs_;
       native.icache_generations = cpu_.icache_generation_.data();
       native.icache_tags = &cpu_.icache_[0].tag;
       native.icache_words = cpu_.icache_[0].words.data();
@@ -4446,8 +4639,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.memory_entries = 0u;
     native.store_entries = 0u;
     native.store_phys = 0u;
+    native.cop0_jumpdest = cpu_.cop0_jumpdest_;
+    native.cop0_badvaddr = cpu_.cop0_badvaddr_;
     native.cop0_sr = cpu_.cop0_sr_;
     native.cop0_cause = cpu_.cop0_cause_;
+    native.cop0_epc = cpu_.cop0_epc_;
     native.hi = cpu_.hi_;
     native.lo = cpu_.lo_;
     native.muldiv_result_ready_cycle = cpu_.muldiv_result_ready_cycle_;
@@ -4545,6 +4741,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.hi_ = native.hi;
     cpu_.lo_ = native.lo;
     cpu_.muldiv_result_ready_cycle_ = native.muldiv_result_ready_cycle;
+    cpu_.cop0_jumpdest_ = native.cop0_jumpdest;
+    cpu_.cop0_badvaddr_ = native.cop0_badvaddr;
+    cpu_.cop0_sr_ = native.cop0_sr;
+    cpu_.cop0_cause_ = native.cop0_cause;
+    cpu_.cop0_epc_ = native.cop0_epc;
 
     result.instructions += native.instructions;
     stats_.native_block_entries += native.block_entries;
