@@ -3622,9 +3622,17 @@ u32 EeCpu::run_quiet_fast_prefix(
         [&](u32 opcode_value, u32 virtual_address) {
             // Aggregate at 4 KiB page granularity. Preserve the opcode in the
             // upper half so load/store classes remain distinguishable.
+            const u32 page =
+                virtual_address & 0xFFFFF000u;
+            // The dominant fallback page is VIF1 DMAC. Preserve exact
+            // register offsets there; aggregate all other regions by page.
+            const u32 location =
+                page == 0x10009000u
+                    ? virtual_address
+                    : page;
             const u64 key =
                 (static_cast<u64>(opcode_value & 63u) << 32u) |
-                static_cast<u64>(virtual_address & 0xFFFFF000u);
+                static_cast<u64>(location);
             for (u32 i = 0u;
                  i < fast_prefix_memory_fallback_count_;
                  ++i) {
