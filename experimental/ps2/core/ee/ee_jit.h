@@ -75,9 +75,12 @@ private:
         u8 instruction_count = 0;
         BlockFunction function = nullptr;
         bool control_flow = false;
+        bool annul_capable = false;
         bool uses_ram = false;
         u32 ram_load_mask = 0;
         u32 ram_store_mask = 0;
+        u8 guard_bail_streak = 0;
+        u8 guard_skip_remaining = 0;
         bool known = false;
     };
     struct Page {
