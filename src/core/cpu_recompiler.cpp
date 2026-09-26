@@ -6389,11 +6389,14 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(control_bits, control);
     const bool delay_visible =
         control_candidate && read_visible(branch_pc + 4u, delay_bits);
+    const bool likely_control =
+        count == 0u && control_candidate && v4_control_is_likely(control);
     const bool split_control =
         count == 0u && control_pair_cross_line && control_candidate &&
-        !delay_visible;
+        !delay_visible && !likely_control;
     const bool simple_control =
-        delay_visible && decode_v4_alu(delay_bits, delay);
+        delay_visible && !v4_control_is_likely(control) &&
+        decode_v4_alu(delay_bits, delay);
     V4DecodedOverflowAlu guarded_control_delay{};
     const bool guarded_control =
         count == 0u && delay_visible && v4_nonlink_conditional(control) &&
@@ -6519,8 +6522,8 @@ struct CpuRecompilerBackend::Impl {
         decode_v4_control(load_control_bits, load_control) &&
         decode_v4_alu(load_delay_bits, load_delay);
 
-    if (count == 0u && !split_control && !simple_control && !guarded_control &&
-        !guarded_store_control && !simple_load && !simple_store &&
+    if (count == 0u && !likely_control && !split_control && !simple_control &&
+        !guarded_control && !guarded_store_control && !simple_load && !simple_store &&
         !simple_overflow_alu && !simple_cond_move && !simple_trap &&
         !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_cop2 && !simple_exception) {
@@ -6603,7 +6606,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (split_control) {
+      if (likely_control) {
+        entry = compile_v4_likely_branch_head(
+            arena, control, branch_pc, block->code_size);
+      } else if (split_control) {
         entry = compile_v4_budget_branch(
             arena, control, branch_pc, block->code_size);
       } else if (simple_exception) {
@@ -6674,7 +6680,7 @@ struct CpuRecompilerBackend::Impl {
       // scheduling boundary.
       V4LinkTargets budget_links{};
       u32 budget_code_size = 0u;
-      if (split_control || guarded_control) {
+      if (likely_control || split_control || guarded_control) {
         block->budget_fn = entry;
         block->budget_requires_empty_chain = true;
       } else if (count != 0u) {
@@ -6718,7 +6724,7 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (split_control || guarded_control)
+          (likely_control || split_control || guarded_control)
               ? 1u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6733,7 +6739,7 @@ struct CpuRecompilerBackend::Impl {
                                                 (store_has_control ? 3u : 1u)
                                           : count))));
       block->max_cycles =
-          (split_control || guarded_control)
+          (likely_control || split_control || guarded_control)
               ? 2u
               : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
@@ -6748,7 +6754,7 @@ struct CpuRecompilerBackend::Impl {
                                                 (store_has_control ? 6u : 3u)
                                           : count))));
       block->has_control =
-          split_control || simple_control || guarded_control ||
+          likely_control || split_control || simple_control || guarded_control ||
           guarded_store_control || load_has_control || store_has_control;
       block->has_memory =
           simple_load || simple_store || guarded_store_control ||
@@ -6762,7 +6768,7 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (split_control || guarded_control)
+        (likely_control || split_control || guarded_control)
             ? 1u
             : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                 simple_cop0 || simple_cop2 || simple_exception)
@@ -6792,7 +6798,7 @@ struct CpuRecompilerBackend::Impl {
     ++stats.native_compile_successes;
     ++stats.native_blocks_compiled;
     ++stats.native_compiled_block_size_histogram[block->instruction_count];
-    if (split_control || simple_control || guarded_control ||
+    if (likely_control || split_control || simple_control || guarded_control ||
         guarded_store_control) {
       ++stats.native_branch_tail_blocks_compiled;
       if (guarded_store_control) {
