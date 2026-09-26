@@ -673,7 +673,7 @@ struct V4NativeState {
   u32 *icache_words = nullptr;
   bool *icache_valid = nullptr;
   u32 icache_line_stride = 0;
-  const u32 *code_page_generations = nullptr;
+  u32 *code_page_generations = nullptr;
   const u64 *code_page_bits = nullptr;
   const u64 *code_line_bits = nullptr;
   void *block_return = nullptr;
@@ -688,6 +688,7 @@ struct V4NativeState {
   u32 store_phys = 0;
   u32 store_byte_offset = 0;
   u32 store_value = 0;
+  u32 store_hits_code = 0;
   u32 load_byte_offset = 0;
   u32 *cop0_regs = nullptr;
   u32 cop0_jumpdest = 0;
@@ -3234,14 +3235,24 @@ V4NativeFn compile_v4_pending_delay_store(
   code.mov(code.ecx, code.r9d);
   code.shr(code.r9d, 6u);
   code.and_(code.ecx, 63u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+      0u);
   code.mov(code.rax, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
   code.test(code.rax, code.rax);
-  code.jz(bail);
-  code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
-  code.shr(code.rax, code.cl);
-  code.test(code.al, 1u);
-  code.jnz(bail);
+  {
+    Label no_code_line;
+    code.jz(no_code_line);
+    code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+    code.shr(code.rax, code.cl);
+    code.test(code.al, 1u);
+    code.jz(no_code_line);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+        1u);
+    code.L(no_code_line);
+  }
 
   code.cmp(code.edx, code.dword[
       code.r11 +
@@ -3500,6 +3511,33 @@ V4NativeFn compile_v4_pending_delay_store(
     code.jne(generation_ok);
     code.mov(code.dword[code.rcx + code.rax * 4], 1u);
     code.L(generation_ok);
+  }
+
+  {
+    Label no_jit_page, jit_generation_ok;
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.shr(code.eax, kV4PhysPageShift);
+    code.mov(code.ecx, code.eax);
+    code.shr(code.ecx, 6u);
+    code.mov(code.rdx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
+    code.test(code.rdx, code.rdx);
+    code.jz(no_jit_page);
+    code.mov(code.rdx, code.qword[code.rdx + code.rcx * 8]);
+    code.mov(code.ecx, code.eax);
+    code.and_(code.ecx, 63u);
+    code.bt(code.rdx, code.rcx);
+    code.jnc(no_jit_page);
+    code.mov(code.rdx, code.ptr[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
+    code.inc(code.dword[code.rdx + code.rax * 4]);
+    code.cmp(code.dword[code.rdx + code.rax * 4], 0u);
+    code.jne(jit_generation_ok);
+    code.mov(code.dword[code.rdx + code.rax * 4], 1u);
+    code.L(jit_generation_ok);
+    code.L(no_jit_page);
   }
 
   // Resolve the already-captured branch destination after its delay slot.
@@ -4971,14 +5009,24 @@ V4NativeFn compile_v4_store(
   code.mov(code.ecx, code.r9d);
   code.shr(code.r9d, 6u);
   code.and_(code.ecx, 63u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+      0u);
   code.mov(code.rax, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
   code.test(code.rax, code.rax);
-  code.jz(guard_exit);
-  code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
-  code.shr(code.rax, code.cl);
-  code.test(code.al, 1u);
-  code.jnz(guard_exit);
+  {
+    Label no_code_line;
+    code.jz(no_code_line);
+    code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
+    code.shr(code.rax, code.cl);
+    code.test(code.al, 1u);
+    code.jz(no_code_line);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+        1u);
+    code.L(no_code_line);
+  }
 
   code.cmp(code.edx, code.dword[
       code.r11 +
@@ -5231,16 +5279,52 @@ V4NativeFn compile_v4_store(
     code.L(generation_ok);
   }
 
+  // Native JIT invalidation: if the written physical page contains translated
+  // code, advance its generation in-place. No C++ invalidation helper is needed.
+  {
+    Label no_jit_page, jit_generation_ok;
+    code.mov(code.eax, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+    code.shr(code.eax, kV4PhysPageShift);
+    code.mov(code.ecx, code.eax);
+    code.shr(code.ecx, 6u);
+    code.mov(code.rdx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
+    code.test(code.rdx, code.rdx);
+    code.jz(no_jit_page);
+    code.mov(code.rdx, code.qword[code.rdx + code.rcx * 8]);
+    code.mov(code.ecx, code.eax);
+    code.and_(code.ecx, 63u);
+    code.bt(code.rdx, code.rcx);
+    code.jnc(no_jit_page);
+    code.mov(code.rdx, code.ptr[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
+    code.inc(code.dword[code.rdx + code.rax * 4]);
+    code.cmp(code.dword[code.rdx + code.rax * 4], 0u);
+    code.jne(jit_generation_ok);
+    code.mov(code.dword[code.rdx + code.rax * 4], 1u);
+    code.L(jit_generation_ok);
+    code.L(no_jit_page);
+  }
+
   // Cached execution is direct-mapped. If this store invalidated the exact
   // I-cache slot containing the fused code, the architectural next instruction
   // must refetch/refill before it executes. End this native fragment after the
   // store and let the normal dispatcher path perform that refill. Uncached code
   // has no guest I-cache dependency and can keep running through the tail.
-  if (cacheable && (tail_count != 0u || control != nullptr)) {
-    code.cmp(code.eax, (start_pc >> 4u) & 0xFFu);
-    code.je(stop_after_store);
+  if (tail_count != 0u || control != nullptr) {
+    // Any write into a currently translated line must end the fragment so
+    // uncached execution cannot continue through stale generated instructions.
+    code.cmp(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+        0u);
+    code.jne(stop_after_store);
+    if (cacheable) {
+      code.cmp(code.eax, (start_pc >> 4u) & 0xFFu);
+      code.je(stop_after_store);
+    }
   }
-
 
   // The store retires the incoming delayed load. Any fused ALU tail therefore
   // observes the committed value, exactly like successive Cpu::step() calls.
@@ -6949,6 +7033,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.memory_entries = 0u;
     native.store_entries = 0u;
     native.store_phys = 0u;
+    native.store_hits_code = 0u;
     native.cop0_jumpdest = cpu_.cop0_jumpdest_;
     native.cop0_badvaddr = cpu_.cop0_badvaddr_;
     native.cop0_sr = cpu_.cop0_sr_;
