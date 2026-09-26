@@ -54,6 +54,7 @@ private:
         u32 pc = 0;
         u32 generation = 0;
         u8 instruction_count = 0;
+        std::array<u32, 32> words{};
         BlockFunction function = nullptr;
         bool control_flow = false;
         bool uses_ram = false;
