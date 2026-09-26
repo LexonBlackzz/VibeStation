@@ -6028,13 +6028,24 @@ struct CpuRecompilerBackend::Impl {
         fn = compile_v4_pending_delay_overflow_alu(
             arena, overflow, code_size);
       } else {
-        V4DecodedLoad load{};
-        if (decode_v4_load(instruction, load)) {
+        V4DecodedCondMove cond_move{};
+        if (decode_v4_cond_move(instruction, cond_move)) {
+          fn = compile_v4_pending_delay_cond_move(
+              arena, cond_move, code_size);
+        } else {
+          V4DecodedTrap trap{};
+          if (decode_v4_trap(instruction, trap)) {
+            fn = compile_v4_pending_delay_trap(arena, trap, code_size);
+          } else {
+            V4DecodedLoad load{};
+            if (decode_v4_load(instruction, load)) {
           fn = compile_v4_pending_delay_load(arena, load, code_size);
         } else {
           V4DecodedStore store{};
-          if (decode_v4_store(instruction, store)) {
-            fn = compile_v4_pending_delay_store(arena, store, code_size);
+              if (decode_v4_store(instruction, store)) {
+                fn = compile_v4_pending_delay_store(arena, store, code_size);
+              }
+            }
           }
         }
       }
@@ -6177,6 +6188,16 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_overflow_alu =
         count == 0u && read_visible(start_pc, overflow_bits) &&
         decode_v4_overflow_alu(overflow_bits, overflow_alu);
+    V4DecodedCondMove cond_move{};
+    u32 cond_move_bits = 0u;
+    const bool simple_cond_move =
+        count == 0u && read_visible(start_pc, cond_move_bits) &&
+        decode_v4_cond_move(cond_move_bits, cond_move);
+    V4DecodedTrap trap{};
+    u32 trap_bits = 0u;
+    const bool simple_trap =
+        count == 0u && read_visible(start_pc, trap_bits) &&
+        decode_v4_trap(trap_bits, trap);
     V4DecodedHiLo hilo{};
     u32 hilo_bits = 0u;
     const bool simple_hilo =
@@ -6261,7 +6282,8 @@ struct CpuRecompilerBackend::Impl {
 
     if (count == 0u && !split_control && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
-        !simple_overflow_alu && !simple_hilo && !simple_muldiv && !simple_cop0 &&
+        !simple_overflow_alu && !simple_cond_move && !simple_trap &&
+        !simple_hilo && !simple_muldiv && !simple_cop0 &&
         !simple_cop2 && !simple_exception) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
@@ -6323,8 +6345,9 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              (simple_overflow_alu || simple_hilo || simple_muldiv ||
-               simple_cop0 || simple_cop2 || simple_exception)
+              (simple_overflow_alu || simple_cond_move || simple_trap ||
+               simple_hilo || simple_muldiv || simple_cop0 ||
+               simple_cop2 || simple_exception)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -6359,6 +6382,12 @@ struct CpuRecompilerBackend::Impl {
       } else if (simple_hilo) {
         entry = compile_v4_hilo(
             arena, hilo, start_pc, links, block->code_size);
+      } else if (simple_cond_move) {
+        entry = compile_v4_cond_move(
+            arena, cond_move, start_pc, links, block->code_size);
+      } else if (simple_trap) {
+        entry = compile_v4_trap(
+            arena, trap, start_pc, links, block->code_size);
       } else if (simple_overflow_alu) {
         entry = compile_v4_overflow_alu(
             arena, overflow_alu, start_pc, links, block->code_size);
@@ -6427,6 +6456,12 @@ struct CpuRecompilerBackend::Impl {
       } else if (simple_hilo) {
         block->budget_fn = compile_v4_hilo(
             arena, hilo, start_pc, budget_links, budget_code_size);
+      } else if (simple_cond_move) {
+        block->budget_fn = compile_v4_cond_move(
+            arena, cond_move, start_pc, budget_links, budget_code_size);
+      } else if (simple_trap) {
+        block->budget_fn = compile_v4_trap(
+            arena, trap, start_pc, budget_links, budget_code_size);
       } else if (simple_overflow_alu) {
         block->budget_fn = compile_v4_overflow_alu(
             arena, overflow_alu, start_pc, budget_links, budget_code_size);
@@ -6446,7 +6481,7 @@ struct CpuRecompilerBackend::Impl {
       block->instruction_count =
           (split_control || guarded_control)
               ? 1u
-              : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+              : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
                      ? 1u
                      : ((simple_control || guarded_store_control)
@@ -6461,7 +6496,7 @@ struct CpuRecompilerBackend::Impl {
       block->max_cycles =
           (split_control || guarded_control)
               ? 2u
-              : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+              : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                   simple_cop0 || simple_cop2 || simple_exception)
                      ? 40u
                      : ((simple_control || guarded_store_control)
@@ -6490,7 +6525,7 @@ struct CpuRecompilerBackend::Impl {
     const u32 translated_count =
         (split_control || guarded_control)
             ? 1u
-            : ((simple_overflow_alu || simple_hilo || simple_muldiv ||
+            : ((simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                 simple_cop0 || simple_cop2 || simple_exception)
                    ? 1u
                    : ((simple_control || guarded_store_control)
@@ -6524,7 +6559,7 @@ struct CpuRecompilerBackend::Impl {
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
       }
-    } else if (simple_overflow_alu || simple_hilo || simple_muldiv ||
+    } else if (simple_overflow_alu || simple_cond_move || simple_trap || simple_hilo || simple_muldiv ||
                simple_cop0 || simple_cop2 || simple_exception) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
