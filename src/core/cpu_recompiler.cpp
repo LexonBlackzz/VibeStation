@@ -208,6 +208,31 @@ bool decode_v4_muldiv(u32 bits, V4DecodedMulDiv &out) {
   }
 }
 
+enum class V4ExceptionOp : u8 {
+  Syscall,
+  Break,
+};
+
+struct V4DecodedException {
+  V4ExceptionOp op = V4ExceptionOp::Syscall;
+};
+
+bool decode_v4_exception(u32 bits, V4DecodedException &out) {
+  if (((bits >> 26) & 0x3Fu) != 0u) {
+    return false;
+  }
+  switch (bits & 0x3Fu) {
+  case 0x0C:
+    out.op = V4ExceptionOp::Syscall;
+    return true;
+  case 0x0D:
+    out.op = V4ExceptionOp::Break;
+    return true;
+  default:
+    return false;
+  }
+}
+
 enum class V4Cop0Op : u8 {
   Mfc0,
   Mtc0,
@@ -441,6 +466,9 @@ struct V4NativeState {
   u32 scheduler_yield = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
+  u32 exception_raised = 0;
+  u32 exception_return_sr = 0;
+  u32 exception_return_bd = 0;
   u32 cycles = 0;
   u32 instructions = 0;
   u32 cycle_budget = 0;
@@ -788,6 +816,117 @@ void emit_retire_incoming_load(Xbyak::CodeGenerator &code, u8 cancel_reg) {
   code.L(done);
 }
 
+void emit_v4_exception_no_delay(Xbyak::CodeGenerator &code, Exception cause,
+                                u32 current_pc) {
+  using namespace Xbyak;
+
+  // R3000A exceptions commit the incoming load before entering the handler.
+  emit_retire_incoming_load(code, 0u);
+
+  // Preserve the pre-exception SR for diagnostics/exception-return tracing.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_sr))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, exception_return_bd))],
+      0u);
+
+  // Push IEc/KUc into the previous-mode stack and enter kernel/interrupt-off.
+  code.mov(code.ecx, code.eax);
+  code.and_(code.ecx, 0x3Fu);
+  code.and_(code.eax, ~0x3Fu);
+  code.shl(code.ecx, 2);
+  code.and_(code.ecx, 0x3Fu);
+  code.or_(code.eax, code.ecx);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      code.eax);
+
+  // CE is meaningless for these exceptions. Replace ExcCode and clear BD.
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))]);
+  code.and_(code.eax, ~((0x3u << 28) | 0x7Cu | (1u << 31)));
+  code.or_(code.eax, static_cast<u32>(cause) << 2);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_cause))],
+      code.eax);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_epc))],
+      current_pc);
+
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
+      current_pc);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, last_in_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, active_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_taken))],
+      0u);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
+      0u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, exception_raised))],
+      1u);
+
+  Label low_vector, vector_ready;
+  code.test(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
+      1u << 22);
+  code.jz(low_vector);
+  code.mov(code.eax, 0xBFC00180u);
+  code.jmp(vector_ready);
+  code.L(low_vector);
+  code.mov(code.eax, 0x80000080u);
+  code.L(vector_ready);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
+      code.eax);
+  code.add(code.eax, 4u);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, next_pc))],
+      code.eax);
+
+  // Cpu::instruction_cycles() charges two cycles for a faulting instruction.
+  code.add(code.ebx, 2u);
+  code.dec(code.r12d);
+  emit_v4_block_return(code);
+}
+
+V4NativeFn compile_v4_exception(V4CodeArena &arena,
+                                const V4DecodedException &inst,
+                                u32 start_pc, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 512u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  const Exception cause =
+      inst.op == V4ExceptionOp::Syscall ? Exception::Syscall : Exception::Break;
+  emit_v4_exception_no_delay(code, cause, start_pc);
+  code.ready();
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
 V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
                                     const V4DecodedOverflowAlu &inst,
                                     u32 start_pc,
@@ -841,9 +980,7 @@ V4NativeFn compile_v4_overflow_alu(V4CodeArena &arena,
   emit_v4_link(code, links.fallthrough, links);
 
   code.L(overflow);
-  code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 1u);
-  emit_v4_block_return(code);
+  emit_v4_exception_no_delay(code, Exception::Overflow, start_pc);
 
   code.ready();
   code_size = static_cast<u32>(code.getSize());
@@ -4268,6 +4405,11 @@ struct CpuRecompilerBackend::Impl {
     const bool simple_cop0 =
         count == 0u && read_visible(start_pc, cop0_bits) &&
         decode_v4_cop0(cop0_bits, cop0);
+    V4DecodedException exception_inst{};
+    u32 exception_bits = 0u;
+    const bool simple_exception =
+        count == 0u && read_visible(start_pc, exception_bits) &&
+        decode_v4_exception(exception_bits, exception_inst);
     std::array<V4DecodedInstruction, kV4MaxBlockInstructions> store_tail{};
     u32 store_tail_count = 0u;
     if (simple_store) {
@@ -4327,7 +4469,8 @@ struct CpuRecompilerBackend::Impl {
 
     if (count == 0u && !simple_control && !guarded_control &&
         !guarded_store_control && !simple_load && !simple_store &&
-        !simple_overflow_alu && !simple_hilo && !simple_muldiv && !simple_cop0) {
+        !simple_overflow_alu && !simple_hilo && !simple_muldiv && !simple_cop0 &&
+        !simple_exception) {
       ++stats.native_compile_attempts;
       u32 rejected_bits = 0u;
       (void)read_visible(start_pc, rejected_bits);
@@ -4388,7 +4531,7 @@ struct CpuRecompilerBackend::Impl {
           link_control(store_control, store_branch_pc);
         } else {
           const u32 translated_count =
-              (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
+              (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
                   ? 1u
                   : (simple_load ? count + load_tail_count + 1u
                                  : (simple_store
@@ -4405,7 +4548,10 @@ struct CpuRecompilerBackend::Impl {
       }
 
       V4NativeFn entry = nullptr;
-      if (simple_cop0) {
+      if (simple_exception) {
+        entry = compile_v4_exception(
+            arena, exception_inst, start_pc, block->code_size);
+      } else if (simple_cop0) {
         entry = compile_v4_cop0(
             arena, cop0, start_pc, links, block->code_size);
       } else if (simple_muldiv) {
@@ -4465,6 +4611,9 @@ struct CpuRecompilerBackend::Impl {
       if (count != 0u) {
         block->budget_fn = compile_v4_alu(
             arena, decoded, 1u, start_pc, budget_links, budget_code_size);
+      } else if (simple_exception) {
+        block->budget_fn = compile_v4_exception(
+            arena, exception_inst, start_pc, budget_code_size);
       } else if (simple_cop0) {
         block->budget_fn = compile_v4_cop0(
             arena, cop0, start_pc, budget_links, budget_code_size);
@@ -4491,7 +4640,7 @@ struct CpuRecompilerBackend::Impl {
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
       block->instruction_count =
-          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
+          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
               ? 1u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? count + 2u
@@ -4503,7 +4652,7 @@ struct CpuRecompilerBackend::Impl {
                                          (store_has_control ? 3u : 1u)
                                    : count)));
       block->max_cycles =
-          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
+          (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
               ? 40u
               : ((simple_control || guarded_control || guarded_store_control)
                      ? (guarded_store_control ? 5u : count + 3u)
@@ -4528,7 +4677,7 @@ struct CpuRecompilerBackend::Impl {
     }
 
     const u32 translated_count =
-        (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0)
+        (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception)
             ? 1u
             : ((simple_control || guarded_control || guarded_store_control)
                    ? count + 2u
@@ -4560,7 +4709,7 @@ struct CpuRecompilerBackend::Impl {
       if (guarded_store_control) {
         ++stats.native_memory_blocks_compiled;
       }
-    } else if (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0) {
+    } else if (simple_overflow_alu || simple_hilo || simple_muldiv || simple_cop0 || simple_exception) {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
@@ -4929,6 +5078,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.scheduler_yield = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
+    native.exception_raised = 0u;
+    native.exception_return_sr = 0u;
+    native.exception_return_bd = 0u;
     native.cycles = 0u;
     native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
@@ -4999,7 +5151,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.pending_branch_pc_ = native.pending_branch_pc;
     cpu_.load_ = {native.pending_load_reg, native.pending_load_value};
     cpu_.next_load_ = {0u, 0u};
-    cpu_.exception_raised_ = false;
+    cpu_.exception_raised_ = native.exception_raised != 0u;
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = false;
     cpu_.gpr_[0] = 0u;
@@ -5011,6 +5163,18 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     cpu_.cop0_sr_ = native.cop0_sr;
     cpu_.cop0_cause_ = native.cop0_cause;
     cpu_.cop0_epc_ = native.cop0_epc;
+    if (native.exception_raised != 0u) {
+      std::memcpy(cpu_.exception_return_regs_, cpu_.gpr_,
+                  sizeof(cpu_.exception_return_regs_));
+      cpu_.exception_return_hi_ = native.hi;
+      cpu_.exception_return_lo_ = native.lo;
+      cpu_.exception_return_epc_ = native.cop0_epc;
+      cpu_.exception_return_sr_ = native.exception_return_sr;
+      cpu_.exception_return_bd_ = native.exception_return_bd != 0u;
+      cpu_.exception_return_valid_ = true;
+      cpu_.gte_result_ready_cycle_ = cpu_.cycles_;
+      cpu_.gte_input_ready_cycle_ = cpu_.cycles_;
+    }
 
     result.instructions += native.instructions;
     stats_.native_block_entries += native.block_entries;
