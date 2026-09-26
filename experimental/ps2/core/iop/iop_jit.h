@@ -59,6 +59,9 @@ public:
     [[nodiscard]] u64 load_delay_entry_retire_count() const {
         return load_delay_entry_retire_count_;
     }
+    [[nodiscard]] u64 native_delay_slot_count() const {
+        return native_delay_slot_count_;
+    }
     [[nodiscard]] const std::array<u64, 64>& compile_stop_opcodes() const {
         return compile_stop_opcodes_;
     }
@@ -94,6 +97,13 @@ private:
         bool known = false;
     };
 
+    struct DelayEntry {
+        u32 instruction = 0;
+        BlockFunction function = nullptr;
+        bool uses_ram = false;
+        bool known = false;
+    };
+
     struct Page {
         void* address = nullptr;
         std::size_t used = 0;
@@ -113,6 +123,7 @@ private:
     void release_code_cache();
 
     std::vector<BlockEntry> entries_{32768};
+    std::array<DelayEntry, 4096> delay_entries_{};
     std::vector<Page> pages_{};
 
     u64 block_compiled_count_ = 0;
@@ -127,6 +138,7 @@ private:
     u64 native_entry_success_count_ = 0;
     u64 compile_failure_count_ = 0;
     u64 load_delay_entry_retire_count_ = 0;
+    u64 native_delay_slot_count_ = 0;
     std::array<u64, 64> compile_stop_opcodes_{};
     std::array<u64, 64> delay_slot_stop_opcodes_{};
     std::array<u64, 5> entry_rejects_{};

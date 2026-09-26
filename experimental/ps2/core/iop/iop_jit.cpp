@@ -1162,6 +1162,7 @@ void IopJit::release_code_cache() {
 #endif
     pages_.clear();
     std::fill(entries_.begin(), entries_.end(), BlockEntry{});
+    delay_entries_.fill(DelayEntry{});
 }
 
 void IopJit::clear() {
@@ -1178,6 +1179,7 @@ void IopJit::clear() {
     native_entry_success_count_ = 0u;
     compile_failure_count_ = 0u;
     load_delay_entry_retire_count_ = 0u;
+    native_delay_slot_count_ = 0u;
     compile_stop_opcodes_.fill(0u);
     delay_slot_stop_opcodes_.fill(0u);
     entry_rejects_.fill(0u);
@@ -1294,9 +1296,108 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
         }
     }
     if (cpu.next_is_delay_slot_) {
-        ++entry_rejects_[3];
-        return 0u;
+        ++native_entry_attempt_count_;
+
+        // The branch itself has already retired through the interpreter, so
+        // state.pc is the delay-slot PC and state.next_pc is the selected
+        // branch destination. The R3000A suppresses external interrupt entry
+        // until this slot completes, but Cause.IP still reflects the pin.
+        if (cpu.bus_.interrupt_pending()) {
+            cpu.state_.cop0[13] |= 0x00000400u;
+        } else {
+            cpu.state_.cop0[13] &= ~0x00000400u;
+        }
+
+        const u32 delay_pc = cpu.state_.pc;
+        const u32 branch_destination = cpu.state_.next_pc;
+        u32 instruction = 0u;
+        if (!cpu.bus_.read32(delay_pc, instruction)) {
+            ++entry_rejects_[3];
+            return 0u;
+        }
+
+        const u32 delay_hash = instruction * 2654435761u;
+        DelayEntry& delay_entry =
+            delay_entries_[
+                (static_cast<std::size_t>(delay_hash) *
+                 delay_entries_.size()) >> 32u];
+
+        if (!delay_entry.known ||
+            delay_entry.instruction != instruction) {
+            u32 compiled = 0u;
+            bool control = false;
+            bool uses_ram = false;
+            u32 store_mask = 0u;
+            u32 blocker_opcode = 64u;
+            bool blocker_is_delay_slot = true;
+            BlockFunction function = compile_block(
+                0u,
+                0xFFFFFFFFu,
+                &instruction,
+                1u,
+                compiled,
+                control,
+                uses_ram,
+                store_mask,
+                blocker_opcode,
+                blocker_is_delay_slot);
+
+            // A pending branch delay slot must retire exactly one instruction.
+            // Loads and nested branches intentionally remain on the exact
+            // interpreter path because they require additional architectural
+            // delay state; ALU/MMI/COP2 bodies, overflow-success cases and
+            // direct-RAM stores are safe here.
+            if (compiled != 1u || control) {
+                function = nullptr;
+            }
+            if (blocker_opcode < compile_stop_opcodes_.size()) {
+                ++compile_stop_opcodes_[blocker_opcode];
+                ++delay_slot_stop_opcodes_[blocker_opcode];
+            }
+            if (function == nullptr) {
+                ++compile_failure_count_;
+            }
+
+            delay_entry = {};
+            delay_entry.instruction = instruction;
+            delay_entry.function = function;
+            delay_entry.uses_ram = uses_ram;
+            delay_entry.known = true;
+        }
+
+        if (delay_entry.function == nullptr) {
+            ++entry_rejects_[3];
+            return 0u;
+        }
+
+        const u32 retired = delay_entry.function(
+            &cpu.state_,
+            cpu.bus_.jit_ram_data(),
+            cpu.bus_.jit_page_generations());
+        if (retired != 1u) {
+            if (delay_entry.uses_ram) ++guard_exit_count_;
+            ++entry_rejects_[3];
+            return 0u;
+        }
+
+        cpu.state_.last_pc = delay_pc;
+        cpu.state_.last_instruction = instruction;
+        cpu.state_.pc = branch_destination;
+        cpu.state_.next_pc = branch_destination + 4u;
+        cpu.next_is_delay_slot_ = false;
+        cpu.state_.gpr[0] = 0u;
+        ++cpu.state_.instructions_executed;
+
+        ++block_executed_count_;
+        ++instruction_count_;
+        ++native_entry_success_count_;
+        ++native_delay_slot_count_;
+        ++native_residency_instruction_count_;
+        if (native_residency_max_ < 1u) native_residency_max_ = 1u;
+        ++native_residency_histogram_[0];
+        return 1u;
     }
+
     if (cpu.bus_.interrupt_pending()) {
         ++entry_rejects_[4];
         return 0u;

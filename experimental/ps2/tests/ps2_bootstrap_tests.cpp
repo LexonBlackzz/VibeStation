@@ -4481,6 +4481,120 @@ bool test_iop_native_cop2_local_writes() {
     return ok;
 }
 
+
+bool test_iop_native_pending_branch_delay_slot() {
+    constexpr ps2::u32 pc = 0x000018B0u;
+    constexpr ps2::u32 target = pc + 0x20u;
+    const ps2::u32 branch =
+        (0x04u << 26) | (1u << 21) | (1u << 16) |
+        ((target - (pc + 4u)) / 4u);
+    const ps2::u32 delay =
+        (0x09u << 26) | (2u << 21) | (2u << 16) | 5u; // ADDIU r2,r2,5
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (auto* system : {&exact, &native}) {
+        ok = expect(
+            system->iop_ram().write32(pc, branch) &&
+            system->iop_ram().write32(pc + 4u, delay),
+            "IOP pending delay-slot setup failed") && ok;
+        system->iop().reset(pc);
+        system->iop().state().gpr[1] = 1u;
+        system->iop().state().gpr[2] = 7u;
+    }
+
+    std::string error;
+    ok = expect(
+        exact.iop().step_hot(error) &&
+        native.iop().step_hot(error),
+        "IOP branch setup for native delay slot failed") && ok;
+    ok = expect(
+        exact.iop().step_hot(error),
+        "IOP reference delay-slot execution failed") && ok;
+
+    const ps2::u32 retired = native.iop().run_native_quiet(1u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native.iop().jit_native_delay_slots() == 1u &&
+        native.iop().state().gpr[2] == exact.iop().state().gpr[2] &&
+        native.iop().state().pc == exact.iop().state().pc &&
+        native.iop().state().next_pc == exact.iop().state().next_pc &&
+        native.iop().state().last_pc == exact.iop().state().last_pc &&
+        native.iop().state().last_instruction ==
+            exact.iop().state().last_instruction,
+        "IOP native pending branch delay slot diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP pending delay slot unexpectedly ran native on non-x64") && ok;
+#endif
+
+    return ok;
+}
+
+bool test_iop_native_pending_branch_store_delay_slot() {
+    constexpr ps2::u32 pc = 0x000018D0u;
+    constexpr ps2::u32 target = pc + 0x20u;
+    constexpr ps2::u32 data = 0x00003000u;
+    const ps2::u32 branch =
+        (0x04u << 26) | (1u << 21) | (1u << 16) |
+        ((target - (pc + 4u)) / 4u);
+    const ps2::u32 delay =
+        (0x2Bu << 26) | (3u << 21) | (2u << 16); // SW r2,0(r3)
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (auto* system : {&exact, &native}) {
+        ok = expect(
+            system->iop_ram().write32(pc, branch) &&
+            system->iop_ram().write32(pc + 4u, delay),
+            "IOP pending store-delay setup failed") && ok;
+        system->iop().reset(pc);
+        system->iop().state().gpr[1] = 1u;
+        system->iop().state().gpr[2] = 0x1234ABCDu;
+        system->iop().state().gpr[3] = data;
+    }
+
+    std::string error;
+    ok = expect(
+        exact.iop().step_hot(error) &&
+        native.iop().step_hot(error),
+        "IOP store-delay branch setup failed") && ok;
+    ok = expect(
+        exact.iop().step_hot(error),
+        "IOP reference store delay slot failed") && ok;
+
+    const ps2::u32 retired = native.iop().run_native_quiet(1u);
+    native.iop_bus().tick(retired);
+    ps2::u32 exact_value = 0u;
+    ps2::u32 native_value = 0u;
+    ok = expect(
+        exact.iop_ram().read32(data, exact_value) &&
+        native.iop_ram().read32(data, native_value),
+        "IOP store-delay result read failed") && ok;
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native_value == exact_value &&
+        native_value == 0x1234ABCDu &&
+        native.iop().state().pc == exact.iop().state().pc &&
+        native.iop().state().next_pc == exact.iop().state().next_pc,
+        "IOP native pending store delay slot diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP store delay slot unexpectedly ran native on non-x64") && ok;
+#endif
+
+    return ok;
+}
+
 bool test_iop_native_compile_blocker_diagnostics() {
     constexpr ps2::u32 pc = 0x000018C0u;
     const std::array<ps2::u32, 2> prefix_stop = {
@@ -6696,6 +6810,8 @@ int main() {
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_iop_native_cop_load_delay_and_div() && ok;
     ok = test_iop_native_cop2_local_writes() && ok;
+    ok = test_iop_native_pending_branch_delay_slot() && ok;
+    ok = test_iop_native_pending_branch_store_delay_slot() && ok;
     ok = test_iop_native_compile_blocker_diagnostics() && ok;
     ok = test_iop_native_overflow_guard() && ok;
     ok = test_iop_native_cross_page_chain() && ok;

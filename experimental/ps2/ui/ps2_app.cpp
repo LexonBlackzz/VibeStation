@@ -1581,6 +1581,10 @@ void Ps2App::panel_profiler() {
         static_cast<unsigned long long>(
             system_.iop().jit_load_delay_entry_retires()));
     ImGui::Text(
+        "IOP pending branch delay slots run native: %llu",
+        static_cast<unsigned long long>(
+            system_.iop().jit_native_delay_slots()));
+    ImGui::Text(
         "IOP residency: avg %.1f instr   p50~%llu   p95~%llu   max %llu",
         iop_average_residency,
         static_cast<unsigned long long>(

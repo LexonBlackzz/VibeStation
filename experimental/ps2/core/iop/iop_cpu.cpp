@@ -988,6 +988,10 @@ u64 IopCpu::jit_load_delay_entry_retires() const {
     return jit_ ? jit_->load_delay_entry_retire_count() : 0u;
 }
 
+u64 IopCpu::jit_native_delay_slots() const {
+    return jit_ ? jit_->native_delay_slot_count() : 0u;
+}
+
 std::array<u64, 64> IopCpu::jit_compile_stop_opcodes() const {
     return jit_ ? jit_->compile_stop_opcodes()
                 : std::array<u64, 64>{};
