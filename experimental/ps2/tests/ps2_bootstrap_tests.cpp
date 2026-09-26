@@ -4288,6 +4288,108 @@ bool test_iop_native_r3000a_block() {
 }
 
 
+
+bool test_iop_native_cop_load_delay_and_div() {
+    constexpr ps2::u32 pc = 0x00001800u;
+    const std::array<ps2::u32, 4> code = {
+        (0x10u << 26) | (1u << 16) | (12u << 11),           // MFC0 r1,Status
+        (0x09u << 26) | (1u << 21) | (2u << 16) | 1u,      // delay: r2=r1(old)+1
+        (3u << 21) | (4u << 16) | 0x1Au,                   // DIV r3,r4
+        (5u << 11) | 0x12u,                                // MFLO r5
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP COP-load/DIV native code setup failed") && ok;
+    }
+
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[1] = 5u;
+    native.iop().state().gpr[1] = 5u;
+    exact.iop().state().cop0[12] = 0x00001234u;
+    native.iop().state().cop0[12] = 0x00001234u;
+    exact.iop().state().gpr[3] =
+        static_cast<ps2::u32>(static_cast<ps2::s32>(-12345));
+    native.iop().state().gpr[3] = exact.iop().state().gpr[3];
+    exact.iop().state().gpr[4] = 37u;
+    native.iop().state().gpr[4] = 37u;
+
+    std::string error;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP COP-load/DIV reference execution failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(
+            static_cast<ps2::u32>(code.size()));
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto& a = exact.iop().state();
+    const auto& b = native.iop().state();
+    ok = expect(
+        retired == code.size() &&
+        a.pc == b.pc &&
+        a.next_pc == b.next_pc &&
+        a.gpr[1] == b.gpr[1] &&
+        a.gpr[2] == b.gpr[2] &&
+        b.gpr[2] == 6u &&
+        a.lo == b.lo &&
+        a.hi == b.hi &&
+        a.gpr[5] == b.gpr[5],
+        "IOP native COP load-delay or DIV state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP COP-load/DIV native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
+bool test_iop_native_overflow_guard() {
+    constexpr ps2::u32 pc = 0x00001900u;
+    const std::array<ps2::u32, 2> code = {
+        (0x09u << 26) | (3u << 16) | 7u,                    // ADDIU r3,r0,7
+        (0x08u << 26) | (1u << 21) | (2u << 16) | 1u,      // ADDI r2,r1,1
+    };
+
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP overflow-guard code setup failed") && ok;
+    }
+    native.iop().reset(pc);
+    native.iop().state().gpr[1] = 0x7FFFFFFFu;
+
+    const ps2::u32 retired = native.iop().run_native_quiet(2u);
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == 1u &&
+        native.iop().state().pc == pc + 4u &&
+        native.iop().state().next_pc == pc + 8u &&
+        native.iop().state().gpr[3] == 7u &&
+        native.iop().state().gpr[2] == 0u,
+        "IOP native overflow guard did not stop before ADDI") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP overflow-guard native block ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_iop_native_cross_page_chain() {
     constexpr ps2::u32 pc = 0x00001FF0u;
     const std::array<ps2::u32, 7> code = {
@@ -6199,6 +6301,8 @@ int main() {
     ok = test_vif1_reverse_dma() && ok;
     ok = test_iop_native_load_delay() && ok;
     ok = test_iop_native_r3000a_block() && ok;
+    ok = test_iop_native_cop_load_delay_and_div() && ok;
+    ok = test_iop_native_overflow_guard() && ok;
     ok = test_iop_native_cross_page_chain() && ok;
     ok = test_ee_native_linear_block() && ok;
     ok = test_ee_native_extended_integer_block() && ok;
