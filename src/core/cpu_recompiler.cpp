@@ -1768,6 +1768,184 @@ V4NativeFn compile_v4_hilo(V4CodeArena &arena,
 }
 
 
+V4NativeFn compile_v4_pending_delay_muldiv(
+    V4CodeArena &arena, const V4DecodedMulDiv &inst, u32 &code_size) {
+  using namespace Xbyak;
+  constexpr size_t kReservation = 1024u;
+  void *buffer = arena.begin_emit(kReservation);
+  if (buffer == nullptr) {
+    return nullptr;
+  }
+  CodeGenerator code(kReservation, buffer);
+  code.setDefaultJmpNEAR(true);
+
+  // MULT/DIV may legally occupy a branch delay slot. Keep the full asynchronous
+  // HI/LO scoreboard in the resident context and retire the pending branch in
+  // generated x64.
+  Label muldiv_ready;
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))]);
+  code.mov(code.rcx, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rcx, code.rbx);
+  code.inc(code.rcx);
+  code.cmp(code.rax, code.rcx);
+  code.jbe(muldiv_ready);
+  code.sub(code.rax, code.rcx);
+  code.add(code.ebx, code.eax);
+  code.L(muldiv_ready);
+
+  emit_read_guest(code, code.eax, inst.rs);
+  emit_read_guest(code, code.ecx, inst.rt);
+
+  Label result_ready, div_zero, div_overflow;
+  u32 fixed_ticks = 0u;
+  switch (inst.op) {
+  case V4MulDivOp::Mult: {
+    code.mov(code.r8d, code.eax);
+    code.imul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label negative, ticks6, ticks9, ticks13, ticks_done;
+    code.test(code.r8d, code.r8d);
+    code.js(negative);
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.jmp(ticks13);
+    code.L(negative);
+    code.cmp(code.r8d, static_cast<u32>(-2048));
+    code.jae(ticks6);
+    code.cmp(code.r8d, static_cast<u32>(-1048576));
+    code.jae(ticks9);
+    code.L(ticks13);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Multu: {
+    code.mov(code.r8d, code.eax);
+    code.mul(code.ecx);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+
+    Label ticks6, ticks9, ticks_done;
+    code.cmp(code.r8d, 0x800u);
+    code.jb(ticks6);
+    code.cmp(code.r8d, 0x100000u);
+    code.jb(ticks9);
+    code.mov(code.edx, 13u);
+    code.jmp(ticks_done);
+    code.L(ticks9);
+    code.mov(code.edx, 9u);
+    code.jmp(ticks_done);
+    code.L(ticks6);
+    code.mov(code.edx, 6u);
+    code.L(ticks_done);
+    break;
+  }
+  case V4MulDivOp::Div:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.cmp(code.eax, 0x80000000u);
+    code.jne(div_overflow);
+    code.cmp(code.ecx, 0xFFFFFFFFu);
+    code.je(result_ready);
+    code.L(div_overflow);
+    code.cdq();
+    code.idiv(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    {
+      Label negative_dividend, div_zero_done;
+      code.mov(code.edx, code.eax);
+      code.test(code.eax, code.eax);
+      code.js(negative_dividend);
+      code.mov(code.eax, 0xFFFFFFFFu);
+      code.jmp(div_zero_done);
+      code.L(negative_dividend);
+      code.mov(code.eax, 1u);
+      code.L(div_zero_done);
+    }
+    code.jmp(result_ready);
+    // Signed overflow: quotient = INT_MIN, remainder = 0.
+    code.L(result_ready);
+    // If divisor was -1 with INT_MIN dividend EAX already contains INT_MIN;
+    // EDX is made zero below before committing the architectural result.
+    break;
+  case V4MulDivOp::Divu:
+    fixed_ticks = 36u;
+    code.test(code.ecx, code.ecx);
+    code.jz(div_zero);
+    code.xor_(code.edx, code.edx);
+    code.div(code.ecx);
+    code.jmp(result_ready);
+    code.L(div_zero);
+    code.mov(code.edx, code.eax);
+    code.mov(code.eax, 0xFFFFFFFFu);
+    code.L(result_ready);
+    break;
+  }
+
+  if (inst.op == V4MulDivOp::Div) {
+    // Repair the INT_MIN / -1 special case without relying on host #DE.
+    Label not_overflow_commit;
+    emit_read_guest(code, code.r8d, inst.rs);
+    emit_read_guest(code, code.r9d, inst.rt);
+    code.cmp(code.r8d, 0x80000000u);
+    code.jne(not_overflow_commit);
+    code.cmp(code.r9d, 0xFFFFFFFFu);
+    code.jne(not_overflow_commit);
+    code.mov(code.eax, 0x80000000u);
+    code.xor_(code.edx, code.edx);
+    code.L(not_overflow_commit);
+  }
+
+  if (inst.op == V4MulDivOp::Div || inst.op == V4MulDivOp::Divu) {
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, lo))], code.eax);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, hi))], code.edx);
+    code.mov(code.edx, fixed_ticks);
+  }
+
+  // ready_cycle = current issue cycle (including an older HI/LO stall) + latency.
+  code.mov(code.rax, code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
+  code.add(code.rax, code.rbx);
+  code.add(code.rax, code.rdx);
+  code.mov(code.qword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState,
+                                           muldiv_result_ready_cycle))],
+      code.rax);
+
+  emit_retire_incoming_load(code, 0u);
+  emit_v4_finish_pending_delay(code, 1u);
+  code.ready();
+
+  code_size = static_cast<u32>(code.getSize());
+  if (!arena.commit_emit(buffer, code_size)) {
+    return nullptr;
+  }
+  return reinterpret_cast<V4NativeFn>(buffer);
+}
+
+
+
 V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
                              const V4DecodedMulDiv &inst,
                              u32 start_pc,
