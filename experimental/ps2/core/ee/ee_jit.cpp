@@ -2017,6 +2017,9 @@ u32 EeJit::execute_block(
         if (!entry.known ||
             entry.pc != block_pc ||
             entry.page_generation != generation) {
+            if (words == nullptr || word_count == 0u) {
+                return nullptr;
+            }
             u32 compiled_instructions = 0;
             bool compiled_control_flow = false;
             bool compiled_uses_ram = false;
@@ -2053,11 +2056,13 @@ u32 EeJit::execute_block(
             entry.uses_ram = compiled_uses_ram;
             entry.ram_load_mask = 0u;
             entry.ram_store_mask = 0u;
+            entry.words = {};
             entry.guard_bail_streak = 0u;
             entry.guard_skip_remaining = 0u;
             for (u32 i = 0;
                  i < compiled_instructions && i < 32u;
                  ++i) {
+                entry.words[i] = words[i];
                 switch (words[i] >> 26) {
                 case 0x1Eu:
                 case 0x20u:
@@ -2213,7 +2218,7 @@ u32 EeJit::execute_block(
         state.last_pc =
             current_pc + (retired - 1u) * 4u;
         state.last_instruction =
-            current_words[retired - 1u];
+            entry->words[retired - 1u];
 
         if (!final_control_flow) {
             state.pc = current_pc + retired * 4u;
@@ -2260,6 +2265,20 @@ u32 EeJit::execute_block(
             current_page_generation =
                 EeRam::generation_from_metadata(
                     page_generations[current_code_page]);
+        }
+
+        // Hot cache hit: jump straight to the existing translation.
+        // Do not re-read up to 32 guest words on every native block boundary.
+        if (BlockEntry* cached = block_entry(
+                next_pc,
+                current_page_generation,
+                nullptr,
+                0u)) {
+            current_pc = next_pc;
+            current_words = cached->words.data();
+            current_count = cached->instruction_count;
+            if (current_count == 0u) break;
+            continue;
         }
 
         const u32 words_to_page_end =
