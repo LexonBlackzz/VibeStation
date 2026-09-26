@@ -1044,12 +1044,17 @@ V4NativeFn compile_v4_muldiv(V4CodeArena &arena,
     code.idiv(code.ecx);
     code.jmp(result_ready);
     code.L(div_zero);
-    code.mov(code.edx, code.eax);
-    code.mov(code.ecx, 1u);
-    code.test(code.eax, code.eax);
-    code.cmovns(code.eax, code.ecx);
-    code.not_(code.ecx);
-    code.cmovs(code.eax, code.ecx);
+    {
+      Label negative_dividend, div_zero_done;
+      code.mov(code.edx, code.eax);
+      code.test(code.eax, code.eax);
+      code.js(negative_dividend);
+      code.mov(code.eax, 0xFFFFFFFFu);
+      code.jmp(div_zero_done);
+      code.L(negative_dividend);
+      code.mov(code.eax, 1u);
+      code.L(div_zero_done);
+    }
     code.jmp(result_ready);
     // Signed overflow: quotient = INT_MIN, remainder = 0.
     code.L(result_ready);
