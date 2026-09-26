@@ -1114,6 +1114,16 @@ void emit_write_cop0(Xbyak::CodeGenerator &code, u8 reg,
   }
 }
 
+void emit_read_store_value(Xbyak::CodeGenerator &code,
+                           const V4DecodedStore &store,
+                           const Xbyak::Reg32 &dst) {
+  if (store.source_cop0) {
+    emit_read_cop0(code, dst, store.rt);
+  } else {
+    emit_read_guest(code, dst, store.rt);
+  }
+}
+
 u8 v4_alu_write_reg(const V4DecodedInstruction &inst) {
   switch (inst.op) {
   case V4AluOp::Nop:
@@ -3394,7 +3404,7 @@ V4NativeFn compile_v4_pending_delay_store(
   // Capture both store operands before retiring any incoming delayed load.
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
-  emit_read_guest(code, code.r8d, store.rt);
+  emit_read_store_value(code, store, code.r8d);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
       code.r8d);
@@ -4384,7 +4394,7 @@ V4NativeFn compile_v4_store_delay_branch(
 
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
-  emit_read_guest(code, code.r8d, store.rt);
+  emit_read_store_value(code, store, code.r8d);
   if (store.op == V4StoreOp::Sh) {
     code.test(code.eax, 1u);
     code.jnz(bail);
@@ -5165,7 +5175,7 @@ V4NativeFn compile_v4_store(
   // Capture both operands before retiring an incoming delayed load.
   emit_read_guest(code, code.eax, store.rs);
   code.add(code.eax, static_cast<u32>(store.simm));
-  emit_read_guest(code, code.r8d, store.rt);
+  emit_read_store_value(code, store, code.r8d);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
       code.r8d);
