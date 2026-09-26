@@ -135,6 +135,18 @@ public:
     const std::array<u64, 64>& native_fallback_opcodes() const {
         return native_fallback_opcodes_;
     }
+    const std::array<u64, 9>& quiet_ee_rejects() const {
+        return quiet_ee_rejects_;
+    }
+    u64 direct_native_entry_attempts() const {
+        return direct_native_entry_attempts_;
+    }
+    u64 direct_native_entry_successes() const {
+        return direct_native_entry_successes_;
+    }
+    u64 direct_native_entry_failures() const {
+        return direct_native_entry_failures_;
+    }
     const std::array<u64, 8>& idle_skip_reasons() const { return idle_skip_reasons_; }
     std::vector<std::pair<u32, u64>> quiet_block_hotspots(
         std::size_t limit = 32u) const;
@@ -207,6 +219,12 @@ private:
     bool profile_timing_enabled_=false;
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 64> native_fallback_opcodes_{};
+    // quiet_ee_rejects_: budget, SIF completion, VU, GS IRQ, DMA/SIF,
+    // pending EE IRQ, video edge, scheduler edge, too-small deadline.
+    std::array<u64, 9> quiet_ee_rejects_{};
+    u64 direct_native_entry_attempts_=0;
+    u64 direct_native_entry_successes_=0;
+    u64 direct_native_entry_failures_=0;
     std::array<u64, 8> idle_skip_reasons_{};
 };
 } // namespace ps2

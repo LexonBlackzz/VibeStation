@@ -46,6 +46,29 @@ public:
     [[nodiscard]] u64 cache_flush_count() const {
         return cache_flush_count_;
     }
+    [[nodiscard]] u64 run_call_count() const { return run_call_count_; }
+    [[nodiscard]] u64 native_entry_attempt_count() const {
+        return native_entry_attempt_count_;
+    }
+    [[nodiscard]] u64 native_entry_success_count() const {
+        return native_entry_success_count_;
+    }
+    [[nodiscard]] u64 compile_failure_count() const {
+        return compile_failure_count_;
+    }
+    [[nodiscard]] const std::array<u64, 5>& entry_rejects() const {
+        return entry_rejects_;
+    }
+    [[nodiscard]] u64 native_residency_instruction_count() const {
+        return native_residency_instruction_count_;
+    }
+    [[nodiscard]] u64 native_residency_max() const {
+        return native_residency_max_;
+    }
+    [[nodiscard]] const std::array<u64, 16>&
+    native_residency_histogram() const {
+        return native_residency_histogram_;
+    }
 
 private:
     using BlockFunction = u32 (*)(IopCpuState*, u8*, u32*);
@@ -88,6 +111,14 @@ private:
     u64 guard_exit_count_ = 0;
     u64 code_store_exit_count_ = 0;
     u64 cache_flush_count_ = 0;
+    u64 run_call_count_ = 0;
+    u64 native_entry_attempt_count_ = 0;
+    u64 native_entry_success_count_ = 0;
+    u64 compile_failure_count_ = 0;
+    std::array<u64, 5> entry_rejects_{};
+    u64 native_residency_instruction_count_ = 0;
+    u64 native_residency_max_ = 0;
+    std::array<u64, 16> native_residency_histogram_{};
 };
 
 } // namespace ps2

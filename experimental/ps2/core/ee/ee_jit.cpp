@@ -1906,6 +1906,12 @@ void EeJit::clear() {
     block_fastmem_store_count_ = 0;
     block_code_store_exit_count_ = 0;
     cache_flush_count_ = 0;
+    native_entry_attempt_count_ = 0;
+    native_entry_success_count_ = 0;
+    block_compile_failure_count_ = 0;
+    native_residency_instruction_count_ = 0;
+    native_residency_max_ = 0;
+    native_residency_histogram_.fill(0u);
 }
 
 EeJit::Function EeJit::compile(u32 instruction) {
@@ -2002,6 +2008,8 @@ u32 EeJit::execute_block(
         return 0;
     }
 
+    ++native_entry_attempt_count_;
+
     auto block_entry = [&](u32 block_pc,
                            u32 generation,
                            const u32* words,
@@ -2030,6 +2038,9 @@ u32 EeJit::execute_block(
                 compiled_instructions,
                 compiled_control_flow,
                 compiled_uses_ram);
+            if (function == nullptr || compiled_instructions == 0u) {
+                ++block_compile_failure_count_;
+            }
             if (page_generations != nullptr &&
                 compiled_instructions != 0u) {
                 const u32 block_physical =
@@ -2303,6 +2314,21 @@ u32 EeJit::execute_block(
         current_words = fetched_words;
     }
 
+    if (total_retired != 0u) {
+        ++native_entry_success_count_;
+        native_residency_instruction_count_ += total_retired;
+        if (total_retired > native_residency_max_) {
+            native_residency_max_ = total_retired;
+        }
+        u32 residency_bucket = 0u;
+        u32 residency_value = total_retired;
+        while (residency_value > 1u &&
+               residency_bucket + 1u < native_residency_histogram_.size()) {
+            residency_value >>= 1u;
+            ++residency_bucket;
+        }
+        ++native_residency_histogram_[residency_bucket];
+    }
     control_flow = final_control_flow;
     return total_retired;
 #else

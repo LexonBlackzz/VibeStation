@@ -1056,6 +1056,14 @@ void IopJit::clear() {
     guard_exit_count_ = 0u;
     code_store_exit_count_ = 0u;
     cache_flush_count_ = 0u;
+    run_call_count_ = 0u;
+    native_entry_attempt_count_ = 0u;
+    native_entry_success_count_ = 0u;
+    compile_failure_count_ = 0u;
+    entry_rejects_.fill(0u);
+    native_residency_instruction_count_ = 0u;
+    native_residency_max_ = 0u;
+    native_residency_histogram_.fill(0u);
 }
 
 IopJit::BlockFunction IopJit::compile_block(
@@ -1120,14 +1128,28 @@ IopJit::BlockFunction IopJit::compile_block(
 
 u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
 #if defined(VIBESTATION_IOP_JIT_X64)
-    if (maximum_instructions == 0u ||
-        cpu.halted_ ||
-        cpu.pending_load_.valid ||
-        cpu.next_load_.valid ||
-        cpu.next_is_delay_slot_ ||
-        cpu.bus_.interrupt_pending()) {
+    ++run_call_count_;
+    if (maximum_instructions == 0u) {
+        ++entry_rejects_[0];
         return 0u;
     }
+    if (cpu.halted_) {
+        ++entry_rejects_[1];
+        return 0u;
+    }
+    if (cpu.pending_load_.valid || cpu.next_load_.valid) {
+        ++entry_rejects_[2];
+        return 0u;
+    }
+    if (cpu.next_is_delay_slot_) {
+        ++entry_rejects_[3];
+        return 0u;
+    }
+    if (cpu.bus_.interrupt_pending()) {
+        ++entry_rejects_[4];
+        return 0u;
+    }
+    ++native_entry_attempt_count_;
 
     auto code_domain = [&](u32 pc,
                            u32& generation,
@@ -1206,6 +1228,9 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
                 control,
                 uses_ram,
                 store_mask);
+            if (function == nullptr || compiled == 0u) {
+                ++compile_failure_count_;
+            }
 
             entry = {};
             entry.pc = current_pc;
@@ -1297,6 +1322,21 @@ u32 IopJit::run(IopCpu& cpu, u32 maximum_instructions) {
     }
 
     if (chained_blocks > 1u) ++chain_count_;
+    if (retired_total != 0u) {
+        ++native_entry_success_count_;
+        native_residency_instruction_count_ += retired_total;
+        if (retired_total > native_residency_max_) {
+            native_residency_max_ = retired_total;
+        }
+        u32 residency_bucket = 0u;
+        u32 residency_value = retired_total;
+        while (residency_value > 1u &&
+               residency_bucket + 1u < native_residency_histogram_.size()) {
+            residency_value >>= 1u;
+            ++residency_bucket;
+        }
+        ++native_residency_histogram_[residency_bucket];
+    }
     cpu.state_.instructions_executed += retired_total;
     cpu.state_.gpr[0] = 0u;
     return retired_total;

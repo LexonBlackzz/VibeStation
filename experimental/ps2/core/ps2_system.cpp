@@ -292,6 +292,10 @@ void Ps2System::reset(u32 entry_point) {
         quiet_ee_blocks_.end(),
         QuietEeBlock{});
     native_fallback_opcodes_.fill(0);
+    quiet_ee_rejects_.fill(0);
+    direct_native_entry_attempts_ = 0;
+    direct_native_entry_successes_ = 0;
+    direct_native_entry_failures_ = 0;
     idle_skip_reasons_.fill(0);
 }
 Ps2System::QuietEeBlock* Ps2System::quiet_ee_block(u32 pc) {
@@ -1328,9 +1332,20 @@ u64 Ps2System::try_skip_hot_sif_getreg(
 
 u64 Ps2System::try_run_quiet_ee_batch(
     u64 budget, std::string& error) {
-    if (budget < 2u ||
-        sif_dma_.ee_completion_pending() ||
-        vu0_.running() || vu1_.running() || gs_.irq_pending()) {
+    if (budget < 2u) {
+        ++quiet_ee_rejects_[0];
+        return 0;
+    }
+    if (sif_dma_.ee_completion_pending()) {
+        ++quiet_ee_rejects_[1];
+        return 0;
+    }
+    if (vu0_.running() || vu1_.running()) {
+        ++quiet_ee_rejects_[2];
+        return 0;
+    }
+    if (gs_.irq_pending()) {
+        ++quiet_ee_rejects_[3];
         return 0;
     }
 
@@ -1353,6 +1368,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
         !sif_dma_.sif1_completion_pending();
     if ((active_dma & ~sif_channels) != 0u ||
         sif0_needs_service || sif1_needs_service) {
+        ++quiet_ee_rejects_[4];
         return 0;
     }
 
@@ -1367,6 +1383,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
     if ((cause & status & 0x0000FF00u) != 0u &&
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0u) {
+        ++quiet_ee_rejects_[5];
         return 0;
     }
 
@@ -1379,7 +1396,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     // still ticked on the exact due IOP instruction by
     // advance_iop_for_ee_cycles().
     const u64 video_room = video_timing_.cycles_to_transition();
-    if (video_room <= 1u) return 0;
+    if (video_room <= 1u) {
+        ++quiet_ee_rejects_[6];
+        return 0;
+    }
 
     u64 maximum = std::min<u64>(budget, kQuietEeBatchLimit);
     maximum = std::min<u64>(maximum, video_room - 1u);
@@ -1389,7 +1409,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
     // return to the system layer before the next EE instruction can observe
     // post-event state.
     if (const auto next_event = scheduler_.next_event_time()) {
-        if (*next_event <= scheduler_.now()) return 0;
+        if (*next_event <= scheduler_.now()) {
+            ++quiet_ee_rejects_[7];
+            return 0;
+        }
         maximum = std::min<u64>(
             maximum, *next_event - scheduler_.now());
     }
@@ -1470,7 +1493,10 @@ u64 Ps2System::try_run_quiet_ee_batch(
             maximum >>= 1u;
         }
     }
-    if (maximum < 2u) return 0;
+    if (maximum < 2u) {
+        ++quiet_ee_rejects_[8];
+        return 0;
+    }
 
     std::chrono::steady_clock::time_point ee_profile_begin{};
     if (profile_timing_enabled_) {
@@ -1607,10 +1633,64 @@ u64 Ps2System::try_run_quiet_ee_batch(
             }
         }
 
+        // JIT-first RAM entry: do not require the legacy quiet-block
+        // classifier to bless a block before the recompiler gets to see it.
+        // Feed raw direct-RAM words to EeJit; it decides how long a native
+        // prefix is valid and can keep chaining from its own block cache.
+        bool direct_native_attempted = false;
+        if (defer_ee_tick && ee_.jit_enabled()) {
+            const u32 native_pc = ee_.state().pc;
+            const u32 physical = EeBus::to_physical(native_pc);
+            if ((native_pc & 3u) == 0u &&
+                native_pc < 0xC0000000u &&
+                physical <= ram_.size() - sizeof(u32)) {
+                const u32 remaining =
+                    static_cast<u32>(maximum - retired);
+                const u32 words_to_page =
+                    (EeRam::kPageSize -
+                     (physical & (EeRam::kPageSize - 1u))) / 4u;
+                const u32 word_count =
+                    std::min<u32>(
+                        32u, std::min(remaining, words_to_page));
+                u32 words[32]{};
+                u32 valid = 0u;
+                for (; valid < word_count; ++valid) {
+                    if (!ram_.read32(
+                            physical + valid * 4u,
+                            words[valid])) {
+                        break;
+                    }
+                }
+                if (valid != 0u) {
+                    direct_native_attempted = true;
+                    ++direct_native_entry_attempts_;
+                    const u32 native_retired = ee_.run_native_block(
+                        native_pc,
+                        ram_.page_generation(physical),
+                        words,
+                        valid,
+                        remaining,
+                        ram_.data(),
+                        ram_.page_generation_data(),
+                        0x0024DE74u,
+                        scratchpad_.data());
+                    if (native_retired != 0u) {
+                        ++direct_native_entry_successes_;
+                        retired += native_retired;
+                        quiet_block_instructions_ += native_retired;
+                        progressed = true;
+                        continue;
+                    }
+                    ++direct_native_entry_failures_;
+                }
+            }
+        }
+
         if (QuietEeBlock* block = quiet_ee_block(ee_.state().pc)) {
             const u32 block_pc = block->pc;
 
-            if (defer_ee_tick && ee_.jit_enabled()) {
+            if (defer_ee_tick && ee_.jit_enabled() &&
+                !direct_native_attempted) {
                 const u32 native_retired = ee_.run_native_block(
                     block_pc,
                     block->page_generation,
