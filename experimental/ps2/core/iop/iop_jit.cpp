@@ -467,6 +467,31 @@ bool emit_body(u32 instruction, Emitter& out) {
                 out.emit32(immediate << 16u);
             }
             break;
+        case 0x12u: { // COP2/GTE local write subset
+            const u32 cop_rs = rs;
+            if (cop_rs == 0x04u || cop_rs == 0x06u) {
+                out.load_eax(rt);
+                const u32 offset = static_cast<u32>(
+                    (cop_rs == 0x04u
+                        ? offsetof(IopCpuState, gte_data)
+                        : offsetof(IopCpuState, gte_ctrl)) +
+                    rd * sizeof(u32));
+                out.store_state_eax(offset);
+                destination = 0u;
+            } else if (cop_rs >= 0x10u) {
+                // PS2-mode IOP behavior mirrors execute_cop2(): geometry is
+                // not evaluated during BIOS capability probes; FLAG clears.
+                out.store_state_imm32(
+                    static_cast<u32>(
+                        offsetof(IopCpuState, gte_ctrl) +
+                        31u * sizeof(u32)),
+                    0u);
+                destination = 0u;
+            } else {
+                return false;
+            }
+            break;
+        }
         default:
             return false;
         }

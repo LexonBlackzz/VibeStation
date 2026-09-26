@@ -4423,6 +4423,64 @@ bool test_iop_native_cop_load_delay_and_div() {
 }
 
 
+
+bool test_iop_native_cop2_local_writes() {
+    constexpr ps2::u32 pc = 0x000018A0u;
+    const std::array<ps2::u32, 3> code = {
+        (0x12u << 26) | (0x04u << 21) | (1u << 16) | (3u << 11), // MTC2
+        (0x12u << 26) | (0x06u << 21) | (2u << 16) | (5u << 11), // CTC2
+        (0x12u << 26) | (0x10u << 21), // PS2-mode GTE probe command
+    };
+
+    ps2::Ps2System exact;
+    ps2::Ps2System native;
+    bool ok = true;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop_ram().write32(pc + i * 4u, code[i]) &&
+            native.iop_ram().write32(pc + i * 4u, code[i]),
+            "IOP COP2 local-write setup failed") && ok;
+    }
+    exact.iop().reset(pc);
+    native.iop().reset(pc);
+    exact.iop().state().gpr[1] = 0x12345678u;
+    native.iop().state().gpr[1] = 0x12345678u;
+    exact.iop().state().gpr[2] = 0x89ABCDEFu;
+    native.iop().state().gpr[2] = 0x89ABCDEFu;
+    exact.iop().state().gte_ctrl[31] = 0xFFFFFFFFu;
+    native.iop().state().gte_ctrl[31] = 0xFFFFFFFFu;
+
+    std::string error;
+    for (ps2::u32 i = 0u; i < code.size(); ++i) {
+        ok = expect(
+            exact.iop().step_hot(error),
+            "IOP COP2 local-write reference failed") && ok;
+    }
+
+    const ps2::u32 retired =
+        native.iop().run_native_quiet(
+            static_cast<ps2::u32>(code.size()));
+    native.iop_bus().tick(retired);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    ok = expect(
+        retired == code.size() &&
+        exact.iop().state().gte_data[3] ==
+            native.iop().state().gte_data[3] &&
+        exact.iop().state().gte_ctrl[5] ==
+            native.iop().state().gte_ctrl[5] &&
+        native.iop().state().gte_data[3] == 0x12345678u &&
+        native.iop().state().gte_ctrl[5] == 0x89ABCDEFu &&
+        native.iop().state().gte_ctrl[31] == 0u,
+        "IOP native COP2 local-write state diverged") && ok;
+#else
+    ok = expect(
+        retired == 0u,
+        "IOP COP2 local-write block unexpectedly ran on non-x64") && ok;
+#endif
+    return ok;
+}
+
 bool test_iop_native_compile_blocker_diagnostics() {
     constexpr ps2::u32 pc = 0x000018C0u;
     const std::array<ps2::u32, 2> prefix_stop = {
@@ -6637,6 +6695,7 @@ int main() {
     ok = test_iop_native_entry_with_pending_load() && ok;
     ok = test_iop_native_r3000a_block() && ok;
     ok = test_iop_native_cop_load_delay_and_div() && ok;
+    ok = test_iop_native_cop2_local_writes() && ok;
     ok = test_iop_native_compile_blocker_diagnostics() && ok;
     ok = test_iop_native_overflow_guard() && ok;
     ok = test_iop_native_cross_page_chain() && ok;
