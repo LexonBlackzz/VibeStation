@@ -4043,6 +4043,25 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_split_scheduler_cop0.require_v4_cop0_native_when_available = true;
   cases.push_back(v4_split_scheduler_cop0);
 
+  CpuCompareCase v4_split_scheduler_cop2{};
+  v4_split_scheduler_cop2.name = "v4_split_scheduler_cop2_delay_native";
+  v4_split_scheduler_cop2.start_pc = 0xA0010000u;
+  v4_split_scheduler_cop2.initial_gpr[1] = 1u;
+  v4_split_scheduler_cop2.initial_gpr[2] = 0x44332211u;
+  v4_split_scheduler_cop2.program = {
+      enc_i(0x05, 1, 0, 1), // BNE taken.
+      (0x12u << 26) | (4u << 21) | (2u << 16) | (6u << 11), // MTC2 data 6.
+      (0x12u << 26) | (0u << 21) | (3u << 16) | (6u << 11), // MFC2 data 6.
+      0u, // Retire the MFC2 load delay.
+  };
+  v4_split_scheduler_cop2.instructions = 4u;
+  v4_split_scheduler_cop2.segment_instructions = {1u, 3u};
+  v4_split_scheduler_cop2.compare_segment_states = true;
+  v4_split_scheduler_cop2.require_v4_native_entry_when_available = true;
+  v4_split_scheduler_cop2.require_v4_pending_delay_native_when_available = true;
+  v4_split_scheduler_cop2.require_v4_cop2_native_when_available = true;
+  cases.push_back(v4_split_scheduler_cop2);
+
   CpuCompareCase v4_split_scheduler_addi{};
   v4_split_scheduler_addi.name = "v4_split_scheduler_addi_delay_native";
   v4_split_scheduler_addi.start_pc = 0xA0010000u;
