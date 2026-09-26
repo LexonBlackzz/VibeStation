@@ -1,0 +1,92 @@
+#pragma once
+
+#include "common/types.h"
+
+#include <array>
+#include <cstddef>
+#include <vector>
+
+namespace ps2 {
+
+class IopCpu;
+struct IopCpuState;
+
+// Native x64 execution tier for the PS2 IOP's R3000A.
+//
+// This is intentionally shaped after VibeStation's mature PS1 V4 backend:
+// cache translated blocks, keep execution resident across basic blocks, use
+// direct RAM stores when they are provably safe, and return to the existing
+// interpreter for architectural corners which are not native yet.
+class IopJit {
+public:
+    IopJit() = default;
+    ~IopJit();
+    IopJit(const IopJit&) = delete;
+    IopJit& operator=(const IopJit&) = delete;
+
+    u32 run(IopCpu& cpu, u32 maximum_instructions);
+    void clear();
+
+    [[nodiscard]] u64 block_compiled_count() const {
+        return block_compiled_count_;
+    }
+    [[nodiscard]] u64 block_executed_count() const {
+        return block_executed_count_;
+    }
+    [[nodiscard]] u64 instruction_count() const {
+        return instruction_count_;
+    }
+    [[nodiscard]] u64 chain_count() const { return chain_count_; }
+    [[nodiscard]] u64 guard_exit_count() const {
+        return guard_exit_count_;
+    }
+    [[nodiscard]] u64 code_store_exit_count() const {
+        return code_store_exit_count_;
+    }
+    [[nodiscard]] u64 cache_flush_count() const {
+        return cache_flush_count_;
+    }
+
+private:
+    using BlockFunction = u32 (*)(IopCpuState*, u8*, u32*);
+
+    struct BlockEntry {
+        u32 pc = 0;
+        u32 generation = 0;
+        u8 instruction_count = 0;
+        BlockFunction function = nullptr;
+        bool control_flow = false;
+        bool uses_ram = false;
+        u32 ram_store_mask = 0;
+        bool known = false;
+    };
+
+    struct Page {
+        void* address = nullptr;
+        std::size_t used = 0;
+    };
+
+    BlockFunction compile_block(
+        u32 pc,
+        u32 code_page,
+        const u32* words,
+        u32 word_count,
+        u32& compiled_instructions,
+        bool& control_flow,
+        bool& uses_ram,
+        u32& ram_store_mask);
+    void release_code_cache();
+
+    std::vector<BlockEntry> entries_{32768};
+    std::vector<Page> pages_{};
+
+    u64 block_compiled_count_ = 0;
+    u64 block_executed_count_ = 0;
+    u64 instruction_count_ = 0;
+    u64 chain_count_ = 0;
+    u64 guard_exit_count_ = 0;
+    u64 code_store_exit_count_ = 0;
+    u64 cache_flush_count_ = 0;
+};
+
+} // namespace ps2
