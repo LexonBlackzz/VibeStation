@@ -5719,19 +5719,27 @@ bool test_ee_ram_page_generation() {
     constexpr ps2::u32 page0 = 0x1000u;
     constexpr ps2::u32 page1 = 0x2000u;
 
-    system.ram().track_code_page(page0);
-    system.ram().track_code_page(page1);
+    // Translating a small code span must not make unrelated data in the same
+    // 4 KiB page self-modifying code.
+    system.ram().track_code_range(page0 + 0x20u, 32u);
     const ps2::u32 g0 = system.ram().page_generation(page0);
-    const ps2::u32 g1 = system.ram().page_generation(page1);
-
     bool ok = expect(
-        system.bus().write32(page0 + 0x20u, 0x12345678u),
-        "EE RAM generation write setup failed");
+        system.bus().write32(page0 + 0x600u, 0xCAFEBABEu),
+        "EE RAM unrelated-region write setup failed");
     ok = expect(
-        system.ram().page_generation(page0) == g0 + 1u &&
-        system.ram().page_generation(page1) == g1,
-        "EE RAM page generation changed the wrong page") && ok;
+        system.ram().page_generation(page0) == g0,
+        "EE RAM unrelated same-page data write invalidated code") && ok;
 
+    ok = expect(
+        system.bus().write32(page0 + 0x20u, 0x12345678u),
+        "EE RAM translated-region write setup failed") && ok;
+    ok = expect(
+        system.ram().page_generation(page0) == g0 + 1u,
+        "EE RAM translated-region write did not invalidate code") && ok;
+
+    // A write crossing a page boundary must invalidate both pages when both
+    // touched regions contain translated code.
+    system.ram().track_code_range(page1 - 8u, 16u);
     const ps2::u32 g0_cross = system.ram().page_generation(page0);
     const ps2::u32 g1_cross = system.ram().page_generation(page1);
     ok = expect(
@@ -5740,7 +5748,7 @@ bool test_ee_ram_page_generation() {
     ok = expect(
         system.ram().page_generation(page0) == g0_cross + 1u &&
         system.ram().page_generation(page1) == g1_cross + 1u,
-        "EE RAM cross-page write did not invalidate both pages") && ok;
+        "EE RAM cross-page write did not invalidate both translated regions") && ok;
     return ok;
 }
 
