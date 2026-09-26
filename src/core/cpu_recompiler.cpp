@@ -1893,6 +1893,7 @@ V4NativeFn compile_v4_pending_delay_store(
         static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
     emit_unaligned_store();
     code.mov(code.dword[code.rcx + code.rdx], code.eax);
+    code.mov(code.r9d, 5u);
   } else {
     switch (store.op) {
     case V4StoreOp::Sb:
@@ -1941,8 +1942,8 @@ V4NativeFn compile_v4_pending_delay_store(
     default:
       break;
     }
+    code.mov(code.r9d, 1u);
   }
-  code.mov(code.r9d, 1u);
 
   code.L(stored);
   emit_retire_incoming_load(code, 0u);
@@ -3211,10 +3212,27 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
   code.jz(guard_exit);
-  switch (store.op) {
-  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
-  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.eax, code.dword[code.rcx + code.rdx]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.dword[code.rcx + code.rdx], code.eax);
+  } else {
+    switch (store.op) {
+    case V4StoreOp::Sb:
+      code.mov(code.byte[code.rcx + code.rdx], code.r8b);
+      break;
+    case V4StoreOp::Sh:
+      code.mov(code.word[code.rcx + code.rdx], code.r8w);
+      break;
+    case V4StoreOp::Sw:
+      code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      break;
+    default:
+      break;
+    }
   }
   code.xor_(code.r9d, code.r9d);
   code.jmp(stored);
@@ -3228,12 +3246,31 @@ V4NativeFn compile_v4_store(
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
   code.jz(guard_exit);
-  switch (store.op) {
-  case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
-  case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
+    code.mov(code.eax, code.dword[code.rcx + code.rdx]);
+    code.mov(code.r9d, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_byte_offset))]);
+    emit_unaligned_store();
+    code.mov(code.dword[code.rcx + code.rdx], code.eax);
+    // SWL/SWR are RAM read-modify-write operations: 4 read wait cycles + 1 write.
+    code.mov(code.r9d, 5u);
+  } else {
+    switch (store.op) {
+    case V4StoreOp::Sb:
+      code.mov(code.byte[code.rcx + code.rdx], code.r8b);
+      break;
+    case V4StoreOp::Sh:
+      code.mov(code.word[code.rcx + code.rdx], code.r8w);
+      break;
+    case V4StoreOp::Sw:
+      code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      break;
+    default:
+      break;
+    }
+    code.mov(code.r9d, 1u);
   }
-  code.mov(code.r9d, 1u);
 
   code.L(stored);
 
