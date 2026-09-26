@@ -36,6 +36,69 @@ constexpr std::size_t kStutterHistoryFrames =
 constexpr std::size_t kStutterQueueTargetFrames =
     static_cast<std::size_t>(Spu2::kSampleRate) * 80u / 1000u;
 
+const char* ee_major_opcode_name(u32 opcode) {
+    switch (opcode & 63u) {
+    case 0x00u: return "SPECIAL";
+    case 0x01u: return "REGIMM";
+    case 0x02u: return "J";
+    case 0x03u: return "JAL";
+    case 0x04u: return "BEQ";
+    case 0x05u: return "BNE";
+    case 0x06u: return "BLEZ";
+    case 0x07u: return "BGTZ";
+    case 0x08u: return "ADDI";
+    case 0x09u: return "ADDIU";
+    case 0x0Au: return "SLTI";
+    case 0x0Bu: return "SLTIU";
+    case 0x0Cu: return "ANDI";
+    case 0x0Du: return "ORI";
+    case 0x0Eu: return "XORI";
+    case 0x0Fu: return "LUI";
+    case 0x10u: return "COP0";
+    case 0x11u: return "COP1";
+    case 0x12u: return "COP2";
+    case 0x14u: return "BEQL";
+    case 0x15u: return "BNEL";
+    case 0x16u: return "BLEZL";
+    case 0x17u: return "BGTZL";
+    case 0x18u: return "DADDI";
+    case 0x19u: return "DADDIU";
+    case 0x1Au: return "LDL";
+    case 0x1Bu: return "LDR";
+    case 0x1Cu: return "MMI";
+    case 0x1Eu: return "LQ";
+    case 0x1Fu: return "SQ";
+    case 0x20u: return "LB";
+    case 0x21u: return "LH";
+    case 0x22u: return "LWL";
+    case 0x23u: return "LW";
+    case 0x24u: return "LBU";
+    case 0x25u: return "LHU";
+    case 0x26u: return "LWR";
+    case 0x27u: return "LWU";
+    case 0x28u: return "SB";
+    case 0x29u: return "SH";
+    case 0x2Au: return "SWL";
+    case 0x2Bu: return "SW";
+    case 0x2Cu: return "SDL";
+    case 0x2Du: return "SDR";
+    case 0x2Eu: return "SWR";
+    case 0x2Fu: return "CACHE";
+    case 0x30u: return "LL";
+    case 0x31u: return "LWC1";
+    case 0x33u: return "PREF";
+    case 0x34u: return "LLD";
+    case 0x36u: return "LQC2";
+    case 0x37u: return "LD";
+    case 0x38u: return "SC";
+    case 0x39u: return "SWC1";
+    case 0x3Cu: return "SCD";
+    case 0x3Eu: return "SQC2";
+    case 0x3Fu: return "SD";
+    default: return "OP";
+    }
+}
+
 } // namespace
 
 bool Ps2App::init() {
@@ -1109,6 +1172,63 @@ void Ps2App::panel_main() {
         static_cast<unsigned long long>(vu_stats.instructions),
         static_cast<unsigned long long>(vu_stats.xgkicks));
 
+    ImGui::Separator();
+    ImGui::TextUnformatted("Rolling profiler");
+    ImGui::Text(
+        "Native EE: %.1f MIPS   %.1f%% of retired EE",
+        profile_native_mips_,
+        profile_native_coverage_percent_);
+    ImGui::Text(
+        "Native blocks: %.0f/s   %.1f instr/block",
+        profile_native_blocks_per_second_,
+        profile_average_native_block_);
+    ImGui::Text(
+        "Native exits: %.0f guard/s   %.0f code-store/s   %.1f cache flush/s",
+        profile_guard_bailouts_per_second_,
+        profile_code_store_exits_per_second_,
+        profile_cache_flushes_per_second_);
+    ImGui::Text(
+        "IOP: %.1f MIPS   VU1: %.1f MIPS",
+        profile_iop_mips_,
+        profile_vu1_mips_);
+    ImGui::Text(
+        "Host run thread: EE %.1f%%   IOP %.1f%%   VU %.1f%%   other %.1f%%",
+        profile_host_ee_percent_,
+        profile_host_iop_percent_,
+        profile_host_vu_percent_,
+        profile_host_other_percent_);
+    ImGui::TextDisabled(
+        "EE coverage = native JIT-retired instructions / all retired EE instructions.");
+
+    std::array<std::pair<double, u32>, 64> fallback_rates{};
+    for (u32 opcode = 0; opcode < 64u; ++opcode) {
+        fallback_rates[opcode] = {
+            profile_fallbacks_per_second_[opcode], opcode};
+    }
+    std::sort(
+        fallback_rates.begin(),
+        fallback_rates.end(),
+        [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        });
+    bool any_fallback = false;
+    for (std::size_t i = 0; i < 6u; ++i) {
+        if (fallback_rates[i].first <= 0.0) break;
+        if (!any_fallback) {
+            ImGui::TextUnformatted("Top native fallback opcodes:");
+            any_fallback = true;
+        }
+        ImGui::BulletText(
+            "%s (0x%02X): %.0f exits/s",
+            ee_major_opcode_name(fallback_rates[i].second),
+            fallback_rates[i].second,
+            fallback_rates[i].first);
+    }
+    if (!any_fallback && system_.ee().jit_enabled()) {
+        ImGui::TextDisabled("Top native fallback opcodes: none in this sample");
+    }
+
+    ImGui::Separator();
     ImGui::Text("IOP state");
     ImGui::SameLine(190.0f);
     if (system_.iop_halted()) {
@@ -1795,6 +1915,24 @@ bool Ps2App::start_bios() {
     guest_frames_per_second_ = 0.0;
     emulation_speed_percent_ = 0.0;
 
+    const auto& jit = system_.ee().jit();
+    profile_sample_native_instructions_ = jit.block_instruction_count();
+    profile_sample_native_blocks_ = jit.block_executed_count();
+    profile_sample_guard_bailouts_ = jit.block_guard_bailout_count();
+    profile_sample_code_store_exits_ = jit.block_code_store_exit_count();
+    profile_sample_cache_flushes_ = jit.cache_flush_count();
+    profile_sample_run_ns_ = system_.profile_run_ns();
+    profile_sample_ee_ns_ = system_.profile_ee_ns();
+    profile_sample_iop_ns_ = system_.profile_iop_ns();
+    profile_sample_vu_ns_ = system_.profile_vu_ns();
+    profile_sample_iop_instructions_ =
+        system_.iop().state().instructions_executed;
+    profile_sample_vu1_instructions_ =
+        system_.vu1().stats().instructions;
+    profile_sample_fallback_opcodes_ =
+        system_.native_fallback_opcodes();
+    profile_fallbacks_per_second_.fill(0.0);
+
     char message[160]{};
     std::snprintf(
         message,
@@ -1936,10 +2074,128 @@ void Ps2App::update_emulation() {
         const u64 fields =
             system_.video_fields_started();
 
+        const u64 ee_delta =
+            instructions - speed_sample_instructions_;
         ee_instructions_per_second_ =
-            static_cast<double>(
-                instructions - speed_sample_instructions_) /
+            static_cast<double>(ee_delta) /
             sample_seconds;
+
+        const auto& jit = system_.ee().jit();
+        const u64 native_instructions =
+            jit.block_instruction_count();
+        const u64 native_blocks =
+            jit.block_executed_count();
+        const u64 guard_bailouts =
+            jit.block_guard_bailout_count();
+        const u64 code_store_exits =
+            jit.block_code_store_exit_count();
+        const u64 cache_flushes =
+            jit.cache_flush_count();
+
+        const u64 native_delta =
+            native_instructions - profile_sample_native_instructions_;
+        const u64 native_block_delta =
+            native_blocks - profile_sample_native_blocks_;
+        const u64 guard_delta =
+            guard_bailouts - profile_sample_guard_bailouts_;
+        const u64 code_store_delta =
+            code_store_exits - profile_sample_code_store_exits_;
+        const u64 cache_flush_delta =
+            cache_flushes - profile_sample_cache_flushes_;
+
+        profile_native_mips_ =
+            static_cast<double>(native_delta) /
+            sample_seconds / 1'000'000.0;
+        profile_native_coverage_percent_ =
+            ee_delta != 0u
+                ? static_cast<double>(native_delta) * 100.0 /
+                    static_cast<double>(ee_delta)
+                : 0.0;
+        profile_native_blocks_per_second_ =
+            static_cast<double>(native_block_delta) /
+            sample_seconds;
+        profile_average_native_block_ =
+            native_block_delta != 0u
+                ? static_cast<double>(native_delta) /
+                    static_cast<double>(native_block_delta)
+                : 0.0;
+        profile_guard_bailouts_per_second_ =
+            static_cast<double>(guard_delta) / sample_seconds;
+        profile_code_store_exits_per_second_ =
+            static_cast<double>(code_store_delta) / sample_seconds;
+        profile_cache_flushes_per_second_ =
+            static_cast<double>(cache_flush_delta) / sample_seconds;
+
+        const u64 iop_instructions =
+            system_.iop().state().instructions_executed;
+        profile_iop_mips_ =
+            static_cast<double>(
+                iop_instructions - profile_sample_iop_instructions_) /
+            sample_seconds / 1'000'000.0;
+
+        const u64 vu1_instructions =
+            system_.vu1().stats().instructions;
+        profile_vu1_mips_ =
+            static_cast<double>(
+                vu1_instructions - profile_sample_vu1_instructions_) /
+            sample_seconds / 1'000'000.0;
+
+        const u64 run_ns = system_.profile_run_ns();
+        const u64 ee_ns = system_.profile_ee_ns();
+        const u64 iop_ns = system_.profile_iop_ns();
+        const u64 vu_ns = system_.profile_vu_ns();
+        const u64 run_delta = run_ns - profile_sample_run_ns_;
+        const u64 ee_ns_delta = ee_ns - profile_sample_ee_ns_;
+        const u64 iop_ns_delta = iop_ns - profile_sample_iop_ns_;
+        const u64 vu_ns_delta = vu_ns - profile_sample_vu_ns_;
+        const u64 accounted_ns =
+            ee_ns_delta + iop_ns_delta + vu_ns_delta;
+        const u64 other_ns =
+            run_delta > accounted_ns
+                ? run_delta - accounted_ns
+                : 0u;
+        if (run_delta != 0u) {
+            const double scale =
+                100.0 / static_cast<double>(run_delta);
+            profile_host_ee_percent_ =
+                static_cast<double>(ee_ns_delta) * scale;
+            profile_host_iop_percent_ =
+                static_cast<double>(iop_ns_delta) * scale;
+            profile_host_vu_percent_ =
+                static_cast<double>(vu_ns_delta) * scale;
+            profile_host_other_percent_ =
+                static_cast<double>(other_ns) * scale;
+        } else {
+            profile_host_ee_percent_ = 0.0;
+            profile_host_iop_percent_ = 0.0;
+            profile_host_vu_percent_ = 0.0;
+            profile_host_other_percent_ = 0.0;
+        }
+
+        const auto& fallback_opcodes =
+            system_.native_fallback_opcodes();
+        for (u32 opcode = 0; opcode < 64u; ++opcode) {
+            profile_fallbacks_per_second_[opcode] =
+                static_cast<double>(
+                    fallback_opcodes[opcode] -
+                    profile_sample_fallback_opcodes_[opcode]) /
+                sample_seconds;
+            profile_sample_fallback_opcodes_[opcode] =
+                fallback_opcodes[opcode];
+        }
+
+        profile_sample_native_instructions_ = native_instructions;
+        profile_sample_native_blocks_ = native_blocks;
+        profile_sample_guard_bailouts_ = guard_bailouts;
+        profile_sample_code_store_exits_ = code_store_exits;
+        profile_sample_cache_flushes_ = cache_flushes;
+        profile_sample_run_ns_ = run_ns;
+        profile_sample_ee_ns_ = ee_ns;
+        profile_sample_iop_ns_ = iop_ns;
+        profile_sample_vu_ns_ = vu_ns;
+        profile_sample_iop_instructions_ = iop_instructions;
+        profile_sample_vu1_instructions_ = vu1_instructions;
+
         guest_fields_per_second_ =
             static_cast<double>(
                 fields - speed_sample_fields_) /
@@ -1970,6 +2226,20 @@ void Ps2App::update_emulation() {
 void Ps2App::reset_core() {
     emulation_running_ = false;
     ee_instructions_per_second_ = 0.0;
+    profile_native_mips_ = 0.0;
+    profile_iop_mips_ = 0.0;
+    profile_vu1_mips_ = 0.0;
+    profile_native_coverage_percent_ = 0.0;
+    profile_native_blocks_per_second_ = 0.0;
+    profile_average_native_block_ = 0.0;
+    profile_guard_bailouts_per_second_ = 0.0;
+    profile_code_store_exits_per_second_ = 0.0;
+    profile_cache_flushes_per_second_ = 0.0;
+    profile_host_ee_percent_ = 0.0;
+    profile_host_iop_percent_ = 0.0;
+    profile_host_vu_percent_ = 0.0;
+    profile_host_other_percent_ = 0.0;
+    profile_fallbacks_per_second_.fill(0.0);
     reset_audio_stutter();
     if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     system_.reset(0);
