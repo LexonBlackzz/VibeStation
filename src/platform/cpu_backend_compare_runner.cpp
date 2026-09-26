@@ -689,13 +689,15 @@ static CpuCompareRunResult run_cpu_compare_case_once(
         sys->cpu().run_slice(test_case.run_slice_cycle_budget,
                              instruction_count);
     if (mode == CpuExecutionMode::Recompiler &&
-        segment.instructions != instruction_count) {
+        segment.instructions != instruction_count &&
+        segment.cycles < test_case.run_slice_cycle_budget) {
       LOG_WARN(
           "CPU_COMPARE_SEGMENT_SHORT name=%s index=%zu requested=%u retired=%u "
-          "pc=0x%08X next=0x%08X cycles=%u",
+          "pc=0x%08X next=0x%08X cycles=%u budget=%u",
           test_case.name, segment_index, instruction_count,
           segment.instructions, sys->cpu().debug_state().pc,
-          sys->cpu().debug_state().next_pc, segment.cycles);
+          sys->cpu().debug_state().next_pc, segment.cycles,
+          test_case.run_slice_cycle_budget);
     }
     out.run.cycles += segment.cycles;
     out.run.instructions += segment.instructions;
