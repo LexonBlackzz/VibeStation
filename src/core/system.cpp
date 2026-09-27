@@ -1678,8 +1678,24 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         run_cycles,
                         cpu_instruction_slice - instructions_executed);
                     if (run.cycles == 0 || run.instructions == 0) {
-                        run.cycles = cpu_.step();
-                        run.instructions = 1;
+                        if (effective_cpu_execution_mode() ==
+                            CpuExecutionMode::Recompiler) {
+                            // The experimental recompiler is a native-only
+                            // engine. Retry the exact architectural boundary
+                            // with its one-instruction native fragment; never
+                            // hide a missing fragment by interpreting it.
+                            run = cpu_.run_slice(run_cycles, 1u);
+                            if (run.cycles == 0 || run.instructions == 0) {
+                                LOG_ERROR(
+                                    "CPU: native recompiler made no progress "
+                                    "at PC=0x%08X budget=%u",
+                                    cpu_.debug_state().pc, run_cycles);
+                                return;
+                            }
+                        } else {
+                            run.cycles = cpu_.step();
+                            run.instructions = 1;
+                        }
                     }
                     const u32 consumed = run.cycles;
                     if (consumed == 0) {

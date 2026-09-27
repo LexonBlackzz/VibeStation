@@ -6258,7 +6258,7 @@ V4NativeFn compile_v4_load(
         static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
     code.jb(ram);
     code.cmp(code.edx, 0x1F800000u);
-    code.jb(slow_exit);
+    code.jb(device);
     code.cmp(code.edx, 0x1F801000u);
     code.jb(scratch);
     if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
@@ -9275,6 +9275,15 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       // next_load_ and a non-sequential next_pc without pending branch metadata
       // are not valid instruction-boundary states. Do not hide an internal
       // pipeline bug by interpreting an instruction; leave the slice unchanged.
+      LOG_ERROR(
+          "CPU: native recompiler unsafe boundary pc=0x%08X next=0x%08X "
+          "load=r%u:0x%08X next_load=r%u:0x%08X delay=%u taken=%u "
+          "branch_pc=0x%08X delay_fn=%p",
+          cpu_.pc_, cpu_.next_pc_, static_cast<unsigned>(cpu_.load_.reg),
+          cpu_.load_.value, static_cast<unsigned>(cpu_.next_load_.reg),
+          cpu_.next_load_.value, cpu_.pending_delay_slot_ ? 1u : 0u,
+          cpu_.pending_branch_taken_ ? 1u : 0u, cpu_.pending_branch_pc_,
+          reinterpret_cast<void *>(pending_delay_fn));
       break;
     }
 
@@ -9487,6 +9496,29 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         // a scheduler-budget exit. No guest instruction has executed.
         continue;
       }
+      LOG_ERROR(
+          "CPU: native zero-progress dispatch pc=0x%08X cycles=%u/%u "
+          "budget=%u block=%p fn=%p budget_fn=%p instructions=%u "
+          "bits=0x%08X rs=r%u:0x%08X rt=r%u:0x%08X "
+          "missing=%u epoch=%u memory=%u generation=%u budget_exit=%u "
+          "bail=%u",
+          native.pc, native.cycles, remaining_cycles,
+          remaining_instructions, static_cast<void *>(block),
+          block != nullptr ? reinterpret_cast<void *>(block->fn) : nullptr,
+          block != nullptr ? reinterpret_cast<void *>(block->budget_fn)
+                           : nullptr,
+          block != nullptr ? block->instruction_count : 0u,
+          block != nullptr ? block->guest_bits[0] : 0u,
+          block != nullptr ? ((block->guest_bits[0] >> 21u) & 31u) : 0u,
+          block != nullptr
+              ? cpu_.gpr_[(block->guest_bits[0] >> 21u) & 31u]
+              : 0u,
+          block != nullptr ? ((block->guest_bits[0] >> 16u) & 31u) : 0u,
+          block != nullptr
+              ? cpu_.gpr_[(block->guest_bits[0] >> 16u) & 31u]
+              : 0u,
+          native.missing_exits, native.epoch_exits, native.memory_exits,
+          native.generation_exits, native.budget_exits, native.bail_exits);
       ++stats_.native_reject_budget;
       ++stats_.budget_exits;
       // Native-only invariant: never execute the blocked instruction through a

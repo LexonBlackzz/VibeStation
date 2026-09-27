@@ -3598,6 +3598,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(cdrom_status_helper);
   cases.push_back(cdrom_status_helper);
 
+  CpuCompareCase expansion_bus_load{};
+  expansion_bus_load.name = "v4_expansion_bus_load_native";
+  expansion_bus_load.initial_gpr[1] = 0x1F000084u;
+  expansion_bus_load.program = {
+      enc_i(0x20, 1, 2, 0), // LB from BIOS expansion/device space
+      0,                    // retire the load delay
+  };
+  expansion_bus_load.require_full_native_when_available = true;
+  expansion_bus_load.require_native_memory_helper_when_available = true;
+  expansion_bus_load.require_native_mmio_when_available = true;
+  expansion_bus_load.require_no_native_ram_load_fastpath = true;
+  expansion_bus_load.require_v4_native_entry_when_available = true;
+  expansion_bus_load.require_v4_native_load_entry_when_available = true;
+  expansion_bus_load.require_v4_mmio_native_when_available = true;
+  pad_cpu_compare_program(expansion_bus_load);
+  cases.push_back(expansion_bus_load);
+
   CpuCompareCase scratchpad_slow_load{};
   scratchpad_slow_load.name = "native_scratchpad_load_stays_helper";
   scratchpad_slow_load.initial_gpr[1] = 0x1F800000u;
