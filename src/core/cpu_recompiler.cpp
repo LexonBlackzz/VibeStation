@@ -6139,11 +6139,23 @@ V4NativeFn compile_v4_load(
   }
   emit_v4_alu_cache_flush(code, prefix_cache);
   if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
-    code.test(code.eax, 1u);
-    code.jnz(unaligned);
+    if (constant_address) {
+      if ((*constant_address & 1u) != 0u) {
+        code.jmp(unaligned);
+      }
+    } else {
+      code.test(code.eax, 1u);
+      code.jnz(unaligned);
+    }
   } else if (load.op == V4LoadOp::Lw) {
-    code.test(code.eax, 3u);
-    code.jnz(unaligned);
+    if (constant_address) {
+      if ((*constant_address & 3u) != 0u) {
+        code.jmp(unaligned);
+      }
+    } else {
+      code.test(code.eax, 3u);
+      code.jnz(unaligned);
+    }
   }
 
   auto emit_memory_read = [&]() {
@@ -6225,7 +6237,12 @@ V4NativeFn compile_v4_load(
     code.jmp(device);
   }
   code.L(scratch);
-  code.sub(code.edx, 0x1F800000u);
+  if (constant_region_known && constant_phys >= 0x1F800000u &&
+      constant_phys < 0x1F801000u) {
+    code.mov(code.edx, constant_phys - 0x1F800000u);
+  } else {
+    code.sub(code.edx, 0x1F800000u);
+  }
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
@@ -6235,7 +6252,9 @@ V4NativeFn compile_v4_load(
   code.jmp(loaded);
 
   code.L(ram);
-  code.and_(code.edx, psx::RAM_SIZE - 1u);
+  if (!(constant_region_known && constant_phys < psx::RAM_SIZE)) {
+    code.and_(code.edx, psx::RAM_SIZE - 1u);
+  }
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
   code.test(code.rcx, code.rcx);
@@ -6715,11 +6734,23 @@ V4NativeFn compile_v4_store(
       code.r8d);
 
   if (store.op == V4StoreOp::Sh) {
-    code.test(code.eax, 1u);
-    code.jnz(unaligned);
+    if (constant_address) {
+      if ((*constant_address & 1u) != 0u) {
+        code.jmp(unaligned);
+      }
+    } else {
+      code.test(code.eax, 1u);
+      code.jnz(unaligned);
+    }
   } else if (store.op == V4StoreOp::Sw) {
-    code.test(code.eax, 3u);
-    code.jnz(unaligned);
+    if (constant_address) {
+      if ((*constant_address & 3u) != 0u) {
+        code.jmp(unaligned);
+      }
+    } else {
+      code.test(code.eax, 3u);
+      code.jnz(unaligned);
+    }
   }
 
   if (constant_address) {
@@ -6912,7 +6943,12 @@ V4NativeFn compile_v4_store(
   code.jmp(stored);
 
   code.L(scratch);
-  code.sub(code.edx, 0x1F800000u);
+  if (constant_region_known && constant_phys >= 0x1F800000u &&
+      constant_phys < 0x1F801000u) {
+    code.mov(code.edx, constant_phys - 0x1F800000u);
+  } else {
+    code.sub(code.edx, 0x1F800000u);
+  }
   code.mov(code.rcx, code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scratchpad))]);
   code.test(code.rcx, code.rcx);
@@ -6943,7 +6979,9 @@ V4NativeFn compile_v4_store(
   code.jmp(stored);
 
   code.L(ram);
-  code.and_(code.edx, psx::RAM_SIZE - 1u);
+  if (!(constant_region_known && constant_phys < psx::RAM_SIZE)) {
+    code.and_(code.edx, psx::RAM_SIZE - 1u);
+  }
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
