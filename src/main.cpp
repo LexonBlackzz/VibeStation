@@ -2394,7 +2394,8 @@ static bool load_debug_snapshot_file(const std::string &path,
 static int run_debug_snapshot_frame(const std::string &bios_path,
                                     const std::string &bin_path,
                                     const std::string &cue_path,
-                                    const std::string &snapshot_path) {
+                                    const std::string &snapshot_path,
+                                    int run_frames) {
   auto sys = std::make_unique<System>();
   if (!sys->load_bios(bios_path) || !sys->load_game(bin_path, cue_path) ||
       !sys->boot_disc()) {
@@ -2411,13 +2412,20 @@ static int run_debug_snapshot_frame(const std::string &bios_path,
   sys->set_input_recorder(nullptr);
   sys->cpu().flush_cpu_backend();
   const auto before = sys->cpu().debug_state();
-  sys->run_frame(false);
+  const int frames_to_run = std::max(1, run_frames);
+  for (int i = 0; i < frames_to_run; ++i) {
+    // GT2 movie input is neutral throughout the current 2862-2950
+    // investigation window, so snapshot continuation needs no recorder.
+    sys->sio().set_button_state(0xFFFFu);
+    sys->run_frame(false);
+    sys->debug_log_frame_state();
+  }
   const auto after = sys->cpu().debug_state();
   std::fprintf(
       stderr,
-      "SNAP_FRAME_DONE mode=%u pc0=%08X pc1=%08X cyc0=%llu cyc1=%llu "
+      "SNAP_FRAME_DONE mode=%u frames=%d pc0=%08X pc1=%08X cyc0=%llu cyc1=%llu "
       "delta=%llu cd=%llu/%llu sio=%llu\n",
-      static_cast<unsigned>(effective_cpu_execution_mode()),
+      static_cast<unsigned>(effective_cpu_execution_mode()), frames_to_run,
       before.pc, after.pc,
       static_cast<unsigned long long>(before.cycles),
       static_cast<unsigned long long>(after.cycles),
@@ -3732,8 +3740,13 @@ int main(int argc, char *argv[]) {
   }
   if (passthrough.size() >= 5 &&
       passthrough[0] == "--debug-snapshot-frame") {
+    const int debug_run_frames =
+        passthrough.size() >= 6
+            ? std::max(1, std::atoi(passthrough[5].c_str()))
+            : 1;
     const int rc = run_debug_snapshot_frame(
-        passthrough[1], passthrough[2], passthrough[3], passthrough[4]);
+        passthrough[1], passthrough[2], passthrough[3], passthrough[4],
+        debug_run_frames);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
