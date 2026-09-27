@@ -1807,9 +1807,77 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
                 }
             }
+            const bool cd_irq_focus =
+                sched_detail && detail_index >= 3623u && detail_index <= 3627u;
+            if (cd_irq_focus) {
+                std::fprintf(
+                    stderr,
+                    "CDIRQ_PRE idx=%llu scan=%u spent=%u cpu=%llu pc=%08X "
+                    "istat=%08X en=%02X flag=%02X linepend=%u linedelay=%d "
+                    "cmd_busy=%u cmd_delay=%d second=%u/%d/%u async=%u/%d/%u "
+                    "redeliver=%u/%d state=%d pending=%d queued=%zu "
+                    "data=%u/%u lba=%d active=%d\n",
+                    static_cast<unsigned long long>(detail_index), scanline,
+                    spent_in_slice,
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    cpu_.debug_state().pc, irq_.stat(),
+                    static_cast<unsigned>(cdrom_.debug_interrupt_enable()),
+                    static_cast<unsigned>(cdrom_.debug_interrupt_flag()),
+                    cdrom_.debug_irq_line_request_pending() ? 1u : 0u,
+                    cdrom_.debug_irq_line_delay_cycles(),
+                    cdrom_.debug_command_busy() ? 1u : 0u,
+                    cdrom_.busy_cycles_remaining(),
+                    cdrom_.debug_pending_second_active() ? 1u : 0u,
+                    cdrom_.debug_pending_second_delay(),
+                    static_cast<unsigned>(cdrom_.debug_pending_second_irq()),
+                    cdrom_.debug_pending_async_active() ? 1u : 0u,
+                    cdrom_.debug_pending_async_delay(),
+                    static_cast<unsigned>(cdrom_.debug_pending_async_irq()),
+                    cdrom_.debug_sector_redelivery_pending() ? 1u : 0u,
+                    cdrom_.debug_sector_redelivery_delay(),
+                    cdrom_.debug_state(), cdrom_.debug_pending_cycles(),
+                    cdrom_.debug_queued_sector_count(),
+                    cdrom_.sector_data_ready() ? 1u : 0u,
+                    cdrom_.sector_data_request() ? 1u : 0u,
+                    cdrom_.current_read_lba(), cdrom_.active_data_lba());
+            }
+
             if (spent_in_slice > 0) {
                 mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);
+            }
+
+            if (cd_irq_focus) {
+                std::fprintf(
+                    stderr,
+                    "CDIRQ_POST idx=%llu scan=%u spent=%u cpu=%llu pc=%08X "
+                    "istat=%08X en=%02X flag=%02X linepend=%u linedelay=%d "
+                    "cmd_busy=%u cmd_delay=%d second=%u/%d/%u async=%u/%d/%u "
+                    "redeliver=%u/%d state=%d pending=%d queued=%zu "
+                    "data=%u/%u lba=%d active=%d\n",
+                    static_cast<unsigned long long>(detail_index), scanline,
+                    spent_in_slice,
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    cpu_.debug_state().pc, irq_.stat(),
+                    static_cast<unsigned>(cdrom_.debug_interrupt_enable()),
+                    static_cast<unsigned>(cdrom_.debug_interrupt_flag()),
+                    cdrom_.debug_irq_line_request_pending() ? 1u : 0u,
+                    cdrom_.debug_irq_line_delay_cycles(),
+                    cdrom_.debug_command_busy() ? 1u : 0u,
+                    cdrom_.busy_cycles_remaining(),
+                    cdrom_.debug_pending_second_active() ? 1u : 0u,
+                    cdrom_.debug_pending_second_delay(),
+                    static_cast<unsigned>(cdrom_.debug_pending_second_irq()),
+                    cdrom_.debug_pending_async_active() ? 1u : 0u,
+                    cdrom_.debug_pending_async_delay(),
+                    static_cast<unsigned>(cdrom_.debug_pending_async_irq()),
+                    cdrom_.debug_sector_redelivery_pending() ? 1u : 0u,
+                    cdrom_.debug_sector_redelivery_delay(),
+                    cdrom_.debug_state(), cdrom_.debug_pending_cycles(),
+                    cdrom_.debug_queued_sector_count(),
+                    cdrom_.sector_data_ready() ? 1u : 0u,
+                    cdrom_.sector_data_request() ? 1u : 0u,
+                    cdrom_.current_read_lba(), cdrom_.active_data_lba());
             }
 
             if (sched_detail) {
