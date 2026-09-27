@@ -739,6 +739,10 @@ struct V4NativeState {
   u32 exception_raised = 0;
   u32 exception_return_sr = 0;
   u32 exception_return_bd = 0;
+  // CPU wait cycles charged synchronously by C++ device bridges while native
+  // code is resident. The block-return trampoline folds this into ebx so
+  // scheduler budgets see the same cost as Cpu::step().
+  u32 *external_cycle_penalty = nullptr;
   u32 cycles = 0;
   u32 instructions = 0;
   u32 cycle_budget = 0;
@@ -8038,6 +8042,14 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
 
   code.L(after_block);
   block_return = const_cast<u8 *>(code.getCurr());
+  // Device MMIO can synchronously execute DMA and charge CPU wait cycles.
+  // Fold those charges into the resident native cycle count before any
+  // direct-link or scheduler-budget decision.
+  code.mov(code.rax, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, external_cycle_penalty))]);
+  code.mov(code.ecx, code.dword[code.rax]);
+  code.add(code.ebx, code.ecx);
+  code.mov(code.dword[code.rax], 0u);
   code.cmp(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
@@ -8439,12 +8451,21 @@ struct CpuRecompilerBackend::Impl {
         crossline_branch_enabled && cacheable && count < decode_limit &&
         count + 1u == decode_limit &&
         (branch_pc & 0x0Fu) == 0x0Cu;
+    // A control instruction at the head of a block remains valid even when its
+    // delay slot falls beyond this block's decode window (for example, the
+    // last word of a 4 KiB page). Compile only the branch head and let the
+    // pending-delay path lower the next-page instruction independently.
+    const bool control_head_split_candidate =
+        count == 0u && count < decode_limit &&
+        !control_pair_within_decode_limit && !control_pair_cross_line;
     const bool control_candidate =
-        (control_pair_within_decode_limit || control_pair_cross_line) &&
+        (control_pair_within_decode_limit || control_pair_cross_line ||
+         control_head_split_candidate) &&
         read_visible(branch_pc, control_bits) &&
         decode_v4_control(control_bits, control);
     const bool delay_visible =
-        control_candidate && read_visible(branch_pc + 4u, delay_bits);
+        control_candidate && !control_head_split_candidate &&
+        read_visible(branch_pc + 4u, delay_bits);
     const bool likely_control =
         count == 0u && control_candidate && v4_control_is_likely(control);
     const bool simple_control =
@@ -9115,6 +9136,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.exception_raised = 0u;
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
+    native.external_cycle_penalty = &cpu_.cycle_penalty_;
     native.cycles = 0u;
     native.instructions = 0u;
     native.cycle_budget = max_cycles - result.cycles;
@@ -9131,7 +9153,10 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.revalidate_attempts = 0u;
     native.revalidate_successes = 0u;
 
+    cpu_.cycle_penalty_ = 0u;
+    cpu_.executing_step_ = true;
     impl_->resident_dispatch(&native);
+    cpu_.executing_step_ = false;
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
 
@@ -9435,6 +9460,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.exception_raised = 0u;
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
+    native.external_cycle_penalty = &cpu_.cycle_penalty_;
     native.cycles = 0u;
     native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
@@ -9450,7 +9476,10 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.icache_refills = 0u;
     native.revalidate_attempts = 0u;
     native.revalidate_successes = 0u;
+    cpu_.cycle_penalty_ = 0u;
+    cpu_.executing_step_ = true;
     impl_->resident_dispatch(&native);
+    cpu_.executing_step_ = false;
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
     stats_.native_direct_link_transitions += native.direct_links;

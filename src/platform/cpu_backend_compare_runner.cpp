@@ -4004,6 +4004,27 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_crossline_cold_delay.require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_crossline_cold_delay);
 
+  CpuCompareCase v4_uncached_page_boundary_delay{};
+  v4_uncached_page_boundary_delay.name =
+      "v4_uncached_page_boundary_branch_delay_stays_native";
+  v4_uncached_page_boundary_delay.start_pc = 0xA0010FFCu;
+  v4_uncached_page_boundary_delay.initial_gpr[1] = 1u;
+  v4_uncached_page_boundary_delay.program = {
+      enc_i(0x04, 1, 1, 4),
+      enc_i(0x09, 0, 5, 0x0055),
+      0u,
+      0u,
+      0u,
+      enc_i(0x09, 0, 6, 0x0066),
+  };
+  v4_uncached_page_boundary_delay.instructions = 2u;
+  v4_uncached_page_boundary_delay.require_v4_native_entry_when_available = true;
+  v4_uncached_page_boundary_delay
+      .require_v4_native_branch_entry_when_available = true;
+  v4_uncached_page_boundary_delay
+      .require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_uncached_page_boundary_delay);
+
   CpuCompareCase v4_split_scheduler_beq{};
   v4_split_scheduler_beq.name = "v4_split_scheduler_beq_delay_state";
   v4_split_scheduler_beq.start_pc = 0xA0010000u;
