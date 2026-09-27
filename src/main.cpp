@@ -3688,7 +3688,7 @@ int main(int argc, char *argv[]) {
     }
     return rc;
   }
-  if (passthrough.size() >= 6 &&
+  if (passthrough.size() >= 5 &&
       passthrough[0] == "--debug-snapshot-frame") {
     const int rc = run_debug_snapshot_frame(
         passthrough[1], passthrough[2], passthrough[3], passthrough[4]);
