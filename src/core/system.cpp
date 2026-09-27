@@ -1738,7 +1738,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             u32 instructions_executed = 0;
             u32 detail_run_index = 0;
             const bool run_detail_focus =
-                sched_detail && detail_index == 2383u;
+                sched_detail && detail_index == 303u;
             if (optimized_cpu_mode) {
                 while (cycles_remaining > 0 &&
                        spent_in_slice < target_slice_cycles &&
