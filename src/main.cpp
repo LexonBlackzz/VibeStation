@@ -2404,7 +2404,7 @@ static int run_debug_snapshot_frame(const std::string &bios_path,
       stderr,
       "SNAP_FRAME_DONE mode=%u pc0=%08X pc1=%08X cyc0=%llu cyc1=%llu "
       "delta=%llu cd=%llu/%llu sio=%llu\n",
-      static_cast<unsigned>(sys->effective_cpu_execution_mode()),
+      static_cast<unsigned>(effective_cpu_execution_mode()),
       before.pc, after.pc,
       static_cast<unsigned long long>(before.cycles),
       static_cast<unsigned long long>(after.cycles),
