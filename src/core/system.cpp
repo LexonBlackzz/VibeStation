@@ -1736,6 +1736,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             const u64 detail_sio_io_before = boot_diag_.sio_io_count;
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
+            u32 detail_run_index = 0;
+            const bool run_detail_focus =
+                sched_detail && detail_index >= 3412u && detail_index <= 3414u;
             if (optimized_cpu_mode) {
                 while (cycles_remaining > 0 &&
                        spent_in_slice < target_slice_cycles &&
@@ -1747,9 +1750,29 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         sio_event_cycles == 0u
                         ? remaining_slice_cycles
                         : std::min(remaining_slice_cycles, sio_event_cycles);
+                    const u32 detail_run_pc0 = cpu_.debug_state().pc;
+                    const u64 detail_run_cpu0 = cpu_.cycle_count();
+                    const u32 detail_run_budget =
+                        cpu_instruction_slice - instructions_executed;
                     CpuRunSliceResult run = cpu_.run_slice(
-                        run_cycles,
-                        cpu_instruction_slice - instructions_executed);
+                        run_cycles, detail_run_budget);
+                    if (run_detail_focus) {
+                        std::fprintf(
+                            stderr,
+                            "SCHED_RUN idx=%llu sub=%u opt=1 "
+                            "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
+                            "reqcy=%u reqins=%u retcy=%u retins=%u "
+                            "spent0=%u remain0=%u sio_dead=%u boundary=%u\n",
+                            static_cast<unsigned long long>(detail_index),
+                            detail_run_index++, detail_run_pc0,
+                            cpu_.debug_state().pc,
+                            static_cast<unsigned long long>(detail_run_cpu0),
+                            static_cast<unsigned long long>(cpu_.cycle_count()),
+                            run_cycles, detail_run_budget, run.cycles,
+                            run.instructions, spent_in_slice, cycles_remaining,
+                            sio_event_cycles,
+                            cpu_timing_boundary_requested_ ? 1u : 0u);
+                    }
                     if (run.cycles == 0 || run.instructions == 0) {
                         if (effective_cpu_execution_mode() ==
                             CpuExecutionMode::Recompiler) {
@@ -1790,8 +1813,29 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             } else {
                 while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
                        instructions_executed < cpu_instruction_slice) {
+                    const u32 detail_run_pc0 = cpu_.debug_state().pc;
+                    const u64 detail_run_cpu0 = cpu_.cycle_count();
+                    const u32 detail_run_cycles =
+                        target_slice_cycles - spent_in_slice;
                     const CpuRunSliceResult run =
-                        cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
+                        cpu_.run_slice(detail_run_cycles, 1u);
+                    if (run_detail_focus) {
+                        std::fprintf(
+                            stderr,
+                            "SCHED_RUN idx=%llu sub=%u opt=0 "
+                            "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
+                            "reqcy=%u reqins=1 retcy=%u retins=%u "
+                            "spent0=%u remain0=%u sio_dead=%u boundary=%u\n",
+                            static_cast<unsigned long long>(detail_index),
+                            detail_run_index++, detail_run_pc0,
+                            cpu_.debug_state().pc,
+                            static_cast<unsigned long long>(detail_run_cpu0),
+                            static_cast<unsigned long long>(cpu_.cycle_count()),
+                            detail_run_cycles, run.cycles, run.instructions,
+                            spent_in_slice, cycles_remaining,
+                            sio_.cycles_until_event(),
+                            cpu_timing_boundary_requested_ ? 1u : 0u);
+                    }
                     const u32 consumed = run.cycles;
                     if (consumed == 0) {
                         break;
