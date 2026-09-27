@@ -3950,6 +3950,33 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_pending_delay_native_when_available = true;
   cases.push_back(v4_pending_delay_refill_budget_boundary);
 
+  CpuCompareCase v4_icache_branch_refill_budget_boundary{};
+  v4_icache_branch_refill_budget_boundary.name =
+      "v4_icache_refill_crossing_budget_retires_started_branch";
+  v4_icache_branch_refill_budget_boundary.start_pc = 0x8001000Cu;
+  v4_icache_branch_refill_budget_boundary.program = {
+      enc_i(0x09, 0, 1, 1),          // cold-line ADDIU: 4 refill + 1
+      enc_j(0x03, 0x80010020u),       // next cold line: refill crosses budget
+      enc_i(0x09, 0, 2, 0x22),        // delay slot must remain pending
+      0u,
+      0u,
+      enc_i(0x09, 0, 3, 0x33),        // JAL target
+  };
+  // After the first instruction the slice has consumed 5/8 cycles. Fetching
+  // JAL costs four more and therefore crosses the deadline. Cpu::step() has
+  // already started JAL, so it must still retire the branch itself (2 cycles)
+  // and stop before the delay slot: 11 cycles / 2 instructions total.
+  v4_icache_branch_refill_budget_boundary.instructions = 4u;
+  v4_icache_branch_refill_budget_boundary.run_slice_cycle_budget = 8u;
+  v4_icache_branch_refill_budget_boundary.compare_segment_states = true;
+  v4_icache_branch_refill_budget_boundary
+      .require_v4_native_entry_when_available = true;
+  v4_icache_branch_refill_budget_boundary
+      .require_v4_native_branch_entry_when_available = true;
+  v4_icache_branch_refill_budget_boundary
+      .require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_icache_branch_refill_budget_boundary);
+
   CpuCompareCase v4_icache_cycle_budget_boundary{};
   v4_icache_cycle_budget_boundary.name =
       "v4_icache_alias_preserves_cycle_budget_boundary";

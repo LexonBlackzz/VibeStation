@@ -7987,16 +7987,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
           code.r14 + static_cast<int>(offsetof(V4Block, budget_fn))]);
       code.test(code.rax, code.rax);
       code.jz(budget_exit);
-      code.cmp(code.byte[
-          code.r14 +
-          static_cast<int>(offsetof(V4Block, budget_requires_empty_chain))], 0u);
-      code.je(refill_fragment_ready);
-      // Empty-chain fragments are legal here when this is still the first
-      // architectural instruction of the dispatcher invocation.
-      code.cmp(code.r12d, code.dword[
-          code.r11 +
-          static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
-      code.jne(budget_exit);
+      // Revalidation was entered only while the pre-fetch cycle count was
+      // still inside the slice. If this refill itself crosses the deadline,
+      // the current instruction has already architecturally started and must
+      // retire even when its generic scheduler-tail fragment normally requires
+      // an empty chain (notably J/JAL/JR/JALR/conditional branches). The
+      // branch fragment yields before its delay slot, so no later instruction
+      // is allowed to leak across the scheduling boundary.
       code.L(refill_fragment_ready);
       code.jmp(code.rax);
       code.L(refill_inside_budget);
