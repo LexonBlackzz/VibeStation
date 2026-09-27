@@ -9104,6 +9104,13 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     return result;
   }
 
+  const bool trace_gt2_slice =
+      [] {
+        const char *env = std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
+        return env != nullptr && env[0] == '1';
+      }() &&
+      max_cycles == 72u && cpu_.pc_ == 0x00000E30u;
+
   const auto run_native_entry_exception = [&](u32 entry_exception) {
     V4NativeState &native = impl_->native_state;
     if (!impl_->native_state_bound) {
@@ -9253,6 +9260,15 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       unsafe_state = true;
     }
 
+    if (trace_gt2_slice) {
+      LOG_WARN(
+          "V4_SLICE_LOOP pc=%08X result_cycles=%u/%u result_ins=%u/%u "
+          "delay=%u branch_pc=%08X",
+          cpu_.pc_, result.cycles, max_cycles, result.instructions,
+          max_instructions, cpu_.pending_delay_slot_ ? 1u : 0u,
+          cpu_.pending_branch_pc_);
+    }
+
     // Match Cpu::step()'s hardware IRQ line synchronization before deciding
     // whether native execution may cross the next instruction boundary.
     if (cpu_.sys_->irq_pending()) {
@@ -9298,6 +9314,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           cpu_.cycles_ += kRefillCycles;
           result.cycles += kRefillCycles;
           stats_.executed_cycles += kRefillCycles;
+          if (trace_gt2_slice) {
+            LOG_WARN(
+                "V4_CPP_REFILL kind=pending_delay pc=%08X result_cycles=%u/%u",
+                cpu_.pc_, result.cycles, max_cycles);
+          }
         }
         delay_visible =
             cpu_.read_visible_instruction_for_backend(cpu_.pc_,
@@ -9358,6 +9379,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           cpu_.cycles_ += kRefillCycles;
           result.cycles += kRefillCycles;
           stats_.executed_cycles += kRefillCycles;
+          if (trace_gt2_slice) {
+            LOG_WARN(
+                "V4_CPP_REFILL kind=compile pc=%08X result_cycles=%u/%u",
+                cpu_.pc_, result.cycles, max_cycles);
+          }
         }
         icache_generation =
             cpu_.instruction_cache_generation_for_backend(cpu_.pc_);
@@ -9503,13 +9529,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.icache_refills = 0u;
     native.revalidate_attempts = 0u;
     native.revalidate_successes = 0u;
-    const bool trace_gt2_budget =
-        [] {
-          const char *env = std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
-          return env != nullptr && env[0] == '1';
-        }() &&
-        max_cycles <= 80u &&
-        (start_pc >= 0x00000DE0u && start_pc < 0x00000E50u);
+    const bool trace_gt2_budget = trace_gt2_slice;
     if (trace_gt2_budget) {
       LOG_WARN(
           "V4_BUDGET_ENTER pc=%08X max_cycles=%u max_ins=%u remain_cycles=%u "
