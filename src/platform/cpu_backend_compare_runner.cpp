@@ -920,10 +920,18 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 2, 2, 2),
       enc_r(1, 2, 3, 0, 0x26),
       enc_r(3, 2, 4, 0, 0x21),
-      enc_i(0x05, 1, 0, -5),
+      enc_i(0x09, 6, 6, 3),
+      enc_r(4, 6, 7, 0, 0x26),
+      enc_r(7, 3, 8, 0, 0x21),
+      enc_r(0, 8, 9, 1, 0x00),
+      enc_i(0x09, 10, 10, 4),
+      enc_r(9, 10, 11, 0, 0x25),
+      enc_r(11, 7, 12, 0, 0x26),
+      enc_r(12, 1, 13, 0, 0x21),
+      enc_i(0x05, 1, 0, -13),
       enc_i(0x09, 5, 5, 1),
   };
-  v4_crossline_block.instructions = 14u;
+  v4_crossline_block.instructions = 28u;
   v4_crossline_block.require_full_native_when_available = true;
   v4_crossline_block.require_v4_native_entry_when_available = true;
   v4_crossline_block.require_v4_native_chain_when_available = true;
@@ -5383,7 +5391,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
                result.stats.native_chain_max_blocks > 1u);
           bool crossline_block =
               !test_case.require_v4_crossline_block_when_available;
-          for (size_t size = 5u;
+          for (size_t size = 13u;
                !crossline_block &&
                size < result.stats.native_compiled_block_size_histogram.size();
                ++size) {

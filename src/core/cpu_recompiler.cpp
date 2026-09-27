@@ -905,10 +905,14 @@ struct V4Block {
   u32 cache_epoch = 0;
   u32 icache_generation = 0;
   u32 second_icache_generation = 0;
+  u32 third_icache_generation = 0;
+  u32 fourth_icache_generation = 0;
   u32 code_page_generation = 0;
   u32 phys_page = 0;
   u16 icache_index = 0;
   u16 second_icache_index = 0;
+  u16 third_icache_index = 0;
+  u16 fourth_icache_index = 0;
   std::array<u32, kV4MaxBlockInstructions> guest_bits{};
   V4NativeFn fn = nullptr;
   // Native scheduler-tail prefix. Branch-only prefixes are restricted to a
@@ -922,6 +926,7 @@ struct V4Block {
   bool has_memory = false;
   bool cacheable = false;
   bool second_icache_line = false;
+  u8 icache_line_count = 0;
   bool retry_second_line = false;
 };
 
@@ -7637,6 +7642,33 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
           code.r14 +
           static_cast<int>(offsetof(V4Block, second_icache_generation))]);
       code.jne(revalidate_cached);
+      {
+        Label two_lines, three_lines;
+        code.cmp(code.byte[
+            code.r14 + static_cast<int>(offsetof(V4Block, icache_line_count))],
+            2u);
+        code.jbe(two_lines);
+        code.movzx(code.ecx, code.word[
+            code.r14 + static_cast<int>(offsetof(V4Block, third_icache_index))]);
+        code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
+        code.cmp(code.edx, code.dword[
+            code.r14 +
+            static_cast<int>(offsetof(V4Block, third_icache_generation))]);
+        code.jne(revalidate_cached);
+        code.cmp(code.byte[
+            code.r14 + static_cast<int>(offsetof(V4Block, icache_line_count))],
+            3u);
+        code.jbe(three_lines);
+        code.movzx(code.ecx, code.word[
+            code.r14 + static_cast<int>(offsetof(V4Block, fourth_icache_index))]);
+        code.mov(code.edx, code.dword[code.r15 + code.rcx * 4]);
+        code.cmp(code.edx, code.dword[
+            code.r14 +
+            static_cast<int>(offsetof(V4Block, fourth_icache_generation))]);
+        code.jne(revalidate_cached);
+        code.L(three_lines);
+        code.L(two_lines);
+      }
       code.L(one_line);
     }
     code.jmp(validity_ok);
@@ -8313,6 +8345,7 @@ struct CpuRecompilerBackend::Impl {
     block->start_pc = start_pc;
     block->cache_epoch = cache_epoch;
     block->cacheable = cacheable;
+    block->icache_line_count = cacheable ? 1u : 0u;
     block->icache_index = static_cast<u16>((start_pc >> 4) & 0xFFu);
     block->icache_generation = cacheable ? icache_generation : 0u;
     const u32 start_phys =
@@ -8328,7 +8361,7 @@ struct CpuRecompilerBackend::Impl {
         (16u - (start_pc & 0x0Fu)) >> 2u;
     const u32 line_instructions =
         cacheable ? first_line_instructions +
-                        (std::clamp(cached_line_span, 1u, 2u) - 1u) * 4u
+                        (std::clamp(cached_line_span, 1u, 4u) - 1u) * 4u
                   : kV4MaxBlockInstructions;
     const u32 page_instructions =
         (0x1000u - (start_phys & 0x0FFFu)) >> 2u;
@@ -8788,6 +8821,9 @@ struct CpuRecompilerBackend::Impl {
                                         : count))));
     if (cacheable && translated_count > first_line_instructions) {
       const u32 second_line_pc = start_pc + first_line_instructions * 4u;
+      const u32 last_pc = start_pc + (translated_count - 1u) * 4u;
+      block->icache_line_count = static_cast<u8>(
+          std::min(4u, ((last_pc >> 4u) - (start_pc >> 4u)) + 1u));
       block->second_icache_line = true;
       block->second_icache_index =
           static_cast<u16>((second_line_pc >> 4u) & 0xFFu);
@@ -8796,6 +8832,20 @@ struct CpuRecompilerBackend::Impl {
       // A promoted block must never refill a not-yet-reached second line while
       // validating its first line. Discard it and rebuild a one-line block.
       block->retry_second_line = cached_line_span > 1u;
+      if (block->icache_line_count >= 3u) {
+        const u32 third_line_pc = second_line_pc + 16u;
+        block->third_icache_index =
+            static_cast<u16>((third_line_pc >> 4u) & 0xFFu);
+        block->third_icache_generation =
+            cpu.instruction_cache_generation_for_backend(third_line_pc);
+      }
+      if (block->icache_line_count >= 4u) {
+        const u32 fourth_line_pc = second_line_pc + 32u;
+        block->fourth_icache_index =
+            static_cast<u16>((fourth_line_pc >> 4u) & 0xFFu);
+        block->fourth_icache_generation =
+            cpu.instruction_cache_generation_for_backend(fourth_line_pc);
+      }
     }
     for (u32 i = 0; i < translated_count; ++i) {
       u32 translated_bits = 0u;
@@ -8870,17 +8920,34 @@ struct CpuRecompilerBackend::Impl {
       return;
     }
 
-    const u32 previous_line = line_start - 16u;
-    for (u32 offset = 0u; offset < 16u; offset += 4u) {
-      const u32 candidate_pc = previous_line + offset;
+    const u32 lookback = std::min(48u, line_start & 0x0FFFu);
+    for (u32 delta = lookback; delta >= 4u; delta -= 4u) {
+      const u32 candidate_pc = line_start - delta;
       V4DispatchEntry *entry = dispatch_entry(candidate_pc, false);
       V4Block *candidate = entry != nullptr ? entry->block : nullptr;
       if (candidate == nullptr || candidate->cache_epoch != cache_epoch ||
-          !candidate->cacheable || candidate->second_icache_line ||
+          !candidate->cacheable || candidate->icache_line_count == 0u ||
+          candidate->icache_line_count >= 4u ||
           candidate->has_control || candidate->has_memory ||
           candidate_pc + candidate->instruction_count * 4u != line_start ||
           candidate->icache_generation !=
               cpu.instruction_cache_generation_for_backend(candidate_pc)) {
+        continue;
+      }
+
+      bool generations_current = true;
+      const u32 next_line = (candidate_pc & ~0x0Fu) + 16u;
+      if (candidate->icache_line_count >= 2u) {
+        generations_current =
+            candidate->second_icache_generation ==
+            cpu.instruction_cache_generation_for_backend(next_line);
+      }
+      if (generations_current && candidate->icache_line_count >= 3u) {
+        generations_current =
+            candidate->third_icache_generation ==
+            cpu.instruction_cache_generation_for_backend(next_line + 16u);
+      }
+      if (!generations_current) {
         continue;
       }
 
@@ -8897,8 +8964,8 @@ struct CpuRecompilerBackend::Impl {
       // working one-line translation installed and executable.
       (void)compile_block(
           cpu, stats, candidate_pc, true,
-          cpu.instruction_cache_generation_for_backend(candidate_pc), 2u,
-          true);
+          cpu.instruction_cache_generation_for_backend(candidate_pc),
+          candidate->icache_line_count + 1u, true);
       return;
     }
   }
