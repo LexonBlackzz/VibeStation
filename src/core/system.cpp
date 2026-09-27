@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace {
@@ -1615,6 +1617,18 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     u32 dma_tick_budget = 0;
     u32 timer_tick_budget = 0;
 
+    u64 sched_detail_frame = ~0ull;
+    if (const char* detail = std::getenv("VIBESTATION_SCHED_TRACE_DETAIL_FRAME")) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(detail, &end, 0);
+        if (end != detail && *end == '\0') {
+            sched_detail_frame = static_cast<u64>(parsed);
+        }
+    }
+    const bool sched_detail =
+        static_cast<u64>(boot_diag_.frame_counter) == sched_detail_frame;
+    u64 sched_outer_slice = 0;
+
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
         extra_cycle_error += extra_cycles_per_frame;
@@ -1661,6 +1675,13 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
                 std::min(cycles_remaining, cpu_instruction_slice * 4u);
+            const u64 detail_index = sched_outer_slice++;
+            const u64 detail_cpu_before = cpu_.cycle_count();
+            const u32 detail_pc_before = cpu_.debug_state().pc;
+            const u32 detail_sio_before = sio_.cycles_until_event();
+            const u64 detail_cd_cmd_before = cdrom_.command_count();
+            const u64 detail_cd_sector_before = cdrom_.sector_count();
+            const u64 detail_sio_io_before = boot_diag_.sio_io_count;
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
             if (optimized_cpu_mode) {
@@ -1737,6 +1758,42 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             if (spent_in_slice > 0) {
                 mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);
+            }
+
+            if (sched_detail) {
+                const auto detail_after = cpu_.debug_state();
+                std::fprintf(
+                    stderr,
+                    "SCHED_SLICE frame=%llu mode=%u scan=%u idx=%llu "
+                    "remain=%u target=%u pc0=%08X pc1=%08X "
+                    "cpu0=%llu cpu1=%llu delta=%llu spent=%u ins=%u "
+                    "sio_dead0=%u sio_dead1=%u cd0=%llu cd1=%llu "
+                    "sec0=%llu sec1=%llu sioio0=%llu sioio1=%llu "
+                    "irq=%08X/%08X\n",
+                    static_cast<unsigned long long>(boot_diag_.frame_counter),
+                    static_cast<unsigned>(effective_cpu_execution_mode()),
+                    scanline,
+                    static_cast<unsigned long long>(detail_index),
+                    cycles_remaining,
+                    target_slice_cycles,
+                    detail_pc_before,
+                    detail_after.pc,
+                    static_cast<unsigned long long>(detail_cpu_before),
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    static_cast<unsigned long long>(
+                        cpu_.cycle_count() - detail_cpu_before),
+                    spent_in_slice,
+                    instructions_executed,
+                    detail_sio_before,
+                    sio_.cycles_until_event(),
+                    static_cast<unsigned long long>(detail_cd_cmd_before),
+                    static_cast<unsigned long long>(cdrom_.command_count()),
+                    static_cast<unsigned long long>(detail_cd_sector_before),
+                    static_cast<unsigned long long>(cdrom_.sector_count()),
+                    static_cast<unsigned long long>(detail_sio_io_before),
+                    static_cast<unsigned long long>(boot_diag_.sio_io_count),
+                    irq_.stat(),
+                    irq_.mask());
             }
 
             dma_tick_budget += spent_in_slice;
