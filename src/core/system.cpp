@@ -1738,7 +1738,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             u32 instructions_executed = 0;
             u32 detail_run_index = 0;
             const bool run_detail_focus =
-                sched_detail && detail_index >= 3412u && detail_index <= 3414u;
+                sched_detail && detail_index == 2383u;
             if (optimized_cpu_mode) {
                 while (cycles_remaining > 0 &&
                        spent_in_slice < target_slice_cycles &&
@@ -1762,7 +1762,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                             "SCHED_RUN idx=%llu sub=%u opt=1 "
                             "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
                             "reqcy=%u reqins=%u retcy=%u retins=%u "
-                            "spent0=%u remain0=%u sio_dead=%u boundary=%u\n",
+                            "spent0=%u remain0=%u sio_dead=%u boundary=%u "
+                            "ra=%08X next0=%08X pend0=%u delay0=%u instr0=%08X\n",
                             static_cast<unsigned long long>(detail_index),
                             detail_run_index++, detail_run_pc0,
                             cpu_.debug_state().pc,
@@ -1771,7 +1772,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                             run_cycles, detail_run_budget, run.cycles,
                             run.instructions, spent_in_slice, cycles_remaining,
                             sio_event_cycles,
-                            cpu_timing_boundary_requested_ ? 1u : 0u);
+                            cpu_timing_boundary_requested_ ? 1u : 0u,
+                            cpu_.reg(31), cpu_.debug_state().next_pc,
+                            cpu_.debug_state().pending_branch_pc,
+                            cpu_.debug_state().pending_delay_slot ? 1u : 0u,
+                            read32(detail_run_pc0));
                     }
                     if (run.cycles == 0 || run.instructions == 0) {
                         if (effective_cpu_execution_mode() ==
@@ -1825,7 +1830,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                             "SCHED_RUN idx=%llu sub=%u opt=0 "
                             "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
                             "reqcy=%u reqins=1 retcy=%u retins=%u "
-                            "spent0=%u remain0=%u sio_dead=%u boundary=%u\n",
+                            "spent0=%u remain0=%u sio_dead=%u boundary=%u "
+                            "ra=%08X next0=%08X pend0=%u delay0=%u instr0=%08X\n",
                             static_cast<unsigned long long>(detail_index),
                             detail_run_index++, detail_run_pc0,
                             cpu_.debug_state().pc,
@@ -1834,7 +1840,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                             detail_run_cycles, run.cycles, run.instructions,
                             spent_in_slice, cycles_remaining,
                             sio_.cycles_until_event(),
-                            cpu_timing_boundary_requested_ ? 1u : 0u);
+                            cpu_timing_boundary_requested_ ? 1u : 0u,
+                            cpu_.reg(31), cpu_.debug_state().next_pc,
+                            cpu_.debug_state().pending_branch_pc,
+                            cpu_.debug_state().pending_delay_slot ? 1u : 0u,
+                            read32(detail_run_pc0));
                     }
                     const u32 consumed = run.cycles;
                     if (consumed == 0) {
