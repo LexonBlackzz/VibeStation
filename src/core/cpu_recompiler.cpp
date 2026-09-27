@@ -3402,7 +3402,7 @@ V4NativeFn compile_v4_cop0(V4CodeArena &arena,
 }
 
 struct V4AluRegisterCache {
-  static constexpr u32 kSlotCount = 3u;
+  static constexpr u32 kSlotCount = 5u;
   std::array<u8, kSlotCount> guest{};
   u32 next_victim = 0u;
 };
@@ -3521,8 +3521,12 @@ const Xbyak::Reg32 &v4_alu_cache_host(Xbyak::CodeGenerator &code, u32 slot) {
     return code.esi;
   case 1u:
     return code.edi;
-  default:
+  case 2u:
     return code.ebp;
+  case 3u:
+    return code.r8d;
+  default:
+    return code.r9d;
   }
 }
 
@@ -5672,7 +5676,7 @@ V4NativeFn compile_v4_branch(
              control.op == V4ControlOp::Jalr) {
     // Capture the dynamic target before either the link write or the delay slot.
     // This is observable when rs == rd or the delay slot rewrites rs.
-    emit_v4_alu_cache_read(code, prefix_cache, code.r8d, control.rs);
+    emit_v4_alu_cache_read(code, prefix_cache, code.edx, control.rs);
   }
 
   // The condition/target has been captured in scratch registers. Commit any
@@ -5720,7 +5724,7 @@ V4NativeFn compile_v4_branch(
              control.op == V4ControlOp::Jalr) {
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pc))],
-        code.r8d);
+        code.edx);
     code.add(code.ebx, prefix_count + 3u);
   } else {
     Label not_taken, selected;
@@ -6729,11 +6733,12 @@ V4NativeFn compile_v4_store(
     code.add(code.eax, static_cast<u32>(store.simm));
   }
   if (store.source_cop0) {
-    emit_read_cop0(code, code.r8d, store.rt);
+    emit_read_cop0(code, code.ecx, store.rt);
   } else {
-    emit_v4_alu_cache_read(code, prefix_cache, code.r8d, store.rt);
+    emit_v4_alu_cache_read(code, prefix_cache, code.ecx, store.rt);
   }
   emit_v4_alu_cache_flush(code, prefix_cache);
+  code.mov(code.r8d, code.ecx);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_value))],
       code.r8d);
