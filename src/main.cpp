@@ -3010,7 +3010,6 @@ int main(int argc, char *argv[]) {
         "--jit-branch-tail-log-count",
         "--jit-branch-tail-blacklist-pc",
         "--cpu-backend-stats-log-frames",
-        "--frame-state-log-frames",
     };
     constexpr std::array<std::string_view, 29> without_value = {
         "--jit-force-compile",
