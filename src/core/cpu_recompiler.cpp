@@ -707,6 +707,7 @@ struct V4NativeState {
   u32 store_byte_offset = 0;
   u32 store_value = 0;
   u32 store_hits_code = 0;
+  u32 store_page_has_code = 0;
   u32 load_byte_offset = 0;
   u32 *cop0_regs = nullptr;
   u32 cop0_jumpdest = 0;
@@ -4657,6 +4658,15 @@ V4NativeFn compile_v4_pending_delay_store(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
       code.edx);
+  code.mov(code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+      0u);
+  // Isolated-cache stores conservatively advance a matching JIT page below;
+  // the normal store path replaces this with the actual page-bitmap result.
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+      1u);
 
   code.test(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))],
@@ -4680,14 +4690,31 @@ V4NativeFn compile_v4_pending_delay_store(
   code.shr(code.r9d, 6u);
   code.and_(code.ecx, 63u);
   code.mov(code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
       0u);
-  code.mov(code.rax, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
-  code.test(code.rax, code.rax);
   {
-    Label no_code_line;
-    code.jz(no_code_line);
+    Label no_code_page, no_code_line;
+    // R9D is line_key >> 10. Most stores target data-only pages, so check the
+    // coarser translated-page bitmap first and avoid touching the much larger
+    // line bitmap on that common path.
+    code.mov(code.esi, code.r9d);
+    code.shr(code.esi, 8u);
+    code.mov(code.edi, code.r9d);
+    code.shr(code.edi, 2u);
+    code.and_(code.edi, 63u);
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
+    code.mov(code.rax, code.qword[code.rax + code.rsi * 8]);
+    code.bt(code.rax, code.rdi);
+    code.jnc(no_code_page);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+        1u);
+
+    code.mov(code.rax, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, code_line_bits))]);
     code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
     code.shr(code.rax, code.cl);
     code.test(code.al, 1u);
@@ -4696,6 +4723,7 @@ V4NativeFn compile_v4_pending_delay_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
         1u);
     code.L(no_code_line);
+    code.L(no_code_page);
   }
 
   code.cmp(code.edx, code.dword[
@@ -7151,23 +7179,18 @@ V4NativeFn compile_v4_store(
   }
 
   // Native JIT invalidation: if the written physical page contains translated
-  // code, advance its generation in-place. No C++ invalidation helper is needed.
+  // code, advance its generation in-place. Reuse the pre-store page result so
+  // the hot store path never probes the translated-page bitmap twice.
   {
     Label no_jit_page, jit_generation_ok;
+    code.cmp(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+        0u);
+    code.je(no_jit_page);
     code.mov(code.eax, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
     code.shr(code.eax, kV4PhysPageShift);
-    code.mov(code.ecx, code.eax);
-    code.shr(code.ecx, 6u);
-    code.mov(code.rdx, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, code_page_bits))]);
-    code.test(code.rdx, code.rdx);
-    code.jz(no_jit_page);
-    code.mov(code.rdx, code.qword[code.rdx + code.rcx * 8]);
-    code.mov(code.ecx, code.eax);
-    code.and_(code.ecx, 63u);
-    code.bt(code.rdx, code.rcx);
-    code.jnc(no_jit_page);
     code.mov(code.rdx, code.ptr[
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
