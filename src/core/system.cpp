@@ -1604,7 +1604,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     const bool optimized_cpu_mode =
         effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
     const u32 cpu_instruction_slice =
-        aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
+        aggressive_fast_mode ? 256u : (fast_mode ? 128u : 128u);
     // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
     // Keep those devices at near-baseline cadence even in fast mode.
     const u32 dma_tick_stride = 16u;
