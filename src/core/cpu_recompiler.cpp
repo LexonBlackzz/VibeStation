@@ -6734,8 +6734,8 @@ V4NativeFn compile_v4_store(
   }
   CodeGenerator code(kReservation, buffer);
   code.setDefaultJmpNEAR(true);
-  Label ram, scratch, device, isolated, stored, stop_after_store, unaligned,
-      slow_after_prefix, bail;
+  Label ram, scratch, memory_guard, device, isolated, stored,
+      stop_after_store, unaligned, slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
   V4AluRegisterCache prefix_cache{};
@@ -6817,14 +6817,41 @@ V4NativeFn compile_v4_store(
       1u << 16);
   code.jnz(isolated);
 
-  // Never directly write a translated 16-byte code line. A different line on
-  // the same 4 KiB page is safe for cached code and should stay on fastmem.
-  // Normalize RAM mirrors to the same 2 MiB backing address first.
   const u32 constant_phys =
       constant_address ? (*constant_address & 0x1FFFFFFFu) : 0u;
   const bool constant_region_known =
       constant_address &&
       (constant_phys < psx::RAM_SIZE || constant_phys >= 0x1F800000u);
+  if (constant_address && constant_phys < psx::RAM_SIZE) {
+    code.xor_(code.ebp, code.ebp);
+    code.jmp(memory_guard);
+  } else if (constant_address && constant_phys >= 0x1F800000u &&
+             constant_phys < 0x1F801000u) {
+    code.mov(code.ebp, 1u);
+    code.jmp(memory_guard);
+  } else if (constant_region_known) {
+    code.jmp(device);
+  } else {
+    Label selected_ram;
+    code.cmp(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jb(selected_ram);
+    code.cmp(code.edx, 0x1F800000u);
+    code.jb(device);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jae(device);
+    code.mov(code.ebp, 1u);
+    code.jmp(memory_guard);
+    code.L(selected_ram);
+    code.xor_(code.ebp, code.ebp);
+  }
+
+  code.L(memory_guard);
+
+  // Never directly write a translated 16-byte code line. A different line on
+  // the same 4 KiB page is safe for cached code and should stay on fastmem.
+  // Normalize RAM mirrors to the same 2 MiB backing address first.
   if (constant_region_known) {
     const u32 line_key = constant_phys < psx::RAM_SIZE
                              ? (constant_phys & (psx::RAM_SIZE - 1u))
@@ -6866,24 +6893,9 @@ V4NativeFn compile_v4_store(
     code.L(no_code_line);
   }
 
-  if (constant_address && constant_phys < psx::RAM_SIZE) {
-    code.jmp(ram);
-  } else if (constant_address && constant_phys >= 0x1F800000u &&
-             constant_phys < 0x1F801000u) {
-    code.jmp(scratch);
-  } else if (constant_region_known) {
-    code.jmp(device);
-  } else {
-    code.cmp(code.edx, code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
-    code.jb(ram);
-    code.cmp(code.edx, 0x1F800000u);
-    code.jb(device);
-    code.cmp(code.edx, 0x1F801000u);
-    code.jae(device);
-    code.jmp(scratch);
-  }
+  code.test(code.ebp, code.ebp);
+  code.jnz(scratch);
+  code.jmp(ram);
 
   auto emit_unaligned_store = [&]() {
     // EAX = old aligned memory word, R8D = guest register value,
