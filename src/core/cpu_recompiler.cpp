@@ -6262,12 +6262,16 @@ V4NativeFn compile_v4_load(
     code.cmp(code.edx, 0x1F801000u);
     code.jb(scratch);
     if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+      // IRQ/timer reads use the reduced bridge. Every other 16-bit MMIO
+      // address still retires through the general native device transaction;
+      // sending those ranges to slow_exit can leave a prefix-free load at the
+      // same PC forever when no interpreter escape exists.
       code.cmp(code.edx, 0x1F801070u);
-      code.jb(slow_exit);
+      code.jb(device);
       code.cmp(code.edx, 0x1F801078u);
       code.jb(hot_mmio16);
       code.cmp(code.edx, 0x1F801100u);
-      code.jb(slow_exit);
+      code.jb(device);
       code.cmp(code.edx, 0x1F801130u);
       code.jb(hot_mmio16);
     }

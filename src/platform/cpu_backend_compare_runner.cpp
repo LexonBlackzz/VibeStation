@@ -3615,6 +3615,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   pad_cpu_compare_program(expansion_bus_load);
   cases.push_back(expansion_bus_load);
 
+  CpuCompareCase joy_status_dynamic_lhu{};
+  joy_status_dynamic_lhu.name = "v4_joy_status_dynamic_lhu_native";
+  joy_status_dynamic_lhu.initial_gpr[17] = 0x1F801040u;
+  joy_status_dynamic_lhu.program = {
+      enc_i(0x25, 17, 13, 4), // LHU r13, JOY_STAT via dynamic MMIO address
+      0,                       // retire the load delay
+  };
+  joy_status_dynamic_lhu.require_full_native_when_available = true;
+  joy_status_dynamic_lhu.require_native_memory_helper_when_available = true;
+  joy_status_dynamic_lhu.require_native_mmio_when_available = true;
+  joy_status_dynamic_lhu.require_no_native_ram_load_fastpath = true;
+  joy_status_dynamic_lhu.require_v4_native_entry_when_available = true;
+  joy_status_dynamic_lhu.require_v4_native_load_entry_when_available = true;
+  joy_status_dynamic_lhu.require_v4_mmio_native_when_available = true;
+  pad_cpu_compare_program(joy_status_dynamic_lhu);
+  cases.push_back(joy_status_dynamic_lhu);
+
   CpuCompareCase scratchpad_slow_load{};
   scratchpad_slow_load.name = "native_scratchpad_load_stays_helper";
   scratchpad_slow_load.initial_gpr[1] = 0x1F800000u;
