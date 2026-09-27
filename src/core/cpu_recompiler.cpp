@@ -8866,6 +8866,26 @@ struct CpuRecompilerBackend::Impl {
       block->has_memory =
           simple_load || simple_store || guarded_store_control ||
           guarded_load_control || (simple_cop2 && v4_cop2_is_memory(cop2));
+
+      if (const char *trace_blocks =
+              std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
+          trace_blocks != nullptr && trace_blocks[0] == '1') {
+        const bool low_poll =
+            start_pc >= 0x00000DE0u && start_pc < 0x00000E50u;
+        const bool high_helper =
+            start_pc >= 0x800876A0u && start_pc < 0x80087740u;
+        if (low_poll || high_helper) {
+          LOG_WARN(
+              "V4_BLOCK_META pc=%08X ins=%u max=%u control=%u memory=%u "
+              "budget_fn=%p empty=%u first=%08X second=%08X third=%08X fourth=%08X",
+              start_pc, block->instruction_count, block->max_cycles,
+              block->has_control ? 1u : 0u, block->has_memory ? 1u : 0u,
+              reinterpret_cast<void *>(block->budget_fn),
+              block->budget_requires_empty_chain ? 1u : 0u,
+              block->guest_bits[0], block->guest_bits[1],
+              block->guest_bits[2], block->guest_bits[3]);
+        }
+      }
     } catch (...) {
       if (!reused_block) {
         --block_count;
@@ -9483,10 +9503,36 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.icache_refills = 0u;
     native.revalidate_attempts = 0u;
     native.revalidate_successes = 0u;
+    const bool trace_gt2_budget =
+        [] {
+          const char *env = std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
+          return env != nullptr && env[0] == '1';
+        }() &&
+        max_cycles <= 80u &&
+        (start_pc >= 0x00000DE0u && start_pc < 0x00000E50u);
+    if (trace_gt2_budget) {
+      LOG_WARN(
+          "V4_BUDGET_ENTER pc=%08X max_cycles=%u max_ins=%u remain_cycles=%u "
+          "remain_ins=%u block_ins=%u block_max=%u",
+          start_pc, max_cycles, max_instructions, remaining_cycles,
+          remaining_instructions, block->instruction_count,
+          block->max_cycles);
+    }
+
     cpu_.cycle_penalty_ = 0u;
     cpu_.executing_step_ = true;
     impl_->resident_dispatch(&native);
     cpu_.executing_step_ = false;
+
+    if (trace_gt2_budget) {
+      LOG_WARN(
+          "V4_BUDGET_EXIT pc0=%08X pc1=%08X cycles=%u ins=%u blocks=%u "
+          "links=%u refill=%u budget_exit=%u missing=%u gen=%u bail=%u",
+          start_pc, native.pc, native.cycles, native.instructions,
+          native.block_entries, native.direct_links, native.icache_refills,
+          native.budget_exits, native.missing_exits,
+          native.generation_exits, native.bail_exits);
+    }
     ++stats_.native_chain_invocations;
     ++stats_.recompiler_frame_native_dispatches;
     stats_.native_direct_link_transitions += native.direct_links;
