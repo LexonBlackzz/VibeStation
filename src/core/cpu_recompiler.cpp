@@ -8835,6 +8835,12 @@ struct CpuRecompilerBackend::Impl {
                                           ? count + store_tail_count +
                                                 (store_has_control ? 3u : 1u)
                                           : count))));
+      const u32 store_issue_max_cycles =
+          simple_store &&
+                  (store.op == V4StoreOp::Swl ||
+                   store.op == V4StoreOp::Swr)
+              ? 7u
+              : 3u;
       block->max_cycles =
           (likely_control || split_control || guarded_control ||
            guarded_store_control || guarded_load_control)
@@ -8850,7 +8856,8 @@ struct CpuRecompilerBackend::Impl {
                                          (load_has_control ? 9u : 6u)
                                    : (simple_store
                                           ? count + store_tail_count +
-                                                (store_has_control ? 6u : 3u)
+                                                store_issue_max_cycles +
+                                                (store_has_control ? 3u : 0u)
                                           : count))));
       block->has_control =
           likely_control || split_control || simple_control || guarded_control ||

@@ -3896,6 +3896,31 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_native_icache_revalidation_when_available = true;
   cases.push_back(v4_native_icache_revalidation);
 
+  CpuCompareCase v4_swr_cycle_budget_boundary{};
+  v4_swr_cycle_budget_boundary.name =
+      "v4_swr_ram_preserves_cycle_budget_boundary";
+  v4_swr_cycle_budget_boundary.start_pc = 0xA0010000u;
+  v4_swr_cycle_budget_boundary.initial_gpr[1] = 0x00012000u;
+  v4_swr_cycle_budget_boundary.initial_gpr[2] = 0xAABBCCDDu;
+  v4_swr_cycle_budget_boundary.memory = {
+      {0x00012000u, 0x11223344u},
+  };
+  // The fused block is ADDIU (1) + SWR RAM RMW (7) + ADDIU (1).
+  // With a five-cycle slice the interpreter retires ADDIU+SWR and overshoots
+  // by the single current instruction. The recompiler must not admit the
+  // trailing ADDIU merely because stale store metadata says SWR costs 3.
+  v4_swr_cycle_budget_boundary.program = {
+      enc_i(0x09, 0, 3, 1),
+      enc_i(0x2E, 1, 2, 1),
+      enc_i(0x09, 0, 4, 0x44),
+  };
+  v4_swr_cycle_budget_boundary.instructions = 3u;
+  v4_swr_cycle_budget_boundary.run_slice_cycle_budget = 5u;
+  v4_swr_cycle_budget_boundary.compare_segment_states = true;
+  v4_swr_cycle_budget_boundary.require_v4_native_entry_when_available = true;
+  v4_swr_cycle_budget_boundary.require_v4_native_store_entry_when_available = true;
+  cases.push_back(v4_swr_cycle_budget_boundary);
+
   CpuCompareCase v4_icache_cycle_budget_boundary{};
   v4_icache_cycle_budget_boundary.name =
       "v4_icache_alias_preserves_cycle_budget_boundary";
