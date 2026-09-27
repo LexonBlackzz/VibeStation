@@ -8140,6 +8140,18 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
         0u);
+
+    // We entered this path because a split branch yielded before its delay
+    // slot. Once that delay instruction has retired, do not immediately chain
+    // into the branch target when the scheduler budget has already been met or
+    // exceeded. The interpreter is allowed to overshoot by the current
+    // instruction, but it returns at that architectural boundary.
+    code.test(code.r12d, code.r12d);
+    code.jz(done);
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jae(done);
+
     code.mov(code.eax, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_sr))]);
     code.test(code.eax, 1u);
