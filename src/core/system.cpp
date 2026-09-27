@@ -358,6 +358,58 @@ u32 System::jit_read16_hot_mmio(u32 phys) {
     return 0x10000u;
 }
 
+void System::jit_sync_time_sensitive_bus_access(u32 phys,
+                                                u32 resident_cycles) {
+    phys = psx::mask_address(phys);
+    const u64 target_cycle =
+        cpu_.cycle_count() + static_cast<u64>(resident_cycles);
+
+    // PAD/SIO accesses are synchronized at the instruction that performs the
+    // transaction. A resident JIT chain has not committed resident_cycles to
+    // Cpu::cycles_ yet, so sync_sio_to_cpu() alone would observe stale time.
+    if (phys >= 0x1F801040u && phys < 0x1F801050u) {
+        if (target_cycle <= sio_synced_cpu_cycle_) {
+            return;
+        }
+        u64 delta = target_cycle - sio_synced_cpu_cycle_;
+        while (delta > 0) {
+            const u32 step =
+                delta > static_cast<u64>(std::numeric_limits<u32>::max())
+                    ? std::numeric_limits<u32>::max()
+                    : static_cast<u32>(delta);
+            sio_.tick(step);
+            delta -= step;
+        }
+        sio_synced_cpu_cycle_ = target_cycle;
+        return;
+    }
+
+    // SPU register accesses use the same absolute CPU-cycle synchronization
+    // model and need the same resident-cycle view.
+    if (phys >= 0x1F801C00u && phys < 0x1F802000u) {
+        if (target_cycle <= spu_synced_cpu_cycle_) {
+            spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+            return;
+        }
+        if (spu_skip_sync_for_turbo_) {
+            spu_synced_cpu_cycle_ = target_cycle;
+            spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+            return;
+        }
+        u64 delta = target_cycle - spu_synced_cpu_cycle_;
+        while (delta > 0) {
+            const u32 step =
+                delta > static_cast<u64>(std::numeric_limits<u32>::max())
+                    ? std::numeric_limits<u32>::max()
+                    : static_cast<u32>(delta);
+            spu_.tick(step);
+            delta -= step;
+        }
+        spu_synced_cpu_cycle_ = target_cycle;
+        spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+    }
+}
+
 void System::sync_sio_to_cpu() {
     const u64 target_cycle = cpu_.cycle_count();
     if (target_cycle <= sio_synced_cpu_cycle_) {

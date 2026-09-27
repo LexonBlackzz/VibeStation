@@ -649,34 +649,82 @@ u32 v4_hot_mmio_read16(System *sys, u32 phys) {
   return sys != nullptr ? sys->jit_read16_hot_mmio(phys) : 0x10000u;
 }
 
-u32 v4_bus_read8(System *sys, u32 phys) {
-  return sys != nullptr ? static_cast<u32>(sys->read8(phys)) : 0u;
+u32 v4_bus_read8(System *sys, u32 phys, u32 resident_cycles) {
+  if (sys == nullptr) {
+    return 0u;
+  }
+  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+  return static_cast<u32>(sys->read8(phys));
 }
 
-u32 v4_bus_read16(System *sys, u32 phys) {
-  return sys != nullptr ? static_cast<u32>(sys->read16(phys)) : 0u;
+u32 v4_bus_read16(System *sys, u32 phys, u32 resident_cycles) {
+  if (sys == nullptr) {
+    return 0u;
+  }
+  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+  return static_cast<u32>(sys->read16(phys));
 }
 
-u32 v4_bus_read32(System *sys, u32 phys) {
-  return sys != nullptr ? sys->read32(phys) : 0u;
+u32 v4_bus_read32(System *sys, u32 phys, u32 resident_cycles) {
+  if (sys == nullptr) {
+    return 0u;
+  }
+  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+  return sys->read32(phys);
 }
 
-void v4_bus_write8(System *sys, u32 phys, u32 value) {
+void v4_bus_write8(System *sys, u32 phys, u32 value,
+                   u32 resident_cycles) {
   if (sys != nullptr) {
+    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
     sys->write8(phys, static_cast<u8>(value));
   }
 }
 
-void v4_bus_write16(System *sys, u32 phys, u32 value) {
+void v4_bus_write16(System *sys, u32 phys, u32 value,
+                    u32 resident_cycles) {
   if (sys != nullptr) {
+    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
     sys->write16(phys, static_cast<u16>(value));
   }
 }
 
-void v4_bus_write32(System *sys, u32 phys, u32 value) {
+void v4_bus_write32(System *sys, u32 phys, u32 value,
+                    u32 resident_cycles) {
   if (sys != nullptr) {
+    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
     sys->write32(phys, value);
   }
+}
+
+void emit_v4_bus_read_cycle_arg(Xbyak::CodeGenerator &code,
+                                u32 extra_cycles = 0u) {
+#if defined(_WIN32)
+  code.mov(code.r8d, code.ebx);
+  if (extra_cycles != 0u) {
+    code.add(code.r8d, extra_cycles);
+  }
+#else
+  code.mov(code.edx, code.ebx);
+  if (extra_cycles != 0u) {
+    code.add(code.edx, extra_cycles);
+  }
+#endif
+}
+
+void emit_v4_bus_write_cycle_arg(Xbyak::CodeGenerator &code,
+                                 u32 extra_cycles = 0u) {
+#if defined(_WIN32)
+  code.mov(code.r9d, code.ebx);
+  if (extra_cycles != 0u) {
+    code.add(code.r9d, extra_cycles);
+  }
+#else
+  code.mov(code.ecx, code.ebx);
+  if (extra_cycles != 0u) {
+    code.add(code.ecx, extra_cycles);
+  }
+#endif
 }
 
 struct V4DispatchPage;
@@ -2481,6 +2529,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
     code.mov(code.esi, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -2603,6 +2652,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
     code.mov(code.edx, code.r8d);
 #endif
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -4463,10 +4513,13 @@ V4NativeFn compile_v4_pending_delay_load(
   code.mov(code.esi, code.edx);
 #endif
   if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
   } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
   } else {
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
   }
   code.call(code.rax);
@@ -4803,6 +4856,7 @@ V4NativeFn compile_v4_pending_delay_store(
     code.mov(code.esi, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -4913,6 +4967,7 @@ V4NativeFn compile_v4_pending_delay_store(
     code.mov(code.esi, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -4949,10 +5004,13 @@ V4NativeFn compile_v4_pending_delay_store(
   code.mov(code.edx, code.r8d);
 #endif
   if (store.op == V4StoreOp::Sb) {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
   } else if (store.op == V4StoreOp::Sh) {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
   } else {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
   }
   code.call(code.rax);
@@ -6357,10 +6415,13 @@ V4NativeFn compile_v4_load(
   code.mov(code.esi, code.edx);
 #endif
   if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
+    emit_v4_bus_read_cycle_arg(code, prefix_count);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
   } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+    emit_v4_bus_read_cycle_arg(code, prefix_count);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
   } else {
+    emit_v4_bus_read_cycle_arg(code, prefix_count);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
   }
   code.call(code.rax);
@@ -6974,6 +7035,7 @@ V4NativeFn compile_v4_store(
     code.mov(code.esi, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -7094,6 +7156,7 @@ V4NativeFn compile_v4_store(
     code.mov(code.esi, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
+    emit_v4_bus_read_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -7131,10 +7194,13 @@ V4NativeFn compile_v4_store(
   code.mov(code.edx, code.r8d);
 #endif
   if (store.op == V4StoreOp::Sb) {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
   } else if (store.op == V4StoreOp::Sh) {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
   } else {
+    emit_v4_bus_write_cycle_arg(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
   }
   code.call(code.rax);

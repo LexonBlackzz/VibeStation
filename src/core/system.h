@@ -534,6 +534,10 @@ public:
   // Narrow reduced bridge used by the experimental recompiler for hot
   // side-effect-compatible 16-bit timer/IRQ reads.
   u32 jit_read16_hot_mmio(u32 phys);
+  // Native CPU blocks keep elapsed guest cycles resident until dispatch
+  // returns. Time-sensitive device bridges use this to observe the exact
+  // instruction-cycle timestamp rather than the older committed CPU count.
+  void jit_sync_time_sensitive_bus_access(u32 phys, u32 resident_cycles);
   u32 jit_mapped_main_ram_size() const {
     const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
     return (memory_window == 5u || memory_window == 7u)
