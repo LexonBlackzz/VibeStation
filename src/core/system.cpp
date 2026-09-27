@@ -1796,16 +1796,77 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                     irq_.mask());
             }
 
+            const bool sched_boundary_focus =
+                sched_detail && detail_index >= 2448u && detail_index <= 2455u;
+            if (sched_boundary_focus) {
+                std::fprintf(
+                    stderr,
+                    "SCHED_BOUNDARY_PRE idx=%llu scan=%u remain=%u "
+                    "dma_budget=%u timer_budget=%u cpu=%llu pc=%08X "
+                    "sio_dead=%u cd=%llu/%llu irq=%08X/%08X\n",
+                    static_cast<unsigned long long>(detail_index), scanline,
+                    cycles_remaining, dma_tick_budget, timer_tick_budget,
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    cpu_.debug_state().pc, sio_.cycles_until_event(),
+                    static_cast<unsigned long long>(cdrom_.command_count()),
+                    static_cast<unsigned long long>(cdrom_.sector_count()),
+                    irq_.stat(), irq_.mask());
+            }
+
             dma_tick_budget += spent_in_slice;
             if (dma_tick_budget >= dma_tick_stride) {
+                const u64 dma_cpu_before = cpu_.cycle_count();
+                const u32 dma_remain_before = cycles_remaining;
+                const u32 dma_budget_before = dma_tick_budget;
                 service_dma();
+                const u64 dma_cpu_after = cpu_.cycle_count();
+                if (sched_boundary_focus) {
+                    std::fprintf(
+                        stderr,
+                        "SCHED_DMA idx=%llu budget0=%u budget1=%u "
+                        "remain0=%u remain1=%u cpu0=%llu cpu1=%llu "
+                        "dma_cycles=%llu sio_dead=%u cd=%llu/%llu "
+                        "irq=%08X/%08X\n",
+                        static_cast<unsigned long long>(detail_index),
+                        dma_budget_before,
+                        dma_tick_budget,
+                        dma_remain_before,
+                        cycles_remaining,
+                        static_cast<unsigned long long>(dma_cpu_before),
+                        static_cast<unsigned long long>(dma_cpu_after),
+                        static_cast<unsigned long long>(
+                            dma_cpu_after - dma_cpu_before),
+                        sio_.cycles_until_event(),
+                        static_cast<unsigned long long>(cdrom_.command_count()),
+                        static_cast<unsigned long long>(cdrom_.sector_count()),
+                        irq_.stat(), irq_.mask());
+                }
                 dma_tick_budget -= dma_tick_stride;
             }
 
             timer_tick_budget += spent_in_slice;
+            const u32 timer_budget_before_tick = timer_tick_budget;
+            u32 timer_ticks = 0u;
             while (timer_tick_budget >= timer_tick_stride) {
                 timers_.tick(timer_tick_stride);
                 timer_tick_budget -= timer_tick_stride;
+                ++timer_ticks;
+            }
+            if (sched_boundary_focus) {
+                std::fprintf(
+                    stderr,
+                    "SCHED_BOUNDARY_POST idx=%llu scan=%u remain=%u "
+                    "dma_budget=%u timer0=%u timer1=%u timer_ticks=%u "
+                    "cpu=%llu pc=%08X sio_dead=%u cd=%llu/%llu "
+                    "irq=%08X/%08X\n",
+                    static_cast<unsigned long long>(detail_index), scanline,
+                    cycles_remaining, dma_tick_budget,
+                    timer_budget_before_tick, timer_tick_budget, timer_ticks,
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    cpu_.debug_state().pc, sio_.cycles_until_event(),
+                    static_cast<unsigned long long>(cdrom_.command_count()),
+                    static_cast<unsigned long long>(cdrom_.sector_count()),
+                    irq_.stat(), irq_.mask());
             }
         }
         if (profile_detailed) {
