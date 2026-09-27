@@ -3490,6 +3490,26 @@ std::optional<u32> v4_alu_constant_result(
   return std::nullopt;
 }
 
+std::optional<u32> v4_alu_constant_register(
+    const V4DecodedInstruction *instructions, u32 count, u8 guest_reg) {
+  V4AluConstantState constants{};
+  for (u32 i = 0u; i < count; ++i) {
+    const u8 write_reg = v4_alu_write_reg(instructions[i]);
+    if (write_reg == 0u) {
+      continue;
+    }
+    const std::optional<u32> result =
+        v4_alu_constant_result(instructions[i], constants);
+    constants.valid[write_reg] = result.has_value();
+    if (result) {
+      constants.value[write_reg] = *result;
+    }
+  }
+  return constants.valid[guest_reg]
+             ? std::optional<u32>(constants.value[guest_reg])
+             : std::nullopt;
+}
+
 const Xbyak::Reg32 &v4_alu_cache_host(Xbyak::CodeGenerator &code, u32 slot) {
   switch (slot) {
   case 0u:
@@ -6102,11 +6122,21 @@ V4NativeFn compile_v4_load(
   V4AluRegisterCache prefix_cache{};
   emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
                               prefix_cache);
+  const std::optional<u32> constant_base =
+      v4_alu_constant_register(prefix.data(), prefix_count, load.rs);
+  const std::optional<u32> constant_address =
+      constant_base
+          ? std::optional<u32>(*constant_base + static_cast<u32>(load.simm))
+          : std::nullopt;
 
   // Without a prefix the load itself is the load-delay instruction and must
   // capture its source before the incoming delayed load retires.
-  emit_v4_alu_cache_read(code, prefix_cache, code.eax, load.rs);
-  code.add(code.eax, static_cast<u32>(load.simm));
+  if (constant_address) {
+    code.mov(code.eax, *constant_address);
+  } else {
+    emit_v4_alu_cache_read(code, prefix_cache, code.eax, load.rs);
+    code.add(code.eax, static_cast<u32>(load.simm));
+  }
   emit_v4_alu_cache_flush(code, prefix_cache);
   if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     code.test(code.eax, 1u);
@@ -6142,8 +6172,12 @@ V4NativeFn compile_v4_load(
     }
   };
 
-  code.mov(code.edx, code.eax);
-  code.and_(code.edx, 0x1FFFFFFFu);
+  if (constant_address) {
+    code.mov(code.edx, *constant_address & 0x1FFFFFFFu);
+  } else {
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+  }
   if (load.op == V4LoadOp::Lwl || load.op == V4LoadOp::Lwr) {
     code.mov(code.ecx, code.edx);
     code.and_(code.ecx, 3u);
@@ -6153,25 +6187,43 @@ V4NativeFn compile_v4_load(
         code.ecx);
     code.and_(code.edx, ~3u);
   }
-  code.cmp(code.edx, code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
-  code.jb(ram);
-  code.cmp(code.edx, 0x1F800000u);
-  code.jb(slow_exit);
-  code.cmp(code.edx, 0x1F801000u);
-  code.jb(scratch);
-  if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
-    code.cmp(code.edx, 0x1F801070u);
+  const u32 constant_phys =
+      constant_address ? (*constant_address & 0x1FFFFFFFu) : 0u;
+  const bool constant_region_known =
+      constant_address &&
+      (constant_phys < psx::RAM_SIZE || constant_phys >= 0x1F800000u);
+  if (constant_address && constant_phys < psx::RAM_SIZE) {
+    code.jmp(ram);
+  } else if (constant_address && constant_phys >= 0x1F800000u &&
+             constant_phys < 0x1F801000u) {
+    code.jmp(scratch);
+  } else if (constant_region_known) {
+    const bool constant_hot_mmio16 =
+        (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) &&
+        ((constant_phys >= 0x1F801070u && constant_phys < 0x1F801078u) ||
+         (constant_phys >= 0x1F801100u && constant_phys < 0x1F801130u));
+    code.jmp(constant_hot_mmio16 ? hot_mmio16 : device);
+  } else {
+    code.cmp(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jb(ram);
+    code.cmp(code.edx, 0x1F800000u);
     code.jb(slow_exit);
-    code.cmp(code.edx, 0x1F801078u);
-    code.jb(hot_mmio16);
-    code.cmp(code.edx, 0x1F801100u);
-    code.jb(slow_exit);
-    code.cmp(code.edx, 0x1F801130u);
-    code.jb(hot_mmio16);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jb(scratch);
+    if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
+      code.cmp(code.edx, 0x1F801070u);
+      code.jb(slow_exit);
+      code.cmp(code.edx, 0x1F801078u);
+      code.jb(hot_mmio16);
+      code.cmp(code.edx, 0x1F801100u);
+      code.jb(slow_exit);
+      code.cmp(code.edx, 0x1F801130u);
+      code.jb(hot_mmio16);
+    }
+    code.jmp(device);
   }
-  code.jmp(device);
   code.L(scratch);
   code.sub(code.edx, 0x1F800000u);
   code.mov(code.rcx, code.ptr[
@@ -6633,6 +6685,12 @@ V4NativeFn compile_v4_store(
   V4AluRegisterCache prefix_cache{};
   emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
                               prefix_cache);
+  const std::optional<u32> constant_base =
+      v4_alu_constant_register(prefix.data(), prefix_count, store.rs);
+  const std::optional<u32> constant_address =
+      constant_base
+          ? std::optional<u32>(*constant_base + static_cast<u32>(store.simm))
+          : std::nullopt;
   if (prefix_count != 0u) {
     code.add(code.ebx, prefix_count);
     code.sub(code.r12d, prefix_count);
@@ -6640,8 +6698,12 @@ V4NativeFn compile_v4_store(
 
 
   // Capture both operands before retiring an incoming delayed load.
-  emit_v4_alu_cache_read(code, prefix_cache, code.eax, store.rs);
-  code.add(code.eax, static_cast<u32>(store.simm));
+  if (constant_address) {
+    code.mov(code.eax, *constant_address);
+  } else {
+    emit_v4_alu_cache_read(code, prefix_cache, code.eax, store.rs);
+    code.add(code.eax, static_cast<u32>(store.simm));
+  }
   if (store.source_cop0) {
     emit_read_cop0(code, code.r8d, store.rt);
   } else {
@@ -6660,8 +6722,12 @@ V4NativeFn compile_v4_store(
     code.jnz(unaligned);
   }
 
-  code.mov(code.edx, code.eax);
-  code.and_(code.edx, 0x1FFFFFFFu);
+  if (constant_address) {
+    code.mov(code.edx, *constant_address & 0x1FFFFFFFu);
+  } else {
+    code.mov(code.edx, code.eax);
+    code.and_(code.edx, 0x1FFFFFFFu);
+  }
   if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
     code.mov(code.ecx, code.edx);
     code.and_(code.ecx, 3u);
@@ -6685,20 +6751,33 @@ V4NativeFn compile_v4_store(
   // Never directly write a translated 16-byte code line. A different line on
   // the same 4 KiB page is safe for cached code and should stay on fastmem.
   // Normalize RAM mirrors to the same 2 MiB backing address first.
-  code.mov(code.r9d, code.edx);
-  {
-    Label line_key_ready;
-    code.cmp(code.r9d, code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
-    code.jae(line_key_ready);
-    code.and_(code.r9d, psx::RAM_SIZE - 1u);
-    code.L(line_key_ready);
+  const u32 constant_phys =
+      constant_address ? (*constant_address & 0x1FFFFFFFu) : 0u;
+  const bool constant_region_known =
+      constant_address &&
+      (constant_phys < psx::RAM_SIZE || constant_phys >= 0x1F800000u);
+  if (constant_region_known) {
+    const u32 line_key = constant_phys < psx::RAM_SIZE
+                             ? (constant_phys & (psx::RAM_SIZE - 1u))
+                             : constant_phys;
+    code.mov(code.r9d, line_key >> 10u);
+    code.mov(code.ecx, (line_key >> 4u) & 63u);
+  } else {
+    code.mov(code.r9d, code.edx);
+    {
+      Label line_key_ready;
+      code.cmp(code.r9d, code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+      code.jae(line_key_ready);
+      code.and_(code.r9d, psx::RAM_SIZE - 1u);
+      code.L(line_key_ready);
+    }
+    code.shr(code.r9d, 4u);
+    code.mov(code.ecx, code.r9d);
+    code.shr(code.r9d, 6u);
+    code.and_(code.ecx, 63u);
   }
-  code.shr(code.r9d, 4u);
-  code.mov(code.ecx, code.r9d);
-  code.shr(code.r9d, 6u);
-  code.and_(code.ecx, 63u);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_hits_code))],
       0u);
@@ -6718,15 +6797,24 @@ V4NativeFn compile_v4_store(
     code.L(no_code_line);
   }
 
-  code.cmp(code.edx, code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
-  code.jb(ram);
-  code.cmp(code.edx, 0x1F800000u);
-  code.jb(device);
-  code.cmp(code.edx, 0x1F801000u);
-  code.jae(device);
-  code.jmp(scratch);
+  if (constant_address && constant_phys < psx::RAM_SIZE) {
+    code.jmp(ram);
+  } else if (constant_address && constant_phys >= 0x1F800000u &&
+             constant_phys < 0x1F801000u) {
+    code.jmp(scratch);
+  } else if (constant_region_known) {
+    code.jmp(device);
+  } else {
+    code.cmp(code.edx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, mapped_main_ram_size))]);
+    code.jb(ram);
+    code.cmp(code.edx, 0x1F800000u);
+    code.jb(device);
+    code.cmp(code.edx, 0x1F801000u);
+    code.jae(device);
+    code.jmp(scratch);
+  }
 
   auto emit_unaligned_store = [&]() {
     // EAX = old aligned memory word, R8D = guest register value,
@@ -8699,6 +8787,23 @@ struct CpuRecompilerBackend::Impl {
       ++stats.native_alu_blocks_compiled;
     } else if (simple_load || simple_store) {
       ++stats.native_memory_blocks_compiled;
+      const u8 address_reg = simple_load ? load.rs : store.rs;
+      const s32 address_offset = simple_load ? load.simm : store.simm;
+      const std::optional<u32> constant_base =
+          v4_alu_constant_register(decoded.data(), count, address_reg);
+      if (constant_base) {
+        const u32 phys =
+            (*constant_base + static_cast<u32>(address_offset)) & 0x1FFFFFFFu;
+        const bool region_known =
+            phys < psx::RAM_SIZE || phys >= 0x1F800000u;
+        if (region_known) {
+          if (simple_load) {
+            ++stats.native_constant_address_load_blocks_compiled;
+          } else {
+            ++stats.native_constant_address_store_blocks_compiled;
+          }
+        }
+      }
       if (load_has_control || store_has_control) {
         ++stats.native_branch_tail_blocks_compiled;
       }

@@ -179,6 +179,7 @@ struct CpuCompareCase {
   bool require_v4_native_icache_revalidation_when_available = false;
   bool require_v4_native_chain_when_available = false;
   bool require_v4_crossline_block_when_available = false;
+  bool require_v4_constant_address_memory_when_available = false;
   bool require_v2_store_branch_entry_when_available = false;
   bool require_v2_branch_not_taken_entry_when_available = false;
   bool require_v2_helper_entry_when_available = false;
@@ -928,6 +929,29 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_crossline_block.require_v4_native_chain_when_available = true;
   v4_crossline_block.require_v4_crossline_block_when_available = true;
   cases.push_back(v4_crossline_block);
+
+  CpuCompareCase v4_constant_address_memory{};
+  v4_constant_address_memory.name = "v4_constant_address_memory";
+  v4_constant_address_memory.program = {
+      enc_i(0x09, 0, 1, 0x1000),
+      enc_i(0x09, 0, 2, 0x1234),
+      enc_i(0x2B, 1, 2, 0),
+      0u,
+      enc_i(0x09, 0, 1, 0x1000),
+      enc_i(0x23, 1, 3, 0),
+      0u,
+  };
+  v4_constant_address_memory.instructions = 7u;
+  v4_constant_address_memory.compare_memory_addresses = {0x00001000u};
+  v4_constant_address_memory.require_full_native_when_available = true;
+  v4_constant_address_memory.require_v4_native_entry_when_available = true;
+  v4_constant_address_memory.require_v4_native_load_entry_when_available =
+      true;
+  v4_constant_address_memory.require_v4_native_store_entry_when_available =
+      true;
+  v4_constant_address_memory
+      .require_v4_constant_address_memory_when_available = true;
+  cases.push_back(v4_constant_address_memory);
 
   CpuCompareCase jit_v2_bne_not_taken{};
   jit_v2_bne_not_taken.name = "jit_v2_bne_not_taken_delay";
@@ -5257,7 +5281,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
            test_case.require_v4_icache_revalidation_when_available ||
            test_case.require_v4_native_icache_revalidation_when_available ||
            test_case.require_v4_native_chain_when_available ||
-           test_case.require_v4_crossline_block_when_available)) {
+           test_case.require_v4_crossline_block_when_available ||
+           test_case.require_v4_constant_address_memory_when_available)) {
         if (!result.stats.native_available) {
           native_check = "skip_v4_native_unavailable";
         } else {
@@ -5365,6 +5390,10 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             crossline_block =
                 result.stats.native_compiled_block_size_histogram[size] != 0u;
           }
+          const bool constant_address_memory =
+              !test_case.require_v4_constant_address_memory_when_available ||
+              (result.stats.native_constant_address_load_blocks_compiled != 0u &&
+               result.stats.native_constant_address_store_blocks_compiled != 0u);
           if (!native_entered) {
             native_check = "v4_native_missing";
           } else if (!load_entered) {
@@ -5413,6 +5442,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
             native_check = "v4_chain_missing";
           } else if (!crossline_block) {
             native_check = "v4_crossline_block_missing";
+          } else if (!constant_address_memory) {
+            native_check = "v4_constant_address_memory_missing";
           } else {
             native_check = "v4_native_entered";
           }
@@ -5425,7 +5456,8 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
               unaligned_native && exception_native && folded_branch &&
               page_local_invalidation &&
               cached_same_page_retained && icache_revalidated &&
-              native_icache_revalidated && chain_entered && crossline_block;
+              native_icache_revalidated && chain_entered && crossline_block &&
+              constant_address_memory;
         }
       }
 

@@ -64,6 +64,8 @@ struct CpuBackendStats {
   u64 native_blocks_compiled = 0;
   u64 native_branch_tail_blocks_compiled = 0;
   u64 native_memory_blocks_compiled = 0;
+  u64 native_constant_address_load_blocks_compiled = 0;
+  u64 native_constant_address_store_blocks_compiled = 0;
   u64 native_alu_blocks_compiled = 0;
   u64 native_reduced_helper_compile_attempts = 0;
   u64 native_reduced_helper_compile_successes = 0;
