@@ -9496,6 +9496,13 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         // a scheduler-budget exit. No guest instruction has executed.
         continue;
       }
+      if (native.budget_exits != 0u && remaining_cycles == 0u) {
+        // A cold I-cache refill can consume the last available cycles before
+        // the first guest instruction begins. That is real native progress;
+        // return to the scheduler without diagnosing a semantic bailout.
+        ++stats_.budget_exits;
+        break;
+      }
       LOG_ERROR(
           "CPU: native zero-progress dispatch pc=0x%08X cycles=%u/%u "
           "budget=%u block=%p fn=%p budget_fn=%p instructions=%u "
@@ -9577,6 +9584,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.native_memory_fastpath_stores += native.store_entries;
     if (block->has_control) {
       ++stats_.native_branch_tail_entries;
+    } else if (block->has_memory) {
+      ++stats_.native_memory_block_entries;
     } else {
       ++stats_.native_alu_block_entries;
     }

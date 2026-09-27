@@ -1684,7 +1684,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                             // engine. Retry the exact architectural boundary
                             // with its one-instruction native fragment; never
                             // hide a missing fragment by interpreting it.
-                            run = cpu_.run_slice(run_cycles, 1u);
+                            // A zero device deadline historically still let
+                            // Cpu::step() begin one instruction and report the
+                            // overshoot. Give the native one-op fragment the
+                            // smallest non-zero budget to preserve that rule.
+                            run = cpu_.run_slice(std::max(run_cycles, 1u), 1u);
                             if (run.cycles == 0 || run.instructions == 0) {
                                 LOG_ERROR(
                                     "CPU: native recompiler made no progress "
