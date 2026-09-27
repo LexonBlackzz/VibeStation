@@ -2419,6 +2419,17 @@ void CdRom::execute_internal_command(u8 cmd,
   last_command_ = cmd;
   command_busy_cycles_ = command_busy_for(cmd);
   command_busy_ = command_busy_cycles_ > 0;
+  if (const char *trace = std::getenv("VIBESTATION_CD_COMMAND_TRACE");
+      trace != nullptr && trace[0] == '1') {
+    LOG_WARN(
+        "CDCMD_START kind=internal cmd=%02X pc=%08X cpu=%llu busy=%d "
+        "flag=%02X en=%02X",
+        static_cast<unsigned>(cmd), sys_ ? sys_->cpu().pc() : 0u,
+        static_cast<unsigned long long>(
+            sys_ ? sys_->cpu().cycle_count() : 0u),
+        command_busy_cycles_, static_cast<unsigned>(interrupt_flag_),
+        static_cast<unsigned>(interrupt_enable_));
+  }
   param_fifo_.assign(params.begin(), params.end());
   execute_command(cmd);
   param_fifo_.clear();
@@ -2664,6 +2675,18 @@ void CdRom::write8(u32 offset, u8 value) {
       ++command_hist_[static_cast<size_t>(value)];
       command_busy_cycles_ = command_busy_for(value);
       command_busy_ = command_busy_cycles_ > 0;
+      if (const char *trace = std::getenv("VIBESTATION_CD_COMMAND_TRACE");
+          trace != nullptr && trace[0] == '1') {
+        LOG_WARN(
+            "CDCMD_START kind=host cmd=%02X pc=%08X cpu=%llu busy=%d "
+            "flag=%02X en=%02X count=%llu",
+            static_cast<unsigned>(value), sys_ ? sys_->cpu().pc() : 0u,
+            static_cast<unsigned long long>(
+                sys_ ? sys_->cpu().cycle_count() : 0u),
+            command_busy_cycles_, static_cast<unsigned>(interrupt_flag_),
+            static_cast<unsigned>(interrupt_enable_),
+            static_cast<unsigned long long>(command_counter_));
+      }
       execute_command(value);
       param_fifo_.clear();
       return;
