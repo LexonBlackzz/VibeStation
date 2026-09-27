@@ -2365,6 +2365,56 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
   return pass ? 0 : 2;
 }
 
+static bool load_debug_snapshot_file(const std::string &path,
+                                     SystemSnapshot &snapshot) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return false;
+  u64 size = 0;
+  file.read(reinterpret_cast<char *>(&size), sizeof(size));
+  if (!file || size > (128ull * 1024ull * 1024ull)) return false;
+  snapshot.data.resize(static_cast<size_t>(size));
+  file.read(reinterpret_cast<char *>(snapshot.data.data()),
+            static_cast<std::streamsize>(snapshot.data.size()));
+  return static_cast<bool>(file);
+}
+
+static int run_debug_snapshot_frame(const std::string &bios_path,
+                                    const std::string &bin_path,
+                                    const std::string &cue_path,
+                                    const std::string &snapshot_path) {
+  auto sys = std::make_unique<System>();
+  if (!sys->load_bios(bios_path) || !sys->load_game(bin_path, cue_path) ||
+      !sys->boot_disc()) {
+    std::fprintf(stderr, "SNAP_FRAME_FAIL init\n");
+    return 1;
+  }
+  SystemSnapshot snapshot;
+  if (!load_debug_snapshot_file(snapshot_path, snapshot) ||
+      !sys->restore_state(snapshot)) {
+    std::fprintf(stderr, "SNAP_FRAME_FAIL restore path=%s\n",
+                 snapshot_path.c_str());
+    return 2;
+  }
+  sys->set_input_recorder(nullptr);
+  sys->cpu().flush_cpu_backend();
+  const auto before = sys->cpu().debug_state();
+  sys->run_frame(false);
+  const auto after = sys->cpu().debug_state();
+  std::fprintf(
+      stderr,
+      "SNAP_FRAME_DONE mode=%u pc0=%08X pc1=%08X cyc0=%llu cyc1=%llu "
+      "delta=%llu cd=%llu/%llu sio=%llu\n",
+      static_cast<unsigned>(sys->effective_cpu_execution_mode()),
+      before.pc, after.pc,
+      static_cast<unsigned long long>(before.cycles),
+      static_cast<unsigned long long>(after.cycles),
+      static_cast<unsigned long long>(after.cycles - before.cycles),
+      static_cast<unsigned long long>(sys->cdrom().command_count()),
+      static_cast<unsigned long long>(sys->cdrom().sector_count()),
+      static_cast<unsigned long long>(sys->boot_diag().sio_io_count));
+  return 0;
+}
+
 static int run_boot_disc_test(const std::string &bios_path, int frames,
                               const std::string &bin_path,
                               const std::string &cue_path) {
@@ -3631,6 +3681,17 @@ int main(int argc, char *argv[]) {
       steps = std::max(1, std::atoi(passthrough[2].c_str()));
     }
     const int rc = run_bios_test(passthrough[1], steps);
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
+  }
+  if (passthrough.size() >= 6 &&
+      passthrough[0] == "--debug-snapshot-frame") {
+    const int rc = run_debug_snapshot_frame(
+        passthrough[1], passthrough[2], passthrough[3], passthrough[4]);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
