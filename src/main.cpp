@@ -2388,6 +2388,9 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   }
 
   auto sys = std::make_unique<System>();
+  InputRecorder boot_input_recorder;
+  boot_input_recorder.set_config(g_input_recorder_config);
+  sys->set_input_recorder(&boot_input_recorder);
   if (!sys->load_bios(bios_path)) {
     LOG_ERROR("BOOT_TEST_FAIL reason=bios_load");
     if (owns_log && g_log_file) {
@@ -2431,6 +2434,26 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
       return 1;
     }
     LOG_INFO("BOOT_TEST memory_card slot=%u path=%s", slot, path.c_str());
+  }
+
+  if (g_input_recorder_config.recording_enabled() ||
+      g_input_recorder_config.playback_enabled()) {
+    const std::string movie_disc_path = !cue_path.empty() ? cue_path : bin_path;
+    if (!boot_input_recorder.init(movie_disc_path, vibestation_full_version_string())) {
+      LOG_ERROR("BOOT_TEST_FAIL reason=input_movie_init detail=%s",
+                boot_input_recorder.status().status_message.c_str());
+      if (owns_log && g_log_file) {
+        log_flush_repeats();
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+      }
+      return 1;
+    }
+    const auto movie_status = boot_input_recorder.status();
+    LOG_INFO("BOOT_TEST input_movie mode=%d frames=%llu path=%s",
+             static_cast<int>(movie_status.mode),
+             static_cast<unsigned long long>(movie_status.playback_total_frames),
+             movie_status.playback_path.c_str());
   }
 
   bool saw_cd_command = false;

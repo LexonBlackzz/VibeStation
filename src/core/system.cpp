@@ -2752,6 +2752,24 @@ void System::write8(u32 addr, u8 val) {
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
         }
+        if (ram_addr <= 0x001F06A6u &&
+            (ram_addr + 0u) >= 0x001F06A6u) {
+            const u8 old_flag = ram_.read8(0x001F06A6u);
+            u8 new_flag = old_flag;
+            for (u32 j = 0; j < 1u; ++j) {
+                if (ram_addr + j == 0x001F06A6u) {
+                    new_flag = static_cast<u8>(
+                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
+                }
+            }
+            LOG_WARN(
+                "GT2_FLAG_WRITE width=8 addr=0x%08X old=%02X new=%02X "
+                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
+                ram_addr, static_cast<unsigned>(old_flag),
+                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
+                cpu_.reg(31),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
+        }
         ram_.write8(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 1);
         debug_note_main_ram_write(ram_addr, val, 1);
@@ -3006,6 +3024,24 @@ void System::write16(u32 addr, u16 val) {
                     static_cast<unsigned long long>(cpu_.cycle_count()),
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
+        }
+        if (ram_addr <= 0x001F06A6u &&
+            (ram_addr + 1u) >= 0x001F06A6u) {
+            const u8 old_flag = ram_.read8(0x001F06A6u);
+            u8 new_flag = old_flag;
+            for (u32 j = 0; j < 2u; ++j) {
+                if (ram_addr + j == 0x001F06A6u) {
+                    new_flag = static_cast<u8>(
+                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
+                }
+            }
+            LOG_WARN(
+                "GT2_FLAG_WRITE width=16 addr=0x%08X old=%02X new=%02X "
+                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
+                ram_addr, static_cast<unsigned>(old_flag),
+                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
+                cpu_.reg(31),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
         }
         ram_.write16(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 2);
@@ -3314,6 +3350,24 @@ void System::write32(u32 addr, u32 val) {
                     static_cast<unsigned long long>(cpu_.cycle_count()),
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
+        }
+        if (ram_addr <= 0x001F06A6u &&
+            (ram_addr + 3u) >= 0x001F06A6u) {
+            const u8 old_flag = ram_.read8(0x001F06A6u);
+            u8 new_flag = old_flag;
+            for (u32 j = 0; j < 4u; ++j) {
+                if (ram_addr + j == 0x001F06A6u) {
+                    new_flag = static_cast<u8>(
+                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
+                }
+            }
+            LOG_WARN(
+                "GT2_FLAG_WRITE width=32 addr=0x%08X old=%02X new=%02X "
+                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
+                ram_addr, static_cast<unsigned>(old_flag),
+                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
+                cpu_.reg(31),
+                static_cast<unsigned long long>(cpu_.cycle_count()));
         }
         ram_.write32(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 4);
