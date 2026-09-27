@@ -2365,6 +2365,19 @@ static int run_spu_audio_test(const std::string &bios_path, int frames,
   return pass ? 0 : 2;
 }
 
+static bool save_debug_snapshot_file(const std::string &path,
+                                     const SystemSnapshot &snapshot) {
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  if (!file) return false;
+  const u64 size = static_cast<u64>(snapshot.data.size());
+  file.write(reinterpret_cast<const char *>(&size), sizeof(size));
+  if (!snapshot.data.empty()) {
+    file.write(reinterpret_cast<const char *>(snapshot.data.data()),
+               static_cast<std::streamsize>(snapshot.data.size()));
+  }
+  return static_cast<bool>(file);
+}
+
 static bool load_debug_snapshot_file(const std::string &path,
                                      SystemSnapshot &snapshot) {
   std::ifstream file(path, std::ios::binary);
@@ -2559,9 +2572,39 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
   LOG_INFO("BOOT_STAGE frame=0 pc=0x%08X band=%s", sys->cpu().pc(),
            pc_band_name(last_band));
 
+  int debug_snapshot_save_frame = -1;
+  std::string debug_snapshot_save_path;
+  if (const char *frame_text =
+          std::getenv("VIBESTATION_SAVE_SNAPSHOT_FRAME")) {
+    char *end = nullptr;
+    const long parsed = std::strtol(frame_text, &end, 0);
+    if (end != frame_text && *end == '\0' && parsed >= 0) {
+      debug_snapshot_save_frame = static_cast<int>(parsed);
+    }
+  }
+  if (const char *path_text =
+          std::getenv("VIBESTATION_SAVE_SNAPSHOT_PATH")) {
+    debug_snapshot_save_path = path_text;
+  }
+
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+
+    if (debug_snapshot_save_frame == (i + 1) &&
+        !debug_snapshot_save_path.empty()) {
+      SystemSnapshot debug_snapshot;
+      if (!sys->save_state(debug_snapshot) ||
+          !save_debug_snapshot_file(debug_snapshot_save_path,
+                                    debug_snapshot)) {
+        LOG_ERROR("BOOT_TEST_FAIL reason=snapshot_save frame=%d path=%s",
+                  i + 1, debug_snapshot_save_path.c_str());
+        return 3;
+      }
+      LOG_INFO("BOOT_SNAPSHOT frame=%d path=%s bytes=%zu", i + 1,
+               debug_snapshot_save_path.c_str(),
+               debug_snapshot.data.size());
+    }
 
     if (g_frame_state_log_frames != 0u &&
         (static_cast<u32>(i + 1) % g_frame_state_log_frames) == 0u) {
