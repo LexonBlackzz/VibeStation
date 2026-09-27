@@ -9447,8 +9447,15 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       break;
     }
 
-    const u32 remaining_cycles = max_cycles - result.cycles;
-    const u32 remaining_instructions = max_instructions - result.instructions;
+    // A cold I-cache fetch can consume the final scheduler cycles before the
+    // current architectural instruction executes. Cpu::step() still finishes
+    // that one instruction, so preserve the same contract with a one-cycle
+    // native tail budget. Never allow unsigned subtraction to turn an
+    // overshoot into a multi-billion-cycle resident-dispatch budget.
+    const u32 remaining_cycles =
+        result.cycles < max_cycles ? (max_cycles - result.cycles) : 1u;
+    const u32 remaining_instructions =
+        max_instructions - result.instructions;
 
     const u32 start_pc = cpu_.pc_;
     V4NativeState &native = impl_->native_state;

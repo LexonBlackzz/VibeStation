@@ -3921,6 +3921,35 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_swr_cycle_budget_boundary.require_v4_native_store_entry_when_available = true;
   cases.push_back(v4_swr_cycle_budget_boundary);
 
+  CpuCompareCase v4_pending_delay_refill_budget_boundary{};
+  v4_pending_delay_refill_budget_boundary.name =
+      "v4_pending_delay_refill_preserves_cycle_budget";
+  // Put a taken branch at the final word of an I-cache line. Its first fetch
+  // costs 4 cycles and the taken branch costs 2, leaving one cycle in the
+  // seven-cycle slice. The delay slot begins the next cold I-cache line: its
+  // 4-cycle refill must be allowed to overshoot only together with that one
+  // architectural delay-slot instruction. The recompiler must not underflow
+  // the remaining cycle budget and continue executing the branch target.
+  v4_pending_delay_refill_budget_boundary.start_pc = 0x8001000Cu;
+  v4_pending_delay_refill_budget_boundary.initial_gpr[1] = 1u;
+  v4_pending_delay_refill_budget_boundary.program = {
+      enc_i(0x05, 1, 0, 4),       // BNE -> 0x80010020
+      0u,                          // delay slot on next I-cache line
+      enc_i(0x09, 0, 7, 0x7777), // untaken-path sentinel
+      0u,
+      0u,
+      enc_i(0x09, 0, 2, 1),      // branch target
+      enc_i(0x09, 0, 3, 2),
+  };
+  v4_pending_delay_refill_budget_boundary.instructions = 4u;
+  v4_pending_delay_refill_budget_boundary.run_slice_cycle_budget = 7u;
+  v4_pending_delay_refill_budget_boundary.compare_segment_states = true;
+  v4_pending_delay_refill_budget_boundary
+      .require_v4_native_entry_when_available = true;
+  v4_pending_delay_refill_budget_boundary
+      .require_v4_pending_delay_native_when_available = true;
+  cases.push_back(v4_pending_delay_refill_budget_boundary);
+
   CpuCompareCase v4_icache_cycle_budget_boundary{};
   v4_icache_cycle_budget_boundary.name =
       "v4_icache_alias_preserves_cycle_budget_boundary";
