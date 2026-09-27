@@ -1679,6 +1679,14 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     }
     const bool sched_detail =
         static_cast<u64>(boot_diag_.frame_counter) == sched_detail_frame;
+    u64 sched_stop_after = ~0ull;
+    if (const char* stop = std::getenv("VIBESTATION_SCHED_STOP_AFTER_SLICE")) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(stop, &end, 0);
+        if (end != stop && *end == '\0') {
+            sched_stop_after = static_cast<u64>(parsed);
+        }
+    }
     u64 sched_outer_slice = 0;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
@@ -2041,6 +2049,19 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                     static_cast<unsigned long long>(cdrom_.command_count()),
                     static_cast<unsigned long long>(cdrom_.sector_count()),
                     irq_.stat(), irq_.mask());
+            }
+
+            if (sched_detail && detail_index == sched_stop_after) {
+                std::fprintf(
+                    stderr,
+                    "SCHED_DEBUG_STOP frame=%u scan=%u idx=%llu pc=%08X "
+                    "cpu=%llu irq=%08X/%08X\n",
+                    boot_diag_.frame_counter, scanline,
+                    static_cast<unsigned long long>(detail_index),
+                    cpu_.debug_state().pc,
+                    static_cast<unsigned long long>(cpu_.cycle_count()),
+                    irq_.stat(), irq_.mask());
+                return;
             }
         }
         if (profile_detailed) {

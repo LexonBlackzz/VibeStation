@@ -2391,6 +2391,75 @@ static bool load_debug_snapshot_file(const std::string &path,
   return static_cast<bool>(file);
 }
 
+static u64 debug_gpr_hash(const CpuDebugState &state) {
+  u64 h = 1469598103934665603ull;
+  for (const u32 v : state.gpr) {
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+      h ^= static_cast<u8>(v >> shift);
+      h *= 1099511628211ull;
+    }
+  }
+  return h;
+}
+
+static int run_debug_snapshot_slice(const std::string &bios_path,
+                                    const std::string &bin_path,
+                                    const std::string &cue_path,
+                                    const std::string &snapshot_path,
+                                    u32 max_cycles,
+                                    u32 max_instructions) {
+  auto sys = std::make_unique<System>();
+  if (!sys->load_bios(bios_path) || !sys->load_game(bin_path, cue_path) ||
+      !sys->boot_disc()) {
+    std::fprintf(stderr, "SNAP_SLICE_FAIL init\n");
+    return 1;
+  }
+  SystemSnapshot snapshot;
+  if (!load_debug_snapshot_file(snapshot_path, snapshot) ||
+      !sys->restore_state(snapshot)) {
+    std::fprintf(stderr, "SNAP_SLICE_FAIL restore path=%s\n",
+                 snapshot_path.c_str());
+    return 2;
+  }
+  sys->set_input_recorder(nullptr);
+  sys->cpu().flush_cpu_backend();
+
+  const CpuDebugState before = sys->cpu().debug_state();
+  const CpuRunSliceResult run =
+      sys->cpu().run_slice(max_cycles, max_instructions);
+  const CpuDebugState after = sys->cpu().debug_state();
+
+  std::fprintf(
+      stderr,
+      "SNAP_SLICE_DONE mode=%u reqcy=%u reqins=%u retcy=%u retins=%u "
+      "pc0=%08X pc1=%08X cur0=%08X cur1=%08X next0=%08X next1=%08X "
+      "cyc0=%llu cyc1=%llu gpr0=%016llX gpr1=%016llX "
+      "load0=%u:%08X load1=%u:%08X nload0=%u:%08X nload1=%u:%08X "
+      "delay0=%u/%u/%u:%08X delay1=%u/%u/%u:%08X "
+      "sr0=%08X sr1=%08X cause0=%08X cause1=%08X epc0=%08X epc1=%08X "
+      "irq=%08X/%08X\n",
+      static_cast<unsigned>(effective_cpu_execution_mode()),
+      max_cycles, max_instructions, run.cycles, run.instructions,
+      before.pc, after.pc, before.current_pc, after.current_pc,
+      before.next_pc, after.next_pc,
+      static_cast<unsigned long long>(before.cycles),
+      static_cast<unsigned long long>(after.cycles),
+      static_cast<unsigned long long>(debug_gpr_hash(before)),
+      static_cast<unsigned long long>(debug_gpr_hash(after)),
+      before.load_reg, before.load_value, after.load_reg, after.load_value,
+      before.next_load_reg, before.next_load_value,
+      after.next_load_reg, after.next_load_value,
+      before.in_delay_slot ? 1u : 0u,
+      before.pending_delay_slot ? 1u : 0u,
+      before.pending_branch_taken ? 1u : 0u, before.pending_branch_pc,
+      after.in_delay_slot ? 1u : 0u,
+      after.pending_delay_slot ? 1u : 0u,
+      after.pending_branch_taken ? 1u : 0u, after.pending_branch_pc,
+      before.cop0_sr, after.cop0_sr, before.cop0_cause, after.cop0_cause,
+      before.cop0_epc, after.cop0_epc, sys->irq().stat(), sys->irq().mask());
+  return 0;
+}
+
 static int run_debug_snapshot_frame(const std::string &bios_path,
                                     const std::string &bin_path,
                                     const std::string &cue_path,
@@ -3731,6 +3800,22 @@ int main(int argc, char *argv[]) {
       steps = std::max(1, std::atoi(passthrough[2].c_str()));
     }
     const int rc = run_bios_test(passthrough[1], steps);
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
+  }
+  if (passthrough.size() >= 7 &&
+      passthrough[0] == "--debug-snapshot-slice") {
+    const u32 max_cycles =
+        static_cast<u32>(std::max(1, std::atoi(passthrough[5].c_str())));
+    const u32 max_instructions =
+        static_cast<u32>(std::max(1, std::atoi(passthrough[6].c_str())));
+    const int rc = run_debug_snapshot_slice(
+        passthrough[1], passthrough[2], passthrough[3], passthrough[4],
+        max_cycles, max_instructions);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
