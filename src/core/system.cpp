@@ -2770,7 +2770,7 @@ void System::write8(u32 addr, u8 val) {
                 cpu_.reg(31),
                 static_cast<unsigned long long>(cpu_.cycle_count()));
         }
-        if (g_log_fmv_diagnostics && ram_addr == 0x001F06A6u) {
+        if (ram_addr == 0x001F06A6u) {
             const u8 old_flag = ram_.read8(0x001F06A6u);
             LOG_WARN(
                 "BUS: GT2 FLAG WRITE8 old=0x%02X new=0x%02X pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu origin=%s dma_ch=%u",
@@ -3054,7 +3054,7 @@ void System::write16(u32 addr, u16 val) {
                 cpu_.reg(31),
                 static_cast<unsigned long long>(cpu_.cycle_count()));
         }
-        if (g_log_fmv_diagnostics && ram_addr <= 0x001F06A6u &&
+        if (ram_addr <= 0x001F06A6u &&
             (ram_addr + 1u) >= 0x001F06A6u) {
             const u8 old_flag = ram_.read8(0x001F06A6u);
             const u32 shift = (0x001F06A6u - ram_addr) * 8u;
@@ -3395,7 +3395,7 @@ void System::write32(u32 addr, u32 val) {
                 cpu_.reg(31),
                 static_cast<unsigned long long>(cpu_.cycle_count()));
         }
-        if (g_log_fmv_diagnostics && ram_addr <= 0x001F06A6u &&
+        if (ram_addr <= 0x001F06A6u &&
             (ram_addr + 3u) >= 0x001F06A6u) {
             const u8 old_flag = ram_.read8(0x001F06A6u);
             const u32 shift = (0x001F06A6u - ram_addr) * 8u;
