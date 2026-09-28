@@ -535,8 +535,15 @@ public:
   // side-effect-compatible 16-bit timer/IRQ reads.
   u32 jit_read16_hot_mmio(u32 phys);
   // Native CPU blocks keep elapsed guest cycles resident until dispatch
-  // returns. Time-sensitive device bridges use this to observe the exact
-  // instruction-cycle timestamp rather than the older committed CPU count.
+  // returns. A host device callback must observe the same start-of-instruction
+  // CPU timestamp as Cpu::step(), without forcing the native chain to commit.
+  void jit_begin_bus_access(u32 phys, u32 resident_cycles);
+  void jit_end_bus_access();
+  u64 device_cpu_cycle() const {
+    return jit_device_cycle_override_active_
+               ? jit_device_cycle_override_
+               : cpu_.cycle_count();
+  }
   void jit_sync_time_sensitive_bus_access(u32 phys, u32 resident_cycles);
   u32 jit_mapped_main_ram_size() const {
     const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
@@ -779,6 +786,10 @@ private:
   u32 bios_menu_streak_after_non_bios_ = 0;
   u64 spu_synced_cpu_cycle_ = 0;
   u64 sio_synced_cpu_cycle_ = 0;
+  // Transient timestamp exposed only while a resident native MMIO callback is
+  // executing. It is deliberately not architectural/snapshot state.
+  u64 jit_device_cycle_override_ = 0;
+  bool jit_device_cycle_override_active_ = false;
   bool cpu_timing_boundary_requested_ = false;
   bool spu_skip_sync_for_turbo_ = false;
   std::atomic<bool> ram_reaper_enabled_{false};
