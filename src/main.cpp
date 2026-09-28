@@ -2695,9 +2695,26 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
     debug_snapshot_save_path = path_text;
   }
 
+  int debug_backend_flush_frame = -1;
+  if (const char *frame_text =
+          std::getenv("VIBESTATION_FLUSH_BACKEND_FRAME")) {
+    char *end = nullptr;
+    const long parsed = std::strtol(frame_text, &end, 0);
+    if (end != frame_text && *end == '\0' && parsed >= 0) {
+      debug_backend_flush_frame = static_cast<int>(parsed);
+    }
+  }
+
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+
+    if (debug_backend_flush_frame == (i + 1)) {
+      LOG_WARN("BOOT_BACKEND_FLUSH frame=%d cpu=%llu pc=%08X", i + 1,
+               static_cast<unsigned long long>(sys->cpu().cycle_count()),
+               sys->cpu().pc());
+      sys->cpu().flush_cpu_backend();
+    }
 
     if (debug_snapshot_save_frame == (i + 1) &&
         !debug_snapshot_save_path.empty()) {
