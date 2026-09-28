@@ -222,7 +222,7 @@ void System::note_cdrom_io(u32 phys_addr) {
     ++boot_diag_.cd_io_count;
     if (!boot_diag_.saw_cd_io) {
         boot_diag_.saw_cd_io = true;
-        boot_diag_.first_cd_io_cycle = cpu_.cycle_count();
+        boot_diag_.first_cd_io_cycle = device_cpu_cycle();
         boot_diag_.first_cd_io_addr = phys_addr;
     }
 }
@@ -231,7 +231,7 @@ void System::note_sio_io(u32 phys_addr) {
     ++boot_diag_.sio_io_count;
     if (!boot_diag_.saw_sio_io) {
         boot_diag_.saw_sio_io = true;
-        boot_diag_.first_sio_io_cycle = cpu_.cycle_count();
+        boot_diag_.first_sio_io_cycle = device_cpu_cycle();
         boot_diag_.first_sio_io_addr = phys_addr;
     }
 }
@@ -356,6 +356,20 @@ u32 System::jit_read16_hot_mmio(u32 phys) {
         return static_cast<u16>(timers_.read(phys - 0x1F801100u));
     }
     return 0x10000u;
+}
+
+void System::jit_begin_bus_access(u32 phys, u32 resident_cycles) {
+    // Cpu::cycles_ is intentionally not advanced while the x64 dispatcher is
+    // resident. Expose its local elapsed-cycle count to device code instead.
+    jit_device_cycle_override_ =
+        cpu_.cycle_count() + static_cast<u64>(resident_cycles);
+    jit_device_cycle_override_active_ = true;
+    jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+}
+
+void System::jit_end_bus_access() {
+    jit_device_cycle_override_active_ = false;
+    jit_device_cycle_override_ = 0;
 }
 
 void System::jit_sync_time_sensitive_bus_access(u32 phys,
@@ -540,6 +554,8 @@ void System::reset() {
     spu_.reset();
     cpu_.reset();
     sio_synced_cpu_cycle_ = cpu_.cycle_count();
+    jit_device_cycle_override_ = 0;
+    jit_device_cycle_override_active_ = false;
     cpu_timing_boundary_requested_ = false;
     spu_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
