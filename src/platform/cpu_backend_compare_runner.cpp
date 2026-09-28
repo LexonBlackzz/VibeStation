@@ -202,6 +202,10 @@ struct CpuCompareCase {
   bool enable_reduced_helper_branch_tail_for_x64 = false;
   bool allow_partial_native_memory_helper = false;
   bool compare_segment_states = false;
+  // Most compare cases want a logical segment to continue after a scheduler
+  // timing boundary, mirroring System::run_frame(). A dedicated boundary case
+  // can keep the short return visible instead.
+  bool preserve_timing_boundary_short_return = false;
   u32 run_slice_cycle_budget = 100000u;
   bool disable_all_native_for_x64 = false;
   bool disable_memory_native_for_x64 = false;
@@ -724,19 +728,44 @@ static CpuCompareRunResult run_cpu_compare_case_once(
       g_cpu_x64_jit_native_memory_cli_value = tiers.memory_native;
       g_cpu_x64_jit_native_alu_cli_value = tiers.alu_native;
     }
-    CpuRunSliceResult segment =
-        sys->cpu().run_slice(test_case.run_slice_cycle_budget,
-                             instruction_count);
+    CpuRunSliceResult segment{};
+    while (segment.instructions < instruction_count &&
+           segment.cycles < test_case.run_slice_cycle_budget) {
+      const u32 remaining_instructions =
+          instruction_count - segment.instructions;
+      const u32 remaining_cycles =
+          test_case.run_slice_cycle_budget - segment.cycles;
+      const CpuRunSliceResult part =
+          sys->cpu().run_slice(remaining_cycles, remaining_instructions);
+      segment.cycles += part.cycles;
+      segment.instructions += part.instructions;
+
+      const bool timing_boundary =
+          sys->cpu_timing_boundary_requested();
+      if (timing_boundary &&
+          !test_case.preserve_timing_boundary_short_return) {
+        // System::run_frame() consumes this after resampling the device and
+        // then continues with the remaining slice budget. Do the same for
+        // multi-instruction compare segments so code mutations stay anchored
+        // to their requested architectural instruction boundary.
+        sys->consume_cpu_timing_boundary_request();
+        if (part.instructions != 0u && part.cycles != 0u) {
+          continue;
+        }
+      }
+      break;
+    }
     if (mode == CpuExecutionMode::Recompiler &&
         segment.instructions != instruction_count &&
         segment.cycles < test_case.run_slice_cycle_budget) {
       LOG_WARN(
           "CPU_COMPARE_SEGMENT_SHORT name=%s index=%zu requested=%u retired=%u "
-          "pc=0x%08X next=0x%08X cycles=%u budget=%u",
+          "pc=0x%08X next=0x%08X cycles=%u budget=%u boundary=%u",
           test_case.name, segment_index, instruction_count,
           segment.instructions, sys->cpu().debug_state().pc,
           sys->cpu().debug_state().next_pc, segment.cycles,
-          test_case.run_slice_cycle_budget);
+          test_case.run_slice_cycle_budget,
+          sys->cpu_timing_boundary_requested() ? 1u : 0u);
     }
     out.run.cycles += segment.cycles;
     out.run.instructions += segment.instructions;
@@ -4090,6 +4119,7 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       enc_i(0x09, 0, 4, 2),
   };
   v4_sio_scheduler_boundary.instructions = 3u;
+  v4_sio_scheduler_boundary.preserve_timing_boundary_short_return = true;
   v4_sio_scheduler_boundary.require_v4_native_entry_when_available = true;
   v4_sio_scheduler_boundary.require_v4_mmio_native_when_available = true;
   cases.push_back(v4_sio_scheduler_boundary);
