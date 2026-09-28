@@ -2,6 +2,7 @@
 #include "system.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 
 namespace {
 constexpr u32 kStreamingDmaSliceWords = 96u;
@@ -10,6 +11,33 @@ constexpr u32 kDicrResetMask = 0x7F000000u;
 
 bool is_streaming_dma_channel(int channel) {
   return channel == 0 || channel == 1;
+}
+
+bool trace_dma_penalty_for_frame(u64 frame) {
+  static const u64 trace_frame = []() -> u64 {
+    const char *value = std::getenv("VIBESTATION_SCHED_TRACE_DETAIL_FRAME");
+    if (value == nullptr || *value == '\0') {
+      return ~0ull;
+    }
+    char *end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 0);
+    return (end != value && *end == '\0') ? static_cast<u64>(parsed) : ~0ull;
+  }();
+  return frame == trace_frame;
+}
+
+void trace_dma_cpu_penalty(System *sys, int channel, u32 words, u32 penalty,
+                           const char *kind) {
+  if (sys == nullptr ||
+      !trace_dma_penalty_for_frame(sys->boot_diag().frame_counter)) {
+    return;
+  }
+  Cpu &cpu = sys->cpu();
+  LOG_WARN(
+      "DMA_CPU_PENALTY frame=%u kind=%s ch=%d words=%u penalty=%u "
+      "pc=%08X cur=%08X cpu=%llu",
+      sys->boot_diag().frame_counter, kind, channel, words, penalty, cpu.pc(),
+      cpu.current_pc(), static_cast<unsigned long long>(cpu.cycle_count()));
 }
 
 u32 sanitize_corrupt_chcr(int channel, u32 value) {
@@ -612,7 +640,9 @@ void DmaController::dma_block(int channel, u32 max_words) {
       }
     }
     if (sys_ != nullptr) {
-      sys_->add_cpu_cycle_penalty(dma_ram_tick_cost(transfer_words));
+      const u32 penalty = dma_ram_tick_cost(transfer_words);
+      trace_dma_cpu_penalty(sys_, channel, transfer_words, penalty, "otc");
+      sys_->add_cpu_cycle_penalty(penalty);
     }
     return;
   }
@@ -702,7 +732,9 @@ void DmaController::dma_block(int channel, u32 max_words) {
   }
 
   if (sys_ != nullptr) {
-    sys_->add_cpu_cycle_penalty(dma_ram_tick_cost(transfer_words));
+    const u32 penalty = dma_ram_tick_cost(transfer_words);
+    trace_dma_cpu_penalty(sys_, channel, transfer_words, penalty, "block");
+    sys_->add_cpu_cycle_penalty(penalty);
   }
 
   if (!from_ram && channel == 3 && g_log_fmv_diagnostics) {
@@ -834,7 +866,9 @@ void DmaController::dma_linked_list(int channel) {
   }
 
   if (sys_ != nullptr) {
-    sys_->add_cpu_cycle_penalty(dma_ram_tick_cost(transferred_words));
+    const u32 penalty = dma_ram_tick_cost(transferred_words);
+    trace_dma_cpu_penalty(sys_, channel, transferred_words, penalty, "linked");
+    sys_->add_cpu_cycle_penalty(penalty);
   }
 }
 
