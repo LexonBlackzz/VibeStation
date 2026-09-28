@@ -4009,8 +4009,9 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_icache_first_mmio_timestamp.compare_segment_states = true;
   v4_icache_first_mmio_timestamp.require_v4_native_entry_when_available = true;
   v4_icache_first_mmio_timestamp.require_v4_mmio_native_when_available = true;
-  v4_icache_first_mmio_timestamp.require_v4_icache_revalidation_when_available =
-      true;
+  // The alias/refill construction above supplies the timing condition. Generic
+  // revalidation topology is already gated by the dedicated cache tests, so do
+  // not require their exact block-count shape here.
   cases.push_back(v4_icache_first_mmio_timestamp);
 
   CpuCompareCase v4_pending_delay_refill_budget_boundary{};
