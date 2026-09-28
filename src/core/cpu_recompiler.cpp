@@ -7750,6 +7750,7 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.L(memory_ok);
   }
 
+  Label full_instruction_budget, full_cycle_budget, try_budget_fragment;
   {
     Label uncached, validity_ok;
     code.cmp(code.byte[
@@ -7831,7 +7832,8 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     {
       Label compare_loop, refill_line, refill_ram, refill_scratch;
       Label refill_source_ready, refill_generation_ok, line_ready;
-      Label revalidate_done, no_second_generation, refill_invalid_region;
+      Label revalidate_done, revalidate_budget_fragment;
+      Label no_second_generation, refill_invalid_region;
 
       // r9d is the translated instruction index. r8/rax/rcx/rdx are volatile
       // scratch registers; the resident bases in r10-r15/rbx remain untouched.
@@ -7840,6 +7842,32 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.cmp(code.r9d, code.dword[
           code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
       code.jae(revalidate_done);
+
+      // If this entry can only use the one-instruction scheduler-tail fragment,
+      // do not refill/validate later instructions in the compiled block. Doing
+      // so would charge an architectural I-cache miss for code the guest has
+      // not executed yet. The first instruction still needs exact byte
+      // validation before its native fragment may retire.
+      {
+        Label validate_current_instruction;
+        code.test(code.r9d, code.r9d);
+        code.jz(validate_current_instruction);
+
+        code.cmp(code.r12d, code.dword[
+            code.r14 +
+            static_cast<int>(offsetof(V4Block, instruction_count))]);
+        code.jb(revalidate_budget_fragment);
+
+        code.mov(code.eax, code.ebx);
+        code.add(code.eax, code.dword[
+            code.r14 + static_cast<int>(offsetof(V4Block, max_cycles))]);
+        code.cmp(code.eax, code.dword[
+            code.r11 +
+            static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+        code.ja(revalidate_budget_fragment);
+
+        code.L(validate_current_instruction);
+      }
 
       // edx = guest PC for this translated instruction.
       code.mov(code.edx, code.dword[
@@ -7967,6 +7995,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.L(refill_invalid_region);
       code.jmp(stale_generation);
 
+      code.L(revalidate_budget_fragment);
+      // Only the first instruction was validated. Do not publish the block's
+      // generation snapshots as current: later instructions/lines remain
+      // unchecked and must be revalidated before a full-block entry.
+      code.jmp(try_budget_fragment);
+
       code.L(revalidate_done);
       code.movzx(code.ecx, code.word[
           code.r14 + static_cast<int>(offsetof(V4Block, icache_index))]);
@@ -8036,7 +8070,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.L(validity_ok);
   }
 
-  Label full_instruction_budget, full_cycle_budget, try_budget_fragment;
   code.cmp(code.r12d, code.dword[
       code.r14 + static_cast<int>(offsetof(V4Block, instruction_count))]);
   code.jae(full_instruction_budget);
