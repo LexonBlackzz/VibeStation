@@ -105,27 +105,6 @@ public:
   size_t debug_queued_sector_count() const {
     return queued_sector_buffers_.size();
   }
-  u8 debug_interrupt_enable() const { return interrupt_enable_; }
-  u8 debug_interrupt_flag() const { return interrupt_flag_; }
-  bool debug_irq_line_request_pending() const {
-    return irq_line_request_pending_;
-  }
-  int debug_irq_line_delay_cycles() const { return irq_line_delay_cycles_; }
-  bool debug_pending_second_active() const { return pending_second_.active; }
-  int debug_pending_second_delay() const { return pending_second_.delay; }
-  u8 debug_pending_second_irq() const { return pending_second_.irq; }
-  bool debug_pending_async_active() const { return pending_async_irq_.active; }
-  int debug_pending_async_delay() const { return pending_async_irq_.delay; }
-  u8 debug_pending_async_irq() const { return pending_async_irq_.irq; }
-  bool debug_command_busy() const { return command_busy_; }
-  int debug_pending_cycles() const { return pending_cycles_; }
-  int debug_state() const { return static_cast<int>(state_); }
-  bool debug_sector_redelivery_pending() const {
-    return sector_redelivery_pending_;
-  }
-  int debug_sector_redelivery_delay() const {
-    return sector_redelivery_delay_cycles_;
-  }
   u64 debug_last_irq_clear_cycle() const { return last_irq_clear_cycle_; }
 
 private:

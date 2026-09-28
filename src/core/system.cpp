@@ -1685,36 +1685,6 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     u32 dma_tick_budget = 0;
     u32 timer_tick_budget = 0;
 
-    u64 sched_detail_frame = ~0ull;
-    if (const char* detail = std::getenv("VIBESTATION_SCHED_TRACE_DETAIL_FRAME")) {
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(detail, &end, 0);
-        if (end != detail && *end == '\0') {
-            sched_detail_frame = static_cast<u64>(parsed);
-        }
-    }
-    const bool sched_detail =
-        static_cast<u64>(boot_diag_.frame_counter) == sched_detail_frame;
-    u64 sched_run_focus = 303u;
-    if (const char* focus = std::getenv("VIBESTATION_SCHED_TRACE_RUN_SLICE")) {
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(focus, &end, 0);
-        if (end != focus && *end == '\0') {
-            sched_run_focus = static_cast<u64>(parsed);
-        }
-    }
-    u64 sched_stop_after = ~0ull;
-    if (const char* stop = std::getenv("VIBESTATION_SCHED_STOP_AFTER_SLICE")) {
-        char* end = nullptr;
-        const unsigned long long parsed = std::strtoull(stop, &end, 0);
-        if (end != stop && *end == '\0') {
-            sched_stop_after = static_cast<u64>(parsed);
-        }
-    }
-    const bool sched_trace_single_step =
-        std::getenv("VIBESTATION_SCHED_TRACE_SINGLE_STEP") != nullptr;
-    u64 sched_outer_slice = 0;
-
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
         extra_cycle_error += extra_cycles_per_frame;
@@ -1761,18 +1731,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         while (cycles_remaining > 0) {
             const u32 target_slice_cycles =
                 std::min(cycles_remaining, cpu_instruction_slice * 4u);
-            const u64 detail_index = sched_outer_slice++;
-            const u64 detail_cpu_before = cpu_.cycle_count();
-            const u32 detail_pc_before = cpu_.debug_state().pc;
-            const u32 detail_sio_before = sio_.cycles_until_event();
-            const u64 detail_cd_cmd_before = cdrom_.command_count();
-            const u64 detail_cd_sector_before = cdrom_.sector_count();
-            const u64 detail_sio_io_before = boot_diag_.sio_io_count;
             u32 spent_in_slice = 0;
             u32 instructions_executed = 0;
-            u32 detail_run_index = 0;
-            const bool run_detail_focus =
-                sched_detail && detail_index == sched_run_focus;
             if (optimized_cpu_mode) {
                 while (cycles_remaining > 0 &&
                        spent_in_slice < target_slice_cycles &&
@@ -1784,36 +1744,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         sio_event_cycles == 0u
                         ? remaining_slice_cycles
                         : std::min(remaining_slice_cycles, sio_event_cycles);
-                    const u32 detail_run_pc0 = cpu_.debug_state().pc;
-                    const u64 detail_run_cpu0 = cpu_.cycle_count();
-                    const u32 detail_run_budget =
-                        (sched_trace_single_step && run_detail_focus)
-                            ? 1u
-                            : (cpu_instruction_slice - instructions_executed);
                     CpuRunSliceResult run = cpu_.run_slice(
-                        run_cycles, detail_run_budget);
-                    if (run_detail_focus) {
-                        std::fprintf(
-                            stderr,
-                            "SCHED_RUN idx=%llu sub=%u opt=1 "
-                            "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
-                            "reqcy=%u reqins=%u retcy=%u retins=%u "
-                            "spent0=%u remain0=%u sio_dead=%u boundary=%u "
-                            "ra=%08X next0=%08X pend0=%u delay0=%u instr0=%08X\n",
-                            static_cast<unsigned long long>(detail_index),
-                            detail_run_index++, detail_run_pc0,
-                            cpu_.debug_state().pc,
-                            static_cast<unsigned long long>(detail_run_cpu0),
-                            static_cast<unsigned long long>(cpu_.cycle_count()),
-                            run_cycles, detail_run_budget, run.cycles,
-                            run.instructions, spent_in_slice, cycles_remaining,
-                            sio_event_cycles,
-                            cpu_timing_boundary_requested_ ? 1u : 0u,
-                            cpu_.reg(31), cpu_.debug_state().next_pc,
-                            cpu_.debug_state().pending_branch_pc,
-                            cpu_.debug_state().pending_delay_slot ? 1u : 0u,
-                            read32(detail_run_pc0));
-                    }
+                        run_cycles,
+                        cpu_instruction_slice - instructions_executed);
                     if (run.cycles == 0 || run.instructions == 0) {
                         if (effective_cpu_execution_mode() ==
                             CpuExecutionMode::Recompiler) {
@@ -1854,34 +1787,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             } else {
                 while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
                        instructions_executed < cpu_instruction_slice) {
-                    const u32 detail_run_pc0 = cpu_.debug_state().pc;
-                    const u64 detail_run_cpu0 = cpu_.cycle_count();
-                    const u32 detail_run_cycles =
-                        target_slice_cycles - spent_in_slice;
                     const CpuRunSliceResult run =
-                        cpu_.run_slice(detail_run_cycles, 1u);
-                    if (run_detail_focus) {
-                        std::fprintf(
-                            stderr,
-                            "SCHED_RUN idx=%llu sub=%u opt=0 "
-                            "pc0=%08X pc1=%08X cpu0=%llu cpu1=%llu "
-                            "reqcy=%u reqins=1 retcy=%u retins=%u "
-                            "spent0=%u remain0=%u sio_dead=%u boundary=%u "
-                            "ra=%08X next0=%08X pend0=%u delay0=%u instr0=%08X\n",
-                            static_cast<unsigned long long>(detail_index),
-                            detail_run_index++, detail_run_pc0,
-                            cpu_.debug_state().pc,
-                            static_cast<unsigned long long>(detail_run_cpu0),
-                            static_cast<unsigned long long>(cpu_.cycle_count()),
-                            detail_run_cycles, run.cycles, run.instructions,
-                            spent_in_slice, cycles_remaining,
-                            sio_.cycles_until_event(),
-                            cpu_timing_boundary_requested_ ? 1u : 0u,
-                            cpu_.reg(31), cpu_.debug_state().next_pc,
-                            cpu_.debug_state().pending_branch_pc,
-                            cpu_.debug_state().pending_delay_slot ? 1u : 0u,
-                            read32(detail_run_pc0));
-                    }
+                        cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
                     const u32 consumed = run.cycles;
                     if (consumed == 0) {
                         break;
@@ -1897,199 +1804,21 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                         (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
                 }
             }
-            const bool cd_irq_focus =
-                sched_detail && detail_index >= 3623u && detail_index <= 3627u;
-            if (cd_irq_focus) {
-                std::fprintf(
-                    stderr,
-                    "CDIRQ_PRE idx=%llu scan=%u spent=%u cpu=%llu pc=%08X "
-                    "istat=%08X en=%02X flag=%02X linepend=%u linedelay=%d "
-                    "cmd_busy=%u cmd_delay=%d second=%u/%d/%u async=%u/%d/%u "
-                    "redeliver=%u/%d state=%d pending=%d queued=%zu "
-                    "data=%u/%u lba=%d active=%d\n",
-                    static_cast<unsigned long long>(detail_index), scanline,
-                    spent_in_slice,
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    cpu_.debug_state().pc, irq_.stat(),
-                    static_cast<unsigned>(cdrom_.debug_interrupt_enable()),
-                    static_cast<unsigned>(cdrom_.debug_interrupt_flag()),
-                    cdrom_.debug_irq_line_request_pending() ? 1u : 0u,
-                    cdrom_.debug_irq_line_delay_cycles(),
-                    cdrom_.debug_command_busy() ? 1u : 0u,
-                    cdrom_.busy_cycles_remaining(),
-                    cdrom_.debug_pending_second_active() ? 1u : 0u,
-                    cdrom_.debug_pending_second_delay(),
-                    static_cast<unsigned>(cdrom_.debug_pending_second_irq()),
-                    cdrom_.debug_pending_async_active() ? 1u : 0u,
-                    cdrom_.debug_pending_async_delay(),
-                    static_cast<unsigned>(cdrom_.debug_pending_async_irq()),
-                    cdrom_.debug_sector_redelivery_pending() ? 1u : 0u,
-                    cdrom_.debug_sector_redelivery_delay(),
-                    cdrom_.debug_state(), cdrom_.debug_pending_cycles(),
-                    cdrom_.debug_queued_sector_count(),
-                    cdrom_.sector_data_ready() ? 1u : 0u,
-                    cdrom_.sector_data_request() ? 1u : 0u,
-                    cdrom_.current_read_lba(), cdrom_.active_data_lba());
-            }
-
             if (spent_in_slice > 0) {
                 mdec_.tick(spent_in_slice);
                 cdrom_.tick(spent_in_slice);
             }
 
-            if (cd_irq_focus) {
-                std::fprintf(
-                    stderr,
-                    "CDIRQ_POST idx=%llu scan=%u spent=%u cpu=%llu pc=%08X "
-                    "istat=%08X en=%02X flag=%02X linepend=%u linedelay=%d "
-                    "cmd_busy=%u cmd_delay=%d second=%u/%d/%u async=%u/%d/%u "
-                    "redeliver=%u/%d state=%d pending=%d queued=%zu "
-                    "data=%u/%u lba=%d active=%d\n",
-                    static_cast<unsigned long long>(detail_index), scanline,
-                    spent_in_slice,
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    cpu_.debug_state().pc, irq_.stat(),
-                    static_cast<unsigned>(cdrom_.debug_interrupt_enable()),
-                    static_cast<unsigned>(cdrom_.debug_interrupt_flag()),
-                    cdrom_.debug_irq_line_request_pending() ? 1u : 0u,
-                    cdrom_.debug_irq_line_delay_cycles(),
-                    cdrom_.debug_command_busy() ? 1u : 0u,
-                    cdrom_.busy_cycles_remaining(),
-                    cdrom_.debug_pending_second_active() ? 1u : 0u,
-                    cdrom_.debug_pending_second_delay(),
-                    static_cast<unsigned>(cdrom_.debug_pending_second_irq()),
-                    cdrom_.debug_pending_async_active() ? 1u : 0u,
-                    cdrom_.debug_pending_async_delay(),
-                    static_cast<unsigned>(cdrom_.debug_pending_async_irq()),
-                    cdrom_.debug_sector_redelivery_pending() ? 1u : 0u,
-                    cdrom_.debug_sector_redelivery_delay(),
-                    cdrom_.debug_state(), cdrom_.debug_pending_cycles(),
-                    cdrom_.debug_queued_sector_count(),
-                    cdrom_.sector_data_ready() ? 1u : 0u,
-                    cdrom_.sector_data_request() ? 1u : 0u,
-                    cdrom_.current_read_lba(), cdrom_.active_data_lba());
-            }
-
-            if (sched_detail) {
-                const auto detail_after = cpu_.debug_state();
-                std::fprintf(
-                    stderr,
-                    "SCHED_SLICE frame=%llu mode=%u scan=%u idx=%llu "
-                    "remain=%u target=%u pc0=%08X pc1=%08X "
-                    "cpu0=%llu cpu1=%llu delta=%llu spent=%u ins=%u "
-                    "sio_dead0=%u sio_dead1=%u cd0=%llu cd1=%llu "
-                    "sec0=%llu sec1=%llu sioio0=%llu sioio1=%llu "
-                    "irq=%08X/%08X\n",
-                    static_cast<unsigned long long>(boot_diag_.frame_counter),
-                    static_cast<unsigned>(effective_cpu_execution_mode()),
-                    scanline,
-                    static_cast<unsigned long long>(detail_index),
-                    cycles_remaining,
-                    target_slice_cycles,
-                    detail_pc_before,
-                    detail_after.pc,
-                    static_cast<unsigned long long>(detail_cpu_before),
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    static_cast<unsigned long long>(
-                        cpu_.cycle_count() - detail_cpu_before),
-                    spent_in_slice,
-                    instructions_executed,
-                    detail_sio_before,
-                    sio_.cycles_until_event(),
-                    static_cast<unsigned long long>(detail_cd_cmd_before),
-                    static_cast<unsigned long long>(cdrom_.command_count()),
-                    static_cast<unsigned long long>(detail_cd_sector_before),
-                    static_cast<unsigned long long>(cdrom_.sector_count()),
-                    static_cast<unsigned long long>(detail_sio_io_before),
-                    static_cast<unsigned long long>(boot_diag_.sio_io_count),
-                    irq_.stat(),
-                    irq_.mask());
-            }
-
-            const bool sched_boundary_focus =
-                sched_detail && detail_index >= 2448u && detail_index <= 2455u;
-            if (sched_boundary_focus) {
-                std::fprintf(
-                    stderr,
-                    "SCHED_BOUNDARY_PRE idx=%llu scan=%u remain=%u "
-                    "dma_budget=%u timer_budget=%u cpu=%llu pc=%08X "
-                    "sio_dead=%u cd=%llu/%llu irq=%08X/%08X\n",
-                    static_cast<unsigned long long>(detail_index), scanline,
-                    cycles_remaining, dma_tick_budget, timer_tick_budget,
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    cpu_.debug_state().pc, sio_.cycles_until_event(),
-                    static_cast<unsigned long long>(cdrom_.command_count()),
-                    static_cast<unsigned long long>(cdrom_.sector_count()),
-                    irq_.stat(), irq_.mask());
-            }
-
             dma_tick_budget += spent_in_slice;
             if (dma_tick_budget >= dma_tick_stride) {
-                const u64 dma_cpu_before = cpu_.cycle_count();
-                const u32 dma_remain_before = cycles_remaining;
-                const u32 dma_budget_before = dma_tick_budget;
                 service_dma();
-                const u64 dma_cpu_after = cpu_.cycle_count();
-                if (sched_boundary_focus) {
-                    std::fprintf(
-                        stderr,
-                        "SCHED_DMA idx=%llu budget0=%u budget1=%u "
-                        "remain0=%u remain1=%u cpu0=%llu cpu1=%llu "
-                        "dma_cycles=%llu sio_dead=%u cd=%llu/%llu "
-                        "irq=%08X/%08X\n",
-                        static_cast<unsigned long long>(detail_index),
-                        dma_budget_before,
-                        dma_tick_budget,
-                        dma_remain_before,
-                        cycles_remaining,
-                        static_cast<unsigned long long>(dma_cpu_before),
-                        static_cast<unsigned long long>(dma_cpu_after),
-                        static_cast<unsigned long long>(
-                            dma_cpu_after - dma_cpu_before),
-                        sio_.cycles_until_event(),
-                        static_cast<unsigned long long>(cdrom_.command_count()),
-                        static_cast<unsigned long long>(cdrom_.sector_count()),
-                        irq_.stat(), irq_.mask());
-                }
                 dma_tick_budget -= dma_tick_stride;
             }
 
             timer_tick_budget += spent_in_slice;
-            const u32 timer_budget_before_tick = timer_tick_budget;
-            u32 timer_ticks = 0u;
             while (timer_tick_budget >= timer_tick_stride) {
                 timers_.tick(timer_tick_stride);
                 timer_tick_budget -= timer_tick_stride;
-                ++timer_ticks;
-            }
-            if (sched_boundary_focus) {
-                std::fprintf(
-                    stderr,
-                    "SCHED_BOUNDARY_POST idx=%llu scan=%u remain=%u "
-                    "dma_budget=%u timer0=%u timer1=%u timer_ticks=%u "
-                    "cpu=%llu pc=%08X sio_dead=%u cd=%llu/%llu "
-                    "irq=%08X/%08X\n",
-                    static_cast<unsigned long long>(detail_index), scanline,
-                    cycles_remaining, dma_tick_budget,
-                    timer_budget_before_tick, timer_tick_budget, timer_ticks,
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    cpu_.debug_state().pc, sio_.cycles_until_event(),
-                    static_cast<unsigned long long>(cdrom_.command_count()),
-                    static_cast<unsigned long long>(cdrom_.sector_count()),
-                    irq_.stat(), irq_.mask());
-            }
-
-            if (sched_detail && detail_index == sched_stop_after) {
-                std::fprintf(
-                    stderr,
-                    "SCHED_DEBUG_STOP frame=%u scan=%u idx=%llu pc=%08X "
-                    "cpu=%llu irq=%08X/%08X\n",
-                    boot_diag_.frame_counter, scanline,
-                    static_cast<unsigned long long>(detail_index),
-                    cpu_.debug_state().pc,
-                    static_cast<unsigned long long>(cpu_.cycle_count()),
-                    irq_.stat(), irq_.mask());
-                return;
             }
         }
         if (profile_detailed) {
@@ -3093,35 +2822,6 @@ void System::write8(u32 addr, u8 val) {
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
         }
-        if (ram_addr <= 0x001F06A6u &&
-            (ram_addr + 0u) >= 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            u8 new_flag = old_flag;
-            for (u32 j = 0; j < 1u; ++j) {
-                if (ram_addr + j == 0x001F06A6u) {
-                    new_flag = static_cast<u8>(
-                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
-                }
-            }
-            LOG_WARN(
-                "GT2_FLAG_WRITE width=8 addr=0x%08X old=%02X new=%02X "
-                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
-                ram_addr, static_cast<unsigned>(old_flag),
-                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
-                cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()));
-        }
-        if (ram_addr == 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            LOG_WARN(
-                "BUS: GT2 FLAG WRITE8 old=0x%02X new=0x%02X pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu origin=%s dma_ch=%u",
-                static_cast<unsigned>(old_flag), static_cast<unsigned>(val),
-                cpu_.pc(), cpu_.current_pc(), cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()),
-                bus_access_from_dma_ ? "DMA" : "CPU",
-                bus_access_from_dma_ ? static_cast<unsigned>(bus_access_dma_channel_)
-                                     : 0u);
-        }
         ram_.write8(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 1);
         debug_note_main_ram_write(ram_addr, val, 1);
@@ -3376,39 +3076,6 @@ void System::write16(u32 addr, u16 val) {
                     static_cast<unsigned long long>(cpu_.cycle_count()),
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
-        }
-        if (ram_addr <= 0x001F06A6u &&
-            (ram_addr + 1u) >= 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            u8 new_flag = old_flag;
-            for (u32 j = 0; j < 2u; ++j) {
-                if (ram_addr + j == 0x001F06A6u) {
-                    new_flag = static_cast<u8>(
-                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
-                }
-            }
-            LOG_WARN(
-                "GT2_FLAG_WRITE width=16 addr=0x%08X old=%02X new=%02X "
-                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
-                ram_addr, static_cast<unsigned>(old_flag),
-                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
-                cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()));
-        }
-        if (ram_addr <= 0x001F06A6u &&
-            (ram_addr + 1u) >= 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            const u32 shift = (0x001F06A6u - ram_addr) * 8u;
-            const u8 new_flag = static_cast<u8>((static_cast<u32>(val) >> shift) & 0xFFu);
-            LOG_WARN(
-                "BUS: GT2 FLAG WRITE16 addr=0x%08X old=0x%02X new=0x%02X raw=0x%04X pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu origin=%s dma_ch=%u",
-                ram_addr, static_cast<unsigned>(old_flag),
-                static_cast<unsigned>(new_flag), static_cast<unsigned>(val),
-                cpu_.pc(), cpu_.current_pc(), cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()),
-                bus_access_from_dma_ ? "DMA" : "CPU",
-                bus_access_from_dma_ ? static_cast<unsigned>(bus_access_dma_channel_)
-                                     : 0u);
         }
         ram_.write16(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 2);
@@ -3717,39 +3384,6 @@ void System::write32(u32 addr, u32 val) {
                     static_cast<unsigned long long>(cpu_.cycle_count()),
                     static_cast<unsigned>(ram_.read8(0x001F06A6u)));
             }
-        }
-        if (ram_addr <= 0x001F06A6u &&
-            (ram_addr + 3u) >= 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            u8 new_flag = old_flag;
-            for (u32 j = 0; j < 4u; ++j) {
-                if (ram_addr + j == 0x001F06A6u) {
-                    new_flag = static_cast<u8>(
-                        (static_cast<u32>(val) >> (j * 8u)) & 0xFFu);
-                }
-            }
-            LOG_WARN(
-                "GT2_FLAG_WRITE width=32 addr=0x%08X old=%02X new=%02X "
-                "pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu",
-                ram_addr, static_cast<unsigned>(old_flag),
-                static_cast<unsigned>(new_flag), cpu_.pc(), cpu_.current_pc(),
-                cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()));
-        }
-        if (ram_addr <= 0x001F06A6u &&
-            (ram_addr + 3u) >= 0x001F06A6u) {
-            const u8 old_flag = ram_.read8(0x001F06A6u);
-            const u32 shift = (0x001F06A6u - ram_addr) * 8u;
-            const u8 new_flag = static_cast<u8>((val >> shift) & 0xFFu);
-            LOG_WARN(
-                "BUS: GT2 FLAG WRITE32 addr=0x%08X old=0x%02X new=0x%02X raw=0x%08X pc=0x%08X cur=0x%08X ra=0x%08X cyc=%llu origin=%s dma_ch=%u",
-                ram_addr, static_cast<unsigned>(old_flag),
-                static_cast<unsigned>(new_flag), val, cpu_.pc(),
-                cpu_.current_pc(), cpu_.reg(31),
-                static_cast<unsigned long long>(cpu_.cycle_count()),
-                bus_access_from_dma_ ? "DMA" : "CPU",
-                bus_access_from_dma_ ? static_cast<unsigned>(bus_access_dma_channel_)
-                                     : 0u);
         }
         ram_.write32(ram_addr, val);
         cpu_.notify_code_write(ram_addr, 4);
