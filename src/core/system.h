@@ -765,8 +765,11 @@ private:
   u8 bus_access_dma_channel_ = 0xFFu;
   u32 bus_access_dma_transfer_id_ = 0;
   std::array<RamAccessLogEntry, kRamWriteHistorySize> ram_write_history_{};
-  std::array<RamWordWriteProvenance, psx::RAM_SIZE / sizeof(u32)>
-      ram_word_write_provenance_{};
+  // One entry per RAM word (512K). Heap-backed on purpose: as a value-
+  // initialized std::array member this cost MSVC ~5 s of front-end time in
+  // every translation unit that includes system.h.
+  std::vector<RamWordWriteProvenance> ram_word_write_provenance_ =
+      std::vector<RamWordWriteProvenance>(psx::RAM_SIZE / sizeof(u32));
   std::array<CpuRamWriteContext, kCpuRamWriteContextSize>
       cpu_ram_write_context_{};
   u32 ram_write_history_pos_ = 0;

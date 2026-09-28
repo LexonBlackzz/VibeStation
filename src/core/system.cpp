@@ -560,7 +560,8 @@ void System::reset() {
     spu_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
     ram_.reset();
-    ram_word_write_provenance_.fill({});
+    std::fill(ram_word_write_provenance_.begin(),
+              ram_word_write_provenance_.end(), RamWordWriteProvenance{});
     cpu_ram_write_context_.fill({});
     frame_cycles_ = 0;
     frame_cycle_remainder_ = 0.0;
