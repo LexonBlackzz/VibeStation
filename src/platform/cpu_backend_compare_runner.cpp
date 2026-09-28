@@ -4014,6 +4014,31 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   // not require their exact block-count shape here.
   cases.push_back(v4_icache_first_mmio_timestamp);
 
+  CpuCompareCase v4_pending_delay_cold_mmio_timestamp{};
+  v4_pending_delay_cold_mmio_timestamp.name =
+      "v4_pending_delay_cold_mmio_preserves_pre_fetch_timestamp";
+  v4_pending_delay_cold_mmio_timestamp.start_pc = 0x80010010u;
+  v4_pending_delay_cold_mmio_timestamp.initial_gpr[1] = 0x1F801044u;
+  v4_pending_delay_cold_mmio_timestamp.initial_next_pc = 0x80010040u;
+  v4_pending_delay_cold_mmio_timestamp.initial_pending_delay_slot = true;
+  v4_pending_delay_cold_mmio_timestamp.initial_pending_branch_taken = true;
+  v4_pending_delay_cold_mmio_timestamp.initial_pending_branch_pc = 0x8001000Cu;
+  v4_pending_delay_cold_mmio_timestamp.program = {
+      enc_i(0x23, 1, 2, 0), // LW r2, PAD/SIO STAT in the pending delay slot
+  };
+  v4_pending_delay_cold_mmio_timestamp.memory = {
+      {0x80010040u, 0u},
+  };
+  v4_pending_delay_cold_mmio_timestamp.instructions = 1u;
+  v4_pending_delay_cold_mmio_timestamp.prime_sio_before_run = true;
+  v4_pending_delay_cold_mmio_timestamp.require_v4_native_entry_when_available =
+      true;
+  v4_pending_delay_cold_mmio_timestamp
+      .require_v4_pending_delay_native_when_available = true;
+  v4_pending_delay_cold_mmio_timestamp.require_v4_mmio_native_when_available =
+      true;
+  cases.push_back(v4_pending_delay_cold_mmio_timestamp);
+
   CpuCompareCase v4_pending_delay_refill_budget_boundary{};
   v4_pending_delay_refill_budget_boundary.name =
       "v4_pending_delay_refill_preserves_cycle_budget";
