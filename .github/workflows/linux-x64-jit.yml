@@ -93,9 +93,3 @@ jobs:
           path: VibeStation-offline-src.tar.gz
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Diagnostic run-id breadcrumb
-        if: always()
-        run: |
-          echo "Intentional post-artifact failure for connector run-id recovery"
-          exit 1
