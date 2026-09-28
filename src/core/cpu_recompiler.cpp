@@ -10041,6 +10041,16 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     }
     stats_.native_instructions += native.instructions;
     stats_.optimized_instructions += native.instructions;
+
+    // A resident MMIO instruction can establish a new scheduler-visible device
+    // deadline. The dispatcher has already returned at the exact instruction
+    // boundary; do not immediately re-enter native code using the stale outer
+    // slice budget. Leave the request pending for System::run_frame() to
+    // consume after it resamples SIO/device timing.
+    if (cpu_.sys_ != nullptr &&
+        cpu_.sys_->cpu_timing_boundary_requested()) {
+      break;
+    }
   }
   return result;
 #endif
