@@ -3113,6 +3113,31 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   mmio_write_branch.native_branch_should_be_taken = true;
   cases.push_back(mmio_write_branch);
 
+  CpuCompareCase mmio_enable_pending_irq{};
+  mmio_enable_pending_irq.name =
+      "v4_mmio_imask_enable_resamples_pending_irq";
+  mmio_enable_pending_irq.start_pc = 0xA0010000u;
+  mmio_enable_pending_irq.initial_gpr[1] = 0x1F801070u;
+  mmio_enable_pending_irq.initial_gpr[2] = 1u;
+  mmio_enable_pending_irq.initial_gpr[3] = 0x12345678u;
+  // VBlank starts pending but masked. The native SW makes it eligible; the
+  // following ADDIU must be preempted by interrupt entry.
+  mmio_enable_pending_irq.initial_cop0_sr_bits = 0x401u;
+  mmio_enable_pending_irq.initial_irq_mask = 0u;
+  mmio_enable_pending_irq.initial_irq_pending = true;
+  mmio_enable_pending_irq.program = {
+      enc_i(0x2B, 1, 2, 4), // SW r2,I_MASK(r1)
+      enc_i(0x09, 3, 3, 1), // must not retire before the IRQ
+      0u,
+  };
+  mmio_enable_pending_irq.instructions = 2u;
+  mmio_enable_pending_irq.require_v4_native_entry_when_available = true;
+  mmio_enable_pending_irq.require_v4_native_store_entry_when_available = true;
+  mmio_enable_pending_irq.require_v4_mmio_native_when_available = true;
+  mmio_enable_pending_irq
+      .require_v4_entry_exception_native_when_available = true;
+  cases.push_back(mmio_enable_pending_irq);
+
   CpuCompareCase native_memory_mid_block_irq{};
   native_memory_mid_block_irq.name = "native_memory_mid_block_irq_state";
   native_memory_mid_block_irq.initial_gpr[1] = 0x1F801070u;
