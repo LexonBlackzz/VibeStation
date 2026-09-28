@@ -9059,6 +9059,30 @@ struct CpuRecompilerBackend::Impl {
       code_pages.mark_address(code_phys);
       code_lines.mark_address(code_phys);
     }
+    if (const char *trace_blocks =
+            std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
+        trace_blocks != nullptr && trace_blocks[0] == '1') {
+      const bool low_poll =
+          start_pc >= 0x00000DE0u && start_pc < 0x00000E50u;
+      const bool high_helper =
+          start_pc >= 0x800876A0u && start_pc < 0x80087740u;
+      if (low_poll || high_helper) {
+        LOG_WARN(
+            "V4_BLOCK_FINAL pc=%08X epoch=%u cacheable=%u lines=%u "
+            "ic0=%u:%u ic1=%u:%u pagegen=%u code=%u "
+            "first=%08X second=%08X third=%08X fourth=%08X",
+            start_pc, block->cache_epoch, block->cacheable ? 1u : 0u,
+            static_cast<unsigned>(block->icache_line_count),
+            static_cast<unsigned>(block->icache_index),
+            block->icache_generation,
+            static_cast<unsigned>(block->second_icache_index),
+            block->second_icache_generation,
+            block->code_page_generation, block->code_size,
+            block->guest_bits[0], block->guest_bits[1],
+            block->guest_bits[2], block->guest_bits[3]);
+      }
+    }
+
     install(start_pc, block);
 
     ++stats.native_compile_successes;
