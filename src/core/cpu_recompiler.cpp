@@ -653,47 +653,56 @@ u32 v4_bus_read8(System *sys, u32 phys, u32 resident_cycles) {
   if (sys == nullptr) {
     return 0u;
   }
-  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
-  return static_cast<u32>(sys->read8(phys));
+  sys->jit_begin_bus_access(phys, resident_cycles);
+  const u32 value = static_cast<u32>(sys->read8(phys));
+  sys->jit_end_bus_access();
+  return value;
 }
 
 u32 v4_bus_read16(System *sys, u32 phys, u32 resident_cycles) {
   if (sys == nullptr) {
     return 0u;
   }
-  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
-  return static_cast<u32>(sys->read16(phys));
+  sys->jit_begin_bus_access(phys, resident_cycles);
+  const u32 value = static_cast<u32>(sys->read16(phys));
+  sys->jit_end_bus_access();
+  return value;
 }
 
 u32 v4_bus_read32(System *sys, u32 phys, u32 resident_cycles) {
   if (sys == nullptr) {
     return 0u;
   }
-  sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
-  return sys->read32(phys);
+  sys->jit_begin_bus_access(phys, resident_cycles);
+  const u32 value = sys->read32(phys);
+  sys->jit_end_bus_access();
+  return value;
 }
 
 void v4_bus_write8(System *sys, u32 phys, u32 value,
                    u32 resident_cycles) {
   if (sys != nullptr) {
-    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+    sys->jit_begin_bus_access(phys, resident_cycles);
     sys->write8(phys, static_cast<u8>(value));
+    sys->jit_end_bus_access();
   }
 }
 
 void v4_bus_write16(System *sys, u32 phys, u32 value,
                     u32 resident_cycles) {
   if (sys != nullptr) {
-    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+    sys->jit_begin_bus_access(phys, resident_cycles);
     sys->write16(phys, static_cast<u16>(value));
+    sys->jit_end_bus_access();
   }
 }
 
 void v4_bus_write32(System *sys, u32 phys, u32 value,
                     u32 resident_cycles) {
   if (sys != nullptr) {
-    sys->jit_sync_time_sensitive_bus_access(phys, resident_cycles);
+    sys->jit_begin_bus_access(phys, resident_cycles);
     sys->write32(phys, value);
+    sys->jit_end_bus_access();
   }
 }
 
