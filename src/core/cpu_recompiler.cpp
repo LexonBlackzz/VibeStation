@@ -784,6 +784,11 @@ struct V4NativeState {
   // (notably IRQ eligibility). End the resident chain at that architectural
   // instruction boundary so run_slice can resample the hardware IRQ line.
   u32 host_timing_boundary = 0;
+  // Revalidation may charge a cold I-cache fetch before the translated block
+  // starts. Device/MMIO accesses in the block's first guest instruction must
+  // observe the pre-fetch Cpu::step() timestamp, so remember that in-flight
+  // fetch separately from cycles belonging to earlier guest instructions.
+  u32 current_block_refill_cycles = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
   // 0 = ordinary dispatch, 1 = Interrupt, 2 = instruction-address AdEL.
@@ -814,6 +819,19 @@ struct V4NativeState {
 
 using V4NativeFn = void (*)(V4NativeState *);
 using V4ResidentDispatchFn = void (*)(V4NativeState *);
+
+void emit_v4_bus_write_first_instruction_cycle_arg_adjust(
+    Xbyak::CodeGenerator &code) {
+#if defined(_WIN32)
+  code.sub(code.r9d, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))]);
+#else
+  code.sub(code.ecx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))]);
+#endif
+}
 
 u32 v4_gte_read_data(Gte *gte, u32 reg) {
   return gte != nullptr ? gte->read_data(reg) : 0u;
@@ -6823,6 +6841,12 @@ V4NativeFn compile_v4_store(
       stop_after_store, unaligned, slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
+  const auto adjust_first_store_bus_timestamp = [&]() {
+    if (prefix_count == 0u) {
+      emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
+    }
+  };
+
   V4AluRegisterCache prefix_cache{};
   emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
                               prefix_cache);
@@ -7211,12 +7235,15 @@ V4NativeFn compile_v4_store(
 #endif
   if (store.op == V4StoreOp::Sb) {
     emit_v4_bus_write_cycle_arg(code);
+    adjust_first_store_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
   } else if (store.op == V4StoreOp::Sh) {
     emit_v4_bus_write_cycle_arg(code);
+    adjust_first_store_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
   } else {
     emit_v4_bus_write_cycle_arg(code);
+    adjust_first_store_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
   }
   code.call(code.rax);
@@ -7736,6 +7763,10 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
                code.r14 + static_cast<int>(offsetof(V4Block, cache_epoch))],
            code.r13d);
   code.jne(stale_epoch);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+      0u);
 
   {
     Label memory_ok;
@@ -7969,6 +8000,10 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.mov(code.eax, code.dword[code.r8 + 12]);
       code.mov(code.dword[code.rcx + 12], code.eax);
       code.add(code.ebx, 4u);
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+          4u);
       code.inc(code.dword[
           code.r11 + static_cast<int>(offsetof(V4NativeState, icache_refills))]);
 
