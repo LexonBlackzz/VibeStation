@@ -116,6 +116,9 @@ struct CpuCompareCodeMutation {
   u32 value = 0;
   bool invalidate_icache_line = true;
   bool prime_sio_transfer = false;
+  // Host JIT maintenance only: discard every translation at this boundary
+  // without touching guest memory (addr/value are ignored).
+  bool flush_backend = false;
 };
 
 struct CpuCompareNativeTierMode {
@@ -790,6 +793,10 @@ static CpuCompareRunResult run_cpu_compare_case_once(
                                   test_case.instructions);
       if (target > executed) {
         run_segment(target - executed);
+      }
+      if (mutation.flush_backend) {
+        sys->cpu().flush_cpu_backend();
+        continue;
       }
       sys->write32(mutation.addr, mutation.value);
       if (mutation.invalidate_icache_line) {
@@ -3995,6 +4002,33 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_native_icache_revalidation
       .require_v4_native_icache_revalidation_when_available = true;
   cases.push_back(v4_native_icache_revalidation);
+
+  CpuCompareCase v4_translation_reset_slot_reuse{};
+  v4_translation_reset_slot_reuse.name =
+      "v4_translation_reset_does_not_alias_reused_block_slot";
+  v4_translation_reset_slot_reuse.start_pc = 0x80010000u;
+  // X (0x80010000) compiles into block slot 0. After a translation reset, Y
+  // (0x80010040) is compiled first and reuses slot 0 under the new epoch. X's
+  // surviving dispatch cell must not run Y's translation when Y jumps back.
+  v4_translation_reset_slot_reuse.program = {
+      enc_i(0x09, 1, 1, 1),
+      enc_j(0x02, 0x80010040u),
+      0u,
+  };
+  v4_translation_reset_slot_reuse.memory = {
+      {0x80010040u, enc_i(0x09, 2, 2, 1)},
+      {0x80010044u, enc_j(0x02, v4_translation_reset_slot_reuse.start_pc)},
+      {0x80010048u, 0u},
+  };
+  {
+    CpuCompareCodeMutation flush{};
+    flush.after_instructions = 3u;
+    flush.flush_backend = true;
+    v4_translation_reset_slot_reuse.mutations.push_back(flush);
+  }
+  v4_translation_reset_slot_reuse.instructions = 18u;
+  v4_translation_reset_slot_reuse.require_v4_native_entry_when_available = true;
+  cases.push_back(v4_translation_reset_slot_reuse);
 
   CpuCompareCase v4_swr_cycle_budget_boundary{};
   v4_swr_cycle_budget_boundary.name =

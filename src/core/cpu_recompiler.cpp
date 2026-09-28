@@ -8532,7 +8532,8 @@ struct CpuRecompilerBackend::Impl {
       return nullptr;
     }
     V4Block *block = entry->block;
-    if (block->cache_epoch != cache_epoch || block->cacheable != cacheable) {
+    if (block->cache_epoch != cache_epoch || block->start_pc != pc ||
+        block->cacheable != cacheable) {
       return nullptr;
     }
 
@@ -8571,11 +8572,15 @@ struct CpuRecompilerBackend::Impl {
     block_count = 0u;
     code_pages.clear();
     code_lines.clear();
+    // block_count restarts at zero, so V4Block slots are reused by the next
+    // compiles under the new epoch. A surviving cell for PC A could then point
+    // at a slot rebuilt for PC B, pass the epoch guard and run B's code at A.
+    // Pages (and thus direct-link cell addresses) survive; their targets do not.
+    for (auto &page : dispatch_pages) {
+      page->entries = {};
+    }
     ++cache_epoch;
     if (cache_epoch == 0u) {
-      for (auto &page : dispatch_pages) {
-        page->entries = {};
-      }
       cache_epoch = 1u;
     }
   }
@@ -9328,7 +9333,7 @@ struct CpuRecompilerBackend::Impl {
       V4DispatchEntry *entry = dispatch_entry(candidate_pc, false);
       V4Block *candidate = entry != nullptr ? entry->block : nullptr;
       if (candidate == nullptr || candidate->cache_epoch != cache_epoch ||
-          !candidate->cacheable || candidate->icache_line_count == 0u ||
+          candidate->start_pc != candidate_pc || !candidate->cacheable || candidate->icache_line_count == 0u ||
           candidate->icache_line_count >= 4u ||
           candidate->has_control || candidate->has_memory ||
           candidate_pc + candidate->instruction_count * 4u != line_start ||
