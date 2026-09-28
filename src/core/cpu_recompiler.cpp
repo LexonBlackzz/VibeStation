@@ -820,6 +820,19 @@ struct V4NativeState {
 using V4NativeFn = void (*)(V4NativeState *);
 using V4ResidentDispatchFn = void (*)(V4NativeState *);
 
+void emit_v4_bus_read_first_instruction_cycle_arg_adjust(
+    Xbyak::CodeGenerator &code) {
+#if defined(_WIN32)
+  code.sub(code.r8d, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))]);
+#else
+  code.sub(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))]);
+#endif
+}
+
 void emit_v4_bus_write_first_instruction_cycle_arg_adjust(
     Xbyak::CodeGenerator &code) {
 #if defined(_WIN32)
@@ -6248,6 +6261,12 @@ V4NativeFn compile_v4_load(
   Label ram, scratch, hot_mmio16, device, loaded, unaligned, slow_after_prefix, bail;
   Label &slow_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
+  const auto adjust_first_load_bus_timestamp = [&]() {
+    if (prefix_count == 0u) {
+      emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
+    }
+  };
+
   V4AluRegisterCache prefix_cache{};
   emit_v4_alu_sequence_cached(code, prefix.data(), prefix_count, true,
                               prefix_cache);
@@ -6446,12 +6465,15 @@ V4NativeFn compile_v4_load(
 #endif
   if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
     emit_v4_bus_read_cycle_arg(code, prefix_count);
+    adjust_first_load_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
   } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     emit_v4_bus_read_cycle_arg(code, prefix_count);
+    adjust_first_load_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
   } else {
     emit_v4_bus_read_cycle_arg(code, prefix_count);
+    adjust_first_load_bus_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
   }
   code.call(code.rax);
@@ -6841,6 +6863,11 @@ V4NativeFn compile_v4_store(
       stop_after_store, unaligned, slow_after_prefix, bail;
   Label &guard_exit = prefix_count != 0u ? slow_after_prefix : bail;
 
+  const auto adjust_first_store_bus_read_timestamp = [&]() {
+    if (prefix_count == 0u) {
+      emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
+    }
+  };
   const auto adjust_first_store_bus_timestamp = [&]() {
     if (prefix_count == 0u) {
       emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
@@ -7076,6 +7103,7 @@ V4NativeFn compile_v4_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
     emit_v4_bus_read_cycle_arg(code);
+    adjust_first_store_bus_read_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -7197,6 +7225,7 @@ V4NativeFn compile_v4_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
     emit_v4_bus_read_cycle_arg(code);
+    adjust_first_store_bus_read_timestamp();
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
