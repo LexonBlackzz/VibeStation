@@ -294,7 +294,7 @@ void Sio::do_transfer() {
   rebuild_stat();
 
   TransferTraceEntry &trace = transfer_trace_[transfer_trace_next_];
-  trace.cycle = sys_ != nullptr ? sys_->cpu().cycle_count() : 0;
+  trace.cycle = sys_ != nullptr ? sys_->device_cpu_cycle() : 0;
   trace.ctrl = ctrl_;
   trace.stat = stat_;
   trace.host_byte = host_byte;
@@ -329,7 +329,7 @@ void Sio::do_ack() {
   }
 
   TransferTraceEntry &trace = transfer_trace_[transfer_trace_next_];
-  trace.cycle = sys_ != nullptr ? sys_->cpu().cycle_count() : 0;
+  trace.cycle = sys_ != nullptr ? sys_->device_cpu_cycle() : 0;
   trace.ctrl = ctrl_;
   trace.stat = stat_;
   trace.host_byte = 0;
