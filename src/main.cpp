@@ -2478,22 +2478,48 @@ static int run_debug_snapshot_frame(const std::string &bios_path,
                  snapshot_path.c_str());
     return 2;
   }
-  sys->set_input_recorder(nullptr);
+  InputRecorder debug_input_recorder;
+  bool resumed_movie = false;
+  if (g_input_recorder_config.playback_enabled()) {
+    debug_input_recorder.set_config(g_input_recorder_config);
+    const std::string movie_disc_path = !cue_path.empty() ? cue_path : bin_path;
+    if (!debug_input_recorder.init(movie_disc_path,
+                                   vibestation_full_version_string())) {
+      std::fprintf(stderr, "SNAP_FRAME_FAIL movie_init detail=%s\n",
+                   debug_input_recorder.status().status_message.c_str());
+      return 3;
+    }
+    const u64 resume_frame = sys->boot_diag().frame_counter;
+    for (u64 frame = 0; frame < resume_frame; ++frame) {
+      (void)debug_input_recorder.get_playback_input(frame);
+    }
+    sys->set_input_recorder(&debug_input_recorder);
+    resumed_movie = true;
+    std::fprintf(stderr,
+                 "SNAP_FRAME_MOVIE resume_frame=%llu playback_index=%llu\n",
+                 static_cast<unsigned long long>(resume_frame),
+                 static_cast<unsigned long long>(
+                     debug_input_recorder.status().playback_current_index));
+  } else {
+    sys->set_input_recorder(nullptr);
+  }
   sys->cpu().flush_cpu_backend();
   const auto before = sys->cpu().debug_state();
   const int frames_to_run = std::max(1, run_frames);
   for (int i = 0; i < frames_to_run; ++i) {
-    // GT2 movie input is neutral throughout the current 2862-2950
-    // investigation window, so snapshot continuation needs no recorder.
-    sys->sio().set_button_state(0xFFFFu);
+    if (!resumed_movie) {
+      sys->sio().set_button_state(0xFFFFu);
+    }
     sys->run_frame(false);
     sys->debug_log_frame_state();
   }
   const auto after = sys->cpu().debug_state();
+  const CpuBackendStats backend_stats = sys->cpu().cpu_backend_stats();
   std::fprintf(
       stderr,
       "SNAP_FRAME_DONE mode=%u frames=%d pc0=%08X pc1=%08X cyc0=%llu cyc1=%llu "
-      "delta=%llu cd=%llu/%llu sio=%llu\n",
+      "delta=%llu cd=%llu/%llu sio=%llu code=%llu blocks=%u flushes=%llu "
+      "hits=%llu misses=%llu\n",
       static_cast<unsigned>(effective_cpu_execution_mode()), frames_to_run,
       before.pc, after.pc,
       static_cast<unsigned long long>(before.cycles),
@@ -2501,7 +2527,12 @@ static int run_debug_snapshot_frame(const std::string &bios_path,
       static_cast<unsigned long long>(after.cycles - before.cycles),
       static_cast<unsigned long long>(sys->cdrom().command_count()),
       static_cast<unsigned long long>(sys->cdrom().sector_count()),
-      static_cast<unsigned long long>(sys->boot_diag().sio_io_count));
+      static_cast<unsigned long long>(sys->boot_diag().sio_io_count),
+      static_cast<unsigned long long>(backend_stats.native_code_bytes),
+      backend_stats.block_count,
+      static_cast<unsigned long long>(backend_stats.flushes),
+      static_cast<unsigned long long>(backend_stats.cache_hits),
+      static_cast<unsigned long long>(backend_stats.cache_misses));
   return 0;
 }
 
