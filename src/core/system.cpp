@@ -1695,6 +1695,8 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             sched_stop_after = static_cast<u64>(parsed);
         }
     }
+    const bool sched_trace_single_step =
+        std::getenv("VIBESTATION_SCHED_TRACE_SINGLE_STEP") != nullptr;
     u64 sched_outer_slice = 0;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
@@ -1769,7 +1771,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                     const u32 detail_run_pc0 = cpu_.debug_state().pc;
                     const u64 detail_run_cpu0 = cpu_.cycle_count();
                     const u32 detail_run_budget =
-                        cpu_instruction_slice - instructions_executed;
+                        (sched_trace_single_step && run_detail_focus)
+                            ? 1u
+                            : (cpu_instruction_slice - instructions_executed);
                     CpuRunSliceResult run = cpu_.run_slice(
                         run_cycles, detail_run_budget);
                     if (run_detail_focus) {
