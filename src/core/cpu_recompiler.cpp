@@ -9223,10 +9223,16 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
   const auto log_translation_reset = [&](const char *reason) {
     const u32 frame =
         cpu_.sys_ != nullptr ? cpu_.sys_->boot_diag().frame_counter : 0u;
+    const size_t arena_used = impl_->arena.bytes_used();
+    const size_t arena_free =
+        arena_used < kV4CodeArenaBytes ? (kV4CodeArenaBytes - arena_used) : 0u;
     LOG_WARN(
-        "V4_TRANSLATION_RESET reason=%s frame=%u cpu=%llu pc=%08X",
+        "V4_TRANSLATION_RESET reason=%s frame=%u cpu=%llu pc=%08X "
+        "arena=%zu/%zu free=%zu blocks=%zu/%zu permanent=%zu",
         reason, frame,
-        static_cast<unsigned long long>(cpu_.cycles_), cpu_.pc_);
+        static_cast<unsigned long long>(cpu_.cycles_), cpu_.pc_,
+        arena_used, kV4CodeArenaBytes, arena_free, impl_->block_count,
+        kV4MaxBlocks, impl_->permanent_code_bytes);
   };
 
   const auto run_native_entry_exception = [&](u32 entry_exception) {
