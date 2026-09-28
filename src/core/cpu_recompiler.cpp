@@ -9220,6 +9220,15 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       }() &&
       max_cycles == 72u && cpu_.pc_ == 0x00000E30u;
 
+  const auto log_translation_reset = [&](const char *reason) {
+    const u32 frame =
+        cpu_.sys_ != nullptr ? cpu_.sys_->boot_diag().frame_counter : 0u;
+    LOG_WARN(
+        "V4_TRANSLATION_RESET reason=%s frame=%u cpu=%llu pc=%08X",
+        reason, frame,
+        static_cast<unsigned long long>(cpu_.cycles_), cpu_.pc_);
+  };
+
   const auto run_native_entry_exception = [&](u32 entry_exception) {
     V4NativeState &native = impl_->native_state;
     if (!impl_->native_state_bound) {
@@ -9440,6 +9449,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           // Code-arena exhaustion is a host JIT resource event, not permission
           // to execute the delay-slot opcode in C++. Recycle translations and
           // regenerate the native one-instruction fragment.
+          log_translation_reset("pending_delay_fragment_retry");
           impl_->reset_translations();
           block = nullptr;
           stats_.native_blocks = 0u;
@@ -9519,6 +9529,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       if (block == nullptr) {
         // A full arena/metadata slab is recycled in bulk; no per-block
         // executable allocations or frees are needed.
+        log_translation_reset("block_compile_retry");
         impl_->reset_translations();
         stats_.native_blocks = 0u;
         stats_.block_count = 0u;
@@ -9905,6 +9916,11 @@ void CpuRecompilerBackend::begin_frame(u32 frame_index) {
 }
 
 void CpuRecompilerBackend::flush() {
+  const u32 frame =
+      cpu_.sys_ != nullptr ? cpu_.sys_->boot_diag().frame_counter : 0u;
+  LOG_WARN(
+      "V4_TRANSLATION_RESET reason=backend_flush frame=%u cpu=%llu pc=%08X",
+      frame, static_cast<unsigned long long>(cpu_.cycles_), cpu_.pc_);
   impl_->reset_translations();
   ++stats_.flushes;
   stats_.native_blocks = 0u;
