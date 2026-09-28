@@ -784,10 +784,11 @@ struct V4NativeState {
   // (notably IRQ eligibility). End the resident chain at that architectural
   // instruction boundary so run_slice can resample the hardware IRQ line.
   u32 host_timing_boundary = 0;
-  // Revalidation may charge a cold I-cache fetch before the translated block
+  // An architectural I-cache fetch may be charged before the translated block
   // starts. Device/MMIO accesses in the block's first guest instruction must
   // observe the pre-fetch Cpu::step() timestamp, so remember that in-flight
   // fetch separately from cycles belonging to earlier guest instructions.
+  // This covers both C++ cold-compile fetches and resident revalidation refills.
   u32 current_block_refill_cycles = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
@@ -2565,6 +2566,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -2688,6 +2690,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
     code.mov(code.edx, code.r8d);
 #endif
     emit_v4_bus_write_cycle_arg(code);
+    emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -4549,12 +4552,15 @@ V4NativeFn compile_v4_pending_delay_load(
 #endif
   if (load.op == V4LoadOp::Lb || load.op == V4LoadOp::Lbu) {
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read8));
   } else if (load.op == V4LoadOp::Lh || load.op == V4LoadOp::Lhu) {
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read16));
   } else {
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
   }
   code.call(code.rax);
@@ -4896,6 +4902,7 @@ V4NativeFn compile_v4_pending_delay_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -5007,6 +5014,7 @@ V4NativeFn compile_v4_pending_delay_store(
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
 #endif
     emit_v4_bus_read_cycle_arg(code);
+    emit_v4_bus_read_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_read32));
     code.call(code.rax);
 #if defined(_WIN32)
@@ -5044,12 +5052,15 @@ V4NativeFn compile_v4_pending_delay_store(
 #endif
   if (store.op == V4StoreOp::Sb) {
     emit_v4_bus_write_cycle_arg(code);
+    emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write8));
   } else if (store.op == V4StoreOp::Sh) {
     emit_v4_bus_write_cycle_arg(code);
+    emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write16));
   } else {
     emit_v4_bus_write_cycle_arg(code);
+    emit_v4_bus_write_first_instruction_cycle_arg_adjust(code);
     code.mov(code.rax, reinterpret_cast<size_t>(&v4_bus_write32));
   }
   code.call(code.rax);
@@ -7621,10 +7632,13 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.r11 + static_cast<int>(offsetof(V4NativeState, gpr))]);
 
   // Keep hot scheduler counters resident across the native chain. r12d is the
-  // instruction downcounter and ebx mirrors V4NativeState::cycles.
+  // instruction downcounter and ebx mirrors V4NativeState::cycles. A C++ cold
+  // instruction fetch can seed cycles before the first native opcode without
+  // committing those cycles to Cpu::cycles_ early.
   code.mov(code.r12d, code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, instruction_budget))]);
-  code.xor_(code.ebx, code.ebx);
+  code.mov(code.ebx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, cycles))]);
   code.mov(code.r13d, code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, cache_epoch))]);
   code.mov(code.r15, code.ptr[
@@ -7762,7 +7776,19 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.jz(budget_exit);
     code.cmp(code.ebx, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
-    code.jae(budget_exit);
+    {
+      Label pending_delay_started;
+      code.jb(pending_delay_started);
+      // A cold fetch for this pending delay-slot instruction may itself reach
+      // the scheduler deadline. Cpu::step() has already started the instruction
+      // at that point, so it must still retire before yielding.
+      code.cmp(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+          0u);
+      code.je(budget_exit);
+      code.L(pending_delay_started);
+    }
     code.mov(code.rax, code.ptr[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_fn))]);
     code.test(code.rax, code.rax);
@@ -7792,10 +7818,6 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
                code.r14 + static_cast<int>(offsetof(V4Block, cache_epoch))],
            code.r13d);
   code.jne(stale_epoch);
-  code.mov(code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
-      0u);
 
   {
     Label memory_ok;
@@ -8254,6 +8276,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
 
   code.L(after_block);
   block_return = const_cast<u8 *>(code.getCurr());
+  // Any fetch associated with the block that just retired is now ordinary
+  // elapsed time. Do not let its timestamp adjustment leak into the next block.
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+      0u);
   // Device MMIO can synchronously execute DMA and charge CPU wait cycles.
   // Fold those charges into the resident native cycle count before any
   // direct-link or scheduler-budget decision.
@@ -8329,6 +8357,12 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   }
 
   linked_entry = const_cast<u8 *>(code.getCurr());
+  // Direct links enter a later block after the previous block has already
+  // retired, so no first-instruction refill adjustment carries across the link.
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, current_block_refill_cycles))],
+      0u);
   code.cmp(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_bail))], 0u);
   code.jne(bail_exit);
@@ -9442,6 +9476,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_delay_fn = nullptr;
     native.scheduler_yield = 0u;
     native.host_timing_boundary = 0u;
+    native.current_block_refill_cycles = cpp_refill_cycles;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = entry_exception;
@@ -9449,7 +9484,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
     native.external_cycle_penalty = &cpu_.cycle_penalty_;
-    native.cycles = 0u;
+    native.cycles = cpp_refill_cycles;
     native.instructions = 0u;
     native.cycle_budget = max_cycles - result.cycles;
     native.instruction_budget = max_instructions - result.instructions;
@@ -9522,6 +9557,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
   while (result.cycles < max_cycles &&
          result.instructions < max_instructions) {
+    // I-cache fills performed in C++ for a not-yet-compiled instruction are
+    // architecturally part of that instruction's Cpu::step(). Keep them
+    // uncommitted until native retirement so first-opcode MMIO sees the same
+    // pre-fetch absolute timestamp as the interpreter.
+    u32 cpp_refill_cycles = 0u;
+
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
     bool unsafe_state = false;
@@ -9589,13 +9630,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
           ++stats_.recompiler_frame_icache_refills;
           constexpr u32 kRefillCycles = 4u;
-          cpu_.cycles_ += kRefillCycles;
-          result.cycles += kRefillCycles;
-          stats_.executed_cycles += kRefillCycles;
+          cpp_refill_cycles += kRefillCycles;
           if (trace_gt2_slice) {
             LOG_WARN(
                 "V4_CPP_REFILL kind=pending_delay pc=%08X result_cycles=%u/%u",
-                cpu_.pc_, result.cycles, max_cycles);
+                cpu_.pc_, result.cycles + cpp_refill_cycles, max_cycles);
           }
         }
         delay_visible =
@@ -9655,13 +9694,11 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         if (cpu_.prepare_instruction_cache_line_for_backend(cpu_.pc_)) {
           ++stats_.recompiler_frame_icache_refills;
           constexpr u32 kRefillCycles = 4u;
-          cpu_.cycles_ += kRefillCycles;
-          result.cycles += kRefillCycles;
-          stats_.executed_cycles += kRefillCycles;
+          cpp_refill_cycles += kRefillCycles;
           if (trace_gt2_slice) {
             LOG_WARN(
                 "V4_CPP_REFILL kind=compile pc=%08X result_cycles=%u/%u",
-                cpu_.pc_, result.cycles, max_cycles);
+                cpu_.pc_, result.cycles + cpp_refill_cycles, max_cycles);
           }
         }
         icache_generation =
@@ -9795,6 +9832,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_delay_fn = reinterpret_cast<void *>(pending_delay_fn);
     native.scheduler_yield = 0u;
     native.host_timing_boundary = 0u;
+    native.current_block_refill_cycles = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = 0u;
@@ -9868,11 +9906,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     constexpr u32 kIcacheRefillCycles = 4u;
     const u32 native_refill_cycles =
         native.icache_refills * kIcacheRefillCycles;
+    const u32 total_refill_cycles = cpp_refill_cycles + native_refill_cycles;
     cpu_.cycles_ += native.cycles;
     result.cycles += native.cycles;
     stats_.native_cycles +=
-        native.cycles >= native_refill_cycles
-            ? native.cycles - native_refill_cycles
+        native.cycles >= total_refill_cycles
+            ? native.cycles - total_refill_cycles
             : 0u;
     stats_.executed_cycles += native.cycles;
 
