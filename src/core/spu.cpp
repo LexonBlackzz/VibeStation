@@ -1248,7 +1248,7 @@ void Spu::write16(u32 offset, u16 value) {
     }
   }
 
-  const u64 cpu_cycle = (sys_ != nullptr) ? sys_->cpu().cycle_count() : 0;
+  const u64 cpu_cycle = (sys_ != nullptr) ? sys_->device_cpu_cycle() : 0;
   auto note_key_write_timing = [&]() {
     const u64 lag = (cpu_cycle > last_synced_cpu_cycle_)
                         ? (cpu_cycle - last_synced_cpu_cycle_)
