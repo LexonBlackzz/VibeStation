@@ -1679,6 +1679,14 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     }
     const bool sched_detail =
         static_cast<u64>(boot_diag_.frame_counter) == sched_detail_frame;
+    u64 sched_run_focus = 303u;
+    if (const char* focus = std::getenv("VIBESTATION_SCHED_TRACE_RUN_SLICE")) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(focus, &end, 0);
+        if (end != focus && *end == '\0') {
+            sched_run_focus = static_cast<u64>(parsed);
+        }
+    }
     u64 sched_stop_after = ~0ull;
     if (const char* stop = std::getenv("VIBESTATION_SCHED_STOP_AFTER_SLICE")) {
         char* end = nullptr;
@@ -1746,7 +1754,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             u32 instructions_executed = 0;
             u32 detail_run_index = 0;
             const bool run_detail_focus =
-                sched_detail && detail_index == 303u;
+                sched_detail && detail_index == sched_run_focus;
             if (optimized_cpu_mode) {
                 while (cycles_remaining > 0 &&
                        spent_in_slice < target_slice_cycles &&
