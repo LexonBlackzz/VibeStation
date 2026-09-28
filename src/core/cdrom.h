@@ -126,6 +126,7 @@ public:
   int debug_sector_redelivery_delay() const {
     return sector_redelivery_delay_cycles_;
   }
+  u64 debug_last_irq_clear_cycle() const { return last_irq_clear_cycle_; }
 
 private:
   System *sys_ = nullptr;
