@@ -139,6 +139,7 @@ struct CpuCompareCase {
   u32 initial_cop0_sr_bits = 0;
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
+  bool prime_sio_before_run = false;
   u32 initial_next_pc = 0;
   bool initial_pending_delay_slot = false;
   bool initial_pending_branch_taken = false;
@@ -675,6 +676,15 @@ static CpuCompareRunResult run_cpu_compare_case_once(
   g_cpu_x64_jit_aggressive_native_prefix_ram_enabled =
       mode == CpuExecutionMode::X64Jit &&
       test_case.enable_aggressive_native_prefix_ram_for_x64;
+  if (test_case.prime_sio_before_run) {
+    // Start a short PAD/SIO transfer at the exact pre-instruction CPU
+    // timestamp. I-cache fetch/refill cycles for the first guest instruction
+    // must not be observed by that instruction's own MMIO transaction.
+    sys->write16(0x1F80104Eu, 1u);      // BAUD: 1 * 8 cycles
+    sys->write16(0x1F80104Au, 0x0003u); // select + TX enable
+    sys->write8(0x1F801040u, 0x01u);    // begin transfer
+  }
+
   CpuCompareRunResult out{};
   u32 executed = 0;
   size_t segment_index = 0;
@@ -3957,6 +3967,22 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_swr_cycle_budget_boundary.require_v4_native_entry_when_available = true;
   v4_swr_cycle_budget_boundary.require_v4_native_store_entry_when_available = true;
   cases.push_back(v4_swr_cycle_budget_boundary);
+
+  CpuCompareCase v4_cold_icache_first_mmio_timestamp{};
+  v4_cold_icache_first_mmio_timestamp.name =
+      "v4_cold_icache_first_mmio_preserves_pre_fetch_timestamp";
+  v4_cold_icache_first_mmio_timestamp.start_pc = 0x80010000u;
+  v4_cold_icache_first_mmio_timestamp.initial_gpr[1] = 0x1F801044u;
+  v4_cold_icache_first_mmio_timestamp.program = {
+      enc_i(0x23, 1, 2, 0), // LW r2, PAD/SIO STAT as the first cold opcode
+  };
+  v4_cold_icache_first_mmio_timestamp.instructions = 1u;
+  v4_cold_icache_first_mmio_timestamp.prime_sio_before_run = true;
+  v4_cold_icache_first_mmio_timestamp.require_v4_native_entry_when_available =
+      true;
+  v4_cold_icache_first_mmio_timestamp.require_v4_mmio_native_when_available =
+      true;
+  cases.push_back(v4_cold_icache_first_mmio_timestamp);
 
   CpuCompareCase v4_icache_first_mmio_timestamp{};
   v4_icache_first_mmio_timestamp.name =
