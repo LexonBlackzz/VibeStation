@@ -4078,6 +4078,22 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_cold_icache_first_cdrom_timestamp);
 
+  CpuCompareCase v4_sio_scheduler_boundary{};
+  v4_sio_scheduler_boundary.name =
+      "v4_sio_mmio_returns_at_scheduler_boundary";
+  v4_sio_scheduler_boundary.start_pc = 0xA0010000u;
+  v4_sio_scheduler_boundary.initial_gpr[1] = 0x1F801040u;
+  v4_sio_scheduler_boundary.initial_gpr[2] = 1u;
+  v4_sio_scheduler_boundary.program = {
+      enc_i(0x28, 1, 2, 0),   // SB r2, SIO DATA: requests a scheduler boundary
+      enc_i(0x09, 0, 3, 1),   // must remain unretired in this run_slice
+      enc_i(0x09, 0, 4, 2),
+  };
+  v4_sio_scheduler_boundary.instructions = 3u;
+  v4_sio_scheduler_boundary.require_v4_native_entry_when_available = true;
+  v4_sio_scheduler_boundary.require_v4_mmio_native_when_available = true;
+  cases.push_back(v4_sio_scheduler_boundary);
+
   CpuCompareCase v4_cdrom_irq_ack_resident_timestamp{};
   v4_cdrom_irq_ack_resident_timestamp.name =
       "v4_cdrom_irq_ack_uses_resident_cycle_timestamp";
