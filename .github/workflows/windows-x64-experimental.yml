@@ -14,25 +14,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Ninja + MSVC instead of the Visual Studio generator: the VS generator
+      # runs every CMake feature check through MSBuild (slow configure) and
+      # schedules compilation per project rather than per file.
       - name: Configure
-        shell: pwsh
-        run: >
-          cmake -S . -B build-windows
-          -G "Visual Studio 17 2022"
-          -A x64
-          -DVIBESTATION_ENABLE_X64_JIT=ON
-          -DVIBESTATION_ENABLE_DISCORD_RPC=OFF
-          -DVIBESTATION_ENABLE_IPO=OFF
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S . -B build-windows -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_C_COMPILER=cl ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DVIBESTATION_ENABLE_X64_JIT=ON ^
+            -DVIBESTATION_ENABLE_DISCORD_RPC=OFF ^
+            -DVIBESTATION_ENABLE_IPO=OFF
 
       - name: Build Release
-        shell: pwsh
-        run: cmake --build build-windows --config Release --parallel 4
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake --build build-windows --parallel %NUMBER_OF_PROCESSORS%
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifact | Out-Null
-          Copy-Item build-windows/Release/VibeStation.exe artifact/VibeStation.exe
+          Copy-Item build-windows/VibeStation.exe artifact/VibeStation.exe
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4

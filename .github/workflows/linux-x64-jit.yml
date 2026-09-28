@@ -51,7 +51,7 @@ jobs:
             -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build-linux --parallel 2
+        run: cmake --build build-linux --parallel "$(nproc)"
 
       - name: CPU backend compare
         run: ./build-linux/VibeStation --cpu-backend-compare-test

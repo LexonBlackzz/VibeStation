@@ -47,19 +47,23 @@ FetchContent_Declare(imgui
 )
 FetchContent_MakeAvailable(imgui)
 
-# nlohmann/json (header-only)
+# Dependencies below are fetched as pinned archives rather than git clones:
+# cloning (json especially) dominated configure time.
+
+# nlohmann/json (header-only). Official 111 KB release source tarball.
 FetchContent_Declare(nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-    GIT_SHALLOW TRUE
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-# stb_image (launcher background texture decoding)
+# stb_image (launcher background texture decoding). Pinned to the commit that
+# `master` resolved to, so builds are reproducible.
 FetchContent_Declare(stb
-    GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.zip
+    URL_HASH SHA256=8e59f72b0780690cda64726804269f638a3be77b9d1506ea95f443f7964bccf0
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(stb)
 
@@ -244,9 +248,9 @@ endif()
 
 if(VIBESTATION_ENABLE_X64_JIT)
     FetchContent_Declare(xbyak
-        GIT_REPOSITORY https://github.com/herumi/xbyak.git
-        GIT_TAG v7.37.4
-        GIT_SHALLOW TRUE
+        URL https://github.com/herumi/xbyak/archive/refs/tags/v7.37.4.zip
+        URL_HASH SHA256=f041ee3827290cac6fa2d88c3c06502b919e748208b458bf90d5cd41d1808392
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(xbyak)
     target_include_directories(VibeStation PRIVATE ${xbyak_SOURCE_DIR})
