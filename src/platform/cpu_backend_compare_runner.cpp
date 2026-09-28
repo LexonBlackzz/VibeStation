@@ -288,6 +288,10 @@ struct CpuComparePeripheralState {
   bool cd_data_ready = false;
   bool cd_data_request = false;
   u64 cd_last_irq_clear_cycle = 0;
+  u64 cd_io_count = 0;
+  u64 first_cd_io_cycle = 0;
+  u64 sio_io_count = 0;
+  u64 first_sio_io_cycle = 0;
 };
 
 static bool cpu_compare_peripherals_equal(
@@ -306,7 +310,11 @@ static bool cpu_compare_peripherals_equal(
          a.cd_last_irq == b.cd_last_irq &&
          a.cd_data_ready == b.cd_data_ready &&
          a.cd_data_request == b.cd_data_request &&
-         a.cd_last_irq_clear_cycle == b.cd_last_irq_clear_cycle;
+         a.cd_last_irq_clear_cycle == b.cd_last_irq_clear_cycle &&
+         a.cd_io_count == b.cd_io_count &&
+         a.first_cd_io_cycle == b.first_cd_io_cycle &&
+         a.sio_io_count == b.sio_io_count &&
+         a.first_sio_io_cycle == b.first_sio_io_cycle;
 }
 
 struct CpuCompareRunResult {
@@ -341,6 +349,11 @@ static CpuComparePeripheralState capture_cpu_compare_peripherals(
   out.cd_data_ready = cd.sector_data_ready();
   out.cd_data_request = cd.sector_data_request();
   out.cd_last_irq_clear_cycle = cd.debug_last_irq_clear_cycle();
+  const auto &boot = sys.boot_diag();
+  out.cd_io_count = boot.cd_io_count;
+  out.first_cd_io_cycle = boot.first_cd_io_cycle;
+  out.sio_io_count = boot.sio_io_count;
+  out.first_sio_io_cycle = boot.first_sio_io_cycle;
   return out;
 }
 
@@ -4049,6 +4062,21 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_pending_delay_cold_mmio_timestamp.require_v4_mmio_native_when_available =
       true;
   cases.push_back(v4_pending_delay_cold_mmio_timestamp);
+
+  CpuCompareCase v4_cold_icache_first_cdrom_timestamp{};
+  v4_cold_icache_first_cdrom_timestamp.name =
+      "v4_cold_icache_first_cdrom_preserves_pre_fetch_timestamp";
+  v4_cold_icache_first_cdrom_timestamp.start_pc = 0x80010000u;
+  v4_cold_icache_first_cdrom_timestamp.initial_gpr[1] = 0x1F801800u;
+  v4_cold_icache_first_cdrom_timestamp.program = {
+      enc_i(0x24, 1, 2, 0), // LBU r2, CD-ROM status as the first cold opcode
+  };
+  v4_cold_icache_first_cdrom_timestamp.instructions = 1u;
+  v4_cold_icache_first_cdrom_timestamp.require_v4_native_entry_when_available =
+      true;
+  v4_cold_icache_first_cdrom_timestamp.require_v4_mmio_native_when_available =
+      true;
+  cases.push_back(v4_cold_icache_first_cdrom_timestamp);
 
   CpuCompareCase v4_cdrom_irq_ack_resident_timestamp{};
   v4_cdrom_irq_ack_resident_timestamp.name =
