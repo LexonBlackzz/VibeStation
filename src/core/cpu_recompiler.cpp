@@ -7898,6 +7898,16 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       code.je(line_ready);
 
       code.L(refill_line);
+      // Revalidation is allowed to inspect future instructions only while their
+      // I-cache lines are already resident. Refilling a later line here would
+      // make that fetch architecturally visible before the guest reaches the
+      // instruction, stealing cycles from the current scheduler slice. Defer
+      // at the first missing future line and retire only the current instruction
+      // through its native budget fragment. A missing line for r9d==0 is the
+      // current architectural fetch and must still refill normally.
+      code.test(code.r9d, code.r9d);
+      code.jnz(revalidate_budget_fragment);
+
       // Recompute line index/offset and convert EDX to its physical line tag.
       code.mov(code.ecx, code.edx);
       code.shr(code.ecx, 4);
