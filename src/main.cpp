@@ -2705,9 +2705,70 @@ static int run_boot_disc_test(const std::string &bios_path, int frames,
     }
   }
 
+  int debug_state_hash_start_frame = -1;
+  int debug_state_hash_end_frame = -1;
+  if (const char *frame_text =
+          std::getenv("VIBESTATION_STATE_HASH_START_FRAME")) {
+    char *end = nullptr;
+    const long parsed = std::strtol(frame_text, &end, 0);
+    if (end != frame_text && *end == '\0' && parsed >= 0) {
+      debug_state_hash_start_frame = static_cast<int>(parsed);
+    }
+  }
+  if (const char *frame_text =
+          std::getenv("VIBESTATION_STATE_HASH_END_FRAME")) {
+    char *end = nullptr;
+    const long parsed = std::strtol(frame_text, &end, 0);
+    if (end != frame_text && *end == '\0' && parsed >= 0) {
+      debug_state_hash_end_frame = static_cast<int>(parsed);
+    }
+  }
+  if (debug_state_hash_start_frame >= 0 &&
+      debug_state_hash_end_frame < debug_state_hash_start_frame) {
+    debug_state_hash_end_frame = debug_state_hash_start_frame;
+  }
+
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+
+    const int completed_frame = i + 1;
+    if (debug_state_hash_start_frame >= 0 &&
+        completed_frame >= debug_state_hash_start_frame &&
+        completed_frame <= debug_state_hash_end_frame) {
+      BenchmarkStateHashes hashes{};
+      if (!capture_benchmark_state_hashes(*sys, hashes)) {
+        LOG_ERROR("BOOT_TEST_FAIL reason=state_hash frame=%d",
+                  completed_frame);
+        return 3;
+      }
+      LOG_INFO(
+          "BOOT_STATE_HASH frame=%d state=%016llX cpu=%016llX "
+          "cpu_debug=%016llX gpr=%016llX gte=%016llX "
+          "cop0_timing=%016llX ram=%016llX gpu=%016llX irq=%016llX "
+          "timers=%016llX dma=%016llX sio=%016llX cdrom=%016llX "
+          "spu=%016llX mdec=%016llX system=%016llX cycles=%llu "
+          "display=%08X pc=%08X",
+          completed_frame,
+          static_cast<unsigned long long>(hashes.state),
+          static_cast<unsigned long long>(hashes.components.cpu),
+          static_cast<unsigned long long>(hashes.cpu_debug),
+          static_cast<unsigned long long>(hashes.gpr),
+          static_cast<unsigned long long>(hashes.gte),
+          static_cast<unsigned long long>(hashes.cop0_timing),
+          static_cast<unsigned long long>(hashes.ram),
+          static_cast<unsigned long long>(hashes.components.gpu),
+          static_cast<unsigned long long>(hashes.components.irq),
+          static_cast<unsigned long long>(hashes.components.timers),
+          static_cast<unsigned long long>(hashes.components.dma),
+          static_cast<unsigned long long>(hashes.components.sio),
+          static_cast<unsigned long long>(hashes.components.cdrom),
+          static_cast<unsigned long long>(hashes.components.spu),
+          static_cast<unsigned long long>(hashes.components.mdec),
+          static_cast<unsigned long long>(hashes.components.system),
+          static_cast<unsigned long long>(hashes.cpu_cycles),
+          hashes.display, hashes.pc);
+    }
 
     if (debug_backend_flush_frame == (i + 1)) {
       LOG_WARN("BOOT_BACKEND_FLUSH frame=%d cpu=%llu pc=%08X", i + 1,
