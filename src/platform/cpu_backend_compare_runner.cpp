@@ -115,6 +115,7 @@ struct CpuCompareCodeMutation {
   u32 addr = 0;
   u32 value = 0;
   bool invalidate_icache_line = true;
+  bool prime_sio_transfer = false;
 };
 
 struct CpuCompareNativeTierMode {
@@ -273,6 +274,7 @@ struct CpuComparePeripheralState {
   u32 irq_mask = 0;
   u32 dma_dpcr = 0;
   u32 dma_dicr = 0;
+  u32 sio_cycles_until_event = 0;
   u64 cd_sector_count = 0;
   int cd_read_lba = 0;
   int cd_active_lba = 0;
@@ -290,6 +292,7 @@ static bool cpu_compare_peripherals_equal(
     const CpuComparePeripheralState &b) {
   return a.irq_stat == b.irq_stat && a.irq_mask == b.irq_mask &&
          a.dma_dpcr == b.dma_dpcr && a.dma_dicr == b.dma_dicr &&
+         a.sio_cycles_until_event == b.sio_cycles_until_event &&
          a.cd_sector_count == b.cd_sector_count &&
          a.cd_read_lba == b.cd_read_lba &&
          a.cd_active_lba == b.cd_active_lba &&
@@ -322,6 +325,7 @@ static CpuComparePeripheralState capture_cpu_compare_peripherals(
   out.irq_mask = sys.irq().mask();
   out.dma_dpcr = sys.debug_dma_read(0x70u);
   out.dma_dicr = sys.debug_dma_read(0x74u);
+  out.sio_cycles_until_event = sys.sio().cycles_until_event();
   out.cd_sector_count = cd.sector_count();
   out.cd_read_lba = cd.current_read_lba();
   out.cd_active_lba = cd.active_data_lba();
@@ -727,6 +731,14 @@ static CpuCompareRunResult run_cpu_compare_case_once(
       sys->write32(mutation.addr, mutation.value);
       if (mutation.invalidate_icache_line) {
         sys->cpu().debug_invalidate_icache_line(mutation.addr);
+      }
+      if (mutation.prime_sio_transfer) {
+        // Start an eight-cycle PAD/SIO transfer exactly at this CPU boundary.
+        // A subsequent first-instruction MMIO access must observe this timestamp,
+        // not a resident I-cache refill charged before that instruction retires.
+        sys->write16(0x1F80104Eu, 1u);      // BAUD: 1 * 8 cycles
+        sys->write16(0x1F80104Au, 0x0003u); // select + TX enable
+        sys->write8(0x1F801040u, 0x01u);    // begin transfer
       }
     }
   }
@@ -3945,6 +3957,35 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_swr_cycle_budget_boundary.require_v4_native_entry_when_available = true;
   v4_swr_cycle_budget_boundary.require_v4_native_store_entry_when_available = true;
   cases.push_back(v4_swr_cycle_budget_boundary);
+
+  CpuCompareCase v4_icache_first_mmio_timestamp{};
+  v4_icache_first_mmio_timestamp.name =
+      "v4_icache_refill_first_mmio_preserves_pre_fetch_timestamp";
+  v4_icache_first_mmio_timestamp.start_pc = 0x80010000u;
+  v4_icache_first_mmio_timestamp.initial_gpr[1] = 0x1F801044u;
+  v4_icache_first_mmio_timestamp.program = {
+      enc_i(0x23, 1, 2, 0),  // LW r2, PAD/SIO STAT -- first block instruction
+      enc_j(0x02, v4_icache_first_mmio_timestamp.start_pc),
+      0u,
+  };
+  // First pass compiles the block and returns to its start. Then evict the
+  // direct-mapped I-cache entry through an aliased line without invalidating the
+  // compiled block, and start an eight-cycle SIO transfer at that exact CPU
+  // boundary. Resident revalidation refills A by four cycles before dispatch.
+  // Cpu::step() keeps that refill in cycle_penalty_ while the first MMIO access
+  // still observes the pre-fetch CPU timestamp. Native execution must do the
+  // same: after the one-instruction second segment SIO must still have all eight
+  // cycles remaining, not four.
+  v4_icache_first_mmio_timestamp.mutations.push_back(
+      {3u, v4_icache_first_mmio_timestamp.start_pc + 0x1000u,
+       0xDEADBEEFu, true, true});
+  v4_icache_first_mmio_timestamp.instructions = 4u;
+  v4_icache_first_mmio_timestamp.compare_segment_states = true;
+  v4_icache_first_mmio_timestamp.require_v4_native_entry_when_available = true;
+  v4_icache_first_mmio_timestamp.require_v4_mmio_native_when_available = true;
+  v4_icache_first_mmio_timestamp.require_v4_icache_revalidation_when_available =
+      true;
+  cases.push_back(v4_icache_first_mmio_timestamp);
 
   CpuCompareCase v4_pending_delay_refill_budget_boundary{};
   v4_pending_delay_refill_budget_boundary.name =
