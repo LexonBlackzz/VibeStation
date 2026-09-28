@@ -8450,6 +8450,7 @@ struct CpuRecompilerBackend::Impl {
   size_t permanent_code_bytes = 0u;
   bool direct_links_enabled = true;
   bool crossline_branch_enabled = true;
+  bool trace_gt2_budget_enabled = false;
   bool initialization_attempted = false;
   bool initialized = false;
 
@@ -8480,6 +8481,10 @@ struct CpuRecompilerBackend::Impl {
         std::getenv("VIBESTATION_V4_DISABLE_CROSSLINE_BRANCH");
     crossline_branch_enabled =
         disable_crossline == nullptr || disable_crossline[0] != '1';
+    const char *trace_gt2_budget =
+        std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
+    trace_gt2_budget_enabled =
+        trace_gt2_budget != nullptr && trace_gt2_budget[0] == '1';
     resident_dispatch =
         install_v4_resident_dispatch(arena, &native_state,
                                      resident_block_return,
@@ -9401,10 +9406,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
   }
 
   const bool trace_gt2_slice =
-      [] {
-        const char *env = std::getenv("VIBESTATION_V4_TRACE_GT2_BUDGET");
-        return env != nullptr && env[0] == '1';
-      }() &&
+      impl_->trace_gt2_budget_enabled &&
       max_cycles == 72u && cpu_.pc_ == 0x00000E30u;
 
   const auto log_translation_reset = [&](const char *reason) {
