@@ -780,6 +780,10 @@ struct V4NativeState {
   u32 pending_branch_taken = 0;
   u32 pending_branch_pc = 0;
   u32 scheduler_yield = 0;
+  // Device/MMIO bridges can synchronously change scheduler-visible state
+  // (notably IRQ eligibility). End the resident chain at that architectural
+  // instruction boundary so run_slice can resample the hardware IRQ line.
+  u32 host_timing_boundary = 0;
   u32 pending_load_reg = 0;
   u32 pending_load_value = 0;
   // 0 = ordinary dispatch, 1 = Interrupt, 2 = instruction-address AdEL.
@@ -4528,6 +4532,10 @@ V4NativeFn compile_v4_pending_delay_load(
 #endif
   code.pop(code.r11);
   code.pop(code.r10);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+      1u);
   code.mov(code.r8d, code.eax);
   if (load.op == V4LoadOp::Lb) {
     code.shl(code.r8d, 24);
@@ -5019,6 +5027,10 @@ V4NativeFn compile_v4_pending_delay_store(
 #endif
   code.pop(code.r11);
   code.pop(code.r10);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+      1u);
 
   // The bus transaction happened with the old delayed-load value visible.
   emit_retire_incoming_load(code, 0u);
@@ -6430,6 +6442,10 @@ V4NativeFn compile_v4_load(
 #endif
   code.pop(code.r11);
   code.pop(code.r10);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+      1u);
 
   code.mov(code.r8d, code.eax);
   if (load.op == V4LoadOp::Lb) {
@@ -7209,6 +7225,10 @@ V4NativeFn compile_v4_store(
 #endif
   code.pop(code.r11);
   code.pop(code.r10);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+      1u);
 
   emit_retire_incoming_load(code, 0u);
   code.mov(code.dword[
@@ -8118,6 +8138,20 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
   code.jne(bail_exit);
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_entries))]);
+  {
+    Label no_host_timing_boundary;
+    code.cmp(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+        0u);
+    code.je(no_host_timing_boundary);
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
+        0u);
+    code.jmp(done);
+    code.L(no_host_timing_boundary);
+  }
   {
     Label no_scheduler_yield, post_delay_irq_clear;
     code.cmp(code.dword[
@@ -9239,6 +9273,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_branch_pc = 0u;
     native.pending_delay_fn = nullptr;
     native.scheduler_yield = 0u;
+    native.host_timing_boundary = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = entry_exception;
@@ -9589,6 +9624,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         pending_delay_fn != nullptr ? cpu_.pending_branch_pc_ : 0u;
     native.pending_delay_fn = reinterpret_cast<void *>(pending_delay_fn);
     native.scheduler_yield = 0u;
+    native.host_timing_boundary = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = 0u;
