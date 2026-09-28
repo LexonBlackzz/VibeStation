@@ -311,6 +311,8 @@ bool System::restore_state(const SystemSnapshot &snap) {
   r.val(frame_cycle_remainder_);
 
   sio_synced_cpu_cycle_ = cpu_.cycle_count();
+  jit_device_cycle_override_ = 0;
+  jit_device_cycle_override_active_ = false;
   cpu_timing_boundary_requested_ = false;
 
   return true;
