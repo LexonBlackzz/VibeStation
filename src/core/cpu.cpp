@@ -2573,6 +2573,12 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
     const u32 consumed = step();
     result.cycles += consumed;
     ++result.instructions;
+    // A device access can establish a new scheduler-visible deadline (SIO is
+    // the important case). Return at that exact architectural boundary so the
+    // System scheduler can resample the device before another instruction.
+    if (sys_ != nullptr && sys_->cpu_timing_boundary_requested()) {
+      break;
+    }
   }
   return result;
 }
