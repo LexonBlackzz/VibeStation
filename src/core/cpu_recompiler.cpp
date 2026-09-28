@@ -9476,7 +9476,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_delay_fn = nullptr;
     native.scheduler_yield = 0u;
     native.host_timing_boundary = 0u;
-    native.current_block_refill_cycles = cpp_refill_cycles;
+    native.current_block_refill_cycles = 0u;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = entry_exception;
@@ -9484,7 +9484,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
     native.external_cycle_penalty = &cpu_.cycle_penalty_;
-    native.cycles = cpp_refill_cycles;
+    native.cycles = 0u;
     native.instructions = 0u;
     native.cycle_budget = max_cycles - result.cycles;
     native.instruction_budget = max_instructions - result.instructions;
@@ -9832,7 +9832,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_delay_fn = reinterpret_cast<void *>(pending_delay_fn);
     native.scheduler_yield = 0u;
     native.host_timing_boundary = 0u;
-    native.current_block_refill_cycles = 0u;
+    native.current_block_refill_cycles = cpp_refill_cycles;
     native.pending_load_reg = cpu_.load_.reg;
     native.pending_load_value = cpu_.load_.value;
     native.entry_exception = 0u;
@@ -9840,7 +9840,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.exception_return_sr = 0u;
     native.exception_return_bd = 0u;
     native.external_cycle_penalty = &cpu_.cycle_penalty_;
-    native.cycles = 0u;
+    native.cycles = cpp_refill_cycles;
     native.instructions = 0u;
     native.cycle_budget = remaining_cycles;
     native.instruction_budget = remaining_instructions;
