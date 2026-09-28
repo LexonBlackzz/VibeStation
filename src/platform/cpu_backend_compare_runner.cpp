@@ -140,6 +140,7 @@ struct CpuCompareCase {
   u32 initial_irq_mask = 0;
   bool initial_irq_pending = false;
   bool prime_sio_before_run = false;
+  bool prime_cdrom_irq_before_run = false;
   u32 initial_next_pc = 0;
   bool initial_pending_delay_slot = false;
   bool initial_pending_branch_taken = false;
@@ -286,6 +287,7 @@ struct CpuComparePeripheralState {
   u8 cd_last_irq = 0;
   bool cd_data_ready = false;
   bool cd_data_request = false;
+  u64 cd_last_irq_clear_cycle = 0;
 };
 
 static bool cpu_compare_peripherals_equal(
@@ -303,7 +305,8 @@ static bool cpu_compare_peripherals_equal(
          a.cd_response_size == b.cd_response_size &&
          a.cd_last_irq == b.cd_last_irq &&
          a.cd_data_ready == b.cd_data_ready &&
-         a.cd_data_request == b.cd_data_request;
+         a.cd_data_request == b.cd_data_request &&
+         a.cd_last_irq_clear_cycle == b.cd_last_irq_clear_cycle;
 }
 
 struct CpuCompareRunResult {
@@ -337,6 +340,7 @@ static CpuComparePeripheralState capture_cpu_compare_peripherals(
   out.cd_last_irq = cd.last_irq_code();
   out.cd_data_ready = cd.sector_data_ready();
   out.cd_data_request = cd.sector_data_request();
+  out.cd_last_irq_clear_cycle = cd.debug_last_irq_clear_cycle();
   return out;
 }
 
@@ -683,6 +687,13 @@ static CpuCompareRunResult run_cpu_compare_case_once(
     sys->write16(0x1F80104Eu, 1u);      // BAUD: 1 * 8 cycles
     sys->write16(0x1F80104Au, 0x0003u); // select + TX enable
     sys->write8(0x1F801040u, 0x01u);    // begin transfer
+  }
+  if (test_case.prime_cdrom_irq_before_run) {
+    // Use the real CD-ROM command path to establish an active INT3. The guest
+    // test can then acknowledge it from inside a resident native chain and
+    // compare the device-visible acknowledgement timestamp with Interpreter.
+    sys->write8(0x1F801800u, 0u);    // index 0
+    sys->write8(0x1F801801u, 0x01u); // GetStat -> INT3
   }
 
   CpuCompareRunResult out{};
@@ -4038,6 +4049,25 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   v4_pending_delay_cold_mmio_timestamp.require_v4_mmio_native_when_available =
       true;
   cases.push_back(v4_pending_delay_cold_mmio_timestamp);
+
+  CpuCompareCase v4_cdrom_irq_ack_resident_timestamp{};
+  v4_cdrom_irq_ack_resident_timestamp.name =
+      "v4_cdrom_irq_ack_uses_resident_cycle_timestamp";
+  v4_cdrom_irq_ack_resident_timestamp.initial_gpr[1] = 0x1F801800u;
+  v4_cdrom_irq_ack_resident_timestamp.initial_gpr[2] = 1u;
+  v4_cdrom_irq_ack_resident_timestamp.initial_gpr[3] = 0x1Fu;
+  v4_cdrom_irq_ack_resident_timestamp.program = {
+      enc_i(0x28, 1, 2, 0), // SB r2, 0(r1): select CD-ROM index 1
+      0u,                    // NOP: accrue one resident cycle after boundary
+      enc_i(0x28, 1, 3, 3), // SB r3, 3(r1): acknowledge active INT3
+  };
+  v4_cdrom_irq_ack_resident_timestamp.instructions = 3u;
+  v4_cdrom_irq_ack_resident_timestamp.prime_cdrom_irq_before_run = true;
+  v4_cdrom_irq_ack_resident_timestamp.require_v4_native_entry_when_available =
+      true;
+  v4_cdrom_irq_ack_resident_timestamp.require_v4_mmio_native_when_available =
+      true;
+  cases.push_back(v4_cdrom_irq_ack_resident_timestamp);
 
   CpuCompareCase v4_pending_delay_refill_budget_boundary{};
   v4_pending_delay_refill_budget_boundary.name =
