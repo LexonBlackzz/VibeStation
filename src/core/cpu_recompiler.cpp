@@ -7999,6 +7999,28 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
       // Only the first instruction was validated. Do not publish the block's
       // generation snapshots as current: later instructions/lines remain
       // unchecked and must be revalidated before a full-block entry.
+      //
+      // If validating that first instruction refilled its I-cache line and the
+      // refill itself reached/crossed the scheduler deadline, Cpu::step() has
+      // already begun the architectural instruction and must still retire it.
+      // Bypass the generic tail gate in that case just like the full
+      // revalidation path below. Otherwise use the ordinary budget-fragment
+      // rules (including the empty-chain requirement for branch fragments).
+      {
+        Label partial_inside_budget;
+        code.cmp(code.ebx, code.dword[
+            code.r11 +
+            static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+        code.jb(partial_inside_budget);
+        code.test(code.r12d, code.r12d);
+        code.jz(budget_exit);
+        code.mov(code.rax, code.ptr[
+            code.r14 + static_cast<int>(offsetof(V4Block, budget_fn))]);
+        code.test(code.rax, code.rax);
+        code.jz(budget_exit);
+        code.jmp(code.rax);
+        code.L(partial_inside_budget);
+      }
       code.jmp(try_budget_fragment);
 
       code.L(revalidate_done);
