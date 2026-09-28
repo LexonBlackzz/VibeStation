@@ -1806,7 +1806,7 @@ void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response,
   }
 
   const u64 now =
-      sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+      sys_ ? static_cast<u64>(sys_->device_cpu_cycle()) : last_irq_clear_cycle_;
   const u64 diff = now - last_irq_clear_cycle_;
   const bool gap_satisfied = diff >= static_cast<u64>(kCdAsyncMinInterruptGapCycles);
   const bool can_deliver_now =
@@ -1851,7 +1851,7 @@ void CdRom::deliver_pending_async_irq() {
     return;
   }
   const u64 now =
-      sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+      sys_ ? static_cast<u64>(sys_->device_cpu_cycle()) : last_irq_clear_cycle_;
   const u64 diff = now - last_irq_clear_cycle_;
   if (diff < static_cast<u64>(kCdAsyncMinInterruptGapCycles)) {
     pending_async_irq_.delay = kCdAsyncRetryDelayCycles;
@@ -2426,7 +2426,7 @@ void CdRom::execute_internal_command(u8 cmd,
         "flag=%02X en=%02X",
         static_cast<unsigned>(cmd), sys_ ? sys_->cpu().pc() : 0u,
         static_cast<unsigned long long>(
-            sys_ ? sys_->cpu().cycle_count() : 0u),
+            sys_ ? sys_->device_cpu_cycle() : 0u),
         command_busy_cycles_, static_cast<unsigned>(interrupt_flag_),
         static_cast<unsigned>(interrupt_enable_));
   }
@@ -2577,7 +2577,7 @@ u8 CdRom::read8(u32 offset) {
               response_index_, response_fifo_.size(),
               static_cast<unsigned>(interrupt_flag_),
               static_cast<unsigned>(interrupt_enable_),
-              static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u));
+              static_cast<unsigned long long>(sys_ ? sys_->device_cpu_cycle() : 0u));
         }
       }
       if (response_index_ >= static_cast<int>(response_fifo_.size())) {
@@ -2606,7 +2606,7 @@ u8 CdRom::read8(u32 offset) {
               static_cast<unsigned>(value),
               static_cast<unsigned>(interrupt_flag_),
               static_cast<unsigned>(interrupt_enable_),
-              static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u));
+              static_cast<unsigned long long>(sys_ ? sys_->device_cpu_cycle() : 0u));
         }
       }
       ++data_index_;
@@ -2631,7 +2631,7 @@ u8 CdRom::read8(u32 offset) {
             data_ready_ ? 1u : 0u, data_request_ ? 1u : 0u, read_lba_,
             static_cast<unsigned>(interrupt_flag_),
             static_cast<unsigned>(interrupt_enable_),
-            static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u));
+            static_cast<unsigned long long>(sys_ ? sys_->device_cpu_cycle() : 0u));
       }
     }
     return 0;
@@ -2682,7 +2682,7 @@ void CdRom::write8(u32 offset, u8 value) {
             "flag=%02X en=%02X count=%llu",
             static_cast<unsigned>(value), sys_ ? sys_->cpu().pc() : 0u,
             static_cast<unsigned long long>(
-                sys_ ? sys_->cpu().cycle_count() : 0u),
+                sys_ ? sys_->device_cpu_cycle() : 0u),
             command_busy_cycles_, static_cast<unsigned>(interrupt_flag_),
             static_cast<unsigned>(interrupt_enable_),
             static_cast<unsigned long long>(command_counter_));
@@ -2776,7 +2776,7 @@ void CdRom::write8(u32 offset, u8 value) {
                 static_cast<unsigned>(interrupt_flag_),
                 static_cast<unsigned>(interrupt_enable_), response_index_,
                 response_fifo_.size(),
-                static_cast<unsigned long long>(sys_ ? sys_->cpu().cycle_count() : 0u));
+                static_cast<unsigned long long>(sys_ ? sys_->device_cpu_cycle() : 0u));
           }
         }
         if ((old_flag & ack_mask) != 0u) {
@@ -2784,7 +2784,7 @@ void CdRom::write8(u32 offset, u8 value) {
               static_cast<u8>(interrupt_flag_ & static_cast<u8>(~ack_mask));
           if (old_flag != 0u && (interrupt_flag_ & kHintMaskAll) == 0u) {
             last_irq_clear_cycle_ =
-                sys_ ? static_cast<u64>(sys_->cpu().cycle_count()) : last_irq_clear_cycle_;
+                sys_ ? static_cast<u64>(sys_->device_cpu_cycle()) : last_irq_clear_cycle_;
           }
           acked_irq = true;
         }
