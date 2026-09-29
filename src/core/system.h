@@ -533,18 +533,48 @@ public:
   u8 *jit_scratchpad_data_mut() { return ram_.scratch_data(); }
   // Narrow reduced bridge used by the experimental recompiler for hot
   // side-effect-compatible 16-bit timer/IRQ reads.
-  u32 jit_read16_hot_mmio(u32 phys);
+  u32 jit_read16_hot_mmio(u32 phys, u32 resident_cycles);
   // Native CPU blocks keep elapsed guest cycles resident until dispatch
   // returns. A host device callback must observe the same start-of-instruction
   // CPU timestamp as Cpu::step(), without forcing the native chain to commit.
   void jit_begin_bus_access(u32 phys, u32 resident_cycles);
   void jit_end_bus_access();
+  // The CPU timestamp devices must observe: the exact cycle of a catch-up
+  // segment while a device is being advanced to an event, the start-of-
+  // instruction cycle of an MMIO access made from resident native code, or the
+  // committed CPU cycle count.
   u64 device_cpu_cycle() const {
+    if (catchup_active_) {
+      return catchup_cycle_;
+    }
     return jit_device_cycle_override_active_
                ? jit_device_cycle_override_
                : cpu_.cycle_count();
   }
   void jit_sync_time_sensitive_bus_access(u32 phys, u32 resident_cycles);
+
+  // ── Event-driven device scheduling ───────────────────────────────
+  // Each device is advanced lazily to an absolute CPU cycle: on every MMIO
+  // access (sync-on-access) and when its own next autonomous event (IRQ
+  // assertion, sector arrival, ...) is due. run_frame() runs the CPU only up
+  // to the earliest of those deadlines, the next scanline edge and frame end.
+  static constexpr u64 kNoDeadline = ~0ull;
+  void sync_timers(u64 target_cycle);
+  void sync_cdrom(u64 target_cycle);
+  void sync_mdec(u64 target_cycle);
+  void sync_sio(u64 target_cycle);
+  void sync_spu(u64 target_cycle);
+  // Earliest absolute cycle at which any device needs the scheduler, or
+  // kNoDeadline.
+  u64 next_device_deadline() const;
+  // Advance every device whose deadline is <= target_cycle and service DMA.
+  void service_device_events(u64 target_cycle);
+  // Called after device MMIO that may have created an earlier deadline.
+  void note_device_state_changed();
+  u64 debug_timers_synced_cycle() const { return timers_synced_cycle_; }
+  u64 debug_cdrom_synced_cycle() const { return cdrom_synced_cycle_; }
+  u64 debug_mdec_synced_cycle() const { return mdec_synced_cycle_; }
+  u64 debug_frame_edge_cycle() const { return frame_edge_cycle_; }
   u32 jit_mapped_main_ram_size() const {
     const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
     return (memory_window == 5u || memory_window == 7u)
@@ -795,6 +825,24 @@ private:
   bool jit_device_cycle_override_active_ = false;
   bool cpu_timing_boundary_requested_ = false;
   bool spu_skip_sync_for_turbo_ = false;
+  // Event scheduler state. *_synced_cycle_ is the absolute CPU cycle each
+  // device state is valid at (it may lag the CPU; devices catch up lazily).
+  u64 timers_synced_cycle_ = 0;
+  u64 cdrom_synced_cycle_ = 0;
+  u64 mdec_synced_cycle_ = 0;
+  // Nominal start of the next frame. Scanline/frame edges are absolute, so an
+  // instruction that overshoots an edge shortens the following scanline.
+  u64 frame_edge_cycle_ = 0;
+  // Timers hold HBlank/VBlank-dependent state, so they are never advanced past
+  // the next scanline edge before that edge has been applied.
+  u64 scanline_edge_cycle_ = kNoDeadline;
+  // Absolute cycle the CPU was last budgeted to run to (0 outside run_frame).
+  u64 run_end_cycle_ = 0;
+  u64 dma_service_cycle_ = kNoDeadline;
+  u64 catchup_cycle_ = 0;
+  bool catchup_active_ = false;
+  struct IoScope;
+  void service_dma();
   std::atomic<bool> ram_reaper_enabled_{false};
   std::atomic<u32> ram_reaper_range_start_{0};
   std::atomic<u32> ram_reaper_range_end_{psx::RAM_SIZE - 1u};

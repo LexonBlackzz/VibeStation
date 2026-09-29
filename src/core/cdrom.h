@@ -80,6 +80,11 @@ public:
   void restore_state(const u8*& pos, size_t& remaining);
 
   void tick(u32 cycles);
+  // CPU cycles until the next autonomous state change (IRQ delay expiry,
+  // sector arrival, command completion...). tick() called with exactly this
+  // many cycles lands on that event; kNoEvent when the drive is quiescent.
+  static constexpr u32 kNoEvent = 0xFFFFFFFFu;
+  u32 cycles_until_event() const;
 
   // DMA reads a word from the data buffer
   u32 dma_read();

@@ -645,8 +645,9 @@ bool decode_v4_alu(u32 bits, V4DecodedInstruction &out) {
 
 #if VIBESTATION_JIT_V4_X64
 
-u32 v4_hot_mmio_read16(System *sys, u32 phys) {
-  return sys != nullptr ? sys->jit_read16_hot_mmio(phys) : 0x10000u;
+u32 v4_hot_mmio_read16(System *sys, u32 phys, u32 resident_cycles) {
+  return sys != nullptr ? sys->jit_read16_hot_mmio(phys, resident_cycles)
+                        : 0x10000u;
 }
 
 u32 v4_bus_read8(System *sys, u32 phys, u32 resident_cycles) {
@@ -6441,6 +6442,9 @@ V4NativeFn compile_v4_load(
       code.r11 + static_cast<int>(offsetof(V4NativeState, system))]);
   code.mov(code.esi, code.edx);
 #endif
+  // Timer reads sync the counter to the load's start-of-instruction cycle.
+  emit_v4_bus_read_cycle_arg(code, prefix_count);
+  adjust_first_load_bus_timestamp();
   code.mov(code.rax, reinterpret_cast<size_t>(&v4_hot_mmio_read16));
   code.call(code.rax);
 #if defined(_WIN32)

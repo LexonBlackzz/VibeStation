@@ -65,6 +65,9 @@ public:
   void write_command(u32 value);
   void write_control(u32 value);
   void tick(u32 cycles);
+  // Cycles until the macroblock output becomes visible (kNoEvent if idle).
+  static constexpr u32 kNoEvent = 0xFFFFFFFFu;
+  u32 cycles_until_event() const;
   u32 read_data();
   u32 read_status() const;
   u8 dma_out_block() const;

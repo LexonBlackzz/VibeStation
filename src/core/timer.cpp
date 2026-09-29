@@ -1,30 +1,10 @@
 #include "timer.h"
 #include "system.h"
+#include <algorithm>
 
 namespace {
 u64 g_timer_trace_counter = 0;
 
-bool counter_reaches_value(u32 old_counter, u32 ticks, u16 value) {
-  if (ticks == 0) {
-    return false;
-  }
-
-  old_counter &= 0xFFFFu;
-  if (ticks >= 0x10000u) {
-    return true;
-  }
-
-  const u32 target = value;
-  if (old_counter < target) {
-    return old_counter + ticks >= target;
-  }
-  if (old_counter > target) {
-    return old_counter + ticks >= (0x10000u + target);
-  }
-
-  // Already sitting on the compare value; the next hit is after a full wrap.
-  return false;
-}
 }
 
 void Timers::reset() {
@@ -94,7 +74,7 @@ void Timers::write(u32 offset, u32 value) {
     t.counter = 0;
     t.one_shot_done = false;
     t.sync_released = false;
-    t.irq_pulse_restore_pending = false;
+    t.irq_pulse_cycles_left = 0;
     if (timer == 0) {
       timer0_dot_cycle_remainder_ = 0;
     } else if (timer == 2) {
@@ -145,63 +125,168 @@ void Timers::write(u32 offset, u32 value) {
   }
 }
 
-void Timers::tick(u32 cycles) {
-  for (int i = 0; i < 3; ++i) {
-    const u8 source = timers_[i].clock_source();
-    u32 ticks = 0;
-
-    if (i == 2) {
-      // PSX-SPX timer2 clock source:
-      //   0/1 = System Clock, 2/3 = System Clock / 8
-      if (source == 2 || source == 3) {
-        const u64 total =
-            static_cast<u64>(timer2_sysclk8_cycle_remainder_) + cycles;
-        ticks = static_cast<u32>(total / 8u);
-        timer2_sysclk8_cycle_remainder_ = static_cast<u32>(total % 8u);
-      } else {
-        ticks = cycles;
-        timer2_sysclk8_cycle_remainder_ = 0;
-      }
-    } else {
-      // Timers 0/1 use the system clock on sources 0/2.
-      if (source == 0 || source == 2) {
-        ticks = cycles;
-      }
-    }
-
-    if (ticks > 0) {
-      tick_timer(i, ticks);
-    }
+u32 Timers::ticks_to_target(const Timer &t) {
+  const u32 counter = t.counter & 0xFFFFu;
+  const u32 target = t.target;
+  if (counter < target) {
+    return target - counter;
   }
-  for (auto &t : timers_) {
-    if (t.irq_pulse_restore_pending) {
-      t.mode |= (1u << 10);
-      t.irq_pulse_restore_pending = false;
+  // At or above the compare value the counter has to wrap before it can hit
+  // the target again (a counter sitting exactly on it waits a full lap).
+  return (0x10000u - counter) + target;
+}
+
+u32 Timers::ticks_to_overflow(const Timer &t) {
+  return 0x10000u - (t.counter & 0xFFFFu);
+}
+
+bool Timers::counts_system_clock(int index) const {
+  if (index == 2) {
+    return true; // sources 0/1 = sysclk, 2/3 = sysclk / 8
+  }
+  const u8 source = timers_[index].clock_source();
+  return source == 0 || source == 2;
+}
+
+bool Timers::counts_eighths(int index) const {
+  if (index != 2) {
+    return false;
+  }
+  const u8 source = timers_[index].clock_source();
+  return source == 2 || source == 3;
+}
+
+u32 Timers::cycles_for_ticks(int index, u32 ticks) const {
+  if (!counts_eighths(index)) {
+    return ticks;
+  }
+  return ticks * 8u - timer2_sysclk8_cycle_remainder_;
+}
+
+void Timers::apply_ticks_to_event(int index, u32 ticks) {
+  Timer &t = timers_[index];
+  const bool target_hit = ticks == ticks_to_target(t);
+  const bool overflow_hit = ticks == ticks_to_overflow(t);
+  handle_timer_event(t, index, target_hit, overflow_hit);
+  if (target_hit && t.reset_on_target() && t.target > 0) {
+    t.counter = 0;
+  } else {
+    t.counter = (t.counter + ticks) & 0xFFFFu;
+  }
+}
+
+void Timers::add_ticks(int index, u32 ticks) {
+  Timer &t = timers_[index];
+  while (ticks > 0) {
+    if (is_paused_by_sync(index)) {
+      return;
+    }
+    const u32 event = std::min(ticks_to_target(t), ticks_to_overflow(t));
+    if (event > ticks) {
+      t.counter = (t.counter + ticks) & 0xFFFFu;
+      return;
+    }
+    apply_ticks_to_event(index, event);
+    ticks -= event;
+  }
+}
+
+void Timers::advance_timer(int index, u32 cycles) {
+  Timer &t = timers_[index];
+  const bool system_clock = counts_system_clock(index);
+  const bool eighths = counts_eighths(index);
+  u32 remaining = cycles;
+  while (remaining > 0) {
+    u32 step = remaining;
+    if (t.irq_pulse_cycles_left != 0) {
+      step = std::min(step, t.irq_pulse_cycles_left);
+    }
+    const bool counting = system_clock && !is_paused_by_sync(index);
+    bool at_event = false;
+    if (counting) {
+      const u32 event_ticks =
+          std::min(ticks_to_target(t), ticks_to_overflow(t));
+      const u32 event_cycles = cycles_for_ticks(index, event_ticks);
+      if (event_cycles <= step) {
+        step = event_cycles;
+        at_event = true;
+      }
+    }
+
+    u32 ticks = step;
+    if (eighths) {
+      const u32 total = timer2_sysclk8_cycle_remainder_ + step;
+      ticks = total / 8u;
+      timer2_sysclk8_cycle_remainder_ = total % 8u;
+    } else if (index == 2) {
+      timer2_sysclk8_cycle_remainder_ = 0;
+    }
+    remaining -= step;
+
+    if (t.irq_pulse_cycles_left != 0) {
+      t.irq_pulse_cycles_left -= step;
+      if (t.irq_pulse_cycles_left == 0) {
+        t.mode |= (1u << 10);
+      }
+    }
+
+    if (!counting) {
+      continue;
+    }
+    if (!at_event) {
+      t.counter = (t.counter + ticks) & 0xFFFFu;
+      continue;
+    }
+    apply_ticks_to_event(index, ticks);
+
+    // Reset-on-target timers with no IRQ left to raise just cycle 0..target;
+    // skip whole periods instead of stepping every hit.
+    const bool irq_possible =
+        t.irq_on_target() && (t.irq_repeat() || !t.one_shot_done);
+    if (remaining > 0 && !irq_possible && t.irq_pulse_cycles_left == 0 &&
+        t.reset_on_target() && t.target > 0 && t.counter == 0) {
+      const u32 period = eighths ? t.target * 8u : t.target;
+      remaining %= period;
     }
   }
 }
 
-void Timers::tick_timer(int index, u32 cycles) {
-  auto &t = timers_[index];
+void Timers::advance(u32 cycles) {
   if (cycles == 0) {
     return;
   }
-
-  if (is_paused_by_sync(index)) {
-    return;
+  for (int i = 0; i < 3; ++i) {
+    advance_timer(i, cycles);
   }
+}
 
-  const u32 old_counter = t.counter;
-  const bool target_hit = counter_reaches_value(old_counter, cycles, t.target);
-  const bool overflow_hit = (old_counter & 0xFFFFu) + cycles >= 0x10000u;
-
-  handle_timer_event(t, index, target_hit, overflow_hit);
-
-  if (target_hit && t.reset_on_target() && t.target > 0) {
-    t.counter = (old_counter + cycles) % t.target;
-  } else {
-    t.counter = (old_counter + cycles) & 0xFFFFu;
+u32 Timers::cycles_until_irq() const {
+  u32 best = kNoEvent;
+  for (int i = 0; i < 3; ++i) {
+    const Timer &t = timers_[i];
+    if (!counts_system_clock(i) || is_paused_by_sync(i)) {
+      continue; // clocked by HBlank/dot edges, which the scheduler owns
+    }
+    if (!t.irq_repeat() && t.one_shot_done) {
+      continue;
+    }
+    u32 ticks = kNoEvent;
+    if (t.irq_on_target()) {
+      ticks = std::min(ticks, ticks_to_target(t));
+    }
+    // A reset-on-target counter below its target never reaches 0xFFFF.
+    const bool overflow_reachable =
+        !(t.reset_on_target() && t.target > 0 &&
+          (t.counter & 0xFFFFu) < t.target);
+    if (t.irq_on_overflow() && overflow_reachable) {
+      ticks = std::min(ticks, ticks_to_overflow(t));
+    }
+    if (ticks == kNoEvent) {
+      continue;
+    }
+    best = std::min(best, cycles_for_ticks(i, ticks));
   }
+  return best;
 }
 
 void Timers::hblank_pulse() {
@@ -212,21 +297,15 @@ void Timers::hblank_pulse() {
   // per HBlank pulse to keep BIOS timing from stalling.
   const u8 t0_source = timers_[0].clock_source();
   if (t0_source == 1 || t0_source == 3) {
-    tick_timer(0, 1);
+    add_ticks(0, 1);
   }
 
   // Timer 1 source 1/3 is HBlank clock.
   const u8 t1_source = timers_[1].clock_source();
   if (t1_source == 1 || t1_source == 3) {
-    tick_timer(1, 1);
+    add_ticks(1, 1);
   }
 
-  for (auto &t : timers_) {
-    if (t.irq_pulse_restore_pending) {
-      t.mode |= (1u << 10);
-      t.irq_pulse_restore_pending = false;
-    }
-  }
   hblank_active_ = false;
   process_sync_event(0, false);
 }
@@ -335,7 +414,7 @@ void Timers::handle_timer_event(Timer &t, int index, bool target_hit,
     t.mode ^= (1u << 10);
   } else {
     t.mode &= ~(1u << 10);
-    t.irq_pulse_restore_pending = true;
+    t.irq_pulse_cycles_left = kIrqPulseCycles;
   }
 
   fire_irq(index);

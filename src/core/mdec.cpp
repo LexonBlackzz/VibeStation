@@ -346,6 +346,17 @@ void Mdec::tick(u32 cycles) {
   }
 }
 
+u32 Mdec::cycles_until_event() const {
+  if (output_ready_delay_cycles_ != 0) {
+    return output_ready_delay_cycles_;
+  }
+  // A finished delay publishes on the next tick (or the next data read).
+  if (!pending_out_fifo_.empty() && out_fifo_.empty()) {
+    return 1;
+  }
+  return kNoEvent;
+}
+
 u32 Mdec::read_data() {
   publish_pending_output();
   if (out_fifo_.empty()) {

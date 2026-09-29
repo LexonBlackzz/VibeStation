@@ -92,6 +92,16 @@ public:
   void write(u32 offset, u32 value);
 
   void tick();
+  // True while some channel is armed (CHCR active and enabled in DPCR): the
+  // scheduler must re-evaluate the request lines whenever a device changes.
+  bool has_waiting_channel() const {
+    for (int i = 0; i < 7; ++i) {
+      if (channels_[i].is_active() && channel_enabled(i)) {
+        return true;
+      }
+    }
+    return false;
+  }
   const TransferDebug &last_debug(int channel) const {
     return last_debug_[channel & 0x7];
   }

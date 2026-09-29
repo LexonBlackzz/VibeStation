@@ -15,7 +15,9 @@ struct Timer {
   u16 mode = 0;    // Mode register
   bool one_shot_done = false;
   bool sync_released = false;
-  bool irq_pulse_restore_pending = false;
+  // Remaining CPU cycles until the bit-10 "IRQ request" line returns high
+  // after a pulse-mode IRQ; 0 = no pulse pending.
+  u32 irq_pulse_cycles_left = 0;
 
   // Mode register bits:
   // 0     : Sync enable
@@ -53,8 +55,18 @@ public:
   u32 read(u32 offset) const;
   void write(u32 offset, u32 value);
 
-  // Advance timers by the given number of CPU cycles
-  void tick(u32 cycles);
+  // Advance the timers by `cycles` CPU cycles. Exactly additive:
+  // advance(a) followed by advance(b) is identical to advance(a + b), because
+  // the span is split at every target/overflow/IRQ-pulse event so each event
+  // is applied at its true cycle.
+  void advance(u32 cycles);
+  // CPU cycles from now until the next timer event that raises an IRQ, or
+  // kNoEvent if none can occur without an external edge (HBlank/VBlank) or
+  // register write.
+  static constexpr u32 kNoEvent = 0xFFFFFFFFu;
+  u32 cycles_until_irq() const;
+  // Width of the bit-10 IRQ-request pulse in pulse mode (mode bit 7 = 0).
+  static constexpr u32 kIrqPulseCycles = 4u;
   void hblank_pulse();
   void set_vblank(bool active);
 
@@ -81,7 +93,17 @@ private:
   u32 timer0_dot_cycle_remainder_ = 0;
   u32 timer2_sysclk8_cycle_remainder_ = 0;
 
-  void tick_timer(int index, u32 ticks);
+  // Ticks until the timer's next target / overflow event (both >= 1).
+  static u32 ticks_to_target(const Timer &t);
+  static u32 ticks_to_overflow(const Timer &t);
+  // Timer 2 in sysclk/8 modes: cycles to produce `ticks` timer ticks.
+  u32 cycles_for_ticks(int index, u32 ticks) const;
+  bool counts_system_clock(int index) const;
+  bool counts_eighths(int index) const;
+  void advance_timer(int index, u32 cycles);
+  // Apply the events reached after exactly `ticks` ticks (counter moves there).
+  void apply_ticks_to_event(int index, u32 ticks);
+  void add_ticks(int index, u32 ticks);
   bool is_paused_by_sync(int index) const;
   void process_sync_event(int index, bool active);
   void handle_timer_event(Timer &t, int index, bool target_hit, bool overflow_hit);

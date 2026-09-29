@@ -2908,7 +2908,11 @@ void CdRom::tick(u32 cycles) {
     }
   }
 
+  // Cycles of this tick left for the read period once a seek finishes: the
+  // first sector period starts when the seek ends, not at the tick start.
+  int reading_cycles = step;
   if (state_ == State::Seeking) {
+    const int seek_left = std::max(pending_cycles_, 0);
     pending_cycles_ -= step;
     if (pending_cycles_ <= 0) {
       read_lba_ = seek_target_valid_ ? seek_target_lba_ : read_lba_;
@@ -2918,6 +2922,7 @@ void CdRom::tick(u32 cycles) {
         read_startup_pending_ = false;
         state_ = State::Reading;
         pending_cycles_ = std::max(1, read_period_cycles_);
+        reading_cycles = std::max(0, step - seek_left);
       } else {
         state_ = State::Idle;
       }
@@ -2925,7 +2930,7 @@ void CdRom::tick(u32 cycles) {
   }
 
   if (state_ == State::Reading) {
-    int remaining = step;
+    int remaining = reading_cycles;
     while (remaining > 0 && state_ == State::Reading) {
       if (pending_cycles_ > remaining) {
         pending_cycles_ -= remaining;
@@ -3016,6 +3021,42 @@ void CdRom::tick(u32 cycles) {
     sys_->add_cdrom_time(
         std::chrono::duration<double, std::milli>(t1 - t0).count());
   }
+}
+
+u32 CdRom::cycles_until_event() const {
+  u32 best = kNoEvent;
+  auto consider = [&](int cycles) {
+    best = std::min(best, static_cast<u32>(std::max(cycles, 1)));
+  };
+  if (irq_line_request_pending_) {
+    consider(irq_line_delay_cycles_);
+  }
+  if (sector_redelivery_pending_) {
+    consider(sector_redelivery_delay_cycles_);
+  }
+  if (command_busy_) {
+    consider(command_busy_cycles_);
+  }
+  if (pending_second_.active) {
+    consider(pending_second_.delay);
+  }
+  if (pending_async_irq_.active) {
+    consider(pending_async_irq_.delay);
+  }
+  if (insert_probe_active_) {
+    consider(insert_probe_delay_cycles_);
+  }
+  if (state_ != State::Idle) {
+    consider(pending_cycles_);
+  }
+  // tick() ends by promoting a queued response IRQ as soon as it can be
+  // delivered; that is an event even without a running countdown.
+  if (!pending_irqs_.empty() &&
+      (interrupt_flag_ & kHintTypeMask) == 0 &&
+      !(pending_irqs_.front().wait_for_command_idle && command_busy_)) {
+    consider(1);
+  }
+  return best;
 }
 
 u32 CdRom::dma_read() {

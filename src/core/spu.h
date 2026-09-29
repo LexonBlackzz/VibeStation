@@ -223,6 +223,13 @@ public:
   void dma_write(u32 value);
   u32 dma_read();
   bool dma_request() const;
+  // True while an SPU IRQ can still be raised autonomously (IRQ9 enabled and
+  // not yet flagged): the scheduler then syncs the SPU every sample.
+  bool irq_watch_active() const;
+  static constexpr u32 kNoEvent = 0xFFFFFFFFu;
+  // Cycles until the SPUCNT DMA-mode latch changes the DMA request line.
+  u32 cycles_until_event() const;
+  static constexpr u32 sample_cycles() { return psx::CPU_CLOCK_HZ / 44100u; }
   void push_cd_audio_samples(const std::vector<s16> &samples, u32 sample_rate);
   void set_output_speed(double speed) {
     const double clamped = std::max(0.25, std::min(speed, 4.0));

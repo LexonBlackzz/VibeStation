@@ -1091,6 +1091,16 @@ void Spu::tick_spucnt_mode_delay(u32 cycles) {
   }
 }
 
+u32 Spu::cycles_until_event() const {
+  // The SPUCNT transfer mode is latched a fixed delay after it is written;
+  // that flips the DMA request line, so it is a scheduler event.
+  return spucnt_mode_delay_cycles_ != 0u ? spucnt_mode_delay_cycles_ : kNoEvent;
+}
+
+bool Spu::irq_watch_active() const {
+  return (spucnt_effective() & 0x0040u) != 0u && (spustat_ & 0x0040u) == 0u;
+}
+
 void Spu::clear_irq9_flag() { spustat_ &= static_cast<u16>(~0x0040u); }
 
 void Spu::maybe_raise_irq9_for_ram_access(u32 start_addr, u32 byte_count) {
@@ -3072,19 +3082,19 @@ void Spu::tick(u32 cycles) {
         (transfer_busy_cycles_ > cycles) ? (transfer_busy_cycles_ - cycles) : 0u;
   }
 
-  const double prev_accum = sample_accum_;
-  sample_accum_ +=
-      (static_cast<double>(cycles) * static_cast<double>(SAMPLE_RATE)) /
-      static_cast<double>(psx::CPU_CLOCK_HZ);
-#ifndef NDEBUG
-  assert(sample_accum_ >= prev_accum);
-#endif
-
-  const int samples_to_generate = static_cast<int>(sample_accum_);
+  // sample_accum_ counts CPU cycles toward the next sample (one every 768).
+  // Integer arithmetic keeps tick(a) + tick(b) identical to tick(a + b), so
+  // the SPU state at a given cycle does not depend on when it was synced.
+  static_assert(psx::CPU_CLOCK_HZ % SAMPLE_RATE == 0,
+                "SPU sample period must be a whole number of CPU cycles");
+  constexpr u64 kCyclesPerSample = psx::CPU_CLOCK_HZ / SAMPLE_RATE;
+  const u64 accum_cycles = static_cast<u64>(sample_accum_) + cycles;
+  const int samples_to_generate =
+      static_cast<int>(accum_cycles / kCyclesPerSample);
+  sample_accum_ = static_cast<double>(accum_cycles % kCyclesPerSample);
   if (samples_to_generate <= 0) {
     return;
   }
-  sample_accum_ -= samples_to_generate;
   audio_diag_.generated_frames += static_cast<u64>(samples_to_generate);
 
   const u16 spucnt_eff = spucnt_effective();

@@ -125,7 +125,7 @@ void Timers::save_state(std::vector<u8>& buf) const {
     write_val(t.mode);
     write_val(static_cast<u8>(t.one_shot_done));
     write_val(static_cast<u8>(t.sync_released));
-    write_val(static_cast<u8>(t.irq_pulse_restore_pending));
+    write_val(t.irq_pulse_cycles_left);
   }
   write_val(static_cast<u8>(hblank_active_));
   write_val(static_cast<u8>(vblank_active_));
@@ -143,7 +143,7 @@ void Timers::restore_state(const u8*& pos, size_t& remaining) {
     read_val(t.mode);
     { u8 v; read_val(v); t.one_shot_done = v != 0; }
     { u8 v; read_val(v); t.sync_released = v != 0; }
-    { u8 v; read_val(v); t.irq_pulse_restore_pending = v != 0; }
+    read_val(t.irq_pulse_cycles_left);
   }
   { u8 v; read_val(v); hblank_active_ = v != 0; }
   { u8 v; read_val(v); vblank_active_ = v != 0; }

@@ -321,8 +321,36 @@ void System::maybe_log_ram_watch_write(u32 phys_addr, u32 value, u32 size_bytes)
     }
 }
 
-void System::sync_spu_to_cpu() {
-    const u64 target_cycle = cpu_.cycle_count();
+namespace {
+constexpr u64 kSyncChunkCycles = 0x40000000ull;
+// Minimum bus time between two slices of a streaming DMA channel.
+constexpr u64 kDmaSliceGapCycles = 16;
+
+// Marks the time devices observe while they are advanced to an event so code
+// such as the CD-ROM interrupt gap check sees the event's own cycle.
+struct CatchupScope {
+    bool& active;
+    u64& cycle;
+    bool saved_active;
+    u64 saved_cycle;
+    CatchupScope(bool& active_ref, u64& cycle_ref, u64 now)
+        : active(active_ref), cycle(cycle_ref), saved_active(active_ref),
+          saved_cycle(cycle_ref) {
+        active = true;
+        cycle = now;
+    }
+    ~CatchupScope() {
+        active = saved_active;
+        cycle = saved_cycle;
+    }
+};
+} // namespace
+
+void System::sync_spu_to_cpu() { sync_spu(device_cpu_cycle()); }
+
+void System::sync_sio_to_cpu() { sync_sio(device_cpu_cycle()); }
+
+void System::sync_spu(u64 target_cycle) {
     if (target_cycle <= spu_synced_cpu_cycle_) {
         spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
         return;
@@ -347,12 +375,166 @@ void System::sync_spu_to_cpu() {
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
 }
 
-u32 System::jit_read16_hot_mmio(u32 phys) {
+void System::sync_sio(u64 target_cycle) {
+    if (target_cycle <= sio_synced_cpu_cycle_) {
+        return;
+    }
+
+    u64 delta = target_cycle - sio_synced_cpu_cycle_;
+    while (delta > 0) {
+        const u32 step =
+            (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
+            ? std::numeric_limits<u32>::max()
+            : static_cast<u32>(delta);
+        sio_.tick(step);
+        delta -= step;
+    }
+    sio_synced_cpu_cycle_ = target_cycle;
+}
+
+void System::sync_timers(u64 target_cycle) {
+    // Never run the timers past an HBlank/VBlank edge that has not been
+    // applied yet: those edges change the counting mode.
+    target_cycle = std::min(target_cycle, scanline_edge_cycle_);
+    while (timers_synced_cycle_ < target_cycle) {
+        const u64 step =
+            std::min(target_cycle - timers_synced_cycle_, kSyncChunkCycles);
+        timers_.advance(static_cast<u32>(step));
+        timers_synced_cycle_ += step;
+    }
+}
+
+void System::sync_cdrom(u64 target_cycle) {
+    while (cdrom_synced_cycle_ < target_cycle) {
+        // Advance to the next drive event so it is applied at its own cycle
+        // (later effects, delays and IRQ gaps are then measured from it).
+        const u32 event = cdrom_.cycles_until_event();
+        const u64 step = std::min<u64>(target_cycle - cdrom_synced_cycle_,
+                                       std::min<u64>(event, kSyncChunkCycles));
+        cdrom_synced_cycle_ += step;
+        CatchupScope scope(catchup_active_, catchup_cycle_, cdrom_synced_cycle_);
+        cdrom_.tick(static_cast<u32>(step));
+    }
+}
+
+void System::sync_mdec(u64 target_cycle) {
+    while (mdec_synced_cycle_ < target_cycle) {
+        const u32 event = mdec_.cycles_until_event();
+        const u64 step = std::min<u64>(target_cycle - mdec_synced_cycle_,
+                                       std::min<u64>(event, kSyncChunkCycles));
+        mdec_synced_cycle_ += step;
+        CatchupScope scope(catchup_active_, catchup_cycle_, mdec_synced_cycle_);
+        mdec_.tick(static_cast<u32>(step));
+    }
+}
+
+u64 System::next_device_deadline() const {
+    u64 deadline = kNoDeadline;
+    const u32 timer_event = timers_.cycles_until_irq();
+    if (timer_event != Timers::kNoEvent) {
+        deadline = std::min(deadline, timers_synced_cycle_ + timer_event);
+    }
+    const u32 cd_event = cdrom_.cycles_until_event();
+    if (cd_event != CdRom::kNoEvent) {
+        deadline = std::min(deadline, cdrom_synced_cycle_ + cd_event);
+    }
+    const u32 mdec_event = mdec_.cycles_until_event();
+    if (mdec_event != Mdec::kNoEvent) {
+        deadline = std::min(deadline, mdec_synced_cycle_ + mdec_event);
+    }
+    const u32 sio_event = sio_.cycles_until_event();
+    if (sio_event != 0u) {
+        deadline = std::min(deadline, sio_synced_cpu_cycle_ + sio_event);
+    }
+    if (spu_.irq_watch_active()) {
+        deadline = std::min(deadline, spu_synced_cpu_cycle_ + Spu::sample_cycles());
+    }
+    const u32 spu_event = spu_.cycles_until_event();
+    if (spu_event != Spu::kNoEvent) {
+        deadline = std::min(deadline, spu_synced_cpu_cycle_ + spu_event);
+    }
+    return std::min(deadline, dma_service_cycle_);
+}
+
+void System::service_dma() {
+    const u64 now = cpu_.cycle_count();
+    // DMA reads the request lines of the CD-ROM/MDEC at this instant.
+    sync_cdrom(now);
+    sync_mdec(now);
+    dma_service_cycle_ = kNoDeadline;
+    dma_.tick();
+    const u64 after = cpu_.cycle_count();
+    if (after > now) {
+        // The transfer slice stalled the CPU; the channel arbitrates again once
+        // that bus time has elapsed (streaming channels move one slice at a
+        // time so their request line can drop between blocks).
+        frame_cycles_ += after - now;
+        if (dma_.has_waiting_channel()) {
+            dma_service_cycle_ = after + kDmaSliceGapCycles;
+        }
+    }
+}
+
+void System::service_device_events(u64 target_cycle) {
+    const u32 timer_event = timers_.cycles_until_irq();
+    if (timer_event != Timers::kNoEvent &&
+        timers_synced_cycle_ + timer_event <= target_cycle) {
+        sync_timers(target_cycle);
+    }
+    bool dma_inputs_changed = false;
+    const u32 cd_event = cdrom_.cycles_until_event();
+    if (cd_event != CdRom::kNoEvent &&
+        cdrom_synced_cycle_ + cd_event <= target_cycle) {
+        sync_cdrom(target_cycle);
+        dma_inputs_changed = true;
+    }
+    const u32 mdec_event = mdec_.cycles_until_event();
+    if (mdec_event != Mdec::kNoEvent &&
+        mdec_synced_cycle_ + mdec_event <= target_cycle) {
+        sync_mdec(target_cycle);
+        dma_inputs_changed = true;
+    }
+    const u32 sio_event = sio_.cycles_until_event();
+    if (sio_event != 0u && sio_synced_cpu_cycle_ + sio_event <= target_cycle) {
+        sync_sio(target_cycle);
+    }
+    if (spu_.irq_watch_active() &&
+        spu_synced_cpu_cycle_ + Spu::sample_cycles() <= target_cycle) {
+        sync_spu(target_cycle);
+    }
+    const u32 spu_event = spu_.cycles_until_event();
+    if (spu_event != Spu::kNoEvent &&
+        spu_synced_cpu_cycle_ + spu_event <= target_cycle) {
+        sync_spu(target_cycle);
+        dma_inputs_changed = true;
+    }
+    if (dma_inputs_changed && dma_.has_waiting_channel()) {
+        dma_service_cycle_ = std::min(dma_service_cycle_, target_cycle);
+    }
+    if (dma_service_cycle_ <= target_cycle) {
+        service_dma();
+    }
+}
+
+void System::note_device_state_changed() {
+    if (dma_.has_waiting_channel()) {
+        dma_service_cycle_ = std::min(dma_service_cycle_, device_cpu_cycle());
+    }
+    if (run_end_cycle_ != 0 && next_device_deadline() < run_end_cycle_) {
+        // A deadline now falls inside the running slice: return at this
+        // instruction boundary so the scheduler can honour it.
+        cpu_timing_boundary_requested_ = true;
+    }
+}
+
+u32 System::jit_read16_hot_mmio(u32 phys, u32 resident_cycles) {
     phys = psx::mask_address(phys);
     if (phys >= 0x1F801070u && phys < 0x1F801078u) {
         return static_cast<u16>(irq_.read(phys - 0x1F801070u));
     }
     if (phys >= 0x1F801100u && phys < 0x1F801130u) {
+        // Sync-on-access at the start-of-instruction cycle of the load.
+        sync_timers(cpu_.cycle_count() + static_cast<u64>(resident_cycles));
         return static_cast<u16>(timers_.read(phys - 0x1F801100u));
     }
     return 0x10000u;
@@ -380,66 +562,17 @@ void System::jit_sync_time_sensitive_bus_access(u32 phys,
 
     // PAD/SIO accesses are synchronized at the instruction that performs the
     // transaction. A resident JIT chain has not committed resident_cycles to
-    // Cpu::cycles_ yet, so sync_sio_to_cpu() alone would observe stale time.
+    // Cpu::cycles_ yet, so the absolute target is passed explicitly.
     if (phys >= 0x1F801040u && phys < 0x1F801050u) {
-        if (target_cycle <= sio_synced_cpu_cycle_) {
-            return;
-        }
-        u64 delta = target_cycle - sio_synced_cpu_cycle_;
-        while (delta > 0) {
-            const u32 step =
-                delta > static_cast<u64>(std::numeric_limits<u32>::max())
-                    ? std::numeric_limits<u32>::max()
-                    : static_cast<u32>(delta);
-            sio_.tick(step);
-            delta -= step;
-        }
-        sio_synced_cpu_cycle_ = target_cycle;
+        sync_sio(target_cycle);
         return;
     }
 
     // SPU register accesses use the same absolute CPU-cycle synchronization
     // model and need the same resident-cycle view.
     if (phys >= 0x1F801C00u && phys < 0x1F802000u) {
-        if (target_cycle <= spu_synced_cpu_cycle_) {
-            spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
-            return;
-        }
-        if (spu_skip_sync_for_turbo_) {
-            spu_synced_cpu_cycle_ = target_cycle;
-            spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
-            return;
-        }
-        u64 delta = target_cycle - spu_synced_cpu_cycle_;
-        while (delta > 0) {
-            const u32 step =
-                delta > static_cast<u64>(std::numeric_limits<u32>::max())
-                    ? std::numeric_limits<u32>::max()
-                    : static_cast<u32>(delta);
-            spu_.tick(step);
-            delta -= step;
-        }
-        spu_synced_cpu_cycle_ = target_cycle;
-        spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+        sync_spu(target_cycle);
     }
-}
-
-void System::sync_sio_to_cpu() {
-    const u64 target_cycle = cpu_.cycle_count();
-    if (target_cycle <= sio_synced_cpu_cycle_) {
-        return;
-    }
-
-    u64 delta = target_cycle - sio_synced_cpu_cycle_;
-    while (delta > 0) {
-        const u32 step =
-            (delta > static_cast<u64>(std::numeric_limits<u32>::max()))
-            ? std::numeric_limits<u32>::max()
-            : static_cast<u32>(delta);
-        sio_.tick(step);
-        delta -= step;
-    }
-    sio_synced_cpu_cycle_ = target_cycle;
 }
 
 bool System::save_spu_voice_sample_to_file(int voice, const std::string& path,
@@ -559,6 +692,15 @@ void System::reset() {
     cpu_timing_boundary_requested_ = false;
     spu_synced_cpu_cycle_ = cpu_.cycle_count();
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+    timers_synced_cycle_ = cpu_.cycle_count();
+    cdrom_synced_cycle_ = cpu_.cycle_count();
+    mdec_synced_cycle_ = cpu_.cycle_count();
+    frame_edge_cycle_ = cpu_.cycle_count();
+    scanline_edge_cycle_ = kNoDeadline;
+    run_end_cycle_ = 0;
+    dma_service_cycle_ = kNoDeadline;
+    catchup_active_ = false;
+    catchup_cycle_ = 0;
     ram_.reset();
     std::fill(ram_word_write_provenance_.begin(),
               ram_word_write_provenance_.end(), RamWordWriteProvenance{});
@@ -1672,19 +1814,28 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // Aggressive fast mode intentionally trades timing stability for throughput.
     const bool fast_mode = g_gpu_fast_mode;
     const bool aggressive_fast_mode = fast_mode && g_gpu_extreme_fast_mode;
-    const bool optimized_cpu_mode =
-        effective_cpu_execution_mode() != CpuExecutionMode::Interpreter;
-    const u32 cpu_instruction_slice =
-        aggressive_fast_mode ? 256u : (fast_mode ? 128u : 32u);
-    // FMV/CD streaming is sensitive to DMA and CDROM service jitter.
-    // Keep those devices at near-baseline cadence even in fast mode.
-    const u32 dma_tick_stride = 16u;
-    const u32 timer_tick_stride = 16u;
     const u32 spu_sync_scanline_stride =
         aggressive_fast_mode ? 32u : (fast_mode ? 16u : 4u);
     u32 extra_cycle_error = 0;
-    u32 dma_tick_budget = 0;
-    u32 timer_tick_budget = 0;
+
+    // Event-driven scheduling. Scanline and frame edges are absolute CPU
+    // cycles, so an instruction that overshoots an edge shortens the next
+    // scanline instead of stretching the frame. Between edges the CPU runs
+    // straight to the earliest device deadline (timer IRQ, CD-ROM/MDEC event,
+    // SIO/SPU event, DMA slice). Devices are otherwise advanced lazily, on
+    // MMIO access (sync-on-access) or when one of those deadlines arrives.
+    struct SchedulerGuard {
+        System& sys;
+        ~SchedulerGuard() {
+            sys.scanline_edge_cycle_ = kNoDeadline;
+            sys.run_end_cycle_ = 0;
+        }
+    } scheduler_guard{*this};
+    if (cpu_.cycle_count() > frame_edge_cycle_ + cycles_per_frame) {
+        // The CPU was stepped outside the frame scheduler (tools/tests).
+        frame_edge_cycle_ = cpu_.cycle_count();
+    }
+    u64 scanline_start = frame_edge_cycle_;
 
     for (u32 scanline = 0; scanline < scanlines_per_frame; scanline++) {
         u32 cycles_this_scanline = base_cycles_per_scanline;
@@ -1693,8 +1844,13 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             ++cycles_this_scanline;
             extra_cycle_error -= scanlines_per_frame;
         }
+        const u64 scanline_end = scanline_start + cycles_this_scanline;
 
         const bool in_vblank = scanline >= vblank_scanline;
+        // The timers must be exactly at the edge before its blanking state is
+        // applied.
+        scanline_edge_cycle_ = scanline_start;
+        sync_timers(scanline_start);
         if (scanline == vblank_scanline) {
             // VBlank is an edge at the beginning of the first blanked scanline.
             // Keep the GPU notification, timer sync edge, and IRQ observable at
@@ -1703,124 +1859,53 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             irq_.request(Interrupt::VBlank);
         }
         timers_.set_vblank(in_vblank);
+        scanline_edge_cycle_ = scanline_end;
 
         std::chrono::high_resolution_clock::time_point start_loop{};
         const double gpu_ms_before_loop = profiling_stats_.gpu_ms;
         if (profile_detailed) {
             start_loop = std::chrono::high_resolution_clock::now();
         }
-        u32 cycles_remaining = cycles_this_scanline;
-        auto service_dma = [&]() {
-            const u64 before_dma_cycles = cpu_.cycle_count();
-            dma_.tick();
-            const u64 after_dma_cycles = cpu_.cycle_count();
-            const u32 dma_cycles =
-                static_cast<u32>(std::min<u64>(after_dma_cycles - before_dma_cycles,
-                                               0xFFFFFFFFull));
-            if (dma_cycles == 0) {
-                return;
+        for (;;) {
+            service_device_events(std::min(cpu_.cycle_count(), scanline_end));
+            const u64 now = cpu_.cycle_count();
+            if (now >= scanline_end) {
+                break;
             }
-
-            frame_cycles_ += dma_cycles;
-            sync_sio_to_cpu();
-            mdec_.tick(dma_cycles);
-            cdrom_.tick(dma_cycles);
-            timers_.tick(dma_cycles);
-            cycles_remaining =
-                (dma_cycles >= cycles_remaining) ? 0 : (cycles_remaining - dma_cycles);
-        };
-        while (cycles_remaining > 0) {
-            const u32 target_slice_cycles =
-                std::min(cycles_remaining, cpu_instruction_slice * 4u);
-            u32 spent_in_slice = 0;
-            u32 instructions_executed = 0;
-            if (optimized_cpu_mode) {
-                while (cycles_remaining > 0 &&
-                       spent_in_slice < target_slice_cycles &&
-                       instructions_executed < cpu_instruction_slice) {
-                    const u32 remaining_slice_cycles =
-                        target_slice_cycles - spent_in_slice;
-                    const u32 sio_event_cycles = sio_.cycles_until_event();
-                    const u32 run_cycles =
-                        sio_event_cycles == 0u
-                        ? remaining_slice_cycles
-                        : std::min(remaining_slice_cycles, sio_event_cycles);
-                    CpuRunSliceResult run = cpu_.run_slice(
-                        run_cycles,
-                        cpu_instruction_slice - instructions_executed);
+            const u64 deadline = std::min(scanline_end, next_device_deadline());
+            const u32 budget = static_cast<u32>(std::min<u64>(
+                std::max<u64>(deadline > now ? deadline - now : 1u, 1u),
+                0xFFFFFFFFull));
+            run_end_cycle_ = now + budget;
+            // An instruction that has started before the deadline retires past
+            // it; the device is then advanced to its exact event cycle.
+            CpuRunSliceResult run = cpu_.run_slice(budget, budget);
+            if (run.cycles == 0 || run.instructions == 0) {
+                if (effective_cpu_execution_mode() ==
+                    CpuExecutionMode::Recompiler) {
+                    // The experimental recompiler is a native-only
+                    // engine. Retry the exact architectural boundary
+                    // with its one-instruction native fragment; never
+                    // hide a missing fragment by interpreting it.
+                    // A zero device deadline historically still let
+                    // Cpu::step() begin one instruction and report the
+                    // overshoot. Give the native one-op fragment the
+                    // smallest non-zero budget to preserve that rule.
+                    run = cpu_.run_slice(std::max(budget, 1u), 1u);
                     if (run.cycles == 0 || run.instructions == 0) {
-                        if (effective_cpu_execution_mode() ==
-                            CpuExecutionMode::Recompiler) {
-                            // The experimental recompiler is a native-only
-                            // engine. Retry the exact architectural boundary
-                            // with its one-instruction native fragment; never
-                            // hide a missing fragment by interpreting it.
-                            // A zero device deadline historically still let
-                            // Cpu::step() begin one instruction and report the
-                            // overshoot. Give the native one-op fragment the
-                            // smallest non-zero budget to preserve that rule.
-                            run = cpu_.run_slice(std::max(run_cycles, 1u), 1u);
-                            if (run.cycles == 0 || run.instructions == 0) {
-                                LOG_ERROR(
-                                    "CPU: native recompiler made no progress "
-                                    "at PC=0x%08X budget=%u",
-                                    cpu_.debug_state().pc, run_cycles);
-                                return;
-                            }
-                        } else {
-                            run.cycles = cpu_.step();
-                            run.instructions = 1;
-                        }
+                        LOG_ERROR(
+                            "CPU: native recompiler made no progress "
+                            "at PC=0x%08X budget=%u",
+                            cpu_.debug_state().pc, budget);
+                        return;
                     }
-                    const u32 consumed = run.cycles;
-                    if (consumed == 0) {
-                        break;
-                    }
-                    spent_in_slice += consumed;
-                    frame_cycles_ += consumed;
-                    sync_sio_to_cpu();
-                    consume_cpu_timing_boundary_request();
-                    instructions_executed += run.instructions;
-                    cycles_remaining =
-                        (consumed >= cycles_remaining) ? 0
-                                                      : (cycles_remaining - consumed);
-                }
-            } else {
-                while (cycles_remaining > 0 && spent_in_slice < target_slice_cycles &&
-                       instructions_executed < cpu_instruction_slice) {
-                    const CpuRunSliceResult run =
-                        cpu_.run_slice(target_slice_cycles - spent_in_slice, 1u);
-                    const u32 consumed = run.cycles;
-                    if (consumed == 0) {
-                        break;
-                    }
-                    spent_in_slice += consumed;
-                    frame_cycles_ += consumed;
-                    // Keep JOYPAD serial handshakes synchronized to the absolute
-                    // CPU clock. SIO MMIO accesses also synchronize immediately.
-                    sync_sio_to_cpu();
-                    consume_cpu_timing_boundary_request();
-                    instructions_executed += std::max(1u, run.instructions);
-                    cycles_remaining =
-                        (consumed >= cycles_remaining) ? 0 : (cycles_remaining - consumed);
+                } else {
+                    run.cycles = cpu_.step();
+                    run.instructions = 1;
                 }
             }
-            if (spent_in_slice > 0) {
-                mdec_.tick(spent_in_slice);
-                cdrom_.tick(spent_in_slice);
-            }
-
-            dma_tick_budget += spent_in_slice;
-            if (dma_tick_budget >= dma_tick_stride) {
-                service_dma();
-                dma_tick_budget -= dma_tick_stride;
-            }
-
-            timer_tick_budget += spent_in_slice;
-            while (timer_tick_budget >= timer_tick_stride) {
-                timers_.tick(timer_tick_stride);
-                timer_tick_budget -= timer_tick_stride;
-            }
+            frame_cycles_ += run.cycles;
+            consume_cpu_timing_boundary_request();
         }
         if (profile_detailed) {
             const auto end_loop = std::chrono::high_resolution_clock::now();
@@ -1832,16 +1917,12 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             add_cpu_time(std::max(0.0, loop_ms - gpu_ms_inside_loop));
         }
 
-        // Advance timers by scanline CPU cycles, then apply HBlank edge events.
+        // Apply the HBlank edge at exactly the scanline boundary.
         std::chrono::high_resolution_clock::time_point start_timers{};
         if (profile_detailed) {
             start_timers = std::chrono::high_resolution_clock::now();
         }
-        // Flush any fractional timer ticks remaining from the CPU loop.
-        if (timer_tick_budget > 0) {
-            timers_.tick(timer_tick_budget);
-            timer_tick_budget = 0;
-        }
+        sync_timers(scanline_end);
         timers_.hblank_pulse();
         if (profile_detailed) {
             const auto end_timers = std::chrono::high_resolution_clock::now();
@@ -1849,6 +1930,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 std::chrono::duration<double, std::milli>(end_timers - start_timers)
                 .count());
         }
+        scanline_start = scanline_end;
 
         const bool sync_spu_now =
             (((scanline + 1u) % spu_sync_scanline_stride) == 0u) ||
@@ -1858,6 +1940,7 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         }
 
     }
+    frame_edge_cycle_ = scanline_start;
     if (!boot_diag_.saw_pad_cmd42 && sio_.saw_pad_cmd42()) {
         boot_diag_.saw_pad_cmd42 = true;
     }
@@ -2433,6 +2516,43 @@ u32 System::spu_dma_read() {
     return spu_.dma_read();
 }
 
+// Sync-on-access for the event-scheduled devices. Constructed at the top of an
+// I/O access: it advances the addressed device to the exact cycle of the
+// access, and afterwards lets the scheduler re-evaluate device deadlines if the
+// access may have changed them.
+struct System::IoScope {
+    System& sys;
+    bool notify = false;
+    IoScope(System& s, u32 io, bool write) : sys(s) {
+        if (io >= 0x100 && io < 0x130) {
+            sys.sync_timers(sys.device_cpu_cycle());
+            notify = write;
+        } else if (io >= 0x800 && io < 0x804) {
+            sys.sync_cdrom(sys.device_cpu_cycle());
+            // Only the index/status port (0x800) read is free of side effects.
+            notify = write || io != 0x800;
+        } else if (io >= 0x820 && io < 0x828) {
+            sys.sync_mdec(sys.device_cpu_cycle());
+            notify = write || io == 0x820;
+        } else if (io >= 0x080 && io < 0x100) {
+            // A CHCR write can start a transfer that reads/writes the CD-ROM
+            // and MDEC immediately.
+            if (write) {
+                sys.sync_cdrom(sys.device_cpu_cycle());
+                sys.sync_mdec(sys.device_cpu_cycle());
+            }
+            notify = write;
+        } else if (io >= 0xC00 && io < 0x1000) {
+            notify = write;
+        }
+    }
+    ~IoScope() {
+        if (notify) {
+            sys.note_device_state_changed();
+        }
+    }
+};
+
 // ── Memory Bus ─────────────────────────────────────────────────────
 // The PS1 memory map translated to hardware component dispatches.
 
@@ -2472,6 +2592,7 @@ u8 System::read8(u32 addr) {
     // I/O Ports
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, false);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return 0xFF;
@@ -2568,6 +2689,7 @@ u16 System::read16(u32 addr) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, false);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return 0xFFFF;
@@ -2670,6 +2792,7 @@ u32 System::read32(u32 addr) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, false);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return 0xFFFFFFFFu;
@@ -2852,6 +2975,7 @@ void System::write8(u32 addr, u8 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, true);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return;
@@ -3107,6 +3231,7 @@ void System::write16(u32 addr, u16 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, true);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return;
@@ -3415,6 +3540,7 @@ void System::write32(u32 addr, u32 val) {
 
     if (phys >= 0x1F801000 && phys < 0x1F803000) {
         u32 io = phys - 0x1F801000;
+        IoScope io_scope(*this, io, true);
         // Unused timer/peripheral gap before CDROM/MDEC/GPU/SPU.
         if (io >= 0x130 && io < 0x800) {
             return;

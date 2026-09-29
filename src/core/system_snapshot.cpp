@@ -177,6 +177,21 @@ bool System::debug_snapshot_component_hashes(
   w.val(post_reg_);
   w.val(frame_cycles_);
   w.val(frame_cycle_remainder_);
+  {
+    // Event-scheduler timestamps, as distances from the CPU cycle count.
+    const u64 now = cpu_.cycle_count();
+    const u64 dma_pending = dma_service_cycle_ != kNoDeadline ? 1u : 0u;
+    const u64 dma_lead =
+        (dma_pending != 0u && dma_service_cycle_ > now) ? dma_service_cycle_ - now : 0u;
+    w.val(now - timers_synced_cycle_);
+    w.val(now - cdrom_synced_cycle_);
+    w.val(now - mdec_synced_cycle_);
+    w.val(now - sio_synced_cpu_cycle_);
+    w.val(now - spu_synced_cpu_cycle_);
+    w.val(now - frame_edge_cycle_);
+    w.val(dma_pending);
+    w.val(dma_lead);
+  }
   out.system = snapshot_hash_bytes(buffer.data(), buffer.size());
   return true;
 }
@@ -236,6 +251,21 @@ bool System::save_state(SystemSnapshot &out) {
   w.val(post_reg_);
   w.val(frame_cycles_);
   w.val(frame_cycle_remainder_);
+  {
+    // Event-scheduler timestamps, as distances from the CPU cycle count.
+    const u64 now = cpu_.cycle_count();
+    const u64 dma_pending = dma_service_cycle_ != kNoDeadline ? 1u : 0u;
+    const u64 dma_lead =
+        (dma_pending != 0u && dma_service_cycle_ > now) ? dma_service_cycle_ - now : 0u;
+    w.val(now - timers_synced_cycle_);
+    w.val(now - cdrom_synced_cycle_);
+    w.val(now - mdec_synced_cycle_);
+    w.val(now - sio_synced_cpu_cycle_);
+    w.val(now - spu_synced_cpu_cycle_);
+    w.val(now - frame_edge_cycle_);
+    w.val(dma_pending);
+    w.val(dma_lead);
+  }
 
   return true;
 }
@@ -309,8 +339,37 @@ bool System::restore_state(const SystemSnapshot &snap) {
   r.val(post_reg_);
   r.val(frame_cycles_);
   r.val(frame_cycle_remainder_);
-
-  sio_synced_cpu_cycle_ = cpu_.cycle_count();
+  {
+    // Event-scheduler timestamps are stored as distances from the CPU cycle
+    // count; devices are only advanced lazily, so they can lag it.
+    const u64 now = cpu_.cycle_count();
+    const bool has_timestamps = remaining >= 8u * sizeof(u64);
+    u64 lag[8] = {};
+    for (u64 &value : lag) {
+      r.val(value);
+    }
+    if (has_timestamps) {
+      timers_synced_cycle_ = now - lag[0];
+      cdrom_synced_cycle_ = now - lag[1];
+      mdec_synced_cycle_ = now - lag[2];
+      sio_synced_cpu_cycle_ = now - lag[3];
+      spu_synced_cpu_cycle_ = now - lag[4];
+      frame_edge_cycle_ = now - lag[5];
+      dma_service_cycle_ = lag[6] == 0 ? kNoDeadline : now + (lag[7]);
+    } else {
+      timers_synced_cycle_ = now;
+      cdrom_synced_cycle_ = now;
+      mdec_synced_cycle_ = now;
+      sio_synced_cpu_cycle_ = now;
+      spu_synced_cpu_cycle_ = now;
+      frame_edge_cycle_ = now;
+      dma_service_cycle_ = kNoDeadline;
+    }
+    spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+    scanline_edge_cycle_ = kNoDeadline;
+    run_end_cycle_ = 0;
+    catchup_active_ = false;
+  }
   jit_device_cycle_override_ = 0;
   jit_device_cycle_override_active_ = false;
   cpu_timing_boundary_requested_ = false;
