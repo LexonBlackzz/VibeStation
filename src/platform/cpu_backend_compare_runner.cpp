@@ -155,6 +155,14 @@ struct CpuCompareCase {
   u32 expected_next_pc = 0;
   u32 expected_current_pc = 0;
   u64 expected_cycles = 0;
+  // Sync-on-access checks. After the run, (gpr[expect_gpr_reg] & mask) must
+  // equal the CPU cycle count at the end of segment `segment_index` (the
+  // start-of-instruction cycle of the next instruction), or a fixed value.
+  int expect_gpr_reg = -1;
+  u32 expect_gpr_mask = 0xFFFFFFFFu;
+  bool expect_gpr_is_segment_cycles = false;
+  size_t expect_gpr_segment = 0;
+  u32 expect_gpr_value = 0;
   bool experimental_unknown_fallback = false;
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
@@ -584,11 +592,8 @@ static void log_cpu_debug_state_diff(const char *name,
 
 static bool cpu_compare_expected_state_pass(const CpuCompareCase &test_case,
                                             CpuExecutionMode mode,
-                                            const CpuDebugState &state) {
-  if (!test_case.expect_final_control_state) {
-    return true;
-  }
-
+                                            const CpuCompareRunResult &result) {
+  const CpuDebugState &state = result.state;
   bool pass = true;
   auto field = [&](const char *field_name, auto expected, auto actual) {
     if (expected == actual) {
@@ -600,10 +605,34 @@ static bool cpu_compare_expected_state_pass(const CpuCompareCase &test_case,
     (void)actual;
   };
 
-  field("pc", test_case.expected_pc, state.pc);
-  field("next_pc", test_case.expected_next_pc, state.next_pc);
-  field("current_pc", test_case.expected_current_pc, state.current_pc);
-  field("cycles", test_case.expected_cycles, state.cycles);
+  if (test_case.expect_final_control_state) {
+    field("pc", test_case.expected_pc, state.pc);
+    field("next_pc", test_case.expected_next_pc, state.next_pc);
+    field("current_pc", test_case.expected_current_pc, state.current_pc);
+    field("cycles", test_case.expected_cycles, state.cycles);
+  }
+
+  if (test_case.expect_gpr_reg >= 0) {
+    const u32 actual =
+        state.gpr[static_cast<size_t>(test_case.expect_gpr_reg)] &
+        test_case.expect_gpr_mask;
+    u32 expected = test_case.expect_gpr_value & test_case.expect_gpr_mask;
+    if (test_case.expect_gpr_is_segment_cycles) {
+      expected = result.segment_states.size() > test_case.expect_gpr_segment
+                     ? static_cast<u32>(
+                           result.segment_states[test_case.expect_gpr_segment]
+                               .cycles) &
+                           test_case.expect_gpr_mask
+                     : 0xDEADBEEFu;
+    }
+    if (actual != expected) {
+      LOG_ERROR(
+          "CPU_COMPARE_EXPECT name=%s mode=%s r%d=0x%08X expected=0x%08X",
+          test_case.name, cpu_compare_mode_name(mode), test_case.expect_gpr_reg,
+          actual, expected);
+    }
+    field("gpr", expected, actual);
+  }
   return pass;
 }
 
@@ -5610,6 +5639,108 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   cases.push_back(v4_uncached_resident_chain);
 
   append_deterministic_random_compare_cases(cases);
+  // ── Event scheduler: sync-on-access ────────────────────────────────
+  // Devices are advanced lazily, so an MMIO read must first bring the device
+  // up to the exact start-of-instruction cycle of the access. Timer 2 counts
+  // the system clock from the MODE write (which resets it), so a later counter
+  // read has to return precisely the cycles elapsed between the two accesses,
+  // in both backends and on both the hot 16-bit bridge and the general path.
+  struct TimerReadVariant {
+    const char *name;
+    u32 load_op;
+    bool hot16;
+  };
+  const TimerReadVariant timer_read_variants[] = {
+      {"sched_timer_counter_lhu_exact", 0x25, true},
+      {"sched_timer_counter_lw_exact", 0x23, false},
+  };
+  for (const TimerReadVariant &variant : timer_read_variants) {
+    CpuCompareCase test{};
+    test.name = variant.name;
+    test.start_pc = 0xA0010000u;
+    test.initial_gpr[1] = 0x1F801120u;
+    test.program.push_back(enc_i(0x2B, 1, 0, 4)); // SW r0 -> T2 MODE (resets)
+    for (int i = 0; i < 20; ++i) {
+      test.program.push_back(0); // NOPs
+    }
+    test.program.push_back(enc_i(variant.load_op, 1, 2, 0)); // read T2 COUNTER
+    test.program.push_back(0);                               // retire load delay
+    test.instructions = static_cast<u32>(test.program.size());
+    test.segment_instructions = {21u, 1u, 1u};
+    test.compare_segment_states = true;
+    test.expect_gpr_reg = 2;
+    test.expect_gpr_mask = 0xFFFFu;
+    test.expect_gpr_is_segment_cycles = true;
+    test.expect_gpr_segment = 0;
+    test.require_v4_native_entry_when_available = true;
+    test.require_v4_native_load_entry_when_available = true;
+    test.require_v4_hot_mmio16_native_when_available = variant.hot16;
+    cases.push_back(test);
+  }
+
+  // A CD-ROM command's INT3 must be visible at the first flag read after its
+  // deadline and not before, even though the drive was never ticked between.
+  struct CdReadVariant {
+    const char *name;
+    u32 loop_iterations;
+    u32 expected_flag;
+  };
+  const CdReadVariant cd_read_variants[] = {
+      {"sched_cdrom_flag_before_deadline", 100u, 0u},
+      {"sched_cdrom_flag_after_deadline", 6000u, 3u},
+  };
+  for (const CdReadVariant &variant : cd_read_variants) {
+    CpuCompareCase test{};
+    test.name = variant.name;
+    test.start_pc = 0xA0010000u;
+    test.initial_gpr[1] = 0x1F801800u;
+    test.initial_gpr[3] = variant.loop_iterations;
+    test.initial_gpr[4] = 1u;
+    test.initial_gpr[5] = 0x1Fu;
+    test.program = {
+        enc_i(0x28, 1, 4, 0),      // SB index = 1
+        enc_i(0x28, 1, 5, 2),      // SB interrupt enable = 0x1F
+        enc_i(0x28, 1, 0, 0),      // SB index = 0
+        enc_i(0x28, 1, 4, 1),      // SB command = GetStat
+        enc_i(0x09, 3, 3, 0xFFFF), // loop: ADDIU r3,r3,-1
+        enc_i(0x05, 3, 0, 0xFFFE), // BNE r3,r0,loop
+        0,                         //   delay slot
+        enc_i(0x28, 1, 4, 0),      // SB index = 1
+        enc_i(0x24, 1, 2, 3),      // LBU r2 = interrupt flag register
+        0,                         // retire load delay
+    };
+    test.instructions = 4u + variant.loop_iterations * 3u + 3u;
+    test.expect_gpr_reg = 2;
+    test.expect_gpr_mask = 0x7u;
+    test.expect_gpr_value = variant.expected_flag;
+    test.require_v4_native_entry_when_available = true;
+    cases.push_back(test);
+  }
+
+  // RAM is mirrored through the 8 MB window selected by RAM_SIZE; every mirror
+  // is real RAM and carries the main-RAM bus penalty. The interpreter used to
+  // charge it only below 2 MB (THPS2 keeps its stack at 0x807FFFF0), which made
+  // the two backends disagree on timing.
+  {
+    CpuCompareCase store_case{};
+    store_case.name = "mirrored_ram_store_penalty_8mb_window";
+    store_case.start_pc = 0xA0010000u;
+    store_case.initial_gpr[1] = 0x807FFFD0u;
+    store_case.initial_gpr[3] = 0x12345678u;
+    store_case.program = {
+        enc_i(0x2B, 1, 3, 0x20), // SW r3, 0x20(r1) -> 0x807FFFF0
+        enc_i(0x23, 1, 4, 0x20), // LW r4, 0x20(r1)
+        0,                       // retire load delay
+    };
+    store_case.instructions = 3u;
+    store_case.compare_memory_addresses.push_back(0x001FFFF0u);
+    store_case.segment_instructions = {1u, 1u, 1u};
+    store_case.compare_segment_states = true;
+    store_case.expect_gpr_reg = 4;
+    store_case.expect_gpr_value = 0x12345678u;
+    cases.push_back(store_case);
+  }
+
   return cases;
 }
 
@@ -5791,7 +5922,7 @@ static int run_cpu_backend_compare_test_impl(bool memory_only = false) {
       const bool peripheral_state_pass = cpu_compare_peripherals_equal(
           reference.peripherals, result.peripherals);
       const bool expected_state_pass =
-          cpu_compare_expected_state_pass(test_case, mode, result.state);
+          cpu_compare_expected_state_pass(test_case, mode, result);
       bool native_check_pass = true;
       const char *native_check = "not_required";
 

@@ -1123,19 +1123,28 @@ void Cpu::add_cycle_penalty(u32 cycles) {
   }
 }
 
+bool Cpu::is_mapped_main_ram_addr(u32 addr) const {
+  // The RAM window follows the RAM_SIZE register: the 2 MB of RAM is mirrored
+  // through an 8 MB window (games such as THPS2 put their stack at 0x807FFFF0),
+  // and every mirror is real RAM with the same bus timing.
+  const u32 mapped_size =
+      sys_ != nullptr ? sys_->jit_mapped_main_ram_size() : 0x00200000u;
+  return (addr & 0x1FFFFFFFu) < mapped_size;
+}
+
 u32 Cpu::cpu_data_read_penalty(u32 addr) const {
   // DuckStation models a 6-tick RAM read. Our load/store op timing already
   // carries a 2-cycle baseline, so add the remaining 4 cycles here for
   // main-RAM data reads. We intentionally do not charge instruction fetches
   // yet because this core still lacks a comparable icache model.
-  return is_main_ram_addr(addr) ? 4u : 0u;
+  return is_mapped_main_ram_addr(addr) ? 4u : 0u;
 }
 
 u32 Cpu::cpu_data_write_penalty(u32 addr) const {
   // PS1 stores to main RAM take ~3 cycles total. Our store ops have a
   // 2-cycle baseline from instruction_cycles(), so add 1 extra cycle
   // for the bus access cost.
-  return is_main_ram_addr(addr) ? 1u : 0u;
+  return is_mapped_main_ram_addr(addr) ? 1u : 0u;
 }
 
 bool Cpu::gte_data_reg_reads_result(u32 reg) {

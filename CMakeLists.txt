@@ -94,6 +94,7 @@ set(VIBESTATION_SOURCES
     src/main.cpp
     src/platform/cpu_backend_compare_runner.cpp
     src/platform/gpu_correctness_runner.cpp
+    src/platform/scheduler_self_test.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
     src/platform/sample_profiler.cpp

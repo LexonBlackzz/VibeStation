@@ -7,6 +7,7 @@
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
+#include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
 #include "ui/app.h"
 #include "version.h"
@@ -3167,6 +3168,17 @@ int main(int argc, char *argv[]) {
   }
   if (std::find(args.begin(), args.end(), "--gpu-benchmark") != args.end()) {
     return run_gpu_microbenchmark();
+  }
+  {
+    // --scheduler-self-test [bios.bin]: device deadline/additivity tests.
+    const auto it =
+        std::find(args.begin(), args.end(), "--scheduler-self-test");
+    if (it != args.end()) {
+      const auto next = std::next(it);
+      const std::string bios_arg =
+          (next != args.end() && next->rfind("--", 0) != 0) ? *next : std::string();
+      return run_scheduler_self_tests(bios_arg);
+    }
   }
 
   auto trim_cli_arg = [](const std::string &input) {

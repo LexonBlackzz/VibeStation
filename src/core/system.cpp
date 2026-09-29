@@ -516,6 +516,18 @@ void System::service_device_events(u64 target_cycle) {
     }
 }
 
+void System::rebase_scheduler_clock() {
+    const u64 cycle = cpu_.cycle_count();
+    timers_synced_cycle_ = cycle;
+    cdrom_synced_cycle_ = cycle;
+    mdec_synced_cycle_ = cycle;
+    sio_synced_cpu_cycle_ = cycle;
+    spu_synced_cpu_cycle_ = cycle;
+    spu_.mark_synced_to_cpu(cycle);
+    frame_edge_cycle_ = cycle;
+    dma_service_cycle_ = kNoDeadline;
+}
+
 void System::note_device_state_changed() {
     if (dma_.has_waiting_channel()) {
         dma_service_cycle_ = std::min(dma_service_cycle_, device_cpu_cycle());
@@ -1824,6 +1836,30 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     // straight to the earliest device deadline (timer IRQ, CD-ROM/MDEC event,
     // SIO/SPU event, DMA slice). Devices are otherwise advanced lazily, on
     // MMIO access (sync-on-access) or when one of those deadlines arrives.
+    // Opt-in scheduling traces for diffing the two CPU backends:
+    //   VIBESTATION_SLICE_TRACE_FRAME=N       log every scheduler slice of frame N
+    //   VIBESTATION_STEP_TRACE_FRAME=N        single-step frame N, logging each
+    //   VIBESTATION_STEP_TRACE_FROM=<cycle>   instruction (pc, instr, sp, cycles)
+    //                                         from this absolute cycle on
+    struct SchedulerTrace {
+        s64 slice_frame = -1;
+        s64 step_frame = -1;
+        u64 step_from_cycle = 0;
+    };
+    static const SchedulerTrace scheduler_trace = [] {
+        SchedulerTrace trace;
+        if (const char* v = std::getenv("VIBESTATION_SLICE_TRACE_FRAME")) {
+            trace.slice_frame = std::atoll(v);
+        }
+        if (const char* v = std::getenv("VIBESTATION_STEP_TRACE_FRAME")) {
+            trace.step_frame = std::atoll(v);
+        }
+        if (const char* v = std::getenv("VIBESTATION_STEP_TRACE_FROM")) {
+            trace.step_from_cycle = std::strtoull(v, nullptr, 10);
+        }
+        return trace;
+    }();
+    const s64 frame_index = static_cast<s64>(boot_diag_.frame_counter);
     struct SchedulerGuard {
         System& sys;
         ~SchedulerGuard() {
@@ -1879,7 +1915,19 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
             run_end_cycle_ = now + budget;
             // An instruction that has started before the deadline retires past
             // it; the device is then advanced to its exact event cycle.
-            CpuRunSliceResult run = cpu_.run_slice(budget, budget);
+            const bool trace_slices = scheduler_trace.slice_frame == frame_index;
+            const bool trace_steps =
+                scheduler_trace.step_frame == frame_index &&
+                now >= scheduler_trace.step_from_cycle;
+            const u32 pre_pc = trace_steps ? cpu_.pc() : 0u;
+            const u32 pre_instr = trace_steps ? read32_instruction(pre_pc) : 0u;
+            CpuRunSliceResult run =
+                cpu_.run_slice(budget, trace_steps ? 1u : budget);
+            if (trace_steps) {
+                LOG_INFO("SCHED_STEP cyc=%llu pc=%08X instr=%08X sp=%08X run=%u/%u",
+                         static_cast<unsigned long long>(now), pre_pc, pre_instr,
+                         cpu_.reg(29), run.cycles, run.instructions);
+            }
             if (run.cycles == 0 || run.instructions == 0) {
                 if (effective_cpu_execution_mode() ==
                     CpuExecutionMode::Recompiler) {
@@ -1905,6 +1953,11 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 }
             }
             frame_cycles_ += run.cycles;
+            if (trace_slices) {
+                LOG_INFO("SCHED_SLICE cyc=%llu pc=%08X budget=%u run=%u/%u",
+                         static_cast<unsigned long long>(cpu_.cycle_count()),
+                         cpu_.pc(), budget, run.cycles, run.instructions);
+            }
             consume_cpu_timing_boundary_request();
         }
         if (profile_detailed) {

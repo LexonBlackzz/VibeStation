@@ -571,10 +571,15 @@ public:
   void service_device_events(u64 target_cycle);
   // Called after device MMIO that may have created an earlier deadline.
   void note_device_state_changed();
+  // After the CPU clock was set externally (tools/tests): declare every device
+  // synced to the current cycle and start the next frame there.
+  void rebase_scheduler_clock();
   u64 debug_timers_synced_cycle() const { return timers_synced_cycle_; }
   u64 debug_cdrom_synced_cycle() const { return cdrom_synced_cycle_; }
   u64 debug_mdec_synced_cycle() const { return mdec_synced_cycle_; }
   u64 debug_frame_edge_cycle() const { return frame_edge_cycle_; }
+  u32 debug_timers_cycles_until_irq() const { return timers_.cycles_until_irq(); }
+  const Mdec &debug_mdec() const { return mdec_; }
   u32 jit_mapped_main_ram_size() const {
     const u32 memory_window = (ram_size_ >> 9u) & 0x7u;
     return (memory_window == 5u || memory_window == 7u)

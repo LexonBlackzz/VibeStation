@@ -246,6 +246,9 @@ void Timers::advance_timer(int index, u32 cycles) {
     if (remaining > 0 && !irq_possible && t.irq_pulse_cycles_left == 0 &&
         t.reset_on_target() && t.target > 0 && t.counter == 0) {
       const u32 period = eighths ? t.target * 8u : t.target;
+      if (remaining >= period) {
+        t.mode |= (1u << 11); // at least one target hit is being skipped
+      }
       remaining %= period;
     }
   }
