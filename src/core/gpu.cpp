@@ -2317,8 +2317,14 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
         return true;
         };
 
+    // info.width/height equal src_width/src_height, so output pixels map 1:1
+    // onto source pixels (no scaling).
+    const bool rows_in_vram_x =
+        display_vram_left >= 0 &&
+        display_vram_left + info.width <= static_cast<int>(psx::VRAM_WIDTH);
+    const auto& rgb_lut = rgb555_to_rgba_lut();
     for (int y = 0; y < info.height; ++y) {
-        const int src_y = (src_height > 0) ? ((y * src_height) / info.height) : 0;
+        const int src_y = y;
         int vram_y0 = display_vram_top + src_y;
         int vram_y1 = vram_y0;
         bool blend_fields = false;
@@ -2351,11 +2357,36 @@ DisplaySampleInfo Gpu::build_display_rgba(std::vector<u32>* rgba,
 
         const size_t row_base =
             static_cast<size_t>(y) * static_cast<size_t>(info.width);
+        if (!display_.is_24bit && !blend_fields && rows_in_vram_x) {
+            // Same bytes as read_rgb() below, via the RGB555 LUT.
+            const u16* src = vram_.data() +
+                static_cast<size_t>(vram_y0) * psx::VRAM_WIDTH +
+                static_cast<size_t>(display_vram_left);
+            u32* dst = rgba != nullptr ? rgba->data() + row_base : nullptr;
+            for (int x = 0; x < info.width; ++x) {
+                const u32 pixel = rgb_lut[src[x] & 0x7FFFu];
+                if (dst != nullptr) {
+                    dst[x] = pixel;
+                }
+                if (include_stats) {
+                    hash ^= pixel & 0xFFu;
+                    hash *= 16777619u;
+                    hash ^= (pixel >> 8) & 0xFFu;
+                    hash *= 16777619u;
+                    hash ^= (pixel >> 16) & 0xFFu;
+                    hash *= 16777619u;
+                    if ((pixel & 0x00FFFFFFu) != 0u) {
+                        ++non_black;
+                    }
+                }
+            }
+            continue;
+        }
         for (int x = 0; x < info.width; ++x) {
             u8 r = 0;
             u8 g = 0;
             u8 b = 0;
-            const int src_x = (src_width > 0) ? ((x * src_width) / info.width) : 0;
+            const int src_x = x;
             if (!read_rgb(vram_y0, src_x, r, g, b)) {
                 continue;
             }

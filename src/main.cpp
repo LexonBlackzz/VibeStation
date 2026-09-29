@@ -1564,8 +1564,9 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                              const std::string &bin_path,
                              const std::string &cue_path) {
   const CpuExecutionMode requested_mode = effective_cpu_execution_mode();
-  // VIBESTATION_BENCH_LEAN=1: no per-component timers and no checkpoint
-  // hashing, so wall_ms reflects emulation cost only (cpu/core_ms read 0).
+  // VIBESTATION_BENCH_LEAN=1: no per-component timers, checkpoint hashing or
+  // diagnostic display sampling (the GUI's run_frame(false) workload), so
+  // wall_ms reflects emulation cost only (cpu/core_ms read 0).
   const bool lean = std::getenv("VIBESTATION_BENCH_LEAN") != nullptr;
   g_profile_detailed_timing = !lean;
 
@@ -1651,7 +1652,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
 
   for (int frame = 0; frame < warmup_frames; ++frame) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(frame + 1));
-    sys->run_frame();
+    sys->run_frame(!lean);
     if (!emit_checkpoint(frame + 1)) {
       std::printf("CPU_BENCHMARK_RESULT status=error reason=checkpoint_capture\n");
       return 1;
@@ -1697,7 +1698,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     const int absolute_frame = warmup_frames + frame + 1;
     sys->sio().set_button_state(
         auto_input_buttons_for_frame(absolute_frame));
-    sys->run_frame();
+    sys->run_frame(!lean);
     const auto &profile = sys->profiling_stats();
     if (requested_mode == CpuExecutionMode::Recompiler) {
       const CpuBackendStats frame_backend = sys->cpu().cpu_backend_stats();
