@@ -7,6 +7,7 @@
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
+#include "platform/sample_profiler.h"
 #include "ui/app.h"
 #include "version.h"
 #include <SDL.h>
@@ -1679,6 +1680,15 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   u64 frame_generation_exits = 0u;
   u64 frame_budget_exits = 0u;
   u64 frame_bail_exits = 0u;
+  // Opt-in statistical profile of the measured frames:
+  // VIBESTATION_SAMPLE_PROFILE=<interval microseconds>.
+  bool sample_profiling = false;
+  if (const char *interval = std::getenv("VIBESTATION_SAMPLE_PROFILE")) {
+    const int interval_us = std::atoi(interval);
+    sample_profiling =
+        sample_profiler::start(interval_us > 0 ? static_cast<unsigned>(interval_us)
+                                               : 500u);
+  }
   const auto wall_start = std::chrono::steady_clock::now();
   for (int frame = 0; frame < measured_frames; ++frame) {
     const int absolute_frame = warmup_frames + frame + 1;
@@ -1724,6 +1734,15 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
     }
   }
   const auto wall_end = std::chrono::steady_clock::now();
+  if (sample_profiling) {
+    std::vector<sample_profiler::CodeRange> ranges;
+    uintptr_t dispatcher = 0, translations = 0, code_end = 0;
+    if (sys->cpu().debug_jit_code_ranges(dispatcher, translations, code_end)) {
+      ranges.push_back({dispatcher, translations, "[V4 resident dispatcher]"});
+      ranges.push_back({translations, code_end, "[V4 translated code]"});
+    }
+    sample_profiler::stop_and_report(stdout, 40, ranges);
+  }
   const double wall_ms = std::chrono::duration<double, std::milli>(
                              wall_end - wall_start)
                              .count();

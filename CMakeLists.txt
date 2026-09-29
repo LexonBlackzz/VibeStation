@@ -96,6 +96,7 @@ set(VIBESTATION_SOURCES
     src/platform/gpu_correctness_runner.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
+    src/platform/sample_profiler.cpp
     src/core/bios.cpp
     src/core/ram.cpp
     src/core/interrupt.cpp
@@ -198,6 +199,10 @@ target_include_directories(VibeStation PRIVATE
     src
     "${stb_SOURCE_DIR}")
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
+if(WIN32)
+    # sample_profiler: DbgHelp symbol lookup and 1 ms timer resolution.
+    target_link_libraries(VibeStation PRIVATE dbghelp winmm)
+endif()
 
 # Windows builds consume these assets from resources/vibestation.rc, so the
 # executable is self-contained. Keep filesystem copies only for non-Windows

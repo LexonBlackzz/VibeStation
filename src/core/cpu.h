@@ -570,6 +570,10 @@ public:
                                   u32 size_bytes);
   void notify_cpu_backend_frame(u32 frame_index);
   void flush_cpu_backend();
+  // Generated-code host ranges for profilers (see CpuRecompilerBackend).
+  bool debug_jit_code_ranges(uintptr_t &dispatcher_begin,
+                             uintptr_t &translations_begin,
+                             uintptr_t &end) const;
   CpuBackendStats cpu_backend_stats() const;
 
   // COP2 (GTE) — publicly accessible for DMA

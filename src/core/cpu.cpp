@@ -2672,6 +2672,14 @@ void Cpu::flush_cpu_backend() {
   }
 }
 
+bool Cpu::debug_jit_code_ranges(uintptr_t &dispatcher_begin,
+                                uintptr_t &translations_begin,
+                                uintptr_t &end) const {
+  return recompiler_backend_ &&
+         recompiler_backend_->debug_code_ranges(dispatcher_begin,
+                                                translations_begin, end);
+}
+
 CpuBackendStats Cpu::cpu_backend_stats() const {
   if (effective_cpu_execution_mode() != CpuExecutionMode::Interpreter &&
       recompiler_backend_) {

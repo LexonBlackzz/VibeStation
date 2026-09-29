@@ -919,6 +919,7 @@ public:
 
   bool available() const { return base_ != nullptr; }
   size_t bytes_used() const { return used_; }
+  const u8 *base() const { return base_; }
 
   void reset_to(size_t offset) {
     used_ = std::min(offset, kV4CodeArenaBytes);
@@ -10072,4 +10073,24 @@ CpuBackendStats CpuRecompilerBackend::stats() const {
       effective_cpu_execution_mode() == CpuExecutionMode::Recompiler;
   out.native_available = impl_->native_available();
   return out;
+}
+
+bool CpuRecompilerBackend::debug_code_ranges(uintptr_t &dispatcher_begin,
+                                             uintptr_t &translations_begin,
+                                             uintptr_t &end) const {
+#if VIBESTATION_JIT_V4_X64
+  if (!impl_->initialized || !impl_->arena.available()) {
+    return false;
+  }
+  const uintptr_t base = reinterpret_cast<uintptr_t>(impl_->arena.base());
+  dispatcher_begin = base;
+  translations_begin = base + impl_->permanent_code_bytes;
+  end = base + impl_->arena.bytes_used();
+  return true;
+#else
+  (void)dispatcher_begin;
+  (void)translations_begin;
+  (void)end;
+  return false;
+#endif
 }
