@@ -389,8 +389,14 @@ endif()
 
 # High warning level + suppress CRT deprecation warnings
 if(MSVC)
-    target_compile_options(VibeStation PRIVATE /W3 /permissive- /MP)
-    target_compile_options(imgui_lib PRIVATE /MP)
+    target_compile_options(VibeStation PRIVATE /W3 /permissive-)
+    # /MP parallelizes files inside one cl.exe call, which only helps the
+    # Visual Studio generator. Ninja already runs one file per process, and
+    # keeping /MP off there keeps invocations simple for compiler caches.
+    if(CMAKE_GENERATOR MATCHES "Visual Studio")
+        target_compile_options(VibeStation PRIVATE /MP)
+        target_compile_options(imgui_lib PRIVATE /MP)
+    endif()
     target_compile_definitions(VibeStation PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 

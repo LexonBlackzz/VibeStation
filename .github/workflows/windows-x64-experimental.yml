@@ -11,9 +11,34 @@ on:
 jobs:
   windows-x64:
     runs-on: windows-2022
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}\.sccache
+      SCCACHE_CACHE_SIZE: 1G
+      SCCACHE_VERSION: v0.18.0
+      SCCACHE_SHA256: 8965c74d5e8a225244f741e18ad2f3f504f48228dc1bac948fc22761a348363d
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Restore the most recent compiler cache and save a new one per commit.
+      # Unchanged files (all of SDL2, most of the emulator) become cache hits.
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-windows-x64-${{ github.sha }}
+          restore-keys: sccache-windows-x64-
+
+      - name: Install sccache
+        shell: pwsh
+        run: |
+          $name = "sccache-$env:SCCACHE_VERSION-x86_64-pc-windows-msvc"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest "https://github.com/mozilla/sccache/releases/download/$env:SCCACHE_VERSION/$name.zip" -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:SCCACHE_SHA256) { throw "sccache checksum mismatch: $hash" }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP -Force
+          Add-Content $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP $name)
 
       # Ninja + MSVC instead of the Visual Studio generator: the VS generator
       # runs every CMake feature check through MSBuild (slow configure) and
@@ -27,6 +52,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_C_COMPILER=cl ^
             -DCMAKE_CXX_COMPILER=cl ^
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ^
             -DVIBESTATION_ENABLE_X64_JIT=ON ^
             -DVIBESTATION_ENABLE_DISCORD_RPC=OFF ^
             -DVIBESTATION_ENABLE_IPO=OFF
@@ -36,7 +63,12 @@ jobs:
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
           call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          sccache --zero-stats
           cmake --build build-windows --parallel %NUMBER_OF_PROCESSORS%
+          set "BUILD_RC=%errorlevel%"
+          sccache --show-stats
+          sccache --stop-server
+          exit /b %BUILD_RC%
 
       - name: Package
         shell: pwsh
