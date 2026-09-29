@@ -3220,6 +3220,110 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       .require_v4_entry_exception_native_when_available = true;
   cases.push_back(mmio_enable_pending_irq);
 
+  CpuCompareCase mmio_chain_cause_sync{};
+  mmio_chain_cause_sync.name =
+      "v4_mmio_chain_continues_with_synced_cause_ip2";
+  mmio_chain_cause_sync.initial_gpr[1] = 0x1F801070u;
+  mmio_chain_cause_sync.initial_gpr[2] = 1u;
+  mmio_chain_cause_sync.initial_gpr[6] = 2u;
+  // VBlank is pending while SR.IEc=0, so no interrupt is ever taken and the
+  // resident chain keeps running across each I_MASK write. Cause.IP2 must
+  // still follow the IRQ line at every boundary for the MFC0 reads.
+  mmio_chain_cause_sync.initial_cop0_sr_bits = 0x400u;
+  mmio_chain_cause_sync.initial_irq_mask = 0u;
+  mmio_chain_cause_sync.initial_irq_pending = true;
+  mmio_chain_cause_sync.program = {
+      enc_i(0x2B, 1, 0, 4),                     // SW r0,I_MASK(r1): line low
+      (0x10u << 26) | (4u << 16) | (13u << 11), // MFC0 r4,Cause
+      enc_i(0x2B, 1, 2, 4),                     // SW r2,I_MASK(r1): line high
+      (0x10u << 26) | (7u << 16) | (13u << 11), // MFC0 r7,Cause
+      enc_r(8, 4, 8, 0, 0x21),                  // ADDU r8,r8,r4
+      enc_r(9, 7, 9, 0, 0x21),                  // ADDU r9,r9,r7
+      enc_i(0x09, 5, 5, 1),                     // ADDIU r5,r5,1
+      enc_i(0x05, 5, 6, 0xFFF8u),               // BNE r5,r6,start
+      0u,
+  };
+  pad_cpu_compare_program(mmio_chain_cause_sync, 18u);
+  mmio_chain_cause_sync.require_v4_native_entry_when_available = true;
+  cases.push_back(mmio_chain_cause_sync);
+
+  // A branch head whose delay slot is a load yields before the slot. Once the
+  // loop is hot, the precompiled delay fragment runs inside the resident chain.
+  CpuCompareCase split_delay_native{};
+  split_delay_native.name = "v4_split_branch_load_delay_continues_natively";
+  split_delay_native.initial_gpr[1] = 0x80012000u;
+  split_delay_native.initial_gpr[6] = 3u;
+  split_delay_native.memory = {{0x00012000u, 0x11111111u}};
+  split_delay_native.program = {
+      enc_i(0x09, 5, 5, 1),        // ADDIU r5,r5,1
+      enc_i(0x05, 5, 6, 0xFFFEu),  // BNE r5,r6,start
+      enc_i(0x23, 1, 3, 0),        // LW r3,0(r1) (delay slot)
+      enc_r(4, 3, 4, 0, 0x21),     // ADDU r4,r4,r3
+      0u,
+  };
+  split_delay_native.instructions = 10u;
+  split_delay_native.require_v4_native_entry_when_available = true;
+  cases.push_back(split_delay_native);
+
+  // Branch at the last word of an I-cache line with its load delay slot on the
+  // next line (line 1). The branch first compiles while line 1 is warm, so its
+  // delay cache is filled. Line 1 is then evicted by code 4 KiB away (same
+  // index, different tag) whose first word has the SAME bits as the delay
+  // slot, so only the tag shows the line is stale. On the second pass the
+  // delay fetch must refill before the slot retires. The SIO STAT read that
+  // follows as the first instruction on line 1 observes an 8-cycle transfer
+  // primed a few instructions earlier; if the refill slipped into that block
+  // its MMIO would see a timestamp 4 cycles early and a different STAT.
+  const u32 alias_line = kCpuComparePc + 0x1010u;
+  CpuCompareCase split_delay_alias{};
+  split_delay_alias.name = "v4_split_branch_crossline_delay_alias_refills";
+  split_delay_alias.initial_gpr[1] = 0x80012000u;
+  split_delay_alias.initial_gpr[5] = 1u;
+  split_delay_alias.initial_gpr[10] = 0x1F801000u;
+  // Prime the SIO transfer right after the alias LW (instruction 10).
+  split_delay_alias.mutations.push_back(
+      {10u, 0x80012004u, 0u, false, true});
+  split_delay_alias.memory = {
+      {0x00012000u, 0x22222222u},
+      {alias_line + 0u, enc_i(0x23, 1, 3, 0)},             // same bits as 0x10
+      {alias_line + 4u, enc_j(0x02, kCpuComparePc + 0x0Cu)}, // back to branch
+      {alias_line + 8u, 0u},
+  };
+  split_delay_alias.program = {
+      enc_j(0x02, kCpuComparePc + 0x1Cu), // 0x00: J 0x1C (warm line 1)
+      0u,                                 // 0x04
+      0u,                                 // 0x08
+      enc_i(0x05, 5, 0, 12),              // 0x0C: BNE r5,r0,+12 -> 0x40
+      enc_i(0x23, 1, 3, 0),               // 0x10: LW r3,0(r1) (delay slot)
+      enc_i(0x23, 10, 7, 0x44),           // 0x14: LW r7,SIO STAT(r10)
+      0u,                                 // 0x18
+      enc_j(0x02, kCpuComparePc + 0x0Cu), // 0x1C: J branch
+      0u,                                 // 0x20
+      0u, 0u, 0u, 0u, 0u, 0u, 0u,         // 0x24..0x3C
+      enc_i(0x09, 0, 5, 0),               // 0x40: ADDIU r5,r0,0
+      enc_j(0x02, alias_line),            // 0x44: J alias (evicts line 1)
+      0u,                                 // 0x48
+  };
+  split_delay_alias.instructions = 15u;
+  split_delay_alias.require_v4_native_entry_when_available = true;
+  cases.push_back(split_delay_alias);
+
+  // Same shape, but line 1 is invalidated in place (valid cleared, tag and
+  // words unchanged) instead of evicted, so only the valid bit shows the delay
+  // fetch must refill. The invalidation targets the alias address: same line
+  // index, but a different code page, so the branch's translation survives.
+  CpuCompareCase split_delay_invalid = split_delay_alias;
+  split_delay_invalid.name =
+      "v4_split_branch_crossline_delay_invalidated_refills";
+  split_delay_invalid.program[0x44 / 4] =
+      enc_j(0x02, kCpuComparePc + 0x0Cu); // 0x44: J branch (no alias trip)
+  split_delay_invalid.mutations = {
+      {7u, 0x80012004u, 0u, false, true},  // prime SIO after ADDIU @0x40
+      {9u, alias_line, 0u, true, false},   // invalidate line 1 via alias
+  };
+  split_delay_invalid.instructions = 12u;
+  cases.push_back(split_delay_invalid);
+
   CpuCompareCase native_memory_mid_block_irq{};
   native_memory_mid_block_irq.name = "native_memory_mid_block_irq_state";
   native_memory_mid_block_irq.initial_gpr[1] = 0x1F801070u;

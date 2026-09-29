@@ -789,9 +789,15 @@ struct V4NativeState {
   u32 pending_branch_taken = 0;
   u32 pending_branch_pc = 0;
   u32 scheduler_yield = 0;
+  // Published by a branch head right before it yields with its delay slot
+  // pending: that head's V4DelayCache (or null) and the translation epoch it
+  // was compiled under. Cleared when consumed and at every dispatch entry.
+  void *pending_delay_cache = nullptr;
+  u32 pending_delay_cache_epoch = 0;
   // Device/MMIO bridges can synchronously change scheduler-visible state
-  // (notably IRQ eligibility). End the resident chain at that architectural
-  // instruction boundary so run_slice can resample the hardware IRQ line.
+  // (notably IRQ eligibility). Set after such an access; at the following
+  // instruction boundary the dispatcher runs v4_resident_device_boundary(),
+  // which resamples the IRQ line and leaves the chain only when required.
   u32 host_timing_boundary = 0;
   // An architectural I-cache fetch may be charged before the translated block
   // starts. Device/MMIO accesses in the block's first guest instruction must
@@ -996,6 +1002,17 @@ V4RejectKind classify_v4_reject(u32 bits) {
   return V4RejectKind::Other;
 }
 
+// Native fragment for the delay slot of a branch head that yields before it.
+// Valid only while the delay word is guest-visible in the I-cache with exactly
+// this tag and these bits, which is what run_slice() would fetch and decode.
+// Filled at compile time when the slot is already visible, otherwise by
+// run_slice() the first time it performs that fetch.
+struct V4DelayCache {
+  V4NativeFn fn = nullptr;
+  u32 tag = 0;
+  u32 bits = 0;
+};
+
 struct V4Block {
   u32 start_pc = 0;
   u32 instruction_count = 0;
@@ -1018,6 +1035,7 @@ struct V4Block {
   // fresh dispatcher entry so they cannot cross a System scheduling boundary
   // that an earlier native chain would otherwise have returned at.
   V4NativeFn budget_fn = nullptr;
+  V4DelayCache delay_cache{};
   bool budget_requires_empty_chain = false;
   V4RejectKind reject_kind = V4RejectKind::Other;
   bool interpreter_only = false;
@@ -5500,7 +5518,8 @@ V4NativeFn compile_v4_pending_delay_control(
 
 V4NativeFn compile_v4_budget_branch(
     V4CodeArena &arena, const V4DecodedControl &control, u32 branch_pc,
-    u32 &code_size) {
+    u32 &code_size, const V4DelayCache *delay_cache = nullptr,
+    u32 cache_epoch = 0u) {
   using namespace Xbyak;
   constexpr size_t kReservation = 1024u;
   void *buffer = arena.begin_emit(kReservation);
@@ -5630,8 +5649,20 @@ V4NativeFn compile_v4_budget_branch(
     code.L(selected);
   }
 
-  // Yield after the branch only. The pending delay slot remains at the same
-  // outer scheduler boundary as the previous helper implementation.
+  // Publish this head's delay-slot cache (or null). The resident dispatcher
+  // uses its fragment only while the delay word is guest-visible with the
+  // cached tag/bits; otherwise run_slice() performs the architectural fetch.
+  code.mov(code.rax, reinterpret_cast<size_t>(delay_cache));
+  code.mov(code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_cache))],
+      code.rax);
+  code.mov(code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, pending_delay_cache_epoch))],
+      cache_epoch);
+
+  // Yield after the branch only; the dispatcher decides whether the pending
+  // delay slot can continue natively at this same instruction boundary.
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
       1u);
@@ -7601,11 +7632,46 @@ V4NativeFn compile_v4_store(
   return reinterpret_cast<V4NativeFn>(buffer);
 }
 
+// Called by the resident dispatcher at the instruction boundary that follows a
+// device MMIO access. It performs exactly the checks run_slice() would make
+// after this dispatch, in the same order, so the chain only leaves native code
+// when one of them actually requires the host: an SIO scheduler deadline, an
+// exhausted slice budget, an interrupt that Cpu::check_irq() would now take,
+// or a pending branch delay slot. `cycles`/`instructions_left` are the resident
+// EBX/R12D counters. Returns non-zero to exit the resident dispatcher.
+u32 v4_resident_device_boundary(V4NativeState *state, u32 cycles,
+                                u32 instructions_left) {
+  System *sys = state->system;
+  if (sys->cpu_timing_boundary_requested()) {
+    return 1u;
+  }
+  // run_slice() ends here without resyncing Cause; so does Cpu::step(), which
+  // only samples the IRQ line at the start of the next instruction.
+  if (instructions_left == 0u || cycles >= state->cycle_budget) {
+    return 1u;
+  }
+  if (sys->irq_pending()) {
+    state->cop0_cause |= 1u << 10;
+  } else {
+    state->cop0_cause &= ~(1u << 10);
+  }
+  if ((state->cop0_sr & 1u) != 0u &&
+      (state->cop0_cause & state->cop0_sr & 0xFF00u) != 0u) {
+    return 1u;
+  }
+  if (state->pending_delay_slot != 0u) {
+    return 1u;
+  }
+  // A RAM_SIZE write changes the mirrored main-RAM window used by fast paths.
+  state->mapped_main_ram_size = sys->jit_mapped_main_ram_size();
+  return 0u;
+}
+
 V4ResidentDispatchFn install_v4_resident_dispatch(
     V4CodeArena &arena, V4NativeState *bound_state,
     void *&block_return, void *&linked_entry) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 4096u;
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -8316,25 +8382,46 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
         code.r11 +
         static_cast<int>(offsetof(V4NativeState, host_timing_boundary))],
         0u);
-    code.jmp(done);
+    // Same call pattern as the in-block device bridges.
+    code.push(code.r10);
+    code.push(code.r11);
+#if defined(_WIN32)
+    code.sub(code.rsp, 32);
+    code.mov(code.rcx, code.r11);
+    code.mov(code.edx, code.ebx);
+    code.mov(code.r8d, code.r12d);
+#else
+    code.mov(code.rdi, code.r11);
+    code.mov(code.esi, code.ebx);
+    code.mov(code.edx, code.r12d);
+#endif
+    code.mov(code.rax, reinterpret_cast<size_t>(&v4_resident_device_boundary));
+    code.call(code.rax);
+#if defined(_WIN32)
+    code.add(code.rsp, 32);
+#endif
+    code.pop(code.r11);
+    code.pop(code.r10);
+    code.test(code.eax, code.eax);
+    code.jnz(done);
     code.L(no_host_timing_boundary);
   }
   {
-    Label no_scheduler_yield, post_delay_irq_clear;
+    Label no_scheduler_yield, post_delay_irq_clear, pending_delay_continue;
     code.cmp(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
         0u);
     code.je(no_scheduler_yield);
 
-    // Split branches still yield before their delay slot to preserve the
-    // scheduler boundary. Once the delay slot itself has retired, the only
-    // required boundary here is interrupt sampling. Check the already-synced
-    // COP0 state in native code and keep the resident chain alive when no IRQ
-    // is eligible.
+    // Split branches yield before their delay slot; pending_delay_continue
+    // decides whether that slot can run natively at this boundary. Once the
+    // delay slot itself has retired, the only required boundary here is
+    // interrupt sampling. Check the already-synced COP0 state in native code
+    // and keep the resident chain alive when no IRQ is eligible.
     code.cmp(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_slot))],
         0u);
-    code.jne(done);
+    code.jne(pending_delay_continue);
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
         0u);
@@ -8360,6 +8447,69 @@ V4ResidentDispatchFn install_v4_resident_dispatch(
     code.test(code.ecx, 0xFF00u);
     code.jnz(done);
     code.L(post_delay_irq_clear);
+    code.jmp(loop);
+
+    // A branch head just retired with its delay slot pending. run_slice()
+    // would return if the slice budget is spent (without resyncing Cause),
+    // otherwise fetch the delay word (read_visible_instruction_for_backend)
+    // and dispatch pending_delay_alu_for(word); IRQs are never taken before a
+    // delay slot and no device ran since the last resample. Reproduce that
+    // natively when the head's delay cache matches the guest-visible word.
+    // Anything else (miss/refill, different bits, uncached) takes the exit.
+    code.L(pending_delay_continue);
+    code.test(code.r12d, code.r12d);
+    code.jz(done);
+    code.cmp(code.ebx, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, cycle_budget))]);
+    code.jae(done);
+    code.mov(code.rdx, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_cache))]);
+    code.test(code.rdx, code.rdx);
+    code.jz(done);
+    code.cmp(code.qword[code.rdx + static_cast<int>(offsetof(V4DelayCache, fn))],
+             0);
+    code.je(done);
+    // rcx = byte offset of the delay PC's direct-mapped I-cache line.
+    code.mov(code.r8d, code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pc))]);
+    code.mov(code.ecx, code.r8d);
+    code.shr(code.ecx, 4);
+    code.and_(code.ecx, 0xFFu);
+    code.imul(code.ecx, code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+    code.movsxd(code.rcx, code.ecx);
+    code.mov(code.r9, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+    code.cmp(code.byte[code.r9 + code.rcx], 0u);
+    code.je(done);
+    code.mov(code.r9, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_tags))]);
+    code.mov(code.eax, code.dword[code.r9 + code.rcx]);
+    code.cmp(code.eax, code.dword[
+        code.rdx + static_cast<int>(offsetof(V4DelayCache, tag))]);
+    code.jne(done);
+    code.mov(code.r9, code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_words))]);
+    code.add(code.r9, code.rcx);
+    code.mov(code.eax, code.r8d);
+    code.shr(code.eax, 2);
+    code.and_(code.eax, 3u);
+    code.mov(code.eax, code.dword[code.r9 + code.rax * 4]);
+    code.cmp(code.eax, code.dword[
+        code.rdx + static_cast<int>(offsetof(V4DelayCache, bits))]);
+    code.jne(done);
+    code.mov(code.rax, code.ptr[
+        code.rdx + static_cast<int>(offsetof(V4DelayCache, fn))]);
+    code.mov(code.ptr[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_fn))],
+        code.rax);
+    code.mov(code.qword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, pending_delay_cache))],
+        0);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],
+        0u);
     code.jmp(loop);
 
     code.L(no_scheduler_yield);
@@ -8919,6 +9069,24 @@ struct CpuRecompilerBackend::Impl {
 
     ++stats.native_compile_attempts;
     try {
+      // Branch heads that yield before a cacheable delay slot publish their
+      // block's V4DelayCache. Decode the slot now if it is already visible;
+      // otherwise run_slice() fills the cache on its first architectural fetch.
+      const V4DelayCache *delay_cache = nullptr;
+      if (control_candidate && cacheable &&
+          cpu.instruction_cacheable(branch_pc + 4u)) {
+        delay_cache = &block->delay_cache;
+        if (delay_visible) {
+          const V4NativeFn delay_fn = pending_delay_alu_for(delay_bits);
+          if (delay_fn != nullptr) {
+            block->delay_cache.fn = delay_fn;
+            block->delay_cache.tag =
+                psx::mask_address(branch_pc + 4u) & ~0x0Fu;
+            block->delay_cache.bits = delay_bits;
+          }
+        }
+      }
+
       V4LinkTargets links{};
       links.entry = direct_links_enabled ? resident_linked_entry : nullptr;
       const auto link_control = [&](const V4DecodedControl &branch,
@@ -8981,7 +9149,8 @@ struct CpuRecompilerBackend::Impl {
             arena, control, branch_pc, block->code_size);
       } else if (split_control) {
         entry = compile_v4_budget_branch(
-            arena, control, branch_pc, block->code_size);
+            arena, control, branch_pc, block->code_size, delay_cache,
+            cache_epoch);
       } else if (simple_exception) {
         entry = compile_v4_exception(
             arena, exception_inst, start_pc, block->code_size);
@@ -9012,12 +9181,14 @@ struct CpuRecompilerBackend::Impl {
             arena, overflow_alu, start_pc, links, block->code_size);
       } else if (guarded_control) {
         entry = compile_v4_budget_branch(
-            arena, control, branch_pc, block->code_size);
+            arena, control, branch_pc, block->code_size, delay_cache,
+            cache_epoch);
       } else if (guarded_store_control || guarded_load_control) {
         // Memory delay slots stay as native pending-delay fragments. Splitting
         // at the branch keeps address faults/MMIO/load-delay state out of C++.
         entry = compile_v4_budget_branch(
-            arena, control, branch_pc, block->code_size);
+            arena, control, branch_pc, block->code_size, delay_cache,
+            cache_epoch);
       } else if (simple_control) {
         entry = compile_v4_branch(
             arena, decoded, count, control, delay, branch_pc,
@@ -9094,7 +9265,8 @@ struct CpuRecompilerBackend::Impl {
             arena, overflow_alu, start_pc, budget_links, budget_code_size);
       } else if (simple_control || guarded_control || guarded_store_control) {
         block->budget_fn = compile_v4_budget_branch(
-            arena, control, branch_pc, budget_code_size);
+            arena, control, branch_pc, budget_code_size, delay_cache,
+            cache_epoch);
         block->budget_requires_empty_chain = block->budget_fn != nullptr;
       } else if (simple_load) {
         block->budget_fn = compile_v4_load(
@@ -9440,6 +9612,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     native.pending_branch_pc = 0u;
     native.pending_delay_fn = nullptr;
     native.scheduler_yield = 0u;
+    native.pending_delay_cache = nullptr;
     native.host_timing_boundary = 0u;
     native.current_block_refill_cycles = 0u;
     native.pending_load_reg = cpu_.load_.reg;
@@ -9606,6 +9779,20 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
           ++stats_.flushes;
           ++stats_.recompiler_frame_flushes;
           pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
+        }
+        // Record this architectural fetch in the yielding head's delay cache
+        // so its next pass can stay resident. The entry is self-validating (the
+        // dispatcher re-checks tag/bits against the guest-visible word); the
+        // epoch check keeps fragment pointers from surviving a reset.
+        V4NativeState &published = impl_->native_state;
+        if (pending_delay_fn != nullptr && cacheable &&
+            published.pending_delay_cache != nullptr &&
+            published.pending_delay_cache_epoch == impl_->cache_epoch) {
+          auto *delay_cache =
+              static_cast<V4DelayCache *>(published.pending_delay_cache);
+          delay_cache->fn = pending_delay_fn;
+          delay_cache->tag = psx::mask_address(cpu_.pc_) & ~0x0Fu;
+          delay_cache->bits = delay_instruction;
         }
       }
     }
@@ -9777,6 +9964,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         pending_delay_fn != nullptr ? cpu_.pending_branch_pc_ : 0u;
     native.pending_delay_fn = reinterpret_cast<void *>(pending_delay_fn);
     native.scheduler_yield = 0u;
+    native.pending_delay_cache = nullptr;
     native.host_timing_boundary = 0u;
     native.current_block_refill_cycles = cpp_refill_cycles;
     native.pending_load_reg = cpu_.load_.reg;
