@@ -2631,25 +2631,16 @@ u32 Cpu::instruction_cache_generation_for_backend(u32 addr) const {
 }
 
 void Cpu::notify_code_write(u32 phys_or_normalized_addr, u32 size_bytes) {
-  // DMA and bus writes can replace executable overlays.  The interpreter uses
-  // its own I-cache, so invalidating only the optimized backend leaves it
-  // executing stale instructions after a CD DMA transfer.
-  if (size_bytes != 0u) {
-    const u32 first = psx::mask_address(phys_or_normalized_addr) & ~0x0Fu;
-    const u32 last = psx::mask_address(
-                         phys_or_normalized_addr + size_bytes - 1u) &
-                     ~0x0Fu;
-    for (u32 line = first;; line += 0x10u) {
-      const u32 index = (line >> 4) & 0xFFu;
-      icache_[index].valid = false;
-      if (++icache_generation_[index] == 0u) {
-        icache_generation_[index] = 1u;
-      }
-      if (line == last) {
-        break;
-      }
-    }
-  }
+  // Ordinary CPU stores and DMA writes update memory only. On the R3000A they
+  // do not touch the I-cache: a cached line keeps its (possibly stale) words
+  // until it is refilled, and software that loads new code flushes the cache
+  // explicitly (BIOS FlushCache, via isolated-cache stores, which do
+  // invalidate lines; see store8/16/32). Invalidating by line index here used
+  // to evict unrelated code sharing that index on every data store.
+  //
+  // Translations of written pages are still invalidated: uncached (KSEG1)
+  // code observes memory directly, and cached lines revalidate their words on
+  // refill, so both backends keep executing exactly what the guest would.
   notify_jit_code_write_only(phys_or_normalized_addr, size_bytes);
 }
 

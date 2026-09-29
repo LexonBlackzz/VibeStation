@@ -1070,6 +1070,32 @@ struct V4LinkTargets {
   void *entry = nullptr;
 };
 
+// Isolated-cache store (SR.IsC): the store hits the I-cache instead of memory
+// and invalidates the direct-mapped line for store_phys, exactly like
+// Cpu::invalidate_icache_line(). Clobbers eax/ecx/edx/rcx.
+void emit_v4_isolated_icache_invalidate(Xbyak::CodeGenerator &code) {
+  using namespace Xbyak;
+  code.mov(code.eax, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.shr(code.eax, 4u);
+  code.and_(code.eax, 0xFFu);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
+  code.mov(code.edx, code.eax);
+  code.imul(code.edx, code.dword[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
+  code.mov(code.byte[code.rcx + code.rdx], 0u);
+  code.mov(code.rcx, code.ptr[
+      code.r11 +
+      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
+  code.inc(code.dword[code.rcx + code.rax * 4]);
+  Label generation_ok;
+  code.jnz(generation_ok);
+  code.mov(code.dword[code.rcx + code.rax * 4], 1u);
+  code.L(generation_ok);
+}
+
 void emit_v4_block_return(Xbyak::CodeGenerator &code) {
   code.jmp(code.ptr[
       code.r11 + static_cast<int>(offsetof(V4NativeState, block_return))]);
@@ -3138,32 +3164,8 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.mov(code.r9d, 1u);
 
     code.L(stored);
-
-    // System::write32() invalidates the corresponding direct-mapped I-cache
-    // line. Fastmem SWC2 must do the same even when no translated code bytes
-    // overlap the store.
-    code.mov(code.eax, code.dword[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
-    code.shr(code.eax, 4u);
-    code.and_(code.eax, 0xFFu);
-    code.mov(code.rcx, code.ptr[
-        code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-    code.mov(code.edx, code.eax);
-    code.imul(code.edx, code.dword[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
-    code.mov(code.byte[code.rcx + code.rdx], 0u);
-    code.mov(code.rcx, code.ptr[
-        code.r11 +
-        static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-    code.inc(code.dword[code.rcx + code.rax * 4]);
-    {
-      Label generation_ok;
-      code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
-      code.jne(generation_ok);
-      code.mov(code.dword[code.rcx + code.rax * 4], 1u);
-      code.L(generation_ok);
-    }
+    // An ordinary data store does not touch the guest I-cache (only
+    // isolated-cache stores do); translated-code overlap is guarded above.
 
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -4914,6 +4916,7 @@ V4NativeFn compile_v4_pending_delay_store(
   };
 
   code.L(isolated);
+  emit_v4_isolated_icache_invalidate(code);
   if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
     code.push(code.r10);
     code.push(code.r11);
@@ -5149,30 +5152,8 @@ V4NativeFn compile_v4_pending_delay_store(
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
 
-  // Match native store invalidation of the direct-mapped guest I-cache slot.
-  code.mov(code.eax, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
-  code.shr(code.eax, 4u);
-  code.and_(code.eax, 0xFFu);
-  code.mov(code.rcx, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-  code.mov(code.edx, code.eax);
-  code.imul(code.edx, code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
-  code.mov(code.byte[code.rcx + code.rdx], 0u);
-  code.mov(code.rcx, code.ptr[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-  code.inc(code.dword[code.rcx + code.rax * 4]);
-  {
-    Label generation_ok;
-    code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
-    code.jne(generation_ok);
-    code.mov(code.dword[code.rcx + code.rax * 4], 1u);
-    code.L(generation_ok);
-  }
-
+  // An ordinary data store does not touch the guest I-cache. Only the JIT's
+  // uncached-code page generation needs to observe it.
   {
     Label no_jit_page, jit_generation_ok;
     code.mov(code.eax, code.dword[
@@ -6202,30 +6183,8 @@ V4NativeFn compile_v4_store_delay_branch(
   code.inc(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_entries))]);
 
-  // Match Cpu::notify_code_write(): invalidate the direct-mapped guest I-cache
-  // slot and advance its generation after the successful store.
-  code.mov(code.eax, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
-  code.shr(code.eax, 4u);
-  code.and_(code.eax, 0xFFu);
-  code.mov(code.rcx, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-  code.mov(code.edx, code.eax);
-  code.imul(code.edx, code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
-  code.mov(code.byte[code.rcx + code.rdx], 0u);
-  code.mov(code.rcx, code.ptr[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-  code.inc(code.dword[code.rcx + code.rax * 4]);
-  {
-    Label generation_ok;
-    code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
-    code.jne(generation_ok);
-    code.mov(code.dword[code.rcx + code.rax * 4], 1u);
-    code.L(generation_ok);
-  }
+  // An ordinary data store does not touch the guest I-cache (only
+  // isolated-cache stores do), matching Cpu::notify_code_write().
 
   // The delay-slot store cannot alter GPRs, so evaluating the branch condition
   // after the store is equivalent to capturing it before the delay slot.
@@ -7137,6 +7096,7 @@ V4NativeFn compile_v4_store(
   };
 
   code.L(isolated);
+  emit_v4_isolated_icache_invalidate(code);
   if (store.op == V4StoreOp::Swl || store.op == V4StoreOp::Swr) {
     // SWL/SWR still perform their aligned read before the isolated store is
     // discarded. Preserve bus side effects and the main-RAM read penalty.
@@ -7365,32 +7325,8 @@ V4NativeFn compile_v4_store(
   code.add(code.ebx, code.r9d);
 
   // The translated-line guard above proves this store cannot modify any
-  // currently translated instruction bytes. Preserve the emulator's guest
-  // I-cache side effect in native code, avoiding a C++ helper on every store.
-  code.mov(code.eax, code.dword[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
-  code.shr(code.eax, 4u);
-  code.and_(code.eax, 0xFFu);
-
-  code.mov(code.rcx, code.ptr[
-      code.r11 + static_cast<int>(offsetof(V4NativeState, icache_valid))]);
-  code.mov(code.edx, code.eax);
-  code.imul(code.edx, code.dword[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_line_stride))]);
-  code.mov(code.byte[code.rcx + code.rdx], 0u);
-
-  code.mov(code.rcx, code.ptr[
-      code.r11 +
-      static_cast<int>(offsetof(V4NativeState, icache_generations))]);
-  code.inc(code.dword[code.rcx + code.rax * 4]);
-  {
-    Label generation_ok;
-    code.cmp(code.dword[code.rcx + code.rax * 4], 0u);
-    code.jne(generation_ok);
-    code.mov(code.dword[code.rcx + code.rax * 4], 1u);
-    code.L(generation_ok);
-  }
+  // currently translated instruction bytes, and an ordinary data store does
+  // not touch the guest I-cache (only isolated-cache stores do).
 
   // Native JIT invalidation: if the written physical page contains translated
   // code, advance its generation in-place. Reuse the pre-store page result so
@@ -9277,6 +9213,17 @@ struct CpuRecompilerBackend::Impl {
             arena, decoded, 0u, store, store_tail, 0u, nullptr, nullptr,
             start_pc, start_pc, cacheable, budget_links, budget_code_size);
       }
+      if (block->budget_fn == nullptr) {
+        // Every block kind above has a budget fragment, so null means the
+        // arena filled between the entry and its fragment. Fail the compile so
+        // the caller recycles translations and retries; publishing the block
+        // would leave a budget-limited dispatch with no native way forward.
+        if (!reused_block) {
+          --block_count;
+        }
+        ++stats.native_compile_failures;
+        return nullptr;
+      }
       block->instruction_count =
           (likely_control || split_control || guarded_control ||
            guarded_store_control || guarded_load_control)
@@ -9693,13 +9640,19 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     stats_.optimized_instructions += native.instructions;
   };
 
-  while (result.cycles < max_cycles &&
-         result.instructions < max_instructions) {
+  // A fetch refill the dispatcher made before finding native.pc's translation
+  // stale. That instruction has architecturally started, so it retires in this
+  // slice even past the budget, exactly like Cpu::step() after a refill.
+  u32 started_refill_cycles = 0u;
+  while (started_refill_cycles != 0u ||
+         (result.cycles < max_cycles &&
+          result.instructions < max_instructions)) {
     // I-cache fills performed in C++ for a not-yet-compiled instruction are
     // architecturally part of that instruction's Cpu::step(). Keep them
     // uncommitted until native retirement so first-opcode MMIO sees the same
     // pre-fetch absolute timestamp as the interpreter.
-    u32 cpp_refill_cycles = 0u;
+    u32 cpp_refill_cycles = started_refill_cycles;
+    started_refill_cycles = 0u;
 
     // Phase 2 will make branch/load delay state resident in V4. Until then,
     // never enter a native block while those architectural states are live.
@@ -9765,8 +9718,19 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
             cpu_.read_visible_instruction_for_backend(cpu_.pc_,
                                                       delay_instruction);
       }
+      // The yielding head's delay cache (see below) usually already holds the
+      // fragment for this word; epoch-matched, so its pointer is live.
+      V4NativeState &published = impl_->native_state;
+      auto *delay_cache =
+          cacheable && published.pending_delay_cache != nullptr &&
+                  published.pending_delay_cache_epoch == impl_->cache_epoch
+              ? static_cast<V4DelayCache *>(published.pending_delay_cache)
+              : nullptr;
       if (delay_visible) {
-        pending_delay_fn = impl_->pending_delay_alu_for(delay_instruction);
+        pending_delay_fn = delay_cache != nullptr && delay_cache->fn != nullptr &&
+                                   delay_cache->bits == delay_instruction
+                               ? delay_cache->fn
+                               : impl_->pending_delay_alu_for(delay_instruction);
         if (pending_delay_fn == nullptr) {
           // Code-arena exhaustion is a host JIT resource event, not permission
           // to execute the delay-slot opcode in C++. Recycle translations and
@@ -9784,12 +9748,8 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         // so its next pass can stay resident. The entry is self-validating (the
         // dispatcher re-checks tag/bits against the guest-visible word); the
         // epoch check keeps fragment pointers from surviving a reset.
-        V4NativeState &published = impl_->native_state;
-        if (pending_delay_fn != nullptr && cacheable &&
-            published.pending_delay_cache != nullptr &&
+        if (pending_delay_fn != nullptr && delay_cache != nullptr &&
             published.pending_delay_cache_epoch == impl_->cache_epoch) {
-          auto *delay_cache =
-              static_cast<V4DelayCache *>(published.pending_delay_cache);
           delay_cache->fn = pending_delay_fn;
           delay_cache->tag = psx::mask_address(cpu_.pc_) & ~0x0Fu;
           delay_cache->bits = delay_instruction;
@@ -10023,6 +9983,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     const u32 native_refill_cycles =
         native.icache_refills * kIcacheRefillCycles;
     const u32 total_refill_cycles = cpp_refill_cycles + native_refill_cycles;
+    if (native.generation_exits != 0u) {
+      // current_block_refill_cycles is cleared whenever a block retires, so a
+      // non-zero value here is the stale block's own first-instruction fetch.
+      started_refill_cycles = native.current_block_refill_cycles;
+      native.cycles -= started_refill_cycles;
+    }
     cpu_.cycles_ += native.cycles;
     result.cycles += native.cycles;
     stats_.native_cycles +=

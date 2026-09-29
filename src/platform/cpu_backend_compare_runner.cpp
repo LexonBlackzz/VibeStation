@@ -3247,6 +3247,40 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   mmio_chain_cause_sync.require_v4_native_entry_when_available = true;
   cases.push_back(mmio_chain_cause_sync);
 
+  // With SR.IsC set, a store hits the I-cache and invalidates the line instead
+  // of writing memory (the BIOS FlushCache idiom). Line 1 is warmed, then
+  // invalidated by an isolated SW on every pass, so each return to it must
+  // refill. Ordinary stores do not touch the I-cache, so native store paths
+  // must perform this invalidation on the isolated path themselves.
+  CpuCompareCase isolated_store_block{};
+  isolated_store_block.name = "v4_isolated_cache_store_invalidates_line";
+  isolated_store_block.initial_gpr[1] = kCpuComparePc;
+  isolated_store_block.initial_cop0_sr_bits = 1u << 16;
+  isolated_store_block.program = {
+      enc_j(0x02, kCpuComparePc + 0x10u), // 0x00: J line 1 (warm it)
+      0u,                                 // 0x04
+      enc_i(0x2B, 1, 0, 0x10),            // 0x08: SW r0,0x10(r1) (isolated)
+      0u,                                 // 0x0C
+      enc_j(0x02, kCpuComparePc + 0x08u), // 0x10: J 0x08
+      0u,                                 // 0x14
+  };
+  isolated_store_block.instructions = 16u;
+  isolated_store_block.require_v4_native_entry_when_available = true;
+  cases.push_back(isolated_store_block);
+
+  // Same, with the isolated SW in a branch delay slot (pending-delay store).
+  CpuCompareCase isolated_store_delay = isolated_store_block;
+  isolated_store_delay.name = "v4_isolated_cache_delay_store_invalidates_line";
+  isolated_store_delay.program = {
+      enc_j(0x02, kCpuComparePc + 0x10u), // 0x00: J line 1 (warm it)
+      0u,                                 // 0x04
+      enc_j(0x02, kCpuComparePc + 0x10u), // 0x08: J line 1
+      enc_i(0x2B, 1, 0, 0x10),            // 0x0C: SW r0,0x10(r1) (delay)
+      enc_j(0x02, kCpuComparePc + 0x08u), // 0x10: J 0x08
+      0u,                                 // 0x14
+  };
+  cases.push_back(isolated_store_delay);
+
   // A branch head whose delay slot is a load yields before the slot. Once the
   // loop is hot, the precompiled delay fragment runs inside the resident chain.
   CpuCompareCase split_delay_native{};
@@ -3323,6 +3357,36 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   };
   split_delay_invalid.instructions = 12u;
   cases.push_back(split_delay_invalid);
+
+  // An ordinary SW patches B's RAM word while line B stays cached (stores do
+  // not touch the I-cache), so B's next translation is compiled from the old
+  // cached bits. An alias then evicts line B; returning to B refills it from
+  // RAM and the dispatcher finds the translation stale only after that refill.
+  // The refill is B's own fetch, so B must retire in the same slice even
+  // though the 3-cycle budget is exhausted, as Cpu::step() does.
+  const u32 stale_b = kCpuComparePc + 0x40u;
+  CpuCompareCase stale_after_refill{};
+  stale_after_refill.name = "v4_stale_after_refill_retires_started_instruction";
+  stale_after_refill.initial_gpr[1] = kCpuComparePc;
+  stale_after_refill.initial_gpr[2] = enc_i(0x09, 4, 4, 2); // ADDIU r4,r4,2
+  stale_after_refill.memory = {
+      {(stale_b + 0x1000u) & 0x1FFFFFFFu, enc_j(0x02, stale_b)}, // alias: J B
+      {(stale_b + 0x1004u) & 0x1FFFFFFFu, 0u},
+  };
+  stale_after_refill.program.assign(0x4Cu / 4u, 0u);
+  stale_after_refill.program[0x00 / 4] = enc_j(0x03, stale_b);   // JAL B (warm)
+  stale_after_refill.program[0x08 / 4] = enc_i(0x2B, 1, 2, 0x40); // SW r2,B
+  stale_after_refill.program[0x0C / 4] = enc_j(0x03, stale_b);   // JAL B (old)
+  stale_after_refill.program[0x14 / 4] =
+      enc_j(0x02, stale_b + 0x1000u);                             // J alias
+  stale_after_refill.program[0x40 / 4] = enc_i(0x09, 4, 4, 1);   // B: ADDIU
+  stale_after_refill.program[0x44 / 4] = enc_r(31, 0, 0, 0, 0x08); // JR ra
+  stale_after_refill.instructions = 18u;
+  stale_after_refill.segment_instructions.assign(18u, 1u);
+  stale_after_refill.run_slice_cycle_budget = 3u;
+  stale_after_refill.compare_segment_states = true;
+  stale_after_refill.require_v4_native_entry_when_available = true;
+  cases.push_back(stale_after_refill);
 
   CpuCompareCase native_memory_mid_block_irq{};
   native_memory_mid_block_irq.name = "native_memory_mid_block_irq_state";
