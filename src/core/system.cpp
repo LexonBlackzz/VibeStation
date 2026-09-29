@@ -2451,8 +2451,10 @@ u8 System::read8(u32 addr) {
     const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
     if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u8 value = ram_.read8(ram_addr);
-        maybe_log_rr4_str_header_read(ram_addr, value, 1, cpu_.pc(),
-            cpu_.cycle_count(), bus_access_from_dma_);
+        if (g_log_fmv_diagnostics) {
+            maybe_log_rr4_str_header_read(ram_addr, value, 1, cpu_.pc(),
+                cpu_.cycle_count(), bus_access_from_dma_);
+        }
         debug_note_main_ram_read(ram_addr, value, 1);
         return value;
     }
@@ -2550,8 +2552,10 @@ u16 System::read16(u32 addr) {
     const u32 mapped_ram_size = mapped_main_ram_size_from_reg(ram_size_);
     if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u16 value = ram_.read16(ram_addr);
-        maybe_log_rr4_str_header_read(ram_addr, value, 2, cpu_.pc(),
-            cpu_.cycle_count(), bus_access_from_dma_);
+        if (g_log_fmv_diagnostics) {
+            maybe_log_rr4_str_header_read(ram_addr, value, 2, cpu_.pc(),
+                cpu_.cycle_count(), bus_access_from_dma_);
+        }
         debug_note_main_ram_read(ram_addr, value, 2);
         return value;
     }
@@ -2647,8 +2651,13 @@ u32 System::read32(u32 addr) {
     if (map_main_ram_address(addr, phys, mapped_ram_size, ram_addr)) {
         const u32 value = ram_.read32(ram_addr);
 
-        maybe_log_rr4_str_header_read(ram_addr, value, 4, cpu_.pc(),
-            cpu_.cycle_count(), bus_access_from_dma_);
+        if (g_log_fmv_diagnostics) {
+
+            maybe_log_rr4_str_header_read(ram_addr, value, 4, cpu_.pc(),
+
+                cpu_.cycle_count(), bus_access_from_dma_);
+
+        }
         debug_note_main_ram_read(ram_addr, value, 4);
         return value;
     }

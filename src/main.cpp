@@ -1564,7 +1564,10 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
                              const std::string &bin_path,
                              const std::string &cue_path) {
   const CpuExecutionMode requested_mode = effective_cpu_execution_mode();
-  g_profile_detailed_timing = true;
+  // VIBESTATION_BENCH_LEAN=1: no per-component timers and no checkpoint
+  // hashing, so wall_ms reflects emulation cost only (cpu/core_ms read 0).
+  const bool lean = std::getenv("VIBESTATION_BENCH_LEAN") != nullptr;
+  g_profile_detailed_timing = !lean;
 
   auto sys = std::make_unique<System>();
   if (!sys->load_bios(bios_path)) {
@@ -1620,7 +1623,7 @@ static int run_cpu_benchmark(const std::string &bios_path, int warmup_frames,
   }
 
   auto emit_checkpoint = [&](int absolute_frame) {
-    if ((absolute_frame % 30) != 0) {
+    if (lean || (absolute_frame % 30) != 0) {
       return true;
     }
     BenchmarkStateHashes hashes{};
