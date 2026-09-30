@@ -13,15 +13,38 @@ constexpr u32 kEeMainRamSize = 32u * 1024u * 1024u;
 bool quiet_ram_span(u32 virtual_address, u32 width, u32 alignment_mask = 0u) {
     if (virtual_address >= 0xC0000000u) return false;
     const u32 aligned = virtual_address & ~alignment_mask;
+    // Scratchpad is EE-private: only the EE core and SPR DMA reach it, and
+    // quiet batches never run while SPR DMA is active. Treating it like
+    // main RAM removes most quiet-batch exits in the retail BIOS.
+    if (aligned >= EeScratchpad::kBase &&
+        aligned < EeScratchpad::kBase + EeScratchpad::kSize) {
+        return width <= EeScratchpad::kBase + EeScratchpad::kSize - aligned;
+    }
     const u32 physical = EeBus::to_physical(aligned);
     return physical < kEeMainRamSize &&
            width <= kEeMainRamSize - physical;
+}
+
+// COP0 accesses that neither read device state nor change interrupt,
+// timer or translation state. Cause IP bits are sampled at batch entry and
+// devices do not advance inside a quiet batch; Count advances per retired
+// instruction in both paths. Writes to Status/Compare/Count/TLB state and
+// ERET/EI/DI still end the batch so interrupts are resampled.
+bool quiet_ee_cop0(u32 instruction) {
+    if ((instruction & 7u) != 0u) return false;
+    const u32 rs = (instruction >> 21) & 31u;
+    const u32 rd = (instruction >> 11) & 31u;
+    if (rs == 0x00u) return true;                     // MFC0
+    if (rs == 0x04u) return rd == 14u || rd == 30u;   // MTC0 EPC/ErrorEPC
+    return false;
 }
 
 bool quiet_ee_static_instruction(u32 instruction) {
     if (instruction == 0u) return true;
     const u32 opcode = instruction >> 26;
     switch (opcode) {
+    case 0x10u: // COP0
+        return quiet_ee_cop0(instruction);
     case 0x00u: // SPECIAL
     case 0x01u: // REGIMM
     case 0x02u: // J
@@ -154,6 +177,7 @@ bool quiet_ee_instruction_value(
     case 0x0Du:
     case 0x0Eu:
     case 0x0Fu:
+    case 0x10u:
     case 0x11u:
     case 0x14u:
     case 0x15u:
@@ -1341,12 +1365,15 @@ u64 Ps2System::try_run_quiet_ee_batch(
         maximum = std::min<u64>(maximum, iop_room);
     }
 
-    // Preserve the current 8:1 EE/IOP interleave exactly while the IOP is
-    // doing real work. We may batch several EE instructions, but never cross
-    // the point where the next IOP instruction is due.
+    // By default, preserve the 8:1 EE/IOP interleave exactly while the IOP
+    // is doing real work: batch several EE instructions, but never cross the
+    // point where the next IOP instruction is due. Quiet EE work never
+    // touches IOP-visible state, so a nonzero sync window instead lets the
+    // IOP trail by up to that many EE cycles and catch up afterwards.
     if (!iop_halted && !iop_idle) {
-        const u64 until_iop_step =
-            ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_;
+        const u64 until_iop_step = iop_sync_window_ > 8u
+            ? iop_sync_window_
+            : (ee_iop_phase_ == 0u ? 8u : 8u - ee_iop_phase_);
         maximum = std::min<u64>(maximum, until_iop_step);
     }
 

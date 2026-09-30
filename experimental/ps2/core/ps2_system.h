@@ -37,6 +37,11 @@ public:
     bool step_ee(std::string& error); bool step_iop(std::string& error);
     u64 run_ee(u64 instruction_budget,std::string& error);
     void refresh_display();
+    // Maximum EE cycles a quiet batch may run ahead of an active IOP before
+    // the IOP is caught up. 0 keeps the exact 8:1 interleave. A larger window
+    // delays IOP-raised EE interrupts and SIF starts by at most this amount.
+    void set_iop_sync_window(u64 cycles) { iop_sync_window_ = cycles; }
+    [[nodiscard]] u64 iop_sync_window() const { return iop_sync_window_; }
     Bios& bios(){return bios_;} const Bios& bios()const{return bios_;}
     EeRam& ram(){return ram_;} const EeRam& ram()const{return ram_;}
     IopRam& iop_ram(){return iop_ram_;} const IopRam& iop_ram()const{return iop_ram_;}
@@ -190,5 +195,6 @@ private:
     std::vector<QuietEeBlock> quiet_ee_blocks_{32768};
     std::array<u64, 64> native_fallback_opcodes_{};
     std::array<u64, 8> idle_skip_reasons_{};
+    u64 iop_sync_window_ = 0;
 };
 } // namespace ps2

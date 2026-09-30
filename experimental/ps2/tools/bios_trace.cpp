@@ -1430,6 +1430,7 @@ int main(int argc, char** argv) {
     bool gs_thread = false;
     bool detailed_gs_stats = false;
     bool audio_only = false;
+    ps2::u64 iop_sync_window = 0;
     const char* display_path = nullptr;
     std::string wav_path;
     for (int index = 3; index < argc; ++index) {
@@ -1441,6 +1442,10 @@ int main(int argc, char** argv) {
         else if (option == "--gs-thread") gs_thread = true;
         else if (option == "--detailed-gs-stats") detailed_gs_stats = true;
         else if (option == "--audio-only") audio_only = true;
+        else if (option.starts_with("--iop-sync-window=")) {
+            iop_sync_window = std::strtoull(
+                std::string(option.substr(18)).c_str(), nullptr, 10);
+        }
         else if (option.starts_with("--wav=") && option.size() > 6u) {
             wav_path = std::string(option.substr(6));
         }
@@ -1481,6 +1486,8 @@ int main(int argc, char** argv) {
         std::cerr << "BIOS_BOOT_ERROR=" << error << '\n';
         return 3;
     }
+    system.set_iop_sync_window(iop_sync_window);
+    std::cout << "IOP_SYNC_WINDOW=" << iop_sync_window << '\n';
 
     ps2::u64 remaining = budget;
     bool first_visible_reported = false;
