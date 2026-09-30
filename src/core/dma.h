@@ -112,6 +112,13 @@ public:
   const RegisterWriteDebug &last_register_write_debug(int channel) const {
     return register_write_debug_[channel & 0x7];
   }
+  // Cumulative since reset; diagnostic only (not part of save states).
+  u64 debug_completed_transfers(int channel) const {
+    return completed_transfers_[channel & 0x7];
+  }
+  u64 debug_moved_words(int channel) const {
+    return moved_words_[channel & 0x7];
+  }
 
 private:
   System *sys_ = nullptr;
@@ -125,6 +132,8 @@ private:
   std::array<u32, 7> active_transfer_debug_id_{};
   u32 next_transfer_debug_id_ = 0;
   RegisterWriteDebug register_write_debug_[7];
+  std::array<u64, 8> completed_transfers_{};
+  std::array<u64, 8> moved_words_{};
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register

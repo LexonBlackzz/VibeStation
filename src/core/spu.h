@@ -257,6 +257,16 @@ public:
   void restore_state(const u8*& pos, size_t& remaining);
 
   u16 status() const { return spustat_; }
+  // Bit n is set while voice n's envelope is not Off.
+  u32 active_voice_mask() const {
+    u32 mask = 0;
+    for (int v = 0; v < NUM_VOICES; ++v) {
+      if (voices_[v].phase != VoiceState::AdsrPhase::Off) {
+        mask |= 1u << v;
+      }
+    }
+    return mask;
+  }
   const AudioDiag &audio_diag() const { return audio_diag_; }
   void reset_audio_diag();
   AudioQueueStats audio_queue_stats(bool reset_window = false) const;

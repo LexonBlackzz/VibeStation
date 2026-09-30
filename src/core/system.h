@@ -149,6 +149,8 @@ public:
     u32 gpu_line_commands = 0;
     u32 gpu_transfer_commands = 0;
     u32 gpu_other_commands = 0;
+    u32 gpu_fill_commands = 0; // GP0 0x02, also counted in rect
+    u32 gpu_gp1_commands = 0;
 
     // Raster work counters. candidate_pixels is bounding-box work visited by
     // triangle rasterizers; covered_pixels passed the edge tests.
@@ -338,6 +340,8 @@ public:
   void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
   void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
   void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
+  void add_gpu_fill_command() { ++profiling_stats_.gpu_fill_commands; }
+  void add_gpu_gp1_command() { ++profiling_stats_.gpu_gp1_commands; }
   void add_gpu_command_bucket(GpuProfileBucket bucket) {
     switch (bucket) {
     case GpuProfileBucket::Flat:
@@ -698,6 +702,9 @@ public:
   CdRom &cdrom() { return cdrom_; }
   const CdRom &cdrom() const { return cdrom_; }
   const Bios &bios() const { return bios_; }
+  // ROM patches must be applied after reset(), which restores the image.
+  Bios &bios_mut() { return bios_; }
+  const DmaController &dma() const { return dma_; }
   InterruptController &irq() { return irq_; }
   bool cpu_timing_boundary_requested() const {
     return cpu_timing_boundary_requested_;

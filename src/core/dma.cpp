@@ -130,6 +130,8 @@ void DmaController::reset() {
   for (auto &dbg : register_write_debug_) {
     dbg = {};
   }
+  completed_transfers_.fill(0);
+  moved_words_.fill(0);
   dpcr_ = 0x07654321;
   dicr_ = 0;
 }
@@ -527,6 +529,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
   // is only a per-channel snapshot and may have been replaced by the time a
   // later CPU fault asks where a word originated.
   dbg.transfer_words = transfer_words;
+  moved_words_[channel] += transfer_words;
   dbg.first_addr = addr & 0x001FFFFCu;
   if (transfer_words != 0u) {
     const s32 span = step * static_cast<s32>(transfer_words - 1u);
@@ -833,6 +836,7 @@ void DmaController::dma_linked_list(int channel) {
     LOG_ERROR("DMA: Linked list loop detected!");
   }
 
+  moved_words_[channel] += transferred_words;
   if (sys_ != nullptr) {
     sys_->add_cpu_cycle_penalty(dma_ram_tick_cost(transferred_words));
   }
@@ -849,6 +853,7 @@ void DmaController::transfer_complete(int channel) {
         static_cast<unsigned long long>(cycle));
   }
 
+  ++completed_transfers_[channel];
   // Clear enable + trigger bits
   ch.channel_ctrl &= ~(1u << 24); // Disable
   ch.channel_ctrl &= ~(1u << 28); // Clear trigger

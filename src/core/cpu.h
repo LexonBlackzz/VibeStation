@@ -12,6 +12,7 @@
 
 class System;
 class CpuRecompilerBackend;
+class GrimTelemetry;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -588,12 +589,15 @@ public:
   CpuDebugState debug_state() const;
   void debug_set_state(const CpuDebugState &state);
   void debug_invalidate_icache_line(u32 addr);
+  // Grim Reaper evaluation hooks (interpreter only); nullptr = off.
+  void set_telemetry(GrimTelemetry *telemetry) { telemetry_ = telemetry; }
 
   void save_state(std::vector<u8>& buf) const;
   void restore_state(const u8*& pos, size_t& remaining);
 
 private:
   System *sys_ = nullptr;
+  GrimTelemetry *telemetry_ = nullptr;
   std::unique_ptr<CpuRecompilerBackend> recompiler_backend_;
   friend class CpuRecompilerBackend;
 

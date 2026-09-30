@@ -95,6 +95,7 @@ set(VIBESTATION_SOURCES
     src/platform/cpu_backend_compare_runner.cpp
     src/platform/gpu_correctness_runner.cpp
     src/platform/scheduler_self_test.cpp
+    src/platform/grim_eval_runner.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
     src/platform/sample_profiler.cpp
@@ -119,6 +120,7 @@ set(VIBESTATION_SOURCES
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp
     src/core/system.cpp
+    src/core/grim_eval.cpp
     src/core/system_snapshot.cpp
     src/core/rewind.cpp
     src/core/renderer.cpp

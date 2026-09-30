@@ -7,6 +7,7 @@
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
+#include "platform/grim_eval_runner.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
 #include "ui/app.h"
@@ -3930,6 +3931,24 @@ int main(int argc, char *argv[]) {
     const bool memory_only =
         passthrough[0] == "--jit-memory-compare-test";
     const int rc = run_cpu_backend_compare_test(memory_only);
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
+  }
+
+  if (!passthrough.empty() && (passthrough[0] == "--grim-eval" ||
+                               passthrough[0] == "--grim-determinism-test" ||
+                               passthrough[0] == "--grim-self-test")) {
+    const std::vector<std::string> grim_args(passthrough.begin() + 1,
+                                             passthrough.end());
+    const int rc = passthrough[0] == "--grim-eval"
+                       ? run_grim_eval_cli(grim_args)
+                   : passthrough[0] == "--grim-self-test"
+                       ? run_grim_self_test(grim_args)
+                       : run_grim_determinism_test(grim_args, argv[0]);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
