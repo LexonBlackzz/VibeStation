@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <limits>
 #include <utility>
 
 namespace ps2 {
@@ -152,6 +153,9 @@ void GsCore::raster_helper_main(u32 helper_index) {
         s32 row_begin = 0;
         s32 row_end = 0;
         u64 generation = 0u;
+        bool triangle_batch = false;
+        const RasterCommand* batch = nullptr;
+        u32 batch_count = 0u;
 
         {
             std::unique_lock lock(raster_parallel_mutex_);
@@ -167,14 +171,31 @@ void GsCore::raster_helper_main(u32 helper_index) {
             ctx = raster_parallel_context_;
             a = raster_parallel_a_;
             b = raster_parallel_b_;
+            triangle_batch = raster_parallel_triangle_batch_;
+            batch = raster_parallel_batch_;
+            batch_count = raster_parallel_batch_count_;
             row_begin =
                 raster_parallel_boundaries_[helper_index];
             row_end =
                 raster_parallel_boundaries_[helper_index + 1u];
         }
 
-        const u64 count = GsRasterizer::draw_sprite_rows(
-            vram_, *ctx, *a, *b, row_begin, row_end);
+        u64 count = 0u;
+        if (triangle_batch) {
+            // Draw every command in submission order, limited to this
+            // lane's rows, so each pixel still sees draws in GS order.
+            auto& lane_counts =
+                raster_parallel_batch_counts_[helper_index];
+            for (u32 i = 0u; i < batch_count; ++i) {
+                const RasterCommand& draw = batch[i];
+                lane_counts[i] = GsRasterizer::draw_triangle_rows(
+                    vram_, draw.context, draw.a, draw.b, draw.c,
+                    row_begin, row_end);
+            }
+        } else {
+            count = GsRasterizer::draw_sprite_rows(
+                vram_, *ctx, *a, *b, row_begin, row_end);
+        }
 
         {
             std::lock_guard lock(raster_parallel_mutex_);
@@ -223,6 +244,7 @@ bool GsCore::try_execute_parallel_sprite(
 
     {
         std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_triangle_batch_ = false;
         raster_parallel_context_ = &command.context;
         raster_parallel_a_ = &command.a;
         raster_parallel_b_ = &command.b;
@@ -346,6 +368,127 @@ void GsCore::submit_display_scanout(
     raster_condition_.notify_one();
 }
 
+bool GsCore::triangle_batch_candidate(const RasterCommand& command) const {
+    const u32 prim = command.primitive;
+    return raster_helper_count_ != 0u &&
+           !detailed_raster_stats_ &&
+           !raster_timing_enabled_ &&
+           command.scanout_display == nullptr &&
+           (prim == 3u || prim == 4u || prim == 5u) &&
+           command.vertex_count >= 3u &&
+           GsRasterizer::band_parallel_safe(command.context);
+}
+
+bool GsCore::triangle_batch_compatible(
+    const RasterCommand& first, const RasterCommand& next) {
+    // Draws in one batch share the frame, depth and texture buffers and the
+    // scissor rectangle. Each already passed band_parallel_safe() for that
+    // shared state, so no band can read what another band writes.
+    const auto& f = first.context;
+    const auto& n = next.context;
+    const bool same_texture =
+        f.texture.enabled == n.texture.enabled &&
+        (!f.texture.enabled ||
+         (f.texture.bp == n.texture.bp &&
+          f.texture.bw == n.texture.bw &&
+          f.texture.psm == n.texture.psm &&
+          f.texture.width == n.texture.width &&
+          f.texture.height == n.texture.height));
+    return f.fbp == n.fbp && f.fbw == n.fbw && f.psm == n.psm &&
+           f.zte == n.zte && f.zbp == n.zbp && f.zpsm == n.zpsm &&
+           f.zmask == n.zmask &&
+           f.scax0 == n.scax0 && f.scax1 == n.scax1 &&
+           f.scay0 == n.scay0 && f.scay1 == n.scay1 &&
+           same_texture;
+}
+
+void GsCore::execute_triangle_batch(std::vector<RasterCommand>& batch) {
+    // Software rasterization must observe every earlier GPU write.
+    synchronize_gpu_to_cpu();
+
+    s32 top = std::numeric_limits<s32>::max();
+    s32 bottom = std::numeric_limits<s32>::min();
+    u64 work = 0u;
+    for (const RasterCommand& command : batch) {
+        s32 draw_top = 0;
+        s32 draw_bottom = 0;
+        if (!GsRasterizer::triangle_row_span(
+                command.context, command.a, command.b, command.c,
+                draw_top, draw_bottom)) {
+            continue;
+        }
+        top = std::min(top, draw_top);
+        bottom = std::max(bottom, draw_bottom);
+        const s32 min_x = std::min({command.a.x, command.b.x, command.c.x});
+        const s32 max_x = std::max({command.a.x, command.b.x, command.c.x});
+        work += static_cast<u64>(draw_bottom - draw_top) *
+                static_cast<u64>(std::max(1, (max_x - min_x) >> 4));
+    }
+
+    // Waking the pool costs a few microseconds; small batches run inline.
+    constexpr u64 kMinParallelBatchWork = 4096u;
+    const u32 lanes = raster_helper_count_ + 1u;
+    const u32 count = static_cast<u32>(batch.size());
+    if (top >= bottom ||
+        bottom - top < static_cast<s32>(lanes * 4u) ||
+        work < kMinParallelBatchWork) {
+        for (const RasterCommand& command : batch) {
+            const u64 pixels = GsRasterizer::draw_triangle(
+                vram_, command.context, command.a, command.b, command.c);
+            record_raster_command(
+                command, pixels, 0u, false,
+                stats_->nonzero_raster_inputs,
+                stats_->nonzero_inputs_with_alpha);
+        }
+        return;
+    }
+
+    const s32 rows = bottom - top;
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_triangle_batch_ = true;
+        raster_parallel_batch_ = batch.data();
+        raster_parallel_batch_count_ = count;
+        raster_parallel_boundaries_[0] = top;
+        for (u32 lane = 1u; lane < lanes; ++lane) {
+            raster_parallel_boundaries_[lane] =
+                top + static_cast<s32>(
+                    (static_cast<s64>(rows) * lane) / lanes);
+        }
+        raster_parallel_boundaries_[lanes] = bottom;
+        raster_parallel_pending_ = raster_helper_count_;
+        ++raster_parallel_generation_;
+    }
+    raster_parallel_condition_.notify_all();
+
+    auto& own_counts = raster_parallel_batch_counts_[0];
+    for (u32 i = 0u; i < count; ++i) {
+        const RasterCommand& command = batch[i];
+        own_counts[i] = GsRasterizer::draw_triangle_rows(
+            vram_, command.context, command.a, command.b, command.c,
+            raster_parallel_boundaries_[0], raster_parallel_boundaries_[1]);
+    }
+
+    {
+        std::unique_lock lock(raster_parallel_mutex_);
+        raster_parallel_done_condition_.wait(lock, [&] {
+            return raster_parallel_pending_ == 0u;
+        });
+        raster_parallel_triangle_batch_ = false;
+    }
+
+    for (u32 i = 0u; i < count; ++i) {
+        u64 pixels = 0u;
+        for (u32 lane = 0u; lane < lanes; ++lane) {
+            pixels += raster_parallel_batch_counts_[lane][i];
+        }
+        record_raster_command(
+            batch[i], pixels, 0u, false,
+            stats_->nonzero_raster_inputs,
+            stats_->nonzero_inputs_with_alpha);
+    }
+}
+
 void GsCore::raster_worker_main() {
     for (;;) {
         RasterCommand command;
@@ -358,18 +501,39 @@ void GsCore::raster_worker_main() {
             command = std::move(raster_queue_.front());
             raster_queue_.pop_front();
         }
+        u64 executed = 1u;
         if (command.scanout_display != nullptr) {
             // Every earlier draw has completed on this thread; pull back any
             // GPU-rendered VRAM before reading it for scanout.
             synchronize_gpu_to_cpu();
             command.scanout_display->update(
                 *command.scanout_registers, vram_);
+        } else if (triangle_batch_candidate(command)) {
+            // Take the following compatible triangles too, so the pool is
+            // woken once per batch rather than once per triangle. When the
+            // worker keeps up, the queue is short and batches stay small.
+            raster_batch_.clear();
+            raster_batch_.push_back(std::move(command));
+            {
+                std::lock_guard lock(raster_mutex_);
+                while (!raster_queue_.empty() &&
+                       raster_batch_.size() < kMaxTriangleBatch &&
+                       triangle_batch_candidate(raster_queue_.front()) &&
+                       triangle_batch_compatible(
+                           raster_batch_.front(), raster_queue_.front())) {
+                    raster_batch_.push_back(
+                        std::move(raster_queue_.front()));
+                    raster_queue_.pop_front();
+                }
+            }
+            executed = raster_batch_.size();
+            execute_triangle_batch(raster_batch_);
         } else {
             execute_raster_command(command);
         }
         {
             std::lock_guard lock(raster_mutex_);
-            ++raster_completed_;
+            raster_completed_ += executed;
         }
         raster_completed_condition_.notify_all();
     }
@@ -1230,6 +1394,25 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - raster_begin).count())
         : 0u;
+
+    record_raster_command(
+        command, pixels, raster_ns, gpu_raster,
+        nonzero_inputs_before, alpha_inputs_before);
+}
+
+void GsCore::record_raster_command(
+    const RasterCommand& command,
+    u64 pixels,
+    u64 raster_ns,
+    bool gpu_raster,
+    u64 nonzero_inputs_before,
+    u64 alpha_inputs_before) {
+    const auto& ctx = command.context;
+    const auto& a = command.a;
+    const auto& b = command.b;
+    const auto& c = command.c;
+    const u32 prim = command.primitive;
+    const u32 vertex_count = command.vertex_count;
 
     if (ctx.texture.enabled && ctx.texture.psm == 2u) {
         u32 state_mask = 0u;

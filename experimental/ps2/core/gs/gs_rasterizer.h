@@ -150,6 +150,30 @@ public:
         const GsRasterVertex& b,
         const GsRasterVertex& c);
 
+    // Band-parallel triangle support. draw_triangle_rows() draws only rows
+    // [row_begin, row_end); every pixel is computed exactly as in
+    // draw_triangle(), so disjoint row bands can run on separate threads.
+    static u64 draw_triangle_rows(
+        GsVram& vram,
+        const GsRasterContext& ctx,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        const GsRasterVertex& c,
+        s32 row_begin,
+        s32 row_end);
+    // Scissor-clipped screen rows the triangle may touch.
+    static bool triangle_row_span(
+        const GsRasterContext& ctx,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        const GsRasterVertex& c,
+        s32& top,
+        s32& bottom);
+    // True when row bands of any draw with this state can be rasterized
+    // concurrently: no texture or depth read can observe another band's
+    // frame or depth writes anywhere inside the scissor rectangle.
+    static bool band_parallel_safe(const GsRasterContext& ctx);
+
 private:
     static bool draw_pixel(
         GsVram& vram,

@@ -11,6 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace ps2 {
 
@@ -281,6 +282,21 @@ private:
         const GsRasterVertex& c,
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
+    // Statistics and VRAM bookkeeping for one completed draw.
+    void record_raster_command(
+        const RasterCommand& command,
+        u64 pixels,
+        u64 raster_ns,
+        bool gpu_raster,
+        u64 nonzero_inputs_before,
+        u64 alpha_inputs_before);
+    // Band-parallel triangle batches (see raster_worker_main()).
+    [[nodiscard]] bool triangle_batch_candidate(
+        const RasterCommand& command) const;
+    [[nodiscard]] static bool triangle_batch_compatible(
+        const RasterCommand& first,
+        const RasterCommand& next);
+    void execute_triangle_batch(std::vector<RasterCommand>& batch);
     void raster_worker_main();
     void start_raster_helpers();
     void stop_raster_helpers();
@@ -340,6 +356,16 @@ private:
         raster_parallel_boundaries_{};
     std::array<u64, kMaxRasterHelpers + 1u>
         raster_parallel_counts_{};
+
+    // Triangle batch job for the helper pool: each lane draws every command
+    // in order, restricted to its own row band.
+    static constexpr u32 kMaxTriangleBatch = 64u;
+    bool raster_parallel_triangle_batch_ = false;
+    const RasterCommand* raster_parallel_batch_ = nullptr;
+    u32 raster_parallel_batch_count_ = 0u;
+    std::array<std::array<u64, kMaxTriangleBatch>, kMaxRasterHelpers + 1u>
+        raster_parallel_batch_counts_{};
+    std::vector<RasterCommand> raster_batch_{};
 };
 
 } // namespace ps2

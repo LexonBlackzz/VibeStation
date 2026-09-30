@@ -1096,7 +1096,8 @@ bool parallel_sprite_vram_safe(
     s32 left,
     s32 right,
     s32 top,
-    s32 bottom) {
+    s32 bottom,
+    bool require_fst = true) {
     if (left < 0 || top < 0 ||
         right <= left || bottom <= top ||
         ctx.fbw == 0u ||
@@ -1110,7 +1111,9 @@ bool parallel_sprite_vram_safe(
     }
 
     if (ctx.texture.enabled) {
-        if (!ctx.texture.fst ||
+        // The texture range below covers the whole texture, so it bounds
+        // STQ sampling as well; sprites keep their original FST-only rule.
+        if ((require_fst && !ctx.texture.fst) ||
             (ctx.texture.psm != 0u &&
              ctx.texture.psm != 1u &&
              ctx.texture.psm != 2u &&
@@ -1437,12 +1440,49 @@ u64 GsRasterizer::draw_sprite_rows(
     return pixels;
 }
 
+bool GsRasterizer::triangle_row_span(
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    const GsRasterVertex& c,
+    s32& top,
+    s32& bottom) {
+    top = std::max(floor_div16(std::min({a.y, b.y, c.y})), ctx.scay0);
+    bottom = std::min(
+        ceil_div16(std::max({a.y, b.y, c.y})), ctx.scay1 + 1);
+    return top < bottom;
+}
+
+bool GsRasterizer::band_parallel_safe(const GsRasterContext& ctx) {
+    return supported_target(ctx) &&
+           supported_texture(ctx.texture) &&
+           parallel_sprite_vram_safe(
+               ctx,
+               ctx.scax0,
+               ctx.scax1 + 1,
+               ctx.scay0,
+               ctx.scay1 + 1,
+               false);
+}
+
 u64 GsRasterizer::draw_triangle(
     GsVram& vram,
     const GsRasterContext& ctx,
     const GsRasterVertex& a,
     const GsRasterVertex& b,
     const GsRasterVertex& c) {
+    return draw_triangle_rows(
+        vram, ctx, a, b, c, ctx.scay0, ctx.scay1 + 1);
+}
+
+u64 GsRasterizer::draw_triangle_rows(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    const GsRasterVertex& c,
+    s32 row_begin,
+    s32 row_end) {
     if (!supported_target(ctx) || !supported_texture(ctx.texture)) return 0;
 
     const s64 area = edge(a, b, c.x, c.y);
@@ -1455,8 +1495,10 @@ u64 GsRasterizer::draw_triangle(
 
     s32 left = std::max(floor_div16(min_x_fp), ctx.scax0);
     s32 right = std::min(ceil_div16(max_x_fp), ctx.scax1 + 1);
-    s32 top = std::max(floor_div16(min_y_fp), ctx.scay0);
-    s32 bottom = std::min(ceil_div16(max_y_fp), ctx.scay1 + 1);
+    // Edge values are evaluated exactly at the first row of this band, so a
+    // band produces the same pixels as the corresponding full-draw rows.
+    s32 top = std::max({floor_div16(min_y_fp), ctx.scay0, row_begin});
+    s32 bottom = std::min({ceil_div16(max_y_fp), ctx.scay1 + 1, row_end});
     const bool constant_q = a.q == b.q && b.q == c.q;
     const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
     const bool constant_z = a.z == b.z && b.z == c.z;

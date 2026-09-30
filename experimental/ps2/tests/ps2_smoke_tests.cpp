@@ -496,6 +496,103 @@ struct TestRandom {
     ps2::u32 below(ps2::u32 limit) { return next() % limit; }
 };
 
+// Band-parallel rasterization relies on draw_triangle_rows() producing, for
+// each row band, exactly the pixels the full draw produces. Draw random
+// triangles whole into one VRAM and as three bands (last band first) into
+// another, across depth, blend, texture and STQ/FST states.
+bool test_gs_triangle_row_bands_match_full_draw() {
+    TestRandom random;
+    random.state = 0xC0FFEE1234567ull;
+    constexpr std::array<ps2::u32, 4> texture_psms = {0u, 1u, 2u, 10u};
+    constexpr std::array<ps2::u32, 4> depth_psms = {48u, 49u, 50u, 58u};
+    ps2::GsVram full;
+    for (ps2::u32 word = 0; word < ps2::GsVram::kSize / 4u; ++word) {
+        (void)full.write_linear32(0, word, random.next());
+    }
+    ps2::GsVram banded = full;
+    ps2::u32 checked = 0;
+    for (ps2::u32 draw = 0; draw < 600u; ++draw) {
+        // Frame at 0 MiB, depth at 1 MiB, textures from 2 MiB. Band order is
+        // only unobservable when these do not alias, which is the condition
+        // band_parallel_safe() enforces before the worker splits a draw.
+        ps2::GsRasterContext ctx{};
+        ctx.fbp = 0u;
+        ctx.fbw = 1u + random.below(10u);
+        ctx.scax1 = static_cast<ps2::s32>(ctx.fbw * 64u - 1u);
+        ctx.scay1 = 255;
+        ctx.gouraud = random.below(2u) != 0u;
+        ctx.zte = random.below(2u) != 0u;
+        ctx.ztst = random.below(4u);
+        ctx.zmask = random.below(2u) != 0u;
+        ctx.zpsm = depth_psms[random.below(4u)];
+        ctx.zbp = 0x1000u;
+        ctx.alpha_blend = random.below(2u) != 0u;
+        ctx.alpha_a = random.below(4u);
+        ctx.alpha_b = random.below(4u);
+        ctx.alpha_c = random.below(4u);
+        ctx.alpha_d = random.below(4u);
+        ctx.alpha_fix = random.below(256u);
+        ctx.fba = random.below(2u) != 0u;
+        auto& t = ctx.texture;
+        t.enabled = random.below(4u) != 0u;
+        t.psm = texture_psms[random.below(4u)];
+        t.bp = 0x2000u + random.below(0x800u);
+        t.bw = 4u + random.below(12u);
+        t.width = 1u << random.below(9u);
+        t.height = 1u << random.below(9u);
+        t.wms = random.below(4u);
+        t.wmt = random.below(4u);
+        t.tcc = random.below(2u) != 0u;
+        t.tfx = random.below(4u);
+        t.fst = random.below(2u) != 0u;
+        t.ta0 = random.below(256u);
+        t.ta1 = random.below(256u);
+        std::array<ps2::GsRasterVertex, 3> v{};
+        const bool constant_q = random.below(2u) != 0u;
+        for (auto& vertex : v) {
+            vertex.x = static_cast<ps2::s32>(
+                random.below(ctx.fbw * 64u * 16u));
+            vertex.y = static_cast<ps2::s32>(random.below(256u * 16u));
+            vertex.z = random.next();
+            vertex.rgba = random.next();
+            vertex.u = static_cast<ps2::s32>(random.below(16384u));
+            vertex.v = static_cast<ps2::s32>(random.below(16384u));
+            vertex.s = static_cast<float>(random.below(4096u)) / 1024.0f;
+            vertex.t = static_cast<float>(random.below(4096u)) / 1024.0f;
+            vertex.q = constant_q
+                ? 1.5f
+                : 0.25f + static_cast<float>(random.below(1024u)) / 256.0f;
+        }
+
+        if (!ps2::GsRasterizer::band_parallel_safe(ctx)) continue;
+        ++checked;
+        const ps2::u64 full_pixels = ps2::GsRasterizer::draw_triangle(
+            full, ctx, v[0], v[1], v[2]);
+        ps2::s32 top = 0;
+        ps2::s32 bottom = 0;
+        ps2::u64 band_pixels = 0;
+        if (ps2::GsRasterizer::triangle_row_span(
+                ctx, v[0], v[1], v[2], top, bottom)) {
+            const ps2::s32 rows = bottom - top;
+            const std::array<ps2::s32, 4> cuts = {
+                top, top + rows / 3, top + (2 * rows) / 3, bottom};
+            for (int band = 2; band >= 0; --band) {
+                band_pixels += ps2::GsRasterizer::draw_triangle_rows(
+                    banded, ctx, v[0], v[1], v[2],
+                    cuts[band], cuts[band + 1]);
+            }
+        }
+        if (!expect(full_pixels == band_pixels,
+                    "banded triangle pixel count differs") ||
+            !expect(full.data() == banded.data(),
+                    "banded triangle VRAM differs")) {
+            return false;
+        }
+    }
+    return expect(checked >= 300u,
+                  "too few band-parallel-safe triangle states tested");
+}
+
 // Gouraud triangles must match the reference per-pixel formula:
 // channel = clamp(trunc((w0*Ca + w1*Cb + w2*Cc) / area), 0, 255), with every
 // pixel outside the edge functions left untouched.
@@ -2705,6 +2802,7 @@ int main() {
     ok = test_gs_sprite_blend_reuses_destination() && ok;
     ok = test_gs_untextured_triangle_without_depth() && ok;
     ok = test_gs_gouraud_triangle_matches_reference() && ok;
+    ok = test_gs_triangle_row_bands_match_full_draw() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
     ok = test_bios_idle_iteration_matches_ee_steps() && ok;
