@@ -85,13 +85,19 @@ int run_grim_map_cli(const std::vector<std::string> &raw_args) {
   cfg.frames = static_cast<u32>(std::max(1, std::atoi(args[0].c_str())));
   cfg.stop_on_death = false;
   cfg.watchdog_seconds = 0.0;
+  for (size_t i = 2; i + 1 < args.size(); ++i) {
+    if (args[i] == "--disc") {
+      cfg.disc_cue = args[i + 1];
+      cfg.map_scenario = "disc";
+    }
+  }
   GrimBootMap map;
   GrimCopyStats stats;
   cfg.boot_map_out = &map;
   cfg.copy_stats_out = &stats;
   const GrimEvalResult r = run_grim_eval(cfg);
-  if (r.end_reason == "bios_load_failed") {
-    std::printf("GRIM_MAP_RESULT status=error reason=bios_load_failed\n");
+  if (r.end_reason == "bios_load_failed" || r.end_reason == "disc_load_failed") {
+    std::printf("GRIM_MAP_RESULT status=error reason=%s\n", r.end_reason.c_str());
     return 1;
   }
   std::string err;
@@ -116,6 +122,32 @@ int run_grim_map_cli(const std::vector<std::string> &raw_args) {
               map.count(GrimWordClass::Unknown), map.provenance_permille() / 10.0,
               map.ram_exec_known, map.ram_exec_words, args[1].c_str());
   print_copy_report(stats);
+  return 0;
+}
+
+int run_grim_map_merge_cli(const std::vector<std::string> &args) {
+  if (args.size() < 3) {
+    std::fprintf(stderr, "usage: --grim-map-merge <a.json> <b.json> <out.json>\n");
+    return 1;
+  }
+  GrimBootMap a, b;
+  std::string err;
+  if (!grim_map_load(args[0], a, err) || !grim_map_load(args[1], b, err)) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
+  }
+  if (a.bios_hash != b.bios_hash || a.words.size() != b.words.size()) {
+    std::fprintf(stderr, "the maps are for different BIOS images\n");
+    return 1;
+  }
+  const GrimBootMap m = grim_map_merge(a, b);
+  if (!grim_map_save(m, args[2], err)) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
+  }
+  std::printf("GRIM_MAP_MERGED scenario=%s code=%u data=%u unused=%u unknown=%u out=%s\n",
+              m.scenario.c_str(), m.count(GrimWordClass::Code), m.count(GrimWordClass::Data),
+              m.count(GrimWordClass::Unused), m.count(GrimWordClass::Unknown), args[2].c_str());
   return 0;
 }
 

@@ -3965,6 +3965,7 @@ int main(int argc, char *argv[]) {
                                passthrough[0] == "--grim-random-genome" ||
                                passthrough[0] == "--grim-map" ||
                                passthrough[0] == "--grim-map-summary" ||
+                               passthrough[0] == "--grim-map-merge" ||
                                passthrough[0] == "--grim-map-test" ||
                                passthrough[0] == "--grim-describe-genome" ||
                                passthrough[0] == "--grim-explore")) {
@@ -3982,6 +3983,8 @@ int main(int argc, char *argv[]) {
                        ? run_grim_explore_cli(grim_args, argv[0])
                    : passthrough[0] == "--grim-map"
                        ? run_grim_map_cli(grim_args)
+                   : passthrough[0] == "--grim-map-merge"
+                       ? run_grim_map_merge_cli(grim_args)
                    : passthrough[0] == "--grim-map-summary"
                        ? run_grim_map_summary_cli(grim_args)
                    : passthrough[0] == "--grim-map-test"

@@ -18,6 +18,7 @@
 //   --grim-map-test [bios]
 //     Classification, provenance, determinism, mutation fuzz and ROM gene tests.
 int run_grim_map_cli(const std::vector<std::string> &args);
+int run_grim_map_merge_cli(const std::vector<std::string> &args);
 int run_grim_map_summary_cli(const std::vector<std::string> &args);
 int run_grim_describe_genome_cli(const std::vector<std::string> &args);
 int run_grim_map_test(const std::vector<std::string> &args, const std::string &self_exe);

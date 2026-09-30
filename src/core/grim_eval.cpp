@@ -1,5 +1,6 @@
 #include "grim_eval.h"
 #include "system.h"
+#include "platform/disc_path_utils.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -223,6 +224,13 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
     return r;
   }
   sys->reset();
+  if (!cfg.disc_cue.empty()) {
+    const std::string bin = resolve_first_bin_from_cue(cfg.disc_cue);
+    if (bin.empty() || !sys->load_game(bin, cfg.disc_cue)) {
+      r.end_reason = "disc_load_failed";
+      return r;
+    }
+  }
 
   std::unique_ptr<GrimGenomeRuntime> genome;
   if (cfg.use_genome) {
@@ -289,6 +297,7 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
         telemetry.end_frame(*sys, sys->spu_audio_capture_samples(), cfg.mute_audio);
     sys->clear_spu_audio_capture();
     r.frames.push_back(f);
+    r.cd_words += f.dma_words[3];
     const std::string line = grim_frame_json(f);
     run_hash = fnv1a(run_hash, line.data(), line.size());
 

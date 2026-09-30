@@ -165,6 +165,26 @@ CLI additions (`--grim-random-genome`, `--grim-explore`): `--mix interface|rom|b
 stream, so the interface genes of a seed do not change. Explore prints
 `GRIM_SURVIVAL` tables and writes `survival.csv`.
 
+### 2.4 Disc scenario (added after the first Phase 3 commit)
+
+- `--grim-map <bios> <frames> <out.json> --disc <game.cue>` maps a boot with the disc
+  inserted (scenario `disc`). `--grim-map-merge a.json b.json out.json` unions two
+  maps of the same BIOS (flags and consumers OR-ed, first-touch minimum).
+  Crash Bandicoot (USA), 1800 frames: code 20,047 words (no-disc: 17,780); merged
+  no-disc + disc: code **24,565**, data 19,531, unused 86,976. Provenance in a disc
+  map is ~51% because the game's own code runs from RAM with no ROM origin; that is
+  expected. Make both maps and merge them, then pass the merged map with `--map`.
+- `--grim-eval ... --disc game.cue` and `--grim-explore ... --disc game.cue` boot with
+  the disc. The result line has `cd_words=` (CD DMA words read). In explore, a machine
+  that is alive but read under 512 words is reported as `disc_not_read` (it stays a
+  survivor, and has its own column in the tables/CSV).
+- Check: 3 seeds on the merged map with the disc: 3 alive, `cd_words` 103k-117k.
+  A 60-seed run (single-patch, uniform): 58 alive, 2 dead-by-gate... plus 4 alive but
+  `disc_not_read` (first_exec 1.4-6.5 s quintiles), so game loading breaks
+  independently of liveness. Late-code survival again varied (80-100%), not monotonic.
+- Not yet covered: the disc tests in `--grim-map-test` (only manual checks so far), and
+  only one game was used to build the disc map.
+
 ## 3. Test checklist for Lexon
 
 From the repo root after `build-ninja.cmd`, with

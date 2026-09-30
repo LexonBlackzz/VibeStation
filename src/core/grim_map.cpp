@@ -315,6 +315,47 @@ std::string grim_map_summary(const GrimBootMap &m, u32 min_bytes) {
 
 // ---- mapper --------------------------------------------------------------------------------
 
+GrimWordClass grim_classify_word(u8 flags, u8 consumer) {
+  const bool executed = (flags & (kGrimExecDirect | kGrimExecViaRam)) != 0;
+  const bool read = (flags & (kGrimReadDirect | kGrimReadViaRam)) != 0;
+  if (executed) {
+    // Code that also went to a peripheral is a conflict, not code.
+    const bool to_peripheral =
+        (consumer & (kGrimConsumerSpu | kGrimConsumerGpu | kGrimConsumerMdec)) != 0;
+    return to_peripheral ? GrimWordClass::Unknown : GrimWordClass::Code;
+  }
+  if (read && ((flags & kGrimUsed) != 0 || consumer != 0)) {
+    return GrimWordClass::Data;
+  }
+  if (read) {
+    return GrimWordClass::Unused; // loaded only to be moved (a copy loop): never used
+  }
+  return (flags & kGrimPartial) != 0 ? GrimWordClass::Unknown : GrimWordClass::Unused;
+}
+
+GrimBootMap grim_map_merge(const GrimBootMap &a, const GrimBootMap &b) {
+  GrimBootMap m = a;
+  m.scenario = a.scenario + "+" + b.scenario;
+  m.frames = std::max(a.frames, b.frames);
+  m.cycles = std::max(a.cycles, b.cycles);
+  m.ram_exec_words = std::max(a.ram_exec_words, b.ram_exec_words);
+  m.ram_exec_known = std::max(a.ram_exec_known, b.ram_exec_known);
+  m.last_new_code_cycle = 0;
+  for (size_t i = 0; i < m.words.size() && i < b.words.size(); ++i) {
+    GrimMapWord &w = m.words[i];
+    const GrimMapWord &o = b.words[i];
+    w.first_exec = std::min(w.first_exec, o.first_exec);
+    w.first_read = std::min(w.first_read, o.first_read);
+    w.consumer |= o.consumer;
+    w.flags |= o.flags;
+    w.cls = grim_classify_word(w.flags, w.consumer);
+    if (w.cls == GrimWordClass::Code) {
+      m.last_new_code_cycle = std::max(m.last_new_code_cycle, w.first_exec);
+    }
+  }
+  return m;
+}
+
 GrimBootMapper::GrimBootMapper(u32 rom_bytes)
     : rom_bytes_(rom_bytes), ram_tag_(kRamBytes, 0u), first_exec_(rom_bytes / 4u, kGrimNever),
       first_read_(rom_bytes / 4u, kGrimNever), consumer_(rom_bytes / 4u, 0),
@@ -798,22 +839,9 @@ GrimBootMap GrimBootMapper::finish(u64 bios_hash, const std::string &scenario, u
     w.first_read = first_read_[i];
     w.consumer = consumer_[i];
     w.flags = flags_[i];
-    const bool executed = (w.flags & (kGrimExecDirect | kGrimExecViaRam)) != 0;
-    const bool read = (w.flags & (kGrimReadDirect | kGrimReadViaRam)) != 0;
-    if (executed) {
-      // Code that also went to a peripheral is a conflict, not code.
-      const bool to_peripheral =
-          (w.consumer & (kGrimConsumerSpu | kGrimConsumerGpu | kGrimConsumerMdec)) != 0;
-      w.cls = to_peripheral ? GrimWordClass::Unknown : GrimWordClass::Code;
+    w.cls = grim_classify_word(w.flags, w.consumer);
+    if (w.cls == GrimWordClass::Code) {
       m.last_new_code_cycle = std::max(m.last_new_code_cycle, w.first_exec);
-    } else if (read && ((w.flags & kGrimUsed) != 0 || w.consumer != 0)) {
-      w.cls = GrimWordClass::Data;
-    } else if (read) {
-      w.cls = GrimWordClass::Unused; // loaded only to be moved (a copy loop): never used
-    } else if ((w.flags & kGrimPartial) != 0) {
-      w.cls = GrimWordClass::Unknown;
-    } else {
-      w.cls = GrimWordClass::Unused;
     }
   }
   return m;

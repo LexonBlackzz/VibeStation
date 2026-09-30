@@ -304,6 +304,8 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
         return 1;
       }
       cfg.use_genome = true;
+    } else if (a == "--disc" && has_value) {
+      cfg.disc_cue = args[++i];
     } else if (a == "--dump-wav" && has_value) {
       cfg.dump_wav_path = args[++i];
     } else if (a == "--dump-frames" && i + 2 < args.size()) {
@@ -323,7 +325,7 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
                 r.error_detail.c_str());
     return 1;
   }
-  if (r.end_reason == "bios_load_failed" ||
+  if (r.end_reason == "bios_load_failed" || r.end_reason == "disc_load_failed" ||
       r.end_reason == "unsupported_cpu_mode") {
     std::printf("GRIM_EVAL_RESULT status=error reason=%s\n", r.end_reason.c_str());
     return 1;
@@ -335,14 +337,15 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
   }
   std::printf("GRIM_EVAL_RESULT verdict=%s reason=%s death_frame=%lld silent=%d "
               "end=%s frames=%zu emulated_s=%.2f wall_s=%.2f speed=%.2fx "
-              "run_hash=0x%016llX genome=0x%016llX out=%s\n",
+              "run_hash=0x%016llX genome=0x%016llX cd_words=%llu out=%s\n",
               r.liveness.alive ? "alive" : "dead", r.liveness.reason.c_str(),
               static_cast<long long>(r.liveness.death_frame),
               r.liveness.silent ? 1 : 0,
               r.end_reason.c_str(), r.frames.size(), r.emulated_seconds,
               r.wall_seconds, r.speed_factor,
               static_cast<unsigned long long>(r.run_hash),
-              static_cast<unsigned long long>(r.genome_hash), out_path.c_str());
+              static_cast<unsigned long long>(r.genome_hash),
+              static_cast<unsigned long long>(r.cd_words), out_path.c_str());
   return r.liveness.alive ? 0 : 2;
 }
 
@@ -687,10 +690,10 @@ struct SurvivalRow {
 void print_survival(const std::vector<SurvivalRow> &rows, const GrimRomContext &ctx,
                     const std::array<u64, 4> &edges, const std::filesystem::path &csv_path) {
   static const char *const kOutcomes[] = {"coverage_stall", "exception_loop", "frozen_frame",
-                                          "dead_audio",     "timeout",        "crash", "error"};
+                                          "dead_audio",     "timeout",        "crash", "error", "disc_not_read"};
   struct Tally {
     u32 n = 0, alive = 0;
-    std::array<u32, 7> dead{};
+    std::array<u32, 8> dead{};
   };
   auto add = [&](Tally &t, const std::string &outcome) {
     ++t.n;
@@ -698,7 +701,7 @@ void print_survival(const std::vector<SurvivalRow> &rows, const GrimRomContext &
       ++t.alive;
       return;
     }
-    for (size_t i = 0; i < 7; ++i) {
+    for (size_t i = 0; i < 8; ++i) {
       if (outcome == kOutcomes[i]) {
         ++t.dead[i];
         return;
@@ -728,7 +731,7 @@ void print_survival(const std::vector<SurvivalRow> &rows, const GrimRomContext &
   };
   (void)ctx;
   std::string csv = "dimension,bucket,label,n,alive,survival_rate,coverage_stall,exception_loop,"
-                    "frozen_frame,dead_audio,timeout,crash,error\n";
+                    "frozen_frame,dead_audio,timeout,crash,error,disc_not_read\n";
   auto emit = [&](const char *dim, size_t idx, const std::string &label, const Tally &t) {
     char line[256];
     std::snprintf(line, sizeof(line), "%s,%zu,%s,%u,%u,%.3f", dim, idx, label.c_str(), t.n, t.alive,
@@ -739,9 +742,9 @@ void print_survival(const std::vector<SurvivalRow> &rows, const GrimRomContext &
     }
     csv += "\n";
     std::printf("  %-14s %-14s n=%-4u alive=%-4u survival=%5.1f%%  stall=%u exc_loop=%u frozen=%u "
-                "audio=%u timeout=%u crash=%u error=%u\n",
+                "audio=%u timeout=%u crash=%u error=%u no_disc=%u\n",
                 dim, label.c_str(), t.n, t.alive, t.n ? 100.0 * t.alive / t.n : 0.0, t.dead[0],
-                t.dead[1], t.dead[2], t.dead[3], t.dead[4], t.dead[5], t.dead[6]);
+                t.dead[1], t.dead[2], t.dead[3], t.dead[4], t.dead[5], t.dead[6], t.dead[7]);
   };
   std::printf("\nGRIM_SURVIVAL by first-execution time of the earliest patched word (quintiles of "
               "executed code words)\n");
@@ -767,6 +770,7 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
   std::string bios;
   double timeout = 300.0;
   std::vector<std::string> child_extra;
+  std::string disc_cue;
   GrimRandomParams params;
   RomMixOptions rom;
   for (size_t i = 0; i < raw_args.size(); ++i) {
@@ -779,6 +783,8 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
       bios = raw_args[++i];
     } else if (a == "--timeout" && has_value) {
       timeout = std::atof(raw_args[++i].c_str());
+    } else if (a == "--disc" && has_value) {
+      disc_cue = raw_args[++i]; // Phase 3: boot with this disc; alive machines must also read it
     } else if (a == "--child-arg" && has_value) {
       child_extra.push_back(raw_args[++i]); // test hook: extra --grim-eval option
     } else if (a == "--families" && has_value) {
@@ -859,6 +865,10 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
                                      (work / "frames").string(),
                                      std::to_string(std::max(1u, frames / 4u)),
                                      "--no-stop-on-death"};
+    if (!disc_cue.empty()) {
+      args.push_back("--disc");
+      args.push_back(disc_cue);
+    }
     args.insert(args.end(), child_extra.begin(), child_extra.end());
     const fs::path log = work / "child.log";
     const GrimChildResult child = grim_run_child(exe, args, log.string(), timeout);
@@ -886,6 +896,12 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
       row.verdict = result_field(line, "verdict");
       row.reason = result_field(line, "reason");
       row.silent = result_field(line, "silent");
+      // A machine that lives but never read the disc (CD DMA under one sector) cannot
+      // load games: it stays a survivor, with its own outcome in the tables.
+      if (!disc_cue.empty() && row.verdict == "alive" &&
+          std::strtoull(result_field(line, "cd_words").c_str(), nullptr, 10) < 512) {
+        row.reason = "disc_not_read";
+      }
       if (row.verdict == "alive") {
         ++alive;
         is_survivor = true;
@@ -926,7 +942,8 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
   if (rom.wants_rom()) {
     std::vector<SurvivalRow> tally_rows;
     for (const Row &row : rows) {
-      tally_rows.push_back({row.bucket, row.kind, row.verdict == "alive" ? "alive"
+      tally_rows.push_back({row.bucket, row.kind, row.verdict == "alive"
+                                                  ? (row.reason == "disc_not_read" ? "disc_not_read" : "alive")
                                                   : row.verdict == "dead" ? row.reason
                                                                           : row.verdict});
     }

@@ -215,6 +215,9 @@ struct GrimEvalConfig {
   GrimBootMap *boot_map_out = nullptr;
   GrimCopyStats *copy_stats_out = nullptr;
   std::string map_scenario = "nodisc";
+  // Phase 3: boot with this disc (a .cue) inserted. Empty = no disc. The result
+  // reports the CD DMA words read (`cd_words`): a corrupted BIOS may fail to load it.
+  std::string disc_cue;
 };
 
 struct GrimEvalResult {
@@ -235,6 +238,7 @@ struct GrimEvalResult {
   u64 genome_hash = 0;       // 0 when no genome was applied
   std::vector<u64> gene_hits; // per gene: events it actually changed
   std::string error_detail;   // set with end_reason rom_gene_mismatch
+  u64 cd_words = 0;           // words moved by CD DMA over the run (disc scenario)
 };
 
 // Runs one evaluation on a fresh System. Requires the interpreter

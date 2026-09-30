@@ -70,6 +70,12 @@ struct GrimBootMap {
   u64 hash() const;
 };
 
+// The class rules, from the flags and consumer a word collected.
+GrimWordClass grim_classify_word(u8 flags, u8 consumer);
+// Union of two maps of the same BIOS (e.g. no-disc and disc scenarios): flags and
+// consumers are OR-ed, first-touch times take the minimum, classes are recomputed.
+GrimBootMap grim_map_merge(const GrimBootMap &a, const GrimBootMap &b);
+
 struct GrimMapRegion {
   u32 start_word = 0, end_word = 0; // [start, end)
   GrimWordClass cls = GrimWordClass::Unused;
