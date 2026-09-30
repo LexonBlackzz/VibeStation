@@ -1,5 +1,6 @@
 #pragma once
 #include "grim_genome.h"
+#include "grim_map.h"
 #include "types.h"
 #include <array>
 #include <string>
@@ -209,6 +210,11 @@ struct GrimEvalConfig {
   // Test only, never set by a normal command line: spin forever after boot so
   // --grim-gene-test can prove that --grim-explore kills a hung child.
   bool test_hang = false;
+  // Phase 3 discovery run: fill *boot_map_out (and *copy_stats_out) from the
+  // clean boot. Observation only; the telemetry hash is identical without it.
+  GrimBootMap *boot_map_out = nullptr;
+  GrimCopyStats *copy_stats_out = nullptr;
+  std::string map_scenario = "nodisc";
 };
 
 struct GrimEvalResult {
@@ -228,6 +234,7 @@ struct GrimEvalResult {
   double speed_factor = 0.0; // emulated / wall
   u64 genome_hash = 0;       // 0 when no genome was applied
   std::vector<u64> gene_hits; // per gene: events it actually changed
+  std::string error_detail;   // set with end_reason rom_gene_mismatch
 };
 
 // Runs one evaluation on a fresh System. Requires the interpreter

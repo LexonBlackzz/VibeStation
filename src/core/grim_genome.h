@@ -4,6 +4,9 @@
 #include <string>
 #include <vector>
 
+class Bios;
+struct GrimRomContext;
+
 // Grim Reaper 2.0, Phase 2: interface genes.
 //
 // A genome is an ordered list of genes. Each gene corrupts what passes between
@@ -66,6 +69,9 @@ enum class GrimGeneType : u8 {
   GpuTexParam,
   GpuState,
   GpuFill,
+  // Phase 3: a ROM gene (one kind of structural MIPS mutation applied to the
+  // BIOS image). Its resolved list of patches lives in GrimGene::patches.
+  RomCode,
   Count
 };
 
@@ -96,6 +102,15 @@ struct GrimParamSpec {
   s32 lo, hi, def;
 };
 
+// One word of the BIOS image changed by a ROM gene. `original` is checked
+// against the stock image before anything is written.
+struct GrimRomPatch {
+  u32 offset = 0; // ROM byte offset, word aligned
+  u32 original = 0;
+  u32 mutated = 0;
+  bool delay_slot = false; // the word sits in a branch delay slot
+};
+
 struct GrimGene {
   GrimGeneType type = GrimGeneType::SpuPitch;
   // SPU genes: voice mask (bits 0-23; bit 24 also selects the main volume
@@ -106,12 +121,26 @@ struct GrimGene {
   u64 seed = 0;
   GrimTrigger trigger;
   std::array<s32, kGrimMaxParams> params{}; // in schema order
+  // RomCode only: the resolved patches (target/trigger are unused for it).
+  // params: kind (GrimRomMut), count, early_ms, curve.
+  std::vector<GrimRomPatch> patches;
 };
 
 struct GrimGenome {
+  // 1: interface genes only. 2: also ROM genes, which pin the BIOS they were
+  // made for by hash (a v1 file still parses and serializes exactly as before).
   u32 version = 1;
+  u64 bios_hash = 0; // version 2 only
   std::vector<GrimGene> genes;
 };
+inline bool grim_genome_has_rom(const GrimGenome &g) {
+  for (const GrimGene &gene : g.genes) {
+    if (gene.type == GrimGeneType::RomCode) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const char *grim_gene_type_name(GrimGeneType t);
 const std::vector<GrimParamSpec> &grim_gene_schema(GrimGeneType t);
@@ -133,6 +162,16 @@ struct GrimRandomParams {
   u32 horizon_frames = 1800; // window/rot frames are drawn from [0, horizon]
   bool spu = true;
   bool gpu = true;
+  // Phase 3: with `rom` set, between rom_genes_min and rom_genes_max ROM genes
+  // of up to rom_patches_max patches each are added (from a separate random
+  // stream, so the interface part of a genome does not depend on this).
+  const GrimRomContext *rom = nullptr;
+  u32 rom_genes_min = 1;
+  u32 rom_genes_max = 3;
+  u32 rom_patches_max = 6;
+  u32 rom_early_ms = 200; // words first executed earlier than this are never patched
+  u32 rom_curve = 2;      // 0 uniform .. 3 cubic preference for late code
+  bool rom_call_swap = false; // the (usually fatal) call_swap kind, off by default
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".
@@ -155,6 +194,11 @@ public:
 
   explicit GrimGenomeRuntime(GrimGenome genome);
   const GrimGenome &genome() const { return genome_; }
+  // ROM genes. apply_rom() checks the BIOS hash and every original word first
+  // and writes nothing on failure (err says why). It expects the stock image
+  // (System::reset() restores it and calls this).
+  bool has_rom_genes() const { return grim_genome_has_rom(genome_); }
+  bool apply_rom(Bios &bios, std::string &err);
   u64 hash() const { return hash_; }
 
   // Rewinds every gene stream, the register shadow and the delay queue.

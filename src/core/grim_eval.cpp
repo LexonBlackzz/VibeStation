@@ -223,15 +223,21 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
     return r;
   }
   sys->reset();
-  for (const auto &[offset, word] : cfg.bios_patches) {
-    sys->bios_mut().patch32(offset, word);
-  }
 
   std::unique_ptr<GrimGenomeRuntime> genome;
   if (cfg.use_genome) {
     genome = std::make_unique<GrimGenomeRuntime>(cfg.genome);
-    sys->set_grim_genome(genome.get());
+    sys->set_grim_genome(genome.get()); // applies ROM genes to the stock image
     r.genome_hash = genome->hash();
+    if (!sys->grim_rom_error().empty()) {
+      r.end_reason = "rom_gene_mismatch";
+      r.error_detail = sys->grim_rom_error();
+      sys->set_grim_genome(nullptr);
+      return r;
+    }
+  }
+  for (const auto &[offset, word] : cfg.bios_patches) {
+    sys->bios_mut().patch32(offset, word);
   }
   if (cfg.test_hang) {
     for (;;) { // test only: never returns, the parent's timeout must kill us
@@ -245,8 +251,13 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
   }
 
   GrimTelemetry telemetry;
+  std::unique_ptr<GrimBootMapper> mapper;
   if (!cfg.native_cpu) {
     sys->cpu().set_telemetry(&telemetry);
+    if (cfg.boot_map_out != nullptr) {
+      mapper = std::make_unique<GrimBootMapper>(sys->bios_mut().image_size());
+      sys->set_grim_boot_mapper(mapper.get());
+    }
   }
   // The capture buffer is the headless null sink: samples stop there and
   // never reach a host device.
@@ -302,6 +313,15 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
     }
   }
   sys->cpu().set_telemetry(nullptr);
+  if (mapper != nullptr) {
+    sys->set_grim_boot_mapper(nullptr);
+    *cfg.boot_map_out = mapper->finish(sys->bios_mut().image_hash(), cfg.map_scenario,
+                                       static_cast<u32>(r.frames.size()),
+                                       telemetry.total_cycles());
+    if (cfg.copy_stats_out != nullptr) {
+      *cfg.copy_stats_out = mapper->stats_report();
+    }
+  }
   if (genome != nullptr) {
     r.gene_hits = genome->hits();
     sys->set_grim_genome(nullptr);

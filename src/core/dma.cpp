@@ -1,4 +1,5 @@
 #include "dma.h"
+#include "grim_map.h"
 #include "system.h"
 #include <algorithm>
 #include <chrono>
@@ -570,6 +571,10 @@ void DmaController::dma_block(int channel, u32 max_words) {
   dbg.id = next_transfer_debug_id_;
   transfer_debug_history_[dbg.id % kTransferDebugHistorySize] = dbg;
   active_transfer_debug_id_[channel] = dbg.id;
+  if (boot_mapper_ != nullptr) {
+    boot_mapper_->note_dma(channel, from_ram, addr, channel == 6 ? -4 : step,
+                           transfer_words, dbg.cpu_cycle);
+  }
 
   if (from_ram && channel == 0 && g_mdec_debug_upload_probe) {
     sys_->debug_note_mdec_dma_in_begin(addr & 0x001FFFFCu, transfer_words);
@@ -813,6 +818,10 @@ void DmaController::dma_linked_list(int channel) {
     const u32 next_addr = header & 0x00FFFFFFu;
     transferred_words += 1;
 
+    if (boot_mapper_ != nullptr) {
+      boot_mapper_->note_dma(channel, true, packet_addr, 4, word_count + 1u,
+                             sys_->cpu().cycle_count());
+    }
     // Send words to GP0
     for (u32 i = 0; i < word_count; i++) {
       addr = (addr + 4) & 0x001FFFFC;

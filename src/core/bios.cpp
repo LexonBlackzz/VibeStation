@@ -178,6 +178,25 @@ bool Bios::patch32(u32 offset, u32 value) {
   return true;
 }
 
+u64 Bios::image_hash() const {
+  u64 h = 14695981039346656037ull;
+  for (u8 b : original_data_) {
+    h = (h ^ b) * 1099511628211ull;
+  }
+  return h;
+}
+
+bool Bios::original_word(u32 offset, u32 &word) const {
+  if ((offset & 3u) != 0u || static_cast<size_t>(offset) + 4u > original_data_.size()) {
+    return false;
+  }
+  word = 0;
+  for (u32 i = 0; i < 4u; ++i) {
+    word |= static_cast<u32>(original_data_[offset + i]) << (i * 8u);
+  }
+  return true;
+}
+
 void Bios::identify() {
   // Try to identify the BIOS version by scanning for known strings
   const size_t scan_size =

@@ -1,4 +1,6 @@
 #include "grim_genome.h"
+#include "bios.h"
+#include "grim_rom.h"
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -13,7 +15,7 @@ namespace {
 constexpr const char *kTypeNames[] = {
     "spu_pitch",  "spu_adsr",   "spu_volume",   "spu_address",  "spu_keyon",
     "spu_noise",  "spu_pmon",   "spu_reverb",   "gpu_vertex",   "gpu_color",
-    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill"};
+    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code"};
 static_assert(sizeof(kTypeNames) / sizeof(kTypeNames[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
               "type name table out of sync");
@@ -77,6 +79,10 @@ const std::vector<GrimParamSpec> kSchemas[] = {
      {"e6_mask", 0, 3, 1}},
     // gpu_fill
     {{"color_mask", 0, 0xFFFFFF, 0x3F3F3F}, {"amp", 0, 511, 16}},
+    // rom_code: generating parameters (the resolved patches are stored beside
+    //           them). kind = GrimRomMut, early_ms = first-execution window that
+    //           is never touched, curve = how strongly later code is preferred
+    {{"kind", 0, 8, 0}, {"count", 1, 4096, 1}, {"early_ms", 0, 60000, 200}, {"curve", 0, 3, 2}},
 };
 static_assert(sizeof(kSchemas) / sizeof(kSchemas[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
@@ -525,7 +531,71 @@ bool parse_trigger(const json &j, GrimTrigger &t, const std::string &ctx, std::s
   return fail(err, ctx + ": unknown trigger kind \"" + kind + "\"");
 }
 
+bool parse_rom_gene(const json &j, size_t index, GrimGene &g, std::string &err) {
+  const std::string ctx = "gene " + std::to_string(index);
+  if (!check_keys(j, {"type", "seed", "params", "patches"}, ctx, err)) {
+    return false;
+  }
+  g = GrimGene{};
+  g.type = GrimGeneType::RomCode;
+  g.target = 1;
+  u64 v = 0;
+  if (!get_uint(j, "seed", 0, ~0ull, v, ctx, err)) {
+    return false;
+  }
+  g.seed = v;
+  const auto &schema = grim_gene_schema(g.type);
+  const json &pj = j["params"];
+  if (!pj.is_object() || pj.size() != schema.size()) {
+    return fail(err, ctx + ": rom_code params must be an object with exactly " +
+                         std::to_string(schema.size()) + " entries");
+  }
+  for (size_t i = 0; i < schema.size(); ++i) {
+    const auto it = pj.find(schema[i].name);
+    if (it == pj.end() || !it->is_number_integer()) {
+      return fail(err, ctx + ": param \"" + schema[i].name + "\" must be an integer");
+    }
+    const s64 val = it->get<s64>();
+    if (val < schema[i].lo || val > schema[i].hi) {
+      return fail(err, ctx + ": param \"" + schema[i].name + "\" out of range");
+    }
+    g.params[i] = static_cast<s32>(val);
+  }
+  if (!j["patches"].is_array()) {
+    return fail(err, ctx + ": patches must be an array");
+  }
+  for (size_t k = 0; k < j["patches"].size(); ++k) {
+    const json &p = j["patches"][k];
+    const std::string pctx = ctx + " patch " + std::to_string(k);
+    if (!p.is_array() || p.size() != 4) {
+      return fail(err, pctx + ": expected [offset, original, mutated, delay_slot]");
+    }
+    for (int f = 0; f < 4; ++f) {
+      if (!(p[f].is_number_unsigned() || (p[f].is_number_integer() && p[f].get<s64>() >= 0))) {
+        return fail(err, pctx + ": values must be non-negative integers");
+      }
+    }
+    GrimRomPatch patch;
+    const u64 off = p[0].get<u64>(), orig = p[1].get<u64>(), mut = p[2].get<u64>(),
+              ds = p[3].get<u64>();
+    if ((off & 3u) != 0u || off >= 0x100000u || orig > 0xFFFFFFFFull || mut > 0xFFFFFFFFull ||
+        ds > 1u) {
+      return fail(err, pctx + ": offset must be word aligned and inside the ROM, words 32 bit");
+    }
+    patch.offset = static_cast<u32>(off);
+    patch.original = static_cast<u32>(orig);
+    patch.mutated = static_cast<u32>(mut);
+    patch.delay_slot = ds != 0u;
+    g.patches.push_back(patch);
+  }
+  return true;
+}
+
 bool parse_gene(const json &j, size_t index, GrimGene &g, std::string &err) {
+  if (j.is_object() && j.contains("type") && j["type"].is_string() &&
+      j["type"].get<std::string>() == "rom_code") {
+    return parse_rom_gene(j, index, g, err);
+  }
   const std::string ctx = "gene " + std::to_string(index);
   if (!check_keys(j, {"type", "target", "seed", "trigger", "params"}, ctx, err)) {
     return false;
@@ -599,11 +669,15 @@ bool grim_genome_parse(const std::string &text, GrimGenome &out, std::string &er
   if (doc.is_discarded()) {
     return fail(err, "not valid JSON");
   }
-  if (!check_keys(doc, {"version", "genes"}, "genome", err)) {
-    return false;
+  if (!doc.is_object()) {
+    return fail(err, "genome: expected an object");
   }
   u64 version = 0;
-  if (!get_uint(doc, "version", 1, 1, version, "genome", err)) {
+  if (!get_uint(doc, "version", 1, 2, version, "genome", err)) {
+    return false;
+  }
+  if (version == 1 ? !check_keys(doc, {"version", "genes"}, "genome", err)
+                   : !check_keys(doc, {"version", "bios_hash", "genes"}, "genome", err)) {
     return false;
   }
   if (!doc["genes"].is_array()) {
@@ -611,10 +685,22 @@ bool grim_genome_parse(const std::string &text, GrimGenome &out, std::string &er
   }
   GrimGenome g;
   g.version = static_cast<u32>(version);
+  if (version == 2) {
+    const json &bh = doc["bios_hash"];
+    char *end = nullptr;
+    const std::string text = bh.is_string() ? bh.get<std::string>() : "";
+    g.bios_hash = std::strtoull(text.c_str(), &end, 16);
+    if (text.size() < 3 || text.compare(0, 2, "0x") != 0 || end == nullptr || *end != 0) {
+      return fail(err, "genome: bios_hash must be a hex string like \"0x1234abcd...\"");
+    }
+  }
   for (size_t i = 0; i < doc["genes"].size(); ++i) {
     GrimGene gene;
     if (!parse_gene(doc["genes"][i], i, gene, err)) {
       return false;
+    }
+    if (gene.type == GrimGeneType::RomCode && version != 2) {
+      return fail(err, "gene " + std::to_string(i) + ": rom_code genes need genome version 2");
     }
     g.genes.push_back(gene);
   }
@@ -632,11 +718,34 @@ bool grim_genome_load(const std::string &path, GrimGenome &out, std::string &err
 }
 
 std::string grim_genome_serialize(const GrimGenome &g) {
-  std::string s = "{\"version\":" + std::to_string(g.version) + ",\"genes\":[";
+  const bool v2 = g.version >= 2 || grim_genome_has_rom(g);
+  std::string s = "{\"version\":" + std::string(v2 ? "2" : "1");
+  if (v2) {
+    char hb[40];
+    std::snprintf(hb, sizeof(hb), ",\"bios_hash\":\"0x%016llX\"",
+                  static_cast<unsigned long long>(g.bios_hash));
+    s += hb;
+  }
+  s += ",\"genes\":[";
   for (size_t i = 0; i < g.genes.size(); ++i) {
     const GrimGene &gene = g.genes[i];
     const GrimTrigger &t = gene.trigger;
     s += i == 0 ? "\n" : ",\n";
+    if (gene.type == GrimGeneType::RomCode) {
+      s += "{\"type\":\"rom_code\",\"seed\":" + std::to_string(gene.seed) + ",\"params\":{";
+      const auto &rs = grim_gene_schema(gene.type);
+      for (size_t k = 0; k < rs.size(); ++k) {
+        s += (k ? ",\"" : "\"") + std::string(rs[k].name) + "\":" + std::to_string(gene.params[k]);
+      }
+      s += "},\"patches\":[";
+      for (size_t k = 0; k < gene.patches.size(); ++k) {
+        const GrimRomPatch &p = gene.patches[k];
+        s += (k ? ",[" : "[") + std::to_string(p.offset) + "," + std::to_string(p.original) +
+             "," + std::to_string(p.mutated) + "," + (p.delay_slot ? "1" : "0") + "]";
+      }
+      s += "]}";
+      continue;
+    }
     s += "{\"type\":\"" + std::string(grim_gene_type_name(gene.type)) +
          "\",\"target\":" + std::to_string(gene.target) +
          ",\"seed\":" + std::to_string(gene.seed) + ",\"trigger\":{\"kind\":\"" +
@@ -708,6 +817,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
                              {GrimGeneType::GpuFill, 1}});
   }
   if (pool.empty()) {
+    if (rp.rom != nullptr && rp.rom_genes_max > 0) {
+      grim_add_random_rom_genes(genome, seed, rp); // ROM-only genome
+    }
     return genome;
   }
   u32 total = 0;
@@ -774,6 +886,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
     }
     genome.genes.push_back(g);
   }
+  if (rp.rom != nullptr && rp.rom_genes_max > 0) {
+    grim_add_random_rom_genes(genome, seed, rp);
+  }
   return genome;
 }
 
@@ -782,9 +897,47 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
 GrimGenomeRuntime::GrimGenomeRuntime(GrimGenome genome) : genome_(std::move(genome)) {
   hash_ = grim_genome_hash(genome_);
   for (size_t i = 0; i < genome_.genes.size(); ++i) {
+    if (genome_.genes[i].type == GrimGeneType::RomCode) {
+      continue; // applied to the ROM image, not to runtime traffic
+    }
     (is_spu_type(genome_.genes[i].type) ? spu_genes_ : gpu_genes_).push_back(i);
   }
   reset();
+}
+
+bool GrimGenomeRuntime::apply_rom(Bios &bios, std::string &err) {
+  const u64 have = bios.image_hash();
+  if (have != genome_.bios_hash) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "ROM genes were made for BIOS 0x%016llX but the loaded BIOS is 0x%016llX",
+                  static_cast<unsigned long long>(genome_.bios_hash),
+                  static_cast<unsigned long long>(have));
+    err = msg;
+    return false;
+  }
+  for (size_t gi = 0; gi < genome_.genes.size(); ++gi) {
+    const GrimGene &gene = genome_.genes[gi];
+    for (size_t k = 0; k < gene.patches.size(); ++k) {
+      const GrimRomPatch &p = gene.patches[k];
+      u32 word = 0;
+      if (!bios.original_word(p.offset, word) || word != p.original) {
+        char msg[200];
+        std::snprintf(msg, sizeof(msg),
+                      "gene %zu patch %zu at ROM 0x%05X: expected original word 0x%08X, the "
+                      "BIOS has 0x%08X (wrong or modified BIOS)",
+                      gi, k, p.offset, p.original, word);
+        err = msg;
+        return false;
+      }
+    }
+  }
+  for (size_t gi = 0; gi < genome_.genes.size(); ++gi) {
+    for (const GrimRomPatch &p : genome_.genes[gi].patches) {
+      bios.patch32(p.offset, p.mutated);
+    }
+  }
+  return true;
 }
 
 void GrimGenomeRuntime::reset() {
@@ -794,6 +947,9 @@ void GrimGenomeRuntime::reset() {
     rng_[i].state = genome_.genes[i].seed;
   }
   hits_.assign(genome_.genes.size(), 0);
+  for (size_t i = 0; i < genome_.genes.size(); ++i) {
+    hits_[i] = genome_.genes[i].patches.size(); // ROM genes: words patched at reset
+  }
   delayed_.clear();
   shadow_.fill(0);
 }

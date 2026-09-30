@@ -149,7 +149,7 @@ void test_rng() {
 // One gene of each type with a non-default trigger, to exercise every field.
 GrimGenome all_types_genome() {
   GrimGenome g;
-  for (size_t t = 0; t < static_cast<size_t>(GrimGeneType::Count); ++t) {
+  for (size_t t = 0; t < static_cast<size_t>(GrimGeneType::RomCode); ++t) {
     GrimGene gene = grim_default_gene(static_cast<GrimGeneType>(t));
     gene.seed = 1000 + t;
     switch (t % 4) {
@@ -907,7 +907,7 @@ void test_gp0_transforms() {
     std::string detail;
     u64 changed_by_type[static_cast<size_t>(GrimGeneType::Count)] = {};
     GrimRng rng{555};
-    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count) && ok; ++t) {
+    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::RomCode) && ok; ++t) {
       const GrimGeneType type = static_cast<GrimGeneType>(t);
       for (int round = 0; round < 40 && ok; ++round) {
         GrimGene g = grim_default_gene(type);
@@ -954,7 +954,7 @@ void test_gp0_transforms() {
     }
     check(ok, "gp0_fuzz_preserves_word_count_and_forbidden_bits", detail);
     bool all_active = true;
-    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count); ++t) {
+    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::RomCode); ++t) {
       all_active = all_active && changed_by_type[t] > 0;
     }
     check(all_active, "gp0_fuzz_every_gene_type_changes_something");

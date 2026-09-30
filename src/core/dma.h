@@ -9,6 +9,7 @@
 // clear)
 
 class System;
+class GrimBootMapper;
 
 struct DmaChannel {
   u32 base_addr = 0;    // MADR: Base address
@@ -83,6 +84,8 @@ public:
   ~DmaController();
 
   void init(System *sys) { sys_ = sys; }
+  // Phase 3 discovery: told about every block / packet moved (nullptr = off).
+  void set_boot_mapper(GrimBootMapper *mapper) { boot_mapper_ = mapper; }
   void reset();
 
   void save_state(std::vector<u8>& buf) const;
@@ -122,6 +125,7 @@ public:
 
 private:
   System *sys_ = nullptr;
+  GrimBootMapper *boot_mapper_ = nullptr;
   DmaChannel channels_[7];
   TransferDebug last_debug_[7];
   // Spyro performs a very large number of short CD DMA slices before the

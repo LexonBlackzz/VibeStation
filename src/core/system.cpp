@@ -400,9 +400,31 @@ void System::sync_spu(u64 target_cycle) {
 void System::set_grim_genome(GrimGenomeRuntime *genome) {
     grim_ = genome;
     gpu_.set_grim_genome(genome);
+    grim_rom_error_.clear();
     if (genome != nullptr) {
         genome->reset();
+        if (genome->has_rom_genes() && bios_.is_loaded()) {
+            bios_.restore_original_image();
+            grim_apply_rom_genes();
+        }
     }
+}
+
+// ROM genes go into the image right after it is restored, so the BIOS copies
+// the patched code into RAM itself. A mismatch is loud and patches nothing.
+void System::grim_apply_rom_genes() {
+    grim_rom_error_.clear();
+    if (grim_ == nullptr || !grim_->has_rom_genes() || !bios_.is_loaded()) {
+        return;
+    }
+    if (!grim_->apply_rom(bios_, grim_rom_error_)) {
+        LOG_ERROR("GRIM: ROM genes NOT applied: %s", grim_rom_error_.c_str());
+    }
+}
+
+void System::set_grim_boot_mapper(GrimBootMapper *mapper) {
+    cpu_.set_boot_mapper(mapper);
+    dma_.set_boot_mapper(mapper);
 }
 
 void System::grim_write_spu16(u32 offset, u16 value) {
@@ -716,6 +738,8 @@ bool System::boot_disc(bool direct_boot) {
         if (!bios_.apply_fast_boot_patch()) {
             LOG_WARN("System: direct disc boot patch failed; falling back to normal BIOS boot.");
         }
+        // The fast-boot patch starts from the stock image: put ROM genes back on top.
+        grim_apply_rom_genes();
     }
 
     set_running(true);
@@ -727,6 +751,7 @@ void System::reset() {
         init_hardware();
     }
     bios_.restore_original_image();
+    grim_apply_rom_genes();
     irq_.reset();
     timers_.reset();
     dma_.reset();

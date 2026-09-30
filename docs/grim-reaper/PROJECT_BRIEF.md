@@ -224,3 +224,28 @@ Lexon's machine, so read it if you can.
   `grim_gui_genome_load`, `App::init_runtime` calls
   `system_->set_grim_genome(grim_gui_genome())`. `System::reset()` rewinds the
   genome, so "reap and reboot" replays it from frame 0.
+
+## Boot map and ROM genes (Phase 3, `src/core/grim_map.*`, `grim_rom.*`)
+
+- `GrimBootMapper` (discovery only) is fed from the telemetry loop in
+  `Cpu::run_slice` (`begin_instruction` before `step()`, `commit_instruction`
+  after, skipped when the step entered an interrupt) and from
+  `DmaController::dma_block` / `dma_linked_list` (`note_dma`, per block/packet).
+  Attach with `System::set_grim_boot_mapper()`; it also needs telemetry attached.
+  `GrimEvalConfig::boot_map_out` does this inside `run_grim_eval`.
+  Nothing is added to `Cpu::step()`, the dynarec or normal play.
+- It keeps a byte tag (ROM offset + 1) for every RAM byte, four byte tags per
+  register, and per ROM word the exec/read/use flags, consumer and first-touch
+  cycles. Rules (IsC stores, moves, load delay, DMA) are in PROGRESS.md 2.2.
+  `GrimBootMap` = result; `grim_map_save/load` write `<path>` + `<path>.words`.
+- `GrimRomContext` (stock image words + map) feeds `grim_rom_generate`; mutation
+  kinds are `GrimRomMut`. Genes of type `rom_code` (genome v2) carry resolved
+  patches. `GrimGenomeRuntime::apply_rom(Bios&)` verifies the BIOS hash and
+  original words and patches through `Bios::patch32`; `System::reset()`,
+  `boot_disc()` (after the fast-boot patch) and `set_grim_genome()` call it via
+  `grim_apply_rom_genes()`; `System::grim_rom_error()` holds a failure message.
+- `Bios::image_hash()` is FNV-1a-64 of the whole (512 KiB padded) stock image;
+  `Bios::original_word()` reads the stock image.
+- CLI: `--grim-map`, `--grim-map-summary`, `--grim-describe-genome`,
+  `--grim-map-test` (`src/platform/grim_map_runner.*`, `grim_map_test.cpp`);
+  `--map/--mix/...` options on `--grim-random-genome` and `--grim-explore`.

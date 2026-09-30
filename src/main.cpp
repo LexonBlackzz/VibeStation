@@ -8,6 +8,7 @@
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
 #include "platform/grim_eval_runner.h"
+#include "platform/grim_map_runner.h"
 #include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
@@ -3962,6 +3963,10 @@ int main(int argc, char *argv[]) {
                                passthrough[0] == "--grim-self-test" ||
                                passthrough[0] == "--grim-gene-test" ||
                                passthrough[0] == "--grim-random-genome" ||
+                               passthrough[0] == "--grim-map" ||
+                               passthrough[0] == "--grim-map-summary" ||
+                               passthrough[0] == "--grim-map-test" ||
+                               passthrough[0] == "--grim-describe-genome" ||
                                passthrough[0] == "--grim-explore")) {
     const std::vector<std::string> grim_args(passthrough.begin() + 1,
                                              passthrough.end());
@@ -3975,6 +3980,14 @@ int main(int argc, char *argv[]) {
                        ? run_grim_random_genome_cli(grim_args)
                    : passthrough[0] == "--grim-explore"
                        ? run_grim_explore_cli(grim_args, argv[0])
+                   : passthrough[0] == "--grim-map"
+                       ? run_grim_map_cli(grim_args)
+                   : passthrough[0] == "--grim-map-summary"
+                       ? run_grim_map_summary_cli(grim_args)
+                   : passthrough[0] == "--grim-map-test"
+                       ? run_grim_map_test(grim_args, argv[0])
+                   : passthrough[0] == "--grim-describe-genome"
+                       ? run_grim_describe_genome_cli(grim_args)
                        : run_grim_determinism_test(grim_args, argv[0]);
     if (g_log_file) {
       log_flush_repeats();

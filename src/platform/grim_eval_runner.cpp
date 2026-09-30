@@ -1,6 +1,7 @@
 #include "platform/grim_eval_runner.h"
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
+#include "core/grim_rom.h"
 #include "core/types.h"
 #include "platform/grim_process.h"
 #include <algorithm>
@@ -317,6 +318,11 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
   }
 
   const GrimEvalResult r = run_grim_eval(cfg);
+  if (r.end_reason == "rom_gene_mismatch") {
+    std::printf("GRIM_EVAL_RESULT status=error reason=rom_gene_mismatch detail=%s\n",
+                r.error_detail.c_str());
+    return 1;
+  }
   if (r.end_reason == "bios_load_failed" ||
       r.end_reason == "unsupported_cpu_mode") {
     std::printf("GRIM_EVAL_RESULT status=error reason=%s\n", r.end_reason.c_str());
@@ -476,12 +482,106 @@ std::string grim_take_bios_arg(std::vector<std::string> &args) {
   return take_bios_arg(args);
 }
 
-int run_grim_random_genome_cli(const std::vector<std::string> &args) {
+namespace {
+
+// Phase 3: which gene families random genomes draw from, and the ROM options.
+struct RomMixOptions {
+  std::string mix = "interface"; // interface | rom | both
+  std::string map_path, bios;
+  u32 patches_max = 6, genes_max = 3, early_ms = 200, curve = 2;
+  bool call_swap = false;
+  GrimRomContext ctx;
+  bool wants_rom() const { return mix == "rom" || mix == "both"; }
+};
+
+// Consumes a ROM-related option at args[i]; returns true when it was one.
+bool take_rom_option(const std::vector<std::string> &args, size_t &i, RomMixOptions &o) {
+  const std::string &a = args[i];
+  const bool has_value = i + 1 < args.size();
+  auto num = [&](u32 lo, u32 hi) {
+    return static_cast<u32>(std::min<long>(hi, std::max<long>(lo, std::atol(args[++i].c_str()))));
+  };
+  if (a == "--map" && has_value) {
+    o.map_path = args[++i];
+  } else if (a == "--mix" && has_value) {
+    o.mix = args[++i];
+  } else if (a == "--rom-patches" && has_value) {
+    o.patches_max = num(1, 4096);
+  } else if (a == "--rom-genes" && has_value) {
+    o.genes_max = num(1, 64);
+  } else if (a == "--early-ms" && has_value) {
+    o.early_ms = num(0, 60000);
+  } else if (a == "--curve" && has_value) {
+    o.curve = num(0, 3);
+  } else if (a == "--call-swap") {
+    o.call_swap = true;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// Loads the map + BIOS when ROM genes are wanted. Prints and returns false on error.
+bool finish_rom_options(RomMixOptions &o, const std::string &bios_from_env) {
+  if (o.mix != "interface" && o.mix != "rom" && o.mix != "both") {
+    std::fprintf(stderr, "--mix must be interface, rom or both\n");
+    return false;
+  }
+  if (!o.wants_rom()) {
+    return true;
+  }
+  if (o.bios.empty()) {
+    o.bios = bios_from_env;
+  }
+  std::string err;
+  if (o.map_path.empty() || o.bios.empty() || !o.ctx.load(o.bios, o.map_path, err)) {
+    std::fprintf(stderr, "ROM genes need --map <file> and a BIOS (--bios or VIBESTATION_BIOS)%s%s\n",
+                 err.empty() ? "" : ": ", err.c_str());
+    return false;
+  }
+  return true;
+}
+
+void apply_rom_options(GrimRandomParams &p, const RomMixOptions &o) {
+  if (o.mix == "rom") {
+    p.spu = p.gpu = false;
+  }
+  if (o.wants_rom()) {
+    p.rom = &o.ctx;
+    p.rom_genes_min = 1;
+    p.rom_genes_max = o.genes_max;
+    p.rom_patches_max = o.patches_max;
+    p.rom_early_ms = o.early_ms;
+    p.rom_curve = o.curve;
+    p.rom_call_swap = o.call_swap;
+  }
+}
+
+} // namespace
+
+int run_grim_random_genome_cli(const std::vector<std::string> &raw_args) {
+  RomMixOptions rom;
+  std::vector<std::string> args;
+  for (size_t i = 0; i < raw_args.size(); ++i) {
+    if (raw_args[i] == "--bios" && i + 1 < raw_args.size()) {
+      rom.bios = raw_args[++i];
+    } else if (!take_rom_option(raw_args, i, rom)) {
+      args.push_back(raw_args[i]);
+    }
+  }
   if (args.size() < 2) {
-    std::fprintf(stderr, "usage: --grim-random-genome <seed> <out.json> [gene_count]\n");
+    std::fprintf(stderr,
+                 "usage: --grim-random-genome <seed> <out.json> [gene_count] [--mix "
+                 "interface|rom|both --map file --bios path] [--rom-patches N] [--rom-genes N] "
+                 "[--early-ms N] [--curve 0-3] [--call-swap]\n");
+    return 1;
+  }
+  const char *env = std::getenv("VIBESTATION_BIOS");
+  if (!finish_rom_options(rom, env != nullptr ? env : "")) {
     return 1;
   }
   GrimRandomParams params;
+  apply_rom_options(params, rom);
   if (args.size() > 2) {
     params.min_genes = params.max_genes =
         static_cast<u32>(std::max(1, std::atoi(args[2].c_str())));
@@ -531,6 +631,135 @@ void write_text(const std::filesystem::path &path, const std::string &text) {
 
 } // namespace
 
+namespace {
+
+// ---- Phase 3: does late code survive mutation? -------------------------------------------
+
+// Quintile edges (in cycles) of first-execution time over all executed code words.
+std::array<u64, 4> exec_time_edges(const GrimRomContext &ctx) {
+  std::vector<u64> t;
+  for (const GrimMapWord &w : ctx.map.words) {
+    if (w.cls == GrimWordClass::Code) {
+      t.push_back(w.first_exec);
+    }
+  }
+  std::sort(t.begin(), t.end());
+  std::array<u64, 4> edges{};
+  for (size_t i = 0; i < 4 && !t.empty(); ++i) {
+    edges[i] = t[t.size() * (i + 1) / 5];
+  }
+  return edges;
+}
+
+int time_bucket(u64 cycle, const std::array<u64, 4> &edges) {
+  int b = 0;
+  while (b < 4 && cycle >= edges[static_cast<size_t>(b)]) {
+    ++b;
+  }
+  return b;
+}
+
+// The earliest-executed patch decides the bucket (it is the first to be hit); the
+// mutation kind is the kind of the gene that holds it.
+void rom_attribution(const GrimGenome &g, const GrimRomContext &ctx,
+                     const std::array<u64, 4> &edges, int &bucket, int &kind) {
+  u64 best = kGrimNever;
+  for (const GrimGene &gene : g.genes) {
+    for (const GrimRomPatch &p : gene.patches) {
+      const u64 t = p.offset / 4u < ctx.map.words.size() ? ctx.map.words[p.offset / 4u].first_exec
+                                                          : kGrimNever;
+      if (t < best) {
+        best = t;
+        kind = gene.params[0];
+      }
+    }
+  }
+  if (best != kGrimNever) {
+    bucket = time_bucket(best, edges);
+  }
+}
+
+struct SurvivalRow {
+  int bucket, kind;
+  std::string outcome; // alive, a death reason, timeout, crash or error
+};
+
+void print_survival(const std::vector<SurvivalRow> &rows, const GrimRomContext &ctx,
+                    const std::array<u64, 4> &edges, const std::filesystem::path &csv_path) {
+  static const char *const kOutcomes[] = {"coverage_stall", "exception_loop", "frozen_frame",
+                                          "dead_audio",     "timeout",        "crash", "error"};
+  struct Tally {
+    u32 n = 0, alive = 0;
+    std::array<u32, 7> dead{};
+  };
+  auto add = [&](Tally &t, const std::string &outcome) {
+    ++t.n;
+    if (outcome == "alive") {
+      ++t.alive;
+      return;
+    }
+    for (size_t i = 0; i < 7; ++i) {
+      if (outcome == kOutcomes[i]) {
+        ++t.dead[i];
+        return;
+      }
+    }
+    ++t.dead[6]; // unknown reasons count as error
+  };
+  std::array<Tally, 5> by_bucket;
+  std::array<Tally, static_cast<size_t>(GrimRomMut::Count)> by_kind;
+  for (const SurvivalRow &r : rows) {
+    if (r.bucket >= 0) {
+      add(by_bucket[static_cast<size_t>(r.bucket)], r.outcome);
+    }
+    if (r.kind >= 0 && r.kind < static_cast<int>(by_kind.size())) {
+      add(by_kind[static_cast<size_t>(r.kind)], r.outcome);
+    }
+  }
+  auto range_text = [&](size_t b) {
+    char t[64];
+    const double lo = b == 0 ? 0.0 : grim_cycles_to_ms(edges[b - 1]);
+    if (b == 4) {
+      std::snprintf(t, sizeof(t), ">=%.0fms", lo);
+    } else {
+      std::snprintf(t, sizeof(t), "%.0f-%.0fms", lo, grim_cycles_to_ms(edges[b]));
+    }
+    return std::string(t);
+  };
+  (void)ctx;
+  std::string csv = "dimension,bucket,label,n,alive,survival_rate,coverage_stall,exception_loop,"
+                    "frozen_frame,dead_audio,timeout,crash,error\n";
+  auto emit = [&](const char *dim, size_t idx, const std::string &label, const Tally &t) {
+    char line[256];
+    std::snprintf(line, sizeof(line), "%s,%zu,%s,%u,%u,%.3f", dim, idx, label.c_str(), t.n, t.alive,
+                  t.n ? static_cast<double>(t.alive) / t.n : 0.0);
+    csv += line;
+    for (u32 d : t.dead) {
+      csv += "," + std::to_string(d);
+    }
+    csv += "\n";
+    std::printf("  %-14s %-14s n=%-4u alive=%-4u survival=%5.1f%%  stall=%u exc_loop=%u frozen=%u "
+                "audio=%u timeout=%u crash=%u error=%u\n",
+                dim, label.c_str(), t.n, t.alive, t.n ? 100.0 * t.alive / t.n : 0.0, t.dead[0],
+                t.dead[1], t.dead[2], t.dead[3], t.dead[4], t.dead[5], t.dead[6]);
+  };
+  std::printf("\nGRIM_SURVIVAL by first-execution time of the earliest patched word (quintiles of "
+              "executed code words)\n");
+  for (size_t b = 0; b < by_bucket.size(); ++b) {
+    emit("first_exec", b, range_text(b), by_bucket[b]);
+  }
+  std::printf("GRIM_SURVIVAL by mutation kind (kind of the gene holding the earliest patch)\n");
+  for (size_t k = 0; k < by_kind.size(); ++k) {
+    if (by_kind[k].n != 0) {
+      emit("kind", k, grim_rom_mut_name(static_cast<GrimRomMut>(k)), by_kind[k]);
+    }
+  }
+  write_text(csv_path, csv);
+  std::printf("GRIM_SURVIVAL_CSV %s\n", csv_path.string().c_str());
+}
+
+} // namespace
+
 int run_grim_explore_cli(const std::vector<std::string> &raw_args,
                          const std::string &self_exe) {
   grim_prepare_eval_process();
@@ -539,9 +768,13 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
   double timeout = 300.0;
   std::vector<std::string> child_extra;
   GrimRandomParams params;
+  RomMixOptions rom;
   for (size_t i = 0; i < raw_args.size(); ++i) {
     const std::string &a = raw_args[i];
     const bool has_value = i + 1 < raw_args.size();
+    if (take_rom_option(raw_args, i, rom)) {
+      continue;
+    }
     if (a == "--bios" && has_value) {
       bios = raw_args[++i];
     } else if (a == "--timeout" && has_value) {
@@ -565,9 +798,16 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
   if (pos.size() < 3 || bios.empty()) {
     std::fprintf(stderr,
                  "usage: --grim-explore <seed_start> <count> <out_dir> [frames=900] "
-                 "[--bios path] [--timeout S=300] [--families spu|gpu|both] [--genes N]\n");
+                 "[--bios path] [--timeout S=300] [--families spu|gpu|both] [--genes N]\n"
+                 "  Phase 3: [--mix interface|rom|both] [--map file] [--rom-patches N] "
+                 "[--rom-genes N] [--early-ms N] [--curve 0-3] [--call-swap]\n");
     return 1;
   }
+  rom.bios = bios;
+  if (!finish_rom_options(rom, bios)) {
+    return 1;
+  }
+  apply_rom_options(params, rom);
   const u64 seed_start = std::strtoull(pos[0].c_str(), nullptr, 10);
   const u32 count = static_cast<u32>(std::max(1, std::atoi(pos[1].c_str())));
   const std::filesystem::path out_dir = pos[2];
@@ -587,8 +827,11 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     u64 seed;
     std::string verdict, reason, silent, hash;
     size_t genes;
+    int bucket = -1, kind = -1; // ROM genes: first-execution quintile and kind of the earliest patch
   };
   std::vector<Row> rows;
+  const std::array<u64, 4> time_edges = rom.wants_rom() ? exec_time_edges(rom.ctx)
+                                                        : std::array<u64, 4>{};
   u32 alive = 0, dead = 0, timeouts = 0, crashes = 0, errors = 0;
 
   for (u32 n = 0; n < count; ++n) {
@@ -622,6 +865,9 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     const std::string line = find_result_line(log.string());
 
     Row row{seed, "", "", "-", hash_text, genome.genes.size()};
+    if (rom.wants_rom()) {
+      rom_attribution(genome, rom.ctx, time_edges, row.bucket, row.kind);
+    }
     bool is_survivor = false;
     if (child.timed_out) {
       row.verdict = "timeout";
@@ -677,6 +923,15 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
   std::printf("GRIM_EXPLORE_SUMMARY seeds=%u alive=%u dead=%u timeout=%u crash=%u error=%u "
               "out=%s\n",
               count, alive, dead, timeouts, crashes, errors, out_dir.string().c_str());
+  if (rom.wants_rom()) {
+    std::vector<SurvivalRow> tally_rows;
+    for (const Row &row : rows) {
+      tally_rows.push_back({row.bucket, row.kind, row.verdict == "alive" ? "alive"
+                                                  : row.verdict == "dead" ? row.reason
+                                                                          : row.verdict});
+    }
+    print_survival(tally_rows, rom.ctx, time_edges, out_dir / "survival.csv");
+  }
   fs::remove(out_dir / "work", ec); // empty by now; ignore failure
   return 0;
 }

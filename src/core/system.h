@@ -24,6 +24,7 @@
 // Forward declarations
 class InputRecorder;
 class GrimGenomeRuntime;
+class GrimBootMapper;
 
 class System {
 public:
@@ -439,7 +440,12 @@ public:
   // Grim Reaper 2.0 interface genes. nullptr = off (the default). The caller
   // owns the runtime; System::reset() rewinds it.
   void set_grim_genome(GrimGenomeRuntime *genome);
+  // Phase 3 discovery hooks (CPU telemetry loop + DMA); nullptr = off.
+  void set_grim_boot_mapper(GrimBootMapper *mapper);
   GrimGenomeRuntime *grim_genome() const { return grim_; }
+  // Non-empty when the genome's ROM genes could not be applied (wrong BIOS or
+  // a modified image); nothing was patched in that case.
+  const std::string &grim_rom_error() const { return grim_rom_error_; }
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
   bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
   void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
@@ -910,6 +916,8 @@ private:
   u64 sound_reaper_prev_seed_ = 0;
   InputRecorder* input_recorder_ = nullptr;
   GrimGenomeRuntime *grim_ = nullptr;
+  std::string grim_rom_error_;
+  void grim_apply_rom_genes();
   void grim_write_spu16(u32 offset, u16 value);
   bool input_playback_stop_requested_ = false;
   void note_cdrom_io(u32 phys_addr);

@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
 #include "grim_eval.h"
+#include "grim_map.h"
 #include "system.h"
 #include <array>
 #include <chrono>
@@ -2588,11 +2589,24 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
            result.instructions < max_instructions) {
       const u32 pc = pc_;
       const u32 interrupts = telemetry_->interrupts_this_frame();
+      const bool map_this = boot_mapper_ != nullptr && (pc & 3u) == 0u;
+      if (map_this) {
+        // What step() is about to fetch: the I-cache line if it holds the
+        // address, otherwise memory (a refill reads it from there).
+        u32 instr = 0;
+        if (!read_visible_instruction_for_backend(pc, instr)) {
+          instr = sys_->read32_instruction(pc);
+        }
+        boot_mapper_->begin_instruction(cycles_, pc, instr, gpr_, cop0_sr_);
+      }
       const u32 consumed = step();
       // Nothing at `pc` ran if the step entered an interrupt or `pc` itself
       // could not be fetched (misaligned).
       if ((pc & 3u) == 0u && telemetry_->interrupts_this_frame() == interrupts) {
         telemetry_->note_exec(pc);
+        if (map_this) {
+          boot_mapper_->commit_instruction();
+        }
       }
       result.cycles += consumed;
       ++result.instructions;
