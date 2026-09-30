@@ -32,6 +32,9 @@ public:
     void capture_visible_window(
         const std::string& path,
         unsigned long long minimum_ee_instructions = 0);
+    // Runs the full UI until `fields` guest fields have elapsed after the
+    // first visible BIOS frame, prints the measured rate, then exits.
+    void benchmark_visible_fields(u64 fields) { benchmark_fields_ = fields; }
 
 private:
     void process_events(bool& quit);
@@ -95,6 +98,11 @@ private:
     bool show_about_ = false;
     bool emulation_running_ = false;
     bool bootstrap_swap_interval_disabled_ = false;
+    // Real-time limiter: EE cycles accrue at the guest clock rate and each UI
+    // frame may spend at most the accrued budget.
+    double realtime_ee_budget_ = 0.0;
+    std::chrono::steady_clock::time_point realtime_last_update_{};
+    bool realtime_limited_ = false;
     std::chrono::steady_clock::time_point speed_sample_time_{};
     u64 speed_sample_instructions_ = 0;
     u64 speed_sample_fields_ = 0;
@@ -104,6 +112,11 @@ private:
     double emulation_speed_percent_ = 0.0;
     std::string visible_capture_path_{};
     unsigned long long visible_capture_minimum_ee_ = 0;
+    u64 benchmark_fields_ = 0;
+    bool benchmark_started_ = false;
+    u64 benchmark_start_field_ = 0;
+    u64 benchmark_ui_frames_ = 0;
+    std::chrono::steady_clock::time_point benchmark_start_time_{};
 
     std::array<char, 1024> bios_path_input_{};
     std::string status_message_ = "PS2 experimental core ready";

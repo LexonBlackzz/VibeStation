@@ -13,6 +13,7 @@ int main(int argc, char** argv) {
     unsigned long long capture_after_ee = 0;
     bool ee_jit = false;
     bool ee_dynarec = false;
+    unsigned long long benchmark_fields = 0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -29,6 +30,8 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Invalid --capture-after-ee value.\n");
                 return 2;
             }
+        } else if (argument == "--benchmark-fields" && i + 1 < argc) {
+            benchmark_fields = std::strtoull(argv[++i], nullptr, 10);
         } else if (argument == "--ee-jit") {
             ee_jit = true;
         } else if (argument == "--ee-dynarec") {
@@ -39,7 +42,8 @@ int main(int argc, char** argv) {
                 "Usage: VibeStationPS2Lab [--bios <path>] "
                 "[--ee-jit|--ee-dynarec] "
                 "[--capture-visible <window.ppm>] "
-                "[--capture-after-ee <instructions>]\n");
+                "[--capture-after-ee <instructions>] "
+                "[--benchmark-fields <fields>]\n");
             return 2;
         }
     }
@@ -72,6 +76,9 @@ int main(int argc, char** argv) {
     }
     if (!capture_path.empty()) {
         app.capture_visible_window(capture_path, capture_after_ee);
+    }
+    if (benchmark_fields != 0) {
+        app.benchmark_visible_fields(benchmark_fields);
     }
 
     const int result = app.run();

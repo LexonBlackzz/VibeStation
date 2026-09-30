@@ -247,6 +247,38 @@ int Ps2App::run() {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
 
+        if (benchmark_fields_ != 0 &&
+            system_.gs_display().has_visible_pixels()) {
+            const u64 field = system_.video_fields_started();
+            const auto now = std::chrono::steady_clock::now();
+            if (!benchmark_started_) {
+                benchmark_started_ = true;
+                benchmark_start_field_ = field;
+                benchmark_start_time_ = now;
+                benchmark_ui_frames_ = 0;
+            } else {
+                ++benchmark_ui_frames_;
+                if (field - benchmark_start_field_ >= benchmark_fields_) {
+                    const double seconds =
+                        std::chrono::duration<double>(
+                            now - benchmark_start_time_).count();
+                    const u64 fields = field - benchmark_start_field_;
+                    std::fprintf(
+                        stdout,
+                        "UI_BENCHMARK_FIELDS=%llu UI_BENCHMARK_SECONDS=%.3f "
+                        "UI_BENCHMARK_FIELD_RATE=%.3f "
+                        "UI_BENCHMARK_UI_FPS=%.1f GPU_GS=%d\n",
+                        static_cast<unsigned long long>(fields),
+                        seconds,
+                        static_cast<double>(fields) / seconds,
+                        static_cast<double>(benchmark_ui_frames_) / seconds,
+                        system_.gs_core().gpu_backend_active() ? 1 : 0);
+                    std::fflush(stdout);
+                    quit = true;
+                }
+            }
+        }
+
         if (!visible_capture_path_.empty() &&
             system_.gs_display().has_visible_pixels() &&
             system_.ee().state().instructions_executed >=
@@ -1867,6 +1899,10 @@ void Ps2App::update_emulation() {
             SDL_GL_SetSwapInterval(1) == 0) {
             bootstrap_swap_interval_disabled_ = false;
         }
+        // Do not bank real time while paused.
+        realtime_last_update_ = {};
+        realtime_ee_budget_ = 0.0;
+        realtime_limited_ = false;
         return;
     }
 
@@ -1875,25 +1911,44 @@ void Ps2App::update_emulation() {
     // pacing as soon as the composed display becomes visible.
     constexpr u64 kNormalChunkInstructions = 8192;
     constexpr u64 kBootstrapChunkInstructions = 1'000'000;
-    constexpr u64 kNormalMaxInstructionsPerFrame = 500000;
     constexpr u64 kBootstrapMaxInstructionsPerFrame = 250'000'000;
     constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(14);
     constexpr auto kBootstrapCpuTimeSlice =
         std::chrono::seconds(6);
+    // Guest EE clock. The core retires one instruction per EE cycle.
+    constexpr double kEeClockHz = 294'912'000.0;
+    // At most ~3 fields of catch-up after a slow host frame.
+    constexpr double kMaxRealtimeBacklog = kEeClockHz * 0.05;
 
     // PCRTC can become valid while it still scans an untouched black buffer.
     // Keep the larger bootstrap slice until the composed display actually
     // contains visible RGB data; validity alone is not a first-frame signal.
     const bool bootstrap_turbo =
         !system_.gs_display().has_visible_pixels();
-    if (bootstrap_turbo != bootstrap_swap_interval_disabled_ &&
-        SDL_GL_SetSwapInterval(bootstrap_turbo ? 0 : 1) == 0) {
-        bootstrap_swap_interval_disabled_ = bootstrap_turbo;
+
+    // Wait for VSync only when the real-time limiter, not host CPU time,
+    // bounded the previous frame. Below full speed, VSync would otherwise
+    // stall emulation whenever a frame overruns the refresh interval.
+    const bool want_no_vsync = bootstrap_turbo || !realtime_limited_;
+    if (want_no_vsync != bootstrap_swap_interval_disabled_ &&
+        SDL_GL_SetSwapInterval(want_no_vsync ? 0 : 1) == 0) {
+        bootstrap_swap_interval_disabled_ = want_no_vsync;
     }
-    const u64 max_instructions =
-        bootstrap_turbo
-            ? kBootstrapMaxInstructionsPerFrame
-            : kNormalMaxInstructionsPerFrame;
+
+    const auto now = std::chrono::steady_clock::now();
+    u64 max_instructions = kBootstrapMaxInstructionsPerFrame;
+    if (bootstrap_turbo) {
+        realtime_ee_budget_ = 0.0;
+    } else {
+        if (realtime_last_update_ != std::chrono::steady_clock::time_point{}) {
+            realtime_ee_budget_ += std::chrono::duration<double>(
+                now - realtime_last_update_).count() * kEeClockHz;
+        }
+        realtime_ee_budget_ =
+            std::min(realtime_ee_budget_, kMaxRealtimeBacklog);
+        max_instructions = static_cast<u64>(realtime_ee_budget_);
+    }
+    realtime_last_update_ = now;
     const auto cpu_time_slice =
         bootstrap_turbo
             ? kBootstrapCpuTimeSlice
@@ -1923,6 +1978,11 @@ void Ps2App::update_emulation() {
             std::chrono::steady_clock::now() >= deadline) {
             break;
         }
+    }
+    if (!bootstrap_turbo) {
+        realtime_limited_ = executed >= max_instructions;
+        realtime_ee_budget_ = std::max(
+            0.0, realtime_ee_budget_ - static_cast<double>(executed));
     }
 
     // Blank-screen bootstrap samples the PCRTC after each large chunk above.
