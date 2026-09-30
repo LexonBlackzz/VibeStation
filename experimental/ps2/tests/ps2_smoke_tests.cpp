@@ -1,6 +1,7 @@
 #include "core/ps2_system.h"
 #include "core/gs/gs_rasterizer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -482,6 +483,93 @@ bool test_ee_quiet_trace_cop1_and_scratchpad() {
              "quiet RAM trace COP1/scratchpad state mismatch") &&
          ok;
     return ok;
+}
+
+struct TestRandom {
+    ps2::u64 state = 0x9E3779B97F4A7C15ull;
+    ps2::u32 next() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<ps2::u32>(state >> 16);
+    }
+    ps2::u32 below(ps2::u32 limit) { return next() % limit; }
+};
+
+// Gouraud triangles must match the reference per-pixel formula:
+// channel = clamp(trunc((w0*Ca + w1*Cb + w2*Cc) / area), 0, 255), with every
+// pixel outside the edge functions left untouched.
+bool test_gs_gouraud_triangle_matches_reference() {
+    TestRandom random;
+    ps2::GsRasterContext ctx{};
+    ctx.fbw = 10;
+    ctx.scax1 = 639;
+    ctx.scay1 = 447;
+    ctx.gouraud = true;
+    const auto edge = [](const ps2::GsRasterVertex& p,
+                         const ps2::GsRasterVertex& q, ps2::s64 px,
+                         ps2::s64 py) {
+        return (px - p.x) * (q.y - p.y) - (py - p.y) * (q.x - p.x);
+    };
+    constexpr ps2::u32 kFill = 0xA5C3E1F7u;
+    for (ps2::u32 draw = 0; draw < 300u; ++draw) {
+        ps2::GsVram vram;
+        for (ps2::u32 y = 0; y < 448u; ++y) {
+            for (ps2::u32 x = 0; x < 640u; ++x) {
+                (void)vram.write_pixel_untracked(0, x, y, 0, 10, kFill);
+            }
+        }
+        // Mix large and thin triangles, in both windings.
+        const ps2::s32 span = (draw % 3u) == 0u ? 640 * 16 : 96 * 16;
+        const ps2::s32 ox = static_cast<ps2::s32>(
+            random.below(static_cast<ps2::u32>(640 * 16 - span / 2)));
+        const ps2::s32 oy = static_cast<ps2::s32>(
+            random.below(static_cast<ps2::u32>(448 * 16 - span / 2)));
+        std::array<ps2::GsRasterVertex, 3> v{};
+        for (auto& vertex : v) {
+            vertex.x = std::min(
+                ox + static_cast<ps2::s32>(
+                         random.below(static_cast<ps2::u32>(span))),
+                640 * 16 - 1);
+            vertex.y = std::min(
+                oy + static_cast<ps2::s32>(
+                         random.below(static_cast<ps2::u32>(span))),
+                448 * 16 - 1);
+            vertex.rgba = random.next();
+        }
+        (void)ps2::GsRasterizer::draw_triangle(vram, ctx, v[0], v[1], v[2]);
+        const ps2::s64 area = edge(v[0], v[1], v[2].x, v[2].y);
+        for (ps2::u32 y = 0; y < 448u; ++y) {
+            for (ps2::u32 x = 0; x < 640u; ++x) {
+                const ps2::s64 px = static_cast<ps2::s64>(x) * 16 + 8;
+                const ps2::s64 py = static_cast<ps2::s64>(y) * 16 + 8;
+                const ps2::s64 w0 = edge(v[1], v[2], px, py);
+                const ps2::s64 w1 = edge(v[2], v[0], px, py);
+                const ps2::s64 w2 = edge(v[0], v[1], px, py);
+                const bool inside = area != 0 &&
+                    (area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                              : (w0 <= 0 && w1 <= 0 && w2 <= 0));
+                ps2::u32 expected = kFill;
+                if (inside) {
+                    expected = 0;
+                    for (ps2::u32 shift = 0; shift < 32u; shift += 8u) {
+                        const ps2::s64 n =
+                            w0 * ((v[0].rgba >> shift) & 0xFFu) +
+                            w1 * ((v[1].rgba >> shift) & 0xFFu) +
+                            w2 * ((v[2].rgba >> shift) & 0xFFu);
+                        const ps2::s64 value =
+                            std::clamp<ps2::s64>(n / area, 0, 255);
+                        expected |= static_cast<ps2::u32>(value) << shift;
+                    }
+                }
+                if (vram.read_pixel(0, x, y, 0, 10) != expected) {
+                    return expect(false,
+                                  "gouraud triangle pixel mismatch");
+                }
+            }
+        }
+    }
+    return true;
 }
 
 bool test_dmac_running_mask() {
@@ -2616,6 +2704,7 @@ int main() {
     ok = test_scanout_skips_unchanged_vram() && ok;
     ok = test_gs_sprite_blend_reuses_destination() && ok;
     ok = test_gs_untextured_triangle_without_depth() && ok;
+    ok = test_gs_gouraud_triangle_matches_reference() && ok;
     ok = test_ram_aliases() && ok;
     ok = test_ram_bounds() && ok;
     ok = test_bios_idle_iteration_matches_ee_steps() && ok;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -202,41 +203,85 @@ u32 blend_color(u32 source, u32 destination, const GsRasterContext& ctx) {
     return output;
 }
 
-u32 interpolate_channel(
-    s64 w0,
-    s64 w1,
-    s64 w2,
-    s64 area,
-    u32 a,
-    u32 b,
-    u32 c,
-    u32 shift) {
-    const s64 numerator =
-        w0 * static_cast<s64>(channel(a, shift)) +
-        w1 * static_cast<s64>(channel(b, shift)) +
-        w2 * static_cast<s64>(channel(c, shift));
-    const s64 value = numerator / area;
-    return static_cast<u32>(std::clamp<s64>(value, 0, 255));
+s64 floor_div(s64 numerator, s64 divisor) {
+    s64 quotient = numerator / divisor;
+    if ((numerator % divisor) != 0 && numerator < 0) --quotient;
+    return quotient;
 }
 
-u32 interpolate_rgba(
-    s64 w0,
-    s64 w1,
-    s64 w2,
-    s64 area,
-    u32 a,
-    u32 b,
-    u32 c) {
-    u32 out = 0;
-    for (u32 shift : {0u, 8u, 16u, 24u}) {
-        out |= interpolate_channel(w0, w1, w2, area, a, b, c, shift) << shift;
+// Interpolates Gouraud color along a triangle row without dividing per pixel.
+// Per channel the reference value is
+//   clamp(trunc((w0*Ca + w1*Cb + w2*Cc) / area), 0, 255).
+// Each channel numerator changes by a constant per pixel, so the floor
+// quotient and remainder by |area| can be advanced incrementally. Because the
+// result is clamped to [0, 255], floor and C++ truncation give the same value:
+// they differ only for negative non-integral quotients, which both clamp to 0.
+class GouraudStepper {
+public:
+    GouraudStepper(s64 area, u32 a, u32 b, u32 c,
+                   s64 w0_dx, s64 w1_dx, s64 w2_dx)
+        : magnitude_(area < 0 ? -area : area), sign_(area < 0 ? -1 : 1) {
+        for (u32 i = 0; i < 4u; ++i) {
+            const u32 shift = i * 8u;
+            ca_[i] = static_cast<s64>(channel(a, shift));
+            cb_[i] = static_cast<s64>(channel(b, shift));
+            cc_[i] = static_cast<s64>(channel(c, shift));
+            const s64 delta =
+                sign_ * (w0_dx * ca_[i] + w1_dx * cb_[i] + w2_dx * cc_[i]);
+            dq_[i] = floor_div(delta, magnitude_);
+            dr_[i] = delta - dq_[i] * magnitude_;
+        }
     }
-    return out;
+
+    void begin_row(s64 w0, s64 w1, s64 w2) {
+        for (u32 i = 0; i < 4u; ++i) {
+            const s64 numerator =
+                sign_ * (w0 * ca_[i] + w1 * cb_[i] + w2 * cc_[i]);
+            q_[i] = floor_div(numerator, magnitude_);
+            r_[i] = numerator - q_[i] * magnitude_;
+        }
+    }
+
+    void step() {
+        for (u32 i = 0; i < 4u; ++i) {
+            q_[i] += dq_[i];
+            r_[i] += dr_[i];
+            if (r_[i] >= magnitude_) {
+                r_[i] -= magnitude_;
+                ++q_[i];
+            }
+        }
+    }
+
+    [[nodiscard]] u32 rgba() const {
+        u32 out = 0;
+        for (u32 i = 0; i < 4u; ++i) {
+            out |= static_cast<u32>(std::clamp<s64>(q_[i], 0, 255))
+                   << (i * 8u);
+        }
+        return out;
+    }
+
+private:
+    s64 magnitude_;
+    s64 sign_;
+    s64 ca_[4]{}, cb_[4]{}, cc_[4]{};
+    s64 q_[4]{}, r_[4]{};
+    s64 dq_[4]{}, dr_[4]{};
+};
+
+// Bit-level equivalents of std::isfinite/std::fabs for float. MSVC does not
+// always inline the <cmath> versions, and these run per STQ pixel.
+bool float_is_finite(float value) {
+    return (std::bit_cast<u32>(value) & 0x7F800000u) != 0x7F800000u;
+}
+float float_abs(float value) {
+    return std::bit_cast<float>(std::bit_cast<u32>(value) & 0x7FFFFFFFu);
 }
 
-s32 stq_to_fixed(float coordinate, float q, u32 size) {
-    if (!std::isfinite(coordinate) || !std::isfinite(q) ||
-        std::fabs(q) < 1.0e-20f || size == 0) {
+inline s32 stq_to_fixed(float coordinate, float q, u32 size) {
+    if (!float_is_finite(coordinate) || !float_is_finite(q) ||
+        float_abs(q) < 1.0e-20f || size == 0) {
         return 0;
     }
 
@@ -250,10 +295,10 @@ s32 stq_to_fixed(float coordinate, float q, u32 size) {
     return static_cast<s32>(std::clamp(fixed, lo, hi));
 }
 
-s32 st_to_fixed_scaled(
+inline s32 st_to_fixed_scaled(
     float coordinate,
     double scale) {
-    if (!std::isfinite(coordinate)) return 0;
+    if (!float_is_finite(coordinate)) return 0;
     const double fixed =
         static_cast<double>(coordinate) * scale;
     const double lo =
@@ -1471,6 +1516,12 @@ u64 GsRasterizer::draw_triangle(
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
         !hot_psm16_pixels && simple_frame_write(ctx);
+    // Z only matters for a real depth comparison or a depth write.
+    const bool need_z =
+        ctx.zte && ((ctx.ztst & 3u) >= 2u || !ctx.zmask);
+    const bool gouraud_step = ctx.gouraud && !constant_rgba;
+    GouraudStepper gouraud(
+        area, a.rgba, b.rgba, c.rgba, w0_dx, w1_dx, w2_dx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         s64 w0 = row_w0;
@@ -1486,11 +1537,52 @@ u64 GsRasterizer::draw_triangle(
               static_cast<double>(row_w1) * b.t +
               static_cast<double>(row_w2) * c.t
             : 0.0;
-        for (s32 x = left; x < right; ++x) {
+
+        // A triangle row covers one contiguous run of pixels. Jump straight
+        // to its first pixel using the exact integer edge functions, then
+        // stop at the first uncovered pixel after it.
+        s32 x = left;
+        {
+            const s64 row_edges[3] = {w0, w1, w2};
+            const s64 edge_steps[3] = {w0_dx, w1_dx, w2_dx};
+            s64 skip = 0;
+            bool row_empty = false;
+            for (u32 i = 0; i < 3u; ++i) {
+                const s64 value =
+                    positive_area ? row_edges[i] : -row_edges[i];
+                const s64 step =
+                    positive_area ? edge_steps[i] : -edge_steps[i];
+                if (value >= 0) continue;
+                if (step <= 0) {
+                    row_empty = true;
+                    break;
+                }
+                skip = std::max(skip, (-value + step - 1) / step);
+            }
+            if (row_empty || skip >= static_cast<s64>(right - left)) {
+                x = right;
+            } else if (skip != 0) {
+                x += static_cast<s32>(skip);
+                w0 += skip * w0_dx;
+                w1 += skip * w1_dx;
+                w2 += skip * w2_dx;
+                // The S/T numerators are stepped by repeated addition;
+                // advance them the same way so rounding is unchanged.
+                if (scaled_constant_q) {
+                    for (s64 i = 0; i < skip; ++i) {
+                        s_num += s_num_dx;
+                        t_num += t_num_dx;
+                    }
+                }
+            }
+        }
+        if (gouraud_step && x < right) gouraud.begin_row(w0, w1, w2);
+        for (; x < right; ++x) {
             const bool inside =
                 positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
                               : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-            if (inside) {
+            if (!inside) break;
+            {
                 s32 u = 0;
                 s32 v = 0;
                 if (ctx.texture.enabled) {
@@ -1533,10 +1625,8 @@ u64 GsRasterizer::draw_triangle(
                         }
                     }
                 }
-                const u32 vertex_rgba = ctx.gouraud && !constant_rgba
-                    ? interpolate_rgba(
-                        w0, w1, w2, area, a.rgba, b.rgba, c.rgba)
-                    : c.rgba;
+                const u32 vertex_rgba =
+                    gouraud_step ? gouraud.rgba() : c.rgba;
                 u32 rgba = shade_pixel(
                     vram, ctx.texture, u, v, vertex_rgba);
                 if (ctx.fog_enabled) {
@@ -1544,7 +1634,7 @@ u64 GsRasterizer::draw_triangle(
                         w0, w1, w2, area, a.fog, b.fog, c.fog);
                     rgba = apply_fog(rgba, ctx.fog_color, fog);
                 }
-                const u32 z = !ctx.zte ? 0u : constant_z ? a.z
+                const u32 z = !need_z ? 0u : constant_z ? a.z
                     : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
                 const bool wrote = hot_psm16_pixels
                     ? draw_hot_osdsys_psm16_pixel(
@@ -1558,6 +1648,7 @@ u64 GsRasterizer::draw_triangle(
             w0 += w0_dx;
             w1 += w1_dx;
             w2 += w2_dx;
+            if (gouraud_step) gouraud.step();
             if (scaled_constant_q) {
                 s_num += s_num_dx;
                 t_num += t_num_dx;
