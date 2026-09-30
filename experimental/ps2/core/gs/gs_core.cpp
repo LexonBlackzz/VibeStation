@@ -84,7 +84,7 @@ void GsCore::synchronize_gpu_to_cpu() const {
         const_cast<GsVram&>(vram_);
     if (gpu_backend_->synchronize_to_cpu(
             mutable_vram)) {
-        ++const_cast<GsStats&>(stats_).gpu_syncs_to_cpu;
+        ++stats_->gpu_syncs_to_cpu;
     }
 }
 
@@ -263,9 +263,9 @@ bool GsCore::try_execute_parallel_sprite(
          ++worker) {
         pixels += raster_parallel_counts_[worker];
     }
-    ++stats_.parallel_sprite_draws;
-    stats_.parallel_sprite_pixels += pixels;
-    stats_.parallel_sprite_helper_jobs += raster_helper_count_;
+    ++stats_->parallel_sprite_draws;
+    stats_->parallel_sprite_pixels += pixels;
+    stats_->parallel_sprite_helper_jobs += raster_helper_count_;
     return true;
 }
 
@@ -306,8 +306,8 @@ bool GsCore::try_execute_gpu_sprite(
     }
 
     pixels = area;
-    ++stats_.gpu_sprite_draws;
-    stats_.gpu_sprite_pixels += area;
+    ++stats_->gpu_sprite_draws;
+    stats_->gpu_sprite_pixels += area;
     return true;
 }
 
@@ -349,7 +349,7 @@ void GsCore::reset() {
     fifo_word_mask_ = 0;
     gif_ = {};
     transfer_ = {};
-    stats_ = {};
+    *stats_ = {};
     vram_.reset();
     if (gpu_backend_ != nullptr) {
         gpu_backend_->invalidate_cpu_source();
@@ -406,7 +406,7 @@ void GsCore::begin_tag(u64 lo, u64 hi) {
             : nloop * gif_.nreg;
     gif_.active = gif_.values_remaining != 0;
 
-    ++stats_.gif_tags;
+    ++stats_->gif_tags;
 
     if (pre) {
         write_register(kRegPrim, prim);
@@ -419,13 +419,13 @@ void GsCore::begin_tag(u64 lo, u64 hi) {
 
 void GsCore::finish_packet() {
     if (gif_.eop) {
-        ++stats_.eop_packets;
+        ++stats_->eop_packets;
     }
     gif_ = {};
 }
 
 void GsCore::process_packed(u32 descriptor, u64 lo, u64 hi) {
-    ++stats_.packed_writes;
+    ++stats_->packed_writes;
 
     switch (descriptor) {
     case 0x00: // PRIM
@@ -499,13 +499,13 @@ void GsCore::process_packed(u32 descriptor, u64 lo, u64 hi) {
     case 0x0F: // NOP
         return;
     default:
-        ++stats_.unsupported_packed;
+        ++stats_->unsupported_packed;
         return;
     }
 }
 
 void GsCore::process_reglist_value(u32 descriptor, u64 value) {
-    ++stats_.reglist_writes;
+    ++stats_->reglist_writes;
 
     if (descriptor == 0x0Fu) {
         return;
@@ -519,7 +519,7 @@ void GsCore::process_reglist_value(u32 descriptor, u64 value) {
 void GsCore::write_register(u32 address, u64 value) {
     address &= 0x7Fu;
     registers_[address] = value;
-    ++stats_.register_writes;
+    ++stats_->register_writes;
 
     if (address == kRegTrxdir) {
         const u32 xdir = static_cast<u32>(value & 0x3u);
@@ -534,13 +534,13 @@ void GsCore::write_register(u32 address, u64 value) {
             transfer_ = {};
         }
     } else if (address == kRegSignal) {
-        ++stats_.signal_events;
+        ++stats_->signal_events;
         if (privileged_ != nullptr) privileged_->signal(value);
     } else if (address == kRegFinish) {
-        ++stats_.finish_events;
+        ++stats_->finish_events;
         if (privileged_ != nullptr) privileged_->finish();
     } else if (address == kRegLabel) {
-        ++stats_.label_events;
+        ++stats_->label_events;
         if (privileged_ != nullptr) privileged_->label(value);
     }
 
@@ -555,13 +555,13 @@ void GsCore::write_register(u32 address, u64 value) {
 
 
 void GsCore::record_unsupported_transfer(u32 reason) {
-    ++stats_.unsupported_transfers;
-    if (stats_.first_unsupported_transfer_count >=
-        stats_.first_unsupported_transfers.size()) {
+    ++stats_->unsupported_transfers;
+    if (stats_->first_unsupported_transfer_count >=
+        stats_->first_unsupported_transfers.size()) {
         return;
     }
-    stats_.first_unsupported_transfers[
-        stats_.first_unsupported_transfer_count++] = {
+    stats_->first_unsupported_transfers[
+        stats_->first_unsupported_transfer_count++] = {
         reason,
         registers_[kRegBitbltbuf],
         registers_[kRegTrxpos],
@@ -596,7 +596,7 @@ void GsCore::begin_host_to_local() {
     }
 
     transfer_.active = true;
-    ++stats_.host_to_local_transfers;
+    ++stats_->host_to_local_transfers;
 }
 
 
@@ -630,7 +630,7 @@ void GsCore::begin_local_to_host() {
     }
 
     transfer_.active = true;
-    ++stats_.local_to_host_transfers;
+    ++stats_->local_to_host_transfers;
 }
 
 bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
@@ -652,7 +652,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
         const u32 value = vram_.read_transfer_pixel(
             transfer_.psm, x, y, transfer_.bp, transfer_.bw);
         ++transfer_.pixel_index;
-        ++stats_.local_to_host_pixels;
+        ++stats_->local_to_host_pixels;
         return value;
     };
 
@@ -670,7 +670,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
             }
             transfer_.pending[transfer_.pending_size++] =
                 static_cast<u8>(low | (high << 4));
-            ++stats_.local_to_host_bytes;
+            ++stats_->local_to_host_bytes;
             continue;
         }
 
@@ -705,7 +705,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
             transfer_.pending[transfer_.pending_size++] =
                 static_cast<u8>(value >> (i * 8));
         }
-        stats_.local_to_host_bytes += bytes_per_pixel;
+        stats_->local_to_host_bytes += bytes_per_pixel;
     }
 
     if (transfer_.pending_size == 0) {
@@ -731,7 +731,7 @@ bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
         transfer_.pending[i] = transfer_.pending[emitted + i];
     }
     transfer_.pending_size = remaining;
-    ++stats_.local_to_host_qwords;
+    ++stats_->local_to_host_qwords;
 
     if (transfer_.pixel_index >= transfer_.total_pixels &&
         transfer_.pending_size == 0) {
@@ -780,7 +780,7 @@ void GsCore::execute_local_to_local() {
         return;
     }
 
-    ++stats_.local_to_local_transfers;
+    ++stats_->local_to_local_transfers;
 
     for (u32 linear_y = 0; linear_y < height; ++linear_y) {
         const u32 row = diry ? (height - 1u - linear_y) : linear_y;
@@ -800,7 +800,7 @@ void GsCore::execute_local_to_local() {
                     (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
                 return;
             }
-            ++stats_.local_to_local_pixels;
+            ++stats_->local_to_local_pixels;
         }
     }
 
@@ -809,8 +809,8 @@ void GsCore::execute_local_to_local() {
 }
 
 void GsCore::consume_image_qword(u64 lo, u64 hi) {
-    ++stats_.image_qwords;
-    stats_.image_bytes += 16;
+    ++stats_->image_qwords;
+    stats_->image_bytes += 16;
 
     if (!transfer_.active) return;
 
@@ -852,7 +852,7 @@ void GsCore::consume_pending_pixels() {
         }
 
         ++transfer_.pixel_index;
-        ++stats_.host_to_local_pixels;
+        ++stats_->host_to_local_pixels;
         if (transfer_.pixel_index >= transfer_.total_pixels) {
             transfer_.active = false;
             registers_[kRegTrxdir] =
@@ -1016,10 +1016,10 @@ void GsCore::emit_primitive(
     const GsRasterVertex& b,
     const GsRasterVertex& c,
     u32 vertex_count) {
-    ++stats_.primitives;
+    ++stats_->primitives;
 
     if (!rasterization_enabled_) {
-        ++stats_.skipped_raster_draws;
+        ++stats_->skipped_raster_draws;
         return;
     }
 
@@ -1028,30 +1028,30 @@ void GsCore::emit_primitive(
     const bool target_supported = GsRasterizer::supported_target(ctx);
     const bool texture_supported = GsRasterizer::supported_texture(ctx.texture);
     if (!target_supported || !texture_supported) {
-        ++stats_.skipped_raster_draws;
-        stats_.unsupported_target_draws += !target_supported;
-        stats_.unsupported_texture_draws += !texture_supported;
-        stats_.last_unsupported_prim = effective_prim();
+        ++stats_->skipped_raster_draws;
+        stats_->unsupported_target_draws += !target_supported;
+        stats_->unsupported_texture_draws += !texture_supported;
+        stats_->last_unsupported_prim = effective_prim();
         const u32 context = static_cast<u32>((effective_prim() >> 9) & 1u);
-        stats_.last_unsupported_frame = registers_[kRegFrame1 + context];
-        stats_.last_unsupported_zbuf = registers_[kRegZbuf1 + context];
-        stats_.last_unsupported_test = registers_[kRegTest1 + context];
-        stats_.last_unsupported_tex0 = registers_[kRegTex0_1 + context];
+        stats_->last_unsupported_frame = registers_[kRegFrame1 + context];
+        stats_->last_unsupported_zbuf = registers_[kRegZbuf1 + context];
+        stats_->last_unsupported_test = registers_[kRegTest1 + context];
+        stats_->last_unsupported_tex0 = registers_[kRegTex0_1 + context];
         return;
     }
 
     if (detailed_raster_stats_) {
-        ctx.texture.nonzero_samples = &stats_.nonzero_texture_samples;
-        ctx.texture.alpha_samples = &stats_.texture_alpha_samples;
-        ctx.texture.first_sample_x = &stats_.first_texture_sample_x;
-        ctx.texture.first_sample_y = &stats_.first_texture_sample_y;
-        ctx.texture.first_sample_rgba = &stats_.first_texture_sample_rgba;
-        ctx.texture.nonzero_shaded = &stats_.nonzero_shaded_samples;
-        ctx.nonzero_colors = &stats_.nonzero_raster_colors;
-        ctx.nonzero_inputs = &stats_.nonzero_raster_inputs;
-        ctx.nonzero_input_alpha = &stats_.nonzero_inputs_with_alpha;
-        ctx.first_input_rgba = &stats_.first_nonzero_input_rgba;
-        ctx.first_alpha_input_rgba = &stats_.first_alpha_input_rgba;
+        ctx.texture.nonzero_samples = &stats_->nonzero_texture_samples;
+        ctx.texture.alpha_samples = &stats_->texture_alpha_samples;
+        ctx.texture.first_sample_x = &stats_->first_texture_sample_x;
+        ctx.texture.first_sample_y = &stats_->first_texture_sample_y;
+        ctx.texture.first_sample_rgba = &stats_->first_texture_sample_rgba;
+        ctx.texture.nonzero_shaded = &stats_->nonzero_shaded_samples;
+        ctx.nonzero_colors = &stats_->nonzero_raster_colors;
+        ctx.nonzero_inputs = &stats_->nonzero_raster_inputs;
+        ctx.nonzero_input_alpha = &stats_->nonzero_inputs_with_alpha;
+        ctx.first_input_rgba = &stats_->first_nonzero_input_rgba;
+        ctx.first_alpha_input_rgba = &stats_->first_alpha_input_rgba;
     }
     const u32 context = static_cast<u32>((effective_prim() >> 9) & 1u);
     RasterCommand command{};
@@ -1093,8 +1093,8 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     const auto& c = command.c;
     const u32 prim = command.primitive;
     const u32 vertex_count = command.vertex_count;
-    const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
-    const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
+    const u64 nonzero_inputs_before = stats_->nonzero_raster_inputs;
+    const u64 alpha_inputs_before = stats_->nonzero_inputs_with_alpha;
     std::chrono::steady_clock::time_point raster_begin{};
     if (raster_timing_enabled_) {
         raster_begin = std::chrono::steady_clock::now();
@@ -1111,8 +1111,8 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
                 candidate_top,
                 candidate_bottom,
                 candidate_area)) {
-            ++stats_.gpu_candidate_sprite_draws;
-            stats_.gpu_candidate_sprite_pixels += candidate_area;
+            ++stats_->gpu_candidate_sprite_draws;
+            stats_->gpu_candidate_sprite_pixels += candidate_area;
 
             const u32 alpha_selectors =
                 (ctx.alpha_a & 3u) |
@@ -1141,24 +1141,24 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
 
             bool recorded = false;
             for (u32 i = 0u;
-                 i < stats_.gpu_candidate_signature_count;
+                 i < stats_->gpu_candidate_signature_count;
                  ++i) {
-                if (stats_.gpu_candidate_signatures[i] == signature) {
-                    ++stats_.gpu_candidate_signature_draws[i];
-                    stats_.gpu_candidate_signature_pixels[i] +=
+                if (stats_->gpu_candidate_signatures[i] == signature) {
+                    ++stats_->gpu_candidate_signature_draws[i];
+                    stats_->gpu_candidate_signature_pixels[i] +=
                         candidate_area;
                     recorded = true;
                     break;
                 }
             }
             if (!recorded &&
-                stats_.gpu_candidate_signature_count <
-                    stats_.gpu_candidate_signatures.size()) {
+                stats_->gpu_candidate_signature_count <
+                    stats_->gpu_candidate_signatures.size()) {
                 const u32 index =
-                    stats_.gpu_candidate_signature_count++;
-                stats_.gpu_candidate_signatures[index] = signature;
-                stats_.gpu_candidate_signature_draws[index] = 1u;
-                stats_.gpu_candidate_signature_pixels[index] =
+                    stats_->gpu_candidate_signature_count++;
+                stats_->gpu_candidate_signatures[index] = signature;
+                stats_->gpu_candidate_signature_draws[index] = 1u;
+                stats_->gpu_candidate_signature_pixels[index] =
                     candidate_area;
             }
         }
@@ -1185,7 +1185,7 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
             pixels = GsRasterizer::draw_triangle(
                 vram_, ctx, a, b, c);
         } else {
-            ++stats_.skipped_raster_draws;
+            ++stats_->skipped_raster_draws;
             return;
         }
     }
@@ -1206,9 +1206,9 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         if (ctx.fbmask != 0u) state_mask |= 1u << 5;
         if (ctx.dither) state_mask |= 1u << 6;
         if ((ctx.scanmask & 2u) != 0u) state_mask |= 1u << 7;
-        ++stats_.psm16_state_draws[state_mask];
-        stats_.psm16_state_pixels[state_mask] += pixels;
-        stats_.psm16_state_ns[state_mask] += raster_ns;
+        ++stats_->psm16_state_draws[state_mask];
+        stats_->psm16_state_pixels[state_mask] += pixels;
+        stats_->psm16_state_ns[state_mask] += raster_ns;
 
         const u32 alpha_selectors =
             (ctx.alpha_a & 3u) |
@@ -1220,18 +1220,18 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
             ((ctx.ztst & 3u) << 8u) |
             (ctx.color_clamp ? (1u << 10u) : 0u) |
             (ctx.pabe ? (1u << 11u) : 0u);
-        ++stats_.psm16_alpha_state_draws[alpha_state];
-        stats_.psm16_alpha_state_pixels[alpha_state] += pixels;
-        stats_.psm16_alpha_state_ns[alpha_state] += raster_ns;
+        ++stats_->psm16_alpha_state_draws[alpha_state];
+        stats_->psm16_alpha_state_pixels[alpha_state] += pixels;
+        stats_->psm16_alpha_state_ns[alpha_state] += raster_ns;
         if ((ctx.alpha_c & 3u) == 2u) {
             const u32 fix = ctx.alpha_fix & 0xFFu;
-            ++stats_.psm16_fix_draws[fix];
-            stats_.psm16_fix_ns[fix] += raster_ns;
+            ++stats_->psm16_fix_draws[fix];
+            stats_->psm16_fix_ns[fix] += raster_ns;
         }
     }
 
-    ++stats_.raster_draws;
-    stats_.raster_pixels += pixels;
+    ++stats_->raster_draws;
+    stats_->raster_pixels += pixels;
     const std::size_t size_bin =
         pixels < 64u ? 0u :
         pixels < 256u ? 1u :
@@ -1239,38 +1239,38 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
         pixels < 4096u ? 3u :
         pixels < 16384u ? 4u :
         pixels < 65536u ? 5u : 6u;
-    ++stats_.raster_draws_by_size[size_bin];
-    stats_.raster_pixels_by_size[size_bin] += pixels;
-    stats_.raster_ns_by_size[size_bin] += raster_ns;
-    if (prim < stats_.raster_draws_by_primitive.size()) {
-        ++stats_.raster_draws_by_primitive[prim];
-        stats_.raster_pixels_by_primitive[prim] += pixels;
-        stats_.raster_ns_by_primitive[prim] += raster_ns;
+    ++stats_->raster_draws_by_size[size_bin];
+    stats_->raster_pixels_by_size[size_bin] += pixels;
+    stats_->raster_ns_by_size[size_bin] += raster_ns;
+    if (prim < stats_->raster_draws_by_primitive.size()) {
+        ++stats_->raster_draws_by_primitive[prim];
+        stats_->raster_pixels_by_primitive[prim] += pixels;
+        stats_->raster_ns_by_primitive[prim] += raster_ns;
     }
     if (ctx.texture.enabled &&
-        ctx.texture.psm < stats_.texture_draws_by_psm.size()) {
-        ++stats_.texture_draws_by_psm[ctx.texture.psm];
-        stats_.texture_ns_by_psm[ctx.texture.psm] += raster_ns;
+        ctx.texture.psm < stats_->texture_draws_by_psm.size()) {
+        ++stats_->texture_draws_by_psm[ctx.texture.psm];
+        stats_->texture_ns_by_psm[ctx.texture.psm] += raster_ns;
 
         if (prim == 6u && vertex_count >= 2u) {
-            stats_.textured_sprite_pixels += pixels;
+            stats_->textured_sprite_pixels += pixels;
             if (ctx.texture.fst) {
-                stats_.textured_sprite_fst_pixels += pixels;
+                stats_->textured_sprite_fst_pixels += pixels;
             } else if (a.q == b.q) {
-                stats_.textured_sprite_constant_q_pixels += pixels;
+                stats_->textured_sprite_constant_q_pixels += pixels;
             } else {
-                stats_.textured_sprite_variable_q_pixels += pixels;
+                stats_->textured_sprite_variable_q_pixels += pixels;
             }
         } else if (
             (prim == 3u || prim == 4u || prim == 5u) &&
             vertex_count >= 3u) {
-            stats_.textured_triangle_pixels += pixels;
+            stats_->textured_triangle_pixels += pixels;
             if (ctx.texture.fst) {
-                stats_.textured_triangle_fst_pixels += pixels;
+                stats_->textured_triangle_fst_pixels += pixels;
             } else if (a.q == b.q && b.q == c.q) {
-                stats_.textured_triangle_constant_q_pixels += pixels;
+                stats_->textured_triangle_constant_q_pixels += pixels;
             } else {
-                stats_.textured_triangle_variable_q_pixels += pixels;
+                stats_->textured_triangle_variable_q_pixels += pixels;
             }
         }
     }
@@ -1279,43 +1279,43 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     }
     if (detailed_raster_stats_) {
         const u64 new_nonzero_inputs =
-            stats_.nonzero_raster_inputs - nonzero_inputs_before;
+            stats_->nonzero_raster_inputs - nonzero_inputs_before;
         if (new_nonzero_inputs != 0u) {
             if (ctx.alpha_blend) {
-                stats_.nonzero_inputs_with_blend += new_nonzero_inputs;
+                stats_->nonzero_inputs_with_blend += new_nonzero_inputs;
             } else {
-                stats_.nonzero_inputs_without_blend += new_nonzero_inputs;
+                stats_->nonzero_inputs_without_blend += new_nonzero_inputs;
             }
-            if (!stats_.first_nonzero_input_valid) {
-                stats_.first_nonzero_input_valid = true;
-                stats_.first_nonzero_input_alpha = command.alpha;
-                stats_.first_nonzero_input_test = command.test;
-                stats_.first_nonzero_input_frame = command.frame;
-                stats_.first_nonzero_input_prim = command.effective_primitive;
-                stats_.first_nonzero_input_rgbaq = command.rgbaq;
-                stats_.first_nonzero_input_tex0 = command.tex0;
-                stats_.first_nonzero_input_texa = command.texa;
-                stats_.first_nonzero_input_st = command.st;
-                stats_.first_nonzero_input_uv = command.uv;
+            if (!stats_->first_nonzero_input_valid) {
+                stats_->first_nonzero_input_valid = true;
+                stats_->first_nonzero_input_alpha = command.alpha;
+                stats_->first_nonzero_input_test = command.test;
+                stats_->first_nonzero_input_frame = command.frame;
+                stats_->first_nonzero_input_prim = command.effective_primitive;
+                stats_->first_nonzero_input_rgbaq = command.rgbaq;
+                stats_->first_nonzero_input_tex0 = command.tex0;
+                stats_->first_nonzero_input_texa = command.texa;
+                stats_->first_nonzero_input_st = command.st;
+                stats_->first_nonzero_input_uv = command.uv;
             }
         }
-        if (!stats_.first_alpha_input_valid &&
-            stats_.nonzero_inputs_with_alpha != alpha_inputs_before) {
-            stats_.first_alpha_input_valid = true;
-            stats_.first_alpha_input_alpha = command.alpha;
-            stats_.first_alpha_input_prim = command.effective_primitive;
-            stats_.first_alpha_input_tex0 = command.tex0;
-            stats_.first_alpha_input_rgbaq = command.rgbaq;
+        if (!stats_->first_alpha_input_valid &&
+            stats_->nonzero_inputs_with_alpha != alpha_inputs_before) {
+            stats_->first_alpha_input_valid = true;
+            stats_->first_alpha_input_alpha = command.alpha;
+            stats_->first_alpha_input_prim = command.effective_primitive;
+            stats_->first_alpha_input_tex0 = command.tex0;
+            stats_->first_alpha_input_rgbaq = command.rgbaq;
         }
     }
     if (ctx.texture.enabled) {
-        ++stats_.textured_raster_draws;
-        stats_.texture_samples += pixels;
+        ++stats_->textured_raster_draws;
+        stats_->texture_samples += pixels;
     }
 }
 
 void GsCore::submit_vertex(u64 xyz, bool xyzf) {
-    ++stats_.vertices;
+    ++stats_->vertices;
 
     const u64 prim_reg = effective_prim();
     const u32 prim = static_cast<u32>(prim_reg & 0x7u);
@@ -1398,14 +1398,14 @@ void GsCore::submit_vertex(u64 xyz, bool xyzf) {
         }
         break;
     default:
-        ++stats_.skipped_raster_draws;
+        ++stats_->skipped_raster_draws;
         draw_vertex_count_ = 0;
         break;
     }
 }
 
 void GsCore::write_gif_qword(u64 lo, u64 hi) {
-    ++stats_.gif_qwords;
+    ++stats_->gif_qwords;
 
     if (!gif_.active) {
         begin_tag(lo, hi);

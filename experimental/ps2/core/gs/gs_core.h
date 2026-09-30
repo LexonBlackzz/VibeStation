@@ -6,6 +6,7 @@
 #include "core/gs/gs_gpu_backend.h"
 
 #include <array>
+#include <memory>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -176,16 +177,16 @@ public:
     }
     [[nodiscard]] const GsStats& stats() const {
         flush_pending_draws();
-        return stats_;
+        return *stats_;
     }
     // These counters are updated by GIF submission on the emulation thread,
     // not by the async raster worker. UI telemetry can read them without
     // draining queued raster work.
     [[nodiscard]] u64 submitted_gif_qwords() const {
-        return stats_.gif_qwords;
+        return stats_->gif_qwords;
     }
     [[nodiscard]] u64 submitted_primitives() const {
-        return stats_.primitives;
+        return stats_->primitives;
     }
     [[nodiscard]] const GsVram& vram() const {
         flush_pending_draws();
@@ -291,7 +292,9 @@ private:
     u8 fifo_word_mask_ = 0;
     GifState gif_{};
     TransferState transfer_{};
-    GsStats stats_{};
+    // Heap-allocated: the diagnostic counters are large, and Ps2System must
+    // stay small enough to live on the default Windows stack.
+    std::unique_ptr<GsStats> stats_ = std::make_unique<GsStats>();
     GsVram vram_{};
     std::array<GsRasterVertex, 3> draw_vertices_{};
     u32 draw_vertex_count_ = 0;
