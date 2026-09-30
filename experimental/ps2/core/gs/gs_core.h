@@ -15,6 +15,7 @@
 namespace ps2 {
 
 class GsPrivileged;
+class GsDisplay;
 
 struct GsUnsupportedTransfer {
     u32 reason = 0;
@@ -165,6 +166,10 @@ public:
         raster_timing_enabled_ = enabled;
     }
     void flush_pending_draws() const;
+    // Scans the current PCRTC registers out to `display` once every draw
+    // queued so far has completed. With async rasterization this is queued
+    // behind those draws, so the caller does not wait for the GS worker.
+    void submit_display_scanout(GsDisplay& display, const GsPrivileged& regs);
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
@@ -225,6 +230,9 @@ private:
         u64 texa = 0;
         u64 st = 0;
         u64 uv = 0;
+        // Non-null for a queued PCRTC scanout instead of a draw.
+        GsDisplay* scanout_display = nullptr;
+        std::shared_ptr<const GsPrivileged> scanout_registers{};
     };
 
     struct TransferState {

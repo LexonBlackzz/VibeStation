@@ -57,7 +57,14 @@ public:
     IopIntc& iop_intc(){return iop_intc_;} const IopIntc& iop_intc()const{return iop_intc_;}
     GsCore& gs_core(){return gs_core_;} const GsCore& gs_core()const{return gs_core_;}
     GsPrivileged& gs_privileged(){return gs_;} const GsPrivileged& gs_privileged()const{return gs_;}
-    GsDisplay& gs_display(){return gs_display_;} const GsDisplay& gs_display()const{return gs_display_;}
+    // Waits for any scanout queued on the GS worker, so the image reflects
+    // the most recent vsync. Use latest_gs_display() on a UI thread that
+    // should not block on the worker.
+    GsDisplay& gs_display(){gs_core_.flush_pending_draws();return gs_display_;}
+    const GsDisplay& gs_display()const{gs_core_.flush_pending_draws();return gs_display_;}
+    // Most recently completed scanout; never waits. Hold lock_image() while
+    // reading its pixels.
+    const GsDisplay& latest_gs_display()const{return gs_display_;}
     Vu1& vu0(){return vu0_;} const Vu1& vu0()const{return vu0_;}
     Vu1& vu1(){return vu1_;} const Vu1& vu1()const{return vu1_;}
     bool bios_started()const{return bios_started_;}

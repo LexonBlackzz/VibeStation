@@ -35,6 +35,8 @@ public:
     // Runs the full UI until `fields` guest fields have elapsed after the
     // first visible BIOS frame, prints the measured rate, then exits.
     void benchmark_visible_fields(u64 fields) { benchmark_fields_ = fields; }
+    // Selects the OpenGL compute GS backend or the software rasterizer.
+    void set_gpu_gs_enabled(bool enabled);
 
 private:
     void process_events(bool& quit);
@@ -116,6 +118,7 @@ private:
     bool benchmark_started_ = false;
     u64 benchmark_start_field_ = 0;
     u64 benchmark_ui_frames_ = 0;
+    double benchmark_emulation_seconds_ = 0.0;
     std::chrono::steady_clock::time_point benchmark_start_time_{};
 
     std::array<char, 1024> bios_path_input_{};

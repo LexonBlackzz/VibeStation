@@ -14,6 +14,7 @@ int main(int argc, char** argv) {
     bool ee_jit = false;
     bool ee_dynarec = false;
     unsigned long long benchmark_fields = 0;
+    bool gpu_gs = true;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -32,6 +33,8 @@ int main(int argc, char** argv) {
             }
         } else if (argument == "--benchmark-fields" && i + 1 < argc) {
             benchmark_fields = std::strtoull(argv[++i], nullptr, 10);
+        } else if (argument == "--no-gpu-gs") {
+            gpu_gs = false;
         } else if (argument == "--ee-jit") {
             ee_jit = true;
         } else if (argument == "--ee-dynarec") {
@@ -43,7 +46,7 @@ int main(int argc, char** argv) {
                 "[--ee-jit|--ee-dynarec] "
                 "[--capture-visible <window.ppm>] "
                 "[--capture-after-ee <instructions>] "
-                "[--benchmark-fields <fields>]\n");
+                "[--benchmark-fields <fields>] [--no-gpu-gs]\n");
             return 2;
         }
     }
@@ -69,6 +72,7 @@ int main(int argc, char** argv) {
     }
     app.set_ee_jit_enabled(ee_jit);
     app.set_ee_dynarec_enabled(ee_dynarec);
+    if (!gpu_gs) app.set_gpu_gs_enabled(false);
 
     if (!bios_path.empty() && !app.launch_bios(bios_path)) {
         app.shutdown();

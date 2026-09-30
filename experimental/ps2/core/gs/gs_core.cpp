@@ -1,5 +1,6 @@
 #include "core/gs/gs_core.h"
 
+#include "core/gs/gs_display.h"
 #include "core/gs/gs_privileged.h"
 
 #include <algorithm>
@@ -321,6 +322,30 @@ void GsCore::flush_pending_draws() const {
     synchronize_gpu_to_cpu();
 }
 
+void GsCore::submit_display_scanout(
+    GsDisplay& display, const GsPrivileged& regs) {
+    if (!async_rasterization_ || !raster_worker_.joinable()) {
+        flush_pending_draws();
+        display.update(regs, vram_);
+        return;
+    }
+
+    RasterCommand command{};
+    command.scanout_display = &display;
+    // PCRTC registers can change before the worker reaches this command, so
+    // scan out the values that were live at this vsync.
+    command.scanout_registers = std::make_shared<const GsPrivileged>(regs);
+    {
+        std::unique_lock lock(raster_mutex_);
+        raster_completed_condition_.wait(lock, [this] {
+            return raster_queue_.size() < 4096u;
+        });
+        raster_queue_.push_back(std::move(command));
+        ++raster_enqueued_;
+    }
+    raster_condition_.notify_one();
+}
+
 void GsCore::raster_worker_main() {
     for (;;) {
         RasterCommand command;
@@ -333,7 +358,15 @@ void GsCore::raster_worker_main() {
             command = std::move(raster_queue_.front());
             raster_queue_.pop_front();
         }
-        execute_raster_command(command);
+        if (command.scanout_display != nullptr) {
+            // Every earlier draw has completed on this thread; pull back any
+            // GPU-rendered VRAM before reading it for scanout.
+            synchronize_gpu_to_cpu();
+            command.scanout_display->update(
+                *command.scanout_registers, vram_);
+        } else {
+            execute_raster_command(command);
+        }
         {
             std::lock_guard lock(raster_mutex_);
             ++raster_completed_;
@@ -634,13 +667,15 @@ void GsCore::begin_local_to_host() {
 }
 
 bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
-    flush_pending_draws();
     lo = 0;
     hi = 0;
 
+    // VIF1 polls this while its reverse DMA waits for a transfer to begin.
+    // Only drain queued draws once there is VRAM data to read.
     if (!transfer_.active || !transfer_.local_to_host) {
         return false;
     }
+    flush_pending_draws();
 
     auto next_pixel = [&]() -> u32 {
         const u32 linear_x = transfer_.pixel_index % transfer_.width;

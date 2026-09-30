@@ -206,7 +206,14 @@ int Ps2App::run() {
     while (!quit) {
         process_events(quit);
         update_pad_input();
-        update_emulation();
+        {
+            const auto emulation_start = std::chrono::steady_clock::now();
+            update_emulation();
+            if (benchmark_started_) {
+                benchmark_emulation_seconds_ += std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - emulation_start).count();
+            }
+        }
         update_audio();
 
         if (!visible_capture_path_.empty() &&
@@ -248,7 +255,7 @@ int Ps2App::run() {
         }
 
         if (benchmark_fields_ != 0 &&
-            system_.gs_display().has_visible_pixels()) {
+            system_.latest_gs_display().has_visible_pixels()) {
             const u64 field = system_.video_fields_started();
             const auto now = std::chrono::steady_clock::now();
             if (!benchmark_started_) {
@@ -267,12 +274,14 @@ int Ps2App::run() {
                         stdout,
                         "UI_BENCHMARK_FIELDS=%llu UI_BENCHMARK_SECONDS=%.3f "
                         "UI_BENCHMARK_FIELD_RATE=%.3f "
-                        "UI_BENCHMARK_UI_FPS=%.1f GPU_GS=%d\n",
+                        "UI_BENCHMARK_UI_FPS=%.1f GPU_GS=%d "
+                        "UI_BENCHMARK_EMULATION_SHARE=%.3f\n",
                         static_cast<unsigned long long>(fields),
                         seconds,
                         static_cast<double>(fields) / seconds,
                         static_cast<double>(benchmark_ui_frames_) / seconds,
-                        system_.gs_core().gpu_backend_active() ? 1 : 0);
+                        system_.gs_core().gpu_backend_active() ? 1 : 0,
+                        benchmark_emulation_seconds_ / seconds);
                     std::fflush(stdout);
                     quit = true;
                 }
@@ -280,7 +289,7 @@ int Ps2App::run() {
         }
 
         if (!visible_capture_path_.empty() &&
-            system_.gs_display().has_visible_pixels() &&
+            system_.latest_gs_display().has_visible_pixels() &&
             system_.ee().state().instructions_executed >=
                 visible_capture_minimum_ee_) {
             if (!write_window_ppm(
@@ -307,6 +316,14 @@ void Ps2App::set_ee_jit_enabled(bool enabled) {
 
 void Ps2App::set_ee_dynarec_enabled(bool enabled) {
     system_.ee().set_dynarec_enabled(enabled);
+}
+
+void Ps2App::set_gpu_gs_enabled(bool enabled) {
+    gpu_gs_enabled_ = enabled;
+    system_.gs_core().set_gpu_backend(
+        enabled && gpu_gs_backend_ != nullptr
+            ? static_cast<GsGpuBackend*>(gpu_gs_backend_.get())
+            : nullptr);
 }
 
 void Ps2App::capture_visible_window(
@@ -426,11 +443,14 @@ void Ps2App::shutdown() {
 
 
 void Ps2App::update_display_texture() {
-    const auto& display = system_.gs_display();
-    if (!display.valid() || display.rgba8().empty()) {
+    const auto& display = system_.latest_gs_display();
+    if (!display.valid() ||
+        display_texture_generation_ == display.generation()) {
         return;
     }
-    if (display_texture_generation_ == display.generation()) {
+    // The GS worker may publish the next scanout concurrently.
+    const auto image_lock = display.lock_image();
+    if (display.rgba8().empty()) {
         return;
     }
 
@@ -933,7 +953,7 @@ void Ps2App::panel_main() {
     const float center_x = start.x + (available.x * 0.5f);
     const float center_y = start.y + (available.y * 0.5f);
 
-    const auto& display = system_.gs_display();
+    const auto& display = system_.latest_gs_display();
     const auto show_boot_progress = [&]() {
         if (!emulation_running_ || display.has_visible_pixels()) {
             return;
@@ -1924,7 +1944,7 @@ void Ps2App::update_emulation() {
     // Keep the larger bootstrap slice until the composed display actually
     // contains visible RGB data; validity alone is not a first-frame signal.
     const bool bootstrap_turbo =
-        !system_.gs_display().has_visible_pixels();
+        !system_.latest_gs_display().has_visible_pixels();
 
     // Wait for VSync only when the real-time limiter, not host CPU time,
     // bounded the previous frame. Below full speed, VSync would otherwise
@@ -1971,7 +1991,7 @@ void Ps2App::update_emulation() {
 
         if (bootstrap_turbo) {
             system_.refresh_display();
-            if (system_.gs_display().has_visible_pixels()) break;
+            if (system_.latest_gs_display().has_visible_pixels()) break;
         }
 
         if (ran == 0 || !error.empty() ||
