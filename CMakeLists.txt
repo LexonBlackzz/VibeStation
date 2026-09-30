@@ -99,6 +99,8 @@ set(VIBESTATION_SOURCES
     src/platform/grim_gene_test.cpp
     src/platform/grim_map_runner.cpp
     src/platform/grim_map_test.cpp
+    src/platform/grim_sample_runner.cpp
+    src/platform/grim_sample_test.cpp
     src/platform/grim_process.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
@@ -127,6 +129,7 @@ set(VIBESTATION_SOURCES
     src/core/grim_eval.cpp
     src/core/grim_genome.cpp
     src/core/grim_map.cpp
+    src/core/grim_sample.cpp
     src/core/grim_rom.cpp
     src/core/system_snapshot.cpp
     src/core/rewind.cpp

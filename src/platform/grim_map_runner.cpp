@@ -2,6 +2,7 @@
 #include "core/grim_eval.h"
 #include "core/grim_map.h"
 #include "core/grim_rom.h"
+#include "core/grim_sample.h"
 #include "platform/grim_eval_runner.h"
 #include <algorithm>
 #include <cstdio>
@@ -205,6 +206,18 @@ int run_grim_describe_genome_cli(const std::vector<std::string> &raw_args) {
       use = &ctx;
     }
   }
-  std::printf("%s", grim_describe_genome(genome, use).c_str());
+  GrimSampleContext samples;
+  const GrimSampleContext *sample_use = nullptr;
+  if (bios.empty()) {
+    const char *env = std::getenv("VIBESTATION_BIOS");
+    bios = env != nullptr ? env : "";
+  }
+  bool needs_samples = false;
+  for (const auto &g : genome.genes) needs_samples = needs_samples || g.type == GrimGeneType::SpuSample;
+  if (needs_samples && !bios.empty()) {
+    if (samples.load(bios, pos.size() > 1 ? pos[1] : "", err)) sample_use = &samples;
+    else std::fprintf(stderr, "sample context not used: %s\n", err.c_str());
+  }
+  std::printf("%s", grim_describe_genome(genome, use, sample_use).c_str());
   return 0;
 }

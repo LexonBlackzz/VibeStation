@@ -77,6 +77,8 @@ u32 LW(u32 rt, s32 off, u32 base) { return I(0x23, base, rt, off); }
 u32 SW(u32 rt, s32 off, u32 base) { return I(0x2B, base, rt, off); }
 u32 LBU(u32 rt, s32 off, u32 base) { return I(0x24, base, rt, off); }
 u32 SB(u32 rt, s32 off, u32 base) { return I(0x28, base, rt, off); }
+u32 SH(u32 rt, s32 off, u32 base) { return I(0x29, base, rt, off); }
+u32 LHU(u32 rt, s32 off, u32 base) { return I(0x25, base, rt, off); }
 u32 BNE(u32 rs, u32 rt, s32 off) { return I(5, rs, rt, off); }
 u32 BEQ(u32 rs, u32 rt, s32 off) { return I(4, rs, rt, off); }
 u32 JAL(u32 addr) { return (3u << 26) | ((addr >> 2) & 0x3FFFFFFu); }
@@ -360,6 +362,151 @@ void test_mapper_unit() {
   const GrimMapWord &w = m.words[0x1000 / 4];
   check((w.consumer & kGrimConsumerSpu) != 0 && w.cls == GrimWordClass::Data && w.first_read == 100,
         "unit_spu_consumer_marks_data_and_first_read", grim_consumer_name(w.consumer));
+}
+
+void test_spu_provenance(const std::filesystem::path &dir) {
+  GrimBootMapper mp(psx::BIOS_SIZE);
+  u32 gpr[32] = {};
+  u64 cycle = 100;
+  auto step = [&](u32 instr) {
+    mp.begin_instruction(cycle, 0x80000000u, instr, gpr, 0);
+    mp.commit_instruction();
+    cycle += 2;
+  };
+  auto write16 = [&](u32 off, u16 value, u32 rt = kT6) {
+    gpr[kT5] = 0x1F801C00u + off;
+    gpr[rt] = value;
+    step(SH(rt, 0, kT5));
+  };
+  // Import two contiguous blocks via the CPU load-delay/word-copy rules.
+  gpr[kT2] = 0x80020000u;
+  for (u32 i = 0; i < 32u; i += 4u) {
+    gpr[kT0] = 0xBFC01000u + i;
+    step(LW(kT1, 0, kT0));
+    step(0);
+    step(SW(kT1, static_cast<s32>(i), kT2));
+  }
+  write16(0x6u, 0xFFFFu); // start is written before upload
+  write16(0xEu, 0u);     // zero repeat falls back to the start at key-on
+  write16(0x1A6u, 0xFFFFu);
+  mp.note_dma(4, true, 0x20000u, 4, 4, cycle);
+  bool wrapped = true;
+  for (u32 i = 0; i < 16u; ++i) {
+    wrapped = wrapped && mp.spu_tag(0x7FFF8u + i) == 0x1001u + i;
+  }
+  check(wrapped, "unit_spu_dma_provenance_wraps_at_512kb");
+  write16(0x1AAu, 0x8000u);
+  write16(0x188u, 1u);
+  GrimBootMap m = mp.finish(1, "spu_unit", 0, cycle);
+  check(m.spu_sample_uses.size() == 4u &&
+            m.spu_sample_uses[0].rom_offset == kGrimNoRomOffset &&
+            m.spu_sample_uses[0].kind == GrimSpuSampleUseKind::StartWrite &&
+            m.spu_sample_uses[2].kind == GrimSpuSampleUseKind::KeyOnStart &&
+            m.spu_sample_uses[2].rom_offset == 0x1000u &&
+            m.spu_sample_uses[3].rom_offset == 0x1000u,
+        "unit_spu_deferred_start_resolves_on_keyon_and_zero_repeat_falls_back");
+  // Both DMA directions move the SPU pointer; incoming DMA retains the Phase 3
+  // rule that device writes clear RAM tags.
+  mp.note_dma(4, false, 0x20010u, 4, 1, cycle);
+  write16(0x1A8u, 0x1234u, kT1);
+  check(mp.spu_tag(0xCu) == 0x101Du && mp.spu_tag(0xDu) == 0x101Eu &&
+            mp.ram_tag(0x20010u) == 0u,
+        "unit_spu_read_dma_advances_transfer_pointer");
+  // SW to the IRQ/transfer address pair writes low then high half, just as the bus.
+  gpr[kT5] = 0x1F801DA4u;
+  gpr[kT6] = 0x00200000u;
+  step(SW(kT6, 0, kT5));
+  // A load in flight must not tag the immediately following FIFO store with its
+  // new origin. Only the subsequent instruction sees the new tags.
+  gpr[kT0] = 0xBFC01100u;
+  step(LHU(kT1, 0, kT0));
+  write16(0x1A8u, 0x5678u, kT1);
+  write16(0x1A8u, 0x9ABCu, kT1);
+  check(mp.spu_tag(0x100u) == 0x101Du && mp.spu_tag(0x101u) == 0x101Eu &&
+            mp.spu_tag(0x102u) == 0x1101u && mp.spu_tag(0x103u) == 0x1102u,
+        "unit_spu_fifo_tracks_halfwords_and_load_delay");
+  // A byte store is unsupported by System's SPU bus path and must not advance it.
+  gpr[kT5] = 0x1F801DA8u;
+  step(SB(kT1, 0, kT5));
+  write16(0x1A8u, 0x9ABCu, kT1);
+  check(mp.spu_tag(0x104u) == 0x1101u && mp.spu_tag(0x106u) == 0u,
+        "unit_spu_unsupported_byte_store_does_not_advance_fifo");
+  // Repeat points and high-lane key-ons are attributed to the correct voice.
+  write16(0x106u, 0xFFFFu);
+  write16(0x10Eu, 0xFFFFu);
+  write16(0x18Au, 1u);
+  m = mp.finish(1, "spu_unit", 0, cycle);
+  const auto &last = m.spu_sample_uses.back();
+  check(last.voice == 16u && last.kind == GrimSpuSampleUseKind::KeyOnRepeat &&
+            last.rom_offset == 0x1000u && last.spu_address == 0x7FFF8u,
+        "unit_spu_high_voice_and_repeat_address_resolve");
+  // Untagged writes invalidate origin; a partly overwritten block is unresolved.
+  write16(0x1A6u, 0xFFFFu);
+  write16(0x1A8u, 0u);
+  write16(0x188u, 1u);
+  m = mp.finish(1, "spu_unit", 0, cycle);
+  check(m.spu_sample_uses[m.spu_sample_uses.size() - 2u].rom_offset == kGrimNoRomOffset,
+        "unit_spu_partial_overwrite_clears_sample_origin");
+  std::string err;
+  GrimBootMap loaded;
+  const auto p = dir / "spu_events.json", p2 = dir / "spu_events_again.json";
+  const bool saved = grim_map_save(m, p.string(), err) && grim_map_load(p.string(), loaded, err) &&
+                     grim_map_save(loaded, p2.string(), err);
+  check(saved && loaded.hash() == m.hash() && read_file(p) == read_file(p2),
+        "unit_spu_event_json_roundtrip_is_exact", err);
+  const GrimBootMap merged = grim_map_merge(m, m);
+  check(merged.spu_sample_uses.size() == m.spu_sample_uses.size(),
+        "unit_map_merge_deduplicates_identical_spu_events");
+  GrimBootMap dormant;
+  dormant.words.resize(8);
+  dormant.words[2].flags = dormant.words[3].flags = kGrimReadDirect;
+  dormant.words[6].flags = kGrimReadViaRam;
+  const auto ranges = grim_map_dormant_regions(dormant);
+  check(dormant.dormant_words() == 3u && ranges.size() == 2u &&
+            ranges[0] == std::make_pair(8u, 16u) && ranges[1] == std::make_pair(24u, 28u),
+        "unit_map_dormant_is_derived_without_changing_classes");
+
+  // Execute a real telemetry-loop boot as well: register values must come from
+  // the pre-instruction GPR snapshot, and FIFO tags from delayed LHU results.
+  std::vector<u32> rom(psx::BIOS_SIZE / 4u, 0u);
+  rom[0x1000u / 4u] = 0x9876000Cu;
+  rom[0x1004u / 4u] = 0x76543210u;
+  rom[0x1008u / 4u] = 0xFEDCBA98u;
+  rom[0x100Cu / 4u] = 0x12345678u;
+  Asm a;
+  auto sh_constant = [&](u32 off, u32 value) {
+    a.li(kT5, 0x1F801C00u + off);
+    a.li(kT6, value);
+    a.emit(SH(kT6, 0, kT5));
+  };
+  sh_constant(0x6u, 0x200u);
+  sh_constant(0xEu, 0u);
+  sh_constant(0x1A6u, 0x200u);
+  a.li(kT0, 0xBFC01000u);
+  a.li(kT5, 0x1F801DA8u);
+  for (u32 i = 0; i < 16u; i += 2u) {
+    a.emit(LHU(kT1, static_cast<s32>(i), kT0));
+    a.emit(0);
+    a.emit(SH(kT1, 0, kT5));
+  }
+  sh_constant(0x1AAu, 0x8000u);
+  for (u32 i = 0; i < 64u; ++i) a.emit(0);
+  sh_constant(0x188u, 1u);
+  a.emit(BEQ(kZero, kZero, -1));
+  a.emit(0);
+  std::copy(a.w.begin(), a.w.end(), rom.begin());
+  const auto bios = dir / "spu_provenance_synthetic.bin";
+  const bool written = write_rom(bios, rom);
+  SynthRun boot;
+  if (written) boot = run_synthetic(bios);
+  bool resolved = false;
+  if (boot.ok) {
+    for (const GrimSpuSampleUse &u : boot.map.spu_sample_uses) {
+      resolved = resolved || (u.voice == 0u && u.kind == GrimSpuSampleUseKind::KeyOnStart &&
+                              u.spu_address == 0x1000u && u.rom_offset == 0x1000u);
+    }
+  }
+  check(resolved, "synthetic_spu_fifo_boot_resolves_voice_to_rom");
 }
 
 // ---- real BIOS ------------------------------------------------------------------------------------
@@ -928,6 +1075,7 @@ int run_grim_map_test(const std::vector<std::string> &raw_args, const std::strin
   test_disassembler();
   test_genome_format(dir);
   test_mapper_unit();
+  test_spu_provenance(dir);
   test_synthetic(dir);
   if (bios.empty()) {
     std::printf("GRIM_MAP_TEST SKIP bios tests (no BIOS path or VIBESTATION_BIOS)\n");

@@ -249,3 +249,34 @@ Lexon's machine, so read it if you can.
 - CLI: `--grim-map`, `--grim-map-summary`, `--grim-describe-genome`,
   `--grim-map-test` (`src/platform/grim_map_runner.*`, `grim_map_test.cpp`);
   `--map/--mix/...` options on `--grim-random-genome` and `--grim-explore`.
+
+## ADPCM samples (Phase 4, `src/core/grim_sample.*`)
+
+- `grim_scan_adpcm()` takes stock ROM words only. It scans both eight-byte address
+  lanes at a 16-byte block stride, requires eight consecutive plausible blocks,
+  nonzero payloads and a loop-end terminator. The raw candidate list is scored by
+  `grim_sample_score()` against map SPU-consumer words; map data is never a scanner
+  input. `grim_sample_annotate()` then refines boundaries from resolved voice starts.
+- `GrimBootMapper` shadows SPU RAM byte tags and transfer addressing during discovery
+  only. Its existing instruction/DMA entry points record start/repeat register writes
+  and key-on requests in `GrimBootMap::spu_sample_uses`. There are no new normal-play
+  hooks. Optional JSON events keep older maps loadable; map hashes with events differ.
+- `GrimSampleContext` holds stock words, scanner candidates and annotated samples.
+  `grim_sample_generate()` emits `spu_sample` genes with resolved word patches and
+  the target block lane (`block_phase`, 0 or 8). Ten kinds cover filter/shift,
+  loop-start/end edits, block payload shuffle/repeat/reverse/transplant, and nibble
+  noise. Payload operators retain both header bytes; transplants retain target length.
+  Shift genes tag values 13–15 with `emulator_shift=1`.
+- Genome version stays 2. `GrimGenomeRuntime::apply_rom()` verifies the BIOS hash and
+  every original word across both ROM families before writing anything. The existing
+  GUI `--genome` path applies sample genes on boot/reset in either CPU mode.
+- `--grim-samples [bios] out.json [--map file.json]` reports ROM ranges, blocks, loop
+  points, voices and cycles. `--grim-sample-test [bios]` checks scanner fixtures,
+  gene invariants, small-edit audio liveness and per-kind clean-audio differences.
+  `--out-dir dir` preserves test genomes/WAVs and `audio_survival.csv` outside the repo.
+- Generation/explore support `--mix samples|all`, `--sample-kind`, `--sample-count`,
+  `--sample-index`, `--sample-genes`, `--sample-magnitude`. `both` retains Phase 3's
+  interface+code meaning. Explore compares child audio hashes with a clean baseline
+  and writes `sample_survival.csv`; use one sample gene for unambiguous attribution.
+- The optional dormant view is derived from unused words with read flags. It adds
+  counts/ranges to map summaries without changing the existing serialized classes.

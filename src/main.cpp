@@ -9,6 +9,7 @@
 #include "platform/gpu_correctness_runner.h"
 #include "platform/grim_eval_runner.h"
 #include "platform/grim_map_runner.h"
+#include "platform/grim_sample_runner.h"
 #include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
@@ -3967,6 +3968,8 @@ int main(int argc, char *argv[]) {
                                passthrough[0] == "--grim-map-summary" ||
                                passthrough[0] == "--grim-map-merge" ||
                                passthrough[0] == "--grim-map-test" ||
+                               passthrough[0] == "--grim-samples" ||
+                               passthrough[0] == "--grim-sample-test" ||
                                passthrough[0] == "--grim-describe-genome" ||
                                passthrough[0] == "--grim-explore")) {
     const std::vector<std::string> grim_args(passthrough.begin() + 1,
@@ -3989,6 +3992,10 @@ int main(int argc, char *argv[]) {
                        ? run_grim_map_summary_cli(grim_args)
                    : passthrough[0] == "--grim-map-test"
                        ? run_grim_map_test(grim_args, argv[0])
+                   : passthrough[0] == "--grim-samples"
+                       ? run_grim_samples_cli(grim_args)
+                   : passthrough[0] == "--grim-sample-test"
+                       ? run_grim_sample_test(grim_args)
                    : passthrough[0] == "--grim-describe-genome"
                        ? run_grim_describe_genome_cli(grim_args)
                        : run_grim_determinism_test(grim_args, argv[0]);

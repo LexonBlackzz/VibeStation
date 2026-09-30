@@ -1,4 +1,5 @@
 #include "grim_rom.h"
+#include "grim_sample.h"
 #include "bios.h"
 #include <algorithm>
 #include <cstdio>
@@ -668,7 +669,8 @@ std::string trigger_text(const GrimTrigger &t) {
 }
 } // namespace
 
-std::string grim_describe_genome(const GrimGenome &genome, const GrimRomContext *ctx) {
+std::string grim_describe_genome(const GrimGenome &genome, const GrimRomContext *ctx,
+                               const GrimSampleContext *samples) {
   std::string out;
   char b[256];
   std::vector<GrimMapRegion> regions;
@@ -685,6 +687,10 @@ std::string grim_describe_genome(const GrimGenome &genome, const GrimRomContext 
   out += "\n";
   for (size_t gi = 0; gi < genome.genes.size(); ++gi) {
     const GrimGene &g = genome.genes[gi];
+    if (g.type == GrimGeneType::SpuSample) {
+      out += "gene " + std::to_string(gi) + ": " + grim_sample_describe_gene(g, samples);
+      continue;
+    }
     if (g.type == GrimGeneType::RomCode) {
       std::snprintf(b, sizeof(b),
                     "gene %zu: rom_code kind=%s patches=%zu (generated: count=%d early_ms=%d "

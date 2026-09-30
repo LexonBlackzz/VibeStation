@@ -26,6 +26,20 @@ constexpr u8 kGrimConsumerMdec = 8; // MDEC input
 std::string grim_consumer_name(u8 mask);
 
 constexpr u64 kGrimNever = ~0ull;
+constexpr u32 kGrimNoRomOffset = ~0u;
+
+// Discovery events refer to SPU byte addresses, not the 8-byte units stored in
+// voice registers. A missing origin is retained: addresses are often written
+// before the bank is uploaded, then resolved again at the key-on write.
+enum class GrimSpuSampleUseKind : u8 { StartWrite, RepeatWrite, KeyOnStart, KeyOnRepeat };
+const char *grim_spu_sample_use_kind_name(GrimSpuSampleUseKind kind);
+struct GrimSpuSampleUse {
+  u64 cycle = 0;
+  u32 spu_address = 0;
+  u32 rom_offset = kGrimNoRomOffset;
+  u8 voice = 0;
+  GrimSpuSampleUseKind kind = GrimSpuSampleUseKind::StartWrite;
+};
 
 // Word flags.
 constexpr u8 kGrimExecDirect = 1;  // fetched straight from ROM
@@ -59,9 +73,12 @@ struct GrimBootMap {
   u32 ram_exec_words = 0;
   u32 ram_exec_known = 0;
   std::vector<GrimMapWord> words;
+  std::vector<GrimSpuSampleUse> spu_sample_uses;
 
   u32 rom_words() const { return static_cast<u32>(words.size()); }
   u32 count(GrimWordClass c) const;
+  // Derived subdivision of Unused, preserving the Phase 3 serialized classes.
+  u32 dormant_words() const;
   // 0..1000.
   u32 provenance_permille() const {
     return ram_exec_words == 0 ? 1000u : static_cast<u32>(u64{ram_exec_known} * 1000u / ram_exec_words);
@@ -84,6 +101,7 @@ struct GrimMapRegion {
   u32 via_ram = 0;              // words reached via a RAM copy
 };
 std::vector<GrimMapRegion> grim_map_regions(const GrimBootMap &m);
+std::vector<std::pair<u32, u32>> grim_map_dormant_regions(const GrimBootMap &m);
 
 // Writes <path> (JSON header + region list) and <path>.words (binary, per
 // word). Both are byte-for-byte reproducible.
@@ -131,9 +149,11 @@ public:
 
   // Test access: the tag (ROM byte offset + 1, 0 = none) of a physical RAM byte.
   u32 ram_tag(u32 phys) const { return ram_tag_[phys & (kRamBytes - 1u)]; }
+  u32 spu_tag(u32 addr) const { return spu_tag_[addr & (kSpuRamBytes - 1u)]; }
 
 private:
   static constexpr u32 kRamBytes = 2u * 1024u * 1024u;
+  static constexpr u32 kSpuRamBytes = 512u * 1024u;
   enum Region : u8 { kNone, kRam, kScratch, kRom, kIo };
   Region decode(u32 addr, u32 &idx) const;
   u32 get_tag(Region r, u32 idx) const;
@@ -144,9 +164,16 @@ private:
   void note_origin(const u32 *tags, size_t n, u8 consumer, bool via_ram, u64 cycle);
   void load_tags(u32 op, u32 ea, u32 rt, u32 out[4], bool &ok);
   void set_reg_tags(u32 reg, const u32 tags[4]);
+  void note_spu_write16(u32 offset, u16 value, const u32 *tags);
+  void note_spu_sample_use(u32 voice, u32 addr, GrimSpuSampleUseKind kind);
+  u32 spu_rom_origin(u32 addr) const;
 
   u32 rom_bytes_;
   std::vector<u32> ram_tag_;      // one per RAM byte
+  std::vector<u32> spu_tag_;      // one per SPU RAM byte, discovery only
+  std::array<u16, 512> spu_regs_{};
+  u32 spu_transfer_addr_ = 0;
+  std::vector<GrimSpuSampleUse> spu_sample_uses_;
   std::array<u32, 1024> scratch_tag_{};
   std::array<std::array<u32, 4>, 32> reg_tags_{};
   int pend_reg_ = -1;
@@ -161,6 +188,6 @@ private:
 
   // The instruction between begin and commit.
   u64 cur_cycle_ = 0;
-  u32 cur_pc_ = 0, cur_instr_ = 0, cur_ea_ = 0, cur_sr_ = 0;
+  u32 cur_pc_ = 0, cur_instr_ = 0, cur_ea_ = 0, cur_sr_ = 0, cur_value_ = 0;
   GrimCopyStats stats_;
 };

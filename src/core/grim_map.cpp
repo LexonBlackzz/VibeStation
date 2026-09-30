@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace {
 constexpr u64 kFnvOffset = 14695981039346656037ull;
@@ -55,12 +56,47 @@ std::string grim_consumer_name(u8 mask) {
   return s;
 }
 
+const char *grim_spu_sample_use_kind_name(GrimSpuSampleUseKind kind) {
+  switch (kind) {
+  case GrimSpuSampleUseKind::StartWrite: return "start_write";
+  case GrimSpuSampleUseKind::RepeatWrite: return "repeat_write";
+  case GrimSpuSampleUseKind::KeyOnStart: return "key_on_start";
+  case GrimSpuSampleUseKind::KeyOnRepeat: return "key_on_repeat";
+  }
+  return "unknown";
+}
+
 u32 GrimBootMap::count(GrimWordClass c) const {
   u32 n = 0;
   for (const GrimMapWord &w : words) {
     n += w.cls == c ? 1u : 0u;
   }
   return n;
+}
+
+u32 GrimBootMap::dormant_words() const {
+  u32 n = 0;
+  for (const GrimMapWord &w : words) {
+    n += w.cls == GrimWordClass::Unused &&
+                 (w.flags & (kGrimReadDirect | kGrimReadViaRam)) != 0 ? 1u : 0u;
+  }
+  return n;
+}
+
+std::vector<std::pair<u32, u32>> grim_map_dormant_regions(const GrimBootMap &m) {
+  std::vector<std::pair<u32, u32>> regions;
+  u32 start = kGrimNoRomOffset;
+  for (u32 i = 0; i <= m.rom_words(); ++i) {
+    const bool dormant = i < m.rom_words() && m.words[i].cls == GrimWordClass::Unused &&
+                         (m.words[i].flags & (kGrimReadDirect | kGrimReadViaRam)) != 0;
+    if (dormant && start == kGrimNoRomOffset) {
+      start = i * 4u;
+    } else if (!dormant && start != kGrimNoRomOffset) {
+      regions.emplace_back(start, i * 4u);
+      start = kGrimNoRomOffset;
+    }
+  }
+  return regions;
 }
 
 u64 GrimBootMap::hash() const {
@@ -76,6 +112,17 @@ u64 GrimBootMap::hash() const {
     h = fnv_u64(h, w.first_exec);
     h = fnv_u64(h, w.first_read);
     h = fnv_u64(h, (u64{static_cast<u8>(w.cls)} << 16) | (u64{w.consumer} << 8) | w.flags);
+  }
+  // Keep hashes of old Phase 3 maps unchanged. The optional Phase 4 event
+  // extension is hashed when present, including unresolved events.
+  if (!spu_sample_uses.empty()) {
+    h = fnv_u64(h, spu_sample_uses.size());
+    for (const GrimSpuSampleUse &u : spu_sample_uses) {
+      h = fnv_u64(h, u.cycle);
+      h = fnv_u64(h, u.spu_address);
+      h = fnv_u64(h, u.rom_offset);
+      h = fnv_u64(h, (u64{u.voice} << 8u) | static_cast<u8>(u.kind));
+    }
   }
   return h;
 }
@@ -169,7 +216,24 @@ bool grim_map_save(const GrimBootMap &m, const std::string &path, std::string &e
     js += buf;
     first = false;
   }
-  js += "\n]}\n";
+  js += "\n]";
+  if (!m.spu_sample_uses.empty()) {
+    js += ",\n\"spu_sample_uses\":[";
+    bool first_use = true;
+    for (const GrimSpuSampleUse &u : m.spu_sample_uses) {
+      std::snprintf(buf, sizeof(buf),
+                    "%s\n{\"cycle\":%llu,\"voice\":%u,\"kind\":\"%s\","
+                    "\"spu_address\":%u,\"rom_offset\":%lld}",
+                    first_use ? "" : ",", static_cast<unsigned long long>(u.cycle),
+                    static_cast<unsigned>(u.voice), grim_spu_sample_use_kind_name(u.kind),
+                    u.spu_address, u.rom_offset == kGrimNoRomOffset
+                                       ? -1ll : static_cast<long long>(u.rom_offset));
+      js += buf;
+      first_use = false;
+    }
+    js += "\n]";
+  }
+  js += "}\n";
   std::ofstream jo(path, std::ios::binary | std::ios::trunc);
   jo << js;
   std::ofstream bo(words_path, std::ios::binary | std::ios::trunc);
@@ -203,6 +267,37 @@ bool grim_map_load(const std::string &path, GrimBootMap &out, std::string &err) 
     m.last_new_code_cycle = j["last_new_code_cycle"].get<u64>();
     m.ram_exec_words = j["provenance"]["ram_exec_words"].get<u32>();
     m.ram_exec_known = j["provenance"]["with_rom_origin"].get<u32>();
+    if (j.contains("spu_sample_uses")) {
+      if (!j["spu_sample_uses"].is_array()) {
+        throw std::runtime_error("SPU sample uses must be an array");
+      }
+      for (const auto &entry : j["spu_sample_uses"]) {
+        GrimSpuSampleUse u;
+        u.cycle = entry.at("cycle").get<u64>();
+        const u32 voice = entry.at("voice").get<u32>();
+        u.spu_address = entry.at("spu_address").get<u32>();
+        const s64 origin = entry.at("rom_offset").get<s64>();
+        const std::string kind = entry.at("kind").get<std::string>();
+        if (voice >= 24u || u.spu_address >= 512u * 1024u || origin < -1 ||
+            origin >= static_cast<s64>(j.at("bios_words").get<u32>()) * 4) {
+          throw std::runtime_error("out-of-range SPU sample use");
+        }
+        u.voice = static_cast<u8>(voice);
+        u.rom_offset = origin < 0 ? kGrimNoRomOffset : static_cast<u32>(origin);
+        bool recognized = false;
+        for (u32 i = 0; i < 4; ++i) {
+          if (kind == grim_spu_sample_use_kind_name(static_cast<GrimSpuSampleUseKind>(i))) {
+            u.kind = static_cast<GrimSpuSampleUseKind>(i);
+            recognized = true;
+            break;
+          }
+        }
+        if (!recognized) {
+          throw std::runtime_error("unknown SPU sample use kind");
+        }
+        m.spu_sample_uses.push_back(u);
+      }
+    }
   } catch (const std::exception &e) {
     err = path + ": bad header (" + e.what() + ")";
     return false;
@@ -245,6 +340,23 @@ std::string grim_map_summary(const GrimBootMap &m, u32 min_bytes) {
                 static_cast<unsigned long long>(m.bios_hash), m.scenario.c_str(), m.frames,
                 cycles_to_ms(m.cycles) / 1000.0, cycles_to_ms(m.last_new_code_cycle));
   s += buf;
+  if (!m.spu_sample_uses.empty()) {
+    u32 resolved = 0, key_on_resolved = 0, key_on_total = 0;
+    for (const GrimSpuSampleUse &u : m.spu_sample_uses) {
+      const bool known = u.rom_offset != kGrimNoRomOffset;
+      resolved += known ? 1u : 0u;
+      if (u.kind == GrimSpuSampleUseKind::KeyOnStart) {
+        ++key_on_total;
+        key_on_resolved += known ? 1u : 0u;
+      }
+    }
+    std::snprintf(buf, sizeof(buf),
+                  "SPU address provenance: %u/%u resolved events; %u/%u key-on starts "
+                  "resolved (unresolved register writes are kept)\n",
+                  resolved, static_cast<u32>(m.spu_sample_uses.size()),
+                  key_on_resolved, key_on_total);
+    s += buf;
+  }
   const u32 total = m.rom_words();
   auto pct = [&](u32 n) { return total ? 100.0 * n / total : 0.0; };
   std::snprintf(buf, sizeof(buf),
@@ -255,23 +367,25 @@ std::string grim_map_summary(const GrimBootMap &m, u32 min_bytes) {
                 m.count(GrimWordClass::Unused), pct(m.count(GrimWordClass::Unused)),
                 m.count(GrimWordClass::Unknown), pct(m.count(GrimWordClass::Unknown)), total);
   s += buf;
-  u32 copied_only = 0;
-  for (const GrimMapWord &w : m.words) {
-    copied_only += w.cls == GrimWordClass::Unused &&
-                           (w.flags & (kGrimReadDirect | kGrimReadViaRam)) != 0
-                       ? 1u
-                       : 0u;
-  }
+  const u32 copied_only = m.dormant_words();
   std::snprintf(buf, sizeof(buf),
-                "  (unused = never touched in this scenario, %u of them were copied to RAM by a "
-                "copy loop and then never used; other paths, e.g. a disc or the memory card "
-                "screens, may use them)\n",
-                copied_only);
+                "  unused split: untouched=%u words (%.1fKB); dormant=%u words (%.1fKB) "
+                "read/copied but never consumed. Serialized classes stay compatible.\n",
+                m.count(GrimWordClass::Unused) - copied_only,
+                (m.count(GrimWordClass::Unused) - copied_only) * 4.0 / 1024.0,
+                copied_only, copied_only * 4.0 / 1024.0);
   s += buf;
   std::snprintf(buf, sizeof(buf),
                 "provenance: %u of %u distinct executed RAM words have a ROM origin (%.1f%%)\n",
                 m.ram_exec_known, m.ram_exec_words, m.provenance_permille() / 10.0);
   s += buf;
+  s += "\ndormant ROM ranges (read/copied, never consumed):\n";
+  for (const auto &range : grim_map_dormant_regions(m)) {
+    if (range.second - range.first < min_bytes) continue;
+    std::snprintf(buf, sizeof(buf), "  0x%05X-0x%05X %.1fKB\n", range.first, range.second,
+                  (range.second - range.first) / 1024.0);
+    s += buf;
+  }
   // Overview per 32 KB of ROM.
   s += "\nper 32 KB block (words): rom_range          code    data  unused unknown  code_via_ram\n";
   for (u32 b = 0; b * 8192u < total; ++b) {
@@ -353,11 +467,26 @@ GrimBootMap grim_map_merge(const GrimBootMap &a, const GrimBootMap &b) {
       m.last_new_code_cycle = std::max(m.last_new_code_cycle, w.first_exec);
     }
   }
+  m.spu_sample_uses.insert(m.spu_sample_uses.end(), b.spu_sample_uses.begin(),
+                           b.spu_sample_uses.end());
+  auto less = [](const GrimSpuSampleUse &x, const GrimSpuSampleUse &y) {
+    if (x.cycle != y.cycle) return x.cycle < y.cycle;
+    if (x.voice != y.voice) return x.voice < y.voice;
+    if (x.kind != y.kind) return x.kind < y.kind;
+    if (x.spu_address != y.spu_address) return x.spu_address < y.spu_address;
+    return x.rom_offset < y.rom_offset;
+  };
+  std::sort(m.spu_sample_uses.begin(), m.spu_sample_uses.end(), less);
+  m.spu_sample_uses.erase(std::unique(m.spu_sample_uses.begin(), m.spu_sample_uses.end(),
+                                      [&](const GrimSpuSampleUse &x, const GrimSpuSampleUse &y) {
+                                        return !less(x, y) && !less(y, x);
+                                      }), m.spu_sample_uses.end());
   return m;
 }
 
 GrimBootMapper::GrimBootMapper(u32 rom_bytes)
-    : rom_bytes_(rom_bytes), ram_tag_(kRamBytes, 0u), first_exec_(rom_bytes / 4u, kGrimNever),
+    : rom_bytes_(rom_bytes), ram_tag_(kRamBytes, 0u), spu_tag_(kSpuRamBytes, 0u),
+      first_exec_(rom_bytes / 4u, kGrimNever),
       first_read_(rom_bytes / 4u, kGrimNever), consumer_(rom_bytes / 4u, 0),
       flags_(rom_bytes / 4u, 0), ram_exec_(kRamBytes / 4u, 0) {}
 
@@ -408,6 +537,7 @@ void GrimBootMapper::begin_instruction(u64 cycle, u32 pc, u32 instr, const u32 *
   cur_instr_ = instr;
   cur_sr_ = sr;
   cur_ea_ = gpr[(instr >> 21) & 31u] + static_cast<u32>(static_cast<s32>(static_cast<s16>(instr)));
+  cur_value_ = gpr[(instr >> 16) & 31u];
 }
 
 void GrimBootMapper::note_origin(const u32 *tags, size_t n, u8 consumer, bool via_ram, u64 cycle) {
@@ -484,6 +614,74 @@ void GrimBootMapper::set_reg_tags(u32 reg, const u32 tags[4]) {
   if (reg != 0) {
     for (int i = 0; i < 4; ++i) {
       reg_tags_[reg][i] = tags[i];
+    }
+  }
+}
+
+u32 GrimBootMapper::spu_rom_origin(u32 addr) const {
+  const u32 first = spu_tag_[addr & (kSpuRamBytes - 1u)];
+  if (first == 0 || first - 1u + 16u > rom_bytes_) {
+    return kGrimNoRomOffset;
+  }
+  // Resolve only a whole block, so one tagged byte in a buffer cannot falsely
+  // identify a mixed or partially overwritten sample.
+  for (u32 i = 1; i < 16u; ++i) {
+    if (spu_tag_[(addr + i) & (kSpuRamBytes - 1u)] != first + i) {
+      return kGrimNoRomOffset;
+    }
+  }
+  return first - 1u;
+}
+
+void GrimBootMapper::note_spu_sample_use(u32 voice, u32 addr, GrimSpuSampleUseKind kind) {
+  GrimSpuSampleUse u;
+  u.cycle = cur_cycle_;
+  u.voice = static_cast<u8>(voice);
+  u.spu_address = addr & (kSpuRamBytes - 1u);
+  u.rom_offset = spu_rom_origin(u.spu_address);
+  u.kind = kind;
+  spu_sample_uses_.push_back(u);
+}
+
+void GrimBootMapper::note_spu_write16(u32 offset, u16 value, const u32 *tags) {
+  if (offset >= 0x400u) {
+    return;
+  }
+  // Same register/transfer semantics as Spu::write16. No SPU hooks are needed:
+  // this code runs only after an instruction in the existing discovery loop.
+  spu_regs_[offset / 2u] = offset >= 0x188u && offset <= 0x18Eu ? 0u : value;
+  if (offset == 0x1A6u) {
+    spu_transfer_addr_ = static_cast<u32>(value) * 8u;
+  } else if (offset == 0x1A8u) {
+    spu_tag_[spu_transfer_addr_ & (kSpuRamBytes - 1u)] = tags[0];
+    spu_tag_[(spu_transfer_addr_ + 1u) & (kSpuRamBytes - 1u)] = tags[1];
+    spu_transfer_addr_ = (spu_transfer_addr_ + 2u) & (kSpuRamBytes - 1u);
+  } else if (offset < 0x180u && (offset & 15u) == 6u) {
+    note_spu_sample_use(offset / 16u, static_cast<u32>(value) * 8u,
+                         GrimSpuSampleUseKind::StartWrite);
+  } else if (offset < 0x180u && (offset & 15u) == 14u) {
+    note_spu_sample_use(offset / 16u, static_cast<u32>(value) * 8u,
+                         GrimSpuSampleUseKind::RepeatWrite);
+  } else if (offset == 0x188u || offset == 0x18Au) {
+    // These are key-on requests (time of the CPU write, before the SPU's next
+    // sample-clock latch), and not new hooks into normal voice playback.
+    if ((spu_regs_[0x1AAu / 2u] & 0x8000u) == 0u) {
+      return;
+    }
+    const u32 base = offset == 0x188u ? 0u : 16u;
+    const u32 mask = offset == 0x188u ? value : value & 255u;
+    for (u32 bit = 0; bit < 16u && base + bit < 24u; ++bit) {
+      if ((mask & (1u << bit)) == 0u) {
+        continue;
+      }
+      const u32 voice = base + bit;
+      const u32 start = static_cast<u32>(spu_regs_[(voice * 16u + 6u) / 2u]) * 8u;
+      u32 repeat = static_cast<u32>(spu_regs_[(voice * 16u + 14u) / 2u]) * 8u;
+      if (repeat == 0u) {
+        repeat = start; // Spu::key_on_voice's zero-repeat fallback
+      }
+      note_spu_sample_use(voice, start, GrimSpuSampleUseKind::KeyOnStart);
+      note_spu_sample_use(voice, repeat, GrimSpuSampleUseKind::KeyOnRepeat);
     }
   }
 }
@@ -721,6 +919,36 @@ void GrimBootMapper::commit_instruction() {
         }
         note_use(padded); // a device register consumed it
       }
+      // System implements SPU accesses as halfword writes. Byte stores to this
+      // range are unhandled and must not advance the FIFO's shadow pointer.
+      if (idx >= kIoSpuBegin && idx < kIoSpuEnd && op != 0x28) {
+        const u32 offset = idx - kIoSpuBegin;
+        if (op == 0x29) {
+          note_spu_write16(offset, static_cast<u16>(cur_value_), src);
+        } else if (op == 0x2B || op == 0x2A || op == 0x2E) {
+          const u32 write_offset = base - kIoSpuBegin;
+          u32 value = cur_value_;
+          u32 out_tags[4] = {0, 0, 0, 0};
+          if (op == 0x2B) {
+            for (u32 i = 0; i < 4u; ++i) out_tags[i] = src[i];
+          } else {
+            // SWL/SWR read-modify-write a full aligned word in the interpreter.
+            const u32 aligned_offset = write_offset & ~3u;
+            value = static_cast<u32>(spu_regs_[aligned_offset / 2u]) |
+                    (static_cast<u32>(spu_regs_[aligned_offset / 2u + 1u]) << 16u);
+            for (size_t i = 0; i < n; ++i) {
+              const u32 lane = (base + puts[i].off) & 3u;
+              const u32 mask = 255u << (lane * 8u);
+              value = (value & ~mask) | (((cur_value_ >> (puts[i].lane * 8u)) & 255u)
+                                         << (lane * 8u));
+              out_tags[lane] = src[puts[i].lane];
+            }
+          }
+          const u32 aligned_offset = write_offset & ~3u;
+          note_spu_write16(aligned_offset, static_cast<u16>(value), out_tags);
+          note_spu_write16(aligned_offset + 2u, static_cast<u16>(value >> 16u), out_tags + 2u);
+        }
+      }
     }
     break;
   }
@@ -798,9 +1026,18 @@ void GrimBootMapper::note_dma(int channel, bool from_ram, u32 addr, s32 step, u3
         ++stats_.dma_tagged_words;
         note_origin(t, 4, consumer, true, cycle);
       }
+      if (channel == 4) {
+        for (u32 b = 0; b < 4u; ++b) {
+          spu_tag_[(spu_transfer_addr_ + b) & (kSpuRamBytes - 1u)] = t[b];
+        }
+      }
     } else {
       t[0] = t[1] = t[2] = t[3] = 0;
       ++stats_.dma_words_to_ram;
+    }
+    if (channel == 4) {
+      // Both SPU DMA directions advance the same transfer pointer.
+      spu_transfer_addr_ = (spu_transfer_addr_ + 4u) & (kSpuRamBytes - 1u);
     }
     a = static_cast<u32>(static_cast<s32>(a) + step) & (kRamBytes - 4u);
   }
@@ -832,6 +1069,7 @@ GrimBootMap GrimBootMapper::finish(u64 bios_hash, const std::string &scenario, u
   m.cycles = cycles;
   m.ram_exec_words = ram_exec_words_;
   m.ram_exec_known = ram_exec_known_;
+  m.spu_sample_uses = spu_sample_uses_;
   m.words.resize(first_exec_.size());
   for (size_t i = 0; i < m.words.size(); ++i) {
     GrimMapWord &w = m.words[i];

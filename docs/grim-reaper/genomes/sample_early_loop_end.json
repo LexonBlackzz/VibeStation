@@ -1,0 +1,3 @@
+{"version":2,"bios_hash":"0x32B1A0FA4DB70C8F","genes":[
+{"type":"spu_sample","seed":15812077570365695333,"params":{"kind":4,"count":1,"magnitude":1,"sample":7,"donor":-1,"emulator_shift":0,"block_phase":0},"patches":[[357984,572588563,572588819,0]]}
+]}

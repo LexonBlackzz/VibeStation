@@ -2,6 +2,7 @@
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
 #include "core/grim_rom.h"
+#include "core/grim_sample.h"
 #include "core/types.h"
 #include "platform/grim_process.h"
 #include <algorithm>
@@ -487,14 +488,19 @@ std::string grim_take_bios_arg(std::vector<std::string> &args) {
 
 namespace {
 
-// Phase 3: which gene families random genomes draw from, and the ROM options.
+// Which gene families random genomes draw from, with ROM/sample options.
 struct RomMixOptions {
-  std::string mix = "interface"; // interface | rom | both
+  std::string mix = "interface"; // both retains Phase 3 interface + ROM semantics
   std::string map_path, bios;
   u32 patches_max = 6, genes_max = 3, early_ms = 200, curve = 2;
+  u32 sample_count = 2, sample_genes = 3, sample_magnitude = 1;
+  s32 sample_kind = -1, sample_index = -1;
+  std::string sample_error;
   bool call_swap = false;
   GrimRomContext ctx;
-  bool wants_rom() const { return mix == "rom" || mix == "both"; }
+  GrimSampleContext sample_ctx;
+  bool wants_rom() const { return mix == "rom" || mix == "both" || mix == "all"; }
+  bool wants_samples() const { return mix == "samples" || mix == "all"; }
 };
 
 // Consumes a ROM-related option at args[i]; returns true when it was one.
@@ -518,6 +524,35 @@ bool take_rom_option(const std::vector<std::string> &args, size_t &i, RomMixOpti
     o.curve = num(0, 3);
   } else if (a == "--call-swap") {
     o.call_swap = true;
+  } else if (a == "--sample-count" && has_value) {
+    o.sample_count = num(1, 256);
+  } else if (a == "--sample-genes" && has_value) {
+    o.sample_genes = num(1, 64);
+  } else if (a == "--sample-magnitude" && has_value) {
+    o.sample_magnitude = num(1, 15);
+  } else if (a == "--sample-index" && has_value) {
+    const std::string value = args[++i];
+    char *end = nullptr;
+    const long v = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != 0 || v < -1 || v > 32767) {
+      o.sample_error = "--sample-index must be -1 (random) or 0..32767";
+    } else {
+      o.sample_index = static_cast<s32>(v);
+    }
+  } else if (a == "--sample-kind" && has_value) {
+    const std::string value = args[++i];
+    o.sample_kind = -1;
+    if (value != "random") {
+      for (u32 k = 0; k < static_cast<u32>(GrimSampleMut::Count); ++k) {
+        if (value == grim_sample_mut_name(static_cast<GrimSampleMut>(k)) ||
+            value == std::to_string(k)) {
+          o.sample_kind = static_cast<s32>(k);
+        }
+      }
+      if (o.sample_kind < 0) {
+        o.sample_error = "--sample-kind must be random, a sample kind name, or 0..9";
+      }
+    }
   } else {
     return false;
   }
@@ -526,28 +561,56 @@ bool take_rom_option(const std::vector<std::string> &args, size_t &i, RomMixOpti
 
 // Loads the map + BIOS when ROM genes are wanted. Prints and returns false on error.
 bool finish_rom_options(RomMixOptions &o, const std::string &bios_from_env) {
-  if (o.mix != "interface" && o.mix != "rom" && o.mix != "both") {
-    std::fprintf(stderr, "--mix must be interface, rom or both\n");
+  if (o.mix != "interface" && o.mix != "rom" && o.mix != "both" && o.mix != "samples" &&
+      o.mix != "all") {
+    std::fprintf(stderr, "--mix must be interface, rom, both, samples or all\n");
     return false;
   }
-  if (!o.wants_rom()) {
+  if (!o.sample_error.empty()) {
+    std::fprintf(stderr, "%s\n", o.sample_error.c_str());
+    return false;
+  }
+  if (!o.wants_rom() && !o.wants_samples()) {
     return true;
   }
   if (o.bios.empty()) {
     o.bios = bios_from_env;
   }
   std::string err;
-  if (o.map_path.empty() || o.bios.empty() || !o.ctx.load(o.bios, o.map_path, err)) {
+  if (o.wants_rom() &&
+      (o.map_path.empty() || o.bios.empty() || !o.ctx.load(o.bios, o.map_path, err))) {
     std::fprintf(stderr, "ROM genes need --map <file> and a BIOS (--bios or VIBESTATION_BIOS)%s%s\n",
                  err.empty() ? "" : ": ", err.c_str());
     return false;
+  }
+  if (o.wants_samples()) {
+    if (o.bios.empty() || !o.sample_ctx.load(o.bios, o.map_path, err)) {
+      std::fprintf(stderr, "Sample genes need a BIOS (--bios or VIBESTATION_BIOS)%s%s\n",
+                   err.empty() ? "" : ": ", err.c_str());
+      return false;
+    }
+    if (o.sample_ctx.samples.empty() ||
+        (o.sample_index >= 0 && static_cast<size_t>(o.sample_index) >= o.sample_ctx.samples.size())) {
+      std::fprintf(stderr, "No scanned sample exists at --sample-index %d (scanned %zu)\n",
+                   o.sample_index, o.sample_ctx.samples.size());
+      return false;
+    }
   }
   return true;
 }
 
 void apply_rom_options(GrimRandomParams &p, const RomMixOptions &o) {
-  if (o.mix == "rom") {
+  if (o.mix == "rom" || o.mix == "samples") {
     p.spu = p.gpu = false;
+  }
+  if (o.wants_samples()) {
+    p.sample = &o.sample_ctx;
+    p.sample_genes_min = 1;
+    p.sample_genes_max = o.sample_genes;
+    p.sample_count_max = o.sample_count;
+    p.sample_kind = o.sample_kind;
+    p.sample_magnitude = o.sample_magnitude;
+    p.sample_index = o.sample_index;
   }
   if (o.wants_rom()) {
     p.rom = &o.ctx;
@@ -575,8 +638,9 @@ int run_grim_random_genome_cli(const std::vector<std::string> &raw_args) {
   if (args.size() < 2) {
     std::fprintf(stderr,
                  "usage: --grim-random-genome <seed> <out.json> [gene_count] [--mix "
-                 "interface|rom|both --map file --bios path] [--rom-patches N] [--rom-genes N] "
-                 "[--early-ms N] [--curve 0-3] [--call-swap]\n");
+                 "interface|rom|both|samples|all --map file --bios path] [--rom-patches N] [--rom-genes N] "
+                 "[--early-ms N] [--curve 0-3] [--call-swap] [--sample-kind name|0-9|random] "
+                 "[--sample-count N] [--sample-index N] [--sample-genes N] [--sample-magnitude 1-15]\n");
     return 1;
   }
   const char *env = std::getenv("VIBESTATION_BIOS");
@@ -591,6 +655,10 @@ int run_grim_random_genome_cli(const std::vector<std::string> &raw_args) {
   }
   const u64 seed = std::strtoull(args[0].c_str(), nullptr, 10);
   const GrimGenome g = grim_random_genome(seed, params);
+  if (g.genes.empty()) {
+    std::fprintf(stderr, "No effective genes could be generated for this seed and selection\n");
+    return 1;
+  }
   std::ofstream out(args[1], std::ios::binary | std::ios::trunc);
   out << grim_genome_serialize(g);
   if (!out) {
@@ -625,6 +693,30 @@ std::string find_result_line(const std::string &path) {
     }
   }
   return found;
+}
+
+bool read_audio_hashes(const std::filesystem::path &path, std::vector<u64> &hashes) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return false;
+  }
+  hashes.clear();
+  std::string line;
+  const std::string needle = "\"audio_hash\":\"";
+  while (std::getline(in, line)) {
+    const size_t p = line.find(needle);
+    if (p == std::string::npos) {
+      continue;
+    }
+    char *end = nullptr;
+    const char *start = line.c_str() + p + needle.size();
+    const u64 value = std::strtoull(start, &end, 16);
+    if (end == start || end == nullptr || *end != '"') {
+      return false;
+    }
+    hashes.push_back(value);
+  }
+  return !hashes.empty();
 }
 
 void write_text(const std::filesystem::path &path, const std::string &text) {
@@ -668,6 +760,9 @@ void rom_attribution(const GrimGenome &g, const GrimRomContext &ctx,
                      const std::array<u64, 4> &edges, int &bucket, int &kind) {
   u64 best = kGrimNever;
   for (const GrimGene &gene : g.genes) {
+    if (gene.type != GrimGeneType::RomCode) {
+      continue;
+    }
     for (const GrimRomPatch &p : gene.patches) {
       const u64 t = p.offset / 4u < ctx.map.words.size() ? ctx.map.words[p.offset / 4u].first_exec
                                                           : kGrimNever;
@@ -805,8 +900,10 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     std::fprintf(stderr,
                  "usage: --grim-explore <seed_start> <count> <out_dir> [frames=900] "
                  "[--bios path] [--timeout S=300] [--families spu|gpu|both] [--genes N]\n"
-                 "  Phase 3: [--mix interface|rom|both] [--map file] [--rom-patches N] "
-                 "[--rom-genes N] [--early-ms N] [--curve 0-3] [--call-swap]\n");
+                 "  ROM: [--mix interface|rom|both|samples|all] [--map file] [--rom-patches N] "
+                 "[--rom-genes N] [--early-ms N] [--curve 0-3] [--call-swap]\n"
+                 "  Samples: [--sample-kind name|0-9|random] [--sample-count N] "
+                 "[--sample-index N] [--sample-genes N] [--sample-magnitude 1-15]\n");
     return 1;
   }
   rom.bios = bios;
@@ -834,11 +931,33 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     std::string verdict, reason, silent, hash;
     size_t genes;
     int bucket = -1, kind = -1; // ROM genes: first-execution quintile and kind of the earliest patch
+    int sample_kind = -1;
+    std::string audio_changed = "-";
   };
   std::vector<Row> rows;
   const std::array<u64, 4> time_edges = rom.wants_rom() ? exec_time_edges(rom.ctx)
                                                         : std::array<u64, 4>{};
   u32 alive = 0, dead = 0, timeouts = 0, crashes = 0, errors = 0;
+  std::vector<u64> clean_audio;
+  if (rom.wants_samples()) {
+    GrimEvalConfig clean_cfg;
+    clean_cfg.bios_path = bios;
+    clean_cfg.frames = frames;
+    clean_cfg.disc_cue = disc_cue;
+    clean_cfg.stop_on_death = false;
+    clean_cfg.watchdog_seconds = timeout;
+    const GrimEvalResult clean = run_grim_eval(clean_cfg);
+    if (clean.end_reason != "frames" || clean.frames.size() != frames) {
+      std::fprintf(stderr, "Cannot compare sample audio: clean baseline ended with %s\n",
+                   clean.end_reason.c_str());
+      return 1;
+    }
+    for (const GrimFrameTelemetry &frame : clean.frames) {
+      clean_audio.push_back(frame.audio_hash);
+    }
+    std::printf("GRIM_EXPLORE_AUDIO_BASELINE frames=%zu run_hash=0x%016llX\n",
+                 clean.frames.size(), static_cast<unsigned long long>(clean.run_hash));
+  }
 
   for (u32 n = 0; n < count; ++n) {
     const u64 seed = seed_start + n;
@@ -848,6 +967,17 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     std::snprintf(hash_text, sizeof(hash_text), "0x%016llX",
                   static_cast<unsigned long long>(grim_genome_hash(genome)));
     const std::string seed_name = "seed_" + std::to_string(seed);
+    if (genome.genes.empty()) {
+      Row row{seed, "error", "no_effective_genes", "-", hash_text, 0};
+      row.sample_kind = rom.sample_kind;
+      rows.push_back(row);
+      ++errors;
+      write_text(out_dir / "crashes" / (seed_name + ".json"), genome_text);
+      std::printf("GRIM_EXPLORE seed=%llu verdict=error reason=no_effective_genes silent=- genome=%s audio_changed=-\n",
+                   static_cast<unsigned long long>(seed), hash_text);
+      std::fflush(stdout);
+      continue;
+    }
     const fs::path work = out_dir / "work" / seed_name;
     fs::remove_all(work, ec);
     fs::create_directories(work, ec);
@@ -878,6 +1008,12 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
     if (rom.wants_rom()) {
       rom_attribution(genome, rom.ctx, time_edges, row.bucket, row.kind);
     }
+    for (const GrimGene &gene : genome.genes) {
+      if (gene.type == GrimGeneType::SpuSample) {
+        row.sample_kind = gene.params[0]; // first sample gene; use --sample-genes 1 for attribution
+        break;
+      }
+    }
     bool is_survivor = false;
     if (child.timed_out) {
       row.verdict = "timeout";
@@ -896,6 +1032,12 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
       row.verdict = result_field(line, "verdict");
       row.reason = result_field(line, "reason");
       row.silent = result_field(line, "silent");
+      if (rom.wants_samples()) {
+        std::vector<u64> audio;
+        if (read_audio_hashes(work / "telemetry.jsonl", audio) && audio.size() == clean_audio.size()) {
+          row.audio_changed = audio == clean_audio ? "0" : "1";
+        }
+      }
       // A machine that lives but never read the disc (CD DMA under one sector) cannot
       // load games: it stays a survivor, with its own outcome in the tables.
       if (!disc_cue.empty() && row.verdict == "alive" &&
@@ -922,17 +1064,17 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
                     fs::copy_options::overwrite_existing, ec);
       fs::remove_all(work, ec);
     }
-    std::printf("GRIM_EXPLORE seed=%llu verdict=%s reason=%s silent=%s genome=%s\n",
+    std::printf("GRIM_EXPLORE seed=%llu verdict=%s reason=%s silent=%s genome=%s audio_changed=%s\n",
                 static_cast<unsigned long long>(seed), row.verdict.c_str(),
-                row.reason.c_str(), row.silent.c_str(), row.hash.c_str());
+                row.reason.c_str(), row.silent.c_str(), row.hash.c_str(), row.audio_changed.c_str());
     std::fflush(stdout);
     rows.push_back(row);
   }
 
-  std::string table = "seed\tverdict\treason\tsilent\tgenome_hash\tgenes\n";
+  std::string table = "seed\tverdict\treason\tsilent\tgenome_hash\tgenes\taudio_changed\n";
   for (const Row &row : rows) {
     table += std::to_string(row.seed) + "\t" + row.verdict + "\t" + row.reason + "\t" +
-             row.silent + "\t" + row.hash + "\t" + std::to_string(row.genes) + "\n";
+             row.silent + "\t" + row.hash + "\t" + std::to_string(row.genes) + "\t" + row.audio_changed + "\n";
   }
   write_text(out_dir / "summary.tsv", table);
   std::printf("\n%s", table.c_str());
@@ -948,6 +1090,35 @@ int run_grim_explore_cli(const std::vector<std::string> &raw_args,
                                                                           : row.verdict});
     }
     print_survival(tally_rows, rom.ctx, time_edges, out_dir / "survival.csv");
+  }
+  if (rom.wants_samples()) {
+    struct SampleTally { u32 n = 0, survived_changed = 0, survived_identical = 0, silent = 0, dead = 0, unresolved = 0; };
+    std::array<SampleTally, static_cast<size_t>(GrimSampleMut::Count)> tallies{};
+    for (const Row &row : rows) {
+      if (row.sample_kind < 0 || row.sample_kind >= static_cast<int>(tallies.size())) {
+        continue;
+      }
+      SampleTally &t = tallies[static_cast<size_t>(row.sample_kind)];
+      ++t.n;
+      if (row.verdict != "alive") ++t.dead;
+      else if (row.silent == "1") ++t.silent;
+      else if (row.audio_changed == "1") ++t.survived_changed;
+      else if (row.audio_changed == "0") ++t.survived_identical;
+      else ++t.unresolved;
+    }
+    std::string csv = "kind,n,survived_changed,survived_identical,silent,dead,unresolved\n";
+    std::printf("GRIM_SAMPLE_SURVIVAL by first sample gene kind (audio survived means alive and silent=0)\n");
+    for (size_t k = 0; k < tallies.size(); ++k) {
+      const SampleTally &t = tallies[k];
+      if (t.n == 0) continue;
+      const std::string kind = grim_sample_mut_name(static_cast<GrimSampleMut>(k));
+      csv += kind + "," + std::to_string(t.n) + "," + std::to_string(t.survived_changed) + "," +
+             std::to_string(t.survived_identical) + "," + std::to_string(t.silent) + "," +
+             std::to_string(t.dead) + "," + std::to_string(t.unresolved) + "\n";
+      std::printf("  %s n=%u survived_changed=%u survived_identical=%u silent=%u dead=%u unresolved=%u\n",
+                   kind.c_str(), t.n, t.survived_changed, t.survived_identical, t.silent, t.dead, t.unresolved);
+    }
+    write_text(out_dir / "sample_survival.csv", csv);
   }
   fs::remove(out_dir / "work", ec); // empty by now; ignore failure
   return 0;

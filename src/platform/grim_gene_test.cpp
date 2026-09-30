@@ -2,6 +2,7 @@
 // triggers, end-to-end on the stock BIOS, determinism, --grim-explore).
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
+#include "core/bios.h"
 #include "core/system.h"
 #include "core/types.h"
 #include "platform/grim_eval_runner.h"
@@ -149,10 +150,13 @@ void test_rng() {
 // One gene of each type with a non-default trigger, to exercise every field.
 GrimGenome all_types_genome() {
   GrimGenome g;
-  for (size_t t = 0; t < static_cast<size_t>(GrimGeneType::RomCode); ++t) {
+  for (size_t t = 0; t < static_cast<size_t>(GrimGeneType::Count); ++t) {
     GrimGene gene = grim_default_gene(static_cast<GrimGeneType>(t));
     gene.seed = 1000 + t;
-    switch (t % 4) {
+    if (grim_gene_is_rom(gene.type)) {
+      g.version = 2;
+      g.bios_hash = 0x123456789ABCDEF0ull;
+    } else switch (t % 4) {
     case 0:
       gene.trigger = window(10, 500);
       break;
@@ -306,6 +310,124 @@ void test_genome_strict() {
   GrimGenome out;
   std::string err;
   check(grim_genome_parse(base, out, err), "genome_strict_accepts_valid", err);
+
+  // Both static families use v2's resolved patch transport, with no runtime
+  // target/trigger fields. Their strict checks must not regress v1 hashes.
+  for (size_t t = 0; t < static_cast<size_t>(GrimGeneType::Count); ++t) {
+    const GrimGeneType type = static_cast<GrimGeneType>(t);
+    if (!grim_gene_is_rom(type)) {
+      continue;
+    }
+    GrimGenome rg;
+    rg.version = 2;
+    rg.bios_hash = 0x123456789ABCDEF0ull;
+    rg.genes.push_back(grim_default_gene(type));
+    rg.genes[0].patches.push_back({32, 0x03021111u, 0x03021121u, false});
+    const std::string valid_text = grim_genome_serialize(rg);
+    GrimGenome parsed;
+    err.clear();
+    check(grim_genome_parse(valid_text, parsed, err) &&
+              grim_genome_serialize(parsed) == valid_text,
+          std::string(grim_gene_type_name(type)) + "_resolved_patches_roundtrip", err);
+    const auto reject_change = [&](const char *label, const std::string &from, const std::string &to) {
+      std::string text = valid_text;
+      const size_t p = text.find(from);
+      if (p == std::string::npos) {
+        check(false, label, "missing fixture anchor");
+        return;
+      }
+      text.replace(p, from.size(), to);
+      GrimGenome rejected;
+      std::string why;
+      check(!grim_genome_parse(text, rejected, why) && !why.empty(),
+            std::string(grim_gene_type_name(type)) + "_rejects_" + label, why);
+    };
+    reject_change("unaligned", "[[32,", "[[33,");
+    reject_change("kind_range", "\"kind\":0", "\"kind\":100");
+    reject_change("unknown_param", "\"count\":1", "\"count\":1,\"extra\":0");
+    reject_change("runtime_target", "\"seed\":0", "\"target\":1,\"seed\":0");
+    reject_change("version_one", "\"version\":2,\"bios_hash\":\"0x123456789ABCDEF0\"", "\"version\":1");
+    if (type == GrimGeneType::SpuSample) {
+      reject_change("delay_slot", ",0]]", ",1]]");
+      reject_change("sample_index", "\"sample\":-1", "\"sample\":-2");
+      reject_change("shift_tag", "\"emulator_shift\":0", "\"emulator_shift\":2");
+      reject_change("block_phase", "\"block_phase\":0", "\"block_phase\":4");
+      reject_change("header_alignment", "[[32,", "[[36,");
+      reject_change("payload_header_change", "\"kind\":0", "\"kind\":9");
+      reject_change("header_gene_payload", ",50467105,", ",50401569,");
+      reject_change("wrong_header_field", "\"kind\":0", "\"kind\":1");
+      GrimGenome shift = rg;
+      shift.genes[0].params[0] = 1;
+      shift.genes[0].params[5] = 1;
+      shift.genes[0].patches[0].mutated = 0x0302111Du;
+      const std::string tagged = grim_genome_serialize(shift);
+      check(grim_genome_parse(tagged, parsed, err), "spu_sample_tagged_reserved_shift_valid", err);
+      std::string untagged = tagged;
+      const size_t tag = untagged.find("\"emulator_shift\":1");
+      untagged.replace(tag, std::string("\"emulator_shift\":1").size(), "\"emulator_shift\":0");
+      check(!grim_genome_parse(untagged, parsed, err), "spu_sample_untagged_reserved_shift_rejected", err);
+    }
+  }
+}
+
+// A static gene is verified and applied to the BIOS image. It has no GP0/SPU
+// traffic semantics, so give it a real transport test rather than no-op fuzz.
+void test_static_gene_transport(GrimGeneType type) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() /
+      ("vibestation_grim_static_" + std::to_string(static_cast<u32>(type)) + "_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir);
+  const fs::path file = dir / "fixture.bin";
+  {
+    std::ofstream out(file, std::ios::binary);
+    const std::vector<char> image(psx::BIOS_SIZE, '\0');
+    out.write(image.data(), static_cast<std::streamsize>(image.size()));
+  }
+  Bios bios;
+  const bool loaded = bios.load(file.string());
+  const std::string prefix = std::string(grim_gene_type_name(type));
+  check(loaded, prefix + "_fixture_loaded");
+  if (loaded) {
+    GrimGenome genome;
+    genome.version = 2;
+    genome.bios_hash = bios.image_hash();
+    GrimGene gene = grim_default_gene(type);
+    const u32 first = type == GrimGeneType::SpuSample ? 0x10u : 0x11223344u;
+    const u32 second = type == GrimGeneType::SpuSample ? 0x20u : 0x55667788u;
+    gene.patches = {{0x20, 0, first, false}, {0x30, 0, second, false}};
+    genome.genes.push_back(gene);
+    std::string err;
+    GrimGenomeRuntime rt(genome);
+    check(rt.has_rom_genes() && rt.apply_rom(bios, err) &&
+              bios.read32(0x20) == first && bios.read32(0x30) == second,
+          prefix + "_verified_rom_application", err);
+    bios.restore_original_image();
+    genome.genes[0].patches[1].original = 1;
+    GrimGenomeRuntime bad_word(genome);
+    check(!bad_word.apply_rom(bios, err) && !err.empty() &&
+              bios.read32(0x20) == 0 && bios.read32(0x30) == 0,
+          prefix + "_original_mismatch_is_atomic", err);
+    genome.genes[0].patches[1].original = 0;
+    genome.bios_hash ^= 1;
+    GrimGenomeRuntime bad_hash(genome);
+    check(!bad_hash.apply_rom(bios, err) && !err.empty() &&
+              bios.read32(0x20) == 0 && bios.read32(0x30) == 0,
+          prefix + "_bios_mismatch_is_atomic", err);
+
+    // The verification pass spans both families before any gene writes.
+    genome.bios_hash = bios.image_hash();
+    GrimGene other = grim_default_gene(type == GrimGeneType::RomCode ? GrimGeneType::SpuSample
+                                                                   : GrimGeneType::RomCode);
+    other.patches = {{0x40, 1, 0xAABBCCDD, false}};
+    genome.genes.push_back(other);
+    GrimGenomeRuntime mixed_bad(genome);
+    check(!mixed_bad.apply_rom(bios, err) && bios.read32(0x20) == 0 &&
+              bios.read32(0x30) == 0 && bios.read32(0x40) == 0,
+          prefix + "_mixed_families_verify_before_writes", err);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 // ---- triggers -------------------------------------------------------------------
@@ -907,8 +1029,12 @@ void test_gp0_transforms() {
     std::string detail;
     u64 changed_by_type[static_cast<size_t>(GrimGeneType::Count)] = {};
     GrimRng rng{555};
-    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::RomCode) && ok; ++t) {
+    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count) && ok; ++t) {
       const GrimGeneType type = static_cast<GrimGeneType>(t);
+      if (grim_gene_is_rom(type)) {
+        test_static_gene_transport(type);
+        continue;
+      }
       for (int round = 0; round < 40 && ok; ++round) {
         GrimGene g = grim_default_gene(type);
         const auto &schema = grim_gene_schema(type);
@@ -954,8 +1080,10 @@ void test_gp0_transforms() {
     }
     check(ok, "gp0_fuzz_preserves_word_count_and_forbidden_bits", detail);
     bool all_active = true;
-    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::RomCode); ++t) {
-      all_active = all_active && changed_by_type[t] > 0;
+    for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count); ++t) {
+      if (!grim_gene_is_rom(static_cast<GrimGeneType>(t))) {
+        all_active = all_active && changed_by_type[t] > 0;
+      }
     }
     check(all_active, "gp0_fuzz_every_gene_type_changes_something");
   }
@@ -1015,6 +1143,10 @@ void test_end_to_end(const std::string &bios, u32 frames) {
     GrimEvalConfig c = eval_cfg(bios, std::min(frames, 400u));
     c.use_genome = true;
     c.genome = all_types_genome();
+    Bios stock;
+    if (stock.load(bios)) {
+      c.genome.bios_hash = stock.image_hash();
+    }
     const GrimEvalResult a = run_grim_eval(c);
     const GrimEvalResult b = run_grim_eval(c);
     check(a.run_hash == b.run_hash && a.gene_hits == b.gene_hits, "e2e_same_genome_same_run_hash", hex(a.run_hash));

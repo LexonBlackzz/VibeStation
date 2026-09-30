@@ -6,6 +6,7 @@
 
 class Bios;
 struct GrimRomContext;
+struct GrimSampleContext;
 
 // Grim Reaper 2.0, Phase 2: interface genes.
 //
@@ -72,6 +73,8 @@ enum class GrimGeneType : u8 {
   // Phase 3: a ROM gene (one kind of structural MIPS mutation applied to the
   // BIOS image). Its resolved list of patches lives in GrimGene::patches.
   RomCode,
+  // Phase 4: resolved ADPCM edits on the BIOS sound bank.
+  SpuSample,
   Count
 };
 
@@ -121,8 +124,10 @@ struct GrimGene {
   u64 seed = 0;
   GrimTrigger trigger;
   std::array<s32, kGrimMaxParams> params{}; // in schema order
-  // RomCode only: the resolved patches (target/trigger are unused for it).
-  // params: kind (GrimRomMut), count, early_ms, curve.
+  // ROM families: resolved patches (target/trigger are unused).
+  // RomCode params: kind, count, early_ms, curve.
+  // SpuSample params: kind, count, magnitude, sample, donor, emulator_shift,
+  // block_phase (0 or 8: block start modulo 16).
   std::vector<GrimRomPatch> patches;
 };
 
@@ -135,11 +140,14 @@ struct GrimGenome {
 };
 inline bool grim_genome_has_rom(const GrimGenome &g) {
   for (const GrimGene &gene : g.genes) {
-    if (gene.type == GrimGeneType::RomCode) {
+    if (gene.type == GrimGeneType::RomCode || gene.type == GrimGeneType::SpuSample) {
       return true;
     }
   }
   return false;
+}
+inline bool grim_gene_is_rom(GrimGeneType type) {
+  return type == GrimGeneType::RomCode || type == GrimGeneType::SpuSample;
 }
 
 const char *grim_gene_type_name(GrimGeneType t);
@@ -172,6 +180,14 @@ struct GrimRandomParams {
   u32 rom_early_ms = 200; // words first executed earlier than this are never patched
   u32 rom_curve = 2;      // 0 uniform .. 3 cubic preference for late code
   bool rom_call_swap = false; // the (usually fatal) call_swap kind, off by default
+  // Phase 4: byte-scanned ADPCM samples; the map is optional annotation only.
+  const GrimSampleContext *sample = nullptr;
+  u32 sample_genes_min = 1;
+  u32 sample_genes_max = 3;
+  u32 sample_count_max = 2; // requested edit span; permutations require >= 2 blocks
+  s32 sample_kind = -1;    // -1 draws all ten kinds
+  u32 sample_magnitude = 1;
+  s32 sample_index = -1;   // -1 draws any scanned sample
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".

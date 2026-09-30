@@ -1,6 +1,7 @@
 #include "grim_genome.h"
 #include "bios.h"
 #include "grim_rom.h"
+#include "grim_sample.h"
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -15,7 +16,7 @@ namespace {
 constexpr const char *kTypeNames[] = {
     "spu_pitch",  "spu_adsr",   "spu_volume",   "spu_address",  "spu_keyon",
     "spu_noise",  "spu_pmon",   "spu_reverb",   "gpu_vertex",   "gpu_color",
-    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code"};
+    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code", "spu_sample"};
 static_assert(sizeof(kTypeNames) / sizeof(kTypeNames[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
               "type name table out of sync");
@@ -83,6 +84,10 @@ const std::vector<GrimParamSpec> kSchemas[] = {
     //           them). kind = GrimRomMut, early_ms = first-execution window that
     //           is never touched, curve = how strongly later code is preferred
     {{"kind", 0, 8, 0}, {"count", 1, 4096, 1}, {"early_ms", 0, 60000, 200}, {"curve", 0, 3, 2}},
+    // spu_sample: resolved word patches; shift 13..15 is tagged separately.
+    {{"kind", 0, 9, 0}, {"count", 1, 256, 1}, {"magnitude", 1, 15, 1},
+     {"sample", -1, 32767, -1}, {"donor", -1, 32767, -1}, {"emulator_shift", 0, 1, 0},
+     {"block_phase", 0, 8, 0}},
 };
 static_assert(sizeof(kSchemas) / sizeof(kSchemas[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
@@ -366,6 +371,9 @@ u32 grim_gene_default_target(GrimGeneType t) {
     return 0xFFFFFFu;
   }
   switch (t) {
+  case GrimGeneType::RomCode:
+  case GrimGeneType::SpuSample:
+    return 1u;
   case GrimGeneType::GpuState:
     return 0x3Fu;
   case GrimGeneType::GpuFill:
@@ -531,13 +539,13 @@ bool parse_trigger(const json &j, GrimTrigger &t, const std::string &ctx, std::s
   return fail(err, ctx + ": unknown trigger kind \"" + kind + "\"");
 }
 
-bool parse_rom_gene(const json &j, size_t index, GrimGene &g, std::string &err) {
+bool parse_rom_gene(const json &j, size_t index, GrimGeneType type, GrimGene &g, std::string &err) {
   const std::string ctx = "gene " + std::to_string(index);
   if (!check_keys(j, {"type", "seed", "params", "patches"}, ctx, err)) {
     return false;
   }
   g = GrimGene{};
-  g.type = GrimGeneType::RomCode;
+  g.type = type;
   g.target = 1;
   u64 v = 0;
   if (!get_uint(j, "seed", 0, ~0ull, v, ctx, err)) {
@@ -547,7 +555,7 @@ bool parse_rom_gene(const json &j, size_t index, GrimGene &g, std::string &err) 
   const auto &schema = grim_gene_schema(g.type);
   const json &pj = j["params"];
   if (!pj.is_object() || pj.size() != schema.size()) {
-    return fail(err, ctx + ": rom_code params must be an object with exactly " +
+    return fail(err, ctx + ": " + grim_gene_type_name(type) + " params must be an object with exactly " +
                          std::to_string(schema.size()) + " entries");
   }
   for (size_t i = 0; i < schema.size(); ++i) {
@@ -560,6 +568,9 @@ bool parse_rom_gene(const json &j, size_t index, GrimGene &g, std::string &err) 
       return fail(err, ctx + ": param \"" + schema[i].name + "\" out of range");
     }
     g.params[i] = static_cast<s32>(val);
+  }
+  if (type == GrimGeneType::SpuSample && g.params[6] != 0 && g.params[6] != 8) {
+    return fail(err, ctx + ": block_phase must be 0 or 8 (SPU addresses are 8-byte aligned)");
   }
   if (!j["patches"].is_array()) {
     return fail(err, ctx + ": patches must be an array");
@@ -586,15 +597,42 @@ bool parse_rom_gene(const json &j, size_t index, GrimGene &g, std::string &err) 
     patch.original = static_cast<u32>(orig);
     patch.mutated = static_cast<u32>(mut);
     patch.delay_slot = ds != 0u;
+    if (type == GrimGeneType::SpuSample && patch.delay_slot) {
+      return fail(err, pctx + ": sample patches cannot be instruction delay slots");
+    }
+    if (type == GrimGeneType::SpuSample) {
+      const GrimSampleMut kind = static_cast<GrimSampleMut>(g.params[0]);
+      const u32 changed = patch.original ^ patch.mutated;
+      if (grim_sample_header_gene(kind)) {
+        const u32 allowed = kind == GrimSampleMut::FilterSwap ? 0x70u
+                            : kind == GrimSampleMut::ShiftChange ? 0xFu : 0x700u;
+        if ((patch.offset & 15u) != static_cast<u32>(g.params[6]) || (changed & ~allowed) != 0u) {
+          return fail(err, pctx + ": header gene must edit only its field at an aligned block header");
+        }
+      } else if ((patch.offset & 15u) == static_cast<u32>(g.params[6]) && (changed & 0xFFFFu) != 0u) {
+        return fail(err, pctx + ": payload gene must preserve both ADPCM header bytes");
+      }
+      if (kind == GrimSampleMut::ShiftChange && (patch.mutated & 15u) >= 13u &&
+          g.params[5] == 0) {
+        return fail(err, pctx + ": shift 13..15 must carry emulator_shift=1");
+      }
+    }
     g.patches.push_back(patch);
+  }
+  if (type == GrimGeneType::SpuSample && g.params[0] != static_cast<s32>(GrimSampleMut::ShiftChange) &&
+      g.params[5] != 0) {
+    return fail(err, ctx + ": emulator_shift is only valid for a shift_change gene");
   }
   return true;
 }
 
 bool parse_gene(const json &j, size_t index, GrimGene &g, std::string &err) {
-  if (j.is_object() && j.contains("type") && j["type"].is_string() &&
-      j["type"].get<std::string>() == "rom_code") {
-    return parse_rom_gene(j, index, g, err);
+  if (j.is_object() && j.contains("type") && j["type"].is_string()) {
+    const std::string type = j["type"].get<std::string>();
+    if (type == "rom_code" || type == "spu_sample") {
+      return parse_rom_gene(j, index, type == "rom_code" ? GrimGeneType::RomCode
+                                                        : GrimGeneType::SpuSample, g, err);
+    }
   }
   const std::string ctx = "gene " + std::to_string(index);
   if (!check_keys(j, {"type", "target", "seed", "trigger", "params"}, ctx, err)) {
@@ -699,8 +737,9 @@ bool grim_genome_parse(const std::string &text, GrimGenome &out, std::string &er
     if (!parse_gene(doc["genes"][i], i, gene, err)) {
       return false;
     }
-    if (gene.type == GrimGeneType::RomCode && version != 2) {
-      return fail(err, "gene " + std::to_string(i) + ": rom_code genes need genome version 2");
+    if (grim_gene_is_rom(gene.type) && version != 2) {
+      return fail(err, "gene " + std::to_string(i) + ": " + grim_gene_type_name(gene.type) +
+                           " genes need genome version 2");
     }
     g.genes.push_back(gene);
   }
@@ -731,8 +770,9 @@ std::string grim_genome_serialize(const GrimGenome &g) {
     const GrimGene &gene = g.genes[i];
     const GrimTrigger &t = gene.trigger;
     s += i == 0 ? "\n" : ",\n";
-    if (gene.type == GrimGeneType::RomCode) {
-      s += "{\"type\":\"rom_code\",\"seed\":" + std::to_string(gene.seed) + ",\"params\":{";
+    if (grim_gene_is_rom(gene.type)) {
+      s += "{\"type\":\"" + std::string(grim_gene_type_name(gene.type)) + "\",\"seed\":" +
+           std::to_string(gene.seed) + ",\"params\":{";
       const auto &rs = grim_gene_schema(gene.type);
       for (size_t k = 0; k < rs.size(); ++k) {
         s += (k ? ",\"" : "\"") + std::string(rs[k].name) + "\":" + std::to_string(gene.params[k]);
@@ -820,6 +860,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
     if (rp.rom != nullptr && rp.rom_genes_max > 0) {
       grim_add_random_rom_genes(genome, seed, rp); // ROM-only genome
     }
+    if (rp.sample != nullptr && rp.sample_genes_max > 0) {
+      grim_add_random_sample_genes(genome, seed, rp);
+    }
     return genome;
   }
   u32 total = 0;
@@ -889,6 +932,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
   if (rp.rom != nullptr && rp.rom_genes_max > 0) {
     grim_add_random_rom_genes(genome, seed, rp);
   }
+  if (rp.sample != nullptr && rp.sample_genes_max > 0) {
+    grim_add_random_sample_genes(genome, seed, rp);
+  }
   return genome;
 }
 
@@ -897,7 +943,7 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
 GrimGenomeRuntime::GrimGenomeRuntime(GrimGenome genome) : genome_(std::move(genome)) {
   hash_ = grim_genome_hash(genome_);
   for (size_t i = 0; i < genome_.genes.size(); ++i) {
-    if (genome_.genes[i].type == GrimGeneType::RomCode) {
+    if (grim_gene_is_rom(genome_.genes[i].type)) {
       continue; // applied to the ROM image, not to runtime traffic
     }
     (is_spu_type(genome_.genes[i].type) ? spu_genes_ : gpu_genes_).push_back(i);
@@ -918,6 +964,9 @@ bool GrimGenomeRuntime::apply_rom(Bios &bios, std::string &err) {
   }
   for (size_t gi = 0; gi < genome_.genes.size(); ++gi) {
     const GrimGene &gene = genome_.genes[gi];
+    if (!grim_gene_is_rom(gene.type)) {
+      continue;
+    }
     for (size_t k = 0; k < gene.patches.size(); ++k) {
       const GrimRomPatch &p = gene.patches[k];
       u32 word = 0;
@@ -933,6 +982,9 @@ bool GrimGenomeRuntime::apply_rom(Bios &bios, std::string &err) {
     }
   }
   for (size_t gi = 0; gi < genome_.genes.size(); ++gi) {
+    if (!grim_gene_is_rom(genome_.genes[gi].type)) {
+      continue;
+    }
     for (const GrimRomPatch &p : genome_.genes[gi].patches) {
       bios.patch32(p.offset, p.mutated);
     }

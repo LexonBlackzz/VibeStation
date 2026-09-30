@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+struct GrimSampleContext;
+
 // Grim Reaper 2.0, Phase 3: ROM code genes.
 //
 // Structural MIPS (R3000A) mutations on the words the boot map labels `code`
@@ -84,7 +86,8 @@ void grim_add_random_rom_genes(GrimGenome &genome, u64 seed, const GrimRandomPar
 
 // Readable listing of a genome. With a context, ROM genes show their
 // disassembly, region and first-execution time.
-std::string grim_describe_genome(const GrimGenome &genome, const GrimRomContext *ctx);
+std::string grim_describe_genome(const GrimGenome &genome, const GrimRomContext *ctx,
+                                 const GrimSampleContext *samples = nullptr);
 
 // Milliseconds of emulated time (33.8688 MHz CPU clock).
 inline double grim_cycles_to_ms(u64 cycles) {
