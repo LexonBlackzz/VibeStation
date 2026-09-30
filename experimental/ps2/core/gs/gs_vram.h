@@ -23,12 +23,17 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
     [[nodiscard]] static u32 depth_address_bytes(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
+    static void color_depth32_addresses(
+        u32 x, u32 y, u32 fbp, u32 zbp, u32 bw,
+        u32& frame_address, u32& depth_address);
 
     bool write_pixel(u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     bool write_pixel_untracked(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw, u32 value);
     [[nodiscard]] u32 read_pixel(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
+    [[nodiscard]] u16 read_psmct16(
+        u32 x, u32 y, u32 bp, u32 bw) const;
     [[nodiscard]] u32 read_pixel_at_address(
         u32 psm, u32 address) const;
     bool write_pixel_at_address_untracked(
@@ -77,6 +82,8 @@ public:
     [[nodiscard]] const std::vector<u8>& data() const { return data_; }
     [[nodiscard]] u64 generation() const { return generation_; }
     void mark_modified() { ++generation_; }
+    [[nodiscard]] const u8* raw_data() const { return data_.data(); }
+    [[nodiscard]] u8* raw_data() { return data_.data(); }
 
 private:
     std::vector<u8> data_;

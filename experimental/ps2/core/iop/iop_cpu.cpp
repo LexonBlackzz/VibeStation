@@ -512,7 +512,17 @@ u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
 }
 
 bool IopCpu::step(std::string& error) {
-    error.clear();
+    return step_internal(error, true);
+}
+
+bool IopCpu::step_hot(std::string& error) {
+    return step_internal(error, false);
+}
+
+bool IopCpu::step_internal(
+    std::string& error,
+    bool clear_error) {
+    if (clear_error) error.clear();
 
     if (halted_) {
         error = halt_reason_;

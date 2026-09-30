@@ -3,6 +3,7 @@
 #include "common/types.h"
 #include "core/gs/gs_vram.h"
 #include "core/gs/gs_rasterizer.h"
+#include "core/gs/gs_gpu_backend.h"
 
 #include <array>
 #include <condition_variable>
@@ -47,9 +48,54 @@ struct GsStats {
     u64 primitives = 0;
     u64 raster_draws = 0;
     u64 raster_pixels = 0;
+    u64 parallel_sprite_draws = 0;
+    u64 parallel_sprite_pixels = 0;
+    u64 parallel_sprite_helper_jobs = 0;
+    u64 gpu_sprite_draws = 0;
+    u64 gpu_sprite_pixels = 0;
+    u64 gpu_syncs_to_cpu = 0;
+    // Compact profile for large dependency-safe GPU sprite candidates.
+    // Signature packing:
+    // bit0 texture enabled; [6:1] texture PSM; [12:7] frame PSM;
+    // [14:13] TFX; bit15 TCC; [32:16] blend/depth state key;
+    // [40:33] ALPHA FIX.
+    u64 gpu_candidate_sprite_draws = 0;
+    u64 gpu_candidate_sprite_pixels = 0;
+    std::array<u64, 16> gpu_candidate_signatures{};
+    std::array<u64, 16> gpu_candidate_signature_draws{};
+    std::array<u64, 16> gpu_candidate_signature_pixels{};
+    u32 gpu_candidate_signature_count = 0;
     std::array<u64, 8> raster_draws_by_primitive{};
     std::array<u64, 8> raster_pixels_by_primitive{};
+    std::array<u64, 8> raster_ns_by_primitive{};
+    // Draw-size histogram bins: <64, <256, <1K, <4K, <16K, <64K, >=64K pixels.
+    std::array<u64, 7> raster_draws_by_size{};
+    std::array<u64, 7> raster_pixels_by_size{};
+    std::array<u64, 7> raster_ns_by_size{};
     std::array<u64, 64> texture_draws_by_psm{};
+    std::array<u64, 64> texture_ns_by_psm{};
+    // PSMCT16-only draw-state profile. Bits:
+    // 0 ABE, 1 ATE, 2 DATE, 3 ZTE, 4 depth write,
+    // 5 FBMSK, 6 dither, 7 active scan mask.
+    std::array<u64, 256> psm16_state_draws{};
+    std::array<u64, 256> psm16_state_pixels{};
+    std::array<u64, 256> psm16_state_ns{};
+    // Exact hot PSMCT16 blend/depth state. Key:
+    // [7:0] ALPHA A/B/C/D selectors, [9:8] ZTST,
+    // bit10 COLCLAMP, bit11 PABE.
+    std::array<u64, 4096> psm16_alpha_state_draws{};
+    std::array<u64, 4096> psm16_alpha_state_pixels{};
+    std::array<u64, 4096> psm16_alpha_state_ns{};
+    std::array<u64, 256> psm16_fix_draws{};
+    std::array<u64, 256> psm16_fix_ns{};
+    u64 textured_sprite_pixels = 0;
+    u64 textured_sprite_fst_pixels = 0;
+    u64 textured_sprite_constant_q_pixels = 0;
+    u64 textured_sprite_variable_q_pixels = 0;
+    u64 textured_triangle_pixels = 0;
+    u64 textured_triangle_fst_pixels = 0;
+    u64 textured_triangle_constant_q_pixels = 0;
+    u64 textured_triangle_variable_q_pixels = 0;
     u64 textured_raster_draws = 0;
     u64 texture_samples = 0;
     u64 nonzero_texture_samples = 0;
@@ -101,11 +147,21 @@ public:
 
     void reset();
     void set_async_rasterization(bool enabled);
+    void set_gpu_backend(GsGpuBackend* backend);
+    [[nodiscard]] bool gpu_backend_active() const {
+        return gpu_backend_ != nullptr && gpu_backend_->available();
+    }
+    [[nodiscard]] const char* gpu_backend_name() const {
+        return gpu_backend_active() ? gpu_backend_->name() : "software";
+    }
     void set_rasterization_enabled(bool enabled) {
         rasterization_enabled_ = enabled;
     }
     void set_detailed_raster_stats(bool enabled) {
         detailed_raster_stats_ = enabled;
+    }
+    void set_raster_timing_enabled(bool enabled) {
+        raster_timing_enabled_ = enabled;
     }
     void flush_pending_draws() const;
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
@@ -217,6 +273,16 @@ private:
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
     void raster_worker_main();
+    void start_raster_helpers();
+    void stop_raster_helpers();
+    void raster_helper_main(u32 helper_index);
+    bool try_execute_parallel_sprite(
+        const RasterCommand& command,
+        u64& pixels);
+    bool try_execute_gpu_sprite(
+        const RasterCommand& command,
+        u64& pixels);
+    void synchronize_gpu_to_cpu() const;
     [[nodiscard]] u64 effective_prim() const;
     [[nodiscard]] GsRasterContext raster_context() const;
 
@@ -233,6 +299,8 @@ private:
     bool async_rasterization_ = false;
     bool rasterization_enabled_ = true;
     bool detailed_raster_stats_ = false;
+    bool raster_timing_enabled_ = false;
+    mutable GsGpuBackend* gpu_backend_ = nullptr;
     mutable std::mutex raster_mutex_{};
     mutable std::condition_variable raster_condition_{};
     mutable std::condition_variable raster_completed_condition_{};
@@ -241,6 +309,26 @@ private:
     bool raster_worker_stop_ = false;
     u64 raster_enqueued_ = 0;
     u64 raster_completed_ = 0;
+
+    // Keep one emulation thread and spare host capacity outside the raster
+    // pool. Small CI hosts still select only hardware_concurrency()-2 helpers,
+    // while desktop CPUs can use up to six raster lanes total.
+    static constexpr u32 kMaxRasterHelpers = 5u;
+    std::array<std::thread, kMaxRasterHelpers> raster_helpers_{};
+    u32 raster_helper_count_ = 0u;
+    std::mutex raster_parallel_mutex_{};
+    std::condition_variable raster_parallel_condition_{};
+    std::condition_variable raster_parallel_done_condition_{};
+    bool raster_parallel_stop_ = false;
+    u64 raster_parallel_generation_ = 0u;
+    u32 raster_parallel_pending_ = 0u;
+    const GsRasterContext* raster_parallel_context_ = nullptr;
+    const GsRasterVertex* raster_parallel_a_ = nullptr;
+    const GsRasterVertex* raster_parallel_b_ = nullptr;
+    std::array<s32, kMaxRasterHelpers + 2u>
+        raster_parallel_boundaries_{};
+    std::array<u64, kMaxRasterHelpers + 1u>
+        raster_parallel_counts_{};
 };
 
 } // namespace ps2

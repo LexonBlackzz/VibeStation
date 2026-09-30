@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -140,6 +141,19 @@ void EeCpu::reset(u32 entry_point) {
     next_is_delay_slot_ = false;
     current_is_delay_slot_ = false;
     memory_exception_pending_ = false;
+    hot_sif_getreg_diag_inflight_ = false;
+    hot_sif_getreg_diag_start_ = 0u;
+    hot_sif_getreg_read_offset_ = 0u;
+    fast_prefix_fallback_opcodes_->fill(0u);
+    fast_prefix_cop2_fallback_words_->fill(0u);
+    fast_prefix_cop2_fallback_counts_->fill(0u);
+    fast_prefix_cop2_fallback_count_ = 0u;
+    fast_prefix_control_fallback_keys_->fill(0u);
+    fast_prefix_control_fallback_counts_->fill(0u);
+    fast_prefix_control_fallback_count_ = 0u;
+    fast_prefix_memory_fallback_keys_->fill(0u);
+    fast_prefix_memory_fallback_counts_->fill(0u);
+    fast_prefix_memory_fallback_count_ = 0u;
     halt_reason_.clear();
 }
 
@@ -393,6 +407,15 @@ bool EeCpu::execute_special(
         }
         return true;
     case 0x0C: { // SYSCALL
+        if (pc == 0x0024DE74u &&
+            static_cast<u32>(gpr_u64(3)) == 0x7Au &&
+            static_cast<u32>(gpr_u64(4)) == 4u &&
+            hot_sif_getreg_read_offset_ == 0u) {
+            hot_sif_getreg_diag_inflight_ = true;
+            hot_sif_getreg_diag_start_ =
+                state_.instructions_executed;
+        }
+
         auto& record =
             state_.recent_syscalls[state_.recent_syscall_next];
         record.instruction = state_.instructions_executed;
@@ -3372,6 +3395,75 @@ u32 EeCpu::skip_bios_literal_iterations(u32 max_iterations) {
     return completed;
 }
 
+bool EeCpu::can_skip_hot_sif_getreg() const {
+    constexpr u32 kPc = 0x0024DE74u;
+    constexpr u32 kReturnPc = 0x00263338u;
+    constexpr std::array<u32, 4> kWrapper = {
+        0x2403007Au, // addiu v1,zero,0x7A
+        0x0000000Cu, // syscall
+        0x03E00008u, // jr ra
+        0x00000000u, // nop
+    };
+
+    return !halted_ &&
+        state_.pc == kPc &&
+        state_.next_pc == kPc + 4u &&
+        !next_is_delay_slot_ &&
+        static_cast<u32>(state_.gpr[3].lo) == 0x7Au &&
+        static_cast<u32>(state_.gpr[4].lo) == 4u &&
+        static_cast<u32>(state_.gpr[31].lo) == kReturnPc &&
+        bus_.matches_code(0x0024DE70u, kWrapper);
+}
+
+bool EeCpu::skip_hot_sif_getreg(u32 value) {
+    constexpr u32 kPc = 0x0024DE74u;
+    constexpr u32 kReturnPc = 0x00263338u;
+    constexpr u32 kCycles = 106u;
+
+    if (!can_skip_hot_sif_getreg()) {
+        return false;
+    }
+
+    // Preserve the diagnostic state produced by the real SYSCALL path.
+    auto& record =
+        state_.recent_syscalls[state_.recent_syscall_next];
+    record.instruction = state_.instructions_executed;
+    record.pc = kPc;
+    record.number = 0x7Au;
+    for (u32 i = 0; i < record.args.size(); ++i) {
+        record.args[i] = gpr_u64(4u + i);
+    }
+    state_.recent_syscall_next =
+        (state_.recent_syscall_next + 1u) %
+        static_cast<u32>(state_.recent_syscalls.size());
+    state_.recent_syscall_count = std::min(
+        state_.recent_syscall_count + 1u,
+        static_cast<u32>(state_.recent_syscalls.size()));
+    ++state_.exception_counts[8];
+
+    write_gpr_word(2u, value);
+    state_.gpr[0] = {};
+
+    // SYSCALL records exception code 8, the retail handler advances EPC by
+    // one instruction, returns through ERET, then the wrapper executes JR RA
+    // + its NOP delay slot. Interrupt-pending bits are preserved.
+    state_.cop0[13] =
+        (state_.cop0[13] & ~0x8000007Cu) | 0x20u;
+    state_.cop0[14] = kPc + 4u;
+
+    state_.last_pc = kPc + 8u;
+    state_.last_instruction = 0u;
+    state_.pc = kReturnPc;
+    state_.next_pc = kReturnPc + 4u;
+    current_is_delay_slot_ = true;
+    next_is_delay_slot_ = false;
+
+    state_.instructions_executed += kCycles;
+    state_.cop0[9] += kCycles;
+    bus_.tick(kCycles);
+    return true;
+}
+
 bool EeCpu::step(std::string& error) {
     return step_internal(error, false, nullptr, false);
 }
@@ -3400,11 +3492,18 @@ u32 EeCpu::run_quiet_fast_prefix(
     const u32* instructions,
     u32 instruction_count,
     u32 maximum_instructions,
-    bool* store_executed) {
-    if (halted_ || instructions == nullptr ||
-        instruction_count == 0u ||
+    bool* store_executed,
+    const u8* instruction_ram,
+    u8* direct_ram,
+    u32* page_generations) {
+    const bool direct_trace =
+        instructions == nullptr && instruction_ram != nullptr;
+    if (halted_ ||
         maximum_instructions == 0u ||
-        state_.pc != block_pc) {
+        (!direct_trace &&
+         (instructions == nullptr ||
+          instruction_count == 0u ||
+          state_.pc != block_pc))) {
         return 0u;
     }
 
@@ -3412,8 +3511,9 @@ u32 EeCpu::run_quiet_fast_prefix(
         *store_executed = false;
     }
 
-    u32 limit = std::min(
-        instruction_count, maximum_instructions);
+    u32 limit = direct_trace
+        ? maximum_instructions
+        : std::min(instruction_count, maximum_instructions);
     const u32 compare_distance =
         state_.cop0[11] - state_.cop0[9];
     if (compare_distance != 0u) {
@@ -3421,19 +3521,190 @@ u32 EeCpu::run_quiet_fast_prefix(
     }
     u32 retired = 0u;
 
-    for (; retired < limit; ++retired) {
-        const u32 expected_pc = block_pc + retired * 4u;
-        if (state_.pc != expected_pc) break;
+    constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+    const bool direct_main_ram =
+        direct_trace &&
+        direct_ram != nullptr &&
+        std::endian::native == std::endian::little;
 
-        const u32 instruction = instructions[retired];
+    auto mark_direct_write = [&](u32 physical, u32 width) {
+        if (page_generations == nullptr || width == 0u) return;
+        const u32 first = physical >> 12;
+        const u32 last = (physical + width - 1u) >> 12;
+        for (u32 page = first; page <= last; ++page) {
+            ++page_generations[page];
+        }
+    };
+    auto read_ram8 = [&](u32 address, u32 physical, u8& value) {
+        if (direct_main_ram && physical < kMainRamSize) {
+            value = direct_ram[physical];
+            return true;
+        }
+        return bus_.read8(address, value);
+    };
+    auto read_ram16 = [&](u32 address, u32 physical, u16& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read16(address, value);
+    };
+    auto read_ram32 = [&](u32 address, u32 physical, u32& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read32(address, value);
+    };
+    auto read_ram64 = [&](u32 address, u32 physical, u64& value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(&value, direct_ram + physical, sizeof(value));
+            return true;
+        }
+        return bus_.read64(address, value);
+    };
+    auto write_ram8 = [&](u32 address, u32 physical, u8 value) {
+        if (direct_main_ram && physical < kMainRamSize) {
+            direct_ram[physical] = value;
+            mark_direct_write(physical, 1u);
+            return true;
+        }
+        return bus_.write8(address, value);
+    };
+    auto write_ram16 = [&](u32 address, u32 physical, u16 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write16(address, value);
+    };
+    auto write_ram32 = [&](u32 address, u32 physical, u32 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write32(address, value);
+    };
+    auto write_ram64 = [&](u32 address, u32 physical, u64 value) {
+        if (direct_main_ram &&
+            physical <= kMainRamSize - sizeof(value)) {
+            std::memcpy(direct_ram + physical, &value, sizeof(value));
+            mark_direct_write(physical, sizeof(value));
+            return true;
+        }
+        return bus_.write64(address, value);
+    };
+
+    auto quiet_data_span = [&](u32 virtual_address,
+                               u32 width,
+                               u32 alignment_mask = 0u) {
+        const u32 aligned = virtual_address & ~alignment_mask;
+        const u32 physical = EeBus::to_physical(aligned);
+        constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+        if (virtual_address < 0xC0000000u &&
+            physical < kMainRamSize &&
+            width <= kMainRamSize - physical) {
+            return true;
+        }
+        if (direct_trace &&
+            aligned >= 0x70000000u &&
+            aligned - 0x70000000u <= 16u * 1024u &&
+            width <= 16u * 1024u - (aligned - 0x70000000u)) {
+            return true;
+        }
+        return false;
+    };
+
+    auto record_memory_fallback =
+        [&](u32 opcode_value, u32 virtual_address) {
+            // Aggregate at 4 KiB page granularity. Preserve the opcode in the
+            // upper half so load/store classes remain distinguishable.
+            const u32 page =
+                virtual_address & 0xFFFFF000u;
+            // The dominant fallback page is VIF1 DMAC. Preserve exact
+            // register offsets there; aggregate all other regions by page.
+            const u32 location =
+                page == 0x10009000u
+                    ? virtual_address
+                    : page;
+            const u64 key =
+                (static_cast<u64>(opcode_value & 63u) << 32u) |
+                static_cast<u64>(location);
+            for (u32 i = 0u;
+                 i < fast_prefix_memory_fallback_count_;
+                 ++i) {
+                if ((*fast_prefix_memory_fallback_keys_)[i] == key) {
+                    ++(*fast_prefix_memory_fallback_counts_)[i];
+                    return;
+                }
+            }
+            if (fast_prefix_memory_fallback_count_ <
+                fast_prefix_memory_fallback_keys_->size()) {
+                const u32 index =
+                    fast_prefix_memory_fallback_count_++;
+                (*fast_prefix_memory_fallback_keys_)[index] = key;
+                (*fast_prefix_memory_fallback_counts_)[index] = 1u;
+            }
+        };
+
+    for (; retired < limit; ++retired) {
+        const u32 expected_pc = direct_trace
+            ? state_.pc
+            : block_pc + retired * 4u;
+        if (!direct_trace && state_.pc != expected_pc) break;
+
+        u32 instruction = 0u;
+        if (direct_trace) {
+            const u32 physical = EeBus::to_physical(expected_pc);
+            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
+            if ((expected_pc & 3u) != 0u ||
+                physical > kMainRamSize - sizeof(u32)) {
+                break;
+            }
+            std::memcpy(
+                &instruction,
+                instruction_ram + physical,
+                sizeof(instruction));
+        } else {
+            instruction = instructions[retired];
+        }
 
         if (instruction == 0u &&
             !next_is_delay_slot_ &&
             state_.next_pc == expected_pc + 4u) {
             u32 run = 1u;
-            while (retired + run < limit &&
-                   instructions[retired + run] == 0u) {
-                ++run;
+            if (direct_trace) {
+                constexpr u32 kMainRamSize =
+                    32u * 1024u * 1024u;
+                while (retired + run < limit) {
+                    const u32 next_pc =
+                        expected_pc + run * 4u;
+                    const u32 next_physical =
+                        EeBus::to_physical(next_pc);
+                    if (next_physical >
+                        kMainRamSize - sizeof(u32)) {
+                        break;
+                    }
+                    u32 next_instruction = 0u;
+                    std::memcpy(
+                        &next_instruction,
+                        instruction_ram + next_physical,
+                        sizeof(next_instruction));
+                    if (next_instruction != 0u) break;
+                    ++run;
+                }
+            } else {
+                while (retired + run < limit &&
+                       instructions[retired + run] == 0u) {
+                    ++run;
+                }
             }
 
             state_.last_pc =
@@ -3514,6 +3785,29 @@ u32 EeCpu::run_quiet_fast_prefix(
                 state_.next_pc = expected_pc + 12u;
                 next_is_delay_slot_ = false;
             }
+        } else if (opcode == 0x08u) { // ADDI
+            const s32 lhs =
+                static_cast<s32>(
+                    static_cast<u32>(gpr_u64(rs)));
+            const s32 rhs = static_cast<s32>(imm);
+            const s64 sum =
+                static_cast<s64>(lhs) +
+                static_cast<s64>(rhs);
+            if (sum <
+                    static_cast<s64>(
+                        std::numeric_limits<s32>::min()) ||
+                sum >
+                    static_cast<s64>(
+                        std::numeric_limits<s32>::max())) {
+                // Rare architected overflow: leave PC/state untouched and
+                // let the full interpreter raise the exact exception.
+                handled = false;
+            } else {
+                write_gpr_word(
+                    rt,
+                    static_cast<u32>(
+                        static_cast<s32>(sum)));
+            }
         } else if (opcode == 0x09u) {
             write_gpr_word(
                 rt,
@@ -3547,11 +3841,713 @@ u32 EeCpu::run_quiet_fast_prefix(
                     static_cast<u64>(instruction & 0xFFFFu));
         } else if (opcode == 0x0Fu) {
             write_gpr_word(rt, (instruction & 0xFFFFu) << 16);
+        } else if (opcode == 0x12u) { // COP2/VU0 register-only fast subset
+            const u32 cop_rs = rs;
+            const u32 ft = rt;
+            const u32 fs = rd;
+            const u32 fd = sa;
+            const u32 cop_funct = funct;
+
+            auto vu_lane_read = [&](u32 reg, u32 lane) -> u32 {
+                const EeGpr& value = state_.vu_vf[reg & 31u];
+                const u64 half = lane < 2u ? value.lo : value.hi;
+                return static_cast<u32>(
+                    half >> ((lane & 1u) * 32u));
+            };
+            auto vu_lane_write =
+                [&](u32 reg, u32 lane, u32 value) {
+                    if ((reg & 31u) == 0u) return;
+                    EeGpr& target = state_.vu_vf[reg & 31u];
+                    u64& half = lane < 2u ? target.lo : target.hi;
+                    const u32 shift = (lane & 1u) * 32u;
+                    half =
+                        (half & ~(0xFFFFFFFFull << shift)) |
+                        (static_cast<u64>(value) << shift);
+                };
+            auto vu_acc_read = [&](u32 lane) -> u32 {
+                const u64 half =
+                    lane < 2u ? state_.vu_acc.lo : state_.vu_acc.hi;
+                return static_cast<u32>(
+                    half >> ((lane & 1u) * 32u));
+            };
+            auto vu_acc_write = [&](u32 lane, u32 value) {
+                u64& half =
+                    lane < 2u ? state_.vu_acc.lo : state_.vu_acc.hi;
+                const u32 shift = (lane & 1u) * 32u;
+                half =
+                    (half & ~(0xFFFFFFFFull << shift)) |
+                    (static_cast<u64>(value) << shift);
+            };
+            auto vu_selected = [&](u32 lane) {
+                static constexpr u32 bits[4] = {
+                    24u, 23u, 22u, 21u};
+                return ((instruction >> bits[lane]) & 1u) != 0u;
+            };
+            auto vu_float = [&](u32 reg, u32 lane) {
+                return ps2_fpu_input(vu_lane_read(reg, lane));
+            };
+            auto vu_write_float =
+                [&](u32 reg, u32 lane, float value) {
+                    vu_lane_write(
+                        reg, lane, ps2_fpu_result(value));
+                };
+            auto acc_float = [&](u32 lane) {
+                return ps2_fpu_input(vu_acc_read(lane));
+            };
+            auto acc_write_float =
+                [&](u32 lane, float value) {
+                    vu_acc_write(
+                        lane, ps2_fpu_result(value));
+                };
+            auto broadcast_binary =
+                [&](u32 source_lane, auto op) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto broadcast_madd =
+                [&](u32 source_lane) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) + product);
+                    }
+                };
+            auto acc_broadcast_binary =
+                [&](u32 source_lane, auto op) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        acc_write_float(
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto acc_broadcast_madd =
+                [&](u32 source_lane) {
+                    const float scalar =
+                        vu_float(ft, source_lane & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        acc_write_float(
+                            lane,
+                            acc_float(lane) + product);
+                    }
+                };
+            auto vector_binary = [&](auto op) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    vu_write_float(
+                        fd,
+                        lane,
+                        op(vu_float(fs, lane), vu_float(ft, lane)));
+                }
+            };
+            auto vector_madd = [&](bool subtract_product) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    const float product =
+                        vu_float(fs, lane) * vu_float(ft, lane);
+                    vu_write_float(
+                        fd,
+                        lane,
+                        acc_float(lane) +
+                            (subtract_product ? -product : product));
+                }
+            };
+            auto scalar_control_binary =
+                [&](u32 control, auto op) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto control_madd =
+                [&](u32 control, bool subtract_product) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) +
+                                (subtract_product ? -product : product));
+                    }
+                };
+            auto acc_vector_binary = [&](auto op) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    acc_write_float(
+                        lane,
+                        op(vu_float(fs, lane), vu_float(ft, lane)));
+                }
+            };
+            auto acc_vector_madd = [&](bool subtract_product) {
+                for (u32 lane = 0u; lane < 4u; ++lane) {
+                    if (!vu_selected(lane)) continue;
+                    const float product =
+                        vu_float(fs, lane) * vu_float(ft, lane);
+                    acc_write_float(
+                        lane,
+                        acc_float(lane) +
+                            (subtract_product ? -product : product));
+                }
+            };
+            auto acc_control_binary =
+                [&](u32 control, auto op) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        acc_write_float(
+                            lane,
+                            op(vu_float(fs, lane), scalar));
+                    }
+                };
+            auto acc_control_madd =
+                [&](u32 control, bool subtract_product) {
+                    const float scalar =
+                        ps2_fpu_input(state_.vu_vi[control]);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        acc_write_float(
+                            lane,
+                            acc_float(lane) +
+                                (subtract_product ? -product : product));
+                    }
+                };
+            auto saturating_float_to_int = [](float value) -> s32 {
+                if (std::isnan(value)) return 0;
+                if (value >=
+                    static_cast<float>(
+                        std::numeric_limits<s32>::max())) {
+                    return std::numeric_limits<s32>::max();
+                }
+                if (value <=
+                    static_cast<float>(
+                        std::numeric_limits<s32>::min())) {
+                    return std::numeric_limits<s32>::min();
+                }
+                return static_cast<s32>(value);
+            };
+            auto write_vi = [&](u32 reg, u32 value) {
+                reg &= 0xFu;
+                if (reg != 0u) {
+                    state_.vu_vi[reg] = static_cast<u16>(value);
+                }
+            };
+
+            if (cop_rs == 0x01u) { // QMFC2
+                if (rt != 0u) state_.gpr[rt] = state_.vu_vf[fs];
+            } else if (cop_rs == 0x02u) { // CFC2
+                if (rt != 0u) {
+                    u32 value = state_.vu_vi[fs];
+                    if (fs == 20u) value &= 0x007FFFFFu;
+                    write_gpr_word(rt, value);
+                }
+            } else if (cop_rs == 0x05u) { // QMTC2
+                if (fs != 0u) state_.vu_vf[fs] = state_.gpr[rt];
+            } else if (cop_rs == 0x06u) { // CTC2
+                if (fs == 0u || fs == 17u ||
+                    fs == 26u || fs == 29u) {
+                    // Read-only / ignored control registers.
+                } else {
+                    const u32 value =
+                        static_cast<u32>(gpr_u64(rt));
+                    if (fs < 16u) {
+                        state_.vu_vi[fs] =
+                            static_cast<u16>(value);
+                    } else if (fs == 20u) {
+                        state_.vu_vi[20] =
+                            (value & 0x007FFFFFu) |
+                            0x3F800000u;
+                    } else if (fs == 28u) {
+                        state_.vu_vi[28] =
+                            value & 0x00000C0Cu;
+                        if ((value & 0x2u) != 0u) {
+                            for (u32 i = 1u; i < 32u; ++i) {
+                                state_.vu_vf[i] = {};
+                            }
+                            for (u32 i = 1u; i < 16u; ++i) {
+                                state_.vu_vi[i] = 0u;
+                            }
+                            state_.vu_vi[29] &= ~0xFFu;
+                        }
+                        if ((value & 0x200u) != 0u) {
+                            state_.vu_vi[29] &= ~0xFF00u;
+                        }
+                    } else {
+                        state_.vu_vi[fs] = value;
+                    }
+                }
+            } else if (cop_rs >= 0x10u) {
+                const auto add =
+                    [](float lhs, float rhs) {
+                        return lhs + rhs;
+                    };
+                const auto mul =
+                    [](float lhs, float rhs) {
+                        return lhs * rhs;
+                    };
+
+                if (cop_funct <= 0x03u) { // VADDx/y/z/w
+                    broadcast_binary(cop_funct, add);
+                } else if (cop_funct >= 0x04u &&
+                           cop_funct <= 0x07u) { // VSUBx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct >= 0x08u &&
+                           cop_funct <= 0x0Bu) { // VMADDx/y/z/w
+                    broadcast_madd(cop_funct & 3u);
+                } else if (cop_funct >= 0x0Cu &&
+                           cop_funct <= 0x0Fu) { // VMSUBx/y/z/w
+                    const float scalar =
+                        vu_float(ft, cop_funct & 3u);
+                    for (u32 lane = 0u; lane < 4u; ++lane) {
+                        if (!vu_selected(lane)) continue;
+                        const float product =
+                            vu_float(fs, lane) * scalar;
+                        vu_write_float(
+                            fd,
+                            lane,
+                            acc_float(lane) - product);
+                    }
+                } else if (cop_funct >= 0x10u &&
+                           cop_funct <= 0x13u) { // VMAXx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
+                } else if (cop_funct >= 0x14u &&
+                           cop_funct <= 0x17u) { // VMINIx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u,
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
+                } else if (cop_funct >= 0x18u &&
+                           cop_funct <= 0x1Bu) { // VMULx/y/z/w
+                    broadcast_binary(
+                        cop_funct & 3u, mul);
+                } else if (cop_funct == 0x1Cu) { // VMULq
+                    scalar_control_binary(22u, mul);
+                } else if (cop_funct == 0x1Du) { // VMAXi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
+                } else if (cop_funct == 0x1Eu) { // VMULi
+                    scalar_control_binary(21u, mul);
+                } else if (cop_funct == 0x1Fu) { // VMINIi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
+                } else if (cop_funct == 0x20u) { // VADDq
+                    scalar_control_binary(
+                        22u,
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x21u) { // VMADDq
+                    control_madd(22u, false);
+                } else if (cop_funct == 0x22u) { // VADDi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x23u) { // VMADDi
+                    control_madd(21u, false);
+                } else if (cop_funct == 0x24u) { // VSUBq
+                    scalar_control_binary(
+                        22u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x25u) { // VMSUBq
+                    control_madd(22u, true);
+                } else if (cop_funct == 0x26u) { // VSUBi
+                    scalar_control_binary(
+                        21u,
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x27u) { // VMSUBi
+                    control_madd(21u, true);
+                } else if (cop_funct == 0x28u) { // VADD
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return lhs + rhs;
+                        });
+                } else if (cop_funct == 0x29u) { // VMADD
+                    vector_madd(false);
+                } else if (cop_funct == 0x2Au) { // VMUL
+                    vector_binary(mul);
+                } else if (cop_funct == 0x2Bu) { // VMAX
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return std::fmax(lhs, rhs);
+                        });
+                } else if (cop_funct == 0x2Cu) { // VSUB
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return lhs - rhs;
+                        });
+                } else if (cop_funct == 0x2Du) { // VMSUB
+                    vector_madd(true);
+                } else if (cop_funct == 0x2Eu) { // VOPMSUB
+                    const float result[3] = {
+                        acc_float(0u) -
+                            vu_float(fs, 1u) * vu_float(ft, 2u),
+                        acc_float(1u) -
+                            vu_float(fs, 2u) * vu_float(ft, 0u),
+                        acc_float(2u) -
+                            vu_float(fs, 0u) * vu_float(ft, 1u),
+                    };
+                    for (u32 lane = 0u; lane < 3u; ++lane) {
+                        if (vu_selected(lane)) {
+                            vu_write_float(fd, lane, result[lane]);
+                        }
+                    }
+                } else if (cop_funct == 0x2Fu) { // VMINI
+                    vector_binary(
+                        [](float lhs, float rhs) {
+                            return std::fmin(lhs, rhs);
+                        });
+                } else if (cop_funct >= 0x3Cu) {
+                    const u32 special =
+                        (instruction & 3u) |
+                        ((instruction >> 4) & 0x7Cu);
+                    const u32 it = ft & 0xFu;
+                    const u32 is = fs & 0xFu;
+                    const u32 fsf =
+                        (instruction >> 21) & 3u;
+                    const u32 ftf =
+                        (instruction >> 23) & 3u;
+
+                    if (special <= 0x03u) { // VADDAx/y/z/w
+                        acc_broadcast_binary(
+                            special,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special >= 0x04u &&
+                               special <= 0x07u) { // VSUBAx/y/z/w
+                        acc_broadcast_binary(
+                            special & 3u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special >= 0x08u &&
+                               special <= 0x0Bu) { // VMADDAx/y/z/w
+                        acc_broadcast_madd(special & 3u);
+                    } else if (special >= 0x0Cu &&
+                               special <= 0x0Fu) { // VMSUBAx/y/z/w
+                        const float scalar =
+                            vu_float(ft, special & 3u);
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float product =
+                                vu_float(fs, lane) * scalar;
+                            acc_write_float(
+                                lane,
+                                acc_float(lane) - product);
+                        }
+                    } else if (special >= 0x10u &&
+                               special <= 0x13u) { // VITOF0/4/12/15
+                        static constexpr u32 shifts[4] = {
+                            0u, 4u, 12u, 15u};
+                        const u32 shift = shifts[special - 0x10u];
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float value =
+                                static_cast<float>(
+                                    static_cast<s32>(
+                                        vu_lane_read(fs, lane))) /
+                                static_cast<float>(1u << shift);
+                            vu_write_float(ft, lane, value);
+                        }
+                    } else if (special >= 0x14u &&
+                               special <= 0x17u) { // VFTOI0/4/12/15
+                        static constexpr u32 shifts[4] = {
+                            0u, 4u, 12u, 15u};
+                        const u32 shift = shifts[special - 0x14u];
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (!vu_selected(lane)) continue;
+                            const float scaled =
+                                vu_float(fs, lane) *
+                                static_cast<float>(1u << shift);
+                            vu_lane_write(
+                                ft,
+                                lane,
+                                static_cast<u32>(
+                                    saturating_float_to_int(scaled)));
+                        }
+                    } else if (special >= 0x18u &&
+                               special <= 0x1Bu) { // VMULAx/y/z/w
+                        acc_broadcast_binary(
+                            special & 3u, mul);
+                    } else if (special == 0x1Cu) { // VMULAq
+                        acc_control_binary(22u, mul);
+                    } else if (special == 0x1Du) { // VABS
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    vu_lane_read(fs, lane) &
+                                        0x7FFFFFFFu);
+                            }
+                        }
+                    } else if (special == 0x1Eu) { // VMULAi
+                        acc_control_binary(21u, mul);
+                    } else if (special == 0x1Fu) { // VCLIPw
+                        const float w =
+                            std::fabs(vu_float(ft, 3u));
+                        u32 clip =
+                            (state_.vu_vi[18] << 6) & 0xFFFFFFu;
+                        for (u32 lane = 0u; lane < 3u; ++lane) {
+                            const float value =
+                                vu_float(fs, lane);
+                            if (value > w) {
+                                clip |= 1u << (lane * 2u);
+                            }
+                            if (value < -w) {
+                                clip |= 1u << (lane * 2u + 1u);
+                            }
+                        }
+                        state_.vu_vi[18] = clip;
+                    } else if (special == 0x20u) { // VADDAq
+                        acc_control_binary(
+                            22u,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x21u) { // VMADDAq
+                        acc_control_madd(22u, false);
+                    } else if (special == 0x22u) { // VADDAi
+                        acc_control_binary(
+                            21u,
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x23u) { // VMADDAi
+                        acc_control_madd(21u, false);
+                    } else if (special == 0x24u) { // VSUBAq
+                        acc_control_binary(
+                            22u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x25u) { // VMSUBAq
+                        acc_control_madd(22u, true);
+                    } else if (special == 0x26u) { // VSUBAi
+                        acc_control_binary(
+                            21u,
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x27u) { // VMSUBAi
+                        acc_control_madd(21u, true);
+                    } else if (special == 0x28u) { // VADDA
+                        acc_vector_binary(
+                            [](float lhs, float rhs) {
+                                return lhs + rhs;
+                            });
+                    } else if (special == 0x29u) { // VMADDA
+                        acc_vector_madd(false);
+                    } else if (special == 0x2Au) { // VMULA
+                        acc_vector_binary(mul);
+                    } else if (special == 0x2Cu) { // VSUBA
+                        acc_vector_binary(
+                            [](float lhs, float rhs) {
+                                return lhs - rhs;
+                            });
+                    } else if (special == 0x2Du) { // VMSUBA
+                        acc_vector_madd(true);
+                    } else if (special == 0x2Eu) { // VOPMULA
+                        const float values[3] = {
+                            vu_float(fs, 1u) * vu_float(ft, 2u),
+                            vu_float(fs, 2u) * vu_float(ft, 0u),
+                            vu_float(fs, 0u) * vu_float(ft, 1u),
+                        };
+                        for (u32 lane = 0u; lane < 3u; ++lane) {
+                            if (vu_selected(lane)) {
+                                acc_write_float(lane, values[lane]);
+                            }
+                        }
+                    } else if (special == 0x2Fu) { // VNOP
+                        // Architectural no-op.
+                    } else if (special == 0x30u) { // VMOVE
+                        const EeGpr source = state_.vu_vf[fs];
+                        auto source_lane = [&](u32 lane) {
+                            const u64 half =
+                                lane < 2u ? source.lo : source.hi;
+                            return static_cast<u32>(
+                                half >> ((lane & 1u) * 32u));
+                        };
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    source_lane(lane));
+                            }
+                        }
+                    } else if (special == 0x31u) { // VMR32
+                        const EeGpr source = state_.vu_vf[fs];
+                        auto source_lane = [&](u32 lane) {
+                            const u32 rotated = (lane + 1u) & 3u;
+                            const u64 half =
+                                rotated < 2u ? source.lo : source.hi;
+                            return static_cast<u32>(
+                                half >> ((rotated & 1u) * 32u));
+                        };
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(
+                                    ft,
+                                    lane,
+                                    source_lane(lane));
+                            }
+                        }
+                    } else if (special == 0x38u) { // VDIV
+                        const float numerator =
+                            vu_float(fs, fsf);
+                        const float denominator =
+                            vu_float(ft, ftf);
+                        if (denominator == 0.0f) {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    std::copysign(
+                                        std::numeric_limits<float>::max(),
+                                        numerator * denominator));
+                        } else {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    numerator / denominator);
+                        }
+                    } else if (special == 0x39u) { // VSQRT
+                        state_.vu_vi[22] =
+                            ps2_fpu_result(
+                                std::sqrt(
+                                    std::fabs(vu_float(ft, ftf))));
+                    } else if (special == 0x3Au) { // VRSQRT
+                        const float numerator =
+                            vu_float(fs, fsf);
+                        const float denominator =
+                            std::sqrt(
+                                std::fabs(vu_float(ft, ftf)));
+                        if (denominator == 0.0f) {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    std::copysign(
+                                        std::numeric_limits<float>::max(),
+                                        numerator));
+                        } else {
+                            state_.vu_vi[22] =
+                                ps2_fpu_result(
+                                    numerator / denominator);
+                        }
+                    } else if (special == 0x3Bu) { // VWAITQ
+                        // Architectural no-op in this synchronous model.
+                    } else if (special == 0x3Cu) { // VMTIR
+                        write_vi(
+                            it,
+                            vu_lane_read(fs, fsf));
+                    } else if (special == 0x3Du) { // VMFIR
+                        const u32 value =
+                            static_cast<u32>(
+                                static_cast<s32>(
+                                    static_cast<s16>(
+                                        state_.vu_vi[is])));
+                        for (u32 lane = 0u; lane < 4u; ++lane) {
+                            if (vu_selected(lane)) {
+                                vu_lane_write(ft, lane, value);
+                            }
+                        }
+                    } else {
+                        handled = false;
+                    }
+                } else {
+                    handled = false;
+                }
+            } else {
+                handled = false;
+            }
         } else if (opcode == 0x19u) {
             write_gpr64(
                 rt,
                 gpr_u64(rs) +
                     static_cast<u64>(static_cast<s64>(imm)));
+        } else if (opcode == 0x1Cu) { // MMI hot integer multiply/divide subset
+            switch (funct) {
+            case 0x18u: // MULT1
+                multiply_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                write_gpr64(rd, state_.lo1);
+                break;
+            case 0x19u: // MULTU1
+                multiply_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                write_gpr64(rd, state_.lo1);
+                break;
+            case 0x1Au: // DIV1
+                divide_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                break;
+            case 0x1Bu: // DIVU1
+                divide_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo1,
+                    state_.hi1);
+                break;
+            default:
+                handled = false;
+                break;
+            }
         } else if (
             opcode == 0x1Eu ||
             opcode == 0x20u || opcode == 0x21u ||
@@ -3560,7 +4556,6 @@ u32 EeCpu::run_quiet_fast_prefix(
             opcode == 0x30u || opcode == 0x31u ||
             opcode == 0x34u || opcode == 0x36u ||
             opcode == 0x37u) {
-            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -3576,9 +4571,11 @@ u32 EeCpu::run_quiet_fast_prefix(
                 (opcode == 0x34u || opcode == 0x37u) ? 8u :
                 16u;
             const u32 physical = EeBus::to_physical(aligned);
-            if (address >= 0xC0000000u ||
-                physical >= kMainRamSize ||
-                width > kMainRamSize - physical) {
+            if (!quiet_data_span(
+                    address,
+                    width,
+                    (opcode == 0x1Eu || opcode == 0x36u) ? 15u : 0u)) {
+                record_memory_fallback(opcode, aligned);
                 handled = false;
             } else {
                 bool access_ok = true;
@@ -3587,8 +4584,9 @@ u32 EeCpu::run_quiet_fast_prefix(
                     u64 lo = 0;
                     u64 hi = 0;
                     access_ok =
-                        bus_.read64(aligned, lo) &&
-                        bus_.read64(aligned + 8u, hi);
+                        read_ram64(aligned, physical, lo) &&
+                        read_ram64(
+                            aligned + 8u, physical + 8u, hi);
                     if (access_ok && rt != 0u) {
                         state_.gpr[rt].lo = lo;
                         state_.gpr[rt].hi = hi;
@@ -3597,7 +4595,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 }
                 case 0x20u: { // LB
                     u8 value = 0;
-                    access_ok = bus_.read8(address, value);
+                    access_ok = read_ram8(address, physical, value);
                     if (access_ok) {
                         write_gpr64(
                             rt,
@@ -3608,7 +4606,7 @@ u32 EeCpu::run_quiet_fast_prefix(
                 }
                 case 0x21u: { // LH
                     u16 value = 0;
-                    access_ok = bus_.read16(address, value);
+                    access_ok = read_ram16(address, physical, value);
                     if (access_ok) {
                         write_gpr64(
                             rt,
@@ -3620,38 +4618,38 @@ u32 EeCpu::run_quiet_fast_prefix(
                 case 0x23u:
                 case 0x30u: { // LW / LL
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) write_gpr_word(rt, value);
                     break;
                 }
                 case 0x24u: { // LBU
                     u8 value = 0;
-                    access_ok = bus_.read8(address, value);
+                    access_ok = read_ram8(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x25u: { // LHU
                     u16 value = 0;
-                    access_ok = bus_.read16(address, value);
+                    access_ok = read_ram16(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x27u: { // LWU
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
                 case 0x31u: { // LWC1
                     u32 value = 0;
-                    access_ok = bus_.read32(address, value);
+                    access_ok = read_ram32(address, physical, value);
                     if (access_ok) state_.fpr[rt] = value;
                     break;
                 }
                 case 0x34u:
                 case 0x37u: { // LLD / LD
                     u64 value = 0;
-                    access_ok = bus_.read64(address, value);
+                    access_ok = read_ram64(address, physical, value);
                     if (access_ok) write_gpr64(rt, value);
                     break;
                 }
@@ -3659,8 +4657,9 @@ u32 EeCpu::run_quiet_fast_prefix(
                     u64 lo = 0;
                     u64 hi = 0;
                     access_ok =
-                        bus_.read64(aligned, lo) &&
-                        bus_.read64(aligned + 8u, hi);
+                        read_ram64(aligned, physical, lo) &&
+                        read_ram64(
+                            aligned + 8u, physical + 8u, hi);
                     if (access_ok && rt != 0u) {
                         state_.vu_vf[rt].lo = lo;
                         state_.vu_vf[rt].hi = hi;
@@ -3679,7 +4678,6 @@ u32 EeCpu::run_quiet_fast_prefix(
             opcode == 0x2Bu || opcode == 0x38u ||
             opcode == 0x39u || opcode == 0x3Cu ||
             opcode == 0x3Eu || opcode == 0x3Fu) {
-            constexpr u32 kMainRamSize = 32u * 1024u * 1024u;
             const u32 address = static_cast<u32>(
                 gpr_u64(rs) +
                 static_cast<u64>(static_cast<s64>(imm)));
@@ -3695,59 +4693,70 @@ u32 EeCpu::run_quiet_fast_prefix(
                 (opcode == 0x3Cu || opcode == 0x3Fu) ? 8u :
                 16u;
             const u32 physical = EeBus::to_physical(aligned);
-            if (address >= 0xC0000000u ||
-                physical >= kMainRamSize ||
-                width > kMainRamSize - physical) {
+            if (!quiet_data_span(
+                    address,
+                    width,
+                    (opcode == 0x1Fu || opcode == 0x3Eu) ? 15u : 0u)) {
+                record_memory_fallback(opcode, aligned);
                 handled = false;
             } else {
                 bool access_ok = true;
                 switch (opcode) {
                 case 0x1Fu: // SQ
                     access_ok =
-                        bus_.write64(aligned, state_.gpr[rt].lo) &&
-                        bus_.write64(
-                            aligned + 8u, state_.gpr[rt].hi);
+                        write_ram64(
+                            aligned, physical, state_.gpr[rt].lo) &&
+                        write_ram64(
+                            aligned + 8u,
+                            physical + 8u,
+                            state_.gpr[rt].hi);
                     break;
                 case 0x28u: // SB
-                    access_ok = bus_.write8(
+                    access_ok = write_ram8(
                         address,
+                        physical,
                         static_cast<u8>(gpr_u64(rt)));
                     break;
                 case 0x29u: // SH
-                    access_ok = bus_.write16(
+                    access_ok = write_ram16(
                         address,
+                        physical,
                         static_cast<u16>(gpr_u64(rt)));
                     break;
                 case 0x2Bu: // SW
-                    access_ok = bus_.write32(
+                    access_ok = write_ram32(
                         address,
+                        physical,
                         static_cast<u32>(gpr_u64(rt)));
                     break;
                 case 0x38u: // SC
-                    access_ok = bus_.write32(
+                    access_ok = write_ram32(
                         address,
+                        physical,
                         static_cast<u32>(gpr_u64(rt)));
                     if (access_ok) write_gpr_word(rt, 1u);
                     break;
                 case 0x39u: // SWC1
-                    access_ok = bus_.write32(
-                        address, state_.fpr[rt]);
+                    access_ok = write_ram32(
+                        address, physical, state_.fpr[rt]);
                     break;
                 case 0x3Cu: // SCD
-                    access_ok = bus_.write64(
-                        address, gpr_u64(rt));
+                    access_ok = write_ram64(
+                        address, physical, gpr_u64(rt));
                     if (access_ok) write_gpr64(rt, 1u);
                     break;
                 case 0x3Eu: // SQC2
                     access_ok =
-                        bus_.write64(
-                            aligned, state_.vu_vf[rt].lo) &&
-                        bus_.write64(
-                            aligned + 8u, state_.vu_vf[rt].hi);
+                        write_ram64(
+                            aligned, physical, state_.vu_vf[rt].lo) &&
+                        write_ram64(
+                            aligned + 8u,
+                            physical + 8u,
+                            state_.vu_vf[rt].hi);
                     break;
                 case 0x3Fu: // SD
-                    access_ok = bus_.write64(
-                        address, gpr_u64(rt));
+                    access_ok = write_ram64(
+                        address, physical, gpr_u64(rt));
                     break;
                 default:
                     access_ok = false;
@@ -3756,12 +4765,222 @@ u32 EeCpu::run_quiet_fast_prefix(
                 if (!access_ok) {
                     handled = false;
                 } else {
-                    stop_after_instruction = true;
-                    if (store_executed != nullptr) {
+                    // Cached prefixes must revalidate after a store because
+                    // the write may have touched their code page. Direct RAM
+                    // traces fetch the next instruction fresh, so they can
+                    // safely continue through ordinary and self-modifying
+                    // stores without returning to the block cache.
+                    stop_after_instruction = !direct_trace;
+                    if (stop_after_instruction &&
+                        store_executed != nullptr) {
                         *store_executed = true;
                     }
                 }
             }
+        } else if (opcode == 0x10u) { // COP0 local-register fast subset
+            const u32 cop_rs = rs;
+            const u32 cop_rd = rd;
+            const u32 cop_sel = instruction & 7u;
+            const u32 cop_funct = funct;
+
+            if (cop_rs == 0x00u && cop_sel == 0u) { // MFC0
+                write_gpr_word(rt, state_.cop0[cop_rd]);
+            } else if (cop_rs == 0x04u && cop_sel == 0u) { // MTC0
+                if (cop_rd != 15u) {
+                    state_.cop0[cop_rd] =
+                        static_cast<u32>(gpr_u64(rt));
+                    if (cop_rd == 11u) {
+                        // Compare write acknowledges timer IP7.
+                        state_.cop0[13] &= ~0x00008000u;
+                    }
+                }
+                // Status/Cause/Compare/TLB register writes can change what
+                // is observable on the very next instruction. Retire this
+                // instruction fast, then return to the system boundary.
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x18u) { // ERET
+                if ((state_.cop0[12] & 0x4u) != 0u) {
+                    state_.pc = state_.cop0[30];
+                    state_.cop0[12] &= ~0x4u;
+                } else {
+                    state_.pc = state_.cop0[14];
+                    state_.cop0[12] &= ~0x2u;
+                }
+                state_.next_pc = state_.pc + 4u;
+                next_is_delay_slot_ = false;
+                current_is_delay_slot_ = false;
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x38u) { // EI
+                const u32 status = state_.cop0[12];
+                if ((status & 0x00020000u) != 0u ||
+                    (status & 0x6u) != 0u ||
+                    (status & 0x18u) == 0u) {
+                    state_.cop0[12] |= 0x00010000u;
+                }
+                stop_after_instruction = true;
+            } else if (cop_rs == 0x10u &&
+                       cop_funct == 0x39u) { // DI
+                const u32 status = state_.cop0[12];
+                if ((status & 0x00020000u) != 0u ||
+                    (status & 0x6u) != 0u ||
+                    (status & 0x18u) == 0u) {
+                    state_.cop0[12] &= ~0x00010000u;
+                }
+                stop_after_instruction = true;
+            } else {
+                handled = false;
+            }
+        } else if (opcode == 0x11u) { // COP1
+            const u32 cop_rs = rs;
+            const u32 fs = (instruction >> 11) & 31u;
+            const u32 fd = (instruction >> 6) & 31u;
+            const u32 cop_funct = instruction & 63u;
+            constexpr u32 kFpuCond = 0x00800000u;
+            bool cop1_handled = true;
+
+            if (cop_rs == 0x00u) { // MFC1
+                write_gpr_word(rt, state_.fpr[fs]);
+            } else if (cop_rs == 0x02u) { // CFC1
+                if (fs == 0u) write_gpr_word(rt, 0x00002E00u);
+                else if (fs == 31u) write_gpr_word(rt, state_.fcr[31]);
+                else write_gpr_word(rt, 0u);
+            } else if (cop_rs == 0x04u) { // MTC1
+                state_.fpr[fs] = static_cast<u32>(gpr_u64(rt));
+            } else if (cop_rs == 0x06u) { // CTC1
+                if (fs == 31u) {
+                    state_.fcr[31] = static_cast<u32>(gpr_u64(rt));
+                }
+            } else if (cop_rs == 0x08u) { // BC1
+                const bool cond =
+                    (state_.fcr[31] & kFpuCond) != 0u;
+                const u32 variant = rt & 3u;
+                const bool take =
+                    (variant & 1u) != 0u ? cond : !cond;
+                const bool likely = (variant & 2u) != 0u;
+                if (take) {
+                    state_.next_pc =
+                        branch_target(expected_pc, imm);
+                    next_is_delay_slot_ = true;
+                } else if (likely) {
+                    state_.pc = expected_pc + 8u;
+                    state_.next_pc = expected_pc + 12u;
+                    next_is_delay_slot_ = false;
+                } else {
+                    state_.next_pc = expected_pc + 8u;
+                    next_is_delay_slot_ = true;
+                }
+            } else if (cop_rs == 0x14u) { // COP1.W
+                if (cop_funct == 0x20u) { // CVT.S.W
+                    const s32 value =
+                        static_cast<s32>(state_.fpr[fs]);
+                    state_.fpr[fd] =
+                        ps2_fpu_result(static_cast<float>(value));
+                } else {
+                    cop1_handled = false;
+                }
+            } else if (cop_rs == 0x10u) { // COP1.S
+                const u32 ft = rt;
+                const float a = ps2_fpu_input(state_.fpr[fs]);
+                const float b = ps2_fpu_input(state_.fpr[ft]);
+                const float acc = ps2_fpu_input(state_.fpu_acc);
+                auto set_fd = [&](float value) {
+                    state_.fpr[fd] = ps2_fpu_result(value);
+                };
+                auto set_acc = [&](float value) {
+                    state_.fpu_acc = ps2_fpu_result(value);
+                };
+                auto set_cond = [&](bool value) {
+                    if (value) state_.fcr[31] |= kFpuCond;
+                    else state_.fcr[31] &= ~kFpuCond;
+                };
+                switch (cop_funct) {
+                case 0x00u: set_fd(a + b); break;
+                case 0x01u: set_fd(a - b); break;
+                case 0x02u: set_fd(a * b); break;
+                case 0x03u:
+                    if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0u) {
+                        const u32 sign =
+                            (state_.fpr[fs] ^ state_.fpr[ft]) &
+                            0x80000000u;
+                        state_.fpr[fd] = sign | 0x7F7FFFFFu;
+                    } else {
+                        set_fd(a / b);
+                    }
+                    break;
+                case 0x04u:
+                    set_fd(std::sqrt(std::fabs(b)));
+                    break;
+                case 0x05u:
+                    state_.fpr[fd] =
+                        state_.fpr[fs] & 0x7FFFFFFFu;
+                    break;
+                case 0x06u:
+                    state_.fpr[fd] = state_.fpr[fs];
+                    break;
+                case 0x07u:
+                    state_.fpr[fd] =
+                        state_.fpr[fs] ^ 0x80000000u;
+                    break;
+                case 0x16u:
+                    if ((state_.fpr[ft] & 0x7FFFFFFFu) == 0u) {
+                        const u32 sign =
+                            (state_.fpr[fs] ^ state_.fpr[ft]) &
+                            0x80000000u;
+                        state_.fpr[fd] = sign | 0x7F7FFFFFu;
+                    } else {
+                        set_fd(a / std::sqrt(std::fabs(b)));
+                    }
+                    break;
+                case 0x18u: set_acc(a + b); break;
+                case 0x19u: set_acc(a - b); break;
+                case 0x1Au: set_acc(a * b); break;
+                case 0x1Cu: set_fd(acc + (a * b)); break;
+                case 0x1Du: set_fd(acc - (a * b)); break;
+                case 0x1Eu: set_acc(acc + (a * b)); break;
+                case 0x1Fu: set_acc(acc - (a * b)); break;
+                case 0x24u: {
+                    if ((state_.fpr[fs] & 0x7F800000u) <=
+                        0x4E800000u) {
+                        const double value =
+                            static_cast<double>(a);
+                        if (value > 2147483647.0) {
+                            state_.fpr[fd] = 0x7FFFFFFFu;
+                        } else if (value < -2147483648.0) {
+                            state_.fpr[fd] = 0x80000000u;
+                        } else {
+                            state_.fpr[fd] = static_cast<u32>(
+                                static_cast<s32>(value));
+                        }
+                    } else {
+                        state_.fpr[fd] =
+                            (state_.fpr[fs] & 0x80000000u)
+                                ? 0x80000000u
+                                : 0x7FFFFFFFu;
+                    }
+                    break;
+                }
+                case 0x28u:
+                    state_.fpr[fd] =
+                        (a >= b) ? state_.fpr[fs] : state_.fpr[ft];
+                    break;
+                case 0x29u:
+                    state_.fpr[fd] =
+                        (a <= b) ? state_.fpr[fs] : state_.fpr[ft];
+                    break;
+                case 0x30u: set_cond(false); break;
+                case 0x32u: set_cond(a == b); break;
+                case 0x34u: set_cond(a < b); break;
+                case 0x36u: set_cond(a <= b); break;
+                default:
+                    cop1_handled = false;
+                    break;
+                }
+            } else {
+                cop1_handled = false;
+            }
+            if (!cop1_handled) handled = false;
         } else if (opcode == 0x2Fu || opcode == 0x33u) {
             // CACHE / PREF are bootstrap no-ops.
         } else if (opcode == 0x01u) {
@@ -3884,6 +5103,37 @@ u32 EeCpu::run_quiet_fast_prefix(
                         static_cast<s64>(gpr_u64(rt)) >>
                         (gpr_u64(rs) & 63u)));
                 break;
+            case 0x18u: // MULT
+                multiply_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                // R5900 MULT/MULTU also write the low result to rd.
+                write_gpr64(rd, state_.lo);
+                break;
+            case 0x19u: // MULTU
+                multiply_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                write_gpr64(rd, state_.lo);
+                break;
+            case 0x1Au: // DIV
+                divide_signed32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                break;
+            case 0x1Bu: // DIVU
+                divide_unsigned32(
+                    static_cast<u32>(gpr_u64(rs)),
+                    static_cast<u32>(gpr_u64(rt)),
+                    state_.lo,
+                    state_.hi);
+                break;
             case 0x21u:
                 write_gpr_word(
                     rd,
@@ -3961,7 +5211,54 @@ u32 EeCpu::run_quiet_fast_prefix(
             handled = false;
         }
 
-        if (!handled) break;
+        if (!handled) {
+            ++(*fast_prefix_fallback_opcodes_)[opcode & 63u];
+            if (opcode == 0x12u) {
+                bool found = false;
+                for (u32 i = 0u;
+                     i < fast_prefix_cop2_fallback_count_;
+                     ++i) {
+                    if ((*fast_prefix_cop2_fallback_words_)[i] ==
+                        instruction) {
+                        ++(*fast_prefix_cop2_fallback_counts_)[i];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found &&
+                    fast_prefix_cop2_fallback_count_ <
+                        fast_prefix_cop2_fallback_words_->size()) {
+                    const u32 index =
+                        fast_prefix_cop2_fallback_count_++;
+                    (*fast_prefix_cop2_fallback_words_)[index] =
+                        instruction;
+                    (*fast_prefix_cop2_fallback_counts_)[index] = 1u;
+                }
+            } else if (opcode == 0x00u || opcode == 0x10u) {
+                const u64 key =
+                    (static_cast<u64>(opcode) << 32u) |
+                    static_cast<u64>(instruction);
+                bool found = false;
+                for (u32 i = 0u;
+                     i < fast_prefix_control_fallback_count_;
+                     ++i) {
+                    if ((*fast_prefix_control_fallback_keys_)[i] == key) {
+                        ++(*fast_prefix_control_fallback_counts_)[i];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found &&
+                    fast_prefix_control_fallback_count_ <
+                        fast_prefix_control_fallback_keys_->size()) {
+                    const u32 index =
+                        fast_prefix_control_fallback_count_++;
+                    (*fast_prefix_control_fallback_keys_)[index] = key;
+                    (*fast_prefix_control_fallback_counts_)[index] = 1u;
+                }
+            }
+            break;
+        }
 
         current_is_delay_slot_ = was_delay_slot;
         state_.last_pc = expected_pc;
@@ -4455,6 +5752,15 @@ bool EeCpu::step_internal(
         }
         case 0x23u: { // LW
             u32 value = 0;
+            if (hot_sif_getreg_diag_inflight_ &&
+                hot_sif_getreg_read_offset_ == 0u &&
+                EeBus::to_physical(address) == 0x1000F230u) {
+                hot_sif_getreg_read_offset_ =
+                    static_cast<u32>(
+                        state_.instructions_executed -
+                        hot_sif_getreg_diag_start_);
+                hot_sif_getreg_diag_inflight_ = false;
+            }
             access_ok = bus_.read32(address, value);
             if (access_ok) write_gpr_word(rt, value);
             break;
@@ -4857,6 +6163,15 @@ generic_decode:
     case 0x23: { // LW
         const u32 address = effective_address();
         u32 value = 0;
+        if (hot_sif_getreg_diag_inflight_ &&
+            hot_sif_getreg_read_offset_ == 0u &&
+            EeBus::to_physical(address) == 0x1000F230u) {
+            hot_sif_getreg_read_offset_ =
+                static_cast<u32>(
+                    state_.instructions_executed -
+                    hot_sif_getreg_diag_start_);
+            hot_sif_getreg_diag_inflight_ = false;
+        }
         if (!read32_mem(address, value)) {
             ok = load_fault("Load word", address);
         } else {

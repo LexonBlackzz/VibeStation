@@ -202,6 +202,11 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << std::dec << '\n';
 
+    std::cout
+        << "EE_HOT_SIF_GETREG_READ_OFFSET="
+        << system.ee().hot_sif_getreg_read_offset()
+        << '\n';
+
     std::cout << "EE_EXCEPTIONS";
     for (ps2::u32 code = 0; code < ee.exception_counts.size(); ++code) {
         if (ee.exception_counts[code] != 0) {
@@ -1047,6 +1052,10 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_UNSUPPORTED_TRANSFERS=" << gs_stats.unsupported_transfers
         << " GS_UNSUPPORTED_PACKED=" << gs_stats.unsupported_packed
         << " GS_SKIPPED_RASTER_DRAWS=" << gs_stats.skipped_raster_draws
+        << " GS_PARALLEL_SPRITE_DRAWS=" << gs_stats.parallel_sprite_draws
+        << " GS_PARALLEL_SPRITE_PIXELS=" << gs_stats.parallel_sprite_pixels
+        << " GS_PARALLEL_SPRITE_HELPER_JOBS="
+        << gs_stats.parallel_sprite_helper_jobs
         << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
         << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';
@@ -1061,10 +1070,105 @@ void print_state(const ps2::Ps2System& system) {
     }
     std::cout << '\n';
 
+    std::cout << "GS_RASTER_TIME_NS";
+    for (ps2::u32 i = 0; i < gs_stats.raster_ns_by_primitive.size(); ++i) {
+        if (gs_stats.raster_ns_by_primitive[i] == 0u) continue;
+        std::cout
+            << " P" << i << '='
+            << gs_stats.raster_ns_by_primitive[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_RASTER_SIZE_TIME";
+    constexpr const char* kRasterSizeLabels[] = {
+        "LT64", "LT256", "LT1K", "LT4K", "LT16K", "LT64K", "GE64K"};
+    for (std::size_t i = 0; i < gs_stats.raster_ns_by_size.size(); ++i) {
+        if (gs_stats.raster_draws_by_size[i] == 0u) continue;
+        std::cout
+            << ' ' << kRasterSizeLabels[i]
+            << "_D=" << gs_stats.raster_draws_by_size[i]
+            << "_P=" << gs_stats.raster_pixels_by_size[i]
+            << "_NS=" << gs_stats.raster_ns_by_size[i];
+    }
+    std::cout << '\n';
+
+    std::cout
+        << "GS_TEXTURE_COORD_PIXELS"
+        << " SPRITE=" << gs_stats.textured_sprite_pixels
+        << " SPRITE_FST=" << gs_stats.textured_sprite_fst_pixels
+        << " SPRITE_CONST_Q=" << gs_stats.textured_sprite_constant_q_pixels
+        << " SPRITE_VAR_Q=" << gs_stats.textured_sprite_variable_q_pixels
+        << " TRI=" << gs_stats.textured_triangle_pixels
+        << " TRI_FST=" << gs_stats.textured_triangle_fst_pixels
+        << " TRI_CONST_Q=" << gs_stats.textured_triangle_constant_q_pixels
+        << " TRI_VAR_Q=" << gs_stats.textured_triangle_variable_q_pixels
+        << '\n';
+
+    std::cout
+        << "GS_GPU_CANDIDATES DRAWS="
+        << gs_stats.gpu_candidate_sprite_draws
+        << " PIXELS="
+        << gs_stats.gpu_candidate_sprite_pixels
+        << '\n';
+
+    std::cout << "GS_GPU_CANDIDATE_SIGNATURES";
+    for (ps2::u32 i = 0;
+         i < gs_stats.gpu_candidate_signature_count;
+         ++i) {
+        std::cout
+            << " S0x" << std::hex << std::uppercase
+            << gs_stats.gpu_candidate_signatures[i]
+            << std::dec
+            << "_D=" << gs_stats.gpu_candidate_signature_draws[i]
+            << "_P=" << gs_stats.gpu_candidate_signature_pixels[i];
+    }
+    std::cout << '\n';
+
     std::cout << "GS_TEXTURE_PSM_DRAWS";
     for (ps2::u32 i = 0; i < gs_stats.texture_draws_by_psm.size(); ++i) {
         if (gs_stats.texture_draws_by_psm[i] == 0u) continue;
         std::cout << " PSM" << i << '=' << gs_stats.texture_draws_by_psm[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_TEXTURE_PSM_TIME_NS";
+    for (ps2::u32 i = 0; i < gs_stats.texture_ns_by_psm.size(); ++i) {
+        if (gs_stats.texture_ns_by_psm[i] == 0u) continue;
+        std::cout
+            << " PSM" << i << '='
+            << gs_stats.texture_ns_by_psm[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_PSM16_STATE_PROFILE";
+    for (ps2::u32 i = 0; i < gs_stats.psm16_state_ns.size(); ++i) {
+        if (gs_stats.psm16_state_ns[i] == 0u) continue;
+        std::cout
+            << " M" << i
+            << "_D=" << gs_stats.psm16_state_draws[i]
+            << "_P=" << gs_stats.psm16_state_pixels[i]
+            << "_NS=" << gs_stats.psm16_state_ns[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_PSM16_ALPHA_STATE_PROFILE";
+    for (ps2::u32 i = 0; i < gs_stats.psm16_alpha_state_ns.size(); ++i) {
+        if (gs_stats.psm16_alpha_state_ns[i] == 0u) continue;
+        std::cout
+            << " K" << i
+            << "_D=" << gs_stats.psm16_alpha_state_draws[i]
+            << "_P=" << gs_stats.psm16_alpha_state_pixels[i]
+            << "_NS=" << gs_stats.psm16_alpha_state_ns[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "GS_PSM16_FIX_PROFILE";
+    for (ps2::u32 i = 0; i < gs_stats.psm16_fix_ns.size(); ++i) {
+        if (gs_stats.psm16_fix_ns[i] == 0u) continue;
+        std::cout
+            << " F" << i
+            << "_D=" << gs_stats.psm16_fix_draws[i]
+            << "_NS=" << gs_stats.psm16_fix_ns[i];
     }
     std::cout << '\n';
 
@@ -1365,6 +1469,7 @@ int main(int argc, char** argv) {
               << '\n';
     system.gs_core().set_async_rasterization(gs_thread);
     system.gs_core().set_detailed_raster_stats(detailed_gs_stats);
+    system.gs_core().set_raster_timing_enabled(profile);
     system.gs_core().set_rasterization_enabled(!audio_only);
     std::string error;
 
@@ -1534,6 +1639,40 @@ int main(int argc, char** argv) {
               << system.skipped_bios_copy_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_MMIO_POLL_ITERATIONS="
               << system.skipped_bios_mmio_poll_iterations() << '\n';
+    std::cout << "EE_SIF_POLL_FAST_SAMPLES="
+              << system.sif_poll_fast_samples()
+              << " EE_SIF_POLL_STABLE_RETURNS="
+              << system.sif_poll_stable_returns()
+              << " EE_FAST_SIF_GETREG_CALLS="
+              << system.fast_sif_getreg_calls()
+              << " EE_FAST_SIF_GETREG_ACTIVE_IOP_CALLS="
+              << system.fast_sif_getreg_active_iop_calls()
+              << '\n';
+    std::cout
+        << "EE_FAST_SIF_ACTIVE_IOP"
+        << " ZERO_DMA=" << system.fast_sif_getreg_active_iop_zero_dma()
+        << " SIF_ONLY=" << system.fast_sif_getreg_active_iop_sif_only()
+        << " OTHER_DMA=" << system.fast_sif_getreg_active_iop_other_dma()
+        << " FIRST_PC=0x" << std::hex << std::uppercase
+        << system.fast_sif_getreg_active_iop_first_pc()
+        << std::dec << '\n';
+    std::cout << "EE_FAST_SIF_GETREG_ARGS";
+    const auto& sif_args = system.fast_sif_getreg_args();
+    for (ps2::u32 i = 0; i < sif_args.size(); ++i) {
+        if (sif_args[i] != 0u) {
+            std::cout << " [" << i << "]=" << sif_args[i];
+        }
+    }
+    std::cout << '\n';
+    std::cout << "EE_FAST_SIF_GETREG_REJECTS";
+    const auto& sif_rejects =
+        system.fast_sif_getreg_rejects();
+    for (ps2::u32 i = 0; i < sif_rejects.size(); ++i) {
+        if (sif_rejects[i] != 0u) {
+            std::cout << " [" << i << "]=" << sif_rejects[i];
+        }
+    }
+    std::cout << '\n';
     std::cout << "IOP_SKIPPED_IDLE_PAIRS="
               << system.skipped_iop_idle_pairs() << '\n';
     std::cout << "EE_SKIPPED_BIOS_LITERAL_ITERATIONS="
@@ -1558,6 +1697,142 @@ int main(int argc, char** argv) {
               << system.quiet_superbatch_calls()
               << " EE_QUIET_SUPERBATCH_INSTRUCTIONS="
               << system.quiet_superbatch_instructions() << '\n';
+    // Temporary deep dump of the dominant post-BIOS EE routine.
+    std::cout << "EE_HOT_ROUTINE_DUMP_BEGIN=0x00215400 END=0x00215800\n";
+    for (ps2::u32 address = 0x00215400u;
+         address < 0x00215800u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
+    std::cout << "EE_VU_HOT_LOOP_DUMP_BEGIN=0x00266FC0 END=0x00267050\n";
+    for (ps2::u32 address = 0x00266FC0u;
+         address < 0x00267050u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_VU_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
+    std::cout << "EE_DMA_HOT_ROUTINE_DUMP_BEGIN=0x00266A00 END=0x00266D40\n";
+    for (ps2::u32 address = 0x00266A00u;
+         address < 0x00266D40u;
+         address += 4u) {
+        ps2::u32 word = 0u;
+        if (!system.bus().read32(address, word)) continue;
+        std::cout
+            << "EE_DMA_CODE ADDR=0x" << std::hex << std::uppercase
+            << address
+            << " WORD=0x" << word
+            << std::dec << '\n';
+    }
+
+    std::cout << "EE_QUIET_HOT_BLOCKS";
+    for (const auto& [pc, hits] : system.quiet_block_hotspots(32u)) {
+        std::cout
+            << " PC_0x" << std::hex << std::uppercase << pc
+            << std::dec << "=" << hits;
+    }
+    std::cout << '\n';
+
+    for (const auto& [pc, hits] : system.quiet_block_hotspots(20u)) {
+        std::cout
+            << "EE_HOT_CODE PC=0x" << std::hex << std::uppercase << pc
+            << std::dec << " HITS=" << hits;
+        for (int word = -4; word <= 12; ++word) {
+            const ps2::u32 address =
+                pc + static_cast<ps2::u32>(word * 4);
+            ps2::u32 opcode = 0;
+            if (system.bus().read32(address, opcode)) {
+                std::cout
+                    << " A" << (word >= 0 ? "+" : "") << word * 4
+                    << "=0x" << std::hex << std::uppercase << opcode
+                    << std::dec;
+            }
+        }
+        std::cout << '\n';
+    }
+
+    std::cout << "EE_FAST_PREFIX_FALLBACK_OPCODES";
+    const auto& fast_fallbacks =
+        system.ee().fast_prefix_fallback_opcodes();
+    for (ps2::u32 opcode = 0u;
+         opcode < fast_fallbacks.size();
+         ++opcode) {
+        if (fast_fallbacks[opcode] != 0u) {
+            std::cout
+                << " OP0x" << std::hex << std::uppercase << opcode
+                << std::dec << '=' << fast_fallbacks[opcode];
+        }
+    }
+    std::cout << '\n';
+
+    std::cout << "EE_FAST_PREFIX_COP2_FALLBACKS";
+    const auto& cop2_words =
+        system.ee().fast_prefix_cop2_fallback_words();
+    const auto& cop2_counts =
+        system.ee().fast_prefix_cop2_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_cop2_fallback_count();
+         ++i) {
+        std::cout
+            << " W0x" << std::hex << std::uppercase
+            << cop2_words[i]
+            << std::dec
+            << '=' << cop2_counts[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "EE_FAST_PREFIX_CONTROL_FALLBACKS";
+    const auto& control_keys =
+        system.ee().fast_prefix_control_fallback_keys();
+    const auto& control_counts =
+        system.ee().fast_prefix_control_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_control_fallback_count();
+         ++i) {
+        const ps2::u32 opcode =
+            static_cast<ps2::u32>(control_keys[i] >> 32u);
+        const ps2::u32 word =
+            static_cast<ps2::u32>(control_keys[i]);
+        std::cout
+            << " OP0x" << std::hex << std::uppercase << opcode
+            << "_W0x" << word
+            << std::dec
+            << '=' << control_counts[i];
+    }
+    std::cout << '\n';
+
+    std::cout << "EE_FAST_PREFIX_MEMORY_FALLBACK_PAGES";
+    const auto& memory_keys =
+        system.ee().fast_prefix_memory_fallback_keys();
+    const auto& memory_counts =
+        system.ee().fast_prefix_memory_fallback_counts();
+    for (ps2::u32 i = 0;
+         i < system.ee().fast_prefix_memory_fallback_count();
+         ++i) {
+        const ps2::u32 opcode =
+            static_cast<ps2::u32>(memory_keys[i] >> 32u);
+        const ps2::u32 page =
+            static_cast<ps2::u32>(memory_keys[i]);
+        std::cout
+            << " OP0x" << std::hex << std::uppercase << opcode
+            << "_P0x" << page
+            << std::dec
+            << '=' << memory_counts[i];
+    }
+    std::cout << '\n';
+
     std::cout << "EE_JIT_BLOCK_INSTRUCTIONS="
               << system.ee().jit().block_instruction_count()
               << " EE_JIT_BLOCK_EXECUTIONS="

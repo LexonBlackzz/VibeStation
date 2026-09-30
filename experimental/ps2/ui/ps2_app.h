@@ -1,10 +1,17 @@
 #pragma once
 
 #include "core/ps2_system.h"
+#include "ui/ps2_gl_gs_backend.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 struct SDL_Window;
 struct _SDL_GameController;
@@ -15,6 +22,7 @@ namespace ps2::ui {
 
 class Ps2App {
 public:
+    ~Ps2App();
     bool init();
     int run();
     void shutdown();
@@ -29,6 +37,9 @@ private:
     void process_events(bool& quit);
     void update_pad_input();
     void update_audio();
+    void reset_audio_stutter();
+    void remember_audio_history(const s16* samples, std::size_t frames);
+    void audio_stutter_thread_main();
     void render_ui();
     void update_display_texture();
     void menu_bar();
@@ -52,10 +63,22 @@ private:
 
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_context_ = nullptr;
+    int gl_major_ = 0;
+    int gl_minor_ = 0;
+    std::unique_ptr<Ps2GlGsBackend> gpu_gs_backend_{};
     SDL_GameController* controller_ = nullptr;
     unsigned int audio_device_ = 0;
+    std::atomic<bool> lag_stutter_enabled_{true};
+    std::atomic<bool> lag_stutter_active_{false};
+    std::vector<s16> audio_history_{};
+    std::size_t audio_history_write_frame_ = 0;
+    std::size_t audio_history_play_frame_ = 0;
+    std::mutex audio_history_mutex_{};
+    std::atomic<bool> audio_stutter_thread_stop_{false};
+    std::thread audio_stutter_thread_{};
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
+    bool gpu_gs_enabled_ = true;
     unsigned int display_texture_ = 0;
     u32 display_texture_width_ = 0;
     u32 display_texture_height_ = 0;
@@ -74,7 +97,11 @@ private:
     bool bootstrap_swap_interval_disabled_ = false;
     std::chrono::steady_clock::time_point speed_sample_time_{};
     u64 speed_sample_instructions_ = 0;
+    u64 speed_sample_fields_ = 0;
     double ee_instructions_per_second_ = 0.0;
+    double guest_fields_per_second_ = 0.0;
+    double guest_frames_per_second_ = 0.0;
+    double emulation_speed_percent_ = 0.0;
     std::string visible_capture_path_{};
     unsigned long long visible_capture_minimum_ee_ = 0;
 

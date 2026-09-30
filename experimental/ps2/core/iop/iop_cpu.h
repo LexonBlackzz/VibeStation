@@ -41,6 +41,10 @@ public:
 
     void reset(u32 entry_point = 0xBFC00000u);
     bool step(std::string& error);
+    // Hot system-run entry: the caller owns a reusable empty error buffer.
+    // Successful instructions never modify it, avoiding millions of
+    // redundant std::string::clear() calls during BIOS execution.
+    bool step_hot(std::string& error);
     [[nodiscard]] bool in_osdsys_idle_loop() const;
     bool skip_osdsys_idle_pair();
     u64 skip_osdsys_idle_pairs(u64 max_pairs);
@@ -54,6 +58,8 @@ public:
     void clear_halt();
 
 private:
+    bool step_internal(std::string& error, bool clear_error);
+
     struct PendingLoad {
         bool valid = false;
         u32 reg = 0;

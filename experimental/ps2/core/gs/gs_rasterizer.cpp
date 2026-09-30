@@ -153,6 +153,27 @@ u32 select_blend_color(u32 selector, u32 source, u32 destination) {
 }
 
 u32 blend_color(u32 source, u32 destination, const GsRasterContext& ctx) {
+    // Retail OSDSYS spends almost all of its PSMCT16 raster time in:
+    //   A=Cs, B=ZERO, C=FIX(20), D=Cd, COLCLAMP=1
+    // which reduces exactly to Cd + (Cs * 20) / 128.  Keep this ahead of
+    // the generic selector/divide path: it covers ~50M pixels in the BIOS
+    // profile while preserving the GS integer blend equation exactly.
+    if (ctx.color_clamp &&
+        (ctx.alpha_a & 3u) == 0u &&
+        (ctx.alpha_b & 3u) == 2u &&
+        (ctx.alpha_c & 3u) == 2u &&
+        (ctx.alpha_d & 3u) == 1u &&
+        (ctx.alpha_fix & 0xFFu) == 20u) {
+        u32 output = source & 0xFF000000u;
+        for (u32 shift : {0u, 8u, 16u}) {
+            const u32 cs = channel(source, shift);
+            const u32 cd = channel(destination, shift);
+            const u32 value = cd + ((cs * 20u) >> 7u);
+            output |= std::min(255u, value) << shift;
+        }
+        return output;
+    }
+
     const u32 factor =
         (ctx.alpha_c & 3u) == 0u ? channel(source, 24) :
         (ctx.alpha_c & 3u) == 1u ? channel(destination, 24) :
@@ -219,11 +240,26 @@ s32 stq_to_fixed(float coordinate, float q, u32 size) {
         return 0;
     }
 
-    const long double fixed =
-        (static_cast<long double>(coordinate) / static_cast<long double>(q)) *
-        static_cast<long double>(size) * 16.0L;
-    const long double lo = static_cast<long double>(std::numeric_limits<s32>::min());
-    const long double hi = static_cast<long double>(std::numeric_limits<s32>::max());
+    const double fixed =
+        (static_cast<double>(coordinate) / static_cast<double>(q)) *
+        static_cast<double>(size) * 16.0;
+    const double lo =
+        static_cast<double>(std::numeric_limits<s32>::min());
+    const double hi =
+        static_cast<double>(std::numeric_limits<s32>::max());
+    return static_cast<s32>(std::clamp(fixed, lo, hi));
+}
+
+s32 st_to_fixed_scaled(
+    float coordinate,
+    double scale) {
+    if (!std::isfinite(coordinate)) return 0;
+    const double fixed =
+        static_cast<double>(coordinate) * scale;
+    const double lo =
+        static_cast<double>(std::numeric_limits<s32>::min());
+    const double hi =
+        static_cast<double>(std::numeric_limits<s32>::max());
     return static_cast<s32>(std::clamp(fixed, lo, hi));
 }
 
@@ -235,15 +271,15 @@ u32 interpolate_z(
     u32 a,
     u32 b,
     u32 c) {
-    const long double numerator =
-        static_cast<long double>(w0) * static_cast<long double>(a) +
-        static_cast<long double>(w1) * static_cast<long double>(b) +
-        static_cast<long double>(w2) * static_cast<long double>(c);
-    long double value = numerator / static_cast<long double>(area);
+    const double numerator =
+        static_cast<double>(w0) * static_cast<double>(a) +
+        static_cast<double>(w1) * static_cast<double>(b) +
+        static_cast<double>(w2) * static_cast<double>(c);
+    double value = numerator / static_cast<double>(area);
     value = std::clamp(
         value,
-        static_cast<long double>(0),
-        static_cast<long double>(std::numeric_limits<u32>::max()));
+        0.0,
+        static_cast<double>(std::numeric_limits<u32>::max()));
     return static_cast<u32>(value);
 }
 
@@ -300,6 +336,43 @@ u32 GsRasterizer::shade_pixel(
         texture.psm == 27u || texture.psm == 36u ||
         texture.psm == 44u;
 
+    // Fast common path: PSMCT16 + MODULATE with tracing disabled.
+    // A 5-bit channel expands as c5<<3, so the GS modulation
+    // ((c5<<3) * Cv) >> 7 is exactly (c5 * Cv) >> 4.
+    if (texture.psm == 2u &&
+        texture.tfx == 0u &&
+        texture.nonzero_samples == nullptr &&
+        texture.alpha_samples == nullptr &&
+        texture.first_sample_x == nullptr &&
+        texture.first_sample_y == nullptr &&
+        texture.first_sample_rgba == nullptr &&
+        texture.nonzero_shaded == nullptr) {
+        const u16 color = vram.read_psmct16(
+            x, y, texture.bp, texture.bw);
+        const u32 r5 = color & 0x1Fu;
+        const u32 g5 = (color >> 5u) & 0x1Fu;
+        const u32 b5 = (color >> 10u) & 0x1Fu;
+        const u32 vr = channel(vertex_rgba, 0u);
+        const u32 vg = channel(vertex_rgba, 8u);
+        const u32 vb = channel(vertex_rgba, 16u);
+        const u32 va = channel(vertex_rgba, 24u);
+        u32 out = 0u;
+        out |= std::min(255u, (r5 * vr) >> 4u);
+        out |= std::min(255u, (g5 * vg) >> 4u) << 8u;
+        out |= std::min(255u, (b5 * vb) >> 4u) << 16u;
+        u32 alpha =
+            (color & 0x8000u) != 0u ? (texture.ta1 & 0xFFu) :
+            (texture.aem && (color & 0x7FFFu) == 0u) ? 0u :
+            (texture.ta0 & 0xFFu);
+        if (texture.tcc) {
+            alpha = modulate_channel(alpha, va);
+        } else {
+            alpha = va;
+        }
+        out |= alpha << 24u;
+        return out;
+    }
+
     u32 texture_rgba = 0;
     if (indexed) {
         const u32 index = vram.read_index(
@@ -318,17 +391,9 @@ u32 GsRasterizer::shade_pixel(
             texture.ta1,
             texture.aem);
     } else {
-        const u32 raw = vram.read_pixel(
-            texture.psm, x, y, texture.bp, texture.bw);
-        if (texture.psm == 0u) {
-            texture_rgba = raw;
-        } else if (texture.psm == 1u) {
-            const u32 rgb = raw & 0x00FFFFFFu;
-            const u32 alpha =
-                (texture.aem && rgb == 0) ? 0u : (texture.ta0 & 0xFFu);
-            texture_rgba = rgb | (alpha << 24);
-        } else {
-            const u16 color = static_cast<u16>(raw);
+        if (texture.psm == 2u) {
+            const u16 color = vram.read_psmct16(
+                x, y, texture.bp, texture.bw);
             const u32 alpha =
                 (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
                 (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
@@ -338,6 +403,28 @@ u32 GsRasterizer::shade_pixel(
                 ((static_cast<u32>(color) & 0x7C00u) << 9) |
                 ((static_cast<u32>(color) & 0x03E0u) << 6) |
                 ((static_cast<u32>(color) & 0x001Fu) << 3);
+        } else {
+            const u32 raw = vram.read_pixel(
+                texture.psm, x, y, texture.bp, texture.bw);
+            if (texture.psm == 0u) {
+                texture_rgba = raw;
+            } else if (texture.psm == 1u) {
+            const u32 rgb = raw & 0x00FFFFFFu;
+            const u32 alpha =
+                (texture.aem && rgb == 0) ? 0u : (texture.ta0 & 0xFFu);
+            texture_rgba = rgb | (alpha << 24);
+            } else {
+                const u16 color = static_cast<u16>(raw);
+                const u32 alpha =
+                    (color & 0x8000u) != 0 ? (texture.ta1 & 0xFFu) :
+                    (texture.aem && (color & 0x7FFFu) == 0) ? 0u :
+                    (texture.ta0 & 0xFFu);
+                texture_rgba =
+                    (alpha << 24) |
+                    ((static_cast<u32>(color) & 0x7C00u) << 9) |
+                    ((static_cast<u32>(color) & 0x03E0u) << 6) |
+                    ((static_cast<u32>(color) & 0x001Fu) << 3);
+            }
         }
     }
 
@@ -422,6 +509,114 @@ u32 GsRasterizer::apply_fog(u32 rgba, u32 fog_color, u32 fog) {
         out |= (value & 0xFFu) << shift;
     }
     return out;
+}
+
+bool simple_frame_write(const GsRasterContext& ctx) {
+    const bool depth_noop =
+        !ctx.zte || (((ctx.ztst & 3u) == 1u) && ctx.zmask);
+    const bool dither_noop =
+        !ctx.dither || (ctx.psm != 2u && ctx.psm != 10u);
+    return (ctx.scanmask & 2u) == 0u &&
+           !ctx.ate &&
+           !ctx.date &&
+           depth_noop &&
+           !ctx.alpha_blend &&
+           !ctx.fba &&
+           ctx.fbmask == 0u &&
+           dither_noop &&
+           ctx.nonzero_colors == nullptr &&
+           ctx.nonzero_inputs == nullptr &&
+           ctx.nonzero_input_alpha == nullptr &&
+           ctx.first_input_rgba == nullptr &&
+           ctx.first_alpha_input_rgba == nullptr;
+}
+
+bool hot_osdsys_psm16_pixel_state(const GsRasterContext& ctx) {
+    return ctx.texture.enabled &&
+           ctx.texture.psm == 2u &&
+           ctx.psm == 0u &&
+           ctx.zte &&
+           (ctx.ztst & 3u) == 2u &&
+           ctx.zpsm == 48u &&
+           ctx.zmask &&
+           ctx.alpha_blend &&
+           !ctx.pabe &&
+           (ctx.alpha_a & 3u) == 0u &&
+           (ctx.alpha_b & 3u) == 2u &&
+           (ctx.alpha_c & 3u) == 2u &&
+           (ctx.alpha_d & 3u) == 1u &&
+           (ctx.alpha_fix & 0xFFu) == 20u &&
+           ctx.color_clamp &&
+           !ctx.ate &&
+           !ctx.date &&
+           !ctx.fba &&
+           ctx.fbmask == 0u &&
+           (ctx.scanmask & 2u) == 0u &&
+           ctx.nonzero_colors == nullptr &&
+           ctx.nonzero_inputs == nullptr &&
+           ctx.nonzero_input_alpha == nullptr &&
+           ctx.first_input_rgba == nullptr &&
+           ctx.first_alpha_input_rgba == nullptr;
+}
+
+bool draw_hot_osdsys_psm16_pixel(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y,
+    u32 z,
+    u32 source) {
+    const u32 ux = static_cast<u32>(x);
+    const u32 uy = static_cast<u32>(y);
+
+    u32 frame_address = 0u;
+    u32 depth_address = 0u;
+    GsVram::color_depth32_addresses(
+        ux, uy, ctx.fbp, ctx.zbp, ctx.fbw,
+        frame_address, depth_address);
+    const u32 destination_z =
+        vram.read_depth_at_address(48u, depth_address);
+    if (z < destination_z) return false; // GEQUAL
+
+    const u32 destination =
+        vram.read_pixel_at_address(0u, frame_address);
+
+    u32 output = source & 0xFF000000u;
+    const u32 sr = source & 0xFFu;
+    const u32 sg = (source >> 8u) & 0xFFu;
+    const u32 sb = (source >> 16u) & 0xFFu;
+    const u32 dr = destination & 0xFFu;
+    const u32 dg = (destination >> 8u) & 0xFFu;
+    const u32 db = (destination >> 16u) & 0xFFu;
+    output |= std::min(255u, dr + ((sr * 20u) >> 7u));
+    output |= std::min(255u, dg + ((sg * 20u) >> 7u)) << 8u;
+    output |= std::min(255u, db + ((sb * 20u) >> 7u)) << 16u;
+
+    return vram.write_pixel_at_address_untracked(
+        0u, frame_address, output);
+}
+
+bool draw_simple_frame_pixel(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    s32 x,
+    s32 y,
+    u32 rgba) {
+    const u32 address = GsVram::pixel_address_bytes(
+        ctx.psm,
+        static_cast<u32>(x),
+        static_cast<u32>(y),
+        ctx.fbp,
+        ctx.fbw);
+    if (ctx.psm == 0u) {
+        return vram.write_pixel_at_address_untracked(0u, address, rgba);
+    }
+    if (ctx.psm == 1u) {
+        return vram.write_pixel_at_address_untracked(
+            1u, address, rgba & 0x00FFFFFFu);
+    }
+    return vram.write_pixel_at_address_untracked(
+        ctx.psm, address, rgba32_to_16(rgba));
 }
 
 u32 GsRasterizer::apply_dither(
@@ -548,13 +743,27 @@ bool GsRasterizer::draw_pixel(
     u32 depth_address = 0;
     u32 source_z = 0;
     if (ctx.zte) {
+        const u32 ztst = ctx.ztst & 3u;
+        if (ztst == 0u) {
+            return false; // NEVER
+        }
+
         source_z = depth_value_for_psm(ctx.zpsm, z);
-        depth_address = GsVram::depth_address_bytes(
-            ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
-        const u32 destination_z = vram.read_depth_at_address(
-            ctx.zpsm, depth_address);
-        if (!depth_test_pass(ctx.ztst, source_z, destination_z)) {
-            return false;
+        if (write_depth || ztst >= 2u) {
+            depth_address = GsVram::depth_address_bytes(
+                ctx.zpsm, ux, uy, ctx.zbp, ctx.fbw);
+        }
+
+        // ZTST=ALWAYS does not depend on destination Z. Avoid the VRAM read
+        // entirely; keep the address only when a depth write is required.
+        if (ztst >= 2u) {
+            const u32 destination_z =
+                vram.read_depth_at_address(
+                    ctx.zpsm, depth_address);
+            if (!depth_test_pass(
+                    ztst, source_z, destination_z)) {
+                return false;
+            }
         }
     }
 
@@ -837,11 +1046,225 @@ u64 GsRasterizer::draw_line(
     return pixels;
 }
 
+bool parallel_sprite_vram_safe(
+    const GsRasterContext& ctx,
+    s32 left,
+    s32 right,
+    s32 top,
+    s32 bottom) {
+    if (left < 0 || top < 0 ||
+        right <= left || bottom <= top ||
+        ctx.fbw == 0u ||
+        static_cast<u32>(right) > ctx.fbw * 64u ||
+        ctx.nonzero_colors != nullptr ||
+        ctx.nonzero_inputs != nullptr ||
+        ctx.nonzero_input_alpha != nullptr ||
+        ctx.first_input_rgba != nullptr ||
+        ctx.first_alpha_input_rgba != nullptr) {
+        return false;
+    }
+
+    if (ctx.texture.enabled) {
+        if (!ctx.texture.fst ||
+            (ctx.texture.psm != 0u &&
+             ctx.texture.psm != 1u &&
+             ctx.texture.psm != 2u &&
+             ctx.texture.psm != 10u) ||
+            ctx.texture.nonzero_samples != nullptr ||
+            ctx.texture.alpha_samples != nullptr ||
+            ctx.texture.first_sample_x != nullptr ||
+            ctx.texture.first_sample_y != nullptr ||
+            ctx.texture.first_sample_rgba != nullptr ||
+            ctx.texture.nonzero_shaded != nullptr) {
+            return false;
+        }
+    }
+
+    auto page_height = [](u32 psm) -> u32 {
+        if (psm == 0u || psm == 1u ||
+            psm == 48u || psm == 49u) {
+            return 32u;
+        }
+        if (psm == 2u || psm == 10u ||
+            psm == 50u || psm == 58u) {
+            return 64u;
+        }
+        return 0u;
+    };
+
+    const auto screen_range = [&](
+        u32 bp,
+        u32 bw,
+        u32 psm,
+        u64& begin,
+        u64& finish) -> bool {
+        const u32 ph = page_height(psm);
+        if (ph == 0u || bw == 0u) return false;
+
+        const u32 min_page_x =
+            static_cast<u32>(left) >> 6u;
+        const u32 max_page_x =
+            static_cast<u32>(right - 1) >> 6u;
+        const u32 min_page_y =
+            static_cast<u32>(top) / ph;
+        const u32 max_page_y =
+            static_cast<u32>(bottom - 1) / ph;
+        if (max_page_x >= bw) return false;
+
+        const u64 base = static_cast<u64>(bp) * 256u;
+        const u64 first_page =
+            static_cast<u64>(min_page_y) * bw +
+            min_page_x;
+        const u64 last_page =
+            static_cast<u64>(max_page_y) * bw +
+            max_page_x;
+        begin = base + first_page * 8192u;
+        finish = base + (last_page + 1u) * 8192u;
+        return finish <= GsVram::kSize;
+    };
+
+    const auto texture_range = [&](
+        u64& begin,
+        u64& finish) -> bool {
+        const u32 ph = page_height(ctx.texture.psm);
+        if (ph == 0u ||
+            ctx.texture.bw == 0u ||
+            ctx.texture.width == 0u ||
+            ctx.texture.height == 0u) {
+            return false;
+        }
+        const u32 pages_x =
+            (ctx.texture.width + 63u) >> 6u;
+        const u32 pages_y =
+            (ctx.texture.height + ph - 1u) / ph;
+        if (pages_x == 0u ||
+            pages_y == 0u ||
+            pages_x > ctx.texture.bw) {
+            return false;
+        }
+
+        const u64 base =
+            static_cast<u64>(ctx.texture.bp) * 256u;
+        const u64 last_page =
+            static_cast<u64>(pages_y - 1u) *
+                ctx.texture.bw +
+            (pages_x - 1u);
+        begin = base;
+        finish = base + (last_page + 1u) * 8192u;
+        return finish <= GsVram::kSize;
+    };
+
+    const auto disjoint = [](
+        u64 a0, u64 a1, u64 b0, u64 b1) {
+        return a1 <= b0 || b1 <= a0;
+    };
+
+    u64 frame_begin = 0u;
+    u64 frame_end = 0u;
+    if (!screen_range(
+            ctx.fbp,
+            ctx.fbw,
+            ctx.psm,
+            frame_begin,
+            frame_end)) {
+        return false;
+    }
+
+    u64 depth_begin = 0u;
+    u64 depth_end = 0u;
+    if (ctx.zte) {
+        if (!screen_range(
+                ctx.zbp,
+                ctx.fbw,
+                ctx.zpsm,
+                depth_begin,
+                depth_end)) {
+            return false;
+        }
+        // Frame writes must never perturb another worker's depth test.
+        if (!disjoint(
+                frame_begin, frame_end,
+                depth_begin, depth_end)) {
+            return false;
+        }
+    }
+
+    if (!ctx.texture.enabled) return true;
+
+    u64 source_begin = 0u;
+    u64 source_end = 0u;
+    if (!texture_range(source_begin, source_end)) {
+        return false;
+    }
+
+    // Texture feedback makes pixel order observable inside the primitive.
+    if (!disjoint(
+            source_begin, source_end,
+            frame_begin, frame_end)) {
+        return false;
+    }
+
+    // A depth-writing primitive can also feed back through a texture.
+    if (ctx.zte && !ctx.zmask &&
+        !disjoint(
+            source_begin, source_end,
+            depth_begin, depth_end)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool GsRasterizer::parallel_sprite_plan(
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    s32& top,
+    s32& bottom,
+    u64& area) {
+    if (!supported_target(ctx) ||
+        !supported_texture(ctx.texture)) {
+        return false;
+    }
+
+    s32 left = ceil_div16(std::min(a.x, b.x));
+    s32 right = ceil_div16(std::max(a.x, b.x));
+    top = ceil_div16(std::min(a.y, b.y));
+    bottom = ceil_div16(std::max(a.y, b.y));
+
+    left = std::max(left, ctx.scax0);
+    right = std::min(right, ctx.scax1 + 1);
+    top = std::max(top, ctx.scay0);
+    bottom = std::min(bottom, ctx.scay1 + 1);
+    if (left >= right || top >= bottom) return false;
+
+    area =
+        static_cast<u64>(right - left) *
+        static_cast<u64>(bottom - top);
+    if (area < 65536u || bottom - top < 16) {
+        return false;
+    }
+
+    return parallel_sprite_vram_safe(
+        ctx, left, right, top, bottom);
+}
+
 u64 GsRasterizer::draw_sprite(
     GsVram& vram,
     const GsRasterContext& ctx,
     const GsRasterVertex& a,
     const GsRasterVertex& b) {
+    return draw_sprite_rows(
+        vram, ctx, a, b, ctx.scay0, ctx.scay1 + 1);
+}
+
+u64 GsRasterizer::draw_sprite_rows(
+    GsVram& vram,
+    const GsRasterContext& ctx,
+    const GsRasterVertex& a,
+    const GsRasterVertex& b,
+    s32 row_begin,
+    s32 row_end) {
     if (!supported_target(ctx) || !supported_texture(ctx.texture)) return 0;
 
     const s32 min_x_fp = std::min(a.x, b.x);
@@ -858,16 +1281,14 @@ u64 GsRasterizer::draw_sprite(
     right = std::min(right, ctx.scax1 + 1);
     top = std::max(top, ctx.scay0);
     bottom = std::min(bottom, ctx.scay1 + 1);
+    top = std::max(top, row_begin);
+    bottom = std::min(bottom, row_end);
 
     if (left >= right || top >= bottom) return 0;
 
     const s64 dx = static_cast<s64>(b.x) - a.x;
     const s64 dy = static_cast<s64>(b.y) - a.y;
 
-    // FST sprite coordinates are separable: U depends only on X and V only
-    // on Y. BIOS/OSDSYS draws many textured sprites, so computing both
-    // 64-bit divisions for every pixel wastes most of the raster time.
-    // Precompute each axis once while preserving the exact integer formula.
     std::array<s32, 2048> cached_u;
     std::array<s32, 2048> cached_v;
     const bool cached_fst = ctx.texture.enabled && ctx.texture.fst;
@@ -892,6 +1313,10 @@ u64 GsRasterizer::draw_sprite(
         }
     }
 
+    const bool hot_psm16_pixels =
+        hot_osdsys_psm16_pixel_state(ctx);
+    const bool simple_pixels =
+        !hot_psm16_pixels && simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         const s32 py = y * 16 + 8;
@@ -908,10 +1333,12 @@ u64 GsRasterizer::draw_sprite(
                     v = cached_row_v;
                 } else {
                     const long double fx = dx != 0
-                        ? static_cast<long double>(px - a.x) / static_cast<long double>(dx)
+                        ? static_cast<long double>(px - a.x) /
+                          static_cast<long double>(dx)
                         : 0.0L;
                     const long double fy = dy != 0
-                        ? static_cast<long double>(py - a.y) / static_cast<long double>(dy)
+                        ? static_cast<long double>(py - a.y) /
+                          static_cast<long double>(dy)
                         : 0.0L;
                     const float s = static_cast<float>(
                         static_cast<long double>(a.s) +
@@ -927,27 +1354,39 @@ u64 GsRasterizer::draw_sprite(
                     v = stq_to_fixed(t, q, ctx.texture.height);
                 }
             }
-            u32 rgba = shade_pixel(vram, ctx.texture, u, v, b.rgba);
+            u32 rgba = shade_pixel(
+                vram, ctx.texture, u, v, b.rgba);
             if (ctx.fog_enabled) {
                 const long double fx = dx != 0
                     ? std::clamp(
                         static_cast<long double>(px - a.x) /
-                        static_cast<long double>(dx), 0.0L, 1.0L)
+                        static_cast<long double>(dx),
+                        0.0L, 1.0L)
                     : 0.0L;
                 const long double fy = dy != 0
                     ? std::clamp(
                         static_cast<long double>(py - a.y) /
-                        static_cast<long double>(dy), 0.0L, 1.0L)
+                        static_cast<long double>(dy),
+                        0.0L, 1.0L)
                     : 0.0L;
                 const long double t_fog = (fx + fy) * 0.5L;
-                const u32 fog = static_cast<u32>(std::clamp<long double>(
-                    static_cast<long double>(a.fog) +
-                    (static_cast<long double>(b.fog) -
-                     static_cast<long double>(a.fog)) * t_fog,
-                    0.0L, 255.0L));
+                const u32 fog = static_cast<u32>(
+                    std::clamp<long double>(
+                        static_cast<long double>(a.fog) +
+                        (static_cast<long double>(b.fog) -
+                         static_cast<long double>(a.fog)) * t_fog,
+                        0.0L, 255.0L));
                 rgba = apply_fog(rgba, ctx.fog_color, fog);
             }
-            if (draw_pixel(vram, ctx, x, y, b.z, rgba)) ++pixels;
+            const bool wrote = hot_psm16_pixels
+                ? draw_hot_osdsys_psm16_pixel(
+                    vram, ctx, x, y, b.z, rgba)
+                : simple_pixels
+                    ? draw_simple_frame_pixel(
+                        vram, ctx, x, y, rgba)
+                    : draw_pixel(
+                        vram, ctx, x, y, b.z, rgba);
+            if (wrote) ++pixels;
         }
     }
     return pixels;
@@ -977,8 +1416,24 @@ u64 GsRasterizer::draw_triangle(
     const bool constant_rgba = a.rgba == b.rgba && b.rgba == c.rgba;
     const bool constant_z = a.z == b.z && b.z == c.z;
     const bool positive_area = area > 0;
-    const long double inv_area =
-        1.0L / static_cast<long double>(area);
+    const double inv_area =
+        1.0 / static_cast<double>(area);
+    const bool scaled_constant_q =
+        ctx.texture.enabled &&
+        !ctx.texture.fst &&
+        constant_q &&
+        std::isfinite(a.q) &&
+        std::fabs(a.q) >= 1.0e-20f;
+    const double constant_u_scale =
+        scaled_constant_q
+            ? (static_cast<double>(ctx.texture.width) *
+               16.0 / static_cast<double>(a.q))
+            : 0.0;
+    const double constant_v_scale =
+        scaled_constant_q
+            ? (static_cast<double>(ctx.texture.height) *
+               16.0 / static_cast<double>(a.q))
+            : 0.0;
 
     // Edge functions are affine in screen space.  Evaluate them once at the
     // top-left pixel centre, then advance by their exact 16.4 fixed-point
@@ -996,11 +1451,41 @@ u64 GsRasterizer::draw_triangle(
     const s64 w1_dy = -16ll * static_cast<s64>(a.x - c.x);
     const s64 w2_dy = -16ll * static_cast<s64>(b.x - a.x);
 
+    // Constant-Q ST interpolation is affine. Keep exact integer edge
+    // stepping, but advance the double-precision S/T numerators across a row
+    // instead of rebuilding six weighted products for every covered pixel.
+    // Row starts are recomputed from integer edge values, bounding floating
+    // accumulation to one scanline.
+    const double s_num_dx = scaled_constant_q
+        ? static_cast<double>(w0_dx) * a.s +
+          static_cast<double>(w1_dx) * b.s +
+          static_cast<double>(w2_dx) * c.s
+        : 0.0;
+    const double t_num_dx = scaled_constant_q
+        ? static_cast<double>(w0_dx) * a.t +
+          static_cast<double>(w1_dx) * b.t +
+          static_cast<double>(w2_dx) * c.t
+        : 0.0;
+
+    const bool hot_psm16_pixels =
+        hot_osdsys_psm16_pixel_state(ctx);
+    const bool simple_pixels =
+        !hot_psm16_pixels && simple_frame_write(ctx);
     u64 pixels = 0;
     for (s32 y = top; y < bottom; ++y) {
         s64 w0 = row_w0;
         s64 w1 = row_w1;
         s64 w2 = row_w2;
+        double s_num = scaled_constant_q
+            ? static_cast<double>(row_w0) * a.s +
+              static_cast<double>(row_w1) * b.s +
+              static_cast<double>(row_w2) * c.s
+            : 0.0;
+        double t_num = scaled_constant_q
+            ? static_cast<double>(row_w0) * a.t +
+              static_cast<double>(row_w1) * b.t +
+              static_cast<double>(row_w2) * c.t
+            : 0.0;
         for (s32 x = left; x < right; ++x) {
             const bool inside =
                 positive_area ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
@@ -1015,20 +1500,37 @@ u64 GsRasterizer::draw_triangle(
                         v = static_cast<s32>(
                             (w0 * a.v + w1 * b.v + w2 * c.v) / area);
                     } else {
-                        const float s = static_cast<float>(
-                            (static_cast<long double>(w0) * a.s +
-                             static_cast<long double>(w1) * b.s +
-                             static_cast<long double>(w2) * c.s) * inv_area);
-                        const float t = static_cast<float>(
-                            (static_cast<long double>(w0) * a.t +
-                             static_cast<long double>(w1) * b.t +
-                             static_cast<long double>(w2) * c.t) * inv_area);
-                        const float q = constant_q ? a.q : static_cast<float>(
-                            (static_cast<long double>(w0) * a.q +
-                             static_cast<long double>(w1) * b.q +
-                             static_cast<long double>(w2) * c.q) * inv_area);
-                        u = stq_to_fixed(s, q, ctx.texture.width);
-                        v = stq_to_fixed(t, q, ctx.texture.height);
+                        const float s = scaled_constant_q
+                            ? static_cast<float>(s_num * inv_area)
+                            : static_cast<float>(
+                                (static_cast<double>(w0) * a.s +
+                                 static_cast<double>(w1) * b.s +
+                                 static_cast<double>(w2) * c.s) * inv_area);
+                        const float t = scaled_constant_q
+                            ? static_cast<float>(t_num * inv_area)
+                            : static_cast<float>(
+                                (static_cast<double>(w0) * a.t +
+                                 static_cast<double>(w1) * b.t +
+                                 static_cast<double>(w2) * c.t) * inv_area);
+                        if (scaled_constant_q) {
+                            u = st_to_fixed_scaled(
+                                s, constant_u_scale);
+                            v = st_to_fixed_scaled(
+                                t, constant_v_scale);
+                        } else {
+                            const float q =
+                                constant_q
+                                    ? a.q
+                                    : static_cast<float>(
+                                        (static_cast<double>(w0) * a.q +
+                                         static_cast<double>(w1) * b.q +
+                                         static_cast<double>(w2) * c.q) *
+                                        inv_area);
+                            u = stq_to_fixed(
+                                s, q, ctx.texture.width);
+                            v = stq_to_fixed(
+                                t, q, ctx.texture.height);
+                        }
                     }
                 }
                 const u32 vertex_rgba = ctx.gouraud && !constant_rgba
@@ -1044,12 +1546,22 @@ u64 GsRasterizer::draw_triangle(
                 }
                 const u32 z = !ctx.zte ? 0u : constant_z ? a.z
                     : interpolate_z(w0, w1, w2, area, a.z, b.z, c.z);
-                if (draw_pixel(vram, ctx, x, y, z, rgba)) ++pixels;
+                const bool wrote = hot_psm16_pixels
+                    ? draw_hot_osdsys_psm16_pixel(
+                        vram, ctx, x, y, z, rgba)
+                    : simple_pixels
+                        ? draw_simple_frame_pixel(vram, ctx, x, y, rgba)
+                        : draw_pixel(vram, ctx, x, y, z, rgba);
+                if (wrote) ++pixels;
             }
 
             w0 += w0_dx;
             w1 += w1_dx;
             w2 += w2_dx;
+            if (scaled_constant_q) {
+                s_num += s_num_dx;
+                t_num += t_num_dx;
+            }
         }
         row_w0 += w0_dy;
         row_w1 += w1_dy;

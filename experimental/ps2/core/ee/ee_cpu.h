@@ -5,6 +5,7 @@
 #include "core/ee/ee_jit.h"
 
 #include <array>
+#include <memory>
 #include <string>
 
 namespace ps2 {
@@ -74,15 +75,20 @@ public:
     bool step_quiet_predecoded(u32 instruction, std::string& error);
     bool step_quiet_unchecked_predecoded(
         u32 instruction, std::string& error);
-    // Execute a linear prefix of already-fetched, side-effect-free EE
-    // instructions without re-entering the full per-instruction decoder.
-    // Stops before memory, coprocessor, exception-capable or control-flow ops.
+    // Execute the hot quiet-interpreter subset without re-entering the full
+    // per-instruction decoder. With instruction_ram set and instructions null,
+    // fetch directly from EE RAM and follow supported control flow across
+    // basic-block boundaries. Fresh fetches preserve self-modifying-code
+    // behavior without cached-block generation checks.
     u32 run_quiet_fast_prefix(
         u32 block_pc,
         const u32* instructions,
         u32 instruction_count,
         u32 maximum_instructions,
-        bool* store_executed = nullptr);
+        bool* store_executed = nullptr,
+        const u8* instruction_ram = nullptr,
+        u8* direct_ram = nullptr,
+        u32* page_generations = nullptr);
     u32 run_native_block(
         u32 pc,
         u32 page_generation,
@@ -115,6 +121,11 @@ public:
     u32 skip_bios_mmio_poll_iterations(u32 max_iterations);
     bool skip_bios_literal_iteration();
     u32 skip_bios_literal_iterations(u32 max_iterations);
+    // Validate/collapse the retail 0x7A SifGetReg(4) syscall wrapper.
+    // The system layer is responsible for sampling SMFLAG at the exact
+    // instruction offset when active IOP execution can change it.
+    [[nodiscard]] bool can_skip_hot_sif_getreg() const;
+    bool skip_hot_sif_getreg(u32 value);
 
     [[nodiscard]] const EeCpuState& state() const { return state_; }
     [[nodiscard]] EeCpuState& state() { return state_; }
@@ -128,6 +139,46 @@ public:
     void clear_jit_cache() { jit_.clear(); }
     [[nodiscard]] bool jit_enabled() const { return jit_enabled_; }
     [[nodiscard]] const EeJit& jit() const { return jit_; }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_fallback_opcodes() const {
+        return *fast_prefix_fallback_opcodes_;
+    }
+    [[nodiscard]] const std::array<u32, 64>&
+    fast_prefix_cop2_fallback_words() const {
+        return *fast_prefix_cop2_fallback_words_;
+    }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_cop2_fallback_counts() const {
+        return *fast_prefix_cop2_fallback_counts_;
+    }
+    [[nodiscard]] u32 fast_prefix_cop2_fallback_count() const {
+        return fast_prefix_cop2_fallback_count_;
+    }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_control_fallback_keys() const {
+        return *fast_prefix_control_fallback_keys_;
+    }
+    [[nodiscard]] const std::array<u64, 64>&
+    fast_prefix_control_fallback_counts() const {
+        return *fast_prefix_control_fallback_counts_;
+    }
+    [[nodiscard]] u32 fast_prefix_control_fallback_count() const {
+        return fast_prefix_control_fallback_count_;
+    }
+    [[nodiscard]] const std::array<u64, 128>&
+    fast_prefix_memory_fallback_keys() const {
+        return *fast_prefix_memory_fallback_keys_;
+    }
+    [[nodiscard]] const std::array<u64, 128>&
+    fast_prefix_memory_fallback_counts() const {
+        return *fast_prefix_memory_fallback_counts_;
+    }
+    [[nodiscard]] u32 fast_prefix_memory_fallback_count() const {
+        return fast_prefix_memory_fallback_count_;
+    }
+    [[nodiscard]] u32 hot_sif_getreg_read_offset() const {
+        return hot_sif_getreg_read_offset_;
+    }
 
     void set_dynarec_enabled(bool enabled) {
         dynarec_enabled_ = enabled;
@@ -187,10 +238,38 @@ private:
     EeBus& bus_;
     Vu1* vu0_micro_ = nullptr;
     EeCpuState state_{};
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_fallback_opcodes_ =
+            std::make_unique<std::array<u64, 64>>();
+    std::unique_ptr<std::array<u32, 64>>
+        fast_prefix_cop2_fallback_words_ =
+            std::make_unique<std::array<u32, 64>>();
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_cop2_fallback_counts_ =
+            std::make_unique<std::array<u64, 64>>();
+    u32 fast_prefix_cop2_fallback_count_ = 0u;
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_control_fallback_keys_ =
+            std::make_unique<std::array<u64, 64>>();
+    std::unique_ptr<std::array<u64, 64>>
+        fast_prefix_control_fallback_counts_ =
+            std::make_unique<std::array<u64, 64>>();
+    u32 fast_prefix_control_fallback_count_ = 0u;
+    std::unique_ptr<std::array<u64, 128>>
+        fast_prefix_memory_fallback_keys_ =
+            std::make_unique<std::array<u64, 128>>();
+    std::unique_ptr<std::array<u64, 128>>
+        fast_prefix_memory_fallback_counts_ =
+            std::make_unique<std::array<u64, 128>>();
+    u32 fast_prefix_memory_fallback_count_ = 0u;
+
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
+    bool hot_sif_getreg_diag_inflight_ = false;
+    u64 hot_sif_getreg_diag_start_ = 0u;
+    u32 hot_sif_getreg_read_offset_ = 0u;
     std::string halt_reason_;
     EeJit jit_{};
     EeDynarec dynarec_{};

@@ -2,7 +2,9 @@
 
 #include "core/gs/gs_privileged.h"
 
+#include <algorithm>
 #include <bit>
+#include <chrono>
 #include <utility>
 
 namespace ps2 {
@@ -62,23 +64,261 @@ GsCore::~GsCore() {
     }
     raster_condition_.notify_one();
     if (raster_worker_.joinable()) raster_worker_.join();
+    stop_raster_helpers();
+}
+
+void GsCore::set_gpu_backend(GsGpuBackend* backend) {
+    flush_pending_draws();
+    gpu_backend_ = backend;
+    if (gpu_backend_ != nullptr) {
+        gpu_backend_->invalidate_cpu_source();
+    }
+}
+
+void GsCore::synchronize_gpu_to_cpu() const {
+    if (gpu_backend_ == nullptr ||
+        !gpu_backend_->available()) {
+        return;
+    }
+    auto& mutable_vram =
+        const_cast<GsVram&>(vram_);
+    if (gpu_backend_->synchronize_to_cpu(
+            mutable_vram)) {
+        ++const_cast<GsStats&>(stats_).gpu_syncs_to_cpu;
+    }
 }
 
 void GsCore::set_async_rasterization(bool enabled) {
     if (async_rasterization_ == enabled) return;
     flush_pending_draws();
     if (enabled && !raster_worker_.joinable()) {
+        start_raster_helpers();
         raster_worker_ = std::thread(&GsCore::raster_worker_main, this);
     }
     async_rasterization_ = enabled;
 }
 
+void GsCore::start_raster_helpers() {
+    if (raster_helper_count_ != 0u) return;
+
+    const unsigned host_threads =
+        std::thread::hardware_concurrency();
+    const u32 desired =
+        host_threads == 0u
+            ? kMaxRasterHelpers
+            : host_threads > 2u
+                ? std::min<u32>(
+                    kMaxRasterHelpers,
+                    static_cast<u32>(host_threads - 2u))
+                : 0u;
+    if (desired == 0u) return;
+
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_stop_ = false;
+    }
+    raster_helper_count_ = desired;
+    for (u32 i = 0u; i < raster_helper_count_; ++i) {
+        raster_helpers_[i] = std::thread(
+            &GsCore::raster_helper_main,
+            this,
+            i + 1u);
+    }
+}
+
+void GsCore::stop_raster_helpers() {
+    if (raster_helper_count_ == 0u) return;
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_stop_ = true;
+        ++raster_parallel_generation_;
+    }
+    raster_parallel_condition_.notify_all();
+    for (u32 i = 0u; i < raster_helper_count_; ++i) {
+        if (raster_helpers_[i].joinable()) {
+            raster_helpers_[i].join();
+        }
+    }
+    raster_helper_count_ = 0u;
+}
+
+void GsCore::raster_helper_main(u32 helper_index) {
+    u64 observed_generation = 0u;
+    for (;;) {
+        const GsRasterContext* ctx = nullptr;
+        const GsRasterVertex* a = nullptr;
+        const GsRasterVertex* b = nullptr;
+        s32 row_begin = 0;
+        s32 row_end = 0;
+        u64 generation = 0u;
+
+        {
+            std::unique_lock lock(raster_parallel_mutex_);
+            raster_parallel_condition_.wait(lock, [&] {
+                return raster_parallel_stop_ ||
+                       raster_parallel_generation_ !=
+                           observed_generation;
+            });
+            if (raster_parallel_stop_) return;
+
+            generation = raster_parallel_generation_;
+            observed_generation = generation;
+            ctx = raster_parallel_context_;
+            a = raster_parallel_a_;
+            b = raster_parallel_b_;
+            row_begin =
+                raster_parallel_boundaries_[helper_index];
+            row_end =
+                raster_parallel_boundaries_[helper_index + 1u];
+        }
+
+        const u64 count = GsRasterizer::draw_sprite_rows(
+            vram_, *ctx, *a, *b, row_begin, row_end);
+
+        {
+            std::lock_guard lock(raster_parallel_mutex_);
+            // Only one raster command can own the pool at a time.
+            if (generation == raster_parallel_generation_) {
+                raster_parallel_counts_[helper_index] = count;
+                if (raster_parallel_pending_ != 0u) {
+                    --raster_parallel_pending_;
+                    if (raster_parallel_pending_ == 0u) {
+                        raster_parallel_done_condition_.notify_one();
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool GsCore::try_execute_parallel_sprite(
+    const RasterCommand& command,
+    u64& pixels) {
+    if (raster_helper_count_ == 0u ||
+        detailed_raster_stats_ ||
+        command.primitive != 6u ||
+        command.vertex_count < 2u) {
+        return false;
+    }
+
+    s32 top = 0;
+    s32 bottom = 0;
+    u64 area = 0u;
+    if (!GsRasterizer::parallel_sprite_plan(
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    const u32 worker_count = raster_helper_count_ + 1u;
+    const s32 rows = bottom - top;
+    if (rows < static_cast<s32>(worker_count * 4u)) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(raster_parallel_mutex_);
+        raster_parallel_context_ = &command.context;
+        raster_parallel_a_ = &command.a;
+        raster_parallel_b_ = &command.b;
+        raster_parallel_counts_.fill(0u);
+        raster_parallel_boundaries_[0] = top;
+        for (u32 worker = 1u;
+             worker < worker_count;
+             ++worker) {
+            raster_parallel_boundaries_[worker] =
+                top + static_cast<s32>(
+                    (static_cast<s64>(rows) * worker) /
+                    worker_count);
+        }
+        raster_parallel_boundaries_[worker_count] = bottom;
+        raster_parallel_pending_ = raster_helper_count_;
+        ++raster_parallel_generation_;
+    }
+    raster_parallel_condition_.notify_all();
+
+    raster_parallel_counts_[0] =
+        GsRasterizer::draw_sprite_rows(
+            vram_,
+            command.context,
+            command.a,
+            command.b,
+            raster_parallel_boundaries_[0],
+            raster_parallel_boundaries_[1]);
+
+    {
+        std::unique_lock lock(raster_parallel_mutex_);
+        raster_parallel_done_condition_.wait(lock, [&] {
+            return raster_parallel_pending_ == 0u;
+        });
+    }
+
+    pixels = 0u;
+    for (u32 worker = 0u;
+         worker < worker_count;
+         ++worker) {
+        pixels += raster_parallel_counts_[worker];
+    }
+    ++stats_.parallel_sprite_draws;
+    stats_.parallel_sprite_pixels += pixels;
+    stats_.parallel_sprite_helper_jobs += raster_helper_count_;
+    return true;
+}
+
+bool GsCore::try_execute_gpu_sprite(
+    const RasterCommand& command,
+    u64& pixels) {
+    if (gpu_backend_ == nullptr ||
+        !gpu_backend_->available() ||
+        detailed_raster_stats_ ||
+        raster_timing_enabled_ ||
+        command.primitive != 6u ||
+        command.vertex_count < 2u) {
+        return false;
+    }
+
+    s32 top = 0;
+    s32 bottom = 0;
+    u64 area = 0u;
+    if (!GsRasterizer::parallel_sprite_plan(
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    if (!gpu_backend_->submit_sprite(
+            vram_,
+            command.context,
+            command.a,
+            command.b,
+            top,
+            bottom,
+            area)) {
+        return false;
+    }
+
+    pixels = area;
+    ++stats_.gpu_sprite_draws;
+    stats_.gpu_sprite_pixels += area;
+    return true;
+}
+
 void GsCore::flush_pending_draws() const {
-    if (!raster_worker_.joinable()) return;
-    std::unique_lock lock(raster_mutex_);
-    raster_completed_condition_.wait(lock, [this] {
-        return raster_completed_ == raster_enqueued_;
-    });
+    if (raster_worker_.joinable()) {
+        std::unique_lock lock(raster_mutex_);
+        raster_completed_condition_.wait(lock, [this] {
+            return raster_completed_ == raster_enqueued_;
+        });
+    }
+    synchronize_gpu_to_cpu();
 }
 
 void GsCore::raster_worker_main() {
@@ -111,6 +351,9 @@ void GsCore::reset() {
     transfer_ = {};
     stats_ = {};
     vram_.reset();
+    if (gpu_backend_ != nullptr) {
+        gpu_backend_->invalidate_cpu_source();
+    }
     draw_vertices_.fill({});
     draw_vertex_count_ = 0;
 }
@@ -852,31 +1095,186 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
     const u32 vertex_count = command.vertex_count;
     const u64 nonzero_inputs_before = stats_.nonzero_raster_inputs;
     const u64 alpha_inputs_before = stats_.nonzero_inputs_with_alpha;
+    std::chrono::steady_clock::time_point raster_begin{};
+    if (raster_timing_enabled_) {
+        raster_begin = std::chrono::steady_clock::now();
+    }
     u64 pixels = 0;
-    if (prim == 0u && vertex_count >= 1u) {
-        pixels = GsRasterizer::draw_point(vram_, ctx, a);
-    } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
-        pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
-    } else if (prim == 6u && vertex_count >= 2u) {
-        pixels = GsRasterizer::draw_sprite(vram_, ctx, a, b);
-    } else if ((prim == 3u || prim == 4u || prim == 5u) && vertex_count >= 3u) {
-        pixels = GsRasterizer::draw_triangle(vram_, ctx, a, b, c);
+    bool gpu_raster = false;
+
+    if (prim == 6u && vertex_count >= 2u) {
+        s32 candidate_top = 0;
+        s32 candidate_bottom = 0;
+        u64 candidate_area = 0u;
+        if (GsRasterizer::parallel_sprite_plan(
+                ctx, a, b,
+                candidate_top,
+                candidate_bottom,
+                candidate_area)) {
+            ++stats_.gpu_candidate_sprite_draws;
+            stats_.gpu_candidate_sprite_pixels += candidate_area;
+
+            const u32 alpha_selectors =
+                (ctx.alpha_a & 3u) |
+                ((ctx.alpha_b & 3u) << 2u) |
+                ((ctx.alpha_c & 3u) << 4u) |
+                ((ctx.alpha_d & 3u) << 6u);
+            const u32 state_key =
+                alpha_selectors |
+                ((ctx.ztst & 3u) << 8u) |
+                (ctx.color_clamp ? (1u << 10u) : 0u) |
+                (ctx.pabe ? (1u << 11u) : 0u) |
+                (ctx.alpha_blend ? (1u << 12u) : 0u) |
+                (ctx.zte ? (1u << 13u) : 0u) |
+                (ctx.zmask ? (1u << 14u) : 0u) |
+                (ctx.ate ? (1u << 15u) : 0u) |
+                (ctx.date ? (1u << 16u) : 0u);
+
+            const u64 signature =
+                (ctx.texture.enabled ? 1ull : 0ull) |
+                (static_cast<u64>(ctx.texture.psm & 0x3Fu) << 1u) |
+                (static_cast<u64>(ctx.psm & 0x3Fu) << 7u) |
+                (static_cast<u64>(ctx.texture.tfx & 0x3u) << 13u) |
+                (static_cast<u64>(ctx.texture.tcc ? 1u : 0u) << 15u) |
+                (static_cast<u64>(state_key & 0x1FFFFu) << 16u) |
+                (static_cast<u64>(ctx.alpha_fix & 0xFFu) << 33u);
+
+            bool recorded = false;
+            for (u32 i = 0u;
+                 i < stats_.gpu_candidate_signature_count;
+                 ++i) {
+                if (stats_.gpu_candidate_signatures[i] == signature) {
+                    ++stats_.gpu_candidate_signature_draws[i];
+                    stats_.gpu_candidate_signature_pixels[i] +=
+                        candidate_area;
+                    recorded = true;
+                    break;
+                }
+            }
+            if (!recorded &&
+                stats_.gpu_candidate_signature_count <
+                    stats_.gpu_candidate_signatures.size()) {
+                const u32 index =
+                    stats_.gpu_candidate_signature_count++;
+                stats_.gpu_candidate_signatures[index] = signature;
+                stats_.gpu_candidate_signature_draws[index] = 1u;
+                stats_.gpu_candidate_signature_pixels[index] =
+                    candidate_area;
+            }
+        }
+    }
+
+    if (prim == 6u && vertex_count >= 2u &&
+        try_execute_gpu_sprite(command, pixels)) {
+        gpu_raster = true;
     } else {
-        ++stats_.skipped_raster_draws;
-        return;
+        // Software rasterization must observe every earlier GPU write.
+        synchronize_gpu_to_cpu();
+
+        if (prim == 0u && vertex_count >= 1u) {
+            pixels = GsRasterizer::draw_point(vram_, ctx, a);
+        } else if ((prim == 1u || prim == 2u) && vertex_count >= 2u) {
+            pixels = GsRasterizer::draw_line(vram_, ctx, a, b);
+        } else if (prim == 6u && vertex_count >= 2u) {
+            if (!try_execute_parallel_sprite(command, pixels)) {
+                pixels = GsRasterizer::draw_sprite(
+                    vram_, ctx, a, b);
+            }
+        } else if ((prim == 3u || prim == 4u || prim == 5u) &&
+                   vertex_count >= 3u) {
+            pixels = GsRasterizer::draw_triangle(
+                vram_, ctx, a, b, c);
+        } else {
+            ++stats_.skipped_raster_draws;
+            return;
+        }
+    }
+
+    const u64 raster_ns = raster_timing_enabled_
+        ? static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - raster_begin).count())
+        : 0u;
+
+    if (ctx.texture.enabled && ctx.texture.psm == 2u) {
+        u32 state_mask = 0u;
+        if (ctx.alpha_blend) state_mask |= 1u << 0;
+        if (ctx.ate) state_mask |= 1u << 1;
+        if (ctx.date) state_mask |= 1u << 2;
+        if (ctx.zte) state_mask |= 1u << 3;
+        if (ctx.zte && !ctx.zmask) state_mask |= 1u << 4;
+        if (ctx.fbmask != 0u) state_mask |= 1u << 5;
+        if (ctx.dither) state_mask |= 1u << 6;
+        if ((ctx.scanmask & 2u) != 0u) state_mask |= 1u << 7;
+        ++stats_.psm16_state_draws[state_mask];
+        stats_.psm16_state_pixels[state_mask] += pixels;
+        stats_.psm16_state_ns[state_mask] += raster_ns;
+
+        const u32 alpha_selectors =
+            (ctx.alpha_a & 3u) |
+            ((ctx.alpha_b & 3u) << 2u) |
+            ((ctx.alpha_c & 3u) << 4u) |
+            ((ctx.alpha_d & 3u) << 6u);
+        const u32 alpha_state =
+            alpha_selectors |
+            ((ctx.ztst & 3u) << 8u) |
+            (ctx.color_clamp ? (1u << 10u) : 0u) |
+            (ctx.pabe ? (1u << 11u) : 0u);
+        ++stats_.psm16_alpha_state_draws[alpha_state];
+        stats_.psm16_alpha_state_pixels[alpha_state] += pixels;
+        stats_.psm16_alpha_state_ns[alpha_state] += raster_ns;
+        if ((ctx.alpha_c & 3u) == 2u) {
+            const u32 fix = ctx.alpha_fix & 0xFFu;
+            ++stats_.psm16_fix_draws[fix];
+            stats_.psm16_fix_ns[fix] += raster_ns;
+        }
     }
 
     ++stats_.raster_draws;
     stats_.raster_pixels += pixels;
+    const std::size_t size_bin =
+        pixels < 64u ? 0u :
+        pixels < 256u ? 1u :
+        pixels < 1024u ? 2u :
+        pixels < 4096u ? 3u :
+        pixels < 16384u ? 4u :
+        pixels < 65536u ? 5u : 6u;
+    ++stats_.raster_draws_by_size[size_bin];
+    stats_.raster_pixels_by_size[size_bin] += pixels;
+    stats_.raster_ns_by_size[size_bin] += raster_ns;
     if (prim < stats_.raster_draws_by_primitive.size()) {
         ++stats_.raster_draws_by_primitive[prim];
         stats_.raster_pixels_by_primitive[prim] += pixels;
+        stats_.raster_ns_by_primitive[prim] += raster_ns;
     }
     if (ctx.texture.enabled &&
         ctx.texture.psm < stats_.texture_draws_by_psm.size()) {
         ++stats_.texture_draws_by_psm[ctx.texture.psm];
+        stats_.texture_ns_by_psm[ctx.texture.psm] += raster_ns;
+
+        if (prim == 6u && vertex_count >= 2u) {
+            stats_.textured_sprite_pixels += pixels;
+            if (ctx.texture.fst) {
+                stats_.textured_sprite_fst_pixels += pixels;
+            } else if (a.q == b.q) {
+                stats_.textured_sprite_constant_q_pixels += pixels;
+            } else {
+                stats_.textured_sprite_variable_q_pixels += pixels;
+            }
+        } else if (
+            (prim == 3u || prim == 4u || prim == 5u) &&
+            vertex_count >= 3u) {
+            stats_.textured_triangle_pixels += pixels;
+            if (ctx.texture.fst) {
+                stats_.textured_triangle_fst_pixels += pixels;
+            } else if (a.q == b.q && b.q == c.q) {
+                stats_.textured_triangle_constant_q_pixels += pixels;
+            } else {
+                stats_.textured_triangle_variable_q_pixels += pixels;
+            }
+        }
     }
-    if (pixels != 0u) {
+    if (pixels != 0u && !gpu_raster) {
         vram_.mark_modified();
     }
     if (detailed_raster_stats_) {

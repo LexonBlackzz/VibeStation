@@ -126,6 +126,23 @@ public:
         const GsRasterVertex& a,
         const GsRasterVertex& b);
 
+    // Persistent-worker support. The plan only succeeds for large sprite
+    // states whose framebuffer writes cannot alias their texture/depth reads.
+    static bool parallel_sprite_plan(
+        const GsRasterContext& ctx,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        s32& top,
+        s32& bottom,
+        u64& area);
+    static u64 draw_sprite_rows(
+        GsVram& vram,
+        const GsRasterContext& ctx,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        s32 row_begin,
+        s32 row_end);
+
     static u64 draw_triangle(
         GsVram& vram,
         const GsRasterContext& ctx,

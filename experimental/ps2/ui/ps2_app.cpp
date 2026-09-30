@@ -1,4 +1,5 @@
 #include "ui/ps2_app.h"
+#include "ui/ps2_gl_gs_backend.h"
 #include "ui/theme_settings.h"
 
 #include <SDL.h>
@@ -13,6 +14,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -22,6 +25,18 @@
 #endif
 
 namespace ps2::ui {
+
+Ps2App::~Ps2App() = default;
+
+namespace {
+
+constexpr std::size_t kAudioChannels = 2u;
+constexpr std::size_t kStutterHistoryFrames =
+    static_cast<std::size_t>(Spu2::kSampleRate) * 400u / 1000u;
+constexpr std::size_t kStutterQueueTargetFrames =
+    static_cast<std::size_t>(Spu2::kSampleRate) * 80u / 1000u;
+
+} // namespace
 
 bool Ps2App::init() {
     SDL_SetMainReady();
@@ -42,6 +57,7 @@ bool Ps2App::init() {
     };
 
     const GlContextAttempt attempts[] = {
+        {4, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 430", false},
         {3, 3, SDL_GL_CONTEXT_PROFILE_CORE, "#version 330", false},
         {3, 2, SDL_GL_CONTEXT_PROFILE_CORE, "#version 150", false},
         {2, 1, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY, "#version 120", true},
@@ -77,6 +93,8 @@ bool Ps2App::init() {
         SDL_GL_SetSwapInterval(1);
         imgui_glsl_version_ = attempt.glsl;
         use_imgui_opengl2_backend_ = attempt.use_opengl2;
+        gl_major_ = attempt.major;
+        gl_minor_ = attempt.minor;
         break;
     }
 
@@ -109,6 +127,10 @@ bool Ps2App::init() {
     }
     if (audio_device_ != 0) {
         SDL_PauseAudioDevice(audio_device_, 0);
+        reset_audio_stutter();
+        audio_stutter_thread_stop_.store(false, std::memory_order_release);
+        audio_stutter_thread_ =
+            std::thread(&Ps2App::audio_stutter_thread_main, this);
     } else {
         std::fprintf(
             stderr,
@@ -145,6 +167,29 @@ bool Ps2App::init() {
             std::fprintf(stderr, "ImGui OpenGL3 backend initialization failed.\n");
             shutdown();
             return false;
+        }
+    }
+
+    if (gl_major_ > 4 ||
+        (gl_major_ == 4 && gl_minor_ >= 3)) {
+        SDL_GL_SetAttribute(
+            SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+        SDL_GLContext gpu_context =
+            SDL_GL_CreateContext(window_);
+        SDL_GL_SetAttribute(
+            SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+        SDL_GL_MakeCurrent(window_, gl_context_);
+
+        if (gpu_context != nullptr) {
+            gpu_gs_backend_ =
+                std::make_unique<Ps2GlGsBackend>(
+                    window_, gpu_context);
+            if (gpu_gs_backend_->available()) {
+                system_.gs_core().set_gpu_backend(
+                    gpu_gs_backend_.get());
+            } else {
+                gpu_gs_backend_.reset();
+            }
         }
     }
 
@@ -299,6 +344,10 @@ bool Ps2App::write_window_ppm(
 }
 
 void Ps2App::shutdown() {
+    audio_stutter_thread_stop_.store(true, std::memory_order_release);
+    if (audio_stutter_thread_.joinable()) {
+        audio_stutter_thread_.join();
+    }
     if (audio_device_ != 0) {
         SDL_ClearQueuedAudio(audio_device_);
         SDL_CloseAudioDevice(audio_device_);
@@ -308,6 +357,9 @@ void Ps2App::shutdown() {
         SDL_GameControllerClose(controller_);
         controller_ = nullptr;
     }
+
+    system_.gs_core().set_gpu_backend(nullptr);
+    gpu_gs_backend_.reset();
 
     if (display_texture_ != 0 && gl_context_ != nullptr) {
         glDeleteTextures(1, &display_texture_);
@@ -497,16 +549,142 @@ void Ps2App::update_pad_input() {
     system_.pad().set_state(state);
 }
 
+void Ps2App::reset_audio_stutter() {
+    {
+        std::lock_guard<std::mutex> lock(audio_history_mutex_);
+        // The tape is always exactly 400 ms long. Before real SPU2 samples
+        // have filled it, the unused portion is intentional silence.
+        audio_history_.assign(
+            kStutterHistoryFrames * kAudioChannels, 0);
+        audio_history_write_frame_ = 0u;
+        audio_history_play_frame_ = 0u;
+    }
+    lag_stutter_active_.store(false, std::memory_order_release);
+}
+
+void Ps2App::remember_audio_history(
+    const s16* samples,
+    std::size_t frames) {
+    if (samples == nullptr || frames == 0u) return;
+
+    std::lock_guard<std::mutex> lock(audio_history_mutex_);
+    const std::size_t capacity_frames = kStutterHistoryFrames;
+    const std::size_t capacity_samples =
+        capacity_frames * kAudioChannels;
+    if (audio_history_.size() != capacity_samples) {
+        audio_history_.assign(capacity_samples, 0);
+        audio_history_write_frame_ = 0u;
+        audio_history_play_frame_ = 0u;
+    }
+
+    // Literal FIFO rolling tape: producer writes at the oldest slot and then
+    // advances. Once all 400 ms slots contain real audio, each new frame
+    // overwrites exactly the oldest frame. The newest frame is never discarded.
+    for (std::size_t frame = 0u; frame < frames; ++frame) {
+        const std::size_t dst =
+            audio_history_write_frame_ * kAudioChannels;
+        const std::size_t src = frame * kAudioChannels;
+        audio_history_[dst + 0u] = samples[src + 0u];
+        audio_history_[dst + 1u] = samples[src + 1u];
+        audio_history_write_frame_ =
+            (audio_history_write_frame_ + 1u) % capacity_frames;
+    }
+}
+
+void Ps2App::audio_stutter_thread_main() {
+    std::vector<s16> refill(
+        kStutterQueueTargetFrames * kAudioChannels);
+
+    while (!audio_stutter_thread_stop_.load(
+        std::memory_order_acquire)) {
+        if (audio_device_ == 0u ||
+            !lag_stutter_enabled_.load(std::memory_order_acquire)) {
+            lag_stutter_active_.store(false, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        const std::size_t queued_frames =
+            SDL_GetQueuedAudioSize(audio_device_) /
+            (kAudioChannels * sizeof(s16));
+        if (queued_frames >= kStutterQueueTargetFrames) {
+            lag_stutter_active_.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        const std::size_t needed_frames =
+            kStutterQueueTargetFrames - queued_frames;
+        {
+            std::lock_guard<std::mutex> lock(audio_history_mutex_);
+            if (audio_history_.size() !=
+                kStutterHistoryFrames * kAudioChannels) {
+                audio_history_.assign(
+                    kStutterHistoryFrames * kAudioChannels, 0);
+                audio_history_write_frame_ = 0u;
+                audio_history_play_frame_ = 0u;
+            }
+
+            // Consumer independently walks the fixed 400 ms tape forever.
+            // If emulation takes 200 ms to produce its next chunk, this host
+            // thread continues reading the existing tape instead of allowing
+            // SDL to underrun. Early in boot, unfilled tape slots are silence,
+            // so the loop length is still 400 ms rather than a tiny buzzing
+            // fragment that grows unpredictably.
+            for (std::size_t frame = 0u;
+                 frame < needed_frames;
+                 ++frame) {
+                const std::size_t src =
+                    audio_history_play_frame_ * kAudioChannels;
+                const std::size_t dst = frame * kAudioChannels;
+                refill[dst + 0u] = audio_history_[src + 0u];
+                refill[dst + 1u] = audio_history_[src + 1u];
+                audio_history_play_frame_ =
+                    (audio_history_play_frame_ + 1u) %
+                    kStutterHistoryFrames;
+            }
+        }
+
+        if (SDL_QueueAudio(
+                audio_device_,
+                refill.data(),
+                static_cast<Uint32>(
+                    needed_frames *
+                    kAudioChannels *
+                    sizeof(s16))) != 0) {
+            SDL_ClearQueuedAudio(audio_device_);
+            lag_stutter_active_.store(false, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            continue;
+        }
+
+        lag_stutter_active_.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    lag_stutter_active_.store(false, std::memory_order_release);
+}
+
 void Ps2App::update_audio() {
     const std::size_t available = system_.spu2().queued_frames();
-    if (available == 0u) return;
+    auto pcm = available != 0u
+        ? system_.spu2().take_samples(available)
+        : std::vector<s16>{};
 
-    // Drain the emulated queue every host frame. If emulation temporarily
-    // outruns playback (notably turbo BIOS bootstrap), keep the newest ~85 ms
-    // rather than building seconds of stale latency.
-    auto pcm = system_.spu2().take_samples(available);
-    if (audio_device_ == 0 || pcm.empty()) return;
+    if (audio_device_ == 0u || pcm.empty()) return;
 
+    const std::size_t frames = pcm.size() / kAudioChannels;
+
+    if (lag_stutter_enabled_.load(std::memory_order_acquire)) {
+        // In rolling-stutter mode fresh SPU2 data never goes directly to SDL.
+        // It only updates the 400 ms tape. The independent host feeder thread
+        // is the sole playback source, so slow EE/GS frames cannot cause
+        // sporadic queue starvation between update_audio() calls.
+        remember_audio_history(pcm.data(), frames);
+        return;
+    }
+
+    // Normal non-stutter path: retain the old low-latency queue behavior.
     constexpr Uint32 kLatencyResetBytes =
         Spu2::kSampleRate * 2u * sizeof(s16) / 8u;
     if (SDL_GetQueuedAudioSize(audio_device_) > kLatencyResetBytes) {
@@ -514,17 +692,19 @@ void Ps2App::update_audio() {
     }
 
     constexpr std::size_t kMaxSubmitFrames = 4096u;
-    const std::size_t frames = pcm.size() / 2u;
     const std::size_t submit_frames =
         std::min(frames, kMaxSubmitFrames);
     const std::size_t first_frame = frames - submit_frames;
-    const s16* data = pcm.data() + first_frame * 2u;
+    const s16* data =
+        pcm.data() + first_frame * kAudioChannels;
 
     if (SDL_QueueAudio(
             audio_device_,
             data,
             static_cast<Uint32>(
-                submit_frames * 2u * sizeof(s16))) != 0) {
+                submit_frames *
+                kAudioChannels *
+                sizeof(s16))) != 0) {
         SDL_ClearQueuedAudio(audio_device_);
     }
 }
@@ -771,6 +951,14 @@ void Ps2App::panel_main() {
             display.width(),
             display.height(),
             display.psm());
+        if (emulation_running_ &&
+            guest_fields_per_second_ > 0.0) {
+            ImGui::Text(
+                "%.1f FPS  |  %.0f%% speed  |  %.1f MIPS",
+                guest_frames_per_second_,
+                emulation_speed_percent_,
+                ee_instructions_per_second_ / 1'000'000.0);
+        }
         show_boot_progress();
         return;
     }
@@ -1249,6 +1437,46 @@ void Ps2App::panel_gs_debug() {
         gs.transfer_active() ? "active" : "idle",
         gs.transfer_psm(),
         gs.transfer_pixels_remaining());
+
+    if (gpu_gs_backend_ != nullptr) {
+        bool enabled = gpu_gs_enabled_;
+        if (ImGui::Checkbox(
+                "GPU GS (OpenGL compute)",
+                &enabled)) {
+            gpu_gs_enabled_ = enabled;
+            system_.gs_core().set_gpu_backend(
+                enabled
+                    ? static_cast<GsGpuBackend*>(
+                        gpu_gs_backend_.get())
+                    : nullptr);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled(
+            system_.gs_core().gpu_backend_active()
+                ? "(active)"
+                : "(software fallback)");
+    } else {
+        ImGui::TextDisabled(
+            "GPU GS: unavailable (OpenGL 4.3 compute required)");
+    }
+
+    const float ui_fps = ImGui::GetIO().Framerate;
+    const float ui_ms =
+        ui_fps > 0.0f ? 1000.0f / ui_fps : 0.0f;
+
+    ImGui::Separator();
+    ImGui::Text(
+        "Guest: %.1f FPS   %.1f%% speed   %.1f fields/s",
+        guest_frames_per_second_,
+        emulation_speed_percent_,
+        guest_fields_per_second_);
+    ImGui::Text(
+        "Host UI: %.1f FPS   %.2f ms/frame   EE: %.1f MIPS",
+        static_cast<double>(ui_fps),
+        static_cast<double>(ui_ms),
+        ee_instructions_per_second_ / 1'000'000.0);
+    ImGui::TextDisabled(
+        "100%% = 59.94 fields/s = 29.97 interlaced frames/s.");
     ImGui::Separator();
 
     if (ImGui::BeginTable("GSStats", 2,
@@ -1283,6 +1511,10 @@ void Ps2App::panel_gs_debug() {
         row("Primitive kicks", static_cast<unsigned long long>(stats.primitives));
         row("Raster draws", static_cast<unsigned long long>(stats.raster_draws));
         row("Raster pixels", static_cast<unsigned long long>(stats.raster_pixels));
+        row("GPU sprite draws", static_cast<unsigned long long>(stats.gpu_sprite_draws));
+        row("GPU sprite pixels", static_cast<unsigned long long>(stats.gpu_sprite_pixels));
+        row("GPU->CPU VRAM syncs", static_cast<unsigned long long>(stats.gpu_syncs_to_cpu));
+        row("CPU parallel sprite draws", static_cast<unsigned long long>(stats.parallel_sprite_draws));
         row("Textured raster draws", static_cast<unsigned long long>(stats.textured_raster_draws));
         row("Texture samples", static_cast<unsigned long long>(stats.texture_samples));
         row("Skipped raster draws", static_cast<unsigned long long>(stats.skipped_raster_draws));
@@ -1418,6 +1650,30 @@ void Ps2App::panel_settings() {
         audio_device_ != 0
             ? "48 kHz stereo active"
             : "unavailable");
+    bool lag_stutter_enabled =
+        lag_stutter_enabled_.load(std::memory_order_acquire);
+    if (ImGui::Checkbox(
+            "Lag Stutter Effect",
+            &lag_stutter_enabled)) {
+        lag_stutter_enabled_.store(
+            lag_stutter_enabled,
+            std::memory_order_release);
+        SDL_ClearQueuedAudio(audio_device_);
+        if (lag_stutter_enabled) {
+            std::lock_guard<std::mutex> lock(audio_history_mutex_);
+            // The write position is the oldest slot on a full rolling tape,
+            // so entering here starts with the least-recent audio first.
+            audio_history_play_frame_ = audio_history_write_frame_;
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled(
+        lag_stutter_active_.load(std::memory_order_acquire)
+            ? "(rolling 400 ms)"
+            : "(Source-style)");
+    ImGui::TextDisabled(
+        "Plays one fixed 400 ms rolling tape on a host feeder thread; "
+        "new SPU2 frames overwrite the oldest tape frames first.");
     ImGui::TextDisabled(
         "Keyboard: arrows D-pad, Z/X/A/S face, Enter/Backspace Start/Select, "
         "Q/E L1/R1, W/R L2/R2.");
@@ -1533,10 +1789,15 @@ bool Ps2App::start_bios() {
     }
 
     emulation_running_ = true;
+    reset_audio_stutter();
     if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     speed_sample_time_ = std::chrono::steady_clock::now();
     speed_sample_instructions_ = system_.ee().state().instructions_executed;
+    speed_sample_fields_ = system_.video_fields_started();
     ee_instructions_per_second_ = 0.0;
+    guest_fields_per_second_ = 0.0;
+    guest_frames_per_second_ = 0.0;
+    emulation_speed_percent_ = 0.0;
 
     char message[160]{};
     std::snprintf(
@@ -1672,11 +1933,29 @@ void Ps2App::update_emulation() {
     const auto sample_seconds =
         std::chrono::duration<double>(sample_time - speed_sample_time_).count();
     if (sample_seconds >= 0.5) {
-        const u64 instructions = system_.ee().state().instructions_executed;
+        constexpr double kNtscFieldsPerSecond = 59.94;
+
+        const u64 instructions =
+            system_.ee().state().instructions_executed;
+        const u64 fields =
+            system_.video_fields_started();
+
         ee_instructions_per_second_ =
-            static_cast<double>(instructions - speed_sample_instructions_) /
+            static_cast<double>(
+                instructions - speed_sample_instructions_) /
             sample_seconds;
+        guest_fields_per_second_ =
+            static_cast<double>(
+                fields - speed_sample_fields_) /
+            sample_seconds;
+        guest_frames_per_second_ =
+            guest_fields_per_second_ * 0.5;
+        emulation_speed_percent_ =
+            (guest_fields_per_second_ /
+             kNtscFieldsPerSecond) * 100.0;
+
         speed_sample_instructions_ = instructions;
+        speed_sample_fields_ = fields;
         speed_sample_time_ = sample_time;
     }
 
@@ -1695,6 +1974,7 @@ void Ps2App::update_emulation() {
 void Ps2App::reset_core() {
     emulation_running_ = false;
     ee_instructions_per_second_ = 0.0;
+    reset_audio_stutter();
     if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
     system_.reset(0);
     status_message_ =

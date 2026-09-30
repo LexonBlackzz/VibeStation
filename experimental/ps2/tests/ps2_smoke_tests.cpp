@@ -417,6 +417,73 @@ bool test_gs_untextured_triangle_without_depth() {
                   "untextured triangle color mismatch");
 }
 
+bool test_ee_quiet_trace_cop1_and_scratchpad() {
+    ps2::Ps2System traced;
+    ps2::Ps2System stepped;
+    constexpr ps2::u32 code = 0x00001000u;
+    constexpr ps2::u32 scratch = 0x70000100u;
+
+    const std::array<ps2::u32, 7> program = {
+        (0x0Fu << 26) | (1u << 16) | 0x3F80u, // LUI r1,0x3F80
+        (0x11u << 26) | (0x04u << 21) | (1u << 16) | (1u << 11), // MTC1 r1,f1
+        (0x11u << 26) | (0x10u << 21) | (1u << 16) | (1u << 11) |
+            (2u << 6) | 0x02u, // MUL.S f2,f1,f1
+        (0x39u << 26) | (2u << 21) | (2u << 16), // SWC1 f2,0(r2)
+        (0x31u << 26) | (2u << 21) | (3u << 16), // LWC1 f3,0(r2)
+        (0x11u << 26) | (0x00u << 21) | (4u << 16) | (3u << 11), // MFC1 r4,f3
+        0u,
+    };
+
+    for (ps2::u32 i = 0; i < program.size(); ++i) {
+        if (!expect(
+                traced.bus().write32(code + i * 4u, program[i]) &&
+                stepped.bus().write32(code + i * 4u, program[i]),
+                "failed to install quiet trace COP1 program")) {
+            return false;
+        }
+    }
+
+    traced.ee().reset(code);
+    stepped.ee().reset(code);
+    traced.ee().state().gpr[2].lo = scratch;
+    stepped.ee().state().gpr[2].lo = scratch;
+
+    const ps2::u32 retired = traced.ee().run_quiet_fast_prefix(
+        0u,
+        nullptr,
+        0u,
+        static_cast<ps2::u32>(program.size()),
+        nullptr,
+        traced.ram().data());
+
+    std::string error;
+    bool ok = expect(
+        retired == program.size(),
+        "quiet RAM trace did not retire COP1/scratchpad program");
+    for (ps2::u32 i = 0; i < program.size() && ok; ++i) {
+        ok = expect(
+                 stepped.ee().step_quiet(error),
+                 "reference COP1/scratchpad step failed") &&
+             ok;
+    }
+
+    ps2::u32 traced_value = 0;
+    ps2::u32 stepped_value = 0;
+    ok = expect(
+             traced.bus().read32(scratch, traced_value) &&
+             stepped.bus().read32(scratch, stepped_value) &&
+             traced_value == stepped_value &&
+             traced.ee().state().gpr[4].lo ==
+                 stepped.ee().state().gpr[4].lo &&
+             traced.ee().state().fpr[2] ==
+                 stepped.ee().state().fpr[2] &&
+             traced.ee().state().pc ==
+                 stepped.ee().state().pc,
+             "quiet RAM trace COP1/scratchpad state mismatch") &&
+         ok;
+    return ok;
+}
+
 bool test_dmac_running_mask() {
     ps2::EeHw hw;
     hw.reset();
@@ -2553,6 +2620,7 @@ int main() {
     ok = test_ram_bounds() && ok;
     ok = test_bios_idle_iteration_matches_ee_steps() && ok;
     ok = test_bios_loop_fast_paths_match_ee_steps() && ok;
+    ok = test_ee_quiet_trace_cop1_and_scratchpad() && ok;
     ok = test_dmac_running_mask() && ok;
     ok = test_ee_jit_matches_interpreter() && ok;
     ok = test_scheduler_ordering() && ok;

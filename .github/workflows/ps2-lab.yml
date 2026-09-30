@@ -33,10 +33,12 @@ jobs:
 
 
   windows-ui:
+
     if: >-
       github.event_name == 'pull_request' ||
       github.ref == 'refs/heads/ps2-lab' ||
       github.ref == 'refs/heads/ps2-lab-perf-experiment'
+
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
