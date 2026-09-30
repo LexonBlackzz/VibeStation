@@ -1411,7 +1411,7 @@ int main(int argc, char** argv) {
         std::cerr
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
-               "[--ee-jit|--profile|--gs-thread|--detailed-gs-stats|--audio-only] "
+               "[--ee-jit|--ee-dynarec|--profile|--gs-thread|--detailed-gs-stats|--audio-only] "
                "[--wav=audio.wav]\n";
         return 64;
     }
@@ -1424,6 +1424,7 @@ int main(int argc, char** argv) {
     const ps2::u64 budget =
         parse_budget(argc >= 3 ? argv[2] : nullptr, kDefaultBudget);
     bool ee_jit = false;
+    bool ee_dynarec = false;
     bool pc_samples = false;
     bool profile = false;
     bool gs_thread = false;
@@ -1434,6 +1435,7 @@ int main(int argc, char** argv) {
     for (int index = 3; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--ee-jit") ee_jit = true;
+        else if (option == "--ee-dynarec") ee_dynarec = true;
         else if (option == "--pc-samples") pc_samples = true;
         else if (option == "--profile") profile = true;
         else if (option == "--gs-thread") gs_thread = true;
@@ -1450,10 +1452,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (ee_jit && ee_dynarec) {
+        std::cerr << "--ee-jit and --ee-dynarec are mutually exclusive.\n";
+        return 64;
+    }
+
     ps2::Ps2System system;
     system.ee().set_jit_enabled(ee_jit);
+    system.ee().set_dynarec_enabled(ee_dynarec);
     std::cout << "EE_BACKEND="
-              << (ee_jit ? "experimental-x64-jit" : "cached-interpreter")
+              << (ee_dynarec
+                      ? "second-gen-x64-dynarec"
+                      : ee_jit
+                          ? "experimental-x64-jit"
+                          : "cached-interpreter")
               << '\n';
     system.gs_core().set_async_rasterization(gs_thread);
     system.gs_core().set_detailed_raster_stats(detailed_gs_stats);
@@ -1837,6 +1849,56 @@ int main(int argc, char** argv) {
               << system.ee().jit().block_guard_bailout_count()
               << " EE_JIT_CACHE_FLUSHES="
               << system.ee().jit().cache_flush_count() << '\n';
+    const auto& dynarec = system.ee().dynarec();
+    std::cout
+        << "EE_DYNAREC_BLOCKS_COMPILED=" << dynarec.compiled_blocks()
+        << " EE_DYNAREC_BLOCKS_EXECUTED=" << dynarec.executed_blocks()
+        << " EE_DYNAREC_INSTRUCTIONS=" << dynarec.executed_instructions()
+        << " EE_DYNAREC_LINK_HITS=" << dynarec.link_hits()
+        << " EE_DYNAREC_LINK_MISSES=" << dynarec.link_misses()
+        << " EE_DYNAREC_GUARD_EXITS=" << dynarec.guard_exits()
+        << " EE_DYNAREC_CODE_INVALIDATION_EXITS="
+        << dynarec.code_invalidation_exits()
+        << " EE_DYNAREC_COP0_WRITE_EXITS="
+        << dynarec.cop0_write_exits()
+        << " EE_DYNAREC_FASTMEM_LOADS=" << dynarec.fastmem_loads()
+        << " EE_DYNAREC_FASTMEM_STORES=" << dynarec.fastmem_stores()
+        << " EE_DYNAREC_REGCACHE_HITS=" << dynarec.register_cache_hits()
+        << " EE_DYNAREC_REGCACHE_FLUSHES="
+        << dynarec.register_cache_flushes()
+        << " EE_DYNAREC_CACHE_FLUSHES=" << dynarec.cache_flushes()
+        << " EE_DYNAREC_FUSED_STATIC_JUMPS="
+        << dynarec.fused_static_jumps()
+        << " EE_DYNAREC_FUSED_CONDITIONAL_BRANCHES="
+        << dynarec.fused_conditional_branches()
+        << " EE_DYNAREC_CONDITIONAL_SIDE_EXITS="
+        << dynarec.conditional_side_exits()
+        << " EE_DYNAREC_DISPATCH_CALLS=" << dynarec.dispatch_calls()
+        << " EE_DYNAREC_DEADLINE_EXITS=" << dynarec.deadline_exits()
+        << " EE_DYNAREC_UNSUPPORTED_EXITS=" << dynarec.unsupported_exits()
+        << '\n';
+
+    auto dynarec_unsupported = dynarec.unsupported_opcodes();
+    std::cout << "EE_DYNAREC_UNSUPPORTED_TOP";
+    for (ps2::u32 rank = 0u; rank < 8u; ++rank) {
+        ps2::u32 best_opcode = 0u;
+        ps2::u64 best_count = 0u;
+        for (ps2::u32 opcode = 0u;
+             opcode < dynarec_unsupported.size();
+             ++opcode) {
+            if (dynarec_unsupported[opcode] > best_count) {
+                best_opcode = opcode;
+                best_count = dynarec_unsupported[opcode];
+            }
+        }
+        if (best_count == 0u) break;
+        std::cout
+            << " 0x" << std::hex << best_opcode
+            << std::dec << ':' << best_count;
+        dynarec_unsupported[best_opcode] = 0u;
+    }
+    std::cout << '\n';
+
     auto fallback_opcodes = system.native_fallback_opcodes();
     std::cout << "EE_NATIVE_FALLBACK_TOP";
     for (ps2::u32 rank = 0u; rank < 8u; ++rank) {

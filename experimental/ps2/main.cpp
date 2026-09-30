@@ -12,6 +12,7 @@ int main(int argc, char** argv) {
     std::string capture_path;
     unsigned long long capture_after_ee = 0;
     bool ee_jit = false;
+    bool ee_dynarec = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -30,11 +31,13 @@ int main(int argc, char** argv) {
             }
         } else if (argument == "--ee-jit") {
             ee_jit = true;
+        } else if (argument == "--ee-dynarec") {
+            ee_dynarec = true;
         } else {
             std::fprintf(
                 stderr,
                 "Usage: VibeStationPS2Lab [--bios <path>] "
-                "[--ee-jit] "
+                "[--ee-jit|--ee-dynarec] "
                 "[--capture-visible <window.ppm>] "
                 "[--capture-after-ee <instructions>]\n");
             return 2;
@@ -49,11 +52,19 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    if (ee_jit && ee_dynarec) {
+        std::fprintf(
+            stderr,
+            "--ee-jit and --ee-dynarec are mutually exclusive.\n");
+        return 2;
+    }
+
     ps2::ui::Ps2App app;
     if (!app.init()) {
         return 1;
     }
     app.set_ee_jit_enabled(ee_jit);
+    app.set_ee_dynarec_enabled(ee_dynarec);
 
     if (!bios_path.empty() && !app.launch_bios(bios_path)) {
         app.shutdown();

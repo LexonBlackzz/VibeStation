@@ -387,11 +387,15 @@ bool EeCpu::execute_special(
         state_.next_pc = static_cast<u32>(gpr_u64(rs));
         next_is_delay_slot_ = true;
         return true;
-    case 0x09: // JALR
+    case 0x09: { // JALR
+        // Source operands are read before the link write. This matters for
+        // the legal rd == rs case.
+        const u32 target = static_cast<u32>(gpr_u64(rs));
         write_gpr_word(rd, pc + 8u);
-        state_.next_pc = static_cast<u32>(gpr_u64(rs));
+        state_.next_pc = target;
         next_is_delay_slot_ = true;
         return true;
+    }
     case 0x0A: // MOVZ
         if (gpr_u64(rt) == 0) {
             write_gpr64(rd, gpr_u64(rs));
@@ -5329,6 +5333,32 @@ u32 EeCpu::run_native_block(
     return retired;
 }
 
+EeDynarec::RunResult EeCpu::run_dynarec(
+    u32 maximum_instructions,
+    u8* ram_data,
+    u32* page_generations,
+    u8* code_page_tracked) {
+    if (!dynarec_enabled_ ||
+        halted_ ||
+        next_is_delay_slot_ ||
+        maximum_instructions == 0u) {
+        return {};
+    }
+
+    EeDynarec::RunResult result = dynarec_.execute(
+        state_,
+        maximum_instructions,
+        ram_data,
+        page_generations,
+        code_page_tracked);
+    if (result.retired != 0u) {
+        state_.gpr[0] = {};
+        current_is_delay_slot_ = false;
+        next_is_delay_slot_ = false;
+    }
+    return result;
+}
+
 bool EeCpu::step_internal(
     std::string& error,
     bool quiet,
@@ -5572,11 +5602,15 @@ bool EeCpu::step_internal(
             state_.next_pc = static_cast<u32>(gpr_u64(rs));
             next_is_delay_slot_ = true;
             break;
-        case 0x09u:
+        case 0x09u: {
+            // JALR reads its target before writing the link register. This
+            // matters for the legal rd == rs form.
+            const u32 target = static_cast<u32>(gpr_u64(rs));
             write_gpr_word(rd, pc + 8u);
-            state_.next_pc = static_cast<u32>(gpr_u64(rs));
+            state_.next_pc = target;
             next_is_delay_slot_ = true;
             break;
+        }
         case 0x0Au:
             if (gpr_u64(rt) == 0u) write_gpr64(rd, gpr_u64(rs));
             break;

@@ -80,25 +80,64 @@ UI capture in 58 seconds after these changes, versus roughly two minutes
 before. This is a measured host-runtime improvement, not a change to the
 emulated EE clock or a guarantee of full-speed emulation on other machines.
 
-## Experimental EE recompiler
+## EE execution backends
 
-The x64 EE recompiler is retained as an **opt-in research backend**. The
-normal PS2 BIOS path uses the cached/predecoded interpreter because current
-measurements show it is faster for sustained BIOS animation.
+The cached/predecoded interpreter remains the default and is the correctness
+baseline. The original `EeJit` is retained behind `--ee-jit` for historical
+comparison only.
 
-Run `VibeStationPS2Lab --ee-jit` or add `--ee-jit` to the headless trace
-only when testing the experimental native backend. The current emitter still
-synchronizes architectural state frequently and returns to the system layer
-after short blocks, so its dispatch and state-spill overhead can outweigh
-the native instruction execution benefit.
+A separate second-generation x64 backend is available with
+`--ee-dynarec`. It does not extend the original JIT. It builds
+multi-instruction RAM-resident basic blocks (up to 64 guest instructions),
+keeps a scored hot set of guest GPRs plus HI/LO in host registers for each
+block, uses dirty-register writeback, and performs guarded main-RAM fastmem.
+Ordinary RAM stores carry code-page generation barriers, including wide
+LQ/SQ and VU/FPU transfers, so self-modifying code exits before stale native
+instructions can run.
 
-The default interpreter now caches RAM-resident instruction blocks, reuses
-predecoded opcodes, batches device timing between event boundaries, and
-continues across ordinary data stores unless they invalidate the executing
-code page. Future recompiler work should use a second-generation design with
-persistent host-register allocation, dirty-register tracking, direct block
-linking, fastmem, and lazy architectural-state synchronization rather than
-continuing to extend the current first-stage emitter.
+The native integer/control subset includes ordinary and likely MIPS branches,
+REGIMM link/likely variants, J/JAL/JR/JALR, delay-slot annul semantics,
+variable and immediate 32/64-bit shifts, conditional moves, SA helpers,
+MTSAB/MTSAH, and the common scalar integer operations. COP1 register/control
+moves and BC1F/BC1T/BC1FL/BC1TL remain inside native blocks. Select-0 COP0
+reads/writes are supported; MTC0 Count is isolated to preserve its exact
+Count-retirement ordering, while state-changing MTC0 operations plus EI/DI
+are precise exits so the system immediately resamples interrupts and devices.
+
+Compiled successor blocks are cached and followed inside one dynarec dispatch,
+avoiding a return through the main PS2 run loop at every basic block. The
+system still owns timing: video transitions, SIF completion, EE timers, COP0
+Compare and the exact EE/IOP 8:1 boundary define the maximum retirement
+deadline passed to the backend. Deadline-capped block formation prevents a
+native block from crossing one of those boundaries. In dynarec mode repeated
+exact IOP sub-deadlines stay inside the dynarec-only quiet super-dispatch; the
+default interpreter continues using its proven normal path.
+
+The trace reports native coverage, block/dispatch efficiency, link hit/miss
+counts, guard/deadline/COP0 exits, fastmem activity, register-cache use, cache
+flushes, and a top unsupported-opcode histogram. These counters are intended
+to drive later ISA expansion rather than adding speculative emitters.
+
+The two native modes are mutually exclusive:
+
+```text
+vibestation_ps2_bios_trace <bios> 400000000 --profile --gs-thread --ee-dynarec
+VibeStationPS2Lab --bios <bios> --ee-dynarec
+```
+
+Use the repeatable Windows comparison harness to validate both performance
+and output:
+
+```powershell
+.\experimental\ps2\scripts\benchmark-ee-dynarec.ps1 `
+    -BiosPath 'C:\path\to\your\bios.bin'
+```
+
+It runs three 400M Release traces for the cached interpreter and the
+second-generation dynarec, reports median field rate/run time, and fails if
+the dynarec changes the interpreter's final display hash or raster-pixel
+count. The dynarec remains opt-in until that comparison demonstrates a
+reliable sustained BIOS win.
 
 ## Verified retail BIOS startup visual
 
@@ -125,10 +164,11 @@ PPM path after the trace budget:
 vibestation_ps2_bios_trace <bios-path> 215000000 <frame.ppm>
 ```
 
-The startup scene is still dark and approximate; this is an experimental GS
-renderer, not a fully accurate PS2. The later Sony/PlayStation 2 logo sequence
-and BIOS chime have not been verified. SPU2 audio synthesis/output is not yet
-implemented.
+The startup scene is still approximate; this is an experimental GS renderer,
+not a fully accurate PS2. SPU2 synthesis, headless PCM/WAV capture, and SDL
+audio playback are implemented for the BIOS path, but timing/mixing fidelity
+remains experimental and should still be validated alongside visual output
+after performance changes.
 
 The Release UI boot path skips redundant EE-to-VU0 state copies while VIF0
 DMA is idle, and uses longer, unsynchronized host frames only until the first
@@ -195,7 +235,12 @@ The experimental build currently contains:
 - a standalone SDL/OpenGL/ImGui VibeStation-style UI;
 - PS2 System, EE Debug, IOP Debug, Scheduler, Settings, and About panels.
 
-The previous IOP-RAM handoff halt is now removed: EE accesses in the `0x1C000000` physical window and IOP accesses to their low-RAM mirrors refer to the same 2 MiB backing store. The BIOS timing calibration path now sees Timer0's external HBlank source instead of the old placeholder /16 clock. CDVD is intentionally still a protocol scaffold rather than a disc engine: register-level bootstrap commands work, while real seek/read media commands remain unimplemented. The next fidelity milestones are IOP timers/INTC/DMAC, stronger SIF synchronization, full CDVD command/media timing, SPU2-facing IOP hardware, and replacing the current instruction-granularity 8:1 startup interleave with event/cycle scheduling. Large parts of the R5900 instruction set, GS rendering, SPU2, ELF loading, and corruption support also remain incomplete.
+The previous IOP-RAM handoff halt is now removed: EE accesses in the `0x1C000000` physical window and IOP accesses to their low-RAM mirrors refer to the same 2 MiB backing store. The BIOS timing calibration path now sees Timer0's external HBlank source instead of the old placeholder /16 clock. CDVD is intentionally still a protocol scaffold rather than a disc engine: register-level bootstrap commands work, while real seek/read media commands remain unimplemented. The next fidelity milestones are stronger IOP timer/INTC/DMAC coverage,
+stronger SIF synchronization, full CDVD command/media timing, more accurate
+SPU2 mixing/timing, and further replacement of instruction-granularity
+interleave with event/cycle scheduling. Large parts of the R5900/VU/GS
+behavior, ELF loading, game execution, and corruption support also remain
+incomplete.
 
 ## UI isolation
 

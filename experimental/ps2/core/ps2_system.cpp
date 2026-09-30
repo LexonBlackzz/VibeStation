@@ -234,6 +234,7 @@ void Ps2System::reset(u32 entry_point) {
     vif0_dma_.reset(); vif1_dma_.reset(); sif_dma_.reset();
     spr_dma_.reset(); ipu_dma_.reset(); vu0_.reset(); vu1_.reset();
     ee_.clear_jit_cache();
+    ee_.clear_dynarec_cache();
     ee_.reset(entry_point); iop_.reset(Bios::kResetVector);
     bios_started_ = false;
     reset_instruction_ = 0;
@@ -1382,7 +1383,22 @@ u64 Ps2System::try_run_quiet_ee_batch(
     if (maximum < 2u) return 0;
 
     u64 retired = 0;
-    while (retired < maximum && !ee_.halted()) {
+    bool dynarec_explicit_exit = false;
+    if (ee_.dynarec_enabled()) {
+        const auto native = ee_.run_dynarec(
+            static_cast<u32>(maximum),
+            ram_.data(),
+            ram_.page_generation_data(),
+            ram_.code_page_tracked_data());
+        retired = native.retired;
+        dynarec_explicit_exit =
+            native.reason == EeDynarec::ExitReason::Cop0Write ||
+            native.reason == EeDynarec::ExitReason::CodeInvalidated;
+    }
+
+    while (retired < maximum &&
+           !dynarec_explicit_exit &&
+           !ee_.halted()) {
         // SifGetReg(4) has a system-level exact-timing accelerator that must
         // advance the active IOP to the real SMFLAG sample point. If a quiet
         // trace reaches the syscall wrapper mid-batch, yield here so run_ee()
@@ -1771,8 +1787,12 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
             }
         }
 
-        const u64 quiet_batch = try_run_quiet_ee_batch(
-            instruction_budget - executed, error);
+        const u64 quiet_batch =
+            ee_.dynarec_enabled()
+                ? try_run_quiet_ee_superbatch(
+                    instruction_budget - executed, error)
+                : try_run_quiet_ee_batch(
+                    instruction_budget - executed, error);
         if (quiet_batch != 0u) {
             executed += quiet_batch;
             if (!error.empty()) break;

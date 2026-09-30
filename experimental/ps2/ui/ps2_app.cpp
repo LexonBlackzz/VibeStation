@@ -273,6 +273,10 @@ void Ps2App::set_ee_jit_enabled(bool enabled) {
     system_.ee().set_jit_enabled(enabled);
 }
 
+void Ps2App::set_ee_dynarec_enabled(bool enabled) {
+    system_.ee().set_dynarec_enabled(enabled);
+}
+
 void Ps2App::capture_visible_window(
     const std::string& path,
     unsigned long long minimum_ee_instructions) {

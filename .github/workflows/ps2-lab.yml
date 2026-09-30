@@ -33,11 +33,12 @@ jobs:
 
 
   windows-ui:
-    # Perf iteration is headless-only. Build the Windows UI once a candidate
-    # is ready to hand off by tagging that commit message with [windows-ui].
+
     if: >-
-      github.ref == 'refs/heads/ps2-lab-perf-experiment' &&
-      contains(github.event.head_commit.message, '[windows-ui]')
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/ps2-lab' ||
+      github.ref == 'refs/heads/ps2-lab-perf-experiment'
+
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,9 +46,13 @@ jobs:
         run: cmake -S experimental/ps2 -B build-ps2
       - name: Build Release UI
         run: cmake --build build-ps2 --config Release --target VibeStationPS2Lab --parallel 2
+      - name: Build Release trace and dynarec tests
+        run: cmake --build build-ps2 --config Release --target vibestation_ps2_bios_trace vibestation_ps2_bootstrap_tests --parallel 2
+      - name: Test second-generation EE backend
+        run: .\build-ps2\Release\vibestation_ps2_bootstrap_tests.exe --second-gen-dynarec-only
       - name: Upload Windows PS2 Lab
         uses: actions/upload-artifact@v4
         with:
-          name: VibeStationPS2Lab-windows-perf-experiment
+          name: VibeStationPS2Lab-windows
           path: build-ps2/Release/VibeStationPS2Lab.exe
           if-no-files-found: error

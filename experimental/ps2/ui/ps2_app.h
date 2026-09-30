@@ -28,6 +28,7 @@ public:
     void shutdown();
     bool launch_bios(const std::string& path);
     void set_ee_jit_enabled(bool enabled);
+    void set_ee_dynarec_enabled(bool enabled);
     void capture_visible_window(
         const std::string& path,
         unsigned long long minimum_ee_instructions = 0);
