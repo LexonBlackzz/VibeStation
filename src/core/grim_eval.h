@@ -1,4 +1,5 @@
 #pragma once
+#include "grim_genome.h"
 #include "types.h"
 #include <array>
 #include <string>
@@ -191,6 +192,23 @@ struct GrimEvalConfig {
   bool stop_on_death = true;
   bool mute_audio = false; // test harness only: feed silence to the recorder
   GrimLivenessConfig liveness;
+
+  // Phase 2. With use_genome, the genome is applied from reset (System owns
+  // nothing; run_grim_eval keeps the runtime alive for the run).
+  bool use_genome = false;
+  GrimGenome genome;
+  // Review outputs. Empty / 0 = off.
+  std::string dump_wav_path;    // captured SPU audio, 16-bit stereo at 44.1 kHz
+  std::string dump_frames_dir;  // displayed area as BMP, every dump_frames_every frames
+  u32 dump_frames_every = 0;
+  // Run under whatever CPU mode is active (the recompiler included) without
+  // the executed-PC telemetry hooks, which only see the interpreter. Frame,
+  // audio, GPU and cycle telemetry stay valid; instruction counts and coverage
+  // read zero. Used to check that genes behave the same under both backends.
+  bool native_cpu = false;
+  // Test only, never set by a normal command line: spin forever after boot so
+  // --grim-gene-test can prove that --grim-explore kills a hung child.
+  bool test_hang = false;
 };
 
 struct GrimEvalResult {
@@ -208,6 +226,8 @@ struct GrimEvalResult {
   double wall_seconds = 0.0;
   double emulated_seconds = 0.0;
   double speed_factor = 0.0; // emulated / wall
+  u64 genome_hash = 0;       // 0 when no genome was applied
+  std::vector<u64> gene_hits; // per gene: events it actually changed
 };
 
 // Runs one evaluation on a fresh System. Requires the interpreter
@@ -219,3 +239,8 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg);
 std::string grim_frame_json(const GrimFrameTelemetry &f);
 std::string grim_summary_json(const GrimEvalResult &r);
 bool grim_write_telemetry_jsonl(const GrimEvalResult &r, const std::string &path);
+
+// Review helpers (no dependencies beyond the standard library).
+bool grim_write_wav(const std::string &path, const std::vector<s16> &stereo_samples);
+bool grim_write_bmp(const std::string &path, int width, int height,
+                    const std::vector<u32> &rgba);

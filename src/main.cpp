@@ -8,6 +8,7 @@
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
 #include "platform/grim_eval_runner.h"
+#include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
 #include "ui/app.h"
@@ -3917,6 +3918,23 @@ int main(int argc, char *argv[]) {
       g_experimental_dma_command_sanitizer = true;
       continue;
     }
+    if (a == "--genome" && (i + 1) < args.size() &&
+        (passthrough.empty() || passthrough[0].rfind("--grim-", 0) != 0)) {
+      // GUI playback of a Grim Reaper genome. The --grim-* modes take their
+      // own --genome after the mode flag, so it stays in passthrough for them.
+      std::string genome_error;
+      if (!grim_gui_genome_load(args[i + 1], genome_error)) {
+        fprintf(stderr, "ERROR: --genome %s: %s\n", args[i + 1].c_str(),
+                genome_error.c_str());
+        return 1;
+      }
+      printf("GRIM: genome %s loaded: %zu genes, hash=0x%016llX (applied on every boot)\n",
+             args[i + 1].c_str(), grim_gui_genome()->genome().genes.size(),
+             static_cast<unsigned long long>(grim_gui_genome()->hash()));
+      fflush(stdout);
+      ++i;
+      continue;
+    }
     passthrough.push_back(a);
   }
 
@@ -3941,13 +3959,22 @@ int main(int argc, char *argv[]) {
 
   if (!passthrough.empty() && (passthrough[0] == "--grim-eval" ||
                                passthrough[0] == "--grim-determinism-test" ||
-                               passthrough[0] == "--grim-self-test")) {
+                               passthrough[0] == "--grim-self-test" ||
+                               passthrough[0] == "--grim-gene-test" ||
+                               passthrough[0] == "--grim-random-genome" ||
+                               passthrough[0] == "--grim-explore")) {
     const std::vector<std::string> grim_args(passthrough.begin() + 1,
                                              passthrough.end());
     const int rc = passthrough[0] == "--grim-eval"
                        ? run_grim_eval_cli(grim_args)
                    : passthrough[0] == "--grim-self-test"
                        ? run_grim_self_test(grim_args)
+                   : passthrough[0] == "--grim-gene-test"
+                       ? run_grim_gene_test(grim_args, argv[0])
+                   : passthrough[0] == "--grim-random-genome"
+                       ? run_grim_random_genome_cli(grim_args)
+                   : passthrough[0] == "--grim-explore"
+                       ? run_grim_explore_cli(grim_args, argv[0])
                        : run_grim_determinism_test(grim_args, argv[0]);
     if (g_log_file) {
       log_flush_repeats();

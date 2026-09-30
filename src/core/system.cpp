@@ -1,4 +1,5 @@
 #include "system.h"
+#include "grim_genome.h"
 #include "input_recorder.h"
 #include <algorithm>
 #include <chrono>
@@ -362,6 +363,27 @@ void System::sync_spu(u64 target_cycle) {
         return;
     }
 
+    // Grim Reaper delayed SPU writes land at their own cycle: tick up to it,
+    // write, then carry on. The SPU is additive, so this does not depend on
+    // where the sync points happen to be.
+    while (grim_ != nullptr && grim_->has_delayed_spu() &&
+           grim_->next_delayed_due() <= target_cycle) {
+        const u64 due = std::max(grim_->next_delayed_due(), spu_synced_cpu_cycle_);
+        u64 part = due - spu_synced_cpu_cycle_;
+        while (part > 0) {
+            const u32 step =
+                (part > static_cast<u64>(std::numeric_limits<u32>::max()))
+                ? std::numeric_limits<u32>::max()
+                : static_cast<u32>(part);
+            spu_.tick(step);
+            part -= step;
+        }
+        spu_synced_cpu_cycle_ = due;
+        spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+        const GrimSpuWrite w = grim_->pop_delayed_spu();
+        spu_.write16(w.offset, w.value);
+    }
+
     u64 delta = target_cycle - spu_synced_cpu_cycle_;
     while (delta > 0) {
         const u32 step =
@@ -373,6 +395,22 @@ void System::sync_spu(u64 target_cycle) {
     }
     spu_synced_cpu_cycle_ = target_cycle;
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+}
+
+void System::set_grim_genome(GrimGenomeRuntime *genome) {
+    grim_ = genome;
+    gpu_.set_grim_genome(genome);
+    if (genome != nullptr) {
+        genome->reset();
+    }
+}
+
+void System::grim_write_spu16(u32 offset, u16 value) {
+    GrimSpuWrite out[GrimGenomeRuntime::kMaxSpuOut];
+    const size_t n = grim_->filter_spu_write(offset, value, device_cpu_cycle(), out);
+    for (size_t i = 0; i < n; ++i) {
+        spu_.write16(out[i].offset, out[i].value);
+    }
 }
 
 void System::sync_sio(u64 target_cycle) {
@@ -746,6 +784,9 @@ void System::reset() {
     gpu_gp0_source_valid_ = false;
     gpu_gp0_source_from_dma_ = false;
     gpu_gp0_source_addr_ = 0;
+    if (grim_ != nullptr) {
+        grim_->reset();
+    }
 }
 
 void System::shutdown() {
@@ -1808,6 +1849,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     }
     const bool profile_detailed = g_profile_detailed_timing;
     cpu_.notify_cpu_backend_frame(boot_diag_.frame_counter);
+    if (grim_ != nullptr) {
+        grim_->begin_frame(boot_diag_.frame_counter);
+    }
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
     apply_sound_reaper_for_frame();
@@ -3386,7 +3430,11 @@ void System::write16(u32 addr, u16 val) {
         }
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();
-            spu_.write16(io - 0xC00, val);
+            if (grim_ != nullptr) {
+                grim_write_spu16(io - 0xC00, val);
+            } else {
+                spu_.write16(io - 0xC00, val);
+            }
             return;
         }
 
@@ -3680,8 +3728,14 @@ void System::write32(u32 addr, u32 val) {
         // SPU
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();
-            spu_.write16(io - 0xC00, static_cast<u16>(val));
-            spu_.write16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            if (grim_ != nullptr) {
+                // Split first, then filter each half: KON/KOFF stay consistent.
+                grim_write_spu16(io - 0xC00, static_cast<u16>(val));
+                grim_write_spu16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            } else {
+                spu_.write16(io - 0xC00, static_cast<u16>(val));
+                spu_.write16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            }
             return;
         }
 

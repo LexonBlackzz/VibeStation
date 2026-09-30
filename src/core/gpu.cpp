@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "grim_genome.h"
 #include "system.h"
 #include <algorithm>
 #include <array>
@@ -933,6 +934,11 @@ void Gpu::gp0(u32 command) {
     if (gp0_words_remaining_ > 0)
         continue;
 
+    if (grim_ != nullptr) {
+        grim_->filter_gp0(gp0_buffer_.data(), gp0_buffer_.size());
+        // Bits 24/25 (raw texture, semi-transparency) may have changed.
+        gp0_command_ = static_cast<u8>(gp0_buffer_[0] >> 24);
+    }
     apply_reaper_to_gp0_command();
 
     // Full command received — dispatch
@@ -1590,6 +1596,10 @@ void Gpu::draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
 }
 
 void Gpu::handle_polyline_word(u32 word) {
+    if (grim_ != nullptr) {
+        word = grim_->filter_gp0_polyline_word(
+            word, polyline_gouraud_, polyline_gouraud_ && !polyline_waiting_vertex_);
+    }
     if (!polyline_gouraud_) {
         if (is_polyline_terminator(word)) {
             polyline_active_ = false;

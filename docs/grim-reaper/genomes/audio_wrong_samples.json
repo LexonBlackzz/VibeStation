@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_address","target":16777215,"seed":109,"trigger":{"kind":"rot","start_frame":0,"end_frame":600},"params":{"which":0,"blocks":200,"random":1}}
+]}

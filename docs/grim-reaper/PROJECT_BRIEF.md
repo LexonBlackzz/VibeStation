@@ -22,8 +22,9 @@ Lexon's machine, so read it if you can.
   lives in `main()` in `src/main.cpp`: options are parsed first and the rest
   goes into `passthrough`. Tests take the BIOS as a path argument, for example
   `D:\Misc\pSXfin_1_13-1220\bios\scph1001_original.bin` on Lexon's machine.
-- Grim Reaper 2.0 adds `--grim-eval`, `--grim-determinism-test` and
-  `--grim-self-test`. See `PROGRESS.md`.
+- Grim Reaper 2.0 adds `--grim-eval`, `--grim-determinism-test`,
+  `--grim-self-test` (Phase 1) and `--grim-gene-test`, `--grim-random-genome`,
+  `--grim-explore` (Phase 2). See `PROGRESS.md`.
 
 ## Main loop and timing
 
@@ -192,3 +193,34 @@ Lexon's machine, so read it if you can.
   large `BootDiagnostics` struct. Reuse them before adding new hooks.
 - Several source files have CRLF or mixed line endings. Check with
   `git diff --numstat --ignore-cr-at-eol`.
+
+## Interface genes (Phase 2, `src/core/grim_genome.{h,cpp}`)
+
+- `GrimGenome` is a versioned list of `GrimGene {type, target, seed, trigger,
+  params}`. Parsing (nlohmann/json, already a dependency) is strict; the
+  serializer is hand-written so the field order is fixed. `GrimGenomeRuntime`
+  holds the per-gene splitmix64 streams, the SPU delay queue and a shadow of the
+  last value written to each SPU register. Everything is integer math.
+- `System` holds `GrimGenomeRuntime *grim_` and passes the same pointer to `Gpu`
+  (`System::set_grim_genome`). `nullptr` = off = one branch per SPU register
+  write (two sites in `System::write16/write32`, which split 32-bit writes
+  first) and per buffered GP0 command (`Gpu::gp0`, before
+  `apply_reaper_to_gp0_command`) or polyline word (`Gpu::handle_polyline_word`).
+- SPU: `System::grim_write_spu16` -> `GrimGenomeRuntime::filter_spu_write`
+  (0..8 output writes per input). Delayed writes wait in the runtime's queue;
+  `System::sync_spu` ticks the SPU to each due cycle and writes them there (the
+  SPU is additive, so this does not depend on where sync points fall).
+  `Spu::read16` returns what the SPU was given, i.e. the transformed value.
+- Time: `boot_diag_.frame_counter` is emulated (only `run_frame` increments it,
+  `System::reset` zeroes it). `run_frame` passes it to `begin_frame`.
+- The recompiler reaches all of this through `v4_bus_write16/32` ->
+  `System::write16/32`, and GP0 through the same `Gpu::gp0`.
+- Runner side: `GrimEvalConfig::{use_genome, genome, dump_wav_path,
+  dump_frames_dir, dump_frames_every}`; `src/platform/grim_process.{h,cpp}`
+  (CreateProcess + Job Object / fork + process group with hard timeout);
+  `grim_explore` and `grim_random_genome` CLIs in `grim_eval_runner.cpp`;
+  `src/platform/grim_gene_test.cpp` (`--grim-gene-test`).
+- GUI: `--genome <file>` before any other mode word; `main()` loads it via
+  `grim_gui_genome_load`, `App::init_runtime` calls
+  `system_->set_grim_genome(grim_gui_genome())`. `System::reset()` rewinds the
+  genome, so "reap and reboot" replays it from frame 0.

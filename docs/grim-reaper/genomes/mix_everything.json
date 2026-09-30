@@ -1,0 +1,11 @@
+{"version":1,"genes":[
+{"type":"spu_pitch","target":16777215,"seed":301,"trigger":{"kind":"rot","start_frame":50,"end_frame":300},"params":{"mode":1,"mul_q8":384,"offset":300,"scale":2741,"depth":64,"period":120}},
+{"type":"spu_volume","target":16777215,"seed":302,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":30,"duty":10,"probability":0},"params":{"mode":1,"clamp":4096,"depth":512,"period":120}},
+{"type":"spu_keyon","target":16777215,"seed":303,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":0,"duty":0,"probability":800},"params":{"mode":2,"keys":0,"prob":700,"delay":300}},
+{"type":"spu_reverb","target":16777215,"seed":304,"trigger":{"kind":"rot","start_frame":0,"end_frame":400},"params":{"cfg":500,"base":0,"eon":1,"spucnt":1}},
+{"type":"spu_noise","target":16777215,"seed":305,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":0,"duty":0,"probability":300},"params":{"piggyback":1}},
+{"type":"gpu_vertex","target":7,"seed":306,"trigger":{"kind":"rot","start_frame":0,"end_frame":400},"params":{"mode":1,"amp":6,"dx":4,"dy":4,"grid":8,"wrap":0,"prob":500}},
+{"type":"gpu_color","target":7,"seed":307,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":40,"duty":20,"probability":0},"params":{"mode":0,"perm":6,"tint":4144959}},
+{"type":"gpu_flags","target":7,"seed":308,"trigger":{"kind":"window","start_frame":100,"end_frame":300},"params":{"semi":3,"raw":3,"prob":300}},
+{"type":"gpu_state","target":63,"seed":309,"trigger":{"kind":"rot","start_frame":100,"end_frame":350},"params":{"amp":3,"drift":20,"e1_mask":31,"e2_mask":31,"e6_mask":1}}
+]}

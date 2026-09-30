@@ -143,9 +143,13 @@ struct GpuCommandDebugInfo {
   std::array<std::array<u8, 4>, kRecentPolys> poly_b{};
 };
 
+class GrimGenomeRuntime;
+
 class Gpu {
 public:
   void init(System *sys) { sys_ = sys; }
+  // Grim Reaper 2.0 GP0 genes; nullptr = off. Owned by the caller.
+  void set_grim_genome(GrimGenomeRuntime *genome) { grim_ = genome; }
   void reset();
 
   // GP0 (Rendering commands) and GP1 (Display control)
@@ -347,6 +351,7 @@ private:
   u32 reaper_pending_geometry_ = 0;
   u32 reaper_pending_texture_ = 0;
   u32 reaper_state_ = 0;
+  GrimGenomeRuntime *grim_ = nullptr;
 
   u32 next_reaper_noise();
   void apply_reaper_to_gp0_command();

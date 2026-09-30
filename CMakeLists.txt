@@ -96,6 +96,8 @@ set(VIBESTATION_SOURCES
     src/platform/gpu_correctness_runner.cpp
     src/platform/scheduler_self_test.cpp
     src/platform/grim_eval_runner.cpp
+    src/platform/grim_gene_test.cpp
+    src/platform/grim_process.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
     src/platform/sample_profiler.cpp
@@ -121,6 +123,7 @@ set(VIBESTATION_SOURCES
     src/core/input_recorder.cpp
     src/core/system.cpp
     src/core/grim_eval.cpp
+    src/core/grim_genome.cpp
     src/core/system_snapshot.cpp
     src/core/rewind.cpp
     src/core/renderer.cpp

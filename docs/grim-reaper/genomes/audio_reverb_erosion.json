@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_reverb","target":16777215,"seed":108,"trigger":{"kind":"rot","start_frame":0,"end_frame":1500},"params":{"cfg":500,"base":96,"eon":1,"spucnt":1}}
+]}

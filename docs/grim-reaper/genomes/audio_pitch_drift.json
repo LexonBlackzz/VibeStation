@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_pitch","target":16777215,"seed":102,"trigger":{"kind":"rot","start_frame":0,"end_frame":900},"params":{"mode":1,"mul_q8":384,"offset":-700,"scale":2741,"depth":64,"period":120}}
+]}

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "core/grim_genome.h"
 #include "platform/disc_path_utils.h"
 #include "platform/memory_card_utils.h"
 #include "ui/input_bindings.h"
@@ -295,6 +296,8 @@ bool App::init_runtime() {
 
     system_ = std::make_unique<System>();
     system_->set_input_recorder(&input_recorder_);
+    // `--genome <file>`: Grim Reaper interface genes, applied to every boot.
+    system_->set_grim_genome(grim_gui_genome());
     renderer_ = std::make_unique<Renderer>();
     if (!input_) {
         input_ = std::make_unique<InputManager>();

@@ -1,6 +1,8 @@
 #include "platform/grim_eval_runner.h"
 #include "core/grim_eval.h"
+#include "core/grim_genome.h"
 #include "core/types.h"
+#include "platform/grim_process.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -269,7 +271,8 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
     std::fprintf(stderr, "usage: --grim-eval [bios] <frames> <out.jsonl> "
                          "[--scenario nodisc] [--max-cycles N] "
                          "[--max-instructions N] [--watchdog-seconds S] "
-                         "[--no-stop-on-death]\n");
+                         "[--no-stop-on-death] [--genome file.json] "
+                         "[--dump-wav out.wav] [--dump-frames dir every_n]\n");
     return 1;
   }
   GrimEvalConfig cfg;
@@ -293,6 +296,20 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
       cfg.watchdog_seconds = std::atof(args[++i].c_str());
     } else if (a == "--no-stop-on-death") {
       cfg.stop_on_death = false;
+    } else if (a == "--genome" && has_value) {
+      std::string err;
+      if (!grim_genome_load(args[++i], cfg.genome, err)) {
+        std::printf("GRIM_EVAL_RESULT status=error reason=bad_genome detail=%s\n", err.c_str());
+        return 1;
+      }
+      cfg.use_genome = true;
+    } else if (a == "--dump-wav" && has_value) {
+      cfg.dump_wav_path = args[++i];
+    } else if (a == "--dump-frames" && i + 2 < args.size()) {
+      cfg.dump_frames_dir = args[++i];
+      cfg.dump_frames_every = static_cast<u32>(std::max(1, std::atoi(args[++i].c_str())));
+    } else if (a == "--test-hang") {
+      cfg.test_hang = true; // test only: see GrimEvalConfig::test_hang
     } else {
       std::fprintf(stderr, "GRIM_EVAL_ERROR unknown option %s\n", a.c_str());
       return 1;
@@ -312,13 +329,14 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
   }
   std::printf("GRIM_EVAL_RESULT verdict=%s reason=%s death_frame=%lld silent=%d "
               "end=%s frames=%zu emulated_s=%.2f wall_s=%.2f speed=%.2fx "
-              "run_hash=0x%016llX out=%s\n",
+              "run_hash=0x%016llX genome=0x%016llX out=%s\n",
               r.liveness.alive ? "alive" : "dead", r.liveness.reason.c_str(),
               static_cast<long long>(r.liveness.death_frame),
               r.liveness.silent ? 1 : 0,
               r.end_reason.c_str(), r.frames.size(), r.emulated_seconds,
               r.wall_seconds, r.speed_factor,
-              static_cast<unsigned long long>(r.run_hash), out_path.c_str());
+              static_cast<unsigned long long>(r.run_hash),
+              static_cast<unsigned long long>(r.genome_hash), out_path.c_str());
   return r.liveness.alive ? 0 : 2;
 }
 
@@ -327,11 +345,29 @@ int run_grim_determinism_test(const std::vector<std::string> &raw_args,
   prepare_eval_process();
   std::vector<std::string> args = raw_args;
   GrimEvalConfig cfg;
+  std::string genome_path;
+  for (size_t i = 0; i + 1 < args.size();) {
+    if (args[i] == "--genome") {
+      genome_path = args[i + 1];
+      args.erase(args.begin() + static_cast<std::ptrdiff_t>(i),
+                 args.begin() + static_cast<std::ptrdiff_t>(i) + 2);
+    } else {
+      ++i;
+    }
+  }
   cfg.bios_path = take_bios_arg(args);
   if (cfg.bios_path.empty()) {
     std::fprintf(stderr, "usage: --grim-determinism-test [bios] [frames=600] "
-                         "[threads=2] [processes=2]\n");
+                         "[threads=2] [processes=2] [--genome file.json]\n");
     return 1;
+  }
+  if (!genome_path.empty()) {
+    std::string err;
+    if (!grim_genome_load(genome_path, cfg.genome, err)) {
+      std::printf("GRIM_DETERMINISM_FAIL reason=bad_genome detail=%s\n", err.c_str());
+      return 1;
+    }
+    cfg.use_genome = true;
   }
   cfg.frames = args.size() > 0
                    ? static_cast<u32>(std::max(1, std::atoi(args[0].c_str())))
@@ -370,6 +406,9 @@ int run_grim_determinism_test(const std::vector<std::string> &raw_args,
     std::string cmd = quote_arg(self_exe) + " --grim-eval " + quote_arg(cfg.bios_path) +
                       " " + std::to_string(cfg.frames) + " " +
                       quote_arg(process_out[p]) + " --no-stop-on-death";
+    if (!genome_path.empty()) {
+      cmd += " --genome " + quote_arg(genome_path);
+    }
 #ifdef _WIN32
     cmd = "\"" + cmd + " > NUL 2>&1\""; // cmd.exe strips the outer quotes
 #else
@@ -429,4 +468,215 @@ int run_grim_self_test(const std::vector<std::string> &raw_args) {
   std::printf("GRIM_SELF_TEST %s failures=%d\n", g_failures == 0 ? "PASS" : "FAIL",
               g_failures);
   return g_failures == 0 ? 0 : 1;
+}
+
+void grim_prepare_eval_process() { prepare_eval_process(); }
+
+std::string grim_take_bios_arg(std::vector<std::string> &args) {
+  return take_bios_arg(args);
+}
+
+int run_grim_random_genome_cli(const std::vector<std::string> &args) {
+  if (args.size() < 2) {
+    std::fprintf(stderr, "usage: --grim-random-genome <seed> <out.json> [gene_count]\n");
+    return 1;
+  }
+  GrimRandomParams params;
+  if (args.size() > 2) {
+    params.min_genes = params.max_genes =
+        static_cast<u32>(std::max(1, std::atoi(args[2].c_str())));
+  }
+  const u64 seed = std::strtoull(args[0].c_str(), nullptr, 10);
+  const GrimGenome g = grim_random_genome(seed, params);
+  std::ofstream out(args[1], std::ios::binary | std::ios::trunc);
+  out << grim_genome_serialize(g);
+  if (!out) {
+    std::fprintf(stderr, "cannot write %s\n", args[1].c_str());
+    return 1;
+  }
+  std::printf("GRIM_GENOME seed=%llu genes=%zu hash=0x%016llX out=%s\n",
+              static_cast<unsigned long long>(seed), g.genes.size(),
+              static_cast<unsigned long long>(grim_genome_hash(g)), args[1].c_str());
+  return 0;
+}
+
+namespace {
+
+// Value of `key=` in a "GRIM_EVAL_RESULT key=value ..." line, or "".
+std::string result_field(const std::string &line, const std::string &key) {
+  const std::string needle = " " + key + "=";
+  const size_t pos = line.find(needle);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  const size_t start = pos + needle.size();
+  return line.substr(start, line.find(' ', start) - start);
+}
+
+std::string find_result_line(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  std::string line, found;
+  while (std::getline(in, line)) {
+    if (line.rfind("GRIM_EVAL_RESULT", 0) == 0) {
+      found = line;
+    }
+  }
+  return found;
+}
+
+void write_text(const std::filesystem::path &path, const std::string &text) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  out << text;
+}
+
+} // namespace
+
+int run_grim_explore_cli(const std::vector<std::string> &raw_args,
+                         const std::string &self_exe) {
+  grim_prepare_eval_process();
+  std::vector<std::string> pos;
+  std::string bios;
+  double timeout = 300.0;
+  std::vector<std::string> child_extra;
+  GrimRandomParams params;
+  for (size_t i = 0; i < raw_args.size(); ++i) {
+    const std::string &a = raw_args[i];
+    const bool has_value = i + 1 < raw_args.size();
+    if (a == "--bios" && has_value) {
+      bios = raw_args[++i];
+    } else if (a == "--timeout" && has_value) {
+      timeout = std::atof(raw_args[++i].c_str());
+    } else if (a == "--child-arg" && has_value) {
+      child_extra.push_back(raw_args[++i]); // test hook: extra --grim-eval option
+    } else if (a == "--families" && has_value) {
+      const std::string f = raw_args[++i];
+      params.spu = f == "spu" || f == "both";
+      params.gpu = f == "gpu" || f == "both";
+    } else if (a == "--genes" && has_value) {
+      params.max_genes = static_cast<u32>(std::max(1, std::atoi(raw_args[++i].c_str())));
+    } else {
+      pos.push_back(a);
+    }
+  }
+  if (bios.empty()) {
+    const char *env = std::getenv("VIBESTATION_BIOS");
+    bios = env != nullptr ? env : "";
+  }
+  if (pos.size() < 3 || bios.empty()) {
+    std::fprintf(stderr,
+                 "usage: --grim-explore <seed_start> <count> <out_dir> [frames=900] "
+                 "[--bios path] [--timeout S=300] [--families spu|gpu|both] [--genes N]\n");
+    return 1;
+  }
+  const u64 seed_start = std::strtoull(pos[0].c_str(), nullptr, 10);
+  const u32 count = static_cast<u32>(std::max(1, std::atoi(pos[1].c_str())));
+  const std::filesystem::path out_dir = pos[2];
+  const u32 frames = pos.size() > 3 ? static_cast<u32>(std::max(1, std::atoi(pos[3].c_str()))) : 900u;
+  params.horizon_frames = frames;
+  params.min_genes = std::min(params.min_genes, params.max_genes);
+
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::create_directories(out_dir / "work", ec);
+  fs::create_directories(out_dir / "survivors", ec);
+  fs::create_directories(out_dir / "crashes", ec);
+  fs::create_directories(out_dir / "dead", ec);
+  const std::string exe = grim_self_exe_path(self_exe);
+
+  struct Row {
+    u64 seed;
+    std::string verdict, reason, silent, hash;
+    size_t genes;
+  };
+  std::vector<Row> rows;
+  u32 alive = 0, dead = 0, timeouts = 0, crashes = 0, errors = 0;
+
+  for (u32 n = 0; n < count; ++n) {
+    const u64 seed = seed_start + n;
+    const GrimGenome genome = grim_random_genome(seed, params);
+    const std::string genome_text = grim_genome_serialize(genome);
+    char hash_text[32];
+    std::snprintf(hash_text, sizeof(hash_text), "0x%016llX",
+                  static_cast<unsigned long long>(grim_genome_hash(genome)));
+    const std::string seed_name = "seed_" + std::to_string(seed);
+    const fs::path work = out_dir / "work" / seed_name;
+    fs::remove_all(work, ec);
+    fs::create_directories(work, ec);
+    write_text(work / "genome.json", genome_text);
+
+    std::vector<std::string> args = {"--grim-eval",
+                                     bios,
+                                     std::to_string(frames),
+                                     (work / "telemetry.jsonl").string(),
+                                     "--genome",
+                                     (work / "genome.json").string(),
+                                     "--dump-wav",
+                                     (work / "audio.wav").string(),
+                                     "--dump-frames",
+                                     (work / "frames").string(),
+                                     std::to_string(std::max(1u, frames / 4u)),
+                                     "--no-stop-on-death"};
+    args.insert(args.end(), child_extra.begin(), child_extra.end());
+    const fs::path log = work / "child.log";
+    const GrimChildResult child = grim_run_child(exe, args, log.string(), timeout);
+    const std::string line = find_result_line(log.string());
+
+    Row row{seed, "", "", "-", hash_text, genome.genes.size()};
+    bool is_survivor = false;
+    if (child.timed_out) {
+      row.verdict = "timeout";
+      row.reason = "hang>" + std::to_string(static_cast<int>(timeout)) + "s";
+      ++timeouts;
+    } else if (child.crashed || !child.started) {
+      row.verdict = "crash";
+      row.reason = child.started ? "exit=" + std::to_string(child.exit_code) : "spawn_failed";
+      ++crashes;
+    } else if (line.empty() || line.find("status=error") != std::string::npos) {
+      row.verdict = "error";
+      row.reason = line.empty() ? "no_result_exit=" + std::to_string(child.exit_code)
+                                : result_field(line, "reason");
+      ++errors;
+    } else {
+      row.verdict = result_field(line, "verdict");
+      row.reason = result_field(line, "reason");
+      row.silent = result_field(line, "silent");
+      if (row.verdict == "alive") {
+        ++alive;
+        is_survivor = true;
+      } else {
+        ++dead;
+      }
+    }
+
+    if (is_survivor) {
+      fs::remove_all(out_dir / "survivors" / seed_name, ec);
+      fs::rename(work, out_dir / "survivors" / seed_name, ec);
+    } else if (row.verdict == "dead") {
+      write_text(out_dir / "dead" / (seed_name + ".json"), genome_text);
+      fs::remove_all(work, ec);
+    } else {
+      write_text(out_dir / "crashes" / (seed_name + ".json"), genome_text);
+      fs::copy_file(log, out_dir / "crashes" / (seed_name + ".log"),
+                    fs::copy_options::overwrite_existing, ec);
+      fs::remove_all(work, ec);
+    }
+    std::printf("GRIM_EXPLORE seed=%llu verdict=%s reason=%s silent=%s genome=%s\n",
+                static_cast<unsigned long long>(seed), row.verdict.c_str(),
+                row.reason.c_str(), row.silent.c_str(), row.hash.c_str());
+    std::fflush(stdout);
+    rows.push_back(row);
+  }
+
+  std::string table = "seed\tverdict\treason\tsilent\tgenome_hash\tgenes\n";
+  for (const Row &row : rows) {
+    table += std::to_string(row.seed) + "\t" + row.verdict + "\t" + row.reason + "\t" +
+             row.silent + "\t" + row.hash + "\t" + std::to_string(row.genes) + "\n";
+  }
+  write_text(out_dir / "summary.tsv", table);
+  std::printf("\n%s", table.c_str());
+  std::printf("GRIM_EXPLORE_SUMMARY seeds=%u alive=%u dead=%u timeout=%u crash=%u error=%u "
+              "out=%s\n",
+              count, alive, dead, timeouts, crashes, errors, out_dir.string().c_str());
+  fs::remove(out_dir / "work", ec); // empty by now; ignore failure
+  return 0;
 }

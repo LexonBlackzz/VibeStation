@@ -23,6 +23,7 @@
 
 // Forward declarations
 class InputRecorder;
+class GrimGenomeRuntime;
 
 class System {
 public:
@@ -435,6 +436,10 @@ public:
   u64 irq_request_count(Interrupt irq) const { return irq_.request_count(irq); }
   const Spu::AudioDiag &spu_audio_diag() const { return spu_.audio_diag(); }
   void reset_spu_audio_diag() { spu_.reset_audio_diag(); }
+  // Grim Reaper 2.0 interface genes. nullptr = off (the default). The caller
+  // owns the runtime; System::reset() rewinds it.
+  void set_grim_genome(GrimGenomeRuntime *genome);
+  GrimGenomeRuntime *grim_genome() const { return grim_; }
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
   bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
   void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
@@ -904,6 +909,8 @@ private:
   bool sound_reaper_prev_use_custom_seed_ = false;
   u64 sound_reaper_prev_seed_ = 0;
   InputRecorder* input_recorder_ = nullptr;
+  GrimGenomeRuntime *grim_ = nullptr;
+  void grim_write_spu16(u32 offset, u16 value);
   bool input_playback_stop_requested_ = false;
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);

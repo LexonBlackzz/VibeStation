@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <memory>
+#include <thread>
 
 namespace {
 constexpr u64 kFnvOffset = 14695981039346656037ull;
@@ -211,7 +213,7 @@ GrimLiveness grim_evaluate_liveness(const std::vector<GrimFrameTelemetry> &frame
 
 GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
   GrimEvalResult r;
-  if (effective_cpu_execution_mode() != CpuExecutionMode::Interpreter) {
+  if (!cfg.native_cpu && effective_cpu_execution_mode() != CpuExecutionMode::Interpreter) {
     r.end_reason = "unsupported_cpu_mode";
     return r;
   }
@@ -225,8 +227,27 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
     sys->bios_mut().patch32(offset, word);
   }
 
+  std::unique_ptr<GrimGenomeRuntime> genome;
+  if (cfg.use_genome) {
+    genome = std::make_unique<GrimGenomeRuntime>(cfg.genome);
+    sys->set_grim_genome(genome.get());
+    r.genome_hash = genome->hash();
+  }
+  if (cfg.test_hang) {
+    for (;;) { // test only: never returns, the parent's timeout must kill us
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
+  std::vector<s16> wav_samples;
+  if (!cfg.dump_frames_dir.empty() && cfg.dump_frames_every > 0) {
+    std::error_code ec;
+    std::filesystem::create_directories(cfg.dump_frames_dir, ec);
+  }
+
   GrimTelemetry telemetry;
-  sys->cpu().set_telemetry(&telemetry);
+  if (!cfg.native_cpu) {
+    sys->cpu().set_telemetry(&telemetry);
+  }
   // The capture buffer is the headless null sink: samples stop there and
   // never reach a host device.
   sys->set_spu_audio_capture(true);
@@ -240,6 +261,19 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
 
   for (u32 i = 0; i < cfg.frames; ++i) {
     sys->run_frame(true, false);
+    if (!cfg.dump_wav_path.empty()) {
+      const std::vector<s16> &a = sys->spu_audio_capture_samples();
+      wav_samples.insert(wav_samples.end(), a.begin(), a.end());
+    }
+    if (!cfg.dump_frames_dir.empty() && cfg.dump_frames_every > 0 &&
+        (i % cfg.dump_frames_every) == 0) {
+      std::vector<u32> rgba;
+      const DisplaySampleInfo info = sys->gpu().build_display_rgba(rgba, false);
+      char name[32];
+      std::snprintf(name, sizeof(name), "frame_%05u.bmp", i);
+      grim_write_bmp((std::filesystem::path(cfg.dump_frames_dir) / name).string(),
+                     info.width, info.height, rgba);
+    }
     const GrimFrameTelemetry f =
         telemetry.end_frame(*sys, sys->spu_audio_capture_samples(), cfg.mute_audio);
     sys->clear_spu_audio_capture();
@@ -268,6 +302,13 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
     }
   }
   sys->cpu().set_telemetry(nullptr);
+  if (genome != nullptr) {
+    r.gene_hits = genome->hits();
+    sys->set_grim_genome(nullptr);
+  }
+  if (!cfg.dump_wav_path.empty()) {
+    grim_write_wav(cfg.dump_wav_path, wav_samples);
+  }
 
   r.liveness = liveness.finish();
   r.cycles = telemetry.total_cycles();
@@ -331,17 +372,24 @@ std::string grim_summary_json(const GrimEvalResult &r) {
                 r.end_reason.c_str(), r.frames.size(),
                 static_cast<unsigned long long>(r.cycles),
                 static_cast<unsigned long long>(r.instructions), r.coverage);
-  char tail[512];
+  std::string hits = "[";
+  for (size_t i = 0; i < r.gene_hits.size(); ++i) {
+    hits += (i ? "," : "") + std::to_string(r.gene_hits[i]);
+  }
+  hits += "]";
+  char tail[1024];
   std::snprintf(tail, sizeof(tail),
                 ",\"exception_repeats\":%llu,\"verdict\":\"%s\",\"reason\":\"%s\","
                 "\"death_frame\":%lld,\"silent\":%s,\"run_hash\":\"0x%016llX\","
+                "\"genome_hash\":\"0x%016llX\",\"gene_hits\":%s,"
                 "\"emulated_s\":%.3f,\"wall_s\":%.3f,\"speed\":%.2f}}",
                 static_cast<unsigned long long>(r.exception_repeats),
                 r.liveness.alive ? "alive" : "dead", r.liveness.reason.c_str(),
                 static_cast<long long>(r.liveness.death_frame),
                 r.liveness.silent ? "true" : "false",
-                static_cast<unsigned long long>(r.run_hash), r.emulated_seconds,
-                r.wall_seconds, r.speed_factor);
+                static_cast<unsigned long long>(r.run_hash),
+                static_cast<unsigned long long>(r.genome_hash), hits.c_str(),
+                r.emulated_seconds, r.wall_seconds, r.speed_factor);
   return std::string(head) + json_array(r.exceptions) + tail;
 }
 
@@ -354,5 +402,91 @@ bool grim_write_telemetry_jsonl(const GrimEvalResult &r, const std::string &path
     out << grim_frame_json(f) << '\n';
   }
   out << grim_summary_json(r) << '\n';
+  return static_cast<bool>(out);
+}
+
+bool grim_write_wav(const std::string &path, const std::vector<s16> &samples) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    return false;
+  }
+  const u32 data_bytes = static_cast<u32>(samples.size() * sizeof(s16));
+  const auto put32 = [&](u32 v) {
+    const char b[4] = {static_cast<char>(v), static_cast<char>(v >> 8),
+                       static_cast<char>(v >> 16), static_cast<char>(v >> 24)};
+    out.write(b, 4);
+  };
+  const auto put16 = [&](u16 v) {
+    const char b[2] = {static_cast<char>(v), static_cast<char>(v >> 8)};
+    out.write(b, 2);
+  };
+  constexpr u32 kRate = 44100; // Spu::SAMPLE_RATE
+  out.write("RIFF", 4);
+  put32(36u + data_bytes);
+  out.write("WAVEfmt ", 8);
+  put32(16);
+  put16(1);  // PCM
+  put16(2);  // stereo
+  put32(kRate);
+  put32(kRate * 4u);
+  put16(4);
+  put16(16);
+  out.write("data", 4);
+  put32(data_bytes);
+  // Little-endian on every supported host; written as bytes to be explicit.
+  for (const s16 s : samples) {
+    put16(static_cast<u16>(s));
+  }
+  return static_cast<bool>(out);
+}
+
+bool grim_write_bmp(const std::string &path, int width, int height,
+                    const std::vector<u32> &rgba) {
+  if (width <= 0 || height <= 0 ||
+      rgba.size() < static_cast<size_t>(width) * static_cast<size_t>(height)) {
+    return false;
+  }
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open()) {
+    return false;
+  }
+  const u32 row_bytes = (static_cast<u32>(width) * 3u + 3u) & ~3u;
+  const u32 image_bytes = row_bytes * static_cast<u32>(height);
+  const auto put32 = [&](u32 v) {
+    const char b[4] = {static_cast<char>(v), static_cast<char>(v >> 8),
+                       static_cast<char>(v >> 16), static_cast<char>(v >> 24)};
+    out.write(b, 4);
+  };
+  const auto put16 = [&](u16 v) {
+    const char b[2] = {static_cast<char>(v), static_cast<char>(v >> 8)};
+    out.write(b, 2);
+  };
+  out.write("BM", 2);
+  put32(54u + image_bytes);
+  put32(0);
+  put32(54);
+  put32(40);
+  put32(static_cast<u32>(width));
+  put32(static_cast<u32>(height)); // positive: bottom-up rows
+  put16(1);
+  put16(24);
+  put32(0);
+  put32(image_bytes);
+  put32(2835);
+  put32(2835);
+  put32(0);
+  put32(0);
+  std::vector<char> row(row_bytes, 0);
+  for (int y = height - 1; y >= 0; --y) {
+    for (int x = 0; x < width; ++x) {
+      const u32 px = rgba[static_cast<size_t>(y) * static_cast<size_t>(width) +
+                          static_cast<size_t>(x)];
+      // The display buffer is R in the low byte (0xAABBGGRR).
+      row[static_cast<size_t>(x) * 3u + 0u] = static_cast<char>(px >> 16);
+      row[static_cast<size_t>(x) * 3u + 1u] = static_cast<char>(px >> 8);
+      row[static_cast<size_t>(x) * 3u + 2u] = static_cast<char>(px);
+    }
+    out.write(row.data(), static_cast<std::streamsize>(row.size()));
+  }
   return static_cast<bool>(out);
 }

@@ -22,3 +22,27 @@ int run_grim_eval_cli(const std::vector<std::string> &args);
 int run_grim_determinism_test(const std::vector<std::string> &args,
                               const std::string &self_exe);
 int run_grim_self_test(const std::vector<std::string> &args);
+
+// Phase 2.
+//   --grim-eval ... also takes: --genome file.json, --dump-wav out.wav,
+//     --dump-frames dir every_n (BMP). The result line gains genome=0x<hash>.
+//   --grim-random-genome <seed> <out.json> [gene_count]
+//   --grim-explore <seed_start> <count> <out_dir> [frames=900] [--bios path]
+//       [--timeout S=300] [--families spu|gpu|both] [--genes N]
+//     Generates a genome per seed and evaluates it in a child process with a
+//     hard timeout. Survivors (alive) keep genome, telemetry, WAV and a few
+//     frames under <out_dir>/survivors/seed_N; hangs and host crashes save the
+//     genome under <out_dir>/crashes. Ends with a summary table
+//     (also <out_dir>/summary.tsv).
+//   --grim-gene-test [bios] [frames=900]
+//     Genome, filter, trigger and end-to-end tests. Needs the BIOS for the
+//     end-to-end, determinism and explore tests.
+int run_grim_random_genome_cli(const std::vector<std::string> &args);
+int run_grim_explore_cli(const std::vector<std::string> &args,
+                         const std::string &self_exe);
+int run_grim_gene_test(const std::vector<std::string> &args,
+                       const std::string &self_exe);
+
+// Shared with grim_gene_test.cpp.
+void grim_prepare_eval_process();
+std::string grim_take_bios_arg(std::vector<std::string> &args);
