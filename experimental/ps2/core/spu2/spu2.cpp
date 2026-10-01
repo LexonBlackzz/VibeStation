@@ -88,7 +88,7 @@ Spu2::Spu2()
 }
 
 void Spu2::reset() {
-    regs_.fill(0);
+    std::fill(regs_.begin(), regs_.end(), u8{0});
     std::fill(ram_.begin(), ram_.end(), 0);
     cores_ = {};
     cycle_phase_ = 0;
@@ -101,10 +101,10 @@ void Spu2::reset() {
     set_raw16(kCoreStride + kStatx, 0u);
 
     // External/core-to-core inputs power up at unity.
-    set_raw16(kExtVolL0, 0x3FFFu);
-    set_raw16(kExtVolR0, 0x3FFFu);
-    set_raw16(kExtVolL1, 0x3FFFu);
-    set_raw16(kExtVolR1, 0x3FFFu);
+    set_raw16(kExtVolL0, 0x7FFFu);
+    set_raw16(kExtVolR0, 0x7FFFu);
+    set_raw16(kExtVolL1, 0x7FFFu);
+    set_raw16(kExtVolR1, 0x7FFFu);
 
     for (u32 core = 0; core < 2u; ++core) {
         const u32 base = core * kCoreStride;
@@ -721,15 +721,15 @@ void Spu2::mix_one_sample() {
     const bool ext_right =
         (mmix1 & (0x0004u | 0x0001u)) != 0u;
 
+    // Ext/input volumes are plain signed 16-bit gains (0x7FFF = unity), not
+    // the doubled 15-bit encoding used by voice and master volumes.
     if (ext_left) {
-        core1_left += apply_volume(
-            core0_left,
-            raw16(kExtVolL1));
+        core1_left +=
+            (core0_left * static_cast<s16>(raw16(kExtVolL1))) >> 15;
     }
     if (ext_right) {
-        core1_right += apply_volume(
-            core0_right,
-            raw16(kExtVolR1));
+        core1_right +=
+            (core0_right * static_cast<s16>(raw16(kExtVolR1))) >> 15;
     }
 
     const auto magnitude32 = [](s32 value) -> u32 {

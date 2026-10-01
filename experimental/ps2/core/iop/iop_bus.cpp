@@ -18,6 +18,9 @@ constexpr u32 kExtensionRomEnd = 0x1E800000u;
 constexpr u32 kSifBase = 0x1D000000u;
 constexpr u32 kDmaIcr = 0x1F8010F4u;
 constexpr u32 kDmaIcr2 = 0x1F801574u;
+constexpr u32 kDma3Madr = 0x1F8010B0u;
+constexpr u32 kDma3Bcr = 0x1F8010B4u;
+constexpr u32 kDma3Chcr = 0x1F8010B8u;
 constexpr u32 kDma4Madr = 0x1F8010C0u;
 constexpr u32 kDma4Bcr = 0x1F8010C4u;
 constexpr u32 kDma4Chcr = 0x1F8010C8u;
@@ -609,6 +612,8 @@ void IopBus::tick(u64 cycles) {
             spu2_dma4_irq_cycles_ -= cycles;
         }
     }
+
+    cdvd_.tick(cycles, *this);
 }
 
 u32 IopBus::to_physical(u32 address) {
@@ -760,11 +765,65 @@ bool IopBus::write_sif32(u32 physical, u32 value) {
     }
 }
 
+bool IopBus::cdvd_dma3_deliver(
+    const u8* data, u32 bytes, u8 dec_set, u8 key4) {
+    u32 madr = 0;
+    u32 bcr = 0;
+    u32 chcr = 0;
+    (void)hw_.read32(kDma3Madr, madr);
+    (void)hw_.read32(kDma3Bcr, bcr);
+    (void)hw_.read32(kDma3Chcr, chcr);
+    const u32 words_per_block = bcr & 0xFFFFu;
+    const u32 blocks = bcr >> 16;
+    if (blocks * words_per_block * 4u < bytes ||
+        (chcr & kDmaStart) == 0u || words_per_block == 0u) {
+        if ((chcr & kDmaStart) != 0u) {
+            (void)hw_.write32(kDma3Chcr, chcr & ~kDmaStart);
+            raise_dma_irq(3u);
+        }
+        return false;
+    }
+
+    const u32 ram_mask = static_cast<u32>(IopRam::kSize - 1u);
+    const u32 shift = (dec_set >> 4) & 7u;
+    for (u32 i = 0; i < bytes; ++i) {
+        u8 byte = data[i];
+        if ((dec_set & 1u) != 0u) byte ^= key4;
+        if ((dec_set & 2u) != 0u) {
+            byte = static_cast<u8>((byte >> shift) | (byte << (8u - shift)));
+        }
+        (void)ram_.write8((madr + i) & ram_mask, byte);
+    }
+
+    const u32 remaining = blocks - bytes / (words_per_block * 4u);
+    (void)hw_.write32(kDma3Madr, madr + bytes);
+    (void)hw_.write32(kDma3Bcr, (remaining << 16) | words_per_block);
+    if (remaining == 0u) {
+        (void)hw_.write32(kDma3Chcr, chcr & ~kDmaStart);
+        raise_dma_irq(3u);
+    }
+    return true;
+}
+
+void IopBus::cdvd_dma3_write_toc(const u8* data, u32 bytes) {
+    u32 madr = 0;
+    u32 chcr = 0;
+    (void)hw_.read32(kDma3Madr, madr);
+    (void)hw_.read32(kDma3Chcr, chcr);
+    const u32 ram_mask = static_cast<u32>(IopRam::kSize - 1u);
+    for (u32 i = 0; i < bytes; ++i) {
+        (void)ram_.write8((madr + i) & ram_mask, data[i]);
+    }
+    (void)hw_.write32(kDma3Chcr, chcr & ~kDmaStart);
+    raise_dma_irq(3u);
+}
+
 u16 IopBus::sif_dma_ready_mask() const {
     return hw_.sif_dma_ready_mask();
 }
 
 bool IopBus::can_tick_event_free(u64 cycles) const {
+    if (cdvd_.cycles_to_event() <= cycles) return false;
     if (spu2_dma4_irq_cycles_ != 0u &&
         spu2_dma4_irq_cycles_ <= cycles) return false;
     for (u32 i = 0; i < root_counters_.size(); ++i) {
@@ -797,6 +856,7 @@ bool IopBus::tick_event_free(u64 cycles) {
     if (spu2_dma4_irq_cycles_ != 0u) {
         spu2_dma4_irq_cycles_ -= cycles;
     }
+    cdvd_.advance(cycles);
     return true;
 }
 
@@ -1094,6 +1154,11 @@ bool IopBus::write32(u32 address, u32 value) {
     }
     if (physical == kDmaIcr || physical == kDmaIcr2) {
         return write_dma_icr(physical, value);
+    }
+    if (physical == kDma3Chcr) {
+        if (!hw_.write32(physical, value)) return false;
+        if ((value & kDmaStart) != 0) cdvd_.on_dma3_start();
+        return true;
     }
     if (physical == kDma6Chcr) {
         u32 stored = value;

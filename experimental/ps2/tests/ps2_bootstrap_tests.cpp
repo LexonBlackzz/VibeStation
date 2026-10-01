@@ -1618,9 +1618,15 @@ bool test_ee_intc_cpu_exception() {
     system.ee().reset(pc);
     system.ee().state().cop0[12] = 0x00010401u; // EIE | IP2 mask | IE
     std::string error;
+    // The EE finishes the instructions already in flight (8) before the
+    // exception is taken so polling loops can still observe I_STAT.
+    for (int i = 0; i < 8; ++i) {
+        ok = expect(system.ee().step(error), "INTC CPU latency step failed") && ok;
+    }
+    ok = expect(system.ee().state().pc == pc + 32u, "INTC taken before pipeline latency") && ok;
     ok = expect(system.ee().step(error), "INTC CPU exception failed") && ok;
     ok = expect(system.ee().state().pc == 0x80000200u, "INTC vector mismatch") && ok;
-    ok = expect(system.ee().state().cop0[14] == pc, "INTC EPC mismatch") && ok;
+    ok = expect(system.ee().state().cop0[14] == pc + 32u, "INTC EPC mismatch") && ok;
     ok = expect((system.ee().state().cop0[13] & 0x0000047Cu) == 0x00000400u,
                 "INTC Cause mismatch") && ok;
     ok = expect((system.ee().state().cop0[12] & 0x2u) != 0, "INTC did not set EXL") && ok;

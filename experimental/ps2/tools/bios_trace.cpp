@@ -1414,7 +1414,7 @@ int main(int argc, char** argv) {
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
                "[--ee-jit|--ee-dynarec|--profile|--gs-thread|--detailed-gs-stats|--audio-only] "
-               "[--wav=audio.wav]\n";
+               "[--wav=audio.wav] [--disc=game.iso]\n";
         return 64;
     }
 
@@ -1434,6 +1434,7 @@ int main(int argc, char** argv) {
     bool audio_only = false;
     const char* display_path = nullptr;
     std::string wav_path;
+    std::string disc_path;
     for (int index = 3; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--ee-jit") ee_jit = true;
@@ -1443,6 +1444,9 @@ int main(int argc, char** argv) {
         else if (option == "--gs-thread") gs_thread = true;
         else if (option == "--detailed-gs-stats") detailed_gs_stats = true;
         else if (option == "--audio-only") audio_only = true;
+        else if (option.starts_with("--disc=") && option.size() > 7u) {
+            disc_path = std::string(option.substr(7));
+        }
         else if (option.starts_with("--wav=") && option.size() > 6u) {
             wav_path = std::string(option.substr(6));
         }
@@ -1477,6 +1481,10 @@ int main(int argc, char** argv) {
 
     if (!system.load_bios(argv[1], error)) {
         std::cerr << "BIOS_LOAD_ERROR=" << error << '\n';
+        return 2;
+    }
+    if (!disc_path.empty() && !system.load_disc(disc_path, error)) {
+        std::cerr << "DISC_LOAD_ERROR=" << error << '\n';
         return 2;
     }
     if (!system.boot_bios(error)) {

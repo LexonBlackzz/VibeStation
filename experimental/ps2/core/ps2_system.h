@@ -56,6 +56,10 @@ public:
     Vu1& vu0(){return vu0_;} const Vu1& vu0()const{return vu0_;}
     Vu1& vu1(){return vu1_;} const Vu1& vu1()const{return vu1_;}
     bool bios_started()const{return bios_started_;}
+    // Takes effect at the next reset; the BIOS then finds the disc in the drive.
+    bool load_disc(const std::string& path,std::string& error){return cdvd_.load_disc(path,error);}
+    void eject_disc(){cdvd_.eject_disc();}
+    CdvdHw& cdvd(){return cdvd_;}
     // The EE owns the user-visible bootstrap run state. An IOP halt is
     // retained for diagnostics but does not discard EE/GS progress.
     bool halted()const{return ee_.halted();}

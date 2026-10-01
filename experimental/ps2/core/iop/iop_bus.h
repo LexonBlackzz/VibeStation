@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/cdvd/cdvd_hw.h"
 #include "core/input/sio2_pad.h"
 #include "core/spu2/spu2.h"
 
@@ -9,13 +10,12 @@
 namespace ps2 {
 
 class Bios;
-class CdvdHw;
 class EeHw;
 class IopHwWindow;
 class IopIntc;
 class IopRam;
 
-class IopBus {
+class IopBus : public CdvdDmaSink {
 public:
     struct RootCounterDebug {
         std::array<u64, 6> count_writes{};
@@ -59,6 +59,10 @@ public:
     [[nodiscard]] bool interrupt_pending() const;
     [[nodiscard]] u16 sif_dma_ready_mask() const;
     void raise_dma_irq(u32 channel);
+
+    bool cdvd_dma3_deliver(
+        const u8* data, u32 bytes, u8 dec_set, u8 key4) override;
+    void cdvd_dma3_write_toc(const u8* data, u32 bytes) override;
 
     Sio2Pad& sio2() { return sio2_; }
     const Sio2Pad& sio2() const { return sio2_; }

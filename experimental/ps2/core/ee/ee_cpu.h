@@ -265,6 +265,8 @@ private:
 
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
+    // Instructions retired since the INTC line asserted (see step()).
+    u32 intc_age_ = 0;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
     bool hot_sif_getreg_diag_inflight_ = false;

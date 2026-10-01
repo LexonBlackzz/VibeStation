@@ -5801,17 +5801,28 @@ bool EeCpu::step_internal(
 
     if (!quiet) {
         if (bus_.intc_pending()) state_.cop0[13] |= 0x00000400u;
-        else state_.cop0[13] &= ~0x00000400u;
+        else { state_.cop0[13] &= ~0x00000400u; intc_age_ = 0; }
         if (bus_.dmac_pending()) state_.cop0[13] |= 0x00000800u;
         else state_.cop0[13] &= ~0x00000800u;
     }
 
     const u32 status = state_.cop0[12];
+    // A real EE finishes the few instructions already in its pipeline when an
+    // interrupt asserts, so a tight loop polling I_STAT still reads the bit
+    // before the handler acknowledges it. Taking the exception on the exact
+    // instruction boundary makes such loops (OSDSYS vsync wait) hang forever.
+    constexpr u32 kIntcLatency = 8u;
+    u32 pending_irq = state_.cop0[13] & status & 0x0000FF00u;
+    if (pending_irq == 0x00000400u && intc_age_ < kIntcLatency) {
+        ++intc_age_;
+        pending_irq = 0;
+    }
     if (!skip_interrupt_check &&
-        (state_.cop0[13] & status & 0x0000FF00u) != 0 &&
+        pending_irq != 0 &&
         (status & 0x00010001u) == 0x00010001u &&
         (status & 0x6u) == 0) {
         raise_exception(0u, pc, current_is_delay_slot_);
+        intc_age_ = 0;
         ++state_.instructions_executed;
         ++state_.cop0[9];
         if (state_.cop0[9] == state_.cop0[11]) {
