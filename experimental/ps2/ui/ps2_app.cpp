@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -760,7 +761,12 @@ void Ps2App::process_events(bool& quit) {
 
         if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
             const bool ctrl = (event.key.keysym.mod & KMOD_CTRL) != 0;
-            if (ctrl && event.key.keysym.sym == SDLK_b) {
+            if (ctrl && event.key.keysym.sym == SDLK_o) {
+                const std::string path = open_disc_dialog();
+                if (!path.empty()) {
+                    load_disc_from_path(path);
+                }
+            } else if (ctrl && event.key.keysym.sym == SDLK_b) {
                 const std::string path = open_bios_dialog();
                 if (!path.empty()) {
                     load_bios_from_path(path);
@@ -852,6 +858,19 @@ void Ps2App::menu_bar() {
             if (!path.empty()) {
                 load_bios_from_path(path);
             }
+        }
+        if (ImGui::MenuItem("Open Disc...", "Ctrl+O")) {
+            const std::string path = open_disc_dialog();
+            if (!path.empty()) {
+                load_disc_from_path(path);
+            }
+        }
+        if (ImGui::MenuItem("Eject Disc", nullptr, false,
+                            system_.cdvd().has_disc())) {
+            system_.eject_disc();
+            reset_core();
+            if (system_.bios().loaded()) start_bios();
+            status_message_ = "Disc ejected";
         }
         ImGui::MenuItem("Load ELF...", nullptr, false, false);
         ImGui::Separator();
@@ -1799,6 +1818,49 @@ std::string Ps2App::open_bios_dialog() {
 #endif
 }
 
+std::string Ps2App::open_disc_dialog() {
+#ifdef _WIN32
+    std::array<char, 1024> path{};
+
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFile = path.data();
+    dialog.nMaxFile = static_cast<DWORD>(path.size());
+    dialog.lpstrFilter =
+        "Disc Images (*.iso;*.bin;*.img)\0*.iso;*.bin;*.img\0"
+        "All Files (*.*)\0*.*\0";
+    dialog.nFilterIndex = 1;
+    dialog.lpstrTitle = "Open PlayStation / PlayStation 2 disc image";
+    dialog.Flags =
+        OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (GetOpenFileNameA(&dialog)) {
+        return path.data();
+    }
+    return {};
+#else
+    status_message_ = "Native disc picker is currently Windows-only.";
+    return {};
+#endif
+}
+
+bool Ps2App::load_disc_from_path(const std::string& path) {
+    std::string error;
+    if (!system_.load_disc(path, error)) {
+        status_message_ = "Disc load failed: " + error;
+        return false;
+    }
+    status_message_ =
+        "Disc loaded: " + std::filesystem::path(path).filename().string();
+    if (!system_.bios().loaded()) {
+        status_message_ += " (load a BIOS to boot it)";
+        return true;
+    }
+    // The BIOS only looks at the drive during startup, so restart it.
+    reset_core();
+    return start_bios();
+}
+
 bool Ps2App::load_bios_from_path(const std::string& path) {
     if (path.empty()) {
         status_message_ = "BIOS path is empty.";
@@ -1832,6 +1894,9 @@ bool Ps2App::load_bios_from_path(const std::string& path) {
 
 bool Ps2App::start_bios() {
     std::string error;
+    // The mechacon clock runs in GMT+9; the BIOS applies the user's zone.
+    system_.cdvd().set_clock(static_cast<u64>(
+        std::time(nullptr) - 946684800 + 9 * 3600));
     if (!system_.boot_bios(error)) {
         status_message_ = "BIOS startup failed: " + error;
         return false;

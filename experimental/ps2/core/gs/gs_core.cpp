@@ -873,6 +873,10 @@ void GsCore::record_unsupported_transfer(u32 reason) {
         registers_[kRegTrxdir]};
 }
 
+// BITBLTBUF buffer width 0 is used by games for small uploads (the BIOS sends
+// 8x2 CLUTs with it); the hardware treats it as one 64-pixel unit.
+static u32 transfer_width_units(u32 bw) { return bw == 0u ? 1u : bw; }
+
 void GsCore::begin_host_to_local() {
     // With the raster worker running, keep ordering through the queue
     // instead of draining it (a drain stalls the EE for the whole backlog).
@@ -889,7 +893,7 @@ void GsCore::begin_host_to_local() {
     const u64 reg = registers_[kRegTrxreg];
 
     transfer_.bp = static_cast<u32>((blit >> 32) & 0x3FFFu);
-    transfer_.bw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    transfer_.bw = transfer_width_units(static_cast<u32>((blit >> 48) & 0x3Fu));
     transfer_.psm = static_cast<u32>((blit >> 56) & 0x3Fu);
     transfer_.dsax = static_cast<u32>((pos >> 32) & 0x7FFu);
     transfer_.dsay = static_cast<u32>((pos >> 48) & 0x7FFu);
@@ -972,7 +976,7 @@ void GsCore::begin_local_to_host() {
 
     transfer_.local_to_host = true;
     transfer_.bp = static_cast<u32>(blit & 0x3FFFu);
-    transfer_.bw = static_cast<u32>((blit >> 16) & 0x3Fu);
+    transfer_.bw = transfer_width_units(static_cast<u32>((blit >> 16) & 0x3Fu));
     transfer_.psm = static_cast<u32>((blit >> 24) & 0x3Fu);
     transfer_.dsax = static_cast<u32>(pos & 0x7FFu);
     transfer_.dsay = static_cast<u32>((pos >> 16) & 0x7FFu);
@@ -1113,10 +1117,10 @@ void GsCore::execute_local_to_local() {
     const u64 reg = registers_[kRegTrxreg];
 
     const u32 sbp = static_cast<u32>(blit & 0x3FFFu);
-    const u32 sbw = static_cast<u32>((blit >> 16) & 0x3Fu);
+    const u32 sbw = transfer_width_units(static_cast<u32>((blit >> 16) & 0x3Fu));
     const u32 spsm = static_cast<u32>((blit >> 24) & 0x3Fu);
     const u32 dbp = static_cast<u32>((blit >> 32) & 0x3FFFu);
-    const u32 dbw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    const u32 dbw = transfer_width_units(static_cast<u32>((blit >> 48) & 0x3Fu));
     const u32 dpsm = static_cast<u32>((blit >> 56) & 0x3Fu);
 
     const u32 ssax = static_cast<u32>(pos & 0x7FFu);

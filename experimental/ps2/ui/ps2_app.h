@@ -27,6 +27,7 @@ public:
     int run();
     void shutdown();
     bool launch_bios(const std::string& path);
+    bool load_disc_from_path(const std::string& path);
     void set_ee_jit_enabled(bool enabled);
     void set_ee_dynarec_enabled(bool enabled);
     void capture_visible_window(
@@ -53,6 +54,7 @@ private:
     void panel_about();
 
     std::string open_bios_dialog();
+    std::string open_disc_dialog();
     bool load_bios_from_path(const std::string& path);
     bool start_bios();
     bool step_ee_once();
