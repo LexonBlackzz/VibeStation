@@ -36,7 +36,7 @@ u32 to_rgba8(u32 psm, u32 raw) {
 
 } // namespace
 
-void GsDisplay::reset() {
+void GsDisplay::reset_locked() {
     valid_ = false;
     width_ = 0;
     height_ = 0;
@@ -48,14 +48,14 @@ void GsDisplay::reset() {
     rgba8_.clear();
 }
 
-void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
+void GsDisplay::update_locked(const GsPrivileged& regs, const GsVram& vram) {
     constexpr std::array<u32, 7> kScanoutRegisters = {
         kPmode, kSmode2, kDispfb1, kDisplay1,
         kDispfb1 + kCircuitStride, kDisplay1 + kCircuitStride, kBgcolor};
     std::array<u64, 7> scanout_registers{};
     for (std::size_t i = 0; i < kScanoutRegisters.size(); ++i) {
         if (!regs.read64(kScanoutRegisters[i], scanout_registers[i])) {
-            reset();
+            reset_locked();
             return;
         }
     }
@@ -72,7 +72,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     u64 smode2 = 0;
     if (!regs.read64(kPmode, pmode) ||
         !regs.read64(kSmode2, smode2)) {
-        reset();
+        reset_locked();
         return;
     }
 
@@ -83,7 +83,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     const bool interlaced = (smode2 & 1u) != 0;
     const bool field_mode = (smode2 & 2u) != 0;
     if (!enabled[0] && !enabled[1]) {
-        if (valid_) reset();
+        if (valid_) reset_locked();
         return;
     }
 
@@ -198,7 +198,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     }
 
     if (!frames[0].valid && !frames[1].valid) {
-        if (valid_) reset();
+        if (valid_) reset_locked();
         return;
     }
 
@@ -306,6 +306,19 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
         }
     }
     ++generation_;
+}
+
+void GsDisplay::reset() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    reset_locked();
+    visible_.store(false, std::memory_order_release);
+}
+
+void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    update_locked(regs, vram);
+    visible_.store(
+        valid_ && nonzero_pixel_count_ != 0, std::memory_order_release);
 }
 
 } // namespace ps2

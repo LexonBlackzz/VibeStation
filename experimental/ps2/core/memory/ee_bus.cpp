@@ -26,6 +26,8 @@ void EeBus::reset() {
     vu1_data_.fill(0);
 }
 
+u8* EeBus::scratchpad_data() { return scratchpad_.data(); }
+
 u32 EeBus::to_physical(u32 address) {
     // The EE exposes main RAM through uncached (0x2...) and uncached
     // accelerated (0x3...) aliases in addition to the normal physical,

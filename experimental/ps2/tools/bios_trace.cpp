@@ -1056,6 +1056,8 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_PARALLEL_SPRITE_PIXELS=" << gs_stats.parallel_sprite_pixels
         << " GS_PARALLEL_SPRITE_HELPER_JOBS="
         << gs_stats.parallel_sprite_helper_jobs
+        << " GS_BANDED_DRAWS=" << gs_stats.banded_draws
+        << " GS_BANDED_BATCHES=" << gs_stats.banded_batches
         << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
         << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';

@@ -58,6 +58,8 @@ private:
     bool step_ee_once();
     bool step_iop_once();
     void update_emulation();
+    void emulation_thread_main();
+    void stop_emulation_thread();
     void reset_core();
     bool write_window_ppm(const std::string& path, int width, int height);
 
@@ -78,11 +80,24 @@ private:
     std::thread audio_stutter_thread_{};
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
-    bool gpu_gs_enabled_ = true;
+    bool gpu_gs_enabled_ = false;
     unsigned int display_texture_ = 0;
     u32 display_texture_width_ = 0;
     u32 display_texture_height_ = 0;
     u64 display_texture_generation_ = ~0ull;
+    // Host-side scaling of the 640x448 output: 0 = nearest, 1 = bilinear.
+    int display_filter_ = 1;
+    int display_filter_applied_ = -1;
+
+    // The core runs on emu_thread_. core_mutex_ guards system_ and every UI
+    // member derived from it: the UI frame holds it except while waiting for
+    // vsync, and the emulation thread holds it per short slice. ui_waiting_
+    // makes the emulation thread back off so the UI is never starved.
+    std::mutex core_mutex_{};
+    std::atomic<bool> ui_waiting_{false};
+    std::atomic<bool> emu_stop_{false};
+    std::atomic<bool> limit_speed_{true};
+    std::thread emu_thread_{};
 
     Ps2System system_{};
 

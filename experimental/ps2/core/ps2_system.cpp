@@ -496,7 +496,7 @@ bool Ps2System::step_ee_core(std::string& error) {
         // the raster worker is not synchronously drained twice per frame.
         const u64 field = video_timing_.fields_started();
         if (!gs_display_.has_visible_pixels() || (field & 1u) == 0u) {
-            gs_display_.update(gs_, gs_core_.vram());
+            gs_core_.enqueue_scanout(gs_display_, gs_);
         }
     }
     if (gs_.irq_pending()) hw_.raise_intc(0);
@@ -1626,7 +1626,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
         gs_.raise_vsync();
         const u64 field = video_timing_.fields_started();
         if (!gs_display_.has_visible_pixels() || (field & 1u) == 0u) {
-            gs_display_.update(gs_, gs_core_.vram());
+            gs_core_.enqueue_scanout(gs_display_, gs_);
         }
     }
 

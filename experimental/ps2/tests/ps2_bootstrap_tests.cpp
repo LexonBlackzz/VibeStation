@@ -3330,8 +3330,13 @@ bool test_gs_depth_layout_and_pixel_pipeline() {
         ad(gs, 0x01, 0x80FF0000u);
         ad(gs, 0x05, xyz(0, 48));
 
-        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x802A2AAAu,
+        // Pixels are sampled at their integer position (as the GS and
+        // PCSX2 do): pixel (0,0) lies on vertex 0 and owns it through the
+        // top-left rule, and pixel (1,0) is one third along the top edge.
+        ok = expect(gs.vram().read_pixel(0, 0, 0, 0, 1) == 0x800000FFu,
                     "GS Gouraud interpolation mismatch") && ok;
+        ok = expect(gs.vram().read_pixel(0, 1, 0, 0, 1) == 0x800055AAu,
+                    "GS Gouraud interpolation mismatch (edge pixel)") && ok;
         ok = expect(gs.stats().raster_draws == 1 &&
                     gs.stats().skipped_raster_draws == 0,
                     "GS Gouraud draw was skipped") && ok;

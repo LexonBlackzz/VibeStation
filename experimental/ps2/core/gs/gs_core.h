@@ -1,18 +1,23 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/gs/gs_privileged.h"
 #include "core/gs/gs_vram.h"
 #include "core/gs/gs_rasterizer.h"
 #include "core/gs/gs_gpu_backend.h"
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace ps2 {
 
+class GsDisplay;
 class GsPrivileged;
 
 struct GsUnsupportedTransfer {
@@ -51,6 +56,8 @@ struct GsStats {
     u64 parallel_sprite_draws = 0;
     u64 parallel_sprite_pixels = 0;
     u64 parallel_sprite_helper_jobs = 0;
+    u64 banded_draws = 0;
+    u64 banded_batches = 0;
     u64 gpu_sprite_draws = 0;
     u64 gpu_sprite_pixels = 0;
     u64 gpu_syncs_to_cpu = 0;
@@ -171,6 +178,10 @@ public:
     void write_gif_qword(u64 lo, u64 hi);
     [[nodiscard]] bool read_local_to_host_qword(u64& lo, u64& hi);
 
+    // Update `display` from `regs` + VRAM. Asynchronous when the raster
+    // worker runs (ordered after all queued draws); otherwise immediate.
+    void enqueue_scanout(GsDisplay& display, const GsPrivileged& regs);
+
     [[nodiscard]] u64 register_value(u32 address) const {
         return registers_[address & 0x7Fu];
     }
@@ -208,7 +219,33 @@ public:
     }
 
 private:
+    // Display scanout queued in order with the draws so the EE never waits
+    // for the raster backlog to drain at vblank.
+    struct ScanoutRequest {
+        GsDisplay* display = nullptr;
+        GsPrivileged regs{};
+    };
+
+    // Host->local image data queued in order with the draws: the EE side
+    // only collects decoded pixel values and the GS worker performs the
+    // swizzled VRAM writes, so an upload no longer drains the draw queue.
+    struct HostUpload {
+        u32 bp = 0;
+        u32 bw = 0;
+        u32 psm = 0;
+        u32 dsax = 0;
+        u32 dsay = 0;
+        u32 width = 0;
+        u32 height = 0;
+        bool dirx = false;
+        bool diry = false;
+        u32 start_index = 0; // First pixel of this chunk in the transfer.
+        std::vector<u32> values{};
+    };
+
     struct RasterCommand {
+        std::shared_ptr<ScanoutRequest> scanout{};
+        std::shared_ptr<HostUpload> upload{};
         GsRasterContext context{};
         GsRasterVertex a{};
         GsRasterVertex b{};
@@ -259,6 +296,9 @@ private:
     void process_packed(u32 descriptor, u64 lo, u64 hi);
     void process_reglist_value(u32 descriptor, u64 value);
     void write_register(u32 address, u64 value);
+    void start_upload_chunk();
+    void enqueue_pending_upload();
+    void execute_host_upload(const HostUpload& upload);
     void begin_host_to_local();
     void begin_local_to_host();
     void execute_local_to_local();
@@ -272,6 +312,34 @@ private:
         const GsRasterVertex& c,
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
+    // Statistics and dirty tracking shared by single and banded draws.
+    void account_raster_command(
+        const RasterCommand& command,
+        u64 pixels,
+        u64 raster_ns,
+        bool gpu_raster,
+        u64 nonzero_inputs_before,
+        u64 alpha_inputs_before);
+
+    // A run of consecutive triangle draws whose VRAM footprints cannot
+    // interact is rasterized in parallel by screen-row bands: each lane runs
+    // every draw in order but only on its own rows, so the result equals
+    // serial execution.
+    static constexpr s32 kBandRows = 8;
+    struct BandJob {
+        const RasterCommand* commands = nullptr;
+        const GsBandFootprint* footprints = nullptr;
+        u32 count = 0;
+        s32 base_row = 0;
+        u32 band_count = 0;
+        std::atomic<u32> next_band{0};
+        // One counter row per lane (index = lane) and draw.
+        std::vector<std::vector<u64>> pixels{};
+    };
+    void execute_banded_batch(
+        std::vector<RasterCommand>& batch,
+        const std::vector<GsBandFootprint>& footprints);
+    void run_band_lane(BandJob& job, u32 lane);
     void raster_worker_main();
     void start_raster_helpers();
     void stop_raster_helpers();
@@ -313,7 +381,7 @@ private:
     // Keep one emulation thread and spare host capacity outside the raster
     // pool. Small CI hosts still select only hardware_concurrency()-2 helpers,
     // while desktop CPUs can use up to six raster lanes total.
-    static constexpr u32 kMaxRasterHelpers = 5u;
+    static constexpr u32 kMaxRasterHelpers = 8u;
     std::array<std::thread, kMaxRasterHelpers> raster_helpers_{};
     u32 raster_helper_count_ = 0u;
     std::mutex raster_parallel_mutex_{};
@@ -325,6 +393,10 @@ private:
     const GsRasterContext* raster_parallel_context_ = nullptr;
     const GsRasterVertex* raster_parallel_a_ = nullptr;
     const GsRasterVertex* raster_parallel_b_ = nullptr;
+    BandJob* raster_band_job_ = nullptr;
+    // EE-thread state for a deferred host->local transfer.
+    bool upload_deferred_ = false;
+    std::shared_ptr<HostUpload> pending_upload_{};
     std::array<s32, kMaxRasterHelpers + 2u>
         raster_parallel_boundaries_{};
     std::array<u64, kMaxRasterHelpers + 1u>

@@ -391,6 +391,33 @@ u16 GsVram::read_psmct16(
         (static_cast<u16>(data_[a + 1]) << 8));
 }
 
+void GsVram::read_pixel_quad(
+    u32 psm, u32 bp, u32 bw,
+    u32 x0, u32 y0, u32 x1, u32 y1,
+    bool need_x1, bool need_y1, u32* out) const {
+    auto fetch = [&](u32 x, u32 y) -> u32 {
+        if (psm == 0u) {
+            u32 value;
+            std::memcpy(&value, data_.data() + address32(x, y, bp, bw), 4);
+            return value;
+        }
+        if (psm == 1u) {
+            const u32 a = address32(x, y, bp, bw);
+            return static_cast<u32>(data_[a]) |
+                   (static_cast<u32>(data_[a + 1]) << 8) |
+                   (static_cast<u32>(data_[a + 2]) << 16);
+        }
+        u16 value;
+        std::memcpy(
+            &value, data_.data() + address16(x, y, bp, bw, psm == 10u), 2);
+        return value;
+    };
+    out[0] = fetch(x0, y0);
+    if (need_x1) out[1] = fetch(x1, y0);
+    if (need_y1) out[2] = fetch(x0, y1);
+    if (need_x1 && need_y1) out[3] = fetch(x1, y1);
+}
+
 u32 GsVram::read_pixel_at_address(u32 psm, u32 a) const {
     if (psm == 0u) {
         if constexpr (std::endian::native == std::endian::little) {
