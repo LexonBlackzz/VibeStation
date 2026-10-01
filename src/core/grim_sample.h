@@ -16,6 +16,7 @@ struct GrimSampleVoiceUse {
   u32 spu_address = 0;
   u8 voice = 0;
   u8 kind = 0; // GrimSpuSampleUseKind, kept numeric in sample reports
+  u32 pitch = kGrimNoPitch;
 };
 
 struct GrimAdpcmSample {
@@ -27,6 +28,12 @@ struct GrimAdpcmSample {
   u64 first_use_cycle = kGrimNever, last_use_cycle = 0;
   u32 spu_words = 0; // map-confirmed words; zero when no map was supplied
   bool voice_start_confirmed = false;
+  // Median over positive-pitch KeyOnStart requests. Old maps and unplayed
+  // samples fall back to 0x1000. The rational milliseconds make sizing exact.
+  double median_key_on_pitch = 4096.0;
+  u32 pitch_key_on_count = 0, zero_pitch_key_on_count = 0;
+  u64 block_duration_numerator = 40, block_duration_denominator = 63;
+  double block_duration_ms = 40.0 / 63.0;
   std::vector<GrimSampleVoiceUse> uses;
 };
 
@@ -51,6 +58,11 @@ enum class GrimSampleMut : u8 {
 };
 const char *grim_sample_mut_name(GrimSampleMut kind);
 bool grim_sample_header_gene(GrimSampleMut kind);
+bool grim_sample_window_gene(GrimSampleMut kind);
+// Optional time/fraction sizing chooses a contiguous window, rounded up and
+// capped at the sample length. Blocks retains the original scattered operators.
+u32 grim_sample_window_blocks(const GrimAdpcmSample &sample, GrimSampleMut kind,
+                              u32 count, GrimSampleSizing sizing = {});
 
 struct GrimSampleContext {
   std::vector<u32> words;
@@ -68,7 +80,7 @@ struct GrimSampleContext {
 // Block order/repeat/transplant change payloads only, keeping target headers.
 GrimGene grim_sample_generate(const GrimSampleContext &ctx, u64 seed, GrimSampleMut kind,
                              u32 count, u32 magnitude, u32 sample_index = kGrimSampleAuto,
-                             u32 donor_index = kGrimSampleAuto);
+                             u32 donor_index = kGrimSampleAuto, GrimSampleSizing sizing = {});
 void grim_add_random_sample_genes(GrimGenome &genome, u64 seed, const GrimRandomParams &rp);
 std::string grim_sample_summary(const GrimSampleContext &ctx);
 std::string grim_sample_describe_gene(const GrimGene &gene, const GrimSampleContext *ctx);

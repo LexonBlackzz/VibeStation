@@ -34,6 +34,10 @@ int run_grim_self_test(const std::vector<std::string> &args);
 //     frames under <out_dir>/survivors/seed_N; hangs and host crashes save the
 //     genome under <out_dir>/crashes. Ends with a summary table
 //     (also <out_dir>/summary.tsv).
+//     --mix samples/all compares captured PCM against a clean boot over the
+//     same frames. Each survivor includes audibility.json; the summary reports
+//     provisional audibility, peak residual dB and time above threshold.
+//     sample_survival.csv separates survived+audible from survived+inaudible.
 //   --grim-gene-test [bios] [frames=900]
 //     Genome, filter, trigger and end-to-end tests. Needs the BIOS for the
 //     end-to-end, determinism and explore tests.

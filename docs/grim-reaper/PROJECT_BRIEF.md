@@ -280,3 +280,29 @@ Lexon's machine, so read it if you can.
   and writes `sample_survival.csv`; use one sample gene for unambiguous attribution.
 - The optional dormant view is derived from unused words with read flags. It adds
   counts/ranges to map summaries without changing the existing serialized classes.
+
+## Audible sample windows (Phase 4.1)
+
+- Mapper `PitchWrite` observes voice +4 writes and records pitch on each key-on.
+  `grim_sample_annotate()` computes the median positive key-on duration per block,
+  including the exact reduced rational milliseconds. Old maps/unplayed samples use
+  base pitch. `--grim-map --shell-input` is an explicit discovery-only controller
+  script; `GrimEvalConfig::scripted_buttons` does not affect normal play.
+- `GrimGene::sample_sizing` is optional v2 generation metadata. Serialized
+  `sizing` selects milliseconds or fraction_permille; absent means old count/RNG
+  semantics. `grim_sample_window_blocks()` rounds up to aligned contiguous blocks.
+  Random sample generation defaults to 100 ms; --sample-count selects legacy sizing,
+  --sample-ms/--sample-fraction select new sizing, --sample-donor pins transplants.
+- `src/core/grim_audibility.*`: `grim_compare_audio()` compares matched stereo PCM
+  windows against a clean reference. Integer energies/counts decide a provisional
+  audible verdict; `grim_audibility_json()` reports residual dB/exposure, stereo
+  peaks, RMS and clipping. `grim_read_wav()` validates PCM review inputs.
+- `GrimEvalConfig::audio_out` captures evaluation-only PCM without changing frame
+  telemetry or run hashes. `src/platform/grim_audibility_runner.*` provides
+  --grim-audibility and --grim-audio-compare. Existing --grim-explore now writes
+  audibility.json and distinguishes survived+audible from survived+inaudible.
+- `--grim-audibility-test` exercises labelled fixtures, repeat/backend equality,
+  short/quiet/stereo/clipping controls and WAV transport. Human verdicts live in
+  docs/grim-reaper/audio_labels.json; null means pending listening and is skipped.
+  New resolved genomes/WAVs remain outside Git. PROGRESS §1–9 records results;
+  Appendix D retains Phase 4's older hash-change measurements.

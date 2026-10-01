@@ -10,6 +10,8 @@
 #include "platform/grim_eval_runner.h"
 #include "platform/grim_map_runner.h"
 #include "platform/grim_sample_runner.h"
+#include "platform/grim_audibility_runner.h"
+#include "platform/grim_audibility_test.h"
 #include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
@@ -3970,6 +3972,9 @@ int main(int argc, char *argv[]) {
                                passthrough[0] == "--grim-map-test" ||
                                passthrough[0] == "--grim-samples" ||
                                passthrough[0] == "--grim-sample-test" ||
+                               passthrough[0] == "--grim-audibility-test" ||
+                               passthrough[0] == "--grim-audibility" ||
+                               passthrough[0] == "--grim-audio-compare" ||
                                passthrough[0] == "--grim-describe-genome" ||
                                passthrough[0] == "--grim-explore")) {
     const std::vector<std::string> grim_args(passthrough.begin() + 1,
@@ -3996,6 +4001,12 @@ int main(int argc, char *argv[]) {
                        ? run_grim_samples_cli(grim_args)
                    : passthrough[0] == "--grim-sample-test"
                        ? run_grim_sample_test(grim_args)
+                   : passthrough[0] == "--grim-audibility-test"
+                       ? run_grim_audibility_test(grim_args)
+                   : passthrough[0] == "--grim-audibility"
+                       ? run_grim_audibility_cli(grim_args)
+                   : passthrough[0] == "--grim-audio-compare"
+                       ? run_grim_audio_compare_cli(grim_args)
                    : passthrough[0] == "--grim-describe-genome"
                        ? run_grim_describe_genome_cli(grim_args)
                        : run_grim_determinism_test(grim_args, argv[0]);

@@ -57,12 +57,23 @@ int run_grim_samples_cli(const std::vector<std::string> &raw_args) {
       row["voice_start_confirmed"] = s.voice_start_confirmed;
       row["spu_words"] = s.spu_words;
       row["voice_mask"] = s.voice_mask;
+      row["median_key_on_pitch"] = s.median_key_on_pitch;
+      row["pitch_key_on_count"] = s.pitch_key_on_count;
+      row["zero_pitch_key_on_count"] = s.zero_pitch_key_on_count;
+      row["block_duration_ms"] = s.block_duration_ms;
+      row["block_duration_numerator"] = s.block_duration_numerator;
+      row["block_duration_denominator"] = s.block_duration_denominator;
+      row["sample_duration_ms"] = s.block_duration_ms * s.block_count;
+      row["duration_basis"] = s.pitch_key_on_count == 0 ? "base_pitch_fallback" : "median_key_on_duration";
       row["first_use_cycle"] = s.first_use_cycle == kGrimNever ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(s.first_use_cycle);
       row["last_use_cycle"] = s.last_use_cycle;
       row["uses"] = nlohmann::ordered_json::array();
-      for (const auto &u : s.uses)
-        row["uses"].push_back({{"cycle", u.cycle}, {"rom_offset", u.rom_offset}, {"spu_address", u.spu_address},
-                                {"voice", u.voice}, {"kind", grim_spu_sample_use_kind_name(static_cast<GrimSpuSampleUseKind>(u.kind))}});
+      for (const auto &u : s.uses) {
+        nlohmann::ordered_json use = {{"cycle", u.cycle}, {"rom_offset", u.rom_offset}, {"spu_address", u.spu_address},
+                                      {"voice", u.voice}, {"kind", grim_spu_sample_use_kind_name(static_cast<GrimSpuSampleUseKind>(u.kind))}};
+        use["pitch"] = u.pitch == kGrimNoPitch ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(u.pitch);
+        row["uses"].push_back(std::move(use));
+      }
       a.push_back(std::move(row));
     }
     return a;
@@ -74,7 +85,8 @@ int run_grim_samples_cli(const std::vector<std::string> &raw_args) {
   for (const auto &u : c.map.spu_sample_uses)
     if (u.rom_offset == kGrimNoRomOffset)
       j["unresolved_uses"].push_back({{"cycle", u.cycle}, {"voice", u.voice}, {"spu_address", u.spu_address},
-                                      {"kind", grim_spu_sample_use_kind_name(u.kind)}});
+                                      {"kind", grim_spu_sample_use_kind_name(u.kind)},
+                                      {"pitch", u.pitch == kGrimNoPitch ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(u.pitch)}});
   std::ofstream out(args[0], std::ios::binary | std::ios::trunc);
   out << j.dump(2) << '\n';
   if (!out) { std::fprintf(stderr, "cannot write samples: %s\n", args[0].c_str()); return 1; }

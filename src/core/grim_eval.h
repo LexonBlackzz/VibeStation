@@ -200,6 +200,9 @@ struct GrimEvalConfig {
   GrimGenome genome;
   // Review outputs. Empty / 0 = off.
   std::string dump_wav_path;    // captured SPU audio, 16-bit stereo at 44.1 kHz
+  // Evaluation-only PCM output for clean-reference residual measurements.
+  // Cleared at entry, interleaved stereo. Has no effect on telemetry hashes.
+  std::vector<s16> *audio_out = nullptr;
   std::string dump_frames_dir;  // displayed area as BMP, every dump_frames_every frames
   u32 dump_frames_every = 0;
   // Run under whatever CPU mode is active (the recompiler included) without
@@ -218,6 +221,9 @@ struct GrimEvalConfig {
   // Phase 3: boot with this disc (a .cue) inserted. Empty = no disc. The result
   // reports the CD DMA words read (`cd_words`): a corrupted BIOS may fail to load it.
   std::string disc_cue;
+  // Evaluation/discovery scenarios only. Sorted (1-based frame, active-low
+  // pad state) changes applied before that frame; empty keeps the stock boot.
+  std::vector<std::pair<u32, u16>> scripted_buttons;
 };
 
 struct GrimEvalResult {

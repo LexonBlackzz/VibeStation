@@ -3,6 +3,7 @@
 #include "core/grim_map.h"
 #include "core/grim_rom.h"
 #include "core/grim_sample.h"
+#include "input/controller.h"
 #include "platform/grim_eval_runner.h"
 #include <algorithm>
 #include <cstdio>
@@ -75,10 +76,21 @@ void print_copy_report(const GrimCopyStats &s) {
 
 int run_grim_map_cli(const std::vector<std::string> &raw_args) {
   grim_prepare_eval_process();
-  std::vector<std::string> args = raw_args;
-  const std::string bios = grim_take_bios_arg(args);
-  if (bios.empty() || args.size() < 2) {
-    std::fprintf(stderr, "usage: --grim-map [bios] <frames> <out.json>\n");
+  std::vector<std::string> args;
+  std::string bios, disc;
+  bool shell_input = false;
+  for (size_t i = 0; i < raw_args.size(); ++i) {
+    if (raw_args[i] == "--shell-input") shell_input = true;
+    else if (raw_args[i] == "--disc" && i + 1 < raw_args.size()) disc = raw_args[++i];
+    else if (raw_args[i] == "--bios" && i + 1 < raw_args.size()) bios = raw_args[++i];
+    else if (raw_args[i].rfind("--", 0) == 0) {
+      std::fprintf(stderr, "unknown map option: %s\n", raw_args[i].c_str());
+      return 1;
+    } else args.push_back(raw_args[i]);
+  }
+  if (bios.empty()) bios = grim_take_bios_arg(args);
+  if (bios.empty() || args.size() != 2) {
+    std::fprintf(stderr, "usage: --grim-map [bios] <frames> <out.json> [--shell-input] [--disc cue] [--bios path]\n");
     return 1;
   }
   GrimEvalConfig cfg;
@@ -86,11 +98,26 @@ int run_grim_map_cli(const std::vector<std::string> &raw_args) {
   cfg.frames = static_cast<u32>(std::max(1, std::atoi(args[0].c_str())));
   cfg.stop_on_death = false;
   cfg.watchdog_seconds = 0.0;
-  for (size_t i = 2; i + 1 < args.size(); ++i) {
-    if (args[i] == "--disc") {
-      cfg.disc_cue = args[i + 1];
-      cfg.map_scenario = "disc";
-    }
+  cfg.disc_cue = disc;
+  if (!disc.empty()) cfg.map_scenario = "disc";
+  if (shell_input) {
+    cfg.map_scenario = disc.empty() ? "shell-input" : "disc+shell-input";
+    auto press = [&](u32 frame, PsxButton button) {
+      cfg.scripted_buttons.emplace_back(frame, static_cast<u16>(0xFFFFu & ~static_cast<u16>(button)));
+      cfg.scripted_buttons.emplace_back(frame + 12u, 0xFFFFu);
+    };
+    press(900u, PsxButton::Right);
+    press(960u, PsxButton::Left);
+    press(1020u, PsxButton::Down);
+    press(1080u, PsxButton::Up);
+    press(1140u, PsxButton::Cross);
+    press(1320u, PsxButton::Circle);
+    press(1440u, PsxButton::Right);
+    press(1500u, PsxButton::Cross);
+    press(1620u, PsxButton::Up);
+    press(1680u, PsxButton::Down);
+    press(1740u, PsxButton::Circle);
+    std::printf("GRIM_MAP_SCRIPT wait=899 frames hold=12 directions=7 cross=2 circle=2 last_release=1752\n");
   }
   GrimBootMap map;
   GrimCopyStats stats;

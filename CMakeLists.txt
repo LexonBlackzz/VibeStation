@@ -172,6 +172,9 @@ set(VIBESTATION_SOURCES
     src/ui/panels/bindings_config_panel.cpp
     src/ui/panels/settings_panel.cpp
     src/ui/panels/vram_panel.cpp
+    src/platform/grim_audibility_runner.cpp
+    src/platform/grim_audibility_test.cpp
+    src/core/grim_audibility.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0-dev")

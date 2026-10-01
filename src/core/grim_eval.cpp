@@ -214,6 +214,17 @@ GrimLiveness grim_evaluate_liveness(const std::vector<GrimFrameTelemetry> &frame
 
 GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
   GrimEvalResult r;
+  if (cfg.audio_out != nullptr) {
+    cfg.audio_out->clear();
+  }
+  u32 previous_input_frame = 0;
+  for (const auto &input : cfg.scripted_buttons) {
+    if (input.first == 0 || input.first < previous_input_frame) {
+      r.end_reason = "invalid_scripted_buttons";
+      return r;
+    }
+    previous_input_frame = input.first;
+  }
   if (!cfg.native_cpu && effective_cpu_execution_mode() != CpuExecutionMode::Interpreter) {
     r.end_reason = "unsupported_cpu_mode";
     return r;
@@ -278,11 +289,25 @@ GrimEvalResult run_grim_eval(const GrimEvalConfig &cfg) {
         .count();
   };
 
+  size_t scripted_input_index = 0;
   for (u32 i = 0; i < cfg.frames; ++i) {
+    while (scripted_input_index < cfg.scripted_buttons.size() &&
+           cfg.scripted_buttons[scripted_input_index].first <= i + 1u) {
+      sys->sio().set_button_state(cfg.scripted_buttons[scripted_input_index].second);
+      ++scripted_input_index;
+    }
     sys->run_frame(true, false);
     if (!cfg.dump_wav_path.empty()) {
       const std::vector<s16> &a = sys->spu_audio_capture_samples();
       wav_samples.insert(wav_samples.end(), a.begin(), a.end());
+    }
+    if (cfg.audio_out != nullptr) {
+      const std::vector<s16> &a = sys->spu_audio_capture_samples();
+      if (cfg.mute_audio) {
+        cfg.audio_out->insert(cfg.audio_out->end(), a.size(), 0);
+      } else {
+        cfg.audio_out->insert(cfg.audio_out->end(), a.begin(), a.end());
+      }
     }
     if (!cfg.dump_frames_dir.empty() && cfg.dump_frames_every > 0 &&
         (i % cfg.dump_frames_every) == 0) {

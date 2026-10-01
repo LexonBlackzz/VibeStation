@@ -31,7 +31,9 @@ constexpr u32 kGrimNoRomOffset = ~0u;
 // Discovery events refer to SPU byte addresses, not the 8-byte units stored in
 // voice registers. A missing origin is retained: addresses are often written
 // before the bank is uploaded, then resolved again at the key-on write.
-enum class GrimSpuSampleUseKind : u8 { StartWrite, RepeatWrite, KeyOnStart, KeyOnRepeat };
+// Append kinds so persisted Phase 4 event values/hashes keep their meaning.
+enum class GrimSpuSampleUseKind : u8 { StartWrite, RepeatWrite, KeyOnStart, KeyOnRepeat, PitchWrite };
+constexpr u32 kGrimNoPitch = ~0u; // legacy map event did not record pitch
 const char *grim_spu_sample_use_kind_name(GrimSpuSampleUseKind kind);
 struct GrimSpuSampleUse {
   u64 cycle = 0;
@@ -39,6 +41,7 @@ struct GrimSpuSampleUse {
   u32 rom_offset = kGrimNoRomOffset;
   u8 voice = 0;
   GrimSpuSampleUseKind kind = GrimSpuSampleUseKind::StartWrite;
+  u32 pitch = kGrimNoPitch; // raw voice +4 register; zero means no progression
 };
 
 // Word flags.

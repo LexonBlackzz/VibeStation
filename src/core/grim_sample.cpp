@@ -169,16 +169,25 @@ std::vector<GrimAdpcmSample> grim_sample_annotate(const std::vector<u32> &words,
     return a.start_offset < b.start_offset;
   });
   for (GrimAdpcmSample &s : result) {
+    std::vector<u32> pitches;
     for (u32 i = s.start_offset / 4u; i < s.end_offset / 4u && i < map.words.size(); ++i)
       if (map.words[i].consumer & kGrimConsumerSpu) ++s.spu_words;
     for (const GrimSpuSampleUse &u : map.spu_sample_uses) {
       const bool start_use = u.kind == GrimSpuSampleUseKind::StartWrite ||
-                             u.kind == GrimSpuSampleUseKind::KeyOnStart;
+                             u.kind == GrimSpuSampleUseKind::KeyOnStart ||
+                             u.kind == GrimSpuSampleUseKind::PitchWrite;
       const bool match = start_use ? u.rom_offset == s.start_offset
                                  : u.rom_offset >= s.start_offset && u.rom_offset < s.end_offset;
       if (!match || u.rom_offset == kGrimNoRomOffset) continue;
       s.uses.push_back(GrimSampleVoiceUse{u.cycle, u.rom_offset, u.spu_address, u.voice,
-                                        static_cast<u8>(u.kind)});
+                                        static_cast<u8>(u.kind), u.pitch});
+      if (u.kind == GrimSpuSampleUseKind::KeyOnStart && u.pitch != kGrimNoPitch) {
+        if (u.pitch == 0) ++s.zero_pitch_key_on_count;
+        else pitches.push_back(u.pitch);
+      }
+      // A pitch write can still refer to a voice's previous start address.
+      // Retain it for inspection without attributing a fresh sample use.
+      if (u.kind == GrimSpuSampleUseKind::PitchWrite) continue;
       s.voice_mask |= 1u << u.voice;
       s.first_use_cycle = std::min(s.first_use_cycle, u.cycle);
       s.last_use_cycle = std::max(s.last_use_cycle, u.cycle);
@@ -187,6 +196,22 @@ std::vector<GrimAdpcmSample> grim_sample_annotate(const std::vector<u32> &words,
         s.loop_start_offsets.push_back(u.rom_offset);
     }
     std::sort(s.loop_start_offsets.begin(), s.loop_start_offsets.end());
+    if (!pitches.empty()) {
+      std::sort(pitches.begin(), pitches.end());
+      const u64 lower = pitches[(pitches.size() - 1u) / 2u];
+      const u64 upper = pitches[pitches.size() / 2u];
+      s.pitch_key_on_count = static_cast<u32>(pitches.size());
+      s.median_key_on_pitch = (static_cast<double>(lower) + static_cast<double>(upper)) / 2.0;
+      // Duration decreases with pitch. An even median averages the two middle
+      // durations, rather than applying reciprocal to the average pitch.
+      s.block_duration_numerator = 28ull * 1000ull * 4096ull * (lower + upper);
+      s.block_duration_denominator = 2ull * 44100ull * lower * upper;
+      const u64 divisor = std::gcd(s.block_duration_numerator, s.block_duration_denominator);
+      s.block_duration_numerator /= divisor;
+      s.block_duration_denominator /= divisor;
+      s.block_duration_ms = static_cast<double>(s.block_duration_numerator) /
+                            static_cast<double>(s.block_duration_denominator);
+    }
   }
   return result;
 }
@@ -224,9 +249,34 @@ const char *grim_sample_mut_name(GrimSampleMut kind) {
 bool grim_sample_header_gene(GrimSampleMut kind) {
   return kind <= GrimSampleMut::LoopEndEarly;
 }
+bool grim_sample_window_gene(GrimSampleMut kind) {
+  return kind < GrimSampleMut::Count &&
+         (kind < GrimSampleMut::LoopStartMove || kind > GrimSampleMut::LoopEndEarly);
+}
+u32 grim_sample_window_blocks(const GrimAdpcmSample &s, GrimSampleMut kind,
+                              u32 count, GrimSampleSizing sizing) {
+  u64 n = std::max(1u, std::min(count, 256u));
+  if (grim_sample_window_gene(kind)) {
+    if (sizing.kind == GrimSampleSizeKind::FractionPermille) {
+      const u64 scaled = u64{s.block_count} * std::max(1u, std::min(sizing.value, 1000u));
+      n = scaled / 1000u + (scaled % 1000u != 0u ? 1u : 0u);
+    } else if (sizing.kind == GrimSampleSizeKind::Milliseconds) {
+      // Exact rational median duration from discovery avoids float rounding at
+      // block boundaries. Discovery caps pitch at its hardware register width.
+      const u64 duration_num = std::max<u64>(1, s.block_duration_numerator);
+      const u64 duration_den = std::max<u64>(1, s.block_duration_denominator);
+      const u64 scaled = u64{std::max(1u, std::min(sizing.value, 60000u))} * duration_den;
+      n = scaled / duration_num + (scaled % duration_num != 0u ? 1u : 0u);
+    }
+    if (kind == GrimSampleMut::BlockShuffle || kind == GrimSampleMut::BlockReverse)
+      n = std::max<u64>(2, n);
+  }
+  return static_cast<u32>(std::min(u64{s.block_count}, n));
+}
 
 GrimGene grim_sample_generate(const GrimSampleContext &ctx, u64 seed, GrimSampleMut kind,
-                             u32 count, u32 magnitude, u32 sample_index, u32 donor_index) {
+                             u32 count, u32 magnitude, u32 sample_index, u32 donor_index,
+                             GrimSampleSizing sizing) {
   GrimGene gene = grim_default_gene(GrimGeneType::SpuSample);
   gene.seed = seed;
   count = std::max(1u, std::min(count, 256u));
@@ -238,10 +288,20 @@ GrimGene grim_sample_generate(const GrimSampleContext &ctx, u64 seed, GrimSample
   gene.params[4] = donor_index == kGrimSampleAuto ? -1 : static_cast<s32>(donor_index);
   gene.params[5] = 0;
   if (kind >= GrimSampleMut::Count) return gene;
+  if (sizing.kind == GrimSampleSizeKind::Milliseconds)
+    sizing.value = std::max(1u, std::min(sizing.value, 60000u));
+  else if (sizing.kind == GrimSampleSizeKind::FractionPermille)
+    sizing.value = std::max(1u, std::min(sizing.value, 1000u));
+  else sizing = {};
+  const bool sized_window = grim_sample_window_gene(kind) && sizing.kind != GrimSampleSizeKind::Blocks;
+  if (sized_window) gene.sample_sizing = sizing;
   std::vector<u32> candidates;
   for (u32 i = 0; i < ctx.samples.size(); ++i) {
     if (!applicable(kind, ctx, i)) continue;
     if (sample_index != kGrimSampleAuto && sample_index != i) continue;
+    // A fixed donor cannot also be the target. Keep automatic donor selection
+    // on its legacy candidate/RNG path.
+    if (kind == GrimSampleMut::Transplant && donor_index != kGrimSampleAuto && i == donor_index) continue;
     candidates.push_back(i);
   }
   // With a map, prefer confirmed bank data over byte-pattern false positives.
@@ -264,7 +324,16 @@ GrimGene grim_sample_generate(const GrimSampleContext &ctx, u64 seed, GrimSample
     const GrimAdpcmSample &s = ctx.samples[si];
     std::vector<u32> changed = ctx.words;
     u32 di = kGrimSampleAuto;
-    const auto blocks = choose_blocks(rng, s.block_count, count);
+    u32 window_first = 0;
+    std::vector<u32> blocks;
+    if (sized_window) {
+      const u32 n = grim_sample_window_blocks(s, kind, count, sizing);
+      window_first = rng.range(0, s.block_count - n);
+      blocks.resize(n);
+      std::iota(blocks.begin(), blocks.end(), window_first);
+    } else {
+      blocks = choose_blocks(rng, s.block_count, count);
+    }
     switch (kind) {
     case GrimSampleMut::FilterSwap:
       for (u32 b : blocks) {
@@ -306,8 +375,9 @@ GrimGene grim_sample_generate(const GrimSampleContext &ctx, u64 seed, GrimSample
     }
     case GrimSampleMut::BlockShuffle:
     case GrimSampleMut::BlockReverse: {
-      const u32 n = std::min(s.block_count, std::max(2u, count));
-      const u32 first = rng.range(0, s.block_count - n);
+      const u32 n = sized_window ? static_cast<u32>(blocks.size())
+                                : std::min(s.block_count, std::max(2u, count));
+      const u32 first = sized_window ? window_first : rng.range(0, s.block_count - n);
       std::vector<u32> order(n);
       std::iota(order.begin(), order.end(), 0u);
       if (kind == GrimSampleMut::BlockReverse) std::reverse(order.begin(), order.end());
@@ -390,7 +460,9 @@ void grim_add_random_sample_genes(GrimGenome &genome, u64 seed, const GrimRandom
       rng.range(0, static_cast<u32>(GrimSampleMut::Count) - 1u)) : static_cast<GrimSampleMut>(rp.sample_kind);
     const u32 count = rng.range(1, std::max(1u, rp.sample_count_max));
     const u32 si = rp.sample_index < 0 ? kGrimSampleAuto : static_cast<u32>(rp.sample_index);
-    GrimGene gene = grim_sample_generate(ctx, rng.next(), kind, count, rp.sample_magnitude, si);
+    const u32 di = rp.sample_donor < 0 ? kGrimSampleAuto : static_cast<u32>(rp.sample_donor);
+    GrimGene gene = grim_sample_generate(ctx, rng.next(), kind, count, rp.sample_magnitude, si,
+                                         di, rp.sample_sizing);
     if (!gene.patches.empty()) genome.genes.push_back(std::move(gene));
   }
   if (grim_genome_has_rom(genome)) { genome.version = 2; genome.bios_hash = ctx.bios_hash; }
@@ -412,9 +484,10 @@ std::string grim_sample_summary(const GrimSampleContext &ctx) {
   for (size_t i = 0; i < ctx.samples.size(); ++i) {
     const auto &s = ctx.samples[i];
     std::snprintf(b, sizeof(b), "sample %zu: rom=0x%05X-0x%05X blocks=%u loop_end=0x%05X "
-                  "voices=0x%06X confirmed=%d spu_words=%u",
+                  "voices=0x%06X confirmed=%d spu_words=%u pitch=%.1f block_ms=%.6f pitch_keyons=%u",
       i, s.start_offset, s.end_offset, s.block_count, s.loop_end_offset, s.voice_mask,
-      s.voice_start_confirmed ? 1 : 0, s.spu_words);
+      s.voice_start_confirmed ? 1 : 0, s.spu_words, s.median_key_on_pitch,
+      s.block_duration_ms, s.pitch_key_on_count);
     out += b;
     if (s.first_use_cycle != kGrimNever) {
       std::snprintf(b, sizeof(b), " first=%.3fms last=%.3fms",
@@ -428,8 +501,8 @@ std::string grim_sample_summary(const GrimSampleContext &ctx) {
     }
     out += "\n";
     for (const auto &u : s.uses) {
-      std::snprintf(b, sizeof(b), "  use voice=%u kind=%u rom=0x%05X spu=0x%05X cycle=%llu\n",
-        u.voice, u.kind, u.rom_offset, u.spu_address, static_cast<unsigned long long>(u.cycle));
+      std::snprintf(b, sizeof(b), "  use voice=%u kind=%u rom=0x%05X spu=0x%05X cycle=%llu pitch=%u\n",
+        u.voice, u.kind, u.rom_offset, u.spu_address, static_cast<unsigned long long>(u.cycle), u.pitch);
       out += b;
     }
   }
@@ -443,6 +516,11 @@ std::string grim_sample_describe_gene(const GrimGene &g, const GrimSampleContext
     g.params[2], g.params[3], g.params[4], g.params[6],
     g.params[5] ? " shift13-15=VibeStation-defined (not hardware-verified)" : "");
   out += b;
+  if (g.sample_sizing.kind != GrimSampleSizeKind::Blocks) {
+    std::snprintf(b, sizeof(b), "  contiguous window request=%u%s\n", g.sample_sizing.value,
+      g.sample_sizing.kind == GrimSampleSizeKind::Milliseconds ? "ms" : "/1000 of sample");
+    out += b;
+  }
   if (ctx != nullptr && !g.patches.empty()) {
     // A map can refine/reorder the byte-only candidate list used during
     // generation. The persisted indices are explanatory parameters, while
@@ -456,6 +534,11 @@ std::string grim_sample_describe_gene(const GrimGene &g, const GrimSampleContext
       if (!contains) continue;
       std::snprintf(b, sizeof(b), "  contextual sample %zu: ROM 0x%05X-0x%05X blocks=%u voices=0x%06X\n",
         i, s.start_offset, s.end_offset, s.block_count, s.voice_mask); out += b;
+      if (g.sample_sizing.kind != GrimSampleSizeKind::Blocks) {
+        std::snprintf(b, sizeof(b), "    resolved window=%u blocks\n",
+          grim_sample_window_blocks(s, static_cast<GrimSampleMut>(g.params[0]),
+                                    static_cast<u32>(g.params[1]), g.sample_sizing)); out += b;
+      }
     }
   }
   for (const GrimRomPatch &p : g.patches) {

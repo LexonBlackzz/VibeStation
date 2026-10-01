@@ -151,6 +151,120 @@ void invariant_fuzz(const GrimSampleContext &c, const std::string &label) {
           error.empty() ? std::to_string(tested) + " deterministic mutations" : error);
   }
 }
+void sizing_fixtures() {
+  auto c = fixture();
+  c.words.assign(32768 / 4u, 0xFFFFFFFFu);
+  bank(c.words, 512, 600, 11);
+  bank(c.words, 16384 + 8, 700, 17);
+  c.init();
+  const GrimSampleSizing milliseconds{GrimSampleSizeKind::Milliseconds, 100};
+  const GrimSampleSizing fraction{GrimSampleSizeKind::FractionPermille, 1000};
+  auto sample = c.samples[0];
+  check(grim_sample_window_blocks(sample, GrimSampleMut::FilterSwap, 1, milliseconds) == 158,
+        "duration_rounds_up_at_base_pitch");
+  sample.block_duration_numerator *= 2;
+  check(grim_sample_window_blocks(sample, GrimSampleMut::FilterSwap, 1, milliseconds) == 79,
+        "duration_uses_pitch_adjusted_block_time");
+  check(grim_sample_window_blocks(sample, GrimSampleMut::BlockReverse, 1, fraction) == 600,
+        "fraction_can_cover_more_than_256_blocks");
+  check(grim_sample_window_blocks(sample, GrimSampleMut::FilterSwap, 1,
+                                 {GrimSampleSizeKind::FractionPermille, 1}) == 1 &&
+        grim_sample_window_blocks(sample, GrimSampleMut::BlockReverse, 1,
+                                  {GrimSampleSizeKind::FractionPermille, 1}) == 2,
+        "fraction_rounding_and_permutation_minimum");
+  for (u32 k = 0; k < static_cast<u32>(GrimSampleMut::Count); ++k) {
+    const auto kind = static_cast<GrimSampleMut>(k);
+    std::string error;
+    for (u64 seed = 1; seed <= 64 && error.empty(); ++seed) {
+      const u32 target = static_cast<u32>(seed & 1u), donor = 1u - target;
+      const auto sizing = seed & 2u ? fraction : milliseconds;
+      const auto gene = grim_sample_generate(c, seed, kind, 2, 2, target, donor, sizing);
+      error = invariant_error(c, gene, kind);
+      GrimGenome parsed;
+      const std::string text = grim_genome_serialize({2, c.bios_hash, {gene}});
+      std::string parse_error;
+      if (!grim_genome_parse(text, parsed, parse_error) || grim_genome_serialize(parsed) != text)
+        error = "sized v2 round trip failed: " + parse_error;
+      if (!grim_sample_window_gene(kind)) {
+        const auto legacy = grim_sample_generate(c, seed, kind, 2, 2, target, donor);
+        if (text != grim_genome_serialize({2, c.bios_hash, {legacy}}))
+          error = "loop edit changed under optional sizing";
+      } else if (kind == GrimSampleMut::FilterSwap || kind == GrimSampleMut::ShiftChange) {
+        const u32 expected = grim_sample_window_blocks(c.samples[target], kind, 2, sizing);
+        if (gene.patches.size() != expected ||
+            gene.patches.back().offset - gene.patches.front().offset != (expected - 1u) * 16u)
+          error = "header window is not contiguous or has wrong size";
+      }
+    }
+    check(error.empty(), std::string("sized_invariants_") + grim_sample_mut_name(kind), error);
+  }
+  const auto gene = grim_sample_generate(c, 3, GrimSampleMut::BlockReverse, 1, 1, 0,
+                                         kGrimSampleAuto, fraction);
+  const std::string valid = grim_genome_serialize({2, c.bios_hash, {gene}});
+  GrimGenome parsed;
+  std::string err;
+  auto bad = valid;
+  bad.replace(bad.find("\"fraction_permille\":1000"), 24, "\"fraction_permille\":1001");
+  check(!grim_genome_parse(bad, parsed, err), "reject_sizing_out_of_range");
+  bad = valid;
+  const auto at = bad.find("\"fraction_permille\":1000");
+  bad.insert(at, "\"milliseconds\":100,");
+  check(!grim_genome_parse(bad, parsed, err), "reject_ambiguous_sizing");
+  const auto old = grim_sample_generate(c, 3, GrimSampleMut::BlockReverse, 1, 1, 0);
+  check(grim_genome_serialize({2, c.bios_hash, {old}}).find("\"sizing\"") == std::string::npos,
+        "absent_sizing_preserves_legacy_v2_shape");
+  GrimRandomParams rp;
+  rp.spu = rp.gpu = false;
+  rp.sample = &c;
+  rp.sample_genes_min = rp.sample_genes_max = 1;
+  rp.sample_kind = static_cast<s32>(GrimSampleMut::Transplant);
+  rp.sample_index = 1;
+  rp.sample_donor = 0;
+  const auto held_donor = grim_random_genome(47, rp);
+  check(held_donor.genes.size() == 1 && held_donor.genes[0].params[3] == 1 &&
+        held_donor.genes[0].params[4] == 0, "random_transplant_honors_explicit_donor");
+  rp.sample_index = -1;
+  bool distinct_target = true;
+  for (u64 seed = 1; seed <= 64; ++seed) {
+    const auto automatic_target = grim_random_genome(seed, rp);
+    distinct_target = distinct_target && automatic_target.genes.size() == 1 &&
+      automatic_target.genes[0].params[3] == 1 && automatic_target.genes[0].params[4] == 0;
+  }
+  check(distinct_target, "random_transplant_excludes_fixed_donor_from_auto_targets");
+  rp.sample_index = 0;
+  check(grim_random_genome(47, rp).genes.empty(), "explicit_transplant_self_target_has_no_effective_gene");
+  rp.sample_index = 1;
+  rp.sample_donor = 99;
+  check(grim_random_genome(47, rp).genes.empty(), "invalid_transplant_donor_has_no_effective_gene");
+}
+void legacy_listening_fixtures(const GrimSampleContext &c) {
+  const char *const names[] = {"sample_filter_crunch", "sample_shift_steps",
+                              "sample_payload_reverse", "sample_early_loop_end"};
+  const u64 hashes[] = {0xFD96A26BAD8F53A7ull, 0x1B7DF521B06A3E23ull,
+                        0xD3FB21702808FDBCull, 0x8F57CF32AA059D7Eull};
+  auto folder = std::filesystem::path("docs/grim-reaper/genomes");
+  if (!std::filesystem::exists(folder))
+    folder = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+             "docs/grim-reaper/genomes";
+  for (size_t i = 0; i < 4; ++i) {
+    GrimGenome g;
+    std::string err;
+    bool ok = grim_genome_load((folder / (std::string(names[i]) + ".json")).string(), g, err);
+    if (ok) {
+      ok = g.genes.size() == 1 && grim_genome_hash(g) == hashes[i] &&
+           g.genes[0].sample_sizing.kind == GrimSampleSizeKind::Blocks;
+      if (ok) {
+        const auto &gene = g.genes[0];
+        const auto regenerated = grim_sample_generate(c, gene.seed,
+          static_cast<GrimSampleMut>(gene.params[0]), static_cast<u32>(gene.params[1]),
+          static_cast<u32>(gene.params[2]), static_cast<u32>(gene.params[3]),
+          gene.params[4] < 0 ? kGrimSampleAuto : static_cast<u32>(gene.params[4]));
+        ok = grim_genome_serialize({2, c.bios_hash, {regenerated}}) == grim_genome_serialize(g);
+      }
+    }
+    check(ok, std::string("legacy_fixture_byte_identical_") + names[i], err);
+  }
+}
 GrimEvalConfig config(const std::string &bios, u32 frames) {
   GrimEvalConfig c;
   c.bios_path = bios;
@@ -318,6 +432,7 @@ int run_grim_sample_test(const std::vector<std::string> &raw_args) {
   failures = 0;
   scanner_fixtures();
   invariant_fuzz(fixture(), "synthetic_invariants");
+  sizing_fixtures();
   if (bios.empty()) { std::fprintf(stderr, "--grim-sample-test requires [bios] or VIBESTATION_BIOS\n"); return 1; }
   GrimBootMap map;
   auto cfg = config(bios, frames);
@@ -330,6 +445,7 @@ int run_grim_sample_test(const std::vector<std::string> &raw_args) {
   if (!c.words.empty()) {
     c.map = map;
     c.init();
+    legacy_listening_fixtures(c);
     const auto score = grim_sample_score(c.scanner_samples, map);
     // 95% precision admits a handful of structural decoys; 99% recall requires
     // practically the whole bank. These are word-level answer-key checks,

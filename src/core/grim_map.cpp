@@ -62,6 +62,7 @@ const char *grim_spu_sample_use_kind_name(GrimSpuSampleUseKind kind) {
   case GrimSpuSampleUseKind::RepeatWrite: return "repeat_write";
   case GrimSpuSampleUseKind::KeyOnStart: return "key_on_start";
   case GrimSpuSampleUseKind::KeyOnRepeat: return "key_on_repeat";
+  case GrimSpuSampleUseKind::PitchWrite: return "pitch_write";
   }
   return "unknown";
 }
@@ -122,6 +123,14 @@ u64 GrimBootMap::hash() const {
       h = fnv_u64(h, u.spu_address);
       h = fnv_u64(h, u.rom_offset);
       h = fnv_u64(h, (u64{u.voice} << 8u) | static_cast<u8>(u.kind));
+    }
+    // An absent optional pitch field has precisely the Phase 4 hash. Hash the
+    // new fields in a tagged extension so zero pitch is distinct from missing.
+    for (size_t i = 0; i < spu_sample_uses.size(); ++i) {
+      if (spu_sample_uses[i].pitch == kGrimNoPitch) continue;
+      h = fnv_u64(h, 0x50495443483431ull); // "PITCH41"
+      h = fnv_u64(h, i);
+      h = fnv_u64(h, spu_sample_uses[i].pitch);
     }
   }
   return h;
@@ -223,12 +232,17 @@ bool grim_map_save(const GrimBootMap &m, const std::string &path, std::string &e
     for (const GrimSpuSampleUse &u : m.spu_sample_uses) {
       std::snprintf(buf, sizeof(buf),
                     "%s\n{\"cycle\":%llu,\"voice\":%u,\"kind\":\"%s\","
-                    "\"spu_address\":%u,\"rom_offset\":%lld}",
+                    "\"spu_address\":%u,\"rom_offset\":%lld",
                     first_use ? "" : ",", static_cast<unsigned long long>(u.cycle),
                     static_cast<unsigned>(u.voice), grim_spu_sample_use_kind_name(u.kind),
                     u.spu_address, u.rom_offset == kGrimNoRomOffset
                                        ? -1ll : static_cast<long long>(u.rom_offset));
       js += buf;
+      if (u.pitch != kGrimNoPitch) {
+        std::snprintf(buf, sizeof(buf), ",\"pitch\":%u", u.pitch);
+        js += buf;
+      }
+      js += "}";
       first_use = false;
     }
     js += "\n]";
@@ -278,6 +292,16 @@ bool grim_map_load(const std::string &path, GrimBootMap &out, std::string &err) 
         u.spu_address = entry.at("spu_address").get<u32>();
         const s64 origin = entry.at("rom_offset").get<s64>();
         const std::string kind = entry.at("kind").get<std::string>();
+        if (entry.contains("pitch")) {
+          if (!entry.at("pitch").is_number_integer()) {
+            throw std::runtime_error("SPU voice pitch must be an integer");
+          }
+          const s64 pitch = entry.at("pitch").get<s64>();
+          if (pitch < 0 || pitch > 65535) {
+            throw std::runtime_error("out-of-range SPU voice pitch");
+          }
+          u.pitch = static_cast<u32>(pitch);
+        }
         if (voice >= 24u || u.spu_address >= 512u * 1024u || origin < -1 ||
             origin >= static_cast<s64>(j.at("bios_words").get<u32>()) * 4) {
           throw std::runtime_error("out-of-range SPU sample use");
@@ -285,7 +309,7 @@ bool grim_map_load(const std::string &path, GrimBootMap &out, std::string &err) 
         u.voice = static_cast<u8>(voice);
         u.rom_offset = origin < 0 ? kGrimNoRomOffset : static_cast<u32>(origin);
         bool recognized = false;
-        for (u32 i = 0; i < 4; ++i) {
+        for (u32 i = 0; i < 5; ++i) {
           if (kind == grim_spu_sample_use_kind_name(static_cast<GrimSpuSampleUseKind>(i))) {
             u.kind = static_cast<GrimSpuSampleUseKind>(i);
             recognized = true;
@@ -341,13 +365,15 @@ std::string grim_map_summary(const GrimBootMap &m, u32 min_bytes) {
                 cycles_to_ms(m.cycles) / 1000.0, cycles_to_ms(m.last_new_code_cycle));
   s += buf;
   if (!m.spu_sample_uses.empty()) {
-    u32 resolved = 0, key_on_resolved = 0, key_on_total = 0;
+    u32 resolved = 0, key_on_resolved = 0, key_on_total = 0, key_on_pitch = 0, pitch_writes = 0;
     for (const GrimSpuSampleUse &u : m.spu_sample_uses) {
       const bool known = u.rom_offset != kGrimNoRomOffset;
       resolved += known ? 1u : 0u;
+      pitch_writes += u.kind == GrimSpuSampleUseKind::PitchWrite ? 1u : 0u;
       if (u.kind == GrimSpuSampleUseKind::KeyOnStart) {
         ++key_on_total;
         key_on_resolved += known ? 1u : 0u;
+        key_on_pitch += u.pitch != kGrimNoPitch ? 1u : 0u;
       }
     }
     std::snprintf(buf, sizeof(buf),
@@ -355,6 +381,9 @@ std::string grim_map_summary(const GrimBootMap &m, u32 min_bytes) {
                   "resolved (unresolved register writes are kept)\n",
                   resolved, static_cast<u32>(m.spu_sample_uses.size()),
                   key_on_resolved, key_on_total);
+    s += buf;
+    std::snprintf(buf, sizeof(buf), "SPU pitch discovery: %u writes; %u/%u key-on starts have pitch\n",
+                  pitch_writes, key_on_pitch, key_on_total);
     s += buf;
   }
   const u32 total = m.rom_words();
@@ -474,7 +503,8 @@ GrimBootMap grim_map_merge(const GrimBootMap &a, const GrimBootMap &b) {
     if (x.voice != y.voice) return x.voice < y.voice;
     if (x.kind != y.kind) return x.kind < y.kind;
     if (x.spu_address != y.spu_address) return x.spu_address < y.spu_address;
-    return x.rom_offset < y.rom_offset;
+    if (x.rom_offset != y.rom_offset) return x.rom_offset < y.rom_offset;
+    return x.pitch < y.pitch;
   };
   std::sort(m.spu_sample_uses.begin(), m.spu_sample_uses.end(), less);
   m.spu_sample_uses.erase(std::unique(m.spu_sample_uses.begin(), m.spu_sample_uses.end(),
@@ -640,6 +670,7 @@ void GrimBootMapper::note_spu_sample_use(u32 voice, u32 addr, GrimSpuSampleUseKi
   u.spu_address = addr & (kSpuRamBytes - 1u);
   u.rom_offset = spu_rom_origin(u.spu_address);
   u.kind = kind;
+  u.pitch = spu_regs_[(voice * 16u + 4u) / 2u];
   spu_sample_uses_.push_back(u);
 }
 
@@ -656,6 +687,10 @@ void GrimBootMapper::note_spu_write16(u32 offset, u16 value, const u32 *tags) {
     spu_tag_[spu_transfer_addr_ & (kSpuRamBytes - 1u)] = tags[0];
     spu_tag_[(spu_transfer_addr_ + 1u) & (kSpuRamBytes - 1u)] = tags[1];
     spu_transfer_addr_ = (spu_transfer_addr_ + 2u) & (kSpuRamBytes - 1u);
+  } else if (offset < 0x180u && (offset & 15u) == 4u) {
+    const u32 voice = offset / 16u;
+    const u32 start = static_cast<u32>(spu_regs_[(voice * 16u + 6u) / 2u]) * 8u;
+    note_spu_sample_use(voice, start, GrimSpuSampleUseKind::PitchWrite);
   } else if (offset < 0x180u && (offset & 15u) == 6u) {
     note_spu_sample_use(offset / 16u, static_cast<u32>(value) * 8u,
                          GrimSpuSampleUseKind::StartWrite);

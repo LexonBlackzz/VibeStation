@@ -114,6 +114,15 @@ struct GrimRomPatch {
   bool delay_slot = false; // the word sits in a branch delay slot
 };
 
+// Optional generation metadata for sample windows. Absent/Blocks preserves
+// Phase 4's block-count semantics and canonical v2 text exactly. Runtime ROM
+// application always uses the resolved patches, never this sizing request.
+enum class GrimSampleSizeKind : u8 { Blocks, Milliseconds, FractionPermille };
+struct GrimSampleSizing {
+  GrimSampleSizeKind kind = GrimSampleSizeKind::Blocks;
+  u32 value = 0;
+};
+
 struct GrimGene {
   GrimGeneType type = GrimGeneType::SpuPitch;
   // SPU genes: voice mask (bits 0-23; bit 24 also selects the main volume
@@ -129,6 +138,7 @@ struct GrimGene {
   // SpuSample params: kind, count, magnitude, sample, donor, emulator_shift,
   // block_phase (0 or 8: block start modulo 16).
   std::vector<GrimRomPatch> patches;
+  GrimSampleSizing sample_sizing;
 };
 
 struct GrimGenome {
@@ -185,9 +195,11 @@ struct GrimRandomParams {
   u32 sample_genes_min = 1;
   u32 sample_genes_max = 3;
   u32 sample_count_max = 2; // requested edit span; permutations require >= 2 blocks
+  GrimSampleSizing sample_sizing{GrimSampleSizeKind::Milliseconds, 100};
   s32 sample_kind = -1;    // -1 draws all ten kinds
   u32 sample_magnitude = 1;
   s32 sample_index = -1;   // -1 draws any scanned sample
+  s32 sample_donor = -1;   // transplant donor; -1 draws a different sample
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".

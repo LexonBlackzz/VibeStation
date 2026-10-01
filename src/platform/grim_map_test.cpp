@@ -5,6 +5,7 @@
 #include "core/grim_genome.h"
 #include "core/grim_map.h"
 #include "core/grim_rom.h"
+#include "core/grim_sample.h"
 #include "core/system.h"
 #include "core/types.h"
 #include "platform/grim_eval_runner.h"
@@ -388,6 +389,7 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   }
   write16(0x6u, 0xFFFFu); // start is written before upload
   write16(0xEu, 0u);     // zero repeat falls back to the start at key-on
+  write16(0x4u, 0x2000u);
   write16(0x1A6u, 0xFFFFu);
   mp.note_dma(4, true, 0x20000u, 4, 4, cycle);
   bool wrapped = true;
@@ -398,13 +400,22 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   write16(0x1AAu, 0x8000u);
   write16(0x188u, 1u);
   GrimBootMap m = mp.finish(1, "spu_unit", 0, cycle);
-  check(m.spu_sample_uses.size() == 4u &&
+  check(m.spu_sample_uses.size() == 5u &&
             m.spu_sample_uses[0].rom_offset == kGrimNoRomOffset &&
             m.spu_sample_uses[0].kind == GrimSpuSampleUseKind::StartWrite &&
-            m.spu_sample_uses[2].kind == GrimSpuSampleUseKind::KeyOnStart &&
-            m.spu_sample_uses[2].rom_offset == 0x1000u &&
-            m.spu_sample_uses[3].rom_offset == 0x1000u,
+            m.spu_sample_uses[3].kind == GrimSpuSampleUseKind::KeyOnStart &&
+            m.spu_sample_uses[3].rom_offset == 0x1000u &&
+            m.spu_sample_uses[4].rom_offset == 0x1000u,
         "unit_spu_deferred_start_resolves_on_keyon_and_zero_repeat_falls_back");
+  check(m.spu_sample_uses[2].kind == GrimSpuSampleUseKind::PitchWrite &&
+            m.spu_sample_uses[2].pitch == 0x2000u &&
+            m.spu_sample_uses[3].pitch == 0x2000u && m.spu_sample_uses[4].pitch == 0x2000u,
+        "unit_spu_pitch_write_and_keyon_snapshot");
+  write16(0x4u, 0x0800u);
+  write16(0x188u, 1u);
+  m = mp.finish(1, "spu_unit", 0, cycle);
+  check(m.spu_sample_uses.back().pitch == 0x0800u && m.spu_sample_uses[3].pitch == 0x2000u,
+        "unit_spu_pitch_changes_do_not_rewrite_old_keyons");
   // Both DMA directions move the SPU pointer; incoming DMA retains the Phase 3
   // rule that device writes clear RAM tags.
   mp.note_dma(4, false, 0x20010u, 4, 1, cycle);
@@ -434,11 +445,12 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   // Repeat points and high-lane key-ons are attributed to the correct voice.
   write16(0x106u, 0xFFFFu);
   write16(0x10Eu, 0xFFFFu);
+  write16(0x104u, 0x1234u);
   write16(0x18Au, 1u);
   m = mp.finish(1, "spu_unit", 0, cycle);
   const auto &last = m.spu_sample_uses.back();
   check(last.voice == 16u && last.kind == GrimSpuSampleUseKind::KeyOnRepeat &&
-            last.rom_offset == 0x1000u && last.spu_address == 0x7FFF8u,
+            last.rom_offset == 0x1000u && last.spu_address == 0x7FFF8u && last.pitch == 0x1234u,
         "unit_spu_high_voice_and_repeat_address_resolve");
   // Untagged writes invalidate origin; a partly overwritten block is unresolved.
   write16(0x1A6u, 0xFFFFu);
@@ -457,6 +469,63 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   const GrimBootMap merged = grim_map_merge(m, m);
   check(merged.spu_sample_uses.size() == m.spu_sample_uses.size(),
         "unit_map_merge_deduplicates_identical_spu_events");
+  GrimBootMap legacy = m;
+  legacy.spu_sample_uses.erase(std::remove_if(legacy.spu_sample_uses.begin(), legacy.spu_sample_uses.end(),
+      [](const GrimSpuSampleUse &u) { return u.kind == GrimSpuSampleUseKind::PitchWrite; }), legacy.spu_sample_uses.end());
+  for (auto &u : legacy.spu_sample_uses) u.pitch = kGrimNoPitch;
+  const auto legacy_path = dir / "legacy_spu_events.json", legacy_again = dir / "legacy_spu_events_again.json";
+  const bool legacy_saved = grim_map_save(legacy, legacy_path.string(), err) &&
+      grim_map_load(legacy_path.string(), loaded, err) && grim_map_save(loaded, legacy_again.string(), err);
+  check(legacy_saved && loaded.hash() == legacy.hash() && read_file(legacy_path) == read_file(legacy_again) &&
+            read_file(legacy_path).find("\"pitch\"") == std::string::npos,
+        "unit_legacy_spu_events_keep_optional_pitch_absent", err);
+  GrimBootMap different_pitch = legacy;
+  different_pitch.spu_sample_uses.back().pitch = 0;
+  check(different_pitch.hash() != legacy.hash(), "unit_zero_pitch_hash_differs_from_absent_pitch");
+  GrimBootMap legacy_hash;
+  legacy_hash.bios_hash = 0x1234u;
+  legacy_hash.scenario = "legacy";
+  legacy_hash.frames = 2;
+  legacy_hash.cycles = 100;
+  legacy_hash.words.resize(1);
+  legacy_hash.spu_sample_uses.push_back({9u, 16u, 32u, 3u, GrimSpuSampleUseKind::KeyOnStart});
+  check(legacy_hash.hash() == 0x4DEB111AC42A3451ull,
+        "unit_legacy_spu_event_hash_keeps_phase4_bytes");
+  // Duration is the median of reciprocals, especially for an even key-on
+  // count. Pitch/repeat writes must not count as extra playback requests.
+  std::vector<u32> adpcm(32u, 0x12345678u);
+  for (u32 i = 0; i < 32u; i += 4u) adpcm[i] = 0x1234000Cu;
+  adpcm[28u] |= 0x100u;
+  const auto candidates = grim_scan_adpcm(adpcm);
+  GrimBootMap duration_map;
+  duration_map.words.resize(adpcm.size());
+  duration_map.spu_sample_uses = {
+      {1u, 0u, 0u, 0u, GrimSpuSampleUseKind::KeyOnStart, 0x1000u},
+      {2u, 0u, 0u, 0u, GrimSpuSampleUseKind::PitchWrite, 1u},
+      {3u, 0u, 0u, 0u, GrimSpuSampleUseKind::KeyOnRepeat, 1u},
+      {4u, 0u, 0u, 0u, GrimSpuSampleUseKind::KeyOnStart, 0x4000u},
+      {5u, 0u, 0u, 0u, GrimSpuSampleUseKind::KeyOnStart, 0u}};
+  auto durations = grim_sample_annotate(adpcm, candidates, duration_map);
+  check(durations.size() == 1u && durations[0].pitch_key_on_count == 2u &&
+            durations[0].zero_pitch_key_on_count == 1u &&
+            durations[0].median_key_on_pitch == 10240.0 &&
+            durations[0].block_duration_numerator == 25u && durations[0].block_duration_denominator == 63u &&
+            durations[0].loop_start_offsets.size() == 1u,
+        "unit_sample_duration_uses_even_median_and_ignores_pitch_repeat_writes");
+  duration_map.spu_sample_uses.push_back({6u, 0u, 0u, 0u, GrimSpuSampleUseKind::KeyOnStart, 0x2000u});
+  durations = grim_sample_annotate(adpcm, candidates, duration_map);
+  check(durations.size() == 1u && durations[0].pitch_key_on_count == 3u &&
+            durations[0].median_key_on_pitch == 8192.0 &&
+            durations[0].block_duration_numerator == 20u && durations[0].block_duration_denominator == 63u,
+        "unit_sample_duration_uses_odd_median");
+  for (auto &u : duration_map.spu_sample_uses) u.pitch = kGrimNoPitch;
+  durations = grim_sample_annotate(adpcm, candidates, duration_map);
+  const auto unplayed = grim_sample_annotate(adpcm, candidates, GrimBootMap{});
+  check(durations.size() == 1u && unplayed.size() == 1u &&
+            durations[0].pitch_key_on_count == 0u && durations[0].median_key_on_pitch == 4096.0 &&
+            durations[0].block_duration_numerator == 40u && durations[0].block_duration_denominator == 63u &&
+            unplayed[0].block_duration_numerator == 40u && unplayed[0].block_duration_denominator == 63u,
+        "unit_sample_duration_legacy_and_unplayed_use_base_pitch");
   GrimBootMap dormant;
   dormant.words.resize(8);
   dormant.words[2].flags = dormant.words[3].flags = kGrimReadDirect;
@@ -481,6 +550,7 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   };
   sh_constant(0x6u, 0x200u);
   sh_constant(0xEu, 0u);
+  sh_constant(0x4u, 0x1000u);
   sh_constant(0x1A6u, 0x200u);
   a.li(kT0, 0xBFC01000u);
   a.li(kT5, 0x1F801DA8u);
@@ -503,10 +573,19 @@ void test_spu_provenance(const std::filesystem::path &dir) {
   if (boot.ok) {
     for (const GrimSpuSampleUse &u : boot.map.spu_sample_uses) {
       resolved = resolved || (u.voice == 0u && u.kind == GrimSpuSampleUseKind::KeyOnStart &&
-                              u.spu_address == 0x1000u && u.rom_offset == 0x1000u);
+                              u.spu_address == 0x1000u && u.rom_offset == 0x1000u && u.pitch == 0x1000u);
     }
   }
   check(resolved, "synthetic_spu_fifo_boot_resolves_voice_to_rom");
+  GrimEvalConfig input_cfg = eval_cfg(bios.string(), 3);
+  const GrimEvalResult no_input = run_grim_eval(input_cfg);
+  input_cfg.scripted_buttons = {{1u, 0xFFFFu}, {2u, 0xFFFFu}};
+  const GrimEvalResult released = run_grim_eval(input_cfg);
+  check(no_input.run_hash == released.run_hash && no_input.frames.size() == released.frames.size(),
+        "synthetic_released_scripted_input_keeps_clean_telemetry");
+  input_cfg.scripted_buttons = {{2u, 0xFFFFu}, {1u, 0xFFFFu}};
+  check(run_grim_eval(input_cfg).end_reason == "invalid_scripted_buttons",
+        "unit_scripted_input_rejects_unsorted_frames");
 }
 
 // ---- real BIOS ------------------------------------------------------------------------------------

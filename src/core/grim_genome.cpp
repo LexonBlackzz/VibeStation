@@ -541,7 +541,9 @@ bool parse_trigger(const json &j, GrimTrigger &t, const std::string &ctx, std::s
 
 bool parse_rom_gene(const json &j, size_t index, GrimGeneType type, GrimGene &g, std::string &err) {
   const std::string ctx = "gene " + std::to_string(index);
-  if (!check_keys(j, {"type", "seed", "params", "patches"}, ctx, err)) {
+  const bool sized = type == GrimGeneType::SpuSample && j.is_object() && j.contains("sizing");
+  if (!(sized ? check_keys(j, {"type", "seed", "params", "patches", "sizing"}, ctx, err)
+              : check_keys(j, {"type", "seed", "params", "patches"}, ctx, err))) {
     return false;
   }
   g = GrimGene{};
@@ -571,6 +573,24 @@ bool parse_rom_gene(const json &j, size_t index, GrimGeneType type, GrimGene &g,
   }
   if (type == GrimGeneType::SpuSample && g.params[6] != 0 && g.params[6] != 8) {
     return fail(err, ctx + ": block_phase must be 0 or 8 (SPU addresses are 8-byte aligned)");
+  }
+  if (sized) {
+    const json &sj = j["sizing"];
+    const std::string sctx = ctx + " sizing";
+    if (!grim_sample_window_gene(static_cast<GrimSampleMut>(g.params[0]))) {
+      return fail(err, sctx + ": loop edits do not have a window");
+    }
+    if (sj.is_object() && sj.contains("milliseconds")) {
+      if (!check_keys(sj, {"milliseconds"}, sctx, err) ||
+          !get_uint(sj, "milliseconds", 1, 60000, v, sctx, err)) return false;
+      g.sample_sizing = {GrimSampleSizeKind::Milliseconds, static_cast<u32>(v)};
+    } else if (sj.is_object() && sj.contains("fraction_permille")) {
+      if (!check_keys(sj, {"fraction_permille"}, sctx, err) ||
+          !get_uint(sj, "fraction_permille", 1, 1000, v, sctx, err)) return false;
+      g.sample_sizing = {GrimSampleSizeKind::FractionPermille, static_cast<u32>(v)};
+    } else {
+      return fail(err, sctx + ": expected milliseconds or fraction_permille");
+    }
   }
   if (!j["patches"].is_array()) {
     return fail(err, ctx + ": patches must be an array");
@@ -777,7 +797,14 @@ std::string grim_genome_serialize(const GrimGenome &g) {
       for (size_t k = 0; k < rs.size(); ++k) {
         s += (k ? ",\"" : "\"") + std::string(rs[k].name) + "\":" + std::to_string(gene.params[k]);
       }
-      s += "},\"patches\":[";
+      s += "}";
+      if (gene.type == GrimGeneType::SpuSample && gene.sample_sizing.kind != GrimSampleSizeKind::Blocks) {
+        const char *key = gene.sample_sizing.kind == GrimSampleSizeKind::Milliseconds
+                            ? "milliseconds" : "fraction_permille";
+        s += ",\"sizing\":{\"" + std::string(key) + "\":" +
+             std::to_string(gene.sample_sizing.value) + "}";
+      }
+      s += ",\"patches\":[";
       for (size_t k = 0; k < gene.patches.size(); ++k) {
         const GrimRomPatch &p = gene.patches[k];
         s += (k ? ",[" : "[") + std::to_string(p.offset) + "," + std::to_string(p.original) +
