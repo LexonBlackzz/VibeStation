@@ -689,6 +689,79 @@ bool test_vif1_source_chain_scratchpad_tadr() {
     return ok;
 }
 
+bool test_vif1_mfifo_drain() {
+    ps2::Ps2System system;
+    ps2::Vif1Dma dma;
+    dma.reset();
+
+    constexpr ps2::u32 ring = 0x100000u;
+    constexpr ps2::u32 cnt_one = (1u << 28) | 1u; // CNT, one payload qword.
+    auto& bus = system.bus();
+    bool ok = true;
+    // D_CTRL: DMAE + MFD = VIF1. RBSR = 4 KB ring, RBOR = ring base.
+    ok = expect(
+             bus.write32(0x1000E000u, 1u | (2u << 2)) &&
+                 bus.write32(0x1000E040u, 0xFF0u) &&
+                 bus.write32(0x1000E050u, ring) &&
+                 bus.write32(0x1000D010u, ring) &&
+                 bus.write32(0x10009030u, ring) &&
+                 bus.write32(0x10009000u, 0x101u | (1u << 2)),
+             "failed to arm MFIFO drain") && ok;
+
+    std::string error;
+    ok = expect(service_n(dma, system, 4, error), "MFIFO empty service failed") && ok;
+    ps2::u32 value = 0;
+    ok = expect(
+             bus.read32(0x10009000u, value) && (value & 0x100u) != 0u,
+             "empty MFIFO drain must stay armed, not end the chain") && ok;
+    ok = expect(
+             bus.read32(0x10009030u, value) && value == ring,
+             "empty MFIFO drain must not advance TADR") && ok;
+    ok = expect(
+             bus.read32(0x1000E010u, value) && (value & (1u << 14)) != 0u,
+             "empty MFIFO drain must raise MEIS") && ok;
+
+    // The producer (SPR_FROM MADR) writes a tag plus one payload qword.
+    ok = expect(
+             bus.write32(ring + 0u, cnt_one) &&
+                 bus.write32(ring + 4u, 0u) &&
+                 bus.write32(ring + 8u, 0u) &&
+                 bus.write32(ring + 12u, 0u) &&
+                 write_words(bus, ring + 0x10u, (0x07u << 24) | 0x1234u, 0u, 0u, 0u) &&
+                 bus.write32(0x1000D010u, ring + 0x20u),
+             "failed to produce MFIFO packet") && ok;
+    ok = expect(service_n(dma, system, 8, error), "MFIFO packet service failed") && ok;
+    ok = expect(
+             bus.read32(0x10003C30u, value) && value == 0x1234u,
+             "MFIFO payload was not decoded") && ok;
+    ok = expect(
+             bus.read32(0x10009030u, value) && value == ring + 0x20u,
+             "MFIFO TADR must follow the consumed packet") && ok;
+    ok = expect(
+             bus.read32(0x10009000u, value) && (value & 0x100u) != 0u,
+             "MFIFO drain must wait for more data after draining") && ok;
+
+    // A packet whose tag is the last ring qword: its payload wraps to the base.
+    ok = expect(
+             bus.write32(0x10009030u, ring + 0xFF0u) &&
+                 bus.write32(ring + 0xFF0u, cnt_one) &&
+                 bus.write32(ring + 0xFF4u, 0u) &&
+                 bus.write32(ring + 0xFF8u, 0u) &&
+                 bus.write32(ring + 0xFFCu, 0u) &&
+                 write_words(bus, ring, (0x07u << 24) | 0x5678u, 0u, 0u, 0u) &&
+                 bus.write32(0x1000D010u, ring + 0x10u),
+             "failed to produce wrapping MFIFO packet") && ok;
+    ok = expect(service_n(dma, system, 8, error), "wrapping MFIFO service failed") && ok;
+    ok = expect(
+             bus.read32(0x10003C30u, value) && value == 0x5678u,
+             "wrapped MFIFO payload was not decoded") && ok;
+    ok = expect(
+             bus.read32(0x10009030u, value) && value == ring + 0x10u,
+             "wrapped MFIFO TADR must stop at the producer") && ok;
+    if (!error.empty()) std::cerr << error << '\n';
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -702,6 +775,7 @@ int main() {
     ok = test_vif1_flush_drains_vu1() && ok;
     ok = test_vif1_source_chain_tte() && ok;
     ok = test_vif1_source_chain_scratchpad_tadr() && ok;
+    ok = test_vif1_mfifo_drain() && ok;
     if (!ok) return EXIT_FAILURE;
     std::cout << "VibeStation PS2 VIF1 tests passed.\n";
     return EXIT_SUCCESS;

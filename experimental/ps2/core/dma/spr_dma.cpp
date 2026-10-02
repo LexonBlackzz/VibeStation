@@ -8,6 +8,8 @@ namespace ps2 {
 namespace {
 
 constexpr u32 kDmacCtrl = 0x1000E000u;
+constexpr u32 kDmacRbsr = 0x1000E040u;
+constexpr u32 kDmacRbor = 0x1000E050u;
 constexpr u32 kSprFromBase = 0x1000D000u;
 constexpr u32 kSprToBase = 0x1000D400u;
 constexpr u32 kChcr = 0x00u;
@@ -45,11 +47,21 @@ bool SprDma::transfer_from_spr(
     EeBus& bus, u32& madr, u32& qwc, u32& sadr,
     std::string& error) {
     const u32 chunk = std::min(qwc, 0x400u);
+    // With a memory FIFO drain channel (D_CTRL.MFD = VIF1/GIF), SPR_FROM
+    // writes into a ring buffer: MADR wraps inside RBOR..RBOR+RBSR.
+    u32 ctrl = 0;
+    u32 ring_mask = 0;
+    u32 ring_base = 0;
+    const bool ring =
+        bus.read32(kDmacCtrl, ctrl) && ((ctrl >> 2) & 0x3u) >= 2u &&
+        bus.read32(kDmacRbsr, ring_mask) && bus.read32(kDmacRbor, ring_base);
     for (u32 q = 0; q < chunk; ++q) {
         u64 lo = 0;
         u64 hi = 0;
         const u32 src = scratchpad_address(sadr + q * 16u);
-        const u32 dst = bus_address(madr + q * 16u);
+        const u32 dst = ring
+            ? ring_base + ((madr + q * 16u) & ring_mask)
+            : bus_address(madr + q * 16u);
         if (!bus.read64(src, lo) || !bus.read64(src + 8u, hi)) {
             error = "SPR-from scratchpad read fault";
             return false;
@@ -60,6 +72,7 @@ bool SprDma::transfer_from_spr(
         }
     }
     madr += chunk * 16u;
+    if (ring) madr = ring_base + (madr & ring_mask);
     sadr = (sadr + chunk * 16u) & kScratchpadMask;
     qwc -= chunk;
     return true;

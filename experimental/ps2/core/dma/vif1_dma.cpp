@@ -11,6 +11,9 @@ namespace ps2 {
 namespace {
 
 constexpr u32 kDmacCtrl = 0x1000E000u;
+constexpr u32 kDmacRbsr = 0x1000E040u;
+constexpr u32 kDmacRbor = 0x1000E050u;
+constexpr u32 kSprFromMadr = 0x1000D010u;
 constexpr u32 kVif1Chcr = 0x10009000u;
 constexpr u32 kVif1Madr = 0x10009010u;
 constexpr u32 kVif1Qwc = 0x10009020u;
@@ -106,6 +109,8 @@ bool supported_unpack_format(u32 format) {
 
 void Vif1Dma::reset() {
     end_after_qwc_ = false;
+    mfifo_empty_signalled_ = false;
+    data_in_ring_ = false;
     payload_ = Payload::None;
     command_irq_pending_ = false;
     active_code_ = 0;
@@ -714,6 +719,20 @@ bool Vif1Dma::service_forward(
     qwc &= 0xFFFFu;
     set_vif1_fqc(bus, qwc);
 
+    u32 dmac_ctrl = 0;
+    u32 ring_mask = 0;
+    u32 ring_base = 0;
+    u32 producer = 0;
+    const bool mfifo =
+        mode == kModeChain &&
+        bus.read32(kDmacCtrl, dmac_ctrl) && ((dmac_ctrl >> 2) & 0x3u) == 2u &&
+        bus.read32(kDmacRbsr, ring_mask) &&
+        bus.read32(kDmacRbor, ring_base) &&
+        bus.read32(kSprFromMadr, producer);
+    auto ring_wrap = [&](u32 address) {
+        return ring_base + (address & ring_mask);
+    };
+
     if (payload_ == Payload::WaitVu) {
         set_vif1_vps(bus, 1u);
         if (vu1_ != nullptr && vu1_->running()) {
@@ -765,9 +784,27 @@ bool Vif1Dma::service_forward(
 
         u64 tag_lo = 0;
         u64 tag_hi = 0;
+        if (mfifo) {
+            tadr = ring_wrap(tadr);
+            if (tadr == (producer & 0x7FFFFFF0u)) {
+                // Drained everything SPR_FROM has written: wait for more.
+                if (!mfifo_empty_signalled_) {
+                    mfifo_empty_signalled_ = true;
+                    bus.raise_dmac(14);
+                }
+                if (!bus.write32(kVif1Tadr, tadr)) {
+                    error = "VIF1 MFIFO TADR write failed";
+                    return false;
+                }
+                return true;
+            }
+            mfifo_empty_signalled_ = false;
+        }
         // TADR bit 31 selects the EE scratchpad for non-SPR DMA channels.
         // Masking it away would instead fetch a tag from main RAM.
-        const u32 tag_address = apply_spr(tadr, (tadr & 0x80000000u) != 0);
+        const u32 tag_address = mfifo
+            ? tadr
+            : apply_spr(tadr, (tadr & 0x80000000u) != 0);
         if (!bus.read64(tag_address, tag_lo) ||
             !bus.read64(tag_address + 8u, tag_hi)) {
             error = "VIF1 DMA tag fetch fault";
@@ -792,11 +829,12 @@ bool Vif1Dma::service_forward(
             end_after_qwc_ = true;
             break;
         case 1: // CNT
-            madr = tag_address + 16u;
+            madr = mfifo ? ring_wrap(tag_address + 16u) : tag_address + 16u;
             tadr = madr + qwc * 16u;
+            if (mfifo) tadr = ring_wrap(tadr);
             break;
         case 2: // NEXT
-            madr = tag_address + 16u;
+            madr = mfifo ? ring_wrap(tag_address + 16u) : tag_address + 16u;
             tadr = address;
             break;
         case 3: // REF
@@ -851,10 +889,11 @@ bool Vif1Dma::service_forward(
             break;
         }
         case 7: // END
-            madr = tag_address + 16u;
+            madr = mfifo ? ring_wrap(tag_address + 16u) : tag_address + 16u;
             end_after_qwc_ = true;
             break;
         }
+        data_in_ring_ = mfifo && (id == 1u || id == 2u || id == 7u);
 
         recent_tags_[recent_tag_next_] = {
             tag_address, tag0, tag1, tadr, madr};
@@ -911,6 +950,12 @@ bool Vif1Dma::service_forward(
     // DIRECT data goes to the GIF; wait while path 3 is mid-packet.
     if (payload_ == Payload::Direct && !gs.gif_path_free(2)) return true;
 
+    const bool ring_data = mfifo && data_in_ring_;
+    // Data not produced yet: SPR_FROM has not reached this qword.
+    if (ring_data && (madr & 0x7FFFFFF0u) == (producer & 0x7FFFFFF0u)) {
+        return true;
+    }
+
     u64 lo = 0;
     u64 hi = 0;
     if (!bus.read64(madr, lo) || !bus.read64(madr + 8u, hi)) {
@@ -922,7 +967,7 @@ bool Vif1Dma::service_forward(
         return false;
     }
 
-    madr = (madr + 16u) & 0x7FFFFFF0u;
+    madr = ring_data ? ring_wrap(madr + 16u) : (madr + 16u) & 0x7FFFFFF0u;
     --qwc;
     if (!bus.write32(kVif1Madr, madr) ||
         !bus.write32(kVif1Qwc, qwc)) {
