@@ -613,7 +613,6 @@ private:
 
   void key_on_voice(int voice);
   void key_off_voice(int voice);
-  void force_off_all_voices_immediate();
   void apply_pending_key_strobes();
 
   s16 next_noise_sample();

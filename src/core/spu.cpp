@@ -1356,10 +1356,6 @@ void Spu::write16(u32 offset, u16 value) {
     note_koff_write(false, value);
     if (value != 0u) {
       note_key_write_timing();
-      if ((spucnt_effective() & 0x8000u) == 0u) {
-        ++audio_diag_.keyoff_ignored_while_disabled;
-        break;
-      }
     }
     pending_koff_mask_ =
         (pending_koff_mask_ & 0x00FF0000u) | static_cast<u32>(value);
@@ -1396,10 +1392,6 @@ void Spu::write16(u32 offset, u16 value) {
                 audio_diag_.v16_kon_write_to_koff_max_samples, delta_samples32);
           }
         }
-      }
-      if ((spucnt_effective() & 0x8000u) == 0u) {
-        ++audio_diag_.keyoff_ignored_while_disabled;
-        break;
       }
     }
     pending_koff_mask_ = (pending_koff_mask_ & 0x0000FFFFu) |
@@ -1482,7 +1474,6 @@ void Spu::write16(u32 offset, u16 value) {
         ++audio_diag_.spucnt_enable_clear_events;
         spu_disabled_window_active_ = true;
         spu_disable_start_sample_ = sample_clock_;
-        force_off_all_voices_immediate();
         pending_kon_mask_ = 0;
         pending_koff_mask_ = 0;
       }
@@ -1725,28 +1716,6 @@ void Spu::key_off_voice(int voice) {
   vs.release_tracking = true;
   vs.release_start_sample = sample_clock_;
   ++audio_diag_.key_off_events;
-}
-
-void Spu::force_off_all_voices_immediate() {
-  u32 forced = 0;
-  for (int v = 0; v < NUM_VOICES; ++v) {
-    VoiceState &vs = voices_[v];
-    if (vs.phase == VoiceState::AdsrPhase::Off) {
-      continue;
-    }
-    ++forced;
-    vs.phase = VoiceState::AdsrPhase::Off;
-    vs.env_level = 0;
-    vs.adsr_counter = 0;
-    vs.key_on = false;
-    vs.stop_after_block = false;
-    vs.release_tracking = false;
-    vs.current_vol_l = 0;
-    vs.current_vol_r = 0;
-  }
-  if (forced != 0u) {
-    audio_diag_.spu_disable_forced_off_voices += forced;
-  }
 }
 
 void Spu::apply_pending_key_strobes() {
@@ -3098,8 +3067,10 @@ void Spu::tick(u32 cycles) {
   audio_diag_.generated_frames += static_cast<u64>(samples_to_generate);
 
   const u16 spucnt_eff = spucnt_effective();
-  const bool enabled = (spucnt_eff & 0x8000u) != 0u;
-  const bool muted = (spucnt_eff & 0x4000u) == 0u;
+  // The mute bit only silences an enabled SPU. Voices keep running with the SPU
+  // disabled (Crash Bash's terminate screen writes SPUCNT=0 and its bass note
+  // keeps playing in pSX).
+  const bool muted = (spucnt_eff & 0x8000u) != 0u && (spucnt_eff & 0x4000u) == 0u;
   const bool force_reverb = force_reverb_enabled_.load(std::memory_order_acquire);
   const bool native_reverb_master = (spucnt_eff & 0x0080u) != 0u;
   const bool native_reverb_configured =
@@ -3117,21 +3088,6 @@ void Spu::tick(u32 cycles) {
   mix_buffer_.resize(out_samples);
   std::fill(mix_buffer_.begin(), mix_buffer_.end(), 0);
   auto &out = mix_buffer_;
-
-  if (!enabled) {
-    for (int i = 0; i < samples_to_generate; ++i) {
-      ++sample_clock_;
-      capture_half_ ^= 1u;
-      ++audio_diag_.muted_output_frames;
-    }
-    enqueue_ring_buffer(out);
-    if (profile_detailed && sys_ != nullptr) {
-      const auto end = std::chrono::high_resolution_clock::now();
-      sys_->add_spu_time(
-          std::chrono::duration<double, std::milli>(end - start).count());
-    }
-    return;
-  }
 
   const bool track_sample_diag = g_spu_advanced_sound_status;
   audio_diag_.gaussian_active = true;
