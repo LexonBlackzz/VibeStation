@@ -163,6 +163,9 @@ struct CpuCompareCase {
   bool expect_gpr_is_segment_cycles = false;
   size_t expect_gpr_segment = 0;
   u32 expect_gpr_value = 0;
+  // Optional: (GTE FLAG & mask) must equal value after the run.
+  u32 expect_gte_flags_mask = 0;
+  u32 expect_gte_flags_value = 0;
   bool experimental_unknown_fallback = false;
   bool require_full_native_when_available = false;
   bool require_native_entry_when_available = false;
@@ -341,6 +344,7 @@ struct CpuCompareRunResult {
   CpuComparePeripheralState peripherals{};
   u32 irq_stat = 0;
   u32 irq_mask = 0;
+  u32 gte_flags = 0;
   std::vector<u32> memory_values;
 };
 
@@ -633,6 +637,16 @@ static bool cpu_compare_expected_state_pass(const CpuCompareCase &test_case,
     }
     field("gpr", expected, actual);
   }
+  if (test_case.expect_gte_flags_mask != 0u) {
+    const u32 actual = result.gte_flags & test_case.expect_gte_flags_mask;
+    if (actual != test_case.expect_gte_flags_value) {
+      LOG_ERROR(
+          "CPU_COMPARE_EXPECT name=%s mode=%s gte_flags=0x%08X expected=0x%08X",
+          test_case.name, cpu_compare_mode_name(mode), actual,
+          test_case.expect_gte_flags_value);
+    }
+    field("gte_flags", test_case.expect_gte_flags_value, actual);
+  }
   return pass;
 }
 
@@ -845,6 +859,7 @@ static CpuCompareRunResult run_cpu_compare_case_once(
     run_segment(test_case.instructions - executed);
   }
   out.state = sys->cpu().debug_state();
+  out.gte_flags = sys->cpu().gte.read_ctrl(31);
   out.stats = sys->cpu().cpu_backend_stats();
   out.peripherals = capture_cpu_compare_peripherals(*sys);
   out.irq_stat = sys->irq().stat();
@@ -3041,6 +3056,23 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
   branch_irq_before.instructions = 1;
   branch_irq_before.require_v4_entry_exception_native_when_available = true;
   cases.push_back(branch_irq_before);
+
+  // An interrupt taken at a GTE command must still run the command: hardware
+  // has already issued it, EPC keeps pointing at it, and the handler steps over
+  // it. RTPS on zeroed registers divides by zero -> FLAG bit 17.
+  CpuCompareCase irq_at_gte_command{};
+  irq_at_gte_command.name = "irq_at_gte_command_still_executes";
+  irq_at_gte_command.initial_cop0_sr_bits = 1u | (1u << 10) | (1u << 30);
+  irq_at_gte_command.initial_irq_mask = 1u;
+  irq_at_gte_command.initial_irq_pending = true;
+  irq_at_gte_command.program = {
+      0x4A180001u, // RTPS
+      0,
+  };
+  irq_at_gte_command.instructions = 1;
+  irq_at_gte_command.expect_gte_flags_mask = 0x20000u;
+  irq_at_gte_command.expect_gte_flags_value = 0x20000u;
+  cases.push_back(irq_at_gte_command);
 
   CpuCompareCase branch_irq_delay{};
   branch_irq_delay.name = "native_branch_tail_irq_pending_before_delay";

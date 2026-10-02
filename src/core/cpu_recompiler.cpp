@@ -9684,6 +9684,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     const bool irq_entry = !cpu_.pending_delay_slot_ && cpu_.check_irq();
     if (irq_entry) {
       ++stats_.native_reject_irq_state;
+      cpu_.execute_gte_before_interrupt();
       run_native_entry_exception(1u);
       continue;
     }

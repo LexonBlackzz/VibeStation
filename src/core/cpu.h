@@ -721,6 +721,7 @@ private:
   // ── Exception Handling ─────────────────────────────────────────
   void exception(Exception cause);
   bool check_irq();
+  void execute_gte_before_interrupt();
 
   // ── Opcode Handlers — Primary ──────────────────────────────────
   void op_special(u32 i);

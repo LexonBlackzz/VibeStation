@@ -1685,6 +1685,23 @@ bool Cpu::check_irq() {
   return pending != 0;
 }
 
+// The R3000A has already issued a GTE command by the time an interrupt is
+// taken at it: the command completes, EPC still points at it, and the kernel
+// (and games' own handlers) step EPC over it. Vectoring without running it
+// silently drops the command (e.g. a vertex-morph INTPL, leaving stale MACs).
+void Cpu::execute_gte_before_interrupt() {
+  if ((pc_ & 3u) != 0u || (cop0_sr_ & (1u << 30)) == 0u) {
+    return;
+  }
+  u32 instruction = 0u;
+  if (!read_visible_instruction_for_backend(pc_, instruction)) {
+    instruction = sys_->read32_instruction(pc_);
+  }
+  if ((instruction >> 26) == 0x12u && (instruction & (1u << 25)) != 0u) {
+    gte.execute(instruction);
+  }
+}
+
 // ── Main Step ──────────────────────────────────────────────────────
 
 u32 Cpu::step() {
@@ -1767,6 +1784,7 @@ u32 Cpu::step() {
         ++cpu_irq_entry_late_log;
       }
     }
+    execute_gte_before_interrupt();
     exception(Exception::Interrupt);
     constexpr u32 irq_cycles = 2;
     cycles_ += irq_cycles;
@@ -2441,6 +2459,7 @@ u32 Cpu::run_compiled_opcode(Cpu *cpu, u32 instruction) {
     cpu->cop0_cause_ &= ~(1u << 10);
   }
   if (!cpu->in_delay_slot_ && cpu->check_irq()) {
+    cpu->execute_gte_before_interrupt();
     cpu->exception(Exception::Interrupt);
     cpu->cycles_ += 2u;
     cpu->executing_step_ = false;
