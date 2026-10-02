@@ -235,7 +235,8 @@ bool EeHw::intc_pending() const {
 }
 
 void EeHw::raise_dmac(u32 channel) {
-    if (channel >= 10u) return;
+    // Channels 0-9 plus 14 (MEIS, memory FIFO empty).
+    if (channel >= 10u && channel != 14u) return;
     const u32 offset = 0x1000E010u - kDmacBase;
     u32 stat =
         static_cast<u32>(dmac_regs_[offset]) |
@@ -259,8 +260,8 @@ bool EeHw::dmac_pending() const {
                (static_cast<u32>(dmac_regs_[offset + 2]) << 16) |
                (static_cast<u32>(dmac_regs_[offset + 3]) << 24);
     }
-    const u32 causes = stat & 0x03FFu;
-    const u32 masks = (stat >> 16) & 0x03FFu;
+    const u32 causes = stat & 0x43FFu;
+    const u32 masks = (stat >> 16) & 0x43FFu;
     return (causes & masks) != 0;
 }
 

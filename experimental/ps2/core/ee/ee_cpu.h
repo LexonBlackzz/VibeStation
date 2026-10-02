@@ -56,6 +56,10 @@ struct EeCpuState {
     std::array<EeSyscallRecord, 64> recent_syscalls{};
     u32 recent_syscall_count = 0;
     u32 recent_syscall_next = 0;
+    // COP0 reg 25 performance counters (MFPS/MTPS = PCCR, MFPC/MTPC = PCR0/1).
+    u32 perf_pccr = 0;
+    std::array<u32, 2> perf_pcr{};
+    u64 perf_last_instruction = 0;
 };
 
 class EeCpu {
@@ -124,6 +128,10 @@ public:
     // Validate/collapse the retail 0x7A SifGetReg(4) syscall wrapper.
     // The system layer is responsible for sampling SMFLAG at the exact
     // instruction offset when active IOP execution can change it.
+    // Retire `instructions` cycles of a loop the caller has proven to be a
+    // fixed point: registers, PC and delay-slot state are identical at every
+    // iteration boundary, so only the time counters move.
+    void fast_forward_fixed_point(u32 instructions);
     [[nodiscard]] bool can_skip_hot_sif_getreg() const;
     bool skip_hot_sif_getreg(u32 value);
 
@@ -230,6 +238,10 @@ private:
     bool execute_special(u32 pc, u32 instruction, std::string& error);
     bool execute_regimm(u32 pc, u32 instruction, std::string& error);
     bool execute_cop0(u32 pc, u32 instruction, std::string& error);
+    // Bring PCR0/PCR1 up to date with the retired instruction count.
+    void update_perf_counters();
+    // MFC0/MTC0 reg 25 with the register chosen by the low 6 bits.
+    bool perf_register(u32 funct, u32*& reg);
     bool execute_cop1(u32 pc, u32 instruction, std::string& error);
     bool execute_cop2(u32 pc, u32 instruction, std::string& error);
     bool run_vu0_micro(u32 start_address, std::string& error);
@@ -265,6 +277,8 @@ private:
 
     bool halted_ = false;
     bool next_is_delay_slot_ = false;
+    // Instructions retired since the INTC line asserted (see step()).
+    u32 intc_age_ = 0;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
     bool hot_sif_getreg_diag_inflight_ = false;

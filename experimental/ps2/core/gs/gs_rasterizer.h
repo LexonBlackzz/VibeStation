@@ -35,6 +35,8 @@ struct GsTextureState {
     bool tcc = false;
     u32 tfx = 0;
     bool fst = true;
+    // TEX1 MMAG/MMIN resolved to a single filter choice for this draw.
+    bool linear = false;
 
     u32 cbp = 0;
     u32 cpsm = 0;
@@ -104,6 +106,20 @@ struct GsRasterContext {
     u32* first_alpha_input_rgba = nullptr; // Optional trace sample.
 };
 
+// VRAM footprint of one primitive, used to decide whether a run of draws can
+// be rasterized in parallel by screen-row bands without changing the result.
+struct GsBandFootprint {
+    s32 top = 0;    // Clipped rows touched: [top, bottom).
+    s32 bottom = 0;
+    u64 area = 0;   // Clipped bounding-box pixels (work estimate).
+    bool has_frame = false;
+    bool has_depth = false;
+    bool has_texture = false;
+    u64 frame_begin = 0, frame_end = 0, frame_key = 0;
+    u64 depth_begin = 0, depth_end = 0, depth_key = 0;
+    u64 texture_begin = 0, texture_end = 0;
+};
+
 class GsRasterizer {
 public:
     [[nodiscard]] static bool supported_target(const GsRasterContext& ctx);
@@ -150,9 +166,9 @@ public:
         const GsRasterVertex& b,
         const GsRasterVertex& c);
 
-    // Band-parallel triangle support. draw_triangle_rows() draws only rows
-    // [row_begin, row_end); every pixel is computed exactly as in
-    // draw_triangle(), so disjoint row bands can run on separate threads.
+    // draw_triangle() restricted to rows [row_begin, row_end). Pixels are
+    // independent, so bands drawn by different threads give the exact result
+    // of one draw_triangle() call.
     static u64 draw_triangle_rows(
         GsVram& vram,
         const GsRasterContext& ctx,
@@ -161,6 +177,7 @@ public:
         const GsRasterVertex& c,
         s32 row_begin,
         s32 row_end);
+
     // Scissor-clipped screen rows the triangle may touch.
     static bool triangle_row_span(
         const GsRasterContext& ctx,
@@ -173,6 +190,17 @@ public:
     // concurrently: no texture or depth read can observe another band's
     // frame or depth writes anywhere inside the scissor rectangle.
     static bool band_parallel_safe(const GsRasterContext& ctx);
+
+    // Fills the footprint for a triangle (primitive 3-5) or sprite (6).
+    // Returns false when the draw must not be banded (unsupported format,
+    // tracing hooks, CLUT reads, or it samples VRAM it also writes).
+    static bool band_plan(
+        const GsRasterContext& ctx,
+        u32 primitive,
+        const GsRasterVertex& a,
+        const GsRasterVertex& b,
+        const GsRasterVertex& c,
+        GsBandFootprint& fp);
 
 private:
     static bool draw_pixel(

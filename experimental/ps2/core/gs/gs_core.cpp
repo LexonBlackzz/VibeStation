@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
-#include <limits>
 #include <utility>
 
 namespace ps2 {
@@ -26,6 +25,7 @@ constexpr u32 kRegXyz2 = 0x05;
 constexpr u32 kRegXyzf3 = 0x0C;
 constexpr u32 kRegXyz3 = 0x0D;
 constexpr u32 kRegTex0_1 = 0x06;
+constexpr u32 kRegTex1_1 = 0x14;
 constexpr u32 kRegClamp1 = 0x08;
 constexpr u32 kRegXyoffset1 = 0x18;
 constexpr u32 kRegPrmodecont = 0x1A;
@@ -150,12 +150,10 @@ void GsCore::raster_helper_main(u32 helper_index) {
         const GsRasterContext* ctx = nullptr;
         const GsRasterVertex* a = nullptr;
         const GsRasterVertex* b = nullptr;
+        BandJob* band_job = nullptr;
         s32 row_begin = 0;
         s32 row_end = 0;
         u64 generation = 0u;
-        bool triangle_batch = false;
-        const RasterCommand* batch = nullptr;
-        u32 batch_count = 0u;
 
         {
             std::unique_lock lock(raster_parallel_mutex_);
@@ -171,9 +169,7 @@ void GsCore::raster_helper_main(u32 helper_index) {
             ctx = raster_parallel_context_;
             a = raster_parallel_a_;
             b = raster_parallel_b_;
-            triangle_batch = raster_parallel_triangle_batch_;
-            batch = raster_parallel_batch_;
-            batch_count = raster_parallel_batch_count_;
+            band_job = raster_band_job_;
             row_begin =
                 raster_parallel_boundaries_[helper_index];
             row_end =
@@ -181,17 +177,8 @@ void GsCore::raster_helper_main(u32 helper_index) {
         }
 
         u64 count = 0u;
-        if (triangle_batch) {
-            // Draw every command in submission order, limited to this
-            // lane's rows, so each pixel still sees draws in GS order.
-            auto& lane_counts =
-                raster_parallel_batch_counts_[helper_index];
-            for (u32 i = 0u; i < batch_count; ++i) {
-                const RasterCommand& draw = batch[i];
-                lane_counts[i] = GsRasterizer::draw_triangle_rows(
-                    vram_, draw.context, draw.a, draw.b, draw.c,
-                    row_begin, row_end);
-            }
+        if (band_job != nullptr) {
+            run_band_lane(*band_job, helper_index);
         } else {
             count = GsRasterizer::draw_sprite_rows(
                 vram_, *ctx, *a, *b, row_begin, row_end);
@@ -244,10 +231,10 @@ bool GsCore::try_execute_parallel_sprite(
 
     {
         std::lock_guard lock(raster_parallel_mutex_);
-        raster_parallel_triangle_batch_ = false;
         raster_parallel_context_ = &command.context;
         raster_parallel_a_ = &command.a;
         raster_parallel_b_ = &command.b;
+        raster_band_job_ = nullptr;
         raster_parallel_counts_.fill(0u);
         raster_parallel_boundaries_[0] = top;
         for (u32 worker = 1u;
@@ -335,6 +322,8 @@ bool GsCore::try_execute_gpu_sprite(
 }
 
 void GsCore::flush_pending_draws() const {
+    // Partially collected upload data must reach the queue before we wait.
+    const_cast<GsCore*>(this)->enqueue_pending_upload();
     if (raster_worker_.joinable()) {
         std::unique_lock lock(raster_mutex_);
         raster_completed_condition_.wait(lock, [this] {
@@ -344,19 +333,306 @@ void GsCore::flush_pending_draws() const {
     synchronize_gpu_to_cpu();
 }
 
-void GsCore::submit_display_scanout(
-    GsDisplay& display, const GsPrivileged& regs) {
-    if (!async_rasterization_ || !raster_worker_.joinable()) {
-        flush_pending_draws();
-        display.update(regs, vram_);
-        return;
+namespace {
+
+// Tracks the VRAM a run of draws writes and reads so that the run can be
+// rasterized by independent row bands. A draw may join the run only if its
+// texture does not touch anything the run writes, nothing it writes is
+// sampled by the run, and its surfaces either do not overlap earlier
+// surfaces or share their exact layout (so one pixel maps to one address).
+class BandHazards {
+public:
+    bool try_add(const GsBandFootprint& fp) {
+        if (fp.bottom <= fp.top) return true; // Draws nothing.
+
+        if (fp.has_texture) {
+            for (u32 i = 0u; i < write_count_; ++i) {
+                if (overlaps(fp.texture_begin, fp.texture_end,
+                             writes_[i].begin, writes_[i].end)) {
+                    return false;
+                }
+            }
+        }
+        if (fp.has_frame && !writable(
+                fp.frame_begin, fp.frame_end, fp.frame_key)) {
+            return false;
+        }
+        if (fp.has_depth && !writable(
+                fp.depth_begin, fp.depth_end, fp.depth_key)) {
+            return false;
+        }
+
+        // Capacity check first so a refused draw leaves no trace.
+        u32 new_writes = 0u;
+        if (fp.has_frame && find_write(fp.frame_key) == kNone) ++new_writes;
+        if (fp.has_depth && find_write(fp.depth_key) == kNone) ++new_writes;
+        if (write_count_ + new_writes > writes_.size() ||
+            (fp.has_texture && read_count_ >= reads_.size())) {
+            return false;
+        }
+
+        if (fp.has_frame) {
+            add_write(fp.frame_begin, fp.frame_end, fp.frame_key);
+        }
+        if (fp.has_depth) {
+            add_write(fp.depth_begin, fp.depth_end, fp.depth_key);
+        }
+        if (fp.has_texture) {
+            reads_[read_count_++] = {
+                fp.texture_begin, fp.texture_end, 0u};
+        }
+        return true;
     }
 
-    RasterCommand command{};
-    command.scanout_display = &display;
-    // PCRTC registers can change before the worker reaches this command, so
-    // scan out the values that were live at this vsync.
-    command.scanout_registers = std::make_shared<const GsPrivileged>(regs);
+private:
+    struct Range {
+        u64 begin = 0;
+        u64 end = 0;
+        u64 key = 0;
+    };
+    static constexpr u32 kNone = ~0u;
+
+    static bool overlaps(u64 a0, u64 a1, u64 b0, u64 b1) {
+        return a0 < b1 && b0 < a1;
+    }
+    u32 find_write(u64 key) const {
+        for (u32 i = 0u; i < write_count_; ++i) {
+            if (writes_[i].key == key) return i;
+        }
+        return kNone;
+    }
+    bool writable(u64 begin, u64 end, u64 key) const {
+        for (u32 i = 0u; i < read_count_; ++i) {
+            if (overlaps(begin, end, reads_[i].begin, reads_[i].end)) {
+                return false;
+            }
+        }
+        for (u32 i = 0u; i < write_count_; ++i) {
+            if (writes_[i].key != key &&
+                overlaps(begin, end, writes_[i].begin, writes_[i].end)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    void add_write(u64 begin, u64 end, u64 key) {
+        const u32 existing = find_write(key);
+        if (existing != kNone) {
+            writes_[existing].begin = std::min(writes_[existing].begin, begin);
+            writes_[existing].end = std::max(writes_[existing].end, end);
+        } else {
+            writes_[write_count_++] = {begin, end, key};
+        }
+    }
+
+    std::array<Range, 12> writes_{};
+    std::array<Range, 12> reads_{};
+    u32 write_count_ = 0u;
+    u32 read_count_ = 0u;
+};
+
+} // namespace
+
+void GsCore::run_band_lane(BandJob& job, u32 lane) {
+    std::vector<u64>& counts = job.pixels[lane];
+    for (;;) {
+        const u32 band =
+            job.next_band.fetch_add(1u, std::memory_order_relaxed);
+        if (band >= job.band_count) return;
+        const s32 row0 =
+            job.base_row + static_cast<s32>(band) * kBandRows;
+        const s32 row1 = row0 + kBandRows;
+        for (u32 i = 0u; i < job.count; ++i) {
+            const GsBandFootprint& fp = job.footprints[i];
+            if (fp.bottom <= row0 || fp.top >= row1) continue;
+            const RasterCommand& cmd = job.commands[i];
+            const s32 begin_row = std::max(row0, fp.top);
+            const s32 end_row = std::min(row1, fp.bottom);
+            counts[i] += cmd.primitive == 6u
+                ? GsRasterizer::draw_sprite_rows(
+                      vram_, cmd.context, cmd.a, cmd.b,
+                      begin_row, end_row)
+                : GsRasterizer::draw_triangle_rows(
+                      vram_, cmd.context, cmd.a, cmd.b, cmd.c,
+                      begin_row, end_row);
+        }
+    }
+}
+
+void GsCore::execute_banded_batch(
+    std::vector<RasterCommand>& batch,
+    const std::vector<GsBandFootprint>& footprints) {
+    // Software rasterization must observe every earlier GPU write.
+    synchronize_gpu_to_cpu();
+
+    const u32 count = static_cast<u32>(batch.size());
+    std::chrono::steady_clock::time_point begin{};
+    if (raster_timing_enabled_) begin = std::chrono::steady_clock::now();
+
+    s32 first_row = 0x7FFFFFFF;
+    s32 last_row = -0x7FFFFFFF;
+    for (const GsBandFootprint& fp : footprints) {
+        if (fp.bottom > fp.top) {
+            first_row = std::min(first_row, fp.top);
+            last_row = std::max(last_row, fp.bottom);
+        }
+    }
+
+    std::vector<u64> totals(count, 0u);
+    if (last_row > first_row) {
+        BandJob job;
+        const u32 lanes = raster_helper_count_ + 1u;
+        job.commands = batch.data();
+        job.footprints = footprints.data();
+        job.count = count;
+        job.base_row = first_row;
+        job.band_count = static_cast<u32>(
+            (last_row - first_row + kBandRows - 1) / kBandRows);
+        job.pixels.assign(lanes, std::vector<u64>(count, 0u));
+        {
+            std::lock_guard lock(raster_parallel_mutex_);
+            raster_band_job_ = &job;
+            raster_parallel_pending_ = raster_helper_count_;
+            ++raster_parallel_generation_;
+        }
+        raster_parallel_condition_.notify_all();
+        run_band_lane(job, 0u);
+        {
+            std::unique_lock lock(raster_parallel_mutex_);
+            raster_parallel_done_condition_.wait(lock, [&] {
+                return raster_parallel_pending_ == 0u;
+            });
+        }
+        for (u32 lane = 0u; lane < lanes; ++lane) {
+            for (u32 i = 0u; i < count; ++i) {
+                totals[i] += job.pixels[lane][i];
+            }
+        }
+    }
+
+    u64 total_ns = 0u;
+    u64 total_pixels = 0u;
+    if (raster_timing_enabled_) {
+        total_ns = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count());
+        for (const u64 pixels : totals) total_pixels += pixels;
+    }
+    for (u32 i = 0u; i < count; ++i) {
+        // Apportion the batch time by pixels so the profile stays useful.
+        const u64 ns = total_pixels != 0u
+            ? total_ns * totals[i] / total_pixels
+            : 0u;
+        account_raster_command(batch[i], totals[i], ns, false, 0u, 0u);
+    }
+    stats_->banded_draws += count;
+    ++stats_->banded_batches;
+}
+
+void GsCore::raster_worker_main() {
+    constexpr u32 kMaxBatch = 512u;
+    constexpr u64 kMinBatchArea = 16384u;
+    std::vector<RasterCommand> batch;
+    std::vector<GsBandFootprint> footprints;
+    for (;;) {
+        batch.clear();
+        footprints.clear();
+        RasterCommand single;
+        bool have_single = false;
+        u64 batch_area = 0u;
+        BandHazards hazards;
+        {
+            std::unique_lock lock(raster_mutex_);
+            raster_condition_.wait(lock, [this] {
+                return raster_worker_stop_ || !raster_queue_.empty();
+            });
+            if (raster_queue_.empty() && raster_worker_stop_) return;
+            const bool banding =
+                raster_helper_count_ != 0u && !detailed_raster_stats_;
+            // Sprites may be sent to the GPU backend, which orders itself
+            // against software draws; keep them out of CPU batches then.
+            const bool sprites_ok =
+                gpu_backend_ == nullptr || !gpu_backend_->available();
+            while (!raster_queue_.empty() && batch.size() < kMaxBatch) {
+                RasterCommand& front = raster_queue_.front();
+                GsBandFootprint fp;
+                const bool bandable =
+                    banding &&
+                    !front.scanout &&
+                    !front.upload &&
+                    (((front.primitive == 3u || front.primitive == 4u ||
+                       front.primitive == 5u) &&
+                      front.vertex_count >= 3u) ||
+                     (front.primitive == 6u && sprites_ok &&
+                      front.vertex_count >= 2u)) &&
+                    GsRasterizer::band_plan(
+                        front.context, front.primitive,
+                        front.a, front.b, front.c, fp);
+                if (!bandable) {
+                    if (batch.empty()) {
+                        single = std::move(front);
+                        raster_queue_.pop_front();
+                        have_single = true;
+                    }
+                    break;
+                }
+                if (!hazards.try_add(fp)) {
+                    if (batch.empty()) { // Cannot happen; never spin.
+                        single = std::move(front);
+                        raster_queue_.pop_front();
+                        have_single = true;
+                    }
+                    break;
+                }
+                batch_area += fp.area;
+                footprints.push_back(fp);
+                batch.push_back(std::move(front));
+                raster_queue_.pop_front();
+            }
+        }
+        // Space opened in the queue; let a blocked producer continue now.
+        raster_completed_condition_.notify_all();
+
+        u64 taken = 0u;
+        if (have_single) {
+            taken = 1u;
+            if (single.scanout) {
+                synchronize_gpu_to_cpu();
+                single.scanout->display->update(
+                    single.scanout->regs, vram_);
+            } else if (single.upload) {
+                execute_host_upload(*single.upload);
+            } else {
+                execute_raster_command(single);
+            }
+        } else {
+            taken = batch.size();
+            if (batch.size() >= 2u && batch_area >= kMinBatchArea) {
+                execute_banded_batch(batch, footprints);
+            } else {
+                for (const RasterCommand& command : batch) {
+                    execute_raster_command(command);
+                }
+            }
+        }
+        {
+            std::lock_guard lock(raster_mutex_);
+            raster_completed_ += taken;
+        }
+        raster_completed_condition_.notify_all();
+    }
+}
+
+void GsCore::enqueue_scanout(
+    GsDisplay& display, const GsPrivileged& regs) {
+    if (!async_rasterization_ || !raster_worker_.joinable()) {
+        display.update(regs, vram());
+        return;
+    }
+    RasterCommand command;
+    command.scanout = std::make_shared<ScanoutRequest>();
+    command.scanout->display = &display;
+    command.scanout->regs = regs;
     {
         std::unique_lock lock(raster_mutex_);
         raster_completed_condition_.wait(lock, [this] {
@@ -368,177 +644,6 @@ void GsCore::submit_display_scanout(
     raster_condition_.notify_one();
 }
 
-bool GsCore::triangle_batch_candidate(const RasterCommand& command) const {
-    const u32 prim = command.primitive;
-    return raster_helper_count_ != 0u &&
-           !detailed_raster_stats_ &&
-           !raster_timing_enabled_ &&
-           command.scanout_display == nullptr &&
-           (prim == 3u || prim == 4u || prim == 5u) &&
-           command.vertex_count >= 3u &&
-           GsRasterizer::band_parallel_safe(command.context);
-}
-
-bool GsCore::triangle_batch_compatible(
-    const RasterCommand& first, const RasterCommand& next) {
-    // Draws in one batch share the frame, depth and texture buffers and the
-    // scissor rectangle. Each already passed band_parallel_safe() for that
-    // shared state, so no band can read what another band writes.
-    const auto& f = first.context;
-    const auto& n = next.context;
-    const bool same_texture =
-        f.texture.enabled == n.texture.enabled &&
-        (!f.texture.enabled ||
-         (f.texture.bp == n.texture.bp &&
-          f.texture.bw == n.texture.bw &&
-          f.texture.psm == n.texture.psm &&
-          f.texture.width == n.texture.width &&
-          f.texture.height == n.texture.height));
-    return f.fbp == n.fbp && f.fbw == n.fbw && f.psm == n.psm &&
-           f.zte == n.zte && f.zbp == n.zbp && f.zpsm == n.zpsm &&
-           f.zmask == n.zmask &&
-           f.scax0 == n.scax0 && f.scax1 == n.scax1 &&
-           f.scay0 == n.scay0 && f.scay1 == n.scay1 &&
-           same_texture;
-}
-
-void GsCore::execute_triangle_batch(std::vector<RasterCommand>& batch) {
-    // Software rasterization must observe every earlier GPU write.
-    synchronize_gpu_to_cpu();
-
-    s32 top = std::numeric_limits<s32>::max();
-    s32 bottom = std::numeric_limits<s32>::min();
-    u64 work = 0u;
-    for (const RasterCommand& command : batch) {
-        s32 draw_top = 0;
-        s32 draw_bottom = 0;
-        if (!GsRasterizer::triangle_row_span(
-                command.context, command.a, command.b, command.c,
-                draw_top, draw_bottom)) {
-            continue;
-        }
-        top = std::min(top, draw_top);
-        bottom = std::max(bottom, draw_bottom);
-        const s32 min_x = std::min({command.a.x, command.b.x, command.c.x});
-        const s32 max_x = std::max({command.a.x, command.b.x, command.c.x});
-        work += static_cast<u64>(draw_bottom - draw_top) *
-                static_cast<u64>(std::max(1, (max_x - min_x) >> 4));
-    }
-
-    // Waking the pool costs a few microseconds; small batches run inline.
-    constexpr u64 kMinParallelBatchWork = 4096u;
-    const u32 lanes = raster_helper_count_ + 1u;
-    const u32 count = static_cast<u32>(batch.size());
-    if (top >= bottom ||
-        bottom - top < static_cast<s32>(lanes * 4u) ||
-        work < kMinParallelBatchWork) {
-        for (const RasterCommand& command : batch) {
-            const u64 pixels = GsRasterizer::draw_triangle(
-                vram_, command.context, command.a, command.b, command.c);
-            record_raster_command(
-                command, pixels, 0u, false,
-                stats_->nonzero_raster_inputs,
-                stats_->nonzero_inputs_with_alpha);
-        }
-        return;
-    }
-
-    const s32 rows = bottom - top;
-    {
-        std::lock_guard lock(raster_parallel_mutex_);
-        raster_parallel_triangle_batch_ = true;
-        raster_parallel_batch_ = batch.data();
-        raster_parallel_batch_count_ = count;
-        raster_parallel_boundaries_[0] = top;
-        for (u32 lane = 1u; lane < lanes; ++lane) {
-            raster_parallel_boundaries_[lane] =
-                top + static_cast<s32>(
-                    (static_cast<s64>(rows) * lane) / lanes);
-        }
-        raster_parallel_boundaries_[lanes] = bottom;
-        raster_parallel_pending_ = raster_helper_count_;
-        ++raster_parallel_generation_;
-    }
-    raster_parallel_condition_.notify_all();
-
-    auto& own_counts = raster_parallel_batch_counts_[0];
-    for (u32 i = 0u; i < count; ++i) {
-        const RasterCommand& command = batch[i];
-        own_counts[i] = GsRasterizer::draw_triangle_rows(
-            vram_, command.context, command.a, command.b, command.c,
-            raster_parallel_boundaries_[0], raster_parallel_boundaries_[1]);
-    }
-
-    {
-        std::unique_lock lock(raster_parallel_mutex_);
-        raster_parallel_done_condition_.wait(lock, [&] {
-            return raster_parallel_pending_ == 0u;
-        });
-        raster_parallel_triangle_batch_ = false;
-    }
-
-    for (u32 i = 0u; i < count; ++i) {
-        u64 pixels = 0u;
-        for (u32 lane = 0u; lane < lanes; ++lane) {
-            pixels += raster_parallel_batch_counts_[lane][i];
-        }
-        record_raster_command(
-            batch[i], pixels, 0u, false,
-            stats_->nonzero_raster_inputs,
-            stats_->nonzero_inputs_with_alpha);
-    }
-}
-
-void GsCore::raster_worker_main() {
-    for (;;) {
-        RasterCommand command;
-        {
-            std::unique_lock lock(raster_mutex_);
-            raster_condition_.wait(lock, [this] {
-                return raster_worker_stop_ || !raster_queue_.empty();
-            });
-            if (raster_queue_.empty() && raster_worker_stop_) return;
-            command = std::move(raster_queue_.front());
-            raster_queue_.pop_front();
-        }
-        u64 executed = 1u;
-        if (command.scanout_display != nullptr) {
-            // Every earlier draw has completed on this thread; pull back any
-            // GPU-rendered VRAM before reading it for scanout.
-            synchronize_gpu_to_cpu();
-            command.scanout_display->update(
-                *command.scanout_registers, vram_);
-        } else if (triangle_batch_candidate(command)) {
-            // Take the following compatible triangles too, so the pool is
-            // woken once per batch rather than once per triangle. When the
-            // worker keeps up, the queue is short and batches stay small.
-            raster_batch_.clear();
-            raster_batch_.push_back(std::move(command));
-            {
-                std::lock_guard lock(raster_mutex_);
-                while (!raster_queue_.empty() &&
-                       raster_batch_.size() < kMaxTriangleBatch &&
-                       triangle_batch_candidate(raster_queue_.front()) &&
-                       triangle_batch_compatible(
-                           raster_batch_.front(), raster_queue_.front())) {
-                    raster_batch_.push_back(
-                        std::move(raster_queue_.front()));
-                    raster_queue_.pop_front();
-                }
-            }
-            executed = raster_batch_.size();
-            execute_triangle_batch(raster_batch_);
-        } else {
-            execute_raster_command(command);
-        }
-        {
-            std::lock_guard lock(raster_mutex_);
-            raster_completed_ += executed;
-        }
-        raster_completed_condition_.notify_all();
-    }
-}
-
 void GsCore::reset() {
     flush_pending_draws();
     registers_.fill(0);
@@ -546,6 +651,8 @@ void GsCore::reset() {
     fifo_word_mask_ = 0;
     gif_ = {};
     transfer_ = {};
+    upload_deferred_ = false;
+    pending_upload_.reset();
     *stats_ = {};
     vram_.reset();
     if (gpu_backend_ != nullptr) {
@@ -766,8 +873,19 @@ void GsCore::record_unsupported_transfer(u32 reason) {
         registers_[kRegTrxdir]};
 }
 
+// BITBLTBUF buffer width 0 is used by games for small uploads (the BIOS sends
+// 8x2 CLUTs with it); the hardware treats it as one 64-pixel unit.
+static u32 transfer_width_units(u32 bw) { return bw == 0u ? 1u : bw; }
+
 void GsCore::begin_host_to_local() {
-    flush_pending_draws();
+    // With the raster worker running, keep ordering through the queue
+    // instead of draining it (a drain stalls the EE for the whole backlog).
+    upload_deferred_ = async_rasterization_ && raster_worker_.joinable();
+    if (upload_deferred_) {
+        enqueue_pending_upload();
+    } else {
+        flush_pending_draws();
+    }
     transfer_ = {};
 
     const u64 blit = registers_[kRegBitbltbuf];
@@ -775,7 +893,7 @@ void GsCore::begin_host_to_local() {
     const u64 reg = registers_[kRegTrxreg];
 
     transfer_.bp = static_cast<u32>((blit >> 32) & 0x3FFFu);
-    transfer_.bw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    transfer_.bw = transfer_width_units(static_cast<u32>((blit >> 48) & 0x3Fu));
     transfer_.psm = static_cast<u32>((blit >> 56) & 0x3Fu);
     transfer_.dsax = static_cast<u32>((pos >> 32) & 0x7FFu);
     transfer_.dsay = static_cast<u32>((pos >> 48) & 0x7FFu);
@@ -794,6 +912,57 @@ void GsCore::begin_host_to_local() {
 
     transfer_.active = true;
     ++stats_->host_to_local_transfers;
+    if (upload_deferred_) start_upload_chunk();
+}
+
+void GsCore::start_upload_chunk() {
+    pending_upload_ = std::make_shared<HostUpload>();
+    pending_upload_->bp = transfer_.bp;
+    pending_upload_->bw = transfer_.bw;
+    pending_upload_->psm = transfer_.psm;
+    pending_upload_->dsax = transfer_.dsax;
+    pending_upload_->dsay = transfer_.dsay;
+    pending_upload_->width = transfer_.width;
+    pending_upload_->height = transfer_.height;
+    pending_upload_->dirx = transfer_.dirx;
+    pending_upload_->diry = transfer_.diry;
+    pending_upload_->start_index = transfer_.pixel_index;
+}
+
+void GsCore::enqueue_pending_upload() {
+    if (!pending_upload_) return;
+    if (pending_upload_->values.empty() || !raster_worker_.joinable()) {
+        pending_upload_.reset();
+        return;
+    }
+    RasterCommand command;
+    command.upload = std::move(pending_upload_);
+    pending_upload_.reset();
+    {
+        std::unique_lock lock(raster_mutex_);
+        raster_completed_condition_.wait(lock, [this] {
+            return raster_queue_.size() < 4096u;
+        });
+        raster_queue_.push_back(std::move(command));
+        ++raster_enqueued_;
+    }
+    raster_condition_.notify_one();
+}
+
+void GsCore::execute_host_upload(const HostUpload& upload) {
+    synchronize_gpu_to_cpu();
+    u32 index = upload.start_index;
+    for (const u32 value : upload.values) {
+        const u32 linear_x = index % upload.width;
+        const u32 linear_y = index / upload.width;
+        const u32 x = upload.dsax +
+            (upload.dirx ? (upload.width - 1u - linear_x) : linear_x);
+        const u32 y = upload.dsay +
+            (upload.diry ? (upload.height - 1u - linear_y) : linear_y);
+        vram_.write_transfer_pixel(
+            upload.psm, x, y, upload.bp, upload.bw, value);
+        ++index;
+    }
 }
 
 
@@ -807,7 +976,7 @@ void GsCore::begin_local_to_host() {
 
     transfer_.local_to_host = true;
     transfer_.bp = static_cast<u32>(blit & 0x3FFFu);
-    transfer_.bw = static_cast<u32>((blit >> 16) & 0x3Fu);
+    transfer_.bw = transfer_width_units(static_cast<u32>((blit >> 16) & 0x3Fu));
     transfer_.psm = static_cast<u32>((blit >> 24) & 0x3Fu);
     transfer_.dsax = static_cast<u32>(pos & 0x7FFu);
     transfer_.dsay = static_cast<u32>((pos >> 16) & 0x7FFu);
@@ -831,15 +1000,13 @@ void GsCore::begin_local_to_host() {
 }
 
 bool GsCore::read_local_to_host_qword(u64& lo, u64& hi) {
+    flush_pending_draws();
     lo = 0;
     hi = 0;
 
-    // VIF1 polls this while its reverse DMA waits for a transfer to begin.
-    // Only drain queued draws once there is VRAM data to read.
     if (!transfer_.active || !transfer_.local_to_host) {
         return false;
     }
-    flush_pending_draws();
 
     auto next_pixel = [&]() -> u32 {
         const u32 linear_x = transfer_.pixel_index % transfer_.width;
@@ -950,10 +1117,10 @@ void GsCore::execute_local_to_local() {
     const u64 reg = registers_[kRegTrxreg];
 
     const u32 sbp = static_cast<u32>(blit & 0x3FFFu);
-    const u32 sbw = static_cast<u32>((blit >> 16) & 0x3Fu);
+    const u32 sbw = transfer_width_units(static_cast<u32>((blit >> 16) & 0x3Fu));
     const u32 spsm = static_cast<u32>((blit >> 24) & 0x3Fu);
     const u32 dbp = static_cast<u32>((blit >> 32) & 0x3FFFu);
-    const u32 dbw = static_cast<u32>((blit >> 48) & 0x3Fu);
+    const u32 dbw = transfer_width_units(static_cast<u32>((blit >> 48) & 0x3Fu));
     const u32 dpsm = static_cast<u32>((blit >> 56) & 0x3Fu);
 
     const u32 ssax = static_cast<u32>(pos & 0x7FFu);
@@ -1035,6 +1202,21 @@ void GsCore::consume_image_qword(u64 lo, u64 hi) {
 
 void GsCore::consume_pending_pixels() {
     auto store_pixel = [&](u32 value) {
+        if (upload_deferred_) {
+            if (!pending_upload_) start_upload_chunk();
+            pending_upload_->values.push_back(value);
+            ++transfer_.pixel_index;
+            ++stats_->host_to_local_pixels;
+            if (transfer_.pixel_index >= transfer_.total_pixels) {
+                transfer_.active = false;
+                registers_[kRegTrxdir] =
+                    (registers_[kRegTrxdir] & ~0x3ull) | 0x3ull;
+                enqueue_pending_upload();
+            } else if (pending_upload_->values.size() >= (1u << 18)) {
+                enqueue_pending_upload();
+            }
+            return;
+        }
         const u32 linear_x = transfer_.pixel_index % transfer_.width;
         const u32 linear_y = transfer_.pixel_index / transfer_.width;
         const u32 x = transfer_.dsax +
@@ -1198,6 +1380,20 @@ GsRasterContext GsCore::raster_context() const {
         texture.ta0 = static_cast<u32>(texa & 0xFFu);
         texture.aem = ((texa >> 15) & 1u) != 0;
         texture.ta1 = static_cast<u32>((texa >> 32) & 0xFFu);
+
+        // TEX1: MMAG (bit 5), MMIN (6-8), LCM (0), K (32-43, signed).
+        // Mipmap levels are not implemented, so MMIN's mipmap modes sample
+        // the base level. If magnify and minify differ, choose by the sign
+        // of K (the LOD for FST/Q=1 draws).
+        const u64 tex1 = registers_[kRegTex1_1 + ctxt];
+        const bool mag_linear = ((tex1 >> 5) & 1u) != 0;
+        const u32 mmin = static_cast<u32>((tex1 >> 6) & 7u);
+        const bool min_linear = mmin == 1u || mmin >= 4u;
+        const s32 lod_k = static_cast<s32>(
+            static_cast<s32>((tex1 >> 32) & 0xFFFu) << 20) >> 20;
+        texture.linear = mag_linear == min_linear
+            ? mag_linear
+            : (lod_k < 0 ? mag_linear : min_linear);
 
         texture.wms = static_cast<u32>(clamp & 0x3u);
         texture.wmt = static_cast<u32>((clamp >> 2) & 0x3u);
@@ -1394,13 +1590,12 @@ void GsCore::execute_raster_command(const RasterCommand& command) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - raster_begin).count())
         : 0u;
-
-    record_raster_command(
+    account_raster_command(
         command, pixels, raster_ns, gpu_raster,
         nonzero_inputs_before, alpha_inputs_before);
 }
 
-void GsCore::record_raster_command(
+void GsCore::account_raster_command(
     const RasterCommand& command,
     u64 pixels,
     u64 raster_ns,
@@ -1622,10 +1817,24 @@ void GsCore::submit_vertex(u64 xyz, bool xyzf) {
     }
 }
 
-void GsCore::write_gif_qword(u64 lo, u64 hi) {
+bool GsCore::gif_path_free(int path) {
+    if (!gif_.active || gif_path_ == path) {
+        gif_stall_ = 0;
+        return true;
+    }
+    if (++gif_stall_ > 262144u) {
+        gif_ = {};
+        gif_stall_ = 0;
+        return true;
+    }
+    return false;
+}
+
+void GsCore::write_gif_qword(u64 lo, u64 hi, int path) {
     ++stats_->gif_qwords;
 
     if (!gif_.active) {
+        gif_path_ = path;
         begin_tag(lo, hi);
         return;
     }

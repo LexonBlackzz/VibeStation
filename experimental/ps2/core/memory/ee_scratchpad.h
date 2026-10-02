@@ -14,6 +14,8 @@ public:
 
     void reset();
     [[nodiscard]] bool contains(u32 address, std::size_t width) const;
+    // Raw storage for the EE fast path (little-endian host).
+    [[nodiscard]] u8* data() { return data_.data(); }
 
     [[nodiscard]] bool read8(u32 address, u8& value) const;
     [[nodiscard]] bool read16(u32 address, u16& value) const;

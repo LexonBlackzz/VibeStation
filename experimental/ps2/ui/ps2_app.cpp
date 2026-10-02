@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -184,10 +185,10 @@ bool Ps2App::init() {
             gpu_gs_backend_ =
                 std::make_unique<Ps2GlGsBackend>(
                     window_, gpu_context);
-            if (gpu_gs_backend_->available()) {
-                system_.gs_core().set_gpu_backend(
-                    gpu_gs_backend_.get());
-            } else {
+            // Off by default: the parallel CPU rasterizer outruns the VRAM
+            // readbacks the GPU path needs (measured 88% vs 64% speed on the
+            // BIOS animation). Enable it in the GS debug panel.
+            if (!gpu_gs_backend_->available()) {
                 gpu_gs_backend_.reset();
             }
         }
@@ -203,17 +204,19 @@ int Ps2App::run() {
     bool quit = false;
     int result = 0;
 
+    emu_stop_.store(false, std::memory_order_release);
+    emu_thread_ = std::thread(&Ps2App::emulation_thread_main, this);
+
     while (!quit) {
+        // Hold the core only while reading or mutating emulator state; the
+        // GL submission and vsync wait below run while the core executes.
+        ui_waiting_.store(true, std::memory_order_release);
+        std::unique_lock<std::mutex> core_lock(core_mutex_);
+        ui_waiting_.store(false, std::memory_order_release);
+
         process_events(quit);
         update_pad_input();
-        {
-            const auto emulation_start = std::chrono::steady_clock::now();
-            update_emulation();
-            if (benchmark_started_) {
-                benchmark_emulation_seconds_ += std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - emulation_start).count();
-            }
-        }
+        update_emulation();
         update_audio();
 
         if (!visible_capture_path_.empty() &&
@@ -235,27 +238,18 @@ int Ps2App::run() {
         ImGui::NewFrame();
 
         update_display_texture();
+        update_ps1_texture();
         render_ui();
 
         ImGui::Render();
 
-        int display_width = 0;
-        int display_height = 0;
-        SDL_GL_GetDrawableSize(window_, &display_width, &display_height);
-        glViewport(0, 0, display_width, display_height);
-
-        const ImVec4 background = ui_theme::g_theme_settings.background;
-        glClearColor(background.x, background.y, background.z, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        if (use_imgui_opengl2_backend_) {
-            ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-        } else {
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        }
-
+        const bool capture_now =
+            !visible_capture_path_.empty() &&
+            system_.gs_display().has_visible_pixels() &&
+            system_.ee().state().instructions_executed >=
+                visible_capture_minimum_ee_;
         if (benchmark_fields_ != 0 &&
-            system_.latest_gs_display().has_visible_pixels()) {
+            system_.gs_display().has_visible_pixels()) {
             const u64 field = system_.video_fields_started();
             const auto now = std::chrono::steady_clock::now();
             if (!benchmark_started_) {
@@ -274,24 +268,35 @@ int Ps2App::run() {
                         stdout,
                         "UI_BENCHMARK_FIELDS=%llu UI_BENCHMARK_SECONDS=%.3f "
                         "UI_BENCHMARK_FIELD_RATE=%.3f "
-                        "UI_BENCHMARK_UI_FPS=%.1f GPU_GS=%d "
-                        "UI_BENCHMARK_EMULATION_SHARE=%.3f\n",
+                        "UI_BENCHMARK_UI_FPS=%.1f GPU_GS=%d\n",
                         static_cast<unsigned long long>(fields),
                         seconds,
                         static_cast<double>(fields) / seconds,
                         static_cast<double>(benchmark_ui_frames_) / seconds,
-                        system_.gs_core().gpu_backend_active() ? 1 : 0,
-                        benchmark_emulation_seconds_ / seconds);
+                        system_.gs_core().gpu_backend_active() ? 1 : 0);
                     std::fflush(stdout);
                     quit = true;
                 }
             }
         }
+        core_lock.unlock();
 
-        if (!visible_capture_path_.empty() &&
-            system_.latest_gs_display().has_visible_pixels() &&
-            system_.ee().state().instructions_executed >=
-                visible_capture_minimum_ee_) {
+        int display_width = 0;
+        int display_height = 0;
+        SDL_GL_GetDrawableSize(window_, &display_width, &display_height);
+        glViewport(0, 0, display_width, display_height);
+
+        const ImVec4 background = ui_theme::g_theme_settings.background;
+        glClearColor(background.x, background.y, background.z, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        if (use_imgui_opengl2_backend_) {
+            ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+        } else {
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        if (capture_now) {
             if (!write_window_ppm(
                     visible_capture_path_, display_width, display_height)) {
                 result = 3;
@@ -303,11 +308,17 @@ int Ps2App::run() {
         SDL_GL_SwapWindow(window_);
     }
 
+    stop_emulation_thread();
     return result;
 }
 
+void Ps2App::stop_emulation_thread() {
+    emu_stop_.store(true, std::memory_order_release);
+    if (emu_thread_.joinable()) emu_thread_.join();
+}
+
 bool Ps2App::launch_bios(const std::string& path) {
-    return load_bios_from_path(path) && start_bios();
+    return load_bios_from_path(path) && (ps1_->active() || start_bios());
 }
 
 void Ps2App::set_ee_jit_enabled(bool enabled) {
@@ -393,6 +404,7 @@ bool Ps2App::write_window_ppm(
 }
 
 void Ps2App::shutdown() {
+    stop_emulation_thread();
     audio_stutter_thread_stop_.store(true, std::memory_order_release);
     if (audio_stutter_thread_.joinable()) {
         audio_stutter_thread_.join();
@@ -407,8 +419,14 @@ void Ps2App::shutdown() {
         controller_ = nullptr;
     }
 
+    stop_ps1();
     system_.gs_core().set_gpu_backend(nullptr);
     gpu_gs_backend_.reset();
+
+    if (ps1_texture_ != 0 && gl_context_ != nullptr) {
+        glDeleteTextures(1, &ps1_texture_);
+        ps1_texture_ = 0;
+    }
 
     if (display_texture_ != 0 && gl_context_ != nullptr) {
         glDeleteTextures(1, &display_texture_);
@@ -443,22 +461,31 @@ void Ps2App::shutdown() {
 
 
 void Ps2App::update_display_texture() {
-    const auto& display = system_.latest_gs_display();
-    if (!display.valid() ||
-        display_texture_generation_ == display.generation()) {
+    const auto& display = system_.gs_display();
+    // Scanout runs on the GS worker; keep the frame stable while uploading.
+    const auto display_lock = display.lock();
+    if (!display.valid() || display.rgba8().empty()) {
         return;
     }
-    // The GS worker may publish the next scanout concurrently.
-    const auto image_lock = display.lock_image();
-    if (display.rgba8().empty()) {
+    if (display_texture_ != 0 && display_filter_applied_ != display_filter_) {
+        const GLint filter = display_filter_ == 0 ? GL_NEAREST : GL_LINEAR;
+        glBindTexture(GL_TEXTURE_2D, display_texture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        display_filter_applied_ = display_filter_;
+    }
+    if (display_texture_generation_ == display.generation()) {
         return;
     }
 
     if (display_texture_ == 0) {
         glGenTextures(1, &display_texture_);
         glBindTexture(GL_TEXTURE_2D, display_texture_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        const GLint filter = display_filter_ == 0 ? GL_NEAREST : GL_LINEAR;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        display_filter_applied_ = display_filter_;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     } else {
@@ -495,6 +522,41 @@ void Ps2App::update_display_texture() {
 
     glBindTexture(GL_TEXTURE_2D, 0);
     display_texture_generation_ = display.generation();
+}
+
+void Ps2App::update_ps1_texture() {
+    if (!ps1_->active()) return;
+    int width = 0;
+    int height = 0;
+    if (!ps1_->take_frame(ps1_frame_, width, height) || width <= 0 ||
+        height <= 0 ||
+        ps1_frame_.size() < static_cast<std::size_t>(width) * height) {
+        return;
+    }
+    if (ps1_texture_ == 0) {
+        glGenTextures(1, &ps1_texture_);
+        glBindTexture(GL_TEXTURE_2D, ps1_texture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, ps1_texture_);
+    }
+    const GLint filter = display_filter_ == 0 ? GL_NEAREST : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (width != ps1_texture_width_ || height != ps1_texture_height_) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, ps1_frame_.data());
+        ps1_texture_width_ = width;
+        ps1_texture_height_ = height;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
+                        GL_UNSIGNED_BYTE, ps1_frame_.data());
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    ps1_width_ = width;
+    ps1_height_ = height;
 }
 
 void Ps2App::update_pad_input() {
@@ -599,6 +661,9 @@ void Ps2App::update_pad_input() {
     }
 
     system_.pad().set_state(state);
+    // The PS1 pad word has the two button bytes the other way round.
+    ps1_->set_buttons(static_cast<std::uint16_t>(
+        (state.buttons << 8) | (state.buttons >> 8)));
 }
 
 void Ps2App::reset_audio_stutter() {
@@ -650,6 +715,7 @@ void Ps2App::audio_stutter_thread_main() {
     while (!audio_stutter_thread_stop_.load(
         std::memory_order_acquire)) {
         if (audio_device_ == 0u ||
+            !audio_live_.load(std::memory_order_acquire) ||
             !lag_stutter_enabled_.load(std::memory_order_acquire)) {
             lag_stutter_active_.store(false, std::memory_order_release);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -718,6 +784,16 @@ void Ps2App::audio_stutter_thread_main() {
 }
 
 void Ps2App::update_audio() {
+    const bool live = emulation_running_ && !system_.halted();
+    if (audio_live_.exchange(live, std::memory_order_acq_rel) && !live &&
+        audio_device_ != 0u) {
+        // Emulation just stopped (pause, halt, reset): drain what is queued
+        // and wipe the tape so nothing keeps looping the last 400 ms.
+        reset_audio_stutter();
+        SDL_ClearQueuedAudio(audio_device_);
+    }
+    if (!live) return;
+
     const std::size_t available = system_.spu2().queued_frames();
     auto pcm = available != 0u
         ? system_.spu2().take_samples(available)
@@ -780,7 +856,12 @@ void Ps2App::process_events(bool& quit) {
 
         if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
             const bool ctrl = (event.key.keysym.mod & KMOD_CTRL) != 0;
-            if (ctrl && event.key.keysym.sym == SDLK_b) {
+            if (ctrl && event.key.keysym.sym == SDLK_o) {
+                const std::string path = open_disc_dialog();
+                if (!path.empty()) {
+                    load_disc_from_path(path);
+                }
+            } else if (ctrl && event.key.keysym.sym == SDLK_b) {
                 const std::string path = open_bios_dialog();
                 if (!path.empty()) {
                     load_bios_from_path(path);
@@ -873,6 +954,20 @@ void Ps2App::menu_bar() {
                 load_bios_from_path(path);
             }
         }
+        if (ImGui::MenuItem("Open Disc...", "Ctrl+O")) {
+            const std::string path = open_disc_dialog();
+            if (!path.empty()) {
+                load_disc_from_path(path);
+            }
+        }
+        if (ImGui::MenuItem("Eject Disc", nullptr, false,
+                            system_.cdvd().has_disc() || ps1_->active())) {
+            stop_ps1();
+            system_.eject_disc();
+            reset_core();
+            if (system_.bios().loaded()) start_bios();
+            status_message_ = "Disc ejected";
+        }
         ImGui::MenuItem("Load ELF...", nullptr, false, false);
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4")) {
@@ -921,6 +1016,19 @@ void Ps2App::menu_bar() {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("PS1 Speed", ps1_->active())) {
+        static constexpr const char* kLabels[] = {
+            "1x (real time)", "2x", "4x", "Unlimited"};
+        static constexpr double kSpeeds[] = {1.0, 2.0, 4.0, 0.0};
+        for (int i = 0; i < 4; ++i) {
+            if (ImGui::MenuItem(kLabels[i], nullptr, ps1_speed_index_ == i)) {
+                ps1_speed_index_ = i;
+                ps1_->set_speed(kSpeeds[i]);
+            }
+        }
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("System", nullptr, &show_system_);
         ImGui::MenuItem("EE Debug", "F9", &show_ee_debug_);
@@ -953,43 +1061,46 @@ void Ps2App::panel_main() {
     const float center_x = start.x + (available.x * 0.5f);
     const float center_y = start.y + (available.y * 0.5f);
 
-    const auto& display = system_.latest_gs_display();
-    const auto show_boot_progress = [&]() {
-        if (!emulation_running_ || display.has_visible_pixels()) {
-            return;
+    if (ps1_->active() && ps1_texture_ != 0 && ps1_width_ > 0) {
+        // PS1 output is 4:3 whatever VRAM region is scanned out.
+        const float aspect = 4.0f / 3.0f;
+        ImVec2 image_size = available;
+        if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
+            image_size.x = image_size.y * aspect;
+        } else {
+            image_size.y = image_size.x / aspect;
         }
-        ImGui::SetCursorPos(ImVec2(start.x + 16.0f, start.y + 16.0f));
-        ImGui::TextColored(
-            ImVec4(0.70f, 0.80f, 1.0f, 1.0f),
-            "Booting BIOS - waiting for first GS image");
-        ImGui::Text(
-            "EE instructions: %.1f million",
-            static_cast<double>(system_.ee().state().instructions_executed) /
-                1'000'000.0);
-        if (ee_instructions_per_second_ > 0.0) {
-            ImGui::Text(
-                "Host throughput: %.1f million EE instructions/s",
-                ee_instructions_per_second_ / 1'000'000.0);
-        }
-        ImGui::TextDisabled("This is not the PS2 hardware clock.");
-    };
+        image_size.x = std::max(1.0f, std::floor(image_size.x + 0.5f));
+        image_size.y = std::max(1.0f, std::floor(image_size.y + 0.5f));
+        ImGui::SetCursorPos(ImVec2(
+            std::floor(start.x + (available.x - image_size.x) * 0.5f),
+            std::floor(start.y + (available.y - image_size.y) * 0.5f)));
+        ImGui::Image((ImTextureID)(intptr_t)ps1_texture_, image_size);
+        ImGui::SetCursorPos(ImVec2(start.x + 10.0f, start.y + 10.0f));
+        ImGui::TextDisabled("PS1 core  %dx%d", ps1_width_, ps1_height_);
+        return;
+    }
+
+    const auto& display = system_.gs_display();
     if (display.valid() && display_texture_ != 0 &&
         display.width() != 0 && display.height() != 0) {
-        const float aspect =
-            static_cast<float>(display.width()) /
-            static_cast<float>(display.height());
+        // The console outputs 4:3 whatever the scanned-out raster is
+        // (640x224 field, 640x448 frame, 640x512 PAL, ...).
+        const float aspect = 4.0f / 3.0f;
         ImVec2 image_size = available;
         if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
             image_size.x = image_size.y * aspect;
         } else if (aspect > 0.0f) {
             image_size.y = image_size.x / aspect;
         }
-        image_size.x = std::max(1.0f, image_size.x);
-        image_size.y = std::max(1.0f, image_size.y);
+        // Whole-pixel size and position: a fractional rectangle makes the
+        // sampler straddle host pixels differently across the image.
+        image_size.x = std::max(1.0f, std::floor(image_size.x + 0.5f));
+        image_size.y = std::max(1.0f, std::floor(image_size.y + 0.5f));
 
         ImGui::SetCursorPos(ImVec2(
-            start.x + (available.x - image_size.x) * 0.5f,
-            start.y + (available.y - image_size.y) * 0.5f));
+            std::floor(start.x + (available.x - image_size.x) * 0.5f),
+            std::floor(start.y + (available.y - image_size.y) * 0.5f)));
         ImGui::Image(
             (ImTextureID)(intptr_t)display_texture_,
             image_size,
@@ -1011,7 +1122,37 @@ void Ps2App::panel_main() {
                 emulation_speed_percent_,
                 ee_instructions_per_second_ / 1'000'000.0);
         }
-        show_boot_progress();
+        return;
+    }
+    // Running but nothing on screen yet: a black 4:3 picture, speed readout
+    // still visible.
+    if (emulation_running_) {
+        const float aspect = 4.0f / 3.0f;
+        ImVec2 image_size = available;
+        if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
+            image_size.x = image_size.y * aspect;
+        } else {
+            image_size.y = image_size.x / aspect;
+        }
+        image_size.x = std::max(1.0f, std::floor(image_size.x + 0.5f));
+        image_size.y = std::max(1.0f, std::floor(image_size.y + 0.5f));
+        ImGui::SetCursorPos(ImVec2(
+            std::floor(start.x + (available.x - image_size.x) * 0.5f),
+            std::floor(start.y + (available.y - image_size.y) * 0.5f)));
+        const ImVec2 corner = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(image_size);
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            corner,
+            ImVec2(corner.x + image_size.x, corner.y + image_size.y),
+            IM_COL32(0, 0, 0, 255));
+        if (guest_fields_per_second_ > 0.0) {
+            ImGui::SetCursorPos(ImVec2(start.x + 10.0f, start.y + 28.0f));
+            ImGui::Text(
+                "%.1f FPS  |  %.0f%% speed  |  %.1f MIPS",
+                guest_frames_per_second_,
+                emulation_speed_percent_,
+                ee_instructions_per_second_ / 1'000'000.0);
+        }
         return;
     }
 
@@ -1175,7 +1316,6 @@ void Ps2App::panel_main() {
         ImGui::Text("running");
     }
     ImGui::EndChild();
-    show_boot_progress();
 }
 
 void Ps2App::panel_system() {
@@ -1691,6 +1831,21 @@ void Ps2App::panel_settings() {
 
     ImGui::Spacing();
     ImGui::Separator();
+    bool limit_speed = limit_speed_.load(std::memory_order_acquire);
+    if (ImGui::Checkbox("Limit speed to 100%", &limit_speed)) {
+        limit_speed_.store(limit_speed, std::memory_order_release);
+    }
+    ImGui::TextDisabled(
+        "Off runs the core flat out, useful for measuring raw speed.");
+
+    const char* const filters[] = {"Nearest", "Bilinear"};
+    ImGui::Combo(
+        "Display filter", &display_filter_, filters, 2);
+    ImGui::TextDisabled(
+        "How the 640x448 picture is scaled to the window.");
+
+    ImGui::Spacing();
+    ImGui::Separator();
     ImGui::Text("PS2 devices");
     ImGui::Text(
         "Controller: %s",
@@ -1774,7 +1929,7 @@ void Ps2App::panel_about() {
     ImGui::End();
 }
 
-std::string Ps2App::open_bios_dialog() {
+std::string Ps2App::open_bios_dialog(const char* title) {
 #ifdef _WIN32
     std::array<char, 1024> path{};
 
@@ -1783,9 +1938,9 @@ std::string Ps2App::open_bios_dialog() {
     dialog.lpstrFile = path.data();
     dialog.nMaxFile = static_cast<DWORD>(path.size());
     dialog.lpstrFilter =
-        "PS2 BIOS Images (*.bin)\0*.bin\0All Files (*.*)\0*.*\0";
+        "BIOS Images (*.bin)\0*.bin\0All Files (*.*)\0*.*\0";
     dialog.nFilterIndex = 1;
-    dialog.lpstrTitle = "Select PlayStation 2 BIOS";
+    dialog.lpstrTitle = title;
     dialog.Flags =
         OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
@@ -1800,6 +1955,81 @@ std::string Ps2App::open_bios_dialog() {
     show_system_ = true;
     return {};
 #endif
+}
+
+std::string Ps2App::open_disc_dialog() {
+#ifdef _WIN32
+    std::array<char, 1024> path{};
+
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFile = path.data();
+    dialog.nMaxFile = static_cast<DWORD>(path.size());
+    dialog.lpstrFilter =
+        "Disc Images (*.iso;*.bin;*.img;*.cue)\0*.iso;*.bin;*.img;*.cue\0"
+        "All Files (*.*)\0*.*\0";
+    dialog.nFilterIndex = 1;
+    dialog.lpstrTitle = "Open PlayStation / PlayStation 2 disc image";
+    dialog.Flags =
+        OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (GetOpenFileNameA(&dialog)) {
+        return path.data();
+    }
+    return {};
+#else
+    status_message_ = "Native disc picker is currently Windows-only.";
+    return {};
+#endif
+}
+
+bool Ps2App::load_disc_from_path(const std::string& path) {
+    stop_ps1();
+    std::string error;
+    if (!system_.load_disc(path, error)) {
+        status_message_ = "Disc load failed: " + error;
+        return false;
+    }
+    if (system_.cdvd().disc().type() == DiscType::Ps1Cd) {
+        return start_ps1(path);
+    }
+    status_message_ =
+        "Disc loaded: " + std::filesystem::path(path).filename().string();
+    if (!system_.bios().loaded()) {
+        status_message_ += " (load a BIOS to boot it)";
+        return true;
+    }
+    // The BIOS only looks at the drive during startup, so restart it.
+    reset_core();
+    return start_bios();
+}
+
+bool Ps2App::start_ps1(const std::string& disc_path) {
+    if (ps1_bios_path_.empty()) {
+        ps1_bios_path_ = open_bios_dialog(
+            "Select a PlayStation 1 BIOS (e.g. SCPH1001.BIN)");
+        if (ps1_bios_path_.empty()) {
+            status_message_ = "PS1 disc needs a PS1 BIOS (--ps1-bios <path>)";
+            return false;
+        }
+    }
+    emulation_running_ = false;
+    std::string error;
+    if (!ps1_->start(ps1_bios_path_, disc_path, error)) {
+        status_message_ = error;
+        ps1_bios_path_.clear();
+        return false;
+    }
+    ps1_->set_speed(1.0);
+    ps1_speed_index_ = 0;
+    status_message_ = "PS1 disc running on the PS1 core: " +
+        std::filesystem::path(disc_path).filename().string();
+    return true;
+}
+
+void Ps2App::stop_ps1() {
+    ps1_->stop();
+    ps1_width_ = ps1_height_ = 0;
 }
 
 bool Ps2App::load_bios_from_path(const std::string& path) {
@@ -1835,6 +2065,9 @@ bool Ps2App::load_bios_from_path(const std::string& path) {
 
 bool Ps2App::start_bios() {
     std::string error;
+    // The mechacon clock runs in GMT+9; the BIOS applies the user's zone.
+    system_.cdvd().set_clock(static_cast<u64>(
+        std::time(nullptr) - 946684800 + 9 * 3600));
     if (!system_.boot_bios(error)) {
         status_message_ = "BIOS startup failed: " + error;
         return false;
@@ -1911,103 +2144,84 @@ bool Ps2App::step_iop_once() {
     return true;
 }
 
+void Ps2App::emulation_thread_main() {
+    using clock = std::chrono::steady_clock;
+    // The EE retires one instruction per cycle here, so 294.912 MHz of
+    // retired instructions is real time. Skipped BIOS loops count too.
+    constexpr double kEeHz = 294'912'000.0;
+    // ~1 ms of host time per slice so the UI can take the core between them.
+    constexpr u64 kChunkInstructions = 100'000;
+    constexpr double kMaxLeadSeconds = 0.002;
+    // Never chase a debt for longer than about one frame, so a slow stretch
+    // is not followed by a burst above 100%.
+    constexpr double kMaxLagSeconds = 0.016;
+
+    clock::time_point base_time{};
+    u64 base_instructions = 0;
+    std::string error;
+
+    while (!emu_stop_.load(std::memory_order_acquire)) {
+        if (ui_waiting_.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(core_mutex_);
+        if (!emulation_running_ ||
+            !system_.bios_started() ||
+            system_.halted()) {
+            base_time = {};
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        const u64 total = system_.ee().state().instructions_executed;
+        const auto now = clock::now();
+        if (base_time == clock::time_point{} ||
+            !limit_speed_.load(std::memory_order_acquire)) {
+            base_time = now;
+            base_instructions = total;
+        } else {
+            const double emulated =
+                static_cast<double>(total - base_instructions) / kEeHz;
+            const double wall =
+                std::chrono::duration<double>(now - base_time).count();
+            if (emulated > wall + kMaxLeadSeconds) {
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            // Too slow to keep up: restart the clock rather than chase a debt.
+            if (wall > emulated + kMaxLagSeconds) {
+                base_time = now;
+                base_instructions = total;
+            }
+        }
+
+        const u64 ran = system_.run_ee(kChunkInstructions, error);
+
+        if (!error.empty()) {
+            emulation_running_ = false;
+            status_message_ = "Execution stopped: " + error;
+            error.clear();
+        } else if (ran == 0) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 void Ps2App::update_emulation() {
     if (!emulation_running_ ||
         !system_.bios_started() ||
         system_.halted()) {
-        if (bootstrap_swap_interval_disabled_ &&
-            SDL_GL_SetSwapInterval(1) == 0) {
-            bootstrap_swap_interval_disabled_ = false;
+        if (system_.halted() && emulation_running_) {
+            emulation_running_ = false;
+            status_message_ = "Execution halted: " + system_.halt_reason();
         }
-        // Do not bank real time while paused.
-        realtime_last_update_ = {};
-        realtime_ee_budget_ = 0.0;
-        realtime_limited_ = false;
         return;
     }
-
-    // During blank-screen bootstrap, run longer slices and avoid waiting for
-    // VSync on frames that cannot yet show BIOS pixels. Restore normal frame
-    // pacing as soon as the composed display becomes visible.
-    constexpr u64 kNormalChunkInstructions = 8192;
-    constexpr u64 kBootstrapChunkInstructions = 1'000'000;
-    constexpr u64 kBootstrapMaxInstructionsPerFrame = 250'000'000;
-    constexpr auto kNormalCpuTimeSlice = std::chrono::milliseconds(14);
-    constexpr auto kBootstrapCpuTimeSlice =
-        std::chrono::seconds(6);
-    // Guest EE clock. The core retires one instruction per EE cycle.
-    constexpr double kEeClockHz = 294'912'000.0;
-    // At most ~3 fields of catch-up after a slow host frame.
-    constexpr double kMaxRealtimeBacklog = kEeClockHz * 0.05;
-
-    // PCRTC can become valid while it still scans an untouched black buffer.
-    // Keep the larger bootstrap slice until the composed display actually
-    // contains visible RGB data; validity alone is not a first-frame signal.
-    const bool bootstrap_turbo =
-        !system_.latest_gs_display().has_visible_pixels();
-
-    // Wait for VSync only when the real-time limiter, not host CPU time,
-    // bounded the previous frame. Below full speed, VSync would otherwise
-    // stall emulation whenever a frame overruns the refresh interval.
-    const bool want_no_vsync = bootstrap_turbo || !realtime_limited_;
-    if (want_no_vsync != bootstrap_swap_interval_disabled_ &&
-        SDL_GL_SetSwapInterval(want_no_vsync ? 0 : 1) == 0) {
-        bootstrap_swap_interval_disabled_ = want_no_vsync;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    u64 max_instructions = kBootstrapMaxInstructionsPerFrame;
-    if (bootstrap_turbo) {
-        realtime_ee_budget_ = 0.0;
-    } else {
-        if (realtime_last_update_ != std::chrono::steady_clock::time_point{}) {
-            realtime_ee_budget_ += std::chrono::duration<double>(
-                now - realtime_last_update_).count() * kEeClockHz;
-        }
-        realtime_ee_budget_ =
-            std::min(realtime_ee_budget_, kMaxRealtimeBacklog);
-        max_instructions = static_cast<u64>(realtime_ee_budget_);
-    }
-    realtime_last_update_ = now;
-    const auto cpu_time_slice =
-        bootstrap_turbo
-            ? kBootstrapCpuTimeSlice
-            : kNormalCpuTimeSlice;
-
-    const auto deadline =
-        std::chrono::steady_clock::now() + cpu_time_slice;
-    u64 executed = 0;
-    std::string error;
-
-    while (executed < max_instructions &&
-           !system_.halted()) {
-        const u64 budget =
-            std::min<u64>(
-                bootstrap_turbo ? kBootstrapChunkInstructions :
-                    kNormalChunkInstructions,
-                max_instructions - executed);
-        const u64 ran = system_.run_ee(budget, error);
-        executed += ran;
-
-        if (bootstrap_turbo) {
-            system_.refresh_display();
-            if (system_.latest_gs_display().has_visible_pixels()) break;
-        }
-
-        if (ran == 0 || !error.empty() ||
-            std::chrono::steady_clock::now() >= deadline) {
-            break;
-        }
-    }
-    if (!bootstrap_turbo) {
-        realtime_limited_ = executed >= max_instructions;
-        realtime_ee_budget_ = std::max(
-            0.0, realtime_ee_budget_ - static_cast<double>(executed));
-    }
-
-    // Blank-screen bootstrap samples the PCRTC after each large chunk above.
-    // Once pixels are visible, VBlank already updates the display. Repeating
-    // a full VRAM scan every host UI frame needlessly drains the GS worker.
 
     const auto sample_time = std::chrono::steady_clock::now();
     const auto sample_seconds =
@@ -2039,13 +2253,7 @@ void Ps2App::update_emulation() {
         speed_sample_time_ = sample_time;
     }
 
-    if (system_.halted()) {
-        emulation_running_ = false;
-        status_message_ = "Execution halted: " + system_.halt_reason();
-    } else if (!error.empty()) {
-        emulation_running_ = false;
-        status_message_ = "Execution stopped: " + error;
-    } else if (system_.iop_halted()) {
+    if (system_.iop_halted()) {
         status_message_ =
             "IOP halted; EE/GS continuing for BIOS bootstrap";
     }

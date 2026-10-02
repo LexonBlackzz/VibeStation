@@ -307,7 +307,7 @@ bool Vu1::xgkick(u16 qword_address, std::string& error) {
             current_tag_eop = ((lo >> 15) & 1u) != 0;
         }
 
-        gs_.write_gif_qword(lo, hi);
+        gs_.write_gif_qword(lo, hi, 1);
         ++stats_.xgkick_qwords;
         byte_offset = (byte_offset + 16u) & memory_mask_;
 

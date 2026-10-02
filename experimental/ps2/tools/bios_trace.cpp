@@ -1056,6 +1056,8 @@ void print_state(const ps2::Ps2System& system) {
         << " GS_PARALLEL_SPRITE_PIXELS=" << gs_stats.parallel_sprite_pixels
         << " GS_PARALLEL_SPRITE_HELPER_JOBS="
         << gs_stats.parallel_sprite_helper_jobs
+        << " GS_BANDED_DRAWS=" << gs_stats.banded_draws
+        << " GS_BANDED_BATCHES=" << gs_stats.banded_batches
         << " GS_UNSUPPORTED_TARGET_DRAWS=" << gs_stats.unsupported_target_draws
         << " GS_UNSUPPORTED_TEXTURE_DRAWS=" << gs_stats.unsupported_texture_draws
         << '\n';
@@ -1412,7 +1414,7 @@ int main(int argc, char** argv) {
             << "usage: vibestation_ps2_bios_trace <bios.bin> "
                "[ee-instruction-budget] [display.ppm] "
                "[--ee-jit|--ee-dynarec|--profile|--gs-thread|--detailed-gs-stats|--audio-only] "
-               "[--wav=audio.wav]\n";
+               "[--wav=audio.wav] [--disc=game.iso]\n";
         return 64;
     }
 
@@ -1433,6 +1435,7 @@ int main(int argc, char** argv) {
     ps2::u64 iop_sync_window = 0;
     const char* display_path = nullptr;
     std::string wav_path;
+    std::string disc_path;
     for (int index = 3; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--ee-jit") ee_jit = true;
@@ -1445,6 +1448,9 @@ int main(int argc, char** argv) {
         else if (option.starts_with("--iop-sync-window=")) {
             iop_sync_window = std::strtoull(
                 std::string(option.substr(18)).c_str(), nullptr, 10);
+        }
+        else if (option.starts_with("--disc=") && option.size() > 7u) {
+            disc_path = std::string(option.substr(7));
         }
         else if (option.starts_with("--wav=") && option.size() > 6u) {
             wav_path = std::string(option.substr(6));
@@ -1480,6 +1486,10 @@ int main(int argc, char** argv) {
 
     if (!system.load_bios(argv[1], error)) {
         std::cerr << "BIOS_LOAD_ERROR=" << error << '\n';
+        return 2;
+    }
+    if (!disc_path.empty() && !system.load_disc(disc_path, error)) {
+        std::cerr << "DISC_LOAD_ERROR=" << error << '\n';
         return 2;
     }
     if (!system.boot_bios(error)) {
@@ -1646,6 +1656,10 @@ int main(int argc, char** argv) {
               << system.skipped_bios_copy_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_MMIO_POLL_ITERATIONS="
               << system.skipped_bios_mmio_poll_iterations() << '\n';
+    std::cout << "EE_SKIPPED_POLL_ITERATIONS="
+              << system.skipped_poll_iterations()
+              << " EE_POLL_LOOPS_SKIPPED="
+              << system.poll_loops_skipped() << '\n';
     std::cout << "EE_SIF_POLL_FAST_SAMPLES="
               << system.sif_poll_fast_samples()
               << " EE_SIF_POLL_STABLE_RETURNS="

@@ -34,6 +34,14 @@ public:
         u32 psm, u32 x, u32 y, u32 bp, u32 bw) const;
     [[nodiscard]] u16 read_psmct16(
         u32 x, u32 y, u32 bp, u32 bw) const;
+    // Raw values of (x0,y0), (x1,y0), (x0,y1), (x1,y1) for the plain colour
+    // formats 0/1/2/10, in one call (bilinear texture fetch). The x1 / y1
+    // reads are skipped when need_x1 / need_y1 are false (out[] is then
+    // left untouched for them).
+    void read_pixel_quad(
+        u32 psm, u32 bp, u32 bw,
+        u32 x0, u32 y0, u32 x1, u32 y1,
+        bool need_x1, bool need_y1, u32* out) const;
     [[nodiscard]] u32 read_pixel_at_address(
         u32 psm, u32 address) const;
     bool write_pixel_at_address_untracked(

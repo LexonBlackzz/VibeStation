@@ -64,6 +64,18 @@ frame took about 4.7 seconds, and the graphical capture reached it in about
 load. While the screen is blank, the UI prioritizes uninterrupted emulation
 and may not respond to input until the first visible frame.
 
+If you build with Ninja (like `build-ps2-ninja.cmd`), run
+`build-ps2-pgo.cmd <bios.bin>` from the repository root instead. It trains on
+450M instructions by default, so the profile also covers the steady-state boot
+animation rather than only the first visible frame, and writes
+`build-ps2-pgo\VibeStationPS2Lab.exe`. On the development machine the
+400M-instruction trace went from 24.6 to 29.9 emulated fields/s (plain Release
+with the `/GS- /Oi /Ot /Ob3` flags in `CMakeLists.txt` is about 26.4), with
+identical emulation output.
+
+The graphical app runs the core on its own thread, paced to real time once
+BIOS pixels appear; **Settings > Limit speed to 100%** turns the limiter off.
+
 On Windows, opening `VibeStationPS2Lab.exe` without arguments creates a
 persistent graphical window and does not load or start a BIOS automatically.
 Use the window's **Load BIOS** and **Start BIOS** buttons to boot manually,

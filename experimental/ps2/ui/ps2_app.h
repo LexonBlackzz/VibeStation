@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ps2_system.h"
+#include "ps1/ps1_mode.h"
 #include "ui/ps2_gl_gs_backend.h"
 
 #include <array>
@@ -27,16 +28,17 @@ public:
     int run();
     void shutdown();
     bool launch_bios(const std::string& path);
+    bool load_disc_from_path(const std::string& path);
+    void set_ps1_bios(const std::string& path) { ps1_bios_path_ = path; }
     void set_ee_jit_enabled(bool enabled);
     void set_ee_dynarec_enabled(bool enabled);
+    void set_gpu_gs_enabled(bool enabled);
     void capture_visible_window(
         const std::string& path,
         unsigned long long minimum_ee_instructions = 0);
     // Runs the full UI until `fields` guest fields have elapsed after the
     // first visible BIOS frame, prints the measured rate, then exits.
     void benchmark_visible_fields(u64 fields) { benchmark_fields_ = fields; }
-    // Selects the OpenGL compute GS backend or the software rasterizer.
-    void set_gpu_gs_enabled(bool enabled);
 
 private:
     void process_events(bool& quit);
@@ -47,6 +49,7 @@ private:
     void audio_stutter_thread_main();
     void render_ui();
     void update_display_texture();
+    void update_ps1_texture();
     void menu_bar();
     void panel_main();
     void panel_system();
@@ -57,12 +60,17 @@ private:
     void panel_settings();
     void panel_about();
 
-    std::string open_bios_dialog();
+    std::string open_bios_dialog(const char* title = "Select PlayStation 2 BIOS");
+    bool start_ps1(const std::string& disc_path);
+    void stop_ps1();
+    std::string open_disc_dialog();
     bool load_bios_from_path(const std::string& path);
     bool start_bios();
     bool step_ee_once();
     bool step_iop_once();
     void update_emulation();
+    void emulation_thread_main();
+    void stop_emulation_thread();
     void reset_core();
     bool write_window_ppm(const std::string& path, int width, int height);
 
@@ -75,6 +83,8 @@ private:
     unsigned int audio_device_ = 0;
     std::atomic<bool> lag_stutter_enabled_{true};
     std::atomic<bool> lag_stutter_active_{false};
+    // False while paused, halted or stopped: the 400 ms tape must not replay.
+    std::atomic<bool> audio_live_{false};
     std::vector<s16> audio_history_{};
     std::size_t audio_history_write_frame_ = 0;
     std::size_t audio_history_play_frame_ = 0;
@@ -83,13 +93,37 @@ private:
     std::thread audio_stutter_thread_{};
     const char* imgui_glsl_version_ = "#version 330";
     bool use_imgui_opengl2_backend_ = false;
-    bool gpu_gs_enabled_ = true;
+    bool gpu_gs_enabled_ = false;
     unsigned int display_texture_ = 0;
     u32 display_texture_width_ = 0;
     u32 display_texture_height_ = 0;
     u64 display_texture_generation_ = ~0ull;
+    // Host-side scaling of the 640x448 output: 0 = nearest, 1 = bilinear.
+    int display_filter_ = 1;
+    int display_filter_applied_ = -1;
+
+    // The core runs on emu_thread_. core_mutex_ guards system_ and every UI
+    // member derived from it: the UI frame holds it except while waiting for
+    // vsync, and the emulation thread holds it per short slice. ui_waiting_
+    // makes the emulation thread back off so the UI is never starved.
+    std::mutex core_mutex_{};
+    std::atomic<bool> ui_waiting_{false};
+    std::atomic<bool> emu_stop_{false};
+    std::atomic<bool> limit_speed_{true};
+    std::thread emu_thread_{};
 
     Ps2System system_{};
+
+    // PS1 discs run on the standalone PS1 core while PS2 emulation is idle.
+    std::unique_ptr<Ps1Mode> ps1_ = std::make_unique<Ps1Mode>();
+    std::string ps1_bios_path_{};
+    std::vector<u32> ps1_frame_{};
+    unsigned int ps1_texture_ = 0;
+    int ps1_width_ = 0;
+    int ps1_height_ = 0;
+    int ps1_texture_width_ = 0;
+    int ps1_texture_height_ = 0;
+    int ps1_speed_index_ = 0;
 
     bool show_system_ = false;
     bool show_ee_debug_ = false;
@@ -99,12 +133,6 @@ private:
     bool show_settings_ = false;
     bool show_about_ = false;
     bool emulation_running_ = false;
-    bool bootstrap_swap_interval_disabled_ = false;
-    // Real-time limiter: EE cycles accrue at the guest clock rate and each UI
-    // frame may spend at most the accrued budget.
-    double realtime_ee_budget_ = 0.0;
-    std::chrono::steady_clock::time_point realtime_last_update_{};
-    bool realtime_limited_ = false;
     std::chrono::steady_clock::time_point speed_sample_time_{};
     u64 speed_sample_instructions_ = 0;
     u64 speed_sample_fields_ = 0;
@@ -118,7 +146,6 @@ private:
     bool benchmark_started_ = false;
     u64 benchmark_start_field_ = 0;
     u64 benchmark_ui_frames_ = 0;
-    double benchmark_emulation_seconds_ = 0.0;
     std::chrono::steady_clock::time_point benchmark_start_time_{};
 
     std::array<char, 1024> bios_path_input_{};

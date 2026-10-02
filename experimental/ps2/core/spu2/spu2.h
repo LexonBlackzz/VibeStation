@@ -137,7 +137,8 @@ private:
     void mix_one_sample();
     void push_sample(s16 left, s16 right);
 
-    std::array<u8, 0x10000> regs_{};
+    // Heap-backed: keeps Ps2System under the stack-footprint budget.
+    std::vector<u8> regs_ = std::vector<u8>(0x10000u, 0u);
     std::vector<u16> ram_;
     std::array<Core, 2> cores_{};
     u64 cycle_phase_ = 0;

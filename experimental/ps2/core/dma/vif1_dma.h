@@ -90,6 +90,10 @@ private:
     void reset_unpack();
 
     bool end_after_qwc_ = false;
+    // Memory FIFO drain (D_CTRL.MFD = VIF1): the chain is read from the
+    // ring buffer that SPR_FROM fills.
+    bool mfifo_empty_signalled_ = false;
+    bool data_in_ring_ = false;
 
     Payload payload_ = Payload::None;
     bool command_irq_pending_ = false;

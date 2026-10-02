@@ -57,17 +57,14 @@ public:
     IopIntc& iop_intc(){return iop_intc_;} const IopIntc& iop_intc()const{return iop_intc_;}
     GsCore& gs_core(){return gs_core_;} const GsCore& gs_core()const{return gs_core_;}
     GsPrivileged& gs_privileged(){return gs_;} const GsPrivileged& gs_privileged()const{return gs_;}
-    // Waits for any scanout queued on the GS worker, so the image reflects
-    // the most recent vsync. Use latest_gs_display() on a UI thread that
-    // should not block on the worker.
-    GsDisplay& gs_display(){gs_core_.flush_pending_draws();return gs_display_;}
-    const GsDisplay& gs_display()const{gs_core_.flush_pending_draws();return gs_display_;}
-    // Most recently completed scanout; never waits. Hold lock_image() while
-    // reading its pixels.
-    const GsDisplay& latest_gs_display()const{return gs_display_;}
+    GsDisplay& gs_display(){return gs_display_;} const GsDisplay& gs_display()const{return gs_display_;}
     Vu1& vu0(){return vu0_;} const Vu1& vu0()const{return vu0_;}
     Vu1& vu1(){return vu1_;} const Vu1& vu1()const{return vu1_;}
     bool bios_started()const{return bios_started_;}
+    // Takes effect at the next reset; the BIOS then finds the disc in the drive.
+    bool load_disc(const std::string& path,std::string& error){return cdvd_.load_disc(path,error);}
+    void eject_disc(){cdvd_.eject_disc();}
+    CdvdHw& cdvd(){return cdvd_;}
     // The EE owns the user-visible bootstrap run state. An IOP halt is
     // retained for diagnostics but does not discard EE/GS progress.
     bool halted()const{return ee_.halted();}
@@ -86,6 +83,9 @@ public:
     u64 skipped_bios_countdown_iterations() const { return skipped_bios_countdown_iterations_; }
     u64 skipped_bios_copy_iterations() const { return skipped_bios_copy_iterations_; }
     u64 skipped_bios_mmio_poll_iterations() const { return skipped_bios_mmio_poll_iterations_; }
+    // Iterations / distinct skips of game-agnostic fixed-point poll loops.
+    u64 skipped_poll_iterations() const { return skipped_poll_iterations_; }
+    u64 poll_loops_skipped() const { return poll_loops_skipped_; }
     u64 sif_poll_fast_samples() const { return sif_poll_fast_samples_; }
     u64 sif_poll_stable_returns() const { return sif_poll_stable_returns_; }
     u64 fast_sif_getreg_calls() const { return fast_sif_getreg_calls_; }
@@ -151,6 +151,8 @@ private:
     u64 try_skip_bios_mmio_poll_iterations(u64 budget, std::string& error);
     u64 try_skip_bios_literal_iterations(u64 budget, std::string& error);
     u64 try_skip_hot_sif_getreg(u64 budget, std::string& error);
+    u64 try_skip_poll_loop(u64 budget, std::string& error);
+    bool poll_loop_candidate(u32 pc);
     u64 try_run_quiet_ee_batch(u64 budget, std::string& error);
     u64 try_run_quiet_ee_superbatch(u64 budget, std::string& error);
     struct QuietEeBlock {
@@ -165,7 +167,7 @@ private:
     QuietEeBlock* quiet_ee_block(u32 pc);
     void reset_iop_subsystem();
     Bios bios_{}; IopIntc iop_intc_{}; CdvdHw cdvd_; EeRam ram_{}; EeScratchpad scratchpad_{};
-    EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsCore gs_core_{}; GsDisplay gs_display_{};
+    EeHw hw_{}; IopHwWindow iop_hw_{}; IopRam iop_ram_{}; GsPrivileged gs_{}; GsDisplay gs_display_{}; GsCore gs_core_{};
     IopBus iop_bus_; EeBus bus_; Vu1 vu0_; Vu1 vu1_; Scheduler scheduler_{}; VideoTiming video_timing_{}; GifDma gif_dma_{}; IpuDma ipu_dma_{}; Vif0Dma vif0_dma_{}; Vif1Dma vif1_dma_{}; SifDma sif_dma_{}; SprDma spr_dma_{}; EeCpu ee_; IopCpu iop_;
     std::string iop_step_error_scratch_{};
     bool bios_started_=false; u32 reset_instruction_=0; u32 iop_reset_instruction_=0; u32 ee_iop_phase_=0;
@@ -189,6 +191,12 @@ private:
     u32 fast_sif_getreg_active_iop_first_pc_=0;
     u64 skipped_iop_idle_pairs_=0;
     u64 skipped_bios_literal_iterations_=0;
+    u64 skipped_poll_iterations_=0;
+    u64 poll_loops_skipped_=0;
+    u32 poll_anchor_pc_=0;
+    u32 poll_window_hits_=0;
+    u32 poll_cooldown_=0;
+    u32 poll_backoff_=16;
     u64 quiet_ee_batch_instructions_=0;
     u64 quiet_ee_active_iop_instructions_=0;
     u64 quiet_ee_batches_=0;

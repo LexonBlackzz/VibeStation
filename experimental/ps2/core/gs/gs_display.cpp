@@ -36,8 +36,7 @@ u32 to_rgba8(u32 psm, u32 raw) {
 
 } // namespace
 
-void GsDisplay::reset() {
-    std::lock_guard lock(image_mutex_);
+void GsDisplay::reset_locked() {
     valid_ = false;
     width_ = 0;
     height_ = 0;
@@ -49,14 +48,14 @@ void GsDisplay::reset() {
     rgba8_.clear();
 }
 
-void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
+void GsDisplay::update_locked(const GsPrivileged& regs, const GsVram& vram) {
     constexpr std::array<u32, 7> kScanoutRegisters = {
         kPmode, kSmode2, kDispfb1, kDisplay1,
         kDispfb1 + kCircuitStride, kDisplay1 + kCircuitStride, kBgcolor};
     std::array<u64, 7> scanout_registers{};
     for (std::size_t i = 0; i < kScanoutRegisters.size(); ++i) {
         if (!regs.read64(kScanoutRegisters[i], scanout_registers[i])) {
-            reset();
+            reset_locked();
             return;
         }
     }
@@ -73,7 +72,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     u64 smode2 = 0;
     if (!regs.read64(kPmode, pmode) ||
         !regs.read64(kSmode2, smode2)) {
-        reset();
+        reset_locked();
         return;
     }
 
@@ -84,7 +83,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     const bool interlaced = (smode2 & 1u) != 0;
     const bool field_mode = (smode2 & 2u) != 0;
     if (!enabled[0] && !enabled[1]) {
-        if (valid_) reset();
+        if (valid_) reset_locked();
         return;
     }
 
@@ -199,7 +198,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
     }
 
     if (!frames[0].valid && !frames[1].valid) {
-        if (valid_) reset();
+        if (valid_) reset_locked();
         return;
     }
 
@@ -218,9 +217,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
         static_cast<u32>(bgcolor & 0x00FFFFFFu) |
         0xFF000000u;
 
-    // Compose into a private buffer and publish it under the image lock so
-    // readers on other threads never observe a partially written frame.
-    std::vector<u32> image(
+    rgba8_.assign(
         static_cast<std::size_t>(width) * height,
         background);
 
@@ -233,7 +230,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
         const u32 copy_height = std::min(height, frames[1].height);
         for (u32 y = 0; y < copy_height; ++y) {
             for (u32 x = 0; x < copy_width; ++x) {
-                image[static_cast<std::size_t>(y) * width + x] =
+                rgba8_[static_cast<std::size_t>(y) * width + x] =
                     frames[1].pixels[
                         static_cast<std::size_t>(y) *
                             frames[1].width +
@@ -266,7 +263,7 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
                         static_cast<std::size_t>(y) *
                             frames[0].width +
                         x];
-                const u32 dst = image[dst_index];
+                const u32 dst = rgba8_[dst_index];
 
                 const u32 alpha128 =
                     constant_alpha
@@ -288,21 +285,12 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
                     (dst >> 16) & 0xFFu,
                     alpha128);
 
-                image[dst_index] =
+                rgba8_[dst_index] =
                     r | (g << 8) | (b << 16) | 0xFF000000u;
             }
         }
     }
 
-    u64 nonzero = 0;
-    for (const u32 pixel : image) {
-        if ((pixel & 0x00FFFFFFu) != 0) {
-            ++nonzero;
-        }
-    }
-
-    std::lock_guard lock(image_mutex_);
-    rgba8_.swap(image);
     valid_ = true;
     width_ = width;
     height_ = height;
@@ -311,8 +299,26 @@ void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
             ? 3u
             : (frames[0].valid ? 1u : 2u);
     psm_ = frames[base_circuit].psm;
-    nonzero_pixel_count_ = nonzero;
+    nonzero_pixel_count_ = 0;
+    for (const u32 pixel : rgba8_) {
+        if ((pixel & 0x00FFFFFFu) != 0) {
+            ++nonzero_pixel_count_;
+        }
+    }
     ++generation_;
+}
+
+void GsDisplay::reset() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    reset_locked();
+    visible_.store(false, std::memory_order_release);
+}
+
+void GsDisplay::update(const GsPrivileged& regs, const GsVram& vram) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    update_locked(regs, vram);
+    visible_.store(
+        valid_ && nonzero_pixel_count_ != 0, std::memory_order_release);
 }
 
 } // namespace ps2

@@ -60,6 +60,7 @@ public:
     [[nodiscard]] bool dmac_pending() const;
 
     [[nodiscard]] static u32 to_physical(u32 address);
+    [[nodiscard]] u8* scratchpad_data();
     [[nodiscard]] static bool is_iop_ram_physical(u32 address) {
         return address >= 0x1C000000u && address < 0x1C200000u;
     }

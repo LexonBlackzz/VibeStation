@@ -1,22 +1,24 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/gs/gs_privileged.h"
 #include "core/gs/gs_vram.h"
 #include "core/gs/gs_rasterizer.h"
 #include "core/gs/gs_gpu_backend.h"
 
 #include <array>
-#include <memory>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 namespace ps2 {
 
-class GsPrivileged;
 class GsDisplay;
+class GsPrivileged;
 
 struct GsUnsupportedTransfer {
     u32 reason = 0;
@@ -54,6 +56,8 @@ struct GsStats {
     u64 parallel_sprite_draws = 0;
     u64 parallel_sprite_pixels = 0;
     u64 parallel_sprite_helper_jobs = 0;
+    u64 banded_draws = 0;
+    u64 banded_batches = 0;
     u64 gpu_sprite_draws = 0;
     u64 gpu_sprite_pixels = 0;
     u64 gpu_syncs_to_cpu = 0;
@@ -167,16 +171,23 @@ public:
         raster_timing_enabled_ = enabled;
     }
     void flush_pending_draws() const;
-    // Scans the current PCRTC registers out to `display` once every draw
-    // queued so far has completed. With async rasterization this is queued
-    // behind those draws, so the caller does not wait for the GS worker.
-    void submit_display_scanout(GsDisplay& display, const GsPrivileged& regs);
     void attach_privileged(GsPrivileged& privileged) { privileged_ = &privileged; }
 
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
     [[nodiscard]] bool write_gif_fifo64(u32 physical, u64 value);
-    void write_gif_qword(u64 lo, u64 hi);
+    // `path` is the GIF path feeding the qword (1 = VU1 XGKICK, 2 = VIF1
+    // DIRECT, 3 = GIF DMA). A packet in progress belongs to its path.
+    void write_gif_qword(u64 lo, u64 hi, int path = 3);
+    // True when `path` may send a qword now. A path that has a packet in
+    // progress keeps the GIF until the packet ends; the others must wait or
+    // their data would be spliced into it (e.g. a draw packet into an image
+    // upload). A packet that never ends is abandoned after a long stall.
+    [[nodiscard]] bool gif_path_free(int path);
     [[nodiscard]] bool read_local_to_host_qword(u64& lo, u64& hi);
+
+    // Update `display` from `regs` + VRAM. Asynchronous when the raster
+    // worker runs (ordered after all queued draws); otherwise immediate.
+    void enqueue_scanout(GsDisplay& display, const GsPrivileged& regs);
 
     [[nodiscard]] u64 register_value(u32 address) const {
         return registers_[address & 0x7Fu];
@@ -215,7 +226,33 @@ public:
     }
 
 private:
+    // Display scanout queued in order with the draws so the EE never waits
+    // for the raster backlog to drain at vblank.
+    struct ScanoutRequest {
+        GsDisplay* display = nullptr;
+        GsPrivileged regs{};
+    };
+
+    // Host->local image data queued in order with the draws: the EE side
+    // only collects decoded pixel values and the GS worker performs the
+    // swizzled VRAM writes, so an upload no longer drains the draw queue.
+    struct HostUpload {
+        u32 bp = 0;
+        u32 bw = 0;
+        u32 psm = 0;
+        u32 dsax = 0;
+        u32 dsay = 0;
+        u32 width = 0;
+        u32 height = 0;
+        bool dirx = false;
+        bool diry = false;
+        u32 start_index = 0; // First pixel of this chunk in the transfer.
+        std::vector<u32> values{};
+    };
+
     struct RasterCommand {
+        std::shared_ptr<ScanoutRequest> scanout{};
+        std::shared_ptr<HostUpload> upload{};
         GsRasterContext context{};
         GsRasterVertex a{};
         GsRasterVertex b{};
@@ -231,9 +268,6 @@ private:
         u64 texa = 0;
         u64 st = 0;
         u64 uv = 0;
-        // Non-null for a queued PCRTC scanout instead of a draw.
-        GsDisplay* scanout_display = nullptr;
-        std::shared_ptr<const GsPrivileged> scanout_registers{};
     };
 
     struct TransferState {
@@ -254,6 +288,9 @@ private:
         u32 pending_size = 0;
     };
 
+    int gif_path_ = 0;
+    u32 gif_stall_ = 0;
+
     struct GifState {
         bool active = false;
         bool eop = false;
@@ -269,6 +306,9 @@ private:
     void process_packed(u32 descriptor, u64 lo, u64 hi);
     void process_reglist_value(u32 descriptor, u64 value);
     void write_register(u32 address, u64 value);
+    void start_upload_chunk();
+    void enqueue_pending_upload();
+    void execute_host_upload(const HostUpload& upload);
     void begin_host_to_local();
     void begin_local_to_host();
     void execute_local_to_local();
@@ -282,21 +322,34 @@ private:
         const GsRasterVertex& c,
         u32 vertex_count);
     void execute_raster_command(const RasterCommand& command);
-    // Statistics and VRAM bookkeeping for one completed draw.
-    void record_raster_command(
+    // Statistics and dirty tracking shared by single and banded draws.
+    void account_raster_command(
         const RasterCommand& command,
         u64 pixels,
         u64 raster_ns,
         bool gpu_raster,
         u64 nonzero_inputs_before,
         u64 alpha_inputs_before);
-    // Band-parallel triangle batches (see raster_worker_main()).
-    [[nodiscard]] bool triangle_batch_candidate(
-        const RasterCommand& command) const;
-    [[nodiscard]] static bool triangle_batch_compatible(
-        const RasterCommand& first,
-        const RasterCommand& next);
-    void execute_triangle_batch(std::vector<RasterCommand>& batch);
+
+    // A run of consecutive triangle draws whose VRAM footprints cannot
+    // interact is rasterized in parallel by screen-row bands: each lane runs
+    // every draw in order but only on its own rows, so the result equals
+    // serial execution.
+    static constexpr s32 kBandRows = 8;
+    struct BandJob {
+        const RasterCommand* commands = nullptr;
+        const GsBandFootprint* footprints = nullptr;
+        u32 count = 0;
+        s32 base_row = 0;
+        u32 band_count = 0;
+        std::atomic<u32> next_band{0};
+        // One counter row per lane (index = lane) and draw.
+        std::vector<std::vector<u64>> pixels{};
+    };
+    void execute_banded_batch(
+        std::vector<RasterCommand>& batch,
+        const std::vector<GsBandFootprint>& footprints);
+    void run_band_lane(BandJob& job, u32 lane);
     void raster_worker_main();
     void start_raster_helpers();
     void stop_raster_helpers();
@@ -340,7 +393,7 @@ private:
     // Keep one emulation thread and spare host capacity outside the raster
     // pool. Small CI hosts still select only hardware_concurrency()-2 helpers,
     // while desktop CPUs can use up to six raster lanes total.
-    static constexpr u32 kMaxRasterHelpers = 5u;
+    static constexpr u32 kMaxRasterHelpers = 8u;
     std::array<std::thread, kMaxRasterHelpers> raster_helpers_{};
     u32 raster_helper_count_ = 0u;
     std::mutex raster_parallel_mutex_{};
@@ -352,20 +405,14 @@ private:
     const GsRasterContext* raster_parallel_context_ = nullptr;
     const GsRasterVertex* raster_parallel_a_ = nullptr;
     const GsRasterVertex* raster_parallel_b_ = nullptr;
+    BandJob* raster_band_job_ = nullptr;
+    // EE-thread state for a deferred host->local transfer.
+    bool upload_deferred_ = false;
+    std::shared_ptr<HostUpload> pending_upload_{};
     std::array<s32, kMaxRasterHelpers + 2u>
         raster_parallel_boundaries_{};
     std::array<u64, kMaxRasterHelpers + 1u>
         raster_parallel_counts_{};
-
-    // Triangle batch job for the helper pool: each lane draws every command
-    // in order, restricted to its own row band.
-    static constexpr u32 kMaxTriangleBatch = 64u;
-    bool raster_parallel_triangle_batch_ = false;
-    const RasterCommand* raster_parallel_batch_ = nullptr;
-    u32 raster_parallel_batch_count_ = 0u;
-    std::array<std::array<u64, kMaxTriangleBatch>, kMaxRasterHelpers + 1u>
-        raster_parallel_batch_counts_{};
-    std::vector<RasterCommand> raster_batch_{};
 };
 
 } // namespace ps2

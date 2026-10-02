@@ -217,6 +217,9 @@ bool GifDma::service(EeBus& bus, GsCore& gs, std::string& error) {
         return true;
     }
 
+    // Another path owns the GIF until its packet ends.
+    if (!gs.gif_path_free(3)) return true;
+
     u64 lo = 0;
     u64 hi = 0;
     if (!bus.read64(madr, lo) || !bus.read64(madr + 8u, hi)) {
@@ -224,7 +227,7 @@ bool GifDma::service(EeBus& bus, GsCore& gs, std::string& error) {
         return false;
     }
 
-    gs.write_gif_qword(lo, hi);
+    gs.write_gif_qword(lo, hi, 3);
     madr += 16u;
     --qwc;
 
