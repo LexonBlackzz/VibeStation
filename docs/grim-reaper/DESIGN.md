@@ -10,16 +10,18 @@ Grim Reaper 2.0 changes the question from:
 
 to:
 
-> "How strangely can I break this PlayStation while keeping it alive?"
+> "How strangely can I break this PlayStation?"
 
-Every press of **New Corruption** should feel like finding a different defective PS1 — a machine with a broken voice, a melted logo, a rotting sound bank, a confused GPU — not another variation of "dead."
+**Mostly alive, sometimes dead, rarely boring.** Every press of **New Corruption** is a pull: nobody, including the system, knows the outcome until the machine boots. Most pulls should give a different defective PS1: a broken voice, a melted logo, a rotting sound bank, a confused GPU. Some will die, and that's part of the fun. Duds are what make an insane pull feel insane. The spirit is the Vinesauce corruptor: press the button, watch, react, press again.
+
+What 2.0 fixes is not that machines die. It's that 1.0's machines all died *the same way* and most survivors were *the same kind of broken*. Typed genes make the survivors varied. Fast death detection and a readable cause of death make the duds quick and a little entertaining, instead of tedious.
 
 The system has four layers:
 
 1. **Discovery** — learn what every part of the BIOS actually *is* (code, samples, geometry, fonts, tables) by watching the emulator run it.
 2. **Genes** — typed mutation operators that break each kind of thing in a way that fits it.
 3. **Evaluation** — deterministic headless runs that measure whether a machine is alive and what kind of broken it is.
-4. **Search** — a quality-diversity archive (MAP-Elites) that collects survivors that behave differently from each other.
+4. **Search (optional, later)** — a quality-diversity archive (MAP-Elites) that collects survivors that behave differently from each other. The core experience does not depend on it (see Layer 4).
 
 ---
 
@@ -231,7 +233,9 @@ Descriptor per survivor, each axis normalized or log-scaled:
 
 ---
 
-## Layer 4 — Search: MAP-Elites archive
+## Layer 4 — Search: MAP-Elites archive (optional, later)
+
+**Status:** deferred. Phases 2–4 showed that typed genes already survive at a high rate (1000/1000 sample genomes survived; about 62% were audibly changed with time-based sizing). Random generation is therefore good enough to be the core experience, and pre-filtering pulls would remove the duds that make good pulls exciting. The archive stays in the design as an optional mode ("surprise me with something I haven't seen") for users with spare CPU. It needs cheap evaluation first (snapshot forking, cached clean references, persistent workers, staged windows).
 
 A single global score collapses diversity toward whatever maximizes it. Instead:
 
@@ -255,13 +259,73 @@ The search runs continuously in the background. The archive is the library of br
 
 ## UX
 
-- **New Corruption:** draws from the archive, preferring cells the user hasn't seen. Instant, because evaluation already happened in the background.
-- **More like this:** uses the current corruption as a parent and breeds variants (interactive evolution, Picbreeder style). The user becomes the fitness function.
-- **Keep / Ban:** keep promotes to favorites and biases the search toward that region. Ban sends a negative signal for that cell or fingerprint.
-- **Intensity knob:** controls gene count and magnitude.
-- **Family toggles:** audio-only, visual-only, code-only, interface-only, rot mode.
-- **Gallery:** archive grid with thumbnails, colored by cell, auto-generated tags ("audio-heavy", "Shell reached", "palette", "geometry melt").
-- **Inspector:** shows the genome in readable form and lets the user disable individual genes to see which one causes which effect.
+Mockups: https://claude.ai/artifact/9hBVYj7yV3JqBkK28co5ws
+
+### Principles
+
+- **Every pull is a surprise.** New Corruption generates a fresh random genome and boots it live. Nothing is pre-evaluated or filtered; the outcome is unknown to everyone until it runs.
+- **Duds are fast and readable, not hidden.** A dead machine is detected within a second or two and shown with a cause of death. The next pull is one press away.
+- **The user handles machines, not parameters.** Seeds, byte offsets and target regions are internal. The UI shows the machine, its genome, gene families, intensity and history.
+- **The user is the curator.** Keep saves a genome; the kept set is the library. There is no automatic library in the core experience.
+- **Honest about what it is.** Results reflect VibeStation's behaviour, not verified hardware behaviour (see Risks).
+
+### Screen 1: First run (Discovery)
+
+Shown when the loaded BIOS has no cached map (keyed by ROM hash).
+
+- Header: "<BIOS name> hasn't been mapped yet", followed by "Runs once per BIOS, cached by ROM hash."
+- **BIOS map strip.** Fills in live as regions are classified, coloured by family. Unknown regions are hatched, unused regions are dark, and dormant regions (copied but never run in the discovery scenarios) are shown separately. Shows "% classified".
+- **Discovery steps** with status (done, running with progress, queued): clean-boot trace per scenario, provenance tagging, asset scan with running counts, probe mapping.
+- **"Pull interface-only"** is available immediately, because interface genes need no map.
+- Status bar: "Mapping", the short ROM hash, and an estimate of time left.
+
+### Screen 2: Panel (New Corruption)
+
+- **NEW CORRUPTION** is the primary action. It generates a random genome from the enabled families at the current intensity, applies it at reset, and boots live. Keyboard shortcut and controller combo, so it works while watching full-screen.
+- **Intensity** controls gene count, gene size and **risk**:
+  - Low: survival biases on (first-touch weighting, early-init protection, conservative code genes). Mostly alive, mild.
+  - Middle: biases weakened.
+  - High: biases off, raw and lethal. Frequent deaths, occasionally something insane.
+  - The readout names both: e.g. "4–7 genes · risky".
+- **Gene families**: Audio, Visual, Code, Interface toggles, plus **Rot mode** ("starts healthy, decays").
+- **Death watch.** The existing liveness gates run on the live machine. On death the panel switches to a dead state:
+  - Cause of death in plain words with the technical detail underneath, e.g. "Died at 1.4 s · exception loop at BFC0 2B68", "Hung waiting for VSync", "Stuck chime", "Black screen, CPU still running".
+  - The genes that were active at that point.
+  - Buttons: New Corruption (primary), Revive (reboot the same genome), Keep anyway.
+  - Death detection is fast (target: under 2 s after the machine stops progressing) so duds cost seconds.
+- **Mercy** setting: off by default. When on, deaths inside the kill window are rerolled automatically and silently counted.
+- **This machine** (alive state): live view is the emulator itself; the panel shows the machine ID, auto tags, and a **curse readout** revealed after a few seconds of running: how far it is from the clean boot, from the audibility metric and later a visual one. It is computed from the result, so it never spoils a pull in advance.
+- **Secondary actions:** **More like this** (mutate the current genome slightly and boot it), **Keep**, **Revive**.
+- **Genome** list, readable, with a per-gene checkbox to disable genes live, and **Copy code**.
+- **History** strip: the last few pulls, alive or dead, each re-bootable.
+
+### Screen 3: Kept & History
+
+- **Kept:** the user's library. Thumbnails, tags, cause of death for kept dead machines, notes, paste-code import, export.
+- **History:** every pull this session (and optionally previous ones), newest first, including deaths. A pull you skipped past can be recovered.
+- **Stats**, for fun: pulls, deaths, death causes, longest-lived machine.
+- No background processes. Thumbnails and clips are captured from live play.
+
+### Novelty without an archive
+
+To avoid pulls that feel samey without pre-filtering, generation keeps a light record of recent pulls (gene families, kinds and targets) and nudges away from recent combinations. This affects what is generated, not whether a pull is shown.
+
+### Colours and theming
+
+- Every colour comes from one theme struct; nothing is hardcoded per widget, so user themes are possible later.
+- Neutrals: background, surface, raised, line, text, muted text. Accent: primary button.
+- Family colours reuse VibeStation's four title-screen squares: Audio blue, Visual gold, Code red, Interface teal. The same colour always means the same family (gene dots, toggles, map regions, tags).
+- Status: alive teal, working gold, dead red.
+
+### UI by implementation phase
+
+| Phase | Available UI |
+|---|---|
+| 1–4 | CLI and `--genome` only |
+| 5 | Panel: New Corruption live, intensity with risk, families, death watch with cause of death, Mercy, Keep, Revive, History, genome list |
+| 6–7 | Visual ROM genes join the families; the map gains named and dormant regions |
+| 8 | More like this, per-gene toggles, curse readout, Kept & History screen, codes, theming |
+| Later | Optional archive mode and background search |
 
 ---
 
@@ -273,10 +337,11 @@ The search runs continuously in the background. The archive is the library of br
 | **2** | Interface genes: SPU register filter + GP0 filter (+ temporal triggers) | Low; immediate results, works in games too |
 | **3** | Clean-boot trace: exec and read maps, first-touch times, code genes | Low–moderate |
 | **4** | ADPCM scanner + SPU DMA confirmation + sample genes | Moderate |
-| **5** | Fingerprints + MAP-Elites archive + background search + New Corruption from archive | Moderate |
+| **5** | Live random New Corruption: genome generation from families and intensity (with risk scaling), live death watch and cause of death, Mercy, Keep, Revive, history, recent-pull novelty | Moderate; makes 2.0 playable |
 | **6** | Provenance tracking + ROM-level geometry, texture and font genes | Higher; the biggest piece |
 | **7** | Probe mapping, effect map, hand-annotation support | Moderate; improves everything above |
-| **8** | UX: breeding, gallery, inspector, sharing codes | Ongoing |
+| **8** | UX: More like this, inspector, curse readout, Kept & History screen, sharing codes, theming | Ongoing |
+| **Later** | Fingerprints + MAP-Elites archive + background search (needs fast evaluation: snapshot forking, cached clean reference, persistent workers) | Optional |
 
 Phases 2–4 alone already produce the "amazing" audio corruptions and logo breakage through the interface layer. Phase 6 makes those corruptions part of the BIOS itself.
 
