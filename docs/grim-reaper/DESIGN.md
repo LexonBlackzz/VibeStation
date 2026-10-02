@@ -180,6 +180,33 @@ Any gene can have a **trigger**:
 - **Rot:** magnitude ramps up over time, so the machine starts nearly healthy and slowly decays. This fits the Grim Reaper name well.
 - **Intermittent:** active on some frames only, with a deterministic pattern from the seed
 
+### 2.10 Faulty hardware genes (the Faulty Hardware Simulator)
+
+A fifth family: instead of breaking the BIOS or its traffic, break the *machine*. These genes model failing memory and, later, other failing parts, as faults that develop, wear in and sometimes depend on load, so a console can feel like a dying real one.
+
+**Principles**
+
+- **Never on the access path.** The recompiler reads and writes RAM directly, and both CPU backends must see the same memory. Faults are applied at scheduler points: stuck cells every eighth scanline, transient faults once per frame. So a stuck bit is "held" about 33 times a frame, not on every access.
+- **Critical memory is almost never hit.** The kernel's low 64 KB of RAM, the top 16 KB (stacks) and the first 4 KB of sound RAM are avoided unless a gene is deliberately generated as critical, which happens to roughly one hardware gene in a hundred (shown as DANGEROUS in the genome list). Everything else, including game code and data, is fair game.
+- **Wear is the point.** The default trigger is a rot ramp, so cells fail one after another as the machine ages.
+
+**Fault archetypes (batch 1: main RAM, VRAM, sound RAM)**
+
+| Fault | Physical analogy | What you see |
+|---|---|---|
+| Stuck-high / stuck-low bits | A cell stuck on one value | Values quietly wrong; code and data in the region drift |
+| Flaky cells | Marginal cells that sometimes flip | Rare random glitches, worse the harder the console works |
+| Bursts | A noisy bus | Short runs of garbage bytes |
+| Bad column | A fractured trace | The same bit wrong at a regular stride: stripes in buffers and samples |
+| Thermal decay | Missing DRAM refresh | Memory nobody rewrites slowly drifts toward 0 or FF; busy buffers stay healthy |
+| Rowhammer | Neighbouring-cell leakage | Rows rewritten every frame damage the rows next to them |
+| Dead VRAM line | A dead scan row | A whole row of pixels forced to black |
+| Bus load | A weak transceiver | A gene's failure rate scales with the DMA traffic of the last frame (idle = stable) |
+
+**Deliberately not done (needs an access-path hook):** stuck address lines and row aliasing, read-destructive bits, write stutter, per-access rowhammer counters. They would need a check on every memory access (or emitted code in the recompiler) and are an opt-in idea for later.
+
+**Later batches:** CD drive (bad sectors, slow reads, the existing Bad modchip as a gene), controller (ghost presses, stick drift, dropouts), memory card (write failures), clock drift.
+
 ---
 
 ## Layer 3 — Evaluation
@@ -338,6 +365,7 @@ To avoid pulls that feel samey without pre-filtering, generation keeps a light r
 | **3** | Clean-boot trace: exec and read maps, first-touch times, code genes | Low–moderate |
 | **4** | ADPCM scanner + SPU DMA confirmation + sample genes | Moderate |
 | **5** | Live random New Corruption: genome generation from families and intensity (with risk scaling), live death watch and cause of death, Mercy, Keep, Revive, history, recent-pull novelty | Moderate; makes 2.0 playable |
+| **5.1** | Faulty Hardware Simulator: failing RAM, VRAM and sound RAM genes (batch 1), then CD, controller, memory card, clock | Low-moderate; runtime genes need no map |
 | **6** | Provenance tracking + ROM-level geometry, texture and font genes | Higher; the biggest piece |
 | **7** | Probe mapping, effect map, hand-annotation support | Moderate; improves everything above |
 | **8** | UX: More like this, inspector, curse readout, Kept & History screen, sharing codes, theming | Ongoing |

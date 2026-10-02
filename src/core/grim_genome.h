@@ -75,6 +75,11 @@ enum class GrimGeneType : u8 {
   RomCode,
   // Phase 4: resolved ADPCM edits on the BIOS sound bank.
   SpuSample,
+  // Phase 5.1: Faulty Hardware Simulator. Failing memory cells in main RAM, VRAM and
+  // SPU RAM, applied at scanline/frame boundaries (never on the access path).
+  HwRam,
+  HwVram,
+  HwSpuRam,
   Count
 };
 
@@ -159,6 +164,18 @@ inline bool grim_genome_has_rom(const GrimGenome &g) {
 inline bool grim_gene_is_rom(GrimGeneType type) {
   return type == GrimGeneType::RomCode || type == GrimGeneType::SpuSample;
 }
+inline bool grim_gene_is_hardware(GrimGeneType type) {
+  return type == GrimGeneType::HwRam || type == GrimGeneType::HwVram ||
+         type == GrimGeneType::HwSpuRam;
+}
+
+// Critical zones the simulator avoids unless a gene is explicitly marked `critical`
+// (about one hardware gene in seventy): the kernel's low 64 KB of RAM (vectors,
+// jump tables, kernel code and data), the top 16 KB (stacks), and the first 4 KB of
+// SPU RAM (decode buffers).
+constexpr u32 kGrimRamKernelBytes = 0x10000u;
+constexpr u32 kGrimRamStackBytes = 0x4000u;
+constexpr u32 kGrimSpuRamReservedBytes = 0x1000u;
 
 const char *grim_gene_type_name(GrimGeneType t);
 const std::vector<GrimParamSpec> &grim_gene_schema(GrimGeneType t);
@@ -206,10 +223,39 @@ struct GrimRandomParams {
   // decays) without drawing extra random numbers.
   u32 risk_q10 = 0;
   bool rot_only = false;
+  // Phase 5.1: hardware genes (0 max = none, and no random numbers are drawn, so every
+  // earlier seed is unchanged). `hw_critical_permille` is the chance that a gene may
+  // fail kernel/stack memory; the default is deliberately tiny.
+  u32 hw_genes_min = 0;
+  u32 hw_genes_max = 0;
+  u32 hw_critical_permille = 10;
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".
 GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &params);
+
+// ---- Faulty Hardware Simulator ------------------------------------------------------
+
+// What the simulator may touch. System implements it (RAM writes also tell the CPU's
+// translation cache); tests implement it with plain arrays.
+struct GrimHwTarget {
+  virtual ~GrimHwTarget() = default;
+  // Read-only views of the three memories (2 MiB, 1024*512 words, 512 KiB).
+  virtual const u8 *ram_view() const = 0;
+  virtual const u16 *vram_view() const = 0;
+  virtual const u8 *spu_view() const = 0;
+  // Writes go through the owner so it can tell the CPU's translation cache.
+  virtual void ram_put(u32 offset, u8 value) = 0;
+  virtual void vram_put(u32 index, u16 value) = 0;
+  virtual void spu_put(u32 offset, u8 value) = 0;
+};
+
+// Reproducible from (seed, params). Appends between hw_genes_min and hw_genes_max hardware
+// genes. Mostly small groups of bad cells away from critical memory; high risk grows the
+// cell counts, rates and regions.
+void grim_add_random_hw_genes(GrimGenome &genome, u64 seed, const GrimRandomParams &params);
+// True when the gene's region overlaps memory the simulator normally avoids.
+bool grim_hw_gene_is_critical(const GrimGene &gene);
 
 // ---- runtime ----------------------------------------------------------------
 
@@ -264,6 +310,13 @@ public:
   // Number of events each gene actually changed (same order as the genome).
   const std::vector<u64> &hits() const { return hits_; }
 
+  // Faulty Hardware Simulator. System calls this at every frame start (frame_tick) and at
+  // every eighth scanline. Stuck cells are re-forced on both ticks; flips and bursts happen
+  // on the frame tick only. Cheap when there are no hardware genes: has_hardware() is false.
+  bool has_hardware() const { return !hw_genes_.empty(); }
+  // bus_load_q10 (0..1024) is how busy the bus was last frame; genes with `load` > 0 fail more when it is high.
+  void apply_hardware(GrimHwTarget &target, bool frame_tick, u32 bus_load_q10);
+
 private:
   struct Delayed {
     u64 due;
@@ -290,6 +343,20 @@ private:
   std::vector<GrimRng> rng_;
   std::vector<u64> hits_;
   std::vector<size_t> spu_genes_, gpu_genes_; // indices into genome_.genes
+  struct HwCell {
+    u32 where; // RAM/SPU byte offset, or VRAM word index
+    u16 mask;  // bits that fail
+  };
+  std::vector<size_t> hw_genes_;                // indices into genome_.genes
+  std::vector<std::vector<HwCell>> hw_cells_;   // per hardware gene, in activation order
+  struct HwRows {                               // decay / hammer bookkeeping, 1 KiB rows
+    std::vector<u64> hash;
+    std::vector<u16> stable;  // frames the row has been unchanged
+    std::vector<u16> hot;     // consecutive frames the row changed
+    bool seeded = false;
+  };
+  std::vector<HwRows> hw_rows_;
+  void build_hw_cells();
   std::vector<Delayed> delayed_; // sorted by due, stable
   std::array<u16, 0x200> shadow_{}; // last value passed to each SPU register
 };

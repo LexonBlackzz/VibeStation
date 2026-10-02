@@ -16,7 +16,8 @@ namespace {
 constexpr const char *kTypeNames[] = {
     "spu_pitch",  "spu_adsr",   "spu_volume",   "spu_address",  "spu_keyon",
     "spu_noise",  "spu_pmon",   "spu_reverb",   "gpu_vertex",   "gpu_color",
-    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code", "spu_sample"};
+    "gpu_flags",  "gpu_texparam", "gpu_state",  "gpu_fill",  "rom_code", "spu_sample",
+    "hw_ram",     "hw_vram",    "hw_spuram"};
 static_assert(sizeof(kTypeNames) / sizeof(kTypeNames[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
               "type name table out of sync");
@@ -88,6 +89,20 @@ const std::vector<GrimParamSpec> kSchemas[] = {
     {{"kind", 0, 9, 0}, {"count", 1, 256, 1}, {"magnitude", 1, 15, 1},
      {"sample", -1, 32767, -1}, {"donor", -1, 32767, -1}, {"emulator_shift", 0, 1, 0},
      {"block_phase", 0, 8, 0}},
+    // hw_ram: mode 0 stuck high, 1 stuck low, 2 flip, 3 burst, 4 bad column, 5 thermal
+    //         decay, 6 rowhammer. cells = failing bytes (burst: bytes per burst, decay and
+    //         hammer: rows per frame). Region = lo_kb..lo_kb+span_kb. rate = permille chance
+    //         per event. arg = column stride in bytes, decay: frames a row must sit unchanged,
+    //         hammer: frames a row must change in a row. load = permille sensitivity to bus load.
+    {{"mode", 0, 6, 0}, {"cells", 1, 4096, 8}, {"lo_kb", 0, 2047, 256}, {"span_kb", 1, 2048, 64},
+     {"bits", 1, 8, 1}, {"rate", 0, 1000, 50}, {"arg", 1, 65535, 64}, {"load", 0, 1000, 0}},
+    // hw_vram: mode 0 stuck high, 1 stuck low, 2 flip, 3 dead line (row forced to black).
+    //          Region = rows row_lo..row_lo+row_span; bits are of the 16-bit pixel.
+    {{"mode", 0, 3, 0}, {"cells", 1, 4096, 8}, {"row_lo", 0, 511, 0}, {"row_span", 1, 512, 512},
+     {"bits", 1, 16, 1}, {"rate", 0, 1000, 50}, {"arg", 1, 65535, 64}, {"load", 0, 1000, 0}},
+    // hw_spuram: mode 0 stuck high, 1 stuck low, 2 flip, 3 burst, 4 bad column.
+    {{"mode", 0, 4, 0}, {"cells", 1, 4096, 8}, {"lo_kb", 0, 511, 16}, {"span_kb", 1, 512, 128},
+     {"bits", 1, 8, 1}, {"rate", 0, 1000, 50}, {"arg", 1, 65535, 64}, {"load", 0, 1000, 0}},
 };
 static_assert(sizeof(kSchemas) / sizeof(kSchemas[0]) ==
                   static_cast<size_t>(GrimGeneType::Count),
@@ -373,6 +388,9 @@ u32 grim_gene_default_target(GrimGeneType t) {
   switch (t) {
   case GrimGeneType::RomCode:
   case GrimGeneType::SpuSample:
+  case GrimGeneType::HwRam:
+  case GrimGeneType::HwVram:
+  case GrimGeneType::HwSpuRam:
     return 1u;
   case GrimGeneType::GpuState:
     return 0x3Fu;
@@ -890,6 +908,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
     if (rp.sample != nullptr && rp.sample_genes_max > 0) {
       grim_add_random_sample_genes(genome, seed, rp);
     }
+    if (rp.hw_genes_max > 0) {
+      grim_add_random_hw_genes(genome, seed, rp);
+    }
     return genome;
   }
   u32 total = 0;
@@ -969,6 +990,9 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
   if (rp.sample != nullptr && rp.sample_genes_max > 0) {
     grim_add_random_sample_genes(genome, seed, rp);
   }
+  if (rp.hw_genes_max > 0) {
+    grim_add_random_hw_genes(genome, seed, rp);
+  }
   return genome;
 }
 
@@ -979,6 +1003,10 @@ GrimGenomeRuntime::GrimGenomeRuntime(GrimGenome genome) : genome_(std::move(geno
   for (size_t i = 0; i < genome_.genes.size(); ++i) {
     if (grim_gene_is_rom(genome_.genes[i].type)) {
       continue; // applied to the ROM image, not to runtime traffic
+    }
+    if (grim_gene_is_hardware(genome_.genes[i].type)) {
+      hw_genes_.push_back(i); // applied to memory at frame/scanline boundaries
+      continue;
     }
     (is_spu_type(genome_.genes[i].type) ? spu_genes_ : gpu_genes_).push_back(i);
   }
@@ -1038,6 +1066,7 @@ void GrimGenomeRuntime::reset() {
   }
   delayed_.clear();
   shadow_.fill(0);
+  build_hw_cells();
 }
 
 void GrimGenomeRuntime::queue_delayed(u64 due, u32 offset, u16 value) {

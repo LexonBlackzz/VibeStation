@@ -132,6 +132,57 @@ Hash change is not used anywhere. Dead pulls are not scored for audibility.
 - A pull that hangs the host for a reason other than the DMA loop would still freeze the emulator
   thread. A UI-side stall detector would be the next step.
 
+### 0.8 Faulty Hardware Simulator (Phase 5.1, batch 1)
+
+Branch `grim-reaper/phase-5.1`, from Phase 5. A fifth gene family, **Hardware** ("HW", purple),
+that fails the machine itself. Design: `DESIGN.md` §2.10. Batch 1 covers main RAM, VRAM and
+sound RAM; CD, controller, memory card and clock come next.
+
+- Three gene types: `hw_ram`, `hw_vram`, `hw_spuram` (genome v1, no map needed, 8 params each).
+  Fault kinds: stuck-high/low bits, flaky cells, bursts, bad column (same bit at a stride),
+  thermal decay (rows nobody rewrites drift toward 0 or FF), rowhammer (rows rewritten every
+  frame damage neighbours), dead VRAM line, and a `load` sensitivity that scales a gene's rate
+  with the DMA traffic of the previous frame (idle = stable).
+- Applied **only at scheduler points** (frame start; stuck cells also every eighth scanline) by
+  `GrimGenomeRuntime::apply_hardware` through a small `GrimHwTarget` interface that `System`
+  implements. Nothing sits on the memory access path, so the recompiler's direct RAM access is
+  untouched; with no hardware genes the cost is one pointer test per eighth scanline.
+- Rot (the default trigger) activates cells one after another, so a machine wears in.
+- **Critical memory** (kernel low 64 KB, top 16 KB for stacks, first 4 KB of sound RAM) is
+  avoided unless a gene is generated as critical: 1.0% of hardware genes (measured 1.0-1.5%
+  over 4000), shown as DANGEROUS in the list; `hw_critical_permille = 0` switches it off.
+  Over 4000 non-critical genes applied for 60 frames: 0 stray writes into those zones.
+- Panel: a fifth family button; hardware genes show title, cells, address range, trigger,
+  "bus-sensitive" and DANGEROUS. Pull settings include Hardware by default.
+- Tests (`--grim-pull-test`, all pass on both backends): every fault kind on a fake target,
+  rewrite-and-hold, scanline vs frame ticks, rot wear-in, closed window, bus-load ratio,
+  determinism, critical rate and zero strays, round trips, all 16 fault kinds generated, the
+  Hardware family in pulls, and six live-machine cases that must take effect on a real BIOS.
+- Yield, hardware family only (40 pulls per level, 900 frames, no disc, live gates):
+
+| Intensity | Alive | Dead (all exception loops) | Survived+audible | Survived+inaudible |
+|---:|---:|---:|---:|---:|
+| 20 | 32 | 8 | 1 | 31 |
+| 50 | 34 | 6 | 7 | 27 |
+| 80 | 34 | 6 | 13 | 21 |
+
+  83% of hardware pulls live. Death does **not** climb with intensity here (20/15/15%): a
+  single bad bit in running Shell code is enough, and cell counts matter less than where they
+  land. "Audible" only measures sound; most of these faults are visual or silent, and there
+  is no visual metric yet. Small samples: read the trend, not the digits.
+- Verification: stock hash `0x432E585CF1535F9C`, all older suites, and full GT2 replay
+  (5738 frames, every BOOT_STATE_HASH field) identical to the Phase 5 baseline on both backends.
+
+**Known issue (separate task flagged):** under the `hw_rowhammer_ram` live case the two CPU
+backends diverge by 2 cycles at frame 212, right after a hammer write turned an instruction in
+running Shell code (`0x0EACE1`, `sw` -> `sltiu`) while it may still sit in the I-cache. The other
+five live cases give identical RAM hashes and hit counts on both backends. So parity holds for
+data faults; for faults that rewrite *code* behind the CPU's back it is not proven. Not fixed here.
+
+**Not done:** faults that need an access-path hook (stuck address lines, row aliasing,
+read-destructive and write-stutter faults); CD/controller/memory card/clock genes; a visual
+interest metric for VRAM faults; the "Bad modchip" as a gene.
+
 ---
 
 # Appendix E — Phase 4.1 reference

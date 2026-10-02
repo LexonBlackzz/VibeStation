@@ -28,7 +28,7 @@ std::string grim_pull_readout(u32 intensity) {
 }
 
 u32 grim_pull_available_families(const GrimPullContext &ctx) {
-  u32 m = kGrimFamilyInterface; // needs nothing but a running machine
+  u32 m = kGrimFamilyInterface | kGrimFamilyHardware; // need nothing but a running machine
   if (ctx.sample != nullptr) {
     m |= kGrimFamilyAudio;
   }
@@ -43,6 +43,9 @@ u32 family_of(GrimGeneType t) {
   switch (t) {
   case GrimGeneType::SpuSample: return kGrimFamilyAudio;
   case GrimGeneType::RomCode: return kGrimFamilyCode;
+  case GrimGeneType::HwRam:
+  case GrimGeneType::HwVram:
+  case GrimGeneType::HwSpuRam: return kGrimFamilyHardware;
   default: return kGrimFamilyInterface;
   }
 }
@@ -61,6 +64,9 @@ u32 domain_of(GrimGeneType t) {
   case GrimGeneType::SpuReverb:
     return kGrimFamilyAudio;
   case GrimGeneType::RomCode: return kGrimFamilyCode;
+  case GrimGeneType::HwRam:
+  case GrimGeneType::HwVram:
+  case GrimGeneType::HwSpuRam: return kGrimFamilyHardware;
   default: return kGrimFamilyVisual;
   }
 }
@@ -75,6 +81,8 @@ std::vector<u64> gene_keys(const GrimGenome &g) {
     } else if (gene.type == GrimGeneType::RomCode) {
       const u32 off = gene.patches.empty() ? 0u : gene.patches.front().offset >> 13;
       k = (2ull << 56) | (static_cast<u64>(gene.params[0]) << 16) | off;
+    } else if (grim_gene_is_hardware(gene.type)) {
+      k = (4ull << 56) | (static_cast<u64>(gene.type) << 16) | static_cast<u64>(gene.params[0]);
     } else {
       k = (3ull << 56) | (static_cast<u64>(gene.type) << 8) |
           static_cast<u64>(gene.trigger.kind);
@@ -121,6 +129,40 @@ std::string trigger_text(const GrimTrigger &t) {
   return "";
 }
 
+std::string hw_title(const GrimGene &g) {
+  static const char *const kRam[] = {"Stuck-high RAM bits", "Stuck-low RAM bits", "Flaky RAM cells",
+                                     "RAM bursts", "Bad RAM column", "Thermal RAM drift", "Rowhammer"};
+  static const char *const kVram[] = {"Stuck-high VRAM bits", "Stuck-low VRAM bits",
+                                      "Flaky VRAM cells", "Dead VRAM line"};
+  static const char *const kSpu[] = {"Stuck-high sound RAM bits", "Stuck-low sound RAM bits",
+                                     "Flaky sound RAM cells", "Sound RAM bursts", "Bad sound RAM column"};
+  const size_t mode = static_cast<size_t>(g.params[0]);
+  if (g.type == GrimGeneType::HwRam) return mode < 7 ? kRam[mode] : "RAM fault";
+  if (g.type == GrimGeneType::HwVram) return mode < 4 ? kVram[mode] : "VRAM fault";
+  return mode < 5 ? kSpu[mode] : "Sound RAM fault";
+}
+
+std::string hw_detail(const GrimGene &g) {
+  char b[160];
+  if (g.type == GrimGeneType::HwVram) {
+    std::snprintf(b, sizeof(b), "%d cell%s · rows %d-%d", g.params[1], g.params[1] == 1 ? "" : "s",
+                  g.params[2], g.params[2] + g.params[3]);
+  } else {
+    const unsigned lo = static_cast<unsigned>(g.params[2]) * 1024u;
+    std::snprintf(b, sizeof(b), "%d cell%s · 0x%05X-0x%05X", g.params[1], g.params[1] == 1 ? "" : "s", lo,
+                  lo + static_cast<unsigned>(g.params[3]) * 1024u);
+  }
+  std::string s = b;
+  s += " · " + trigger_text(g.trigger);
+  if (g.params[7] > 0) {
+    s += " · bus-sensitive";
+  }
+  if (grim_hw_gene_is_critical(g)) {
+    s += " · DANGEROUS";
+  }
+  return s;
+}
+
 std::string pretty(const char *snake) {
   std::string s = snake;
   std::replace(s.begin(), s.end(), '_', ' ');
@@ -142,6 +184,7 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
   if (enabled & kGrimFamilyInterface) slots.push_back({kGrimFamilyInterface, 4});
   if (enabled & kGrimFamilyAudio) slots.push_back({kGrimFamilyAudio, 3});
   if (enabled & kGrimFamilyCode) slots.push_back({kGrimFamilyCode, 3});
+  if (enabled & kGrimFamilyHardware) slots.push_back({kGrimFamilyHardware, 3});
   if (slots.empty()) {
     return out;
   }
@@ -150,14 +193,15 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
 
   GrimRng pick{seed ^ 0x5851F42D4C957F2Dull};
   const u32 n = pick.range(plan.min_genes, plan.max_genes);
-  u32 count_if = 0, count_audio = 0, count_code = 0;
+  u32 count_if = 0, count_audio = 0, count_code = 0, count_hw = 0;
   for (u32 i = 0; i < n; ++i) {
     u32 w = pick.range(0, total - 1);
     for (const Slot &s : slots) {
       if (w < s.weight) {
         (s.family == kGrimFamilyInterface ? count_if
          : s.family == kGrimFamilyAudio   ? count_audio
-                                          : count_code)++;
+         : s.family == kGrimFamilyCode    ? count_code
+                                          : count_hw)++;
         break;
       }
       w -= s.weight;
@@ -191,6 +235,15 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
     p.rom_curve = plan.rom_curve;
     p.rom_call_swap = plan.rom_call_swap;
     const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 3u), p);
+    out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
+  }
+  if (count_hw > 0) {
+    GrimRandomParams p;
+    p.spu = p.gpu = false;
+    p.hw_genes_min = p.hw_genes_max = count_hw;
+    p.risk_q10 = plan.risk_q10;
+    p.rot_only = settings.rot;
+    const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 5u), p);
     out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
   }
   // A ROM gene that found nothing to change is not a gene.
@@ -283,7 +336,7 @@ std::vector<GrimGeneLine> grim_pull_describe(const GrimGenome &genome,
   for (const GrimGene &g : genome.genes) {
     GrimGeneLine l;
     l.domain = domain_of(g.type);
-    l.rom = grim_gene_is_rom(g.type);
+    l.tag = grim_gene_is_rom(g.type) ? "ROM" : grim_gene_is_hardware(g.type) ? "HW" : "IFACE";
     char b[128];
     if (g.type == GrimGeneType::RomCode) {
       l.title = pretty(grim_rom_mut_name(static_cast<GrimRomMut>(g.params[0])));
@@ -303,6 +356,9 @@ std::vector<GrimGeneLine> grim_pull_describe(const GrimGenome &genome,
       std::snprintf(b, sizeof(b), "sound bank #%d \xC2\xB7 %zu word%s", g.params[3], g.patches.size(),
                     g.patches.size() == 1 ? "" : "s");
       l.detail = b;
+    } else if (grim_gene_is_hardware(g.type)) {
+      l.title = hw_title(g);
+      l.detail = hw_detail(g);
     } else {
       l.title = iface_title(g.type);
       l.detail = trigger_text(g.trigger);

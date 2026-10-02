@@ -339,3 +339,13 @@ Lexon's machine, so read it if you can.
 - CLI: `--grim-pull-test` (generation, Mercy, death text, library, live machines; run
   once per `--backend`), `--grim-pull-yield` (real pulls in child processes with a hard
   timeout), `--grim-eval ... --live-gates`.
+
+## Faulty Hardware Simulator (Phase 5.1)
+
+- `src/core/grim_hardware.cpp`: `GrimGenomeRuntime::apply_hardware(GrimHwTarget&, frame_tick, bus_load_q10)`,
+  `build_hw_cells()` (deterministic cell lists from the gene seed), `grim_add_random_hw_genes()` (critical
+  policy), `grim_hw_gene_is_critical()`. Gene types `HwRam/HwVram/HwSpuRam` in `grim_genome.{h,cpp}`
+  (8 params each; modes documented in the schema table). `System::grim_hardware_tick()` implements
+  `GrimHwTarget` (RAM writes call `Cpu::notify_code_write`) and is called from `run_frame` at frame start and
+  every eighth scanline. `GrimRandomParams::hw_genes_min/max/hw_critical_permille` add them; Hardware is
+  `kGrimFamilyHardware` in the pull generator and a fifth family button in the panel.

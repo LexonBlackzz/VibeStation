@@ -1880,6 +1880,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
     apply_sound_reaper_for_frame();
+    if (grim_ != nullptr && grim_->has_hardware()) {
+        grim_hardware_tick(true);
+    }
 
     const bool pal = gpu_.display_mode().is_pal;
     const u32 scanlines_per_frame = pal ? 314 : 263;
@@ -1956,6 +1959,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         // applied.
         scanline_edge_cycle_ = scanline_start;
         sync_timers(scanline_start);
+        if ((scanline & 7u) == 0u && grim_ != nullptr && grim_->has_hardware()) {
+            grim_hardware_tick(false);
+        }
         if (scanline == vblank_scanline) {
             // VBlank is an edge at the beginning of the first blanked scanline.
             // Keep the GPU notification, timer sync edge, and IRQ observable at
@@ -2423,6 +2429,33 @@ void System::apply_ram_reaper_for_frame() {
         }
     }
     ram_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
+}
+
+void System::grim_hardware_tick(bool frame_tick) {
+    struct Target final : GrimHwTarget {
+        System& s;
+        explicit Target(System& sys) : s(sys) {}
+        const u8* ram_view() const override { return s.ram_.data(); }
+        const u16* vram_view() const override { return s.gpu_.vram(); }
+        const u8* spu_view() const override { return s.spu_.spu_ram_data(); }
+        void ram_put(u32 offset, u8 value) override {
+            s.ram_.write8(offset, value);
+            s.cpu_.notify_code_write(offset, 1);
+        }
+        void vram_put(u32 index, u16 value) override { s.gpu_.corrupt_vram_word(index, value); }
+        void spu_put(u32 offset, u8 value) override { s.spu_.spu_ram_mut_data()[offset] = value; }
+    } target(*this);
+    if (frame_tick) {
+        // How busy the bus was last frame: DMA words moved, 64K words = fully loaded.
+        u64 words = 0;
+        for (int ch = 0; ch < 7; ++ch) {
+            words += dma_.debug_moved_words(ch);
+        }
+        const u64 delta = words >= grim_hw_dma_words_prev_ ? words - grim_hw_dma_words_prev_ : 0u;
+        grim_hw_dma_words_prev_ = words;
+        grim_hw_bus_load_q10_ = static_cast<u32>(std::min<u64>(1024u, delta * 1024u / 65536u));
+    }
+    grim_->apply_hardware(target, frame_tick, grim_hw_bus_load_q10_);
 }
 
 void System::apply_gpu_reaper_for_frame() {

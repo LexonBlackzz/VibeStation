@@ -178,6 +178,7 @@ set(VIBESTATION_SOURCES
     src/core/grim_live.cpp
     src/core/grim_pull.cpp
     src/core/grim_library.cpp
+    src/core/grim_hardware.cpp
     src/platform/grim_pull_test.cpp
     src/ui/panels/grim_pull_actions.cpp
     src/ui/definitive/definitive_grim_pull.cpp

@@ -39,7 +39,7 @@ struct Options {
   u32 pulls = 40;
   u32 threads = 6;
   std::vector<u32> intensities{20, 50, 80};
-  u32 families = kGrimFamilyAudio | kGrimFamilyCode | kGrimFamilyInterface;
+  u32 families = kGrimFamilyAudio | kGrimFamilyCode | kGrimFamilyInterface | kGrimFamilyHardware;
   std::string out_dir;
 };
 
@@ -72,6 +72,7 @@ bool parse_options(std::vector<std::string> args, Options &o) {
       if (v.find("audio") != std::string::npos) o.families |= kGrimFamilyAudio;
       if (v.find("code") != std::string::npos) o.families |= kGrimFamilyCode;
       if (v.find("iface") != std::string::npos) o.families |= kGrimFamilyInterface;
+      if (v.find("hw") != std::string::npos) o.families |= kGrimFamilyHardware;
     } else {
       std::fprintf(stderr, "GRIM_PULL_ERROR unknown option %s\n", args[i].c_str());
       return false;
@@ -92,6 +93,8 @@ struct LiveRun {
   std::string rom_error;
   GrimLiveStatus status;
   u32 frames_run = 0;
+  u64 ram_hash = 0;  // FNV over main RAM at the end: both backends must agree
+  u64 hw_hits = 0;   // bytes/words the hardware genes changed
 };
 
 LiveRun run_live(const Options &o, const GrimGenome *genome, u32 frames, bool game_disc = false) {
@@ -119,16 +122,26 @@ LiveRun run_live(const Options &o, const GrimGenome *genome, u32 frames, bool ga
     }
   }
   r.status = watch.status();
+  {
+    u64 h = 14695981039346656037ull;
+    const u8 *ram = sys->jit_main_ram_data();
+    for (u32 i = 0; i < psx::RAM_SIZE; ++i) h = (h ^ ram[i]) * 1099511628211ull;
+    r.ram_hash = h;
+    if (rt != nullptr) {
+      for (u64 n : rt->hits()) r.hw_hits += n;
+    }
+  }
   watch.detach(*sys);
   sys->set_grim_genome(nullptr);
   return r;
 }
 
 void print_live(const std::string &name, const Options &o, const LiveRun &r) {
-  std::printf("GRIM_PULL_LIVE %s backend=%s dead=%d frame=%u reason=%s seconds=%.3f silent=%d\n",
+  std::printf("GRIM_PULL_LIVE %s backend=%s dead=%d frame=%u reason=%s seconds=%.3f silent=%d ram=%016llX hw=%llu\n",
               name.c_str(), o.backend.c_str(), r.status.dead ? 1 : 0, r.status.death.frame,
               r.status.dead ? r.status.death.reason.c_str() : "alive", r.status.seconds,
-              r.status.silent ? 1 : 0);
+              r.status.silent ? 1 : 0, static_cast<unsigned long long>(r.ram_hash),
+              static_cast<unsigned long long>(r.hw_hits));
 }
 
 GrimGene rom_gene(const std::vector<u32> &stock, const std::vector<std::pair<u32, u32>> &patches) {
@@ -177,6 +190,7 @@ void plan_tests() {
 u32 gene_family(const GrimGene &g) {
   return g.type == GrimGeneType::SpuSample ? kGrimFamilyAudio
          : g.type == GrimGeneType::RomCode ? kGrimFamilyCode
+         : grim_gene_is_hardware(g.type)   ? kGrimFamilyHardware
                                            : kGrimFamilyInterface;
 }
 
@@ -197,7 +211,7 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
   // Family toggles: only enabled families appear; Visual alone makes nothing.
   bool toggles_ok = true;
   std::string toggle_detail;
-  for (u32 mask = 1; mask <= 15; ++mask) {
+  for (u32 mask = 1; mask <= 31; ++mask) {
     for (u32 t : {10u, 50u, 90u}) {
       for (u64 seed = 100; seed < 112; ++seed) {
         GrimPullSettings s;
@@ -454,6 +468,282 @@ void library_tests() {
   fs::remove_all(dir, ec);
 }
 
+// ---- faulty hardware simulator ------------------------------------------------------------
+
+struct FakeHw final : GrimHwTarget {
+  std::vector<u8> ram = std::vector<u8>(2u * 1024u * 1024u, 0x5A);
+  std::vector<u16> vram = std::vector<u16>(1024u * 512u, 0x1234);
+  std::vector<u8> spu = std::vector<u8>(512u * 1024u, 0xA5);
+  std::vector<u32> ram_writes, spu_writes;
+  const u8 *ram_view() const override { return ram.data(); }
+  const u16 *vram_view() const override { return vram.data(); }
+  const u8 *spu_view() const override { return spu.data(); }
+  void ram_put(u32 o, u8 v) override { ram[o] = v; ram_writes.push_back(o); }
+  void vram_put(u32 i, u16 v) override { vram[i] = v; }
+  void spu_put(u32 o, u8 v) override { spu[o] = v; spu_writes.push_back(o); }
+  size_t ram_diff() const { size_t n = 0; for (u8 b : ram) n += b != 0x5A; return n; }
+};
+
+GrimGene hw_gene(GrimGeneType type, s32 mode, s32 cells, s32 lo, s32 span, s32 bits, s32 rate, s32 arg, s32 load) {
+  GrimGene g = grim_default_gene(type);
+  g.seed = 77;
+  g.params = {mode, cells, lo, span, bits, rate, arg, load};
+  return g;
+}
+
+size_t run_hw(FakeHw &t, const GrimGene &g, u32 frames, u32 load = 0, u32 first_frame = 0) {
+  GrimGenome genome;
+  genome.genes.push_back(g);
+  GrimGenomeRuntime rt(genome);
+  for (u32 f = first_frame; f < first_frame + frames; ++f) {
+    rt.begin_frame(f);
+    rt.apply_hardware(t, true, load);
+    for (int s = 0; s < 4; ++s) rt.apply_hardware(t, false, load);
+  }
+  return static_cast<size_t>(rt.hits()[0]);
+}
+
+void hardware_tests(const GrimPullContext &ctx) {
+  using T = GrimGeneType;
+  // Stuck-high: only the chosen bits of only the chosen bytes change, inside the region.
+  {
+    FakeHw t;
+    const GrimGene g = hw_gene(T::HwRam, 0, 16, 512, 64, 2, 0, 1, 0);
+    run_hw(t, g, 3);
+    bool inside = true;
+    for (u32 o : t.ram_writes) inside = inside && o >= 512u * 1024u && o < 576u * 1024u;
+    check(t.ram_diff() > 0 && t.ram_diff() <= 16 && inside, "hw_stuck_high_changes_few_bytes_inside_region",
+          std::to_string(t.ram_diff()) + " bytes");
+    bool only_high = true;
+    for (u8 b : t.ram) only_high = only_high && (b & 0x5A) == 0x5A; // bits only ever set
+    check(only_high, "hw_stuck_high_only_sets_bits");
+  }
+  {
+    FakeHw t;
+    run_hw(t, hw_gene(T::HwRam, 1, 16, 512, 64, 2, 0, 1, 0), 3);
+    bool only_low = true;
+    for (u8 b : t.ram) only_low = only_low && (b | 0x5A) == 0x5A;
+    check(t.ram_diff() > 0 && only_low, "hw_stuck_low_only_clears_bits");
+  }
+  // A game rewrites the cell: the next tick holds the bit again.
+  {
+    FakeHw t;
+    std::fill(t.ram.begin(), t.ram.end(), u8{0});
+    GrimGenome genome;
+    genome.genes.push_back(hw_gene(T::HwRam, 0, 1, 512, 8, 1, 0, 1, 0));
+    GrimGenomeRuntime rt(genome);
+    rt.begin_frame(0);
+    rt.apply_hardware(t, true, 0);
+    bool held = !t.ram_writes.empty();
+    if (held) {
+      const u32 where = t.ram_writes[0];
+      held = t.ram[where] != 0;
+      t.ram[where] = 0; // the game rewrites the cell
+      rt.apply_hardware(t, false, 0);
+      held = held && t.ram[where] != 0;
+    }
+    check(held, "hw_stuck_bit_holds_after_rewrite");
+  }
+  // Bad column: the same bit at a regular stride.
+  {
+    FakeHw t;
+    const GrimGene g = hw_gene(T::HwRam, 4, 20, 512, 64, 1, 0, 256, 0);
+    run_hw(t, g, 2);
+    std::set<u32> offs(t.ram_writes.begin(), t.ram_writes.end());
+    bool stride_ok = offs.size() >= 10;
+    u32 prev = 0;
+    for (u32 o : offs) {
+      stride_ok = stride_ok && (prev == 0 || o - prev == 256);
+      prev = o;
+    }
+    check(stride_ok, "hw_bad_column_has_regular_stride", std::to_string(offs.size()) + " cells");
+  }
+  // Flip: transient, frame tick only; rate 1000 flips every active cell every frame.
+  {
+    FakeHw t;
+    GrimGenome genome;
+    genome.genes.push_back(hw_gene(T::HwRam, 2, 8, 512, 64, 1, 1000, 1, 0));
+    GrimGenomeRuntime rt(genome);
+    rt.begin_frame(0);
+    for (int s = 0; s < 6; ++s) rt.apply_hardware(t, false, 0);
+    check(t.ram_diff() == 0, "hw_flip_does_not_fire_on_scanline_ticks");
+    rt.apply_hardware(t, true, 0);
+    check(t.ram_diff() > 0 && t.ram_diff() <= 8, "hw_flip_fires_on_the_frame_tick");
+  }
+  // Burst writes a run of random bytes.
+  {
+    FakeHw t;
+    run_hw(t, hw_gene(T::HwRam, 3, 32, 512, 64, 1, 1000, 1, 0), 1);
+    check(t.ram_writes.size() == 32, "hw_burst_writes_a_run", std::to_string(t.ram_writes.size()));
+  }
+  // Decay: rows nobody rewrites drift; rows that keep changing do not.
+  {
+    FakeHw t;
+    GrimGenome genome;
+    genome.genes.push_back(hw_gene(T::HwRam, 5, 64, 512, 8, 1, 1000, 10, 0)); // 8 rows
+    GrimGenomeRuntime rt(genome);
+    for (u32 f = 0; f < 40; ++f) {
+      rt.begin_frame(f);
+      t.ram[512u * 1024u + 3] = static_cast<u8>(f); // row 0 is rewritten every frame
+      rt.apply_hardware(t, true, 0);
+    }
+    bool row0_untouched = true, others_decayed = false;
+    for (u32 o : t.ram_writes) {
+      const u32 row = (o - 512u * 1024u) / 1024u;
+      row0_untouched = row0_untouched && row != 0u;
+      others_decayed = others_decayed || row > 0u;
+    }
+    check(others_decayed && row0_untouched, "hw_decay_hits_idle_rows_only");
+    check(t.ram_writes.size() >= 8, "hw_decay_needs_idle_frames_first", std::to_string(t.ram_writes.size()));
+  }
+  // Rowhammer: rows that change every frame damage a neighbour.
+  {
+    FakeHw t;
+    GrimGenome genome;
+    genome.genes.push_back(hw_gene(T::HwRam, 6, 8, 512, 8, 1, 1000, 4, 0));
+    GrimGenomeRuntime rt(genome);
+    for (u32 f = 0; f < 30; ++f) {
+      rt.begin_frame(f);
+      t.ram[512u * 1024u + 3 * 1024u + 5] = static_cast<u8>(f); // row 3 is hammered
+      rt.apply_hardware(t, true, 0);
+    }
+    bool neighbours = !t.ram_writes.empty();
+    for (u32 o : t.ram_writes) {
+      const u32 row = (o - 512u * 1024u) / 1024u;
+      neighbours = neighbours && (row == 2u || row == 4u);
+    }
+    check(neighbours, "hw_rowhammer_damages_neighbouring_rows");
+  }
+  // VRAM and sound RAM.
+  {
+    FakeHw t;
+    run_hw(t, hw_gene(T::HwVram, 3, 3, 100, 20, 1, 0, 1, 0), 2);
+    size_t black_rows = 0;
+    for (u32 row = 0; row < 512; ++row) black_rows += t.vram[row * 1024u + 500u] == 0 ? 1u : 0u;
+    check(black_rows >= 1 && black_rows <= 3, "hw_vram_dead_line_blanks_whole_rows", std::to_string(black_rows));
+    FakeHw t2;
+    run_hw(t2, hw_gene(T::HwVram, 0, 12, 0, 512, 3, 0, 1, 0), 2);
+    size_t changed = 0;
+    for (u16 w : t2.vram) changed += w != 0x1234 ? 1u : 0u;
+    check(changed > 0 && changed <= 12, "hw_vram_stuck_bits");
+    FakeHw t3;
+    run_hw(t3, hw_gene(T::HwSpuRam, 1, 12, 16, 128, 2, 0, 1, 0), 2);
+    bool in_spu = !t3.spu_writes.empty();
+    for (u32 o : t3.spu_writes) in_spu = in_spu && o >= 16u * 1024u && o < 144u * 1024u;
+    check(in_spu, "hw_sound_ram_faults_stay_in_region");
+  }
+  // Triggers: rot grows the number of faulty cells, a closed window does nothing.
+  {
+    GrimGene g = hw_gene(T::HwRam, 0, 200, 512, 128, 1, 0, 1, 0);
+    g.trigger.kind = GrimTriggerKind::Rot;
+    g.trigger.start_frame = 100;
+    g.trigger.end_frame = 1100;
+    FakeHw early, late, before;
+    run_hw(before, g, 1, 0, 50);
+    run_hw(early, g, 1, 0, 300);
+    run_hw(late, g, 1, 0, 1050);
+    check(before.ram_diff() == 0 && early.ram_diff() > 0 && late.ram_diff() > early.ram_diff() * 2,
+          "hw_rot_wears_in_gradually",
+          std::to_string(before.ram_diff()) + "/" + std::to_string(early.ram_diff()) + "/" +
+              std::to_string(late.ram_diff()));
+    g.trigger.kind = GrimTriggerKind::Window;
+    g.trigger.start_frame = 10;
+    g.trigger.end_frame = 20;
+    FakeHw outside;
+    run_hw(outside, g, 5, 0, 30);
+    check(outside.ram_diff() == 0, "hw_window_closed_means_healthy");
+  }
+  // Bus load: a load-sensitive flaky cell fails more when the bus is busy, less when idle.
+  {
+    const GrimGene g = hw_gene(T::HwRam, 2, 64, 512, 128, 1, 300, 1, 1000);
+    FakeHw idle, busy, plain;
+    const size_t idle_hits = run_hw(idle, g, 200, 0);
+    const size_t busy_hits = run_hw(busy, g, 200, 1024);
+    GrimGene insensitive = g;
+    insensitive.params[7] = 0;
+    const size_t plain_hits = run_hw(plain, insensitive, 200, 1024);
+    check(busy_hits > idle_hits * 4 && plain_hits > idle_hits, "hw_bus_load_raises_failure_rate",
+          std::to_string(idle_hits) + " idle, " + std::to_string(busy_hits) + " busy, " +
+              std::to_string(plain_hits) + " plain");
+  }
+  // Determinism.
+  {
+    const GrimGene g = hw_gene(T::HwRam, 2, 32, 512, 128, 2, 400, 1, 0);
+    FakeHw a, b;
+    run_hw(a, g, 120);
+    run_hw(b, g, 120);
+    check(a.ram == b.ram && a.ram_writes == b.ram_writes, "hw_same_genome_same_faults");
+  }
+  // Critical memory: kernel and stack are almost never hit, and never by accident.
+  {
+    GrimRandomParams p;
+    p.spu = p.gpu = false;
+    p.hw_genes_min = p.hw_genes_max = 1;
+    p.risk_q10 = 1024;
+    u32 critical = 0, total = 0, stray = 0;
+    for (u64 seed = 1; seed <= 4000; ++seed) {
+      const GrimGenome g = grim_random_genome(seed, p);
+      for (const GrimGene &gene : g.genes) {
+        ++total;
+        const bool crit = grim_hw_gene_is_critical(gene);
+        critical += crit ? 1u : 0u;
+        if (!crit) {
+          FakeHw t;
+          GrimGene always = gene;
+          always.trigger = GrimTrigger{};
+          run_hw(t, always, 60);
+          for (u32 o : t.ram_writes)
+            stray += (o < kGrimRamKernelBytes || o >= 2u * 1024u * 1024u - kGrimRamStackBytes) ? 1u : 0u;
+          for (u32 o : t.spu_writes) stray += o < kGrimSpuRamReservedBytes ? 1u : 0u;
+        }
+      }
+    }
+    const double pct = 100.0 * critical / std::max(1u, total);
+    check(pct > 0.2 && pct < 2.5, "hw_critical_hits_are_extremely_rare", std::to_string(pct) + " %");
+    check(stray == 0, "hw_non_critical_genes_never_touch_kernel_or_stack", std::to_string(stray) + " stray writes");
+    p.hw_critical_permille = 0;
+    u32 any = 0;
+    for (u64 seed = 1; seed <= 2000; ++seed) {
+      for (const GrimGene &gene : grim_random_genome(seed, p).genes) any += grim_hw_gene_is_critical(gene) ? 1u : 0u;
+    }
+    check(any == 0, "hw_critical_can_be_switched_off");
+  }
+  // Generated hardware genomes are valid text and every kind of fault shows up.
+  {
+    GrimRandomParams p;
+    p.spu = p.gpu = false;
+    p.hw_genes_min = p.hw_genes_max = 3;
+    std::set<std::pair<int, int>> kinds;
+    bool round_trip = true;
+    for (u64 seed = 1; seed <= 300; ++seed) {
+      const GrimGenome g = grim_random_genome(seed, p);
+      GrimGenome parsed;
+      std::string err;
+      round_trip = round_trip && grim_genome_parse(grim_genome_serialize(g), parsed, err) &&
+                   grim_genome_hash(parsed) == grim_genome_hash(g);
+      for (const GrimGene &gene : g.genes) kinds.insert({static_cast<int>(gene.type), gene.params[0]});
+    }
+    check(round_trip, "hw_genomes_round_trip");
+    check(kinds.size() >= 14, "hw_generator_covers_every_fault_kind", std::to_string(kinds.size()) + " kinds");
+  }
+  // Pull integration: the Hardware family makes only hardware genes, with readable lines.
+  {
+    GrimPullSettings s;
+    s.families = kGrimFamilyHardware;
+    bool only_hw = true, lines_ok = true;
+    for (u64 seed = 1; seed <= 40; ++seed) {
+      const GrimGenome g = grim_pull_generate(seed, s, ctx, nullptr);
+      only_hw = only_hw && !g.genes.empty();
+      for (const GrimGene &gene : g.genes) only_hw = only_hw && grim_gene_is_hardware(gene.type);
+      for (const GrimGeneLine &l : grim_pull_describe(g, ctx)) {
+        lines_ok = lines_ok && l.tag == "HW" && l.domain == kGrimFamilyHardware && !l.title.empty() &&
+                   !l.detail.empty();
+      }
+    }
+    check(only_hw && lines_ok, "pull_hardware_family_makes_hardware_genes");
+  }
+}
+
 // A corrupted GPU list that points back at itself used to replay a million packets inside
 // one DMA (minutes of host time), freezing the live machine and the death watch with it.
 void dma_loop_test(const Options &o) {
@@ -508,6 +798,30 @@ void live_tests(const Options &o, const GrimPullContext &ctx, const std::vector<
   check(loop.status.death.detail.find("Syscall exception") != std::string::npos &&
             loop.status.death.culprit_gene == 0,
         "live_exception_loop_names_cause_and_culprit", loop.status.death.detail);
+
+  // Faulty hardware on a real machine: effects happen, and both CPU backends see the same
+  // memory (compare the ram= and hw= fields of the two runs' GRIM_PULL_LIVE lines).
+  {
+    struct Case {
+      const char *name;
+      GrimGene gene;
+    } cases[] = {
+        {"hw_stuck_high_ram", hw_gene(GrimGeneType::HwRam, 0, 400, 1024, 512, 2, 0, 1, 0)},
+        {"hw_flaky_ram", hw_gene(GrimGeneType::HwRam, 2, 200, 600, 900, 1, 700, 1, 0)},
+        {"hw_decay_ram", hw_gene(GrimGeneType::HwRam, 5, 32, 256, 1024, 2, 600, 20, 0)},
+        {"hw_rowhammer_ram", hw_gene(GrimGeneType::HwRam, 6, 16, 256, 1024, 2, 600, 3, 0)},
+        {"hw_dead_vram_line", hw_gene(GrimGeneType::HwVram, 3, 6, 0, 480, 1, 0, 1, 0)},
+        {"hw_stuck_sound_ram", hw_gene(GrimGeneType::HwSpuRam, 1, 800, 16, 400, 3, 0, 1, 0)},
+    };
+    for (Case &c : cases) {
+      GrimGenome g;
+      g.genes.push_back(c.gene);
+      const LiveRun r = run_live(o, &g, o.frames);
+      print_live(c.name, o, r);
+      check(r.rom_error.empty() && r.hw_hits > 0, std::string(c.name) + "_takes_effect_on_a_real_machine",
+            std::to_string(r.hw_hits) + " changes");
+    }
+  }
 
   // Recovery: the next pull on a fresh machine is unaffected by the dead one.
   const LiveRun again = run_live(o, nullptr, 240);
@@ -571,6 +885,7 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
   generation_tests(ctx, no_rom);
   mercy_and_death_text_tests();
   library_tests();
+  hardware_tests(ctx);
   dma_loop_test(o);
   live_tests(o, ctx, rom.words);
 

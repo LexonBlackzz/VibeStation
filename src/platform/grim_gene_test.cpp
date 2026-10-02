@@ -1035,6 +1035,9 @@ void test_gp0_transforms() {
         test_static_gene_transport(type);
         continue;
       }
+      if (grim_gene_is_hardware(type)) {
+        continue; // memory faults, not GP0 traffic: --grim-pull-test covers them
+      }
       for (int round = 0; round < 40 && ok; ++round) {
         GrimGene g = grim_default_gene(type);
         const auto &schema = grim_gene_schema(type);
@@ -1081,7 +1084,8 @@ void test_gp0_transforms() {
     check(ok, "gp0_fuzz_preserves_word_count_and_forbidden_bits", detail);
     bool all_active = true;
     for (size_t t = static_cast<size_t>(GrimGeneType::GpuVertex); t < static_cast<size_t>(GrimGeneType::Count); ++t) {
-      if (!grim_gene_is_rom(static_cast<GrimGeneType>(t))) {
+      if (!grim_gene_is_rom(static_cast<GrimGeneType>(t)) &&
+          !grim_gene_is_hardware(static_cast<GrimGeneType>(t))) {
         all_active = all_active && changed_by_type[t] > 0;
       }
     }

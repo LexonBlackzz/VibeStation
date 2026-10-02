@@ -929,6 +929,10 @@ private:
   void apply_ram_reaper_for_frame();
   void apply_gpu_reaper_for_frame();
   void apply_sound_reaper_for_frame();
+  // Faulty Hardware Simulator (Phase 5.1): frame start and every eighth scanline.
+  void grim_hardware_tick(bool frame_tick);
+  u64 grim_hw_dma_words_prev_ = 0;
+  u32 grim_hw_bus_load_q10_ = 0;
 };
 
 // Timer IRQ helper (called from timer.cpp)

@@ -19,6 +19,7 @@ struct GrimTheme {
     ImU32 visual = IM_COL32(211, 169, 63, 255);
     ImU32 code = IM_COL32(224, 83, 94, 255);
     ImU32 iface = IM_COL32(63, 179, 166, 255);
+    ImU32 hardware = IM_COL32(160, 123, 224, 255);
     ImU32 alive = IM_COL32(63, 179, 166, 255);
     ImU32 working = IM_COL32(211, 169, 63, 255);
     ImU32 dead = IM_COL32(224, 83, 94, 255);
@@ -32,6 +33,7 @@ ImU32 family_color(u32 family) {
     case kGrimFamilyAudio: return kTheme.audio;
     case kGrimFamilyVisual: return kTheme.visual;
     case kGrimFamilyCode: return kTheme.code;
+    case kGrimFamilyHardware: return kTheme.hardware;
     default: return kTheme.iface;
     }
 }
@@ -261,14 +263,14 @@ void App::draw_grim_pull_tab() {
     ImGui::Spacing();
     {
         u32 on = 0;
-        for (u32 f : {kGrimFamilyAudio, kGrimFamilyCode, kGrimFamilyInterface}) {
+        for (u32 f : {kGrimFamilyAudio, kGrimFamilyCode, kGrimFamilyInterface, kGrimFamilyHardware}) {
             on += (s.settings.families & f & available) != 0 ? 1u : 0u;
         }
         char right[32];
-        std::snprintf(right, sizeof(right), "%u of 4", on);
+        std::snprintf(right, sizeof(right), "%u of 5", on);
         caption("GENE FAMILIES", right);
         const float gap = 6.0f;
-        const float w = (full - 3.0f * gap) / 4.0f;
+        const float w = (full - 4.0f * gap) / 5.0f;
         const struct {
             const char* label;
             u32 family;
@@ -281,8 +283,10 @@ void App::draw_grim_pull_tab() {
             {"Code", kGrimFamilyCode, (available & kGrimFamilyCode) != 0,
              "Needs the BIOS map; it is made once per BIOS (see the status bar)."},
             {"Iface", kGrimFamilyInterface, true, ""},
+            {"HW", kGrimFamilyHardware, true,
+             "Faulty hardware simulator: failing RAM, VRAM and sound RAM. Kernel memory is almost never hit."},
         };
-        for (size_t i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < 5; ++i) {
             if (i > 0) {
                 ImGui::SameLine(0.0f, gap);
             }
@@ -316,11 +320,19 @@ void App::draw_grim_pull_tab() {
             ImGui::PushStyleColor(ImGuiCol_Text, culprit ? kTheme.dead : kTheme.text);
             ImGui::TextUnformatted(l.title.c_str());
             ImGui::PopStyleColor();
-            ImGui::SameLine();
+            // Long details (hardware genes) go on their own line under the title.
+            const float room = full - 18.0f - 48.0f - ImGui::CalcTextSize(l.title.c_str()).x;
+            if (ImGui::CalcTextSize(l.detail.c_str()).x > room) {
+                ImGui::SetCursorScreenPos(ImVec2(p.x + 18.0f, p.y + ImGui::GetTextLineHeightWithSpacing()));
+            } else {
+                ImGui::SameLine();
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, kTheme.muted);
+            ImGui::PushTextWrapPos(p.x + full - 48.0f);
             ImGui::TextUnformatted(l.detail.c_str());
+            ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
-            const char* tag = l.rom ? "ROM" : "IFACE";
+            const char* tag = l.tag.c_str();
             draw->AddText(ImVec2(p.x + full - ImGui::CalcTextSize(tag).x, p.y), kTheme.faint, tag);
         }
     }
