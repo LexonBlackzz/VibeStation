@@ -676,6 +676,7 @@ void Ps2App::audio_stutter_thread_main() {
     while (!audio_stutter_thread_stop_.load(
         std::memory_order_acquire)) {
         if (audio_device_ == 0u ||
+            !audio_live_.load(std::memory_order_acquire) ||
             !lag_stutter_enabled_.load(std::memory_order_acquire)) {
             lag_stutter_active_.store(false, std::memory_order_release);
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -744,6 +745,16 @@ void Ps2App::audio_stutter_thread_main() {
 }
 
 void Ps2App::update_audio() {
+    const bool live = emulation_running_ && !system_.halted();
+    if (audio_live_.exchange(live, std::memory_order_acq_rel) && !live &&
+        audio_device_ != 0u) {
+        // Emulation just stopped (pause, halt, reset): drain what is queued
+        // and wipe the tape so nothing keeps looping the last 400 ms.
+        reset_audio_stutter();
+        SDL_ClearQueuedAudio(audio_device_);
+    }
+    if (!live) return;
+
     const std::size_t available = system_.spu2().queued_frames();
     auto pcm = available != 0u
         ? system_.spu2().take_samples(available)

@@ -79,6 +79,8 @@ private:
     unsigned int audio_device_ = 0;
     std::atomic<bool> lag_stutter_enabled_{true};
     std::atomic<bool> lag_stutter_active_{false};
+    // False while paused, halted or stopped: the 400 ms tape must not replay.
+    std::atomic<bool> audio_live_{false};
     std::vector<s16> audio_history_{};
     std::size_t audio_history_write_frame_ = 0;
     std::size_t audio_history_play_frame_ = 0;
