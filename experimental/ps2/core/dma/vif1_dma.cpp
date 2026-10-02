@@ -558,7 +558,7 @@ bool Vif1Dma::consume_payload_word(
             const u64 hi =
                 static_cast<u64>(direct_words_[2]) |
                 (static_cast<u64>(direct_words_[3]) << 32);
-            gs.write_gif_qword(lo, hi);
+            gs.write_gif_qword(lo, hi, 2);
             direct_word_count_ = 0;
         }
         if (direct_words_remaining_ == 0) return finish_command(bus);
@@ -907,6 +907,9 @@ bool Vif1Dma::service_forward(
     }
 
     if (qwc == 0) return true;
+
+    // DIRECT data goes to the GIF; wait while path 3 is mid-packet.
+    if (payload_ == Payload::Direct && !gs.gif_path_free(2)) return true;
 
     u64 lo = 0;
     u64 hi = 0;

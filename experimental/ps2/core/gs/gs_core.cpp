@@ -1817,10 +1817,24 @@ void GsCore::submit_vertex(u64 xyz, bool xyzf) {
     }
 }
 
-void GsCore::write_gif_qword(u64 lo, u64 hi) {
+bool GsCore::gif_path_free(int path) {
+    if (!gif_.active || gif_path_ == path) {
+        gif_stall_ = 0;
+        return true;
+    }
+    if (++gif_stall_ > 262144u) {
+        gif_ = {};
+        gif_stall_ = 0;
+        return true;
+    }
+    return false;
+}
+
+void GsCore::write_gif_qword(u64 lo, u64 hi, int path) {
     ++stats_.gif_qwords;
 
     if (!gif_.active) {
+        gif_path_ = path;
         begin_tag(lo, hi);
         return;
     }

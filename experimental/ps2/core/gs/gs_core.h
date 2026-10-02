@@ -175,7 +175,14 @@ public:
 
     [[nodiscard]] bool write_gif_fifo32(u32 physical, u32 value);
     [[nodiscard]] bool write_gif_fifo64(u32 physical, u64 value);
-    void write_gif_qword(u64 lo, u64 hi);
+    // `path` is the GIF path feeding the qword (1 = VU1 XGKICK, 2 = VIF1
+    // DIRECT, 3 = GIF DMA). A packet in progress belongs to its path.
+    void write_gif_qword(u64 lo, u64 hi, int path = 3);
+    // True when `path` may send a qword now. A path that has a packet in
+    // progress keeps the GIF until the packet ends; the others must wait or
+    // their data would be spliced into it (e.g. a draw packet into an image
+    // upload). A packet that never ends is abandoned after a long stall.
+    [[nodiscard]] bool gif_path_free(int path);
     [[nodiscard]] bool read_local_to_host_qword(u64& lo, u64& hi);
 
     // Update `display` from `regs` + VRAM. Asynchronous when the raster
@@ -280,6 +287,9 @@ private:
         std::array<u8, 32> pending{};
         u32 pending_size = 0;
     };
+
+    int gif_path_ = 0;
+    u32 gif_stall_ = 0;
 
     struct GifState {
         bool active = false;
