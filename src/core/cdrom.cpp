@@ -2231,6 +2231,14 @@ void CdRom::cmd_test() {
   case 0x21:
     enqueue_irq(3, {0x00u});
     break;
+  case 0x04: // Reset SCEx counters
+    enqueue_irq(3, {stat_byte()});
+    break;
+  case 0x05: // Read SCEx counters
+    // Sony's anti-modchip routine (e.g. Crash Bash) reads this after playing the
+    // disc and terminates if the second byte is non-zero. A real console reports 0.
+    enqueue_irq(3, {stat_byte(), 0x00u, 0x00u});
+    break;
   case 0x22:
     enqueue_irq(3, {static_cast<u8>('f'), static_cast<u8>('o'),
                     static_cast<u8>('r'), static_cast<u8>(' '),
