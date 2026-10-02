@@ -1,6 +1,7 @@
 #pragma once
 #include "types.h"
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <fstream>
@@ -29,6 +30,9 @@ class CdRom {
 public:
   void init(System *sys) { sys_ = sys; }
   void reset();
+  // Grim Reaper "bad modchip": the controller fails Sony's software checks.
+  void set_bad_modchip(bool on) { bad_modchip_.store(on, std::memory_order_release); }
+  bool bad_modchip() const { return bad_modchip_.load(std::memory_order_acquire); }
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path);
@@ -113,6 +117,7 @@ public:
   u64 debug_last_irq_clear_cycle() const { return last_irq_clear_cycle_; }
 
 private:
+  std::atomic<bool> bad_modchip_{false};
   System *sys_ = nullptr;
   bool disc_loaded_ = false;
 

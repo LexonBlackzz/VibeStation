@@ -355,6 +355,13 @@ void App::panel_grim_reaper() {
 
     ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f),
         "Experimental BIOS corruption. Original BIOS is never modified.");
+    ImGui::Checkbox("Bad modchip", &bad_modchip_enabled_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "CD controller fails Sony's software checks (SCEx counters, region, "
+            "version).\nSome games show SOFTWARE TERMINATED, others won't care, "
+            "some may break.");
+    }
     if (ImGui::BeginTabBar("GrimReaperTabs")) {
         if (ImGui::BeginTabItem("Single BIOS")) {
 

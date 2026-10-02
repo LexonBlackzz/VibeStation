@@ -2226,12 +2226,31 @@ void CdRom::cmd_test() {
 
   switch (param_fifo_[0]) {
   case 0x20:
-    enqueue_irq(3, {0x96u, 0x08u, 0x24u, 0xC1u});
+    if (bad_modchip()) {
+      enqueue_irq(3, {0x00u, 0x00u, 0x00u, 0x00u}); // no valid version date
+    } else {
+      enqueue_irq(3, {0x96u, 0x08u, 0x24u, 0xC1u});
+    }
     break;
   case 0x21:
     enqueue_irq(3, {0x00u});
     break;
+  case 0x04: // Reset SCEx counters
+    enqueue_irq(3, {stat_byte()});
+    break;
+  case 0x05: // Read SCEx counters
+    // Sony's anti-modchip routine (e.g. Crash Bash) reads this after playing the
+    // disc: a non-zero second byte makes the game show its own "SOFTWARE
+    // TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED" screen. A real console
+    // reports 0; the Grim Reaper "bad modchip" option reports a fault.
+    enqueue_irq(3, {stat_byte(), static_cast<u8>(bad_modchip() ? 0x01u : 0x00u),
+                    0x00u});
+    break;
   case 0x22:
+    if (bad_modchip()) {
+      enqueue_irq(3, {'f', 'o', 'r', ' ', 'E', 'u', 'r', 'o', 'p', 'e'});
+      break;
+    }
     enqueue_irq(3, {static_cast<u8>('f'), static_cast<u8>('o'),
                     static_cast<u8>('r'), static_cast<u8>(' '),
                     static_cast<u8>('U'), static_cast<u8>('/'),

@@ -215,6 +215,7 @@ private:
 	u64 gpu_reaper_active_seed_ = 0u;
 	u64 gpu_reaper_total_mutations_ = 0;
 	bool sound_reaper_enabled_ = false;
+	bool bad_modchip_enabled_ = false;
 	u32 sound_reaper_writes_per_frame_ = 32u;
 	float sound_reaper_intensity_percent_ = 20.0f;
 	bool sound_reaper_affect_pitch_ = true;

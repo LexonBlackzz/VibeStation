@@ -899,6 +899,9 @@ void App::update() {
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
+    if (system_) {
+        system_->cdrom().set_bad_modchip(bad_modchip_enabled_);
+    }
 
     // Push controller state into lock-free mailbox consumed by the emu thread.
     const u16 buttons = input_->controller().button_state();

@@ -876,6 +876,13 @@ void App::panel_definitive_grim_reaper() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
+    ImGui::Checkbox("Bad modchip", &bad_modchip_enabled_);
+    ImGui::TextUnformatted(
+        "CD controller fails software checks. May terminate or break games.");
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
 
     const bool bios_ready =
         system_ != nullptr &&
