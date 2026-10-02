@@ -681,10 +681,16 @@ void IopBus::raise_dma_irq(u32 channel) {
     u32 current = 0;
     if (!hw_.read32(address, current)) return;
 
-    current |= 1u << (24u + index);
-
+    // A channel only latches its completion flag while its interrupt is
+    // enabled (SIF0/SIF1 excepted). A flag latched while disabled fires as
+    // soon as the driver enables the channel, e.g. cdvdman's DVD sector
+    // verification running on the stale CdGetToc DMA3 completion.
     const bool enabled =
         (current & (1u << (16u + index))) != 0;
+    if (!enabled && !sif_always_routes) return;
+
+    current |= 1u << (24u + index);
+
     const bool master =
         (current & (1u << 23)) != 0;
     const bool force =
