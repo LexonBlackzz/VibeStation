@@ -1359,6 +1359,10 @@ void Spu::write16(u32 offset, u16 value) {
     }
     pending_koff_mask_ =
         (pending_koff_mask_ & 0x00FF0000u) | static_cast<u32>(value);
+    if ((spucnt_effective() & 0x8000u) == 0u) {
+      cut_voices_immediate(pending_koff_mask_ & 0x0000FFFFu);
+      pending_koff_mask_ &= 0x00FF0000u;
+    }
     break;
   case 0x18E:
     note_koff_write(true, value);
@@ -1396,6 +1400,10 @@ void Spu::write16(u32 offset, u16 value) {
     }
     pending_koff_mask_ = (pending_koff_mask_ & 0x0000FFFFu) |
                          (static_cast<u32>(value & 0x00FFu) << 16);
+    if ((spucnt_effective() & 0x8000u) == 0u) {
+      cut_voices_immediate(pending_koff_mask_ & 0x00FF0000u);
+      pending_koff_mask_ &= 0x0000FFFFu;
+    }
     break;
   case 0x190:
     pitch_mod_mask_ = (pitch_mod_mask_ & 0x00FF0000u) | static_cast<u32>(value);
@@ -1716,6 +1724,26 @@ void Spu::key_off_voice(int voice) {
   vs.release_tracking = true;
   vs.release_start_sample = sample_clock_;
   ++audio_diag_.key_off_events;
+}
+
+// A key-off written while the SPU is disabled stops the voice at once instead
+// of entering its release phase; the game's SPU init rewrites voice registers
+// and SPU RAM right after, which would otherwise bend a still-sounding tail.
+void Spu::cut_voices_immediate(u32 mask) {
+  for (int v = 0; v < NUM_VOICES; ++v) {
+    if ((mask & (1u << v)) == 0u) {
+      continue;
+    }
+    VoiceState &vs = voices_[v];
+    vs.phase = VoiceState::AdsrPhase::Off;
+    vs.env_level = 0;
+    vs.adsr_counter = 0;
+    vs.key_on = false;
+    vs.stop_after_block = false;
+    vs.release_tracking = false;
+    vs.current_vol_l = 0;
+    vs.current_vol_r = 0;
+  }
 }
 
 void Spu::apply_pending_key_strobes() {
