@@ -923,7 +923,7 @@ void App::panel_definitive_grim_reaper() {
     ImGui::Separator();
     ImGui::Spacing();
     ImGui::Checkbox("Bad modchip", &bad_modchip_enabled_);
-    ImGui::TextUnformatted(
+    ImGui::TextWrapped(
         "CD controller fails software checks. May terminate or break games.");
 
     ImGui::Spacing();
