@@ -1220,6 +1220,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     return 1;
   }
+  // `--genome file.json --frame-test ...`: run a Grim Reaper genome headless (both CPU modes).
+  sys->set_grim_genome(grim_gui_genome());
   if (!cue_path.empty()) {
     LOG_INFO("Disc cue: %s", cue_path.c_str());
     LOG_INFO("Disc bin: %s", bin_path.c_str());

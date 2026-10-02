@@ -1169,9 +1169,11 @@ void emit_read_cop0(Xbyak::CodeGenerator &code,
     code.mov(dst, 0x00000002u);
     break;
   default:
-    code.mov(code.rax, code.ptr[
+    // Use the destination's own 64-bit register for the table pointer: callers keep live
+    // values in RAX (SWC0 holds its address there) and must not see it clobbered.
+    code.mov(dst.cvt64(), code.ptr[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cop0_regs))]);
-    code.mov(dst, code.dword[code.rax + static_cast<int>(reg & 31u) * 4]);
+    code.mov(dst, code.dword[dst.cvt64() + static_cast<int>(reg & 31u) * 4]);
     break;
   }
 }
@@ -5740,7 +5742,14 @@ V4NativeFn compile_v4_likely_branch_head(
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, pending_branch_pc))],
       branch_pc);
-  code.inc(code.ebx);
+  // Primary branch-likely opcodes 0x14..0x17 are one-cycle in the CPU timing model. The REGIMM
+  // likely forms (opcode 1, odd rt encodings) cost what a taken BcondZ costs: two cycles.
+  if (control.op == V4ControlOp::Beql || control.op == V4ControlOp::Bnel ||
+      control.op == V4ControlOp::Blezl || control.op == V4ControlOp::Bgtzl) {
+    code.inc(code.ebx);
+  } else {
+    code.add(code.ebx, 2u);
+  }
   code.dec(code.r12d);
   code.mov(code.dword[
       code.r11 + static_cast<int>(offsetof(V4NativeState, scheduler_yield))],

@@ -1996,12 +1996,21 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 now >= scheduler_trace.step_from_cycle;
             const u32 pre_pc = trace_steps ? cpu_.pc() : 0u;
             const u32 pre_instr = trace_steps ? read32_instruction(pre_pc) : 0u;
+            // The word the CPU really executes: the I-cache copy when the line is cached
+            // (it can differ from memory), 0 when the line is not cached.
+            u32 pre_visible = 0u;
+            const bool pre_cached =
+                trace_steps && cpu_.read_visible_instruction_for_backend(pre_pc, pre_visible);
             CpuRunSliceResult run =
                 cpu_.run_slice(budget, trace_steps ? 1u : budget);
             if (trace_steps) {
                 LOG_INFO("SCHED_STEP cyc=%llu pc=%08X instr=%08X sp=%08X run=%u/%u",
                          static_cast<unsigned long long>(now), pre_pc, pre_instr,
                          cpu_.reg(29), run.cycles, run.instructions);
+                if (pre_cached && pre_visible != pre_instr) {
+                    LOG_INFO("SCHED_STEP_STALE pc=%08X memory=%08X icache=%08X", pre_pc,
+                             pre_instr, pre_visible);
+                }
             }
             if (run.cycles == 0 || run.instructions == 0) {
                 if (effective_cpu_execution_mode() ==

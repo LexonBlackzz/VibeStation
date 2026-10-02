@@ -173,11 +173,20 @@ sound RAM; CD, controller, memory card and clock come next.
 - Verification: stock hash `0x432E585CF1535F9C`, all older suites, and full GT2 replay
   (5738 frames, every BOOT_STATE_HASH field) identical to the Phase 5 baseline on both backends.
 
-**Known issue (separate task flagged):** under the `hw_rowhammer_ram` live case the two CPU
-backends diverge by 2 cycles at frame 212, right after a hammer write turned an instruction in
-running Shell code (`0x0EACE1`, `sw` -> `sltiu`) while it may still sit in the I-cache. The other
-five live cases give identical RAM hashes and hit counts on both backends. So parity holds for
-data faults; for faults that rewrite *code* behind the CPU's back it is not proven. Not fixed here.
+**Backend drift found and fixed.** Under the `hw_rowhammer_ram` live case the two CPU backends drifted
+by 2 cycles at frame 212, right after a hammer write corrupted running Shell code. It looked like an I-cache
+problem; it was not. The corrupted code contained encodings real programs never use, and the recompiler had
+two bugs on them (reproduced in the CPU compare harness, no I-cache or RAM change needed):
+1. REGIMM branch-likely forms (opcode 1 with the unused "likely" rt bit) cost 1 cycle when taken in the
+   block-head emitter; the Interpreter charges 2 like any taken BcondZ (only opcodes 0x14-0x17 are 1 cycle).
+2. SWC0 of a plain COP0 register: `emit_read_cop0` used RAX as its table pointer, and RAX holds the store
+   address, so the store went to a garbage address.
+Both fixed in `cpu_recompiler.cpp`; new compare cases cover them (odd REGIMM loops, SWC0 value/address, SW vs
+SWC0 first in a block) plus four guards for code changed behind the CPU (stale cached line, refill after
+alias eviction, change before first fetch, mid-line change), which already passed. All six live hardware
+cases now give identical RAM and hit counts on both backends. Full GT2 replay still matches the baseline
+on every field for both backends. The step trace also gained `SCHED_STEP_STALE` lines (I-cache word differs
+from memory), and `--genome file.json --frame-test` runs a genome headless on either backend.
 
 **Not done:** faults that need an access-path hook (stuck address lines, row aliasing,
 read-destructive and write-stutter faults); CD/controller/memory card/clock genes; a visual
