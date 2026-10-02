@@ -46,6 +46,9 @@ public:
     // redundant std::string::clear() calls during BIOS execution.
     bool step_hot(std::string& error);
     [[nodiscard]] bool in_osdsys_idle_loop() const;
+    // True while the PC is in a `j self; nop` idle pair (any address).
+    [[nodiscard]] bool at_idle_pair() const;
+    [[nodiscard]] u32 idle_pair_address() const;
     bool skip_osdsys_idle_pair();
     u64 skip_osdsys_idle_pairs(u64 max_pairs);
     u64 run(u64 instruction_budget, std::string& error);

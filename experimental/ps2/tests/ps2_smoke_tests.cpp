@@ -1588,6 +1588,80 @@ bool test_iop_external_interrupt_exception() {
     return ok;
 }
 
+// A guest spinning on the INTC vblank bit is a fixed point; the generic poll
+// skipper must reproduce stepping it instruction by instruction exactly.
+bool test_generic_poll_loop_skip_matches_ee_steps() {
+    const auto path = create_test_bios();
+    constexpr ps2::u32 kProgram = 0x00100000u;
+    constexpr std::array<ps2::u32, 12> kCode = {
+        0x3C031000u, // lui   v1,0x1000
+        0x3463F000u, // ori   v1,v1,0xF000   (INTC I_STAT)
+        0x8C620000u, // loop: lw v0,0(v1)
+        0x30420004u, //       andi v0,v0,4   (VBLANK_START)
+        0u, 0u, 0u,
+        0x1040FFFAu, //       beq v0,zero,loop
+        0u,
+        0x08040009u, // done: j done
+        0u,
+        0u};
+    constexpr ps2::u64 kSteps = 8'000'000u;
+
+    auto prepare = [&](ps2::Ps2System& system, std::string& error) {
+        bool ok = system.load_bios(path.string(), error) &&
+                  system.boot_bios(error);
+        for (std::size_t i = 0; i < kCode.size(); ++i) {
+            ok = system.bus().write32(
+                     kProgram + static_cast<ps2::u32>(i) * 4u, kCode[i]) &&
+                 ok;
+        }
+        // Park the IOP in a `j self; nop` idle pair at an arbitrary address.
+        ok = system.iop_bus().write32(0x1000u, 0x08000400u) &&
+             system.iop_bus().write32(0x1004u, 0u) && ok;
+        system.iop().state().pc = 0x1000u;
+        system.iop().state().next_pc = 0x1004u;
+        system.ee().state().pc = kProgram;
+        system.ee().state().next_pc = kProgram + 4u;
+        return ok;
+    };
+
+    std::string error;
+    ps2::Ps2System skipped;
+    ps2::Ps2System stepped;
+    bool ok = expect(prepare(skipped, error) && prepare(stepped, error),
+                     "poll skip test setup failed");
+
+    std::string run_error;
+    ok = expect(skipped.run_ee(kSteps, run_error) == kSteps,
+                "poll skip run did not retire the full budget") && ok;
+    for (ps2::u64 i = 0; i < kSteps; ++i) {
+        if (!stepped.step_ee(run_error)) {
+            ok = expect(false, "stepped poll loop failed") && ok;
+            break;
+        }
+    }
+
+    const auto& a = skipped.ee().state();
+    const auto& b = stepped.ee().state();
+    ok = expect(skipped.skipped_poll_iterations() > 100000u,
+                "generic poll loop was not skipped") && ok;
+    ok = expect(a.pc == b.pc && a.next_pc == b.next_pc,
+                "poll skip PC mismatch") && ok;
+    ok = expect(a.instructions_executed == b.instructions_executed,
+                "poll skip instruction count mismatch") && ok;
+    ok = expect(a.cop0[9] == b.cop0[9], "poll skip Count mismatch") && ok;
+    ok = expect(a.gpr[2].lo == b.gpr[2].lo && a.gpr[3].lo == b.gpr[3].lo,
+                "poll skip register mismatch") && ok;
+    ok = expect(skipped.video_fields_started() ==
+                    stepped.video_fields_started(),
+                "poll skip changed vblank timing") && ok;
+    ok = expect(a.pc >= kProgram + 0x24u,
+                "poll loop never saw the vblank bit") && ok;
+
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    return ok;
+}
+
 bool test_cdvd_raises_iop_irq2() {
     ps2::Ps2System system;
 
@@ -2646,6 +2720,7 @@ int main() {
     ok = test_cdvd_mechacon_config_nvram() && ok;
     ok = test_iop_intc_registers() && ok;
     ok = test_iop_external_interrupt_exception() && ok;
+    ok = test_generic_poll_loop_skip_matches_ee_steps() && ok;
     ok = test_cdvd_raises_iop_irq2() && ok;
     ok = test_iop_root_counters() && ok;
     ok = test_iop_event_free_tick_matches_regular_tick() && ok;

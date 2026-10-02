@@ -572,8 +572,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
     // during active IOP bootstrap work.
     const u32 initial_iop_pc = iop_.state().pc;
     if (!iop_.halted() &&
-        initial_iop_pc != 0x0000AE94u &&
-        initial_iop_pc != 0x0000AE98u) {
+        !iop_.at_idle_pair()) {
         const u64 co_limit = std::min<u64>(budget, 65536u);
         u64 co_retired = 0u;
 
@@ -702,7 +701,7 @@ u64 Ps2System::try_skip_bios_idle_iterations(
         ++idle_skip_reasons_[5]; return 0;
     }
     if (!iop_.halted() &&
-        (iop_pc == 0x0000AE94u || iop_pc == 0x0000AE98u) &&
+        iop_.at_idle_pair() &&
         !sif_dma_.iop_completion_pending()) {
         u64 safe_cycles = budget;
         safe_cycles = std::min<u64>(
@@ -969,7 +968,7 @@ u64 Ps2System::try_skip_bios_copy_iterations(
         bus_.intc_pending() || bus_.dmac_pending() ||
         iop_bus_.interrupt_pending()) return 0;
     const u32 iop_pc = iop_.state().pc;
-    if (iop_pc != 0x0000AE94u && iop_pc != 0x0000AE98u) return 0;
+    if (!iop_.at_idle_pair()) return 0;
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
@@ -1047,8 +1046,7 @@ u64 Ps2System::try_skip_bios_mmio_poll_iterations(
     if (iterations == 0u) return 0;
     if (sif_dma_.iop_completion_pending() ||
         iop_bus_.interrupt_pending() ||
-        (iop_.state().pc != 0x0000AE94u &&
-         iop_.state().pc != 0x0000AE98u)) iterations = 1u;
+        !iop_.at_idle_pair()) iterations = 1u;
     while (iterations > 1u) {
         const u64 iop_steps =
             (ee_iop_phase_ + iterations * kCyclesPerIteration) / 8u;
@@ -1077,7 +1075,7 @@ u64 Ps2System::try_skip_bios_literal_iterations(
         bus_.intc_pending() || bus_.dmac_pending() ||
         iop_bus_.interrupt_pending()) return 0;
     const u32 iop_pc = iop_.state().pc;
-    if (iop_pc != 0x0000AE94u && iop_pc != 0x0000AE98u) return 0;
+    if (!iop_.at_idle_pair()) return 0;
     const u16 active_dma =
         hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
     const u16 sif_channels = (1u << 5) | (1u << 6);
@@ -1688,6 +1686,264 @@ u64 Ps2System::try_run_quiet_ee_superbatch(
     return retired;
 }
 
+
+// ---------------------------------------------------------------------------
+// Game-agnostic poll-loop skipping.
+//
+// Guests spend most of their time spinning on a vblank/DMA/flag that only an
+// external event changes. Such a loop is a fixed point: after one iteration
+// every register is exactly what it was at the top, so repeating it until the
+// next event changes nothing but the cycle counters. The loop is proven by
+// executing real iterations (so no decoding mistake can corrupt state) and
+// comparing the complete register file, and only loops built from register
+// ALU ops plus loads from side-effect-free locations are considered.
+namespace {
+
+struct PollSnapshot {
+    std::array<EeGpr, 32> gpr;
+    u64 hi, lo, hi1, lo1;
+    u32 sa;
+};
+
+PollSnapshot poll_snapshot(const EeCpuState& s) {
+    return {s.gpr, s.hi, s.lo, s.hi1, s.lo1, s.sa};
+}
+
+bool poll_snapshots_equal(const PollSnapshot& a, const PollSnapshot& b) {
+    for (std::size_t i = 0; i < a.gpr.size(); ++i) {
+        if (a.gpr[i].lo != b.gpr[i].lo || a.gpr[i].hi != b.gpr[i].hi) {
+            return false;
+        }
+    }
+    return a.hi == b.hi && a.lo == b.lo && a.hi1 == b.hi1 &&
+           a.lo1 == b.lo1 && a.sa == b.sa;
+}
+
+bool poll_is_load(u32 insn) {
+    switch (insn >> 26) {
+    case 0x20u: case 0x21u: case 0x23u: case 0x24u:
+    case 0x25u: case 0x27u: case 0x37u:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Instructions a poll loop may contain (everything but the closing branch).
+bool poll_allowed_instruction(u32 insn) {
+    const u32 op = insn >> 26;
+    if (op == 0u) {
+        switch (insn & 0x3Fu) {
+        case 0x00u: case 0x02u: case 0x03u: case 0x04u: case 0x06u:
+        case 0x07u: case 0x0Au: case 0x0Bu: case 0x10u: case 0x12u:
+        case 0x21u: case 0x23u: case 0x24u: case 0x25u: case 0x26u:
+        case 0x27u: case 0x2Au: case 0x2Bu: case 0x2Du: case 0x2Fu:
+        case 0x38u: case 0x3Au: case 0x3Bu: case 0x3Cu: case 0x3Eu:
+        case 0x3Fu:
+            return true;
+        default:
+            return false;
+        }
+    }
+    switch (op) {
+    case 0x09u: case 0x0Au: case 0x0Bu: case 0x0Cu: case 0x0Du:
+    case 0x0Eu: case 0x0Fu: case 0x19u:
+        return true;
+    default:
+        return poll_is_load(insn);
+    }
+}
+
+bool poll_is_closing_branch(u32 insn) {
+    switch (insn >> 26) {
+    case 0x04u: case 0x05u: case 0x06u: case 0x07u:
+        return true;
+    case 0x01u: {
+        const u32 rt = (insn >> 16) & 0x1Fu;
+        return rt == 0u || rt == 1u;
+    }
+    default:
+        return false;
+    }
+}
+
+} // namespace
+
+bool Ps2System::poll_loop_candidate(u32 pc) {
+    if (poll_cooldown_ != 0u) {
+        --poll_cooldown_;
+        return false;
+    }
+    // A spinning guest keeps the PC inside a few instructions for many
+    // consecutive batches.
+    if (pc - poll_anchor_pc_ + 64u < 128u) {
+        return ++poll_window_hits_ >= 4u;
+    }
+    poll_anchor_pc_ = pc;
+    poll_window_hits_ = 0u;
+    return false;
+}
+
+u64 Ps2System::try_skip_poll_loop(u64 budget, std::string& error) {
+    constexpr u32 kMaxLoopInstructions = 16u;
+    constexpr u32 kMaxDetectionSteps = 48u;
+    constexpr u32 kMaxVerifyIterations = 3u;
+
+    auto fail = [&](u64 retired) {
+        poll_window_hits_ = 0u;
+        poll_cooldown_ = poll_backoff_;
+        poll_backoff_ = std::min<u32>(poll_backoff_ * 2u, 4096u);
+        return retired;
+    };
+
+    const u16 active_dma =
+        hw_.dmac_enabled() ? hw_.dmac_running_mask() : 0u;
+    const u16 sif_channels = (1u << 5) | (1u << 6);
+    if (budget < 256u || !scheduler_.empty() ||
+        hw_.timer_irq_possible() || sif_dma_.ee_completion_pending() ||
+        vu0_.running() || vu1_.running() || gs_.irq_pending() ||
+        bus_.intc_pending() || bus_.dmac_pending() ||
+        (active_dma & ~sif_channels) != 0u ||
+        ((active_dma & sif_channels) &
+            iop_bus_.sif_dma_ready_mask()) != 0u ||
+        video_timing_.cycles_to_transition() < 4096u) {
+        return 0;
+    }
+    // While the IOP runs real code it can arm SIF transfers or raise EE
+    // interrupts at any instruction, so skipping ahead could reorder them.
+    const bool iop_idle = iop_.halted() || iop_.at_idle_pair();
+    if (!iop_idle) return 0;
+    const auto& cpu = ee_.state();
+    {
+        const u32 status = cpu.cop0[12];
+        const u32 cause = cpu.cop0[13] & ~0x00000C00u;
+        if ((cause & status & 0x0000FF00u) != 0 &&
+            (status & 0x00010001u) == 0x00010001u &&
+            (status & 0x6u) == 0) return 0;
+    }
+
+    u64 retired = 0;
+    auto step = [&]() {
+        const u64 before = cpu.instructions_executed;
+        const bool ok = step_ee_core(error);
+        if (cpu.instructions_executed != before) ++retired;
+        return ok;
+    };
+
+    // 1. Find a short backward-branching loop by executing real instructions.
+    u32 head = 0;
+    u32 loop_length = 0;
+    for (u32 i = 0; i < kMaxDetectionSteps; ++i) {
+        const u32 prev_pc = cpu.pc;
+        if (!step()) return retired;
+        if (cpu.pc < prev_pc) {
+            head = cpu.pc;
+            loop_length = (prev_pc - head) / 4u + 1u;
+            break;
+        }
+    }
+    if (head == 0u || loop_length < 3u || loop_length > kMaxLoopInstructions ||
+        cpu.next_pc != head + 4u) {
+        return fail(retired);
+    }
+
+    // 2. The body must be plain ALU/load code closed by a backward branch.
+    std::array<u32, kMaxLoopInstructions> body{};
+    for (u32 i = 0; i < loop_length; ++i) {
+        if (!bus_.fetch32(head + i * 4u, body[i])) return fail(retired);
+    }
+    const u32 branch_index = loop_length - 2u;
+    const u32 branch = body[branch_index];
+    const u32 branch_target =
+        head + branch_index * 4u + 4u +
+        static_cast<u32>(static_cast<s32>(static_cast<s16>(branch & 0xFFFFu)) * 4);
+    if (!poll_is_closing_branch(branch) || branch_target != head) {
+        return fail(retired);
+    }
+    for (u32 i = 0; i < loop_length; ++i) {
+        if (i == branch_index) continue;
+        if (!poll_allowed_instruction(body[i])) return fail(retired);
+    }
+
+    // 3. Execute whole iterations, checking every load address, until one
+    //    leaves the registers exactly as it found them.
+    auto load_address_ok = [&](u32 insn) {
+        const u32 rs = (insn >> 21) & 0x1Fu;
+        const u32 ea = static_cast<u32>(cpu.gpr[rs].lo) +
+            static_cast<u32>(static_cast<s32>(static_cast<s16>(insn & 0xFFFFu)));
+        if (ea >= 0x70000000u && ea < 0x70004000u) return true;  // scratchpad
+        if (ea >= 0xC0000000u) return false;                      // mapped
+        const u32 physical = EeBus::to_physical(ea);
+        if (physical < EeRam::kSize) return true;
+        if (physical >= 0x1FC00000u) return true;                 // BIOS ROM
+        if (physical == 0x12001000u) return true;                 // GS CSR
+        if (physical >= 0x1000E000u && physical < 0x1000E100u) return true;
+        if (physical >= 0x10008000u && physical < 0x1000B500u) return true;
+        // INTC / SIF registers: the IOP can write these, but it is parked.
+        if (physical >= 0x1000F000u && physical < 0x1000F040u) return true;
+        if (physical >= 0x1000F200u && physical < 0x1000F300u) return true;
+        return false;
+    };
+
+    PollSnapshot before = poll_snapshot(cpu);
+    bool fixed = false;
+    for (u32 iteration = 0; iteration < kMaxVerifyIterations && !fixed;
+         ++iteration) {
+        for (u32 i = 0; i < loop_length; ++i) {
+            const u32 pc = cpu.pc;
+            if (pc != head + i * 4u) return fail(retired);
+            if (poll_is_load(body[i]) && !load_address_ok(body[i])) {
+                return fail(retired);
+            }
+            if (!step()) return retired;
+        }
+        if (cpu.pc != head || cpu.next_pc != head + 4u) return fail(retired);
+        const PollSnapshot after = poll_snapshot(cpu);
+        fixed = poll_snapshots_equal(before, after);
+        before = after;
+    }
+    if (!fixed) return fail(retired);
+
+    // 4. Nothing can change until the next event, so run to just before it.
+    u64 room = budget > retired ? budget - retired : 0u;
+    const u64 video_room = video_timing_.cycles_to_transition();
+    if (video_room <= 1u) return fail(retired);
+    room = std::min<u64>(room, video_room - 1u);
+    const u32 sif_ee_completion = sif_dma_.ee_completion_cycles();
+    if (sif_ee_completion != 0u) room = std::min<u64>(room, sif_ee_completion);
+    const u32 compare_distance = cpu.cop0[11] - cpu.cop0[9];
+    if (compare_distance != 0u) {
+        if (compare_distance <= 1u) return fail(retired);
+        room = std::min<u64>(room, compare_distance - 1u);
+    }
+    const u32 iop_completion = sif_dma_.iop_completion_steps();
+    if (iop_completion != 0u) {
+        const u64 iop_room =
+            static_cast<u64>(iop_completion) * 8u - ee_iop_phase_;
+        room = std::min<u64>(room, iop_room);
+    }
+    u64 iterations = room / loop_length;
+    // The parked IOP must not hit a timer/CDVD event inside the skipped span.
+    while (iterations >= 2u &&
+           !iop_bus_.can_tick_event_free(
+               (ee_iop_phase_ + iterations * loop_length) / 8u)) {
+        iterations >>= 1u;
+    }
+    if (iterations < 2u) return fail(retired);
+    const u64 cycles = iterations * loop_length;
+
+    poll_backoff_ = 16u;
+    ee_.fast_forward_fixed_point(static_cast<u32>(cycles));
+    sif_dma_.tick_ee_cycles(bus_, cycles);
+    scheduler_.run_until(scheduler_.now() + cycles, {});
+    video_timing_.tick(cycles, hw_, iop_intc_);
+    advance_iop_for_ee_cycles(cycles, error);
+    if (gs_.irq_pending()) hw_.raise_intc(0);
+    skipped_poll_iterations_ += iterations;
+    ++poll_loops_skipped_;
+    return retired + cycles;
+}
+
 u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
     error.clear();
     if(!bios_started_){error="BIOS has not been started.";return 0;}
@@ -1779,6 +2035,17 @@ u64 Ps2System::run_ee(u64 instruction_budget,std::string& error){
         if (ee_.state().pc == 0x0024DE74u &&
             instruction_budget - executed >= 106u) {
             const u64 skipped = try_skip_hot_sif_getreg(
+                instruction_budget - executed, error);
+            if (skipped != 0u) {
+                executed += skipped;
+                if (!error.empty()) break;
+                continue;
+            }
+        }
+
+        if (instruction_budget - executed >= 256u &&
+            poll_loop_candidate(ee_.state().pc)) {
+            const u64 skipped = try_skip_poll_loop(
                 instruction_budget - executed, error);
             if (skipped != 0u) {
                 executed += skipped;

@@ -433,39 +433,48 @@ bool IopCpu::execute_cop2(
         error);
 }
 
+// Address of the `j self; nop` pair the PC is executing, or 0. Every IOP
+// kernel parks its idle thread in such a pair, but not at the same address
+// (0xAE94 in the ROM OSDSYS image, 0xB89C in the Disgaea one). This only
+// inspects PC and code; interrupt/load-delay state is checked by the callers.
+u32 IopCpu::idle_pair_address() const {
+    if (halted_) return 0u;
+    u32 branch_pc = 0u;
+    if (!next_is_delay_slot_ && state_.next_pc == state_.pc + 4u) {
+        branch_pc = state_.pc;
+    } else if (next_is_delay_slot_ && state_.pc >= 4u &&
+               state_.next_pc == state_.pc - 4u) {
+        branch_pc = state_.pc - 4u;
+    } else {
+        return 0u;
+    }
+    u32 branch = 0;
+    u32 delay = 0;
+    if (!bus_.read32(branch_pc, branch) ||
+        !bus_.read32(branch_pc + 4u, delay) || delay != 0u ||
+        (branch >> 26) != 2u) {
+        return 0u;
+    }
+    const u32 target =
+        ((branch_pc + 4u) & 0xF0000000u) | ((branch & 0x03FFFFFFu) << 2);
+    return target == branch_pc ? branch_pc : 0u;
+}
+
+bool IopCpu::at_idle_pair() const { return idle_pair_address() != 0u; }
+
 bool IopCpu::in_osdsys_idle_loop() const {
-    if (halted_ || pending_load_.valid || next_load_.valid ||
+    if (pending_load_.valid || next_load_.valid ||
         bus_.interrupt_pending()) {
         return false;
     }
-
-    const bool at_branch =
-        state_.pc == 0x0000AE94u &&
-        state_.next_pc == 0x0000AE98u &&
-        !next_is_delay_slot_;
-    const bool at_delay =
-        state_.pc == 0x0000AE98u &&
-        state_.next_pc == 0x0000AE94u &&
-        next_is_delay_slot_;
-    if (!at_branch && !at_delay) return false;
-
-    u32 branch = 0;
-    u32 delay = 0;
-    return bus_.read32(0x0000AE94u, branch) &&
-           bus_.read32(0x0000AE98u, delay) &&
-           branch == 0x08002BA5u &&
-           delay == 0u;
+    return idle_pair_address() != 0u;
 }
 
 bool IopCpu::skip_osdsys_idle_pair() {
-    if (halted_ || state_.pc != 0x0000AE94u ||
-        state_.next_pc != 0x0000AE98u || next_is_delay_slot_ ||
-        pending_load_.valid || next_load_.valid ||
+    if (pending_load_.valid || next_load_.valid ||
         bus_.interrupt_pending()) return false;
-    u32 branch = 0, delay = 0;
-    if (!bus_.read32(0x0000AE94u, branch) ||
-        !bus_.read32(0x0000AE98u, delay) ||
-        branch != 0x08002BA5u || delay != 0u) return false;
+    const u32 pc = idle_pair_address();
+    if (pc == 0u || state_.pc != pc) return false;
 
     state_.cop0[13] &= ~0x00000400u;
     bus_.tick(1u);
@@ -473,10 +482,10 @@ bool IopCpu::skip_osdsys_idle_pair() {
     else state_.cop0[13] &= ~0x00000400u;
     bus_.tick(1u);
 
-    state_.last_pc = 0x0000AE98u;
+    state_.last_pc = pc + 4u;
     state_.last_instruction = 0u;
-    state_.pc = 0x0000AE94u;
-    state_.next_pc = 0x0000AE98u;
+    state_.pc = pc;
+    state_.next_pc = pc + 4u;
     state_.gpr[0] = 0u;
     state_.instructions_executed += 2u;
     direct_write_mask_ = 0u;
@@ -484,15 +493,10 @@ bool IopCpu::skip_osdsys_idle_pair() {
 }
 
 u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
-    if (max_pairs == 0u || halted_ ||
-        state_.pc != 0x0000AE94u ||
-        state_.next_pc != 0x0000AE98u || next_is_delay_slot_ ||
-        pending_load_.valid || next_load_.valid ||
+    if (max_pairs == 0u || pending_load_.valid || next_load_.valid ||
         bus_.interrupt_pending()) return 0;
-    u32 branch = 0, delay = 0;
-    if (!bus_.read32(0x0000AE94u, branch) ||
-        !bus_.read32(0x0000AE98u, delay) ||
-        branch != 0x08002BA5u || delay != 0u) return 0;
+    const u32 pc = idle_pair_address();
+    if (pc == 0u || state_.pc != pc) return 0;
 
     u64 pairs = std::min<u64>(max_pairs, 65536u);
     while (pairs != 0u && !bus_.tick_event_free(pairs * 2u)) {
@@ -501,10 +505,10 @@ u64 IopCpu::skip_osdsys_idle_pairs(u64 max_pairs) {
     if (pairs == 0u) return 0;
 
     state_.cop0[13] &= ~0x00000400u;
-    state_.last_pc = 0x0000AE98u;
+    state_.last_pc = pc + 4u;
     state_.last_instruction = 0u;
-    state_.pc = 0x0000AE94u;
-    state_.next_pc = 0x0000AE98u;
+    state_.pc = pc;
+    state_.next_pc = pc + 4u;
     state_.gpr[0] = 0u;
     state_.instructions_executed += pairs * 2u;
     direct_write_mask_ = 0u;
@@ -577,10 +581,13 @@ bool IopCpu::step_internal(
     // Retail ROM OSDSYS spends most of bootstrap in this J/NOP scheduler
     // idle pair. Keep the ordinary interrupt check above and load-delay
     // retirement below, but avoid the full decoder for these exact words.
-    if ((pc == 0x0000AE94u && instruction == 0x08002BA5u) ||
-        (pc == 0x0000AE98u && instruction == 0u)) {
-        if (pc == 0x0000AE94u) {
-            state_.next_pc = 0x0000AE94u;
+    const bool idle_jump =
+        (instruction >> 26) == 2u &&
+        (((pc + 4u) & 0xF0000000u) |
+         ((instruction & 0x03FFFFFFu) << 2)) == pc;
+    if (idle_jump || (instruction == 0u && in_delay_slot)) {
+        if (idle_jump) {
+            state_.next_pc = pc;
             next_is_delay_slot_ = true;
         }
         if (pending_load_.valid && pending_load_.reg != 0) {

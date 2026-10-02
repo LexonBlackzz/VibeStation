@@ -1032,30 +1032,11 @@ void Ps2App::panel_main() {
     }
 
     const auto& display = system_.gs_display();
-    const auto show_boot_progress = [&]() {
-        if (!emulation_running_ || display.has_visible_pixels()) {
-            return;
-        }
-        ImGui::SetCursorPos(ImVec2(start.x + 16.0f, start.y + 16.0f));
-        ImGui::TextColored(
-            ImVec4(0.70f, 0.80f, 1.0f, 1.0f),
-            "Booting BIOS - waiting for first GS image");
-        ImGui::Text(
-            "EE instructions: %.1f million",
-            static_cast<double>(system_.ee().state().instructions_executed) /
-                1'000'000.0);
-        if (ee_instructions_per_second_ > 0.0) {
-            ImGui::Text(
-                "Host throughput: %.1f million EE instructions/s",
-                ee_instructions_per_second_ / 1'000'000.0);
-        }
-        ImGui::TextDisabled("This is not the PS2 hardware clock.");
-    };
     if (display.valid() && display_texture_ != 0 &&
         display.width() != 0 && display.height() != 0) {
-        const float aspect =
-            static_cast<float>(display.width()) /
-            static_cast<float>(display.height());
+        // The console outputs 4:3 whatever the scanned-out raster is
+        // (640x224 field, 640x448 frame, 640x512 PAL, ...).
+        const float aspect = 4.0f / 3.0f;
         ImVec2 image_size = available;
         if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
             image_size.x = image_size.y * aspect;
@@ -1091,7 +1072,37 @@ void Ps2App::panel_main() {
                 emulation_speed_percent_,
                 ee_instructions_per_second_ / 1'000'000.0);
         }
-        show_boot_progress();
+        return;
+    }
+    // Running but nothing on screen yet: a black 4:3 picture, speed readout
+    // still visible.
+    if (emulation_running_) {
+        const float aspect = 4.0f / 3.0f;
+        ImVec2 image_size = available;
+        if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
+            image_size.x = image_size.y * aspect;
+        } else {
+            image_size.y = image_size.x / aspect;
+        }
+        image_size.x = std::max(1.0f, std::floor(image_size.x + 0.5f));
+        image_size.y = std::max(1.0f, std::floor(image_size.y + 0.5f));
+        ImGui::SetCursorPos(ImVec2(
+            std::floor(start.x + (available.x - image_size.x) * 0.5f),
+            std::floor(start.y + (available.y - image_size.y) * 0.5f)));
+        const ImVec2 corner = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(image_size);
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            corner,
+            ImVec2(corner.x + image_size.x, corner.y + image_size.y),
+            IM_COL32(0, 0, 0, 255));
+        if (guest_fields_per_second_ > 0.0) {
+            ImGui::SetCursorPos(ImVec2(start.x + 10.0f, start.y + 28.0f));
+            ImGui::Text(
+                "%.1f FPS  |  %.0f%% speed  |  %.1f MIPS",
+                guest_frames_per_second_,
+                emulation_speed_percent_,
+                ee_instructions_per_second_ / 1'000'000.0);
+        }
         return;
     }
 
@@ -1255,7 +1266,6 @@ void Ps2App::panel_main() {
         ImGui::Text("running");
     }
     ImGui::EndChild();
-    show_boot_progress();
 }
 
 void Ps2App::panel_system() {
@@ -2091,9 +2101,10 @@ void Ps2App::emulation_thread_main() {
     constexpr double kEeHz = 294'912'000.0;
     // ~1 ms of host time per slice so the UI can take the core between them.
     constexpr u64 kChunkInstructions = 100'000;
-    constexpr u64 kBootstrapChunkInstructions = 1'000'000;
     constexpr double kMaxLeadSeconds = 0.002;
-    constexpr double kMaxLagSeconds = 0.25;
+    // Never chase a debt for longer than about one frame, so a slow stretch
+    // is not followed by a burst above 100%.
+    constexpr double kMaxLagSeconds = 0.016;
 
     clock::time_point base_time{};
     u64 base_instructions = 0;
@@ -2115,13 +2126,9 @@ void Ps2App::emulation_thread_main() {
             continue;
         }
 
-        // Until the first BIOS pixels appear nothing is displayed, so run
-        // unpaced; pacing starts fresh at the first visible frame.
-        const bool bootstrap_turbo =
-            !system_.gs_display().has_visible_pixels();
         const u64 total = system_.ee().state().instructions_executed;
         const auto now = clock::now();
-        if (base_time == clock::time_point{} || bootstrap_turbo ||
+        if (base_time == clock::time_point{} ||
             !limit_speed_.load(std::memory_order_acquire)) {
             base_time = now;
             base_instructions = total;
@@ -2135,18 +2142,14 @@ void Ps2App::emulation_thread_main() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
-            // Too slow to keep up: run flat out rather than chase a debt.
+            // Too slow to keep up: restart the clock rather than chase a debt.
             if (wall > emulated + kMaxLagSeconds) {
                 base_time = now;
                 base_instructions = total;
             }
         }
 
-        const u64 ran = system_.run_ee(
-            bootstrap_turbo ? kBootstrapChunkInstructions
-                            : kChunkInstructions,
-            error);
-        if (bootstrap_turbo) system_.refresh_display();
+        const u64 ran = system_.run_ee(kChunkInstructions, error);
 
         if (!error.empty()) {
             emulation_running_ = false;
@@ -2163,23 +2166,11 @@ void Ps2App::update_emulation() {
     if (!emulation_running_ ||
         !system_.bios_started() ||
         system_.halted()) {
-        if (bootstrap_swap_interval_disabled_ &&
-            SDL_GL_SetSwapInterval(1) == 0) {
-            bootstrap_swap_interval_disabled_ = false;
-        }
         if (system_.halted() && emulation_running_) {
             emulation_running_ = false;
             status_message_ = "Execution halted: " + system_.halt_reason();
         }
         return;
-    }
-
-    // Avoid waiting for VSync on frames that cannot yet show BIOS pixels.
-    const bool bootstrap_turbo =
-        !system_.gs_display().has_visible_pixels();
-    if (bootstrap_turbo != bootstrap_swap_interval_disabled_ &&
-        SDL_GL_SetSwapInterval(bootstrap_turbo ? 0 : 1) == 0) {
-        bootstrap_swap_interval_disabled_ = bootstrap_turbo;
     }
 
     const auto sample_time = std::chrono::steady_clock::now();

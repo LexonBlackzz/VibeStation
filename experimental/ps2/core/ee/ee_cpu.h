@@ -124,6 +124,10 @@ public:
     // Validate/collapse the retail 0x7A SifGetReg(4) syscall wrapper.
     // The system layer is responsible for sampling SMFLAG at the exact
     // instruction offset when active IOP execution can change it.
+    // Retire `instructions` cycles of a loop the caller has proven to be a
+    // fixed point: registers, PC and delay-slot state are identical at every
+    // iteration boundary, so only the time counters move.
+    void fast_forward_fixed_point(u32 instructions);
     [[nodiscard]] bool can_skip_hot_sif_getreg() const;
     bool skip_hot_sif_getreg(u32 value);
 

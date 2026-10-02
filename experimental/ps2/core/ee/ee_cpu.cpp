@@ -3288,6 +3288,13 @@ u32 EeCpu::skip_bios_mmio_poll_iterations(u32 max_iterations) {
     return max_iterations;
 }
 
+void EeCpu::fast_forward_fixed_point(u32 instructions) {
+    state_.cop0[13] &= ~0x00000C00u;
+    state_.cop0[9] += instructions;
+    state_.instructions_executed += instructions;
+    bus_.tick(instructions);
+}
+
 bool EeCpu::skip_bios_literal_iteration() {
     return skip_bios_literal_iteration_impl(true);
 }

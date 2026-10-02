@@ -1649,6 +1649,10 @@ int main(int argc, char** argv) {
               << system.skipped_bios_copy_iterations() << '\n';
     std::cout << "EE_SKIPPED_BIOS_MMIO_POLL_ITERATIONS="
               << system.skipped_bios_mmio_poll_iterations() << '\n';
+    std::cout << "EE_SKIPPED_POLL_ITERATIONS="
+              << system.skipped_poll_iterations()
+              << " EE_POLL_LOOPS_SKIPPED="
+              << system.poll_loops_skipped() << '\n';
     std::cout << "EE_SIF_POLL_FAST_SAMPLES="
               << system.sif_poll_fast_samples()
               << " EE_SIF_POLL_STABLE_RETURNS="

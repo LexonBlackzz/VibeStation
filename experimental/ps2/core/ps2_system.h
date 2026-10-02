@@ -78,6 +78,9 @@ public:
     u64 skipped_bios_countdown_iterations() const { return skipped_bios_countdown_iterations_; }
     u64 skipped_bios_copy_iterations() const { return skipped_bios_copy_iterations_; }
     u64 skipped_bios_mmio_poll_iterations() const { return skipped_bios_mmio_poll_iterations_; }
+    // Iterations / distinct skips of game-agnostic fixed-point poll loops.
+    u64 skipped_poll_iterations() const { return skipped_poll_iterations_; }
+    u64 poll_loops_skipped() const { return poll_loops_skipped_; }
     u64 sif_poll_fast_samples() const { return sif_poll_fast_samples_; }
     u64 sif_poll_stable_returns() const { return sif_poll_stable_returns_; }
     u64 fast_sif_getreg_calls() const { return fast_sif_getreg_calls_; }
@@ -143,6 +146,8 @@ private:
     u64 try_skip_bios_mmio_poll_iterations(u64 budget, std::string& error);
     u64 try_skip_bios_literal_iterations(u64 budget, std::string& error);
     u64 try_skip_hot_sif_getreg(u64 budget, std::string& error);
+    u64 try_skip_poll_loop(u64 budget, std::string& error);
+    bool poll_loop_candidate(u32 pc);
     u64 try_run_quiet_ee_batch(u64 budget, std::string& error);
     u64 try_run_quiet_ee_superbatch(u64 budget, std::string& error);
     struct QuietEeBlock {
@@ -181,6 +186,12 @@ private:
     u32 fast_sif_getreg_active_iop_first_pc_=0;
     u64 skipped_iop_idle_pairs_=0;
     u64 skipped_bios_literal_iterations_=0;
+    u64 skipped_poll_iterations_=0;
+    u64 poll_loops_skipped_=0;
+    u32 poll_anchor_pc_=0;
+    u32 poll_window_hits_=0;
+    u32 poll_cooldown_=0;
+    u32 poll_backoff_=16;
     u64 quiet_ee_batch_instructions_=0;
     u64 quiet_ee_active_iop_instructions_=0;
     u64 quiet_ee_batches_=0;
