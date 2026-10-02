@@ -603,6 +603,7 @@ private:
 
   void key_on_voice(int voice);
   void key_off_voice(int voice);
+  void cut_voices_immediate(u32 mask);
   void apply_pending_key_strobes();
 
   s16 next_noise_sample();
