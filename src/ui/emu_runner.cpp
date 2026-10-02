@@ -1,4 +1,5 @@
 #include "emu_runner.h"
+#include "../core/grim_live.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -374,6 +375,9 @@ void EmuRunner::worker_main() {
             frame_active_.store(false, std::memory_order_release);
             idle_cv_.notify_all();
             return 0u;
+        }
+        if (GrimLiveWatch *watch = grim_watch_.load(std::memory_order_acquire)) {
+            watch->on_frame(*system_);
         }
         const u64 cpu_cycles_after = system_->cpu().cycle_count();
         const u64 cpu_cycles_advanced = cpu_cycles_after >= cpu_cycles_before

@@ -899,6 +899,7 @@ void App::update() {
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
+    grim_pull_update();
     if (system_) {
         system_->cdrom().set_bad_modchip(bad_modchip_enabled_);
     }
@@ -2124,6 +2125,7 @@ void App::shutdown() {
     }
     // Stop presentation first: it may still recycle raw buffers back to
     // EmuRunner. The emulation thread remains alive until that worker exits.
+    grim_pull_shutdown();
     frame_presentation_worker_.stop();
     emu_runner_.stop();
     input_recorder_.shutdown();

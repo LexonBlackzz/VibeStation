@@ -808,6 +808,12 @@ void DmaController::dma_linked_list(int channel) {
   u32 addr = channels_[channel].base_addr & 0x001FFFFC;
   u32 safety = 0;
   u32 transferred_words = 0;
+  // RAM cannot change during this atomic transfer, so a node visited twice means the list
+  // never ends. Brent's cycle detection stops it at once instead of replaying the loop a
+  // million times (minutes of host time for a corrupted list). Real lists never revisit.
+  u32 tortoise = addr;
+  u32 power = 1, steps = 0;
+  bool cycle = false;
 
   while (safety < 0x100000) {
     sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
@@ -839,9 +845,18 @@ void DmaController::dma_linked_list(int channel) {
 
     addr = header & 0x001FFFFC;
     safety++;
+    if (addr == tortoise) {
+      cycle = true;
+      break;
+    }
+    if (++steps == power) {
+      tortoise = addr;
+      power <<= 1;
+      steps = 0;
+    }
   }
 
-  if (safety >= 0x100000) {
+  if (cycle || safety >= 0x100000) {
     LOG_ERROR("DMA: Linked list loop detected!");
   }
 

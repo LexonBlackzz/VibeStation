@@ -4,6 +4,138 @@ Read this first in every new session, then `DESIGN.md`, then
 `PROJECT_BRIEF.md` (the code map). The conventions file is the repo-root
 `AGENTS.md`. It is gitignored and local to Lexon's machine.
 
+## 0. Phase 5 status (2026-10-03)
+
+**Phase 5 (live random New Corruption) is implemented on `grim-reaper/phase-5`, from
+Phase 4.1 plus main.** Phase 4.1 is kept as Appendix E below (its §N numbering is unchanged).
+The panel mockups are the Design canvas linked from `DESIGN.md`.
+
+- [x] Pull generator: families, intensity with risk, rot mode, recent-pull novelty
+- [x] Live death watch with readable cause of death; no per-instruction hook
+- [x] Mercy (off by default), Keep, Revive, History, genome list, Kept list
+- [x] Library persisted atomically; damaged file recovered
+- [x] Panel in the definitive Grim Reaper page; 1.0 reapers kept as the "Classic reapers" tab
+- [x] Per-BIOS boot map made once, in a child process
+- [x] Tests (`--grim-pull-test`, both backends) and yield (`--grim-pull-yield`)
+- [x] Stock hash, older suites, GT2 parity (see §0.6)
+- [ ] The panel has **not been looked at on screen by the agent**: only its code paths ran
+      (the GUI path was driven by a temporary environment hook, since removed). Lexon's eyes first.
+
+### 0.1 What a pull is
+
+New Corruption draws a fresh seed, generates a genome from the enabled families at the
+intensity, resets the machine (which replays ROM genes and rewinds interface genes) and runs
+it live. Nothing is evaluated or filtered first. Families are *gene sources*: **Audio** =
+ADPCM sample genes, **Code** = ROM code genes (needs the boot map), **Interface** = SPU/GPU
+runtime filters, **Visual** = reserved for the Phase 6 ROM visual genes (the button is
+disabled and generates nothing). Every gene still carries its domain colour in the list.
+
+Intensity (0-100) sets the total gene count (`1+6t/100 .. 2+9t/100`, e.g. 58 -> 4-7), the
+interface risk (magnitudes pulled toward the full parameter range; it draws no extra random
+numbers, so older seeds are unchanged), and the code survival biases: words first run before
+`600 - 6t` ms are avoided, late-code preference falls from cubic to uniform, patches per gene
+2-8, `call_swap` only from 90. Sample windows are `100 + 4t` ms. Labels: safe <20, mild <45,
+risky <70, lethal. Rot mode turns every interface gene into a ramp that starts healthy (2-7 s)
+and decays; it cannot rot ROM genes, and the panel says so.
+
+Novelty: the generator builds up to four candidates from the seed and keeps the one that
+overlaps least with the last eight pulls (gene type/kind/target keys). It never decides
+whether a pull is shown.
+
+### 0.2 Death watch
+
+`GrimLiveWatch` runs the Phase 1 gates on the live machine, once per frame, on the emulator
+thread. It reads what the emulator already counts (GP0/DMA/SPU work, displayed-image hash,
+exceptions) and the audio through `Spu::set_audio_tap`. Thresholds (frames, ~60/s): inert 150,
+frozen picture 240, exception loop 45, COP0-sampled stuck exception 100 (a running game
+disc doubles the first two and the last). Measured on a clean no-disc boot: the longest idle
+run is 72 frames and the longest frozen run 81, so the gates sit well above a healthy boot.
+
+Causes of death are plain words plus detail: "Stuck in an exception loop - Reserved-instruction
+exception at BFC0 2B68, repeating with no progress", "Machine went inert", "Frozen picture",
+"Black screen, no sound"; an exception loop on a word a ROM gene patched also names that gene.
+
+The recompiler takes exceptions natively, so its exception loops are caught by the COP0
+Cause/EPC sample instead: **same reason, slower** (0.75 s interpreter, 1.7 s recompiler in the
+test). Both backends give identical verdicts and death frames for the hang, the clean boot and
+the six generated pulls (the `GRIM_PULL_LIVE` lines of the two `--grim-pull-test` runs diff clean
+apart from that one time).
+
+**Host hangs.** A corrupted GPU linked list that points back at itself used to replay a million
+packets inside one DMA, minutes of host time: the emulator thread never reached the watch and
+the UI would deadlock in `pause_and_wait_idle()`. Two of the first 120 yield pulls did this.
+`dma_linked_list` now stops at the first revisited node (Brent cycle detection; RAM cannot change
+during the atomic transfer, so a revisit means the list never ends). Real lists never revisit
+(GT2 parity below). Regression test `dma_linked_list_loop_does_not_hang_the_host`. This is the
+only change to a normal-play path besides the audio-tap null check (§0.6).
+
+### 0.3 Library, Mercy, data
+
+`GrimLibrary` keeps every pull (200 un-kept at most; kept pulls, dead ones included, are never
+trimmed) in `grim_data/library.json` beside the executable, written through a temp file and
+renamed; a damaged file is moved to `.corrupt`. Mercy (off) rerolls a death inside 4 s and
+marks the replaced pull so History hides it; the stats count it. The boot map for a BIOS is
+made once by a child process (`--grim-map`, interpreter, about 30 s) the first time the page is
+opened and cached by ROM hash under `grim_data/maps/`. Until then Audio and Interface work and
+Code stays off with a status line.
+
+### 0.4 Tests
+
+`--grim-pull-test <bios> [--backend interpreter|recompiler]` (run it once per backend): plan
+bounds and monotonicity, determinism, family toggles (every mask), unavailable families, risk
+bounds, round trips, rot, novelty, early-init bias, Mercy, death text, library (round trip,
+trimming, corruption recovery, atomic save), the DMA loop, and live machines (clean boot alive,
+hang, exception loop, recovery after a dead pull, wrong-BIOS refusal, six generated pulls).
+All pass on both backends.
+
+### 0.5 Yield (live/dead and audible, reported separately)
+
+`--grim-pull-yield`: 40 pulls per intensity, families Audio+Code+Interface, 900 frames, no-disc
+SCPH-1001, each pull in its own child process with the live gates. Audible = the Phase 4.1
+residual/exposure metric against the clean boot (provisional, as before).
+
+Cells are counts of 40 pulls; "alive" splits into survived+audible / survived+inaudible; no pull
+was silent, errored or hung the host after the DMA fix.
+
+| Intensity | Mean genes | Alive | Dead | Survived+audible | Survived+inaudible | Death causes |
+|---:|---:|---:|---:|---:|---:|---|
+| 20 (safe) | 2.6 | 39 | 1 | 31 | 8 | exception loop 1 |
+| 50 (risky) | 5.0 | 31 | 9 | 28 | 3 | exception loop 6, inert 3 |
+| 80 (lethal) | 6.9 | 24 | 16 | 13 | 11 | exception loop 12, inert 4 |
+
+All 120: **94 alive / 26 dead (78% / 22%)**; of the 94 survivors **72 audibly changed** (77%, 31/39 at
+the safe end). Death climbs with intensity as intended. Before the DMA fix, 2 of these same
+pulls hung the host (both lethal-intensity code genes); they now die or live in seconds.
+The metric is provisional (four human labels), so "audible" is a measured proxy, not a listening result.
+
+Hash change is not used anywhere. Dead pulls are not scored for audibility.
+
+### 0.6 Verification
+
+- Stock no-genome 1800 frames: `run_hash=0x432E585CF1535F9C`, unchanged.
+- Passing: CPU differential, GPU, scheduler (13 checks), Grim self, gene, map, sample (600 frames,
+  3 seeds), audibility (4 labels), pull test on both backends.
+- Full GT2 regression replay, 5738/5738 frames, **every BOOT_STATE_HASH field identical** between the
+  pre-Phase-5 build (phase-4.1 + main) and this build, separately for the interpreter and the recompiler.
+  That covers the DMA cycle detection, the audio-tap check and the light-telemetry branch.
+
+### 0.7 Not done / limits
+
+- Panel not seen on screen by the agent. No thumbnails, audio clip, curse readout, "More like this"
+  or per-gene toggles (Phase 8). Copy code copies the genome JSON.
+- Visual family generates nothing until Phase 6. Code genes need the map; mapping runs on first use.
+- Death thresholds come from one BIOS' clean boot; a game disc doubles them, nothing more. A static
+  loading screen with silence in some game could still read as "frozen".
+- Only MSVC/Windows built. Alternating pinned benchmarks were not rerun (the watch is off in normal
+  play; the normal-path costs are one null check per produced audio block and a few arithmetic ops
+  per linked-list packet).
+- A pull that hangs the host for a reason other than the DMA loop would still freeze the emulator
+  thread. A UI-side stall detector would be the next step.
+
+---
+
+# Appendix E — Phase 4.1 reference
+
 ## 1. Phase 4.1 status (2026-10-01)
 
 **Phase 4.1 is done on `grim-reaper/phase-4.1`, from Phase 4 `9a51ea4`.**

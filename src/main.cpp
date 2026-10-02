@@ -12,6 +12,7 @@
 #include "platform/grim_sample_runner.h"
 #include "platform/grim_audibility_runner.h"
 #include "platform/grim_audibility_test.h"
+#include "platform/grim_pull_test.h"
 #include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
@@ -3973,6 +3974,8 @@ int main(int argc, char *argv[]) {
                                passthrough[0] == "--grim-samples" ||
                                passthrough[0] == "--grim-sample-test" ||
                                passthrough[0] == "--grim-audibility-test" ||
+                               passthrough[0] == "--grim-pull-test" ||
+                               passthrough[0] == "--grim-pull-yield" ||
                                passthrough[0] == "--grim-audibility" ||
                                passthrough[0] == "--grim-audio-compare" ||
                                passthrough[0] == "--grim-describe-genome" ||
@@ -4003,6 +4006,10 @@ int main(int argc, char *argv[]) {
                        ? run_grim_sample_test(grim_args)
                    : passthrough[0] == "--grim-audibility-test"
                        ? run_grim_audibility_test(grim_args)
+                   : passthrough[0] == "--grim-pull-test"
+                       ? run_grim_pull_test(grim_args)
+                   : passthrough[0] == "--grim-pull-yield"
+                       ? run_grim_pull_yield(grim_args)
                    : passthrough[0] == "--grim-audibility"
                        ? run_grim_audibility_cli(grim_args)
                    : passthrough[0] == "--grim-audio-compare"

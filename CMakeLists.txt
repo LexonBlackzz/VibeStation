@@ -175,6 +175,12 @@ set(VIBESTATION_SOURCES
     src/platform/grim_audibility_runner.cpp
     src/platform/grim_audibility_test.cpp
     src/core/grim_audibility.cpp
+    src/core/grim_live.cpp
+    src/core/grim_pull.cpp
+    src/core/grim_library.cpp
+    src/platform/grim_pull_test.cpp
+    src/ui/panels/grim_pull_actions.cpp
+    src/ui/definitive/definitive_grim_pull.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0-dev")

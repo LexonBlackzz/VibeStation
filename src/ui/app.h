@@ -2,6 +2,7 @@
 #include "../core/input_recorder.h"
 #include "emu_runner.h"
 #include "frame_presentation_worker.h"
+#include "grim_pull_state.h"
 #include "../integrations/discord_presence.h"
 #include "../core/config.h"
 #include "../core/renderer.h"
@@ -75,6 +76,7 @@ private:
 	bool definitive_grim_reaper_active_ = false;
 	bool definitive_grim_reaper_closing_ = false;
 	bool definitive_grim_reaper_advanced_ = false;
+	int definitive_grim_reaper_tab_ = 0; // 0 = 2.0 pulls, 1 = classic reapers
 	float definitive_grim_reaper_visibility_ = 0.0f;
 	int definitive_grim_reaper_style_ = 0;
 	bool gameplay_exit_transition_active_ = false;
@@ -333,6 +335,20 @@ private:
 	void disable_gpu_reaper_mode();
 	void sync_sound_reaper_config();
 	void disable_sound_reaper_mode();
+
+	// Grim Reaper 2.0 live pulls (src/ui/panels/grim_pull_actions.cpp, panel in
+	// src/ui/definitive/definitive_grim_pull.cpp).
+	std::unique_ptr<GrimPullState> grim_pull_;
+	GrimPullState& grim_pull_state();
+	void grim_pull_update();
+	void grim_pull_shutdown();
+	bool grim_pull_new();
+	bool grim_pull_boot(const GrimGenome& genome, u64 pull_number);
+	bool grim_pull_boot_entry(u64 pull_number);
+	void grim_pull_keep(u64 pull_number, bool keep);
+	void grim_pull_start_mapping();
+	void grim_pull_save_library();
+	void draw_grim_pull_tab();
 
 	// Deferred heavy initialization to avoid large stack allocations on startup.
 	bool init_runtime();

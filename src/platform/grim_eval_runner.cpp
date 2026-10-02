@@ -1,6 +1,7 @@
 #include "platform/grim_eval_runner.h"
 #include "core/grim_eval.h"
 #include "core/grim_audibility.h"
+#include "core/grim_live.h"
 #include "core/grim_genome.h"
 #include "core/grim_rom.h"
 #include "core/grim_sample.h"
@@ -306,6 +307,8 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
         return 1;
       }
       cfg.use_genome = true;
+    } else if (a == "--live-gates") {
+      cfg.liveness = grim_live_config(false); // the thresholds the GUI death watch uses
     } else if (a == "--disc" && has_value) {
       cfg.disc_cue = args[++i];
     } else if (a == "--dump-wav" && has_value) {

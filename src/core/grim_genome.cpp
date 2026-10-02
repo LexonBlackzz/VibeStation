@@ -928,7 +928,8 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
         g.params[i] = rng.srange(spec.lo, spec.hi);
       } else {
         const u32 u = rng.unit_q10();
-        const u32 bias = (u * u) >> 10;
+        u32 bias = (u * u) >> 10;
+        bias += ((1024u - bias) * rp.risk_q10) >> 10;
         g.params[i] = lerp_q10(spec.def, rng.srange(spec.lo, spec.hi), bias);
       }
     }
@@ -953,6 +954,12 @@ GrimGenome grim_random_genome(u64 seed, const GrimRandomParams &rp) {
       } else {
         t.probability = rng.range(50, 600);
       }
+    }
+    if (rp.rot_only && (t.kind != GrimTriggerKind::Rot || t.start_frame < 120u)) {
+      t = GrimTrigger{};
+      t.kind = GrimTriggerKind::Rot;
+      t.start_frame = 120u + static_cast<u32>(g.seed % 300u); // healthy for 2-7 s
+      t.end_frame = t.start_frame + std::max(300u, horizon);
     }
     genome.genes.push_back(g);
   }

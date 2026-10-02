@@ -449,6 +449,7 @@ public:
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
   bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
   void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
+  void set_spu_audio_tap(std::vector<s16> *tap) { spu_.set_audio_tap(tap); }
   const std::vector<s16> &spu_audio_capture_samples() const {
     return spu_.audio_capture_samples();
   }

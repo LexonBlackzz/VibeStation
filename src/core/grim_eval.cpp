@@ -125,6 +125,8 @@ GrimFrameTelemetry GrimTelemetry::end_frame(System &sys,
                       cpu.cop0_sr, cpu.cop0_cause, cpu.cop0_epc,
                       cpu.cop0_badvaddr};
   f.cpu_hash = fnv1a(cpu_hash, regs, sizeof(regs));
+  f.cop0_cause = cpu.cop0_cause;
+  f.cop0_epc = cpu.cop0_epc;
   return f;
 }
 
@@ -168,8 +170,14 @@ bool GrimLivenessTracker::update(const GrimFrameTelemetry &f) {
           cfg_.exception_loop_repeat_ratio * static_cast<double>(non_irq);
   exc_loop_run_ = looping ? exc_loop_run_ + 1u : 0u;
 
+  const bool same_exception = have_prev_ && ((f.cop0_cause >> 2) & 31u) != 0u &&
+                              f.cop0_epc == prev_epc_;
+  stuck_exc_run_ = same_exception && inert ? stuck_exc_run_ + 1u : 0u;
+  prev_epc_ = f.cop0_epc;
+
   const char *reason = nullptr;
-  if (exc_loop_run_ >= cfg_.exception_loop_frames) {
+  if (exc_loop_run_ >= cfg_.exception_loop_frames ||
+      (cfg_.stuck_exception_frames != 0 && stuck_exc_run_ >= cfg_.stuck_exception_frames)) {
     reason = "exception_loop";
   } else if (stall_run_ >= cfg_.coverage_stall_frames) {
     reason = "coverage_stall";

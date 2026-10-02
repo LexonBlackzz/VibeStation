@@ -275,6 +275,10 @@ public:
   void set_audio_capture(bool enabled) { capture_enabled_ = enabled; }
   bool audio_capture_enabled() const { return capture_enabled_; }
   void clear_audio_capture();
+  // Grim Reaper live death watch: a copy of every produced stereo block (before
+  // resampling) is appended here. Set and cleared only while the emulator is
+  // paused; nullptr (the default) costs one branch per produced block.
+  void set_audio_tap(std::vector<s16> *tap) { audio_tap_ = tap; }
   const std::vector<s16> &audio_capture_samples() const {
     return capture_samples_;
   }
@@ -422,6 +426,7 @@ private:
   std::atomic<bool> starvation_stutter_active_{false};
   std::atomic<bool> raw_drift_mode_{false};
   bool capture_enabled_ = false;
+  std::vector<s16> *audio_tap_ = nullptr;
   u32 host_buffer_bytes_ = 0;
   u32 opened_audio_samples_ = 0;
   std::atomic<u32> obtained_callback_sample_rate_{0};

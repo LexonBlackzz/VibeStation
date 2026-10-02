@@ -42,11 +42,24 @@ struct GrimFrameTelemetry {
   double audio_rms = 0.0; // over both channels, s16 units
   double audio_zcr = 0.0; // zero crossings per stereo frame (mid channel)
   u64 cpu_hash = 0;       // GPRs, PC, HI/LO, SR, Cause, EPC, BadVAddr
+  // COP0 state at the end of the frame (not part of the JSON/run hash). Both CPU
+  // backends keep it, so the live watch can see an exception loop the recompiler
+  // runs natively.
+  u32 cop0_cause = 0;
+  u32 cop0_epc = 0;
 };
 
 class GrimTelemetry {
 public:
   GrimTelemetry();
+
+  // Live death watch: keep counting exceptions, but let Cpu::run_slice() use its
+  // normal loop (no per-instruction hook). Coverage and instruction counts then
+  // read zero, exactly like the native-CPU evaluation mode.
+  void set_tracks_execution(bool on) { tracks_execution_ = on; }
+  bool tracks_execution() const { return tracks_execution_; }
+  u32 last_exception_cause() const { return last_exc_cause_; }
+  u32 last_exception_epc() const { return last_exc_epc_; }
 
   // Called by Cpu::run_slice() for every executed instruction while attached.
   void note_exec(u32 pc) {
@@ -90,6 +103,7 @@ private:
   static constexpr u32 kScratchWords = psx::SCRATCHPAD_SIZE / 4u;
   static constexpr u32 kOtherWord = kRamWords + kBiosWords + kScratchWords;
   std::vector<u64> exec_bits_;
+  bool tracks_execution_ = true;
 
   u64 instructions_ = 0;
   u32 new_pcs_ = 0;
@@ -129,6 +143,10 @@ struct GrimLivenessConfig {
   // exception_loop_repeat_ratio repeat the previous cause+EPC, with no new
   // code executed.
   u32 exception_loop_frames = 60;
+  // stuck_exception: this many consecutive inert frames (as for coverage_stall) in
+  // which the last exception was not an interrupt and its EPC never changed. 0 = off
+  // (the Phase 1 gates stay exactly as they were); the live watch turns it on.
+  u32 stuck_exception_frames = 0;
   u32 exception_loop_min_per_frame = 8;
   double exception_loop_repeat_ratio = 0.9;
   // Audio is judged over the whole run. An audio frame "moves" when its RMS
@@ -171,6 +189,8 @@ private:
   u32 stall_run_ = 0;
   u32 frozen_run_ = 0;
   u32 exc_loop_run_ = 0;
+  u32 stuck_exc_run_ = 0;
+  u32 prev_epc_ = 0;
   u32 audio_moving_frames_ = 0;
   bool drew_image_ = false;
   bool have_prev_ = false;

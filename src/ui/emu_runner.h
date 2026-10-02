@@ -11,6 +11,8 @@
 #include <thread>
 #include <vector>
 
+class GrimLiveWatch;
+
 struct FrameSnapshot {
   u64 frame_id = 0;
   int width = 0;
@@ -53,6 +55,11 @@ public:
   bool is_running() const { return running_.load(std::memory_order_acquire); }
   bool playback_stopped_at_eof() const {
     return playback_stopped_at_eof_.load(std::memory_order_acquire);
+  }
+  // Grim Reaper death watch: called on the emulator thread after every frame.
+  // Change it only while paused (pause_and_wait_idle()); nullptr = off.
+  void set_grim_watch(GrimLiveWatch *watch) {
+    grim_watch_.store(watch, std::memory_order_release);
   }
   void set_vram_debug_capture_enabled(bool enabled) {
     capture_vram_debug_.store(enabled, std::memory_order_release);
@@ -114,6 +121,7 @@ private:
   std::atomic<double> speed_{1.0};
   std::atomic<u64> input_mailbox_{0};
   std::atomic<u64> completed_frame_count_{0};
+  std::atomic<GrimLiveWatch *> grim_watch_{nullptr};
 
   mutable std::mutex control_mutex_;
   std::condition_variable control_cv_;

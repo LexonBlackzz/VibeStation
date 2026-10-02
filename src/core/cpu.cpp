@@ -2601,7 +2601,7 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
     return recompiler_backend_->run_slice(max_cycles, max_instructions);
   }
 
-  if (telemetry_ != nullptr) {
+  if (telemetry_ != nullptr && telemetry_->tracks_execution()) {
     // Grim Reaper evaluation loop, kept out of step() so the normal
     // interpreter pays one branch per slice rather than one per instruction.
     while (result.cycles < max_cycles &&

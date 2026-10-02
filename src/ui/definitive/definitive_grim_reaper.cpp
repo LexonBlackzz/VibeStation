@@ -617,6 +617,52 @@ void App::panel_definitive_grim_reaper() {
     ImGui::PushFont(
         font_for_size(14.0f));
 
+    // 2.0 pulls are the default page; the 1.0 reapers stay one click away.
+    {
+        const float half =
+            (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
+        const char* names[2] = {
+            "NEW CORRUPTION", "CLASSIC REAPERS"};
+        for (int i = 0; i < 2; ++i) {
+            if (i > 0) {
+                ImGui::SameLine(0.0f, 8.0f);
+            }
+            const bool active =
+                definitive_grim_reaper_tab_ == i;
+            if (active) {
+                ImGui::PushStyleColor(
+                    ImGuiCol_Button,
+                    ImGui::GetStyleColorVec4(
+                        ImGuiCol_ButtonActive));
+            }
+            if (ImGui::Button(names[i], ImVec2(half, 30.0f))) {
+                definitive_grim_reaper_tab_ = i;
+            }
+            if (active) {
+                ImGui::PopStyleColor();
+            }
+        }
+        ImGui::Spacing();
+    }
+
+    if (definitive_grim_reaper_tab_ == 0) {
+        draw_grim_pull_tab();
+        ImGui::Spacing();
+        if (ImGui::Button(
+                has_started_emulation_
+                    ? "Close Panel"
+                    : "Back",
+                ImVec2(-1.0f, 34.0f))) {
+            play_close_sound();
+            close_definitive_grim_reaper();
+        }
+        ImGui::PopFont();
+        ImGui::End();
+        ImGui::PopStyleColor(15);
+        ImGui::PopStyleVar(6);
+        return;
+    }
+
     // Style is the single high-level selector; all controls below it are
     // contextual so the same concepts are not repeated per Reaper type.
     ImGui::TextUnformatted("STYLE");

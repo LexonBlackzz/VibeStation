@@ -306,3 +306,36 @@ Lexon's machine, so read it if you can.
   docs/grim-reaper/audio_labels.json; null means pending listening and is skipped.
   New resolved genomes/WAVs remain outside Git. PROGRESS §1–9 records results;
   Appendix D retains Phase 4's older hash-change measurements.
+
+## Live pulls (Phase 5)
+
+- `src/core/grim_pull.{h,cpp}`: `GrimPullSettings` (families, intensity 0-100, rot),
+  `grim_pull_plan()` (intensity -> gene range, risk, early-init bias, sample window),
+  `grim_pull_generate(seed, settings, ctx, history)`, `GrimPullHistory` (novelty: picks
+  one of four seed-derived candidates, never filters), `grim_pull_describe()` (panel gene
+  lines), `grim_pull_compatible()` (wrong-BIOS refusal), `grim_machine_id()`. Families
+  are gene sources: Audio = sample genes, Code = ROM code genes (needs the map),
+  Interface = SPU/GPU runtime filters, Visual = reserved for Phase 6 (generates nothing).
+  `GrimRandomParams::risk_q10/rot_only` are the two new generator knobs; both are no-ops
+  at their defaults, so every earlier seed still draws identically.
+- `src/core/grim_live.{h,cpp}`: `GrimLiveWatch` (attach/detach/on_frame, thread-safe
+  `status()`), `grim_live_config()`, `grim_describe_death()`, `grim_mercy_should_reroll()`.
+  The watch uses *light* telemetry: `GrimTelemetry::set_tracks_execution(false)` keeps
+  `Cpu::run_slice` on its normal loop. `Spu::set_audio_tap()` copies each produced stereo
+  block for the RMS/zero-crossing gates; nullptr costs one branch per block. Exceptions
+  come from `GrimTelemetry::note_exception` (interpreter) and, for the recompiler (which
+  takes them natively), from the COP0 Cause/EPC sampled at frame end
+  (`GrimLivenessConfig::stuck_exception_frames`, 0 = off for the Phase 1 gates).
+- `src/core/grim_library.{h,cpp}`: `GrimLibrary`, one JSON file written through a temp file
+  and rename; a damaged file is moved to `.corrupt` and the library starts empty.
+- UI: `src/ui/grim_pull_state.h`, `src/ui/panels/grim_pull_actions.cpp` (boot, revive,
+  keep, per-BIOS context, map discovery child process, death polling, Mercy),
+  `src/ui/definitive/definitive_grim_pull.cpp` (the panel; the 1.0 reapers are the
+  "Classic reapers" tab of the same page). `EmuRunner::set_grim_watch()` calls the watch
+  on the emulator thread after every frame.
+- Data lives next to the executable in `grim_data/` (`library.json`, `maps/<bios hash>.json`
+  + `.words`). The map is made once per BIOS by a child process running `--grim-map`
+  (interpreter only, ~30 s) the first time the Grim Reaper page is opened.
+- CLI: `--grim-pull-test` (generation, Mercy, death text, library, live machines; run
+  once per `--backend`), `--grim-pull-yield` (real pulls in child processes with a hard
+  timeout), `--grim-eval ... --live-gates`.

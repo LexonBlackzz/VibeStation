@@ -200,6 +200,12 @@ struct GrimRandomParams {
   u32 sample_magnitude = 1;
   s32 sample_index = -1;   // -1 draws any scanned sample
   s32 sample_donor = -1;   // transplant donor; -1 draws a different sample
+  // Phase 5 (live pulls). risk_q10 (0..1024) pushes interface-gene magnitudes toward
+  // the full parameter range; 0 keeps the survivable bias and draws exactly as
+  // before. rot_only turns every interface gene into a rot ramp (starts healthy,
+  // decays) without drawing extra random numbers.
+  u32 risk_q10 = 0;
+  bool rot_only = false;
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".
