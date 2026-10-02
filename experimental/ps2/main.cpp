@@ -10,6 +10,7 @@ int main(int argc, char** argv) {
     const auto startup_clock = std::chrono::steady_clock::now();
     std::string bios_path;
     std::string disc_path;
+    std::string ps1_bios_path;
     std::string capture_path;
     unsigned long long capture_after_ee = 0;
     bool ee_jit = false;
@@ -21,6 +22,8 @@ int main(int argc, char** argv) {
             bios_path = argv[++i];
         } else if (argument == "--disc" && i + 1 < argc) {
             disc_path = argv[++i];
+        } else if (argument == "--ps1-bios" && i + 1 < argc) {
+            ps1_bios_path = argv[++i];
         } else if (argument == "--capture-visible" && i + 1 < argc) {
             capture_path = argv[++i];
         } else if (argument == "--capture-after-ee" && i + 1 < argc) {
@@ -40,6 +43,7 @@ int main(int argc, char** argv) {
             std::fprintf(
                 stderr,
                 "Usage: VibeStationPS2Lab [--bios <path>] [--disc <image>] "
+                "[--ps1-bios <path>] "
                 "[--ee-jit|--ee-dynarec] "
                 "[--capture-visible <window.ppm>] "
                 "[--capture-after-ee <instructions>]\n");
@@ -66,6 +70,7 @@ int main(int argc, char** argv) {
     if (!app.init()) {
         return 1;
     }
+    app.set_ps1_bios(ps1_bios_path);
     app.set_ee_jit_enabled(ee_jit);
     app.set_ee_dynarec_enabled(ee_dynarec);
 

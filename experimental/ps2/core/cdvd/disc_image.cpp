@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <vector>
 
 namespace ps2 {
@@ -28,8 +29,36 @@ bool same_name(const u8* name, u32 length, const char* want) {
 
 } // namespace
 
-bool DiscImage::open(const std::string& path, std::string& error) {
+bool DiscImage::open(const std::string& cue_or_image, std::string& error) {
     close();
+    std::string path = cue_or_image;
+    std::string ext = path.size() > 4u ? path.substr(path.size() - 4u) : "";
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (ext == ".cue") {
+        // Only the first FILE (the data track) is mapped; audio tracks are not.
+        std::ifstream cue(path);
+        std::string line;
+        path.clear();
+        while (std::getline(cue, line)) {
+            const auto q1 = line.find('"');
+            const auto q2 = line.find('"', q1 + 1u);
+            if (line.find("FILE") != std::string::npos &&
+                q1 != std::string::npos && q2 != std::string::npos) {
+                const auto dir = cue_or_image.find_last_of("/\\");
+                path = (dir == std::string::npos
+                            ? std::string()
+                            : cue_or_image.substr(0, dir + 1u)) +
+                       line.substr(q1 + 1u, q2 - q1 - 1u);
+                break;
+            }
+        }
+        if (path.empty()) {
+            error = "No FILE entry in cue sheet: " + cue_or_image;
+            return false;
+        }
+    }
     file_->open(path, std::ios::binary | std::ios::ate);
     if (!*file_) {
         error = "Cannot open disc image: " + path;
@@ -37,21 +66,28 @@ bool DiscImage::open(const std::string& path, std::string& error) {
     }
     const auto bytes = static_cast<u64>(file_->tellg());
 
-    // Plain ISOs are a multiple of 2048; raw MODE1 images of 2352 (user data
-    // at +16). A size divisible by both is far more likely an ISO.
-    if (bytes % 2048u == 0u) {
+    // Plain ISOs are a multiple of 2048; raw images use 2352-byte sectors with
+    // user data at +16 (MODE1) or +24 (MODE2 XA, i.e. PS1 discs). A raw image
+    // starts with a sync pattern, which tells it apart from an ISO of a size
+    // divisible by both.
+    std::array<u8, 16> head{};
+    file_->seekg(0);
+    file_->read(reinterpret_cast<char*>(head.data()), 16);
+    const bool raw = bytes % 2352u == 0u && head[0] == 0x00u &&
+                     head[1] == 0xFFu && head[11] == 0x00u;
+    if (raw) {
+        sector_size_ = 2352u;
+        data_offset_ = head[15] == 2u ? 24u : 16u;
+    } else if (bytes % 2048u == 0u) {
         sector_size_ = 2048u;
         data_offset_ = 0u;
-    } else if (bytes % 2352u == 0u) {
-        sector_size_ = 2352u;
-        data_offset_ = 16u;
     } else {
         error = "Unsupported disc image size: " + path;
         file_->close();
         return false;
     }
     sector_count_ = static_cast<u32>(bytes / sector_size_);
-    path_ = path;
+    path_ = cue_or_image;
     detect_type();
     return true;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ps2_system.h"
+#include "ps1/ps1_mode.h"
 #include "ui/ps2_gl_gs_backend.h"
 
 #include <array>
@@ -28,6 +29,7 @@ public:
     void shutdown();
     bool launch_bios(const std::string& path);
     bool load_disc_from_path(const std::string& path);
+    void set_ps1_bios(const std::string& path) { ps1_bios_path_ = path; }
     void set_ee_jit_enabled(bool enabled);
     void set_ee_dynarec_enabled(bool enabled);
     void capture_visible_window(
@@ -43,6 +45,7 @@ private:
     void audio_stutter_thread_main();
     void render_ui();
     void update_display_texture();
+    void update_ps1_texture();
     void menu_bar();
     void panel_main();
     void panel_system();
@@ -53,7 +56,9 @@ private:
     void panel_settings();
     void panel_about();
 
-    std::string open_bios_dialog();
+    std::string open_bios_dialog(const char* title = "Select PlayStation 2 BIOS");
+    bool start_ps1(const std::string& disc_path);
+    void stop_ps1();
     std::string open_disc_dialog();
     bool load_bios_from_path(const std::string& path);
     bool start_bios();
@@ -102,6 +107,17 @@ private:
     std::thread emu_thread_{};
 
     Ps2System system_{};
+
+    // PS1 discs run on the standalone PS1 core while PS2 emulation is idle.
+    std::unique_ptr<Ps1Mode> ps1_ = std::make_unique<Ps1Mode>();
+    std::string ps1_bios_path_{};
+    std::vector<u32> ps1_frame_{};
+    unsigned int ps1_texture_ = 0;
+    int ps1_width_ = 0;
+    int ps1_height_ = 0;
+    int ps1_texture_width_ = 0;
+    int ps1_texture_height_ = 0;
+    int ps1_speed_index_ = 0;
 
     bool show_system_ = false;
     bool show_ee_debug_ = false;

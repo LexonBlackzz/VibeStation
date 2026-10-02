@@ -238,6 +238,7 @@ int Ps2App::run() {
         ImGui::NewFrame();
 
         update_display_texture();
+        update_ps1_texture();
         render_ui();
 
         ImGui::Render();
@@ -286,7 +287,7 @@ void Ps2App::stop_emulation_thread() {
 }
 
 bool Ps2App::launch_bios(const std::string& path) {
-    return load_bios_from_path(path) && start_bios();
+    return load_bios_from_path(path) && (ps1_->active() || start_bios());
 }
 
 void Ps2App::set_ee_jit_enabled(bool enabled) {
@@ -379,8 +380,14 @@ void Ps2App::shutdown() {
         controller_ = nullptr;
     }
 
+    stop_ps1();
     system_.gs_core().set_gpu_backend(nullptr);
     gpu_gs_backend_.reset();
+
+    if (ps1_texture_ != 0 && gl_context_ != nullptr) {
+        glDeleteTextures(1, &ps1_texture_);
+        ps1_texture_ = 0;
+    }
 
     if (display_texture_ != 0 && gl_context_ != nullptr) {
         glDeleteTextures(1, &display_texture_);
@@ -476,6 +483,41 @@ void Ps2App::update_display_texture() {
 
     glBindTexture(GL_TEXTURE_2D, 0);
     display_texture_generation_ = display.generation();
+}
+
+void Ps2App::update_ps1_texture() {
+    if (!ps1_->active()) return;
+    int width = 0;
+    int height = 0;
+    if (!ps1_->take_frame(ps1_frame_, width, height) || width <= 0 ||
+        height <= 0 ||
+        ps1_frame_.size() < static_cast<std::size_t>(width) * height) {
+        return;
+    }
+    if (ps1_texture_ == 0) {
+        glGenTextures(1, &ps1_texture_);
+        glBindTexture(GL_TEXTURE_2D, ps1_texture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, ps1_texture_);
+    }
+    const GLint filter = display_filter_ == 0 ? GL_NEAREST : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (width != ps1_texture_width_ || height != ps1_texture_height_) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, ps1_frame_.data());
+        ps1_texture_width_ = width;
+        ps1_texture_height_ = height;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
+                        GL_UNSIGNED_BYTE, ps1_frame_.data());
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    ps1_width_ = width;
+    ps1_height_ = height;
 }
 
 void Ps2App::update_pad_input() {
@@ -580,6 +622,9 @@ void Ps2App::update_pad_input() {
     }
 
     system_.pad().set_state(state);
+    // The PS1 pad word has the two button bytes the other way round.
+    ps1_->set_buttons(static_cast<std::uint16_t>(
+        (state.buttons << 8) | (state.buttons >> 8)));
 }
 
 void Ps2App::reset_audio_stutter() {
@@ -866,7 +911,8 @@ void Ps2App::menu_bar() {
             }
         }
         if (ImGui::MenuItem("Eject Disc", nullptr, false,
-                            system_.cdvd().has_disc())) {
+                            system_.cdvd().has_disc() || ps1_->active())) {
+            stop_ps1();
             system_.eject_disc();
             reset_core();
             if (system_.bios().loaded()) start_bios();
@@ -920,6 +966,19 @@ void Ps2App::menu_bar() {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("PS1 Speed", ps1_->active())) {
+        static constexpr const char* kLabels[] = {
+            "1x (real time)", "2x", "4x", "Unlimited"};
+        static constexpr double kSpeeds[] = {1.0, 2.0, 4.0, 0.0};
+        for (int i = 0; i < 4; ++i) {
+            if (ImGui::MenuItem(kLabels[i], nullptr, ps1_speed_index_ == i)) {
+                ps1_speed_index_ = i;
+                ps1_->set_speed(kSpeeds[i]);
+            }
+        }
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("System", nullptr, &show_system_);
         ImGui::MenuItem("EE Debug", "F9", &show_ee_debug_);
@@ -951,6 +1010,26 @@ void Ps2App::panel_main() {
     const ImVec2 start = ImGui::GetCursorPos();
     const float center_x = start.x + (available.x * 0.5f);
     const float center_y = start.y + (available.y * 0.5f);
+
+    if (ps1_->active() && ps1_texture_ != 0 && ps1_width_ > 0) {
+        // PS1 output is 4:3 whatever VRAM region is scanned out.
+        const float aspect = 4.0f / 3.0f;
+        ImVec2 image_size = available;
+        if (image_size.y > 0.0f && image_size.x / image_size.y > aspect) {
+            image_size.x = image_size.y * aspect;
+        } else {
+            image_size.y = image_size.x / aspect;
+        }
+        image_size.x = std::max(1.0f, std::floor(image_size.x + 0.5f));
+        image_size.y = std::max(1.0f, std::floor(image_size.y + 0.5f));
+        ImGui::SetCursorPos(ImVec2(
+            std::floor(start.x + (available.x - image_size.x) * 0.5f),
+            std::floor(start.y + (available.y - image_size.y) * 0.5f)));
+        ImGui::Image((ImTextureID)(intptr_t)ps1_texture_, image_size);
+        ImGui::SetCursorPos(ImVec2(start.x + 10.0f, start.y + 10.0f));
+        ImGui::TextDisabled("PS1 core  %dx%d", ps1_width_, ps1_height_);
+        return;
+    }
 
     const auto& display = system_.gs_display();
     const auto show_boot_progress = [&]() {
@@ -1790,7 +1869,7 @@ void Ps2App::panel_about() {
     ImGui::End();
 }
 
-std::string Ps2App::open_bios_dialog() {
+std::string Ps2App::open_bios_dialog(const char* title) {
 #ifdef _WIN32
     std::array<char, 1024> path{};
 
@@ -1799,9 +1878,9 @@ std::string Ps2App::open_bios_dialog() {
     dialog.lpstrFile = path.data();
     dialog.nMaxFile = static_cast<DWORD>(path.size());
     dialog.lpstrFilter =
-        "PS2 BIOS Images (*.bin)\0*.bin\0All Files (*.*)\0*.*\0";
+        "BIOS Images (*.bin)\0*.bin\0All Files (*.*)\0*.*\0";
     dialog.nFilterIndex = 1;
-    dialog.lpstrTitle = "Select PlayStation 2 BIOS";
+    dialog.lpstrTitle = title;
     dialog.Flags =
         OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
@@ -1827,7 +1906,7 @@ std::string Ps2App::open_disc_dialog() {
     dialog.lpstrFile = path.data();
     dialog.nMaxFile = static_cast<DWORD>(path.size());
     dialog.lpstrFilter =
-        "Disc Images (*.iso;*.bin;*.img)\0*.iso;*.bin;*.img\0"
+        "Disc Images (*.iso;*.bin;*.img;*.cue)\0*.iso;*.bin;*.img;*.cue\0"
         "All Files (*.*)\0*.*\0";
     dialog.nFilterIndex = 1;
     dialog.lpstrTitle = "Open PlayStation / PlayStation 2 disc image";
@@ -1845,10 +1924,14 @@ std::string Ps2App::open_disc_dialog() {
 }
 
 bool Ps2App::load_disc_from_path(const std::string& path) {
+    stop_ps1();
     std::string error;
     if (!system_.load_disc(path, error)) {
         status_message_ = "Disc load failed: " + error;
         return false;
+    }
+    if (system_.cdvd().disc().type() == DiscType::Ps1Cd) {
+        return start_ps1(path);
     }
     status_message_ =
         "Disc loaded: " + std::filesystem::path(path).filename().string();
@@ -1859,6 +1942,34 @@ bool Ps2App::load_disc_from_path(const std::string& path) {
     // The BIOS only looks at the drive during startup, so restart it.
     reset_core();
     return start_bios();
+}
+
+bool Ps2App::start_ps1(const std::string& disc_path) {
+    if (ps1_bios_path_.empty()) {
+        ps1_bios_path_ = open_bios_dialog(
+            "Select a PlayStation 1 BIOS (e.g. SCPH1001.BIN)");
+        if (ps1_bios_path_.empty()) {
+            status_message_ = "PS1 disc needs a PS1 BIOS (--ps1-bios <path>)";
+            return false;
+        }
+    }
+    emulation_running_ = false;
+    std::string error;
+    if (!ps1_->start(ps1_bios_path_, disc_path, error)) {
+        status_message_ = error;
+        ps1_bios_path_.clear();
+        return false;
+    }
+    ps1_->set_speed(1.0);
+    ps1_speed_index_ = 0;
+    status_message_ = "PS1 disc running on the PS1 core: " +
+        std::filesystem::path(disc_path).filename().string();
+    return true;
+}
+
+void Ps2App::stop_ps1() {
+    ps1_->stop();
+    ps1_width_ = ps1_height_ = 0;
 }
 
 bool Ps2App::load_bios_from_path(const std::string& path) {

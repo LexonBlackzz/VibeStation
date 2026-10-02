@@ -18,8 +18,9 @@ enum class DiscType : u8 {
     Illegal = 0xFF,
 };
 
-// Read-only sector image. Supports plain 2048-byte ISOs and raw 2352-byte
-// MODE1 images; sectors are always handed out as 2048 bytes of user data.
+// Read-only sector image. Supports plain 2048-byte ISOs, raw 2352-byte MODE1/
+// MODE2 images and .cue sheets (data track only); sectors are always handed
+// out as 2048 bytes of user data.
 class DiscImage {
 public:
     bool open(const std::string& path, std::string& error);
