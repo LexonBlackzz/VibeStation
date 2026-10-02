@@ -56,6 +56,10 @@ struct EeCpuState {
     std::array<EeSyscallRecord, 64> recent_syscalls{};
     u32 recent_syscall_count = 0;
     u32 recent_syscall_next = 0;
+    // COP0 reg 25 performance counters (MFPS/MTPS = PCCR, MFPC/MTPC = PCR0/1).
+    u32 perf_pccr = 0;
+    std::array<u32, 2> perf_pcr{};
+    u64 perf_last_instruction = 0;
 };
 
 class EeCpu {
@@ -234,6 +238,10 @@ private:
     bool execute_special(u32 pc, u32 instruction, std::string& error);
     bool execute_regimm(u32 pc, u32 instruction, std::string& error);
     bool execute_cop0(u32 pc, u32 instruction, std::string& error);
+    // Bring PCR0/PCR1 up to date with the retired instruction count.
+    void update_perf_counters();
+    // MFC0/MTC0 reg 25 with the register chosen by the low 6 bits.
+    bool perf_register(u32 funct, u32*& reg);
     bool execute_cop1(u32 pc, u32 instruction, std::string& error);
     bool execute_cop2(u32 pc, u32 instruction, std::string& error);
     bool run_vu0_micro(u32 start_address, std::string& error);

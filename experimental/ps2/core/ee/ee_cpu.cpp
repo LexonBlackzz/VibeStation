@@ -703,8 +703,38 @@ bool EeCpu::execute_regimm(u32 pc, u32 instruction, std::string& error) {
     return true;
 }
 
+void EeCpu::update_perf_counters(){
+    const u64 now=state_.instructions_executed;
+    const u32 delta=static_cast<u32>(now-state_.perf_last_instruction);
+    state_.perf_last_instruction=now;
+    if((state_.perf_pccr & 0x80000000u)==0) return;
+    // One retired instruction is one cycle here; events 1 (cycle) and 2
+    // (instruction issued) are the ones games use for timing.
+    for(u32 i=0;i<2u;++i){
+        const u32 event=(state_.perf_pccr>>(i==0?5u:15u)) & 0x1Fu;
+        if(event==1u||event==2u) state_.perf_pcr[i]+=delta;
+    }
+}
+
+bool EeCpu::perf_register(u32 funct,u32*& reg){
+    switch(funct){
+        case 0u: reg=&state_.perf_pccr; return true;
+        case 1u: reg=&state_.perf_pcr[0]; return true;
+        case 3u: reg=&state_.perf_pcr[1]; return true;
+        default: return false;
+    }
+}
+
 bool EeCpu::execute_cop0(u32 pc,u32 instruction,std::string& error){
     const u32 rs=(instruction>>21)&31u, rt=(instruction>>16)&31u, rd=(instruction>>11)&31u, sel=instruction&7u, funct=instruction&63u;
+    if((rs==0x00||rs==0x04) && sel!=0 && rd==25u){
+        u32* reg=nullptr;
+        if(!perf_register(funct,reg)) return fail(pc,instruction,"Unsupported COP0 select",error);
+        update_perf_counters();
+        if(rs==0x00) write_gpr_word(rt,*reg);
+        else *reg=static_cast<u32>(gpr_u64(rt));
+        return true;
+    }
     if(rs==0x00){ if(sel!=0) return fail(pc,instruction,"Unsupported COP0 select",error); write_gpr_word(rt,state_.cop0[rd]); return true; }
     if(rs==0x08){ // BC0F / BC0T / BC0FL / BC0TL
         if(rt>3u) return fail(pc,instruction,"Unsupported BC0 condition branch",error);
