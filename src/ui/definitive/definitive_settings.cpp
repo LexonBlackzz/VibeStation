@@ -1,6 +1,7 @@
 #include "ui/app.h"
 #include "ui/definitive/definitive_shared.h"
 #include "ui/output_resolution_utils.h"
+#include "ui/favorite_emulator.h"
 #include "ui/theme_settings.h"
 #include "version.h"
 
@@ -806,7 +807,7 @@ void App::panel_definitive_settings() {
 
     case 3: { // System
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 326.0f, "CPU & PERFORMANCE");
+            draw, layout, left_x, content_y, column_w, 394.0f, "CPU & PERFORMANCE");
 
         const char* cpu_backend_labels[] = {
             "Interpreter", "Recompiler (Experimental)"
@@ -879,6 +880,28 @@ void App::panel_definitive_settings() {
         }
         note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
             "Reduces internal work for slower PCs with some quality tradeoffs.");
+
+        // Shared with VibeStation 2's System Configuration; read by main().
+        const char* favorite_labels[] = {
+            "VibeStation 1", "VibeStation 2 (Experimental)"
+        };
+        int favorite =
+            vibestation::load_favorite_emulator() ==
+                    vibestation::FavoriteEmulator::VibeStation2
+                ? 1
+                : 0;
+        if (definitive_settings_combo(
+            draw, layout, "system_favorite", "Favorite Emulator",
+            left_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            column_w - 2.0f, favorite, favorite_labels,
+            IM_ARRAYSIZE(favorite_labels))) {
+            vibestation::save_favorite_emulator(
+                favorite == 1
+                    ? vibestation::FavoriteEmulator::VibeStation2
+                    : vibestation::FavoriteEmulator::VibeStation1);
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            "Which one VibeStation opens in: the PS1 or the PS2 emulator.");
 
         draw_settings_section(
             draw, layout, right_x, content_y, column_w, 394.0f, "PLAYBACK & SERVICES");

@@ -1,0 +1,622 @@
+<title>VibeStation 2 Menu Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+1p:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a fixed 1280x800 "console screen" (same as the definitive UI and vs2start.mp4)
+   scaled to fit, with design notes underneath. Single deliberate dark look: it is a TV screen. */
+:root {
+  --void: #000000;          /* screen black, matches the video's tail */
+  --orb: #cfe6ff;           /* orbiting light core */
+  --select: #38b6ff;        /* selected item cyan-blue */
+  --idle: #8c95a3;          /* unselected item grey */
+  --reaper: #ff4a4a;        /* Grim Reaper tint */
+  --ink: #e8eef6;           /* notes text */
+  --ink-dim: #8a96a8;
+  --line: #1c2740;
+  --page: #05070c;
+  --display: "M PLUS 1p", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { background: var(--page); color: var(--ink); }
+body { font-family: var(--display); padding-inline: 16px; padding-block: 20px 48px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.bar h1 { font-weight: 400; font-size: 18px; margin: 0; letter-spacing: .02em; }
+.bar h1 span { color: var(--ink-dim); font-weight: 300; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn { font: 500 13px var(--display); color: var(--ink); background: #0d1424; border: 1px solid var(--line);
+  padding: 7px 12px; border-radius: 3px; cursor: pointer; }
+.btn:hover { border-color: #33466e; }
+.btn:focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
+.btn.primary { border-color: #1f5f8f; background: #0b2238; }
+input[type=file] { display: none; }
+
+/* ---------- the screen ---------- */
+.viewport { position: relative; width: 100%; aspect-ratio: 1280 / 800; max-width: 100%;
+  background: var(--void); overflow: hidden; border: 1px solid var(--line); }
+#stage { position: absolute; left: 0; top: 0; width: 1280px; height: 800px; transform-origin: 0 0;
+  background: var(--void); overflow: hidden; user-select: none; }
+#stage canvas, #stage video { position: absolute; inset: 0; width: 1280px; height: 800px; }
+#stage video { object-fit: cover; background: #000; z-index: 5; transition: opacity .6s; }
+.layer { position: absolute; inset: 0; transition: opacity .7s ease; }
+
+/* top-right wordmark, echoes the definitive UI's corner block */
+.corner { position: absolute; right: 46px; top: 38px; text-align: right; font-family: var(--mono);
+  font-size: 11px; letter-spacing: .14em; color: #6f7b8f; line-height: 1.9; }
+.corner b { display: block; font-family: var(--display); font-weight: 300; font-size: 22px; letter-spacing: .06em;
+  color: #c9d3e0; margin-bottom: 6px; }
+.corner i { display: block; width: 34px; height: 1px; background: #46526a; margin: 8px 0 0 auto; }
+
+/* menu column right of the orbit, like the PS2 "Browser / System Configuration" pair */
+.menu { position: absolute; left: 640px; top: 0; height: 800px; width: 560px; }
+.item { position: absolute; left: 0; top: 0; white-space: nowrap; cursor: pointer;
+  transition: transform .45s cubic-bezier(.2,.8,.2,1), opacity .45s, color .3s, text-shadow .3s; }
+.item .label { font-weight: 300; font-size: 30px; letter-spacing: .01em; color: var(--idle); }
+.item.sel .label { color: var(--select); font-weight: 400;
+  text-shadow: 0 0 18px rgba(56,182,255,.55), 0 0 2px rgba(56,182,255,.9); }
+.item .sub { font-size: 13px; color: #7d8aa0; letter-spacing: .04em; height: 0; overflow: hidden; opacity: 0;
+  transition: opacity .35s, height .35s; }
+.item.sel .sub { opacity: 1; height: 22px; margin-top: 2px; }
+.item.reaper.sel .label { color: var(--reaper); text-shadow: 0 0 18px rgba(255,74,74,.55); }
+
+.hints { position: absolute; bottom: 44px; left: 0; right: 0; display: flex; justify-content: space-between;
+  padding: 0 300px; font-size: 18px; font-weight: 300; color: #b8c2d0; }
+.hints span { display: inline-flex; align-items: center; gap: 9px; }
+.hints, .corner { transition: opacity .8s ease; }
+.glyph { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center;
+  background: radial-gradient(circle at 40% 35%, #4b5568, #1e2430); font-size: 12px; color: #dfe6f0;
+  box-shadow: inset 0 0 0 1px #5d6880; }
+.glyph.x { color: #9ec5ff; } .glyph.o { color: #ff9c9c; } .glyph.t { color: #8ff0c8; } .glyph.s { color: #f3a6e4; }
+
+/* ---------- sub screens ---------- */
+.screen { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity .6s ease; }
+.screen.on { opacity: 1; pointer-events: auto; }
+.screen h2 { position: absolute; left: 90px; top: 58px; margin: 0; font-weight: 300; font-size: 30px;
+  color: var(--select); text-shadow: 0 0 16px rgba(56,182,255,.45); }
+.screen .crumb { position: absolute; left: 92px; top: 100px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .14em; color: #66738a; }
+
+/* Browser: discs float as translucent tiles on a perspective floor */
+.shelf { position: absolute; left: 0; right: 0; top: 230px; height: 300px; perspective: 900px; }
+.disc { position: absolute; top: 40px; width: 150px; height: 190px; transform-style: preserve-3d; cursor: pointer;
+  transition: transform .5s cubic-bezier(.2,.8,.2,1), opacity .5s, filter .5s; }
+.disc .face { position: absolute; inset: 0; border-radius: 4px;
+  background: linear-gradient(160deg, rgba(150,190,255,.20), rgba(40,70,140,.10) 60%, rgba(150,190,255,.06));
+  box-shadow: inset 0 0 0 1px rgba(170,205,255,.35), 0 0 30px rgba(56,140,255,.10); display: grid; place-items: center; }
+.disc .face svg { width: 74px; height: 74px; opacity: .85; }
+.disc .refl { position: absolute; left: 0; right: 0; top: 196px; height: 70px; border-radius: 4px; opacity: .25;
+  background: linear-gradient(180deg, rgba(150,190,255,.18), transparent); transform: scaleY(-1); }
+.disc.sel .face { box-shadow: inset 0 0 0 1px rgba(56,182,255,.9), 0 0 40px rgba(56,182,255,.35); }
+.gameinfo { position: absolute; left: 0; right: 0; top: 560px; text-align: center; }
+.gameinfo .t { font-size: 26px; font-weight: 300; color: #e6edf6; }
+.gameinfo .m { margin-top: 8px; font-family: var(--mono); font-size: 12px; letter-spacing: .1em; color: #7a879c; }
+
+/* System Configuration: PS2-style two column list */
+.config { position: absolute; left: 230px; top: 180px; width: 820px; display: flex; flex-direction: column; gap: 4px; }
+.row { display: grid; grid-template-columns: 1fr 300px; align-items: center; padding: 11px 22px; border-radius: 2px;
+  font-size: 19px; font-weight: 300; color: #aab4c3; cursor: pointer; }
+.row .v { color: #d7dfea; text-align: right; font-family: var(--mono); font-size: 15px; }
+.row.sel { background: linear-gradient(90deg, rgba(56,182,255,.20), rgba(56,182,255,.04)); color: #fff;
+  box-shadow: inset 2px 0 0 var(--select); }
+.row.sel .v::before { content: "\25C0  "; color: var(--select); }
+.row.sel .v::after { content: "  \25B6"; color: var(--select); }
+.cfgnote { position: absolute; left: 252px; top: 640px; font-size: 13px; color: #75839a; max-width: 760px; }
+
+/* Version panel */
+.version { position: absolute; left: 50%; top: 190px; transform: translateX(-50%); width: 620px;
+  border: 1px solid rgba(200,205,215,.18); background: rgba(14,14,16,.7); padding: 30px 38px;
+  font-family: var(--mono); font-size: 14px; color: #c7d0dd; display: grid; grid-template-columns: 210px 1fr; row-gap: 12px; }
+.version .k { color: #75839a; }
+
+/* boot / misc overlays */
+.center-msg { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  font-weight: 300; font-size: 22px; color: #c9d3e0; }
+.center-msg small { display: block; margin-top: 10px; font-family: var(--mono); font-size: 12px; letter-spacing: .14em; color: #66738a; }
+.confirm { display: flex; gap: 40px; justify-content: center; margin-top: 26px; font-size: 22px; }
+.confirm span { cursor: pointer; color: var(--idle); }
+.confirm span.sel { color: var(--select); text-shadow: 0 0 14px rgba(56,182,255,.5); }
+.timecode { position: absolute; left: 14px; bottom: 10px; z-index: 6; font-family: var(--mono); font-size: 11px;
+  color: #54607a; letter-spacing: .1em; }
+
+/* ---------- notes ---------- */
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.note { border: 1px solid var(--line); background: #080c16; padding: 16px 18px; min-width: 0; }
+.note h3 { margin: 0 0 8px; font-size: 12px; font-family: var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--select); font-weight: 500; }
+.note p, .note li { font-size: 14px; line-height: 1.6; color: #b3bdcb; margin: 0; }
+.note ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.note code { font-family: var(--mono); font-size: 12.5px; color: #d5dde8; }
+.keys { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
+@media (prefers-reduced-motion: reduce) { .item, .disc, .layer, .screen { transition: none; } }
+</style>
+
+<div class="wrap">
+  <div class="bar">
+    <h1>VibeStation 2 <span>· menu prototype</span></h1>
+    <div class="controls">
+      <label class="btn primary" for="vid" id="vidbtn">Play startup with vs2start.mp4…</label>
+      <input type="file" id="vid" accept="video/mp4,video/*">
+      <button class="btn" id="replay" type="button">Replay reveal (no video)</button>
+      <button class="btn" id="mute" type="button" aria-pressed="false">Sound: on</button>
+    </div>
+  </div>
+
+  <div class="viewport" id="viewport" tabindex="0" aria-label="VibeStation 2 screen. Use arrow keys, Enter, Escape and T.">
+    <div id="stage">
+      <canvas id="bg" width="1280" height="800"></canvas>
+      <video id="boot" playsinline hidden></video>
+      <div class="timecode" id="tc" hidden></div>
+
+      <!-- main menu -->
+      <div class="layer" id="main">
+        <div class="corner" id="corner"><b>VibeStation 2</b>v0.6.0-ps2lab<br>128 BITS<br>ENDLESS NIGHTS<i></i></div>
+        <div class="menu" id="menu"></div>
+        <div class="hints" id="hints">
+          <span><i class="glyph x">✕</i>Enter</span>
+          <span><i class="glyph t">△</i>Version</span>
+        </div>
+      </div>
+
+      <!-- browser -->
+      <div class="screen" id="s-browser">
+        <h2>Browser</h2><div class="crumb">ROM DIRECTORY · F:\PS2</div>
+        <div class="shelf" id="shelf"></div>
+        <div class="gameinfo"><div class="t" id="gtitle"></div><div class="m" id="gmeta"></div></div>
+        <div class="hints"><span><i class="glyph x">✕</i>Boot</span><span><i class="glyph s">□</i>Set Directory</span><span><i class="glyph o">○</i>Back</span></div>
+      </div>
+
+      <!-- system configuration -->
+      <div class="screen" id="s-config">
+        <h2>System Configuration</h2><div class="crumb">← → CHANGE VALUE</div>
+        <div class="config" id="config"></div>
+        <div class="cfgnote" id="cfgnote"></div>
+        <div class="hints"><span><i class="glyph x">✕</i>Change</span><span><i class="glyph o">○</i>Back</span></div>
+      </div>
+
+      <!-- version -->
+      <div class="screen" id="s-version">
+        <h2>Version Information</h2>
+        <div class="version">
+          <span class="k">Emulator</span><span>VibeStation 2 (PS2 lab)</span>
+          <span class="k">Version</span><span>v0.6.0-ps2lab</span>
+          <span class="k">BIOS</span><span>Loaded · SCPH-39001 · v1.60</span>
+          <span class="k">EE core</span><span>R5900 · 294.912 MHz · Recompiler</span>
+          <span class="k">IOP core</span><span>R3000A · 36.864 MHz</span>
+          <span class="k">GS raster</span><span>CPU · 8 lanes · row bands</span>
+          <span class="k">ROM directory</span><span>F:\PS2</span>
+          <span class="k">Games found</span><span>6</span>
+        </div>
+        <div class="hints"><span></span><span><i class="glyph o">○</i>Back</span></div>
+      </div>
+
+      <!-- grim reaper -->
+      <div class="screen" id="s-reaper">
+        <h2 style="color:var(--reaper);text-shadow:0 0 16px rgba(255,74,74,.45)">Grim Reaper</h2>
+        <div class="crumb">CORRUPT EE RAM · VRAM · SPU2 · BIOS</div>
+        <div class="center-msg"><div>The orbit turns red here.<small>FULL GRIM REAPER PANEL GOES HERE, REUSED FROM THE DEFINITIVE UI</small></div></div>
+        <div class="hints"><span></span><span><i class="glyph o">○</i>Back</span></div>
+      </div>
+
+      <!-- start / exit -->
+      <div class="screen" id="s-start"><div class="center-msg"><div>Starting BIOS…<small>MENU COLLAPSES INTO THE ORBIT, THEN THE GS OUTPUT FADES IN</small></div></div></div>
+      <div class="screen" id="s-exit"><div class="center-msg"><div>Exit VibeStation 2?
+        <div class="confirm" id="confirm"><span data-v="no" class="sel">No</span><span data-v="yes">Yes</span></div></div></div></div>
+    </div>
+  </div>
+  <div class="keys">Click the screen, then: ↑ ↓ move · Enter / X select · Esc / C back · T version · ← → change values. Mouse clicks and the wheel work too.</div>
+
+  <div class="notes">
+    <div class="note"><h3>Startup timeline</h3><ul>
+      <li><code>0.0–4.4 s</code> vs2start.mp4 boot animation, full screen.</li>
+      <li><code>4.5 s</code> video turns black. Dust specks fade in on the black.</li>
+      <li><code>4.9 s</code> orbs fly out from the centre onto the ring, one every 120 ms.</li>
+      <li><code>5.9 s</code> menu items slide in from the right, then the hints.</li>
+      <li><code>12.76 s</code> video and audio end. The UI is already usable, so the user can skip the tail.</li>
+    </ul></div>
+    <div class="note"><h3>Definitive UI → VibeStation 2</h3><ul>
+      <li>Start Emulation, Load Game, Change BIOS, Grim Reaper, Settings, Exit keep their names and order.</li>
+      <li>Game Library panel → <b>Browser</b> screen (Load Game).</li>
+      <li>Settings → <b>System Configuration</b> list.</li>
+      <li>System Info panel → <b>Version</b> screen on △.</li>
+      <li>The corner block and monospace labels carry over, so the two UIs read as a pair.</li>
+    </ul></div>
+    <div class="note"><h3>Building it in ImGui</h3><ul>
+      <li>Orbit: orbs on a tilted 3D ring with perspective, drawn far to near with <code>ImDrawList</code>: additive halo and core sprites, tapered tail segments and a twinkling cross flare, same approach as <code>definitive_background.cpp</code>.</li>
+      <li>Motion: a 30 s cycle from the reveal. The ring holds and locks in (0–3 s), pulls into one big orb (3–5.5 s), holds (5.5–7.5 s), drifts apart to each orb's own tilted orbit (7.5–15 s), roams the sphere (15–23 s), then gathers back into the ring (23–30 s). Positions are blends of a ring slot and an own-orbit point, scaled toward the centre by the merge weight.</li>
+      <li>Menu: <code>definitive_home.cpp</code>'s item list, re-laid out as a carousel with eased y and alpha.</li>
+      <li>Sound: <code>vs2-highlight</code> on moving the selection, <code>vs2-menuopen</code> / <code>vs2-menuclose</code> on entering or leaving a screen, <code>vs2-selected</code> on confirming an action. They hook into the existing <code>definitive_audio.cpp</code> sound-effect path.</li>
+      <li>Video: decode in the intro module (pl_mpeg for MPEG-1, or Media Foundation for the existing .mp4) and start the reveal at the first fully black frame.</li>
+    </ul></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const viewport = document.getElementById('viewport');
+  const fit = () => { stage.style.transform = `scale(${viewport.clientWidth / 1280})`; };
+  new ResizeObserver(fit).observe(viewport); fit();
+
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ITEMS = [
+    { id: 'start', label: 'Start Emulation', sub: 'Load BIOS and start playing' },
+    { id: 'browser', label: 'Load Game', sub: 'Choose a game from your library' },
+    { id: 'bios', label: 'Change BIOS', sub: 'Manage BIOS files' },
+    { id: 'reaper', label: 'Grim Reaper', sub: 'Corrupt EE RAM, VRAM, SPU2 and BIOS', reaper: true },
+    { id: 'config', label: 'Settings', sub: 'System Configuration' },
+    { id: 'exit', label: 'Exit', sub: 'Close VibeStation 2' },
+  ];
+  const GAMES = [
+    { t: 'Gran Turismo 4', m: 'SCUS-97328 · DVD · NTSC-U' },
+    { t: 'Disgaea: Hour of Darkness', m: 'SLUS-20666 · DVD · NTSC-U' },
+    { t: 'Ico', m: 'SCUS-97113 · CD · NTSC-U' },
+    { t: 'Katamari Damacy', m: 'SLUS-21008 · DVD · NTSC-U' },
+    { t: 'Shadow of the Colossus', m: 'SCUS-97472 · DVD · NTSC-U' },
+    { t: 'Crash Bandicoot (PS1 disc)', m: 'SCUS-94900 · CD · runs on the PS1 core' },
+  ];
+  const CONFIG = [
+    { k: 'EE core', v: ['Recompiler', 'Interpreter'], n: 'Recompiler is the dynarec. Interpreter is slower but easier to debug.' },
+    { k: 'GS renderer', v: ['CPU (parallel)', 'GPU compute'], n: 'The parallel CPU rasterizer is the default. It currently beats the GPU path on the BIOS.' },
+    { k: 'Speed limit', v: ['On (100%)', 'Off'], n: 'Off runs as fast as the host allows.' },
+    { k: 'Aspect ratio', v: ['4:3', '16:9 stretch'], n: 'PS2 output is shown 4:3 by default.' },
+    { k: 'Texture filter', v: ['Nearest', 'Bilinear'], n: 'Applies to the presented frame, not GS sampling.' },
+    { k: 'Startup video', v: ['On', 'Skip'], n: 'Plays vs2start.mp4 before the menu.' },
+    { k: 'Language', v: ['English', '日本語'], n: '' },
+  ];
+  const cfgState = CONFIG.map(() => 0);
+
+  /* ---------- background: black void, dust, 3D orbit of lights ---------- */
+  const cv = document.getElementById('bg'); const g = cv.getContext('2d');
+  // Prebaked sprites (in ImGui these become two small textures).
+  function sprite(size, stops) {
+    const c = document.createElement('canvas'); c.width = c.height = size; const x = c.getContext('2d');
+    const r = x.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    stops.forEach(([o, col]) => r.addColorStop(o, col)); x.fillStyle = r; x.fillRect(0, 0, size, size); return c;
+  }
+  const halo = sprite(128, [[0, 'rgba(150,200,255,.75)'], [.12, 'rgba(70,150,255,.5)'], [.4, 'rgba(30,100,255,.14)'], [1, 'rgba(0,0,0,0)']]);
+  const core = sprite(32, [[0, 'rgba(255,255,255,1)'], [.4, 'rgba(255,255,255,.95)'], [.7, 'rgba(170,215,255,.35)'], [1, 'rgba(0,0,0,0)']]);
+  const haloR = sprite(128, [[0, 'rgba(255,120,110,.6)'], [.12, 'rgba(255,70,60,.35)'], [.4, 'rgba(200,30,30,.1)'], [1, 'rgba(0,0,0,0)']]);
+  const coreR = sprite(32, [[0, 'rgba(255,240,235,1)'], [.35, 'rgba(255,150,140,.9)'], [.7, 'rgba(255,60,50,.25)'], [1, 'rgba(0,0,0,0)']]);
+
+  const ORBS = 8, CX = 430, CY = 380, R = 150, INCL = 1.05, TILT = -0.42, FOCAL = 520;
+  // One cycle, in seconds from the reveal:
+  //   0-3 ring formation · 3-5.5 ring pulls into one big orb · 5.5-7.5 big orb holds
+  //   7.5-15 orbs drift apart to their own places · 15-23 roam · 23-30 gather into the ring
+  const CYCLE = 30;
+  const rnd = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  const orbs = Array.from({ length: ORBS }, (_, i) => ({
+    phase: i * (Math.PI * 2 / ORBS), wobP: i * 1.9,
+    tw: 1.3 + (i * 29 % 9) / 6, trail: [],
+    // this orb's own path on the sphere: radius, orbit tilt, tilt axis, speed, start angle
+    ownR: R * (.55 + .7 * rnd(i + 1)),
+    ownTilt: (.35 + .85 * rnd(i + 11)) * (rnd(i + 21) > .5 ? 1 : -1),
+    ownNode: rnd(i + 31) * Math.PI * 2,
+    ownSpeed: (.18 + .3 * rnd(i + 41)) * (rnd(i + 51) > .5 ? 1 : -1),
+    ownPhase: rnd(i + 61) * Math.PI * 2,
+  }));
+  const smooth = (a, b, x) => { const v = Math.min(1, Math.max(0, (x - a) / (b - a))); return v * v * (3 - 2 * v); };
+  // Rodrigues rotation of (x, y, 0) about the in-plane axis (cos n, sin n, 0) by angle th.
+  function tipOff(x, y, n, th) {
+    const kx = Math.cos(n), ky = Math.sin(n), c = Math.cos(th), s = Math.sin(th), d = kx * x + ky * y;
+    return [x * c + kx * d * (1 - c), y * c + ky * d * (1 - c), (kx * y - ky * x) * s];
+  }
+  const dust = Array.from({ length: 70 }, (_, i) => ({
+    x: (i * 997) % 1280, y: (i * 613) % 800, s: .4 + (i % 5) * .25, v: 3 + (i % 7) * 1.5, p: i * 2.3,
+  }));
+  let fogA = 1, orbsIn = 1, tint = 0, tintTarget = 0, collapse = 0, collapseTarget = 0, revealT0 = -1e9;
+
+  function project(x, y, z) {
+    // tilt the whole ring in screen space, then perspective
+    const c = Math.cos(TILT), s = Math.sin(TILT);
+    const sx = x * c - y * s, sy = x * s + y * c, f = FOCAL / (FOCAL + z);
+    return [CX + sx * f, CY + sy * f, f];
+  }
+  function drawSparkle(x, y, len, alpha, ang) {
+    g.save(); g.translate(x, y); g.rotate(ang); g.globalAlpha = alpha;
+    for (let r = 0; r < 2; r++) {
+      const grd = g.createLinearGradient(-len, 0, len, 0);
+      grd.addColorStop(0, 'rgba(255,255,255,0)'); grd.addColorStop(.5, tint > .5 ? 'rgba(255,200,190,.9)' : 'rgba(190,225,255,.9)');
+      grd.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = grd; g.fillRect(-len, -.6, len * 2, 1.2);
+      g.rotate(Math.PI / 2);
+    }
+    g.restore();
+  }
+
+  function frame(now) {
+    const t = now / 1000;
+    tint += (tintTarget - tint) * .06; collapse += (collapseTarget - collapse) * .05;
+    g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1; g.fillStyle = '#000'; g.fillRect(0, 0, 1280, 800);
+
+    // Grim Reaper only: a faint red bloom behind the ring. Otherwise pure black.
+    if (tint > .01) {
+      const fr = g.createRadialGradient(CX, CY, 0, CX, CY, 520);
+      fr.addColorStop(0, `rgba(70,6,8,${.6 * tint * fogA})`); fr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = fr; g.fillRect(0, 0, 1280, 800);
+    }
+    g.globalCompositeOperation = 'lighter';
+
+    // dust: neutral grey specks drifting upward
+    for (const d of dust) {
+      const y = (d.y - (reduce ? 0 : t * d.v)) % 800, yy = y < 0 ? y + 800 : y;
+      g.globalAlpha = fogA * (.10 + .08 * Math.sin(t * 1.3 + d.p));
+      g.fillStyle = '#d8dce4'; g.fillRect(d.x, yy, d.s, d.s);
+    }
+
+    // Cycle position. Starts at the reveal, so the orbs fly out of the centre
+    // straight into the ring formation.
+    const cycleT0 = revealT0 > 0 && revealT0 < t ? revealT0 : 0;
+    const sc = reduce ? 1.5 : (((t - cycleT0) % CYCLE) + CYCLE) % CYCLE;
+    // ring: weight of the shared ring vs. each orb's own path (switches while merged)
+    const ring = sc < 7.5 ? 1 : smooth(23, 30, sc);
+    // merge: 1 = every orb pulled into the centre, forming one big orb
+    const merge = sc < 7.5 ? smooth(3, 5.5, sc) : 1 - smooth(7.5, 15, sc);
+    const lock = Math.exp(-Math.pow((sc - 1.5) / .8, 2));           // ring locks in
+    const spin = reduce ? 0 : t * .22, shrink = 1 - collapse;
+    const pts = orbs.map((o, i) => {
+      const local = Math.min(1, Math.max(0, (t - revealT0 - .4 - i * .12) / .9));
+      const k = revealT0 < 0 ? orbsIn : easeOut(local) * orbsIn;
+      // shared ring slot
+      const a = spin + o.phase;
+      const ringP = [Math.cos(a) * R, Math.sin(a) * R, 0];
+      // own path: a tilted orbit whose axis drifts slowly, so it roams the sphere
+      const b = o.ownPhase + (reduce ? 0 : t * o.ownSpeed);
+      const ownP = tipOff(Math.cos(b) * o.ownR, Math.sin(b) * o.ownR,
+                          o.ownNode + (reduce ? 0 : t * .05), o.ownTilt);
+      const m = (1 - merge) * k * shrink;
+      const sx = (ownP[0] + (ringP[0] - ownP[0]) * ring) * m;
+      const sy = (ownP[1] + (ringP[1] - ownP[1]) * ring) * m;
+      const sz = (ownP[2] + (ringP[2] - ownP[2]) * ring) * m;          // height above the ring plane
+      const x = sx;
+      const y = sy * Math.cos(INCL) - sz * Math.sin(INCL), z = sy * Math.sin(INCL) + sz * Math.cos(INCL);
+      const [px, py, f] = project(x, y, z);
+      o.trail.push([px, py, f]); if (o.trail.length > 26) o.trail.shift();
+      return { o, px, py, f, z, k };
+    }).sort((p, q) => q.z - p.z); // far first
+
+    // one big orb while merged: a large shared halo and core, gently pulsing
+    if (merge > .02 && shrink > .5) {
+      const pulse = 1 + .08 * Math.sin(t * 3.2), big = merge * merge * orbsIn;
+      const bh = 150 * pulse * (.4 + .6 * merge), bc = 34 * pulse * merge;
+      g.globalAlpha = .85 * big * (1 - tint); g.drawImage(halo, CX - bh, CY - bh, bh * 2, bh * 2);
+      g.globalAlpha = .85 * big * tint; g.drawImage(haloR, CX - bh, CY - bh, bh * 2, bh * 2);
+      g.globalAlpha = big * (1 - tint); g.drawImage(core, CX - bc, CY - bc, bc * 2, bc * 2);
+      g.globalAlpha = big * tint; g.drawImage(coreR, CX - bc, CY - bc, bc * 2, bc * 2);
+      drawSparkle(CX, CY, 70 * pulse * merge, .55 * big, .25 + t * .05);
+    }
+
+    // faint ring flash as the formation locks in
+    if (lock > .01 && shrink > .5) {
+      g.save(); g.translate(CX, CY); g.rotate(TILT); g.globalAlpha = .22 * lock * orbsIn;
+      g.strokeStyle = tint > .5 ? '#ff9a90' : '#7fbcff'; g.lineWidth = 1.2;
+      g.beginPath(); g.ellipse(0, 0, R * shrink, R * Math.cos(INCL) * shrink, 0, 0, Math.PI * 2); g.stroke(); g.restore();
+    }
+
+    for (const p of pts) {
+      const depth = Math.min(1, Math.max(0, (p.f - .8) / .4)); // 0 = back, 1 = front
+      const bright = Math.min(1.3, (.45 + .55 * depth) * (1 + .35 * lock)) * p.k;
+      // comet tail: tapered segments along recent positions
+      const tr = p.o.trail;
+      for (let j = 1; j < tr.length; j++) {
+        const f = j / tr.length;
+        g.globalAlpha = f * f * .5 * bright;
+        g.strokeStyle = tint > .5 ? '#ff8a80' : '#6fb4ff';
+        g.lineWidth = (.6 + 3.2 * f) * tr[j][2];
+        g.lineCap = 'round';
+        g.beginPath(); g.moveTo(tr[j - 1][0], tr[j - 1][1]); g.lineTo(tr[j][0], tr[j][1]); g.stroke();
+      }
+      const tw = .75 + .25 * Math.sin(t * p.o.tw * 3 + p.o.wobP);
+      const hs = (46 + 30 * depth) * p.f, cs = (9 + 5 * depth) * p.f;
+      g.globalAlpha = bright * tw * (1 - tint); g.drawImage(halo, p.px - hs, p.py - hs, hs * 2, hs * 2);
+      g.globalAlpha = bright * tw * tint; g.drawImage(haloR, p.px - hs, p.py - hs, hs * 2, hs * 2);
+      g.globalAlpha = bright * (1 - tint); g.drawImage(core, p.px - cs, p.py - cs, cs * 2, cs * 2);
+      g.globalAlpha = bright * tint; g.drawImage(coreR, p.px - cs, p.py - cs, cs * 2, cs * 2);
+      // star flare on the nearer orbs, twinkling
+      if (depth > .35) drawSparkle(p.px, p.py, (14 + 22 * depth) * tw * p.f, (depth - .35) * .9 * bright * tw, .25 + t * .05);
+    }
+    g.globalAlpha = 1; requestAnimationFrame(frame);
+  }
+  const easeOut = x => 1 - Math.pow(1 - x, 3);
+  requestAnimationFrame(frame);
+
+  /* ---------- menu ---------- */
+  const menu = document.getElementById('menu');
+  ITEMS.forEach((it, i) => {
+    const el = document.createElement('div'); el.className = 'item' + (it.reaper ? ' reaper' : '');
+    el.innerHTML = `<div class="label">${it.label}</div><div class="sub">${it.sub}</div>`;
+    el.addEventListener('click', () => { if (sel === i) activate(); else { sel = i; layout(); } });
+    menu.appendChild(el);
+  });
+  /* ---------- sound effects ---------- */
+  // Web Audio, unlocked by the first click or key press (browsers block sound before that).
+  const SFX = { highlight: 'vs2-highlight.wav', open: 'vs2-menuopen.wav', close: 'vs2-menuclose.wav', select: 'vs2-selected.wav' };
+  const sfxBuf = {}; let actx = null, sfxOn = true, sfxQuiet = false;
+  function unlockAudio() {
+    if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; }
+    for (const [name, file] of Object.entries(SFX)) {
+      fetch(file).then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+        .then(b => actx.decodeAudioData(b)).then(buf => { sfxBuf[name] = buf; }).catch(() => {});
+    }
+  }
+  function sfx(name) {
+    if (!sfxOn || sfxQuiet || !actx || !sfxBuf[name]) return;
+    const src = actx.createBufferSource(), gain = actx.createGain();
+    gain.gain.value = .7; src.buffer = sfxBuf[name]; src.connect(gain).connect(actx.destination); src.start();
+  }
+  addEventListener('pointerdown', unlockAudio, true); addEventListener('keydown', unlockAudio, true);
+  const muteBtn = document.getElementById('mute');
+  muteBtn.addEventListener('click', () => {
+    sfxOn = !sfxOn; muteBtn.textContent = `Sound: ${sfxOn ? 'on' : 'off'}`;
+    muteBtn.setAttribute('aria-pressed', String(!sfxOn));
+    document.getElementById('boot').muted = !sfxOn;
+  });
+
+  let sel = 1, screen = 'main', revealed = true, lastSel = 1;
+  function layout() {
+    if (sel !== lastSel) { lastSel = sel; sfx('highlight'); }
+    [...menu.children].forEach((el, i) => {
+      const d = i - sel, y = 352 + d * 46 + (d > 0 ? 22 : 0);
+      const op = revealed ? Math.max(0, 1 - Math.abs(d) * .3) : 0;
+      el.style.transform = `translate(${revealed ? Math.abs(d) * 8 : 120}px, ${y}px)`;
+      el.style.opacity = op; el.classList.toggle('sel', i === sel);
+    });
+    tintTarget = ITEMS[sel].reaper && screen === 'main' ? 1 : (screen === 'reaper' ? 1 : 0);
+  }
+  layout();
+
+  /* ---------- screens ---------- */
+  const main = document.getElementById('main');
+  function show(name, quiet = false) {
+    if (!quiet && name !== screen) {
+      if (name === 'start') sfx('select');
+      else if (name === 'main') sfx('close');
+      else sfx('open');
+    }
+    screen = name;
+    main.style.opacity = name === 'main' ? 1 : 0;
+    main.style.pointerEvents = name === 'main' ? 'auto' : 'none';
+    for (const s of document.querySelectorAll('.screen')) s.classList.toggle('on', s.id === 's-' + name);
+    // orbit fades back behind sub screens, PS2-style
+    orbsIn = name === 'main' ? 1 : (name === 'start' || name === 'exit' ? .25 : .35);
+    collapseTarget = name === 'start' ? 1 : 0;
+    fogA = name === 'start' ? .2 : 1;
+    layout();
+  }
+  function activate() {
+    const id = ITEMS[sel].id;
+    if (id === 'browser' || id === 'bios') show('browser');
+    else if (id === 'config') show('config');
+    else if (id === 'reaper') show('reaper');
+    else if (id === 'start') { show('start'); setTimeout(() => screen === 'start' && show('main', true), 2600); }
+    else if (id === 'exit') { exitSel = 0; drawConfirm(); show('exit'); }
+  }
+
+  // browser shelf
+  const shelf = document.getElementById('shelf'); let gsel = 0;
+  const discSvg = `<svg viewBox="0 0 74 74"><circle cx="37" cy="37" r="33" fill="none" stroke="rgba(200,225,255,.7)" stroke-width="1.2"/><circle cx="37" cy="37" r="9" fill="none" stroke="rgba(200,225,255,.6)"/><circle cx="37" cy="37" r="22" fill="none" stroke="rgba(200,225,255,.18)" stroke-width="10"/></svg>`;
+  GAMES.forEach((gm, i) => {
+    const d = document.createElement('div'); d.className = 'disc';
+    d.innerHTML = `<div class="face">${discSvg}</div><div class="refl"></div>`;
+    d.addEventListener('click', () => { gsel = i; drawShelf(); });
+    shelf.appendChild(d);
+  });
+  let lastG = 0;
+  function drawShelf() {
+    if (gsel !== lastG) { lastG = gsel; sfx('highlight'); }
+    [...shelf.children].forEach((d, i) => {
+      const k = i - gsel;
+      d.style.transform = `translateX(${565 + k * 190}px) translateZ(${k === 0 ? 60 : -Math.abs(k) * 40}px) rotateY(${k === 0 ? (reduce ? 0 : -8) : k * -6}deg)`;
+      d.style.opacity = Math.max(0, 1 - Math.abs(k) * .28); d.classList.toggle('sel', k === 0);
+    });
+    document.getElementById('gtitle').textContent = GAMES[gsel].t;
+    document.getElementById('gmeta').textContent = GAMES[gsel].m;
+  }
+  drawShelf();
+
+  // config list
+  const config = document.getElementById('config'); let csel = 0;
+  CONFIG.forEach((c, i) => {
+    const r = document.createElement('div'); r.className = 'row';
+    r.addEventListener('click', () => { if (csel === i) change(1); else { csel = i; drawConfig(); } });
+    config.appendChild(r);
+  });
+  let lastC = 0;
+  function drawConfig() {
+    if (csel !== lastC) { lastC = csel; sfx('highlight'); }
+    [...config.children].forEach((r, i) => {
+      r.innerHTML = `<span>${CONFIG[i].k}</span><span class="v">${CONFIG[i].v[cfgState[i]]}</span>`;
+      r.classList.toggle('sel', i === csel);
+    });
+    document.getElementById('cfgnote').textContent = CONFIG[csel].n;
+  }
+  function change(dir) { const n = CONFIG[csel].v.length; cfgState[csel] = (cfgState[csel] + dir + n) % n; sfx('select'); drawConfig(); }
+  drawConfig();
+
+  // exit confirm
+  let exitSel = 0; const confirmEl = document.getElementById('confirm');
+  let lastE = 0;
+  function drawConfirm() {
+    if (exitSel !== lastE) { lastE = exitSel; sfx('highlight'); }
+    [...confirmEl.children].forEach((s, i) => s.classList.toggle('sel', i === exitSel));
+  }
+  [...confirmEl.children].forEach((s, i) => s.addEventListener('click', () => { exitSel = i; drawConfirm(); confirmExit(); }));
+  // "Yes" restarts the reveal in this prototype, since a web page cannot close itself.
+  function confirmExit() { if (exitSel === 1) { sfx('select'); reveal(); } else show('main'); }
+
+  /* ---------- input ---------- */
+  viewport.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase(); let used = true;
+    const back = k === 'escape' || k === 'c' || k === 'backspace';
+    const ok = k === 'enter' || k === 'x' || k === ' ';
+    if (screen === 'main') {
+      if (k === 'arrowup') sel = (sel + ITEMS.length - 1) % ITEMS.length;
+      else if (k === 'arrowdown') sel = (sel + 1) % ITEMS.length;
+      else if (ok) activate(); else if (k === 't') show('version'); else used = false;
+      layout();
+    } else if (screen === 'browser') {
+      if (k === 'arrowleft') gsel = Math.max(0, gsel - 1); else if (k === 'arrowright') gsel = Math.min(GAMES.length - 1, gsel + 1);
+      else if (back) show('main'); else if (ok) show('start'); else used = false; drawShelf();
+      if (ok) setTimeout(() => screen === 'start' && show('main', true), 2600);
+    } else if (screen === 'config') {
+      if (k === 'arrowup') csel = (csel + CONFIG.length - 1) % CONFIG.length; else if (k === 'arrowdown') csel = (csel + 1) % CONFIG.length;
+      else if (k === 'arrowleft') change(-1); else if (k === 'arrowright' || ok) change(1); else if (back) show('main'); else used = false;
+      drawConfig();
+    } else if (screen === 'exit') {
+      if (k === 'arrowleft' || k === 'arrowright') { exitSel ^= 1; drawConfirm(); } else if (ok) confirmExit(); else if (back) show('main'); else used = false;
+    } else if (back) show('main'); else used = false;
+    if (used) e.preventDefault();
+  });
+  let wheelLock = 0;
+  viewport.addEventListener('wheel', e => {
+    if (screen !== 'main' || Date.now() < wheelLock) return; e.preventDefault(); wheelLock = Date.now() + 140;
+    sel = (sel + (e.deltaY > 0 ? 1 : ITEMS.length - 1)) % ITEMS.length; layout();
+  }, { passive: false });
+  viewport.addEventListener('pointerdown', () => viewport.focus({ preventScroll: true }));
+
+  /* ---------- reveal sequence ---------- */
+  const hints = document.getElementById('hints'), corner = document.getElementById('corner');
+  function hideAll() {
+    revealed = false; fogA = 0; orbsIn = 0; revealT0 = 1e9;
+    hints.style.opacity = 0; corner.style.opacity = 0; screen = 'main'; show('main'); fogA = 0; orbsIn = 0;
+    main.style.opacity = 1; layout();
+  }
+  function reveal() {
+    hideAll();
+    const start = performance.now() / 1000; revealT0 = start;
+    let fogStart = performance.now();
+    const fogTick = () => { const p = Math.min(1, (performance.now() - fogStart) / 1200); fogA = p; if (p < 1) requestAnimationFrame(fogTick); };
+    requestAnimationFrame(fogTick); orbsIn = 1;
+    setTimeout(() => { revealed = true; layout(); }, 1400);
+    setTimeout(() => { corner.style.opacity = 1; }, 1700);
+    setTimeout(() => { hints.style.opacity = 1; }, 2000);
+  }
+  document.getElementById('replay').addEventListener('click', () => { stopVideo(); reveal(); viewport.focus({ preventScroll: true }); });
+
+  // video startup: play the user's local vs2start.mp4, reveal when it goes black (~4.5 s)
+  const video = document.getElementById('boot'), tc = document.getElementById('tc');
+  let videoUrl = null, revealedFromVideo = false;
+  function stopVideo() { video.pause(); video.hidden = true; tc.hidden = true; }
+  document.getElementById('vid').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(f); video.src = videoUrl; video.currentTime = 0;
+    document.getElementById('vidbtn').textContent = 'Replay startup';
+    hideAll(); revealedFromVideo = false; video.hidden = false; video.style.opacity = 1; tc.hidden = false;
+    video.play().catch(() => {}); viewport.focus({ preventScroll: true });
+  });
+  document.getElementById('vidbtn').addEventListener('click', e => {
+    if (videoUrl) { e.preventDefault(); hideAll(); revealedFromVideo = false; video.hidden = false; video.style.opacity = 1;
+      tc.hidden = false; video.currentTime = 0; video.play().catch(() => {}); viewport.focus({ preventScroll: true }); }
+  });
+  video.addEventListener('timeupdate', () => {
+    tc.textContent = `vs2start.mp4  ${video.currentTime.toFixed(2)} / ${(video.duration || 0).toFixed(2)} s`;
+    if (!revealedFromVideo && video.currentTime >= 4.5) {
+      revealedFromVideo = true;
+      video.style.opacity = 0;           // the tail is black anyway; audio keeps playing
+      reveal();
+    }
+  });
+  video.addEventListener('ended', () => { video.hidden = true; tc.hidden = true; });
+})();
+</script>
