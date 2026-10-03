@@ -324,11 +324,10 @@ void definitive_ui::release_background_assets() {
 
 void definitive_ui::draw_launcher_background(
     ImDrawList* draw, const ImVec2& pos, const ImVec2& size,
-    float opacity) {
+    float opacity, float zoom, float blur) {
     const float alpha = std::clamp(opacity, 0.0f, 1.0f);
 
-    // Pure black is the transition canvas. The photo is composited over it
-    // only after the launcher controls have finished their own reveal.
+    // Pure black is the transition canvas the photo fades in over.
     draw->AddRectFilled(
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
         definitive_ui::rgba(0, 0, 0, 255));
@@ -351,7 +350,15 @@ void definitive_ui::draw_launcher_background(
         return;
     }
 
-    const CoverUv uv = cover_uv_for_size(size);
+    CoverUv uv = cover_uv_for_size(size);
+    if (zoom > 1.0f) {
+        // Crop around the centre: a smaller UV window fills the same rect.
+        const float cu = (uv.u0 + uv.u1) * 0.5f;
+        const float cv = (uv.v0 + uv.v1) * 0.5f;
+        const float hu = (uv.u1 - uv.u0) * 0.5f / zoom;
+        const float hv = (uv.v1 - uv.v0) * 0.5f / zoom;
+        uv = CoverUv{cu - hu, cv - hv, cu + hu, cv + hv};
+    }
     const GLuint display_texture =
         g_background_soft_texture != 0
             ? g_background_soft_texture
@@ -361,6 +368,16 @@ void definitive_ui::draw_launcher_background(
         pos, ImVec2(pos.x + size.x, pos.y + size.y),
         ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1),
         definitive_ui::rgba(255, 255, 255, definitive_ui::glow_alpha(255.0f * alpha)));
+
+    const float blur_mix = std::clamp(blur, 0.0f, 1.0f);
+    if (blur_mix > 0.001f && g_background_blur_texture != 0) {
+        draw->AddImage(
+            (ImTextureID)(intptr_t)g_background_blur_texture,
+            pos, ImVec2(pos.x + size.x, pos.y + size.y),
+            ImVec2(uv.u0, uv.v0), ImVec2(uv.u1, uv.v1),
+            definitive_ui::rgba(255, 255, 255,
+                definitive_ui::glow_alpha(255.0f * alpha * blur_mix)));
+    }
 
     if (definitive_ui::theme_active()) {
         ImVec4 tint = ui_theme::g_theme_settings.background;

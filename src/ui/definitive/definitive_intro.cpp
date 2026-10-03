@@ -29,6 +29,19 @@ std::array<ImVec4, 4> g_intro_ambient_colors = {{
     ImVec4(0.20f, 0.38f, 0.72f, 1.0f),
 }};
 
+// Small generated textures: a soft round glow for the colour lights and a
+// tiling grey noise for the film grain.
+GLuint g_intro_glow_texture = 0;
+GLuint g_intro_noise_texture = 0;
+
+// The launcher's colour bars, which the four lights turn into.
+constexpr std::array<std::array<int, 3>, 4> kBarColors = {{
+    {{194, 44, 56}},
+    {{52, 128, 125}},
+    {{177, 145, 72}},
+    {{52, 93, 157}},
+}};
+
 constexpr float kIntroWakeBegin = 0.04f;
 constexpr float kIntroIconBegin = 0.24f;
 constexpr float kIntroIconFadeEnd = 0.94f;
@@ -38,10 +51,12 @@ constexpr float kIntroSweepBegin = 2.02f;
 constexpr float kIntroSweepEnd = 2.72f;
 constexpr float kIntroWordmarkBegin = 2.48f;
 constexpr float kIntroWordmarkBlurEnd = 2.78f;
-constexpr float kIntroDetailBegin = 2.86f;
-constexpr float kIntroDetailEnd = 3.48f;
-constexpr float kIntroHandoffBegin = 3.42f;
-constexpr float kIntroOutroBegin = 3.56f;
+// The icon leaves while the title glides (definitive_shared.h).
+constexpr float kIntroIconLeaveEnd = definitive_ui::kIntroGlideStart + 0.55f;
+// Each light leaves 80 ms after the previous one.
+constexpr float kIntroLightStagger = 0.08f;
+constexpr float kIntroLightTravel = 1.25f;
+constexpr float kIntroGrainAlpha = 0.018f;
 
 void compute_intro_ambient_colors(
     const unsigned char* pixels,
@@ -168,127 +183,44 @@ void compute_intro_ambient_colors(
     }
 }
 
-void draw_radial_glow(
+void set_additive_blend(const ImDrawList*, const ImDrawCmd*) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+}
+
+void begin_additive(ImDrawList* draw) {
+    draw->AddCallback(set_additive_blend, nullptr);
+}
+
+void end_additive(ImDrawList* draw) {
+    draw->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+}
+
+ImU32 color_with_alpha(float r, float g, float b, float alpha) {
+    return IM_COL32(
+        definitive_ui::glow_alpha(r),
+        definitive_ui::glow_alpha(g),
+        definitive_ui::glow_alpha(b),
+        definitive_ui::glow_alpha(255.0f * alpha));
+}
+
+// A light of `radius` at `center`; call between begin/end_additive.
+void draw_glow(
     ImDrawList* draw,
     const ImVec2& center,
     float radius,
-    const ImVec4& color,
-    float strength) {
-    if (draw == nullptr ||
-        radius <= 1.0f ||
-        strength <= 0.001f) {
+    ImU32 color) {
+    if (g_intro_glow_texture == 0 || radius <= 0.5f) {
         return;
     }
 
-    constexpr int kLayers = 10;
-    for (int i = 0; i < kLayers; ++i) {
-        const float t =
-            static_cast<float>(i) /
-            static_cast<float>(kLayers - 1);
-        const float layer_radius =
-            radius *
-            (1.0f - 0.58f * t);
-        const float alpha =
-            strength *
-            (0.008f + 0.012f * t);
-
-        draw->AddCircleFilled(
-            center,
-            layer_radius,
-            IM_COL32(
-                definitive_ui::glow_alpha(
-                    color.x * 255.0f),
-                definitive_ui::glow_alpha(
-                    color.y * 255.0f),
-                definitive_ui::glow_alpha(
-                    color.z * 255.0f),
-                definitive_ui::glow_alpha(
-                    alpha * 255.0f)),
-            64);
-    }
-}
-
-void draw_intro_grain(
-    ImDrawList* draw,
-    const ImVec2& pos,
-    const ImVec2& size,
-    float elapsed,
-    float strength) {
-    if (draw == nullptr ||
-        strength <= 0.001f) {
-        return;
-    }
-
-    uint32_t state =
-        0x9E3779B9u ^
-        static_cast<uint32_t>(
-            std::max(
-                0.0f,
-                elapsed) *
-            24.0f);
-
-    constexpr int kSpecks = 72;
-    for (int i = 0; i < kSpecks; ++i) {
-        state =
-            state * 1664525u +
-            1013904223u;
-        const float nx =
-            static_cast<float>(
-                state & 0xFFFFu) /
-            65535.0f;
-
-        state =
-            state * 1664525u +
-            1013904223u;
-        const float ny =
-            static_cast<float>(
-                state & 0xFFFFu) /
-            65535.0f;
-
-        const float x =
-            pos.x + size.x * nx;
-        const float y =
-            pos.y + size.y * ny;
-        const int alpha =
-            definitive_ui::glow_alpha(
-                strength *
-                (3.0f +
-                    static_cast<float>(
-                        (state >> 24u) & 0x3u)));
-
-        draw->AddRectFilled(
-            ImVec2(x, y),
-            ImVec2(x + 1.0f, y + 1.0f),
-            IM_COL32(
-                228, 235, 244,
-                alpha));
-    }
-}
-
-void draw_centered_detail(
-    ImDrawList* draw,
-    const ImVec2& center,
-    float font_size,
-    ImU32 color,
-    const char* text) {
-    ImFont* font =
-        definitive_ui::font_for_size(
-            font_size);
-    const ImVec2 text_size =
-        font->CalcTextSizeA(
-            font_size,
-            FLT_MAX,
-            0.0f,
-            text);
-
-    draw->AddText(
-        font,
-        font_size,
-        ImVec2(
-            center.x - text_size.x * 0.5f,
-            center.y - text_size.y * 0.5f),
-        color,
-        text);
+    draw->AddImage(
+        (ImTextureID)(intptr_t)g_intro_glow_texture,
+        ImVec2(center.x - radius, center.y - radius),
+        ImVec2(center.x + radius, center.y + radius),
+        ImVec2(0.0f, 0.0f),
+        ImVec2(1.0f, 1.0f),
+        color);
 }
 
 bool upload_rgba_texture(
@@ -719,27 +651,68 @@ void draw_vista_wordmark(
         text);
 }
 
+void ensure_intro_effect_textures() {
+    if (g_intro_glow_texture == 0) {
+        // Bright core, 35% at 0.45 of the radius, nothing at the edge.
+        constexpr int kSize = 64;
+        std::vector<unsigned char> pixels(kSize * kSize * 4u);
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                const float dx = (static_cast<float>(x) + 0.5f) / kSize * 2.0f - 1.0f;
+                const float dy = (static_cast<float>(y) + 0.5f) / kSize * 2.0f - 1.0f;
+                const float d = std::sqrt(dx * dx + dy * dy);
+                float a = 0.0f;
+                if (d < 0.45f) {
+                    a = 1.0f - 0.65f * (d / 0.45f);
+                }
+                else if (d < 1.0f) {
+                    a = 0.35f * (1.0f - (d - 0.45f) / 0.55f);
+                }
+                unsigned char* p = &pixels[(static_cast<size_t>(y) * kSize + x) * 4u];
+                p[0] = p[1] = p[2] = 255;
+                p[3] = static_cast<unsigned char>(std::lround(255.0f * a));
+            }
+        }
+        upload_rgba_texture(g_intro_glow_texture, pixels.data(), kSize, kSize);
+    }
+
+    if (g_intro_noise_texture == 0) {
+        constexpr int kSize = 256;
+        std::vector<unsigned char> pixels(kSize * kSize * 4u);
+        uint32_t state = 0x2545F491u;
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            state = state * 1664525u + 1013904223u;
+            const unsigned char v = static_cast<unsigned char>(state >> 24u);
+            pixels[i + 0] = pixels[i + 1] = pixels[i + 2] = v;
+            pixels[i + 3] = 255;
+        }
+        if (upload_rgba_texture(g_intro_noise_texture, pixels.data(), kSize, kSize)) {
+            glBindTexture(GL_TEXTURE_2D, g_intro_noise_texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+    }
+}
+
 } // namespace
 
 namespace definitive_ui {
 
 void preload_intro_assets() {
     ensure_intro_icon_texture_loaded();
+    ensure_intro_effect_textures();
 }
 
 void release_intro_assets() {
-    if (g_intro_icon_texture != 0) {
-        glDeleteTextures(
-            1,
-            &g_intro_icon_texture);
-        g_intro_icon_texture = 0;
-    }
-
-    if (g_intro_icon_blur_texture != 0) {
-        glDeleteTextures(
-            1,
-            &g_intro_icon_blur_texture);
-        g_intro_icon_blur_texture = 0;
+    for (GLuint* texture : {&g_intro_icon_texture, &g_intro_icon_blur_texture,
+                            &g_intro_glow_texture, &g_intro_noise_texture}) {
+        if (*texture != 0) {
+            glDeleteTextures(1, texture);
+            *texture = 0;
+        }
     }
 
     g_intro_icon_width = 0;
@@ -747,31 +720,41 @@ void release_intro_assets() {
     g_intro_icon_load_attempted = false;
 }
 
+float intro_color_bar_alpha(int index, float elapsed) {
+    const float start =
+        kIntroGlideStart + kIntroLightStagger * static_cast<float>(index);
+    const float travel =
+        std::clamp((elapsed - start) / kIntroLightTravel, 0.0f, 1.0f);
+    return timeline_progress(travel, 0.8f, 1.0f);
+}
+
 void draw_intro_presentation(
     const ImVec2& pos,
     const ImVec2& size,
-    float elapsed) {
+    float elapsed,
+    const IntroTargets& targets) {
     ImDrawList* overlay =
         ImGui::GetForegroundDrawList();
     const ImVec2 end(
         pos.x + size.x,
         pos.y + size.y);
 
-    const float handoff =
-        timeline_progress(
-            elapsed,
-            kIntroHandoffBegin,
-            kLauncherIntroDuration);
-
-    overlay->AddRectFilled(
-        pos,
-        end,
-        rgba(0, 0, 0, 255));
+    // Until the glide the intro owns the screen; afterwards the launcher is
+    // drawn underneath and only the parts still moving are drawn here.
+    if (elapsed < kIntroGlideStart) {
+        overlay->AddRectFilled(
+            pos,
+            end,
+            rgba(0, 0, 0, 255));
+    }
 
     ensure_intro_icon_texture_loaded();
+    ensure_intro_effect_textures();
 
     const float unit =
         std::min(size.x, size.y);
+    // Pixel offsets below were tuned for an 800 px tall window.
+    const float design = unit / 800.0f;
     const ImVec2 center(
         pos.x + size.x * 0.5f,
         pos.y + size.y * 0.455f);
@@ -781,42 +764,6 @@ void draw_intro_presentation(
             elapsed,
             kIntroWakeBegin,
             0.92f);
-    const float atmosphere_out =
-        1.0f -
-        timeline_progress(
-            elapsed,
-            kIntroOutroBegin,
-            kLauncherIntroDuration);
-    const float atmosphere =
-        wake * atmosphere_out;
-
-    // Four low-energy color pools are sampled from the actual icon. They wake
-    // the black screen up without turning the intro into an RGB light show.
-    constexpr std::array<ImVec2, 4> kGlowOffsets = {{
-        ImVec2(-0.18f, -0.12f),
-        ImVec2(0.18f, -0.10f),
-        ImVec2(-0.16f, 0.13f),
-        ImVec2(0.17f, 0.14f),
-    }};
-
-    for (size_t i = 0;
-         i < kGlowOffsets.size();
-         ++i) {
-        const ImVec2 glow_center(
-            center.x +
-                unit *
-                kGlowOffsets[i].x,
-            center.y +
-                unit *
-                kGlowOffsets[i].y);
-
-        draw_radial_glow(
-            overlay,
-            glow_center,
-            unit * 0.215f,
-            g_intro_ambient_colors[i],
-            0.07f * atmosphere);
-    }
 
     const float icon_alpha =
         timeline_progress(
@@ -851,6 +798,13 @@ void draw_intro_presentation(
         0.115f * zoom_t +
         overshoot;
 
+    // The icon rises a little, shrinks and fades while the title glides.
+    const float leave =
+        timeline_progress(
+            elapsed,
+            kIntroGlideStart,
+            kIntroIconLeaveEnd);
+
     const float base_icon_size =
         std::clamp(
             unit * 0.285f,
@@ -858,28 +812,26 @@ void draw_intro_presentation(
             260.0f);
 
     const float icon_size =
-        base_icon_size * zoom;
+        base_icon_size * zoom * (1.0f - 0.07f * leave);
+    const ImVec2 icon_center(
+        center.x,
+        center.y - 22.0f * design * leave);
 
     const ImVec2 icon0(
-        center.x - icon_size * 0.5f,
-        center.y - icon_size * 0.5f);
+        icon_center.x - icon_size * 0.5f,
+        icon_center.y - icon_size * 0.5f);
     const ImVec2 icon1(
-        center.x + icon_size * 0.5f,
-        center.y + icon_size * 0.5f);
+        icon_center.x + icon_size * 0.5f,
+        icon_center.y + icon_size * 0.5f);
 
-    const float outro =
-        1.0f -
-        timeline_progress(
-            elapsed,
-            kIntroOutroBegin,
-            kLauncherIntroDuration);
     const float visible =
-        icon_alpha * outro;
+        icon_alpha * (1.0f - leave);
 
     // During the first defocused beat, use two tiny color-separated blurred
     // copies. They collapse naturally as the real icon comes into focus.
     if (g_intro_icon_blur_texture != 0 &&
-        blur_mix > 0.08f) {
+        blur_mix > 0.08f &&
+        visible > 0.001f) {
         const float fringe =
             2.5f *
             blur_mix;
@@ -921,7 +873,8 @@ void draw_intro_presentation(
     }
 
     if (g_intro_icon_blur_texture != 0 &&
-        blur_mix > 0.001f) {
+        blur_mix > 0.001f &&
+        visible > 0.001f) {
         overlay->AddImage(
             (ImTextureID)(intptr_t)
                 g_intro_icon_blur_texture,
@@ -939,7 +892,8 @@ void draw_intro_presentation(
                     blur_mix)));
     }
 
-    if (g_intro_icon_texture != 0) {
+    if (g_intro_icon_texture != 0 &&
+        visible > 0.001f) {
         overlay->AddImage(
             (ImTextureID)(intptr_t)
                 g_intro_icon_texture,
@@ -956,8 +910,9 @@ void draw_intro_presentation(
                     visible *
                     (1.0f - blur_mix))));
 
-        // A single restrained highlight travels across the real icon after it
-        // resolves. Cropping the icon itself keeps the sweep inside its alpha.
+        // A soft band of light crosses the icon once it is in focus. It is
+        // the icon itself drawn additively in thin slices, so it stays inside
+        // the icon's shape and takes on its colours.
         if (elapsed >= kIntroSweepBegin &&
             elapsed <= kIntroSweepEnd) {
             const float sweep =
@@ -965,56 +920,47 @@ void draw_intro_presentation(
                     elapsed,
                     kIntroSweepBegin,
                     kIntroSweepEnd);
-            constexpr float kStripWidth = 0.16f;
-            const float center_u =
-                -kStripWidth +
-                (1.0f + kStripWidth * 2.0f) *
-                    sweep;
-            const float u0 =
-                std::clamp(
-                    center_u -
-                        kStripWidth * 0.5f,
-                    0.0f,
-                    1.0f);
-            const float u1 =
-                std::clamp(
-                    center_u +
-                        kStripWidth * 0.5f,
-                    0.0f,
-                    1.0f);
+            const float sweep_peak =
+                std::sin(
+                    3.14159265358979323846f *
+                    sweep);
+            constexpr int kSlices = 12;
+            constexpr float kHalfWidth = 0.18f;
+            const float center_u = -0.25f + 1.5f * sweep;
 
-            if (u1 > u0 + 0.001f) {
-                const float x0 =
-                    icon0.x +
-                    icon_size * u0;
-                const float x1 =
-                    icon0.x +
-                    icon_size * u1;
-                const float sweep_peak =
-                    std::sin(
-                        3.14159265358979323846f *
-                        sweep);
+            begin_additive(overlay);
+            for (int s = 0; s < kSlices; ++s) {
+                const float a =
+                    center_u - kHalfWidth +
+                    2.0f * kHalfWidth * static_cast<float>(s) / kSlices;
+                const float b = a + 2.0f * kHalfWidth / kSlices;
+                const float weight =
+                    1.0f - std::fabs((a + b) * 0.5f - center_u) / kHalfWidth;
+                const float u0 = std::clamp(a, 0.0f, 1.0f);
+                const float u1 = std::clamp(b, 0.0f, 1.0f);
+                if (u1 <= u0 + 0.0005f || weight <= 0.0f) {
+                    continue;
+                }
 
                 overlay->AddImage(
                     (ImTextureID)(intptr_t)
                         g_intro_icon_texture,
-                    ImVec2(x0, icon0.y),
-                    ImVec2(x1, icon1.y),
+                    ImVec2(icon0.x + icon_size * u0, icon0.y),
+                    ImVec2(icon0.x + icon_size * u1, icon1.y),
                     ImVec2(u0, 0.0f),
                     ImVec2(u1, 1.0f),
-                    rgba(
-                        255,
-                        255,
-                        255,
-                        glow_alpha(
-                            74.0f *
-                            visible *
-                            sweep_peak)));
+                    color_with_alpha(
+                        255.0f, 255.0f, 255.0f,
+                        0.41f * visible * sweep_peak * weight));
             }
+            end_additive(overlay);
         }
     }
 
-    if (elapsed >= kIntroWordmarkBegin) {
+    // The title comes into focus under the icon, then glides into the
+    // launcher's own title spot and hands over to it at kIntroGlideEnd.
+    if (elapsed >= kIntroWordmarkBegin &&
+        elapsed < kIntroGlideEnd) {
         const float word_blur =
             1.0f -
             timeline_progress(
@@ -1026,97 +972,163 @@ void draw_intro_presentation(
                 elapsed,
                 kIntroWordmarkBegin,
                 kIntroWordmarkBlurEnd + 0.18f);
-        const float word_scale =
-            1.025f -
-            0.025f * word_settle;
-
-        const int word_alpha =
-            glow_alpha(
-                242.0f * outro);
-
-        draw_vista_wordmark(
-            overlay,
-            ImVec2(
-                center.x,
-                center.y +
-                    base_icon_size * 0.70f),
+        const float start_size =
             std::clamp(
                 unit * 0.049f,
                 30.0f,
                 44.0f) *
-                word_scale,
-            word_blur,
-            rgba(
-                229,
-                232,
-                236,
-                word_alpha));
-    }
+            (1.025f - 0.025f * word_settle);
+        const ImVec2 start_text =
+            font_for_size(start_size)->CalcTextSizeA(
+                start_size, FLT_MAX, 0.0f, "VibeStation");
+        const ImVec2 start_pos(
+            center.x - start_text.x * 0.5f,
+            center.y + base_icon_size * 0.70f - start_text.y * 0.5f);
 
-    if (elapsed >= kIntroDetailBegin &&
-        elapsed <= kIntroHandoffBegin + 0.16f) {
-        const float detail_in =
-            timeline_progress(
-                elapsed,
-                kIntroDetailBegin,
-                kIntroDetailBegin + 0.24f);
-        const float detail_out =
-            1.0f -
-            timeline_progress(
-                elapsed,
-                kIntroDetailEnd,
-                kIntroHandoffBegin + 0.16f);
-        const float detail_alpha =
-            detail_in *
-            detail_out *
-            outro;
+        const float glide =
+            ease_in_out_cubic(
+                (elapsed - kIntroGlideStart) /
+                (kIntroGlideEnd - kIntroGlideStart));
+        const auto mix = [glide](float a, float b) {
+            return a + (b - a) * glide;
+        };
 
-        draw_centered_detail(
+        const float font_size =
+            mix(start_size, targets.brand_size);
+        const ImVec2 text_size =
+            font_for_size(font_size)->CalcTextSizeA(
+                font_size, FLT_MAX, 0.0f, "VibeStation");
+        const ImVec2 top_left(
+            mix(start_pos.x, targets.brand_pos.x),
+            mix(start_pos.y, targets.brand_pos.y));
+
+        draw_vista_wordmark(
             overlay,
             ImVec2(
-                center.x,
-                center.y +
-                    base_icon_size * 0.92f),
-            std::clamp(
-                unit * 0.0155f,
-                10.0f,
-                13.0f),
-            rgba(
-                164,
-                176,
-                190,
-                glow_alpha(
-                    128.0f *
-                    detail_alpha)),
-            "PS1 EMULATION SYSTEM");
+                top_left.x + text_size.x * 0.5f,
+                top_left.y + text_size.y * 0.5f),
+            font_size,
+            glide > 0.0f ? 0.0f : word_blur,
+            text_color(
+                rgba(
+                    static_cast<int>(mix(229.0f, 223.0f)),
+                    static_cast<int>(mix(232.0f, 225.0f)),
+                    static_cast<int>(mix(236.0f, 228.0f)),
+                    static_cast<int>(mix(242.0f, 248.0f)))));
     }
 
-    // The final glow expands rather than simply disappearing. This visually
-    // hands the startup illumination to the launcher background underneath.
-    if (handoff > 0.001f &&
-        handoff < 0.995f) {
-        draw_radial_glow(
-            overlay,
-            center,
-            unit *
-                (0.30f +
-                    0.64f * handoff),
-            ImVec4(
-                0.58f,
-                0.72f,
-                0.86f,
-                1.0f),
-            0.10f *
-                (1.0f - handoff));
+    // Four soft lights in colours sampled from the icon. At the glide each
+    // shrinks and arcs into its colour bar under the launcher title.
+    constexpr float kLightsDone =
+        kIntroGlideStart + 3.0f * kIntroLightStagger +
+        kIntroLightTravel + 0.5f;
+    if (elapsed < kLightsDone) {
+        constexpr std::array<ImVec2, 4> kPoolOffsets = {{
+            ImVec2(-0.18f, -0.12f),
+            ImVec2(0.18f, -0.10f),
+            ImVec2(-0.16f, 0.13f),
+            ImVec2(0.17f, 0.14f),
+        }};
+
+        begin_additive(overlay);
+        for (size_t i = 0; i < kPoolOffsets.size(); ++i) {
+            const float start =
+                kIntroGlideStart +
+                kIntroLightStagger * static_cast<float>(i);
+            const float travel =
+                std::clamp((elapsed - start) / kIntroLightTravel, 0.0f, 1.0f);
+            const float move = ease_in_out_cubic(travel);
+
+            const ImVec2 from(
+                center.x + unit * kPoolOffsets[i].x,
+                center.y + unit * kPoolOffsets[i].y);
+            const ImVec2 to = targets.bar_centers[i];
+            const float dx = to.x - from.x;
+            const float dy = to.y - from.y;
+            const float length = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
+            const float arc =
+                std::sin(3.14159265358979323846f * move) *
+                60.0f * design * (i % 2 != 0 ? 1.0f : -1.0f);
+            const ImVec2 light(
+                from.x + dx * move - dy / length * arc,
+                from.y + dy * move + dx / length * arc);
+
+            const float radius =
+                unit * 0.215f +
+                (12.0f * targets.ui_scale - unit * 0.215f) *
+                    ease_out_cubic(travel);
+            const ImVec4& ambient = g_intro_ambient_colors[i];
+            const std::array<int, 3>& bar = kBarColors[i];
+            const float base = 0.16f * wake;
+            const float strength =
+                travel <= 0.0f
+                    ? base
+                    : (base + (0.55f - base) * ease_out_cubic(travel)) *
+                        (1.0f - timeline_progress(travel, 0.88f, 1.0f));
+
+            draw_glow(
+                overlay,
+                light,
+                radius,
+                color_with_alpha(
+                    ambient.x * 255.0f + (bar[0] - ambient.x * 255.0f) * move,
+                    ambient.y * 255.0f + (bar[1] - ambient.y * 255.0f) * move,
+                    ambient.z * 255.0f + (bar[2] - ambient.z * 255.0f) * move,
+                    strength));
+
+            // A brief flash as the light lands on its bar.
+            if (travel >= 1.0f) {
+                const float landed = start + kIntroLightTravel;
+                const float flash =
+                    1.0f - timeline_progress(elapsed, landed, landed + 0.5f);
+                if (flash > 0.0f) {
+                    draw_glow(
+                        overlay,
+                        to,
+                        34.0f * targets.ui_scale,
+                        color_with_alpha(
+                            static_cast<float>(bar[0]),
+                            static_cast<float>(bar[1]),
+                            static_cast<float>(bar[2]),
+                            0.35f * flash));
+                }
+            }
+        }
+        end_additive(overlay);
     }
 
-    draw_intro_grain(
-        overlay,
-        pos,
-        size,
-        elapsed,
-        1.0f -
-            0.72f * handoff);
+    // Film grain, fading out with the glide.
+    const float grain =
+        kIntroGrainAlpha *
+        (1.0f -
+            timeline_progress(
+                elapsed,
+                kIntroGlideStart,
+                kIntroGlideEnd));
+    if (grain > 0.0005f &&
+        g_intro_noise_texture != 0) {
+        // New grain 24 times a second: jump to another spot in the tile.
+        uint32_t state =
+            0x9E3779B9u ^
+            static_cast<uint32_t>(std::max(0.0f, elapsed) * 24.0f);
+        state = state * 1664525u + 1013904223u;
+        const float u = static_cast<float>(state >> 16u) / 65536.0f;
+        state = state * 1664525u + 1013904223u;
+        const float v = static_cast<float>(state >> 16u) / 65536.0f;
+        // Each noise texel covers 3x3 pixels.
+        const float span_u = size.x / (256.0f * 3.0f);
+        const float span_v = size.y / (256.0f * 3.0f);
+
+        begin_additive(overlay);
+        overlay->AddImage(
+            (ImTextureID)(intptr_t)g_intro_noise_texture,
+            pos,
+            end,
+            ImVec2(u, v),
+            ImVec2(u + span_u, v + span_v),
+            color_with_alpha(255.0f, 255.0f, 255.0f, grain));
+        end_additive(overlay);
+    }
 }
 
 } // namespace definitive_ui
