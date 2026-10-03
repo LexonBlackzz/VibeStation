@@ -151,6 +151,7 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ui/vs2/vs2_edge_light.cpp
         ui/vs2/vs2_toolbar.cpp
         ui/vs2/vs2_stb_image.cpp
+        ui/vs2/vs2_stb_vorbis.cpp
     )
     target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
     target_include_directories(VibeStationPS2Lab PRIVATE ${stb_SOURCE_DIR})
@@ -167,8 +168,8 @@ if(VIBESTATION_PS2_ENABLE_UI)
             comdlg32 ole32 shell32 uuid)
     endif()
 
-    # Frontend sounds sit next to the executable.
-    # They are not in the repository; see resources/vs2/README.md.
+    # Frontend sounds and logos sit next to the executable; see
+    # resources/vs2/README.md.
     add_custom_command(TARGET VibeStationPS2Lab POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/resources/vs2

@@ -14,6 +14,7 @@ constexpr const char* kSettingsFile = "vibestation2.ini";
 constexpr float kRevealAt = 4.5f;      // vs2start.mp4 turns black here
 constexpr float kStartingSeconds = 1.1f;
 constexpr float kHandoffSeconds = 1.2f;
+constexpr float kDisclaimerSeconds = 2.0f;
 
 bool is_sub_screen(int screen) {
     // Browser, Config, Version, Reaper, Exit
@@ -124,23 +125,22 @@ void Frontend::frame() {
 
     if (first_frame_) {
         first_frame_ = false;
-        if (host_.session_running()) {
-            // Launched with --bios or a disc: go straight to the game. (A game
-            // paused before switching away waits behind the menu instead.)
-            intro_pending_ = false;
-            begin_reveal();
-            go(Screen::InGame, true);
-            game_alpha_ = 1.0f;
-        } else if (intro_pending_) {
-            boot_t0_ = now_;
-            play_boot_sound();
-        } else {
-            // No boot animation (switched back, or turned off): the menu
-            // animates in to its own jingle.
-            begin_reveal();
-            play_back_to_menu_sound();
-        }
+        // The first time VibeStation 2 appears in a run, a short
+        // non-affiliation notice comes before anything else (not when a game
+        // was launched straight from the command line).
+        if (!shown_before_ && !host_.session_running()) disclaimer_t0_ = now_;
+        else begin_first_screen();
         shown_before_ = true;
+    }
+    if (disclaimer_t0_ >= 0.0) {
+        draw_disclaimer(draw, layout, static_cast<float>(now_ - disclaimer_t0_));
+        if (now_ - disclaimer_t0_ >= kDisclaimerSeconds) {
+            disclaimer_t0_ = -1.0;
+            begin_first_screen();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+        return;
     }
 
     Input in = read_input();
@@ -256,6 +256,45 @@ void Frontend::frame() {
 
     ImGui::End();
     ImGui::PopStyleVar(3);
+}
+
+void Frontend::begin_first_screen() {
+    if (host_.session_running()) {
+        // Launched with --bios or a disc: go straight to the game. (A game
+        // paused before switching away waits behind the menu instead.)
+        intro_pending_ = false;
+        begin_reveal();
+        go(Screen::InGame, true);
+        game_alpha_ = 1.0f;
+    } else if (intro_pending_) {
+        boot_t0_ = now_;
+        play_boot_sound();
+    } else {
+        // No boot animation (switched back, or turned off): the menu
+        // animates in to its own jingle.
+        begin_reveal();
+        play_back_to_menu_sound();
+    }
+}
+
+void Frontend::draw_disclaimer(ImDrawList* draw, const Layout& layout, float t) {
+    const float a = smoothstep(0.0f, 0.3f, t) *
+                    (1.0f - smoothstep(kDisclaimerSeconds - 0.35f, kDisclaimerSeconds, t));
+    if (a <= 0.001f) return;
+    constexpr std::array<const char*, 3> kLines = {{
+        "VibeStation is an independent, non-commercial fan project.",
+        "It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment.",
+        "PlayStation names, logos and sounds belong to Sony and are used under fair use.",
+    }};
+    for (std::size_t i = 0; i < kLines.size(); ++i) {
+        const float size = layout.px(i == 0 ? 19.0f : 14.0f);
+        const FontRole role = i == 0 ? FontRole::Light : FontRole::Regular;
+        const ImVec2 ts = text_size(role, size, kLines[i]);
+        text(draw, role, size,
+             ImVec2(layout.point(640, 0).x - ts.x * 0.5f,
+                    layout.point(0, i == 0 ? 356.0f : 372.0f + 26.0f * static_cast<float>(i)).y),
+             with_alpha(i == 0 ? color::kText : color::kSub, a), kLines[i]);
+    }
 }
 
 void Frontend::go(Screen next, bool quiet) {

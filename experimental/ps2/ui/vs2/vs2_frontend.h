@@ -77,6 +77,9 @@ private:
     // vs2_frontend.cpp
     void go(Screen next, bool quiet = false);
     void begin_reveal();
+    // What the first frame of an activation starts: game, boot or menu.
+    void begin_first_screen();
+    void draw_disclaimer(ImDrawList* draw, const Layout& layout, float t);
     void update_intro(const Input& in);
     void draw_intro(ImDrawList* draw, const Layout& layout);
     void draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size);
@@ -145,6 +148,8 @@ private:
     bool first_frame_ = true;
     // Set after the first frame ever: later activations skip the boot.
     bool shown_before_ = false;
+    // >= 0 while the startup disclaimer is up (its start time).
+    double disclaimer_t0_ = -1.0;
 
     // Starts hidden: the menu only fades in with the reveal, never at launch.
     float home_alpha_ = 0.0f;

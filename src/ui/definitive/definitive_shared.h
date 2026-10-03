@@ -42,6 +42,10 @@ void draw_intro_presentation(
 // Opacity of launcher colour bar `index`, which fades in as its light lands.
 float intro_color_bar_alpha(int index, float elapsed);
 
+// Non-affiliation notice shown on black before the startup sequence.
+inline constexpr float kStartupDisclaimerSeconds = 2.0f;
+void draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float elapsed);
+
 void preload_audio_assets();
 void release_audio_assets();
 

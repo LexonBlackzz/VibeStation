@@ -234,6 +234,7 @@ add_library(vibestation_vs2 STATIC
     experimental/ps2/ui/vs2/vs2_screens.cpp
     experimental/ps2/ui/vs2/vs2_edge_light.cpp
     experimental/ps2/ui/vs2/vs2_toolbar.cpp
+    experimental/ps2/ui/vs2/vs2_stb_vorbis.cpp
 )
 set_target_properties(vibestation_vs2 PROPERTIES
     CXX_STANDARD 20
@@ -247,9 +248,8 @@ if(WIN32)
     target_link_libraries(vibestation_vs2 PUBLIC comdlg32 ole32 shell32 uuid)
 endif()
 target_link_libraries(VibeStation PRIVATE vibestation_vs2)
-
-# VibeStation 2's sounds are looked up in resources/vs2 next to the
-# executable. They are not in the repository; see resources/vs2/README.md.
+# VibeStation 2's sounds and logos are looked up in resources/vs2 next to
+# the executable; see experimental/ps2/resources/vs2/README.md.
 add_custom_command(TARGET VibeStation POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2"

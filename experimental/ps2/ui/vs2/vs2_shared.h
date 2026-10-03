@@ -106,7 +106,7 @@ void play_back_to_menu_sound();
 // Stops either of them.
 void stop_boot_sound();
 // Frontend mixer (vs2_mixer.cpp): menu sounds and the menu ambience
-// (vs2-ambientbg.wav loop + vs2-certainstatic.wav waves) share one device
+// (vs2-ambientbg.ogg loop + vs2-certainstatic.wav waves) share one device
 // and one reverb. ambience_set_active fades the ambience in or out;
 // ambience_update schedules the waves.
 inline constexpr int kMixerRate = 48000;

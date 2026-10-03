@@ -1,9 +1,12 @@
 #include "ui/vs2/vs2_shared.h"
 
 #include <SDL.h>
+#define STB_VORBIS_HEADER_ONLY
+#include <stb_vorbis.c>
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -20,7 +23,7 @@ namespace {
 // The frontend's sound mixer, on its own SDL device (the boot sound is the
 // only thing that plays elsewhere):
 // - menu sounds: one at a time; a new one fades the previous out quickly
-// - ambience: vs2-ambientbg.wav loops quietly; the first pass plays as
+// - ambience: vs2-ambientbg.ogg loops quietly; the first pass plays as
 //   recorded, every later pass tape-style at a new speed (and pitch).
 //   vs2-certainstatic.wav washes in at random intervals like waves, each one
 //   slowed down, pitch-shifted and low-passed differently.
@@ -242,21 +245,46 @@ void SDLCALL mix(void* userdata, Uint8* stream, int len) {
     std::erase_if(m.ui, [](const Voice& v) { return v.done(); });
 }
 
+// A WAV, or an Ogg Vorbis file (.ogg, decoded by stb_vorbis), converted to
+// `format` / `channels` at the mixer rate.
 bool load_converted(const char* name, SDL_AudioFormat format, Uint8 channels, std::vector<Uint8>& out) {
     const std::filesystem::path path = find_asset(name);
+    if (path.empty()) return false;
+
     SDL_AudioSpec spec{};
-    Uint8* buffer = nullptr;
-    Uint32 length = 0;
-    if (path.empty() || SDL_LoadWAV(path.string().c_str(), &spec, &buffer, &length) == nullptr) return false;
+    std::vector<Uint8> source;
+    if (path.extension() == ".ogg") {
+        int ogg_channels = 0;
+        int ogg_rate = 0;
+        short* samples = nullptr;
+        const int frames =
+            stb_vorbis_decode_filename(path.string().c_str(), &ogg_channels, &ogg_rate, &samples);
+        if (frames <= 0 || samples == nullptr) {
+            std::free(samples);
+            return false;
+        }
+        spec.format = AUDIO_S16SYS;
+        spec.channels = static_cast<Uint8>(ogg_channels);
+        spec.freq = ogg_rate;
+        const auto* bytes = reinterpret_cast<const Uint8*>(samples);
+        source.assign(bytes, bytes + static_cast<std::size_t>(frames) * ogg_channels * sizeof(short));
+        std::free(samples);
+    } else {
+        Uint8* buffer = nullptr;
+        Uint32 length = 0;
+        if (SDL_LoadWAV(path.string().c_str(), &spec, &buffer, &length) == nullptr) return false;
+        source.assign(buffer, buffer + length);
+        SDL_FreeWAV(buffer);
+    }
+
     SDL_AudioCVT cvt{};
     if (SDL_BuildAudioCVT(&cvt, spec.format, spec.channels, spec.freq, format, channels, kMixerRate) < 0) {
-        SDL_FreeWAV(buffer);
         return false;
     }
+    const std::size_t length = source.size();
     cvt.len = static_cast<int>(length);
-    out.assign(static_cast<std::size_t>(length) * std::max(1, cvt.len_mult), 0);
-    std::memcpy(out.data(), buffer, length);
-    SDL_FreeWAV(buffer);
+    out.assign(length * static_cast<std::size_t>(std::max(1, cvt.len_mult)), 0);
+    std::memcpy(out.data(), source.data(), length);
     cvt.buf = out.data();
     if (cvt.needed && SDL_ConvertAudio(&cvt) != 0) return false;
     out.resize(static_cast<std::size_t>(cvt.needed ? cvt.len_cvt : cvt.len));
@@ -270,7 +298,9 @@ bool ensure_open() {
     m.attempted = true;
 
     std::vector<Uint8> bytes;
-    if (load_converted("vs2-ambientbg.wav", AUDIO_S16SYS, 2, bytes)) {
+    // Ogg keeps the 2:48 loop small; an older local .wav still works.
+    if (load_converted("vs2-ambientbg.ogg", AUDIO_S16SYS, 2, bytes) ||
+        load_converted("vs2-ambientbg.wav", AUDIO_S16SYS, 2, bytes)) {
         m.background.resize(bytes.size() / sizeof(Sint16));
         std::memcpy(m.background.data(), bytes.data(), m.background.size() * sizeof(Sint16));
     }

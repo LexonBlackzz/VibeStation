@@ -102,6 +102,9 @@ constexpr float kLauncherStartFadeSeconds = 0.42f;
 // glides into place while the launcher arrives underneath it.
 float g_startup_elapsed = 0.0f;
 bool g_startup_complete = false;
+// The disclaimer shown before the startup sequence (once per run).
+float g_disclaimer_elapsed = 0.0f;
+bool g_disclaimer_done = false;
 
 // Launcher arrival, in seconds on the startup clock.
 constexpr float kRowsStart = definitive_ui::kIntroGlideStart + 0.35f;
@@ -608,6 +611,7 @@ void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
 
 void App::skip_definitive_startup() {
     definitive_ui::skip_startup_sound();
+    g_disclaimer_done = true;
     g_startup_elapsed = definitive_ui::kLauncherSequenceEnd;
     g_startup_complete = true;
     g_intro_highlight_dismissed = true;
@@ -625,6 +629,8 @@ void App::release_definitive_ui_assets() {
     g_launcher_start_transition_elapsed = 0.0f;
     g_startup_elapsed = 0.0f;
     g_startup_complete = false;
+    g_disclaimer_elapsed = 0.0f;
+    g_disclaimer_done = false;
     g_intro_highlight = 0.0f;
     g_intro_highlight_dismissed = false;
     definitive_settings_transition_ =
@@ -638,9 +644,24 @@ void App::panel_definitive_home() {
     const ImVec2 window_pos = ImGui::GetWindowPos();
     const ImVec2 window_size = ImGui::GetWindowSize();
 
-    definitive_ui::play_startup_sound();
-
     const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
+
+    // A short non-affiliation notice comes first, before any Sony-style
+    // presentation; the startup clock and sound wait for it.
+    if (!g_disclaimer_done) {
+        definitive_ui::preload_intro_assets();
+        definitive_ui::preload_background_assets();
+        definitive_ui::preload_audio_assets();
+        definitive_ui::draw_startup_disclaimer(
+            window_pos, window_size, g_disclaimer_elapsed);
+        g_disclaimer_elapsed += dt;
+        if (g_disclaimer_elapsed >= definitive_ui::kStartupDisclaimerSeconds) {
+            g_disclaimer_done = true;
+        }
+        return;
+    }
+
+    definitive_ui::play_startup_sound();
     if (!g_startup_complete) {
         // Space, Enter, A or a click skips to the glide. The launcher is not
         // clickable until well after that, so the same press cannot land on

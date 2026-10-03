@@ -1132,3 +1132,38 @@ void draw_intro_presentation(
 }
 
 } // namespace definitive_ui
+
+namespace definitive_ui {
+
+void draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float elapsed) {
+    ImDrawList* overlay = ImGui::GetForegroundDrawList();
+    overlay->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), rgba(0, 0, 0, 255));
+
+    const float alpha =
+        timeline_progress(elapsed, 0.0f, 0.3f) *
+        (1.0f - timeline_progress(elapsed, kStartupDisclaimerSeconds - 0.35f,
+                                  kStartupDisclaimerSeconds));
+    if (alpha <= 0.001f) {
+        return;
+    }
+
+    const Layout layout = make_layout(pos, size);
+    constexpr std::array<const char*, 3> kLines = {{
+        "VibeStation is an independent, non-commercial fan project.",
+        "It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment.",
+        "PlayStation names, logos and sounds belong to Sony and are used under fair use.",
+    }};
+    const float font_size = layout.px(14.0f);
+    ImFont* font = font_for_size(font_size);
+    for (std::size_t i = 0; i < kLines.size(); ++i) {
+        const ImVec2 ts = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, kLines[i]);
+        const ImVec2 at(pos.x + (size.x - ts.x) * 0.5f,
+                        layout.point(0.0f, 366.0f + 26.0f * static_cast<float>(i)).y);
+        overlay->AddText(font, font_size, at,
+                         rgba(i == 0 ? 214 : 160, i == 0 ? 220 : 170, i == 0 ? 228 : 182,
+                              glow_alpha(255.0f * alpha)),
+                         kLines[i]);
+    }
+}
+
+} // namespace definitive_ui
