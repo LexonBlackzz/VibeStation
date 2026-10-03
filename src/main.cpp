@@ -27,17 +27,20 @@
 #include <vector>
 
 #include "ui/host_window.h"
+#include "ui/favorite_emulator.h"
 #include "ui/vs2_hosted.h"
 
 namespace {
-// Runs VibeStation 1 (the PS1 app) and, on request, VibeStation 2 (the PS2
-// app) in the same window. Only the active app draws and reads input.
-// VibeStation 2 is set up the first time it is opened and then kept, so
-// switching back and forth is instant and both keep their state.
+// Runs VibeStation 1 (the PS1 app) and VibeStation 2 (the PS2 app) in the
+// same window. Only the active app draws and reads input. VibeStation 2 is
+// set up the first time it is opened and then kept, so switching back and
+// forth is instant and both keep their state. The favourite emulator (set in
+// either app's settings) decides which side opens first.
 //
-// switch_test (--switch-test): switches VibeStation 1 -> 2 -> 1 twice through
-// the same paths as the menu buttons (without the warning dialog), then
-// quits. Returns the process exit code: 0 on success.
+// switch_test (--switch-test): starts in VibeStation 1 whatever the
+// favourite, switches 1 -> 2 -> 1 twice through the same paths as the menu
+// buttons (without the warning dialog), then quits. Returns the process exit
+// code: 0 on success.
 int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
   if (!ps1.begin_run()) {
     return 1;
@@ -45,6 +48,30 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
   std::unique_ptr<ps2::ui::Vibestation2> ps2;
   bool ps2_active = false;
   int result = 0;
+
+  // Hands the window to VibeStation 2, setting it up on first use. False
+  // (and VibeStation 1 keeps the window) if it fails to start.
+  const auto enter_vs2 = [&]() {
+    if (!ps2) {
+      ps2 = std::make_unique<ps2::ui::Vibestation2>();
+      if (!ps2->init(host.window, host.gl_context, host.gl_major,
+                     host.gl_minor, host.glsl, host.opengl2)) {
+        fprintf(stderr, "VibeStation 2 failed to start.\n");
+        ps2.reset();
+        return false;
+      }
+    }
+    ps1.on_deactivated();
+    ps2->activate();
+    ps2_active = true;
+    return true;
+  };
+
+  if (!switch_test &&
+      vibestation::load_favorite_emulator() ==
+          vibestation::FavoriteEmulator::VibeStation2) {
+    enter_vs2();
+  }
 
   // --switch-test schedule: how long to stay on each side before switching.
   constexpr std::array<Uint32, 5> kTestHoldMs = {7000, 7000, 3000, 6000, 2000};
@@ -78,23 +105,14 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
         break;
       }
       if (ps1.take_vs2_switch_request()) {
-        if (!ps2) {
-          ps2 = std::make_unique<ps2::ui::Vibestation2>();
-          if (!ps2->init(host.window, host.gl_context, host.gl_major,
-                         host.gl_minor, host.glsl, host.opengl2)) {
-            fprintf(stderr, "VibeStation 2 failed to start.\n");
-            ps2.reset();
-            ps1.on_activated();
-            if (switch_test) {
-              result = 3;
-              break;
-            }
-            continue;
+        if (!enter_vs2()) {
+          ps1.on_activated();
+          if (switch_test) {
+            result = 3;
+            break;
           }
+          continue;
         }
-        ps1.on_deactivated();
-        ps2->activate();
-        ps2_active = true;
         switched = true;
       }
     }

@@ -109,6 +109,8 @@ private:
     void update_config(const Input& in, const Layout& layout);
     void draw_config(ImDrawList* draw, const Layout& layout, float alpha);
     void change_config(int row, int direction);
+    [[nodiscard]] int config_row_count() const;
+    [[nodiscard]] int config_row_id(int visible) const;
     void draw_version(ImDrawList* draw, const Layout& layout, float alpha);
     void draw_reaper(ImDrawList* draw, const Layout& layout, float alpha);
     void update_exit(const Input& in, const Layout& layout);
@@ -133,6 +135,8 @@ private:
     bool intro_pending_ = false;
     bool intro_revealed_ = false;
     bool first_frame_ = true;
+    // Set after the first frame ever: later activations skip the boot.
+    bool shown_before_ = false;
 
     // Starts hidden: the menu only fades in with the reveal, never at launch.
     float home_alpha_ = 0.0f;

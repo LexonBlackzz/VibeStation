@@ -74,7 +74,9 @@ void Frontend::restart_boot() {
     home_sel_anim_ = 1.0f;
     reveal_t0_ = -1.0;
     first_frame_ = true;
-    intro_pending_ = settings_.startup_video;
+    // The boot animation plays once per run; coming back from VibeStation 1
+    // goes straight to the menu (with vs2-backtomenu.wav, see frame()).
+    intro_pending_ = settings_.startup_video && !shown_before_;
     if (intro_pending_) {
         orbit_.hide();
         screen_ = Screen::Intro;
@@ -128,8 +130,12 @@ void Frontend::frame() {
             boot_t0_ = now_;
             play_boot_sound();
         } else {
+            // No boot animation (switched back, or turned off): the menu
+            // animates in to its own jingle.
             begin_reveal();
+            play_back_to_menu_sound();
         }
+        shown_before_ = true;
     }
 
     const Input in = read_input();

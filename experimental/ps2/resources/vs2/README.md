@@ -6,6 +6,7 @@ build) and works without any of them:
 | File | Used for | Without it |
 |---|---|---|
 | `vs2-boot.wav` | Sound of the boot animation; it plays on under the menu reveal. | The boot animation plays silently. |
+| `vs2-backtomenu.wav` | The menu animating in without the boot animation: coming back from VibeStation 1, or with Startup animation set to Skip. Off with Menu sounds. | Silent |
 | `vs2-highlight.wav` | Moving the selection | Silent |
 | `vs2-menuopen.wav` | Opening a screen | Silent |
 | `vs2-menuclose.wav` | Going back | Silent |

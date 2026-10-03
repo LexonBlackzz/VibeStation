@@ -100,6 +100,10 @@ void set_sounds_enabled(bool enabled);
 // The boot animation's sound (vs2-boot.wav) on its own device, so menu
 // sounds never cut it off.
 void play_boot_sound();
+// Coming back to the menu without the boot animation (vs2-backtomenu.wav),
+// on the same device; silent when menu sounds are off.
+void play_back_to_menu_sound();
+// Stops either of them.
 void stop_boot_sound();
 // Frontend mixer (vs2_mixer.cpp): menu sounds and the menu ambience
 // (vs2-ambientbg.wav loop + vs2-certainstatic.wav waves) share one device

@@ -1,6 +1,7 @@
 #include "ui/vs2/vs2_frontend.h"
 
 #include "core/cdvd/disc_image.h"
+#include "ui/favorite_emulator.h"
 
 #include <algorithm>
 #include <array>
@@ -70,8 +71,17 @@ const char* ee_core_name(EeCore core) {
 
 enum ConfigRow {
     kEeCore, kGsRenderer, kSpeedLimit, kDisplayFilter, kLagStutter,
-    kStartupVideo, kMenuSounds, kAmbience, kDeveloperView, kConfigRows
+    kStartupVideo, kMenuSounds, kAmbience, kFavorite, kDeveloperView, kConfigRows
 };
+
+// Rows are 42 apart from y 160, clear of the note at y 600.
+constexpr float kConfigTop = 160.0f;
+constexpr float kConfigStep = 42.0f;
+constexpr float kConfigHeight = 40.0f;
+
+bool favorite_is_vs2() {
+    return vibestation::load_favorite_emulator() == vibestation::FavoriteEmulator::VibeStation2;
+}
 
 } // namespace
 
@@ -311,6 +321,13 @@ void Frontend::change_config(int row, int direction) {
         settings_.sounds = !settings_.sounds;
         set_sounds_enabled(settings_.sounds);
         break;
+    case kFavorite:
+        // Shared with VibeStation 1's settings, not part of vibestation2.ini.
+        vibestation::save_favorite_emulator(favorite_is_vs2()
+                                                ? vibestation::FavoriteEmulator::VibeStation1
+                                                : vibestation::FavoriteEmulator::VibeStation2);
+        play_select_sound();
+        return;
     case kDeveloperView:
         play_select_sound();
         host_.open_developer_view();
@@ -321,23 +338,36 @@ void Frontend::change_config(int row, int direction) {
     save_settings();
 }
 
+// The favourite-emulator row only exists inside VibeStation; the standalone
+// lab has no VibeStation 1 to start in. config_sel_ counts visible rows.
+int Frontend::config_row_count() const {
+    return host_.can_switch_to_vs1() ? kConfigRows : kConfigRows - 1;
+}
+
+int Frontend::config_row_id(int visible) const {
+    return !host_.can_switch_to_vs1() && visible >= kFavorite ? visible + 1 : visible;
+}
+
 void Frontend::update_config(const Input& in, const Layout& layout) {
+    const int count = config_row_count();
+    config_sel_ = std::clamp(config_sel_, 0, count - 1);
     const int before = config_sel_;
-    if (in.up) config_sel_ = (config_sel_ + kConfigRows - 1) % kConfigRows;
-    if (in.down) config_sel_ = (config_sel_ + 1) % kConfigRows;
+    if (in.up) config_sel_ = (config_sel_ + count - 1) % count;
+    if (in.down) config_sel_ = (config_sel_ + 1) % count;
     if (in.clicked) {
-        for (int i = 0; i < kConfigRows; ++i) {
-            const float y = 172.0f + i * 46.0f;
-            if (ImGui::IsMouseHoveringRect(layout.point(230, y), layout.point(1050, y + 44), false)) {
-                if (i == config_sel_) change_config(i, 1);
+        for (int i = 0; i < count; ++i) {
+            const float y = kConfigTop + i * kConfigStep;
+            if (ImGui::IsMouseHoveringRect(layout.point(230, y), layout.point(1050, y + kConfigHeight), false)) {
+                if (i == config_sel_) change_config(config_row_id(i), 1);
                 else config_sel_ = i;
             }
         }
     }
     if (config_sel_ != before) play_highlight_sound();
-    if (in.left && config_sel_ != kDeveloperView) change_config(config_sel_, -1);
-    else if (in.right && config_sel_ != kDeveloperView) change_config(config_sel_, 1);
-    else if (in.accept) change_config(config_sel_, 1);
+    const int row = config_row_id(config_sel_);
+    if (in.left && row != kDeveloperView) change_config(row, -1);
+    else if (in.right && row != kDeveloperView) change_config(row, 1);
+    else if (in.accept) change_config(row, 1);
     else if (in.back) go(Screen::Home);
 }
 
@@ -366,14 +396,18 @@ void Frontend::draw_config(ImDrawList* draw, const Layout& layout, float alpha) 
                           : "Plays the boot animation silently: vs2-boot.wav is missing from resources/vs2."},
         {"Menu sounds", settings_.sounds ? "On" : "Off", "Sounds for moving, opening and confirming."},
         {"Ambience", settings_.ambience ? "On" : "Off", "A soft background hum and distant static while you are in the menus."},
+        {"Favorite emulator", favorite_is_vs2() ? "VibeStation 2" : "VibeStation 1",
+         "Which one VibeStation opens in. Also in VibeStation 1's Settings, under System."},
         {"Developer view", "Open", "The PS2 lab interface with the EE, IOP and GS debuggers. F12 switches back."},
     }};
 
-    for (int i = 0; i < kConfigRows; ++i) {
-        const float y = 172.0f + i * 46.0f;
+    const int count = config_row_count();
+    for (int i = 0; i < count; ++i) {
+        const Row& r = rows[static_cast<std::size_t>(config_row_id(i))];
+        const float y = kConfigTop + i * kConfigStep;
         const bool sel = i == config_sel_;
         const ImVec2 p0 = layout.point(230, y);
-        const ImVec2 p1 = layout.point(1050, y + 44);
+        const ImVec2 p1 = layout.point(1050, y + kConfigHeight);
         if (sel) {
             draw->AddRectFilledMultiColor(p0, p1,
                 with_alpha(color::kSelect, 0.20f * alpha), with_alpha(color::kSelect, 0.04f * alpha),
@@ -381,23 +415,24 @@ void Frontend::draw_config(ImDrawList* draw, const Layout& layout, float alpha) 
             draw->AddRectFilled(p0, ImVec2(p0.x + std::max(1.0f, layout.px(2)), p1.y), with_alpha(color::kSelect, alpha));
         }
         const float label_size = layout.px(19);
-        const ImVec2 ls = text_size(FontRole::Light, label_size, rows[i].label);
+        const ImVec2 ls = text_size(FontRole::Light, label_size, r.label);
         const float mid = (p0.y + p1.y) * 0.5f;
         text(draw, FontRole::Light, label_size, ImVec2(layout.point(252, 0).x, mid - ls.y * 0.5f),
-             with_alpha(sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(170, 180, 195, 255), alpha), rows[i].label);
+             with_alpha(sel ? IM_COL32(255, 255, 255, 255) : IM_COL32(170, 180, 195, 255), alpha), r.label);
 
-        std::string value = rows[i].value;
-        if (sel && i != kDeveloperView) value = "<  " + value + "  >";
+        std::string value = r.value;
+        if (sel && config_row_id(i) != kDeveloperView) value = "<  " + value + "  >";
         const float value_size = layout.px(15);
         const ImVec2 vs = text_size(FontRole::Mono, value_size, value.c_str());
         text(draw, FontRole::Mono, value_size, ImVec2(layout.point(1028, 0).x - vs.x, mid - vs.y * 0.5f),
              with_alpha(sel ? color::kSelect : IM_COL32(215, 223, 234, 255), alpha), value.c_str());
     }
+    const int selected = config_row_id(std::clamp(config_sel_, 0, count - 1));
     text(draw, FontRole::Regular, layout.px(13), layout.point(252, 600),
-         with_alpha(IM_COL32(117, 131, 154, 255), alpha), rows[static_cast<std::size_t>(config_sel_)].note);
+         with_alpha(IM_COL32(117, 131, 154, 255), alpha), rows[static_cast<std::size_t>(selected)].note);
 
     draw_hints(draw, layout, alpha,
-               {{'x', config_sel_ == kDeveloperView ? "Open" : "Change"}, {'o', "Back"}});
+               {{'x', config_row_id(config_sel_) == kDeveloperView ? "Open" : "Change"}, {'o', "Back"}});
 }
 
 // ------------------------------------------------------------------ version

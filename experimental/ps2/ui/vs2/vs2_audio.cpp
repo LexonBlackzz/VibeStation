@@ -53,9 +53,13 @@ SDL_AudioDeviceID g_boot_device = 0;
 
 void preload_sounds() { ensure_loaded(); }
 
-void play_boot_sound() {
+namespace {
+
+// The boot sound and the back-to-menu jingle share one device: either one
+// replaces the other.
+void play_jingle(const char* file) {
     stop_boot_sound();
-    const std::filesystem::path path = find_asset("vs2-boot.wav");
+    const std::filesystem::path path = find_asset(file);
     SDL_AudioSpec spec{};
     Uint8* buffer = nullptr;
     Uint32 length = 0;
@@ -71,6 +75,14 @@ void play_boot_sound() {
         SDL_PauseAudioDevice(g_boot_device, 0);
     }
     SDL_FreeWAV(buffer);
+}
+
+} // namespace
+
+void play_boot_sound() { play_jingle("vs2-boot.wav"); }
+
+void play_back_to_menu_sound() {
+    if (g_enabled) play_jingle("vs2-backtomenu.wav");
 }
 
 void stop_boot_sound() {
