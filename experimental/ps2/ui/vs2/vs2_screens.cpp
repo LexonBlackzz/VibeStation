@@ -467,7 +467,7 @@ void Frontend::draw_version(ImDrawList* draw, const Layout& layout, float alpha)
     const std::string bios = host_.bios_loaded() ? describe_romver(host_.bios_romver()) : "Not loaded";
     const std::string ee = std::string("R5900 · 294.912 MHz · ") + ee_core_name(host_.ee_core());
     const std::array<std::pair<const char*, std::string>, 8> rows = {{
-        {"Emulator", "VibeStation 2 (PS2 lab)"},
+        {"Emulator", "VibeStation 2"},
         {"Version", kVersionLabel},
         {"BIOS", bios},
         {"EE core", ee},

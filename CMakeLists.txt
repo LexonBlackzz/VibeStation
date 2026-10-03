@@ -249,7 +249,8 @@ set_target_properties(vibestation_vs2 PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
-target_compile_definitions(vibestation_vs2 PRIVATE SDL_MAIN_HANDLED=1)
+target_compile_definitions(vibestation_vs2 PRIVATE SDL_MAIN_HANDLED=1
+    VIBESTATION_VERSION_LABEL="${VIBESTATION_VERSION_STRING}")
 # stb_image itself is compiled into the executable (definitive_background.cpp).
 target_include_directories(vibestation_vs2 PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(vibestation_vs2 PUBLIC vibestation_ps2_core imgui_lib SDL2::SDL2-static)

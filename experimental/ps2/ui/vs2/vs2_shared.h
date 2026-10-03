@@ -13,7 +13,12 @@ namespace ps2::ui::vs2 {
 // Same design space as the PS1 definitive UI and vs2start.mp4.
 inline constexpr float kDesignWidth = 1280.0f;
 inline constexpr float kDesignHeight = 800.0f;
-inline constexpr const char* kVersionLabel = "v0.6.0-ps2lab";
+// The VibeStation version (VIBESTATION_VERSION_STRING in the root
+// CMakeLists.txt, the same one VibeStation 1 shows), passed in by the build.
+#ifndef VIBESTATION_VERSION_LABEL
+#define VIBESTATION_VERSION_LABEL "dev"
+#endif
+inline constexpr const char* kVersionLabel = VIBESTATION_VERSION_LABEL;
 
 // ---------------------------------------------------------------- layout
 // Maps 1280x800 design units onto the window, letterboxed and centred

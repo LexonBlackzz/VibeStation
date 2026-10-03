@@ -1,6 +1,9 @@
 #include "ui/vs2/vs2_frontend.h"
 
+#include <SDL.h>
+
 #include <array>
+#include <cstddef>
 
 namespace ps2::ui::vs2 {
 
@@ -28,6 +31,64 @@ struct Item {
     const char* label;
     const char* sub;
 };
+
+// Two short lines under the version, one picked at random per run: the PS2
+// side's answer to the PS1 launcher's quotes (definitive_home.cpp).
+struct Quote {
+    const char* line1;
+    const char* line2;
+};
+
+constexpr std::array<Quote, 40> kQuotes = {{
+    {"128 BITS", "ENDLESS NIGHTS"},
+    {"THE TOWERS RISE", "THE NIGHT BEGINS"},
+    {"BLUE LIGHT ON", "WORLD OFF"},
+    {"8 MB OF MEMORIES", "STILL ENOUGH"},
+    {"THE DVD SPINS", "THE HOURS GO"},
+    {"STAND IT UP", "SETTLE IN"},
+    {"A BLACK SLAB", "A BRIGHT PAST"},
+    {"THE ORBS GATHER", "THE MENU WAKES"},
+    {"EMOTION ENGINE", "STILL RUNNING"},
+    {"TWO STICKS", "ONE MORE LEVEL"},
+    {"THE FAN WHIRS", "THE STORY STARTS"},
+    {"DEEPER BLUES", "LONGER NIGHTS"},
+    {"OLD SAVES", "NEW SUNRISE"},
+    {"THE HUM", "BEFORE THE GAME"},
+    {"MORE POLYGONS", "SAME MAGIC"},
+    {"STILL LOADING", "STILL WORTH IT"},
+    {"MEMORY CARD 1", "STILL FULL"},
+    {"THE TRAY OPENS", "SO DOES THE PAST"},
+    {"BIGGER WORLDS", "SAME BEDROOM"},
+    {"SPLIT SCREEN", "WHOLE NIGHT"},
+    {"STARS DRIFT", "SAVES WAIT"},
+    {"THE LIGHT TURNS BLUE", "THE ROOM GOES QUIET"},
+    {"FROM CD TO DVD", "FROM THEN TO NOW"},
+    {"ANOTHER GENERATION", "ANOTHER NIGHT"},
+    {"THE SEQUEL", "TO YOUR CHILDHOOD"},
+    {"MORE BITS", "MORE NIGHTS"},
+    {"BACKWARDS COMPATIBLE", "WITH YOUR MEMORIES"},
+    {"PROGRESSIVE SCAN", "NOSTALGIC NIGHTS"},
+    {"WIDESCREEN DREAMS", "4:3 MEMORIES"},
+    {"THE CUBES TURN", "THE YEARS RETURN"},
+    {"HOLD R1", "HOLD ON"},
+    {"A NEW DISC", "AN OLD FEELING"},
+    {"THE SWIRL FADES", "THE GAME BEGINS"},
+    {"SAVE POINT", "SAFE PLACE"},
+    {"VIBRATION ON", "WORRIES OFF"},
+    {"STILL IN THE TRAY", "STILL IN YOUR HEAD"},
+    {"THE MEMORY CARD", "REMEMBERS YOU"},
+    {"PRESS START", "IT'S STILL HERE"},
+    {"LATE NIGHT", "LAST LEVEL"},
+    {"THE SECOND STATION", "SAME OLD MAGIC"},
+}};
+
+const Quote& corner_quote() {
+    // Chosen once per run, like the PS1 launcher's.
+    static const std::size_t index = static_cast<std::size_t>(
+        (SDL_GetPerformanceCounter() ^ (static_cast<Uint64>(SDL_GetTicks()) << 32)) %
+        kQuotes.size());
+    return kQuotes[index];
+}
 
 ImU32 lerp_color(ImU32 a, ImU32 b, float t) {
     const ImVec4 x = ImGui::ColorConvertU32ToFloat4(a);
@@ -195,8 +256,8 @@ void Frontend::draw_home(ImDrawList* draw, const Layout& layout) {
         };
         right_text(FontRole::Light, 22, 38, IM_COL32(201, 211, 224, 255), "VibeStation 2");
         right_text(FontRole::Mono, 11, 76, IM_COL32(111, 123, 143, 255), kVersionLabel);
-        right_text(FontRole::Mono, 11, 96, IM_COL32(111, 123, 143, 255), "128 BITS");
-        right_text(FontRole::Mono, 11, 116, IM_COL32(111, 123, 143, 255), "ENDLESS NIGHTS");
+        right_text(FontRole::Mono, 11, 96, IM_COL32(111, 123, 143, 255), corner_quote().line1);
+        right_text(FontRole::Mono, 11, 116, IM_COL32(111, 123, 143, 255), corner_quote().line2);
         draw->AddLine(layout.point(right - 34, 140), layout.point(right, 140),
                       with_alpha(IM_COL32(70, 82, 106, 255), a), std::max(1.0f, layout.px(1)));
     }

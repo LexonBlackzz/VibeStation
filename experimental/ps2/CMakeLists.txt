@@ -153,7 +153,13 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ui/vs2/vs2_stb_image.cpp
         ui/vs2/vs2_stb_vorbis.cpp
     )
-    target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
+    # Same version label as VibeStation (VIBESTATION_VERSION_STRING in the root
+    # CMakeLists.txt), read from there so the two never disagree.
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../../CMakeLists.txt VIBESTATION_VERSION_LINE
+        REGEX "^set[(]VIBESTATION_VERSION_STRING ")
+    string(REGEX REPLACE ".*\"([^\"]*)\".*" "\\1" VIBESTATION_VERSION_STRING "${VIBESTATION_VERSION_LINE}")
+    target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1
+        VIBESTATION_VERSION_LABEL="${VIBESTATION_VERSION_STRING}")
     target_include_directories(VibeStationPS2Lab PRIVATE ${stb_SOURCE_DIR})
     target_link_libraries(VibeStationPS2Lab PRIVATE
         vibestation_ps2_core
