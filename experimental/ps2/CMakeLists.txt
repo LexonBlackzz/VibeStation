@@ -140,6 +140,8 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ui/vs2/vs2_boot.cpp
         ui/vs2/vs2_orbit.cpp
         ui/vs2/vs2_screens.cpp
+        ui/vs2/vs2_edge_light.cpp
+        ui/vs2/vs2_toolbar.cpp
     )
     target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
     target_link_libraries(VibeStationPS2Lab PRIVATE

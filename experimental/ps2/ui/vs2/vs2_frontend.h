@@ -2,10 +2,13 @@
 
 #include "ui/vs2/vs2_host.h"
 #include "ui/vs2/vs2_boot.h"
+#include "ui/vs2/vs2_edge_light.h"
 #include "ui/vs2/vs2_orbit.h"
 #include "ui/vs2/vs2_shared.h"
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +43,10 @@ public:
     void leave_to_vs1() { if (leave_t0_ < 0.0) leave_t0_ = now_; }
     // False while a menu is up, so pad keys do not reach a running game.
     [[nodiscard]] bool wants_game_input() const { return screen_ == Screen::InGame; }
+    // Each new emulator frame, for the light around the picture.
+    void on_game_frame(const std::uint32_t* rgba, int width, int height) {
+        edge_light_.update(rgba, width, height);
+    }
 
 private:
     enum class Screen { Intro, Home, Browser, Config, Version, Reaper, Exit, Starting, InGame };
@@ -74,6 +81,12 @@ private:
     void draw_intro(ImDrawList* draw, const Layout& layout);
     void draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size);
     void update_in_game();
+    // vs2_toolbar.cpp
+    void draw_toolbar(const ImVec2& image_pos, const ImVec2& image_size, bool ps1);
+    void draw_perf_overlay(ImDrawList* draw, const ImVec2& image_pos, const ImVec2& image_size);
+    void leave_game_to(Screen next);
+    void set_turbo_held(bool held);
+    void restart_session();
     void start_session();
     void boot_game(const Game& game);
     void toast(std::string message);
@@ -137,6 +150,17 @@ private:
     double toast_t0_ = -10.0;
     double leave_t0_ = -1.0; // fading out towards VibeStation 1
     double game_entered_t0_ = 0.0;
+
+    // In-game chrome.
+    EdgeLight edge_light_{};
+    float toolbar_visibility_ = 0.0f;
+    float toolbar_reveal_hold_ = 0.0f;
+    std::array<float, 9> toolbar_hover_mix_{};
+    std::array<bool, 9> toolbar_was_hovered_{};
+    bool turbo_held_ = false;
+    bool show_perf_ = false;
+    // What Restart boots again: a disc, or the BIOS when empty.
+    std::string last_boot_disc_{};
 
     std::mutex games_mutex_{};
     std::vector<Game> games_{};

@@ -83,6 +83,8 @@ public:
     [[nodiscard]] double speed_percent() const override;
     [[nodiscard]] double frames_per_second() const override;
     [[nodiscard]] std::string status_message() const override;
+    void set_turbo(bool active) override;
+    bool save_snapshot() override;
     [[nodiscard]] vs2::EeCore ee_core() const override;
     void set_ee_core(vs2::EeCore core) override;
     [[nodiscard]] bool gpu_gs_available() const override;
@@ -176,6 +178,8 @@ private:
     std::atomic<bool> ui_waiting_{false};
     std::atomic<bool> emu_stop_{false};
     std::atomic<bool> limit_speed_{true};
+    // Held fast-forward: ignores limit_speed_ without changing the setting.
+    std::atomic<bool> turbo_{false};
     std::thread emu_thread_{};
 
     Ps2System system_{};

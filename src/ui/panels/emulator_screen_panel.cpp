@@ -62,7 +62,7 @@ namespace {
         case GameplayToolbarIcon::Rewind:
         case GameplayToolbarIcon::FastForward: {
             const float dir =
-                icon == GameplayToolbarIcon::FastForward ? 1.0f : -1.0f;
+                icon == GameplayToolbarIcon::FastForward ? -1.0f : 1.0f;
             for (int i = 0; i < 2; ++i) {
                 const float offset =
                     (static_cast<float>(i) - 0.5f) * 13.0f * s;

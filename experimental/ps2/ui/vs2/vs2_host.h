@@ -48,6 +48,11 @@ public:
     [[nodiscard]] virtual double speed_percent() const = 0;
     [[nodiscard]] virtual double frames_per_second() const = 0;
     [[nodiscard]] virtual std::string status_message() const = 0;
+    // Runs flat out while held (the toolbar's fast-forward button).
+    virtual void set_turbo(bool active) = 0;
+    // Saves the current frame as a PNG under snapshots/; the result goes to
+    // status_message().
+    virtual bool save_snapshot() = 0;
 
     // Settings
     [[nodiscard]] virtual EeCore ee_core() const = 0;

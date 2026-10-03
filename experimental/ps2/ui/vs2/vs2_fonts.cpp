@@ -58,7 +58,8 @@ void load_fonts() {
     if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();
 
     const std::array<std::filesystem::path, 4> paths = {
-        system_font({"segoeuil.ttf", "segoeui.ttf", "DejaVuSans.ttf"}),
+        // Semilight rather than Light: Light was too thin to read on black.
+        system_font({"segoeuisl.ttf", "segoeuil.ttf", "segoeui.ttf", "DejaVuSans.ttf"}),
         system_font({"segoeui.ttf", "DejaVuSans.ttf"}),
         system_font({"CascadiaMono.ttf", "consola.ttf", "DejaVuSansMono.ttf"}),
         system_font({"segoeuib.ttf", "DejaVuSans-Bold.ttf"}),
@@ -79,6 +80,12 @@ void load_fonts() {
     }
 }
 
+// Text is drawn a little larger than the layout asks for: small print gains
+// the most (11 -> 13, 13 -> 15), headings less (30 -> 33).
+float readable(float size) {
+    return size * (1.18f - 0.08f * std::clamp((size - 14.0f) / 10.0f, 0.0f, 1.0f));
+}
+
 ImFont* font(FontRole role, float pixel_size) {
     const auto& set = g_fonts[static_cast<std::size_t>(role)];
     for (std::size_t i = 0; i < kSizes.size(); ++i) {
@@ -89,11 +96,13 @@ ImFont* font(FontRole role, float pixel_size) {
 
 void text(ImDrawList* draw, FontRole role, float size, const ImVec2& pos,
           ImU32 color, const char* str) {
-    draw->AddText(font(role, size), size, pos, color, str);
+    const float shown = readable(size);
+    draw->AddText(font(role, shown), shown, pos, color, str);
 }
 
 ImVec2 text_size(FontRole role, float size, const char* str) {
-    return font(role, size)->CalcTextSizeA(size, FLT_MAX, 0.0f, str);
+    const float shown = readable(size);
+    return font(role, shown)->CalcTextSizeA(shown, FLT_MAX, 0.0f, str);
 }
 
 } // namespace ps2::ui::vs2

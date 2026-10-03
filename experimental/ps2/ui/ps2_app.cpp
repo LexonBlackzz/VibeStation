@@ -46,6 +46,79 @@ constexpr std::size_t kStutterHistoryFrames =
 constexpr std::size_t kStutterQueueTargetFrames =
     static_cast<std::size_t>(Spu2::kSampleRate) * 80u / 1000u;
 
+void append_be32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<std::uint8_t>(value >> shift));
+    }
+}
+
+std::uint32_t png_crc(const std::uint8_t* data, std::size_t size) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+void append_png_chunk(std::vector<std::uint8_t>& out, const char* type,
+                      const std::vector<std::uint8_t>& data) {
+    append_be32(out, static_cast<std::uint32_t>(data.size()));
+    const std::size_t start = out.size();
+    out.insert(out.end(), type, type + 4);
+    out.insert(out.end(), data.begin(), data.end());
+    append_be32(out, png_crc(out.data() + start, out.size() - start));
+}
+
+// Uncompressed PNG (stored DEFLATE blocks), the same format VibeStation 1's
+// snapshots use. RGBA8 with red in the low byte, alpha forced opaque.
+std::vector<std::uint8_t> encode_png(const std::vector<std::uint32_t>& rgba, int width,
+                                     int height) {
+    std::vector<std::uint8_t> raw;
+    raw.reserve(static_cast<std::size_t>(height) * (static_cast<std::size_t>(width) * 4u + 1u));
+    for (int y = 0; y < height; ++y) {
+        raw.push_back(0); // filter: none
+        for (int x = 0; x < width; ++x) {
+            const std::uint32_t px = rgba[static_cast<std::size_t>(y) * width + x];
+            raw.push_back(static_cast<std::uint8_t>(px));
+            raw.push_back(static_cast<std::uint8_t>(px >> 8));
+            raw.push_back(static_cast<std::uint8_t>(px >> 16));
+            raw.push_back(255);
+        }
+    }
+
+    std::vector<std::uint8_t> idat = {0x78, 0x01};
+    for (std::size_t offset = 0; offset < raw.size();) {
+        const std::size_t len = std::min<std::size_t>(raw.size() - offset, 65535u);
+        const bool last = offset + len == raw.size();
+        idat.push_back(last ? 1 : 0);
+        idat.push_back(static_cast<std::uint8_t>(len));
+        idat.push_back(static_cast<std::uint8_t>(len >> 8));
+        idat.push_back(static_cast<std::uint8_t>(~len));
+        idat.push_back(static_cast<std::uint8_t>(~len >> 8));
+        idat.insert(idat.end(), raw.begin() + offset, raw.begin() + offset + len);
+        offset += len;
+    }
+    std::uint32_t a = 1, b = 0;
+    for (const std::uint8_t byte : raw) {
+        a = (a + byte) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    append_be32(idat, (b << 16) | a);
+
+    std::vector<std::uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    std::vector<std::uint8_t> ihdr;
+    append_be32(ihdr, static_cast<std::uint32_t>(width));
+    append_be32(ihdr, static_cast<std::uint32_t>(height));
+    ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0}); // 8-bit RGBA
+    append_png_chunk(png, "IHDR", ihdr);
+    append_png_chunk(png, "IDAT", idat);
+    append_png_chunk(png, "IEND", {});
+    return png;
+}
+
 } // namespace
 
 bool Ps2App::init(const HostedWindow* host) {
@@ -658,6 +731,10 @@ void Ps2App::update_display_texture() {
 
     glBindTexture(GL_TEXTURE_2D, 0);
     display_texture_generation_ = display.generation();
+    if (frontend_) {
+        frontend_->on_game_frame(display.rgba8().data(), static_cast<int>(display.width()),
+                                 static_cast<int>(display.height()));
+    }
 }
 
 void Ps2App::update_ps1_texture() {
@@ -693,6 +770,7 @@ void Ps2App::update_ps1_texture() {
     glBindTexture(GL_TEXTURE_2D, 0);
     ps1_width_ = width;
     ps1_height_ = height;
+    if (frontend_) frontend_->on_game_frame(ps1_frame_.data(), width, height);
 }
 
 void Ps2App::update_pad_input() {
@@ -2337,7 +2415,8 @@ void Ps2App::emulation_thread_main() {
         const u64 total = system_.ee().state().instructions_executed;
         const auto now = clock::now();
         if (base_time == clock::time_point{} ||
-            !limit_speed_.load(std::memory_order_acquire)) {
+            !limit_speed_.load(std::memory_order_acquire) ||
+            turbo_.load(std::memory_order_acquire)) {
             base_time = now;
             base_instructions = total;
         } else {
@@ -2534,6 +2613,63 @@ vs2::GameView Ps2App::game_view() const {
 double Ps2App::speed_percent() const { return emulation_speed_percent_; }
 double Ps2App::frames_per_second() const { return guest_frames_per_second_; }
 std::string Ps2App::status_message() const { return status_message_; }
+
+void Ps2App::set_turbo(bool active) { turbo_.store(active, std::memory_order_release); }
+
+bool Ps2App::save_snapshot() {
+    std::vector<std::uint32_t> frame;
+    int width = 0;
+    int height = 0;
+    if (ps1_->active()) {
+        frame = ps1_frame_;
+        width = ps1_width_;
+        height = ps1_height_;
+    } else {
+        const auto& display = system_.gs_display();
+        const auto display_lock = display.lock();
+        if (display.valid()) {
+            frame = display.rgba8();
+            width = static_cast<int>(display.width());
+            height = static_cast<int>(display.height());
+        }
+    }
+    if (width <= 0 || height <= 0 ||
+        frame.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        status_message_ = "No picture to save yet.";
+        return false;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::current_path(ec) / "snapshots";
+    std::filesystem::create_directories(dir, ec);
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char stamp[32] = {};
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
+    std::filesystem::path path = dir / ("ps2_snapshot_" + std::string(stamp) + ".png");
+    for (int n = 1; std::filesystem::exists(path, ec); ++n) {
+        path = dir / ("ps2_snapshot_" + std::string(stamp) + "_" + std::to_string(n) + ".png");
+    }
+
+    const std::vector<std::uint8_t> png = encode_png(frame, width, height);
+    FILE* file = nullptr;
+#ifdef _WIN32
+    _wfopen_s(&file, path.c_str(), L"wb");
+#else
+    file = std::fopen(path.c_str(), "wb");
+#endif
+    const bool written = file != nullptr &&
+        std::fwrite(png.data(), 1, png.size(), file) == png.size();
+    if (file != nullptr) std::fclose(file);
+    status_message_ = written ? "Snapshot saved: " + path.filename().string()
+                              : "Couldn't save the snapshot.";
+    return written;
+}
 
 vs2::EeCore Ps2App::ee_core() const {
     if (system_.ee().dynarec_enabled()) return vs2::EeCore::Dynarec;

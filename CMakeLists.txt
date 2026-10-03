@@ -232,6 +232,8 @@ add_library(vibestation_vs2 STATIC
     experimental/ps2/ui/vs2/vs2_mixer.cpp
     experimental/ps2/ui/vs2/vs2_orbit.cpp
     experimental/ps2/ui/vs2/vs2_screens.cpp
+    experimental/ps2/ui/vs2/vs2_edge_light.cpp
+    experimental/ps2/ui/vs2/vs2_toolbar.cpp
 )
 set_target_properties(vibestation_vs2 PROPERTIES
     CXX_STANDARD 20

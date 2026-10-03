@@ -273,6 +273,8 @@ void Frontend::start_session() {
         save_settings();
     }
     if (host_.start_bios_session()) {
+        last_boot_disc_.clear();
+        edge_light_.reset();
         go(Screen::Starting);
     } else {
         toast(host_.status_message());
@@ -291,6 +293,8 @@ void Frontend::boot_game(const Game& game) {
         save_settings();
     }
     if (host_.boot_disc(game.path) && host_.session_active()) {
+        last_boot_disc_ = game.path;
+        edge_light_.reset();
         go(Screen::Starting);
     } else {
         toast(host_.status_message());
@@ -316,25 +320,38 @@ void Frontend::update_in_game() {
 void Frontend::draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size) {
     const float a = game_alpha_;
     draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(0, 0, 0, static_cast<int>(255 * a)));
+
+    // The console always outputs 4:3, whatever raster size is scanned out.
+    constexpr float aspect = 4.0f / 3.0f;
+    ImVec2 image = size;
+    if (image.x / image.y > aspect) image.x = image.y * aspect;
+    else image.y = image.x / aspect;
+    image.x = std::floor(image.x + 0.5f);
+    image.y = std::floor(image.y + 0.5f);
+    const ImVec2 p0(std::floor(pos.x + (size.x - image.x) * 0.5f),
+                    std::floor(pos.y + (size.y - image.y) * 0.5f));
+
+    // Light from the picture's edges spills onto the wall around it, as in
+    // VibeStation 1.
+    edge_light_.draw(draw, pos, size, p0, image, a);
+
     const GameView view = host_.game_view();
     if (view.texture != 0 && view.width > 0 && view.height > 0) {
-        // The console always outputs 4:3, whatever raster size is scanned out.
-        constexpr float aspect = 4.0f / 3.0f;
-        ImVec2 image = size;
-        if (image.x / image.y > aspect) image.x = image.y * aspect;
-        else image.y = image.x / aspect;
-        image.x = std::floor(image.x + 0.5f);
-        image.y = std::floor(image.y + 0.5f);
-        const ImVec2 p0(std::floor(pos.x + (size.x - image.x) * 0.5f),
-                        std::floor(pos.y + (size.y - image.y) * 0.5f));
         draw->AddImage(static_cast<ImTextureID>(view.texture), p0,
                        ImVec2(p0.x + image.x, p0.y + image.y), ImVec2(0, 0), ImVec2(1, 1),
                        IM_COL32(255, 255, 255, static_cast<int>(255 * a)));
     }
 
+    if (screen_ == Screen::InGame && a > 0.9f) {
+        if (show_perf_) draw_perf_overlay(draw, p0, image);
+        draw_toolbar(p0, image, view.ps1);
+    } else {
+        set_turbo_held(false);
+    }
+
     // Brief readout after entering the game.
     const float osd = a * (1.0f - smoothstep(3.0f, 3.8f, static_cast<float>(now_ - game_entered_t0_)));
-    if (osd > 0.01f && screen_ == Screen::InGame) {
+    if (osd > 0.01f && screen_ == Screen::InGame && !show_perf_) {
         char line[96];
         if (host_.frames_per_second() > 0.0) {
             std::snprintf(line, sizeof(line), "%.1f FPS  ·  %.0f%%  ·  Esc  Menu",
