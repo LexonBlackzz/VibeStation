@@ -195,9 +195,18 @@ add_executable(VibeStation ${VIBESTATION_SOURCES})
 
 if(WIN32)
     # Embed the application icon plus launcher background, startup icon and UI
-    # sounds directly into VibeStation.exe as Windows resources.
+    # sounds directly into VibeStation.exe as Windows resources, along with
+    # VibeStation 2's sounds and logos.
     target_sources(VibeStation PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc)
+    # Re-embed when one of VibeStation 2's files changes.
+    file(GLOB VIBESTATION_VS2_RESOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.wav
+        ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.ogg
+        ${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2/*.png)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/vibestation.rc
+        PROPERTIES OBJECT_DEPENDS "${VIBESTATION_VS2_RESOURCES}")
 endif()
 
 target_include_directories(VibeStation PRIVATE
@@ -248,14 +257,17 @@ if(WIN32)
     target_link_libraries(vibestation_vs2 PUBLIC comdlg32 ole32 shell32 uuid)
 endif()
 target_link_libraries(VibeStation PRIVATE vibestation_vs2)
-# VibeStation 2's sounds and logos are looked up in resources/vs2 next to
-# the executable; see experimental/ps2/resources/vs2/README.md.
+# On Windows VibeStation 2's sounds and logos are embedded (see the .rc
+# above); elsewhere they are looked up in resources/vs2 next to the
+# executable. See experimental/ps2/resources/vs2/README.md.
+if(NOT WIN32)
 add_custom_command(TARGET VibeStation POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2"
         "$<TARGET_FILE_DIR:VibeStation>/resources/vs2"
     COMMENT "Copying VibeStation 2 resources"
     VERBATIM)
+endif()
 
 # Windows builds consume these assets from resources/vibestation.rc, so the
 # executable is self-contained. Keep filesystem copies only for non-Windows

@@ -6,6 +6,19 @@
 
 #include <array>
 #include <cstddef>
+#include <fstream>
+#include <iterator>
+#include <string>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace ps2::ui::vs2 {
 
@@ -34,6 +47,55 @@ std::filesystem::path find_asset(const char* name) {
     return {};
 }
 
+namespace {
+
+#ifdef _WIN32
+// "vs2-boot.wav" -> "VS2_BOOT_WAV", the name resources/vibestation.rc gives it.
+std::wstring resource_name(const char* name) {
+    std::wstring out;
+    for (const char* c = name; *c != '\0'; ++c) {
+        const char ch = (*c == '-' || *c == '.') ? '_' : *c;
+        out.push_back(static_cast<wchar_t>(ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch));
+    }
+    return out;
+}
+
+// The embedded copy in this executable, if any (none in the standalone lab).
+bool embedded_asset(const char* name, const unsigned char*& data, std::size_t& size) {
+    HMODULE module = GetModuleHandleW(nullptr);
+    HRSRC resource = module != nullptr
+        ? FindResourceW(module, resource_name(name).c_str(), MAKEINTRESOURCEW(10)) // RT_RCDATA
+        : nullptr;
+    if (resource == nullptr) return false;
+    HGLOBAL loaded = LoadResource(module, resource);
+    const DWORD bytes = SizeofResource(module, resource);
+    data = loaded != nullptr ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
+    size = bytes;
+    return data != nullptr && size != 0;
+}
+#else
+bool embedded_asset(const char*, const unsigned char*&, std::size_t&) { return false; }
+#endif
+
+} // namespace
+
+std::vector<unsigned char> load_asset(const char* name) {
+    const unsigned char* data = nullptr;
+    std::size_t size = 0;
+    if (embedded_asset(name, data, size)) return {data, data + size};
+
+    const std::filesystem::path path = find_asset(name);
+    if (path.empty()) return {};
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+bool asset_available(const char* name) {
+    const unsigned char* data = nullptr;
+    std::size_t size = 0;
+    return embedded_asset(name, data, size) || !find_asset(name).empty();
+}
+
 unsigned int create_texture_rgba(int width, int height, const void* pixels, bool linear) {
     GLuint texture = 0;
     glGenTextures(1, &texture);
@@ -52,10 +114,11 @@ unsigned int create_texture_rgba(int width, int height, const void* pixels, bool
 
 unsigned int load_image_texture(const char* name, int& width, int& height) {
     width = height = 0;
-    const std::filesystem::path path = find_asset(name);
-    if (path.empty()) return 0;
+    const std::vector<unsigned char> file = load_asset(name);
+    if (file.empty()) return 0;
     int channels = 0;
-    unsigned char* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    unsigned char* pixels = stbi_load_from_memory(file.data(), static_cast<int>(file.size()),
+                                                  &width, &height, &channels, 4);
     if (pixels == nullptr || width <= 0 || height <= 0) {
         if (pixels != nullptr) stbi_image_free(pixels);
         width = height = 0;

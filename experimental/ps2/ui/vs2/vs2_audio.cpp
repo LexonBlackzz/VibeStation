@@ -59,11 +59,13 @@ namespace {
 // replaces the other.
 void play_jingle(const char* file) {
     stop_boot_sound();
-    const std::filesystem::path path = find_asset(file);
+    const std::vector<unsigned char> wav = load_asset(file);
     SDL_AudioSpec spec{};
     Uint8* buffer = nullptr;
     Uint32 length = 0;
-    if (path.empty() || SDL_LoadWAV(path.string().c_str(), &spec, &buffer, &length) == nullptr) {
+    if (wav.empty() ||
+        SDL_LoadWAV_RW(SDL_RWFromConstMem(wav.data(), static_cast<int>(wav.size())), 1, &spec,
+                       &buffer, &length) == nullptr) {
         return;
     }
     spec.callback = nullptr;

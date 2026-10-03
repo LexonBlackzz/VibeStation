@@ -123,6 +123,12 @@ void mixer_release();
 // Finds resources/vs2/<name> next to the executable, in the working
 // directory, or one level up. Empty when missing.
 std::filesystem::path find_asset(const char* name);
+// The bytes of resources/vs2/<name>. Inside VibeStation.exe on Windows they
+// are embedded resources (resources/vibestation.rc names each file in capitals
+// with - and . as _, e.g. VS2_BOOT_WAV); otherwise, or if missing there, the
+// file is read from disk via find_asset(). Empty when neither has it.
+std::vector<unsigned char> load_asset(const char* name);
+bool asset_available(const char* name);
 
 // RGBA8 texture helpers (OpenGL, UI thread only).
 unsigned int create_texture_rgba(int width, int height, const void* pixels, bool linear);

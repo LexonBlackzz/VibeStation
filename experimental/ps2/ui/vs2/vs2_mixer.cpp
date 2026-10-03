@@ -248,17 +248,17 @@ void SDLCALL mix(void* userdata, Uint8* stream, int len) {
 // A WAV, or an Ogg Vorbis file (.ogg, decoded by stb_vorbis), converted to
 // `format` / `channels` at the mixer rate.
 bool load_converted(const char* name, SDL_AudioFormat format, Uint8 channels, std::vector<Uint8>& out) {
-    const std::filesystem::path path = find_asset(name);
-    if (path.empty()) return false;
+    const std::vector<unsigned char> file = load_asset(name);
+    if (file.empty()) return false;
 
     SDL_AudioSpec spec{};
     std::vector<Uint8> source;
-    if (path.extension() == ".ogg") {
+    if (std::filesystem::path(name).extension() == ".ogg") {
         int ogg_channels = 0;
         int ogg_rate = 0;
         short* samples = nullptr;
-        const int frames =
-            stb_vorbis_decode_filename(path.string().c_str(), &ogg_channels, &ogg_rate, &samples);
+        const int frames = stb_vorbis_decode_memory(file.data(), static_cast<int>(file.size()),
+                                                    &ogg_channels, &ogg_rate, &samples);
         if (frames <= 0 || samples == nullptr) {
             std::free(samples);
             return false;
@@ -272,7 +272,10 @@ bool load_converted(const char* name, SDL_AudioFormat format, Uint8 channels, st
     } else {
         Uint8* buffer = nullptr;
         Uint32 length = 0;
-        if (SDL_LoadWAV(path.string().c_str(), &spec, &buffer, &length) == nullptr) return false;
+        if (SDL_LoadWAV_RW(SDL_RWFromConstMem(file.data(), static_cast<int>(file.size())), 1, &spec,
+                           &buffer, &length) == nullptr) {
+            return false;
+        }
         source.assign(buffer, buffer + length);
         SDL_FreeWAV(buffer);
     }

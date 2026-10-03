@@ -393,7 +393,7 @@ void Frontend::update_config(const Input& in, const Layout& layout) {
 void Frontend::draw_config(ImDrawList* draw, const Layout& layout, float alpha) {
     draw_title(draw, layout, alpha, "System Configuration", "LEFT / RIGHT CHANGES A VALUE", color::kSelect);
 
-    const bool boot_sound_found = !find_asset("vs2-boot.wav").empty();
+    const bool boot_sound_found = asset_available("vs2-boot.wav");
     struct Row {
         const char* label;
         std::string value;

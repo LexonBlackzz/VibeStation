@@ -1,7 +1,10 @@
 # VibeStation 2 frontend sounds and images
 
-The frontend looks for these files here (copied next to the executable on every
-build) and works without any of them:
+On Windows, VibeStation.exe has these files built in (resources/vibestation.rc
+embeds each one as a named resource: its file name in capitals with - and . as
+_). The standalone PS2 lab, other platforms, and any file missing from the exe
+read them from this folder instead (copied next to the executable on every
+build). VibeStation 2 works without any of them:
 
 | File | Used for | Without it |
 |---|---|---|
