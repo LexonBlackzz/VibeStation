@@ -6,8 +6,19 @@ namespace ps2::ui::vs2 {
 
 namespace {
 
-constexpr int kItemCount = 6;
-constexpr int kReaperItem = 3;
+// Menu items by id; "VibeStation 1" only appears when running inside
+// VibeStation next to it.
+enum ItemId { kStart, kLoadGame, kChangeBios, kReaperItem, kSettings, kVibeStation1, kExit };
+constexpr int kMaxItems = 7;
+
+int menu_items(const Host& host, std::array<int, kMaxItems>& ids) {
+    int n = 0;
+    for (int id : {kStart, kLoadGame, kChangeBios, kReaperItem, kSettings}) ids[n++] = id;
+    if (host.can_switch_to_vs1()) ids[n++] = kVibeStation1;
+    ids[n++] = kExit;
+    return n;
+}
+
 constexpr float kMenuX = 640.0f;
 constexpr float kMenuY = 352.0f;
 constexpr float kRowStep = 46.0f;
@@ -42,6 +53,10 @@ void glow_text(ImDrawList* draw, FontRole role, float size, const ImVec2& p,
 } // namespace
 
 void Frontend::update_home(const Input& in, const Layout& layout) {
+    if (leave_t0_ >= 0.0) return; // fading out towards VibeStation 1
+    std::array<int, kMaxItems> ids{};
+    const int kItemCount = menu_items(host_, ids);
+    home_sel_ = std::clamp(home_sel_, 0, kItemCount - 1);
     const int before = home_sel_;
     if (in.up) home_sel_ = (home_sel_ + kItemCount - 1) % kItemCount;
     if (in.down) home_sel_ = (home_sel_ + 1) % kItemCount;
@@ -72,8 +87,10 @@ void Frontend::update_home(const Input& in, const Layout& layout) {
 }
 
 void Frontend::activate_home_item() {
-    switch (home_sel_) {
-    case 0:
+    std::array<int, kMaxItems> ids{};
+    const int count = menu_items(host_, ids);
+    switch (ids[static_cast<std::size_t>(std::clamp(home_sel_, 0, count - 1))]) {
+    case kStart:
         if (host_.session_active() && !host_.session_running()) {
             play_select_sound();
             host_.resume_session();
@@ -83,10 +100,10 @@ void Frontend::activate_home_item() {
             start_session();
         }
         break;
-    case 1:
+    case kLoadGame:
         go(Screen::Browser);
         break;
-    case 2: {
+    case kChangeBios: {
         play_open_sound();
         const std::string path = host_.pick_bios_file();
         if (path.empty()) break;
@@ -103,10 +120,15 @@ void Frontend::activate_home_item() {
     case kReaperItem:
         go(Screen::Reaper);
         break;
-    case 4:
+    case kSettings:
         go(Screen::Config);
         break;
-    case 5:
+    case kVibeStation1:
+        // Fade to black, then hand the window back (see Frontend::frame).
+        play_select_sound();
+        leave_t0_ = now_;
+        break;
+    case kExit:
         exit_sel_ = 0;
         go(Screen::Exit);
         break;
@@ -126,15 +148,20 @@ void Frontend::draw_home(ImDrawList* draw, const Layout& layout) {
     const float alpha = home_alpha_;
 
     const bool paused = host_.session_active() && !host_.session_running();
-    const std::array<Item, kItemCount> items = {{
+    const std::array<Item, kMaxItems> by_id = {{
         paused ? Item{"Resume Game", "Return to the paused game"}
                : Item{"Start Emulation", "Load BIOS and start playing"},
         {"Load Game", "Choose a game from your library"},
         {"Change BIOS", "Manage BIOS files"},
         {"Grim Reaper", "Corrupt EE RAM, VRAM, SPU2 and BIOS"},
         {"Settings", "System Configuration"},
-        {"Exit", "Close VibeStation 2"},
+        {"VibeStation 1", "Switch back to the PS1 emulator"},
+        {"Exit", "Close VibeStation"},
     }};
+    std::array<int, kMaxItems> ids{};
+    const int kItemCount = menu_items(host_, ids);
+    std::array<Item, kMaxItems> items{};
+    for (int i = 0; i < kItemCount; ++i) items[static_cast<std::size_t>(i)] = by_id[static_cast<std::size_t>(ids[static_cast<std::size_t>(i)])];
 
     const float label_size = layout.px(kLabelSize);
     const float sub_size = layout.px(13);
@@ -146,7 +173,7 @@ void Frontend::draw_home(ImDrawList* draw, const Layout& layout) {
         const float y = kMenuY + d * kRowStep + 22.0f * saturate(d);
         const float x = kMenuX + std::fabs(d) * 8.0f + (1.0f - menu_in) * 120.0f;
         const float selected = saturate(1.0f - std::fabs(d));
-        const ImU32 accent = i == kReaperItem ? color::kReaper : color::kSelect;
+        const ImU32 accent = ids[static_cast<std::size_t>(i)] == kReaperItem ? color::kReaper : color::kSelect;
         const ImU32 col = lerp_color(color::kIdle, accent, selected);
 
         glow_text(draw, FontRole::Light, label_size, layout.point(x, y),

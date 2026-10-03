@@ -61,7 +61,27 @@ void Frontend::shutdown() {
     release_sounds();
 }
 
-void Frontend::on_hidden() { ambience_set_active(false); }
+void Frontend::on_hidden() {
+    ambience_set_active(false);
+    stop_boot_sound();
+}
+
+void Frontend::restart_boot() {
+    leave_t0_ = -1.0;
+    stop_boot_sound();
+    home_alpha_ = sub_alpha_ = game_alpha_ = 0.0f;
+    home_sel_ = 1;
+    home_sel_anim_ = 1.0f;
+    reveal_t0_ = -1.0;
+    first_frame_ = true;
+    intro_pending_ = settings_.startup_video;
+    if (intro_pending_) {
+        orbit_.hide();
+        screen_ = Screen::Intro;
+    } else {
+        screen_ = Screen::Home;
+    }
+}
 
 void Frontend::on_shown() {
     if (host_.session_running()) {
@@ -97,8 +117,9 @@ void Frontend::frame() {
 
     if (first_frame_) {
         first_frame_ = false;
-        if (host_.session_active()) {
-            // Launched with --bios or a disc: go straight to the game.
+        if (host_.session_running()) {
+            // Launched with --bios or a disc: go straight to the game. (A game
+            // paused before switching away waits behind the menu instead.)
             intro_pending_ = false;
             begin_reveal();
             go(Screen::InGame, true);
@@ -184,6 +205,17 @@ void Frontend::frame() {
     }
     if (game_alpha_ > 0.001f) draw_in_game(draw, pos, size);
     draw_toast(draw, layout);
+
+    // "VibeStation 1" chosen: fade to black, then hand the window back.
+    if (leave_t0_ >= 0.0) {
+        const float k = smoothstep(0.0f, 0.5f, static_cast<float>(now_ - leave_t0_));
+        draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                            IM_COL32(0, 0, 0, static_cast<int>(255.0f * k)));
+        if (now_ - leave_t0_ >= 0.6) {
+            leave_t0_ = -1.0;
+            host_.switch_to_vs1();
+        }
+    }
 
     ImGui::End();
     ImGui::PopStyleVar(3);

@@ -23,7 +23,7 @@ namespace {
 constexpr float kDesignWidth = 1280.0f;
 constexpr float kDesignHeight = 800.0f;
 
-std::array<bool, 6> g_menu_was_engaged = {};
+std::array<bool, 7> g_menu_was_engaged = {};
 
 struct LauncherQuote {
     const char* line1;
@@ -84,7 +84,7 @@ constexpr std::array<LauncherQuote, 48> kLauncherQuotes = {{
 size_t g_launcher_quote_index = 0;
 bool g_launcher_quote_selected = false;
 
-std::array<float, 6> g_menu_highlight_mix = {};
+std::array<float, 7> g_menu_highlight_mix = {};
 
 enum class LauncherStartTransition {
     None,
@@ -402,6 +402,7 @@ enum class MenuIcon {
     Chip,
     Skull,
     Settings,
+    Orbit,
     Exit
 };
 
@@ -481,6 +482,20 @@ void draw_icon(ImDrawList* draw, const Layout& layout, MenuIcon icon,
             draw->AddLine(a0, a1, color, 2.0f * s);
         }
         break;
+    case MenuIcon::Orbit: {
+        // VibeStation 2's orbiting lights: a tilted ring with three of them.
+        const ImVec2 c(p.x + 13.0f * s, p.y + 14.0f * s);
+        draw->AddEllipse(c, ImVec2(12.0f * s, 6.5f * s), color, -0.42f, 24, 1.4f * s);
+        static constexpr float kAngles[] = {0.4f, 2.5f, 4.4f};
+        for (const float a : kAngles) {
+            const float ex = 12.0f * s * std::cos(a), ey = 6.5f * s * std::sin(a);
+            const float cr = std::cos(-0.42f), sr = std::sin(-0.42f);
+            draw->AddCircleFilled(ImVec2(c.x + ex * cr - ey * sr, c.y + ex * sr + ey * cr),
+                                  2.6f * s, color, 10);
+        }
+        draw->AddCircleFilled(c, 2.0f * s, color, 10);
+        break;
+    }
     case MenuIcon::Exit:
         draw->AddRect(
             ImVec2(p.x + 8.0f * s, p.y + 2.0f * s),
@@ -508,8 +523,8 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
     constexpr float kX = 36.0f;
     constexpr float kY = 198.0f;
     constexpr float kWidth = 396.0f;
-    constexpr float kHeight = 54.0f;
-    constexpr float kGap = 6.0f;
+    constexpr float kHeight = 50.0f;
+    constexpr float kGap = 4.0f;
 
     const float y = kY + index * (kHeight + kGap);
     const ImVec2 p = layout.point(kX, y);
@@ -616,11 +631,11 @@ bool menu_button(const Layout& layout, ImDrawList* draw, int index,
 
     const float content_shift = 2.0f * highlight_mix;
     draw_icon(draw, layout, icon,
-        kX + 24.0f + content_shift, y + 13.0f,
+        kX + 24.0f + content_shift, y + 11.0f,
         definitive_text_color(main_color));
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 7.0f, 18.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 6.0f, 18.5f,
         main_color, title);
-    add_text(draw, layout, kX + 72.0f + content_shift, y + 33.0f, 11.5f,
+    add_text(draw, layout, kX + 72.0f + content_shift, y + 31.0f, 11.5f,
         sub_color, subtitle);
 
     ImGui::PopID();
@@ -893,7 +908,9 @@ void App::panel_definitive_home() {
         "Grim Reaper", "Corrupt BIOS, RAM, GPU and audio", launcher_ready);
     const bool settings_pressed = menu_button(layout, draw, 4, MenuIcon::Settings,
         "Settings", "Configure emulator options", launcher_ready);
-    const bool exit_pressed = menu_button(layout, draw, 5, MenuIcon::Exit,
+    const bool vs2_pressed = menu_button(layout, draw, 5, MenuIcon::Orbit,
+        "VibeStation 2", "Switch to the PS2 emulator (experimental)", launcher_ready);
+    const bool exit_pressed = menu_button(layout, draw, 6, MenuIcon::Exit,
         "Exit", "Close VibeStation", launcher_ready);
 
     const auto choose_bios = [this]() -> bool {
@@ -984,6 +1001,12 @@ void App::panel_definitive_home() {
         !launcher_transitioning) {
         play_ui_open_sound();
         open_definitive_settings();
+    }
+    if (vs2_pressed && launcher_ready &&
+        !launcher_transitioning && !vs2_warning_open_) {
+        // Experimental: always confirm first (definitive_vs2_switch.cpp).
+        play_ui_open_sound();
+        vs2_warning_open_ = true;
     }
     if (exit_pressed && launcher_ready &&
         !launcher_transitioning) {

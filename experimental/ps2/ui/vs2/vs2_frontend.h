@@ -34,6 +34,10 @@ public:
     void on_shown();
     // Going to the developer view: fades the menu ambience out.
     void on_hidden();
+    // Replays the boot animation into the menu (each switch to VibeStation 2).
+    void restart_boot();
+    // Fades to black and hands the window back to VibeStation 1.
+    void leave_to_vs1() { if (leave_t0_ < 0.0) leave_t0_ = now_; }
     // False while a menu is up, so pad keys do not reach a running game.
     [[nodiscard]] bool wants_game_input() const { return screen_ == Screen::InGame; }
 
@@ -131,6 +135,7 @@ private:
 
     std::string toast_{};
     double toast_t0_ = -10.0;
+    double leave_t0_ = -1.0; // fading out towards VibeStation 1
     double game_entered_t0_ = 0.0;
 
     std::mutex games_mutex_{};

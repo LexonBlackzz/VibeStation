@@ -107,7 +107,7 @@ if(VIBESTATION_PS2_ENABLE_UI)
     # PS1 discs run on the standalone VibeStation PS1 core (src/core).
     set(VIBESTATION_PS1_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
     set(VIBESTATION_PS1_CORE_SOURCES
-        bios cdrom component_serialize cpu cpu_recompiler cpu_recompiler_x64 dma gpu gte
+        bios cdrom component_serialize cpu cpu_recompiler dma gpu gte
         input_recorder interrupt mdec memory_card pad_controller ram renderer
         rewind rr4_diagnostics sio spu system system_snapshot timer
         audio_ring_buffer)

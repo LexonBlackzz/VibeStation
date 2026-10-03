@@ -19,6 +19,7 @@ struct SDL_Window;
 struct _SDL_GameController;
 typedef struct _SDL_GameController SDL_GameController;
 typedef void* SDL_GLContext;
+struct ImGuiContext;
 
 namespace ps2::ui {
 
@@ -26,12 +27,35 @@ namespace vs2 {
 class Frontend;
 }
 
+// A window owned by someone else (VibeStation, when the PS2 app runs inside
+// it next to VibeStation 1).
+struct HostedWindow {
+    SDL_Window* window = nullptr;
+    SDL_GLContext gl_context = nullptr;
+    int gl_major = 0;
+    int gl_minor = 0;
+    const char* glsl = "#version 330";
+    bool opengl2 = false;
+};
+
 class Ps2App : public vs2::Host {
 public:
     Ps2App();
     ~Ps2App() override;
-    bool init();
+    // Without a host, creates its own window (the standalone PS2 lab).
+    bool init(const HostedWindow* host = nullptr);
     int run();
+    // run() split up for a host: begin_run() once, then frame() until it
+    // returns false (quit).
+    void begin_run();
+    bool frame();
+    // The host switched to or away from this app.
+    void on_activated();
+    void on_deactivated();
+    // True once, after the user chose "VibeStation 1" in the menu.
+    bool take_vs1_switch_request();
+    // Starts the switch as if "VibeStation 1" had been chosen (--switch-test).
+    void begin_vs1_switch();
     void shutdown();
     bool launch_bios(const std::string& path);
     bool load_disc_from_path(const std::string& path);
@@ -71,6 +95,8 @@ public:
     void set_lag_stutter(bool enabled) override;
     void open_developer_view() override;
     void request_quit() override;
+    [[nodiscard]] bool can_switch_to_vs1() const override;
+    void switch_to_vs1() override;
     void capture_visible_window(
         const std::string& path,
         unsigned long long minimum_ee_instructions = 0);
@@ -79,6 +105,8 @@ public:
     void benchmark_visible_fields(u64 fields) { benchmark_fields_ = fields; }
 
 private:
+    bool create_own_window();
+    bool init_after_window();
     void process_events(bool& quit);
     void update_pad_input();
     void update_audio();
@@ -192,6 +220,14 @@ private:
     // VibeStation 2 frontend; the lab panels above are the developer view.
     std::unique_ptr<vs2::Frontend> frontend_{};
     bool developer_view_ = false;
+
+    // Hosted inside VibeStation (shared window, own ImGui context).
+    bool hosted_ = false;
+    ImGuiContext* imgui_context_ = nullptr;
+    bool vs1_switch_requested_ = false;
+    // frame() loop state (formerly locals of run()).
+    int run_result_ = 0;
+    std::chrono::steady_clock::time_point frame_started_{};
 };
 
 } // namespace ps2::ui

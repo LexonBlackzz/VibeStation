@@ -26,7 +26,103 @@
 #include <string_view>
 #include <vector>
 
+#include "ui/host_window.h"
+#include "ui/vs2_hosted.h"
+
 namespace {
+// Runs VibeStation 1 (the PS1 app) and, on request, VibeStation 2 (the PS2
+// app) in the same window. Only the active app draws and reads input.
+// VibeStation 2 is set up the first time it is opened and then kept, so
+// switching back and forth is instant and both keep their state.
+//
+// switch_test (--switch-test): switches VibeStation 1 -> 2 -> 1 twice through
+// the same paths as the menu buttons (without the warning dialog), then
+// quits. Returns the process exit code: 0 on success.
+int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
+  if (!ps1.begin_run()) {
+    return 1;
+  }
+  std::unique_ptr<ps2::ui::Vibestation2> ps2;
+  bool ps2_active = false;
+  int result = 0;
+
+  // --switch-test schedule: how long to stay on each side before switching.
+  constexpr std::array<Uint32, 5> kTestHoldMs = {7000, 7000, 3000, 6000, 2000};
+  std::size_t test_step = 0;
+  Uint32 test_step_start = SDL_GetTicks();
+  bool test_switch_pending = false;
+  const auto test_log = [](const char* what) {
+    printf("SWITCH_TEST: %s\n", what);
+    fflush(stdout);
+  };
+
+  while (true) {
+    if (switch_test && !test_switch_pending &&
+        SDL_GetTicks() - test_step_start >= kTestHoldMs[test_step]) {
+      if (test_step + 1 == kTestHoldMs.size()) {
+        test_log("done");
+        break;
+      }
+      test_switch_pending = true;
+      if (ps2_active) {
+        ps2->begin_switch_back();
+      }
+      else {
+        ps1.begin_vs2_switch();
+      }
+    }
+
+    bool switched = false;
+    if (!ps2_active) {
+      if (!ps1.frame()) {
+        break;
+      }
+      if (ps1.take_vs2_switch_request()) {
+        if (!ps2) {
+          ps2 = std::make_unique<ps2::ui::Vibestation2>();
+          if (!ps2->init(host.window, host.gl_context, host.gl_major,
+                         host.gl_minor, host.glsl, host.opengl2)) {
+            fprintf(stderr, "VibeStation 2 failed to start.\n");
+            ps2.reset();
+            ps1.on_activated();
+            if (switch_test) {
+              result = 3;
+              break;
+            }
+            continue;
+          }
+        }
+        ps1.on_deactivated();
+        ps2->activate();
+        ps2_active = true;
+        switched = true;
+      }
+    }
+    else {
+      if (!ps2->frame()) {
+        break;
+      }
+      if (ps2->take_switch_request()) {
+        ps2->deactivate();
+        ps1.on_activated();
+        ps2_active = false;
+        switched = true;
+      }
+    }
+
+    if (switch_test && switched) {
+      test_log(ps2_active ? "now in VibeStation 2" : "now in VibeStation 1");
+      test_switch_pending = false;
+      ++test_step;
+      test_step_start = SDL_GetTicks();
+    }
+  }
+  if (ps2) {
+    ps2->shutdown();
+  }
+  return result;
+}
+
 u64 benchmark_hash_bytes(const u8 *data, size_t size) {
   constexpr u64 kOffset = 1469598103934665603ull;
   constexpr u64 kPrime = 1099511628211ull;
@@ -4095,14 +4191,26 @@ int main(int argc, char *argv[]) {
   printf("Starting up...\n");
   fflush(stdout);
 
+  // One window for both VibeStation 1 (PS1) and VibeStation 2 (PS2).
+  HostWindow host;
+  if (!create_host_window(host, "VibeStation - PS1 Emulator")) {
+    fprintf(stderr, "FATAL: Failed to create the VibeStation window!\n");
+    fflush(stderr);
+    printf("Press Enter to exit...\n");
+    fflush(stdout);
+    getchar();
+    return 1;
+  }
+
   App app;
   app.set_input_recorder_config(g_input_recorder_config);
   printf("App object created.\n");
   fflush(stdout);
 
-  if (!app.init()) {
+  if (!app.init(&host)) {
     fprintf(stderr, "FATAL: Failed to initialize VibeStation!\n");
     fflush(stderr);
+    destroy_host_window(host);
     printf("Press Enter to exit...\n");
     fflush(stdout);
     getchar();
@@ -4149,6 +4257,7 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "FATAL: Failed to launch command-line disc.\n");
       fflush(stderr);
       app.shutdown();
+      destroy_host_window(host);
       if (g_log_file) {
         log_flush_repeats();
         std::fclose(g_log_file);
@@ -4164,6 +4273,7 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "FATAL: Failed to launch BIOS-only.\n");
       fflush(stderr);
       app.shutdown();
+      destroy_host_window(host);
       if (g_log_file) {
         log_flush_repeats();
         std::fclose(g_log_file);
@@ -4176,8 +4286,11 @@ int main(int argc, char *argv[]) {
   printf("Initialization complete! Running...\n");
   fflush(stdout);
 
-  app.run();
+  const bool switch_test =
+      std::find(args.begin(), args.end(), "--switch-test") != args.end();
+  const int run_result = run_vibestation(app, host, switch_test);
   app.shutdown();
+  destroy_host_window(host);
 
-  return 0;
+  return run_result;
 }

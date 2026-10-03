@@ -48,7 +48,24 @@ constexpr std::size_t kStutterQueueTargetFrames =
 
 } // namespace
 
-bool Ps2App::init() {
+bool Ps2App::init(const HostedWindow* host) {
+    hosted_ = host != nullptr;
+    if (hosted_) {
+        // Running inside VibeStation's shared window, next to VibeStation 1.
+        window_ = host->window;
+        gl_context_ = host->gl_context;
+        gl_major_ = host->gl_major;
+        gl_minor_ = host->gl_minor;
+        imgui_glsl_version_ = host->glsl;
+        use_imgui_opengl2_backend_ = host->opengl2;
+        SDL_GL_MakeCurrent(window_, gl_context_);
+    } else if (!create_own_window()) {
+        return false;
+    }
+    return init_after_window();
+}
+
+bool Ps2App::create_own_window() {
     SDL_SetMainReady();
     if (SDL_Init(
             SDL_INIT_VIDEO |
@@ -120,7 +137,10 @@ bool Ps2App::init() {
         shutdown();
         return false;
     }
+    return true;
+}
 
+bool Ps2App::init_after_window() {
     SDL_AudioSpec desired_audio{};
     desired_audio.freq = static_cast<int>(Spu2::kSampleRate);
     desired_audio.format = AUDIO_S16SYS;
@@ -156,7 +176,10 @@ bool Ps2App::init() {
     }
 
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    // Own context, made current explicitly: when hosted, VibeStation 1's
+    // context already exists and ImGui would not switch to the new one.
+    imgui_context_ = ImGui::CreateContext();
+    ImGui::SetCurrentContext(imgui_context_);
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -222,14 +245,26 @@ bool Ps2App::init() {
 }
 
 int Ps2App::run() {
-    bool quit = false;
-    int result = 0;
+    begin_run();
+    while (frame()) {
+    }
+    stop_emulation_thread();
+    return run_result_;
+}
 
+void Ps2App::begin_run() {
+    if (emu_thread_.joinable()) return;
     emu_stop_.store(false, std::memory_order_release);
     emu_thread_ = std::thread(&Ps2App::emulation_thread_main, this);
+    frame_started_ = std::chrono::steady_clock::now();
+}
 
-    auto frame_started = std::chrono::steady_clock::now();
-    while (!quit) {
+bool Ps2App::frame() {
+    ImGui::SetCurrentContext(imgui_context_);
+    bool quit = false;
+    int& result = run_result_;
+    auto& frame_started = frame_started_;
+    {
         // Hold the core only while reading or mutating emulator state; the
         // GL submission and vsync wait below run while the core executes.
         ui_waiting_.store(true, std::memory_order_release);
@@ -248,7 +283,7 @@ int Ps2App::run() {
                 "UI capture stopped before reaching a visible BIOS frame: %s\n",
                 status_message_.c_str());
             result = 4;
-            break;
+            return false;
         }
 
         if (use_imgui_opengl2_backend_) {
@@ -358,9 +393,7 @@ int Ps2App::run() {
             frame_started = after < deadline + frame_time ? deadline : after;
         }
     }
-
-    stop_emulation_thread();
-    return result;
+    return !quit;
 }
 
 void Ps2App::stop_emulation_thread() {
@@ -492,14 +525,23 @@ void Ps2App::shutdown() {
         display_texture_generation_ = ~0ull;
     }
 
-    if (ImGui::GetCurrentContext() != nullptr) {
+    if (imgui_context_ != nullptr) {
+        ImGui::SetCurrentContext(imgui_context_);
         if (use_imgui_opengl2_backend_) {
             ImGui_ImplOpenGL2_Shutdown();
         } else {
             ImGui_ImplOpenGL3_Shutdown();
         }
         ImGui_ImplSDL2_Shutdown();
-        ImGui::DestroyContext();
+        ImGui::DestroyContext(imgui_context_);
+        imgui_context_ = nullptr;
+    }
+
+    // When hosted, the window, the GL context and SDL belong to the host.
+    if (hosted_) {
+        window_ = nullptr;
+        gl_context_ = nullptr;
+        return;
     }
 
     if (gl_context_) {
@@ -513,6 +555,44 @@ void Ps2App::shutdown() {
     }
 
     SDL_Quit();
+}
+
+// ---------------------------------------------------------------------------
+// Running inside VibeStation next to VibeStation 1
+
+void Ps2App::on_activated() {
+    ImGui::SetCurrentContext(imgui_context_);
+    SDL_GL_SetSwapInterval(1);
+    SDL_SetWindowTitle(window_, developer_view_ ? kDeveloperTitle : kFrontendTitle);
+    ImGui::GetIO().ClearInputKeys();
+    begin_run();
+    developer_view_ = false;
+    if (frontend_) frontend_->restart_boot();
+}
+
+void Ps2App::on_deactivated() {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    pause_session();
+    // Nothing may keep sounding while VibeStation 1 has the window: the
+    // stutter tape would otherwise loop its last 400 ms forever.
+    audio_live_.store(false, std::memory_order_release);
+    reset_audio_stutter();
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
+    if (frontend_) frontend_->on_hidden();
+}
+
+bool Ps2App::take_vs1_switch_request() {
+    const bool requested = vs1_switch_requested_;
+    vs1_switch_requested_ = false;
+    return requested;
+}
+
+bool Ps2App::can_switch_to_vs1() const { return hosted_; }
+void Ps2App::switch_to_vs1() { vs1_switch_requested_ = true; }
+
+void Ps2App::begin_vs1_switch() {
+    if (frontend_) frontend_->leave_to_vs1();
+    else vs1_switch_requested_ = true;
 }
 
 

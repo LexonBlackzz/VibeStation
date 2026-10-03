@@ -129,6 +129,7 @@ set(VIBESTATION_SOURCES
     src/ui/embedded_resources.cpp
     src/ui/frame_presentation_worker.cpp
     src/ui/app.cpp
+    src/ui/host_window.cpp
     src/ui/app_discord_presence.cpp
     src/ui/input_bindings.cpp
     src/ui/output_resolution_utils.cpp
@@ -142,6 +143,9 @@ set(VIBESTATION_SOURCES
     src/ui/definitive/definitive_intro.cpp
     src/ui/definitive/definitive_settings.cpp
     src/ui/definitive/definitive_home.cpp
+    src/ui/definitive/definitive_vs2_switch.cpp
+    # VibeStation 2 runs PS1 discs on this (PS1, C++17) core.
+    experimental/ps2/ps1/ps1_mode.cpp
     src/ui/panels/grim_reaper_actions.cpp
     src/ui/panels/grim_reaper_runtime.cpp
     src/ui/panels/cpu_backend_panel.cpp
@@ -198,12 +202,56 @@ endif()
 
 target_include_directories(VibeStation PRIVATE
     src
-    "${stb_SOURCE_DIR}")
+    "${stb_SOURCE_DIR}"
+    # After src: ui/vs2_hosted.h and ps1/ps1_mode.h. The only name both trees
+    # share, ui/theme_settings.h, is the same file.
+    experimental/ps2)
 target_link_libraries(VibeStation PRIVATE imgui_lib SDL2::SDL2-static nlohmann_json::nlohmann_json)
 if(WIN32)
     # sample_profiler: DbgHelp symbol lookup and 1 ms timer resolution.
     target_link_libraries(VibeStation PRIVATE dbghelp winmm)
 endif()
+
+# ── VibeStation 2 (PS2) ─────────────────────────────────────────────
+# The PS2 core and its frontend are C++20 while VibeStation builds as C++17,
+# so they live in their own libraries; main.cpp only sees ui/vs2_hosted.h.
+# The PS2 lab project provides the core; its standalone UI stays off here.
+set(VIBESTATION_PS2_ENABLE_UI OFF CACHE BOOL "" FORCE)
+add_subdirectory(experimental/ps2 EXCLUDE_FROM_ALL)
+
+add_library(vibestation_vs2 STATIC
+    experimental/ps2/ui/vs2_hosted.cpp
+    experimental/ps2/ui/ps2_app.cpp
+    experimental/ps2/ui/ps2_gl_gs_backend.cpp
+    experimental/ps2/ui/vs2/vs2_assets.cpp
+    experimental/ps2/ui/vs2/vs2_audio.cpp
+    experimental/ps2/ui/vs2/vs2_boot.cpp
+    experimental/ps2/ui/vs2/vs2_fonts.cpp
+    experimental/ps2/ui/vs2/vs2_frontend.cpp
+    experimental/ps2/ui/vs2/vs2_home.cpp
+    experimental/ps2/ui/vs2/vs2_mixer.cpp
+    experimental/ps2/ui/vs2/vs2_orbit.cpp
+    experimental/ps2/ui/vs2/vs2_screens.cpp
+)
+set_target_properties(vibestation_vs2 PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF)
+target_compile_definitions(vibestation_vs2 PRIVATE SDL_MAIN_HANDLED=1)
+target_link_libraries(vibestation_vs2 PUBLIC vibestation_ps2_core imgui_lib SDL2::SDL2-static)
+if(WIN32)
+    target_link_libraries(vibestation_vs2 PUBLIC comdlg32 ole32 shell32 uuid)
+endif()
+target_link_libraries(VibeStation PRIVATE vibestation_vs2)
+
+# VibeStation 2's sounds are looked up in resources/vs2 next to the
+# executable. They are not in the repository; see resources/vs2/README.md.
+add_custom_command(TARGET VibeStation POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/experimental/ps2/resources/vs2"
+        "$<TARGET_FILE_DIR:VibeStation>/resources/vs2"
+    COMMENT "Copying VibeStation 2 resources"
+    VERBATIM)
 
 # Windows builds consume these assets from resources/vibestation.rc, so the
 # executable is self-contained. Keep filesystem copies only for non-Windows

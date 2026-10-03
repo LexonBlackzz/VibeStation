@@ -65,6 +65,9 @@ public:
     // App
     virtual void open_developer_view() = 0;
     virtual void request_quit() = 0;
+    // Running inside VibeStation next to VibeStation 1: offer the way back.
+    [[nodiscard]] virtual bool can_switch_to_vs1() const = 0;
+    virtual void switch_to_vs1() = 0;
 };
 
 } // namespace ps2::ui::vs2
