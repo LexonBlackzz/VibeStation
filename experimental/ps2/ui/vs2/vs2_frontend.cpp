@@ -13,6 +13,7 @@ namespace {
 constexpr const char* kSettingsFile = "vibestation2.ini";
 constexpr float kRevealAt = 4.5f;      // vs2start.mp4 turns black here
 constexpr float kStartingSeconds = 1.1f;
+constexpr float kHandoffSeconds = 1.2f;
 
 bool is_sub_screen(int screen) {
     // Browser, Config, Version, Reaper, Exit
@@ -170,6 +171,10 @@ void Frontend::frame() {
         }
         break;
     case Screen::InGame: update_in_game(); break;
+    case Screen::Handoff:
+        // Show the message for a moment, then fade out to VibeStation 1.
+        if (now_ - screen_t0_ >= kHandoffSeconds && leave_t0_ < 0.0) leave_t0_ = now_;
+        break;
     }
 
     const int screen = static_cast<int>(screen_);
@@ -181,7 +186,7 @@ void Frontend::frame() {
     float presence = 1.0f;
     if (is_sub_screen(screen)) presence = .15f;
     if (screen_ == Screen::Exit) presence = .15f;
-    if (screen_ == Screen::Starting) presence = .6f;
+    if (screen_ == Screen::Starting || screen_ == Screen::Handoff) presence = .6f;
     if (screen_ == Screen::InGame) presence = 0.0f;
     const bool reaper =
         (screen_ == Screen::Home && home_sel_ == 3) || screen_ == Screen::Reaper;
@@ -191,7 +196,7 @@ void Frontend::frame() {
     // Ambience: only in the menus, a few seconds after the reveal so it does
     // not fight the boot sound.
     const bool in_menus = screen_ != Screen::Intro && screen_ != Screen::Starting &&
-                          screen_ != Screen::InGame;
+                          screen_ != Screen::InGame && screen_ != Screen::Handoff;
     ambience_set_active(settings_.ambience && in_menus && reveal_t0_ >= 0.0 && now_ - reveal_t0_ > 3.0);
     ambience_update(dt_);
 
@@ -216,6 +221,19 @@ void Frontend::frame() {
             text(draw, FontRole::Light, layout.px(22),
                  ImVec2(layout.point(640, 0).x - ts.x * 0.5f, layout.point(0, 600).y),
                  with_alpha(color::kText, a), label);
+        }
+        if (screen_ == Screen::Handoff) {
+            const float a = smoothstep(0.1f, 0.45f, static_cast<float>(now_ - screen_t0_));
+            const char* label = "Switching to VibeStation 1";
+            const ImVec2 ts = text_size(FontRole::Light, layout.px(26), label);
+            text(draw, FontRole::Light, layout.px(26),
+                 ImVec2(layout.point(640, 0).x - ts.x * 0.5f, layout.point(0, 560).y),
+                 with_alpha(color::kText, a), label);
+            const std::string sub = "PS1 games run in VibeStation 1 · " + handoff_title_;
+            const ImVec2 ss = text_size(FontRole::Regular, layout.px(13), sub.c_str());
+            text(draw, FontRole::Regular, layout.px(13),
+                 ImVec2(layout.point(640, 0).x - ss.x * 0.5f, layout.point(0, 606).y),
+                 with_alpha(color::kSub, a), sub.c_str());
         }
     }
     if (game_alpha_ > 0.001f) draw_in_game(draw, pos, size);
@@ -301,6 +319,17 @@ void Frontend::start_session() {
 }
 
 void Frontend::boot_game(const Game& game) {
+    // Inside VibeStation, PS1 discs go to VibeStation 1 with its own toolbar
+    // and overlay; VibeStation 2's are built around the PS2 core. (The
+    // standalone lab keeps running them on its built-in PS1 core.)
+    if (game.kind.rfind("PS1", 0) == 0 && host_.can_switch_to_vs1()) {
+        play_select_sound();
+        host_.pause_session();
+        host_.hand_ps1_disc_to_vs1(game.path);
+        handoff_title_ = game.title;
+        go(Screen::Handoff, true);
+        return;
+    }
     if (!host_.bios_loaded() && game.kind.rfind("PS1", 0) != 0) {
         const std::string path = host_.pick_bios_file();
         if (path.empty() || !host_.load_bios(path)) {

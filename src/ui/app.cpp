@@ -500,6 +500,9 @@ bool App::begin_run() {
 
 bool App::frame() {
     ImGui::SetCurrentContext(imgui_context_);
+    if (!pending_vs2_disc_.empty()) {
+        boot_pending_vs2_disc();
+    }
     bool quit = false;
     const u64 perf_freq = perf_freq_;
     const double target_frame_sec = target_frame_sec_;
@@ -814,6 +817,7 @@ void App::process_events(bool& quit) {
                         bios_path_ = path;
                         save_persistent_config();
                         has_started_emulation_ = false;
+                        session_suspended_ = false;
                         set_grim_reaper_mode(false);
                         status_message_ = "BIOS loaded: " + system_->bios().get_info();
                     }
@@ -887,6 +891,7 @@ void App::process_events(bool& quit) {
                     disable_gpu_reaper_mode();
                     disable_sound_reaper_mode();
                     has_started_emulation_ = false;
+                    session_suspended_ = false;
                     status_message_ = "Emulation stopped";
                 }
             }
@@ -1117,7 +1122,10 @@ void App::render_ui() {
             if (!gameplay_exit_transition_switched_) {
                 gameplay_exit_transition_switched_ = true;
                 has_started_emulation_ = false;
-                status_message_ = "Emulation stopped";
+                // Exit keeps the paused session for Resume Emulation; Stop ends it.
+                session_suspended_ = !gameplay_exit_stops_;
+                status_message_ = gameplay_exit_stops_ ? "Emulation stopped"
+                                                       : "Emulation paused";
             }
 
             gameplay_exit_alpha =
@@ -1255,6 +1263,7 @@ void App::menu_bar() {
                         bios_path_ = path;
                         save_persistent_config();
                         has_started_emulation_ = false;
+                        session_suspended_ = false;
                         set_grim_reaper_mode(false);
                         status_message_ = "BIOS loaded: " + system_->bios().get_info();
                     }
@@ -1339,6 +1348,7 @@ void App::menu_bar() {
                 disable_gpu_reaper_mode();
                 disable_sound_reaper_mode();
                 has_started_emulation_ = false;
+                session_suspended_ = false;
                 status_message_ = "Emulation stopped";
             }
             if (ImGui::MenuItem("Take Snapshot", "F8", false,
@@ -1590,6 +1600,8 @@ bool App::load_disc_from_ui(const std::string& bin_path,
 
     game_bin_path_ = bin_path;
     game_cue_path_ = cue_path;
+    // A new pick replaces a game paused behind the launcher: Start boots it.
+    session_suspended_ = false;
     apply_memory_card_settings(false);
     status_message_ = "Disc selected: " + disc_label + " (Emulation > Boot Disc)";
     return true;
@@ -2145,6 +2157,7 @@ void App::try_autoload_bios_from_config() {
 
     if (system_->load_bios(bios_path_)) {
         has_started_emulation_ = false;
+        session_suspended_ = false;
         status_message_ = "Auto-loaded BIOS: " + system_->bios().get_info();
     }
     else {

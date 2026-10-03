@@ -79,6 +79,7 @@ public:
     [[nodiscard]] bool session_running() const override;
     void pause_session() override;
     void resume_session() override;
+    void stop_session() override;
     [[nodiscard]] vs2::GameView game_view() const override;
     [[nodiscard]] double speed_percent() const override;
     [[nodiscard]] double frames_per_second() const override;
@@ -99,6 +100,9 @@ public:
     void request_quit() override;
     [[nodiscard]] bool can_switch_to_vs1() const override;
     void switch_to_vs1() override;
+    void hand_ps1_disc_to_vs1(const std::string& path) override;
+    // The disc handed over by hand_ps1_disc_to_vs1, once (empty if none).
+    std::string take_ps1_handoff();
     void capture_visible_window(
         const std::string& path,
         unsigned long long minimum_ee_instructions = 0);
@@ -229,6 +233,7 @@ private:
     bool hosted_ = false;
     ImGuiContext* imgui_context_ = nullptr;
     bool vs1_switch_requested_ = false;
+    std::string ps1_handoff_path_{};
     // frame() loop state (formerly locals of run()).
     int run_result_ = 0;
     std::chrono::steady_clock::time_point frame_started_{};

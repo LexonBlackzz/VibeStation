@@ -13,7 +13,7 @@ namespace ps2::ui::vs2 {
 
 namespace {
 
-enum class ToolIcon { Pause, Play, FastForward, Skull, Camera, Folder, Tv, Restart, Exit, More };
+enum class ToolIcon { Pause, Play, FastForward, Skull, Camera, Folder, Tv, Restart, Stop, Exit, More };
 
 void draw_tool_icon(ImDrawList* draw, ToolIcon icon, const ImVec2& c, float s, ImU32 color,
                     ImU32 cutout) {
@@ -72,6 +72,9 @@ void draw_tool_icon(ImDrawList* draw, ToolIcon icon, const ImVec2& c, float s, I
                                 ImVec2(c.x + 8.5f * s, c.y - 1.8f * s), color);
         break;
     }
+    case ToolIcon::Stop:
+        draw->AddRectFilled(ImVec2(c.x - 8 * s, c.y - 8 * s), ImVec2(c.x + 8 * s, c.y + 8 * s), color, 2 * s);
+        break;
     case ToolIcon::Exit:
         draw->AddRect(ImVec2(c.x - 11 * s, c.y - 10 * s), ImVec2(c.x - 2 * s, c.y + 10 * s), color, 1.5f * s, 0, stroke);
         draw->AddLine(ImVec2(c.x - 5 * s, c.y), ImVec2(c.x + 10 * s, c.y), color, stroke);
@@ -131,7 +134,7 @@ void Frontend::restart_session() {
 void Frontend::draw_toolbar(const ImVec2& image_pos, const ImVec2& image_size, bool ps1) {
     if (image_size.x < 260.0f || image_size.y < 160.0f) return;
 
-    constexpr int kButtons = 9;
+    constexpr int kButtons = 10;
     constexpr int kSeparators = 5;
     const float base_width = 28.0f + 46.0f * kButtons + 10.0f * (kButtons - 1 - kSeparators) +
                              18.0f * kSeparators;
@@ -295,11 +298,13 @@ void Frontend::draw_toolbar(const ImVec2& image_pos, const ImVec2& image_size, b
 
     const Result restart = tool(6, "restart", ToolIcon::Restart, x, true, false, "Restart emulation");
     next(false);
-    const Result exit = tool(7, "exit", ToolIcon::Exit, x, true, false, "Exit to menu");
+    const Result stop = tool(7, "stop", ToolIcon::Stop, x, true, false, "Stop emulation");
+    next(false);
+    const Result exit = tool(8, "exit", ToolIcon::Exit, x, true, false, "Exit to menu (the game stays paused)");
     next(true);
 
     const bool more_open = ImGui::IsPopupOpen("##vs2_toolbar_more");
-    const Result more = tool(8, "more", ToolIcon::More, x, true, more_open, "More");
+    const Result more = tool(9, "more", ToolIcon::More, x, true, more_open, "More");
     if (more.clicked) {
         play_open_sound();
         ImGui::OpenPopup("##vs2_toolbar_more");
@@ -353,7 +358,21 @@ void Frontend::draw_toolbar(const ImVec2& image_pos, const ImVec2& image_size, b
         play_select_sound();
         restart_session();
     }
-    if (leave_to != screen_) leave_game_to(leave_to);
+    if (stop.clicked) {
+        // End the session and land on the menu, where Start begins afresh.
+        set_turbo_held(false);
+        host_.stop_session();
+        edge_light_.reset();
+        toolbar_visibility_ = 0.0f;
+        toolbar_reveal_hold_ = 0.0f;
+        home_sel_ = 0;
+        home_sel_anim_ = 0.0f;
+        play_close_sound();
+        toast(host_.status_message());
+        go(Screen::Home, true);
+    } else if (leave_to != screen_) {
+        leave_game_to(leave_to);
+    }
 }
 
 void Frontend::draw_perf_overlay(ImDrawList* draw, const ImVec2& image_pos, const ImVec2& image_size) {

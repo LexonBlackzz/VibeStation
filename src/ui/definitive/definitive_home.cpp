@@ -89,7 +89,8 @@ std::array<float, 7> g_menu_highlight_mix = {};
 enum class LauncherStartTransition {
     None,
     Bios,
-    Disc
+    Disc,
+    Resume
 };
 
 LauncherStartTransition g_launcher_start_transition =
@@ -605,6 +606,13 @@ void draw_info_badge(ImDrawList* draw, const Layout& layout, float x, float y) {
 }
 }
 
+void App::skip_definitive_startup() {
+    definitive_ui::skip_startup_sound();
+    g_startup_elapsed = definitive_ui::kLauncherSequenceEnd;
+    g_startup_complete = true;
+    g_intro_highlight_dismissed = true;
+}
+
 void App::release_definitive_ui_assets() {
     definitive_ui::release_audio_assets();
     g_menu_was_engaged.fill(false);
@@ -804,8 +812,14 @@ void App::panel_definitive_home() {
         return pressed;
     };
 
-    bool start_pressed = menu_row(0, MenuIcon::Play,
-        "Start Emulation", "Load BIOS and start playing");
+    // A game left with the toolbar's Exit waits paused behind the launcher.
+    const bool can_resume =
+        session_suspended_ && system_ != nullptr && system_->bios_loaded();
+    bool start_pressed = can_resume
+        ? menu_row(0, MenuIcon::Play,
+            "Resume Emulation", "Return to the paused game")
+        : menu_row(0, MenuIcon::Play,
+            "Start Emulation", "Load BIOS and start playing");
     const bool load_game_pressed = menu_row(1, MenuIcon::Folder,
         "Load Game", "Choose a game from your library");
     const bool change_bios_pressed = menu_row(2, MenuIcon::Chip,
@@ -849,6 +863,7 @@ void App::panel_definitive_home() {
         bios_path_ = path;
         save_persistent_config();
         has_started_emulation_ = false;
+        session_suspended_ = false;
         set_grim_reaper_mode(false);
         status_message_ = "BIOS loaded: " + system_->bios().get_info();
         return true;
@@ -857,7 +872,12 @@ void App::panel_definitive_home() {
     if (start_pressed && launcher_ready &&
         g_launcher_start_transition == LauncherStartTransition::None) {
         play_ui_open_sound();
-        if (!system_->bios_loaded() && !choose_bios()) {
+        if (can_resume) {
+            g_launcher_start_transition = LauncherStartTransition::Resume;
+            g_launcher_start_transition_elapsed = 0.0f;
+            status_message_ = "Resuming emulation...";
+        }
+        else if (!system_->bios_loaded() && !choose_bios()) {
             // File picker cancelled or BIOS failed to load.
         }
         else {
@@ -952,10 +972,21 @@ void App::panel_definitive_home() {
             g_launcher_start_transition = LauncherStartTransition::None;
             g_launcher_start_transition_elapsed = 0.0f;
 
-            launcher_started_this_frame =
-                requested == LauncherStartTransition::Disc
-                    ? boot_disc_from_ui()
-                    : start_bios_from_ui();
+            if (requested == LauncherStartTransition::Resume) {
+                session_suspended_ = false;
+                has_started_emulation_ = true;
+                gameplay_toolbar_visibility_ = 0.0f;
+                gameplay_toolbar_reveal_hold_ = 0.0f;
+                emu_runner_.set_running(true);
+                status_message_ = "Emulation resumed";
+                launcher_started_this_frame = true;
+            }
+            else {
+                launcher_started_this_frame =
+                    requested == LauncherStartTransition::Disc
+                        ? boot_disc_from_ui()
+                        : start_bios_from_ui();
+            }
 
             // Keep this final launcher frame fully black. The next frame is
             // owned by the emulator screen if startup succeeded.

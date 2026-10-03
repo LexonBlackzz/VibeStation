@@ -82,6 +82,8 @@ void play_open_sound();
 void play_close_sound();
 void play_startup_sound();
 void stop_startup_sound();
+// Counts the startup sound as played without playing it.
+void skip_startup_sound();
 
 struct Layout {
     ImVec2 origin{};

@@ -5,6 +5,8 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <string>
+#include <utility>
 
 // Switching from VibeStation 1 (this app) to VibeStation 2 (the PS2 app),
 // which runs in the same window: the home screen's "VibeStation 2" button
@@ -197,4 +199,47 @@ void App::begin_vs2_switch() {
         vs2_warning_open_ = false;
         vs2_fade_out_ = 0.0f;
     }
+}
+
+// A PS1 disc picked in VibeStation 2's Browser runs here instead, with this
+// app's toolbar and performance overlay. Called right after the switch back,
+// while the screen is still fading in from black.
+void App::boot_disc_from_vs2(const std::string& path) {
+    // Booted from frame(), with this app's ImGui context current.
+    pending_vs2_disc_ = path;
+}
+
+void App::boot_pending_vs2_disc() {
+    const std::string path = std::exchange(pending_vs2_disc_, {});
+    // Straight into the game: no launcher intro now or after leaving it.
+    skip_definitive_startup();
+    if (!init_runtime() || system_ == nullptr) {
+        status_message_ = "Couldn't start the PS1 emulator.";
+        return;
+    }
+
+    std::string bin;
+    std::string cue;
+    std::string error;
+    if (!resolve_disc_paths(path, bin, cue, error)) {
+        status_message_ = error;
+        return;
+    }
+    if (!system_->bios_loaded()) {
+        const std::string bios = open_file_dialog(
+            "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
+        if (bios.empty() || !system_->load_bios(bios)) {
+            status_message_ = "PS1 games need a PS1 BIOS. Choose one with Change BIOS.";
+            return;
+        }
+        bios_path_ = bios;
+        save_persistent_config();
+    }
+
+    // Replace whatever this side had running or paused.
+    emu_runner_.pause_and_wait_idle();
+    has_started_emulation_ = false;
+    session_suspended_ = false;
+    load_disc_from_ui(bin, cue);
+    boot_disc_from_ui();
 }

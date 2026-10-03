@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -662,6 +663,10 @@ bool Ps2App::take_vs1_switch_request() {
 
 bool Ps2App::can_switch_to_vs1() const { return hosted_; }
 void Ps2App::switch_to_vs1() { vs1_switch_requested_ = true; }
+
+void Ps2App::hand_ps1_disc_to_vs1(const std::string& path) { ps1_handoff_path_ = path; }
+
+std::string Ps2App::take_ps1_handoff() { return std::exchange(ps1_handoff_path_, {}); }
 
 void Ps2App::begin_vs1_switch() {
     if (frontend_) frontend_->leave_to_vs1();
@@ -2593,6 +2598,12 @@ void Ps2App::resume_session() {
     speed_sample_instructions_ = system_.ee().state().instructions_executed;
     speed_sample_fields_ = system_.video_fields_started();
     status_message_ = "Running";
+}
+
+void Ps2App::stop_session() {
+    stop_ps1();
+    reset_core();
+    status_message_ = "Emulation stopped";
 }
 
 vs2::GameView Ps2App::game_view() const {

@@ -49,7 +49,7 @@ public:
     }
 
 private:
-    enum class Screen { Intro, Home, Browser, Config, Version, Reaper, Exit, Starting, InGame };
+    enum class Screen { Intro, Home, Browser, Config, Version, Reaper, Exit, Starting, InGame, Handoff };
 
     struct Game {
         std::string path;
@@ -156,13 +156,15 @@ private:
     char hint_clicked_ = 0;
     double leave_t0_ = -1.0; // fading out towards VibeStation 1
     double game_entered_t0_ = 0.0;
+    // A PS1 disc going to VibeStation 1 (Screen::Handoff): its title.
+    std::string handoff_title_{};
 
     // In-game chrome.
     EdgeLight edge_light_{};
     float toolbar_visibility_ = 0.0f;
     float toolbar_reveal_hold_ = 0.0f;
-    std::array<float, 9> toolbar_hover_mix_{};
-    std::array<bool, 9> toolbar_was_hovered_{};
+    std::array<float, 10> toolbar_hover_mix_{};
+    std::array<bool, 10> toolbar_was_hovered_{};
     bool turbo_held_ = false;
     bool show_perf_ = false;
     // What Restart boots again: a disc, or the BIOS when empty.

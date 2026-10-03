@@ -1541,6 +1541,7 @@ void App::panel_definitive_grim_reaper() {
             }
             else {
                 has_started_emulation_ = false;
+                session_suspended_ = false;
                 system_->reset();
                 apply_memory_card_settings(false);
                 has_started_emulation_ = true;

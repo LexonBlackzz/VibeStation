@@ -40,6 +40,8 @@ public:
 	bool take_vs2_switch_request();
 	// Starts the switch as if the warning had been confirmed (--switch-test).
 	void begin_vs2_switch();
+	// A PS1 disc chosen in VibeStation 2: boot it here (after a switch back).
+	void boot_disc_from_vs2(const std::string& path);
 	void shutdown();
 	bool launch_disc_from_cli(const std::string& bios_path,
 		const std::string& disc_path, bool direct_boot);
@@ -110,6 +112,15 @@ private:
 	bool gameplay_exit_transition_active_ = false;
 	bool gameplay_exit_transition_switched_ = false;
 	float gameplay_exit_transition_elapsed_ = 0.0f;
+	// Toolbar Stop ends the session; Exit keeps it paused behind the launcher,
+	// which then offers Resume Emulation (session_suspended_).
+	bool gameplay_exit_stops_ = true;
+	bool session_suspended_ = false;
+	void exit_gameplay_to_launcher(bool stop);
+	// Ends the launcher startup sequence at once (a game booted from VS2).
+	void skip_definitive_startup();
+	std::string pending_vs2_disc_{};
+	void boot_pending_vs2_disc();
 	bool show_corruption_presets_ = false;
 	bool show_bindings_config_ = false;
 	bool show_fmv_diagnostics_ = false;

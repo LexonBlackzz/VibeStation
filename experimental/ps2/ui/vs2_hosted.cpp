@@ -36,6 +36,8 @@ bool Vibestation2::frame() { return app_ ? app_->frame() : false; }
 
 bool Vibestation2::take_switch_request() { return app_ && app_->take_vs1_switch_request(); }
 
+std::string Vibestation2::take_ps1_disc() { return app_ ? app_->take_ps1_handoff() : std::string{}; }
+
 void Vibestation2::begin_switch_back() {
     if (app_) app_->begin_vs1_switch();
 }

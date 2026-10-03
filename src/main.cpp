@@ -37,11 +37,15 @@ namespace {
 // forth is instant and both keep their state. The favourite emulator (set in
 // either app's settings) decides which side opens first.
 //
+// cli_session: a BIOS or disc was launched from the command line, so it
+// starts in VibeStation 1 whatever the favourite.
+//
 // switch_test (--switch-test): starts in VibeStation 1 whatever the
 // favourite, switches 1 -> 2 -> 1 twice through the same paths as the menu
 // buttons (without the warning dialog), then quits. Returns the process exit
 // code: 0 on success.
-int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
+int run_vibestation(App& ps1, const HostWindow& host, bool switch_test,
+                    bool cli_session) {
   if (!ps1.begin_run()) {
     return 1;
   }
@@ -67,7 +71,8 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
     return true;
   };
 
-  if (!switch_test &&
+  // A BIOS or disc given on the command line runs in VibeStation 1.
+  if (!switch_test && !cli_session &&
       vibestation::load_favorite_emulator() ==
           vibestation::FavoriteEmulator::VibeStation2) {
     enter_vs2();
@@ -121,8 +126,12 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test) {
         break;
       }
       if (ps2->take_switch_request()) {
+        const std::string ps1_disc = ps2->take_ps1_disc();
         ps2->deactivate();
         ps1.on_activated();
+        if (!ps1_disc.empty()) {
+          ps1.boot_disc_from_vs2(ps1_disc);
+        }
         ps2_active = false;
         switched = true;
       }
@@ -4306,7 +4315,9 @@ int main(int argc, char *argv[]) {
 
   const bool switch_test =
       std::find(args.begin(), args.end(), "--switch-test") != args.end();
-  const int run_result = run_vibestation(app, host, switch_test);
+  const int run_result = run_vibestation(
+      app, host, switch_test,
+      !windowed_disc_path.empty() || !windowed_bios_only_path.empty());
   app.shutdown();
   destroy_host_window(host);
 

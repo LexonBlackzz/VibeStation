@@ -192,6 +192,7 @@ bool App::reap_and_reboot_bios() {
     grim_reaper_last_output_path_ = out_path.string();
 
     has_started_emulation_ = false;
+    session_suspended_ = false;
     system_->reset();
     apply_memory_card_settings(false);
     has_started_emulation_ = true;
@@ -336,6 +337,7 @@ bool App::reap_and_reboot_bios_batch() {
     grim_reaper_last_output_path_ = out_path.string();
 
     has_started_emulation_ = false;
+    session_suspended_ = false;
     system_->reset();
     apply_memory_card_settings(false);
     has_started_emulation_ = true;

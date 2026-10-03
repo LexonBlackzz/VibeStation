@@ -5,6 +5,7 @@
 // executable builds as C++17 while the PS2 code needs C++20.
 
 #include <memory>
+#include <string>
 
 struct SDL_Window;
 
@@ -29,6 +30,8 @@ public:
     bool frame();
     // True once, after the user chose "VibeStation 1" and the screen faded.
     bool take_switch_request();
+    // A PS1 disc to boot in VibeStation 1 after that switch (empty if none).
+    std::string take_ps1_disc();
     // Starts the fade back to VibeStation 1 (--switch-test).
     void begin_switch_back();
     void shutdown();

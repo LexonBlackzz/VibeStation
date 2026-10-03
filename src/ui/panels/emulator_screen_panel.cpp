@@ -25,6 +25,7 @@ namespace {
         Folder,
         Tv,
         Restart,
+        Stop,
         Exit,
         More
     };
@@ -176,6 +177,13 @@ namespace {
                 color);
             break;
         }
+        case GameplayToolbarIcon::Stop: {
+            draw->AddRectFilled(
+                ImVec2(center.x - 8.0f * s, center.y - 8.0f * s),
+                ImVec2(center.x + 8.0f * s, center.y + 8.0f * s),
+                color, 2.0f * s);
+            break;
+        }
         case GameplayToolbarIcon::Exit: {
             draw->AddRect(
                 ImVec2(center.x - 11.0f * s, center.y - 10.0f * s),
@@ -208,13 +216,51 @@ namespace {
     }
 }
 
+void App::exit_gameplay_to_launcher(bool stop) {
+    play_ui_close_sound();
+
+    gameplay_toolbar_rewind_active_ = false;
+    emu_runner_.set_rewind_active(false);
+    gameplay_toolbar_turbo_active_ = false;
+    apply_speed_override();
+
+    emu_runner_.pause_and_wait_idle();
+    if (stop) {
+        disable_ram_reaper_mode();
+        disable_gpu_reaper_mode();
+        disable_sound_reaper_mode();
+        set_grim_reaper_mode(false);
+    }
+
+    show_settings_ = false;
+    show_vram_ = false;
+    show_about_ = false;
+    show_grim_reaper_ = false;
+    show_perf_ = false;
+
+    // Fade gameplay to black, switch to the launcher at full black, then
+    // reveal the launcher. Keep has_started_emulation_ true until the
+    // midpoint so the outgoing gameplay frame remains visible.
+    definitive_grim_reaper_active_ = false;
+    definitive_grim_reaper_closing_ = false;
+    definitive_grim_reaper_advanced_ = false;
+    definitive_grim_reaper_visibility_ = 0.0f;
+    gameplay_exit_stops_ = stop;
+    gameplay_exit_transition_active_ = true;
+    gameplay_exit_transition_switched_ = false;
+    gameplay_exit_transition_elapsed_ = 0.0f;
+    gameplay_toolbar_visibility_ = 0.0f;
+    gameplay_toolbar_reveal_hold_ = 0.0f;
+    status_message_ = stop ? "Stopping emulation..." : "Returning to launcher...";
+}
+
 void App::draw_gameplay_toolbar(
     const ImVec2& image_pos, const ImVec2& image_size) {
     if (image_size.x < 260.0f || image_size.y < 160.0f) {
         return;
     }
 
-    constexpr int kButtonCount = 10;
+    constexpr int kButtonCount = 11;
     constexpr int kSeparatorCount = 5;
 
     const float requested_scale =
@@ -786,47 +832,29 @@ void App::draw_gameplay_toolbar(
     }
 
     x += button_size + gap;
-    const ButtonResult exit = button(
+    const ButtonResult stop = button(
         8,
+        "stop",
+        GameplayToolbarIcon::Stop,
+        x,
+        true,
+        false,
+        "Stop emulation");
+    if (stop.clicked) {
+        exit_gameplay_to_launcher(true);
+    }
+
+    x += button_size + gap;
+    const ButtonResult exit = button(
+        9,
         "exit",
         GameplayToolbarIcon::Exit,
         x,
         true,
         false,
-        "Exit to launcher");
+        "Exit to launcher (the game stays paused)");
     if (exit.clicked) {
-        play_ui_close_sound();
-
-        gameplay_toolbar_rewind_active_ = false;
-        emu_runner_.set_rewind_active(false);
-        gameplay_toolbar_turbo_active_ = false;
-        apply_speed_override();
-
-        emu_runner_.pause_and_wait_idle();
-        disable_ram_reaper_mode();
-        disable_gpu_reaper_mode();
-        disable_sound_reaper_mode();
-        set_grim_reaper_mode(false);
-
-        show_settings_ = false;
-        show_vram_ = false;
-        show_about_ = false;
-        show_grim_reaper_ = false;
-        show_perf_ = false;
-
-        // Fade gameplay to black, switch to the launcher at full black, then
-        // reveal the launcher. Keep has_started_emulation_ true until the
-        // midpoint so the outgoing gameplay frame remains visible.
-        definitive_grim_reaper_active_ = false;
-        definitive_grim_reaper_closing_ = false;
-        definitive_grim_reaper_advanced_ = false;
-        definitive_grim_reaper_visibility_ = 0.0f;
-        gameplay_exit_transition_active_ = true;
-        gameplay_exit_transition_switched_ = false;
-        gameplay_exit_transition_elapsed_ = 0.0f;
-        gameplay_toolbar_visibility_ = 0.0f;
-        gameplay_toolbar_reveal_hold_ = 0.0f;
-        status_message_ = "Returning to launcher...";
+        exit_gameplay_to_launcher(false);
     }
 
     x += button_size + separator_space;
@@ -834,7 +862,7 @@ void App::draw_gameplay_toolbar(
         x - separator_space * 0.5f);
 
     const ButtonResult more = button(
-        9,
+        10,
         "more",
         GameplayToolbarIcon::More,
         x,
@@ -1021,6 +1049,7 @@ void App::panel_emulator_screen() {
                     bios_path_ = path;
                     save_persistent_config();
                     has_started_emulation_ = false;
+                    session_suspended_ = false;
                     set_grim_reaper_mode(false);
                     status_message_ = "BIOS loaded: " + system_->bios().get_info();
                 }

@@ -44,6 +44,8 @@ public:
     [[nodiscard]] virtual bool session_running() const = 0;
     virtual void pause_session() = 0;
     virtual void resume_session() = 0;
+    // Ends the session (the toolbar's Stop); the BIOS stays loaded.
+    virtual void stop_session() = 0;
     [[nodiscard]] virtual GameView game_view() const = 0;
     [[nodiscard]] virtual double speed_percent() const = 0;
     [[nodiscard]] virtual double frames_per_second() const = 0;
@@ -73,6 +75,9 @@ public:
     // Running inside VibeStation next to VibeStation 1: offer the way back.
     [[nodiscard]] virtual bool can_switch_to_vs1() const = 0;
     virtual void switch_to_vs1() = 0;
+    // A PS1 disc picked in the Browser runs in VibeStation 1 instead: the host
+    // boots it there after the next switch_to_vs1().
+    virtual void hand_ps1_disc_to_vs1(const std::string& path) = 0;
 };
 
 } // namespace ps2::ui::vs2
