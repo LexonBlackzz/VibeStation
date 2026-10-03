@@ -249,7 +249,7 @@ bool quiet_ee_instruction(
            quiet_ee_instruction_value(state, instruction);
 }
 }
-Ps2System::Ps2System():cdvd_(iop_intc_,bios_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu0_(bus_,gs_core_,0x11000000u,0x11004000u,0x0FFFu,0x100038D0u,0x100038E0u,false),vu1_(bus_,gs_core_),ee_(bus_,&vu0_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif0_dma_.attach_vu0(vu0_);vif0_dma_.attach_ee(ee_);vif1_dma_.attach_vu1(vu1_);reset();}
+Ps2System::Ps2System():cdvd_(iop_intc_,bios_),iop_bus_(iop_ram_,iop_hw_,hw_,iop_intc_,cdvd_,bios_),bus_(ram_,scratchpad_,hw_,iop_hw_,iop_ram_,cdvd_,gs_,gs_core_,bios_),vu0_(bus_,gs_core_,0x11000000u,0x11004000u,0x0FFFu,0x100038D0u,0x100038E0u,false),vu1_(bus_,gs_core_),ee_(bus_,&vu0_),iop_(iop_bus_){gs_core_.attach_privileged(gs_);vif0_dma_.attach_vu0(vu0_);vif0_dma_.attach_ee(ee_);vif1_dma_.attach_vu1(vu1_);ee_.set_dynarec_scratchpad(scratchpad_.data());reset();}
 void Ps2System::reset(u32 entry_point) {
     ram_.reset(); scratchpad_.reset(); bus_.reset(); hw_.reset();
     iop_hw_.reset(); iop_intc_.reset(); cdvd_.reset(); iop_ram_.reset();
@@ -1409,17 +1409,24 @@ u64 Ps2System::try_run_quiet_ee_batch(
 
     u64 retired = 0;
     bool dynarec_explicit_exit = false;
-    if (ee_.dynarec_enabled()) {
+    // Native code gets the batch first. After it exits on an instruction it
+    // cannot compile (or a guarded memory access), the interpreter retires a
+    // short chunk and native execution resumes, instead of the interpreter
+    // running the whole remainder of the batch.
+    constexpr u32 kInterpreterChunkBeforeDynarec = 8u;
+    const bool dynarec = ee_.dynarec_enabled();
+    auto run_native = [&]() {
         const auto native = ee_.run_dynarec(
-            static_cast<u32>(maximum),
+            static_cast<u32>(maximum - retired),
             ram_.data(),
             ram_.page_generation_data(),
             ram_.code_page_tracked_data());
-        retired = native.retired;
+        retired += native.retired;
         dynarec_explicit_exit =
             native.reason == EeDynarec::ExitReason::Cop0Write ||
             native.reason == EeDynarec::ExitReason::CodeInvalidated;
-    }
+    };
+    if (dynarec) run_native();
 
     while (retired < maximum &&
            !dynarec_explicit_exit &&
@@ -1533,11 +1540,15 @@ u64 Ps2System::try_run_quiet_ee_batch(
             const u32 physical = EeBus::to_physical(pc);
             if ((pc & 3u) == 0u &&
                 physical <= ram_.size() - sizeof(u32)) {
+                const u64 remaining = maximum - retired;
                 const u32 trace_retired = ee_.run_quiet_fast_prefix(
                     0u,
                     nullptr,
                     0u,
-                    static_cast<u32>(maximum - retired),
+                    static_cast<u32>(dynarec
+                        ? std::min<u64>(
+                              remaining, kInterpreterChunkBeforeDynarec)
+                        : remaining),
                     nullptr,
                     ram_.data(),
                     ram_.data(),
@@ -1548,6 +1559,7 @@ u64 Ps2System::try_run_quiet_ee_batch(
                     fast_interpreter_instructions_ += trace_retired;
                     ++fast_interpreter_calls_;
                     progressed = true;
+                    if (dynarec && retired < maximum) run_native();
                     continue;
                 }
             }

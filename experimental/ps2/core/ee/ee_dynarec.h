@@ -39,6 +39,9 @@ public:
     EeDynarec& operator=(const EeDynarec&) = delete;
 
     void clear();
+    // Host storage for the 16 KiB EE scratchpad at 0x70000000, used by the
+    // fastmem path. Null keeps scratchpad accesses on guarded exits.
+    void set_scratchpad(u8* data) { scratchpad_ = data; }
 
     RunResult execute(
         EeCpuState& state,
@@ -135,6 +138,16 @@ private:
         std::size_t used = 0;
     };
 
+    // A PC/budget that recently failed to compile. The interpreter handles
+    // it; remembering the failure avoids rebuilding compile state every time
+    // execution re-enters the dynarec there. Keyed by the code page
+    // generation so self-modified code is retried.
+    struct FailedCompile {
+        u32 pc = 0xFFFFFFFFu;
+        u32 compile_budget = 0;
+        u32 page_generation = 0;
+    };
+
     Block* lookup_or_compile(
         u32 pc,
         u32 compile_limit,
@@ -153,6 +166,8 @@ private:
     void release_code_cache();
 
     std::vector<Block> blocks_;
+    std::vector<FailedCompile> failed_compiles_;
+    u8* scratchpad_ = nullptr;
     std::vector<CodePage> code_pages_;
 
     u64 compiled_blocks_ = 0;
