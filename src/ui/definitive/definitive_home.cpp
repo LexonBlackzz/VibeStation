@@ -306,10 +306,11 @@ void draw_launcher_initialization_overlay(
     constexpr float kMenuX = 30.0f;
     constexpr float kMenuY = 194.0f;
     constexpr float kMenuW = 410.0f;
-    constexpr float kMenuH = 59.0f;
-    constexpr float kMenuStep = 60.0f;
+    // Matches menu_button(): rows at y 198 + 54 * i, 50 tall, 4 apart.
+    constexpr float kMenuH = 54.0f;
+    constexpr float kMenuStep = 54.0f;
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         const float start =
             0.34f + static_cast<float>(i) * 0.09f;
         const float reveal =
