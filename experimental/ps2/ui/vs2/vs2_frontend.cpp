@@ -250,10 +250,14 @@ void Frontend::update_intro(const Input& in) {
     const double t = now_ - boot_t0_;
     const bool skip = in.accept || in.back || in.clicked;
     if (t >= kRevealAt || skip) {
-        // The boot sound plays on under the menu; skipping cuts it.
-        if (t < kRevealAt) stop_boot_sound();
+        // The boot sound plays on under the menu; skipping swaps it for the
+        // back-to-menu jingle.
         intro_pending_ = false;
         begin_reveal();
+        if (t < kRevealAt) {
+            stop_boot_sound(); // also when menu sounds (and so the jingle) are off
+            play_back_to_menu_sound();
+        }
         go(Screen::Home, true);
     }
 }
