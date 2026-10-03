@@ -30,6 +30,7 @@ namespace {
 
 constexpr u32 kRamSize = static_cast<u32>(EeRam::kSize);
 constexpr u32 kPageSize = EeRam::kPageSize;
+constexpr u32 kScratchpadSize = 16u * 1024u;
 constexpr u32 kMaxBlockInstructions = 64u;
 constexpr std::size_t kCodePageSize = 64u * 1024u;
 constexpr std::size_t kMaxCodePages = 1024u;
@@ -364,6 +365,46 @@ ControlKind control_kind(u32 instruction) {
 
 bool is_control(u32 instruction) {
     return control_kind(instruction) != ControlKind::None;
+}
+
+// Guest register a branch writes as its link register, or 0 if none.
+u32 branch_link_register(u32 instruction, ControlKind control) {
+    switch (control) {
+    case ControlKind::Jal:
+    case ControlKind::Bltzal:
+    case ControlKind::Bgezal:
+    case ControlKind::Bltzall:
+    case ControlKind::Bgezall:
+        return 31u;
+    case ControlKind::Jalr:
+        return (instruction >> 11) & 31u;
+    default:
+        return 0u;
+    }
+}
+
+// A load or store in a delay slot is compiled with its guards evaluated
+// before the branch (see emit_delay_slot_memory_precheck), which requires
+// the delay slot's base register to hold the same value at both points.
+bool delay_slot_memory_supported(
+    u32 instruction,
+    ControlKind control,
+    u32 delay) {
+    if (!is_load(delay) && !is_store(delay)) return false;
+    const u32 base = (delay >> 21) & 31u;
+    const u32 link = branch_link_register(instruction, control);
+    if (link != 0u && base == link) return false;
+    // These branches keep their source operand in R10 across the delay
+    // slot, and store barriers use R10 as the page-generation base.
+    if (is_store(delay) &&
+        (control == ControlKind::Jalr ||
+         control == ControlKind::Bltzal ||
+         control == ControlKind::Bgezal ||
+         control == ControlKind::Bltzall ||
+         control == ControlKind::Bgezall)) {
+        return false;
+    }
+    return true;
 }
 
 bool is_fusable_conditional(ControlKind control) {
@@ -1018,37 +1059,22 @@ void emit_ps2_float_normalize(
     out.patch(done_denormal, done);
 }
 
+// Code pages are mapped read/write/execute once. Toggling W^X around every
+// block compile cost two protection syscalls per block, which showed up as
+// ~4% of emulation time; blocks are appended to pages and never rewritten.
 void* allocate_page() {
 #ifdef _WIN32
     return VirtualAlloc(
         nullptr, kCodePageSize,
         MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE);
+        PAGE_EXECUTE_READWRITE);
 #else
     void* page = mmap(
         nullptr, kCodePageSize,
-        PROT_READ | PROT_WRITE,
+        PROT_READ | PROT_WRITE | PROT_EXEC,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1, 0);
     return page == MAP_FAILED ? nullptr : page;
-#endif
-}
-
-bool protect_page(void* page, bool executable) {
-#ifdef _WIN32
-    DWORD old_protection = 0;
-    return VirtualProtect(
-               page, kCodePageSize,
-               executable
-                   ? PAGE_EXECUTE_READ
-                   : PAGE_READWRITE,
-               &old_protection) != 0;
-#else
-    return mprotect(
-               page, kCodePageSize,
-               executable
-                   ? PROT_READ | PROT_EXEC
-                   : PROT_READ | PROT_WRITE) == 0;
 #endif
 }
 
@@ -1193,11 +1219,32 @@ void emit_fastmem_address(
     u32 width,
     std::vector<std::size_t>& fail_jumps,
     bool require_single_page = false,
-    u32 alignment_mask = 0u) {
+    u32 alignment_mask = 0u,
+    u64 scratchpad_delta = 0u) {
     out.load_guest(RAX, rs, true);
     out.add_r32_imm32(
         RAX,
         static_cast<u32>(static_cast<s32>(immediate)));
+
+    // Scratchpad (0x70000000, 16 KiB). Callers address memory as
+    // [RBP + RAX] with RBP = main RAM, so produce RAX = (scratchpad - RAM)
+    // + offset. That value is always >= kRamSize, which lets store barriers
+    // tell it apart from a RAM offset.
+    std::size_t scratchpad_done = 0u;
+    if (scratchpad_delta != 0u) {
+        out.mov_rr32(RCX, RAX);
+        out.add_r32_imm32(RCX, 0x90000000u); // ECX = address - 0x70000000
+        if (alignment_mask != 0u) {
+            out.and_r32_imm32(RCX, ~alignment_mask);
+        }
+        out.cmp_r32_imm32(RCX, kScratchpadSize - width);
+        const std::size_t not_scratchpad = out.jcc32(0x7u); // JA
+        out.mov_rr32(RAX, RCX);
+        out.mov_r64_imm(RCX, scratchpad_delta);
+        out.add_rr64(RAX, RCX);
+        scratchpad_done = out.jmp32();
+        out.patch(not_scratchpad, out.bytes.size());
+    }
 
     std::vector<std::size_t> direct;
     std::vector<std::size_t> alias2;
@@ -1251,6 +1298,10 @@ void emit_fastmem_address(
         out.cmp_r32_imm32(RCX, kPageSize - width);
         fail_jumps.push_back(out.jcc32(0x7u)); // JA
     }
+
+    if (scratchpad_delta != 0u) {
+        out.patch(scratchpad_done, out.bytes.size());
+    }
 }
 
 void emit_store_generation_barrier(
@@ -1259,6 +1310,10 @@ void emit_store_generation_barrier(
     u32 code_page_count,
     std::vector<std::size_t>& selfmod_jumps,
     u8 generation_increment = 1u) {
+    // Scratchpad stores (RAX >= kRamSize, see emit_fastmem_address) never
+    // touch code pages.
+    out.cmp_r64_imm32(RAX, kRamSize);
+    const std::size_t not_ram = out.jcc32(0x3u); // JAE
     out.mov_rr32(RCX, RAX);
     out.shift_imm32(RCX, 5u, 12u); // SHR ECX,12
 
@@ -1274,6 +1329,7 @@ void emit_store_generation_barrier(
     }
 
     out.patch(untracked, out.bytes.size());
+    out.patch(not_ram, out.bytes.size());
 }
 
 struct FusedConditionalEdge {
@@ -1305,7 +1361,60 @@ struct CompileState {
     bool ends_cop0_write = false;
     u32 fastmem_loads = 0;
     u32 fastmem_stores = 0;
+    // Host scratchpad minus host RAM, or 0 when scratchpad fastmem is off.
+    u64 scratchpad_delta = 0;
 };
+
+// A load or store in a delay slot cannot take its own precise guard exit:
+// by then the branch has been decided and the exit would lose its target.
+// Evaluate the delay slot's fastmem and self-modification guards before the
+// branch instead, and on failure exit exactly as a guard exit at the branch
+// would (the interpreter then runs branch and delay slot). The block builder
+// only accepts such delay slots when the branch does not write their base
+// register (delay_slot_memory_supported), so this computes the same address
+// and the delay slot's own guards cannot fail afterwards.
+void emit_delay_slot_memory_precheck(CompileState& cs, u32 branch_index) {
+    Emitter& out = cs.out;
+    const EeDynarecIrInstruction& delay = cs.ir[branch_index + 1u];
+    const bool store = is_store(delay.word);
+    if (!store && !is_load(delay.word)) return;
+
+    std::vector<std::size_t> fail;
+    emit_fastmem_address(
+        out, delay.rs, delay.immediate, delay.memory_width, fail,
+        store, delay.alignment_mask, cs.scratchpad_delta);
+    if (store) {
+        // Mirrors emit_store_generation_barrier(): a store to a tracked page
+        // that holds this block's code must take the self-modification exit.
+        out.cmp_r64_imm32(RAX, kRamSize);
+        const std::size_t not_ram = out.jcc32(0x3u); // JAE
+        out.mov_rr32(RCX, RAX);
+        out.shift_imm32(RCX, 5u, 12u); // SHR ECX,12
+        out.loadzx8_indexed(RDX, R11, RCX);
+        out.test_rr64(RDX, RDX);
+        const std::size_t untracked = out.jcc32(0x4u); // JE
+        for (u32 i = 0u; i < cs.code_page_count; ++i) {
+            out.cmp_r32_imm32(RCX, cs.code_pages[i]);
+            fail.push_back(out.jcc32(0x4u)); // JE
+        }
+        out.patch(untracked, out.bytes.size());
+        out.patch(not_ram, out.bytes.size());
+    }
+
+    const std::size_t skip_fail = out.jmp32();
+    const std::size_t fail_label = out.bytes.size();
+    for (const auto jump : fail) out.patch(jump, fail_label);
+    if (branch_index == 0u) {
+        out.epilogue_return(0u);
+    } else {
+        emit_commit_sequential(
+            out, branch_index,
+            cs.pcs[branch_index],
+            cs.pcs[branch_index - 1u],
+            cs.words[branch_index - 1u]);
+    }
+    out.patch(skip_fail, out.bytes.size());
+}
 
 bool emit_fused_conditional_side_exit(
     CompileState& cs,
@@ -2076,7 +2185,8 @@ bool emit_body(
 
         std::vector<std::size_t> fail;
         emit_fastmem_address(
-            out, rs, imm, width, fail, false, alignment_mask);
+            out, rs, imm, width, fail, false, alignment_mask,
+            cs.scratchpad_delta);
 
         if (opcode == 0x31u) { // LWC1
             out.load_indexed(RDX, RBP, RAX, 4u, false);
@@ -2158,7 +2268,8 @@ bool emit_body(
 
         std::vector<std::size_t> fail;
         emit_fastmem_address(
-            out, rs, imm, width, fail, true, alignment_mask);
+            out, rs, imm, width, fail, true, alignment_mask,
+            cs.scratchpad_delta);
 
         if (opcode == 0x39u) { // SWC1
             out.load32(
@@ -2248,7 +2359,8 @@ bool emit_body(
 } // namespace
 
 EeDynarec::EeDynarec()
-    : blocks_(kBlockCacheEntries) {}
+    : blocks_(kBlockCacheEntries),
+      failed_compiles_(kBlockCacheEntries) {}
 
 EeDynarec::~EeDynarec() {
     release_code_cache();
@@ -2262,6 +2374,8 @@ void EeDynarec::release_code_cache() {
 #endif
     code_pages_.clear();
     std::fill(blocks_.begin(), blocks_.end(), Block{});
+    std::fill(
+        failed_compiles_.begin(), failed_compiles_.end(), FailedCompile{});
 }
 
 void EeDynarec::clear() {
@@ -2348,11 +2462,44 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         return &cached;
     }
 
+    FailedCompile& failed = failed_compiles_[index];
+    if (failed.pc == pc &&
+        failed.compile_budget == compile_budget &&
+        failed.page_generation == generation) {
+        return nullptr;
+    }
+    // Any early return below leaves the PC uncompiled; record it so the next
+    // lookup at the same PC and generation fails fast.
+    struct FailureRecorder {
+        FailedCompile& entry;
+        u32 pc;
+        u32 compile_budget;
+        u32 generation;
+        bool compiled = false;
+        ~FailureRecorder() {
+            if (!compiled) {
+                entry.pc = pc;
+                entry.compile_budget = compile_budget;
+                entry.page_generation = generation;
+            }
+        }
+    } failure_recorder{failed, pc, compile_budget, generation};
+
     CompileState cs;
     cs.block_pc = pc;
     cs.code_page = page;
     cs.code_pages[0] = page;
     cs.code_page_count = 1u;
+    if (scratchpad_ != nullptr) {
+        // RAX = delta + offset must never look like a RAM offset (see
+        // emit_fastmem_address); otherwise leave scratchpad on guard exits.
+        const u64 delta =
+            reinterpret_cast<std::uintptr_t>(scratchpad_) -
+            reinterpret_cast<std::uintptr_t>(ram_data);
+        if (delta >= kRamSize && delta <= ~u64{0} - kScratchpadSize) {
+            cs.scratchpad_delta = delta;
+        }
+    }
 
     const u32 available =
         (std::min)(kMaxBlockInstructions, compile_budget);
@@ -2412,10 +2559,14 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                 read_word(ram_data, delay_physical);
             const EeDynarecIrInstruction delay_ir =
                 decode_ee_dynarec_ir(delay_pc, delay);
+            const bool delay_memory =
+                delay_ir.has(EeIrReadsMemory) ||
+                delay_ir.has(EeIrWritesMemory);
             if (!supported_noncontrol(delay) ||
                 delay_ir.has(EeIrPreciseExit) ||
-                delay_ir.has(EeIrReadsMemory) ||
-                delay_ir.has(EeIrWritesMemory)) {
+                (delay_memory &&
+                 !delay_slot_memory_supported(
+                     instruction, control, delay))) {
                 break;
             }
 
@@ -2594,6 +2745,11 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             }
         }
 
+        // Fused J/JAL and predicted conditional branches sit inside the
+        // body with their delay slot right after them.
+        if (control_kind(cs.words[i]) != ControlKind::None) {
+            emit_delay_slot_memory_precheck(cs, i);
+        }
         if (!fused_branch &&
             !emit_body(cs, i, exits)) {
             return nullptr;
@@ -2620,6 +2776,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         const u32 branch_pc = branch_ir.pc;
         const u32 rs = branch_ir.rs;
         const u32 rt = branch_ir.rt;
+
+        // Before the link write and before R10 is reused below.
+        emit_delay_slot_memory_precheck(cs, branch_index);
 
         bool preserved_dynamic_target = false;
         bool preserved_link_branch_source = false;
@@ -2870,7 +3029,6 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     }
 
     CodePage& code_page = code_pages_.back();
-    if (!protect_page(code_page.address, false)) return nullptr;
     auto* destination =
         static_cast<u8*>(code_page.address) + code_page.used;
     std::memcpy(
@@ -2878,7 +3036,6 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         cs.out.bytes.data(),
         cs.out.bytes.size());
     flush_code(destination, cs.out.bytes.size());
-    if (!protect_page(code_page.address, true)) return nullptr;
     code_page.used +=
         (cs.out.bytes.size() + 15u) & ~std::size_t{15u};
 
@@ -2921,6 +3078,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     fused_static_jumps_ += cs.fused_static_jumps;
     fused_conditional_branches_ += cs.fused_conditional_count;
     ++compiled_blocks_;
+    failure_recorder.compiled = true;
     return &cached;
 #endif
 }

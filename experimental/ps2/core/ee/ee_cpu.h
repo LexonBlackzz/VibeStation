@@ -193,6 +193,7 @@ public:
         if (enabled) jit_enabled_ = false;
     }
     void clear_dynarec_cache() { dynarec_.clear(); }
+    void set_dynarec_scratchpad(u8* data) { dynarec_.set_scratchpad(data); }
     [[nodiscard]] bool dynarec_enabled() const { return dynarec_enabled_; }
     [[nodiscard]] const EeDynarec& dynarec() const { return dynarec_; }
 
