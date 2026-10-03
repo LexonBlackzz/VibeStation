@@ -198,9 +198,13 @@ void Frontend::update_browser(const Input& in, const Layout& layout) {
     }
     if (browser_sel_ != before) play_highlight_sound();
 
+    // With no games, the centred message is a button for the folder picker.
+    const bool message_clicked =
+        count == 0 && in.clicked &&
+        ImGui::IsMouseHoveringRect(layout.point(330, 350), layout.point(950, 460), false);
     if (in.accept && count > 0) {
         boot_game(games[static_cast<std::size_t>(browser_sel_)]);
-    } else if (in.square) {
+    } else if (in.square || message_clicked || (in.accept && count == 0)) {
         const std::string dir = host_.pick_folder("Choose your game folder");
         if (!dir.empty()) {
             settings_.rom_dir = dir;

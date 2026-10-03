@@ -138,7 +138,16 @@ void Frontend::frame() {
         shown_before_ = true;
     }
 
-    const Input in = read_input();
+    Input in = read_input();
+    // A hint at the bottom was clicked last frame: act as if its button was pressed.
+    switch (hint_clicked_) {
+    case 'x': in.accept = true; break;
+    case 'o': in.back = true; break;
+    case 't': in.triangle = true; break;
+    case 's': in.square = true; break;
+    default: break;
+    }
+    hint_clicked_ = 0;
     switch (screen_) {
     case Screen::Intro: update_intro(in); break;
     case Screen::Home: update_home(in, layout); break;
@@ -418,6 +427,14 @@ void Frontend::draw_hints(ImDrawList* draw, const Layout& layout, float alpha,
         else if (i > 0) x = left + (right - left) * (static_cast<float>(i) / (n - 1)) - width * 0.5f;
 
         const ImVec2 c(x + r, y);
+        // Hints double as buttons for mouse users. Only the screen that is
+        // fully shown takes the click, not one still fading out.
+        const ImVec2 h0(x - layout.px(8), y - r - layout.px(6));
+        const ImVec2 h1(x + width + layout.px(8), y + r + layout.px(6));
+        if (alpha > 0.95f && ImGui::IsMouseHoveringRect(h0, h1, false)) {
+            draw->AddRectFilled(h0, h1, IM_COL32(255, 255, 255, static_cast<int>(16 * alpha)), layout.px(4));
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) hint_clicked_ = glyph;
+        }
         draw->AddCircleFilled(c, r, IM_COL32(38, 44, 56, static_cast<int>(255 * alpha)));
         draw->AddCircle(c, r, IM_COL32(93, 104, 128, static_cast<int>(255 * alpha)), 0, std::max(1.0f, layout.px(1)));
         const float s = r * 0.42f;

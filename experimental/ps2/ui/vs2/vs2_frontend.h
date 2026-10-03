@@ -152,6 +152,8 @@ private:
 
     std::string toast_{};
     double toast_t0_ = -10.0;
+    // Glyph of the button hint clicked this frame (0 = none); read next frame.
+    char hint_clicked_ = 0;
     double leave_t0_ = -1.0; // fading out towards VibeStation 1
     double game_entered_t0_ = 0.0;
 
