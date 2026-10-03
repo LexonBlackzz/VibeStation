@@ -1,6 +1,7 @@
 #include "ui/ps2_app.h"
 #include "ui/ps2_gl_gs_backend.h"
 #include "ui/theme_settings.h"
+#include "ui/vs2/vs2_frontend.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -17,16 +18,24 @@
 #include <filesystem>
 #include <limits>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
 #include <Windows.h>
 #include <commdlg.h>
+#include <shobjidl.h>
 #endif
 
 namespace ps2::ui {
 
+namespace {
+constexpr const char* kFrontendTitle = "VibeStation 2";
+constexpr const char* kDeveloperTitle = "VibeStation - PS2 Experimental";
+} // namespace
+
+Ps2App::Ps2App() = default;
 Ps2App::~Ps2App() = default;
 
 namespace {
@@ -72,12 +81,13 @@ bool Ps2App::init() {
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
         window_ = SDL_CreateWindow(
-            "VibeStation - PS2 Experimental",
+            kFrontendTitle,
             SDL_WINDOWPOS_CENTERED,
             SDL_WINDOWPOS_CENTERED,
             1280,
             800,
-            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+                SDL_WINDOW_HIDDEN);
 
         if (!window_) {
             continue;
@@ -92,6 +102,12 @@ bool Ps2App::init() {
 
         SDL_GL_MakeCurrent(window_, gl_context_);
         SDL_GL_SetSwapInterval(1);
+        // Black from the first moment, not a blank window while the rest of
+        // the app (fonts, textures, audio) sets up.
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        SDL_GL_SwapWindow(window_);
+        SDL_ShowWindow(window_);
         imgui_glsl_version_ = attempt.glsl;
         use_imgui_opengl2_backend_ = attempt.use_opengl2;
         gl_major_ = attempt.major;
@@ -197,6 +213,11 @@ bool Ps2App::init() {
     system_.gs_core().set_async_rasterization(true);
     reset_core();
     status_message_ = "PS2 experimental core ready";
+
+    // Last, so saved settings apply to the fully set up core and GPU backend.
+    frontend_ = std::make_unique<vs2::Frontend>(*this);
+    frontend_->init();
+    SDL_SetWindowTitle(window_, developer_view_ ? kDeveloperTitle : kFrontendTitle);
     return true;
 }
 
@@ -207,6 +228,7 @@ int Ps2App::run() {
     emu_stop_.store(false, std::memory_order_release);
     emu_thread_ = std::thread(&Ps2App::emulation_thread_main, this);
 
+    auto frame_started = std::chrono::steady_clock::now();
     while (!quit) {
         // Hold the core only while reading or mutating emulator state; the
         // GL submission and vsync wait below run while the core executes.
@@ -306,6 +328,35 @@ int Ps2App::run() {
         }
 
         SDL_GL_SwapWindow(window_);
+
+        // Frame cap. Vsync is requested, but some drivers ignore it for
+        // windowed (or unfocused) apps and the loop would redraw flat out.
+        // Sleep off whatever is left of the display's frame time; with
+        // working vsync nothing is left and this does nothing. The core lock
+        // is already released, so emulation is unaffected.
+        {
+            using clock = std::chrono::steady_clock;
+            SDL_DisplayMode mode{};
+            const int display = SDL_GetWindowDisplayIndex(window_);
+            const int refresh =
+                display >= 0 && SDL_GetCurrentDisplayMode(display, &mode) == 0 && mode.refresh_rate > 0
+                    ? mode.refresh_rate
+                    : 60;
+            const auto frame_time = std::chrono::duration_cast<clock::duration>(
+                std::chrono::duration<double>(1.0 / refresh));
+            const auto deadline = frame_started + frame_time;
+            const auto now = clock::now();
+            if (now < deadline) {
+                // Coarse sleep, then yield for the last stretch: Windows
+                // sleeps are only accurate to about a millisecond.
+                const auto coarse = deadline - now - std::chrono::milliseconds(2);
+                if (coarse > clock::duration::zero()) std::this_thread::sleep_for(coarse);
+                while (clock::now() < deadline) std::this_thread::yield();
+            }
+            // Keep a steady cadence; after a late frame, start over from now.
+            const auto after = clock::now();
+            frame_started = after < deadline + frame_time ? deadline : after;
+        }
     }
 
     stop_emulation_thread();
@@ -420,6 +471,11 @@ void Ps2App::shutdown() {
     }
 
     stop_ps1();
+    // Before the GL context goes: the frontend owns textures and threads.
+    if (frontend_) {
+        frontend_->shutdown();
+        frontend_.reset();
+    }
     system_.gs_core().set_gpu_backend(nullptr);
     gpu_gs_backend_.reset();
 
@@ -577,6 +633,12 @@ void Ps2App::update_pad_input() {
     }
 
     Sio2Pad::State state{};
+    // While a frontend menu is up, the keys drive the menu, not the game.
+    if (!developer_view_ && frontend_ && !frontend_->wants_game_input()) {
+        system_.pad().set_state(state);
+        ps1_->set_buttons(0xFFFFu);
+        return;
+    }
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 
     const auto set_button =
@@ -854,6 +916,14 @@ void Ps2App::process_events(bool& quit) {
             continue;
         }
 
+        if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+            event.key.keysym.sym == SDLK_F12) {
+            set_developer_view(!developer_view_);
+            continue;
+        }
+        // The frontend reads its own keys through ImGui.
+        if (!developer_view_ && frontend_) continue;
+
         if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
             const bool ctrl = (event.key.keysym.mod & KMOD_CTRL) != 0;
             if (ctrl && event.key.keysym.sym == SDLK_o) {
@@ -895,6 +965,10 @@ void Ps2App::process_events(bool& quit) {
 }
 
 void Ps2App::render_ui() {
+    if (!developer_view_ && frontend_) {
+        frontend_->frame();
+        return;
+    }
     menu_bar();
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1038,6 +1112,10 @@ void Ps2App::menu_bar() {
         ImGui::Separator();
         ImGui::MenuItem("Settings", "Ctrl+,", &show_settings_);
         ImGui::MenuItem("About", nullptr, &show_about_);
+        ImGui::Separator();
+        if (ImGui::MenuItem("VibeStation 2 Frontend", "F12", false, frontend_ != nullptr)) {
+            set_developer_view(false);
+        }
         ImGui::EndMenu();
     }
 
@@ -2269,6 +2347,150 @@ void Ps2App::reset_core() {
         system_.bios().loaded()
             ? "PS2 core reset; BIOS remains loaded"
             : "PS2 core reset";
+}
+
+// ---------------------------------------------------------------------------
+// VibeStation 2 frontend host
+
+void Ps2App::set_developer_view(bool enabled) {
+    if (!frontend_) enabled = true;
+    developer_view_ = enabled;
+    if (window_ != nullptr) {
+        SDL_SetWindowTitle(window_, enabled ? kDeveloperTitle : kFrontendTitle);
+    }
+    if (!frontend_) return;
+    if (enabled) frontend_->on_hidden();
+    else frontend_->on_shown();
+}
+
+bool Ps2App::bios_loaded() const { return system_.bios().loaded(); }
+std::string Ps2App::bios_romver() const { return system_.bios().romver(); }
+std::string Ps2App::bios_path() const { return bios_path_input_.data(); }
+bool Ps2App::load_bios(const std::string& path) { return load_bios_from_path(path); }
+std::string Ps2App::pick_bios_file() { return open_bios_dialog(); }
+
+std::string Ps2App::pick_folder(const char* title) {
+#ifdef _WIN32
+    std::string result;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        const std::wstring wide_title(title, title + std::strlen(title));
+        dialog->SetTitle(wide_title.c_str());
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->Show(nullptr)) && SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                result = std::filesystem::path(path).string();
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    return result;
+#else
+    (void)title;
+    status_message_ = "The folder picker is currently Windows-only.";
+    return {};
+#endif
+}
+
+bool Ps2App::start_bios_session() {
+    // Start Emulation boots into the BIOS menu, so take out any disc.
+    stop_ps1();
+    if (system_.cdvd().has_disc()) system_.eject_disc();
+    reset_core();
+    return start_bios();
+}
+
+bool Ps2App::boot_disc(const std::string& path) { return load_disc_from_path(path); }
+
+bool Ps2App::session_active() const {
+    return ps1_->active() || (system_.bios_started() && !system_.halted());
+}
+
+bool Ps2App::session_running() const {
+    return ps1_->active() || (emulation_running_ && session_active());
+}
+
+void Ps2App::pause_session() {
+    // The PS1 core has no pause; it keeps running behind the menu.
+    if (emulation_running_) {
+        emulation_running_ = false;
+        status_message_ = "Paused";
+    }
+}
+
+void Ps2App::resume_session() {
+    if (!system_.bios_started() || system_.halted()) return;
+    emulation_running_ = true;
+    speed_sample_time_ = std::chrono::steady_clock::now();
+    speed_sample_instructions_ = system_.ee().state().instructions_executed;
+    speed_sample_fields_ = system_.video_fields_started();
+    status_message_ = "Running";
+}
+
+vs2::GameView Ps2App::game_view() const {
+    vs2::GameView view{};
+    if (ps1_->active()) {
+        if (ps1_texture_ != 0 && ps1_width_ > 0) {
+            view = {ps1_texture_, ps1_width_, ps1_height_, true};
+        }
+        return view;
+    }
+    if (display_texture_ != 0 && display_texture_width_ != 0) {
+        view = {display_texture_, static_cast<int>(display_texture_width_),
+                static_cast<int>(display_texture_height_), false};
+    }
+    return view;
+}
+
+double Ps2App::speed_percent() const { return emulation_speed_percent_; }
+double Ps2App::frames_per_second() const { return guest_frames_per_second_; }
+std::string Ps2App::status_message() const { return status_message_; }
+
+vs2::EeCore Ps2App::ee_core() const {
+    if (system_.ee().dynarec_enabled()) return vs2::EeCore::Dynarec;
+    if (system_.ee().jit_enabled()) return vs2::EeCore::Jit;
+    return vs2::EeCore::Interpreter;
+}
+
+void Ps2App::set_ee_core(vs2::EeCore core) {
+    // Each setter switches the other backend off when it enables its own.
+    system_.ee().set_jit_enabled(core == vs2::EeCore::Jit);
+    system_.ee().set_dynarec_enabled(core == vs2::EeCore::Dynarec);
+}
+
+bool Ps2App::gpu_gs_available() const { return gpu_gs_backend_ != nullptr; }
+bool Ps2App::gpu_gs_enabled() const { return gpu_gs_enabled_ && gpu_gs_backend_ != nullptr; }
+bool Ps2App::limit_speed() const { return limit_speed_.load(std::memory_order_acquire); }
+void Ps2App::set_limit_speed(bool enabled) { limit_speed_.store(enabled, std::memory_order_release); }
+int Ps2App::display_filter() const { return display_filter_; }
+void Ps2App::set_display_filter(int filter) { display_filter_ = filter == 0 ? 0 : 1; }
+bool Ps2App::lag_stutter() const { return lag_stutter_enabled_.load(std::memory_order_acquire); }
+
+void Ps2App::set_lag_stutter(bool enabled) {
+    // Same switch-over as the developer Settings panel.
+    lag_stutter_enabled_.store(enabled, std::memory_order_release);
+    if (audio_device_ != 0) SDL_ClearQueuedAudio(audio_device_);
+    if (enabled) {
+        std::lock_guard<std::mutex> lock(audio_history_mutex_);
+        audio_history_play_frame_ = audio_history_write_frame_;
+    }
+}
+
+void Ps2App::open_developer_view() { set_developer_view(true); }
+
+void Ps2App::request_quit() {
+    SDL_Event event{};
+    event.type = SDL_QUIT;
+    SDL_PushEvent(&event);
 }
 
 } // namespace ps2::ui

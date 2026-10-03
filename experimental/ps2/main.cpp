@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     bool ee_dynarec = false;
     unsigned long long benchmark_fields = 0;
     bool gpu_gs = false;
+    bool developer_view = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -39,6 +40,8 @@ int main(int argc, char** argv) {
             }
         } else if (argument == "--benchmark-fields" && i + 1 < argc) {
             benchmark_fields = std::strtoull(argv[++i], nullptr, 10);
+        } else if (argument == "--dev") {
+            developer_view = true;
         } else if (argument == "--gpu-gs") {
             gpu_gs = true;
         } else if (argument == "--ee-jit") {
@@ -78,8 +81,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     app.set_ps1_bios(ps1_bios_path);
-    app.set_ee_jit_enabled(ee_jit);
-    app.set_ee_dynarec_enabled(ee_dynarec);
+    // Only override the saved EE core when asked to on the command line.
+    if (ee_jit) app.set_ee_jit_enabled(true);
+    if (ee_dynarec) app.set_ee_dynarec_enabled(true);
+    if (developer_view) app.set_developer_view(true);
     if (gpu_gs) app.set_gpu_gs_enabled(true);
 
     if (!disc_path.empty() && !app.load_disc_from_path(disc_path)) {

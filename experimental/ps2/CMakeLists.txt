@@ -130,6 +130,16 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ui/ps2_app.cpp
         ui/ps2_gl_gs_backend.cpp
         ui/theme_settings.cpp
+        # VibeStation 2 frontend (structured like src/ui/definitive)
+        ui/vs2/vs2_mixer.cpp
+        ui/vs2/vs2_assets.cpp
+        ui/vs2/vs2_audio.cpp
+        ui/vs2/vs2_fonts.cpp
+        ui/vs2/vs2_frontend.cpp
+        ui/vs2/vs2_home.cpp
+        ui/vs2/vs2_boot.cpp
+        ui/vs2/vs2_orbit.cpp
+        ui/vs2/vs2_screens.cpp
     )
     target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
     target_link_libraries(VibeStationPS2Lab PRIVATE
@@ -140,8 +150,17 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ${VIBESTATION_PS2_OPENGL_LIBRARY}
     )
     if(WIN32)
-        target_link_libraries(VibeStationPS2Lab PRIVATE comdlg32)
+        # ole32/shell32/uuid for the folder picker.
+        target_link_libraries(VibeStationPS2Lab PRIVATE
+            comdlg32 ole32 shell32 uuid)
     endif()
+
+    # Frontend sounds sit next to the executable.
+    # They are not in the repository; see resources/vs2/README.md.
+    add_custom_command(TARGET VibeStationPS2Lab POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/resources/vs2
+            $<TARGET_FILE_DIR:VibeStationPS2Lab>/resources/vs2)
 endif()
 
 add_executable(vibestation_ps2_bios_trace
