@@ -272,12 +272,27 @@ void Frontend::draw_browser(ImDrawList* draw, const Layout& layout, float alpha)
                                   with_alpha(color::kSelect, a * 0.12f / g), layout.px(5), 0, layout.px(2));
                 }
             }
-            // Disc face
+            // Disc face: the console's logo, or a plain disc when unknown.
             const ImVec2 c = layout.point(cx, top + h * 0.5f);
-            const ImU32 line = IM_COL32(200, 225, 255, static_cast<int>(180 * a));
-            draw->AddCircle(c, layout.px(33 * scale), line, 48, std::max(1.0f, layout.px(1.2f)));
-            draw->AddCircle(c, layout.px(22 * scale), IM_COL32(200, 225, 255, static_cast<int>(45 * a)), 48, layout.px(10 * scale));
-            draw->AddCircle(c, layout.px(9 * scale), IM_COL32(200, 225, 255, static_cast<int>(150 * a)), 32, std::max(1.0f, layout.px(1)));
+            const std::string& kind = games[static_cast<std::size_t>(i)].kind;
+            const Logo* logo = kind.rfind("PS1", 0) == 0   ? &ps1_logo_
+                               : kind.rfind("PS2", 0) == 0 ? &ps2_logo_
+                                                           : nullptr;
+            if (logo != nullptr && logo->texture != 0) {
+                // Fit inside the tile with a margin, keeping the aspect.
+                const float box = layout.px(112 * scale);
+                const float fit = std::min(box / logo->width, box / logo->height);
+                const ImVec2 half(logo->width * fit * 0.5f, logo->height * fit * 0.5f);
+                draw->AddImage(static_cast<ImTextureID>(logo->texture), ImVec2(c.x - half.x, c.y - half.y),
+                               ImVec2(c.x + half.x, c.y + half.y), ImVec2(0, 0), ImVec2(1, 1),
+                               logo == &ps2_logo_ ? IM_COL32(220, 232, 250, static_cast<int>(235 * a))
+                                                  : IM_COL32(255, 255, 255, static_cast<int>(255 * a)));
+            } else {
+                const ImU32 line = IM_COL32(200, 225, 255, static_cast<int>(180 * a));
+                draw->AddCircle(c, layout.px(33 * scale), line, 48, std::max(1.0f, layout.px(1.2f)));
+                draw->AddCircle(c, layout.px(22 * scale), IM_COL32(200, 225, 255, static_cast<int>(45 * a)), 48, layout.px(10 * scale));
+                draw->AddCircle(c, layout.px(9 * scale), IM_COL32(200, 225, 255, static_cast<int>(150 * a)), 32, std::max(1.0f, layout.px(1)));
+            }
             // Reflection on the floor
             const ImVec2 r0 = layout.point(cx - w * 0.5f, top + h + 8);
             const ImVec2 r1 = layout.point(cx + w * 0.5f, top + h + 70);

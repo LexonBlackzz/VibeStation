@@ -46,6 +46,8 @@ void Frontend::init() {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
     boot_.create_textures();
+    ps1_logo_.texture = load_image_texture("ps.png", ps1_logo_.width, ps1_logo_.height);
+    ps2_logo_.texture = load_image_texture("ps2.png", ps2_logo_.width, ps2_logo_.height);
     if (settings_.startup_video && !host_.session_active()) {
         intro_pending_ = true;
         orbit_.hide();
@@ -58,6 +60,8 @@ void Frontend::shutdown() {
     stop_scan();
     boot_.destroy_textures();
     orbit_.destroy_textures();
+    destroy_texture(ps1_logo_.texture);
+    destroy_texture(ps2_logo_.texture);
     mixer_release();
     release_sounds();
 }

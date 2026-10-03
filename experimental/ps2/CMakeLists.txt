@@ -79,6 +79,14 @@ if(VIBESTATION_PS2_ENABLE_UI)
     )
     FetchContent_MakeAvailable(imgui)
 
+    # stb_image (console logos in the Browser); same pin as the main build.
+    FetchContent_Declare(stb
+        URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.zip
+        URL_HASH SHA256=8e59f72b0780690cda64726804269f638a3be77b9d1506ea95f443f7964bccf0
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(stb)
+
     if(WIN32)
         set(VIBESTATION_PS2_OPENGL_LIBRARY opengl32)
     else()
@@ -142,8 +150,10 @@ if(VIBESTATION_PS2_ENABLE_UI)
         ui/vs2/vs2_screens.cpp
         ui/vs2/vs2_edge_light.cpp
         ui/vs2/vs2_toolbar.cpp
+        ui/vs2/vs2_stb_image.cpp
     )
     target_compile_definitions(VibeStationPS2Lab PRIVATE SDL_MAIN_HANDLED=1)
+    target_include_directories(VibeStationPS2Lab PRIVATE ${stb_SOURCE_DIR})
     target_link_libraries(VibeStationPS2Lab PRIVATE
         vibestation_ps2_core
         vibestation_ps1_core

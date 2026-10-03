@@ -2,8 +2,10 @@
 
 #include <SDL.h>
 #include <SDL_opengl.h>
+#include <stb_image.h>
 
 #include <array>
+#include <cstddef>
 
 namespace ps2::ui::vs2 {
 
@@ -45,6 +47,36 @@ unsigned int create_texture_rgba(int width, int height, const void* pixels, bool
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, pixels);
     glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+unsigned int load_image_texture(const char* name, int& width, int& height) {
+    width = height = 0;
+    const std::filesystem::path path = find_asset(name);
+    if (path.empty()) return 0;
+    int channels = 0;
+    unsigned char* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    if (pixels == nullptr || width <= 0 || height <= 0) {
+        if (pixels != nullptr) stbi_image_free(pixels);
+        width = height = 0;
+        return 0;
+    }
+
+    // Dark artwork on an opaque white page: darkness becomes opacity, so the
+    // artwork turns white (and can be tinted) over the dark UI.
+    const unsigned char* corner = pixels;
+    if (corner[3] == 255 && corner[0] > 235 && corner[1] > 235 && corner[2] > 235) {
+        const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        for (std::size_t i = 0; i < count; ++i) {
+            unsigned char* p = pixels + i * 4;
+            const int luma = (p[0] * 54 + p[1] * 183 + p[2] * 19) >> 8;
+            p[3] = static_cast<unsigned char>((255 - luma) * p[3] / 255);
+            p[0] = p[1] = p[2] = 255;
+        }
+    }
+
+    const unsigned int texture = create_texture_rgba(width, height, pixels, true);
+    stbi_image_free(pixels);
     return texture;
 }
 

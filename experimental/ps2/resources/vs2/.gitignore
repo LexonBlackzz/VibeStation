@@ -1,2 +1,4 @@
 *.mp4
 *.wav
+# Console logos (ps.png, ps2.png) are Sony trademarks: kept local too.
+*.png

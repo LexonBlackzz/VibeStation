@@ -127,5 +127,9 @@ std::filesystem::path find_asset(const char* name);
 // RGBA8 texture helpers (OpenGL, UI thread only).
 unsigned int create_texture_rgba(int width, int height, const void* pixels, bool linear);
 void destroy_texture(unsigned int& texture);
+// An image from resources/vs2 as a texture (0 if missing). A picture with an
+// opaque white background (dark artwork on white) is turned into light
+// artwork on transparency so it shows on the dark UI.
+unsigned int load_image_texture(const char* name, int& width, int& height);
 
 } // namespace ps2::ui::vs2

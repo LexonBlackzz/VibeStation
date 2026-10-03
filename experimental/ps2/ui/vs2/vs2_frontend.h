@@ -123,6 +123,14 @@ private:
     Host& host_;
     Orbit orbit_{};
     BootAnimation boot_{};
+    // Browser disc logos from resources/vs2 (ps.png, ps2.png); 0 when missing.
+    struct Logo {
+        unsigned int texture = 0;
+        int width = 0;
+        int height = 0;
+    };
+    Logo ps1_logo_{};
+    Logo ps2_logo_{};
     double boot_t0_ = 0.0;
     Settings settings_{};
 
