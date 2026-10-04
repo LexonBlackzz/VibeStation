@@ -1,5 +1,7 @@
 #include "ui/vs2/vs2_frontend.h"
 
+#include "ui/startup_disclaimer.h"
+
 #include <SDL.h>
 
 #include <cstdio>
@@ -14,7 +16,6 @@ constexpr const char* kSettingsFile = "vibestation2.ini";
 constexpr float kRevealAt = 4.5f;      // vs2start.mp4 turns black here
 constexpr float kStartingSeconds = 1.1f;
 constexpr float kHandoffSeconds = 1.2f;
-constexpr float kDisclaimerSeconds = 2.0f;
 
 bool is_sub_screen(int screen) {
     // Browser, Config, Version, Reaper, Exit
@@ -125,17 +126,29 @@ void Frontend::frame() {
 
     if (first_frame_) {
         first_frame_ = false;
-        // The first time VibeStation 2 appears in a run, a short
-        // non-affiliation notice comes before anything else (not when a game
-        // was launched straight from the command line).
-        if (!shown_before_ && !host_.session_running()) disclaimer_t0_ = now_;
-        else begin_first_screen();
+        // The first time VibeStation 2 appears in a run, the non-affiliation
+        // notice comes before anything else, until confirmed (not when a game
+        // was launched straight from the command line, and not once it was
+        // confirmed for good or already in VibeStation 1 this run).
+        if (!shown_before_ && !host_.session_running() && vibestation::startup_disclaimer_needed()) {
+            disclaimer_t0_ = now_;
+        } else {
+            begin_first_screen();
+        }
         shown_before_ = true;
     }
     if (disclaimer_t0_ >= 0.0) {
-        draw_disclaimer(draw, layout, static_cast<float>(now_ - disclaimer_t0_));
-        if (now_ - disclaimer_t0_ >= kDisclaimerSeconds) {
+        float a = smoothstep(0.0f, 0.3f, static_cast<float>(now_ - disclaimer_t0_));
+        if (disclaimer_close_t0_ >= 0.0) {
+            a *= 1.0f - smoothstep(0.0f, 0.3f, static_cast<float>(now_ - disclaimer_close_t0_));
+        }
+        if (draw_disclaimer(draw, layout, a) && disclaimer_close_t0_ < 0.0) {
+            vibestation::acknowledge_startup_disclaimer(disclaimer_remember_);
+            disclaimer_close_t0_ = now_;
+        }
+        if (disclaimer_close_t0_ >= 0.0 && now_ - disclaimer_close_t0_ >= 0.35) {
             disclaimer_t0_ = -1.0;
+            disclaimer_close_t0_ = -1.0;
             begin_first_screen();
         }
         ImGui::End();
@@ -277,10 +290,8 @@ void Frontend::begin_first_screen() {
     }
 }
 
-void Frontend::draw_disclaimer(ImDrawList* draw, const Layout& layout, float t) {
-    const float a = smoothstep(0.0f, 0.3f, t) *
-                    (1.0f - smoothstep(kDisclaimerSeconds - 0.35f, kDisclaimerSeconds, t));
-    if (a <= 0.001f) return;
+bool Frontend::draw_disclaimer(ImDrawList* draw, const Layout& layout, float a) {
+    if (a <= 0.001f) return false;
     constexpr std::array<const char*, 3> kLines = {{
         "VibeStation is an independent, non-commercial fan project.",
         "It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment.",
@@ -292,9 +303,62 @@ void Frontend::draw_disclaimer(ImDrawList* draw, const Layout& layout, float t) 
         const ImVec2 ts = text_size(role, size, kLines[i]);
         text(draw, role, size,
              ImVec2(layout.point(640, 0).x - ts.x * 0.5f,
-                    layout.point(0, i == 0 ? 356.0f : 372.0f + 26.0f * static_cast<float>(i)).y),
+                    layout.point(0, i == 0 ? 296.0f : 312.0f + 26.0f * static_cast<float>(i)).y),
              with_alpha(i == 0 ? color::kText : color::kSub, a), kLines[i]);
     }
+    const bool ready = a > 0.95f; // ignore input while fading
+
+    // "Don't show this disclaimer again", ticked by default; click to toggle.
+    const char* label = "Don't show this disclaimer again";
+    const float label_px = layout.px(14.0f);
+    const ImVec2 ls = text_size(FontRole::Regular, label_px, label);
+    const float box = layout.px(18.0f);
+    const float gap = layout.px(12.0f);
+    const float row_w = box + gap + ls.x;
+    const ImVec2 b0(layout.point(640, 0).x - row_w * 0.5f, layout.point(0, 410).y);
+    const ImVec2 b1(b0.x + box, b0.y + box);
+    const ImVec2 hit0(b0.x - layout.px(8), b0.y - layout.px(8));
+    const ImVec2 hit1(b0.x + row_w + layout.px(8), b1.y + layout.px(8));
+    const bool box_hover = ImGui::IsMouseHoveringRect(hit0, hit1, false);
+    if (ready && box_hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        disclaimer_remember_ = !disclaimer_remember_;
+        play_highlight_sound();
+    }
+    draw->AddRect(b0, b1, with_alpha(box_hover ? color::kSelect : IM_COL32(120, 136, 160, 255), a),
+                  layout.px(3), 0, std::max(1.0f, layout.px(1.4f)));
+    if (disclaimer_remember_) {
+        const float th = std::max(1.0f, layout.px(2.2f));
+        draw->AddLine(ImVec2(b0.x + box * 0.22f, b0.y + box * 0.52f),
+                      ImVec2(b0.x + box * 0.43f, b0.y + box * 0.74f), with_alpha(color::kSelect, a), th);
+        draw->AddLine(ImVec2(b0.x + box * 0.43f, b0.y + box * 0.74f),
+                      ImVec2(b0.x + box * 0.80f, b0.y + box * 0.28f), with_alpha(color::kSelect, a), th);
+    }
+    text(draw, FontRole::Regular, label_px, ImVec2(b1.x + gap, b0.y + (box - ls.y) * 0.5f),
+         with_alpha(IM_COL32(188, 198, 212, 255), a), label);
+
+    // "I understand": click it, or Enter / Space / X / A.
+    const ImVec2 o0 = layout.point(530, 460);
+    const ImVec2 o1 = layout.point(750, 504);
+    const bool ok_hover = ImGui::IsMouseHoveringRect(o0, o1, false);
+    draw->AddRectFilled(o0, o1, with_alpha(color::kSelect, a * (ok_hover ? 0.24f : 0.12f)), layout.px(4));
+    draw->AddRect(o0, o1, with_alpha(color::kSelect, a * (ok_hover ? 1.0f : 0.7f)), layout.px(4), 0,
+                  std::max(1.0f, layout.px(1.4f)));
+    const char* ok = "I understand";
+    const ImVec2 os = text_size(FontRole::Light, layout.px(20), ok);
+    text(draw, FontRole::Light, layout.px(20),
+         ImVec2((o0.x + o1.x - os.x) * 0.5f, (o0.y + o1.y - os.y) * 0.5f), with_alpha(color::kText, a), ok);
+
+    const bool keyed = ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_X, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
+    const bool clicked = ok_hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    if (ready && (keyed || clicked)) {
+        play_select_sound();
+        return true;
+    }
+    return false;
 }
 
 void Frontend::go(Screen next, bool quiet) {

@@ -28,6 +28,7 @@
 
 #include "ui/host_window.h"
 #include "ui/favorite_emulator.h"
+#include "ui/startup_disclaimer.h"
 #include "ui/vs2_hosted.h"
 
 namespace {
@@ -48,6 +49,10 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test,
                     bool cli_session) {
   if (!ps1.begin_run()) {
     return 1;
+  }
+  if (switch_test) {
+    // Nobody is there to press "I understand": skip it for this run only.
+    vibestation::acknowledge_startup_disclaimer(false);
   }
   std::unique_ptr<ps2::ui::Vibestation2> ps2;
   bool ps2_active = false;

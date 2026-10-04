@@ -1,5 +1,6 @@
 #include "ui/app.h"
 #include "ui/definitive/definitive_shared.h"
+#include "ui/startup_disclaimer.h"
 #include "ui/output_resolution_utils.h"
 #include "ui/screenshot_utils.h"
 #include "ui/theme_settings.h"
@@ -105,6 +106,10 @@ bool g_startup_complete = false;
 // The disclaimer shown before the startup sequence (once per run).
 float g_disclaimer_elapsed = 0.0f;
 bool g_disclaimer_done = false;
+// < 0 while the notice is up, else seconds into its fade-out.
+float g_disclaimer_closing = -1.0f;
+// The "Don't show this disclaimer again" checkbox; ticked by default.
+bool g_disclaimer_remember = true;
 
 // Launcher arrival, in seconds on the startup clock.
 constexpr float kRowsStart = definitive_ui::kIntroGlideStart + 0.35f;
@@ -631,6 +636,7 @@ void App::release_definitive_ui_assets() {
     g_startup_complete = false;
     g_disclaimer_elapsed = 0.0f;
     g_disclaimer_done = false;
+    g_disclaimer_closing = -1.0f;
     g_intro_highlight = 0.0f;
     g_intro_highlight_dismissed = false;
     definitive_settings_transition_ =
@@ -646,19 +652,34 @@ void App::panel_definitive_home() {
 
     const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 0.05f);
 
-    // A short non-affiliation notice comes first, before any Sony-style
-    // presentation; the startup clock and sound wait for it.
+    // The non-affiliation notice comes first, before any Sony-style
+    // presentation, until confirmed; the startup clock and sound wait for it.
     if (!g_disclaimer_done) {
-        definitive_ui::preload_intro_assets();
-        definitive_ui::preload_background_assets();
-        definitive_ui::preload_audio_assets();
-        definitive_ui::draw_startup_disclaimer(
-            window_pos, window_size, g_disclaimer_elapsed);
-        g_disclaimer_elapsed += dt;
-        if (g_disclaimer_elapsed >= definitive_ui::kStartupDisclaimerSeconds) {
+        // Already confirmed for good, or in VibeStation 2 earlier this run.
+        if (g_disclaimer_closing < 0.0f && !vibestation::startup_disclaimer_needed()) {
             g_disclaimer_done = true;
         }
-        return;
+        else {
+            definitive_ui::preload_intro_assets();
+            definitive_ui::preload_background_assets();
+            definitive_ui::preload_audio_assets();
+            g_disclaimer_elapsed += dt;
+            float alpha = timeline_progress(g_disclaimer_elapsed, 0.0f, 0.3f);
+            if (g_disclaimer_closing >= 0.0f) {
+                g_disclaimer_closing += dt;
+                alpha *= 1.0f - timeline_progress(g_disclaimer_closing, 0.0f, 0.3f);
+            }
+            if (definitive_ui::draw_startup_disclaimer(
+                    window_pos, window_size, alpha, g_disclaimer_remember) &&
+                g_disclaimer_closing < 0.0f) {
+                vibestation::acknowledge_startup_disclaimer(g_disclaimer_remember);
+                g_disclaimer_closing = 0.0f;
+            }
+            if (g_disclaimer_closing >= 0.35f) {
+                g_disclaimer_done = true;
+            }
+            return;
+        }
     }
 
     definitive_ui::play_startup_sound();
