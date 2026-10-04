@@ -167,22 +167,18 @@ set(VIBESTATION_SOURCES
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0")
-set(VIBESTATION_BUILD_NUMBER_FILE
-    "${CMAKE_CURRENT_SOURCE_DIR}/resources/build_number.txt")
 set(VIBESTATION_VERSION_SOURCE
     "${CMAKE_CURRENT_BINARY_DIR}/generated/vibestation_version.cpp")
 
-add_custom_command(
-    OUTPUT "${VIBESTATION_VERSION_SOURCE}"
+# Runs on every build so a new HEAD gets its build number; the generated file
+# is only rewritten (and recompiled) when the number actually changes.
+add_custom_target(vibestation_version
     COMMAND ${CMAKE_COMMAND}
         -DVIBESTATION_VERSION_STRING=${VIBESTATION_VERSION_STRING}
-        -DVIBESTATION_BUILD_NUMBER_FILE=${VIBESTATION_BUILD_NUMBER_FILE}
+        -DVIBESTATION_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DVIBESTATION_VERSION_SOURCE=${VIBESTATION_VERSION_SOURCE}
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
-    # Do not depend on build_number.txt here: the generator increments it,
-    # which would otherwise make this command perpetually dirty.
-    DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/increment_build_number.cmake"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version.cmake"
+    BYPRODUCTS "${VIBESTATION_VERSION_SOURCE}"
     VERBATIM
     COMMENT "Updating VibeStation build metadata")
 
@@ -192,6 +188,7 @@ set_source_files_properties("${VIBESTATION_VERSION_SOURCE}" PROPERTIES
     SKIP_PRECOMPILE_HEADERS ON)
 
 add_executable(VibeStation ${VIBESTATION_SOURCES})
+add_dependencies(VibeStation vibestation_version)
 
 if(WIN32)
     # Embed the application icon plus launcher background, startup icon and UI
