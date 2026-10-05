@@ -630,6 +630,7 @@ void Gpu::reset() {
     }
     gp0_fifo_.clear();
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     gp0_mode_ = Gp0Mode::Command;
     gp0_words_remaining_ = 0;
     display_ = {};
@@ -880,6 +881,12 @@ void Gpu::consume_vram_write_word(u32 word) {
     }
 }
 
+void Gpu::gp0_from_ram(u32 command, u32 phys) {
+    gp0_word_source_ = phys;
+    gp0(command);
+    gp0_word_source_ = Pgxp::kNoSource;
+}
+
 void Gpu::gp0(u32 command) {
     const bool profile_detailed = g_profile_detailed_timing;
     std::chrono::high_resolution_clock::time_point start{};
@@ -900,6 +907,9 @@ void Gpu::gp0(u32 command) {
             static_cast<int>(gp0_mode_));
     }
 
+    // Only the incoming word's RAM source is known; words that queued behind
+    // a VRAM read lose theirs (and just miss PGXP).
+    u32 word_source = gp0_fifo_.empty() ? gp0_word_source_ : Pgxp::kNoSource;
     gp0_fifo_.push_back(command);
     while (!gp0_fifo_.empty()) {
         if (gp0_mode_ == Gp0Mode::VramRead) {
@@ -928,6 +938,8 @@ void Gpu::gp0(u32 command) {
     }
 
     gp0_buffer_.push_back(command);
+    gp0_buffer_src_.push_back(word_source);
+    word_source = Pgxp::kNoSource;
     gp0_words_remaining_--;
 
     if (gp0_words_remaining_ > 0)
@@ -1238,6 +1250,7 @@ void Gpu::gp0(u32 command) {
     }
 
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     }
     if (profile_detailed && sys_) {
         const auto end = std::chrono::high_resolution_clock::now();
@@ -1319,9 +1332,9 @@ void Gpu::gp0_fill_rect() {
 void Gpu::gp0_mono_tri() {
     Color c(gp0_buffer_[0]);
     Vertex v[3];
-    v[0] = decode_vertex_word(gp0_buffer_[1]);
-    v[1] = decode_vertex_word(gp0_buffer_[2]);
-    v[2] = decode_vertex_word(gp0_buffer_[3]);
+    v[0] = decode_buffer_vertex(1);
+    v[1] = decode_buffer_vertex(2);
+    v[2] = decode_buffer_vertex(3);
     v[0].color = c;
     v[1].color = c;
     v[2].color = c;
@@ -1333,7 +1346,7 @@ void Gpu::gp0_mono_quad() {
     Color c(gp0_buffer_[0]);
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
-        v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
+        v[i] = decode_buffer_vertex(1 + i);
         v[i].color = c;
     }
     debug_note_polygon(gp0_command_, v, 4, false, false);
@@ -1350,13 +1363,13 @@ void Gpu::gp0_textured_tri() {
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     Vertex v[3];
-    v[0] = decode_vertex_word(gp0_buffer_[1]);
+    v[0] = decode_buffer_vertex(1);
     v[0].u = gp0_buffer_[2] & 0xFF;
     v[0].v = (gp0_buffer_[2] >> 8) & 0xFF;
-    v[1] = decode_vertex_word(gp0_buffer_[3]);
+    v[1] = decode_buffer_vertex(3);
     v[1].u = gp0_buffer_[4] & 0xFF;
     v[1].v = (gp0_buffer_[4] >> 8) & 0xFF;
-    v[2] = decode_vertex_word(gp0_buffer_[5]);
+    v[2] = decode_buffer_vertex(5);
     v[2].u = gp0_buffer_[6] & 0xFF;
     v[2].v = (gp0_buffer_[6] >> 8) & 0xFF;
     v[0].color = c;
@@ -1378,7 +1391,7 @@ void Gpu::gp0_textured_quad() {
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
         int base = 1 + i * 2;
-        v[i] = decode_vertex_word(gp0_buffer_[base]);
+        v[i] = decode_buffer_vertex(base);
         v[i].u = gp0_buffer_[base + 1] & 0xFF;
         v[i].v = (gp0_buffer_[base + 1] >> 8) & 0xFF;
         v[i].color = c;
@@ -1392,10 +1405,8 @@ void Gpu::gp0_textured_quad() {
 void Gpu::gp0_shaded_tri() {
     Vertex v[3];
     for (int i = 0; i < 3; i++) {
+        v[i] = decode_buffer_vertex(i * 2 + 1);
         v[i].color = Color(gp0_buffer_[i * 2]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
     }
     debug_note_polygon(gp0_command_, v, 3, false, true);
     draw_shaded_triangle(v[0], v[1], v[2]);
@@ -1404,10 +1415,8 @@ void Gpu::gp0_shaded_tri() {
 void Gpu::gp0_shaded_quad() {
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
+        v[i] = decode_buffer_vertex(i * 2 + 1);
         v[i].color = Color(gp0_buffer_[i * 2]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
     }
     debug_note_polygon(gp0_command_, v, 4, false, true);
     draw_shaded_triangle(v[0], v[1], v[2]);
@@ -1421,10 +1430,8 @@ void Gpu::gp0_shaded_textured_tri() {
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 3; i++) {
         int base = i * 3;
+        v[i] = decode_buffer_vertex(base + 1);
         v[i].color = Color(gp0_buffer_[base]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
@@ -1440,10 +1447,8 @@ void Gpu::gp0_shaded_textured_quad() {
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 4; i++) {
         int base = i * 3;
+        v[i] = decode_buffer_vertex(base + 1);
         v[i].color = Color(gp0_buffer_[base]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
@@ -1505,6 +1510,24 @@ Vertex Gpu::decode_vertex_word(u32 word) const {
     v.y = static_cast<s16>(sign_extend_11(word >> 16) + draw_y_offset_);
     v.fx = static_cast<float>(v.x);
     v.fy = static_cast<float>(v.y);
+    return v;
+}
+
+Vertex Gpu::decode_buffer_vertex(size_t index) const {
+    const u32 word = gp0_buffer_[index];
+    Vertex v = decode_vertex_word(word);
+    if (!g_pgxp_enabled || pgxp_ == nullptr || index >= gp0_buffer_src_.size()) {
+        return v;
+    }
+    Pgxp::PreciseVertex precise;
+    // The GPU ignores the top 5 bits of each coordinate, but the stored word
+    // must match exactly for the precise vertex to be this one.
+    if (pgxp_->lookup(gp0_buffer_src_[index], word, precise)) {
+        v.fx = precise.x + static_cast<float>(draw_x_offset_);
+        v.fy = precise.y + static_cast<float>(draw_y_offset_);
+        v.w = precise.w;
+        v.has_w = true;
+    }
     return v;
 }
 
@@ -1987,6 +2010,7 @@ void Gpu::gp1_reset() {
 void Gpu::gp1_reset_command_buffer() {
     gp0_fifo_.clear();
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     gp0_words_remaining_ = 0;
     gp0_mode_ = Gp0Mode::Command;
     polyline_active_ = false;
@@ -2663,55 +2687,8 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     const bool edge0_top_left = is_top_left_edge(v1, v2);
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
-    if (!g_gpu_fast_mode) {
-        s16 min_x = std::min({ v0.x, v1.x, v2.x });
-        s16 max_x = std::max({ v0.x, v1.x, v2.x });
-        s16 min_y = std::min({ v0.y, v1.y, v2.y });
-        s16 max_y = std::max({ v0.y, v1.y, v2.y });
-        min_x = std::max(min_x, draw_x_min_);
-        max_x = std::min(max_x, draw_x_max_);
-        min_y = std::max(min_y, draw_y_min_);
-        max_y = std::min(max_y, draw_y_max_);
-        if (max_x - min_x > 1023 || max_y - min_y > 511) {
-            return;
-        }
-
-        const bool opaque_path = !semi_transparency_mode_;
-        const s32 step_w0_x = -(v2.y - v1.y);
-        const s32 step_w0_y = (v2.x - v1.x);
-        const s32 step_w1_x = -(v0.y - v2.y);
-        const s32 step_w1_y = (v0.x - v2.x);
-        const s32 step_w2_x = -(v1.y - v0.y);
-        const s32 step_w2_y = (v1.x - v0.x);
-
-        s32 w0_row = edge(v1, v2, min_x, min_y);
-        s32 w1_row = edge(v2, v0, min_x, min_y);
-        s32 w2_row = edge(v0, v1, min_x, min_y);
-
-        for (s16 y = min_y; y <= max_y; ++y) {
-            s16 span_min_x = 0;
-            s16 span_max_x = -1;
-            if (triangle_scanline_span(
-                    min_x, max_x, w0_row, w1_row, w2_row,
-                    step_w0_x, step_w1_x, step_w2_x,
-                    edge0_top_left, edge1_top_left, edge2_top_left,
-                    span_min_x, span_max_x)) {
-                for (s16 x = span_min_x; x <= span_max_x; ++x) {
-                    if (opaque_path) {
-                        write_pixel_opaque_clipped(x, y, color15);
-                    }
-                    else {
-                        set_pixel_clipped(x, y, color15, true);
-                    }
-                }
-            }
-            w0_row += step_w0_y;
-            w1_row += step_w1_y;
-            w2_row += step_w2_y;
-        }
-        return;
-    }
-    const bool opaque_fast_path = !semi_transparency_mode_;
+    // Flat fill has no per-pixel interpolation to cheapen, so every mode
+    // uses the exact span rasterizer.
     s16 min_x = std::min({ v0.x, v1.x, v2.x });
     s16 max_x = std::max({ v0.x, v1.x, v2.x });
     s16 min_y = std::min({ v0.y, v1.y, v2.y });
@@ -2720,9 +2697,11 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     max_x = std::min(max_x, draw_x_max_);
     min_y = std::max(min_y, draw_y_min_);
     max_y = std::min(max_y, draw_y_max_);
-    if (max_x - min_x > 1023 || max_y - min_y > 511)
+    if (max_x - min_x > 1023 || max_y - min_y > 511) {
         return;
+    }
 
+    const bool opaque_path = !semi_transparency_mode_;
     const s32 step_w0_x = -(v2.y - v1.y);
     const s32 step_w0_y = (v2.x - v1.x);
     const s32 step_w1_x = -(v0.y - v2.y);
@@ -2735,23 +2714,21 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     s32 w2_row = edge(v0, v1, min_x, min_y);
 
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (opaque_fast_path) {
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                if (opaque_path) {
                     write_pixel_opaque_clipped(x, y, color15);
                 }
                 else {
                     set_pixel_clipped(x, y, color15, true);
                 }
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -2890,23 +2867,41 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
 
+    // Fast mode: exact coverage spans, but colors stepped in float instead of
+    // three integer divides per pixel.
+    const float inv_area = 1.0f / static_cast<float>(area);
+    const auto color_num = [&](s32 a, s32 b, s32 c, u8 Color::*channel) {
+        return a * static_cast<s32>(v0.color.*channel) +
+            b * static_cast<s32>(v1.color.*channel) +
+            c * static_cast<s32>(v2.color.*channel);
+    };
+    const float dr_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::r)) * inv_area;
+    const float dg_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::g)) * inv_area;
+    const float db_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::b)) * inv_area;
+
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                const s32 r_mix =
-                    (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area;
-                const s32 g_mix =
-                    (w0 * v0.color.g + w1 * v1.color.g + w2 * v2.color.g) / area;
-                const s32 b_mix =
-                    (w0 * v0.color.b + w1 * v1.color.b + w2 * v2.color.b) / area;
-                const u8 r = static_cast<u8>(clamp_u8_i(r_mix));
-                const u8 g = static_cast<u8>(clamp_u8_i(g_mix));
-                const u8 b = static_cast<u8>(clamp_u8_i(b_mix));
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            const s32 w0 = w0_row + step_w0_x * span_dx;
+            const s32 w1 = w1_row + step_w1_x * span_dx;
+            const s32 w2 = w2_row + step_w2_x * span_dx;
+            float r_value = static_cast<float>(color_num(w0, w1, w2, &Color::r)) * inv_area;
+            float g_value = static_cast<float>(color_num(w0, w1, w2, &Color::g)) * inv_area;
+            float b_value = static_cast<float>(color_num(w0, w1, w2, &Color::b)) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                const u8 r = static_cast<u8>(clamp_u8_i(static_cast<int>(r_value)));
+                const u8 g = static_cast<u8>(clamp_u8_i(static_cast<int>(g_value)));
+                const u8 b = static_cast<u8>(clamp_u8_i(static_cast<int>(b_value)));
                 const u16 out15 = pack_rgb15_dithered(r, g, b, 0, x, y, dither_enabled_);
                 if (opaque_fast_path) {
                     write_pixel_opaque_clipped(x, y, out15);
@@ -2914,10 +2909,10 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                 else {
                     set_pixel_clipped(x, y, out15, true);
                 }
+                r_value += dr_dx;
+                g_value += dg_dx;
+                b_value += db_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -2926,6 +2921,10 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
 }
 
 void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
+    if (g_pgxp_enabled && v0.has_w && v1.has_w && v2.has_w &&
+        draw_textured_triangle_pgxp(v0, v1, v2, false)) {
+        return;
+    }
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3115,21 +3114,28 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         w1_row * static_cast<s32>(v1.v) +
         w2_row * static_cast<s32>(v2.v);
 
+    const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
+    const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        float u_value = static_cast<float>(u_row_num) * inv_area;
-        float v_value = static_cast<float>(v_row_num) * inv_area;
-        const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
-        const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (profile_raster) {
-                    ++profile_covered;
-                }
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            if (profile_raster) {
+                profile_covered += static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+            }
+            float u_value =
+                static_cast<float>(u_row_num + step_u_x_num * span_dx) * inv_area;
+            float v_value =
+                static_cast<float>(v_row_num + step_v_x_num * span_dx) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
@@ -3159,12 +3165,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
+                u_value += du_dx;
+                v_value += dv_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
-            u_value += du_dx;
-            v_value += dv_dx;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -3180,6 +3183,11 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
 }
 
 void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    if (g_pgxp_enabled && v0.has_w && v1.has_w && v2.has_w &&
+        !g_gpu_extreme_fast_mode &&
+        draw_textured_triangle_pgxp(v0, v1, v2, true)) {
+        return;
+    }
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3448,27 +3456,37 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         w1_row * static_cast<s32>(v1.color.b) +
         w2_row * static_cast<s32>(v2.color.b);
 
+    const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
+    const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
+    const float dr_dx = static_cast<float>(step_r_x_num) * inv_area;
+    const float dg_dx = static_cast<float>(step_g_x_num) * inv_area;
+    const float db_dx = static_cast<float>(step_b_x_num) * inv_area;
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        float u_value = static_cast<float>(u_row_num) * inv_area;
-        float v_value = static_cast<float>(v_row_num) * inv_area;
-        float r_value = static_cast<float>(r_row_num) * inv_area;
-        float g_value = static_cast<float>(g_row_num) * inv_area;
-        float b_value = static_cast<float>(b_row_num) * inv_area;
-        const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
-        const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
-        const float dr_dx = static_cast<float>(step_r_x_num) * inv_area;
-        const float dg_dx = static_cast<float>(step_g_x_num) * inv_area;
-        const float db_dx = static_cast<float>(step_b_x_num) * inv_area;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (profile_raster) {
-                    ++profile_covered;
-                }
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            if (profile_raster) {
+                profile_covered += static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+            }
+            float u_value =
+                static_cast<float>(u_row_num + step_u_x_num * span_dx) * inv_area;
+            float v_value =
+                static_cast<float>(v_row_num + step_v_x_num * span_dx) * inv_area;
+            float r_value =
+                static_cast<float>(r_row_num + step_r_x_num * span_dx) * inv_area;
+            float g_value =
+                static_cast<float>(g_row_num + step_g_x_num * span_dx) * inv_area;
+            float b_value =
+                static_cast<float>(b_row_num + step_b_x_num * span_dx) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
@@ -3502,15 +3520,12 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
+                u_value += du_dx;
+                v_value += dv_dx;
+                r_value += dr_dx;
+                g_value += dg_dx;
+                b_value += db_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
-            u_value += du_dx;
-            v_value += dv_dx;
-            r_value += dr_dx;
-            g_value += dg_dx;
-            b_value += db_dx;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -3526,6 +3541,166 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             profile_candidates, profile_covered, profile_covered,
             texture.depth, profile_transparent, profile_semi);
     }
+}
+
+bool Gpu::draw_textured_triangle_pgxp(const Vertex &p0, const Vertex &p1,
+                                      const Vertex &p2, bool gouraud) {
+    // Attribute setup uses the sub-pixel PGXP positions. Barycentric weight
+    // i is a linear function of the pixel position: l_i(x, y) =
+    // edge(P_{i+1}, P_{i+2}, (x, y)) / area.
+    struct Linear {
+        double dx = 0.0, dy = 0.0, c = 0.0;
+        double at(double x, double y) const { return dx * x + dy * y + c; }
+        Linear scaled(double s) const { return { dx * s, dy * s, c * s }; }
+        Linear plus(const Linear &o) const {
+            return { dx + o.dx, dy + o.dy, c + o.c };
+        }
+    };
+    const Vertex *pv[3] = { &p0, &p1, &p2 };
+    const double area =
+        (static_cast<double>(p1.fx) - p0.fx) * (static_cast<double>(p2.fy) - p0.fy) -
+        (static_cast<double>(p1.fy) - p0.fy) * (static_cast<double>(p2.fx) - p0.fx);
+    if (std::abs(area) < 0.5) {
+        return false; // too thin for sub-pixel setup to be trustworthy
+    }
+    Linear bary[3];
+    for (int i = 0; i < 3; ++i) {
+        const Vertex &a = *pv[(i + 1) % 3];
+        const Vertex &b = *pv[(i + 2) % 3];
+        if (!(pv[i]->w > 0.0f)) {
+            return false;
+        }
+        const double ex = static_cast<double>(b.fx) - a.fx;
+        const double ey = static_cast<double>(b.fy) - a.fy;
+        // edge(a, b, p) = ex * (p.y - a.y) - ey * (p.x - a.x)
+        bary[i] = Linear{ -ey / area, ex / area,
+                          (ey * a.fx - ex * a.fy) / area };
+    }
+
+    // Perspective-correct texture coordinates: interpolate attr/w and 1/w,
+    // then divide per pixel. Gouraud colour stays affine, as on hardware.
+    Linear inv_w{}, u_over_w{}, v_over_w{}, red{}, green{}, blue{};
+    u8 u_min = 255, u_max = 0, v_min = 255, v_max = 0;
+    for (int i = 0; i < 3; ++i) {
+        const Vertex &vx = *pv[i];
+        const double rw = 1.0 / static_cast<double>(vx.w);
+        inv_w = inv_w.plus(bary[i].scaled(rw));
+        u_over_w = u_over_w.plus(bary[i].scaled(rw * vx.u));
+        v_over_w = v_over_w.plus(bary[i].scaled(rw * vx.v));
+        red = red.plus(bary[i].scaled(vx.color.r));
+        green = green.plus(bary[i].scaled(vx.color.g));
+        blue = blue.plus(bary[i].scaled(vx.color.b));
+        u_min = std::min(u_min, vx.u);
+        u_max = std::max(u_max, vx.u);
+        v_min = std::min(v_min, vx.v);
+        v_max = std::max(v_max, vx.v);
+    }
+
+    // Coverage is exactly the integer rasterizer's.
+    Vertex v0 = p0;
+    Vertex v1 = p1;
+    Vertex v2 = p2;
+    const s32 int_area = edge(v0, v1, v2.x, v2.y);
+    if (int_area == 0) {
+        return true;
+    }
+    if (int_area < 0) {
+        std::swap(v1, v2);
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
+    s16 min_x = std::min({ v0.x, v1.x, v2.x });
+    s16 max_x = std::max({ v0.x, v1.x, v2.x });
+    s16 min_y = std::min({ v0.y, v1.y, v2.y });
+    s16 max_y = std::max({ v0.y, v1.y, v2.y });
+    min_x = std::max(min_x, draw_x_min_);
+    max_x = std::min(max_x, draw_x_max_);
+    min_y = std::max(min_y, draw_y_min_);
+    max_y = std::min(max_y, draw_y_max_);
+    if (max_x - min_x > 1023 || max_y - min_y > 511) {
+        return true;
+    }
+
+    const TextureSampleState texture = prepare_texture_sample_state();
+    const bool raw_texture = (gp0_command_ & 0x1u) != 0;
+    const bool dither = dither_enabled_ && !g_gpu_extreme_fast_mode;
+    const bool semi_enabled = semi_transparency_mode_ && !g_gpu_extreme_fast_mode;
+    const Color flat = p0.color;
+    const s32 step_w0_x = -(v2.y - v1.y);
+    const s32 step_w0_y = (v2.x - v1.x);
+    const s32 step_w1_x = -(v0.y - v2.y);
+    const s32 step_w1_y = (v0.x - v2.x);
+    const s32 step_w2_x = -(v1.y - v0.y);
+    const s32 step_w2_y = (v1.x - v0.x);
+    s32 w0_row = edge(v1, v2, min_x, min_y);
+    s32 w1_row = edge(v2, v0, min_x, min_y);
+    s32 w2_row = edge(v0, v1, min_x, min_y);
+
+    // Floor with a little slack so values that are mathematically integral
+    // do not drop a texel to float error. 1e-6 stays below the smallest real
+    // fraction an integer triangle can produce (1/area, area <= 2^19).
+    const auto to_coord = [](double value, u8 lo, u8 hi) {
+        const int c = static_cast<int>(std::floor(value + 1.0e-6));
+        return static_cast<u8>(std::clamp(c, static_cast<int>(lo), static_cast<int>(hi)));
+    };
+    const auto to_channel = [](double value) {
+        return static_cast<u8>(std::clamp(static_cast<int>(std::floor(value + 1.0e-6)), 0, 255));
+    };
+
+    for (s16 y = min_y; y <= max_y; ++y) {
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const double fy = static_cast<double>(y);
+            const double fx0 = static_cast<double>(span_min_x);
+            double q = inv_w.at(fx0, fy);
+            double nu = u_over_w.at(fx0, fy);
+            double nv = v_over_w.at(fx0, fy);
+            double cr = red.at(fx0, fy);
+            double cg = green.at(fx0, fy);
+            double cb = blue.at(fx0, fy);
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                // Pixels on the integer edge can sit just outside the
+                // sub-pixel triangle; keep 1/w positive there.
+                const double rq = 1.0 / std::max(q, 1.0e-12);
+                const u8 u = to_coord(nu * rq, u_min, u_max);
+                const u8 v_coord = to_coord(nv * rq, v_min, v_max);
+                const u16 texel = read_texel(texture, u, v_coord);
+                if (texel != 0) {
+                    u16 out15 = texel;
+                    if (!raw_texture) {
+                        const u8 mr = gouraud ? to_channel(cr) : flat.r;
+                        const u8 mg = gouraud ? to_channel(cg) : flat.g;
+                        const u8 mb = gouraud ? to_channel(cb) : flat.b;
+                        out15 = dither
+                            ? modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y)
+                            : modulate_texel_15bit(texel, mr, mg, mb);
+                    }
+                    if (semi_enabled && (texel & 0x8000u) != 0) {
+                        set_pixel_clipped(x, y, out15, true);
+                    }
+                    else {
+                        write_pixel_opaque_clipped(x, y, out15);
+                    }
+                }
+                q += inv_w.dx;
+                nu += u_over_w.dx;
+                nv += v_over_w.dx;
+                cr += red.dx;
+                cg += green.dx;
+                cb += blue.dx;
+            }
+        }
+        w0_row += step_w0_y;
+        w1_row += step_w1_y;
+        w2_row += step_w2_y;
+    }
+    return true;
 }
 
 void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {

@@ -121,6 +121,8 @@ inline bool g_experimental_dma_command_sanitizer = false;
 inline bool g_low_spec_mode = false;
 inline bool g_gpu_fast_mode = false;
 inline bool g_gpu_extreme_fast_mode = false;
+// PGXP: sub-pixel GTE vertices + perspective-correct texturing (cosmetic).
+inline bool g_pgxp_enabled = false;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,

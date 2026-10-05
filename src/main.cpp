@@ -3975,6 +3975,19 @@ int main(int argc, char *argv[]) {
       fmv_diagnostics_override = 0;
       continue;
     }
+    if (a == "--gpu-fast-mode") {
+      g_gpu_fast_mode = true;
+      continue;
+    }
+    if (a == "--gpu-extreme-fast-mode") {
+      g_gpu_fast_mode = true;
+      g_gpu_extreme_fast_mode = true;
+      continue;
+    }
+    if (a == "--pgxp") {
+      g_pgxp_enabled = true;
+      continue;
+    }
     if (a == "--experimental-bios-size") {
       if ((i + 1) < args.size()) {
         std::string v = args[i + 1];

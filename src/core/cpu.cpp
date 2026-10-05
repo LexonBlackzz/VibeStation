@@ -3857,6 +3857,9 @@ void Cpu::op_swc2(u32 i) {
   }
   u32 val = gte.read_data(rt(i));
   store32(addr, val);
+  if (g_pgxp_enabled && !exception_raised_) {
+    gte.pgxp.record_store(addr & 0x1FFFFFFFu, rt(i), val);
+  }
 }
 
 void Cpu::op_cop3(u32 /*i*/) { raise_cop_unusable(3); }

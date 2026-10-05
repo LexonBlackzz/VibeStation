@@ -2056,6 +2056,7 @@ void App::save_persistent_config() const {
     // Sync from globals that UI panels write to directly
     out.gpu_fast_mode = g_gpu_fast_mode;
     out.gpu_extreme_fast_mode = g_gpu_extreme_fast_mode;
+    out.pgxp_enabled = g_pgxp_enabled;
     out.bilinear_filtering = g_bilinear_filtering;
     out.deinterlace_mode = g_deinterlace_mode;
     out.output_resolution_mode = g_output_resolution_mode;

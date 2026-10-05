@@ -671,7 +671,7 @@ void App::panel_definitive_settings() {
             "Smooths the final image when scaling instead of keeping hard pixels.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 190.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 260.0f, "GPU");
 
         if (definitive_settings_switch(
             draw, layout, "video_fast_gpu", "Fast Mode",
@@ -696,6 +696,15 @@ void App::panel_definitive_settings() {
         }
         note(right_x + 1.0f, content_y + 43.0f + row_step,
             "Trades more shading and transparency accuracy for additional speed.");
+
+        if (definitive_settings_switch(
+            draw, layout, "video_pgxp", "PGXP",
+            right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, g_pgxp_enabled)) {
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Perspective-correct textures from sub-pixel 3D vertices; reduces warping.");
         break;
     }
 

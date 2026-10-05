@@ -171,6 +171,12 @@ void App::panel_settings() {
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.5f, 1.0f),
                     "More unstable than Fast Mode and may heavily reduce shading, transparency, and presentation quality.");
+                if (ImGui::Checkbox("PGXP", &g_pgxp_enabled)) {
+                    save_persistent_config();
+                }
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Perspective-correct textures from sub-pixel 3D vertices; reduces texture warping.");
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };
                 int deinterlace_index = static_cast<int>(g_deinterlace_mode);

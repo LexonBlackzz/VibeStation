@@ -889,6 +889,55 @@ void v4_gte_execute(Gte *gte, u32 command) {
   }
 }
 
+// Mirrors Cpu::op_swc2's PGXP bookkeeping. The store does not touch the GTE,
+// so re-reading the register yields the value just written.
+void v4_pgxp_swc2(Gte *gte, u32 phys, u32 reg) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.record_store(phys, reg, gte->read_data(reg));
+  }
+}
+
+// Emitted after a completed SWC2 store of a screen-XY register (12..15),
+// with V4NativeState::store_phys already holding the store address. Only RAX
+// and RCX/RDX (dead at both call sites) are clobbered; R8-R11 are preserved.
+void emit_v4_pgxp_swc2(Xbyak::CodeGenerator &code, u32 reg) {
+  if (reg < 12u || reg > 15u) {
+    return;
+  }
+  Xbyak::Label skip;
+  code.mov(code.rax, reinterpret_cast<size_t>(&g_pgxp_enabled));
+  code.cmp(code.byte[code.rax], 0u);
+  code.je(skip);
+  code.push(code.r8);
+  code.push(code.r9);
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+  code.mov(code.edx, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.mov(code.r8d, reg);
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+  code.mov(code.esi, code.dword[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+  code.mov(code.edx, reg);
+#endif
+  code.mov(code.rax, reinterpret_cast<size_t>(&v4_pgxp_swc2));
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+  code.pop(code.r9);
+  code.pop(code.r8);
+  code.L(skip);
+}
+
 class V4CodeArena {
 public:
   V4CodeArena() = default;
@@ -2753,6 +2802,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
 #endif
     code.pop(code.r11);
     code.pop(code.r10);
+    emit_v4_pgxp_swc2(code, inst.rt);
 
     code.xor_(code.r9d, code.r9d);
     code.mov(code.eax, code.dword[
@@ -3167,6 +3217,7 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.L(stored);
     // An ordinary data store does not touch the guest I-cache (only
     // isolated-cache stores do); translated-code overlap is guarded above.
+    emit_v4_pgxp_swc2(code, inst.rt);
 
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],

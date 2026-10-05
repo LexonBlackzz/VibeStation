@@ -1,4 +1,5 @@
 #include "gte.h"
+#include <cmath>
 
 // ── Register Read/Write ────────────────────────────────────────────
 
@@ -231,6 +232,9 @@ void Gte::write_data(u32 reg, u32 value) {
   case 15: // SXY2 FIFO — pushes
     push_sx(static_cast<s16>(value));
     push_sy(static_cast<s16>(value >> 16));
+    if (g_pgxp_enabled) {
+      pgxp.push_untracked_screen_xy();
+    }
     break;
   case 16:
     sz[0] = static_cast<u16>(value);
@@ -771,12 +775,58 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   push_sx(sx_val);
   push_sy(sy_val);
 
+  if (g_pgxp_enabled) {
+    Pgxp::PreciseVertex precise;
+    const bool valid = precise_projection(raw_mac, sx_val, sy_val, screen_x,
+                                          screen_y, precise);
+    pgxp.push_screen_xy(sx_val, sy_val, valid, precise);
+  }
+
   // Depth cueing
   if (set_mac0) {
     s64 mac0_val = static_cast<s64>(dqb) + static_cast<s64>(dqa) * div_result;
     set_mac(0, mac0_val);
     set_ir(0, static_cast<s32>(mac[0] >> 12), false);
   }
+}
+
+bool Gte::precise_projection(const s64 raw_mac[3], s16 sx_val, s16 sy_val,
+                             s64 screen_x, s64 screen_y,
+                             Pgxp::PreciseVertex &out) const {
+  // Vertices the hardware clamped to the screen-coordinate range have no
+  // meaningful sub-pixel position.
+  const s64 int_x = screen_x >> 16;
+  const s64 int_y = screen_y >> 16;
+  if (int_x != sx_val || int_y != sy_val) {
+    return false;
+  }
+  const double depth = static_cast<double>(raw_mac[2]) / 4096.0;
+  if (depth <= 0.0 || sz[3] == 0 ||
+      static_cast<u32>(sz[3]) * 2u <= static_cast<u32>(h)) {
+    return false; // divide overflow: the hardware result is already saturated
+  }
+
+  // Same projection as above (SXY = OF + IR * H/SZ3) without rounding IR
+  // or the reciprocal.
+  const double ir_scale = (sf != 0) ? (1.0 / 4096.0) : 1.0;
+  const double ir_min = lm ? 0.0 : -32768.0;
+  const double ir_x =
+      std::clamp(static_cast<double>(raw_mac[0]) * ir_scale, ir_min, 32767.0);
+  const double ir_y =
+      std::clamp(static_cast<double>(raw_mac[1]) * ir_scale, ir_min, 32767.0);
+  const double scale =
+      std::min(static_cast<double>(h) / depth, 131071.0 / 65536.0);
+  const double fx = static_cast<double>(ofx) / 65536.0 + ir_x * scale;
+  const double fy = static_cast<double>(ofy) / 65536.0 + ir_y * scale;
+  // Float and the hardware's table divide can disagree by a fraction of a
+  // pixel; anything further off means the two paths diverged.
+  if (std::abs(fx - static_cast<double>(sx_val)) > 2.0 ||
+      std::abs(fy - static_cast<double>(sy_val)) > 2.0) {
+    return false;
+  }
+  out = Pgxp::PreciseVertex{static_cast<float>(fx), static_cast<float>(fy),
+                            static_cast<float>(depth)};
+  return true;
 }
 
 void Gte::cmd_rtpt() {

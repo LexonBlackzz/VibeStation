@@ -18,6 +18,7 @@ struct Config {
     bool bilinear_filtering = false;
     bool gpu_fast_mode = false;
     bool gpu_extreme_fast_mode = false;
+    bool pgxp_enabled = false;
     bool low_spec_mode = false;
 
     // CPU
