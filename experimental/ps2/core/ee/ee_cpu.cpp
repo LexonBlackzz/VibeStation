@@ -203,6 +203,7 @@ void EeCpu::raise_exception(
     u32 pc,
     bool in_delay_slot,
     bool tlb_refill) {
+    ++exceptions_raised_;
     if (code < state_.exception_counts.size()) {
         ++state_.exception_counts[code];
     }
@@ -5800,9 +5801,13 @@ EeDynarec::RunResult EeCpu::run_dynarec(
     u8* ram_data,
     u32* page_generations,
     u8* code_page_tracked) {
+    // Blocks start on a sequential PC. A taken branch whose delay slot is
+    // still pending shows as next_pc != pc + 4 even where a fast path has
+    // not set next_is_delay_slot_.
     if (!dynarec_enabled_ ||
         halted_ ||
         next_is_delay_slot_ ||
+        state_.next_pc != state_.pc + 4u ||
         maximum_instructions == 0u) {
         return {};
     }
@@ -5819,6 +5824,43 @@ EeDynarec::RunResult EeCpu::run_dynarec(
         next_is_delay_slot_ = false;
     }
     return result;
+}
+
+u32 EeCpu::dynarec_interpret(
+    void* context, u32 pc, u32 instruction, u32 in_delay_slot) {
+    auto& cpu = *static_cast<EeCpu*>(context);
+    EeCpuState& state = cpu.state_;
+
+    // The block commits Count and the retired-instruction total for all of
+    // its instructions when it exits, so a normal retirement here must not
+    // advance them. Count cannot reach Compare inside a block (the system
+    // bounds every batch by the Compare distance), so the restored Cause
+    // loses nothing.
+    const u32 count = state.cop0[9];
+    const u32 cause = state.cop0[13];
+    const u64 executed = state.instructions_executed;
+    const u64 exceptions = cpu.exceptions_raised_;
+
+    state.pc = pc;
+    state.next_pc = pc + 4u;
+    cpu.next_is_delay_slot_ = in_delay_slot != 0u;
+    const bool ok = cpu.step_internal(
+        cpu.dynarec_interpret_error_, true, &instruction, true);
+    cpu.current_is_delay_slot_ = false;
+    cpu.next_is_delay_slot_ = false;
+    if (!ok) {
+        // Halted; the instruction did not retire and PC is restored.
+        return EeDynarec::kInterpreterFailed;
+    }
+    ++cpu.dynarec_interpreted_instructions_;
+    if (cpu.exceptions_raised_ != exceptions) {
+        // Retired into an exception vector, with its own Count step.
+        return EeDynarec::kInterpreterException;
+    }
+    state.cop0[9] = count;
+    state.cop0[13] = cause;
+    state.instructions_executed = executed;
+    return EeDynarec::kInterpreterRetired;
 }
 
 bool EeCpu::step_internal(

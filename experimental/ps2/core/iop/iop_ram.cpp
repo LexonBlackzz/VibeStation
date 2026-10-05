@@ -9,6 +9,7 @@ IopRam::IopRam()
 
 void IopRam::reset() {
     std::fill(data_.begin(), data_.end(), 0);
+    ++generation_;
 }
 
 bool IopRam::contains(u32 offset, std::size_t width) const {
@@ -49,12 +50,14 @@ bool IopRam::read64(u32 offset, u64& value) const {
 
 bool IopRam::write8(u32 offset, u8 value) {
     if (!contains(offset, 1)) return false;
+    ++generation_;
     data_[offset] = value;
     return true;
 }
 
 bool IopRam::write16(u32 offset, u16 value) {
     if (!contains(offset, 2)) return false;
+    ++generation_;
     data_[offset] = static_cast<u8>(value);
     data_[offset + 1] = static_cast<u8>(value >> 8);
     return true;
@@ -62,6 +65,7 @@ bool IopRam::write16(u32 offset, u16 value) {
 
 bool IopRam::write32(u32 offset, u32 value) {
     if (!contains(offset, 4)) return false;
+    ++generation_;
     for (u32 i = 0; i < 4; ++i) {
         data_[offset + i] = static_cast<u8>(value >> (i * 8));
     }
@@ -70,6 +74,7 @@ bool IopRam::write32(u32 offset, u32 value) {
 
 bool IopRam::write64(u32 offset, u64 value) {
     if (!contains(offset, 8)) return false;
+    ++generation_;
     for (u32 i = 0; i < 8; ++i) {
         data_[offset + i] = static_cast<u8>(value >> (i * 8));
     }

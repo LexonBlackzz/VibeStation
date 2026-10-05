@@ -12,7 +12,45 @@
 #include <string_view>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 namespace {
+
+// CPU seconds used by the calling thread. With --gs-thread this is the
+// EE/system thread alone, which separates its cost from rasterization.
+double thread_cpu_seconds() {
+#ifdef _WIN32
+    FILETIME creation{};
+    FILETIME exit{};
+    FILETIME kernel{};
+    FILETIME user{};
+    if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) {
+        return 0.0;
+    }
+    const auto seconds = [](FILETIME time) {
+        return static_cast<double>(
+            (static_cast<std::uint64_t>(time.dwHighDateTime) << 32u) |
+            time.dwLowDateTime) * 1.0e-7;
+    };
+    return seconds(kernel) + seconds(user);
+#else
+    timespec now{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return static_cast<double>(now.tv_sec) +
+           static_cast<double>(now.tv_nsec) * 1.0e-9;
+#endif
+}
+
 
 void write_le16(std::ofstream& out, std::uint16_t value) {
     const char bytes[2] = {
@@ -1353,6 +1391,17 @@ void print_state(const ps2::Ps2System& system) {
         << " PCRTC_BGCOLOR=0x" << bgcolor
         << std::dec << '\n';
 
+    {
+        // FNV-1a over all of GS VRAM: catches rasterizer differences that
+        // never reach the displayed frame.
+        ps2::u64 vram_hash = 1469598103934665603ull;
+        for (const ps2::u8 byte : gs.vram().data()) {
+            vram_hash = (vram_hash ^ byte) * 1099511628211ull;
+        }
+        std::cout << "GS_VRAM_HASH=0x" << std::hex << std::uppercase
+                  << vram_hash << std::dec << '\n';
+    }
+
     if (display.valid()) {
         ps2::u64 nonzero_vram_bytes = 0;
         for (const ps2::u8 byte : gs.vram().data()) {
@@ -1503,6 +1552,7 @@ int main(int argc, char** argv) {
     bool first_visible_reported = false;
     std::chrono::steady_clock::time_point first_visible_time{};
     std::clock_t first_visible_cpu = 0;
+    double first_visible_thread_cpu = 0.0;
     ps2::u64 first_visible_field = 0;
     std::chrono::nanoseconds run_time{};
     std::chrono::nanoseconds display_time{};
@@ -1550,6 +1600,7 @@ int main(int argc, char** argv) {
             first_visible_reported = true;
             first_visible_time = std::chrono::steady_clock::now();
             first_visible_cpu = std::clock();
+            first_visible_thread_cpu = thread_cpu_seconds();
             first_visible_field = system.video_fields_started();
             std::cerr
                 << "TRACE_FIRST_VISIBLE EE=" << (budget - remaining)
@@ -1615,6 +1666,7 @@ int main(int argc, char** argv) {
 
     const auto wall_end = std::chrono::steady_clock::now();
     const auto cpu_end = std::clock();
+    const double thread_cpu_end = thread_cpu_seconds();
     print_state(system);
     if (profile) {
         if (first_visible_reported) {
@@ -1632,6 +1684,8 @@ int main(int argc, char** argv) {
                 << (visible_seconds > 0 ? visible_fields / visible_seconds : 0.0)
                 << " PROFILE_FIELD_CPU_RATE="
                 << (visible_cpu_seconds > 0 ? visible_fields / visible_cpu_seconds : 0.0)
+                << " PROFILE_VISIBLE_MAIN_THREAD_CPU_S="
+                << (thread_cpu_end - first_visible_thread_cpu)
                 << '\n';
         }
         std::cout << "PROFILE_RUN_MS="
@@ -1897,6 +1951,8 @@ int main(int argc, char** argv) {
         << " EE_DYNAREC_DISPATCH_CALLS=" << dynarec.dispatch_calls()
         << " EE_DYNAREC_DEADLINE_EXITS=" << dynarec.deadline_exits()
         << " EE_DYNAREC_UNSUPPORTED_EXITS=" << dynarec.unsupported_exits()
+        << " EE_DYNAREC_INTERPRETED="
+        << system.ee().dynarec_interpreted_instructions()
         << '\n';
 
     auto dynarec_unsupported = dynarec.unsupported_opcodes();
