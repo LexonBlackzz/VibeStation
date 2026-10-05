@@ -897,10 +897,72 @@ void v4_pgxp_swc2(Gte *gte, u32 phys, u32 reg) {
   }
 }
 
-// Emitted after a completed SWC2 store of a screen-XY register (12..15),
-// with V4NativeState::store_phys already holding the store address. Only RAX
-// and RCX/RDX (dead at both call sites) are clobbered; R8-R11 are preserved.
-void emit_v4_pgxp_swc2(Xbyak::CodeGenerator &code, u32 reg) {
+// LWC2 PGXP bookkeeping, mirroring Cpu::op_lwc2 (GTE register already
+// written).
+void v4_pgxp_lwc2(Gte *gte, u32 phys, u32 reg) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.on_lwc2(reg, phys, gte->read_data(reg));
+  }
+}
+
+// MFC2/MTC2 PGXP bookkeeping, mirroring Cpu::op_cop2. Neither move changes
+// the GTE register afterwards, so re-reading it yields the moved value.
+void v4_pgxp_mfc2(Gte *gte, u32 reg, u32 rt) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.on_mfc2(reg, rt, gte->read_data(reg));
+  }
+}
+
+void v4_pgxp_mtc2(Gte *gte, u32 reg, u32 rt) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.on_mtc2(reg, rt, gte->read_data(reg));
+  }
+}
+
+// Calls fn(gte, reg, rt) when PGXP is enabled, for a screen-XY GTE register.
+// Preserves R8-R11; clobbers only RAX/RCX/RDX (and RDI/RSI on SysV).
+void emit_v4_pgxp_move(Xbyak::CodeGenerator &code, size_t fn, u32 reg, u32 rt) {
+  if (reg < 12u || reg > 15u) {
+    return;
+  }
+  Xbyak::Label skip;
+  code.mov(code.rax, reinterpret_cast<size_t>(&g_pgxp_enabled));
+  code.cmp(code.byte[code.rax], 0u);
+  code.je(skip);
+  code.push(code.r8);
+  code.push(code.r9);
+  code.push(code.r10);
+  code.push(code.r11);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+  code.mov(code.edx, reg);
+  code.mov(code.r8d, rt);
+#else
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+  code.mov(code.esi, reg);
+  code.mov(code.edx, rt);
+#endif
+  code.mov(code.rax, fn);
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+  code.pop(code.r9);
+  code.pop(code.r8);
+  code.L(skip);
+}
+
+// Emitted after a completed SWC2 store (or, with fn = v4_pgxp_lwc2, an LWC2
+// load) of a screen-XY register (12..15), with V4NativeState::store_phys
+// already holding the address. Calls fn(gte, phys, reg). Only RAX and
+// RCX/RDX (dead at every call site) are clobbered; R8-R11 are preserved.
+void emit_v4_pgxp_swc2(Xbyak::CodeGenerator &code, u32 reg,
+                       size_t fn = reinterpret_cast<size_t>(&v4_pgxp_swc2)) {
   if (reg < 12u || reg > 15u) {
     return;
   }
@@ -926,7 +988,7 @@ void emit_v4_pgxp_swc2(Xbyak::CodeGenerator &code, u32 reg) {
       code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
   code.mov(code.edx, reg);
 #endif
-  code.mov(code.rax, reinterpret_cast<size_t>(&v4_pgxp_swc2));
+  code.mov(code.rax, fn);
   code.call(code.rax);
 #if defined(_WIN32)
   code.add(code.rsp, 32);
@@ -2439,6 +2501,8 @@ V4NativeFn compile_v4_pending_delay_cop2_register(
     }
     emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
     code.mov(code.r8d, code.eax);
+    emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mfc2), inst.rd,
+                      inst.rt);
     emit_retire_incoming_load(code, inst.rt);
     if (inst.rt != 0u) {
       code.mov(code.dword[
@@ -2481,6 +2545,10 @@ V4NativeFn compile_v4_pending_delay_cop2_register(
             ? reinterpret_cast<size_t>(&v4_gte_write_data)
             : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
         inst.rd);
+    if (inst.op == V4Cop2Op::Mtc2) {
+      emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mtc2), inst.rd,
+                        inst.rt);
+    }
     code.mov(code.rax, code.qword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
     code.add(code.rax, code.rbx);
@@ -2702,6 +2770,7 @@ V4NativeFn compile_v4_pending_delay_cop2(
         code.rax);
     code.add(code.ebx, code.r9d);
     emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
+    emit_v4_pgxp_swc2(code, inst.rt, reinterpret_cast<size_t>(&v4_pgxp_lwc2));
     code.inc(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, memory_entries))]);
     emit_v4_finish_pending_delay(code, 2u);
@@ -2827,6 +2896,8 @@ V4NativeFn compile_v4_pending_delay_cop2(
     }
     emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
     code.mov(code.r8d, code.eax);
+    emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mfc2), inst.rd,
+                      inst.rt);
     emit_retire_incoming_load(code, inst.rt);
     if (inst.rt != 0u) {
       code.mov(code.dword[
@@ -2870,6 +2941,10 @@ V4NativeFn compile_v4_pending_delay_cop2(
             ? reinterpret_cast<size_t>(&v4_gte_write_data)
             : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
         inst.rd);
+    if (inst.op == V4Cop2Op::Mtc2) {
+      emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mtc2), inst.rd,
+                        inst.rt);
+    }
     code.mov(code.rax, code.qword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
     code.add(code.rax, code.rbx);
@@ -3256,6 +3331,8 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     }
     emit_read_call(reinterpret_cast<size_t>(&v4_gte_read_data), inst.rd);
     code.mov(code.r8d, code.eax);
+    emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mfc2), inst.rd,
+                      inst.rt);
     emit_retire_incoming_load(code, inst.rt);
     if (inst.rt != 0u) {
       code.mov(code.dword[
@@ -3297,6 +3374,10 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
             ? reinterpret_cast<size_t>(&v4_gte_write_data)
             : reinterpret_cast<size_t>(&v4_gte_write_ctrl),
         inst.rd);
+    if (inst.op == V4Cop2Op::Mtc2) {
+      emit_v4_pgxp_move(code, reinterpret_cast<size_t>(&v4_pgxp_mtc2), inst.rd,
+                        inst.rt);
+    }
     code.mov(code.rax, code.qword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, cpu_cycle_base))]);
     code.add(code.rax, code.rbx);
@@ -9586,7 +9667,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
-        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
+        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics &&
+         !g_pgxp_enabled) // PGXP memory mode tracks loads/stores in the interpreter
+            ? 1u : 0u;
     native.block_bail = 0u;
     native.memory_entries = 0u;
     native.store_entries = 0u;
@@ -9950,7 +10033,9 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     // architectural values, budgets and per-entry counters need refreshing.
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
-        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
+        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics &&
+         !g_pgxp_enabled) // PGXP memory mode tracks loads/stores in the interpreter
+            ? 1u : 0u;
     native.block_bail = 0u;
     native.memory_entries = 0u;
     native.store_entries = 0u;

@@ -943,6 +943,61 @@ bool test_pgxp_partial_match_falls_back() {
                                    v1, v2);
 }
 
+// Memory mode: precision follows a projected vertex through CPU registers,
+// RAM and the scratchpad, and stale values never inherit it.
+bool test_pgxp_memory_mode_propagation() {
+  const Pgxp::PreciseVertex near_v{10.25f, 20.75f, 2.0f};
+  const u32 value = vertex_word(10, 20);
+  constexpr u32 kPrim = 0x00012000u;      // GPU primitive word in RAM
+  constexpr u32 kScratch = 0x1F800010u;   // staging in the scratchpad
+  constexpr u32 kCopy = 0x00012100u;
+  bool ok = true;
+  auto expect = [&](const char *what, bool cond) {
+    if (!cond) {
+      std::fprintf(stderr, "[GPU TEST] FAIL pgxp memory mode: %s\n", what);
+      ok = false;
+    }
+  };
+  auto precise_at = [&](const Pgxp &p, u32 phys, u32 word) {
+    Pgxp::PreciseVertex v;
+    return p.lookup(phys, word, v) && v.x == near_v.x && v.y == near_v.y &&
+           v.w == near_v.w;
+  };
+
+  Pgxp p;
+  p.push_screen_xy(10, 20, true, near_v); // RTPS -> SXY2
+  p.on_mfc2(14u, 8u, value);              // MFC2 t0, SXY2
+  p.on_sw(8u, kScratch, value);           // SW t0 -> scratchpad
+  p.on_lw(9u, kScratch, value);           // LW t1 <- scratchpad
+  p.on_sw(9u, kPrim, value);              // SW t1 -> primitive
+  expect("MFC2 -> SW -> LW -> SW chain", precise_at(p, kPrim, value));
+
+  // MTC2 back into the GTE, then SWC2: precision survives the round trip.
+  p.push_screen_xy(0, 0, false, {});
+  p.on_mtc2(12u, 9u, value);              // MTC2 t1 -> SXY0
+  p.record_store(kCopy, 12u, value);      // SWC2 SXY0
+  expect("MTC2 -> SWC2", precise_at(p, kCopy, value));
+
+  // LWC2 from tracked RAM, then SWC2.
+  p.on_lwc2(13u, kPrim, value);
+  p.record_store(kCopy + 4u, 13u, value);
+  expect("LWC2 -> SWC2", precise_at(p, kCopy + 4u, value));
+
+  // A register that now holds a different value must not pass precision on.
+  const u32 other = vertex_word(11, 20);
+  p.on_sw(9u, kPrim + 8u, other);
+  expect("stale register ignored", !precise_at(p, kPrim + 8u, other));
+
+  // An untracked store over a tracked word must clear it.
+  p.on_sw(0u, kPrim, value);
+  expect("untracked SW clears word", !precise_at(p, kPrim, value));
+
+  if (ok) {
+    std::fprintf(stdout, "[GPU TEST] PASS pgxp memory mode propagation\n");
+  }
+  return ok;
+}
+
 // Regression for screen-position matching: a different vertex that rounds
 // to the same pixel (stored elsewhere, very different depth) must not be
 // borrowed, and neither may a slot whose word was overwritten since.
@@ -981,7 +1036,7 @@ int run_gpu_correctness_tests() {
   g_gpu_extreme_fast_mode = false;
   g_pgxp_enabled = false;
 
-  const std::array<std::pair<const char *, bool (*)()>, 14> tests = {{
+  const std::array<std::pair<const char *, bool (*)()>, 15> tests = {{
       {"flat triangle", &test_flat_triangle},
       {"flat span edge cases", &test_flat_span_edge_cases},
       {"gouraud triangle", &test_gouraud_triangle},
@@ -996,6 +1051,7 @@ int run_gpu_correctness_tests() {
       {"pgxp perspective", &test_pgxp_perspective_sampling},
       {"pgxp partial match", &test_pgxp_partial_match_falls_back},
       {"pgxp same-pixel vertex", &test_pgxp_same_pixel_other_vertex_ignored},
+      {"pgxp memory mode", &test_pgxp_memory_mode_propagation},
   }};
 
   int failed = 0;
