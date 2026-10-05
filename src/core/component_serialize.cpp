@@ -264,7 +264,10 @@ void CdRom::save_state(std::vector<u8>& buf) const {
   write_val(pending_second_.irq);
   write_vec(pending_second_.response);
 
-  write_val(static_cast<u8>(pending_async_irq_.active));
+  // Bit 1 carries allow_current_data_ready without changing the layout.
+  write_val(static_cast<u8>(
+      (pending_async_irq_.active ? 1u : 0u) |
+      (pending_async_irq_.allow_current_data_ready ? 2u : 0u)));
   write_val(static_cast<u32>(pending_async_irq_.delay));
   write_val(pending_async_irq_.irq);
   write_vec(pending_async_irq_.response);
@@ -393,7 +396,12 @@ void CdRom::restore_state(const u8*& pos, size_t& remaining) {
   read_val(pending_second_.irq);
   read_vec(pending_second_.response);
 
-  { u8 v; read_val(v); pending_async_irq_.active = v != 0; }
+  {
+    u8 v;
+    read_val(v);
+    pending_async_irq_.active = (v & 1u) != 0;
+    pending_async_irq_.allow_current_data_ready = (v & 2u) != 0;
+  }
   { u32 v; read_val(v); pending_async_irq_.delay = static_cast<int>(v); }
   read_val(pending_async_irq_.irq);
   read_vec(pending_async_irq_.response);
