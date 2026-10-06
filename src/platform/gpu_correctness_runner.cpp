@@ -786,7 +786,7 @@ bool test_texture_window_triangle() {
   return compare_vram("texture window triangle", *gpu, expected);
 }
 
-// ── PGXP ─────────────────────────────────────────────────────────────
+// â”€â”€ PGXP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Texel value encodes its U coordinate so a drawn pixel reveals which
 // texel the rasterizer sampled.
 constexpr u16 kPgxpTexpage = 0x0104u; // X page 4 (256px), 15-bit direct.
@@ -943,6 +943,52 @@ bool test_pgxp_partial_match_falls_back() {
                                    v1, v2);
 }
 
+// A triangle whose unclipped vertices are 1024+ pixels apart is not drawn at
+// all; without the check this one would leave a sliver at x = 0..509.
+bool test_oversized_triangle_rejected() {
+  auto gpu = std::make_unique<Gpu>();
+  gpu->init(nullptr);
+  gpu->reset();
+  gpu->gp0(rgb_command(0x20, 255, 255, 255)); // flat triangle
+  gpu->gp0(vertex_word(-520, 10));
+  gpu->gp0(vertex_word(510, 10));
+  gpu->gp0(vertex_word(500, 40));
+  const std::vector<u16> expected(kVramPixels, 0);
+  return compare_vram("oversized triangle rejected", *gpu, expected);
+}
+
+// Grim Reaper's geometry pulse moves a vertex of the next draw, with PGXP off
+// and on (the moved vertex must not keep its precise position).
+bool test_reaper_geometry_moves_vertex() {
+  const RefVertex v0{20, 70, 128, 128, 128, 2, 3};
+  const RefVertex v1{170, 75, 128, 128, 128, 200, 5};
+  const RefVertex v2{26, 190, 128, 128, 128, 6, 60};
+  bool ok = true;
+  for (int pgxp_on = 0; pgxp_on < 2; ++pgxp_on) {
+    Pgxp pgxp;
+    project_and_store(pgxp, v0, 2.0f, kVertexAddr[0]);
+    project_and_store(pgxp, v1, 3.0f, kVertexAddr[1]);
+    project_and_store(pgxp, v2, 4.0f, kVertexAddr[2]);
+    g_pgxp_enabled = pgxp_on != 0;
+    auto plain = make_pgxp_gpu(&pgxp);
+    draw_raw_textured_tri(*plain, v0, v1, v2,
+                          {{kVertexAddr[0], kVertexAddr[1], kVertexAddr[2]}});
+    auto mutated = make_pgxp_gpu(&pgxp);
+    mutated->set_reaper_pulse(1, 0, 0x1234567u);
+    draw_raw_textured_tri(*mutated, v0, v1, v2,
+                          {{kVertexAddr[0], kVertexAddr[1], kVertexAddr[2]}});
+    g_pgxp_enabled = false;
+    if (std::equal(plain->vram(), plain->vram() + kVramPixels,
+                   mutated->vram())) {
+      std::fprintf(stderr,
+                   "[GPU TEST] FAIL reaper geometry (pgxp=%d): no change\n",
+                   pgxp_on);
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 // Memory mode: precision follows a projected vertex through CPU registers,
 // RAM and the scratchpad, and stale values never inherit it.
 bool test_pgxp_memory_mode_propagation() {
@@ -1036,7 +1082,7 @@ int run_gpu_correctness_tests() {
   g_gpu_extreme_fast_mode = false;
   g_pgxp_enabled = false;
 
-  const std::array<std::pair<const char *, bool (*)()>, 15> tests = {{
+  const std::array<std::pair<const char *, bool (*)()>, 17> tests = {{
       {"flat triangle", &test_flat_triangle},
       {"flat span edge cases", &test_flat_span_edge_cases},
       {"gouraud triangle", &test_gouraud_triangle},
@@ -1047,6 +1093,8 @@ int run_gpu_correctness_tests() {
       {"4-bit CLUT triangle", &test_4bit_clut_triangle},
       {"8-bit CLUT triangle", &test_8bit_clut_triangle},
       {"texture window triangle", &test_texture_window_triangle},
+      {"oversized triangle rejection", &test_oversized_triangle_rejected},
+      {"reaper geometry pulse", &test_reaper_geometry_moves_vertex},
       {"pgxp equal depth", &test_pgxp_equal_depth_matches_affine},
       {"pgxp perspective", &test_pgxp_perspective_sampling},
       {"pgxp partial match", &test_pgxp_partial_match_falls_back},

@@ -19,6 +19,7 @@ struct Config {
     bool gpu_fast_mode = false;
     bool gpu_extreme_fast_mode = false;
     bool pgxp_enabled = false;
+    int gpu_upscale = 0;
     bool low_spec_mode = false;
 
     // CPU

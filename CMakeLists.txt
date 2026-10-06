@@ -111,6 +111,7 @@ set(VIBESTATION_SOURCES
     src/core/dma.cpp
     src/core/mdec.cpp
     src/core/gpu.cpp
+    src/core/gpu_hw_renderer.cpp
     src/core/gte.cpp
     src/core/cpu.cpp
     src/core/component_serialize.cpp

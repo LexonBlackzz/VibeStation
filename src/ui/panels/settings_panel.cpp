@@ -177,6 +177,24 @@ void App::panel_settings() {
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
                     "Perspective-correct textures from sub-pixel 3D vertices; reduces texture warping.");
+                {
+                    static const int kUpscaleValues[] = {0, 2, 3, 4, 6, 8};
+                    const char* upscale_names[] = {
+                        "Native (Software)", "2x (OpenGL)", "3x (OpenGL)",
+                        "4x (OpenGL)", "6x (OpenGL)", "8x (OpenGL)"
+                    };
+                    int upscale_index = 0;
+                    for (int i = 0; i < IM_ARRAYSIZE(kUpscaleValues); ++i) {
+                        if (kUpscaleValues[i] == g_gpu_upscale) {
+                            upscale_index = i;
+                        }
+                    }
+                    if (ImGui::Combo("Internal Resolution", &upscale_index,
+                            upscale_names, IM_ARRAYSIZE(upscale_names))) {
+                        g_gpu_upscale = kUpscaleValues[std::clamp(upscale_index, 0, 5)];
+                        save_persistent_config();
+                    }
+                }
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };
                 int deinterlace_index = static_cast<int>(g_deinterlace_mode);

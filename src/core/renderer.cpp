@@ -985,7 +985,7 @@ bool Renderer::render_shader_pass(
       GL_TEXTURE0);
   glBindTexture(
       GL_TEXTURE_2D,
-      texture_id_);
+      source_texture());
 
   if (s.texture_location >= 0) {
     s.Uniform1i(
@@ -1192,7 +1192,18 @@ unsigned int Renderer::get_texture_id() const {
         output_texture;
   }
 
-  return texture_id_;
+  return source_texture();
+}
+
+void Renderer::set_external_source(unsigned int texture) {
+  external_texture_ = texture;
+  if (texture == 0) {
+    return;
+  }
+  const GLint filter = bilinear_filtering_ ? GL_LINEAR : GL_NEAREST;
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
 }
 
 void Renderer::prepare_present(

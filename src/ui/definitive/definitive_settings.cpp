@@ -671,7 +671,7 @@ void App::panel_definitive_settings() {
             "Smooths the final image when scaling instead of keeping hard pixels.");
 
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 260.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 330.0f, "GPU");
 
         if (definitive_settings_switch(
             draw, layout, "video_fast_gpu", "Fast Mode",
@@ -705,6 +705,28 @@ void App::panel_definitive_settings() {
         }
         note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
             "Perspective-correct textures from sub-pixel 3D vertices; reduces warping.");
+
+        static const int kUpscaleValues[] = {0, 2, 3, 4, 6, 8};
+        const char* upscale_names[] = {
+            "Native (Software)", "2x (OpenGL)", "3x (OpenGL)", "4x (OpenGL)",
+            "6x (OpenGL)", "8x (OpenGL)"
+        };
+        int upscale_index = 0;
+        for (int i = 0; i < IM_ARRAYSIZE(kUpscaleValues); ++i) {
+            if (kUpscaleValues[i] == g_gpu_upscale) {
+                upscale_index = i;
+            }
+        }
+        if (definitive_settings_combo(
+            draw, layout, "video_upscale", "Internal Resolution",
+            right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, upscale_index, upscale_names,
+            IM_ARRAYSIZE(upscale_names))) {
+            g_gpu_upscale = kUpscaleValues[std::clamp(upscale_index, 0, 5)];
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Renders 3D at a higher resolution on the graphics card; FMVs stay native.");
         break;
     }
 

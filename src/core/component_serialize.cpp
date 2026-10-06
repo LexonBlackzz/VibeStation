@@ -888,6 +888,7 @@ void Gpu::save_state(std::vector<u8>& buf) const {
 }
 
 void Gpu::restore_state(const u8*& pos, size_t& remaining) {
+  hw_full_sync_pending_ = true; // VRAM is replaced wholesale
   auto read = [&](void* dest, size_t size) {
     std::memcpy(dest, pos, size);
     pos += size;
