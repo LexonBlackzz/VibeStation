@@ -41,6 +41,62 @@ const char* short_bios_target_name(int index) {
     }
 }
 
+// The byte engine picker shared by the BIOS and RAM styles. Returns true on change.
+bool draw_engine_controls(GrimByteEngine& e) {
+    bool changed = false;
+    ImGui::TextUnformatted("ENGINE");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##byte_engine", grim_byte_op_name(e.op))) {
+        for (int i = 0; i < static_cast<int>(GrimByteOp::Count); ++i) {
+            const GrimByteOp op = static_cast<GrimByteOp>(i);
+            if (ImGui::Selectable(grim_byte_op_name(op), op == e.op)) {
+                e.op = op;
+                if (grim_byte_op_is_shift(op)) {
+                    e.value = static_cast<u8>(std::clamp<int>(e.value, 1, 7));
+                }
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", grim_byte_op_help(op));
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", grim_byte_op_help(e.op));
+    ImGui::PopStyleColor();
+    if (grim_byte_op_is_shift(e.op)) {
+        int bits = std::clamp<int>(e.value, 1, 7);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("##engine_bits", &bits, 1, 7, "%d bit(s)")) {
+            e.value = static_cast<u8>(bits);
+            changed = true;
+        }
+    } else if (grim_byte_op_uses_value(e.op)) {
+        const float field = 64.0f;
+        ImGui::AlignTextToFramePadding();
+        if (e.op == GrimByteOp::Replace) {
+            ImGui::TextUnformatted("Replace");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(field);
+            changed |= ImGui::InputScalar("##engine_match", ImGuiDataType_U8, &e.match, nullptr, nullptr,
+                                          "%02X", ImGuiInputTextFlags_CharsHexadecimal);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("with");
+        }
+        else {
+            ImGui::TextUnformatted("N");
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(field);
+        changed |= ImGui::InputScalar("##engine_value", ImGuiDataType_U8, &e.value, nullptr, nullptr, "%02X",
+                                      ImGuiInputTextFlags_CharsHexadecimal);
+        ImGui::SameLine();
+        ImGui::TextDisabled("hex");
+    }
+    return changed;
+}
+
 const char* preset_type_for_style(int style) {
     switch (style) {
     case 0: return "grim-single";
@@ -699,10 +755,42 @@ void App::panel_definitive_grim_reaper() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    if (style <= 1) {
+        draw_engine_controls(grim_engine_);
+        ImGui::Spacing();
+    }
+    else if (style == 2) {
+        if (draw_engine_controls(ram_reaper_engine_) && ram_reaper_enabled_) {
+            sync_ram_reaper_config();
+        }
+        ImGui::Spacing();
+    }
+
     // Contextual strength.
     ImGui::TextUnformatted("STRENGTH");
 
-    if (style == 0) {
+    if (style <= 1) {
+        // Where hits land: random positions (the original) or every Nth byte.
+        bool every = grim_every_ > 0;
+        if (ImGui::RadioButton("Random strike", !every)) {
+            grim_every_ = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Every Nth byte", every)) {
+            grim_every_ = std::max(grim_every_, 256);
+        }
+        if (grim_every_ > 0) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputInt("##every_n", &grim_every_, 1, 64);
+            grim_every_ = std::clamp(grim_every_, 1, 1 << 20);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Hits byte start, start + %d, start + %d, ... up to the end.",
+                grim_every_, grim_every_ * 2);
+            ImGui::PopStyleColor();
+        }
+    }
+
+    if (style == 0 && grim_every_ == 0) {
         const float max_strength =
             grim_reaper_area_index_ == 0
                 ? 0.1f
@@ -722,7 +810,12 @@ void App::panel_definitive_grim_reaper() {
     }
     else if (style == 1) {
         ImGui::TextDisabled(
-            "Batch mode keeps one strength per selected BIOS range.");
+            grim_every_ > 0
+                ? "Every Nth byte applies to each selected range."
+                : "Batch mode keeps one strength per selected BIOS range.");
+    }
+    else if (style == 0) {
+        // Every Nth byte: the step is the strength.
     }
     else if (style == 2) {
         ImGui::SetNextItemWidth(-1.0f);
@@ -785,6 +878,17 @@ void App::panel_definitive_grim_reaper() {
                 }
             }
             ImGui::EndCombo();
+        }
+        if (grim_reaper_area_index_ == kGrimReaperRangeCount - 1) {
+            const float half = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
+            ImGui::SetNextItemWidth(half);
+            ImGui::InputTextWithHint("##custom_start", "start (hex)", grim_reaper_custom_start_hex_,
+                IM_ARRAYSIZE(grim_reaper_custom_start_hex_), ImGuiInputTextFlags_CharsHexadecimal);
+            ImGui::SameLine(0.0f, 8.0f);
+            ImGui::SetNextItemWidth(half);
+            ImGui::InputTextWithHint("##custom_end", "end (hex, 0 = last)", grim_reaper_custom_end_hex_,
+                IM_ARRAYSIZE(grim_reaper_custom_end_hex_), ImGuiInputTextFlags_CharsHexadecimal);
+            ImGui::TextDisabled("Byte offsets in the BIOS file, inclusive.");
         }
     }
     else if (style == 1) {
@@ -1059,20 +1163,6 @@ void App::panel_definitive_grim_reaper() {
                     "Seed",
                     ImGuiDataType_U64,
                     &grim_seed_);
-            }
-
-            if (grim_reaper_area_index_ ==
-                kGrimReaperRangeCount - 1) {
-                ImGui::InputText(
-                    "Custom Start (hex)",
-                    grim_reaper_custom_start_hex_,
-                    IM_ARRAYSIZE(
-                        grim_reaper_custom_start_hex_));
-                ImGui::InputText(
-                    "Custom End (hex)",
-                    grim_reaper_custom_end_hex_,
-                    IM_ARRAYSIZE(
-                        grim_reaper_custom_end_hex_));
             }
 
             if (ImGui::Checkbox(

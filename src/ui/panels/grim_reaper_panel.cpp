@@ -41,6 +41,9 @@ namespace {
         bool grim_has_seed = false;
         std::string custom_start_hex;
         std::string custom_end_hex;
+        // Byte engine (absent in older presets: the original random bytes).
+        GrimByteEngine engine;
+        u32 every = 0;
         bool intro_enabled = false;
         bool charset_enabled = false;
         bool end_enabled = false;
@@ -155,6 +158,15 @@ namespace {
         return out;
     }
 
+    void write_engine(std::ostream& out, const GrimByteEngine& engine, int every) {
+        out << "engine=" << grim_byte_op_key(engine.op) << "\n";
+        out << "engine_value=" << static_cast<unsigned>(engine.value) << "\n";
+        out << "engine_match=" << static_cast<unsigned>(engine.match) << "\n";
+        if (every > 0) {
+            out << "every=" << every << "\n";
+        }
+    }
+
     std::filesystem::path ensure_corruption_preset_dir() {
         const std::filesystem::path dir = std::filesystem::current_path() /
             kCorruptionPresetDirName;
@@ -226,6 +238,24 @@ namespace {
                 }
                 else if (key == "custom_start") {
                     parsed.custom_start_hex = value;
+                }
+                else if (key == "engine") {
+                    grim_byte_op_from_key(value, parsed.engine.op);
+                }
+                else if (key == "engine_value") {
+                    u32 v = 0;
+                    if (parse_u32_value(value, v)) {
+                        parsed.engine.value = static_cast<u8>(std::min<u32>(v, 255u));
+                    }
+                }
+                else if (key == "engine_match") {
+                    u32 v = 0;
+                    if (parse_u32_value(value, v)) {
+                        parsed.engine.match = static_cast<u8>(std::min<u32>(v, 255u));
+                    }
+                }
+                else if (key == "every") {
+                    parse_u32_value(value, parsed.every);
                 }
                 else if (key == "custom_end") {
                     parsed.custom_end_hex = value;
@@ -967,6 +997,7 @@ bool App::save_current_grim_preset(bool batch_mode) {
     if (batch_mode) {
         out << "type=grim_batch\n";
         out << "name=" << stem << "\n";
+        write_engine(out, grim_engine_, grim_every_);
         if (grim_batch_intro_enabled_) {
             out << "intro(\n";
             out << "seed=" << grim_batch_intro_seed_ << "\n";
@@ -989,6 +1020,7 @@ bool App::save_current_grim_preset(bool batch_mode) {
     else {
         out << "type=grim_single\n";
         out << "name=" << stem << "\n";
+        write_engine(out, grim_engine_, grim_every_);
         out << "area=" << kGrimReaperRanges[grim_reaper_area_index_].slug << "\n";
         out << "seed=" << grim_seed_ << "\n";
         out << "randstrike=" << grim_reaper_random_percent_ << "\n";
@@ -1022,6 +1054,7 @@ bool App::save_current_ram_preset() {
     out << std::fixed << std::setprecision(3);
     out << "type=ram_reaper\n";
     out << "name=" << stem << "\n";
+    write_engine(out, ram_reaper_engine_, 0);
     out << "enabled=" << (ram_reaper_enabled_ ? 1 : 0) << "\n";
     out << "intensity=" << ram_reaper_intensity_percent_ << "\n";
     out << "writes_per_frame=" << ram_reaper_writes_per_frame_ << "\n";
@@ -1139,6 +1172,8 @@ bool App::load_corruption_preset(const std::filesystem::path& path) {
             grim_reaper_area_index_ = kGrimReaperRangeCount - 1;
         }
         grim_reaper_random_percent_ = preset.grim_randstrike;
+        grim_engine_ = preset.engine;
+        grim_every_ = static_cast<int>(std::min<u32>(preset.every, 1u << 20));
         grim_use_custom_seed_ = preset.grim_has_seed;
         grim_seed_ = preset.grim_seed;
         if (!preset.custom_start_hex.empty()) {
@@ -1158,6 +1193,8 @@ bool App::load_corruption_preset(const std::filesystem::path& path) {
         grim_batch_charset_enabled_ = preset.charset_enabled;
         grim_batch_end_enabled_ = preset.end_enabled;
         grim_batch_intro_percent_ = preset.intro_randstrike;
+        grim_engine_ = preset.engine;
+        grim_every_ = static_cast<int>(std::min<u32>(preset.every, 1u << 20));
         grim_batch_charset_percent_ = preset.charset_randstrike;
         grim_batch_end_percent_ = preset.end_randstrike;
         grim_batch_intro_seed_ = preset.intro_seed;
@@ -1178,6 +1215,7 @@ bool App::load_corruption_preset(const std::filesystem::path& path) {
         ram_reaper_range_end_ = preset.ram_range_end;
         ram_reaper_use_custom_seed_ = preset.ram_has_seed;
         ram_reaper_seed_ = preset.ram_seed;
+        ram_reaper_engine_ = preset.engine;
         sync_ram_reaper_config();
     }
     else if (preset.type == ParsedCorruptionPreset::Type::GpuReaper) {

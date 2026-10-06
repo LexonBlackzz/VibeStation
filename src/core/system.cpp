@@ -2412,7 +2412,8 @@ void System::apply_ram_reaper_for_frame() {
         if (target_main) {
             if (cursor == target_index) {
                 const u32 offset = addr_dist(ram_reaper_rng_);
-                ram_.write8(offset, static_cast<u8>(byte_dist(ram_reaper_rng_)));
+                const u32 random = byte_dist(ram_reaper_rng_);
+                ram_.write8(offset, grim_byte_apply(cfg.engine, ram_.read8(offset), random));
                 cpu_.notify_code_write(offset, 1);
                 ++mutations;
                 continue;
@@ -2421,8 +2422,12 @@ void System::apply_ram_reaper_for_frame() {
         }
         if (target_vram) {
             if (cursor == target_index) {
-                gpu_.corrupt_vram_word(vram_dist(ram_reaper_rng_),
-                    static_cast<u16>(ram_reaper_rng_() & 0xFFFFu));
+                const u32 index = vram_dist(ram_reaper_rng_);
+                const u32 random = ram_reaper_rng_() & 0xFFFFu;
+                const u16 old = gpu_.vram()[index];
+                gpu_.corrupt_vram_word(index, static_cast<u16>(
+                    grim_byte_apply(cfg.engine, static_cast<u8>(old), random) |
+                    (grim_byte_apply(cfg.engine, static_cast<u8>(old >> 8), random >> 8) << 8)));
                 ++mutations;
                 continue;
             }
@@ -2430,8 +2435,10 @@ void System::apply_ram_reaper_for_frame() {
         }
         if (target_spu) {
             if (cursor == target_index) {
-                spu_.corrupt_ram_byte(spu_dist(ram_reaper_rng_),
-                    static_cast<u8>(byte_dist(ram_reaper_rng_)));
+                const u32 offset = spu_dist(ram_reaper_rng_);
+                const u32 random = byte_dist(ram_reaper_rng_);
+                spu_.corrupt_ram_byte(offset,
+                    grim_byte_apply(cfg.engine, spu_.spu_ram_data()[offset], random));
                 ++mutations;
                 continue;
             }

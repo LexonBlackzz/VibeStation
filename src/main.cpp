@@ -4048,6 +4048,10 @@ int main(int argc, char *argv[]) {
       g_experimental_dma_command_sanitizer = true;
       continue;
     }
+    if (a == "--open-grim-reaper") {
+      g_cli_open_grim_reaper = true;
+      continue;
+    }
     if (a == "--genome" && (i + 1) < args.size() &&
         (passthrough.empty() || passthrough[0].rfind("--grim-", 0) != 0)) {
       // GUI playback of a Grim Reaper genome. The --grim-* modes take their

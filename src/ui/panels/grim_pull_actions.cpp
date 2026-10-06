@@ -224,15 +224,39 @@ void App::grim_pull_update() {
 }
 
 bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
+    return grim_pull_start(genome, std::vector<char>(genome.genes.size(), 1), pull_number);
+}
+
+bool App::grim_pull_start(const GrimGenome& full, const std::vector<char>& on, u64 pull_number) {
     GrimPullState& s = grim_pull_state();
     if (!system_ || !system_->bios_loaded() || bios_path_.empty()) {
         s.message = "Load a BIOS first.";
         return false;
     }
+    // The machine runs the genes that are switched on; the full genome stays for toggling.
+    GrimGenome running = full;
+    running.genes.clear();
+    std::vector<size_t> index;
+    for (size_t i = 0; i < full.genes.size(); ++i) {
+        if (i >= on.size() || on[i] != 0) {
+            running.genes.push_back(full.genes[i]);
+            index.push_back(i);
+        }
+    }
+    if (running.genes.empty()) {
+        s.message = "Switch on at least one gene.";
+        return false;
+    }
     std::string err;
-    if (!grim_pull_compatible(genome, s.bios_hash, err)) {
+    if (!grim_pull_compatible(running, s.bios_hash, err)) {
         s.message = err;
         return false;
+    }
+    // Copies: `full` and `on` may be the state's own fields, which release() keeps.
+    const GrimGenome full_copy = full;
+    std::vector<char> mask(full.genes.size(), 1);
+    for (size_t i = 0; i < mask.size() && i < on.size(); ++i) {
+        mask[i] = on[i] != 0 ? 1 : 0;
     }
 
     emu_runner_.pause_and_wait_idle();
@@ -248,7 +272,7 @@ bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
         emu_runner_.set_running(true);
         return false;
     }
-    auto runtime = std::make_unique<GrimGenomeRuntime>(genome);
+    auto runtime = std::make_unique<GrimGenomeRuntime>(running);
     system_->set_grim_genome(runtime.get());
     s.runtime = std::move(runtime); // the old runtime is no longer referenced
     has_started_emulation_ = false;
@@ -265,25 +289,70 @@ bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
         return false;
     }
 
-    s.genome = genome;
+    s.genome = full_copy;
+    s.gene_on = mask;
+    s.running = std::move(running);
+    s.running_on = mask;
+    s.running_index = std::move(index);
     s.pull = pull_number;
-    s.machine_id = grim_machine_id(genome);
+    s.machine_id = grim_machine_id(s.running);
     GrimPullContext ctx;
     ctx.rom = s.rom.get();
     ctx.sample = s.sample.get();
     ctx.bios_hash = s.bios_hash;
-    s.lines = grim_pull_describe(genome, ctx);
+    s.lines = grim_pull_describe(s.genome, ctx);
     s.lines_fps = 60;
     s.has_machine = true;
     s.outcome_saved = false;
+    s.recipe_open = false; // the machine and its genome take the room now
     s.status = GrimLiveStatus{};
     s.message.clear();
 
-    s.watch = std::make_unique<GrimLiveWatch>(&s.genome, grim_live_config(system_->disc_loaded()));
+    s.watch = std::make_unique<GrimLiveWatch>(&s.running, grim_live_config(system_->disc_loaded()));
     s.watch->attach(*system_);
     emu_runner_.set_grim_watch(s.watch.get());
     emu_runner_.set_running(true);
     status_message_ = "Pull " + s.machine_id + " booted.";
+    return true;
+}
+
+bool App::grim_pull_revive() {
+    GrimPullState& s = grim_pull_state();
+    if (s.genome.genes.empty()) {
+        return false;
+    }
+    if (s.gene_on == s.running_on || s.running.genes.empty()) {
+        return grim_pull_start(s.genome, s.gene_on, s.pull);
+    }
+    // A different gene mask is a different machine: it gets its own pull and history entry.
+    GrimGenome variant = s.genome;
+    variant.genes.clear();
+    size_t off = 0;
+    for (size_t i = 0; i < s.genome.genes.size(); ++i) {
+        if (s.gene_on[i] != 0) {
+            variant.genes.push_back(s.genome.genes[i]);
+        } else {
+            ++off;
+        }
+    }
+    if (variant.genes.empty()) {
+        s.message = "Switch on at least one gene.";
+        return false;
+    }
+    GrimPullEntry e;
+    e.genome = grim_genome_serialize(variant);
+    e.genome_hash = grim_genome_hash(variant);
+    e.families = s.settings.families;
+    e.intensity = s.settings.intensity;
+    e.rot = s.settings.rot;
+    e.note = grim_machine_id(s.genome) + " without " + std::to_string(off) + (off == 1 ? " gene" : " genes");
+    const u64 pull = s.library.add(e);
+    grim_pull_save_library();
+    if (!grim_pull_start(s.genome, s.gene_on, pull)) {
+        s.library.update(pull, true, "boot_failed", "Did not boot", 0.0);
+        grim_pull_save_library();
+        return false;
+    }
     return true;
 }
 
@@ -395,6 +464,7 @@ void App::grim_pull_release() {
     }
     s.runtime.reset();
     s.has_machine = false;
+    s.recipe_open = true;
     s.status = GrimLiveStatus{};
     s.rerolls = 0;
     set_grim_reaper_mode(false);

@@ -1,5 +1,6 @@
 #pragma once
 #include "bios.h"
+#include "grim_classic.h"
 #include "cdrom.h"
 #include "cpu.h"
 #include "dma.h"
@@ -39,6 +40,7 @@ public:
     bool affect_spu_ram = true;
     bool use_custom_seed = false;
     u64 seed = 1;
+    GrimByteEngine engine; // what each hit byte becomes (Random = the original reaper)
   };
 
   struct GpuReaperConfig {

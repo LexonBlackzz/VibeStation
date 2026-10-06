@@ -22,6 +22,9 @@ struct ImGuiContext;
 struct HostWindow;
 typedef void* SDL_GLContext;
 
+// --open-grim-reaper: skip the launcher intro and open the Grim Reaper page (testing).
+extern bool g_cli_open_grim_reaper;
+
 class App {
 public:
 	void set_input_recorder_config(const InputRecorder::Config& config);
@@ -235,6 +238,9 @@ private:
 	bool grim_use_custom_seed_ = false;
 	u64 grim_seed_ = 1u;
 	u64 grim_last_used_seed_ = 0u;
+	// Classic BIOS engine: what each hit byte becomes, and where hits land (0 = random strike).
+	GrimByteEngine grim_engine_;
+	int grim_every_ = 0;
 	bool ram_reaper_enabled_ = false;
 	u32 ram_reaper_writes_per_frame_ = 64u;
 	float ram_reaper_intensity_percent_ = 35.0f;
@@ -245,6 +251,7 @@ private:
 	u32 ram_reaper_range_end_ = psx::RAM_SIZE - 1u;
 	bool ram_reaper_use_custom_seed_ = false;
 	u64 ram_reaper_seed_ = 1u;
+	GrimByteEngine ram_reaper_engine_;
 	u64 ram_reaper_active_seed_ = 0u;
 	u64 ram_reaper_total_mutations_ = 0;
 	bool gpu_reaper_enabled_ = false;
@@ -391,6 +398,8 @@ private:
 	bool grim_pull_paste_code(const std::string& text);
 	bool grim_pull_new();
 	bool grim_pull_boot(const GrimGenome& genome, u64 pull_number);
+	bool grim_pull_start(const GrimGenome& full, const std::vector<char>& on, u64 pull_number);
+	bool grim_pull_revive();
 	bool grim_pull_boot_entry(u64 pull_number);
 	void grim_pull_keep(u64 pull_number, bool keep);
 	void grim_pull_start_mapping();

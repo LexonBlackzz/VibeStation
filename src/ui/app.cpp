@@ -931,6 +931,8 @@ void App::process_events(bool& quit) {
     }
 }
 
+bool g_cli_open_grim_reaper = false;
+
 void App::update() {
     input_->update();
     if (system_) {
@@ -943,6 +945,11 @@ void App::update() {
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
+    if (g_cli_open_grim_reaper) {
+        g_cli_open_grim_reaper = false;
+        skip_definitive_startup();
+        open_definitive_grim_reaper();
+    }
     grim_pull_update();
     if (system_) {
         system_->cdrom().set_bad_modchip(bad_modchip_enabled_);

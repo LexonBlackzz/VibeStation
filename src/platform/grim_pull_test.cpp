@@ -2,6 +2,7 @@
 #include "grim_eval_runner.h"
 #include "core/bios.h"
 #include "core/grim_audibility.h"
+#include "core/grim_classic.h"
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
 #include "core/grim_library.h"
@@ -22,6 +23,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <thread>
 
@@ -192,6 +194,82 @@ void plan_tests() {
 }
 
 u32 gene_family(const GrimGene &g) { return grim_gene_family(g.type); }
+
+// Classic byte engines (BIOS-free).
+void classic_tests() {
+  using O = GrimByteOp;
+  const auto ap = [](O op, u8 old, u8 n, u8 match = 0) {
+    GrimByteEngine e;
+    e.op = op;
+    e.value = n;
+    e.match = match;
+    return grim_byte_apply(e, old, 0xA5u);
+  };
+  check(ap(O::Random, 0x00, 1) == 0xA5 && ap(O::Add, 0xFF, 2) == 0x01 && ap(O::Subtract, 0x01, 2) == 0xFF &&
+            ap(O::Replace, 0x10, 0x99, 0x10) == 0x99 && ap(O::Replace, 0x11, 0x99, 0x10) == 0x11 &&
+            ap(O::ShiftLeft, 0x81, 1) == 0x02 && ap(O::ShiftRight, 0x81, 1) == 0x40 &&
+            ap(O::RotateLeft, 0x81, 1) == 0x03 && ap(O::RotateRight, 0x81, 1) == 0xC0 &&
+            ap(O::Xor, 0xF0, 0xFF) == 0x0F && ap(O::And, 0xF3, 0x0F) == 0x03 && ap(O::Or, 0xF0, 0x0F) == 0xFF &&
+            ap(O::Invert, 0x0F, 0) == 0xF0 && ap(O::Set, 0x12, 0x34) == 0x34,
+        "classic_engine_ops");
+  bool keys = true;
+  for (int i = 0; i < static_cast<int>(O::Count); ++i) {
+    O back = O::Random;
+    keys = keys && grim_byte_op_from_key(grim_byte_op_key(static_cast<O>(i)), back) && back == static_cast<O>(i);
+  }
+  check(keys, "classic_engine_preset_keys_round_trip");
+
+  // Every Nth byte: exactly start, start+N, ... <= end, nothing else.
+  std::vector<u8> d(4096, 0);
+  GrimByteSweep every;
+  every.start = 100;
+  every.end = 1000;
+  every.every = 100;
+  GrimByteEngine set;
+  set.op = O::Set;
+  set.value = 7;
+  const size_t n = grim_byte_corrupt(d.data(), d.size(), every, set, 1);
+  bool exact = n == 10;
+  for (size_t i = 0; i < d.size(); ++i) {
+    exact = exact && (d[i] == 7) == (i >= 100 && i <= 1000 && (i - 100) % 100 == 0);
+  }
+  check(exact, "classic_every_nth_hits_exactly_the_stride", std::to_string(n));
+
+  // The Random engine with a random strike is the original Classic reaper, draw for draw.
+  std::vector<u8> a(8192), b(8192);
+  for (size_t i = 0; i < a.size(); ++i) a[i] = b[i] = static_cast<u8>(i * 31u);
+  {
+    std::mt19937 rng;
+    std::seed_seq seq{0x89ABCDEFu, 0x01234567u, 0x9E3779B9u, 0x243F6A88u};
+    rng.seed(seq);
+    for (size_t k = 0; k < 300; ++k) {
+      const size_t idx = 512 + (static_cast<size_t>(rng()) % 4096);
+      a[idx] = static_cast<u8>(rng() & 0xFFu);
+    }
+  }
+  GrimByteSweep strike;
+  strike.start = 512;
+  strike.end = 512 + 4095;
+  strike.strikes = 300;
+  grim_byte_corrupt(b.data(), b.size(), strike, GrimByteEngine{}, 0x0123456789ABCDEFull);
+  check(a == b, "classic_random_strike_matches_old_reaper");
+  // The same positions, other engine: XOR touches only bytes the Random strike touched.
+  std::vector<u8> c(8192);
+  for (size_t i = 0; i < c.size(); ++i) c[i] = static_cast<u8>(i * 31u);
+  GrimByteEngine x;
+  x.op = O::Xor;
+  x.value = 0xFF;
+  grim_byte_corrupt(c.data(), c.size(), strike, x, 0x0123456789ABCDEFull);
+  bool same_spots = true;
+  for (size_t i = 0; i < c.size(); ++i) {
+    const u8 base = static_cast<u8>(i * 31u);
+    same_spots = same_spots && (c[i] == base || i >= 512);
+    same_spots = same_spots && (i < 512 || i > 4607 ? c[i] == base : true);
+  }
+  check(same_spots, "classic_engines_stay_inside_the_range");
+  check(grim_byte_corrupt(c.data(), c.size(), GrimByteSweep{9000, 9999, 0, 5}, x, 1) == 0,
+        "classic_range_outside_data_is_a_no_op");
+}
 
 void share_tests(const GrimPullContext &ctx) {
   const GrimGenome g = grim_pull_generate(77, GrimPullSettings{}, ctx, nullptr);
@@ -970,6 +1048,7 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
     mercy_and_death_text_tests();
     library_tests(o.backend);
     share_tests(none);
+    classic_tests();
     hardware_tests(none);
     std::printf("GRIM_PULL_TEST %s failures=%d backend=%s\n", failures == 0 ? "ALL_PASS" : "FAILED",
                 failures, o.backend.c_str());
@@ -1000,6 +1079,7 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
   library_tests(o.backend);
   culprit_tests(o);
   share_tests(ctx);
+  classic_tests();
   hardware_tests(ctx);
   dma_loop_test(o);
   live_tests(o, ctx, rom.words);

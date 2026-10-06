@@ -31,6 +31,23 @@ Older phase records moved to `history/` (Appendix A-E = phase-1 .. phase-4.1).
 - **CI:** Linux runs `--grim-gene-test`, `--grim-audibility-test --unit-only` and
   `--grim-pull-test` without a BIOS (51 checks).
 
+Second pass the same day (looked at on screen this time, via `--open-grim-reaper`):
+
+- **Panel redesign.** Machine card first (alive: ID, time, family dots; dead: cause, detail,
+  likely culprit with "Revive without it"; idle: hint). New Corruption with Revive beside it, then
+  Keep / Clean / Copy code / Paste code as real buttons. Colours come from the user's theme (ImGui
+  style; the primary button follows the theme accent); only family and alive/dead colours are fixed.
+  The Recipe (intensity with risk-band track, families, Rot and Mercy switches) folds away while a
+  machine runs. History chips show machine ID and lifetime. Back button kept (host page).
+- **Per-gene switches.** The machine keeps its whole genome plus a mask. Revive boots the genes
+  that are on; a changed mask becomes a new pull whose note says what it came from
+  ("#4BC4 without 1 gene"). The dead card's culprit button switches that gene off and revives.
+- **Classic engines** (`src/core/grim_classic.*`): Random, Add, Subtract, Replace X with Y, Shift
+  left/right, Rotate left/right, XOR, AND, OR, Invert, Set, for the BIOS (single and batch) and RAM
+  reapers. BIOS hits land by random strike (as before) or every Nth byte. The Random engine with a
+  random strike draws exactly like the old reaper, so old seeds and presets reproduce. Presets save
+  `engine`, `engine_value`, `engine_match`, `every`. The custom hex range is shown inline.
+
 Yield (`--grim-pull-yield`, 40 pulls per level, 900 frames, no disc, SCPH-1001, new map):
 
 | Families | Intensity | Alive | Dead | Survived+audible | Survived+inaudible |

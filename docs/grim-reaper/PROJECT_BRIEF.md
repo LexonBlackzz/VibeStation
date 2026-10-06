@@ -374,3 +374,11 @@ Lexon's machine, so read it if you can.
   share codes, hardware fake target); Linux CI runs it with the gene and audibility unit tests.
   Its default map is now `docs/grim-reaper/maps/scph1001_phase51_nodisc_1800.json` (local, make
   it with `--grim-map <bios> 1800 <that path>`).
+- Panel: `definitive_grim_pull.cpp` builds its `Palette` from the ImGui style each frame (theme);
+  `Card` helpers draw backgrounds after content (draw-list channels). Mask state lives in
+  `GrimPullState::{genome, gene_on, running, running_on, running_index}`; `App::grim_pull_start`
+  boots `genome` filtered by a mask, `grim_pull_revive` re-boots (a new mask = a new library entry).
+  The watch judges `running`, so death culprits map back through `running_index`.
+- Classic engines: `grim_byte_corrupt()` / `grim_byte_apply()` (`src/core/grim_classic.*`);
+  `App::grim_engine_`, `grim_every_` (BIOS), `ram_reaper_engine_` -> `RamReaperConfig::engine`.
+- `--open-grim-reaper` (GUI): skips the intro and opens the page, for testing and screenshots.

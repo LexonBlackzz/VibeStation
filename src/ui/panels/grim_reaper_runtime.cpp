@@ -15,6 +15,7 @@ void App::sync_ram_reaper_config() {
     cfg.affect_spu_ram = ram_reaper_affect_spu_ram_;
     cfg.use_custom_seed = ram_reaper_use_custom_seed_;
     cfg.seed = ram_reaper_seed_;
+    cfg.engine = ram_reaper_engine_;
     system_->set_ram_reaper_config(cfg);
     ram_reaper_active_seed_ = system_->ram_reaper_last_seed();
     ram_reaper_total_mutations_ = system_->ram_reaper_total_mutations();

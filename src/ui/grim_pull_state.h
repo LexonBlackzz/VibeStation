@@ -40,10 +40,16 @@ struct GrimPullState {
   std::string map_error;
   double map_started = 0.0;
 
-  // The machine on screen.
+  // The machine on screen. `genome` is the whole pull; `gene_on` is the user's per-gene
+  // switch (applied by Revive). `running` is what the machine actually runs: the genes
+  // that were on at boot (`running_on`), `running_index` maps them back into `genome`.
   bool has_machine = false;
   u64 pull = 0;
   GrimGenome genome;
+  std::vector<char> gene_on;
+  GrimGenome running;
+  std::vector<char> running_on;
+  std::vector<size_t> running_index;
   std::string machine_id;
   std::vector<GrimGeneLine> lines;
   u32 lines_fps = 0; // frame rate the trigger times in `lines` were written for
@@ -52,6 +58,9 @@ struct GrimPullState {
   GrimLiveStatus status;
   bool outcome_saved = false; // the death (or survival) is recorded in the library
   u32 rerolls = 0;            // pulls Mercy replaced silently since the last shown one
+
+  bool recipe_open = true;  // the Recipe section; folds away while a machine runs
+  bool kept_open = false;   // the Kept list under Last pulls
 
   std::string message;
 };
