@@ -9996,6 +9996,38 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       break;
     }
 
+    // Memory instrumentation (PGXP memory mode, RAM/bus tracing) observes
+    // every load and store, which only the interpreter does. The native
+    // dispatcher refuses memory blocks while it is on, so run this block's
+    // instructions through Cpu::step() and come back to native code after.
+    if (block->has_memory &&
+        (g_pgxp_enabled || g_trace_ram || g_trace_bus ||
+         g_ram_watch_diagnostics)) {
+      // A cold compile above may already have filled the I-cache line; that
+      // fetch belongs to the first instruction, which Cpu::step() will now
+      // find cached.
+      cpu_.cycles_ += cpp_refill_cycles;
+      result.cycles += cpp_refill_cycles;
+      bool boundary = false;
+      for (u32 k = 0; k < block->instruction_count &&
+                      result.cycles < max_cycles &&
+                      result.instructions < max_instructions;
+           ++k) {
+        result.cycles += cpu_.step();
+        ++result.instructions;
+        ++stats_.fallback_instructions;
+        ++stats_.interpreter_fallback_steps;
+        if (cpu_.sys_ != nullptr && cpu_.sys_->cpu_timing_boundary_requested()) {
+          boundary = true;
+          break;
+        }
+      }
+      if (boundary) {
+        break;
+      }
+      continue;
+    }
+
     // A cold I-cache fetch can consume the final scheduler cycles before the
     // current architectural instruction executes. Cpu::step() still finishes
     // that one instruction, so preserve the same contract with a one-cycle
@@ -10158,6 +10190,20 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
         // return to the scheduler without diagnosing a semantic bailout.
         ++stats_.budget_exits;
         break;
+      }
+      if ((native.memory_exits != 0u || native.bail_exits != 0u) &&
+          native.memory_fastpath_allowed == 0u) {
+        // Memory instrumentation is on (see the block check above): a load
+        // or store the native code could not take, e.g. in a branch delay
+        // slot. That one instruction runs in the interpreter.
+        result.cycles += cpu_.step();
+        ++result.instructions;
+        ++stats_.fallback_instructions;
+        ++stats_.interpreter_fallback_steps;
+        if (cpu_.sys_ != nullptr && cpu_.sys_->cpu_timing_boundary_requested()) {
+          break;
+        }
+        continue;
       }
       LOG_ERROR(
           "CPU: native zero-progress dispatch pc=0x%08X cycles=%u/%u "
