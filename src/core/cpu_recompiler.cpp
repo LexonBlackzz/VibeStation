@@ -1000,6 +1000,70 @@ void emit_v4_pgxp_swc2(Xbyak::CodeGenerator &code, u32 reg,
   code.L(skip);
 }
 
+// LW/SW PGXP bookkeeping, mirroring Cpu::op_lw / Cpu::op_sw (memory mode).
+void v4_pgxp_lw(Gte *gte, u32 rt, u32 phys, u32 value) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.on_lw(rt, phys, value);
+  }
+}
+
+void v4_pgxp_sw(Gte *gte, u32 rt, u32 phys, u32 value) {
+  if (gte != nullptr && g_pgxp_enabled) {
+    gte->pgxp.on_sw(rt, phys, value);
+  }
+}
+
+// Emitted right after a native RAM/scratchpad word access, where EDX holds
+// the offset into that region and R8D the loaded or stored value. Calls
+// fn(gte, rt, EDX + phys_base, R8D) when PGXP is enabled. Clobbers only RAX;
+// RCX/RDX and R8-R11 are preserved for the code that follows.
+void emit_v4_pgxp_word(Xbyak::CodeGenerator &code, size_t fn, u32 rt,
+                       u32 phys_base) {
+  if (rt == 0u) {
+    return;
+  }
+  Xbyak::Label skip;
+  code.mov(code.rax, reinterpret_cast<size_t>(&g_pgxp_enabled));
+  code.cmp(code.byte[code.rax], 0u);
+  code.je(skip);
+  // Six pushes plus the shadow space keep the stack alignment unchanged.
+  code.push(code.rcx);
+  code.push(code.rdx);
+  code.push(code.r8);
+  code.push(code.r9);
+  code.push(code.r10);
+  code.push(code.r11);
+  code.lea(code.eax, code.ptr[code.rdx + static_cast<int>(phys_base)]);
+#if defined(_WIN32)
+  code.sub(code.rsp, 32);
+  code.mov(code.r9d, code.r8d);  // value
+  code.mov(code.r8d, code.eax);  // phys
+  code.mov(code.edx, rt);
+  code.mov(code.rcx, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+#else
+  code.mov(code.ecx, code.r8d);  // value
+  code.mov(code.edx, code.eax);  // phys
+  code.mov(code.esi, rt);
+  code.mov(code.rdi, code.ptr[
+      code.r11 + static_cast<int>(offsetof(V4NativeState, gte))]);
+#endif
+  code.mov(code.rax, fn);
+  code.call(code.rax);
+#if defined(_WIN32)
+  code.add(code.rsp, 32);
+#endif
+  code.pop(code.r11);
+  code.pop(code.r10);
+  code.pop(code.r9);
+  code.pop(code.r8);
+  code.pop(code.rdx);
+  code.pop(code.rcx);
+  code.L(skip);
+}
+
+constexpr u32 kV4ScratchpadPhys = 0x1F800000u;
+
 class V4CodeArena {
 public:
   V4CodeArena() = default;
@@ -3133,6 +3197,13 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.test(code.rcx, code.rcx);
     code.jz(bail);
     code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+    // The PGXP LWC2 hook below reads the physical address from store_phys.
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
+    code.add(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        kV4ScratchpadPhys);
     code.xor_(code.r9d, code.r9d);
     code.jmp(loaded);
 
@@ -3143,6 +3214,9 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.test(code.rcx, code.rcx);
     code.jz(bail);
     code.mov(code.r8d, code.dword[code.rcx + code.rdx]);
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
     code.mov(code.r9d, 4u);
 
     code.L(loaded);
@@ -3164,6 +3238,7 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.add(code.ebx, code.r9d);
 
     emit_write_call(reinterpret_cast<size_t>(&v4_gte_write_data), inst.rt);
+    emit_v4_pgxp_swc2(code, inst.rt, reinterpret_cast<size_t>(&v4_pgxp_lwc2));
 
     code.mov(code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, last_pc))],
@@ -3218,7 +3293,13 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
         code.edx);
 
-    // Do not bypass JIT invalidation for stores into translated code.
+    // A store into a translated code line still happens natively; the page's
+    // JIT generation is advanced after it (below) so the stale translation is
+    // recompiled before it runs again, as for ordinary stores.
+    code.mov(code.dword[
+        code.r11 +
+        static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+        0u);
     code.mov(code.r9d, code.edx);
     {
       Label line_key_ready;
@@ -3240,7 +3321,15 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.mov(code.rax, code.qword[code.rax + code.r9 * 8]);
     code.shr(code.rax, code.cl);
     code.test(code.al, 1u);
-    code.jnz(bail);
+    {
+      Label no_code_line;
+      code.jz(no_code_line);
+      code.mov(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+          1u);
+      code.L(no_code_line);
+    }
 
     code.cmp(code.edx, code.dword[
         code.r11 +
@@ -3284,6 +3373,10 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
     code.mov(code.edx, code.dword[
         code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
     code.and_(code.edx, psx::RAM_SIZE - 1u);
+    // Mirror-normalised, for the PGXP hook and the code-page index below.
+    code.mov(code.dword[
+        code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))],
+        code.edx);
     code.mov(code.rcx, code.ptr[
         code.r11 + static_cast<int>(offsetof(V4NativeState, main_ram))]);
     code.test(code.rcx, code.rcx);
@@ -3293,7 +3386,30 @@ V4NativeFn compile_v4_cop2(V4CodeArena &arena,
 
     code.L(stored);
     // An ordinary data store does not touch the guest I-cache (only
-    // isolated-cache stores do); translated-code overlap is guarded above.
+    // isolated-cache stores do). If it wrote into a translated code line,
+    // advance that page's JIT generation so the translation is revalidated.
+    {
+      Label no_code, generation_ok;
+      code.cmp(code.dword[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, store_page_has_code))],
+          0u);
+      code.je(no_code);
+      code.mov(code.eax, code.dword[
+          code.r11 + static_cast<int>(offsetof(V4NativeState, store_phys))]);
+      code.cmp(code.eax, psx::RAM_SIZE);
+      code.jae(no_code);
+      code.shr(code.eax, kV4PhysPageShift);
+      code.mov(code.rdx, code.ptr[
+          code.r11 +
+          static_cast<int>(offsetof(V4NativeState, code_page_generations))]);
+      code.inc(code.dword[code.rdx + code.rax * 4]);
+      code.cmp(code.dword[code.rdx + code.rax * 4], 0u);
+      code.jne(generation_ok);
+      code.mov(code.dword[code.rdx + code.rax * 4], 1u);
+      code.L(generation_ok);
+      code.L(no_code);
+    }
     emit_v4_pgxp_swc2(code, inst.rt);
 
     code.mov(code.dword[
@@ -4610,7 +4726,7 @@ V4NativeFn compile_v4_pending_delay_overflow_alu(
 V4NativeFn compile_v4_pending_delay_load(
     V4CodeArena &arena, const V4DecodedLoad &load, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 2560u; // room for PGXP hooks
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -4690,6 +4806,10 @@ V4NativeFn compile_v4_pending_delay_load(
   code.test(code.rcx, code.rcx);
   code.jz(bail);
   emit_memory_read();
+  if (load.op == V4LoadOp::Lw && !load.dest_cop0) {
+    emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw), load.rt,
+                      kV4ScratchpadPhys);
+  }
   code.xor_(code.r9d, code.r9d);
   code.jmp(loaded);
 
@@ -4700,6 +4820,10 @@ V4NativeFn compile_v4_pending_delay_load(
   code.test(code.rcx, code.rcx);
   code.jz(bail);
   emit_memory_read();
+  if (load.op == V4LoadOp::Lw && !load.dest_cop0) {
+    emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw), load.rt,
+                      0u);
+  }
   code.mov(code.r9d, 4u);
   code.jmp(loaded);
 
@@ -5119,6 +5243,10 @@ V4NativeFn compile_v4_pending_delay_store(
       break;
     case V4StoreOp::Sw:
       code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      if (!store.source_cop0) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, kV4ScratchpadPhys);
+      }
       break;
     default:
       break;
@@ -5154,6 +5282,10 @@ V4NativeFn compile_v4_pending_delay_store(
       break;
     case V4StoreOp::Sw:
       code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      if (!store.source_cop0) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, 0u);
+      }
       break;
     default:
       break;
@@ -6215,7 +6347,7 @@ V4NativeFn compile_v4_store_delay_branch(
     const V4DecodedStore &store, u32 branch_pc,
     const V4LinkTargets &links, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 2560u; // room for PGXP hooks
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -6296,7 +6428,12 @@ V4NativeFn compile_v4_store_delay_branch(
   switch (store.op) {
   case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
   case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+    if (!store.source_cop0) {
+      emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw), store.rt,
+                        kV4ScratchpadPhys);
+    }
+    break;
   }
   code.xor_(code.r9d, code.r9d);
   code.jmp(stored);
@@ -6313,7 +6450,12 @@ V4NativeFn compile_v4_store_delay_branch(
   switch (store.op) {
   case V4StoreOp::Sb: code.mov(code.byte[code.rcx + code.rdx], code.r8b); break;
   case V4StoreOp::Sh: code.mov(code.word[code.rcx + code.rdx], code.r8w); break;
-  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d); break;
+  case V4StoreOp::Sw: code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+    if (!store.source_cop0) {
+      emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw), store.rt,
+                        0u);
+    }
+    break;
   }
   code.mov(code.r9d, 1u);
 
@@ -6404,7 +6546,7 @@ V4NativeFn compile_v4_load(
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
     const V4LinkTargets &links, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 2560u; // room for PGXP hooks
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -6553,6 +6695,10 @@ V4NativeFn compile_v4_load(
   code.test(code.rcx, code.rcx);
   code.jz(slow_exit);
   emit_memory_read();
+  if (load.op == V4LoadOp::Lw && !load.dest_cop0) {
+    emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw), load.rt,
+                      kV4ScratchpadPhys);
+  }
   code.xor_(code.r9d, code.r9d);
   code.jmp(loaded);
 
@@ -6565,6 +6711,10 @@ V4NativeFn compile_v4_load(
   code.test(code.rcx, code.rcx);
   code.jz(slow_exit);
   emit_memory_read();
+  if (load.op == V4LoadOp::Lw && !load.dest_cop0) {
+    emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_lw), load.rt,
+                      0u);
+  }
   code.mov(code.r9d, 4u);
   code.jmp(loaded);
 
@@ -7008,7 +7158,7 @@ V4NativeFn compile_v4_store(
     const V4DecodedInstruction *delay, u32 branch_pc, u32 start_pc,
     bool cacheable, const V4LinkTargets &links, u32 &code_size) {
   using namespace Xbyak;
-  constexpr size_t kReservation = 2048u;
+  constexpr size_t kReservation = 2560u; // room for PGXP hooks
   void *buffer = arena.begin_emit(kReservation);
   if (buffer == nullptr) {
     return nullptr;
@@ -7315,6 +7465,10 @@ V4NativeFn compile_v4_store(
       break;
     case V4StoreOp::Sw:
       code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      if (!store.source_cop0) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, kV4ScratchpadPhys);
+      }
       break;
     default:
       break;
@@ -7353,6 +7507,10 @@ V4NativeFn compile_v4_store(
       break;
     case V4StoreOp::Sw:
       code.mov(code.dword[code.rcx + code.rdx], code.r8d);
+      if (!store.source_cop0) {
+        emit_v4_pgxp_word(code, reinterpret_cast<size_t>(&v4_pgxp_sw),
+                          store.rt, 0u);
+      }
       break;
     default:
       break;
@@ -9676,9 +9834,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
 
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
-        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics &&
-         !g_pgxp_enabled) // PGXP memory mode tracks loads/stores in the interpreter
-            ? 1u : 0u;
+        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
     native.block_bail = 0u;
     native.memory_entries = 0u;
     native.store_entries = 0u;
@@ -10005,13 +10161,12 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       break;
     }
 
-    // Memory instrumentation (PGXP memory mode, RAM/bus tracing) observes
-    // every load and store, which only the interpreter does. The native
-    // dispatcher refuses memory blocks while it is on, so run this block's
+    // RAM/bus tracing observes every load and store, which only the
+    // interpreter does (PGXP memory mode is tracked natively). The native
+    // dispatcher refuses memory blocks while tracing, so run this block's
     // instructions through Cpu::step() and come back to native code after.
     if (block->has_memory &&
-        (g_pgxp_enabled || g_trace_ram || g_trace_bus ||
-         g_ram_watch_diagnostics)) {
+        (g_trace_ram || g_trace_bus || g_ram_watch_diagnostics)) {
       // A cold compile above may already have filled the I-cache line; that
       // fetch belongs to the first instruction, which Cpu::step() will now
       // find cached.
@@ -10074,9 +10229,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
     // architectural values, budgets and per-entry counters need refreshing.
     native.mapped_main_ram_size = cpu_.sys_->jit_mapped_main_ram_size();
     native.memory_fastpath_allowed =
-        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics &&
-         !g_pgxp_enabled) // PGXP memory mode tracks loads/stores in the interpreter
-            ? 1u : 0u;
+        (!g_trace_ram && !g_trace_bus && !g_ram_watch_diagnostics) ? 1u : 0u;
     native.block_bail = 0u;
     native.memory_entries = 0u;
     native.store_entries = 0u;
@@ -10202,7 +10355,7 @@ CpuRunSliceResult CpuRecompilerBackend::run_slice(u32 max_cycles,
       }
       if ((native.memory_exits != 0u || native.bail_exits != 0u) &&
           native.memory_fastpath_allowed == 0u) {
-        // Memory instrumentation is on (see the block check above): a load
+        // RAM/bus tracing is on (see the block check above): a load
         // or store the native code could not take, e.g. in a branch delay
         // slot. That one instruction runs in the interpreter.
         result.cycles += cpu_.step();
