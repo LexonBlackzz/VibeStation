@@ -2338,6 +2338,9 @@ void Spu::enqueue_ring_buffer(const std::vector<s16> &samples) {
     return;
   }
 
+  if (audio_tap_ != nullptr) {
+    audio_tap_->insert(audio_tap_->end(), samples.begin(), samples.end());
+  }
   const u64 produced_stereo_frames = samples.size() / 2u;
   produced_stereo_frames_total_.fetch_add(produced_stereo_frames,
                                           std::memory_order_relaxed);

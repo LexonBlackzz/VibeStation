@@ -12,6 +12,8 @@
 
 class System;
 class CpuRecompilerBackend;
+class GrimTelemetry;
+class GrimBootMapper;
 
 struct CpuRunSliceResult {
   u32 cycles = 0;
@@ -588,12 +590,19 @@ public:
   CpuDebugState debug_state() const;
   void debug_set_state(const CpuDebugState &state);
   void debug_invalidate_icache_line(u32 addr);
+  // Grim Reaper evaluation hooks (interpreter only); nullptr = off.
+  void set_telemetry(GrimTelemetry *telemetry) { telemetry_ = telemetry; }
+  // Phase 3 discovery (clean-boot map): also needs telemetry attached, and is
+  // only consulted by the telemetry loop in run_slice.
+  void set_boot_mapper(GrimBootMapper *mapper) { boot_mapper_ = mapper; }
 
   void save_state(std::vector<u8>& buf) const;
   void restore_state(const u8*& pos, size_t& remaining);
 
 private:
   System *sys_ = nullptr;
+  GrimTelemetry *telemetry_ = nullptr;
+  GrimBootMapper *boot_mapper_ = nullptr;
   std::unique_ptr<CpuRecompilerBackend> recompiler_backend_;
   friend class CpuRecompilerBackend;
 

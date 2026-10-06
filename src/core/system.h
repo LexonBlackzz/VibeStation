@@ -1,5 +1,6 @@
 #pragma once
 #include "bios.h"
+#include "grim_classic.h"
 #include "cdrom.h"
 #include "cpu.h"
 #include "dma.h"
@@ -23,6 +24,8 @@
 
 // Forward declarations
 class InputRecorder;
+class GrimGenomeRuntime;
+class GrimBootMapper;
 
 class System {
 public:
@@ -37,6 +40,10 @@ public:
     bool affect_spu_ram = true;
     bool use_custom_seed = false;
     u64 seed = 1;
+    GrimByteEngine engine; // what each hit byte becomes (Random = the original reaper)
+    u32 every = 0;         // 0: writes_per_frame random hits; N: every Nth byte (min 8)
+    u32 burst_frames = 0;  // 0/1: a pass every frame; N: one pass every N frames
+    u32 freeze_cells = 0;  // 0: off; N: the last N hit cells are held every frame
   };
 
   struct GpuReaperConfig {
@@ -149,6 +156,8 @@ public:
     u32 gpu_line_commands = 0;
     u32 gpu_transfer_commands = 0;
     u32 gpu_other_commands = 0;
+    u32 gpu_fill_commands = 0; // GP0 0x02, also counted in rect
+    u32 gpu_gp1_commands = 0;
 
     // Raster work counters. candidate_pixels is bounding-box work visited by
     // triangle rasterizers; covered_pixels passed the edge tests.
@@ -338,6 +347,8 @@ public:
   void add_gpu_gp0_word() { ++profiling_stats_.gpu_gp0_words; }
   void add_gpu_gp0_command() { ++profiling_stats_.gpu_gp0_commands; }
   void add_gpu_draw_command() { ++profiling_stats_.gpu_draw_commands; }
+  void add_gpu_fill_command() { ++profiling_stats_.gpu_fill_commands; }
+  void add_gpu_gp1_command() { ++profiling_stats_.gpu_gp1_commands; }
   void add_gpu_command_bucket(GpuProfileBucket bucket) {
     switch (bucket) {
     case GpuProfileBucket::Flat:
@@ -431,9 +442,19 @@ public:
   u64 irq_request_count(Interrupt irq) const { return irq_.request_count(irq); }
   const Spu::AudioDiag &spu_audio_diag() const { return spu_.audio_diag(); }
   void reset_spu_audio_diag() { spu_.reset_audio_diag(); }
+  // Grim Reaper 2.0 interface genes. nullptr = off (the default). The caller
+  // owns the runtime; System::reset() rewinds it.
+  void set_grim_genome(GrimGenomeRuntime *genome);
+  // Phase 3 discovery hooks (CPU telemetry loop + DMA); nullptr = off.
+  void set_grim_boot_mapper(GrimBootMapper *mapper);
+  GrimGenomeRuntime *grim_genome() const { return grim_; }
+  // Non-empty when the genome's ROM genes could not be applied (wrong BIOS or
+  // a modified image); nothing was patched in that case.
+  const std::string &grim_rom_error() const { return grim_rom_error_; }
   void set_spu_audio_capture(bool enabled) { spu_.set_audio_capture(enabled); }
   bool spu_audio_capture_enabled() const { return spu_.audio_capture_enabled(); }
   void clear_spu_audio_capture() { spu_.clear_audio_capture(); }
+  void set_spu_audio_tap(std::vector<s16> *tap) { spu_.set_audio_tap(tap); }
   const std::vector<s16> &spu_audio_capture_samples() const {
     return spu_.audio_capture_samples();
   }
@@ -698,6 +719,9 @@ public:
   CdRom &cdrom() { return cdrom_; }
   const CdRom &cdrom() const { return cdrom_; }
   const Bios &bios() const { return bios_; }
+  // ROM patches must be applied after reset(), which restores the image.
+  Bios &bios_mut() { return bios_; }
+  const DmaController &dma() const { return dma_; }
   InterruptController &irq() { return irq_; }
   bool cpu_timing_boundary_requested() const {
     return cpu_timing_boundary_requested_;
@@ -865,6 +889,19 @@ private:
   bool ram_reaper_prev_enabled_ = false;
   bool ram_reaper_prev_use_custom_seed_ = false;
   u64 ram_reaper_prev_seed_ = 0;
+  std::atomic<u32> ram_reaper_engine_packed_{0};
+  std::atomic<s32> ram_reaper_engine_offset_{0x100};
+  std::atomic<u32> ram_reaper_every_{0};
+  std::atomic<u32> ram_reaper_burst_frames_{0};
+  std::atomic<u32> ram_reaper_freeze_cells_{0};
+  struct RamReaperFrozen {
+    u8 target; // 0 main RAM, 1 VRAM (word index), 2 sound RAM
+    u32 at;
+    u16 value;
+  };
+  std::vector<RamReaperFrozen> ram_reaper_frozen_;
+  u32 ram_reaper_freeze_next_ = 0;
+  u32 ram_reaper_pass_frame_ = 0;
   std::atomic<bool> gpu_reaper_enabled_{false};
   std::atomic<u32> gpu_reaper_writes_per_frame_{1};
   std::atomic<u32> gpu_reaper_intensity_x10_{1000};
@@ -897,6 +934,10 @@ private:
   bool sound_reaper_prev_use_custom_seed_ = false;
   u64 sound_reaper_prev_seed_ = 0;
   InputRecorder* input_recorder_ = nullptr;
+  GrimGenomeRuntime *grim_ = nullptr;
+  std::string grim_rom_error_;
+  void grim_apply_rom_genes();
+  void grim_write_spu16(u32 offset, u16 value);
   bool input_playback_stop_requested_ = false;
   void note_cdrom_io(u32 phys_addr);
   void note_sio_io(u32 phys_addr);
@@ -906,6 +947,10 @@ private:
   void apply_ram_reaper_for_frame();
   void apply_gpu_reaper_for_frame();
   void apply_sound_reaper_for_frame();
+  // Faulty Hardware Simulator (Phase 5.1): frame start and every eighth scanline.
+  void grim_hardware_tick(bool frame_tick);
+  u64 grim_hw_dma_words_prev_ = 0;
+  u32 grim_hw_bus_load_q10_ = 0;
 };
 
 // Timer IRQ helper (called from timer.cpp)

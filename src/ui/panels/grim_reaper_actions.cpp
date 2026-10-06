@@ -10,15 +10,6 @@
 #include <string>
 #include <vector>
 
-namespace {
-    void seed_mt19937(std::mt19937& rng, u64 seed) {
-        const u32 lo = static_cast<u32>(seed & 0xFFFFFFFFull);
-        const u32 hi = static_cast<u32>((seed >> 32) & 0xFFFFFFFFull);
-        std::seed_seq seq{ lo, hi, 0x9E3779B9u, 0x243F6A88u };
-        rng.seed(seq);
-    }
-}
-
 void App::set_grim_reaper_mode(bool enabled) {
     if (enabled) {
         grim_reaper_mode_active_ = true;
@@ -153,13 +144,12 @@ bool App::reap_and_reboot_bios() {
             static_cast<u64>(std::random_device{}()));
     grim_last_used_seed_ = seed;
     grim_seed_ = seed;
-    std::mt19937 rng;
-    seed_mt19937(rng, seed);
-
-    for (size_t i = 0; i < mutations; ++i) {
-        const size_t idx = start + (static_cast<size_t>(rng()) % span);
-        bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
-    }
+    GrimByteSweep sweep;
+    sweep.start = start;
+    sweep.end = end;
+    sweep.every = static_cast<size_t>(std::max(0, grim_every_));
+    sweep.strikes = mutations;
+    mutations = grim_byte_corrupt(bios_data.data(), bios_data.size(), sweep, grim_engine_, seed);
     const std::filesystem::path src_path = std::filesystem::path(bios_path_);
     const std::filesystem::path out_path =
         src_path.parent_path() /
@@ -178,9 +168,7 @@ bool App::reap_and_reboot_bios() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(out_path.string())) {
         set_grim_reaper_mode(false);
@@ -268,14 +256,12 @@ bool App::reap_and_reboot_bios_batch() {
             const u64 seed = grim_batch_use_custom_seeds_ ? seed_slot : next_random_seed();
             seed_slot = seed;
             grim_last_used_seed_ = seed;
-            std::mt19937 rng;
-            seed_mt19937(rng, seed);
-            for (size_t i = 0; i < mutations; ++i) {
-                const size_t idx = start + (static_cast<size_t>(rng()) % span);
-                bios_data[idx] = static_cast<u8>(rng() & 0xFFu);
-            }
-
-            total_mutations += mutations;
+            GrimByteSweep sweep;
+            sweep.start = start;
+            sweep.end = end;
+            sweep.every = static_cast<size_t>(std::max(0, grim_every_));
+            sweep.strikes = mutations;
+            total_mutations += grim_byte_corrupt(bios_data.data(), bios_data.size(), sweep, grim_engine_, seed);
             return true;
         };
 
@@ -323,9 +309,7 @@ bool App::reap_and_reboot_bios_batch() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(out_path.string())) {
         set_grim_reaper_mode(false);

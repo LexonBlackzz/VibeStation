@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_pitch","target":16777215,"seed":101,"trigger":{"kind":"always"},"params":{"mode":0,"mul_q8":128,"offset":256,"scale":2741,"depth":64,"period":120}}
+]}

@@ -9,6 +9,7 @@
 // clear)
 
 class System;
+class GrimBootMapper;
 
 struct DmaChannel {
   u32 base_addr = 0;    // MADR: Base address
@@ -83,6 +84,8 @@ public:
   ~DmaController();
 
   void init(System *sys) { sys_ = sys; }
+  // Phase 3 discovery: told about every block / packet moved (nullptr = off).
+  void set_boot_mapper(GrimBootMapper *mapper) { boot_mapper_ = mapper; }
   void reset();
 
   void save_state(std::vector<u8>& buf) const;
@@ -112,9 +115,17 @@ public:
   const RegisterWriteDebug &last_register_write_debug(int channel) const {
     return register_write_debug_[channel & 0x7];
   }
+  // Cumulative since reset; diagnostic only (not part of save states).
+  u64 debug_completed_transfers(int channel) const {
+    return completed_transfers_[channel & 0x7];
+  }
+  u64 debug_moved_words(int channel) const {
+    return moved_words_[channel & 0x7];
+  }
 
 private:
   System *sys_ = nullptr;
+  GrimBootMapper *boot_mapper_ = nullptr;
   DmaChannel channels_[7];
   TransferDebug last_debug_[7];
   // Spyro performs a very large number of short CD DMA slices before the
@@ -125,6 +136,8 @@ private:
   std::array<u32, 7> active_transfer_debug_id_{};
   u32 next_transfer_debug_id_ = 0;
   RegisterWriteDebug register_write_debug_[7];
+  std::array<u64, 8> completed_transfers_{};
+  std::array<u64, 8> moved_words_{};
 
   u32 dpcr_ = 0x07654321; // DMA control register (priority/enable)
   u32 dicr_ = 0;          // DMA interrupt register

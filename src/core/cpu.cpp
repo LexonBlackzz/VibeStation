@@ -1,5 +1,7 @@
 #include "cpu.h"
 #include "cpu_recompiler.h"
+#include "grim_eval.h"
+#include "grim_map.h"
 #include "system.h"
 #include <array>
 #include <chrono>
@@ -1485,6 +1487,9 @@ void Cpu::exception(Exception cause) {
     cop0_cause_ &= ~(1u << 31);
   }
   exception_return_epc_ = cop0_epc_;
+  if (telemetry_ != nullptr) {
+    telemetry_->note_exception(static_cast<u32>(cause), cop0_epc_);
+  }
 
   // Jump to exception handler
   if (cause != Exception::Interrupt && logged_exception_count < 32) {
@@ -2590,6 +2595,41 @@ CpuRunSliceResult Cpu::run_slice(u32 max_cycles, u32 max_instructions) {
   const CpuExecutionMode mode = effective_cpu_execution_mode();
   if (mode != CpuExecutionMode::Interpreter && recompiler_backend_) {
     return recompiler_backend_->run_slice(max_cycles, max_instructions);
+  }
+
+  if (telemetry_ != nullptr && telemetry_->tracks_execution()) {
+    // Grim Reaper evaluation loop, kept out of step() so the normal
+    // interpreter pays one branch per slice rather than one per instruction.
+    while (result.cycles < max_cycles &&
+           result.instructions < max_instructions) {
+      const u32 pc = pc_;
+      const u32 interrupts = telemetry_->interrupts_this_frame();
+      const bool map_this = boot_mapper_ != nullptr && (pc & 3u) == 0u;
+      if (map_this) {
+        // What step() is about to fetch: the I-cache line if it holds the
+        // address, otherwise memory (a refill reads it from there).
+        u32 instr = 0;
+        if (!read_visible_instruction_for_backend(pc, instr)) {
+          instr = sys_->read32_instruction(pc);
+        }
+        boot_mapper_->begin_instruction(cycles_, pc, instr, gpr_, cop0_sr_);
+      }
+      const u32 consumed = step();
+      // Nothing at `pc` ran if the step entered an interrupt or `pc` itself
+      // could not be fetched (misaligned).
+      if ((pc & 3u) == 0u && telemetry_->interrupts_this_frame() == interrupts) {
+        telemetry_->note_exec(pc);
+        if (map_this) {
+          boot_mapper_->commit_instruction();
+        }
+      }
+      result.cycles += consumed;
+      ++result.instructions;
+      if (sys_ != nullptr && sys_->cpu_timing_boundary_requested()) {
+        break;
+      }
+    }
+    return result;
   }
 
   while (result.cycles < max_cycles &&

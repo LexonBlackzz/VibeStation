@@ -1,0 +1,4 @@
+{"version":1,"genes":[
+{"type":"spu_volume","target":16777215,"seed":106,"trigger":{"kind":"always"},"params":{"mode":0,"clamp":4096,"depth":512,"period":120}},
+{"type":"spu_volume","target":16777215,"seed":107,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":240,"duty":120,"probability":0},"params":{"mode":1,"clamp":4096,"depth":512,"period":120}}
+]}

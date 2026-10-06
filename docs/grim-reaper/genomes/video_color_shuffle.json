@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"gpu_color","target":7,"seed":203,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":120,"duty":60,"probability":0},"params":{"mode":0,"perm":6,"tint":4144959}}
+]}

@@ -894,9 +894,7 @@ void App::panel_definitive_home() {
         }
 
         emu_runner_.pause_and_wait_idle();
-        disable_ram_reaper_mode();
-        disable_gpu_reaper_mode();
-        disable_sound_reaper_mode();
+        stop_all_corruption();
         if (!system_->load_bios(path)) {
             status_message_ = "Failed to load BIOS!";
             return false;

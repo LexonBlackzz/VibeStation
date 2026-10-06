@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"gpu_vertex","target":7,"seed":201,"trigger":{"kind":"rot","start_frame":0,"end_frame":1200},"params":{"mode":1,"amp":14,"dx":4,"dy":4,"grid":8,"wrap":0,"prob":500}}
+]}

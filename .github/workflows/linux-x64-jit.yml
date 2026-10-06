@@ -82,6 +82,12 @@ jobs:
       - name: GPU self test
         run: ./build-linux/VibeStation --gpu-self-test
 
+      - name: Grim Reaper tests (the parts that need no BIOS)
+        run: |
+          ./build-linux/VibeStation --grim-gene-test
+          ./build-linux/VibeStation --grim-audibility-test --unit-only
+          ./build-linux/VibeStation --grim-pull-test
+
       - name: Upload Linux executable
         if: always()
         uses: actions/upload-artifact@v4

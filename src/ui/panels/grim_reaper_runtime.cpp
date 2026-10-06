@@ -15,6 +15,10 @@ void App::sync_ram_reaper_config() {
     cfg.affect_spu_ram = ram_reaper_affect_spu_ram_;
     cfg.use_custom_seed = ram_reaper_use_custom_seed_;
     cfg.seed = ram_reaper_seed_;
+    cfg.engine = ram_reaper_engine_;
+    cfg.every = ram_reaper_every_;
+    cfg.burst_frames = ram_reaper_burst_frames_;
+    cfg.freeze_cells = ram_reaper_freeze_cells_;
     system_->set_ram_reaper_config(cfg);
     ram_reaper_active_seed_ = system_->ram_reaper_last_seed();
     ram_reaper_total_mutations_ = system_->ram_reaper_total_mutations();
@@ -76,4 +80,15 @@ void App::disable_sound_reaper_mode() {
     if (system_) {
         system_->disable_sound_reaper();
     }
+}
+
+void App::sync_disc_reaper_config() {
+    if (!system_) {
+        return;
+    }
+    GrimDiscReaperConfig cfg = disc_reaper_;
+    cfg.enabled = disc_reaper_enabled_;
+    cfg.start_frame = static_cast<u32>(
+        std::max(0.0f, disc_reaper_start_seconds_) * static_cast<float>(system_->target_fps()));
+    system_->cdrom().set_disc_reaper(cfg);
 }

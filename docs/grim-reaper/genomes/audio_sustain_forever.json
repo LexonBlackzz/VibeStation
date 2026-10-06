@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_adsr","target":16777215,"seed":104,"trigger":{"kind":"always"},"params":{"mode":0}}
+]}

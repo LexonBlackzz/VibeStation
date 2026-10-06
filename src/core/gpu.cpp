@@ -1,4 +1,5 @@
 #include "gpu.h"
+#include "grim_genome.h"
 #include "system.h"
 #include <algorithm>
 #include <array>
@@ -1013,6 +1014,11 @@ void Gpu::gp0(u32 command) {
     if (gp0_words_remaining_ > 0)
         continue;
 
+    if (grim_ != nullptr) {
+        grim_->filter_gp0(gp0_buffer_.data(), gp0_buffer_.size());
+        // Bits 24/25 (raw texture, semi-transparency) may have changed.
+        gp0_command_ = static_cast<u8>(gp0_buffer_[0] >> 24);
+    }
     apply_reaper_to_gp0_command();
 
     // Full command received — dispatch
@@ -1022,6 +1028,9 @@ void Gpu::gp0(u32 command) {
         sys_->add_gpu_command_bucket(gpu_profile_bucket_for_opcode(op));
         if (op >= 0x20 && op <= 0x7Fu) {
             sys_->add_gpu_draw_command();
+        }
+        if (op == 0x02u) {
+            sys_->add_gpu_fill_command();
         }
     }
     // GP0 draw command bit1 selects semi-transparency for that command.
@@ -1696,6 +1705,10 @@ void Gpu::draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
 }
 
 void Gpu::handle_polyline_word(u32 word) {
+    if (grim_ != nullptr) {
+        word = grim_->filter_gp0_polyline_word(
+            word, polyline_gouraud_, polyline_gouraud_ && !polyline_waiting_vertex_);
+    }
     if (!polyline_gouraud_) {
         if (is_polyline_terminator(word)) {
             polyline_active_ = false;
@@ -2030,6 +2043,9 @@ void Gpu::gp1(u32 command) {
         trace_should_log(gp1_count, g_trace_burst_gpu, g_trace_stride_gpu)) {
         LOG_CAT_DEBUG(LogCategory::Gpu, "GPU: GP1[%llu] = 0x%08X",
             static_cast<unsigned long long>(gp1_count), command);
+    }
+    if (sys_) {
+        sys_->add_gpu_gp1_command();
     }
     u8 op = (command >> 24) & 0x3F;
 

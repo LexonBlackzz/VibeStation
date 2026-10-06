@@ -95,6 +95,13 @@ set(VIBESTATION_SOURCES
     src/platform/cpu_backend_compare_runner.cpp
     src/platform/gpu_correctness_runner.cpp
     src/platform/scheduler_self_test.cpp
+    src/platform/grim_eval_runner.cpp
+    src/platform/grim_gene_test.cpp
+    src/platform/grim_map_runner.cpp
+    src/platform/grim_map_test.cpp
+    src/platform/grim_sample_runner.cpp
+    src/platform/grim_sample_test.cpp
+    src/platform/grim_process.cpp
     src/platform/disc_path_utils.cpp
     src/platform/memory_card_utils.cpp
     src/platform/sample_profiler.cpp
@@ -120,6 +127,11 @@ set(VIBESTATION_SOURCES
     src/core/rr4_diagnostics.cpp
     src/core/input_recorder.cpp
     src/core/system.cpp
+    src/core/grim_eval.cpp
+    src/core/grim_genome.cpp
+    src/core/grim_map.cpp
+    src/core/grim_sample.cpp
+    src/core/grim_rom.cpp
     src/core/system_snapshot.cpp
     src/core/rewind.cpp
     src/core/renderer.cpp
@@ -165,6 +177,19 @@ set(VIBESTATION_SOURCES
     src/ui/panels/bindings_config_panel.cpp
     src/ui/panels/settings_panel.cpp
     src/ui/panels/vram_panel.cpp
+    src/platform/grim_audibility_runner.cpp
+    src/platform/grim_audibility_test.cpp
+    src/core/grim_audibility.cpp
+    src/core/grim_live.cpp
+    src/core/grim_pull.cpp
+    src/core/grim_library.cpp
+    src/core/grim_hardware.cpp
+    src/platform/grim_pull_test.cpp
+    src/ui/panels/grim_pull_actions.cpp
+    src/ui/definitive/definitive_grim_pull.cpp
+    src/core/grim_share.cpp
+    src/core/grim_classic.cpp
+    src/core/grim_disc.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0")

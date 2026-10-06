@@ -1,0 +1,4 @@
+{"version":1,"genes":[
+{"type":"gpu_texparam","target":7,"seed":205,"trigger":{"kind":"always"},"params":{"which":2,"clut_mask":127,"tp_mask":31,"prob":800}},
+{"type":"gpu_state","target":63,"seed":206,"trigger":{"kind":"rot","start_frame":0,"end_frame":900},"params":{"amp":0,"drift":0,"e1_mask":31,"e2_mask":1023,"e6_mask":1}}
+]}

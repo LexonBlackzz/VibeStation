@@ -1,0 +1,3 @@
+{"version":1,"genes":[
+{"type":"spu_keyon","target":16777215,"seed":105,"trigger":{"kind":"intermittent","start_frame":0,"end_frame":0,"period":0,"duty":0,"probability":600},"params":{"mode":2,"keys":0,"prob":700,"delay":2500}}
+]}

@@ -2,6 +2,7 @@
 #include "../core/input_recorder.h"
 #include "emu_runner.h"
 #include "frame_presentation_worker.h"
+#include "grim_pull_state.h"
 #include "../integrations/discord_presence.h"
 #include "../core/config.h"
 #include "../core/gpu_hw_renderer.h"
@@ -21,6 +22,9 @@ struct ImVec2;
 struct ImGuiContext;
 struct HostWindow;
 typedef void* SDL_GLContext;
+
+// --open-grim-reaper: skip the launcher intro and open the Grim Reaper page (testing).
+extern bool g_cli_open_grim_reaper;
 
 class App {
 public:
@@ -111,6 +115,7 @@ private:
 	bool definitive_grim_reaper_active_ = false;
 	bool definitive_grim_reaper_closing_ = false;
 	bool definitive_grim_reaper_advanced_ = false;
+	int definitive_grim_reaper_tab_ = 0; // 0 = 2.0 pulls, 1 = classic reapers
 	float definitive_grim_reaper_visibility_ = 0.0f;
 	int definitive_grim_reaper_style_ = 0;
 	bool gameplay_exit_transition_active_ = false;
@@ -237,6 +242,9 @@ private:
 	bool grim_use_custom_seed_ = false;
 	u64 grim_seed_ = 1u;
 	u64 grim_last_used_seed_ = 0u;
+	// Classic BIOS engine: what each hit byte becomes, and where hits land (0 = random strike).
+	GrimByteEngine grim_engine_;
+	int grim_every_ = 0;
 	bool ram_reaper_enabled_ = false;
 	u32 ram_reaper_writes_per_frame_ = 64u;
 	float ram_reaper_intensity_percent_ = 35.0f;
@@ -247,6 +255,21 @@ private:
 	u32 ram_reaper_range_end_ = psx::RAM_SIZE - 1u;
 	bool ram_reaper_use_custom_seed_ = false;
 	u64 ram_reaper_seed_ = 1u;
+	GrimByteEngine ram_reaper_engine_;
+	u32 ram_reaper_every_ = 0;        // 0 = random writes; N = every Nth byte
+	u32 ram_reaper_burst_frames_ = 0; // 0/1 = every frame; N = one pass every N frames
+	u32 ram_reaper_freeze_cells_ = 0; // 0 = off; N = hold the last N hits
+	// Disc Reaper (Classic): corrupts game data as the CD drive reads it.
+	GrimDiscReaperConfig disc_reaper_;
+	bool disc_reaper_enabled_ = false;
+	float disc_reaper_start_seconds_ = 0.0f;
+	bool disc_reaper_use_custom_seed_ = false;
+	// Auto-corrupt (Classic BIOS styles): re-corrupt with a new seed on a timer.
+	bool grim_auto_enabled_ = false;
+	float grim_auto_seconds_ = 15.0f;
+	bool grim_auto_armed_ = false;
+	int grim_auto_style_ = 0;
+	double grim_auto_next_ = 0.0;
 	u64 ram_reaper_active_seed_ = 0u;
 	u64 ram_reaper_total_mutations_ = 0;
 	bool gpu_reaper_enabled_ = false;
@@ -260,6 +283,7 @@ private:
 	u64 gpu_reaper_active_seed_ = 0u;
 	u64 gpu_reaper_total_mutations_ = 0;
 	bool sound_reaper_enabled_ = false;
+	bool bad_modchip_enabled_ = false;
 	u32 sound_reaper_writes_per_frame_ = 32u;
 	float sound_reaper_intensity_percent_ = 20.0f;
 	bool sound_reaper_affect_pitch_ = true;
@@ -378,6 +402,33 @@ private:
 	void disable_gpu_reaper_mode();
 	void sync_sound_reaper_config();
 	void disable_sound_reaper_mode();
+	// The Classic runtime reapers off and any New Corruption machine released: every
+	// path that boots, stops or swaps the BIOS goes back to an ordinary PlayStation.
+	void stop_all_corruption();
+	void sync_disc_reaper_config();
+	void grim_auto_arm(int style);
+	void grim_auto_tick();
+	void draw_disc_reaper_tab();
+	void draw_ram_reaper_tricks();
+
+	// Grim Reaper 2.0 live pulls (src/ui/panels/grim_pull_actions.cpp, panel in
+	// src/ui/definitive/definitive_grim_pull.cpp).
+	std::unique_ptr<GrimPullState> grim_pull_;
+	GrimPullState& grim_pull_state();
+	void grim_pull_update();
+	void grim_pull_shutdown();
+	void grim_pull_release();
+	void grim_pull_clean_machine();
+	bool grim_pull_paste_code(const std::string& text);
+	bool grim_pull_new();
+	bool grim_pull_boot(const GrimGenome& genome, u64 pull_number);
+	bool grim_pull_start(const GrimGenome& full, const std::vector<char>& on, u64 pull_number);
+	bool grim_pull_revive();
+	bool grim_pull_boot_entry(u64 pull_number);
+	void grim_pull_keep(u64 pull_number, bool keep);
+	void grim_pull_start_mapping();
+	void grim_pull_save_library();
+	void draw_grim_pull_tab();
 
 	// Deferred heavy initialization to avoid large stack allocations on startup.
 	bool init_runtime();

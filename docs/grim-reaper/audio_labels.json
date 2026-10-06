@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "scenario": "nodisc",
+  "frames": 600,
+  "metric": "residual_energy_v1",
+  "genome_base": "../..",
+  "threshold_status": "provisional: four human labels",
+  "labels": [
+    {
+      "genome": "docs/grim-reaper/genomes/sample_filter_crunch.json",
+      "audible": true,
+      "listener": "Lexon",
+      "notes": "Audible crackle."
+    },
+    {
+      "genome": "docs/grim-reaper/genomes/sample_shift_steps.json",
+      "audible": true,
+      "listener": "Lexon",
+      "notes": "Audible, weakly distinct: similar to filter crunch with a brief pitch-like blip."
+    },
+    {
+      "genome": "docs/grim-reaper/genomes/sample_payload_reverse.json",
+      "audible": false,
+      "listener": "Lexon",
+      "notes": "Sounds exactly like the clean boot. Changed audio hashes do not establish audibility."
+    },
+    {
+      "genome": "docs/grim-reaper/genomes/sample_early_loop_end.json",
+      "audible": true,
+      "listener": "Lexon",
+      "notes": "Clearly audible on the bass; chimes sound the same."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/chimes_whole_reverse.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Whole chime payload reversal; listen for altered ringing/warble from about 3.3 s."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/bass_long_filter.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Long bass filter edit; listen for rough crunch from about 1.5 s."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/bass_payload_repeat.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: 100 ms payload repeat; listen for a held/rough bass fragment from about 2.1 s."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/bass_nibble_grit.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: 100 ms nibble edit; listen for subtle bass grit near 1.8 s."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/chimes_borderline_shift.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Borderline metric-positive; listen for a small chime gain/crush blip near 3.6 s."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/chimes_short_shift.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Borderline metric-negative; check for a brief chime blip near 3.7 s versus clean."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/chimes_quiet_shuffle.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Metric-negative; compare late chime grain around 4.4 s against clean."
+    },
+    {
+      "genome": "D:/Projects/github/vs-runs/phase4.1/listening/sample6_whole_noise.json",
+      "audible": null,
+      "listener": "pending Lexon",
+      "notes": "Prediction to check by ear: Unplayed-sample control; no-input boot should sound like clean. Purpose of sample 6 unconfirmed."
+    }
+  ]
+}

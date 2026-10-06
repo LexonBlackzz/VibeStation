@@ -1,9 +1,12 @@
 #pragma once
+#include "grim_disc.h"
 #include "types.h"
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -23,12 +26,21 @@ struct CdTrack {
   int index01_file_lba = 0; // INDEX 01 position in current file (sectors)
   int index01_abs_lba = 150; // Absolute disc LBA for INDEX 01
   u64 index01_file_offset = 0; // Byte offset of INDEX 01 in current file
+  u64 file_bytes = 0; // size of `filename`, measured once at load (0 = unknown)
 };
 
 class CdRom {
 public:
   void init(System *sys) { sys_ = sys; }
   void reset();
+  // Grim Reaper "bad modchip": the controller fails Sony's software checks.
+  void set_bad_modchip(bool on) { bad_modchip_.store(on, std::memory_order_release); }
+  // Grim Reaper disc corruption (any thread). Sectors are corrupted as they are read.
+  void set_disc_reaper(const GrimDiscReaperConfig &cfg);
+  // Name of the protected boot executable once the disc was scanned ("" before).
+  std::string disc_reaper_boot_name() const;
+  u64 disc_reaper_hits() const { return grim_disc_hits_.load(std::memory_order_relaxed); }
+  bool bad_modchip() const { return bad_modchip_.load(std::memory_order_acquire); }
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
   bool swap_disc_image(const std::string &bin_path, const std::string &cue_path);
@@ -113,11 +125,22 @@ public:
   u64 debug_last_irq_clear_cycle() const { return last_irq_clear_cycle_; }
 
 private:
+  std::atomic<bool> bad_modchip_{false};
+  void grim_disc_apply(int psx_lba, std::vector<u8> &raw_sector, const CdTrack *track);
+  mutable std::mutex grim_disc_mutex_;
+  GrimDiscReaperConfig grim_disc_cfg_ = g_grim_disc_cli;
+  GrimDiscLayout grim_disc_layout_;
+  bool grim_disc_scanned_ = false;
+  bool grim_disc_scanning_ = false;
+  std::atomic<u64> grim_disc_hits_{0};
   System *sys_ = nullptr;
   bool disc_loaded_ = false;
 
   // Disc image
   std::ifstream bin_file_;
+  // A track file other than the primary one (multi-file cues), kept open between reads.
+  std::ifstream extra_file_;
+  std::string extra_file_path_;
   std::vector<CdTrack> tracks_;
   std::string resolved_disc_path_;
   bool track_map_valid_ = false;

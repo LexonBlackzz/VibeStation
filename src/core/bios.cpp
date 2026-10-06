@@ -8,6 +8,7 @@
 bool Bios::load(const std::string &path) {
   loaded_ = false;
   fast_boot_patched_ = false;
+  image_patched_ = false;
   info_.clear();
   mapped_size_ = psx::BIOS_SIZE;
   data_.clear();
@@ -158,10 +159,42 @@ void Bios::restore_original_image() {
   if (!loaded_ || original_data_.empty()) {
     return;
   }
-  if (fast_boot_patched_) {
+  if (fast_boot_patched_ || image_patched_) {
     data_ = original_data_;
     fast_boot_patched_ = false;
+    image_patched_ = false;
   }
+}
+
+bool Bios::patch32(u32 offset, u32 value) {
+  if (!loaded_ || (offset & 3u) != 0u ||
+      static_cast<size_t>(offset) + 4u > data_.size()) {
+    return false;
+  }
+  for (u32 i = 0; i < 4u; ++i) {
+    data_[offset + i] = static_cast<u8>(value >> (i * 8u));
+  }
+  image_patched_ = true;
+  return true;
+}
+
+u64 Bios::image_hash() const {
+  u64 h = 14695981039346656037ull;
+  for (u8 b : original_data_) {
+    h = (h ^ b) * 1099511628211ull;
+  }
+  return h;
+}
+
+bool Bios::original_word(u32 offset, u32 &word) const {
+  if ((offset & 3u) != 0u || static_cast<size_t>(offset) + 4u > original_data_.size()) {
+    return false;
+  }
+  word = 0;
+  for (u32 i = 0; i < 4u; ++i) {
+    word |= static_cast<u32>(original_data_[offset + i]) << (i * 8u);
+  }
+  return true;
 }
 
 void Bios::identify() {

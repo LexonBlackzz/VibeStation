@@ -4211,6 +4211,129 @@ static std::vector<CpuCompareCase> make_cpu_compare_cases() {
       true;
   cases.push_back(v4_cached_icache_revalidation);
 
+  // Found by the Grim Reaper hardware simulator: corrupted code can contain encodings real
+  // programs never use. REGIMM with rt = 0x1F (BGEZ with the unused "likely" and "link" bits
+  // set) feeding a SWC0 in its delay slot made the backends differ by one or two cycles per pass.
+  {
+    CpuCompareCase odd_regimm{};
+    odd_regimm.name = "odd_regimm_rt1f_branch_to_self_with_swc0_delay_slot";
+    odd_regimm.start_pc = 0x80010000u;
+    odd_regimm.program = {0x06FFFFFFu, 0xE3000000u, 0u};
+    odd_regimm.instructions = 24u;
+    cases.push_back(odd_regimm);
+
+    CpuCompareCase odd_branch_nop{};
+    odd_branch_nop.name = "odd_regimm_rt1f_branch_to_self_with_nop_delay_slot";
+    odd_branch_nop.start_pc = 0x80010000u;
+    odd_branch_nop.program = {0x06FFFFFFu, 0u, 0u};
+    odd_branch_nop.instructions = 24u;
+    cases.push_back(odd_branch_nop);
+
+    for (u32 variant = 0; variant < 6; ++variant) {
+      static const char *const kNames[] = {"swc0_first_cop0_reg12", "sw_first_reg12", "swc0_first_cop0_reg0",
+                                           "sw_first_reg0", "swc0_first_via_r24_cop0_reg0",
+                                           "sw_first_via_r24_reg0"};
+      CpuCompareCase c{};
+      c.name = kNames[variant];
+      c.start_pc = 0x80010000u;
+      static const u32 kStores[] = {0xE00C0000u, 0xAC0C0000u, 0xE0000000u, 0xAC000000u, 0xE3000000u, 0xAF000000u};
+      c.program = {kStores[variant], enc_i(0x09, 0, 2, 1), 0u};
+      c.instructions = 2u;
+      cases.push_back(c);
+    }
+
+    // SWC0 of a plain COP0 register: the stored value and the address must both survive the
+    // register read (the native register read once clobbered the address in RAX).
+    CpuCompareCase swc0_value{};
+    swc0_value.name = "swc0_stores_cop0_register_value_to_the_right_address";
+    swc0_value.start_pc = 0x80010000u;
+    swc0_value.program = {enc_i(0x0F, 0, 1, 0xBEEF), enc_i(0x0D, 1, 1, 0x1234), 0x40811800u /* mtc0 r1,$3 */,
+                          0u, 0xE0030100u /* swc0 $3,0x100(r0) */, 0u};
+    swc0_value.instructions = 6u;
+    swc0_value.compare_memory_addresses = {0x100u, 0x80000100u};
+    cases.push_back(swc0_value);
+
+    CpuCompareCase swc0_alone{};
+    swc0_alone.name = "swc0_straight_line";
+    swc0_alone.start_pc = 0x80010000u;
+    swc0_alone.program = {0xE3000000u, enc_i(0x09, 0, 1, 1), 0u};
+    swc0_alone.instructions = 2u;
+    cases.push_back(swc0_alone);
+  }
+
+  // Code changed in RAM behind the CPU (no store, no cache flush): a cached line keeps its
+  // stale words until it is refilled, and both backends must keep executing exactly that.
+  // Used by the Grim Reaper hardware simulator and by DMA into live code.
+  {
+    CpuCompareCase stale_cached_loop{};
+    stale_cached_loop.name = "ram_code_change_behind_cpu_cached_line_stays_stale";
+    stale_cached_loop.start_pc = 0x80010000u;
+    stale_cached_loop.program = {
+        enc_i(0x09, 1, 1, 1),
+        enc_j(0x02, stale_cached_loop.start_pc),
+        0u,
+    };
+    stale_cached_loop.mutations.push_back(
+        {3u, stale_cached_loop.start_pc, enc_i(0x09, 1, 1, 5), false});
+    stale_cached_loop.instructions = 12u;
+    cases.push_back(stale_cached_loop);
+
+    // The two blocks alias in the I-cache, so every pass refills from memory and the
+    // changed word takes effect at the next refill.
+    CpuCompareCase refill_after_change{};
+    refill_after_change.name = "ram_code_change_behind_cpu_visible_after_refill";
+    refill_after_change.start_pc = 0x80010000u;
+    refill_after_change.program = {
+        enc_i(0x09, 1, 1, 1),
+        enc_j(0x02, 0x80011000u),
+        0u,
+    };
+    refill_after_change.memory = {
+        {0x80011000u, enc_i(0x09, 2, 2, 1)},
+        {0x80011004u, enc_j(0x02, refill_after_change.start_pc)},
+        {0x80011008u, 0u},
+    };
+    refill_after_change.mutations.push_back(
+        {7u, refill_after_change.start_pc, enc_i(0x09, 1, 1, 9), false});
+    refill_after_change.instructions = 40u;
+    cases.push_back(refill_after_change);
+
+    // A line that was never fetched: the changed word is simply what memory holds.
+    CpuCompareCase uncached_change{};
+    uncached_change.name = "ram_code_change_behind_cpu_before_first_fetch";
+    uncached_change.start_pc = 0x80010000u;
+    uncached_change.program = {
+        enc_i(0x09, 1, 1, 1),
+        enc_j(0x02, 0x80010100u),
+        0u,
+    };
+    uncached_change.memory = {
+        {0x80010100u, enc_i(0x09, 2, 2, 1)},
+        {0x80010104u, enc_j(0x02, uncached_change.start_pc)},
+        {0x80010108u, 0u},
+    };
+    uncached_change.mutations.push_back(
+        {1u, 0x80010100u, enc_i(0x09, 2, 2, 7), false});
+    uncached_change.instructions = 20u;
+    cases.push_back(uncached_change);
+
+    // The changed word sits in the middle of a line the loop is running through.
+    CpuCompareCase mid_line_change{};
+    mid_line_change.name = "ram_code_change_behind_cpu_mid_line_then_new_block";
+    mid_line_change.start_pc = 0x80010000u;
+    mid_line_change.program = {
+        enc_i(0x09, 1, 1, 1),
+        enc_i(0x09, 2, 2, 1),
+        enc_i(0x09, 3, 3, 1),
+        enc_j(0x02, mid_line_change.start_pc),
+        0u,
+    };
+    mid_line_change.mutations.push_back(
+        {6u, mid_line_change.start_pc + 8u, enc_i(0x09, 3, 3, 3), false});
+    mid_line_change.instructions = 40u;
+    cases.push_back(mid_line_change);
+  }
+
   CpuCompareCase v4_native_icache_revalidation{};
   v4_native_icache_revalidation.name =
       "v4_native_icache_alias_revalidates_inside_dispatch";

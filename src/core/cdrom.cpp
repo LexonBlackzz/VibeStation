@@ -110,6 +110,7 @@ bool resolve_track_layout(std::vector<CdTrack> &tracks,
     const std::string key = normalize_path_key(track.filename);
     const int base_abs = file_base_abs[key];
     track.index01_abs_lba = base_abs + std::max(0, track.index01_file_lba);
+    track.file_bytes = file_bytes[key];
     track.index01_file_offset =
         static_cast<u64>(std::max(0, track.index01_file_lba)) *
         static_cast<u64>(std::max(1, track.sector_size));
@@ -478,6 +479,8 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
   tracks_.clear();
   disc_loaded_ = false;
   track_map_valid_ = false;
@@ -542,6 +545,7 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
 
   resolved_disc_path_ = primary_fs.string();
   disc_loaded_ = true;
+  grim_disc_scanned_ = false; // a new disc gets its own file system scan
   track_map_valid_ = monotonic;
 
   reset();
@@ -577,6 +581,8 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
 
   std::vector<CdTrack> parsed_tracks;
   std::filesystem::path cue_dir;
@@ -651,6 +657,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   resolved_disc_path_ = primary_fs.string();
   bin_size_ = file_size_bytes(primary_fs.string());
   disc_loaded_ = true;
+  grim_disc_scanned_ = false; // a new disc gets its own file system scan
   track_map_valid_ = monotonic;
 
   // Keep controller configuration (notably IRQ enable) intact for hot-swap,
@@ -717,6 +724,8 @@ void CdRom::unload_disc() {
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
   tracks_.clear();
   disc_loaded_ = false;
   track_map_valid_ = false;
@@ -987,8 +996,10 @@ int CdRom::track_end_lba(const CdTrack *track) const {
   if (idx + 1u < tracks_.size()) {
     return tracks_[idx + 1u].index01_abs_lba - 151;
   }
-  const u64 file_bytes = !track->filename.empty() ? file_size_bytes(track->filename)
-                                                   : bin_size_;
+  // Runs for every sector read: use the size measured at load, not a host file query.
+  const u64 file_bytes = track->filename.empty() ? bin_size_
+                         : track->file_bytes != 0 ? track->file_bytes
+                                                  : file_size_bytes(track->filename);
   const int sectors =
       static_cast<int>(file_bytes / static_cast<u64>(std::max(1, track->sector_size)));
   const int rel_len = std::max(1, sectors - track->index01_file_lba);
@@ -1033,7 +1044,6 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     return synthesize_sector();
   }
 
-  std::ifstream alt_file;
   std::ifstream *stream = nullptr;
   u64 target_size = 0;
 
@@ -1045,12 +1055,22 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     stream = &bin_file_;
     target_size = bin_size_;
   } else {
-    alt_file.open(std::filesystem::path(target_path), std::ios::binary);
-    if (!alt_file.is_open()) {
+    // Other track files (multi-file cues, e.g. one file per CD audio track) stay open:
+    // reopening and measuring the file for every sector cost a host file query each.
+    if (extra_file_path_ != target_path || !extra_file_.is_open()) {
+      extra_file_.close();
+      extra_file_.clear();
+      extra_file_.open(std::filesystem::path(target_path), std::ios::binary);
+      extra_file_path_ = target_path;
+    }
+    if (!extra_file_.is_open()) {
+      extra_file_path_.clear();
       return synthesize_sector();
     }
-    stream = &alt_file;
-    target_size = file_size_bytes(target_path);
+    stream = &extra_file_;
+    target_size = track->filename == target_path && track->file_bytes != 0
+                      ? track->file_bytes
+                      : file_size_bytes(target_path);
   }
 
   if (target_size > 0 &&
@@ -1066,6 +1086,7 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   }
   stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
   if (stream->gcount() == sector_size) {
+    grim_disc_apply(psx_lba, raw_sector, track);
     return true;
   }
 
@@ -1074,7 +1095,66 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   if (static_cast<size_t>(got) < raw_sector.size()) {
     std::fill(raw_sector.begin() + got, raw_sector.end(), 0xFFu);
   }
+  grim_disc_apply(psx_lba, raw_sector, track);
   return true;
+}
+
+void CdRom::set_disc_reaper(const GrimDiscReaperConfig &cfg) {
+  std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+  grim_disc_cfg_ = cfg;
+}
+
+std::string CdRom::disc_reaper_boot_name() const {
+  std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+  return grim_disc_scanned_ ? grim_disc_layout_.boot_name : std::string();
+}
+
+// Grim Reaper disc corruption, applied to every sector read from the image (data, XA
+// and CD audio all come through read_raw_sector_for_lba). The file system is scanned
+// once per disc, the first time corruption is active, to keep it and the boot
+// executable intact.
+void CdRom::grim_disc_apply(int psx_lba, std::vector<u8> &raw_sector, const CdTrack *track) {
+  if (grim_disc_scanning_) {
+    return; // the scan itself reads clean sectors
+  }
+  GrimDiscReaperConfig cfg;
+  {
+    std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+    cfg = grim_disc_cfg_;
+  }
+  if (!cfg.enabled || (cfg.start_frame > 0 && sys_ != nullptr &&
+                       sys_->boot_diag().frame_counter < cfg.start_frame)) {
+    return;
+  }
+  if (!grim_disc_scanned_) {
+    grim_disc_scanning_ = true;
+    GrimDiscLayout layout = grim_disc_scan([this](int lba, u8 *user) {
+      std::vector<u8> raw;
+      const CdTrack *t = nullptr;
+      if (!read_raw_sector_for_lba(lba, raw, &t) || is_audio_track(t)) {
+        return false;
+      }
+      size_t at = 0;
+      if (raw.size() >= 2352u) {
+        at = raw[15] == 2 ? 24u : raw[15] == 1 ? 16u : 0u;
+        if (at == 0) {
+          return false;
+        }
+      } else if (raw.size() < 2048u) {
+        return false;
+      }
+      std::copy(raw.begin() + static_cast<std::ptrdiff_t>(at),
+                raw.begin() + static_cast<std::ptrdiff_t>(at + 2048u), user);
+      return true;
+    });
+    grim_disc_scanning_ = false;
+    std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+    grim_disc_layout_ = std::move(layout);
+    grim_disc_scanned_ = true;
+  }
+  const size_t hits = grim_disc_corrupt_sector(raw_sector.data(), raw_sector.size(), is_audio_track(track),
+                                               psx_lba, cfg, grim_disc_layout_);
+  grim_disc_hits_.fetch_add(hits, std::memory_order_relaxed);
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }
@@ -2226,7 +2306,11 @@ void CdRom::cmd_test() {
 
   switch (param_fifo_[0]) {
   case 0x20:
-    enqueue_irq(3, {0x96u, 0x08u, 0x24u, 0xC1u});
+    if (bad_modchip()) {
+      enqueue_irq(3, {0x00u, 0x00u, 0x00u, 0x00u}); // no valid version date
+    } else {
+      enqueue_irq(3, {0x96u, 0x08u, 0x24u, 0xC1u});
+    }
     break;
   case 0x21:
     enqueue_irq(3, {0x00u});
@@ -2236,10 +2320,17 @@ void CdRom::cmd_test() {
     break;
   case 0x05: // Read SCEx counters
     // Sony's anti-modchip routine (e.g. Crash Bash) reads this after playing the
-    // disc and terminates if the second byte is non-zero. A real console reports 0.
-    enqueue_irq(3, {stat_byte(), 0x00u, 0x00u});
+    // disc: a non-zero second byte makes the game show its own "SOFTWARE
+    // TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED" screen. A real console
+    // reports 0; the Grim Reaper "bad modchip" option reports a fault.
+    enqueue_irq(3, {stat_byte(), static_cast<u8>(bad_modchip() ? 0x01u : 0x00u),
+                    0x00u});
     break;
   case 0x22:
+    if (bad_modchip()) {
+      enqueue_irq(3, {'f', 'o', 'r', ' ', 'E', 'u', 'r', 'o', 'p', 'e'});
+      break;
+    }
     enqueue_irq(3, {static_cast<u8>('f'), static_cast<u8>('o'),
                     static_cast<u8>('r'), static_cast<u8>(' '),
                     static_cast<u8>('U'), static_cast<u8>('/'),

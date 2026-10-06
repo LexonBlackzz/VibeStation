@@ -14,6 +14,14 @@ public:
   bool is_loaded() const { return loaded_; }
   bool apply_fast_boot_patch();
   void restore_original_image();
+  // Writes a little-endian word into the loaded image (not the bus; the ROM
+  // stays read-only to the CPU). Undone by restore_original_image().
+  bool patch32(u32 offset, u32 value);
+  // The stock image (before any patch), for Grim Reaper ROM genes: FNV-1a-64
+  // of the whole file, and one little-endian word of it.
+  u64 image_hash() const;
+  bool original_word(u32 offset, u32 &word) const;
+  u32 image_size() const { return static_cast<u32>(original_data_.size()); }
   bool fast_boot_patched() const { return fast_boot_patched_; }
 
   u8 read8(u32 offset) const;
@@ -31,6 +39,7 @@ private:
   std::vector<u8> original_data_{};
   bool loaded_ = false;
   bool fast_boot_patched_ = false;
+  bool image_patched_ = false;
   std::string info_;
   u32 mapped_size_ = psx::BIOS_SIZE;
 

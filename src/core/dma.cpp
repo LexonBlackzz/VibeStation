@@ -1,4 +1,5 @@
 #include "dma.h"
+#include "grim_map.h"
 #include "system.h"
 #include <algorithm>
 #include <chrono>
@@ -130,6 +131,8 @@ void DmaController::reset() {
   for (auto &dbg : register_write_debug_) {
     dbg = {};
   }
+  completed_transfers_.fill(0);
+  moved_words_.fill(0);
   dpcr_ = 0x07654321;
   dicr_ = 0;
 }
@@ -525,6 +528,7 @@ void DmaController::dma_block(int channel, u32 max_words) {
   // is only a per-channel snapshot and may have been replaced by the time a
   // later CPU fault asks where a word originated.
   dbg.transfer_words = transfer_words;
+  moved_words_[channel] += transfer_words;
   dbg.first_addr = addr & 0x001FFFFCu;
   if (transfer_words != 0u) {
     const s32 span = step * static_cast<s32>(transfer_words - 1u);
@@ -565,6 +569,10 @@ void DmaController::dma_block(int channel, u32 max_words) {
   dbg.id = next_transfer_debug_id_;
   transfer_debug_history_[dbg.id % kTransferDebugHistorySize] = dbg;
   active_transfer_debug_id_[channel] = dbg.id;
+  if (boot_mapper_ != nullptr) {
+    boot_mapper_->note_dma(channel, from_ram, addr, channel == 6 ? -4 : step,
+                           transfer_words, dbg.cpu_cycle);
+  }
 
   if (from_ram && channel == 0 && g_mdec_debug_upload_probe) {
     sys_->debug_note_mdec_dma_in_begin(addr & 0x001FFFFCu, transfer_words);
@@ -798,6 +806,12 @@ void DmaController::dma_linked_list(int channel) {
   u32 addr = channels_[channel].base_addr & 0x001FFFFC;
   u32 safety = 0;
   u32 transferred_words = 0;
+  // RAM cannot change during this atomic transfer, so a node visited twice means the list
+  // never ends. Brent's cycle detection stops it at once instead of replaying the loop a
+  // million times (minutes of host time for a corrupted list). Real lists never revisit.
+  u32 tortoise = addr;
+  u32 power = 1, steps = 0;
+  bool cycle = false;
 
   while (safety < 0x100000) {
     sys_->debug_begin_dma_bus_access(static_cast<u8>(channel));
@@ -808,6 +822,10 @@ void DmaController::dma_linked_list(int channel) {
     const u32 next_addr = header & 0x00FFFFFFu;
     transferred_words += 1;
 
+    if (boot_mapper_ != nullptr) {
+      boot_mapper_->note_dma(channel, true, packet_addr, 4, word_count + 1u,
+                             sys_->cpu().cycle_count());
+    }
     // Send words to GP0
     for (u32 i = 0; i < word_count; i++) {
       addr = (addr + 4) & 0x001FFFFC;
@@ -825,12 +843,22 @@ void DmaController::dma_linked_list(int channel) {
 
     addr = header & 0x001FFFFC;
     safety++;
+    if (addr == tortoise) {
+      cycle = true;
+      break;
+    }
+    if (++steps == power) {
+      tortoise = addr;
+      power <<= 1;
+      steps = 0;
+    }
   }
 
-  if (safety >= 0x100000) {
+  if (cycle || safety >= 0x100000) {
     LOG_ERROR("DMA: Linked list loop detected!");
   }
 
+  moved_words_[channel] += transferred_words;
   if (sys_ != nullptr) {
     sys_->add_cpu_cycle_penalty(dma_ram_tick_cost(transferred_words));
   }
@@ -847,6 +875,7 @@ void DmaController::transfer_complete(int channel) {
         static_cast<unsigned long long>(cycle));
   }
 
+  ++completed_transfers_[channel];
   // Clear enable + trigger bits
   ch.channel_ctrl &= ~(1u << 24); // Disable
   ch.channel_ctrl &= ~(1u << 28); // Clear trigger

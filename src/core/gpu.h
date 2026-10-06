@@ -148,10 +148,14 @@ struct GpuCommandDebugInfo {
   std::array<std::array<u8, 4>, kRecentPolys> poly_b{};
 };
 
+class GrimGenomeRuntime;
+
 class Gpu {
 public:
   void init(System *sys) { sys_ = sys; }
   void set_pgxp(const Pgxp *pgxp) { pgxp_ = pgxp; }
+  // Grim Reaper 2.0 GP0 genes; nullptr = off. Owned by the caller.
+  void set_grim_genome(GrimGenomeRuntime *genome) { grim_ = genome; }
   // Records draws for the OpenGL upscaler into `stream` (nullptr stops).
   // Recording always starts with a full VRAM sync.
   void set_hw_stream(GpuHwStream *stream);
@@ -397,6 +401,7 @@ private:
   u32 reaper_draws_this_frame_ = 0;
   u32 reaper_draws_last_frame_ = 0;
   u32 reaper_draws_prev_frame_ = 0;
+  GrimGenomeRuntime *grim_ = nullptr;
 
   u32 next_reaper_noise();
   void apply_reaper_to_gp0_command();

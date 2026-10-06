@@ -1,4 +1,5 @@
 #include "system.h"
+#include "grim_genome.h"
 #include "input_recorder.h"
 #include <algorithm>
 #include <chrono>
@@ -183,6 +184,13 @@ void log_unhandled_bus_read(BusWarnLimiter& limiter, const char* width,
         if (cfg.range_start > cfg.range_end) {
             std::swap(cfg.range_start, cfg.range_end);
         }
+        if (cfg.engine.op >= GrimByteOp::Count) {
+            cfg.engine.op = GrimByteOp::Random;
+        }
+        // Every Nth: below 8 a pass is millions of writes and the host would stall.
+        cfg.every = cfg.every == 0 ? 0u : std::clamp<u32>(cfg.every, 8u, psx::RAM_SIZE);
+        cfg.burst_frames = std::min<u32>(cfg.burst_frames, 60u * 600u);
+        cfg.freeze_cells = std::min<u32>(cfg.freeze_cells, 4096u);
         return cfg;
     }
 
@@ -362,6 +370,27 @@ void System::sync_spu(u64 target_cycle) {
         return;
     }
 
+    // Grim Reaper delayed SPU writes land at their own cycle: tick up to it,
+    // write, then carry on. The SPU is additive, so this does not depend on
+    // where the sync points happen to be.
+    while (grim_ != nullptr && grim_->has_delayed_spu() &&
+           grim_->next_delayed_due() <= target_cycle) {
+        const u64 due = std::max(grim_->next_delayed_due(), spu_synced_cpu_cycle_);
+        u64 part = due - spu_synced_cpu_cycle_;
+        while (part > 0) {
+            const u32 step =
+                (part > static_cast<u64>(std::numeric_limits<u32>::max()))
+                ? std::numeric_limits<u32>::max()
+                : static_cast<u32>(part);
+            spu_.tick(step);
+            part -= step;
+        }
+        spu_synced_cpu_cycle_ = due;
+        spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+        const GrimSpuWrite w = grim_->pop_delayed_spu();
+        spu_.write16(w.offset, w.value);
+    }
+
     u64 delta = target_cycle - spu_synced_cpu_cycle_;
     while (delta > 0) {
         const u32 step =
@@ -373,6 +402,44 @@ void System::sync_spu(u64 target_cycle) {
     }
     spu_synced_cpu_cycle_ = target_cycle;
     spu_.mark_synced_to_cpu(spu_synced_cpu_cycle_);
+}
+
+void System::set_grim_genome(GrimGenomeRuntime *genome) {
+    grim_ = genome;
+    gpu_.set_grim_genome(genome);
+    grim_rom_error_.clear();
+    if (genome != nullptr) {
+        genome->reset();
+        if (genome->has_rom_genes() && bios_.is_loaded()) {
+            bios_.restore_original_image();
+            grim_apply_rom_genes();
+        }
+    }
+}
+
+// ROM genes go into the image right after it is restored, so the BIOS copies
+// the patched code into RAM itself. A mismatch is loud and patches nothing.
+void System::grim_apply_rom_genes() {
+    grim_rom_error_.clear();
+    if (grim_ == nullptr || !grim_->has_rom_genes() || !bios_.is_loaded()) {
+        return;
+    }
+    if (!grim_->apply_rom(bios_, grim_rom_error_)) {
+        LOG_ERROR("GRIM: ROM genes NOT applied: %s", grim_rom_error_.c_str());
+    }
+}
+
+void System::set_grim_boot_mapper(GrimBootMapper *mapper) {
+    cpu_.set_boot_mapper(mapper);
+    dma_.set_boot_mapper(mapper);
+}
+
+void System::grim_write_spu16(u32 offset, u16 value) {
+    GrimSpuWrite out[GrimGenomeRuntime::kMaxSpuOut];
+    const size_t n = grim_->filter_spu_write(offset, value, device_cpu_cycle(), out);
+    for (size_t i = 0; i < n; ++i) {
+        spu_.write16(out[i].offset, out[i].value);
+    }
 }
 
 void System::sync_sio(u64 target_cycle) {
@@ -679,6 +746,8 @@ bool System::boot_disc(bool direct_boot) {
         if (!bios_.apply_fast_boot_patch()) {
             LOG_WARN("System: direct disc boot patch failed; falling back to normal BIOS boot.");
         }
+        // The fast-boot patch starts from the stock image: put ROM genes back on top.
+        grim_apply_rom_genes();
     }
 
     set_running(true);
@@ -690,6 +759,8 @@ void System::reset() {
         init_hardware();
     }
     bios_.restore_original_image();
+    grim_apply_rom_genes();
+    ram_reaper_frozen_.clear(); // held cells belong to the machine that was running
     irq_.reset();
     timers_.reset();
     dma_.reset();
@@ -747,6 +818,9 @@ void System::reset() {
     gpu_gp0_source_valid_ = false;
     gpu_gp0_source_from_dma_ = false;
     gpu_gp0_source_addr_ = 0;
+    if (grim_ != nullptr) {
+        grim_->reset();
+    }
 }
 
 void System::shutdown() {
@@ -1809,9 +1883,15 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
     }
     const bool profile_detailed = g_profile_detailed_timing;
     cpu_.notify_cpu_backend_frame(boot_diag_.frame_counter);
+    if (grim_ != nullptr) {
+        grim_->begin_frame(boot_diag_.frame_counter);
+    }
     apply_ram_reaper_for_frame();
     apply_gpu_reaper_for_frame();
     apply_sound_reaper_for_frame();
+    if (grim_ != nullptr && grim_->has_hardware()) {
+        grim_hardware_tick(true);
+    }
 
     const bool pal = gpu_.display_mode().is_pal;
     const u32 scanlines_per_frame = pal ? 314 : 263;
@@ -1888,6 +1968,9 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
         // applied.
         scanline_edge_cycle_ = scanline_start;
         sync_timers(scanline_start);
+        if ((scanline & 7u) == 0u && grim_ != nullptr && grim_->has_hardware()) {
+            grim_hardware_tick(false);
+        }
         if (scanline == vblank_scanline) {
             // VBlank is an edge at the beginning of the first blanked scanline.
             // Keep the GPU notification, timer sync edge, and IRQ observable at
@@ -1922,12 +2005,21 @@ void System::run_frame(bool sample_display_diag, bool skip_spu_for_turbo) {
                 now >= scheduler_trace.step_from_cycle;
             const u32 pre_pc = trace_steps ? cpu_.pc() : 0u;
             const u32 pre_instr = trace_steps ? read32_instruction(pre_pc) : 0u;
+            // The word the CPU really executes: the I-cache copy when the line is cached
+            // (it can differ from memory), 0 when the line is not cached.
+            u32 pre_visible = 0u;
+            const bool pre_cached =
+                trace_steps && cpu_.read_visible_instruction_for_backend(pre_pc, pre_visible);
             CpuRunSliceResult run =
                 cpu_.run_slice(budget, trace_steps ? 1u : budget);
             if (trace_steps) {
                 LOG_INFO("SCHED_STEP cyc=%llu pc=%08X instr=%08X sp=%08X run=%u/%u",
                          static_cast<unsigned long long>(now), pre_pc, pre_instr,
                          cpu_.reg(29), run.cycles, run.instructions);
+                if (pre_cached && pre_visible != pre_instr) {
+                    LOG_INFO("SCHED_STEP_STALE pc=%08X memory=%08X icache=%08X", pre_pc,
+                             pre_instr, pre_visible);
+                }
             }
             if (run.cycles == 0 || run.instructions == 0) {
                 if (effective_cpu_execution_mode() ==
@@ -2132,6 +2224,13 @@ void System::set_ram_reaper_config(const RamReaperConfig& config) {
     ram_reaper_use_custom_seed_.store(sanitized.use_custom_seed,
         std::memory_order_release);
     ram_reaper_seed_.store(sanitized.seed, std::memory_order_release);
+    ram_reaper_engine_packed_.store(static_cast<u32>(sanitized.engine.op) |
+        (static_cast<u32>(sanitized.engine.value) << 8) |
+        (static_cast<u32>(sanitized.engine.match) << 16), std::memory_order_release);
+    ram_reaper_engine_offset_.store(sanitized.engine.offset, std::memory_order_release);
+    ram_reaper_every_.store(sanitized.every, std::memory_order_release);
+    ram_reaper_burst_frames_.store(sanitized.burst_frames, std::memory_order_release);
+    ram_reaper_freeze_cells_.store(sanitized.freeze_cells, std::memory_order_release);
 }
 
 System::RamReaperConfig System::ram_reaper_config() const {
@@ -2152,6 +2251,14 @@ System::RamReaperConfig System::ram_reaper_config() const {
     cfg.use_custom_seed =
         ram_reaper_use_custom_seed_.load(std::memory_order_acquire);
     cfg.seed = ram_reaper_seed_.load(std::memory_order_acquire);
+    const u32 engine = ram_reaper_engine_packed_.load(std::memory_order_acquire);
+    cfg.engine.op = static_cast<GrimByteOp>(engine & 0xFFu);
+    cfg.engine.value = static_cast<u8>(engine >> 8);
+    cfg.engine.match = static_cast<u8>(engine >> 16);
+    cfg.engine.offset = ram_reaper_engine_offset_.load(std::memory_order_acquire);
+    cfg.every = ram_reaper_every_.load(std::memory_order_acquire);
+    cfg.burst_frames = ram_reaper_burst_frames_.load(std::memory_order_acquire);
+    cfg.freeze_cells = ram_reaper_freeze_cells_.load(std::memory_order_acquire);
     return sanitize_ram_reaper_config(cfg);
 }
 
@@ -2253,6 +2360,7 @@ void System::apply_ram_reaper_for_frame() {
     if (!cfg.enabled) {
         ram_reaper_prev_enabled_ = false;
         ram_reaper_rng_seeded_ = false;
+        ram_reaper_frozen_.clear();
         return;
     }
 
@@ -2273,13 +2381,49 @@ void System::apply_ram_reaper_for_frame() {
         seed_mt19937(ram_reaper_rng_, seed);
         ram_reaper_last_seed_.store(seed, std::memory_order_release);
         ram_reaper_rng_seeded_ = true;
+        ram_reaper_pass_frame_ = 0;
     }
 
     ram_reaper_prev_enabled_ = true;
     ram_reaper_prev_use_custom_seed_ = cfg.use_custom_seed;
     ram_reaper_prev_seed_ = cfg.seed;
 
-    if (cfg.writes_per_frame == 0 || cfg.intensity_percent <= 0.0f) {
+    constexpr u32 kVramWords = static_cast<u32>(psx::VRAM_WIDTH * psx::VRAM_HEIGHT);
+    // Freeze ("hellgenie"): every held cell is written again each frame, so the game
+    // cannot repair it. Held cells last until the reaper is switched off or the
+    // machine resets.
+    if (ram_reaper_frozen_.size() > cfg.freeze_cells) {
+        ram_reaper_frozen_.resize(cfg.freeze_cells);
+    }
+    for (const RamReaperFrozen& f : ram_reaper_frozen_) {
+        if (f.target == 0) {
+            if (ram_.read8(f.at) != static_cast<u8>(f.value)) {
+                ram_.write8(f.at, static_cast<u8>(f.value));
+                cpu_.notify_code_write(f.at, 1);
+            }
+        } else if (f.target == 1) {
+            gpu_.corrupt_vram_word(f.at, f.value);
+        } else {
+            spu_.corrupt_ram_byte(f.at, static_cast<u8>(f.value));
+        }
+    }
+    const auto hold = [&](u8 target, u32 at, u16 value) {
+        if (cfg.freeze_cells == 0) {
+            return;
+        }
+        if (ram_reaper_frozen_.size() < cfg.freeze_cells) {
+            ram_reaper_frozen_.push_back({target, at, value});
+        } else {
+            ram_reaper_frozen_[ram_reaper_freeze_next_++ % cfg.freeze_cells] = {target, at, value};
+        }
+    };
+
+    // Bursts: one corruption pass every N frames instead of every frame.
+    const u32 frame = ram_reaper_pass_frame_++;
+    if (cfg.burst_frames > 1 && (frame % cfg.burst_frames) != 0) {
+        return;
+    }
+    if (cfg.intensity_percent <= 0.0f || (cfg.every == 0 && cfg.writes_per_frame == 0)) {
         return;
     }
 
@@ -2293,12 +2437,76 @@ void System::apply_ram_reaper_for_frame() {
         return;
     }
 
+    u64 mutations = 0;
+    const auto hit_main = [&](u32 offset, u32 random) {
+        const u8 piped = ram_.read8(static_cast<u32>(
+            grim_byte_pipe_source(offset, cfg.engine.offset, psx::RAM_SIZE)));
+        const u8 value = grim_byte_apply(cfg.engine, ram_.read8(offset), random, piped);
+        ram_.write8(offset, value);
+        cpu_.notify_code_write(offset, 1);
+        hold(0, offset, value);
+        ++mutations;
+    };
+    const auto hit_vram = [&](u32 index, u32 random) {
+        const u16 old = gpu_.vram()[index];
+        const u16 src = gpu_.vram()[grim_byte_pipe_source(index, cfg.engine.offset, kVramWords)];
+        const u16 value = static_cast<u16>(
+            grim_byte_apply(cfg.engine, static_cast<u8>(old), random, static_cast<u8>(src)) |
+            (grim_byte_apply(cfg.engine, static_cast<u8>(old >> 8), random >> 8,
+                 static_cast<u8>(src >> 8)) << 8));
+        gpu_.corrupt_vram_word(index, value);
+        hold(1, index, value);
+        ++mutations;
+    };
+    const auto hit_spu = [&](u32 offset, u32 random) {
+        const u8* spu = spu_.spu_ram_data();
+        const u8 value = grim_byte_apply(cfg.engine, spu[offset], random,
+            spu[grim_byte_pipe_source(offset, cfg.engine.offset, Spu::RAM_SIZE_BYTES)]);
+        spu_.corrupt_ram_byte(offset, value);
+        hold(2, offset, value);
+        ++mutations;
+    };
+
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    std::uniform_int_distribution<u32> byte_dist(0u, 0xFFu);
+    if (cfg.every > 0) {
+        // Every Nth byte (VRAM: every Nth pixel), at fixed positions; intensity is the
+        // chance that each of them is hit in this pass.
+        const double chance = static_cast<double>(cfg.intensity_percent) / 100.0;
+        const auto take = [&]() { return chance >= 1.0 || unit_dist(ram_reaper_rng_) < chance; };
+        if (target_main) {
+            for (u32 a = cfg.range_start; a <= cfg.range_end; a += cfg.every) {
+                if (take()) {
+                    hit_main(a, byte_dist(ram_reaper_rng_));
+                }
+                if (cfg.range_end - a < cfg.every) {
+                    break;
+                }
+            }
+        }
+        if (target_vram) {
+            for (u32 i = 0; i < kVramWords; i += cfg.every) {
+                if (take()) {
+                    hit_vram(i, ram_reaper_rng_() & 0xFFFFu);
+                }
+            }
+        }
+        if (target_spu) {
+            for (u32 a = 0; a < Spu::RAM_SIZE_BYTES; a += cfg.every) {
+                if (take()) {
+                    hit_spu(a, byte_dist(ram_reaper_rng_));
+                }
+            }
+        }
+        ram_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
+        return;
+    }
+
     const double desired_writes =
         static_cast<double>(cfg.writes_per_frame) *
         (static_cast<double>(cfg.intensity_percent) / 100.0);
     u32 writes_this_frame = static_cast<u32>(std::floor(desired_writes));
     const double frac = desired_writes - static_cast<double>(writes_this_frame);
-    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
     if (unit_dist(ram_reaper_rng_) < frac) {
         ++writes_this_frame;
     }
@@ -2317,44 +2525,64 @@ void System::apply_ram_reaper_for_frame() {
     }
 
     std::uniform_int_distribution<u32> addr_dist(cfg.range_start, cfg.range_end);
-    std::uniform_int_distribution<u32> byte_dist(0u, 0xFFu);
-    std::uniform_int_distribution<u32> vram_dist(
-        0u, static_cast<u32>(psx::VRAM_WIDTH * psx::VRAM_HEIGHT - 1u));
+    std::uniform_int_distribution<u32> vram_dist(0u, kVramWords - 1u);
     std::uniform_int_distribution<u32> spu_dist(0u, Spu::RAM_SIZE_BYTES - 1u);
     std::uniform_int_distribution<u32> target_dist(0u, target_count - 1u);
-    u64 mutations = 0;
     for (u32 i = 0; i < writes_this_frame; ++i) {
         const u32 target_index = target_dist(ram_reaper_rng_);
         u32 cursor = 0;
         if (target_main) {
             if (cursor == target_index) {
                 const u32 offset = addr_dist(ram_reaper_rng_);
-                ram_.write8(offset, static_cast<u8>(byte_dist(ram_reaper_rng_)));
-                cpu_.notify_code_write(offset, 1);
-                ++mutations;
+                hit_main(offset, byte_dist(ram_reaper_rng_));
                 continue;
             }
             ++cursor;
         }
         if (target_vram) {
             if (cursor == target_index) {
-                gpu_.corrupt_vram_word(vram_dist(ram_reaper_rng_),
-                    static_cast<u16>(ram_reaper_rng_() & 0xFFFFu));
-                ++mutations;
+                const u32 index = vram_dist(ram_reaper_rng_);
+                hit_vram(index, ram_reaper_rng_() & 0xFFFFu);
                 continue;
             }
             ++cursor;
         }
         if (target_spu) {
             if (cursor == target_index) {
-                spu_.corrupt_ram_byte(spu_dist(ram_reaper_rng_),
-                    static_cast<u8>(byte_dist(ram_reaper_rng_)));
-                ++mutations;
+                const u32 offset = spu_dist(ram_reaper_rng_);
+                hit_spu(offset, byte_dist(ram_reaper_rng_));
                 continue;
             }
         }
     }
     ram_reaper_total_mutations_.fetch_add(mutations, std::memory_order_acq_rel);
+}
+
+void System::grim_hardware_tick(bool frame_tick) {
+    struct Target final : GrimHwTarget {
+        System& s;
+        explicit Target(System& sys) : s(sys) {}
+        const u8* ram_view() const override { return s.ram_.data(); }
+        const u16* vram_view() const override { return s.gpu_.vram(); }
+        const u8* spu_view() const override { return s.spu_.spu_ram_data(); }
+        void ram_put(u32 offset, u8 value) override {
+            s.ram_.write8(offset, value);
+            s.cpu_.notify_code_write(offset, 1);
+        }
+        void vram_put(u32 index, u16 value) override { s.gpu_.corrupt_vram_word(index, value); }
+        void spu_put(u32 offset, u8 value) override { s.spu_.spu_ram_mut_data()[offset] = value; }
+    } target(*this);
+    if (frame_tick) {
+        // How busy the bus was last frame: DMA words moved, 64K words = fully loaded.
+        u64 words = 0;
+        for (int ch = 0; ch < 7; ++ch) {
+            words += dma_.debug_moved_words(ch);
+        }
+        const u64 delta = words >= grim_hw_dma_words_prev_ ? words - grim_hw_dma_words_prev_ : 0u;
+        grim_hw_dma_words_prev_ = words;
+        grim_hw_bus_load_q10_ = static_cast<u32>(std::min<u64>(1024u, delta * 1024u / 65536u));
+    }
+    grim_->apply_hardware(target, frame_tick, grim_hw_bus_load_q10_);
 }
 
 void System::apply_gpu_reaper_for_frame() {
@@ -3387,7 +3615,11 @@ void System::write16(u32 addr, u16 val) {
         }
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();
-            spu_.write16(io - 0xC00, val);
+            if (grim_ != nullptr) {
+                grim_write_spu16(io - 0xC00, val);
+            } else {
+                spu_.write16(io - 0xC00, val);
+            }
             return;
         }
 
@@ -3681,8 +3913,14 @@ void System::write32(u32 addr, u32 val) {
         // SPU
         if (io >= 0xC00 && io < 0x1000) {
             sync_spu_to_cpu();
-            spu_.write16(io - 0xC00, static_cast<u16>(val));
-            spu_.write16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            if (grim_ != nullptr) {
+                // Split first, then filter each half: KON/KOFF stay consistent.
+                grim_write_spu16(io - 0xC00, static_cast<u16>(val));
+                grim_write_spu16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            } else {
+                spu_.write16(io - 0xC00, static_cast<u16>(val));
+                spu_.write16(io - 0xC00 + 2, static_cast<u16>(val >> 16));
+            }
             return;
         }
 

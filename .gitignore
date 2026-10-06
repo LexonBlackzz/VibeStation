@@ -15,3 +15,5 @@ src_backup/
 tools/
 tests/
 AGENTS.md
+# Grim Reaper boot maps are derived from copyrighted BIOS data: regenerate locally
+docs/grim-reaper/maps/

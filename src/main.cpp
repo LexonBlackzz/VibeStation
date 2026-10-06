@@ -8,6 +8,14 @@
 #include "input/controller.h"
 #include "platform/cpu_backend_compare_runner.h"
 #include "platform/gpu_correctness_runner.h"
+#include "platform/grim_eval_runner.h"
+#include "platform/grim_map_runner.h"
+#include "platform/grim_sample_runner.h"
+#include "platform/grim_audibility_runner.h"
+#include "platform/grim_audibility_test.h"
+#include "platform/grim_pull_test.h"
+#include "core/grim_disc.h"
+#include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
 #include "ui/app.h"
@@ -1496,6 +1504,8 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     return 1;
   }
+  // `--genome file.json --frame-test ...`: run a Grim Reaper genome headless (both CPU modes).
+  sys->set_grim_genome(grim_gui_genome());
   if (!cue_path.empty()) {
     LOG_INFO("Disc cue: %s", cue_path.c_str());
     LOG_INFO("Disc bin: %s", bin_path.c_str());
@@ -4235,6 +4245,36 @@ int main(int argc, char *argv[]) {
       g_experimental_dma_command_sanitizer = true;
       continue;
     }
+    if (a == "--disc-reaper" && (i + 1) < args.size()) {
+      std::string disc_error;
+      if (!grim_disc_parse(args[i + 1], g_grim_disc_cli, disc_error)) {
+        fprintf(stderr, "ERROR: --disc-reaper: %s\n", disc_error.c_str());
+        return 1;
+      }
+      ++i;
+      continue;
+    }
+    if (a == "--open-grim-reaper") {
+      g_cli_open_grim_reaper = true;
+      continue;
+    }
+    if (a == "--genome" && (i + 1) < args.size() &&
+        (passthrough.empty() || passthrough[0].rfind("--grim-", 0) != 0)) {
+      // GUI playback of a Grim Reaper genome. The --grim-* modes take their
+      // own --genome after the mode flag, so it stays in passthrough for them.
+      std::string genome_error;
+      if (!grim_gui_genome_load(args[i + 1], genome_error)) {
+        fprintf(stderr, "ERROR: --genome %s: %s\n", args[i + 1].c_str(),
+                genome_error.c_str());
+        return 1;
+      }
+      printf("GRIM: genome %s loaded: %zu genes, hash=0x%016llX (applied on every boot)\n",
+             args[i + 1].c_str(), grim_gui_genome()->genome().genes.size(),
+             static_cast<unsigned long long>(grim_gui_genome()->hash()));
+      fflush(stdout);
+      ++i;
+      continue;
+    }
     passthrough.push_back(a);
   }
 
@@ -4249,6 +4289,69 @@ int main(int argc, char *argv[]) {
     const bool memory_only =
         passthrough[0] == "--jit-memory-compare-test";
     const int rc = run_cpu_backend_compare_test(memory_only);
+    if (g_log_file) {
+      log_flush_repeats();
+      std::fclose(g_log_file);
+      g_log_file = nullptr;
+    }
+    return rc;
+  }
+
+  if (!passthrough.empty() && (passthrough[0] == "--grim-eval" ||
+                               passthrough[0] == "--grim-determinism-test" ||
+                               passthrough[0] == "--grim-self-test" ||
+                               passthrough[0] == "--grim-gene-test" ||
+                               passthrough[0] == "--grim-random-genome" ||
+                               passthrough[0] == "--grim-map" ||
+                               passthrough[0] == "--grim-map-summary" ||
+                               passthrough[0] == "--grim-map-merge" ||
+                               passthrough[0] == "--grim-map-test" ||
+                               passthrough[0] == "--grim-samples" ||
+                               passthrough[0] == "--grim-sample-test" ||
+                               passthrough[0] == "--grim-audibility-test" ||
+                               passthrough[0] == "--grim-pull-test" ||
+                               passthrough[0] == "--grim-pull-yield" ||
+                               passthrough[0] == "--grim-audibility" ||
+                               passthrough[0] == "--grim-audio-compare" ||
+                               passthrough[0] == "--grim-describe-genome" ||
+                               passthrough[0] == "--grim-explore")) {
+    const std::vector<std::string> grim_args(passthrough.begin() + 1,
+                                             passthrough.end());
+    const int rc = passthrough[0] == "--grim-eval"
+                       ? run_grim_eval_cli(grim_args)
+                   : passthrough[0] == "--grim-self-test"
+                       ? run_grim_self_test(grim_args)
+                   : passthrough[0] == "--grim-gene-test"
+                       ? run_grim_gene_test(grim_args, argv[0])
+                   : passthrough[0] == "--grim-random-genome"
+                       ? run_grim_random_genome_cli(grim_args)
+                   : passthrough[0] == "--grim-explore"
+                       ? run_grim_explore_cli(grim_args, argv[0])
+                   : passthrough[0] == "--grim-map"
+                       ? run_grim_map_cli(grim_args)
+                   : passthrough[0] == "--grim-map-merge"
+                       ? run_grim_map_merge_cli(grim_args)
+                   : passthrough[0] == "--grim-map-summary"
+                       ? run_grim_map_summary_cli(grim_args)
+                   : passthrough[0] == "--grim-map-test"
+                       ? run_grim_map_test(grim_args, argv[0])
+                   : passthrough[0] == "--grim-samples"
+                       ? run_grim_samples_cli(grim_args)
+                   : passthrough[0] == "--grim-sample-test"
+                       ? run_grim_sample_test(grim_args)
+                   : passthrough[0] == "--grim-audibility-test"
+                       ? run_grim_audibility_test(grim_args)
+                   : passthrough[0] == "--grim-pull-test"
+                       ? run_grim_pull_test(grim_args)
+                   : passthrough[0] == "--grim-pull-yield"
+                       ? run_grim_pull_yield(grim_args)
+                   : passthrough[0] == "--grim-audibility"
+                       ? run_grim_audibility_cli(grim_args)
+                   : passthrough[0] == "--grim-audio-compare"
+                       ? run_grim_audio_compare_cli(grim_args)
+                   : passthrough[0] == "--grim-describe-genome"
+                       ? run_grim_describe_genome_cli(grim_args)
+                       : run_grim_determinism_test(grim_args, argv[0]);
     if (g_log_file) {
       log_flush_repeats();
       std::fclose(g_log_file);
