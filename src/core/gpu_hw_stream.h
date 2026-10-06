@@ -20,6 +20,9 @@ struct GpuHwVertex {
   u32 color = 0;  // r | g << 8 | b << 16
   float u = 0.0f; // texel coordinates (before window/wrap)
   float v = 0.0f;
+  // Texel range the primitive covers (min u, min v, max u, max v); texture
+  // filtering stays inside it so neighbouring atlas texels never bleed in.
+  u8 uv_limits[4] = {0, 0, 255, 255};
 };
 
 enum class GpuHwOp : u8 {

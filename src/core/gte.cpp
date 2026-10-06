@@ -837,6 +837,22 @@ void Gte::cmd_nclip() {
   s64 result = static_cast<s64>(sx[0]) * (sy[1] - sy[2]) +
                static_cast<s64>(sx[1]) * (sy[2] - sy[0]) +
                static_cast<s64>(sx[2]) * (sy[0] - sy[1]);
+  // PGXP culling: games cull back faces by this sign, and on whole-pixel
+  // positions thin front-facing triangles can come out zero or flipped
+  // (holes in models). Use the precise positions when all three are known.
+  Pgxp::PreciseVertex p[3];
+  if (g_pgxp_enabled && pgxp.screen_xy(0, sx[0], sy[0], p[0]) &&
+      pgxp.screen_xy(1, sx[1], sy[1], p[1]) &&
+      pgxp.screen_xy(2, sx[2], sy[2], p[2])) {
+    double precise = static_cast<double>(p[0].x) * (p[1].y - p[2].y) +
+                     static_cast<double>(p[1].x) * (p[2].y - p[0].y) +
+                     static_cast<double>(p[2].x) * (p[0].y - p[1].y);
+    // Keep a small but real area from truncating to 0.
+    if (std::abs(precise) > 0.1 && std::abs(precise) < 1.0) {
+      precise += precise < 0.0 ? -1.0 : 1.0;
+    }
+    result = static_cast<s64>(precise);
+  }
   set_mac(0, result);
 }
 
