@@ -366,8 +366,12 @@ public:
         u32 new_writes = 0u;
         if (fp.has_frame && find_write(fp.frame_key) == kNone) ++new_writes;
         if (fp.has_depth && find_write(fp.depth_key) == kNone) ++new_writes;
+        const u32 merge_read = fp.has_texture
+            ? find_overlapping_read(fp.texture_begin, fp.texture_end)
+            : kNone;
         if (write_count_ + new_writes > writes_.size() ||
-            (fp.has_texture && read_count_ >= reads_.size())) {
+            (fp.has_texture && merge_read == kNone &&
+             read_count_ >= reads_.size())) {
             return false;
         }
 
@@ -378,8 +382,17 @@ public:
             add_write(fp.depth_begin, fp.depth_end, fp.depth_key);
         }
         if (fp.has_texture) {
-            reads_[read_count_++] = {
-                fp.texture_begin, fp.texture_end, 0u};
+            // Runs usually sample one texture over and over. Overlapping
+            // ranges merge into their exact union (no gap is added), which
+            // keeps long runs within capacity.
+            if (merge_read != kNone) {
+                Range& read = reads_[merge_read];
+                read.begin = std::min(read.begin, fp.texture_begin);
+                read.end = std::max(read.end, fp.texture_end);
+            } else {
+                reads_[read_count_++] = {
+                    fp.texture_begin, fp.texture_end, 0u};
+            }
         }
         return true;
     }
@@ -394,6 +407,14 @@ private:
 
     static bool overlaps(u64 a0, u64 a1, u64 b0, u64 b1) {
         return a0 < b1 && b0 < a1;
+    }
+    u32 find_overlapping_read(u64 begin, u64 end) const {
+        for (u32 i = 0u; i < read_count_; ++i) {
+            if (overlaps(begin, end, reads_[i].begin, reads_[i].end)) {
+                return i;
+            }
+        }
+        return kNone;
     }
     u32 find_write(u64 key) const {
         for (u32 i = 0u; i < write_count_; ++i) {
@@ -426,7 +447,7 @@ private:
     }
 
     std::array<Range, 12> writes_{};
-    std::array<Range, 12> reads_{};
+    std::array<Range, 32> reads_{};
     u32 write_count_ = 0u;
     u32 read_count_ = 0u;
 };

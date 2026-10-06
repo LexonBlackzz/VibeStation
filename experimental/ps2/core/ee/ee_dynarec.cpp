@@ -35,6 +35,8 @@ constexpr u32 kMaxBlockInstructions = 64u;
 constexpr std::size_t kCodePageSize = 64u * 1024u;
 constexpr std::size_t kMaxCodePages = 1024u;
 constexpr std::size_t kBlockCacheEntries = 65536u;
+// Twice the block pool, keeping index probes short.
+constexpr std::size_t kBlockIndexEntries = 2u * kBlockCacheEntries;
 
 u32 compile_budget_for_limit(u32 limit) {
     limit = (std::min)(limit, kMaxBlockInstructions);
@@ -246,7 +248,7 @@ bool supported_special(u32 instruction) {
     }
 }
 
-bool supported_noncontrol(u32 instruction) {
+bool supported_native(u32 instruction) {
     if (instruction == 0u) return true;
     const u32 opcode = instruction >> 26;
     if (opcode == 0u) return supported_special(instruction);
@@ -286,6 +288,36 @@ bool supported_noncontrol(u32 instruction) {
         return true;
     }
     return false;
+}
+
+// Register-only instructions without a native emitter that a block hands to
+// the interpreter in place (EeDynarec::InterpreterFallback). Memory, control
+// flow, COP0 and SYSCALL remain block boundaries; SYSCALL stays one so the
+// system can intercept kernel calls between batches. BREAK only ever exits
+// through its exception, typically from a divide-by-zero check's delay slot.
+bool interpreter_supported(u32 instruction) {
+    const u32 opcode = instruction >> 26;
+    const u32 rs = (instruction >> 21) & 31u;
+    switch (opcode) {
+    case 0x00u: { // SPECIAL
+        const u32 funct = instruction & 63u;
+        return funct != 0x08u && funct != 0x09u && // JR/JALR
+               funct != 0x0Cu;                     // SYSCALL
+    }
+    case 0x01u: { // REGIMM traps
+        const u32 rt = (instruction >> 16) & 31u;
+        return rt >= 0x08u && rt <= 0x0Eu;
+    }
+    case 0x08u: // ADDI
+    case 0x18u: // DADDI
+    case 0x1Cu: // MMI
+        return true;
+    case 0x11u: // COP1 other than BC1x
+    case 0x12u: // COP2 (VU0 macro) other than BC2x
+        return rs != 0x08u;
+    default:
+        return false;
+    }
 }
 
 enum class ControlKind {
@@ -476,6 +508,10 @@ bool writes_gpr(u32 instruction, u32 reg) {
     }
     if (is_mtc0(instruction) || is_cop0_ei_di(instruction)) return false;
     if (is_mfc0(instruction)) return rt == reg;
+    // Interpreter-fallback instructions (conservatively for MMI).
+    if (opcode == 0x08u || opcode == 0x18u) return rt == reg;
+    if (opcode == 0x1Cu) return rt == reg || rd == reg;
+    if (opcode == 0x12u) return rt == reg; // QMFC2/CFC2
     switch (opcode) {
     case 0x09u:
     case 0x0Au:
@@ -662,6 +698,11 @@ struct Emitter {
         rex(false, -1, -1, dst);
         emit(static_cast<u8>(0xB8u + (dst & 7u)));
         emit32(value);
+    }
+    void call_r64(Reg target) {
+        rex(false, -1, -1, target);
+        emit(0xFFu);
+        modrm(3u, 2u, target);
     }
 
     void mem_disp_prefix(
@@ -993,9 +1034,11 @@ struct Emitter {
         }
     }
 
+    // RSI holds a branch condition or JR target read before a delay slot.
     void prologue() {
         push(RBX); push(RBP); push(R12);
         push(R13); push(R14); push(R15);
+        push(RSI);
 #ifdef _WIN32
         mov_rr64(RBX, RCX);
         mov_rr64(RBP, RDX);
@@ -1007,6 +1050,11 @@ struct Emitter {
         mov_rr64(R10, RDX);
         mov_rr64(R11, RCX);
 #endif
+        reload_cache();
+    }
+
+    // Load every cached guest register and HI/LO from EeCpuState.
+    void reload_cache() {
         for (int i = 0; i < 4; ++i) {
             const u32 guest =
                 guest_cache[static_cast<std::size_t>(i)];
@@ -1026,12 +1074,118 @@ struct Emitter {
         }
     }
 
+    // Every block exit jumps to one shared exit sequence (emit_shared_exit)
+    // with ECX = an exit_table index and, for an exit that commits PC,
+    // R10D = the next PC. Inlining the commit at each exit made blocks
+    // several times larger.
+    static constexpr u32 kCountsOnlyExit = 0xFFFFFFFFu;
+    struct ExitEntry {
+        // kCountsOnlyExit: advance Count but leave PC and last_* alone.
+        u32 last_pc = 0;
+        u32 last_instruction = 0;
+        // Retired count returned to EeDynarec::execute().
+        u32 returned = 0;
+        // Added to Count and the retired-instruction total; 0 commits
+        // nothing.
+        u32 counted = 0;
+    };
+    std::vector<ExitEntry> exit_table;
+    std::vector<std::size_t> exit_jumps;
+
+    void jump_to_exit(const ExitEntry& entry) {
+        mov_r32_imm(RCX, static_cast<u32>(exit_table.size()));
+        exit_table.push_back(entry);
+        exit_jumps.push_back(jmp32());
+    }
+
+    // Return `retired` without committing anything.
     void epilogue_return(u32 retired) {
-        flush_cache();
-        mov_r32_imm(RAX, retired);
+        jump_to_exit({0u, 0u, retired, 0u});
+    }
+
+    void emit_shared_exit() {
+        if (exit_jumps.empty()) return;
+        const std::size_t entry_label = bytes.size();
+        for (const auto jump : exit_jumps) patch(jump, entry_label);
+
+        // RDX = &exit_table[ECX]
+        emit(0x48u); emit(0x8Du); emit(0x15u); // LEA RDX,[RIP+table]
+        const std::size_t table_disp = bytes.size();
+        emit32(0u);
+        shift_imm32(RCX, 4u, 4u); // SHL ECX,4
+        add_rr64(RDX, RCX);
+
+        constexpr u32 kCount = static_cast<u32>(
+            offsetof(EeCpuState, cop0) + 9u * sizeof(u32));
+        constexpr u32 kCompare = static_cast<u32>(
+            offsetof(EeCpuState, cop0) + 11u * sizeof(u32));
+        constexpr u32 kCause = static_cast<u32>(
+            offsetof(EeCpuState, cop0) + 13u * sizeof(u32));
+        load32(RAX, RDX, 12u); // counted
+        test_rr64(RAX, RAX);
+        const std::size_t no_commit = jcc32(0x4u); // JE
+        mem_disp_prefix(true, RAX, RBX, 0x01u); // ADD [RBX+d],RAX
+        emit32(static_cast<u32>(
+            offsetof(EeCpuState, instructions_executed)));
+        mem_disp_prefix(false, RAX, RBX, 0x01u); // ADD [RBX+d],EAX
+        emit32(kCount);
+        load32(R11, RBX, kCount);
+        mem_disp_prefix(false, R11, RBX, 0x3Bu); // CMP R11D,[RBX+d]
+        emit32(kCompare);
+        const std::size_t not_equal = jcc32(0x5u); // JNE
+        rex(false, -1, -1, RBX); // OR DWORD [RBX+d],imm32
+        emit(0x81u);
+        modrm(2u, 1u, RBX);
+        emit32(kCause);
+        emit32(0x00008000u);
+        patch(not_equal, bytes.size());
+
+        load32(R11, RDX, 0u); // last_pc
+        cmp_r32_imm32(R11, kCountsOnlyExit);
+        const std::size_t counts_only = jcc32(0x4u); // JE
+        store32(RBX, static_cast<u32>(offsetof(EeCpuState, last_pc)), R11);
+        load32(R11, RDX, 4u);
+        store32(
+            RBX,
+            static_cast<u32>(offsetof(EeCpuState, last_instruction)),
+            R11);
+        store32(RBX, static_cast<u32>(offsetof(EeCpuState, pc)), R10);
+        add_r32_imm32(R10, 4u);
+        store32(RBX, static_cast<u32>(offsetof(EeCpuState, next_pc)), R10);
+        patch(no_commit, bytes.size());
+        patch(counts_only, bytes.size());
+
+        load32(RAX, RDX, 8u); // returned
+        // Cached registers always hold their guest's current value, so
+        // storing the clean ones too is harmless.
+        for (int i = 0; i < 4; ++i) {
+            const u32 guest = guest_cache[static_cast<std::size_t>(i)];
+            if (guest == 0xFFFFFFFFu) continue;
+            store64(
+                RBX,
+                static_cast<u32>(
+                    offsetof(EeCpuState, gpr) + guest * sizeof(EeGpr)),
+                cache_host(i));
+        }
+        if (cache_hi) {
+            store64(RBX, static_cast<u32>(offsetof(EeCpuState, hi)), R8);
+        }
+        if (cache_lo) {
+            store64(RBX, static_cast<u32>(offsetof(EeCpuState, lo)), R9);
+        }
+        pop(RSI);
         pop(R15); pop(R14); pop(R13);
         pop(R12); pop(RBP); pop(RBX);
         emit(0xC3u);
+
+        while ((bytes.size() & 3u) != 0u) emit(0xCCu);
+        patch(table_disp, bytes.size());
+        for (const ExitEntry& exit : exit_table) {
+            emit32(exit.last_pc);
+            emit32(exit.last_instruction);
+            emit32(exit.returned);
+            emit32(exit.counted);
+        }
     }
 };
 
@@ -1095,6 +1249,20 @@ void flush_code(void* code, std::size_t size) {
 #endif
 }
 
+// Pending rel32 jump sites for one instruction's checks. The lists are small
+// and bounded (at most four address-range jumps; three fast-path failures
+// plus one compare per code page), so a fixed array keeps compiling free
+// of heap allocations.
+struct JumpList {
+    std::array<std::size_t, 16> sites{};
+    u32 count = 0;
+    void push_back(std::size_t site) { sites[count++] = site; }
+    [[nodiscard]] const std::size_t* begin() const { return sites.data(); }
+    [[nodiscard]] const std::size_t* end() const {
+        return sites.data() + count;
+    }
+};
+
 void emit_add_state64(Emitter& out, u32 offset, u32 value) {
     out.rex(true, -1, -1, RBX);
     out.emit(0x81u);
@@ -1127,89 +1295,45 @@ void emit_and_state32(Emitter& out, u32 offset, u32 value) {
     out.emit32(value);
 }
 
-void emit_commit_common(
-    Emitter& out,
-    u32 retired,
-    u32 last_pc,
-    u32 last_instruction) {
-    if (retired != 0u) {
-        out.store32_imm(
-            RBX,
-            static_cast<u32>(offsetof(EeCpuState, last_pc)),
-            last_pc);
-        out.store32_imm(
-            RBX,
-            static_cast<u32>(offsetof(EeCpuState, last_instruction)),
-            last_instruction);
-        emit_add_state64(
-            out,
-            static_cast<u32>(
-                offsetof(EeCpuState, instructions_executed)),
-            retired);
-        emit_add_state32(
-            out,
-            static_cast<u32>(
-                offsetof(EeCpuState, cop0) + 9u * sizeof(u32)),
-            retired);
-
-        out.load32(
-            RAX, RBX,
-            static_cast<u32>(
-                offsetof(EeCpuState, cop0) + 9u * sizeof(u32)));
-        out.load32(
-            RDX, RBX,
-            static_cast<u32>(
-                offsetof(EeCpuState, cop0) + 11u * sizeof(u32)));
-        out.rex(false, RDX, -1, RAX);
-        out.emit(0x39u);
-        out.modrm(3u, RDX, RAX);
-        const std::size_t not_equal = out.jcc32(0x5u); // JNE
-        emit_or_state32(
-            out,
-            static_cast<u32>(
-                offsetof(EeCpuState, cop0) + 13u * sizeof(u32)),
-            0x00008000u);
-        out.patch(not_equal, out.bytes.size());
-    }
-}
-
+// Exit with PC = next_pc after retiring `retired` instructions.
 void emit_commit_sequential(
     Emitter& out,
     u32 retired,
     u32 next_pc,
     u32 last_pc,
     u32 last_instruction) {
-    emit_commit_common(
-        out, retired, last_pc, last_instruction);
-    out.store32_imm(
-        RBX,
-        static_cast<u32>(offsetof(EeCpuState, pc)),
-        next_pc);
-    out.store32_imm(
-        RBX,
-        static_cast<u32>(offsetof(EeCpuState, next_pc)),
-        next_pc + 4u);
-    out.epilogue_return(retired);
+    if (retired == 0u) {
+        out.store32_imm(
+            RBX, static_cast<u32>(offsetof(EeCpuState, pc)), next_pc);
+        out.store32_imm(
+            RBX,
+            static_cast<u32>(offsetof(EeCpuState, next_pc)),
+            next_pc + 4u);
+        out.epilogue_return(0u);
+        return;
+    }
+    out.mov_r32_imm(R10, next_pc);
+    out.jump_to_exit({last_pc, last_instruction, retired, retired});
 }
 
+// Exit with PC taken from pc_reg after retiring `retired` instructions.
 void emit_commit_dynamic_pc(
     Emitter& out,
     u32 retired,
     Reg pc_reg,
     u32 last_pc,
     u32 last_instruction) {
-    emit_commit_common(
-        out, retired, last_pc, last_instruction);
-    out.store32(
-        RBX,
-        static_cast<u32>(offsetof(EeCpuState, pc)),
-        pc_reg);
-    out.add_r32_imm32(pc_reg, 4u);
-    out.store32(
-        RBX,
-        static_cast<u32>(offsetof(EeCpuState, next_pc)),
-        pc_reg);
-    out.epilogue_return(retired);
+    if (retired == 0u) {
+        out.store32(RBX, static_cast<u32>(offsetof(EeCpuState, pc)), pc_reg);
+        out.add_r32_imm32(pc_reg, 4u);
+        out.store32(
+            RBX, static_cast<u32>(offsetof(EeCpuState, next_pc)), pc_reg);
+        out.epilogue_return(0u);
+        return;
+    }
+    // Before jump_to_exit, which reuses ECX.
+    if (pc_reg != R10) out.mov_rr32(R10, pc_reg);
+    out.jump_to_exit({last_pc, last_instruction, retired, retired});
 }
 
 void emit_fastmem_address(
@@ -1217,7 +1341,7 @@ void emit_fastmem_address(
     u32 rs,
     s16 immediate,
     u32 width,
-    std::vector<std::size_t>& fail_jumps,
+    JumpList& fail_jumps,
     bool require_single_page = false,
     u32 alignment_mask = 0u,
     u64 scratchpad_delta = 0u) {
@@ -1246,9 +1370,9 @@ void emit_fastmem_address(
         out.patch(not_scratchpad, out.bytes.size());
     }
 
-    std::vector<std::size_t> direct;
-    std::vector<std::size_t> alias2;
-    std::vector<std::size_t> alias3;
+    JumpList direct;
+    JumpList alias2;
+    JumpList alias3;
 
     out.cmp_r32_imm32(RAX, 0x20000000u);
     direct.push_back(out.jcc32(0x2u)); // JB
@@ -1308,7 +1432,7 @@ void emit_store_generation_barrier(
     Emitter& out,
     const std::array<u32, 4>& code_pages,
     u32 code_page_count,
-    std::vector<std::size_t>& selfmod_jumps,
+    JumpList& selfmod_jumps,
     u8 generation_increment = 1u) {
     // Scratchpad stores (RAX >= kRamSize, see emit_fastmem_address) never
     // touch code pages.
@@ -1340,6 +1464,9 @@ struct FusedConditionalEdge {
     u32 fallthrough_pc = 0;
     u32 side_exit_pc = 0;
     bool predicted_taken = false;
+    // The delay slot overwrites an operand: the condition is evaluated into
+    // RSI before it (emit_condition_to_rsi).
+    bool condition_first = false;
 };
 
 struct CompileState {
@@ -1354,6 +1481,9 @@ struct CompileState {
     u32 count = 0;
     ControlKind control = ControlKind::None;
     u32 control_index = 0;
+    // The final branch reads its operands before its delay slot: the
+    // condition (or JR target) is held in RSI.
+    bool operands_first = false;
     u32 trace_next_pc = 0;
     u32 fused_static_jumps = 0;
     std::array<FusedConditionalEdge, 8> fused_conditionals{};
@@ -1363,7 +1493,74 @@ struct CompileState {
     u32 fastmem_stores = 0;
     // Host scratchpad minus host RAM, or 0 when scratchpad fastmem is off.
     u64 scratchpad_delta = 0;
+    // Null when instructions without a native emitter end the block.
+    EeDynarec::InterpreterFallback interpreter_fallback = nullptr;
+    void* interpreter_context = nullptr;
 };
+
+// Hand one instruction without a native emitter to the interpreter. The call
+// clobbers the volatile host registers, so the cached guest registers and
+// HI/LO are flushed before it and reloaded after it, and R10/R11/RSI are
+// saved.
+// Dirty flags stay set: exits emitted later may still be reached on paths
+// where the flushed values are the only current copy.
+void emit_interpreter_call(CompileState& cs, u32 index) {
+    Emitter& out = cs.out;
+    const u32 pc = cs.pcs[index];
+    const u32 in_delay_slot =
+        index != 0u && is_control(cs.words[index - 1u]) ? 1u : 0u;
+
+    out.flush_cache();
+    out.push(R10);
+    out.push(R11);
+    out.push(RSI);
+    // The seven prologue pushes and these three leave RSP 8 bytes past
+    // 16-byte alignment; 40 bytes realign it and reserve the Win64 shadow
+    // space.
+    out.add_r64_imm32(RSP, static_cast<u32>(-40));
+#ifdef _WIN32
+    out.mov_r64_imm(
+        RCX, reinterpret_cast<std::uintptr_t>(cs.interpreter_context));
+    out.mov_r32_imm(RDX, pc);
+    out.mov_r32_imm(R8, cs.words[index]);
+    out.mov_r32_imm(R9, in_delay_slot);
+#else
+    out.mov_r64_imm(
+        RDI, reinterpret_cast<std::uintptr_t>(cs.interpreter_context));
+    out.mov_r32_imm(RSI, pc);
+    out.mov_r32_imm(RDX, cs.words[index]);
+    out.mov_r32_imm(RCX, in_delay_slot);
+#endif
+    out.mov_r64_imm(
+        RAX, reinterpret_cast<std::uintptr_t>(cs.interpreter_fallback));
+    out.call_r64(RAX);
+    out.add_r64_imm32(RSP, 40u);
+    out.pop(RSI);
+    out.pop(R11);
+    out.pop(R10);
+    out.reload_cache();
+
+    out.cmp_r32_imm32(RAX, EeDynarec::kInterpreterRetired);
+    const std::size_t retired = out.jcc32(0x4u); // JE
+    out.cmp_r32_imm32(RAX, EeDynarec::kInterpreterException);
+    const std::size_t failed = out.jcc32(0x5u); // JNE
+
+    // Exception: the interpreter has set PC to the vector and counted this
+    // instruction; commit the instructions before it.
+    out.jump_to_exit(
+        {Emitter::kCountsOnlyExit, 0u, index + 1u, index});
+
+    out.patch(failed, out.bytes.size());
+    if (index == 0u) {
+        out.epilogue_return(0u);
+    } else {
+        emit_commit_sequential(
+            out, index, pc,
+            cs.pcs[index - 1u], cs.words[index - 1u]);
+    }
+
+    out.patch(retired, out.bytes.size());
+}
 
 // A load or store in a delay slot cannot take its own precise guard exit:
 // by then the branch has been decided and the exit would lose its target.
@@ -1379,7 +1576,7 @@ void emit_delay_slot_memory_precheck(CompileState& cs, u32 branch_index) {
     const bool store = is_store(delay.word);
     if (!store && !is_load(delay.word)) return;
 
-    std::vector<std::size_t> fail;
+    JumpList fail;
     emit_fastmem_address(
         out, delay.rs, delay.immediate, delay.memory_width, fail,
         store, delay.alignment_mask, cs.scratchpad_delta);
@@ -1416,6 +1613,24 @@ void emit_delay_slot_memory_precheck(CompileState& cs, u32 branch_index) {
     out.patch(skip_fail, out.bytes.size());
 }
 
+// Evaluate a compare-and-branch condition into RSI (1 when taken) ahead of a
+// delay slot that overwrites one of its operands.
+void emit_condition_to_rsi(
+    Emitter& out,
+    const EeDynarecIrInstruction& branch,
+    ControlKind control) {
+    out.load_guest(RAX, branch.rs);
+    if (control == ControlKind::Beq || control == ControlKind::Bne) {
+        out.load_guest(RDX, branch.rt);
+        out.cmp_rr64(RAX, RDX);
+    } else {
+        out.test_rr64(RAX, RAX);
+    }
+    out.setcc_al(branch_take_cc(control));
+    out.movzx_eax_al();
+    out.mov_rr64(RSI, RAX);
+}
+
 bool emit_fused_conditional_side_exit(
     CompileState& cs,
     const FusedConditionalEdge& edge) {
@@ -1423,17 +1638,22 @@ bool emit_fused_conditional_side_exit(
     const EeDynarecIrInstruction& branch =
         cs.ir[edge.branch_index];
 
-    out.load_guest(RAX, branch.rs);
-    if (edge.control == ControlKind::Beq ||
-        edge.control == ControlKind::Bne) {
-        out.load_guest(RDX, branch.rt);
-        out.cmp_rr64(RAX, RDX);
+    u8 take_cc = branch_take_cc(edge.control);
+    if (edge.condition_first) {
+        out.test_rr64(RSI, RSI);
+        take_cc = 0x5u; // JNE
     } else {
-        out.test_rr64(RAX, RAX);
+        out.load_guest(RAX, branch.rs);
+        if (edge.control == ControlKind::Beq ||
+            edge.control == ControlKind::Bne) {
+            out.load_guest(RDX, branch.rt);
+            out.cmp_rr64(RAX, RDX);
+        } else {
+            out.test_rr64(RAX, RAX);
+        }
     }
 
-    const std::size_t take =
-        out.jcc32(branch_take_cc(edge.control));
+    const std::size_t take = out.jcc32(take_cc);
     const u32 retired = edge.delay_index + 1u;
     const u32 last_pc = cs.pcs[edge.delay_index];
     const u32 last_instruction = cs.words[edge.delay_index];
@@ -1474,6 +1694,13 @@ bool emit_body(
     const s16 imm = ir.immediate;
 
     if (instruction == 0u) return true;
+
+    if (cs.interpreter_fallback != nullptr &&
+        !supported_native(instruction) &&
+        interpreter_supported(instruction)) {
+        emit_interpreter_call(cs, index);
+        return true;
+    }
 
     // Static J/JAL instructions may be fused into a same-page native trace.
     // The block builder has already placed their architecturally executed
@@ -2183,7 +2410,7 @@ bool emit_body(
             opcode == 0x23u || opcode == 0x30u;
         if (width == 0u) return false;
 
-        std::vector<std::size_t> fail;
+        JumpList fail;
         emit_fastmem_address(
             out, rs, imm, width, fail, false, alignment_mask,
             cs.scratchpad_delta);
@@ -2266,7 +2493,7 @@ bool emit_body(
         const u32 alignment_mask = ir.alignment_mask;
         if (width == 0u) return false;
 
-        std::vector<std::size_t> fail;
+        JumpList fail;
         emit_fastmem_address(
             out, rs, imm, width, fail, true, alignment_mask,
             cs.scratchpad_delta);
@@ -2313,7 +2540,7 @@ bool emit_body(
             out.store_guest(rt, RDX);
         }
 
-        std::vector<std::size_t> selfmod;
+        JumpList selfmod;
         emit_store_generation_barrier(
             out,
             cs.code_pages,
@@ -2360,7 +2587,39 @@ bool emit_body(
 
 EeDynarec::EeDynarec()
     : blocks_(kBlockCacheEntries),
+      index_(kBlockIndexEntries),
       failed_compiles_(kBlockCacheEntries) {}
+
+namespace {
+std::size_t block_key_hash(u32 pc, u32 compile_budget) {
+    const u64 key =
+        (static_cast<u64>(pc >> 2u) * 11400714819323198485ull) ^
+        (static_cast<u64>(compile_budget) * 0x9E3779B97F4A7C15ull);
+    return static_cast<std::size_t>(key ^ (key >> 32u));
+}
+} // namespace
+
+EeDynarec::Block* EeDynarec::find_block(u32 pc, u32 compile_budget) {
+    const std::size_t mask = index_.size() - 1u;
+    for (std::size_t i = block_key_hash(pc, compile_budget) & mask;;
+         i = (i + 1u) & mask) {
+        const IndexEntry& entry = index_[i];
+        if (entry.block == 0u) return nullptr;
+        if (entry.pc == pc && entry.compile_budget == compile_budget) {
+            return &blocks_[entry.block - 1u];
+        }
+    }
+}
+
+// The caller guarantees the key is absent and block_count_ is below
+// blocks_.size(); the index is twice that size, so probing terminates.
+EeDynarec::Block& EeDynarec::add_block(u32 pc, u32 compile_budget) {
+    const std::size_t mask = index_.size() - 1u;
+    std::size_t i = block_key_hash(pc, compile_budget) & mask;
+    while (index_[i].block != 0u) i = (i + 1u) & mask;
+    index_[i] = {pc, compile_budget, ++block_count_};
+    return blocks_[block_count_ - 1u];
+}
 
 EeDynarec::~EeDynarec() {
     release_code_cache();
@@ -2373,7 +2632,11 @@ void EeDynarec::release_code_cache() {
     }
 #endif
     code_pages_.clear();
-    std::fill(blocks_.begin(), blocks_.end(), Block{});
+    // Stale links may still point at released blocks; clearing them makes
+    // link validation fail instead of reaching freed code.
+    std::fill(blocks_.begin(), blocks_.begin() + block_count_, Block{});
+    block_count_ = 0u;
+    std::fill(index_.begin(), index_.end(), IndexEntry{});
     std::fill(
         failed_compiles_.begin(), failed_compiles_.end(), FailedCompile{});
 }
@@ -2437,32 +2700,27 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     // 1-16 instruction exact-timing variants separate from the 16/32/64
     // throughput variants so an 8:1 IOP deadline cannot permanently poison
     // the cache with a tiny block.
-    const u64 key =
-        (static_cast<u64>(pc >> 2u) * 11400714819323198485ull) ^
-        (static_cast<u64>(compile_budget) * 0x9E3779B97F4A7C15ull);
-    const std::size_t index =
-        static_cast<std::size_t>(key ^ (key >> 32u)) &
-        (blocks_.size() - 1u);
-    Block& cached = blocks_[index];
+    Block* const existing = find_block(pc, compile_budget);
     bool cached_pages_valid =
-        cached.function != nullptr &&
-        cached.pc == pc &&
-        cached.page_generation == generation &&
-        cached.compile_budget == compile_budget;
+        existing != nullptr &&
+        existing->function != nullptr &&
+        existing->page_generation == generation;
     if (cached_pages_valid) {
-        for (u32 i = 0u; i < cached.source_page_count; ++i) {
-            if (page_generations[cached.source_pages[i]] !=
-                cached.source_generations[i]) {
+        for (u32 i = 0u; i < existing->source_page_count; ++i) {
+            if (page_generations[existing->source_pages[i]] !=
+                existing->source_generations[i]) {
                 cached_pages_valid = false;
                 break;
             }
         }
     }
     if (cached_pages_valid) {
-        return &cached;
+        return existing;
     }
 
-    FailedCompile& failed = failed_compiles_[index];
+    FailedCompile& failed = failed_compiles_[
+        block_key_hash(pc, compile_budget) &
+        (failed_compiles_.size() - 1u)];
     if (failed.pc == pc &&
         failed.compile_budget == compile_budget &&
         failed.page_generation == generation) {
@@ -2486,10 +2744,18 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     } failure_recorder{failed, pc, compile_budget, generation};
 
     CompileState cs;
+    cs.out.bytes.reserve(kCodePageSize / 4u);
     cs.block_pc = pc;
     cs.code_page = page;
     cs.code_pages[0] = page;
     cs.code_page_count = 1u;
+    cs.interpreter_fallback = interpreter_fallback_;
+    cs.interpreter_context = interpreter_context_;
+    auto compilable = [&](u32 instruction) {
+        return supported_native(instruction) ||
+               (cs.interpreter_fallback != nullptr &&
+                interpreter_supported(instruction));
+    };
     if (scratchpad_ != nullptr) {
         // RAX = delta + offset must never look like a RAM offset (see
         // emit_fastmem_address); otherwise leave scratchpad on guard exits.
@@ -2562,8 +2828,11 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             const bool delay_memory =
                 delay_ir.has(EeIrReadsMemory) ||
                 delay_ir.has(EeIrWritesMemory);
-            if (!supported_noncontrol(delay) ||
-                delay_ir.has(EeIrPreciseExit) ||
+            // Native precise exits (MTC0, EI/DI) cannot sit in a delay slot;
+            // an interpreted BREAK leaves through its exception.
+            if (!compilable(delay) ||
+                (delay_ir.has(EeIrPreciseExit) &&
+                 supported_native(delay)) ||
                 (delay_memory &&
                  !delay_slot_memory_supported(
                      instruction, control, delay))) {
@@ -2604,14 +2873,26 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                 control == ControlKind::Bc1t ||
                 control == ControlKind::Bc1fl ||
                 control == ControlKind::Bc1tl;
-            if ((!cop1_branch && writes_gpr(delay, rs)) ||
-                ((control == ControlKind::Beq ||
-                  control == ControlKind::Bne ||
-                  control == ControlKind::Beql ||
-                  control == ControlKind::Bnel) &&
-                 writes_gpr(delay, rt))) {
-                break;
-            }
+            // The delay slot is emitted before a non-likely branch reads its
+            // operands. When the delay slot overwrites one, read it first:
+            // compare-and-branch forms evaluate their condition into RSI and
+            // JR keeps its target there. Likely branches, the *AL forms and
+            // JALR already read their operands before the delay slot; J/JAL
+            // have none.
+            const bool delay_clobbers_operand =
+                !cop1_branch &&
+                control != ControlKind::J &&
+                control != ControlKind::Jal &&
+                (writes_gpr(delay, rs) ||
+                 ((control == ControlKind::Beq ||
+                   control == ControlKind::Bne ||
+                   control == ControlKind::Beql ||
+                   control == ControlKind::Bnel) &&
+                  writes_gpr(delay, rt)));
+            const bool operands_first =
+                delay_clobbers_operand &&
+                (is_fusable_conditional(control) ||
+                 control == ControlKind::Jr);
 
             // Keep the predicted direction of safe non-likely integer
             // branches inside this native trace. Backward edges are normally
@@ -2648,6 +2929,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                     edge.fallthrough_pc = fallthrough;
                     edge.side_exit_pc = side_exit_pc;
                     edge.predicted_taken = predicted_taken;
+                    edge.condition_first = operands_first;
 
                     append(fetch_pc, instruction);
                     append(delay_pc, delay);
@@ -2660,10 +2942,11 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             append(fetch_pc, instruction);
             append(delay_pc, delay);
             cs.control = control;
+            cs.operands_first = operands_first;
             break;
         }
 
-        if (!supported_noncontrol(instruction)) break;
+        if (!compilable(instruction)) break;
         if (is_mtc0(instruction) &&
             ((instruction >> 11) & 31u) == 9u &&
             cs.count != 0u) {
@@ -2729,7 +3012,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
         has_control ? cs.count - 2u : cs.count;
 
     for (u32 i = 0u; i < body_count; ++i) {
-        bool fused_branch = false;
+        const FusedConditionalEdge* branch_edge = nullptr;
         const FusedConditionalEdge* delay_edge = nullptr;
         for (u32 edge_index = 0u;
              edge_index < cs.fused_conditional_count;
@@ -2737,18 +3020,22 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             const auto& edge =
                 cs.fused_conditionals[edge_index];
             if (edge.branch_index == i) {
-                fused_branch = true;
+                branch_edge = &edge;
                 break;
             }
             if (edge.delay_index == i) {
                 delay_edge = &edge;
             }
         }
+        const bool fused_branch = branch_edge != nullptr;
 
         // Fused J/JAL and predicted conditional branches sit inside the
         // body with their delay slot right after them.
         if (control_kind(cs.words[i]) != ControlKind::None) {
             emit_delay_slot_memory_precheck(cs, i);
+        }
+        if (fused_branch && branch_edge->condition_first) {
+            emit_condition_to_rsi(cs.out, cs.ir[i], branch_edge->control);
         }
         if (!fused_branch &&
             !emit_body(cs, i, exits)) {
@@ -2906,6 +3193,13 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
                 branch_pc + 4u,
                 delay);
         } else {
+            if (cs.operands_first) {
+                if (cs.control == ControlKind::Jr) {
+                    cs.out.load_guest(RSI, rs, true);
+                } else {
+                    emit_condition_to_rsi(cs.out, branch_ir, cs.control);
+                }
+            }
             if (!emit_body(cs, delay_index, exits)) return nullptr;
         }
 
@@ -2922,6 +3216,12 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             break;
         case ControlKind::Jr:
         case ControlKind::Jalr:
+            if (cs.operands_first) {
+                emit_commit_dynamic_pc(
+                    cs.out, cs.count, RSI,
+                    branch_pc + 4u, delay);
+                break;
+            }
             if (!preserved_dynamic_target) {
                 cs.out.load_guest(R10, rs, true);
             }
@@ -2944,7 +3244,10 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             const bool cop1_branch =
                 cs.control == ControlKind::Bc1f ||
                 cs.control == ControlKind::Bc1t;
-            if (cop1_branch) {
+            if (cs.operands_first) {
+                // Evaluated before the delay slot overwrote an operand.
+                cs.out.test_rr64(RSI, RSI);
+            } else if (cop1_branch) {
                 cs.out.load32(
                     RAX, RBX,
                     static_cast<u32>(
@@ -2981,6 +3284,7 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             case ControlKind::Bc1t: take_cc = 0x5u; break;
             default: break;
             }
+            if (cs.operands_first) take_cc = 0x5u; // JNE on RSI
 
             const std::size_t take =
                 cs.out.jcc32(take_cc);
@@ -3010,12 +3314,18 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
             cs.pcs[cs.count - 1u],
             cs.words[cs.count - 1u]);
     }
+    cs.out.emit_shared_exit();
 
     if (cs.out.bytes.empty() ||
         cs.out.bytes.size() > kCodePageSize / 2u) {
         return nullptr;
     }
 
+    // A new key needs a free block; release before placing this code.
+    if (existing == nullptr && block_count_ >= blocks_.size()) {
+        release_code_cache();
+        ++cache_flushes_;
+    }
     if (code_pages_.empty() ||
         code_pages_.back().used + cs.out.bytes.size() >
             kCodePageSize) {
@@ -3039,6 +3349,9 @@ EeDynarec::Block* EeDynarec::lookup_or_compile(
     code_page.used +=
         (cs.out.bytes.size() + 15u) & ~std::size_t{15u};
 
+    // A release above may have dropped the existing block.
+    Block* slot = find_block(pc, compile_budget);
+    Block& cached = slot != nullptr ? *slot : add_block(pc, compile_budget);
     cached = {};
     cached.pc = pc;
     cached.page_generation = generation;

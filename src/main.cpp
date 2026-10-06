@@ -2,6 +2,7 @@
 // Entry point
 
 #define SDL_MAIN_HANDLED // Prevent SDL from redefining main()
+#include "core/gpu_hw_renderer.h"
 #include "core/system.h"
 #include "core/input_recorder.h"
 #include "input/controller.h"
@@ -36,6 +37,7 @@
 
 #include "ui/host_window.h"
 #include "ui/favorite_emulator.h"
+#include "ui/startup_disclaimer.h"
 #include "ui/vs2_hosted.h"
 
 namespace {
@@ -56,6 +58,10 @@ int run_vibestation(App& ps1, const HostWindow& host, bool switch_test,
                     bool cli_session) {
   if (!ps1.begin_run()) {
     return 1;
+  }
+  if (switch_test) {
+    // Nobody is there to press "I understand": skip it for this run only.
+    vibestation::acknowledge_startup_disclaimer(false);
   }
   std::unique_ptr<ps2::ui::Vibestation2> ps2;
   bool ps2_active = false;
@@ -1229,6 +1235,127 @@ static int run_bios_test(const std::string &bios_path, int steps) {
   return 0;
 }
 
+// --gpu-upscale N: replay the OpenGL upscaler in a hidden window during
+// --frame-test and dump its picture next to the software frame.
+static int g_test_gpu_upscale = 0;
+
+struct HeadlessUpscaler {
+  SDL_Window *window = nullptr;
+  SDL_GLContext context = nullptr;
+  GpuHwRenderer renderer;
+  GpuHwStream stream;
+
+  bool init(int scale) {
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+      LOG_ERROR("Upscaler test: SDL video init failed: %s", SDL_GetError());
+      return false;
+    }
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    window = SDL_CreateWindow("VibeStation upscaler test", 0, 0, 64, 64,
+                              SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    if (window == nullptr) {
+      LOG_ERROR("Upscaler test: window creation failed: %s", SDL_GetError());
+      return false;
+    }
+    context = SDL_GL_CreateContext(window);
+    if (context == nullptr) {
+      LOG_ERROR("Upscaler test: GL context failed: %s", SDL_GetError());
+      return false;
+    }
+    SDL_GL_MakeCurrent(window, context);
+    return renderer.init(scale);
+  }
+  void shutdown() {
+    renderer.shutdown();
+    if (context) SDL_GL_DeleteContext(context);
+    if (window) SDL_DestroyWindow(window);
+    context = nullptr;
+    window = nullptr;
+  }
+  // Stream statistics for the end-of-run log.
+  std::array<u64, 7> op_counts{};
+  u64 check_mask_draws = 0;
+  u64 set_mask_draws = 0;
+  u64 semi_draws = 0;
+  u64 sprite_draws = 0;
+  void trace(const GpuHwStream &s, int frame) {
+    for (const GpuHwCommand &c : s.commands) {
+      if (c.op != GpuHwOp::Triangles) {
+        LOG_INFO("HWTRACE f=%d op=%d x=%u y=%u w=%u h=%u src=%u,%u flags=%02X", frame,
+                 static_cast<int>(c.op), c.x, c.y, c.w, c.h, c.src_x, c.src_y, c.flags);
+        continue;
+      }
+      float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+      for (u32 i = 0; i < c.count; ++i) {
+        const GpuHwVertex &v = s.vertices[c.first + i];
+        x0 = std::min(x0, v.x); x1 = std::max(x1, v.x);
+        y0 = std::min(y0, v.y); y1 = std::max(y1, v.y);
+      }
+      LOG_INFO("HWTRACE f=%d tris=%u bbox=%.0f,%.0f-%.0f,%.0f flags=%02X semi=%u depth=%u "
+               "tex=%u,%u clut=%u,%u clip=%d,%d-%d,%d col0=%06X", frame, c.count / 3,
+               x0, y0, x1, y1, c.flags, c.semi_mode, c.tex_depth, c.tex_base_x,
+               c.tex_base_y, c.clut_x, c.clut_y, c.clip_x0, c.clip_y0, c.clip_x1,
+               c.clip_y1, s.vertices[c.first].color);
+    }
+  }
+  void tally(const GpuHwStream &s) {
+    for (const GpuHwCommand &c : s.commands) {
+      ++op_counts[static_cast<size_t>(c.op)];
+      if (c.op == GpuHwOp::Triangles) {
+        if (c.flags & gpu_hw::kCheckMask) ++check_mask_draws;
+        if (c.flags & gpu_hw::kSetMask) ++set_mask_draws;
+        if (c.flags & gpu_hw::kSemiTransparent) ++semi_draws;
+        if (c.flags & gpu_hw::kSprite) ++sprite_draws;
+      }
+    }
+  }
+  void log_tally() const {
+    LOG_INFO("Upscaler test: ops tri=%llu fill=%llu write=%llu copy=%llu sync_page=%llu "
+             "full_sync=%llu present=%llu; draws check_mask=%llu set_mask=%llu "
+             "semi=%llu sprite=%llu",
+             (unsigned long long)op_counts[0], (unsigned long long)op_counts[1],
+             (unsigned long long)op_counts[2], (unsigned long long)op_counts[3],
+             (unsigned long long)op_counts[4], (unsigned long long)op_counts[5],
+             (unsigned long long)op_counts[6], (unsigned long long)check_mask_draws,
+             (unsigned long long)set_mask_draws, (unsigned long long)semi_draws,
+             (unsigned long long)sprite_draws);
+  }
+  void dump(int frame_index) {
+    std::vector<u32> rgba;
+    if (!renderer.read_output(rgba)) {
+      LOG_INFO("Upscaler test: frame %d presented from software", frame_index);
+      return;
+    }
+    char path[128];
+    std::snprintf(path, sizeof(path), "frame_%04d_upscaled.ppm", frame_index);
+    std::ofstream out(path, std::ios::binary);
+    out << "P6\n" << renderer.output_width() << " " << renderer.output_height()
+        << "\n255\n";
+    for (u32 px : rgba) {
+      out.put(static_cast<char>(px & 0xFFu));
+      out.put(static_cast<char>((px >> 8) & 0xFFu));
+      out.put(static_cast<char>((px >> 16) & 0xFFu));
+    }
+    LOG_INFO("Upscaler test: wrote %s (%dx%d)", path, renderer.output_width(),
+             renderer.output_height());
+    if (std::getenv("VIBESTATION_UPSCALER_DUMP_VRAM") != nullptr) {
+      int vw = 0, vh = 0;
+      if (renderer.read_color_buffer(rgba, vw, vh)) {
+        std::snprintf(path, sizeof(path), "frame_%04d_hwvram.ppm", frame_index);
+        std::ofstream vout(path, std::ios::binary);
+        vout << "P6\n" << vw << " " << vh << "\n255\n";
+        for (u32 px : rgba) {
+          vout.put(static_cast<char>(px & 0xFFu));
+          vout.put(static_cast<char>((px >> 8) & 0xFFu));
+          vout.put(static_cast<char>((px >> 16) & 0xFFu));
+        }
+      }
+    }
+  }
+};
+
 static int run_frame_test(const std::string &bios_path, int frames,
                           const std::string &bin_path = "",
                           const std::string &cue_path = "",
@@ -1292,7 +1419,14 @@ static int run_frame_test(const std::string &bios_path, int frames,
     }
     LOG_INFO("Frame test: wrote %s", path);
   };
-  auto should_dump_vram = [frames](int frame_index) {
+  int dump_range_start = -1, dump_range_end = -1;
+  if (const char *range = std::getenv("VIBESTATION_DUMP_RANGE")) {
+    std::sscanf(range, "%d-%d", &dump_range_start, &dump_range_end);
+  }
+  auto should_dump_vram = [frames, dump_range_start, dump_range_end](int frame_index) {
+    if (frame_index >= dump_range_start && frame_index <= dump_range_end) {
+      return true;
+    }
     if (frame_index == frames) {
       return true;
     }
@@ -1335,6 +1469,32 @@ static int run_frame_test(const std::string &bios_path, int frames,
   }
 
   auto sys = std::make_unique<System>();
+  // VIBESTATION_TEST_GPU_REAPER=N: Grim Reaper geometry corruption, N per frame.
+  if (const char *reaper = std::getenv("VIBESTATION_TEST_GPU_REAPER")) {
+    System::GpuReaperConfig cfg;
+    cfg.enabled = true;
+    cfg.writes_per_frame = static_cast<u32>(std::max(1, std::atoi(reaper)));
+    cfg.affect_texture_state = false;
+    cfg.use_custom_seed = true;
+    sys->set_gpu_reaper_config(cfg);
+  }
+  // VIBESTATION_TEST_GPU_OPTS: comma list of filter, widescreen,
+  // native_color (15-bit dithered upscaled output).
+  if (const char *opts = std::getenv("VIBESTATION_TEST_GPU_OPTS")) {
+    const std::string list = opts;
+    g_gpu_texture_filter = list.find("filter") != std::string::npos;
+    g_gpu_widescreen = list.find("widescreen") != std::string::npos;
+    g_gpu_true_color = list.find("native_color") == std::string::npos;
+  }
+  HeadlessUpscaler upscaler;
+  if (g_test_gpu_upscale > 0) {
+    if (!upscaler.init(g_test_gpu_upscale)) {
+      LOG_ERROR("Upscaler test: unavailable");
+      upscaler.shutdown();
+      return 1;
+    }
+    sys->gpu().set_hw_stream(&upscaler.stream);
+  }
   if (!sys->load_bios(bios_path)) {
     LOG_ERROR("System failed to load BIOS");
     if (owns_log && g_log_file) {
@@ -1412,6 +1572,18 @@ static int run_frame_test(const std::string &bios_path, int frames,
   for (int i = 0; i < frames; ++i) {
     sys->sio().set_button_state(auto_input_buttons_for_frame(i + 1));
     sys->run_frame();
+    if (g_test_gpu_upscale > 0) {
+      upscaler.tally(upscaler.stream);
+      if (const char *tf = std::getenv("VIBESTATION_UPSCALER_TRACE_FRAME")) {
+        const char *tc = std::getenv("VIBESTATION_UPSCALER_TRACE_COUNT");
+        const int trace_count = tc ? std::max(1, std::atoi(tc)) : 2;
+        if (i + 1 >= std::atoi(tf) && i + 1 < std::atoi(tf) + trace_count) {
+          upscaler.trace(upscaler.stream, i + 1);
+        }
+      }
+      upscaler.renderer.replay(upscaler.stream);
+      upscaler.stream.clear();
+    }
     sys->cpu().notify_cpu_backend_frame(static_cast<u32>(i + 1));
     const double frame_cpu_ms = sys->profiling_stats().cpu_ms;
     const double frame_core_ms = sys->profiling_stats().total_ms;
@@ -1515,6 +1687,9 @@ static int run_frame_test(const std::string &bios_path, int frames,
       dump_vram_ppm(*sys, i + 1);
       dump_vram_raw(*sys, i + 1);
       dump_display_ppm(*sys, i + 1);
+      if (g_test_gpu_upscale > 0) {
+        upscaler.dump(i + 1);
+      }
     }
     if (gpu_debug_out.is_open()) {
       dump_gpu_debug_frame(gpu_debug_out, i + 1, *sys);
@@ -1544,6 +1719,9 @@ static int run_frame_test(const std::string &bios_path, int frames,
           ? std::clamp((1.0 - frame_budget_ms / core_ms_avg) * 100.0,
                        0.0, 100.0)
           : 0.0;
+  if (g_test_gpu_upscale > 0) {
+    upscaler.log_tally();
+  }
   LOG_INFO("FRAME_PERF cpu_core_ms=%.3f core_ms=%.3f cpu_core_min_ms=%.3f cpu_core_max_ms=%.3f core_min_ms=%.3f core_max_ms=%.3f slowdown_percent=%.2f target_fps=%.3f detailed=%u",
            cpu_core_ms_avg, core_ms_avg, frame_test_cpu_ms_min,
            frame_test_cpu_ms_max, frame_test_core_ms_min,
@@ -3978,6 +4156,24 @@ int main(int argc, char *argv[]) {
     }
     if (a == "--no-fmv-diagnostics") {
       fmv_diagnostics_override = 0;
+      continue;
+    }
+    if (a == "--gpu-fast-mode") {
+      g_gpu_fast_mode = true;
+      continue;
+    }
+    if (a == "--gpu-extreme-fast-mode") {
+      g_gpu_fast_mode = true;
+      g_gpu_extreme_fast_mode = true;
+      continue;
+    }
+    if (a == "--gpu-upscale" && (i + 1) < args.size()) {
+      g_test_gpu_upscale = std::max(1, std::atoi(args[i + 1].c_str()));
+      ++i;
+      continue;
+    }
+    if (a == "--pgxp") {
+      g_pgxp_enabled = true;
       continue;
     }
     if (a == "--experimental-bios-size") {

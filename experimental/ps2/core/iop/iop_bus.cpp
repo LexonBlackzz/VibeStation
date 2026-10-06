@@ -103,6 +103,8 @@ IopBus::IopBus(
       bios_(bios) {}
 
 void IopBus::reset() {
+    deferred_cycles_ = 0u;
+    quiet_cycles_ = 0u;
     cache_control_.fill(0);
     sio2_.reset();
     spu2_.reset();
@@ -144,6 +146,7 @@ bool IopBus::read_ohci(
         width == 0u || width > 4u) {
         return false;
     }
+    sync_counters();
 
     const u32 offset = physical - kOhciBase;
     const u32 aligned = offset & ~3u;
@@ -189,6 +192,8 @@ bool IopBus::write_ohci(
         width == 0u || width > 4u) {
         return false;
     }
+    sync_counters();
+    quiet_cycles_ = 0u;
 
     const u32 offset = physical - kOhciBase;
     const u32 aligned = offset & ~3u;
@@ -412,6 +417,7 @@ bool IopBus::read_root_counter(
     u32 index = 0;
     u32 reg = 0;
     if (!decode_root_counter(physical, index, reg)) return false;
+    sync_counters();
 
     static constexpr u32 bases[6] = {
         0x1F801100u, 0x1F801110u, 0x1F801120u,
@@ -446,6 +452,8 @@ bool IopBus::write_root_counter(
     u32 index = 0;
     u32 reg = 0;
     if (!decode_root_counter(physical, index, reg)) return false;
+    sync_counters();
+    quiet_cycles_ = 0u; // Recomputed by the next tick.
 
     static constexpr u32 bases[6] = {
         0x1F801100u, 0x1F801110u, 0x1F801120u,
@@ -527,8 +535,7 @@ bool IopBus::write_root_counter(
     return true;
 }
 
-void IopBus::tick(u64 cycles) {
-    spu2_.tick(cycles);
+void IopBus::advance_counters(u64 cycles) {
     ohci_frame_phase_ += cycles;
     while (ohci_frame_phase_ >= kOhciFrameCycles) {
         ohci_frame_phase_ -= kOhciFrameCycles;
@@ -559,6 +566,16 @@ void IopBus::tick(u64 cycles) {
 
         const u64 maximum =
             i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+
+        // No target or overflow step inside the interval: the per-step loop
+        // below would only increment.
+        const bool target_live =
+            !counter.target_deferred && counter.target <= maximum;
+        if (counter.count + increments <= maximum &&
+            (!target_live || counter.count + increments < counter.target)) {
+            counter.count += increments;
+            continue;
+        }
 
         for (u64 step = 0; step < increments; ++step) {
             ++counter.count;
@@ -612,15 +629,57 @@ void IopBus::tick(u64 cycles) {
             spu2_dma4_irq_cycles_ -= cycles;
         }
     }
-
-    cdvd_.tick(cycles, *this);
 }
 
-u32 IopBus::to_physical(u32 address) {
-    if (address >= 0x80000000u && address < 0xC0000000u) {
-        return address & 0x1FFFFFFFu;
+u64 IopBus::cycles_to_counter_event() const {
+    u64 best = spu2_dma4_irq_cycles_ != 0u
+        ? spu2_dma4_irq_cycles_
+        : ~u64{0};
+    for (u32 i = 0; i < root_counters_.size(); ++i) {
+        const RootCounter& counter = root_counters_[i];
+        const u64 rate = root_counter_rate_cache_[i];
+        const u64 maximum = i < 3u ? 0xFFFFull : 0xFFFFFFFFull;
+        // Increments until the step that reaches the target or overflows.
+        u64 steps = maximum + 1u - counter.count;
+        if (!counter.target_deferred && counter.target <= maximum) {
+            steps = std::min<u64>(
+                steps,
+                counter.count < counter.target
+                    ? counter.target - counter.count
+                    : 1u);
+        }
+        best = std::min<u64>(
+            best, (steps - 1u) * rate + (rate - counter.phase));
     }
-    return address;
+    return best;
+}
+
+void IopBus::sync_counters() const {
+    // Deferred time is part of the bus state readers see; applying it never
+    // crosses an event (see tick), so it is safe from const accessors.
+    auto& self = const_cast<IopBus&>(*this);
+    if (self.deferred_cycles_ == 0u) return;
+    const u64 cycles = self.deferred_cycles_;
+    self.deferred_cycles_ = 0u;
+    self.advance_counters(cycles);
+    self.quiet_cycles_ = self.cycles_to_counter_event();
+}
+
+void IopBus::tick(u64 cycles) {
+    spu2_.tick(cycles);
+    // IOP instructions tick one cycle at a time. Root counter, OHCI frame
+    // and SPU2 DMA IRQ time is only visible through their registers or an
+    // IRQ, so accumulate it until the next event is due (or a register
+    // access calls sync_counters) and apply it in one step.
+    const u64 pending = deferred_cycles_ + cycles;
+    if (pending < quiet_cycles_) {
+        deferred_cycles_ = pending;
+    } else {
+        deferred_cycles_ = 0u;
+        advance_counters(pending);
+        quiet_cycles_ = cycles_to_counter_event();
+    }
+    cdvd_.tick(cycles, *this);
 }
 
 bool IopBus::interrupt_pending() const {
@@ -829,6 +888,7 @@ u16 IopBus::sif_dma_ready_mask() const {
 }
 
 bool IopBus::can_tick_event_free(u64 cycles) const {
+    sync_counters();
     if (cdvd_.cycles_to_event() <= cycles) return false;
     if (spu2_dma4_irq_cycles_ != 0u &&
         spu2_dma4_irq_cycles_ <= cycles) return false;
@@ -846,6 +906,7 @@ bool IopBus::can_tick_event_free(u64 cycles) const {
 
 bool IopBus::tick_event_free(u64 cycles) {
     if (!can_tick_event_free(cycles)) return false;
+    quiet_cycles_ = 0u;
 
     spu2_.tick(cycles);
     const u64 frame_total = ohci_frame_phase_ + cycles;
@@ -1281,6 +1342,8 @@ bool IopBus::write32(u32 address, u32 value) {
             stored &= ~kDmaStart;
             raise_dma_irq(channel);
             if (core == 0u) {
+                sync_counters();
+                quiet_cycles_ = 0u;
                 spu2_dma4_irq_cycles_ =
                     words == 0u ? 48u :
                     static_cast<u64>(words) * 48u;

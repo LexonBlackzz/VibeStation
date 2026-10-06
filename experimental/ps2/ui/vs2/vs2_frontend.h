@@ -79,7 +79,8 @@ private:
     void begin_reveal();
     // What the first frame of an activation starts: game, boot or menu.
     void begin_first_screen();
-    void draw_disclaimer(ImDrawList* draw, const Layout& layout, float t);
+    // The startup disclaimer at opacity `a`; true on the frame it is confirmed.
+    bool draw_disclaimer(ImDrawList* draw, const Layout& layout, float a);
     void update_intro(const Input& in);
     void draw_intro(ImDrawList* draw, const Layout& layout);
     void draw_in_game(ImDrawList* draw, const ImVec2& pos, const ImVec2& size);
@@ -150,6 +151,8 @@ private:
     bool shown_before_ = false;
     // >= 0 while the startup disclaimer is up (its start time).
     double disclaimer_t0_ = -1.0;
+    double disclaimer_close_t0_ = -1.0; // fading out after "I understand"
+    bool disclaimer_remember_ = true;   // "Don't show this disclaimer again"
 
     // Starts hidden: the menu only fades in with the reveal, never at launch.
     float home_alpha_ = 0.0f;

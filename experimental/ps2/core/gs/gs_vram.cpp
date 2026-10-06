@@ -162,6 +162,22 @@ constexpr auto kPage32Words = make_page32_words();
 constexpr auto kPage16Halfwords = make_page16_halfwords(false);
 constexpr auto kPage16SHalfwords = make_page16_halfwords(true);
 
+// True when every in-page offset is its row-0 column term plus its column-0
+// row term, which is what GsVram::swizzle_column/swizzle_row rely on.
+template <std::size_t N>
+constexpr bool page_is_separable(
+    const std::array<u16, N>& page, u32 rows) {
+    for (u32 y = 0; y < rows; ++y) {
+        for (u32 x = 0; x < 64u; ++x) {
+            if (page[y * 64u + x] != page[x] + page[y * 64u]) return false;
+        }
+    }
+    return true;
+}
+static_assert(page_is_separable(kPage32Words, 32u));
+static_assert(page_is_separable(kPage16Halfwords, 64u));
+static_assert(page_is_separable(kPage16SHalfwords, 64u));
+
 u32 address32(u32 x, u32 y, u32 bp, u32 bw) {
     const u32 page_x = x >> 6;
     const u32 page_y = y >> 5;
@@ -292,6 +308,24 @@ u32 GsVram::pixel_address_bytes(
     default:
         return 0;
     }
+}
+
+u32 GsVram::swizzle_column(u32 psm, u32 x) {
+    if (psm == 0u || psm == 1u) {
+        return ((x >> 6) << 11) + kPage32Words[x & 63u];
+    }
+    const auto& page = psm == 10u ? kPage16SHalfwords : kPage16Halfwords;
+    return ((x >> 6) << 12) + page[x & 63u];
+}
+
+u32 GsVram::swizzle_row(u32 psm, u32 y, u32 bp, u32 bw) {
+    if (psm == 0u || psm == 1u) {
+        return (bp << 6) + (((y >> 5) * bw) << 11) +
+               kPage32Words[(y & 31u) * 64u];
+    }
+    const auto& page = psm == 10u ? kPage16SHalfwords : kPage16Halfwords;
+    return (bp << 7) + (((y >> 6) * bw) << 12) +
+           page[(y & 63u) * 64u];
 }
 
 u32 GsVram::depth_address_bytes(

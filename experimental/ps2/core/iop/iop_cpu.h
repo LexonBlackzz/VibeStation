@@ -111,6 +111,16 @@ private:
 
     bool halted_ = false;
     std::string halt_reason_;
+
+    // idle_pair_address() result for a pair held in IOP RAM, valid while
+    // the RAM write generation is unchanged.
+    struct IdlePairCache {
+        bool valid = false;
+        u32 branch_pc = 0;
+        u64 generation = 0;
+        u32 result = 0;
+    };
+    mutable IdlePairCache idle_cache_{};
 };
 
 } // namespace ps2

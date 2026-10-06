@@ -1198,7 +1198,8 @@ void App::panel_emulator_screen() {
         // The gameplay surface is intentionally chrome-free. The only
         // persistent in-client control is the floating toolbar drawn over the
         // game image below.
-        const float display_aspect = 4.0f / 3.0f;
+        const float display_aspect =
+            g_gpu_widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
         const float dst_aspect =
             (avail.y > 0.0f) ? (avail.x / avail.y) : display_aspect;
         ImVec2 draw_size = avail;

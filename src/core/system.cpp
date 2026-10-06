@@ -691,6 +691,7 @@ void System::init_hardware() {
     dma_.init(this);
     gpu_.init(this);
     cpu_.init(this);
+    gpu_.set_pgxp(&cpu_.gte.pgxp);
 
     hw_init_ = true;
 }
@@ -839,7 +840,7 @@ void System::gpu_gp0_dma(u32 val, u32 src_addr) {
     gpu_gp0_source_valid_ = true;
     gpu_gp0_source_from_dma_ = true;
     gpu_gp0_source_addr_ = src_addr & 0x001FFFFCu;
-    gpu_.gp0(val);
+    gpu_.gp0_from_ram(val, gpu_gp0_source_addr_);
     gpu_gp0_source_valid_ = false;
 }
 

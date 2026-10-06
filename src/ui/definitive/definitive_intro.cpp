@@ -1133,37 +1133,85 @@ void draw_intro_presentation(
 
 } // namespace definitive_ui
 
+
 namespace definitive_ui {
 
-void draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float elapsed) {
-    ImDrawList* overlay = ImGui::GetForegroundDrawList();
-    overlay->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), rgba(0, 0, 0, 255));
-
-    const float alpha =
-        timeline_progress(elapsed, 0.0f, 0.3f) *
-        (1.0f - timeline_progress(elapsed, kStartupDisclaimerSeconds - 0.35f,
-                                  kStartupDisclaimerSeconds));
-    if (alpha <= 0.001f) {
-        return;
+bool draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float alpha,
+                             bool& remember) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), rgba(0, 0, 0, 255));
+    const float a = std::clamp(alpha, 0.0f, 1.0f);
+    if (a <= 0.001f) {
+        return false;
     }
 
     const Layout layout = make_layout(pos, size);
-    constexpr std::array<const char*, 3> kLines = {{
-        "VibeStation is an independent, non-commercial fan project.",
-        "It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment.",
-        "PlayStation names, logos and sounds belong to Sony and are used under fair use.",
-    }};
-    const float font_size = layout.px(14.0f);
-    ImFont* font = font_for_size(font_size);
-    for (std::size_t i = 0; i < kLines.size(); ++i) {
-        const ImVec2 ts = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, kLines[i]);
-        const ImVec2 at(pos.x + (size.x - ts.x) * 0.5f,
-                        layout.point(0.0f, 366.0f + 26.0f * static_cast<float>(i)).y);
-        overlay->AddText(font, font_size, at,
-                         rgba(i == 0 ? 214 : 160, i == 0 ? 220 : 170, i == 0 ? 228 : 182,
-                              glow_alpha(255.0f * alpha)),
-                         kLines[i]);
+    const auto centered = [&](float y, float px, ImU32 color, const char* text) {
+        ImFont* font = font_for_size(layout.px(px));
+        const ImVec2 ts = font->CalcTextSizeA(layout.px(px), FLT_MAX, 0.0f, text);
+        draw->AddText(font, layout.px(px),
+                      ImVec2(pos.x + (size.x - ts.x) * 0.5f, layout.point(0.0f, y).y),
+                      color, text);
+    };
+    centered(306.0f, 15.0f, rgba(214, 220, 228, glow_alpha(255.0f * a)),
+             "VibeStation is an independent, non-commercial fan project.");
+    centered(338.0f, 14.0f, rgba(160, 170, 182, glow_alpha(255.0f * a)),
+             "It is not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment.");
+    centered(364.0f, 14.0f, rgba(160, 170, 182, glow_alpha(255.0f * a)),
+             "PlayStation names, logos and sounds belong to Sony and are used under fair use.");
+
+    // Checkbox, centred as one row with its label.
+    const char* label = "Don't show this disclaimer again";
+    const float label_px = layout.px(13.0f);
+    ImFont* label_font = font_for_size(label_px);
+    const ImVec2 label_size = label_font->CalcTextSizeA(label_px, FLT_MAX, 0.0f, label);
+    const float box = layout.px(16.0f);
+    const float gap = layout.px(10.0f);
+    const float row_w = box + gap + label_size.x;
+    const ImVec2 box0(pos.x + (size.x - row_w) * 0.5f, layout.point(0.0f, 420.0f).y);
+    ImGui::SetCursorScreenPos(ImVec2(box0.x - layout.px(6.0f), box0.y - layout.px(6.0f)));
+    const bool box_clicked = ImGui::InvisibleButton(
+        "##disclaimer_remember", ImVec2(row_w + layout.px(12.0f), box + layout.px(12.0f)));
+    const bool box_hovered = ImGui::IsItemHovered();
+    if (box_clicked && a > 0.95f) {
+        remember = !remember;
+        play_cursor_sound();
     }
+    draw->AddRect(box0, ImVec2(box0.x + box, box0.y + box),
+                  rgba(box_hovered ? 211 : 150, box_hovered ? 229 : 166, box_hovered ? 246 : 184,
+                       glow_alpha(235.0f * a)),
+                  layout.px(2.0f), 0, std::max(1.0f, layout.px(1.3f)));
+    if (remember) {
+        const float s = box;
+        draw->AddLine(ImVec2(box0.x + s * 0.22f, box0.y + s * 0.52f),
+                      ImVec2(box0.x + s * 0.43f, box0.y + s * 0.74f),
+                      rgba(205, 231, 255, glow_alpha(255.0f * a)), std::max(1.0f, layout.px(2.0f)));
+        draw->AddLine(ImVec2(box0.x + s * 0.43f, box0.y + s * 0.74f),
+                      ImVec2(box0.x + s * 0.80f, box0.y + s * 0.28f),
+                      rgba(205, 231, 255, glow_alpha(255.0f * a)), std::max(1.0f, layout.px(2.0f)));
+    }
+    draw->AddText(label_font, label_px,
+                  ImVec2(box0.x + box + gap, box0.y + (box - label_size.y) * 0.5f),
+                  rgba(188, 196, 206, glow_alpha(255.0f * a)), label);
+
+    // "I understand", in the launcher's button style. Enter, Space or A too.
+    const ImVec2 b0 = layout.point(540.0f, 466.0f);
+    const ImVec2 b1 = layout.point(740.0f, 508.0f);
+    ImGui::SetCursorScreenPos(b0);
+    const bool pressed = ImGui::InvisibleButton(
+        "##disclaimer_ok", ImVec2(b1.x - b0.x, b1.y - b0.y));
+    const bool hovered = ImGui::IsItemHovered();
+    draw->AddRectFilled(b0, b1, rgba(12, 17, 23, glow_alpha((hovered ? 200.0f : 150.0f) * a)));
+    draw->AddRect(b0, b1, rgba(211, 229, 246, glow_alpha((hovered ? 255.0f : 190.0f) * a)),
+                  0.0f, 0, std::max(1.0f, layout.px(1.35f)));
+    centered(478.0f, 16.0f, rgba(236, 240, 246, glow_alpha(255.0f * a)), "I understand");
+
+    const bool keyed = ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_Space, false) ||
+                       ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
+    // Not while still fading in, so a held key from launching does not count.
+    return a > 0.95f && (pressed || keyed);
 }
 
 } // namespace definitive_ui

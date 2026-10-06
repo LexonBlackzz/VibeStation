@@ -127,6 +127,13 @@ Config Config::load(const std::string& path) {
     get_bool("bilinear_filtering", cfg.bilinear_filtering);
     get_bool("gpu_fast_mode", cfg.gpu_fast_mode);
     get_bool("gpu_extreme_fast_mode", cfg.gpu_extreme_fast_mode);
+    get_bool("pgxp_enabled", cfg.pgxp_enabled);
+    if (j.contains("gpu_upscale") && j["gpu_upscale"].is_number_integer()) {
+        cfg.gpu_upscale = std::clamp(j["gpu_upscale"].get<int>(), 0, 8);
+    }
+    get_bool("gpu_true_color", cfg.gpu_true_color);
+    get_bool("gpu_texture_filter", cfg.gpu_texture_filter);
+    get_bool("gpu_widescreen", cfg.gpu_widescreen);
     get_bool("low_spec_mode", cfg.low_spec_mode);
     if (j.contains("deinterlace_mode") && j["deinterlace_mode"].is_number_unsigned()) {
         u32 v = j["deinterlace_mode"].get<u32>();
@@ -334,6 +341,11 @@ void Config::save(const std::string& path) const {
     j["bilinear_filtering"] = bilinear_filtering;
     j["gpu_fast_mode"] = gpu_fast_mode;
     j["gpu_extreme_fast_mode"] = gpu_fast_mode && gpu_extreme_fast_mode;
+    j["pgxp_enabled"] = pgxp_enabled;
+    j["gpu_upscale"] = gpu_upscale;
+    j["gpu_true_color"] = gpu_true_color;
+    j["gpu_texture_filter"] = gpu_texture_filter;
+    j["gpu_widescreen"] = gpu_widescreen;
     j["low_spec_mode"] = low_spec_mode;
     j["deinterlace_mode"] = static_cast<int>(deinterlace_mode);
     j["output_resolution_mode"] = static_cast<int>(output_resolution_mode);
@@ -449,6 +461,11 @@ void Config::apply_to_globals() const {
     g_low_spec_mode = low_spec_mode;
     g_gpu_fast_mode = gpu_fast_mode;
     g_gpu_extreme_fast_mode = gpu_extreme_fast_mode;
+    g_pgxp_enabled = pgxp_enabled;
+    g_gpu_upscale = gpu_upscale;
+    g_gpu_true_color = gpu_true_color;
+    g_gpu_texture_filter = gpu_texture_filter;
+    g_gpu_widescreen = gpu_widescreen;
     g_bilinear_filtering = bilinear_filtering;
     g_deinterlace_mode = deinterlace_mode;
     g_output_resolution_mode = output_resolution_mode;

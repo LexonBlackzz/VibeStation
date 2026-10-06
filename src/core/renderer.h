@@ -39,6 +39,10 @@ public:
   static const char *shader_mode_name(ShaderMode mode);
 
   unsigned int get_texture_id() const;
+  // Presents `texture` (e.g. the OpenGL upscaler's output) instead of the
+  // uploaded software frame; 0 returns to the software frame. The logical
+  // frame size stays that of the last uploaded software frame.
+  void set_external_source(unsigned int texture);
   int last_frame_width() const { return last_frame_width_; }
   int last_frame_height() const { return last_frame_height_; }
 
@@ -48,6 +52,10 @@ private:
   SDL_Window *window_ = nullptr;
   SDL_GLContext gl_context_ = nullptr;
   unsigned int texture_id_ = 0;
+  unsigned int external_texture_ = 0;
+  unsigned int source_texture() const {
+    return external_texture_ != 0 ? external_texture_ : texture_id_;
+  }
   int last_frame_width_ = 320;
   int last_frame_height_ = 240;
   int texture_width_ = 0;

@@ -3,6 +3,7 @@
 #include "common/types.h"
 
 #include <cstddef>
+#include <cstring>
 #include <vector>
 
 namespace ps2 {
@@ -26,10 +27,21 @@ public:
     [[nodiscard]] bool write32(u32 offset, u32 value);
     [[nodiscard]] bool write64(u32 offset, u64 value);
 
+    // Unchecked little-endian word; the caller guarantees offset is
+    // 4-byte aligned and inside the RAM.
+    [[nodiscard]] u32 word(u32 offset) const {
+        u32 value;
+        std::memcpy(&value, data_.data() + offset, sizeof(value));
+        return value;
+    }
+    // Advances on every write; lets callers cache facts about RAM contents.
+    [[nodiscard]] u64 generation() const { return generation_; }
+
 private:
     [[nodiscard]] bool contains(u32 offset, std::size_t width) const;
 
     std::vector<u8> data_;
+    u64 generation_ = 0;
 };
 
 } // namespace ps2

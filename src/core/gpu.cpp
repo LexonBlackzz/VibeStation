@@ -377,6 +377,17 @@ namespace {
             (((b >> 3) & 0x1F) << 10) |
             (preserve_bits & 0x8000u));
     }
+    // The GPU skips any triangle whose vertices are 1024 or more pixels apart
+    // horizontally or 512 or more vertically, judged on the unclipped (but
+    // 11-bit wrapped) coordinates before the drawing area is applied.
+    bool exceeds_primitive_limits(const Vertex& a, const Vertex& b,
+                                  const Vertex& c) {
+        const int min_x = std::min({ a.x, b.x, c.x });
+        const int max_x = std::max({ a.x, b.x, c.x });
+        const int min_y = std::min({ a.y, b.y, c.y });
+        const int max_y = std::max({ a.y, b.y, c.y });
+        return max_x - min_x >= 1024 || max_y - min_y >= 512;
+    }
 } // namespace
 
 // ── Command Length Table ───────────────────────────────────────────
@@ -626,11 +637,13 @@ u32 Gpu::gp0_command_length(u8 opcode) {
 
 void Gpu::reset() {
     vram_.fill(0);
+    hw_full_sync_pending_ = true;
     if (gp0_buffer_.capacity() < 12) {
         gp0_buffer_.reserve(12);
     }
     gp0_fifo_.clear();
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     gp0_mode_ = Gp0Mode::Command;
     gp0_words_remaining_ = 0;
     display_ = {};
@@ -678,6 +691,7 @@ void Gpu::reset() {
 void Gpu::corrupt_vram_word(u32 index, u16 value) {
     const size_t safe_index = static_cast<size_t>(index) % vram_.size();
     vram_[safe_index] = value;
+    hw_full_sync_pending_ = true;
 }
 
 void Gpu::corrupt_render_state(u32 selector, u32 value) {
@@ -757,8 +771,13 @@ void Gpu::corrupt_render_state(u32 selector, u32 value) {
 
 void Gpu::set_reaper_pulse(u32 geometry_mutations, u32 texture_mutations,
     u32 seed) {
-    reaper_pending_geometry_ = geometry_mutations;
-    reaper_pending_texture_ = texture_mutations;
+    // Mutations a VBlank period had no draws for carry over (games below
+    // 60 fps draw only every other period); seed 0 (Reaper off) clears them.
+    constexpr u32 kMaxPending = 4096;
+    reaper_pending_geometry_ = seed == 0 ? 0 :
+        std::min(kMaxPending, reaper_pending_geometry_ + geometry_mutations);
+    reaper_pending_texture_ = seed == 0 ? 0 :
+        std::min(kMaxPending, reaper_pending_texture_ + texture_mutations);
     reaper_state_ = seed ? seed : 0xA341316Cu;
 }
 
@@ -800,19 +819,62 @@ void Gpu::apply_reaper_to_gp0_command() {
     }
 
     const u8 opcode = static_cast<u8>(gp0_command_);
-    if (reaper_pending_geometry_ > 0 && is_draw_primitive_opcode(opcode)) {
-        std::vector<size_t> vertex_indices;
-        for (size_t i = 1; i < gp0_buffer_.size(); ++i) {
-            if ((i % 2u) == 1u) {
-                vertex_indices.push_back(i);
-            }
+    if (is_draw_primitive_opcode(opcode)) {
+        ++reaper_draws_this_frame_;
+    }
+    if (reaper_pending_geometry_ == 0 && reaper_pending_texture_ == 0) {
+        return;
+    }
+
+    // Spread the frame's mutations over its draws (estimated from the last
+    // frame) instead of spending them all on the first few, which are usually
+    // backgrounds that later draws cover.
+    const auto hit = [&](u32 pending) {
+        if (pending == 0) {
+            return false;
         }
-        if (!vertex_indices.empty()) {
-            const u32 noise = next_reaper_noise();
-            const size_t slot = vertex_indices[noise % vertex_indices.size()];
-            gp0_buffer_[slot] = mutate_vertex_word(gp0_buffer_[slot], noise);
-            --reaper_pending_geometry_;
+        // Games below 60 fps draw in every other VBlank period or so; use the
+        // busier of the last two.
+        const u32 expected =
+            std::max(reaper_draws_last_frame_, reaper_draws_prev_frame_);
+        const u32 remaining = expected > reaper_draws_this_frame_
+            ? expected - reaper_draws_this_frame_ + 1u
+            : 1u;
+        return pending >= remaining || (next_reaper_noise() % remaining) < pending;
+    };
+
+    // Word index of each vertex (and its texcoord word, 0 if none).
+    size_t vertex_slots[4] = {};
+    size_t uv_slots[4] = {};
+    size_t vertex_count = 0;
+    if (opcode >= 0x20 && opcode <= 0x3F) {
+        const bool gouraud = (opcode & 0x10u) != 0;
+        const bool textured = (opcode & 0x04u) != 0;
+        const size_t stride = 1u + (textured ? 1u : 0u) + (gouraud ? 1u : 0u);
+        vertex_count = (opcode & 0x08u) ? 4u : 3u;
+        for (size_t i = 0; i < vertex_count; ++i) {
+            vertex_slots[i] = 1u + i * stride;
+            uv_slots[i] = textured ? vertex_slots[i] + 1u : 0u;
         }
+    } else if (opcode >= 0x40 && opcode <= 0x5F) {
+        const bool gouraud = (opcode & 0x10u) != 0;
+        vertex_count = 2;
+        vertex_slots[0] = 1;
+        vertex_slots[1] = gouraud ? 3u : 2u;
+    } else if (opcode >= 0x60 && opcode <= 0x7F) {
+        vertex_count = 1;
+        vertex_slots[0] = 1;
+        uv_slots[0] = (opcode & 0x04u) ? 2u : 0u;
+    }
+    while (vertex_count > 0 && vertex_slots[vertex_count - 1] >= gp0_buffer_.size()) {
+        --vertex_count;
+    }
+
+    if (vertex_count > 0 && hit(reaper_pending_geometry_)) {
+        const u32 noise = next_reaper_noise();
+        const size_t slot = vertex_slots[noise % vertex_count];
+        gp0_buffer_[slot] = mutate_vertex_word(gp0_buffer_[slot], noise);
+        --reaper_pending_geometry_;
     }
 
     if (reaper_pending_texture_ == 0) {
@@ -820,16 +882,19 @@ void Gpu::apply_reaper_to_gp0_command() {
     }
 
     if (is_textured_primitive_opcode(opcode)) {
-        std::vector<size_t> texture_indices;
-        for (size_t i = 2; i < gp0_buffer_.size(); ++i) {
-            if ((i % 2u) == 0u) {
-                texture_indices.push_back(i);
+        if (!hit(reaper_pending_texture_)) {
+            return;
+        }
+        size_t candidates[4] = {};
+        size_t candidate_count = 0;
+        for (size_t i = 0; i < vertex_count; ++i) {
+            if (uv_slots[i] != 0 && uv_slots[i] < gp0_buffer_.size()) {
+                candidates[candidate_count++] = uv_slots[i];
             }
         }
-        if (!texture_indices.empty()) {
+        if (candidate_count > 0) {
             const u32 noise = next_reaper_noise();
-            const size_t slot = texture_indices[noise % texture_indices.size()];
-            gp0_buffer_[slot] ^= noise;
+            gp0_buffer_[candidates[noise % candidate_count]] ^= noise;
             --reaper_pending_texture_;
         }
         return;
@@ -878,7 +943,14 @@ void Gpu::consume_vram_write_word(u32 word) {
 
     if (vram_tx_pos_ >= vram_tx_total_) {
         gp0_mode_ = Gp0Mode::Command;
+        hw_record_vram_write(vram_tx_x_, vram_tx_y_, vram_tx_w_, vram_tx_h_);
     }
+}
+
+void Gpu::gp0_from_ram(u32 command, u32 phys) {
+    gp0_word_source_ = phys;
+    gp0(command);
+    gp0_word_source_ = Pgxp::kNoSource;
 }
 
 void Gpu::gp0(u32 command) {
@@ -901,6 +973,9 @@ void Gpu::gp0(u32 command) {
             static_cast<int>(gp0_mode_));
     }
 
+    // Only the incoming word's RAM source is known; words that queued behind
+    // a VRAM read lose theirs (and just miss PGXP).
+    u32 word_source = gp0_fifo_.empty() ? gp0_word_source_ : Pgxp::kNoSource;
     gp0_fifo_.push_back(command);
     while (!gp0_fifo_.empty()) {
         if (gp0_mode_ == Gp0Mode::VramRead) {
@@ -929,6 +1004,8 @@ void Gpu::gp0(u32 command) {
     }
 
     gp0_buffer_.push_back(command);
+    gp0_buffer_src_.push_back(word_source);
+    word_source = Pgxp::kNoSource;
     gp0_words_remaining_--;
 
     if (gp0_words_remaining_ > 0)
@@ -1247,6 +1324,7 @@ void Gpu::gp0(u32 command) {
     }
 
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     }
     if (profile_detailed && sys_) {
         const auto end = std::chrono::high_resolution_clock::now();
@@ -1323,18 +1401,25 @@ void Gpu::gp0_fill_rect() {
             vram_[index] = out;
         }
     }
+    if (x + w > psx::VRAM_WIDTH || y + h > psx::VRAM_HEIGHT ||
+        check_mask_before_draw_) {
+        hw_record_vram_write(x, y, w, h);
+    } else {
+        hw_record_fill(x, y, w, h, gp0_buffer_[0]);
+    }
 }
 
 void Gpu::gp0_mono_tri() {
     Color c(gp0_buffer_[0]);
     Vertex v[3];
-    v[0] = decode_vertex_word(gp0_buffer_[1]);
-    v[1] = decode_vertex_word(gp0_buffer_[2]);
-    v[2] = decode_vertex_word(gp0_buffer_[3]);
+    v[0] = decode_buffer_vertex(1);
+    v[1] = decode_buffer_vertex(2);
+    v[2] = decode_buffer_vertex(3);
     v[0].color = c;
     v[1].color = c;
     v[2].color = c;
     debug_note_polygon(gp0_command_, v, 3, false, false);
+    hw_record_polygon(v, 3, false, false);
     draw_flat_triangle(v[0], v[1], v[2], c);
 }
 
@@ -1342,10 +1427,11 @@ void Gpu::gp0_mono_quad() {
     Color c(gp0_buffer_[0]);
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
-        v[i] = decode_vertex_word(gp0_buffer_[1 + i]);
+        v[i] = decode_buffer_vertex(1 + i);
         v[i].color = c;
     }
     debug_note_polygon(gp0_command_, v, 4, false, false);
+    hw_record_polygon(v, 4, false, false);
     draw_flat_triangle(v[0], v[1], v[2], c);
     draw_flat_triangle(v[1], v[2], v[3], c);
 }
@@ -1359,13 +1445,13 @@ void Gpu::gp0_textured_tri() {
     texpage_ = static_cast<u16>(gp0_buffer_[4] >> 16);
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     Vertex v[3];
-    v[0] = decode_vertex_word(gp0_buffer_[1]);
+    v[0] = decode_buffer_vertex(1);
     v[0].u = gp0_buffer_[2] & 0xFF;
     v[0].v = (gp0_buffer_[2] >> 8) & 0xFF;
-    v[1] = decode_vertex_word(gp0_buffer_[3]);
+    v[1] = decode_buffer_vertex(3);
     v[1].u = gp0_buffer_[4] & 0xFF;
     v[1].v = (gp0_buffer_[4] >> 8) & 0xFF;
-    v[2] = decode_vertex_word(gp0_buffer_[5]);
+    v[2] = decode_buffer_vertex(5);
     v[2].u = gp0_buffer_[6] & 0xFF;
     v[2].v = (gp0_buffer_[6] >> 8) & 0xFF;
     v[0].color = c;
@@ -1373,6 +1459,7 @@ void Gpu::gp0_textured_tri() {
     v[2].color = c;
     debug_note_polygon(gp0_command_, v, 3, true, false,
                        (gp0_command_ & 0x1u) != 0);
+    hw_record_polygon(v, 3, true, (gp0_command_ & 0x1u) != 0);
     draw_textured_triangle(v[0], v[1], v[2], c);
 }
 
@@ -1387,13 +1474,14 @@ void Gpu::gp0_textured_quad() {
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
         int base = 1 + i * 2;
-        v[i] = decode_vertex_word(gp0_buffer_[base]);
+        v[i] = decode_buffer_vertex(base);
         v[i].u = gp0_buffer_[base + 1] & 0xFF;
         v[i].v = (gp0_buffer_[base + 1] >> 8) & 0xFF;
         v[i].color = c;
     }
     debug_note_polygon(gp0_command_, v, 4, true, false,
                        (gp0_command_ & 0x1u) != 0);
+    hw_record_polygon(v, 4, true, (gp0_command_ & 0x1u) != 0);
     draw_textured_triangle(v[0], v[1], v[2], c);
     draw_textured_triangle(v[1], v[2], v[3], c);
 }
@@ -1401,24 +1489,22 @@ void Gpu::gp0_textured_quad() {
 void Gpu::gp0_shaded_tri() {
     Vertex v[3];
     for (int i = 0; i < 3; i++) {
+        v[i] = decode_buffer_vertex(i * 2 + 1);
         v[i].color = Color(gp0_buffer_[i * 2]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
     }
     debug_note_polygon(gp0_command_, v, 3, false, true);
+    hw_record_polygon(v, 3, false, false);
     draw_shaded_triangle(v[0], v[1], v[2]);
 }
 
 void Gpu::gp0_shaded_quad() {
     Vertex v[4];
     for (int i = 0; i < 4; i++) {
+        v[i] = decode_buffer_vertex(i * 2 + 1);
         v[i].color = Color(gp0_buffer_[i * 2]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[i * 2 + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
     }
     debug_note_polygon(gp0_command_, v, 4, false, true);
+    hw_record_polygon(v, 4, false, false);
     draw_shaded_triangle(v[0], v[1], v[2]);
     draw_shaded_triangle(v[1], v[2], v[3]);
 }
@@ -1430,15 +1516,14 @@ void Gpu::gp0_shaded_textured_tri() {
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 3; i++) {
         int base = i * 3;
+        v[i] = decode_buffer_vertex(base + 1);
         v[i].color = Color(gp0_buffer_[base]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
     debug_note_polygon(gp0_command_, v, 3, true, true,
                        (gp0_command_ & 0x1u) != 0);
+    hw_record_polygon(v, 3, true, (gp0_command_ & 0x1u) != 0);
     draw_shaded_textured_triangle(v[0], v[1], v[2]);
 }
 
@@ -1449,15 +1534,14 @@ void Gpu::gp0_shaded_textured_quad() {
     semi_transparency_ = static_cast<u8>((texpage_ >> 5) & 0x3u);
     for (int i = 0; i < 4; i++) {
         int base = i * 3;
+        v[i] = decode_buffer_vertex(base + 1);
         v[i].color = Color(gp0_buffer_[base]);
-        const Vertex pos = decode_vertex_word(gp0_buffer_[base + 1]);
-        v[i].x = pos.x;
-        v[i].y = pos.y;
         v[i].u = gp0_buffer_[base + 2] & 0xFF;
         v[i].v = (gp0_buffer_[base + 2] >> 8) & 0xFF;
     }
     debug_note_polygon(gp0_command_, v, 4, true, true,
                        (gp0_command_ & 0x1u) != 0);
+    hw_record_polygon(v, 4, true, (gp0_command_ & 0x1u) != 0);
     draw_shaded_textured_triangle(v[0], v[1], v[2]);
     draw_shaded_textured_triangle(v[1], v[2], v[3]);
 }
@@ -1510,10 +1594,30 @@ void Gpu::gp0_shaded_polyline_start() {
 
 Vertex Gpu::decode_vertex_word(u32 word) const {
     Vertex v{};
+    // Coordinates are signed 11-bit; the drawing offset is added after, without
+    // wrapping (double-buffered games draw past x=1023 from a buffer at x=512).
     v.x = static_cast<s16>(sign_extend_11(word) + draw_x_offset_);
     v.y = static_cast<s16>(sign_extend_11(word >> 16) + draw_y_offset_);
     v.fx = static_cast<float>(v.x);
     v.fy = static_cast<float>(v.y);
+    return v;
+}
+
+Vertex Gpu::decode_buffer_vertex(size_t index) const {
+    const u32 word = gp0_buffer_[index];
+    Vertex v = decode_vertex_word(word);
+    if (!g_pgxp_enabled || pgxp_ == nullptr || index >= gp0_buffer_src_.size()) {
+        return v;
+    }
+    Pgxp::PreciseVertex precise;
+    // The GPU ignores the top 5 bits of each coordinate, but the stored word
+    // must match exactly for the precise vertex to be this one.
+    if (pgxp_->lookup(gp0_buffer_src_[index], word, precise)) {
+        v.fx = precise.x + static_cast<float>(draw_x_offset_);
+        v.fy = precise.y + static_cast<float>(draw_y_offset_);
+        v.w = precise.w;
+        v.has_w = true;
+    }
     return v;
 }
 
@@ -1524,6 +1628,7 @@ void Gpu::draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent) 
     if (dx_span > 1023 || dy_span > 511) {
         return;
     }
+    hw_record_line(a, c, b, c);
     s16 x0 = a.x;
     s16 y0 = a.y;
     const s16 x1 = b.x;
@@ -1558,6 +1663,7 @@ void Gpu::draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
     if (dx_span > 1023 || dy_span > 511) {
         return;
     }
+    hw_record_line(a, ca, b, cb);
     s16 x0 = a.x;
     s16 y0 = a.y;
     const s16 x1 = b.x;
@@ -1644,6 +1750,7 @@ void Gpu::gp0_mono_rect() {
     s16 y = origin.y;
     u16 w = static_cast<u16>(gp0_buffer_[2] & 0x3FFu);
     u16 h = static_cast<u16>((gp0_buffer_[2] >> 16) & 0x1FFu);
+    hw_record_rect(x, y, w, h, c, false, 0, 0, false);
     draw_rect(x, y, w, h, c);
 }
 
@@ -1679,6 +1786,7 @@ void Gpu::gp0_textured_rect() {
     }
 
     const bool raw_texture = (gp0_command_ & 0x1u) != 0;
+    hw_record_rect(x, y, w, h, c, true, u, v, raw_texture);
     if (gpu_command_diagnostics_enabled()) {
         const u32 rect_index =
             (command_debug_.gp0_textured_rect_count - 1u) %
@@ -1755,6 +1863,7 @@ void Gpu::gp0_mono_rect_1() {
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
     s16 y = origin.y;
+    hw_record_rect(x, y, 1, 1, c, false, 0, 0, false);
     draw_rect(x, y, 1, 1, c);
 }
 
@@ -1763,6 +1872,7 @@ void Gpu::gp0_mono_rect_8() {
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
     s16 y = origin.y;
+    hw_record_rect(x, y, 8, 8, c, false, 0, 0, false);
     draw_rect(x, y, 8, 8, c);
 }
 
@@ -1771,6 +1881,7 @@ void Gpu::gp0_mono_rect_16() {
     const Vertex origin = decode_vertex_word(gp0_buffer_[1]);
     s16 x = origin.x;
     s16 y = origin.y;
+    hw_record_rect(x, y, 16, 16, c, false, 0, 0, false);
     draw_rect(x, y, 16, 16, c);
 }
 
@@ -1914,6 +2025,11 @@ void Gpu::gp0_vram_copy() {
             vram_[dst_index] = pixel;
         }
     }
+    if (check_mask_before_draw_ || force_set_mask_bit_) {
+        hw_record_vram_write(dst_x, dst_y, w, h);
+    } else {
+        hw_record_vram_copy(src_x, src_y, dst_x, dst_y, w, h);
+    }
 }
 
 // ── GP1 (Display Control) ──────────────────────────────────────────
@@ -2003,6 +2119,7 @@ void Gpu::gp1_reset() {
 void Gpu::gp1_reset_command_buffer() {
     gp0_fifo_.clear();
     gp0_buffer_.clear();
+    gp0_buffer_src_.clear();
     gp0_words_remaining_ = 0;
     gp0_mode_ = Gp0Mode::Command;
     polyline_active_ = false;
@@ -2514,6 +2631,10 @@ void Gpu::vblank() {
     // Presentation needs pixels every VBlank, but display hashing/non-black
     // statistics are diagnostic work and are recomputed on demand.
     presented_display_info_ = build_display_rgba(presented_display_rgba_, false);
+    hw_record_present();
+    reaper_draws_prev_frame_ = reaper_draws_last_frame_;
+    reaper_draws_last_frame_ = reaper_draws_this_frame_;
+    reaper_draws_this_frame_ = 0;
     presented_display_valid_ = true;
     frame_complete_ = true;
     if (sys_ && fmv_diagnostics_enabled()) {
@@ -2667,6 +2788,9 @@ u16 Gpu::read_texel(const TextureSampleState &state, u8 u, u8 v) const {
 }
 
 void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
+    if (exceeds_primitive_limits(v0, v1, v2)) {
+        return;
+    }
     const u16 color15 = c.to_15bit();
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
@@ -2679,55 +2803,8 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     const bool edge0_top_left = is_top_left_edge(v1, v2);
     const bool edge1_top_left = is_top_left_edge(v2, v0);
     const bool edge2_top_left = is_top_left_edge(v0, v1);
-    if (!g_gpu_fast_mode) {
-        s16 min_x = std::min({ v0.x, v1.x, v2.x });
-        s16 max_x = std::max({ v0.x, v1.x, v2.x });
-        s16 min_y = std::min({ v0.y, v1.y, v2.y });
-        s16 max_y = std::max({ v0.y, v1.y, v2.y });
-        min_x = std::max(min_x, draw_x_min_);
-        max_x = std::min(max_x, draw_x_max_);
-        min_y = std::max(min_y, draw_y_min_);
-        max_y = std::min(max_y, draw_y_max_);
-        if (max_x - min_x > 1023 || max_y - min_y > 511) {
-            return;
-        }
-
-        const bool opaque_path = !semi_transparency_mode_;
-        const s32 step_w0_x = -(v2.y - v1.y);
-        const s32 step_w0_y = (v2.x - v1.x);
-        const s32 step_w1_x = -(v0.y - v2.y);
-        const s32 step_w1_y = (v0.x - v2.x);
-        const s32 step_w2_x = -(v1.y - v0.y);
-        const s32 step_w2_y = (v1.x - v0.x);
-
-        s32 w0_row = edge(v1, v2, min_x, min_y);
-        s32 w1_row = edge(v2, v0, min_x, min_y);
-        s32 w2_row = edge(v0, v1, min_x, min_y);
-
-        for (s16 y = min_y; y <= max_y; ++y) {
-            s16 span_min_x = 0;
-            s16 span_max_x = -1;
-            if (triangle_scanline_span(
-                    min_x, max_x, w0_row, w1_row, w2_row,
-                    step_w0_x, step_w1_x, step_w2_x,
-                    edge0_top_left, edge1_top_left, edge2_top_left,
-                    span_min_x, span_max_x)) {
-                for (s16 x = span_min_x; x <= span_max_x; ++x) {
-                    if (opaque_path) {
-                        write_pixel_opaque_clipped(x, y, color15);
-                    }
-                    else {
-                        set_pixel_clipped(x, y, color15, true);
-                    }
-                }
-            }
-            w0_row += step_w0_y;
-            w1_row += step_w1_y;
-            w2_row += step_w2_y;
-        }
-        return;
-    }
-    const bool opaque_fast_path = !semi_transparency_mode_;
+    // Flat fill has no per-pixel interpolation to cheapen, so every mode
+    // uses the exact span rasterizer.
     s16 min_x = std::min({ v0.x, v1.x, v2.x });
     s16 max_x = std::max({ v0.x, v1.x, v2.x });
     s16 min_y = std::min({ v0.y, v1.y, v2.y });
@@ -2736,9 +2813,11 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     max_x = std::min(max_x, draw_x_max_);
     min_y = std::max(min_y, draw_y_min_);
     max_y = std::min(max_y, draw_y_max_);
-    if (max_x - min_x > 1023 || max_y - min_y > 511)
+    if (max_x - min_x > 1023 || max_y - min_y > 511) {
         return;
+    }
 
+    const bool opaque_path = !semi_transparency_mode_;
     const s32 step_w0_x = -(v2.y - v1.y);
     const s32 step_w0_y = (v2.x - v1.x);
     const s32 step_w1_x = -(v0.y - v2.y);
@@ -2751,23 +2830,21 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
     s32 w2_row = edge(v0, v1, min_x, min_y);
 
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (opaque_fast_path) {
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                if (opaque_path) {
                     write_pixel_opaque_clipped(x, y, color15);
                 }
                 else {
                     set_pixel_clipped(x, y, color15, true);
                 }
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -2776,6 +2853,9 @@ void Gpu::draw_flat_triangle(Vertex v0, Vertex v1, Vertex v2, Color c) {
 }
 
 void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    if (exceeds_primitive_limits(v0, v1, v2)) {
+        return;
+    }
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -2906,23 +2986,41 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
     s32 w1_row = edge(v2, v0, min_x, min_y);
     s32 w2_row = edge(v0, v1, min_x, min_y);
 
+    // Fast mode: exact coverage spans, but colors stepped in float instead of
+    // three integer divides per pixel.
+    const float inv_area = 1.0f / static_cast<float>(area);
+    const auto color_num = [&](s32 a, s32 b, s32 c, u8 Color::*channel) {
+        return a * static_cast<s32>(v0.color.*channel) +
+            b * static_cast<s32>(v1.color.*channel) +
+            c * static_cast<s32>(v2.color.*channel);
+    };
+    const float dr_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::r)) * inv_area;
+    const float dg_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::g)) * inv_area;
+    const float db_dx =
+        static_cast<float>(color_num(step_w0_x, step_w1_x, step_w2_x, &Color::b)) * inv_area;
+
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                const s32 r_mix =
-                    (w0 * v0.color.r + w1 * v1.color.r + w2 * v2.color.r) / area;
-                const s32 g_mix =
-                    (w0 * v0.color.g + w1 * v1.color.g + w2 * v2.color.g) / area;
-                const s32 b_mix =
-                    (w0 * v0.color.b + w1 * v1.color.b + w2 * v2.color.b) / area;
-                const u8 r = static_cast<u8>(clamp_u8_i(r_mix));
-                const u8 g = static_cast<u8>(clamp_u8_i(g_mix));
-                const u8 b = static_cast<u8>(clamp_u8_i(b_mix));
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            const s32 w0 = w0_row + step_w0_x * span_dx;
+            const s32 w1 = w1_row + step_w1_x * span_dx;
+            const s32 w2 = w2_row + step_w2_x * span_dx;
+            float r_value = static_cast<float>(color_num(w0, w1, w2, &Color::r)) * inv_area;
+            float g_value = static_cast<float>(color_num(w0, w1, w2, &Color::g)) * inv_area;
+            float b_value = static_cast<float>(color_num(w0, w1, w2, &Color::b)) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                const u8 r = static_cast<u8>(clamp_u8_i(static_cast<int>(r_value)));
+                const u8 g = static_cast<u8>(clamp_u8_i(static_cast<int>(g_value)));
+                const u8 b = static_cast<u8>(clamp_u8_i(static_cast<int>(b_value)));
                 const u16 out15 = pack_rgb15_dithered(r, g, b, 0, x, y, dither_enabled_);
                 if (opaque_fast_path) {
                     write_pixel_opaque_clipped(x, y, out15);
@@ -2930,10 +3028,10 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
                 else {
                     set_pixel_clipped(x, y, out15, true);
                 }
+                r_value += dr_dx;
+                g_value += dg_dx;
+                b_value += db_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -2942,6 +3040,13 @@ void Gpu::draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2) {
 }
 
 void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
+    if (exceeds_primitive_limits(v0, v1, v2)) {
+        return;
+    }
+    if (g_pgxp_enabled && v0.has_w && v1.has_w && v2.has_w &&
+        draw_textured_triangle_pgxp(v0, v1, v2, false)) {
+        return;
+    }
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3131,21 +3236,28 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
         w1_row * static_cast<s32>(v1.v) +
         w2_row * static_cast<s32>(v2.v);
 
+    const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
+    const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        float u_value = static_cast<float>(u_row_num) * inv_area;
-        float v_value = static_cast<float>(v_row_num) * inv_area;
-        const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
-        const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (profile_raster) {
-                    ++profile_covered;
-                }
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            if (profile_raster) {
+                profile_covered += static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+            }
+            float u_value =
+                static_cast<float>(u_row_num + step_u_x_num * span_dx) * inv_area;
+            float v_value =
+                static_cast<float>(v_row_num + step_v_x_num * span_dx) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
@@ -3175,12 +3287,9 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
+                u_value += du_dx;
+                v_value += dv_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
-            u_value += du_dx;
-            v_value += dv_dx;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -3196,6 +3305,14 @@ void Gpu::draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color /*c*/) {
 }
 
 void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
+    if (exceeds_primitive_limits(v0, v1, v2)) {
+        return;
+    }
+    if (g_pgxp_enabled && v0.has_w && v1.has_w && v2.has_w &&
+        !g_gpu_extreme_fast_mode &&
+        draw_textured_triangle_pgxp(v0, v1, v2, true)) {
+        return;
+    }
     s32 area = edge(v0, v1, v2.x, v2.y);
     if (area == 0) {
         return;
@@ -3464,27 +3581,37 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
         w1_row * static_cast<s32>(v1.color.b) +
         w2_row * static_cast<s32>(v2.color.b);
 
+    const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
+    const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
+    const float dr_dx = static_cast<float>(step_r_x_num) * inv_area;
+    const float dg_dx = static_cast<float>(step_g_x_num) * inv_area;
+    const float db_dx = static_cast<float>(step_b_x_num) * inv_area;
     for (s16 y = min_y; y <= max_y; ++y) {
-        s32 w0 = w0_row;
-        s32 w1 = w1_row;
-        s32 w2 = w2_row;
-        float u_value = static_cast<float>(u_row_num) * inv_area;
-        float v_value = static_cast<float>(v_row_num) * inv_area;
-        float r_value = static_cast<float>(r_row_num) * inv_area;
-        float g_value = static_cast<float>(g_row_num) * inv_area;
-        float b_value = static_cast<float>(b_row_num) * inv_area;
-        const float du_dx = static_cast<float>(step_u_x_num) * inv_area;
-        const float dv_dx = static_cast<float>(step_v_x_num) * inv_area;
-        const float dr_dx = static_cast<float>(step_r_x_num) * inv_area;
-        const float dg_dx = static_cast<float>(step_g_x_num) * inv_area;
-        const float db_dx = static_cast<float>(step_b_x_num) * inv_area;
-        for (s16 x = min_x; x <= max_x; ++x) {
-            if (edge_inside_ccw(w0, edge0_top_left) &&
-                edge_inside_ccw(w1, edge1_top_left) &&
-                edge_inside_ccw(w2, edge2_top_left)) {
-                if (profile_raster) {
-                    ++profile_covered;
-                }
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const s32 span_dx =
+                static_cast<s32>(span_min_x) - static_cast<s32>(min_x);
+            if (profile_raster) {
+                profile_covered += static_cast<u64>(
+                    static_cast<int>(span_max_x) -
+                    static_cast<int>(span_min_x) + 1);
+            }
+            float u_value =
+                static_cast<float>(u_row_num + step_u_x_num * span_dx) * inv_area;
+            float v_value =
+                static_cast<float>(v_row_num + step_v_x_num * span_dx) * inv_area;
+            float r_value =
+                static_cast<float>(r_row_num + step_r_x_num * span_dx) * inv_area;
+            float g_value =
+                static_cast<float>(g_row_num + step_g_x_num * span_dx) * inv_area;
+            float b_value =
+                static_cast<float>(b_row_num + step_b_x_num * span_dx) * inv_area;
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
                 const u8 u =
                     static_cast<u8>(static_cast<s32>(u_value) & 0xFF);
                 const u8 v_coord =
@@ -3518,15 +3645,12 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
                         set_pixel_clipped(x, y, out15, texel_semi);
                     }
                 }
+                u_value += du_dx;
+                v_value += dv_dx;
+                r_value += dr_dx;
+                g_value += dg_dx;
+                b_value += db_dx;
             }
-            w0 += step_w0_x;
-            w1 += step_w1_x;
-            w2 += step_w2_x;
-            u_value += du_dx;
-            v_value += dv_dx;
-            r_value += dr_dx;
-            g_value += dg_dx;
-            b_value += db_dx;
         }
         w0_row += step_w0_y;
         w1_row += step_w1_y;
@@ -3542,6 +3666,166 @@ void Gpu::draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2) {
             profile_candidates, profile_covered, profile_covered,
             texture.depth, profile_transparent, profile_semi);
     }
+}
+
+bool Gpu::draw_textured_triangle_pgxp(const Vertex &p0, const Vertex &p1,
+                                      const Vertex &p2, bool gouraud) {
+    // Attribute setup uses the sub-pixel PGXP positions. Barycentric weight
+    // i is a linear function of the pixel position: l_i(x, y) =
+    // edge(P_{i+1}, P_{i+2}, (x, y)) / area.
+    struct Linear {
+        double dx = 0.0, dy = 0.0, c = 0.0;
+        double at(double x, double y) const { return dx * x + dy * y + c; }
+        Linear scaled(double s) const { return { dx * s, dy * s, c * s }; }
+        Linear plus(const Linear &o) const {
+            return { dx + o.dx, dy + o.dy, c + o.c };
+        }
+    };
+    const Vertex *pv[3] = { &p0, &p1, &p2 };
+    const double area =
+        (static_cast<double>(p1.fx) - p0.fx) * (static_cast<double>(p2.fy) - p0.fy) -
+        (static_cast<double>(p1.fy) - p0.fy) * (static_cast<double>(p2.fx) - p0.fx);
+    if (std::abs(area) < 0.5) {
+        return false; // too thin for sub-pixel setup to be trustworthy
+    }
+    Linear bary[3];
+    for (int i = 0; i < 3; ++i) {
+        const Vertex &a = *pv[(i + 1) % 3];
+        const Vertex &b = *pv[(i + 2) % 3];
+        if (!(pv[i]->w > 0.0f)) {
+            return false;
+        }
+        const double ex = static_cast<double>(b.fx) - a.fx;
+        const double ey = static_cast<double>(b.fy) - a.fy;
+        // edge(a, b, p) = ex * (p.y - a.y) - ey * (p.x - a.x)
+        bary[i] = Linear{ -ey / area, ex / area,
+                          (ey * a.fx - ex * a.fy) / area };
+    }
+
+    // Perspective-correct texture coordinates: interpolate attr/w and 1/w,
+    // then divide per pixel. Gouraud colour stays affine, as on hardware.
+    Linear inv_w{}, u_over_w{}, v_over_w{}, red{}, green{}, blue{};
+    u8 u_min = 255, u_max = 0, v_min = 255, v_max = 0;
+    for (int i = 0; i < 3; ++i) {
+        const Vertex &vx = *pv[i];
+        const double rw = 1.0 / static_cast<double>(vx.w);
+        inv_w = inv_w.plus(bary[i].scaled(rw));
+        u_over_w = u_over_w.plus(bary[i].scaled(rw * vx.u));
+        v_over_w = v_over_w.plus(bary[i].scaled(rw * vx.v));
+        red = red.plus(bary[i].scaled(vx.color.r));
+        green = green.plus(bary[i].scaled(vx.color.g));
+        blue = blue.plus(bary[i].scaled(vx.color.b));
+        u_min = std::min(u_min, vx.u);
+        u_max = std::max(u_max, vx.u);
+        v_min = std::min(v_min, vx.v);
+        v_max = std::max(v_max, vx.v);
+    }
+
+    // Coverage is exactly the integer rasterizer's.
+    Vertex v0 = p0;
+    Vertex v1 = p1;
+    Vertex v2 = p2;
+    const s32 int_area = edge(v0, v1, v2.x, v2.y);
+    if (int_area == 0) {
+        return true;
+    }
+    if (int_area < 0) {
+        std::swap(v1, v2);
+    }
+    const bool edge0_top_left = is_top_left_edge(v1, v2);
+    const bool edge1_top_left = is_top_left_edge(v2, v0);
+    const bool edge2_top_left = is_top_left_edge(v0, v1);
+    s16 min_x = std::min({ v0.x, v1.x, v2.x });
+    s16 max_x = std::max({ v0.x, v1.x, v2.x });
+    s16 min_y = std::min({ v0.y, v1.y, v2.y });
+    s16 max_y = std::max({ v0.y, v1.y, v2.y });
+    min_x = std::max(min_x, draw_x_min_);
+    max_x = std::min(max_x, draw_x_max_);
+    min_y = std::max(min_y, draw_y_min_);
+    max_y = std::min(max_y, draw_y_max_);
+    if (max_x - min_x > 1023 || max_y - min_y > 511) {
+        return true;
+    }
+
+    const TextureSampleState texture = prepare_texture_sample_state();
+    const bool raw_texture = (gp0_command_ & 0x1u) != 0;
+    const bool dither = dither_enabled_ && !g_gpu_extreme_fast_mode;
+    const bool semi_enabled = semi_transparency_mode_ && !g_gpu_extreme_fast_mode;
+    const Color flat = p0.color;
+    const s32 step_w0_x = -(v2.y - v1.y);
+    const s32 step_w0_y = (v2.x - v1.x);
+    const s32 step_w1_x = -(v0.y - v2.y);
+    const s32 step_w1_y = (v0.x - v2.x);
+    const s32 step_w2_x = -(v1.y - v0.y);
+    const s32 step_w2_y = (v1.x - v0.x);
+    s32 w0_row = edge(v1, v2, min_x, min_y);
+    s32 w1_row = edge(v2, v0, min_x, min_y);
+    s32 w2_row = edge(v0, v1, min_x, min_y);
+
+    // Floor with a little slack so values that are mathematically integral
+    // do not drop a texel to float error. 1e-6 stays below the smallest real
+    // fraction an integer triangle can produce (1/area, area <= 2^19).
+    const auto to_coord = [](double value, u8 lo, u8 hi) {
+        const int c = static_cast<int>(std::floor(value + 1.0e-6));
+        return static_cast<u8>(std::clamp(c, static_cast<int>(lo), static_cast<int>(hi)));
+    };
+    const auto to_channel = [](double value) {
+        return static_cast<u8>(std::clamp(static_cast<int>(std::floor(value + 1.0e-6)), 0, 255));
+    };
+
+    for (s16 y = min_y; y <= max_y; ++y) {
+        s16 span_min_x = 0;
+        s16 span_max_x = -1;
+        if (triangle_scanline_span(
+                min_x, max_x, w0_row, w1_row, w2_row,
+                step_w0_x, step_w1_x, step_w2_x,
+                edge0_top_left, edge1_top_left, edge2_top_left,
+                span_min_x, span_max_x)) {
+            const double fy = static_cast<double>(y);
+            const double fx0 = static_cast<double>(span_min_x);
+            double q = inv_w.at(fx0, fy);
+            double nu = u_over_w.at(fx0, fy);
+            double nv = v_over_w.at(fx0, fy);
+            double cr = red.at(fx0, fy);
+            double cg = green.at(fx0, fy);
+            double cb = blue.at(fx0, fy);
+            for (s16 x = span_min_x; x <= span_max_x; ++x) {
+                // Pixels on the integer edge can sit just outside the
+                // sub-pixel triangle; keep 1/w positive there.
+                const double rq = 1.0 / std::max(q, 1.0e-12);
+                const u8 u = to_coord(nu * rq, u_min, u_max);
+                const u8 v_coord = to_coord(nv * rq, v_min, v_max);
+                const u16 texel = read_texel(texture, u, v_coord);
+                if (texel != 0) {
+                    u16 out15 = texel;
+                    if (!raw_texture) {
+                        const u8 mr = gouraud ? to_channel(cr) : flat.r;
+                        const u8 mg = gouraud ? to_channel(cg) : flat.g;
+                        const u8 mb = gouraud ? to_channel(cb) : flat.b;
+                        out15 = dither
+                            ? modulate_texel_dithered_15bit(texel, mr, mg, mb, x, y)
+                            : modulate_texel_15bit(texel, mr, mg, mb);
+                    }
+                    if (semi_enabled && (texel & 0x8000u) != 0) {
+                        set_pixel_clipped(x, y, out15, true);
+                    }
+                    else {
+                        write_pixel_opaque_clipped(x, y, out15);
+                    }
+                }
+                q += inv_w.dx;
+                nu += u_over_w.dx;
+                nv += v_over_w.dx;
+                cr += red.dx;
+                cg += green.dx;
+                cb += blue.dx;
+            }
+        }
+        w0_row += step_w0_y;
+        w1_row += step_w1_y;
+        w2_row += step_w2_y;
+    }
+    return true;
 }
 
 void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
@@ -3581,4 +3865,360 @@ void Gpu::draw_rect(s16 x, s16 y, u16 w, u16 h, Color c) {
             }
         }
     }
+}
+
+// ── OpenGL upscaler recording ─────────────────────────────────────
+// Mirrors what the software rasterizer drew so the UI thread can replay it
+// at a higher resolution. Nothing here touches vram_; the software result
+// stays authoritative and is only copied out (page syncs, VRAM writes).
+
+void Gpu::set_hw_stream(GpuHwStream *stream) {
+    hw_stream_ = stream;
+    hw_full_sync_pending_ = true;
+}
+
+void Gpu::hw_emit_pending_full_sync() {
+    if (!hw_full_sync_pending_) {
+        return;
+    }
+    hw_full_sync_pending_ = false;
+    GpuHwCommand cmd{};
+    cmd.op = GpuHwOp::FullSync;
+    cmd.first = static_cast<u32>(hw_stream_->pixels.size());
+    cmd.count = static_cast<u32>(vram_.size());
+    hw_stream_->pixels.insert(hw_stream_->pixels.end(), vram_.begin(), vram_.end());
+    hw_stream_->commands.push_back(cmd);
+    hw_page_dirty_.fill(false);
+}
+
+void Gpu::hw_mark_dirty(int x0, int y0, int x1, int y1) {
+    x0 = std::clamp(x0, 0, static_cast<int>(psx::VRAM_WIDTH) - 1);
+    x1 = std::clamp(x1, 0, static_cast<int>(psx::VRAM_WIDTH) - 1);
+    y0 = std::clamp(y0, 0, static_cast<int>(psx::VRAM_HEIGHT) - 1);
+    y1 = std::clamp(y1, 0, static_cast<int>(psx::VRAM_HEIGHT) - 1);
+    if (x1 < x0 || y1 < y0) {
+        return;
+    }
+    for (int py = y0 / gpu_hw::kPageHeight; py <= y1 / gpu_hw::kPageHeight; ++py) {
+        for (int px = x0 / gpu_hw::kPageWidth; px <= x1 / gpu_hw::kPageWidth; ++px) {
+            hw_page_dirty_[static_cast<size_t>(py * gpu_hw::kPageColumns + px)] = true;
+        }
+    }
+}
+
+void Gpu::hw_sync_texture_pages() {
+    const auto sync_page = [this](int px, int py) {
+        px &= gpu_hw::kPageColumns - 1;
+        py &= 1;
+        const size_t page = static_cast<size_t>(py * gpu_hw::kPageColumns + px);
+        if (!hw_page_dirty_[page]) {
+            return;
+        }
+        hw_page_dirty_[page] = false;
+        GpuHwCommand cmd{};
+        cmd.op = GpuHwOp::SyncPage;
+        cmd.x = static_cast<u16>(px * gpu_hw::kPageWidth);
+        cmd.y = static_cast<u16>(py * gpu_hw::kPageHeight);
+        cmd.w = gpu_hw::kPageWidth;
+        cmd.h = gpu_hw::kPageHeight;
+        cmd.first = static_cast<u32>(hw_stream_->pixels.size());
+        cmd.count = static_cast<u32>(gpu_hw::kPageWidth * gpu_hw::kPageHeight);
+        for (int y = 0; y < gpu_hw::kPageHeight; ++y) {
+            const u16 *row = vram_.data() +
+                static_cast<size_t>(cmd.y + y) * psx::VRAM_WIDTH + cmd.x;
+            hw_stream_->pixels.insert(hw_stream_->pixels.end(), row,
+                                      row + gpu_hw::kPageWidth);
+        }
+        hw_stream_->commands.push_back(cmd);
+    };
+
+    const int depth = std::min((texpage_ >> 7) & 0x3, 2);
+    const int page_x = texpage_ & 0xF;
+    const int page_y = (texpage_ >> 4) & 0x1;
+    const int texture_pages = 1 << depth; // 4-bit: 1, 8-bit: 2, 15-bit: 4
+    for (int i = 0; i < texture_pages; ++i) {
+        sync_page(page_x + i, page_y);
+    }
+    if (depth < 2) {
+        const int clut_x = (clut_ & 0x3F) * 16;
+        const int clut_y = (clut_ >> 6) & 0x1FF;
+        const int clut_entries = depth == 0 ? 16 : 256;
+        const int first_page = clut_x / gpu_hw::kPageWidth;
+        const int last_page = (clut_x + clut_entries - 1) / gpu_hw::kPageWidth;
+        for (int p = first_page; p <= last_page; ++p) {
+            sync_page(p, clut_y / gpu_hw::kPageHeight);
+        }
+    }
+}
+
+GpuHwCommand Gpu::hw_draw_state(bool textured, bool raw, bool sprite) const {
+    GpuHwCommand cmd{};
+    cmd.op = GpuHwOp::Triangles;
+    cmd.flags = static_cast<u8>(
+        (textured ? gpu_hw::kTextured : 0u) |
+        (textured && raw ? gpu_hw::kRawTexture : 0u) |
+        (semi_transparency_mode_ ? gpu_hw::kSemiTransparent : 0u) |
+        (force_set_mask_bit_ ? gpu_hw::kSetMask : 0u) |
+        (check_mask_before_draw_ ? gpu_hw::kCheckMask : 0u) |
+        (sprite ? gpu_hw::kSprite : 0u));
+    // The PS1 dithers gouraud-shaded and texture-modulated polygons and lines,
+    // never rectangles.
+    const u8 op = static_cast<u8>(gp0_command_);
+    const bool gouraud = op >= 0x20 && op <= 0x5F && (op & 0x10u) != 0;
+    if (dither_enabled_ && !sprite && (textured ? !raw : gouraud)) {
+        cmd.flags |= gpu_hw::kDither;
+    }
+    cmd.semi_mode = semi_transparency_;
+    if (textured) {
+        cmd.tex_depth = static_cast<u8>(std::min((texpage_ >> 7) & 0x3, 2));
+        cmd.tex_base_x = static_cast<u16>((texpage_ & 0xF) * 64);
+        cmd.tex_base_y = static_cast<u16>(((texpage_ >> 4) & 0x1) * 256);
+        cmd.clut_x = static_cast<u16>((clut_ & 0x3F) * 16);
+        cmd.clut_y = static_cast<u16>((clut_ >> 6) & 0x1FF);
+        cmd.tw_mask_x = static_cast<u8>(tex_window_mask_x_);
+        cmd.tw_mask_y = static_cast<u8>(tex_window_mask_y_);
+        cmd.tw_off_x = static_cast<u8>(tex_window_off_x_);
+        cmd.tw_off_y = static_cast<u8>(tex_window_off_y_);
+    }
+    cmd.clip_x0 = draw_x_min_;
+    cmd.clip_y0 = draw_y_min_;
+    cmd.clip_x1 = draw_x_max_;
+    cmd.clip_y1 = draw_y_max_;
+    return cmd;
+}
+
+void Gpu::hw_push_triangle(const GpuHwCommand &state, const GpuHwVertex &a,
+                           const GpuHwVertex &b, const GpuHwVertex &c) {
+    std::vector<GpuHwCommand> &cmds = hw_stream_->commands;
+    if (cmds.empty() || !cmds.back().same_draw_state(state)) {
+        GpuHwCommand cmd = state;
+        cmd.first = static_cast<u32>(hw_stream_->vertices.size());
+        cmd.count = 0;
+        cmds.push_back(cmd);
+    }
+    hw_stream_->vertices.push_back(a);
+    hw_stream_->vertices.push_back(b);
+    hw_stream_->vertices.push_back(c);
+    cmds.back().count += 3;
+
+    const float min_x = std::min({a.x, b.x, c.x});
+    const float max_x = std::max({a.x, b.x, c.x});
+    const float min_y = std::min({a.y, b.y, c.y});
+    const float max_y = std::max({a.y, b.y, c.y});
+    hw_mark_dirty(std::max<int>(static_cast<int>(std::floor(min_x)), state.clip_x0),
+                  std::max<int>(static_cast<int>(std::floor(min_y)), state.clip_y0),
+                  std::min<int>(static_cast<int>(std::ceil(max_x)), state.clip_x1),
+                  std::min<int>(static_cast<int>(std::ceil(max_y)), state.clip_y1));
+}
+
+namespace {
+u32 hw_pack_color(Color c) {
+    return static_cast<u32>(c.r) | (static_cast<u32>(c.g) << 8) |
+        (static_cast<u32>(c.b) << 16);
+}
+
+GpuHwVertex hw_vertex(const Vertex &v, bool perspective) {
+    GpuHwVertex out;
+    out.x = v.fx;
+    out.y = v.fy;
+    out.w = perspective ? v.w : 1.0f;
+    out.color = hw_pack_color(v.color);
+    out.u = static_cast<float>(v.u);
+    out.v = static_cast<float>(v.v);
+    return out;
+}
+} // namespace
+
+void Gpu::hw_record_polygon(const Vertex *v, int count, bool textured, bool raw) {
+    if (!hw_recording()) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    if (textured) {
+        hw_sync_texture_pages();
+    }
+    const GpuHwCommand state = hw_draw_state(textured, raw, false);
+    // Perspective only when every vertex of the triangle carries PGXP depth.
+    const auto tri = [&](int i0, int i1, int i2) {
+        // Same oversized-primitive rejection as the software rasterizer.
+        if (exceeds_primitive_limits(v[i0], v[i1], v[i2])) {
+            return;
+        }
+        const bool perspective = v[i0].has_w && v[i1].has_w && v[i2].has_w;
+        hw_push_triangle(state, hw_vertex(v[i0], perspective),
+                         hw_vertex(v[i1], perspective),
+                         hw_vertex(v[i2], perspective));
+    };
+    tri(0, 1, 2);
+    if (count == 4) {
+        tri(1, 2, 3);
+    }
+}
+
+void Gpu::hw_record_rect(s16 x, s16 y, u16 w, u16 h, Color c, bool textured,
+                         u8 u, u8 v, bool raw) {
+    if (!hw_recording() || w == 0 || h == 0) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    if (textured) {
+        hw_sync_texture_pages();
+    }
+    const GpuHwCommand state = hw_draw_state(textured, raw, true);
+    // Texel coordinates at the rectangle edges; a fragment inside column dx
+    // interpolates to u + dx + f (0 < f < 1) and floors to u + dx. Flipped
+    // rectangles run backwards so they floor to u + w - 1 - dx.
+    const float u0 = tex_rect_x_flip_ ? static_cast<float>(u) + w : u;
+    const float u1 = tex_rect_x_flip_ ? static_cast<float>(u) : static_cast<float>(u) + w;
+    const float v0 = tex_rect_y_flip_ ? static_cast<float>(v) + h : v;
+    const float v1 = tex_rect_y_flip_ ? static_cast<float>(v) : static_cast<float>(v) + h;
+    const auto corner = [&](float px, float py, float pu, float pv) {
+        GpuHwVertex out;
+        out.x = px;
+        out.y = py;
+        out.color = hw_pack_color(c);
+        out.u = pu;
+        out.v = pv;
+        return out;
+    };
+    const float x0 = x;
+    const float y0 = y;
+    const float x1 = static_cast<float>(x) + w;
+    const float y1 = static_cast<float>(y) + h;
+    const GpuHwVertex tl = corner(x0, y0, u0, v0);
+    const GpuHwVertex tr = corner(x1, y0, u1, v0);
+    const GpuHwVertex bl = corner(x0, y1, u0, v1);
+    const GpuHwVertex br = corner(x1, y1, u1, v1);
+    hw_push_triangle(state, tl, tr, bl);
+    hw_push_triangle(state, tr, br, bl);
+}
+
+void Gpu::hw_record_line(const Vertex &a, Color ca, const Vertex &b, Color cb) {
+    if (!hw_recording()) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    const GpuHwCommand state = hw_draw_state(false, false, false);
+    // A one-pixel-wide band along the major axis, covering both endpoints.
+    const float dx = static_cast<float>(b.x - a.x);
+    const float dy = static_cast<float>(b.y - a.y);
+    const bool x_major = std::abs(dx) >= std::abs(dy);
+    const float ox = x_major ? 0.0f : 1.0f;
+    const float oy = x_major ? 1.0f : 0.0f;
+    float ax = a.x, ay = a.y, bx = b.x, by = b.y;
+    if (x_major) {
+        (bx >= ax ? bx : ax) += 1.0f;
+    } else {
+        (by >= ay ? by : ay) += 1.0f;
+    }
+    GpuHwVertex p0, p1, p2, p3;
+    p0.x = ax;      p0.y = ay;      p0.color = hw_pack_color(ca);
+    p1.x = bx;      p1.y = by;      p1.color = hw_pack_color(cb);
+    p2.x = ax + ox; p2.y = ay + oy; p2.color = hw_pack_color(ca);
+    p3.x = bx + ox; p3.y = by + oy; p3.color = hw_pack_color(cb);
+    hw_push_triangle(state, p0, p1, p2);
+    hw_push_triangle(state, p1, p3, p2);
+}
+
+void Gpu::hw_record_fill(u16 x, u16 y, u16 w, u16 h, u32 color) {
+    if (!hw_recording() || w == 0 || h == 0) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    GpuHwCommand cmd{};
+    cmd.op = GpuHwOp::Fill;
+    cmd.x = x;
+    cmd.y = y;
+    cmd.w = static_cast<u16>(std::min<int>(w, psx::VRAM_WIDTH - x));
+    cmd.h = static_cast<u16>(std::min<int>(h, psx::VRAM_HEIGHT - y));
+    cmd.color = color & 0x00FFFFFFu;
+    hw_stream_->commands.push_back(cmd);
+    hw_mark_dirty(x, y, x + w - 1, y + h - 1);
+}
+
+void Gpu::hw_record_vram_write(u16 x, u16 y, u16 w, u16 h) {
+    if (!hw_recording() || w == 0 || h == 0) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    // Split at the VRAM edges so every recorded rectangle is contiguous.
+    const int widths[2] = {std::min<int>(w, psx::VRAM_WIDTH - x),
+                           w - std::min<int>(w, psx::VRAM_WIDTH - x)};
+    const int heights[2] = {std::min<int>(h, psx::VRAM_HEIGHT - y),
+                            h - std::min<int>(h, psx::VRAM_HEIGHT - y)};
+    for (int iy = 0; iy < 2; ++iy) {
+        for (int ix = 0; ix < 2; ++ix) {
+            const int rw = widths[ix];
+            const int rh = heights[iy];
+            if (rw <= 0 || rh <= 0) {
+                continue;
+            }
+            GpuHwCommand cmd{};
+            cmd.op = GpuHwOp::VramWrite;
+            cmd.x = static_cast<u16>(ix == 0 ? x : 0);
+            cmd.y = static_cast<u16>(iy == 0 ? y : 0);
+            cmd.w = static_cast<u16>(rw);
+            cmd.h = static_cast<u16>(rh);
+            cmd.first = static_cast<u32>(hw_stream_->pixels.size());
+            cmd.count = static_cast<u32>(rw * rh);
+            for (int row = 0; row < rh; ++row) {
+                const u16 *src = vram_.data() +
+                    static_cast<size_t>(cmd.y + row) * psx::VRAM_WIDTH + cmd.x;
+                hw_stream_->pixels.insert(hw_stream_->pixels.end(), src, src + rw);
+            }
+            hw_stream_->commands.push_back(cmd);
+            hw_mark_dirty(cmd.x, cmd.y, cmd.x + rw - 1, cmd.y + rh - 1);
+        }
+    }
+}
+
+void Gpu::hw_record_vram_copy(u16 src_x, u16 src_y, u16 dst_x, u16 dst_y,
+                              u16 w, u16 h) {
+    if (!hw_recording() || w == 0 || h == 0) {
+        return;
+    }
+    const bool wraps = src_x + w > psx::VRAM_WIDTH || dst_x + w > psx::VRAM_WIDTH ||
+        src_y + h > psx::VRAM_HEIGHT || dst_y + h > psx::VRAM_HEIGHT;
+    if (wraps) {
+        // Rare: fall back to the native result of the copy.
+        hw_record_vram_write(dst_x, dst_y, w, h);
+        return;
+    }
+    hw_emit_pending_full_sync();
+    GpuHwCommand cmd{};
+    cmd.op = GpuHwOp::VramCopy;
+    cmd.src_x = src_x;
+    cmd.src_y = src_y;
+    cmd.x = dst_x;
+    cmd.y = dst_y;
+    cmd.w = w;
+    cmd.h = h;
+    hw_stream_->commands.push_back(cmd);
+    hw_mark_dirty(dst_x, dst_y, dst_x + w - 1, dst_y + h - 1);
+}
+
+void Gpu::hw_record_present() {
+    if (!hw_recording()) {
+        return;
+    }
+    hw_emit_pending_full_sync();
+    const CrtcRect crtc = calculate_crtc_rect(display_);
+    const bool interlaced_field_output = display_.interlaced && display_.vres != 0;
+    const bool in_vram = crtc.vram_left >= 0 && crtc.vram_top >= 0 &&
+        crtc.vram_left + crtc.width <= static_cast<int>(psx::VRAM_WIDTH) &&
+        crtc.vram_top + crtc.height <= static_cast<int>(psx::VRAM_HEIGHT);
+    GpuHwCommand cmd{};
+    cmd.op = GpuHwOp::Present;
+    cmd.x = static_cast<u16>(std::max(0, crtc.vram_left));
+    cmd.y = static_cast<u16>(std::max(0, crtc.vram_top));
+    cmd.w = static_cast<u16>(std::max(1, crtc.width));
+    cmd.h = static_cast<u16>(std::max(1, crtc.height));
+    // 24-bit (FMV) output packs pixels across VRAM words and field-based
+    // deinterlacing reads alternating lines; both are shown from the exact
+    // software frame instead.
+    const bool software = !display_.display_enabled || display_.is_24bit ||
+        !in_vram ||
+        (interlaced_field_output && g_deinterlace_mode != DeinterlaceMode::Weave);
+    cmd.flags = software ? gpu_hw::kSoftwarePresent : 0u;
+    hw_stream_->commands.push_back(cmd);
 }

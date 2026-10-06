@@ -27,7 +27,8 @@ bool test_system_stack_footprint() {
 }
 
 bool test_mmi_por_128() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000;
     const ps2::u32 op = (0x1Cu << 26) | (1u << 21) | (2u << 16) |
                         (3u << 11) | (0x12u << 6) | 0x29u;
@@ -45,7 +46,8 @@ bool test_mmi_por_128() {
 }
 
 bool test_mmi_padduw() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000;
     const ps2::u32 op = (0x1Cu << 26) | (1u << 21) | (2u << 16) |
                         (3u << 11) | (0x10u << 6) | 0x28u;
@@ -63,7 +65,8 @@ bool test_mmi_padduw() {
 }
 
 bool test_mmi_madd_and_plzcw() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2100u;
     std::string error;
     bool ok = true;
@@ -137,7 +140,8 @@ bool test_mmi_madd_and_plzcw() {
 }
 
 bool test_mmi_pmfhl_pmthl() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2180u;
     std::string error;
     bool ok = true;
@@ -225,7 +229,8 @@ bool test_mmi_pmfhl_pmthl() {
 }
 
 bool test_mmi_packed_accumulator_moves() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x21C0u;
     std::string error;
     bool ok = true;
@@ -278,7 +283,8 @@ bool test_mmi_packed_accumulator_moves() {
 }
 
 bool test_mmi_bootstrap_packed_ops() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2200u;
     std::string error;
     bool ok = true;
@@ -396,7 +402,8 @@ bool test_mmi_bootstrap_packed_ops() {
 }
 
 bool test_mmi_bios_instruction_expansion() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2280u;
     std::string error;
     bool ok = true;
@@ -623,7 +630,8 @@ bool test_mmi_bios_instruction_expansion() {
 }
 
 bool test_cop2_bios_macro_expansion() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2300u;
     std::string error;
     bool ok = true;
@@ -778,7 +786,8 @@ bool test_cop2_bios_macro_expansion() {
 }
 
 bool test_unaligned_doubleword_merges() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000;
     constexpr ps2::u32 base = 0x1000;
     constexpr ps2::u64 mem = 0x8877665544332211ull;
@@ -806,7 +815,8 @@ bool test_unaligned_doubleword_merges() {
 }
 
 bool test_unaligned_word_and_atomic_memory_ops() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000u;
     constexpr ps2::u32 base = 0x1000u;
     bool ok = true;
@@ -887,7 +897,8 @@ bool test_unaligned_word_and_atomic_memory_ops() {
 }
 
 bool test_bootstrap_mmio() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     bool ok = true;
 
     ok = expect(system.bus().write16(0xBA000008u, 0x1234u), "DVE write failed") && ok;
@@ -938,7 +949,8 @@ bool test_bootstrap_mmio() {
 }
 
 bool test_ee_timer_events() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 count = 0x10000000u;
     constexpr ps2::u32 mode = 0x10000010u;
     constexpr ps2::u32 comp = 0x10000020u;
@@ -1119,7 +1131,8 @@ bool test_ee_timer_irq_distance() {
 }
 
 bool test_ee_intc_register_semantics() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     ps2::u32 value = 0;
     bool ok = expect(system.bus().write32(0x1000F010u, 0x0003u), "INTC_MASK initial toggle failed");
     ok = expect(system.bus().read32(0x1000F010u, value) && value == 0x0003u,
@@ -1141,7 +1154,8 @@ bool test_ee_intc_register_semantics() {
 }
 
 bool test_vu_mapping_and_cop2() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     auto acc_lane = [&system](ps2::u32 lane) -> ps2::u32 {
         const auto& acc = system.ee().state().vu_acc;
         const ps2::u64 half = lane < 2u ? acc.lo : acc.hi;
@@ -1610,7 +1624,8 @@ bool test_vu_mapping_and_cop2() {
 }
 
 bool test_ee_intc_cpu_exception() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2800;
     bool ok = expect(system.bus().write32(pc, 0), "INTC test NOP write failed");
     ok = expect(system.bus().write32(0x1000F010u, 1u << 1), "INTC test mask enable failed") && ok;
@@ -1634,7 +1649,8 @@ bool test_ee_intc_cpu_exception() {
 }
 
 bool test_ee_cop0_count_compare_irq() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2A00u;
     bool ok = expect(
         system.bus().write32(pc, 0u) &&
@@ -1677,7 +1693,8 @@ bool test_ee_cop0_count_compare_irq() {
 }
 
 bool test_ee_bc0_dmac_condition_branches() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2B00u;
     std::string error;
     bool ok = true;
@@ -1738,7 +1755,8 @@ bool test_ee_bc0_dmac_condition_branches() {
 }
 
 bool test_ee_di_ei_privilege_gate() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2C00;
     // EI / DI COP0 functions.
     const ps2::u32 ei = 0x42000038u;
@@ -1774,7 +1792,8 @@ bool test_ee_di_ei_privilege_gate() {
 }
 
 bool test_ee_break_exception_and_tlb_ops() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x3200u;
     std::string error;
     bool ok = true;
@@ -1839,7 +1858,8 @@ bool test_ee_break_exception_and_tlb_ops() {
 }
 
 bool test_ee_trap_instructions() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x3800u;
 
     // TEQ r1,r2 and TNEI r1,7.
@@ -1882,7 +1902,8 @@ bool test_ee_trap_instructions() {
 }
 
 bool test_ee_sa_and_qfsrv() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x3600u;
 
     // MTSA r1; MFSA r2.
@@ -1946,7 +1967,8 @@ bool test_ee_sa_and_qfsrv() {
 }
 
 bool test_ee_tlb_mapped_memory_and_refill() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x3400u;
     constexpr ps2::u32 virtual_base = 0xC0004000u;
     constexpr ps2::u32 physical_base = 0x00002000u;
@@ -2013,7 +2035,8 @@ bool test_ee_tlb_mapped_memory_and_refill() {
 }
 
 bool test_ee_integer_overflow_exception() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x3000u;
     constexpr ps2::u32 add =
         (1u << 21) | (2u << 16) | (3u << 11) | 0x20u;
@@ -2053,7 +2076,8 @@ bool test_ee_integer_overflow_exception() {
 }
 
 bool test_syscall_exception() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000;
     bool ok = expect(system.bus().write32(pc, 0x0000000Cu), "SYSCALL write failed");
     system.ee().reset(pc);
@@ -2074,7 +2098,8 @@ bool test_syscall_exception() {
 }
 
 bool test_syscall_delay_slot_exception() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2400;
     // BEQ r0,r0,+1 followed by SYSCALL in the mandatory delay slot.
     bool ok = expect(system.bus().write32(pc, 0x10000001u), "delay branch write failed");
@@ -2128,7 +2153,8 @@ bool test_video_timing_vblank_irqs() {
 
 
 bool test_gif_packet_decode() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     bool ok = true;
 
     constexpr ps2::u32 fifo = ps2::GsCore::kGifFifoBase;
@@ -2187,7 +2213,8 @@ bool test_gif_packet_decode() {
 
 
 bool test_gif_dma_engine() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     ps2::GifDma dma;
     dma.reset();
     std::string error;
@@ -2652,7 +2679,8 @@ bool test_gs_async_raster_ordering() {
 
 
 bool test_gs_display_extraction() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     bool ok = true;
 
     // Display circuit 1: 4x2 pixels, framebuffer starts at DBX=2, DBY=3.
@@ -3729,7 +3757,8 @@ bool test_gs_local_copy_and_depth_transfer() {
 
 
 bool test_gs_signal_finish_label_and_imr() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     auto& gs = system.gs_core();
     auto& priv = system.gs_privileged();
 
@@ -4044,7 +4073,8 @@ bool test_gs_local_to_host_transfer() {
 }
 
 bool test_vif1_reverse_dma() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     ps2::Vif1Dma dma;
     dma.reset();
 
@@ -5948,8 +5978,10 @@ bool test_ee_native_linear_block() {
         (0u << 26) | (3u << 16) | (4u << 11) | (2u << 6) | 0x00u,
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto native_storage = std::make_unique<ps2::Ps2System>();
+    auto& native = *native_storage;
     exact.ee().reset(pc);
     native.ee().reset(pc);
 
@@ -6001,8 +6033,10 @@ bool test_ee_native_extended_integer_block() {
         (0x33u << 26) | (1u << 21),            // PREF
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto native_storage = std::make_unique<ps2::Ps2System>();
+    auto& native = *native_storage;
     exact.ee().reset(pc);
     native.ee().reset(pc);
 
@@ -6065,8 +6099,10 @@ bool test_ee_native_ram_loads() {
 
     bool ok = true;
     for (const ps2::u32 base : aliases) {
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         ok = expect(
             exact.bus().write64(0x6000u, 0xFEDCBA9876543210ull) &&
             native.bus().write64(0x6000u, 0xFEDCBA9876543210ull),
@@ -6110,7 +6146,8 @@ bool test_ee_native_ram_loads() {
     }
 
 #if defined(_M_X64) || defined(__x86_64__)
-    ps2::Ps2System guarded;
+    auto guarded_storage = std::make_unique<ps2::Ps2System>();
+    auto& guarded = *guarded_storage;
     guarded.ee().reset(pc);
     guarded.ee().state().gpr[1].lo = 0x10000000u;
     const ps2::u32 retired = guarded.ee().run_native_block(
@@ -6138,8 +6175,10 @@ bool test_ee_native_ram_stores() {
         (0x09u << 26) | (3u << 16) | 9u,              // ADDIU r3,r0,9
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto native_storage = std::make_unique<ps2::Ps2System>();
+    auto& native = *native_storage;
     exact.ee().reset(pc);
     native.ee().reset(pc);
     exact.ee().state().gpr[1].lo = data;
@@ -6208,7 +6247,8 @@ bool test_ee_native_ram_stores() {
             native.ee().state().gpr[3].lo,
         "EE native store block did not continue after data stores") && ok;
 
-    ps2::Ps2System selfmod;
+    auto selfmod_storage = std::make_unique<ps2::Ps2System>();
+    auto& selfmod = *selfmod_storage;
     selfmod.ee().reset(pc);
     selfmod.ee().state().gpr[1].lo = pc + 0x100u;
     selfmod.ee().state().gpr[2].lo = 0x12345678u;
@@ -6230,7 +6270,8 @@ bool test_ee_native_ram_stores() {
         selfmod.ram().page_generation(pc) == generation + 1u,
         "EE self-modifying native store did not exit at barrier") && ok;
 
-    ps2::Ps2System guarded;
+    auto guarded_storage = std::make_unique<ps2::Ps2System>();
+    auto& guarded = *guarded_storage;
     guarded.ee().reset(pc);
     guarded.ee().state().gpr[1].lo = 0x10000000u;
     guarded.ee().state().gpr[2].lo = 0x12345678u;
@@ -6259,8 +6300,10 @@ bool test_ee_native_quadword_fastmem() {
         (0x1Fu << 26) | (3u << 21) | (2u << 16), // SQ r2,0(r3)
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto native_storage = std::make_unique<ps2::Ps2System>();
+    auto& native = *native_storage;
     constexpr ps2::u64 lo = 0x0123456789ABCDEFull;
     constexpr ps2::u64 hi = 0xFEDCBA9876543210ull;
     bool ok = expect(
@@ -6340,8 +6383,10 @@ bool test_ee_native_fpu_and_sc_fastmem() {
         (0x3Cu << 26) | (1u << 21) | (5u << 16) | 16u, // SCD r5,16(r1)
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System native;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto native_storage = std::make_unique<ps2::Ps2System>();
+    auto& native = *native_storage;
     bool ok = expect(
         exact.bus().write32(data, 0xDEADBEEFu) &&
         native.bus().write32(data, 0xDEADBEEFu),
@@ -6427,8 +6472,10 @@ bool test_ee_native_regimm() {
                 (variant << 16) | 2u,
             (0x09u << 26) | (2u << 16) | 7u,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         exact.ee().reset(pc);
         native.ee().reset(pc);
         exact.ee().state().gpr[1].lo = source;
@@ -6474,8 +6521,10 @@ bool test_ee_native_regimm() {
                 (0x10u << 16) | 2u,
             (0x09u << 26) | (2u << 16) | 9u,
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System native;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto native_storage = std::make_unique<ps2::Ps2System>();
+        auto& native = *native_storage;
         exact.ee().reset(pc);
         native.ee().reset(pc);
         exact.ee().state().gpr[31].lo =
@@ -6507,8 +6556,10 @@ bool test_ee_native_regimm() {
         (0x01u << 26) | (3u << 21) | (0x18u << 16) | 0x000Bu,
         (0x01u << 26) | (3u << 21) | (0x19u << 16) | 0x0005u,
     };
-    ps2::Ps2System exact_sa;
-    ps2::Ps2System native_sa;
+    auto exact_sa_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact_sa = *exact_sa_storage;
+    auto native_sa_storage = std::make_unique<ps2::Ps2System>();
+    auto& native_sa = *native_sa_storage;
     exact_sa.ee().reset(pc);
     native_sa.ee().reset(pc);
     exact_sa.ee().state().gpr[3].lo = 0xAu;
@@ -6542,8 +6593,10 @@ bool test_ee_native_branch_delay() {
         0x1000FFFFu,
         (0x09u << 26) | (1u << 16) | 7u,
     };
-    ps2::Ps2System exact;
-    ps2::Ps2System compiled;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto compiled_storage = std::make_unique<ps2::Ps2System>();
+    auto& compiled = *compiled_storage;
     exact.ee().reset(pc);
     compiled.ee().reset(pc);
     std::string error;
@@ -6572,8 +6625,10 @@ bool test_ee_phase_aware_idle_skip() {
     auto run_case = [&](ps2::u32 entry_steps,
                         ps2::u32 skipped_steps,
                         const char* label) {
-        ps2::Ps2System exact;
-        ps2::Ps2System fast;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto fast_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast = *fast_storage;
         bool ok = true;
         for (ps2::u32 i = 0u; i < code.size(); ++i) {
             ok = expect(
@@ -6651,8 +6706,10 @@ bool test_ee_quiet_fast_prefix() {
         (0x2Au << 26) | (6u << 16), // SWL r6,0(r0): unsupported fast store
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System fast;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto fast_storage = std::make_unique<ps2::Ps2System>();
+    auto& fast = *fast_storage;
     exact.ee().reset(pc);
     fast.ee().reset(pc);
 
@@ -6691,8 +6748,10 @@ bool test_ee_quiet_fast_prefix() {
 
     {
         const std::array<ps2::u32, 6> nops{};
-        ps2::Ps2System exact_nops;
-        ps2::Ps2System fast_nops;
+        auto exact_nops_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact_nops = *exact_nops_storage;
+        auto fast_nops_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast_nops = *fast_nops_storage;
         exact_nops.ee().reset(pc);
         fast_nops.ee().reset(pc);
         exact_nops.ee().state().cop0[11] = 6u;
@@ -6720,7 +6779,8 @@ bool test_ee_quiet_fast_prefix() {
             na.cop0[13] == nb.cop0[13],
             "EE bulk-NOP retirement diverged") && ok;
 
-        ps2::Ps2System compare_limited;
+        auto compare_limited_storage = std::make_unique<ps2::Ps2System>();
+        auto& compare_limited = *compare_limited_storage;
         compare_limited.ee().reset(pc);
         compare_limited.ee().state().cop0[11] = 3u;
         const ps2::u32 compare_retired =
@@ -6746,7 +6806,8 @@ bool test_ee_quiet_fast_ram_store_barrier() {
         (0x09u << 26) | (3u << 16) | 9u, // must not execute in same prefix
     };
 
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     system.ee().reset(pc);
     system.ee().state().gpr[2].lo = 0x12345678u;
     system.ram().track_code_page(pc);
@@ -6788,8 +6849,10 @@ bool test_ee_quiet_fast_ram_loads() {
         (0x2Au << 26) | (1u << 21) | (6u << 16) | 8u, // SWL: fallback
     };
 
-    ps2::Ps2System exact;
-    ps2::Ps2System fast;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto fast_storage = std::make_unique<ps2::Ps2System>();
+    auto& fast = *fast_storage;
     bool ok = expect(
         exact.bus().write64(data, 0xFEDCBA9876543210ull) &&
         fast.bus().write64(data, 0xFEDCBA9876543210ull),
@@ -6840,8 +6903,10 @@ bool test_ee_quiet_fast_branch_block() {
             (0x04u << 26) | (1u << 21) | (1u << 16) | 2u, // BEQ taken
             (0x09u << 26) | (2u << 16) | 7u, // delay slot
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System fast;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto fast_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast = *fast_storage;
         exact.ee().reset(pc);
         fast.ee().reset(pc);
         std::string error;
@@ -6873,8 +6938,10 @@ bool test_ee_quiet_fast_branch_block() {
             (0x04u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQ not taken
             (0x09u << 26) | (3u << 16) | 5u, // real delay slot
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System fast;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto fast_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast = *fast_storage;
         exact.ee().reset(pc);
         fast.ee().reset(pc);
         exact.ee().state().gpr[1].lo = 1u;
@@ -6908,8 +6975,10 @@ bool test_ee_quiet_fast_branch_block() {
             (0x01u << 26) | (1u << 21) | (0x01u << 16) | 2u, // BGEZ not taken
             (0x09u << 26) | (3u << 16) | 6u, // delay slot
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System fast;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto fast_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast = *fast_storage;
         exact.ee().reset(pc);
         fast.ee().reset(pc);
         exact.ee().state().gpr[1].lo = 0xFFFFFFFFFFFFFFFFull;
@@ -6941,8 +7010,10 @@ bool test_ee_quiet_fast_branch_block() {
             (0x14u << 26) | (1u << 21) | (2u << 16) | 2u, // BEQL not taken
             (0x09u << 26) | (3u << 16) | 9u, // annulled delay slot
         };
-        ps2::Ps2System exact;
-        ps2::Ps2System fast;
+        auto exact_storage = std::make_unique<ps2::Ps2System>();
+        auto& exact = *exact_storage;
+        auto fast_storage = std::make_unique<ps2::Ps2System>();
+        auto& fast = *fast_storage;
         exact.ee().reset(pc);
         fast.ee().reset(pc);
         exact.ee().state().gpr[1].lo = 1u;
@@ -6974,8 +7045,10 @@ bool test_ee_quiet_fast_branch_block() {
 }
 
 bool test_ee_quiet_step_matches_exact_execution() {
-    ps2::Ps2System exact;
-    ps2::Ps2System quiet;
+    auto exact_storage = std::make_unique<ps2::Ps2System>();
+    auto& exact = *exact_storage;
+    auto quiet_storage = std::make_unique<ps2::Ps2System>();
+    auto& quiet = *quiet_storage;
     constexpr ps2::u32 pc = 0x3000u;
     const ps2::u32 code[] = {
         (0x09u << 26) | (1u << 16) | 0x4000u,                 // addiu r1,r0,0x4000
@@ -7028,7 +7101,8 @@ bool test_ee_quiet_step_matches_exact_execution() {
 }
 
 bool test_ee_ram_page_generation() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 page0 = 0x1000u;
     constexpr ps2::u32 page1 = 0x2000u;
 
@@ -7058,7 +7132,8 @@ bool test_ee_ram_page_generation() {
 }
 
 bool test_iop_osdsys_idle_detection() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 branch_pc = 0x0000AE94u;
     constexpr ps2::u32 delay_pc = 0x0000AE98u;
     constexpr ps2::u32 idle_branch = 0x08002BA5u;
@@ -7092,7 +7167,8 @@ bool test_iop_osdsys_idle_detection() {
 }
 
 bool test_iop_halt_is_nonfatal_to_ee_bootstrap() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     // COP1 is not part of the PS1-derived IOP/R3000A ISA and deliberately
     // forces the IOP interpreter into its diagnostic halt state.
     constexpr ps2::u32 unsupported_iop = 0x44000000u;
@@ -7110,7 +7186,8 @@ bool test_iop_halt_is_nonfatal_to_ee_bootstrap() {
 }
 
 bool test_fpu_accumulator() {
-    ps2::Ps2System system;
+    auto system_storage = std::make_unique<ps2::Ps2System>();
+    auto& system = *system_storage;
     constexpr ps2::u32 pc = 0x2000;
     const ps2::u32 adda = (0x11u << 26) | (0x10u << 21) | (1u << 16) | 0x18u;
     system.bus().write32(pc, adda);

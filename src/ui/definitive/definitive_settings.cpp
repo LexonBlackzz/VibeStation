@@ -621,7 +621,7 @@ void App::panel_definitive_settings() {
 
     case 1: { // Video
         draw_settings_section(
-            draw, layout, left_x, content_y, column_w, 260.0f, "DISPLAY");
+            draw, layout, left_x, content_y, column_w, 396.0f, "DISPLAY");
 
         const char* resolution_modes[] = {
             "320x240", "640x480", "1024x768"
@@ -670,8 +670,26 @@ void App::panel_definitive_settings() {
         note(left_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
             "Smooths the final image when scaling instead of keeping hard pixels.");
 
+        if (definitive_settings_switch(
+            draw, layout, "video_true_color", "True Color",
+            left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, g_gpu_true_color)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Upscaled only: full colour precision instead of 15-bit dithered colour.");
+
+        if (definitive_settings_switch(
+            draw, layout, "video_texture_filter", "Texture Filtering",
+            left_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            column_w - 2.0f, g_gpu_texture_filter)) {
+            save_persistent_config();
+        }
+        note(left_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            "Upscaled only: smooths 3D textures (bilinear); 2D sprites stay sharp.");
+
         draw_settings_section(
-            draw, layout, right_x, content_y, column_w, 190.0f, "GPU");
+            draw, layout, right_x, content_y, column_w, 398.0f, "GPU");
 
         if (definitive_settings_switch(
             draw, layout, "video_fast_gpu", "Fast Mode",
@@ -696,6 +714,46 @@ void App::panel_definitive_settings() {
         }
         note(right_x + 1.0f, content_y + 43.0f + row_step,
             "Trades more shading and transparency accuracy for additional speed.");
+
+        if (definitive_settings_switch(
+            draw, layout, "video_pgxp", "PGXP",
+            right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            column_w - 2.0f, g_pgxp_enabled)) {
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 2.0f,
+            "Perspective-correct textures from sub-pixel 3D vertices; reduces warping.");
+
+        static const int kUpscaleValues[] = {0, 2, 3, 4, 6, 8};
+        const char* upscale_names[] = {
+            "Native (Software)", "2x (OpenGL)", "3x (OpenGL)", "4x (OpenGL)",
+            "6x (OpenGL)", "8x (OpenGL)"
+        };
+        int upscale_index = 0;
+        for (int i = 0; i < IM_ARRAYSIZE(kUpscaleValues); ++i) {
+            if (kUpscaleValues[i] == g_gpu_upscale) {
+                upscale_index = i;
+            }
+        }
+        if (definitive_settings_combo(
+            draw, layout, "video_upscale", "Internal Resolution",
+            right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            column_w - 2.0f, upscale_index, upscale_names,
+            IM_ARRAYSIZE(upscale_names))) {
+            g_gpu_upscale = kUpscaleValues[std::clamp(upscale_index, 0, 5)];
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 3.0f,
+            "Renders 3D at a higher resolution on the graphics card; FMVs stay native.");
+
+        if (definitive_settings_switch(
+            draw, layout, "video_widescreen", "Widescreen Hack",
+            right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            column_w - 2.0f, g_gpu_widescreen)) {
+            save_persistent_config();
+        }
+        note(right_x + 1.0f, content_y + 43.0f + row_step * 4.0f,
+            "Widens the 3D view to 16:9; 2D elements are stretched.");
         break;
     }
 

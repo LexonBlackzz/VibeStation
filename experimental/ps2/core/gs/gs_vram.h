@@ -21,6 +21,14 @@ public:
     [[nodiscard]] static u32 transfer_bpp(u32 psm);
     [[nodiscard]] static u32 pixel_address_bytes(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
+    // For PSMCT32/24 and PSMCT16/16S the in-page swizzle is a bit
+    // permutation, so a pixel address splits exactly into a column term and
+    // a row term: pixel_address_bytes(psm, x, y, bp, bw) ==
+    // ((swizzle_column(psm, x) + swizzle_row(psm, y, bp, bw)) & unit mask)
+    // * pixel bytes, in 32-bit words (formats 0/1) or 16-bit halfwords
+    // (formats 2/10).
+    [[nodiscard]] static u32 swizzle_column(u32 psm, u32 x);
+    [[nodiscard]] static u32 swizzle_row(u32 psm, u32 y, u32 bp, u32 bw);
     [[nodiscard]] static u32 depth_address_bytes(
         u32 psm, u32 x, u32 y, u32 bp, u32 bw);
     static void color_depth32_addresses(

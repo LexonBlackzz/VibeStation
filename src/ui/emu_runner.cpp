@@ -72,6 +72,15 @@ bool EmuRunner::start(System* system) {
         pending_memcard_paths_ = {};
     }
     capture_vram_debug_.store(false, std::memory_order_release);
+    // A (possibly new) System starts unattached; the worker attaches the
+    // upscaler stream after its first frame if upscaling is enabled.
+    hw_attached_ = false;
+    hw_recording_.clear();
+    system_->gpu().set_hw_stream(nullptr);
+    {
+        std::lock_guard<std::mutex> lock(hw_mutex_);
+        hw_pending_.clear();
+    }
 
     worker_ = std::thread(&EmuRunner::worker_main, this);
     return true;
@@ -207,6 +216,47 @@ void EmuRunner::recycle_consumed_frame(FrameSnapshot&& frame) {
     if (frame.rgba.capacity() >= recycled_frame_.rgba.capacity()) {
         recycled_frame_ = std::move(frame);
     }
+}
+
+void EmuRunner::sync_hw_recording() {
+    const bool want = g_gpu_upscale > 0;
+    if (want != hw_attached_) {
+        hw_attached_ = want;
+        hw_recording_.clear();
+        system_->gpu().set_hw_stream(want ? &hw_recording_ : nullptr);
+        std::lock_guard<std::mutex> lock(hw_mutex_);
+        hw_pending_.clear();
+        return;
+    }
+    if (!hw_attached_ || hw_recording_.empty()) {
+        return;
+    }
+    // Commands are incremental, so they are never dropped one frame at a
+    // time. If the UI stops draining (minimized, stalled) the backlog is
+    // discarded instead and the next frame starts with a full VRAM sync.
+    constexpr size_t kMaxPendingBytes = 256u << 20;
+    {
+        std::lock_guard<std::mutex> lock(hw_mutex_);
+        if (hw_pending_.byte_size() + hw_recording_.byte_size() > kMaxPendingBytes) {
+            hw_pending_.clear();
+            system_->gpu().request_hw_full_sync();
+        } else if (hw_pending_.empty()) {
+            std::swap(hw_pending_, hw_recording_);
+        } else {
+            hw_pending_.append(hw_recording_);
+        }
+    }
+    hw_recording_.clear();
+}
+
+bool EmuRunner::consume_hw_stream(GpuHwStream& out) {
+    out.clear();
+    std::lock_guard<std::mutex> lock(hw_mutex_);
+    if (hw_pending_.empty()) {
+        return false;
+    }
+    std::swap(out, hw_pending_);
+    return true;
 }
 
 bool EmuRunner::consume_latest_vram_snapshot(std::vector<u16>& out_vram) {
@@ -386,6 +436,7 @@ void EmuRunner::worker_main() {
         completed_frame_count_.store(
             static_cast<u64>(system_->boot_diag().frame_counter),
             std::memory_order_release);
+        sync_hw_recording();
         if (g_frame_state_log_frames != 0u &&
             (system_->boot_diag().frame_counter %
              g_frame_state_log_frames) == 0u) {

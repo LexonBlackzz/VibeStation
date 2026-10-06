@@ -76,6 +76,9 @@ public:
   bool consume_latest_frame(FrameSnapshot &out_frame);
   void recycle_consumed_frame(FrameSnapshot &&frame);
   bool consume_latest_vram_snapshot(std::vector<u16> &out_vram);
+  // Moves all draw commands recorded for the OpenGL upscaler since the last
+  // call into out (UI thread). Returns false when there are none.
+  bool consume_hw_stream(GpuHwStream &out);
   u64 completed_frame_count() const {
     return completed_frame_count_.load(std::memory_order_acquire);
   }
@@ -109,6 +112,7 @@ private:
   void publish_frame(FrameSnapshot &&frame, const RuntimeSnapshot &snapshot);
   void publish_snapshot(const RuntimeSnapshot &snapshot);
   void worker_main();
+  void sync_hw_recording();
   void wait_until_idle();
 
   System *system_ = nullptr;
@@ -152,6 +156,13 @@ private:
   mutable std::mutex memcard_request_mutex_;
   bool has_pending_memcard_request_ = false;
   std::array<std::string, 2> pending_memcard_paths_{};
+
+  // OpenGL upscaler: the worker records into hw_recording_ and moves each
+  // frame's commands to hw_pending_, which the UI thread drains.
+  GpuHwStream hw_recording_;
+  bool hw_attached_ = false;
+  mutable std::mutex hw_mutex_;
+  GpuHwStream hw_pending_;
 
   // Rewind
   RewindManager rewind_manager_;
