@@ -696,7 +696,8 @@ void App::panel_definitive_home() {
                 ImGui::IsMouseClicked(ImGuiMouseButton_Left));
 
         if (skip_intro) {
-            definitive_ui::stop_startup_sound();
+            // The picture cuts to the glide; the sound fades out instead.
+            definitive_ui::fade_out_startup_sound(1200.0f);
             g_startup_elapsed = definitive_ui::kIntroGlideStart;
         }
         else {

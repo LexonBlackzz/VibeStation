@@ -89,6 +89,8 @@ void play_open_sound();
 void play_close_sound();
 void play_startup_sound();
 void stop_startup_sound();
+// Fades the startup sound to silence over fade_ms (used when the intro is skipped).
+void fade_out_startup_sound(float fade_ms);
 // Counts the startup sound as played without playing it.
 void skip_startup_sound();
 
