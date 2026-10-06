@@ -4,6 +4,7 @@
 #include "ui/app.h"
 
 #include "core/bios.h"
+#include "core/grim_share.h"
 #include "platform/grim_process.h"
 
 #include <algorithm>
@@ -152,7 +153,10 @@ void App::grim_pull_update() {
                 }
             }
             s.sample = std::move(sample);
-            if (s.map_state == GrimPullState::MapState::None) {
+            // No map yet, or one made before maps recorded which RAM ran code (the hardware
+            // genes' survival bias needs it). Code genes keep using the old map meanwhile.
+            if (s.map_state == GrimPullState::MapState::None ||
+                (s.rom && s.rom->map.ram_exec_ranges.empty())) {
                 grim_pull_start_mapping();
             }
         } else {
@@ -181,6 +185,21 @@ void App::grim_pull_update() {
         }
     }
 
+    // Trigger times count emulated frames: describe them in seconds at the rate the
+    // machine actually runs (the BIOS switches PAL machines to 50 Hz after reset).
+    if (s.has_machine) {
+        const u32 fps = static_cast<u32>(system_->target_fps() + 0.5);
+        if (fps != s.lines_fps) {
+            GrimPullContext ctx;
+            ctx.rom = s.rom.get();
+            ctx.sample = s.sample.get();
+            ctx.bios_hash = s.bios_hash;
+            ctx.frame_rate = fps;
+            s.lines = grim_pull_describe(s.genome, ctx);
+            s.lines_fps = fps;
+        }
+    }
+
     // Death watch: read the verdict, record it, and let Mercy replace early deaths.
     if (s.watch) {
         s.status = s.watch->status();
@@ -189,12 +208,17 @@ void App::grim_pull_update() {
             s.library.update(s.pull, true, s.status.death.reason, s.status.death.headline,
                              s.status.death.seconds);
             grim_pull_save_library();
+            // At most 25 silent rerolls in a row, so a hopeless setting cannot spin forever.
             if (grim_mercy_should_reroll(s.mercy, s.status) && s.rerolls < 25) {
                 ++s.rerolls;
                 s.library.mark_mercy(s.pull);
                 grim_pull_save_library();
                 grim_pull_new();
+            } else {
+                s.rerolls = 0; // this death is shown
             }
+        } else if (!s.status.dead && s.status.frames > kGrimMercyWindowFrames) {
+            s.rerolls = 0; // survived the window: shown
         }
     }
 }
@@ -212,16 +236,7 @@ bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
     }
 
     emu_runner_.pause_and_wait_idle();
-    // Remember how long the previous machine lived before it is torn down.
-    if (s.watch && !s.outcome_saved && s.has_machine) {
-        const GrimLiveStatus last = s.watch->status();
-        s.library.update(s.pull, last.dead, last.death.reason, last.death.headline, last.seconds);
-    }
-    emu_runner_.set_grim_watch(nullptr);
-    if (s.watch) {
-        s.watch->detach(*system_);
-        s.watch.reset();
-    }
+    grim_pull_release(); // the previous machine, if any
     disable_ram_reaper_mode();
     disable_gpu_reaper_mode();
     disable_sound_reaper_mode();
@@ -258,6 +273,7 @@ bool App::grim_pull_boot(const GrimGenome& genome, u64 pull_number) {
     ctx.sample = s.sample.get();
     ctx.bios_hash = s.bios_hash;
     s.lines = grim_pull_describe(genome, ctx);
+    s.lines_fps = 60;
     s.has_machine = true;
     s.outcome_saved = false;
     s.status = GrimLiveStatus{};
@@ -316,6 +332,30 @@ bool App::grim_pull_boot_entry(u64 pull_number) {
     return grim_pull_boot(genome, pull_number);
 }
 
+bool App::grim_pull_paste_code(const std::string& text) {
+    GrimPullState& s = grim_pull_state();
+    GrimGenome genome;
+    std::string err;
+    if (!grim_share_parse(text, genome, err)) {
+        s.message = "Cannot read that code: " + err + ".";
+        return false;
+    }
+    if (genome.genes.empty()) {
+        s.message = "That code has no genes.";
+        return false;
+    }
+    // Seed 0 marks a pasted machine: it was not pulled here.
+    const u64 pull = s.library.add(make_entry(0, genome, s.settings));
+    grim_pull_save_library();
+    if (!grim_pull_boot(genome, pull)) {
+        s.library.update(pull, true, "boot_failed", "Did not boot", 0.0);
+        grim_pull_save_library();
+        return false;
+    }
+    status_message_ = "Pasted machine " + s.machine_id + " booted.";
+    return true;
+}
+
 void App::grim_pull_keep(u64 pull_number, bool keep) {
     GrimPullState& s = grim_pull_state();
     if (s.library.set_kept(pull_number, keep)) {
@@ -323,20 +363,57 @@ void App::grim_pull_keep(u64 pull_number, bool keep) {
     }
 }
 
-void App::grim_pull_shutdown() {
-    if (!grim_pull_) {
+void App::stop_all_corruption() {
+    disable_ram_reaper_mode();
+    disable_gpu_reaper_mode();
+    disable_sound_reaper_mode();
+    grim_pull_release();
+}
+
+// Tears down the New Corruption machine (records how it ended, detaches the watch and
+// the genome). The next System::reset() restores the stock BIOS image. Call with the
+// emulator paused.
+void App::grim_pull_release() {
+    if (!grim_pull_ || !grim_pull_->has_machine) {
         return;
     }
     GrimPullState& s = *grim_pull_;
-    emu_runner_.pause_and_wait_idle();
     emu_runner_.set_grim_watch(nullptr);
-    if (s.watch && system_) {
-        if (!s.outcome_saved && s.has_machine) {
+    if (s.watch) {
+        if (!s.outcome_saved) {
             const GrimLiveStatus last = s.watch->status();
             s.library.update(s.pull, last.dead, last.death.reason, last.death.headline, last.seconds);
             grim_pull_save_library();
         }
-        s.watch->detach(*system_);
+        if (system_) {
+            s.watch->detach(*system_);
+        }
+        s.watch.reset();
     }
-    s.watch.reset();
+    if (system_) {
+        system_->set_grim_genome(nullptr);
+    }
+    s.runtime.reset();
+    s.has_machine = false;
+    s.status = GrimLiveStatus{};
+    s.rerolls = 0;
+    set_grim_reaper_mode(false);
+}
+
+void App::grim_pull_clean_machine() {
+    if (!system_ || !system_->bios_loaded()) {
+        return;
+    }
+    // Both paths call stop_all_corruption(), which releases the pull.
+    if (system_->disc_loaded() ? boot_disc_from_ui() : start_bios_from_ui()) {
+        status_message_ = "Clean machine booted.";
+    }
+}
+
+void App::grim_pull_shutdown() {
+    if (!grim_pull_) {
+        return;
+    }
+    emu_runner_.pause_and_wait_idle();
+    grim_pull_release();
 }

@@ -2,6 +2,7 @@
 #include "system.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 GrimLivenessConfig grim_live_config(bool game_disc) {
   GrimLivenessConfig c;
@@ -41,8 +42,46 @@ std::string hex_addr(u32 a) {
 }
 } // namespace
 
+s32 grim_find_culprit_gene(const GrimGenome &genome, u32 epc, const u8 *ram, const Bios *bios) {
+  constexpr u32 kRamBytes = 2u * 1024u * 1024u;
+  const u32 phys = epc & 0x1FFFFFFFu;
+  // The faulting word, then the next one: EPC points at the branch when the fault
+  // sits in its delay slot.
+  for (u32 delta : {0u, 4u}) {
+    const u32 at = (phys + delta) & ~3u;
+    for (size_t gi = 0; gi < genome.genes.size(); ++gi) {
+      for (const GrimRomPatch &p : genome.genes[gi].patches) {
+        if (at >= 0x1FC00000u) { // early boot runs straight from ROM
+          if (p.offset == at - 0x1FC00000u) {
+            return static_cast<s32>(gi);
+          }
+          continue;
+        }
+        // Later code runs from RAM copies of the (patched) image: the word and both
+        // neighbours must match it, so a coincidental equal word does not count.
+        const u32 off = at & (kRamBytes - 1u);
+        if (ram == nullptr || bios == nullptr || at >= 0x00800000u || p.offset < 4u || off < 4u ||
+            off + 8u > kRamBytes) {
+          continue;
+        }
+        bool same = true;
+        for (u32 k = 0; k < 3 && same; ++k) {
+          u32 w;
+          std::memcpy(&w, ram + off - 4u + k * 4u, 4);
+          same = w == bios->read32(p.offset - 4u + k * 4u);
+        }
+        if (same) {
+          return static_cast<s32>(gi);
+        }
+      }
+    }
+  }
+  return -1;
+}
+
 GrimDeath grim_describe_death(const std::string &reason, u32 frame, double seconds, u32 pc,
-                              u32 exception_cause, u32 epc, const GrimGenome *genome) {
+                              u32 exception_cause, u32 epc, const GrimGenome *genome,
+                              const u8 *ram, const Bios *bios) {
   GrimDeath d;
   d.reason = reason;
   d.frame = frame;
@@ -59,19 +98,8 @@ GrimDeath grim_describe_death(const std::string &reason, u32 frame, double secon
       std::snprintf(buf, sizeof(buf), "The CPU keeps taking the same exception.");
     }
     d.detail = buf;
-    // The BIOS runs straight from ROM at 0xBFC00000 early on; a ROM gene that
-    // patched exactly the faulting word is the likely culprit.
-    const u32 phys = epc & 0x1FFFFFFFu;
-    if (genome != nullptr && exception_cause != 0xFFFFFFFFu && phys >= 0x1FC00000u) {
-      const u32 offset = phys - 0x1FC00000u;
-      for (size_t gi = 0; gi < genome->genes.size() && d.culprit_gene < 0; ++gi) {
-        for (const GrimRomPatch &p : genome->genes[gi].patches) {
-          if (p.offset == (offset & ~3u)) {
-            d.culprit_gene = static_cast<s32>(gi);
-            break;
-          }
-        }
-      }
+    if (genome != nullptr && exception_cause != 0xFFFFFFFFu) {
+      d.culprit_gene = grim_find_culprit_gene(*genome, epc, ram, bios);
     }
   } else if (reason == "coverage_stall") {
     d.headline = "Machine went inert";
@@ -157,7 +185,8 @@ void GrimLiveWatch::on_frame(System &sys) {
     next.death = grim_describe_death(
         tracker_.finish().reason, f.frame, seconds, sys.cpu().pc(),
         noted ? telemetry_.last_exception_cause() : ((f.cop0_cause >> 2) & 31u),
-        noted ? telemetry_.last_exception_epc() : f.cop0_epc, &genome_);
+        noted ? telemetry_.last_exception_epc() : f.cop0_epc, &genome_, sys.jit_main_ram_data(),
+        &sys.bios());
   } else {
     // Whole-run audio gate: a machine that never drew and never made a sound.
     const GrimLiveness verdict = tracker_.finish();

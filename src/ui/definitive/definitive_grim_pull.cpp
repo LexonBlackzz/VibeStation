@@ -2,6 +2,7 @@
 // Drawn inside the definitive Grim Reaper window by App::panel_definitive_grim_reaper().
 #include "definitive_shared.h"
 #include "ui/app.h"
+#include "core/grim_share.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,7 +19,6 @@ struct GrimTheme {
     ImU32 audio = IM_COL32(91, 134, 224, 255);
     ImU32 visual = IM_COL32(211, 169, 63, 255);
     ImU32 code = IM_COL32(224, 83, 94, 255);
-    ImU32 iface = IM_COL32(63, 179, 166, 255);
     ImU32 hardware = IM_COL32(160, 123, 224, 255);
     ImU32 alive = IM_COL32(63, 179, 166, 255);
     ImU32 working = IM_COL32(211, 169, 63, 255);
@@ -33,8 +33,7 @@ ImU32 family_color(u32 family) {
     case kGrimFamilyAudio: return kTheme.audio;
     case kGrimFamilyVisual: return kTheme.visual;
     case kGrimFamilyCode: return kTheme.code;
-    case kGrimFamilyHardware: return kTheme.hardware;
-    default: return kTheme.iface;
+    default: return kTheme.hardware;
     }
 }
 
@@ -189,6 +188,7 @@ void App::draw_grim_pull_tab() {
         }
         const ImVec2 p = ImGui::GetCursorScreenPos();
         if (ImGui::Button("##new_corruption", ImVec2(-1.0f, 54.0f))) {
+            s.rerolls = 0; // a pull you asked for: Mercy starts counting again
             grim_pull_new();
         }
         if (!bios_ready) {
@@ -219,11 +219,30 @@ void App::draw_grim_pull_tab() {
             grim_pull_keep(s.pull, !kept);
         }
         ImGui::SameLine(0.0f, gap);
-        if (ImGui::Button("Copy code", ImVec2(w, 36.0f))) {
-            ImGui::SetClipboardText(grim_genome_serialize(s.genome).c_str());
-            s.message = "Genome copied to the clipboard.";
+        if (ImGui::Button("Clean machine", ImVec2(w, 36.0f))) {
+            grim_pull_clean_machine();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Reboot an ordinary PlayStation (and the loaded game, if any).\n"
+                              "Booting anything else from the menus does the same.");
+        }
+        const float half = (full - gap) * 0.5f;
+        if (ImGui::Button("Copy code", ImVec2(half, 30.0f))) {
+            ImGui::SetClipboardText(grim_share_code(s.genome).c_str());
+            s.message = "Corruption code copied. Anyone with the same BIOS can paste it.";
         }
         if (!can) {
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine(0.0f, gap);
+        if (!bios_ready) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Paste code", ImVec2(half, 30.0f))) {
+            const char* clip = ImGui::GetClipboardText();
+            grim_pull_paste_code(clip != nullptr ? clip : "");
+        }
+        if (!bios_ready) {
             ImGui::EndDisabled();
         }
     }
@@ -263,43 +282,42 @@ void App::draw_grim_pull_tab() {
     ImGui::Spacing();
     {
         u32 on = 0;
-        for (u32 f : {kGrimFamilyAudio, kGrimFamilyCode, kGrimFamilyInterface, kGrimFamilyHardware}) {
+        for (u32 f : {kGrimFamilyAudio, kGrimFamilyVisual, kGrimFamilyCode, kGrimFamilyHardware}) {
             on += (s.settings.families & f & available) != 0 ? 1u : 0u;
         }
         char right[32];
-        std::snprintf(right, sizeof(right), "%u of 5", on);
+        std::snprintf(right, sizeof(right), "%u of 4", on);
         caption("GENE FAMILIES", right);
         const float gap = 6.0f;
-        const float w = (full - 4.0f * gap) / 5.0f;
+        const float w = (full - 3.0f * gap) / 4.0f;
         const struct {
             const char* label;
             u32 family;
-            bool enabled;
-            const char* why;
+            const char* tip;
         } rows[] = {
-            {"Audio", kGrimFamilyAudio, (available & kGrimFamilyAudio) != 0, "Needs a loaded BIOS."},
-            {"Visual", kGrimFamilyVisual, false,
-             "Visual ROM genes arrive in a later phase. GPU glitches are under Interface."},
-            {"Code", kGrimFamilyCode, (available & kGrimFamilyCode) != 0,
-             "Needs the BIOS map; it is made once per BIOS (see the status bar)."},
-            {"Iface", kGrimFamilyInterface, true, ""},
-            {"HW", kGrimFamilyHardware, true,
+            {"Audio", kGrimFamilyAudio, "The BIOS sound bank and what the CPU tells the sound chip."},
+            {"Visual", kGrimFamilyVisual, "What the CPU tells the GPU: vertices, colours, textures, draw state."},
+            {"Code", kGrimFamilyCode, (available & kGrimFamilyCode) != 0
+                ? "The BIOS program itself. The most lethal family."
+                : "Needs the BIOS map; it is made once per BIOS (see the status line)."},
+            {"Hardware", kGrimFamilyHardware,
              "Faulty hardware simulator: failing RAM, VRAM and sound RAM. Kernel memory is almost never hit."},
         };
-        for (size_t i = 0; i < 5; ++i) {
+        for (size_t i = 0; i < 4; ++i) {
             if (i > 0) {
                 ImGui::SameLine(0.0f, gap);
             }
+            const bool enabled = (available & rows[i].family) != 0;
             const bool on_now = (s.settings.families & rows[i].family) != 0;
             if (family_button(rows[i].label, rows[i].label, family_color(rows[i].family), on_now,
-                              rows[i].enabled, w)) {
+                              enabled, w)) {
                 s.settings.families ^= rows[i].family;
             }
-            if (!rows[i].enabled && ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", rows[i].why);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", rows[i].tip);
             }
         }
-        ImGui::Checkbox("Rot mode: starts healthy, decays (interface genes)", &s.settings.rot);
+        ImGui::Checkbox("Rot mode: starts healthy, decays (all but BIOS patches)", &s.settings.rot);
         ImGui::Checkbox("Mercy: reroll deaths in the first 4 s", &s.mercy);
     }
 

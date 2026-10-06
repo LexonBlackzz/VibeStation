@@ -813,9 +813,7 @@ void App::process_events(bool& quit) {
                     "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
                 if (!path.empty()) {
                     emu_runner_.pause_and_wait_idle();
-                    disable_ram_reaper_mode();
-                    disable_gpu_reaper_mode();
-                    disable_sound_reaper_mode();
+                    stop_all_corruption();
                     if (system_->load_bios(path)) {
                         bios_path_ = path;
                         save_persistent_config();
@@ -890,9 +888,7 @@ void App::process_events(bool& quit) {
             else if (no_mod && key == SDLK_F7) {
                 if (system_->bios_loaded() && has_started_emulation_) {
                     emu_runner_.pause_and_wait_idle();
-                    disable_ram_reaper_mode();
-                    disable_gpu_reaper_mode();
-                    disable_sound_reaper_mode();
+                    stop_all_corruption();
                     has_started_emulation_ = false;
                     session_suspended_ = false;
                     status_message_ = "Emulation stopped";
@@ -1263,9 +1259,7 @@ void App::menu_bar() {
                     "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
                 if (!path.empty()) {
                     emu_runner_.pause_and_wait_idle();
-                    disable_ram_reaper_mode();
-                    disable_gpu_reaper_mode();
-                    disable_sound_reaper_mode();
+                    stop_all_corruption();
                     if (system_->load_bios(path)) {
                         bios_path_ = path;
                         save_persistent_config();
@@ -1351,9 +1345,7 @@ void App::menu_bar() {
             if (ImGui::MenuItem("Stop", "F7", false,
                 bios_loaded && has_started_emulation_)) {
                 emu_runner_.pause_and_wait_idle();
-                disable_ram_reaper_mode();
-                disable_gpu_reaper_mode();
-                disable_sound_reaper_mode();
+                stop_all_corruption();
                 has_started_emulation_ = false;
                 session_suspended_ = false;
                 status_message_ = "Emulation stopped";
@@ -1364,9 +1356,7 @@ void App::menu_bar() {
             }
             if (ImGui::MenuItem("Restart BIOS", nullptr, false, bios_loaded)) {
                 emu_runner_.pause_and_wait_idle();
-                disable_ram_reaper_mode();
-                disable_gpu_reaper_mode();
-                disable_sound_reaper_mode();
+                stop_all_corruption();
                 set_grim_reaper_mode(false);
                 if (!bios_path_.empty() && !system_->load_bios(bios_path_)) {
                     status_message_ = "Failed to reload original BIOS";
@@ -1677,9 +1667,7 @@ bool App::start_bios_from_ui() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     system_->reset();
     apply_memory_card_settings(false);
     if (!start_configured_input_movie()) {
@@ -1699,9 +1687,7 @@ bool App::start_bios_from_ui() {
 
 bool App::boot_disc_from_ui() {
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
 
     if (!system_->bios_loaded()) {
         status_message_ = "Load a BIOS before booting a disc.";
@@ -1752,9 +1738,7 @@ bool App::unload_disc_from_ui() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
 
     // If emulation was already running, also send a live eject to the
     // emulation thread in case it picked up the disc via hot-insert.
@@ -1786,9 +1770,7 @@ bool App::launch_bios_only_from_cli(const std::string& bios_path) {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     system_->reset();
     if (!start_configured_input_movie()) {
         return false;

@@ -376,6 +376,9 @@ private:
 	void disable_gpu_reaper_mode();
 	void sync_sound_reaper_config();
 	void disable_sound_reaper_mode();
+	// The Classic runtime reapers off and any New Corruption machine released: every
+	// path that boots, stops or swaps the BIOS goes back to an ordinary PlayStation.
+	void stop_all_corruption();
 
 	// Grim Reaper 2.0 live pulls (src/ui/panels/grim_pull_actions.cpp, panel in
 	// src/ui/definitive/definitive_grim_pull.cpp).
@@ -383,6 +386,9 @@ private:
 	GrimPullState& grim_pull_state();
 	void grim_pull_update();
 	void grim_pull_shutdown();
+	void grim_pull_release();
+	void grim_pull_clean_machine();
+	bool grim_pull_paste_code(const std::string& text);
 	bool grim_pull_new();
 	bool grim_pull_boot(const GrimGenome& genome, u64 pull_number);
 	bool grim_pull_boot_entry(u64 pull_number);

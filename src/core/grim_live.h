@@ -16,6 +16,7 @@
 // interpreter keeps its normal loop and the recompiler never sees it.
 
 class System;
+class Bios;
 
 // What the panel shows for a dead machine. Plain words first, technical detail
 // underneath (DESIGN.md "Death watch").
@@ -47,7 +48,14 @@ GrimLivenessConfig grim_live_config(bool game_disc);
 // Plain-words cause of death from a gate id plus what the CPU was doing.
 // `exception_cause`/`epc` are the last non-interrupt exception (0xFFFFFFFF = none).
 GrimDeath grim_describe_death(const std::string &reason, u32 frame, double seconds, u32 pc,
-                              u32 exception_cause, u32 epc, const GrimGenome *genome);
+                              u32 exception_cause, u32 epc, const GrimGenome *genome,
+                              const u8 *ram = nullptr, const Bios *bios = nullptr);
+
+// Index of the gene that patched the word at `epc` (or the next word, for a delay
+// slot), or -1. ROM addresses match patch offsets directly; RAM addresses match when
+// the word and its neighbours equal the patched image (`ram` = 2 MB main RAM, `bios`
+// = the loaded, patched BIOS). Either pointer may be null to skip the RAM case.
+s32 grim_find_culprit_gene(const GrimGenome &genome, u32 epc, const u8 *ram, const Bios *bios);
 
 // Mercy (off by default): a death inside the kill window is rerolled by the
 // caller. Pure function so it can be tested without a machine.

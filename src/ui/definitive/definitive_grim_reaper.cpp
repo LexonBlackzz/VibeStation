@@ -1581,9 +1581,7 @@ void App::panel_definitive_grim_reaper() {
                 "Replay Last Corrupted BIOS",
                 ImVec2(-1.0f, 32.0f))) {
             emu_runner_.pause_and_wait_idle();
-            disable_ram_reaper_mode();
-            disable_gpu_reaper_mode();
-            disable_sound_reaper_mode();
+            stop_all_corruption();
             set_grim_reaper_mode(true);
 
             if (!system_->load_bios(

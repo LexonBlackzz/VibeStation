@@ -16,6 +16,7 @@ GrimPullPlan grim_pull_plan(u32 intensity) {
   p.rom_patches_max = 2u + t * 6u / 100u;
   p.rom_call_swap = t >= 90u;
   p.sample_ms = 100u + t * 4u;
+  p.hw_avoid_code_permille = t <= 20u ? 1000u : (100u - t) * 1000u / 80u;
   p.risk_label = t < 20u ? "safe" : t < 45u ? "mild" : t < 70u ? "risky" : "lethal";
   return p;
 }
@@ -28,30 +29,16 @@ std::string grim_pull_readout(u32 intensity) {
 }
 
 u32 grim_pull_available_families(const GrimPullContext &ctx) {
-  u32 m = kGrimFamilyInterface | kGrimFamilyHardware; // need nothing but a running machine
-  if (ctx.sample != nullptr) {
-    m |= kGrimFamilyAudio;
-  }
+  // SPU and GP0 filters and hardware faults need nothing but a running machine;
+  // without a sound-bank scan, Audio is SPU filters only.
+  u32 m = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyHardware;
   if (ctx.rom != nullptr) {
     m |= kGrimFamilyCode;
   }
   return m;
 }
 
-namespace {
-u32 family_of(GrimGeneType t) {
-  switch (t) {
-  case GrimGeneType::SpuSample: return kGrimFamilyAudio;
-  case GrimGeneType::RomCode: return kGrimFamilyCode;
-  case GrimGeneType::HwRam:
-  case GrimGeneType::HwVram:
-  case GrimGeneType::HwSpuRam: return kGrimFamilyHardware;
-  default: return kGrimFamilyInterface;
-  }
-}
-
-// Domain colour of one gene: what it breaks, whatever way it gets there.
-u32 domain_of(GrimGeneType t) {
+u32 grim_gene_family(GrimGeneType t) {
   switch (t) {
   case GrimGeneType::SpuSample:
   case GrimGeneType::SpuPitch:
@@ -71,6 +58,7 @@ u32 domain_of(GrimGeneType t) {
   }
 }
 
+namespace {
 std::vector<u64> gene_keys(const GrimGenome &g) {
   std::vector<u64> keys;
   for (const GrimGene &gene : g.genes) {
@@ -112,9 +100,9 @@ const char *iface_title(GrimGeneType t) {
   }
 }
 
-std::string trigger_text(const GrimTrigger &t) {
+std::string trigger_text(const GrimTrigger &t, u32 fps) {
   char b[96];
-  const auto sec = [](u32 f) { return static_cast<double>(f) / 60.0; };
+  const auto sec = [fps](u32 f) { return static_cast<double>(f) / static_cast<double>(std::max(fps, 1u)); };
   switch (t.kind) {
   case GrimTriggerKind::Always: return "always on";
   case GrimTriggerKind::Window:
@@ -142,7 +130,7 @@ std::string hw_title(const GrimGene &g) {
   return mode < 5 ? kSpu[mode] : "Sound RAM fault";
 }
 
-std::string hw_detail(const GrimGene &g) {
+std::string hw_detail(const GrimGene &g, u32 fps) {
   char b[160];
   if (g.type == GrimGeneType::HwVram) {
     std::snprintf(b, sizeof(b), "%d cell%s · rows %d-%d", g.params[1], g.params[1] == 1 ? "" : "s",
@@ -153,7 +141,7 @@ std::string hw_detail(const GrimGene &g) {
                   lo + static_cast<unsigned>(g.params[3]) * 1024u);
   }
   std::string s = b;
-  s += " · " + trigger_text(g.trigger);
+  s += " · " + trigger_text(g.trigger, fps);
   if (g.params[7] > 0) {
     s += " · bus-sensitive";
   }
@@ -181,8 +169,8 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
     u32 weight;
   };
   std::vector<Slot> slots;
-  if (enabled & kGrimFamilyInterface) slots.push_back({kGrimFamilyInterface, 4});
-  if (enabled & kGrimFamilyAudio) slots.push_back({kGrimFamilyAudio, 3});
+  if (enabled & kGrimFamilyAudio) slots.push_back({kGrimFamilyAudio, 4});
+  if (enabled & kGrimFamilyVisual) slots.push_back({kGrimFamilyVisual, 3});
   if (enabled & kGrimFamilyCode) slots.push_back({kGrimFamilyCode, 3});
   if (enabled & kGrimFamilyHardware) slots.push_back({kGrimFamilyHardware, 3});
   if (slots.empty()) {
@@ -193,34 +181,44 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
 
   GrimRng pick{seed ^ 0x5851F42D4C957F2Dull};
   const u32 n = pick.range(plan.min_genes, plan.max_genes);
-  u32 count_if = 0, count_audio = 0, count_code = 0, count_hw = 0;
+  u32 count_spu = 0, count_gpu = 0, count_sample = 0, count_code = 0, count_hw = 0;
   for (u32 i = 0; i < n; ++i) {
     u32 w = pick.range(0, total - 1);
     for (const Slot &s : slots) {
       if (w < s.weight) {
-        (s.family == kGrimFamilyInterface ? count_if
-         : s.family == kGrimFamilyAudio   ? count_audio
-         : s.family == kGrimFamilyCode    ? count_code
-                                          : count_hw)++;
+        if (s.family == kGrimFamilyAudio) {
+          // Half of the audio genes rot the sound bank itself, when it was scanned.
+          (ctx.sample != nullptr && pick.range(0, 1) == 0 ? count_sample : count_spu)++;
+        } else {
+          (s.family == kGrimFamilyVisual ? count_gpu : s.family == kGrimFamilyCode ? count_code : count_hw)++;
+        }
         break;
       }
       w -= s.weight;
     }
   }
 
-  if (count_if > 0) {
+  const auto add_interface = [&](u32 count, bool spu, u64 salt) {
     GrimRandomParams p;
-    p.min_genes = p.max_genes = count_if;
+    p.spu = spu;
+    p.gpu = !spu;
+    p.min_genes = p.max_genes = count;
     p.risk_q10 = plan.risk_q10;
     p.rot_only = settings.rot;
-    const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 1u), p);
+    const GrimGenome g = grim_random_genome(grim_mix64(seed ^ salt), p);
     out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
+  };
+  if (count_spu > 0) {
+    add_interface(count_spu, true, 1u);
   }
-  if (count_audio > 0) {
+  if (count_gpu > 0) {
+    add_interface(count_gpu, false, 6u);
+  }
+  if (count_sample > 0) {
     GrimRandomParams p;
     p.spu = p.gpu = false;
     p.sample = ctx.sample;
-    p.sample_genes_min = p.sample_genes_max = count_audio;
+    p.sample_genes_min = p.sample_genes_max = count_sample;
     p.sample_sizing = {GrimSampleSizeKind::Milliseconds, plan.sample_ms};
     const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 2u), p);
     out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
@@ -242,6 +240,10 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
     p.spu = p.gpu = false;
     p.hw_genes_min = p.hw_genes_max = count_hw;
     p.risk_q10 = plan.risk_q10;
+    if (ctx.rom != nullptr) {
+      p.hw_avoid_ram = &ctx.rom->map.ram_exec_ranges;
+      p.hw_avoid_permille = plan.hw_avoid_code_permille;
+    }
     p.rot_only = settings.rot;
     const GrimGenome g = grim_random_genome(grim_mix64(seed ^ 5u), p);
     out.genes.insert(out.genes.end(), g.genes.begin(), g.genes.end());
@@ -252,12 +254,8 @@ GrimGenome generate_one(u64 seed, const GrimPullSettings &settings, const GrimPu
                                    return grim_gene_is_rom(g.type) && g.patches.empty();
                                  }),
                   out.genes.end());
-  if (out.genes.empty() && (enabled & kGrimFamilyInterface)) {
-    GrimRandomParams p;
-    p.min_genes = p.max_genes = 1;
-    p.risk_q10 = plan.risk_q10;
-    p.rot_only = settings.rot;
-    out = grim_random_genome(grim_mix64(seed ^ 4u), p);
+  if (out.genes.empty() && (enabled & (kGrimFamilyAudio | kGrimFamilyVisual))) {
+    add_interface(1, (enabled & kGrimFamilyAudio) != 0, 4u);
   }
   if (grim_genome_has_rom(out)) {
     out.version = 2;
@@ -304,7 +302,7 @@ GrimGenome grim_pull_generate(u64 seed, const GrimPullSettings &settings,
   if (family_mask_used != nullptr) {
     u32 m = 0;
     for (const GrimGene &g : best.genes) {
-      m |= family_of(g.type);
+      m |= grim_gene_family(g.type);
     }
     *family_mask_used = m;
   }
@@ -335,7 +333,7 @@ std::vector<GrimGeneLine> grim_pull_describe(const GrimGenome &genome,
   std::vector<GrimGeneLine> lines;
   for (const GrimGene &g : genome.genes) {
     GrimGeneLine l;
-    l.domain = domain_of(g.type);
+    l.domain = grim_gene_family(g.type);
     l.tag = grim_gene_is_rom(g.type) ? "ROM" : grim_gene_is_hardware(g.type) ? "HW" : "IFACE";
     char b[128];
     if (g.type == GrimGeneType::RomCode) {
@@ -358,10 +356,10 @@ std::vector<GrimGeneLine> grim_pull_describe(const GrimGenome &genome,
       l.detail = b;
     } else if (grim_gene_is_hardware(g.type)) {
       l.title = hw_title(g);
-      l.detail = hw_detail(g);
+      l.detail = hw_detail(g, ctx.frame_rate);
     } else {
       l.title = iface_title(g.type);
-      l.detail = trigger_text(g.trigger);
+      l.detail = trigger_text(g.trigger, ctx.frame_rate);
     }
     lines.push_back(std::move(l));
   }

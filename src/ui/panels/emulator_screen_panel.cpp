@@ -226,9 +226,7 @@ void App::exit_gameplay_to_launcher(bool stop) {
 
     emu_runner_.pause_and_wait_idle();
     if (stop) {
-        disable_ram_reaper_mode();
-        disable_gpu_reaper_mode();
-        disable_sound_reaper_mode();
+        stop_all_corruption();
         set_grim_reaper_mode(false);
     }
 
@@ -1042,9 +1040,7 @@ void App::panel_emulator_screen() {
                 "BIOS Files (*.bin)\0*.bin\0All Files\0*.*\0", "Select PS1 BIOS");
             if (!path.empty()) {
                 emu_runner_.pause_and_wait_idle();
-                disable_ram_reaper_mode();
-                disable_gpu_reaper_mode();
-                disable_sound_reaper_mode();
+                stop_all_corruption();
                 if (system_->load_bios(path)) {
                     bios_path_ = path;
                     save_persistent_config();

@@ -133,6 +133,13 @@ u64 GrimBootMap::hash() const {
       h = fnv_u64(h, spu_sample_uses[i].pitch);
     }
   }
+  // Optional, like the events above: maps without it keep their hash.
+  if (!ram_exec_ranges.empty()) {
+    h = fnv_u64(h, 0x52414D4558454Cull); // "RAMEXEL"
+    for (const auto &r : ram_exec_ranges) {
+      h = fnv_u64(h, (u64{r.first} << 32) | r.second);
+    }
+  }
   return h;
 }
 
@@ -247,6 +254,15 @@ bool grim_map_save(const GrimBootMap &m, const std::string &path, std::string &e
     }
     js += "\n]";
   }
+  if (!m.ram_exec_ranges.empty()) {
+    js += ",\n\"ram_exec\":[";
+    for (size_t i = 0; i < m.ram_exec_ranges.size(); ++i) {
+      std::snprintf(buf, sizeof(buf), "%s[%u,%u]", i == 0 ? "" : ",", m.ram_exec_ranges[i].first,
+                    m.ram_exec_ranges[i].second);
+      js += buf;
+    }
+    js += "]";
+  }
   js += "}\n";
   std::ofstream jo(path, std::ios::binary | std::ios::trunc);
   jo << js;
@@ -281,6 +297,11 @@ bool grim_map_load(const std::string &path, GrimBootMap &out, std::string &err) 
     m.last_new_code_cycle = j["last_new_code_cycle"].get<u64>();
     m.ram_exec_words = j["provenance"]["ram_exec_words"].get<u32>();
     m.ram_exec_known = j["provenance"]["with_rom_origin"].get<u32>();
+    if (j.contains("ram_exec")) {
+      for (const auto &r : j["ram_exec"]) {
+        m.ram_exec_ranges.emplace_back(r.at(0).get<u32>(), r.at(1).get<u32>());
+      }
+    }
     if (j.contains("spu_sample_uses")) {
       if (!j["spu_sample_uses"].is_array()) {
         throw std::runtime_error("SPU sample uses must be an array");
@@ -484,6 +505,17 @@ GrimBootMap grim_map_merge(const GrimBootMap &a, const GrimBootMap &b) {
   m.ram_exec_words = std::max(a.ram_exec_words, b.ram_exec_words);
   m.ram_exec_known = std::max(a.ram_exec_known, b.ram_exec_known);
   m.last_new_code_cycle = 0;
+  m.ram_exec_ranges.insert(m.ram_exec_ranges.end(), b.ram_exec_ranges.begin(), b.ram_exec_ranges.end());
+  std::sort(m.ram_exec_ranges.begin(), m.ram_exec_ranges.end());
+  std::vector<std::pair<u32, u32>> merged;
+  for (const auto &r : m.ram_exec_ranges) {
+    if (!merged.empty() && r.first <= merged.back().second) {
+      merged.back().second = std::max(merged.back().second, r.second);
+    } else {
+      merged.push_back(r);
+    }
+  }
+  m.ram_exec_ranges = std::move(merged);
   for (size_t i = 0; i < m.words.size() && i < b.words.size(); ++i) {
     GrimMapWord &w = m.words[i];
     const GrimMapWord &o = b.words[i];
@@ -1105,6 +1137,21 @@ GrimBootMap GrimBootMapper::finish(u64 bios_hash, const std::string &scenario, u
   m.ram_exec_words = ram_exec_words_;
   m.ram_exec_known = ram_exec_known_;
   m.spu_sample_uses = spu_sample_uses_;
+  constexpr u32 kWordsPerKb = 1024u / 4u;
+  for (u32 kb = 0; kb < kRamBytes / 1024u; ++kb) {
+    bool ran = false;
+    for (u32 w = kb * kWordsPerKb; w < (kb + 1u) * kWordsPerKb && !ran; ++w) {
+      ran = (ram_exec_[w] & 1u) != 0;
+    }
+    if (!ran) {
+      continue;
+    }
+    if (!m.ram_exec_ranges.empty() && m.ram_exec_ranges.back().second == kb * 1024u) {
+      m.ram_exec_ranges.back().second += 1024u;
+    } else {
+      m.ram_exec_ranges.emplace_back(kb * 1024u, kb * 1024u + 1024u);
+    }
+  }
   m.words.resize(first_exec_.size());
   for (size_t i = 0; i < m.words.size(); ++i) {
     GrimMapWord &w = m.words[i];

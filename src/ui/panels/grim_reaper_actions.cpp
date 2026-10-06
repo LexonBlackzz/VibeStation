@@ -178,9 +178,7 @@ bool App::reap_and_reboot_bios() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(out_path.string())) {
         set_grim_reaper_mode(false);
@@ -323,9 +321,7 @@ bool App::reap_and_reboot_bios_batch() {
     }
 
     emu_runner_.pause_and_wait_idle();
-    disable_ram_reaper_mode();
-    disable_gpu_reaper_mode();
-    disable_sound_reaper_mode();
+    stop_all_corruption();
     set_grim_reaper_mode(true);
     if (!system_->load_bios(out_path.string())) {
         set_grim_reaper_mode(false);

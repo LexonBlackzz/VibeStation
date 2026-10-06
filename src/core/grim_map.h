@@ -77,6 +77,9 @@ struct GrimBootMap {
   u32 ram_exec_known = 0;
   std::vector<GrimMapWord> words;
   std::vector<GrimSpuSampleUse> spu_sample_uses;
+  // Physical RAM byte ranges [start, end) that ran code, in whole kilobytes (Phase 5.1,
+  // optional: empty in older maps). Hardware genes at low intensity keep clear of them.
+  std::vector<std::pair<u32, u32>> ram_exec_ranges;
 
   u32 rom_words() const { return static_cast<u32>(words.size()); }
   u32 count(GrimWordClass c) const;

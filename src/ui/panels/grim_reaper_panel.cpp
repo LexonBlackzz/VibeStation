@@ -459,9 +459,7 @@ void App::panel_grim_reaper() {
             }
             if (ImGui::Button("Stop")) {
                 emu_runner_.pause_and_wait_idle();
-                disable_ram_reaper_mode();
-                disable_gpu_reaper_mode();
-                disable_sound_reaper_mode();
+                stop_all_corruption();
                 has_started_emulation_ = false;
                 session_suspended_ = false;
                 status_message_ = "Emulation stopped";
@@ -476,9 +474,7 @@ void App::panel_grim_reaper() {
             }
             if (ImGui::Button("Restart Corrupted BIOS")) {
                 emu_runner_.pause_and_wait_idle();
-                disable_ram_reaper_mode();
-                disable_gpu_reaper_mode();
-                disable_sound_reaper_mode();
+                stop_all_corruption();
                 set_grim_reaper_mode(true);
                 if (!system_->load_bios(grim_reaper_last_output_path_)) {
                     set_grim_reaper_mode(false);

@@ -9,6 +9,7 @@
 #include "core/grim_pull.h"
 #include "core/grim_rom.h"
 #include "core/grim_sample.h"
+#include "core/grim_share.h"
 #include "core/system.h"
 #include "platform/grim_process.h"
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -33,13 +35,13 @@ void check(bool ok, const std::string &name, const std::string &detail = "") {
 
 struct Options {
   std::string bios;
-  std::string map = "docs/grim-reaper/maps/scph1001_phase4_nodisc_1800.json";
+  std::string map = "docs/grim-reaper/maps/scph1001_phase51_nodisc_1800.json";
   std::string backend = "interpreter";
   u32 frames = 420;
   u32 pulls = 40;
   u32 threads = 6;
   std::vector<u32> intensities{20, 50, 80};
-  u32 families = kGrimFamilyAudio | kGrimFamilyCode | kGrimFamilyInterface | kGrimFamilyHardware;
+  u32 families = kGrimFamilyAll;
   std::string out_dir;
 };
 
@@ -71,14 +73,16 @@ bool parse_options(std::vector<std::string> args, Options &o) {
       const std::string v = args[++i];
       if (v.find("audio") != std::string::npos) o.families |= kGrimFamilyAudio;
       if (v.find("code") != std::string::npos) o.families |= kGrimFamilyCode;
-      if (v.find("iface") != std::string::npos) o.families |= kGrimFamilyInterface;
+      if (v.find("visual") != std::string::npos) o.families |= kGrimFamilyVisual;
+      // The old Interface family: SPU and GP0 filters, now under Audio and Visual.
+      if (v.find("iface") != std::string::npos) o.families |= kGrimFamilyAudio | kGrimFamilyVisual;
       if (v.find("hw") != std::string::npos) o.families |= kGrimFamilyHardware;
     } else {
       std::fprintf(stderr, "GRIM_PULL_ERROR unknown option %s\n", args[i].c_str());
       return false;
     }
   }
-  return !o.bios.empty();
+  return true; // the pull test runs its BIOS-free part without one
 }
 
 void set_backend(const std::string &name) {
@@ -187,11 +191,22 @@ void plan_tests() {
   check(grim_pull_plan(1000).max_genes == high.max_genes, "plan_clamps");
 }
 
-u32 gene_family(const GrimGene &g) {
-  return g.type == GrimGeneType::SpuSample ? kGrimFamilyAudio
-         : g.type == GrimGeneType::RomCode ? kGrimFamilyCode
-         : grim_gene_is_hardware(g.type)   ? kGrimFamilyHardware
-                                           : kGrimFamilyInterface;
+u32 gene_family(const GrimGene &g) { return grim_gene_family(g.type); }
+
+void share_tests(const GrimPullContext &ctx) {
+  const GrimGenome g = grim_pull_generate(77, GrimPullSettings{}, ctx, nullptr);
+  const std::string code = grim_share_code(g);
+  GrimGenome out;
+  std::string err;
+  const std::string wrapped = "  " + code.substr(0, 20) + "\r\n" + code.substr(20) + "\n";
+  check(!g.genes.empty() && grim_share_parse(wrapped, out, err) && grim_genome_hash(out) == grim_genome_hash(g),
+        "share_code_survives_line_breaks", err);
+  check(grim_share_parse(grim_genome_serialize(g), out, err) && grim_genome_hash(out) == grim_genome_hash(g),
+        "share_parse_takes_plain_json", err);
+  check(!grim_share_parse(code.substr(0, code.size() / 2), out, err), "share_rejects_truncated_code");
+  check(!grim_share_parse("VSGRIM1:%%%%", out, err) && !grim_share_parse("hello", out, err) &&
+            !grim_share_parse("", out, err),
+        "share_rejects_garbage");
 }
 
 void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom) {
@@ -208,7 +223,7 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
   check(repeat_ok, "generate_same_seed_same_genome");
   check(hashes.size() >= 55, "generate_seeds_vary", std::to_string(hashes.size()) + "/60 distinct");
 
-  // Family toggles: only enabled families appear; Visual alone makes nothing.
+  // Family toggles: only enabled families appear; the retired Interface bit alone makes nothing.
   bool toggles_ok = true;
   std::string toggle_detail;
   for (u32 mask = 1; mask <= 31; ++mask) {
@@ -224,9 +239,13 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
             toggle_detail = "mask " + std::to_string(mask) + " produced foreign gene";
           }
         }
-        if ((mask & ~kGrimFamilyVisual) == 0 && !g.genes.empty()) {
+        if ((mask & kGrimFamilyAll) == 0 && !g.genes.empty()) {
           toggles_ok = false;
-          toggle_detail = "visual-only made genes";
+          toggle_detail = "no family made genes";
+        }
+        if ((mask & kGrimFamilyAll) != 0 && g.genes.empty()) {
+          toggles_ok = false;
+          toggle_detail = "mask " + std::to_string(mask) + " made nothing";
         }
       }
     }
@@ -236,7 +255,7 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
   bool no_code = true;
   for (u64 seed = 1; seed <= 30; ++seed) {
     GrimPullSettings s;
-    s.families = kGrimFamilyCode | kGrimFamilyInterface;
+    s.families = kGrimFamilyCode | kGrimFamilyAudio;
     for (const GrimGene &g : grim_pull_generate(seed, s, no_rom, nullptr).genes) {
       no_code = no_code && g.type != GrimGeneType::RomCode;
     }
@@ -250,7 +269,8 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
         "available_families");
 
   // Risk bounds: counts within the plan, every genome valid text that round-trips.
-  bool bounds_ok = true, roundtrip_ok = true;
+  bool bounds_ok = true, roundtrip_ok = true, share_ok = true;
+  double shortest_ratio = 1e9;
   std::string bounds_detail;
   double mean_low = 0, mean_high = 0;
   for (u32 t : {0u, 25u, 50u, 75u, 100u}) {
@@ -268,33 +288,44 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
       std::string err;
       roundtrip_ok = roundtrip_ok && grim_genome_parse(grim_genome_serialize(g), parsed, err) &&
                      grim_genome_hash(parsed) == grim_genome_hash(g);
+      GrimGenome shared;
+      const std::string code = grim_share_code(g);
+      share_ok = share_ok && code.rfind("VSGRIM1:", 0) == 0 && code.find_first_of(" \n{") == std::string::npos &&
+                 grim_share_parse(code, shared, err) && grim_genome_hash(shared) == grim_genome_hash(g);
+      shortest_ratio = std::min(shortest_ratio, static_cast<double>(code.size()) /
+                                                    static_cast<double>(grim_genome_serialize(g).size()));
       (t == 0 ? mean_low : mean_high) += t == 0 || t == 100 ? n : 0;
     }
   }
   check(bounds_ok, "gene_count_within_plan", bounds_detail);
   check(roundtrip_ok, "generated_genomes_round_trip");
+  check(share_ok, "share_codes_round_trip");
+  check(shortest_ratio < 1.0, "share_codes_are_shorter_than_json", std::to_string(shortest_ratio));
   check(mean_high / 40.0 > mean_low / 40.0 + 3.0, "high_intensity_means_more_genes",
         std::to_string(mean_low / 40.0) + " vs " + std::to_string(mean_high / 40.0));
 
-  // Rot: every interface gene is a rot ramp that starts healthy.
+  // Rot: every runtime gene (interface or hardware) is a rot ramp that starts healthy.
   bool rot_ok = true;
   u32 iface_seen = 0;
   for (u64 seed = 1; seed <= 40; ++seed) {
     GrimPullSettings s;
-    s.families = kGrimFamilyInterface;
+    s.families = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyHardware;
     s.rot = true;
     for (const GrimGene &g : grim_pull_generate(seed, s, ctx, nullptr).genes) {
+      if (grim_gene_is_rom(g.type)) {
+        continue; // patched into the BIOS image: cannot rot
+      }
       ++iface_seen;
       rot_ok = rot_ok && g.trigger.kind == GrimTriggerKind::Rot && g.trigger.start_frame >= 120 &&
                g.trigger.end_frame > g.trigger.start_frame;
     }
   }
-  check(rot_ok && iface_seen > 0, "rot_mode_ramps_every_interface_gene");
+  check(rot_ok && iface_seen > 0, "rot_mode_ramps_every_runtime_gene");
   // Without rot the survivable mix of trigger kinds is untouched.
   std::set<int> kinds;
   for (u64 seed = 1; seed <= 40; ++seed) {
     GrimPullSettings s;
-    s.families = kGrimFamilyInterface;
+    s.families = kGrimFamilyVisual;
     for (const GrimGene &g : grim_pull_generate(seed, s, ctx, nullptr).genes) {
       kinds.insert(static_cast<int>(g.trigger.kind));
     }
@@ -307,9 +338,12 @@ void generation_tests(const GrimPullContext &ctx, const GrimPullContext &no_rom)
     u32 n = 0;
     for (u64 seed = 1; seed <= 80; ++seed) {
       GrimPullSettings s;
-      s.families = kGrimFamilyInterface;
+      s.families = kGrimFamilyAudio | kGrimFamilyVisual;
       s.intensity = t;
       for (const GrimGene &g : grim_pull_generate(seed, s, ctx, nullptr).genes) {
+        if (grim_gene_is_rom(g.type)) {
+          continue;
+        }
         const GrimGene def = grim_default_gene(g.type);
         const auto &schema = grim_gene_schema(g.type);
         for (size_t i = 0; i < schema.size(); ++i) {
@@ -410,9 +444,46 @@ void mercy_and_death_text_tests() {
   }
 }
 
-void library_tests() {
+// Code genes usually kill the machine in a RAM copy of the shell, not in ROM.
+void culprit_tests(const Options &o) {
+  Bios bios;
+  if (!bios.load(o.bios)) {
+    check(false, "culprit_bios_loads");
+    return;
+  }
+  constexpr u32 kOffset = 0x20000u; // any word away from the image edges
+  GrimGenome g;
+  g.version = 2;
+  g.genes.push_back(grim_default_gene(GrimGeneType::RomCode));
+  GrimGene gene = grim_default_gene(GrimGeneType::RomCode);
+  GrimRomPatch p;
+  p.offset = kOffset;
+  p.original = bios.read32(kOffset);
+  p.mutated = p.original ^ 0x00200000u;
+  gene.patches.push_back(p);
+  g.genes.push_back(gene);
+  bios.patch32(kOffset, p.mutated);
+
+  std::vector<u8> ram(2u * 1024u * 1024u, 0);
+  constexpr u32 kRamAt = 0x30000u;
+  for (u32 k = 0; k < 3; ++k) {
+    const u32 w = bios.read32(kOffset - 4u + k * 4u);
+    std::memcpy(ram.data() + kRamAt - 4u + k * 4u, &w, 4);
+  }
+  check(grim_find_culprit_gene(g, 0x80000000u | kRamAt, ram.data(), &bios) == 1, "culprit_found_in_ram_copy");
+  check(grim_find_culprit_gene(g, 0x80000000u | (kRamAt - 4u), ram.data(), &bios) == 1,
+        "culprit_found_after_delay_slot_branch");
+  check(grim_find_culprit_gene(g, 0xBFC00000u | kOffset, nullptr, nullptr) == 1, "culprit_found_in_rom");
+  check(grim_find_culprit_gene(g, 0x80000000u | kRamAt, nullptr, nullptr) == -1, "culprit_ram_needs_ram");
+  ram[kRamAt + 4u] ^= 0xFFu; // a neighbour that is not the BIOS copy
+  check(grim_find_culprit_gene(g, 0x80000000u | kRamAt, ram.data(), &bios) == -1,
+        "culprit_ignores_coincidental_word");
+}
+
+void library_tests(const std::string &backend) {
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "vibestation_grim_library_test";
+  // One folder per backend: the two test runs are often started side by side.
+  const fs::path dir = fs::temp_directory_path() / ("vibestation_grim_library_test_" + backend);
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
@@ -505,6 +576,35 @@ size_t run_hw(FakeHw &t, const GrimGene &g, u32 frames, u32 load = 0, u32 first_
 
 void hardware_tests(const GrimPullContext &ctx) {
   using T = GrimGeneType;
+  // Low intensity keeps RAM faults off code that ran in the clean boot; lethal does not.
+  if (ctx.rom == nullptr || ctx.rom->map.ram_exec_ranges.empty()) {
+    std::printf("GRIM_PULL_TEST SKIP hw_low_intensity_avoids_code (map has no ram_exec; regenerate it)\n");
+  } else {
+    const auto &code = ctx.rom->map.ram_exec_ranges;
+    const auto on_code = [&](u32 t) {
+      u32 hit = 0, n = 0;
+      for (u64 seed = 1; seed <= 300; ++seed) {
+        GrimPullSettings s;
+        s.families = kGrimFamilyHardware;
+        s.intensity = t;
+        for (const GrimGene &g : grim_pull_generate(seed, s, ctx, nullptr).genes) {
+          if (g.type != T::HwRam || grim_hw_gene_is_critical(g)) {
+            continue;
+          }
+          const u32 lo = static_cast<u32>(g.params[2]) * 1024u;
+          const u32 hi = lo + static_cast<u32>(g.params[3]) * 1024u;
+          bool over = false;
+          for (const auto &r : code) over = over || (lo < r.second && r.first < hi);
+          hit += over ? 1u : 0u;
+          ++n;
+        }
+      }
+      return n == 0 ? 1.0 : static_cast<double>(hit) / n;
+    };
+    const double safe = on_code(10), lethal = on_code(100);
+    check(safe < 0.1 && lethal > safe + 0.2, "hw_low_intensity_avoids_code",
+          std::to_string(safe) + " vs " + std::to_string(lethal) + " of RAM genes on code");
+  }
   // Stuck-high: only the chosen bits of only the chosen bytes change, inside the region.
   {
     FakeHw t;
@@ -863,6 +963,19 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
   }
   set_backend(o.backend);
 
+  if (o.bios.empty()) { // CI: everything that needs no BIOS image
+    std::printf("GRIM_PULL_TEST SKIP bios tests (no BIOS path or VIBESTATION_BIOS)\n");
+    const GrimPullContext none;
+    plan_tests();
+    mercy_and_death_text_tests();
+    library_tests(o.backend);
+    share_tests(none);
+    hardware_tests(none);
+    std::printf("GRIM_PULL_TEST %s failures=%d backend=%s\n", failures == 0 ? "ALL_PASS" : "FAILED",
+                failures, o.backend.c_str());
+    return failures == 0 ? 0 : 1;
+  }
+
   GrimSampleContext sample;
   GrimRomContext rom;
   std::string err;
@@ -884,7 +997,9 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
   plan_tests();
   generation_tests(ctx, no_rom);
   mercy_and_death_text_tests();
-  library_tests();
+  library_tests(o.backend);
+  culprit_tests(o);
+  share_tests(ctx);
   hardware_tests(ctx);
   dma_loop_test(o);
   live_tests(o, ctx, rom.words);
@@ -900,9 +1015,9 @@ int run_grim_pull_yield(const std::vector<std::string> &args) {
   grim_prepare_eval_process();
   Options o;
   o.frames = 900;
-  if (!parse_options(args, o)) {
+  if (!parse_options(args, o) || o.bios.empty()) {
     std::fprintf(stderr, "usage: --grim-pull-yield [bios] [--map file.json] [--pulls N] "
-                         "[--frames N] [--intensity a,b,c] [--threads N] [--families audio,code,iface]\n");
+                         "[--frames N] [--intensity a,b,c] [--threads N] [--families audio,visual,code,hw]\n");
     return 1;
   }
   GrimSampleContext sample;

@@ -46,12 +46,12 @@ struct GrimPullState {
   GrimGenome genome;
   std::string machine_id;
   std::vector<GrimGeneLine> lines;
+  u32 lines_fps = 0; // frame rate the trigger times in `lines` were written for
   std::unique_ptr<GrimGenomeRuntime> runtime;
   std::unique_ptr<GrimLiveWatch> watch;
   GrimLiveStatus status;
   bool outcome_saved = false; // the death (or survival) is recorded in the library
   u32 rerolls = 0;            // pulls Mercy replaced silently since the last shown one
-  double alive_recorded = 0.0;
 
   std::string message;
 };

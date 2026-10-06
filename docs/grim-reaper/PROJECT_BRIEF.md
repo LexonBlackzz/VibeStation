@@ -305,7 +305,7 @@ Lexon's machine, so read it if you can.
   short/quiet/stereo/clipping controls and WAV transport. Human verdicts live in
   docs/grim-reaper/audio_labels.json; null means pending listening and is skipped.
   New resolved genomes/WAVs remain outside Git. PROGRESS §1–9 records results;
-  Appendix D retains Phase 4's older hash-change measurements.
+  history/phase-4.md retains Phase 4's older hash-change measurements.
 
 ## Live pulls (Phase 5)
 
@@ -314,8 +314,9 @@ Lexon's machine, so read it if you can.
   `grim_pull_generate(seed, settings, ctx, history)`, `GrimPullHistory` (novelty: picks
   one of four seed-derived candidates, never filters), `grim_pull_describe()` (panel gene
   lines), `grim_pull_compatible()` (wrong-BIOS refusal), `grim_machine_id()`. Families
-  are gene sources: Audio = sample genes, Code = ROM code genes (needs the map),
-  Interface = SPU/GPU runtime filters, Visual = reserved for Phase 6 (generates nothing).
+  name what breaks (`grim_gene_family()`): Audio = sample genes + SPU filters, Visual =
+  GP0 filters (+ Phase 6 ROM visual genes), Code = ROM code genes (needs the map),
+  Hardware = faults. Bit 8 was the old Interface family and now generates nothing.
   `GrimRandomParams::risk_q10/rot_only` are the two new generator knobs; both are no-ops
   at their defaults, so every earlier seed still draws identically.
 - `src/core/grim_live.{h,cpp}`: `GrimLiveWatch` (attach/detach/on_frame, thread-safe
@@ -349,3 +350,27 @@ Lexon's machine, so read it if you can.
   `GrimHwTarget` (RAM writes call `Cpu::notify_code_write`) and is called from `run_frame` at frame start and
   every eighth scanline. `GrimRandomParams::hw_genes_min/max/hw_critical_permille` add them; Hardware is
   `kGrimFamilyHardware` in the pull generator and a fifth family button in the panel.
+
+## Follow-up after the v0.6.0 merge (2026-10-06)
+
+- Families are domains: `grim_gene_family()` in `grim_pull.cpp` is both the generator's family
+  and the panel colour. `generate_one()` splits Audio genes between sample genes (when the
+  sound bank was scanned) and SPU filters; Visual draws GP0 filters.
+- `App::stop_all_corruption()` (= the three Classic `disable_*_reaper_mode()` calls +
+  `grim_pull_release()`) is what every boot, Stop, BIOS change and Classic reaper path calls.
+  `grim_pull_release()` records the outcome, detaches the watch and the genome; the next
+  `System::reset()` restores the stock image. `grim_pull_boot()` releases the old machine
+  first. "Clean machine" = `boot_disc_from_ui()` or `start_bios_from_ui()`.
+- Share codes: `src/core/grim_share.{h,cpp}`, `VSGRIM1:` + base64url(zlib(JSON)). Deflate
+  is stb_image_write compiled in that file; inflate is the stb_image already linked by
+  `definitive_background.cpp`, bounded to 4 MB of output.
+- `grim_find_culprit_gene()` (`grim_live.cpp`) matches ROM addresses by patch offset and RAM
+  addresses by comparing the word and its neighbours with the patched BIOS image.
+- Maps gained optional `ram_exec` (`GrimBootMap::ram_exec_ranges`, 1 KB granularity, hashed
+  only when present). `GrimRandomParams::hw_avoid_ram/hw_avoid_permille` keep non-critical RAM
+  faults off those ranges; `GrimPullPlan::hw_avoid_code_permille` is 1000 up to intensity 20,
+  falling to 0 at 100. The panel re-maps a BIOS whose cached map has no `ram_exec`.
+- `--grim-pull-test` without a BIOS runs the BIOS-free part (plan, Mercy/death text, library,
+  share codes, hardware fake target); Linux CI runs it with the gene and audibility unit tests.
+  Its default map is now `docs/grim-reaper/maps/scph1001_phase51_nodisc_1800.json` (local, make
+  it with `--grim-map <bios> 1800 <that path>`).

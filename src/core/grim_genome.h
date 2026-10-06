@@ -229,6 +229,12 @@ struct GrimRandomParams {
   u32 hw_genes_min = 0;
   u32 hw_genes_max = 0;
   u32 hw_critical_permille = 10;
+  // Survival bias for RAM faults: with this chance (permille) a non-critical RAM gene is
+  // placed clear of `hw_avoid_ram` (byte ranges that ran code in the clean boot, from the
+  // boot map), since one stuck bit in running code is enough to kill. Null = no bias and
+  // no extra random numbers.
+  const std::vector<std::pair<u32, u32>> *hw_avoid_ram = nullptr;
+  u32 hw_avoid_permille = 0;
 };
 // Reproducible from (seed, params). Biased toward survivable settings: small
 // magnitudes, partial targets, ramps and windows more often than "always".

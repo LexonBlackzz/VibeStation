@@ -279,7 +279,7 @@ The search runs continuously in the background. The archive is the library of br
 ## Genome format and reproducibility
 
 - A corruption is saved as a genome (list of typed genes with parameters), plus BIOS hash and scenario, not just an RNG seed. This keeps it reproducible across VibeStation versions and makes it shareable, editable and breedable.
-- Compact text or base64 export for sharing ("corruption codes").
+- Compact share codes ("corruption codes"): `VSGRIM1:` + base64url of the zlib-compressed genome JSON. Paste also accepts plain JSON.
 - The fingerprint and a thumbnail or short audio clip are stored alongside for browsing.
 
 ---
@@ -314,7 +314,7 @@ Shown when the loaded BIOS has no cached map (keyed by ROM hash).
   - Middle: biases weakened.
   - High: biases off, raw and lethal. Frequent deaths, occasionally something insane.
   - The readout names both: e.g. "4–7 genes · risky".
-- **Gene families**: Audio, Visual, Code, Interface toggles, plus **Rot mode** ("starts healthy, decays").
+- **Gene families** name what breaks: **Audio** (sound bank samples and SPU register filters), **Visual** (GP0 filters now, ROM visual genes from Phase 6), **Code** (BIOS code, needs the map) and **Hardware** (the Faulty Hardware Simulator). How a gene works (ROM patch, interface filter, hardware fault) is a tag on its line, not a toggle. Plus **Rot mode** ("starts healthy, decays"; every gene except BIOS patches).
 - **Death watch.** The existing liveness gates run on the live machine. On death the panel switches to a dead state:
   - Cause of death in plain words with the technical detail underneath, e.g. "Died at 1.4 s · exception loop at BFC0 2B68", "Hung waiting for VSync", "Stuck chime", "Black screen, CPU still running".
   - The genes that were active at that point.
@@ -323,7 +323,8 @@ Shown when the loaded BIOS has no cached map (keyed by ROM hash).
 - **Mercy** setting: off by default. When on, deaths inside the kill window are rerolled automatically and silently counted.
 - **This machine** (alive state): live view is the emulator itself; the panel shows the machine ID, auto tags, and a **curse readout** revealed after a few seconds of running: how far it is from the clean boot, from the audibility metric and later a visual one. It is computed from the result, so it never spoils a pull in advance.
 - **Secondary actions:** **More like this** (mutate the current genome slightly and boot it), **Keep**, **Revive**.
-- **Genome** list, readable, with a per-gene checkbox to disable genes live, and **Copy code**.
+- **Genome** list, readable, with a per-gene checkbox to disable genes live, **Copy code** and **Paste code** (a `VSGRIM1:` share code, see "Genome format").
+- **Clean machine** reboots an ordinary PlayStation. Any other boot, BIOS change or Stop also ends the corrupted machine; to corrupt a game, load it first and then pull.
 - **History** strip: the last few pulls, alive or dead, each re-bootable.
 
 ### Screen 3: Kept & History
@@ -341,7 +342,7 @@ To avoid pulls that feel samey without pre-filtering, generation keeps a light r
 
 - Every colour comes from one theme struct; nothing is hardcoded per widget, so user themes are possible later.
 - Neutrals: background, surface, raised, line, text, muted text. Accent: primary button.
-- Family colours reuse VibeStation's four title-screen squares: Audio blue, Visual gold, Code red, Interface teal. The same colour always means the same family (gene dots, toggles, map regions, tags).
+- Family colours: Audio blue, Visual gold and Code red reuse VibeStation's title-screen squares; Hardware is purple. The same colour always means the same family (gene dots, toggles, map regions, tags).
 - Status: alive teal, working gold, dead red.
 
 ### UI by implementation phase
@@ -351,7 +352,7 @@ To avoid pulls that feel samey without pre-filtering, generation keeps a light r
 | 1–4 | CLI and `--genome` only |
 | 5 | Panel: New Corruption live, intensity with risk, families, death watch with cause of death, Mercy, Keep, Revive, History, genome list |
 | 6–7 | Visual ROM genes join the families; the map gains named and dormant regions |
-| 8 | More like this, per-gene toggles, curse readout, Kept & History screen, codes, theming |
+| 8 | More like this, per-gene toggles, curse readout, Kept & History screen, theming (share codes landed early, after 5.1) |
 | Later | Optional archive mode and background search |
 
 ---

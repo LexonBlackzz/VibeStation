@@ -43,6 +43,15 @@ u32 chance(const GrimGene &g, u32 magnitude, u32 bus_load_q10) {
 }
 bool roll(u64 r, u32 salt, u32 p) { return grim_mix64(r ^ (u64{salt} << 32)) % 100000u < p; }
 
+bool overlaps(const std::vector<std::pair<u32, u32>> &ranges, u32 lo, u32 hi) {
+  for (const auto &r : ranges) {
+    if (lo < r.second && r.first < hi) {
+      return true;
+    }
+  }
+  return false;
+}
+
 u64 row_hash(const u8 *p) {
   u64 h = 0xCBF29CE484222325ull;
   for (u32 i = 0; i < kRowBytes; i += 8) {
@@ -290,6 +299,16 @@ void grim_add_random_hw_genes(GrimGenome &genome, u64 seed, const GrimRandomPara
       u32 span = std::min(16u + r.range(0, span_cap), ram ? 1024u : 256u);
       span = std::min(span, ceil_kb - floor_kb);
       u32 lo = floor_kb + r.range(0, ceil_kb - floor_kb - span);
+      if (ram && !critical && rp.hw_avoid_ram != nullptr && !rp.hw_avoid_ram->empty() &&
+          r.range(0, 999) < rp.hw_avoid_permille) {
+        // Redraw (narrowing now and then) until the span misses code; give up after a few.
+        for (u32 tries = 0; tries < 24 && overlaps(*rp.hw_avoid_ram, lo * 1024u, (lo + span) * 1024u); ++tries) {
+          if (tries % 6u == 5u) {
+            span = std::max(16u, span / 2u);
+          }
+          lo = floor_kb + r.range(0, ceil_kb - floor_kb - span);
+        }
+      }
       if (critical) { // the rare unlucky chip: kernel/stack (RAM) or decode buffers (SPU)
         if (ram) {
           lo = r.range(0, 1) == 1 ? total_kb - span : r.range(0, 63);

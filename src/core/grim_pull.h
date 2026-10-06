@@ -13,26 +13,30 @@ struct GrimSampleContext;
 // live. Nothing here evaluates or filters a pull: the outcome is unknown to
 // everyone until the machine runs (DESIGN.md, "Every pull is a surprise").
 //
-// Families name where a gene comes from:
-//   Audio     ADPCM sample genes on the BIOS sound bank (ROM)
-//   Visual    reserved for the ROM visual genes of Phase 6 (generates nothing yet)
+// Families name what a gene breaks, whatever way it gets there:
+//   Audio     BIOS sound bank samples (ROM) and SPU register filters (runtime)
+//   Visual    GP0 filters (runtime); the ROM visual genes of Phase 6 join later
 //   Code      structural MIPS mutations of BIOS code (ROM, needs the boot map)
-//   Interface SPU register and GP0 filters at runtime (no map needed)
-//   Hardware  Faulty Hardware Simulator: failing RAM, VRAM and sound RAM (no map needed)
-// Each gene still carries its own domain colour in the genome list.
+//   Hardware  Faulty Hardware Simulator: failing RAM, VRAM and sound RAM (runtime)
+// How a gene works (ROM patch, interface filter, hardware fault) is its tag.
 
 enum GrimFamily : u32 {
   kGrimFamilyAudio = 1,
   kGrimFamilyVisual = 2,
   kGrimFamilyCode = 4,
-  kGrimFamilyInterface = 8,
+  // 8 was the Interface family before families meant domains; old library entries
+  // may still carry it, and it generates nothing.
   kGrimFamilyHardware = 16,
+  kGrimFamilyAll = kGrimFamilyAudio | kGrimFamilyVisual | kGrimFamilyCode | kGrimFamilyHardware,
 };
 
+// The family a gene belongs to (also its colour in the genome list).
+u32 grim_gene_family(GrimGeneType type);
+
 struct GrimPullSettings {
-  u32 families = kGrimFamilyAudio | kGrimFamilyCode | kGrimFamilyInterface | kGrimFamilyHardware;
+  u32 families = kGrimFamilyAll;
   u32 intensity = 50; // 0..100
-  bool rot = false;   // interface genes start healthy and decay
+  bool rot = false;   // runtime genes (interface and hardware) start healthy and decay
 };
 
 // What an intensity means. Total gene count scales with it, and so does risk:
@@ -46,6 +50,7 @@ struct GrimPullPlan {
   u32 rom_patches_max = 2;
   bool rom_call_swap = false;
   u32 sample_ms = 100;    // sample window per gene
+  u32 hw_avoid_code_permille = 1000; // RAM faults placed clear of code that ran (needs the map)
   const char *risk_label = "safe"; // safe | mild | risky | lethal
 };
 GrimPullPlan grim_pull_plan(u32 intensity);
@@ -58,6 +63,7 @@ struct GrimPullContext {
   const GrimRomContext *rom = nullptr;
   const GrimSampleContext *sample = nullptr;
   u64 bios_hash = 0;
+  u32 frame_rate = 60; // emulated frames per second (50 on PAL): trigger times in seconds
 };
 u32 grim_pull_available_families(const GrimPullContext &ctx);
 
@@ -93,7 +99,7 @@ std::string grim_machine_id(const GrimGenome &genome);
 
 // One readable line per gene for the panel's genome list.
 struct GrimGeneLine {
-  u32 domain = kGrimFamilyInterface; // colour: Audio blue, Visual gold, Code red, Hardware purple
+  u32 domain = kGrimFamilyVisual; // grim_gene_family(): Audio blue, Visual gold, Code red, Hardware purple
   std::string tag = "IFACE";          // ROM | IFACE | HW
   std::string title;
   std::string detail;
