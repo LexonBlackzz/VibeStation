@@ -42,9 +42,12 @@ void draw_intro_presentation(
 // Opacity of launcher colour bar `index`, which fades in as its light lands.
 float intro_color_bar_alpha(int index, float elapsed);
 
-// Non-affiliation notice shown on black before the startup sequence.
-inline constexpr float kStartupDisclaimerSeconds = 2.0f;
-void draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float elapsed);
+// Non-affiliation notice on black before the startup sequence, with "Don't
+// show this disclaimer again" (`remember`) and "I understand". Draws at
+// `alpha` (for the fades) and returns true on the frame it is confirmed.
+// Uses ImGui items, so call it inside the launcher window.
+bool draw_startup_disclaimer(const ImVec2& pos, const ImVec2& size, float alpha,
+                             bool& remember);
 
 void preload_audio_assets();
 void release_audio_assets();

@@ -171,6 +171,41 @@ void App::panel_settings() {
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.5f, 1.0f),
                     "More unstable than Fast Mode and may heavily reduce shading, transparency, and presentation quality.");
+                if (ImGui::Checkbox("PGXP", &g_pgxp_enabled)) {
+                    save_persistent_config();
+                }
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "Perspective-correct textures from sub-pixel 3D vertices; reduces texture warping.");
+                {
+                    static const int kUpscaleValues[] = {0, 2, 3, 4, 6, 8};
+                    const char* upscale_names[] = {
+                        "Native (Software)", "2x (OpenGL)", "3x (OpenGL)",
+                        "4x (OpenGL)", "6x (OpenGL)", "8x (OpenGL)"
+                    };
+                    int upscale_index = 0;
+                    for (int i = 0; i < IM_ARRAYSIZE(kUpscaleValues); ++i) {
+                        if (kUpscaleValues[i] == g_gpu_upscale) {
+                            upscale_index = i;
+                        }
+                    }
+                    if (ImGui::Combo("Internal Resolution", &upscale_index,
+                            upscale_names, IM_ARRAYSIZE(upscale_names))) {
+                        g_gpu_upscale = kUpscaleValues[std::clamp(upscale_index, 0, 5)];
+                        save_persistent_config();
+                    }
+                    ImGui::BeginDisabled(g_gpu_upscale <= 0);
+                    if (ImGui::Checkbox("True Color", &g_gpu_true_color)) {
+                        save_persistent_config();
+                    }
+                    if (ImGui::Checkbox("Texture Filtering", &g_gpu_texture_filter)) {
+                        save_persistent_config();
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::Checkbox("Widescreen Hack", &g_gpu_widescreen)) {
+                        save_persistent_config();
+                    }
+                }
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };
                 int deinterlace_index = static_cast<int>(g_deinterlace_mode);

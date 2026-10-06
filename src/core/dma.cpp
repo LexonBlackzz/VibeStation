@@ -404,8 +404,6 @@ u32 DmaController::dma_ram_tick_cost(u32 word_count) const {
     return 0;
   }
 
-  // DuckStation models DMA RAM access as roughly one tick per word plus a
-  // small row-reload overhead per 16-word chunk.
   return word_count + ((word_count + 15u) / 16u);
 }
 

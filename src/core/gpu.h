@@ -1,4 +1,6 @@
 #pragma once
+#include "gpu_hw_stream.h"
+#include "pgxp.h"
 #include "types.h"
 #include <array>
 #include <deque>
@@ -24,10 +26,13 @@ struct Color {
 // Vertex type
 struct Vertex {
   s16 x, y;
-  float fx, fy;
+  float fx, fy; // sub-pixel position (== x, y unless PGXP matched)
+  float w;      // view-space depth from PGXP, valid only when has_w
+  bool has_w;
   Color color;
   u8 u, v; // Texture coordinates
-  Vertex() : x(0), y(0), fx(0.0f), fy(0.0f), u(0), v(0) {}
+  Vertex()
+      : x(0), y(0), fx(0.0f), fy(0.0f), w(1.0f), has_w(false), u(0), v(0) {}
 };
 
 // Display mode
@@ -146,10 +151,20 @@ struct GpuCommandDebugInfo {
 class Gpu {
 public:
   void init(System *sys) { sys_ = sys; }
+  void set_pgxp(const Pgxp *pgxp) { pgxp_ = pgxp; }
+  // Records draws for the OpenGL upscaler into `stream` (nullptr stops).
+  // Recording always starts with a full VRAM sync.
+  void set_hw_stream(GpuHwStream *stream);
+  // VRAM changed behind the recorder's back (reset, save state, debug
+  // writes): the next recorded command is preceded by a full sync.
+  void request_hw_full_sync() { hw_full_sync_pending_ = true; }
   void reset();
 
   // GP0 (Rendering commands) and GP1 (Display control)
   void gp0(u32 command);
+  // GP0 word fetched by DMA from physical RAM address phys (lets PGXP find
+  // the precise vertex the game stored there).
+  void gp0_from_ram(u32 command, u32 phys);
   void gp1(u32 command);
 
   // Read from GPU (GPUREAD port + GPUSTAT)
@@ -194,6 +209,10 @@ public:
 
 private:
   System *sys_ = nullptr;
+  const Pgxp *pgxp_ = nullptr;
+  GpuHwStream *hw_stream_ = nullptr;
+  bool hw_full_sync_pending_ = true;
+  std::array<bool, gpu_hw::kPageCount> hw_page_dirty_{};
 
   // 1MB VRAM: 1024 x 512 x 16bpp
   std::array<u16, psx::VRAM_WIDTH * psx::VRAM_HEIGHT> vram_{};
@@ -201,6 +220,9 @@ private:
   // GP0 command buffer (commands can span multiple words)
   std::deque<u32> gp0_fifo_;
   std::vector<u32> gp0_buffer_;
+  // Source RAM address of each gp0_buffer_ word (Pgxp::kNoSource if unknown).
+  std::vector<u32> gp0_buffer_src_;
+  u32 gp0_word_source_ = Pgxp::kNoSource;
   std::vector<u16> vram_copy_buffer_;
   u32 gp0_words_remaining_ = 0;
   u32 gp0_command_ = 0;
@@ -296,6 +318,10 @@ private:
   void draw_shaded_triangle(Vertex v0, Vertex v1, Vertex v2);
   void draw_textured_triangle(Vertex v0, Vertex v1, Vertex v2, Color c);
   void draw_shaded_textured_triangle(Vertex v0, Vertex v1, Vertex v2);
+  // Perspective-correct textured triangle for PGXP vertices; returns false
+  // (drawing nothing) when the triangle should take the normal path.
+  bool draw_textured_triangle_pgxp(const Vertex &v0, const Vertex &v1,
+                                   const Vertex &v2, bool gouraud);
   void draw_rect(s16 x, s16 y, u16 w, u16 h, Color c);
   void draw_line_segment(Vertex a, Vertex b, Color c, bool semi_transparent);
   void draw_gouraud_line_segment(Vertex a, Color ca, Vertex b, Color cb,
@@ -324,6 +350,8 @@ private:
   void debug_note_polygon(u8 opcode, const Vertex* vertices, int vertex_count,
                           bool textured, bool shaded, bool raw_texture = false);
   Vertex decode_vertex_word(u32 word) const;
+  // Polygon vertex from gp0_buffer_[index], with PGXP precision if tracked.
+  Vertex decode_buffer_vertex(size_t index) const;
   void handle_polyline_word(u32 word);
   void consume_vram_write_word(u32 word);
 
@@ -336,6 +364,24 @@ private:
   // Lookup table for GP0 command lengths
   static u32 gp0_command_length(u8 opcode);
 
+  // ── OpenGL upscaler recording (no-ops unless hw_stream_ is set) ───
+  bool hw_recording() const { return hw_stream_ != nullptr; }
+  void hw_emit_pending_full_sync();
+  void hw_mark_dirty(int x0, int y0, int x1, int y1);
+  void hw_sync_texture_pages();
+  GpuHwCommand hw_draw_state(bool textured, bool raw, bool sprite) const;
+  void hw_push_triangle(const GpuHwCommand &state, const GpuHwVertex &a,
+                        const GpuHwVertex &b, const GpuHwVertex &c);
+  void hw_record_polygon(const Vertex *v, int count, bool textured, bool raw);
+  void hw_record_rect(s16 x, s16 y, u16 w, u16 h, Color c, bool textured,
+                      u8 u, u8 v, bool raw);
+  void hw_record_line(const Vertex &a, Color ca, const Vertex &b, Color cb);
+  void hw_record_fill(u16 x, u16 y, u16 w, u16 h, u32 color);
+  void hw_record_vram_write(u16 x, u16 y, u16 w, u16 h);
+  void hw_record_vram_copy(u16 src_x, u16 src_y, u16 dst_x, u16 dst_y, u16 w,
+                           u16 h);
+  void hw_record_present();
+
   // Variable-length polyline stream state.
   bool polyline_active_ = false;
   bool polyline_gouraud_ = false;
@@ -347,6 +393,10 @@ private:
   u32 reaper_pending_geometry_ = 0;
   u32 reaper_pending_texture_ = 0;
   u32 reaper_state_ = 0;
+  // Draw commands this VBlank period and the two before, to spread mutations.
+  u32 reaper_draws_this_frame_ = 0;
+  u32 reaper_draws_last_frame_ = 0;
+  u32 reaper_draws_prev_frame_ = 0;
 
   u32 next_reaper_noise();
   void apply_reaper_to_gp0_command();

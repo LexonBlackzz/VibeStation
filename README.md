@@ -118,6 +118,6 @@ VibeStation does ***not*** provide any kind of BIOS files. You must legally obta
 # Sony Disclaimer
 VibeStation is an independent, non-commercial fan project. It is **not** affiliated with, endorsed by, sponsored by or in any way officially connected to Sony Interactive Entertainment.
 
-"PlayStation", "PS1", "PS2", the PlayStation logos and related sounds are trademarks or copyrighted works of Sony Interactive Entertainment. VibeStation 2 includes some of these logos and sounds (in `experimental/ps2/resources/vs2`) under fair use, to recreate the feel of the consoles in its menus. Their use does not imply any sponsorship, collaboration or endorsement by Sony. Both VibeStation 1 and VibeStation 2 show a short disclaimer to this effect when they start.
+"PlayStation", "PS1", "PS2", the PlayStation logos and related sounds are trademarks or copyrighted works of Sony Interactive Entertainment. VibeStation 2 includes some of these logos and sounds (in `experimental/ps2/resources/vs2`) under fair use, to recreate the feel of the consoles in its menus. Their use does not imply any sponsorship, collaboration or endorsement by Sony. Both VibeStation 1 and VibeStation 2 show a disclaimer to this effect when they start, until you confirm it with "I understand" (tick "Don't show this disclaimer again" to hide it for good).
 
 ⚠️ VibeStation is still experimental. Many features are incomplete, inaccurate, buggy, or unstable. Compatibility is not guaranteed.

@@ -6,7 +6,9 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <vector>
 
 namespace ps2 {
 namespace {
@@ -546,6 +548,144 @@ u32 apply_texture_function(
         : vertex_alpha;
     return out | (alpha << 24);
 }
+
+// Per-draw texel fetch for the plain formats (PSMCT32/24/16/16S) without
+// trace hooks. Addresses come from per-column and per-row swizzle terms
+// (GsVram::swizzle_column/swizzle_row) instead of a full swizzle and format
+// dispatch per tap; filtering and the texture function are the same code as
+// GsRasterizer::shade_pixel. The terms are cached per raster thread.
+class TextureSampler {
+public:
+    TextureSampler(const GsVram& vram, const GsTextureState& texture)
+        : texture_(texture) {
+        const u32 psm = texture.psm;
+        fast_ = texture.enabled &&
+                (psm == 0u || psm == 1u || psm == 2u || psm == 10u) &&
+                texture.width != 0u && texture.height != 0u &&
+                texture.nonzero_samples == nullptr &&
+                texture.alpha_samples == nullptr &&
+                texture.first_sample_x == nullptr &&
+                texture.first_sample_y == nullptr &&
+                texture.first_sample_rgba == nullptr &&
+                texture.nonzero_shaded == nullptr;
+        if (!fast_) return;
+        data_ = vram.raw_data();
+        wide_ = psm == 0u || psm == 1u;
+        unit_mask_ = wide_ ? (GsVram::kSize / 4u) - 1u
+                           : (GsVram::kSize / 2u) - 1u;
+        // Wrapped coordinates stay below the texture size, except
+        // REGION_REPEAT, whose MAXU/MAXV term may reach 1023.
+        const u32 columns = texture.wms == 3u ? 1024u : texture.width;
+        const u32 rows = texture.wmt == 3u ? 1024u : texture.height;
+        thread_local Tables tables;
+        if (!tables.valid || tables.psm != psm ||
+            tables.bp != texture.bp || tables.bw != texture.bw ||
+            tables.columns.size() < columns ||
+            tables.rows.size() < rows) {
+            tables.valid = true;
+            tables.psm = psm;
+            tables.bp = texture.bp;
+            tables.bw = texture.bw;
+            tables.columns.resize(std::max<std::size_t>(
+                columns, tables.columns.size()));
+            tables.rows.resize(std::max<std::size_t>(
+                rows, tables.rows.size()));
+            for (u32 x = 0; x < tables.columns.size(); ++x) {
+                tables.columns[x] = GsVram::swizzle_column(psm, x);
+            }
+            for (u32 y = 0; y < tables.rows.size(); ++y) {
+                tables.rows[y] =
+                    GsVram::swizzle_row(psm, y, texture.bp, texture.bw);
+            }
+        }
+        columns_ = tables.columns.data();
+        rows_ = tables.rows.data();
+    }
+
+    [[nodiscard]] bool fast() const { return fast_; }
+
+    // Equals GsRasterizer::shade_pixel(vram, texture, u, v, vertex_rgba)
+    // when fast() is true.
+    [[nodiscard]] u32 shade(s32 u, s32 v, u32 vertex_rgba) const {
+        const GsTextureState& t = texture_;
+        if (!t.linear) {
+            const u32 x = static_cast<u32>(wrap_coordinate(
+                u >> 4, t.width, t.wms, t.minu, t.maxu));
+            const u32 y = static_cast<u32>(wrap_coordinate(
+                v >> 4, t.height, t.wmt, t.minv, t.maxv));
+            return apply_texture_function(
+                t, texel_from_raw(t, raw(x, y)), vertex_rgba);
+        }
+
+        // Same arithmetic as sample_bilinear().
+        const s32 uu = u - 8;
+        const s32 vv = v - 8;
+        const u32 fx = static_cast<u32>(uu) & 15u;
+        const u32 fy = static_cast<u32>(vv) & 15u;
+        const s32 xi = uu >> 4;
+        const s32 yi = vv >> 4;
+        const u32 x0 = static_cast<u32>(wrap_coordinate(
+            xi, t.width, t.wms, t.minu, t.maxu));
+        const u32 y0 = static_cast<u32>(wrap_coordinate(
+            yi, t.height, t.wmt, t.minv, t.maxv));
+        const u32 c00 = texel_from_raw(t, raw(x0, y0));
+        if (fx == 0u && fy == 0u) {
+            return apply_texture_function(t, c00, vertex_rgba);
+        }
+        const u32 x1 = static_cast<u32>(wrap_coordinate(
+            xi + 1, t.width, t.wms, t.minu, t.maxu));
+        const u32 y1 = static_cast<u32>(wrap_coordinate(
+            yi + 1, t.height, t.wmt, t.minv, t.maxv));
+        const u32 c10 = fx != 0u ? texel_from_raw(t, raw(x1, y0)) : c00;
+        const u32 c01 = fy != 0u ? texel_from_raw(t, raw(x0, y1)) : c00;
+        const u32 c11 = (fx != 0u && fy != 0u)
+            ? texel_from_raw(t, raw(x1, y1))
+            : (fx != 0u ? c10 : c01);
+        constexpr u32 kLanes = 0x00FF00FFu;
+        const u32 wx0 = 16u - fx;
+        const u32 wy0 = 16u - fy;
+        const u32 top_rb = (c00 & kLanes) * wx0 + (c10 & kLanes) * fx;
+        const u32 bottom_rb = (c01 & kLanes) * wx0 + (c11 & kLanes) * fx;
+        const u32 top_ag = ((c00 >> 8) & kLanes) * wx0 +
+                           ((c10 >> 8) & kLanes) * fx;
+        const u32 bottom_ag = ((c01 >> 8) & kLanes) * wx0 +
+                              ((c11 >> 8) & kLanes) * fx;
+        const u32 rb = ((top_rb * wy0 + bottom_rb * fy) >> 8) & kLanes;
+        const u32 ag = ((top_ag * wy0 + bottom_ag * fy) >> 8) & kLanes;
+        return apply_texture_function(t, rb | (ag << 8), vertex_rgba);
+    }
+
+private:
+    struct Tables {
+        bool valid = false;
+        u32 psm = 0;
+        u32 bp = 0;
+        u32 bw = 0;
+        std::vector<u32> columns{};
+        std::vector<u32> rows{};
+    };
+
+    // Raw texel as GsVram::read_pixel returns it for these formats.
+    [[nodiscard]] u32 raw(u32 x, u32 y) const {
+        const u32 unit = (columns_[x] + rows_[y]) & unit_mask_;
+        if (wide_) {
+            u32 value;
+            std::memcpy(&value, data_ + unit * 4u, sizeof(value));
+            return texture_.psm == 0u ? value : (value & 0x00FFFFFFu);
+        }
+        u16 value;
+        std::memcpy(&value, data_ + unit * 2u, sizeof(value));
+        return value;
+    }
+
+    const GsTextureState& texture_;
+    bool fast_ = false;
+    bool wide_ = false;
+    const u8* data_ = nullptr;
+    u32 unit_mask_ = 0;
+    const u32* columns_ = nullptr;
+    const u32* rows_ = nullptr;
+};
 
 } // namespace
 
@@ -1641,6 +1781,7 @@ u64 GsRasterizer::draw_sprite_rows(
         }
     }
 
+    const TextureSampler sampler(vram, ctx.texture);
     const bool hot_psm16_pixels =
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
@@ -1684,8 +1825,9 @@ u64 GsRasterizer::draw_sprite_rows(
                     v = stq_to_fixed(t, q, ctx.texture.height);
                 }
             }
-            u32 rgba = shade_pixel(
-                vram, ctx.texture, u, v, b.rgba);
+            u32 rgba = sampler.fast()
+                ? sampler.shade(u, v, b.rgba)
+                : shade_pixel(vram, ctx.texture, u, v, b.rgba);
             if (ctx.fog_enabled) {
                 const long double fx = dx != 0
                     ? std::clamp(
@@ -1988,6 +2130,7 @@ u64 GsRasterizer::draw_triangle_rows(
           static_cast<double>(w2_dx) * c.t
         : 0.0;
 
+    const TextureSampler sampler(vram, ctx.texture);
     const bool hot_psm16_pixels =
         hot_osdsys_psm16_pixel_state(ctx);
     const bool simple_pixels =
@@ -2114,8 +2257,9 @@ u64 GsRasterizer::draw_triangle_rows(
                 }
                 const u32 vertex_rgba =
                     gouraud_step ? gouraud.rgba() : c.rgba;
-                u32 rgba = shade_pixel(
-                    vram, ctx.texture, u, v, vertex_rgba);
+                u32 rgba = sampler.fast()
+                    ? sampler.shade(u, v, vertex_rgba)
+                    : shade_pixel(vram, ctx.texture, u, v, vertex_rgba);
                 if (fog_enabled) {
                     const u32 fog = interpolate_scalar(
                         w0, w1, w2, area, a.fog, b.fog, c.fog);

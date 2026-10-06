@@ -3,6 +3,7 @@
 #include "common/types.h"
 #include "core/cdvd/cdvd_hw.h"
 #include "core/input/sio2_pad.h"
+#include "core/iop/iop_ram.h"
 #include "core/spu2/spu2.h"
 
 #include <array>
@@ -13,7 +14,6 @@ class Bios;
 class EeHw;
 class IopHwWindow;
 class IopIntc;
-class IopRam;
 
 class IopBus : public CdvdDmaSink {
 public:
@@ -51,10 +51,25 @@ public:
     [[nodiscard]] bool write16(u32 address, u16 value);
     [[nodiscard]] bool write32(u32 address, u32 value);
 
-    [[nodiscard]] static u32 to_physical(u32 address);
+    [[nodiscard]] static u32 to_physical(u32 address) {
+        if (address >= 0x80000000u && address < 0xC0000000u) {
+            return address & 0x1FFFFFFFu;
+        }
+        return address;
+    }
     [[nodiscard]] static bool is_ram_address(u32 address) {
         return to_physical(address) < 0x00800000u;
     }
+    // Aligned word from IOP RAM or its mirrors, as read32() would return
+    // it; false for any other address. Lets code fetches skip the device
+    // decode.
+    [[nodiscard]] bool read_ram32(u32 address, u32& value) const {
+        const u32 physical = to_physical(address);
+        if (physical >= 0x00800000u || (physical & 3u) != 0u) return false;
+        value = ram_.word(physical & static_cast<u32>(IopRam::kSize - 1u));
+        return true;
+    }
+    [[nodiscard]] u64 ram_generation() const { return ram_.generation(); }
 
     [[nodiscard]] bool interrupt_pending() const;
     [[nodiscard]] u16 sif_dma_ready_mask() const;
@@ -86,6 +101,13 @@ private:
         u32& index,
         u32& reg);
     [[nodiscard]] u64 root_counter_rate(u32 index) const;
+    // Root counter, OHCI frame and SPU2 DMA IRQ time (see tick()).
+    void advance_counters(u64 cycles);
+    // Cycles until the next root counter target/overflow step or SPU2 DMA
+    // IRQ, counting the cycle on which it happens.
+    [[nodiscard]] u64 cycles_to_counter_event() const;
+    // Apply deferred counter time before its state is read or changed.
+    void sync_counters() const;
     [[nodiscard]] bool read_root_counter(u32 physical, u32 width, u32& value) const;
     [[nodiscard]] bool write_root_counter(u32 physical, u32 width, u32 value);
 
@@ -114,6 +136,10 @@ private:
     std::array<u32, 6> root_counter_rate_cache_{};
     RootCounterDebug root_counter_debug_{};
     u64 spu2_dma4_irq_cycles_ = 0;
+    // Elapsed counter time not yet applied, always below quiet_cycles_
+    // (the distance to the next counter event; 0 forces a recompute).
+    u64 deferred_cycles_ = 0;
+    u64 quiet_cycles_ = 0;
 };
 
 } // namespace ps2

@@ -565,6 +565,7 @@ bool App::frame() {
             frame_presentation_worker_.recycle_consumed(
                 std::move(prepared_frame));
         }
+        update_hw_upscaler();
         runtime_snapshot_ = emu_runner_.runtime_snapshot();
         u32 now_ms = SDL_GetTicks();
         if (has_started_emulation_ && system_ != nullptr) {
@@ -929,6 +930,42 @@ void App::process_events(bool& quit) {
             event.type == SDL_CONTROLLERBUTTONUP) {
             input_->process_event(event);
         }
+    }
+}
+
+void App::update_hw_upscaler() {
+    if (g_gpu_upscale <= 0) {
+        if (hw_renderer_) {
+            hw_renderer_->shutdown();
+            hw_renderer_.reset();
+        }
+        if (renderer_) {
+            renderer_->set_external_source(0);
+        }
+        return;
+    }
+    if (!hw_renderer_) {
+        hw_renderer_ = std::make_unique<GpuHwRenderer>();
+        if (!hw_renderer_->init(g_gpu_upscale)) {
+            // e.g. the OpenGL 2.1 fallback context: stay on software output.
+            LOG_WARN("App: OpenGL upscaler unavailable; using software output");
+            hw_renderer_.reset();
+            g_gpu_upscale = 0;
+            if (renderer_) {
+                renderer_->set_external_source(0);
+            }
+            return;
+        }
+    } else if (hw_renderer_->scale() != g_gpu_upscale) {
+        hw_renderer_->set_scale(g_gpu_upscale);
+    }
+    if (emu_runner_.consume_hw_stream(hw_stream_scratch_)) {
+        hw_renderer_->replay(hw_stream_scratch_);
+    }
+    const bool use_hw =
+        hw_renderer_->has_output() && !hw_renderer_->software_present();
+    if (renderer_) {
+        renderer_->set_external_source(use_hw ? hw_renderer_->output_texture() : 0);
     }
 }
 
@@ -2056,6 +2093,11 @@ void App::save_persistent_config() const {
     // Sync from globals that UI panels write to directly
     out.gpu_fast_mode = g_gpu_fast_mode;
     out.gpu_extreme_fast_mode = g_gpu_extreme_fast_mode;
+    out.pgxp_enabled = g_pgxp_enabled;
+    out.gpu_upscale = g_gpu_upscale;
+    out.gpu_true_color = g_gpu_true_color;
+    out.gpu_texture_filter = g_gpu_texture_filter;
+    out.gpu_widescreen = g_gpu_widescreen;
     out.bilinear_filtering = g_bilinear_filtering;
     out.deinterlace_mode = g_deinterlace_mode;
     out.output_resolution_mode = g_output_resolution_mode;

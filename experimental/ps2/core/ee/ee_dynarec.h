@@ -33,6 +33,19 @@ public:
         ExitReason reason = ExitReason::Unsupported;
     };
 
+    // Runs one register-only instruction that has no native emitter, with
+    // the block's guest registers flushed to EeCpuState. in_delay_slot is
+    // nonzero for a branch delay slot. Returns one of the kInterpreter*
+    // values below.
+    using InterpreterFallback =
+        u32 (*)(void* context, u32 pc, u32 instruction, u32 in_delay_slot);
+    // Retired normally; the block continues and commits its Count.
+    static constexpr u32 kInterpreterRetired = 0u;
+    // Retired into an exception; PC is the vector and Count is advanced.
+    static constexpr u32 kInterpreterException = 1u;
+    // Did not retire (the CPU halted); PC is the instruction's own.
+    static constexpr u32 kInterpreterFailed = 2u;
+
     EeDynarec();
     ~EeDynarec();
     EeDynarec(const EeDynarec&) = delete;
@@ -42,6 +55,14 @@ public:
     // Host storage for the 16 KiB EE scratchpad at 0x70000000, used by the
     // fastmem path. Null keeps scratchpad accesses on guarded exits.
     void set_scratchpad(u8* data) { scratchpad_ = data; }
+    // Without a fallback, blocks end before any instruction lacking a
+    // native emitter.
+    void set_interpreter_fallback(
+        InterpreterFallback fallback, void* context) {
+        interpreter_fallback_ = fallback;
+        interpreter_context_ = context;
+        clear();
+    }
 
     RunResult execute(
         EeCpuState& state,
@@ -148,6 +169,17 @@ private:
         u32 page_generation = 0;
     };
 
+    // Open-addressing index from (PC, compile budget) to a block in
+    // blocks_. Keys live in the entry so probing never touches a Block.
+    struct IndexEntry {
+        u32 pc = 0;
+        u32 compile_budget = 0;
+        u32 block = 0; // blocks_ position + 1; 0 marks an empty entry
+    };
+
+    [[nodiscard]] Block* find_block(u32 pc, u32 compile_budget);
+    Block& add_block(u32 pc, u32 compile_budget);
+
     Block* lookup_or_compile(
         u32 pc,
         u32 compile_limit,
@@ -165,9 +197,15 @@ private:
         u8* code_page_tracked);
     void release_code_cache();
 
+    // A key keeps its block (and every link to it) until the whole cache
+    // is released; recompiling after a code change reuses the block.
     std::vector<Block> blocks_;
+    u32 block_count_ = 0;
+    std::vector<IndexEntry> index_;
     std::vector<FailedCompile> failed_compiles_;
     u8* scratchpad_ = nullptr;
+    InterpreterFallback interpreter_fallback_ = nullptr;
+    void* interpreter_context_ = nullptr;
     std::vector<CodePage> code_pages_;
 
     u64 compiled_blocks_ = 0;

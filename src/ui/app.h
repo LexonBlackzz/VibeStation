@@ -4,6 +4,7 @@
 #include "frame_presentation_worker.h"
 #include "../integrations/discord_presence.h"
 #include "../core/config.h"
+#include "../core/gpu_hw_renderer.h"
 #include "../core/renderer.h"
 #include "../core/system.h"
 #include "../core/types.h"
@@ -69,6 +70,9 @@ private:
 
 	std::unique_ptr<System> system_;
 	std::unique_ptr<Renderer> renderer_;
+	// OpenGL upscaler (UI thread); null while g_gpu_upscale is 0.
+	std::unique_ptr<GpuHwRenderer> hw_renderer_;
+	GpuHwStream hw_stream_scratch_;
 	std::unique_ptr<InputManager> input_;
 	InputRecorder input_recorder_;
 	InputRecorder::Config input_recorder_config_{};
@@ -298,6 +302,7 @@ private:
 	bool should_route_keyboard_to_emu(const SDL_Event& event,
 		const ImGuiIO& io) const;
 	void update();
+	void update_hw_upscaler();
 	void render_ui();
 	void push_performance_history_sample();
 	void draw_performance_gpu_dip_diagnostics();

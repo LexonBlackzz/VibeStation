@@ -1583,10 +1583,7 @@ bool CdRom::can_discard_unread_sector_tail() const {
   if (!data_ready_) {
     return false;
   }
-
-  // DuckStation keeps multiple sector buffers and switches the current read
-  // buffer when a missed INT1 is delivered. That effectively drops the raw
-  // tail after the sector header plus 2048-byte data payload has been read.
+  
   if (read_whole_sector_ && data_buffer_.size() == kRawSectorBytesAfterSync &&
       data_index_ >= kRawSectorHeaderAndDataBytes) {
     return true;
@@ -1802,6 +1799,7 @@ void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response,
   }
 
   if (pending_async_irq_.active && pending_async_irq_.irq == irq_num) {
+    pending_async_irq_.allow_current_data_ready |= allow_current_data_ready;
     return;
   }
 
@@ -1829,6 +1827,7 @@ void CdRom::queue_or_deliver_async_irq(u8 irq_num, std::vector<u8> response,
   }
 
   pending_async_irq_.active = true;
+  pending_async_irq_.allow_current_data_ready = allow_current_data_ready;
   pending_async_irq_.irq = irq_num;
   pending_async_irq_.response = std::move(response);
   pending_async_irq_.delay =
@@ -1846,6 +1845,7 @@ void CdRom::deliver_pending_async_irq() {
     return;
   }
   if (pending_async_irq_.irq == 1u &&
+      !pending_async_irq_.allow_current_data_ready &&
       should_defer_sector_irq_for_unread_buffer()) {
     pending_async_irq_.delay = kCdAsyncRetryDelayCycles;
     return;

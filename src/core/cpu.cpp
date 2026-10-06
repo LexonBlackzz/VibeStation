@@ -1133,10 +1133,6 @@ bool Cpu::is_mapped_main_ram_addr(u32 addr) const {
 }
 
 u32 Cpu::cpu_data_read_penalty(u32 addr) const {
-  // DuckStation models a 6-tick RAM read. Our load/store op timing already
-  // carries a 2-cycle baseline, so add the remaining 4 cycles here for
-  // main-RAM data reads. We intentionally do not charge instruction fetches
-  // yet because this core still lacks a comparable icache model.
   return is_mapped_main_ram_addr(addr) ? 4u : 0u;
 }
 
@@ -3502,6 +3498,9 @@ void Cpu::op_lw(u32 i) {
   if (cpu_diag_enabled() && rt(i) == 31 && !is_plausible_exec_addr(val)) {
     log_suspicious_ra_load(sys_, current_pc_, gpr_, addr, val);
   }
+  if (g_pgxp_enabled) {
+    gte.pgxp.on_lw(rt(i), phys, val);
+  }
   schedule_load(rt(i), val, addr);
 }
 
@@ -3623,6 +3622,9 @@ void Cpu::op_sw(u32 i) {
                        cycles_, cop0_sr_, cop0_cause_, sys_->irq_pending());
   }
   store32(addr, store_val);
+  if (g_pgxp_enabled && !exception_raised_) {
+    gte.pgxp.on_sw(rt(i), addr & 0x1FFFFFFFu, store_val);
+  }
 }
 
 void Cpu::op_swl(u32 i) {
@@ -3764,6 +3766,9 @@ void Cpu::op_cop2(u32 i) {
     if (gte_data_reg_reads_result(rd(i))) {
       add_cycle_penalty(gte_result_stall_cycles());
     }
+    if (g_pgxp_enabled) {
+      gte.pgxp.on_mfc2(rd(i), rt(i), gte.read_data(rd(i)));
+    }
     schedule_load(rt(i), gte.read_data(rd(i)));
     break;
   case 0x02: // CFC2: Move from COP2 control register
@@ -3774,6 +3779,9 @@ void Cpu::op_cop2(u32 i) {
     break;
   case 0x04: // MTC2: Move to COP2 data register
     gte.write_data(rd(i), gpr_[rt(i)]);
+    if (g_pgxp_enabled) {
+      gte.pgxp.on_mtc2(rd(i), rt(i), gpr_[rt(i)]);
+    }
     gte_input_ready_cycle_ =
         cycles_ + static_cast<u64>(cycle_penalty_) + 6;
     break;
@@ -3846,6 +3854,9 @@ void Cpu::op_lwc2(u32 i) {
   if (exception_raised_)
     return;
   gte.write_data(rt(i), val);
+  if (g_pgxp_enabled) {
+    gte.pgxp.on_lwc2(rt(i), addr & 0x1FFFFFFFu, val);
+  }
   gte_input_ready_cycle_ =
       cycles_ + static_cast<u64>(cycle_penalty_) + 6;
 }
@@ -3857,6 +3868,9 @@ void Cpu::op_swc2(u32 i) {
   }
   u32 val = gte.read_data(rt(i));
   store32(addr, val);
+  if (g_pgxp_enabled && !exception_raised_) {
+    gte.pgxp.record_store(addr & 0x1FFFFFFFu, rt(i), val);
+  }
 }
 
 void Cpu::op_cop3(u32 /*i*/) { raise_cop_unusable(3); }

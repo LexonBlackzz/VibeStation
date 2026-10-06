@@ -1,4 +1,5 @@
 #pragma once
+#include "pgxp.h"
 #include "types.h"
 #include <array>
 #include <vector>
@@ -22,6 +23,10 @@ public:
   void save_state(std::vector<u8>& buf) const;
   void restore_state(const u8*& pos, size_t& remaining);
 
+  // Maintained while g_pgxp_enabled: RTPS/RTPT fill it, SWC2 records stores
+  // through it, the GPU reads it.
+  Pgxp pgxp;
+
 private:
   // ── Data Registers (COP2 data) ─────────────────────────────────
   // Vectors
@@ -38,7 +43,6 @@ private:
 
   s64 mac[4] = {};        // MAC0-MAC3 (accumulator) — 44-bit for MAC1..3
                           // Note: MAC1-3 store the sf-shifted value (>> sf),
-                          // matching DuckStation's 32-bit MAC register behavior.
   u32 otz = 0;            // Average Z
   u32 lzcs = 0, lzcr = 0; // Leading zero count
 
@@ -62,6 +66,9 @@ private:
 
   // ── Commands ───────────────────────────────────────────────────
   void cmd_rtps(int v_idx, bool set_mac0); // Perspective transform (single)
+  bool precise_projection(const s64 raw_mac[3], s16 sx_val, s16 sy_val,
+                          s64 screen_x, s64 screen_y,
+                          Pgxp::PreciseVertex &out) const;
   void cmd_rtpt();                         // Perspective transform (triple)
   void cmd_nclip();                        // Normal clipping
   void cmd_avsz3();                        // Average of 3 Z values

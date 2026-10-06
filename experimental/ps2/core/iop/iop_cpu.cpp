@@ -448,16 +448,32 @@ u32 IopCpu::idle_pair_address() const {
     } else {
         return 0u;
     }
+    // This runs several times per EE batch while the IOP idles. The code
+    // words are usually cold in the host cache by then, so remember the
+    // answer for a RAM pair until IOP RAM is next written.
+    const u64 generation = bus_.ram_generation();
+    if (idle_cache_.valid &&
+        idle_cache_.branch_pc == branch_pc &&
+        idle_cache_.generation == generation) {
+        return idle_cache_.result;
+    }
     u32 branch = 0;
     u32 delay = 0;
-    if (!bus_.read32(branch_pc, branch) ||
-        !bus_.read32(branch_pc + 4u, delay) || delay != 0u ||
-        (branch >> 26) != 2u) {
-        return 0u;
+    const bool ram_branch = bus_.read_ram32(branch_pc, branch);
+    const bool ram_delay = bus_.read_ram32(branch_pc + 4u, delay);
+    u32 result = 0u;
+    if ((ram_branch || bus_.read32(branch_pc, branch)) &&
+        (ram_delay || bus_.read32(branch_pc + 4u, delay)) &&
+        delay == 0u && (branch >> 26) == 2u) {
+        const u32 target =
+            ((branch_pc + 4u) & 0xF0000000u) |
+            ((branch & 0x03FFFFFFu) << 2);
+        if (target == branch_pc) result = branch_pc;
     }
-    const u32 target =
-        ((branch_pc + 4u) & 0xF0000000u) | ((branch & 0x03FFFFFFu) << 2);
-    return target == branch_pc ? branch_pc : 0u;
+    if (ram_branch && ram_delay) {
+        idle_cache_ = {true, branch_pc, generation, result};
+    }
+    return result;
 }
 
 bool IopCpu::at_idle_pair() const { return idle_pair_address() != 0u; }
@@ -562,7 +578,8 @@ bool IopCpu::step_internal(
     next_is_delay_slot_ = false;
 
     u32 instruction = 0;
-    if (!bus_.read32(pc, instruction)) {
+    if (!bus_.read_ram32(pc, instruction) &&
+        !bus_.read32(pc, instruction)) {
         return fail(
             pc,
             0,
@@ -785,7 +802,8 @@ bool IopCpu::step_internal(
     case 0x23: { // LW
         const u32 addr = address();
         u32 value = 0;
-        if (!bus_.read32(addr, value)) {
+        if (!bus_.read_ram32(addr, value) &&
+            !bus_.read32(addr, value)) {
             ok = read_fault("load word", addr);
         } else {
             schedule_load(rt, value);

@@ -65,7 +65,13 @@ struct EeCpuState {
 class EeCpu {
 public:
     explicit EeCpu(EeBus& bus, Vu1* vu0_micro = nullptr)
-        : bus_(bus), vu0_micro_(vu0_micro) {}
+        : bus_(bus), vu0_micro_(vu0_micro) {
+        dynarec_.set_interpreter_fallback(
+            &EeCpu::dynarec_interpret, this);
+    }
+    // Native dynarec code holds a pointer to this object.
+    EeCpu(const EeCpu&) = delete;
+    EeCpu& operator=(const EeCpu&) = delete;
 
     void reset(u32 entry_point = 0);
     bool step(std::string& error);
@@ -196,6 +202,10 @@ public:
     void set_dynarec_scratchpad(u8* data) { dynarec_.set_scratchpad(data); }
     [[nodiscard]] bool dynarec_enabled() const { return dynarec_enabled_; }
     [[nodiscard]] const EeDynarec& dynarec() const { return dynarec_; }
+    // Instructions dynarec blocks handed to the interpreter in place.
+    [[nodiscard]] u64 dynarec_interpreted_instructions() const {
+        return dynarec_interpreted_instructions_;
+    }
 
     // VU0 macro mode (EE COP2) and VIF0 micro mode share one architectural
     // register file. These helpers bridge the bootstrap interpreter state.
@@ -209,6 +219,10 @@ private:
         bool quiet,
         const u32* prefetched_instruction = nullptr,
         bool skip_interrupt_check = false);
+    // EeDynarec::InterpreterFallback. Runs one register-only instruction
+    // from inside a native block whose guest registers are flushed to state_.
+    static u32 dynarec_interpret(
+        void* context, u32 pc, u32 instruction, u32 in_delay_slot);
     bool skip_bios_literal_iteration_impl(bool verify_code);
     [[nodiscard]] static s16 immediate(u32 instruction);
     [[nodiscard]] static u32 branch_target(u32 pc, s16 imm);
@@ -282,6 +296,9 @@ private:
     u32 intc_age_ = 0;
     bool current_is_delay_slot_ = false;
     bool memory_exception_pending_ = false;
+    u64 exceptions_raised_ = 0u;
+    u64 dynarec_interpreted_instructions_ = 0u;
+    std::string dynarec_interpret_error_;
     bool hot_sif_getreg_diag_inflight_ = false;
     u64 hot_sif_getreg_diag_start_ = 0u;
     u32 hot_sif_getreg_read_offset_ = 0u;

@@ -160,6 +160,9 @@ private:
   PendingSecondResponse pending_second_;
   struct PendingAsyncIrq {
     bool active = false;
+    // An INT1 announcing the sector already in the data buffer: that unread
+    // buffer must not hold back the very IRQ that tells the host to read it.
+    bool allow_current_data_ready = false;
     int delay = 0;
     u8 irq = 0;
     std::vector<u8> response;
