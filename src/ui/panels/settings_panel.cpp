@@ -194,6 +194,17 @@ void App::panel_settings() {
                         g_gpu_upscale = kUpscaleValues[std::clamp(upscale_index, 0, 5)];
                         save_persistent_config();
                     }
+                    ImGui::BeginDisabled(g_gpu_upscale <= 0);
+                    if (ImGui::Checkbox("True Color", &g_gpu_true_color)) {
+                        save_persistent_config();
+                    }
+                    if (ImGui::Checkbox("Texture Filtering", &g_gpu_texture_filter)) {
+                        save_persistent_config();
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::Checkbox("Widescreen Hack", &g_gpu_widescreen)) {
+                        save_persistent_config();
+                    }
                 }
                 const char* deinterlace_modes[] = { "Weave (Stable)", "Bob (Field)",
                                                    "Blend (Soft)" };

@@ -1470,6 +1470,14 @@ static int run_frame_test(const std::string &bios_path, int frames,
     cfg.use_custom_seed = true;
     sys->set_gpu_reaper_config(cfg);
   }
+  // VIBESTATION_TEST_GPU_OPTS: comma list of filter, widescreen,
+  // native_color (15-bit dithered upscaled output).
+  if (const char *opts = std::getenv("VIBESTATION_TEST_GPU_OPTS")) {
+    const std::string list = opts;
+    g_gpu_texture_filter = list.find("filter") != std::string::npos;
+    g_gpu_widescreen = list.find("widescreen") != std::string::npos;
+    g_gpu_true_color = list.find("native_color") == std::string::npos;
+  }
   HeadlessUpscaler upscaler;
   if (g_test_gpu_upscale > 0) {
     if (!upscaler.init(g_test_gpu_upscale)) {

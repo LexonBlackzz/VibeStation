@@ -121,25 +121,17 @@ public:
   // @param requested_count  Number of samples to produce.
   void read_samples(s16 *out_buffer, size_t requested_count);
 
-  // DuckStation-style normal playback read. This never enters the stutter
-  // loop: it consumes fresh frames when available, stretches a short partial
-  // read over the requested output to avoid a hard silence splice, and emits
-  // silence only when completely empty.
   void read_live_samples(s16 *out_buffer, size_t requested_count);
 
   // Force Source-style stutter output while consuming any newly generated
-  // live audio into the rolling history. This keeps the loop evolving during
-  // sustained emulation slowdown without playing delayed live audio.
+  // live audio into the rolling history.
   void read_stutter_samples(s16 *out_buffer, size_t requested_count);
 
-  // Real-time callback read. This never waits for the producer: if the ring
-  // lock is busy, or fewer samples are available, the missing output remains
-  // silence and the result reports how many fresh samples were consumed.
+  // Real-time callback read
   ReadResult try_read_samples(s16 *out_buffer, size_t requested_count,
                               size_t discard_before_read = 0);
 
   // Play the recent-output history without consuming live queued samples.
-  // Used only during real starvation; like try_read_samples(), it never waits.
   ReadResult try_read_history_samples(s16 *out_buffer,
                                       size_t requested_count,
                                       size_t drain_live_samples = 0);

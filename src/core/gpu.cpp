@@ -3945,6 +3945,13 @@ GpuHwCommand Gpu::hw_draw_state(bool textured, bool raw, bool sprite) const {
         (force_set_mask_bit_ ? gpu_hw::kSetMask : 0u) |
         (check_mask_before_draw_ ? gpu_hw::kCheckMask : 0u) |
         (sprite ? gpu_hw::kSprite : 0u));
+    // The PS1 dithers gouraud-shaded and texture-modulated polygons and lines,
+    // never rectangles.
+    const u8 op = static_cast<u8>(gp0_command_);
+    const bool gouraud = op >= 0x20 && op <= 0x5F && (op & 0x10u) != 0;
+    if (dither_enabled_ && !sprite && (textured ? !raw : gouraud)) {
+        cmd.flags |= gpu_hw::kDither;
+    }
     cmd.semi_mode = semi_transparency_;
     if (textured) {
         cmd.tex_depth = static_cast<u8>(std::min((texpage_ >> 7) & 0x3, 2));

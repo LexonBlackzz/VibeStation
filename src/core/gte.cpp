@@ -543,10 +543,6 @@ s64 Gte::multiply_accumulate(int idx, s64 base, const s16 *matrix_row,
 }
 
 void Gte::interpolate_color(s64 in_mac1, s64 in_mac2, s64 in_mac3) {
-  // Two-step depth cue: [MAC,IR] = MAC+(FC-MAC)*IR0
-  //   Step 1: [IR1,IR2,IR3] = ((FC-SHL 12) - [MAC1,MAC2,MAC3]) SAR (sf*12)
-  //   Step 2: [MAC1,MAC2,MAC3] = (([IR1,IR2,IR3] * IR0) + [MAC1,MAC2,MAC3]) SAR (sf*12)
-  // Matching DuckStation's InterpolateColor — intermediate IR saturation is critical.
   const s64 in_mac[3] = {in_mac1, in_mac2, in_mac3};
 
   // Step 1: FC-MAC, with lm=false (signed IR range)
@@ -752,10 +748,6 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   else
     ir[3] = static_cast<s16>(ir3_mac);
 
-  // Push SZ FIFO.
-  // PSX-SPX: SZ3 = MAC3 SAR ((1-SF)*12).
-  // But MAC3 in the spec is already sf-shifted. Since we have the raw value,
-  // always push raw >> 12 to match DuckStation's PushSZ(s32(z >> 12)).
   u16 sz_val =
       static_cast<u16>(clamp(static_cast<s32>(raw_mac[2] >> 12), 0, 0xFFFF,
                              1u << 18));
@@ -765,7 +757,10 @@ void Gte::cmd_rtps(int v_idx, bool set_mac0) {
   u32 div_result = divide(h, sz[3]);
 
   // SXY2 = OFX/OFY + IR1/IR2 * div_result
-  s64 screen_x = static_cast<s64>(ofx) + static_cast<s64>(ir[1]) * div_result;
+  // Widescreen hack: squeeze X by 3/4 so a 16:9 display shows more of
+  // the scene (the game also culls against the wider view).
+  const s64 x_term = static_cast<s64>(ir[1]) * div_result;
+  s64 screen_x = static_cast<s64>(ofx) + (g_gpu_widescreen ? x_term * 3 / 4 : x_term);
   s64 screen_y = static_cast<s64>(ofy) + static_cast<s64>(ir[2]) * div_result;
 
   s16 sx_val = static_cast<s16>(
@@ -816,7 +811,8 @@ bool Gte::precise_projection(const s64 raw_mac[3], s16 sx_val, s16 sy_val,
       std::clamp(static_cast<double>(raw_mac[1]) * ir_scale, ir_min, 32767.0);
   const double scale =
       std::min(static_cast<double>(h) / depth, 131071.0 / 65536.0);
-  const double fx = static_cast<double>(ofx) / 65536.0 + ir_x * scale;
+  const double fx = static_cast<double>(ofx) / 65536.0 +
+                    ir_x * scale * (g_gpu_widescreen ? 0.75 : 1.0);
   const double fy = static_cast<double>(ofy) / 65536.0 + ir_y * scale;
   // Float and the hardware's table divide can disagree by a fraction of a
   // pixel; anything further off means the two paths diverged.
@@ -1080,9 +1076,6 @@ void Gte::cmd_cdp() {
 }
 
 void Gte::cmd_dpcs() {
-  // DPCS: in_MAC = [R,G,B] SHL 16 (no sf shift for the initial store,
-  // matching DuckStation's TruncateAndSetMAC<1>(color<<16, 0)).
-  // Then two-step interpolation with far color.
   const s64 in_mac1 = static_cast<s64>(rgbc[0]) << 16;
   const s64 in_mac2 = static_cast<s64>(rgbc[1]) << 16;
   const s64 in_mac3 = static_cast<s64>(rgbc[2]) << 16;
@@ -1091,8 +1084,6 @@ void Gte::cmd_dpcs() {
 }
 
 void Gte::cmd_dcpl() {
-  // DCPL: in_MAC = [R*IR1,G*IR2,B*IR3] SHL 4
-  // No need to store to MAC — use local variables like DuckStation
   const s64 in_mac1 = (static_cast<s64>(rgbc[0]) * static_cast<s64>(ir[1])) << 4;
   const s64 in_mac2 = (static_cast<s64>(rgbc[1]) * static_cast<s64>(ir[2])) << 4;
   const s64 in_mac3 = (static_cast<s64>(rgbc[2]) * static_cast<s64>(ir[3])) << 4;

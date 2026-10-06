@@ -43,7 +43,6 @@ private:
 
   s64 mac[4] = {};        // MAC0-MAC3 (accumulator) — 44-bit for MAC1..3
                           // Note: MAC1-3 store the sf-shifted value (>> sf),
-                          // matching DuckStation's 32-bit MAC register behavior.
   u32 otz = 0;            // Average Z
   u32 lzcs = 0, lzcr = 0; // Leading zero count
 

@@ -1583,10 +1583,7 @@ bool CdRom::can_discard_unread_sector_tail() const {
   if (!data_ready_) {
     return false;
   }
-
-  // DuckStation keeps multiple sector buffers and switches the current read
-  // buffer when a missed INT1 is delivered. That effectively drops the raw
-  // tail after the sector header plus 2048-byte data payload has been read.
+  
   if (read_whole_sector_ && data_buffer_.size() == kRawSectorBytesAfterSync &&
       data_index_ >= kRawSectorHeaderAndDataBytes) {
     return true;

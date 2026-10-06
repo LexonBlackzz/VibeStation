@@ -20,6 +20,9 @@ struct Config {
     bool gpu_extreme_fast_mode = false;
     bool pgxp_enabled = false;
     int gpu_upscale = 0;
+    bool gpu_true_color = true;
+    bool gpu_texture_filter = false;
+    bool gpu_widescreen = false;
     bool low_spec_mode = false;
 
     // CPU

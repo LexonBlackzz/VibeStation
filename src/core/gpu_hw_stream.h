@@ -40,6 +40,7 @@ constexpr u8 kSetMask = 1u << 3;
 constexpr u8 kCheckMask = 1u << 4;
 constexpr u8 kSprite = 1u << 5;          // rectangle: texels map 1:1
 constexpr u8 kSoftwarePresent = 1u << 6; // Present: show the software frame
+constexpr u8 kDither = 1u << 7;          // PS1 dithering applies to this draw
 constexpr int kPageWidth = 64;
 constexpr int kPageHeight = 256;
 constexpr int kPageColumns = 16;

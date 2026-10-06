@@ -125,6 +125,11 @@ inline bool g_gpu_extreme_fast_mode = false;
 inline bool g_pgxp_enabled = false;
 // OpenGL upscaler internal resolution multiplier; 0 = software output only.
 inline int g_gpu_upscale = 0;
+// Upscaler enhancements (OpenGL output only).
+inline bool g_gpu_true_color = true;     // full colour precision, no dither
+inline bool g_gpu_texture_filter = false; // bilinear texture filtering
+// GTE widescreen hack: squeeze 3D projection for a 16:9 display.
+inline bool g_gpu_widescreen = false;
 inline bool g_bilinear_filtering = false;
 enum class CpuExecutionMode : u8 {
   Interpreter = 0,

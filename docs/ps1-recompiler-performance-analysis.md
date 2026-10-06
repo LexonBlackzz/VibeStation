@@ -28,8 +28,7 @@ Interpreter fallback was a real problem and important paths are now native, but
 it is no longer the main measured limit. The largest CPU costs are very short
 blocks, dispatch frequency, repeated guest-state traffic, and the lack of a
 general register-allocating IR. Whole-emulator speed is also capped by the
-synchronous scalar software GPU. Closing the gap to DuckStation requires
-architectural work, not a longer list of opcode-specific emitters.
+synchronous scalar software GPU.
 
 ## Test configuration
 
@@ -310,6 +309,5 @@ real time is 60 FPS. These measure different things and should not be combined.
 Either way, VibeStation remains far behind a mature emulator.
 
 This patch removes a game-breaking recompiler corruption and most measured
-interpreter dependence. It does not make VibeStation competitive with
-DuckStation by itself. The evidence now points at dispatch/state traffic, event
+interpreter dependence. The evidence now points at dispatch/state traffic, event
 scheduling, and rendering as the work that can close the remaining gap.

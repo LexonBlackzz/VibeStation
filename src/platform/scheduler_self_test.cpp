@@ -461,7 +461,6 @@ void test_dma_otc_completion() {
   const u64 before = now(*sys);
   sys->write32(kDmaBase + 6 * 0x10 + 8, 0x11000002u);
   const u64 stall = now(*sys) - before;
-  // DuckStation-style cost: one cycle per word plus a row reload per 16 words.
   const u64 expected_stall = kWords + (kWords + 15u) / 16u;
   // OTC writes backwards from MADR: the top word links to its predecessor and
   // the lowest word is the end-of-list marker.

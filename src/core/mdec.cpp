@@ -69,10 +69,6 @@ inline bool fmv_diagnostics_enabled() {
 constexpr u32 kTicksPerBlock = 448u;
 constexpr size_t kDataInFifoHalfwords = 1024u / sizeof(u16);
 constexpr size_t kDmaInRequestHalfwords = 32u * 2u;
-// DuckStation schedules macroblock copy-out after TICKS_PER_BLOCK * 6. With
-// incremental RLE consumption, DMA0 can keep feeding the input FIFO while DMA1
-// waits on realistic output latency instead of making every macroblock
-// available in the same instant it is parsed.
 constexpr u32 kMacroblockOutputDelayCycles = kTicksPerBlock * 6u;
 
 } // namespace
@@ -407,8 +403,6 @@ u32 Mdec::read_status() const {
   if (!data_out_ready) {
     status |= 1u << 31;
   }
-  // DuckStation models the data-in FIFO as 1024 bytes. Preserve that
-  // backpressure so DMA0 cannot run an entire compressed frame ahead of MDEC.
   if (in_halfword_fifo_.size() >= kDataInFifoHalfwords) {
       status |= 1u << 30;
   }

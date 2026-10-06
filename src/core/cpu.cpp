@@ -1133,10 +1133,6 @@ bool Cpu::is_mapped_main_ram_addr(u32 addr) const {
 }
 
 u32 Cpu::cpu_data_read_penalty(u32 addr) const {
-  // DuckStation models a 6-tick RAM read. Our load/store op timing already
-  // carries a 2-cycle baseline, so add the remaining 4 cycles here for
-  // main-RAM data reads. We intentionally do not charge instruction fetches
-  // yet because this core still lacks a comparable icache model.
   return is_mapped_main_ram_addr(addr) ? 4u : 0u;
 }
 

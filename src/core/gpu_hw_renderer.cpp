@@ -129,13 +129,96 @@ uniform int u_set_mask;
 uniform sampler2D u_color_copy; // upscaled VRAM snapshot for 15-bit textures
 uniform int u_scale;
 uniform int u_check_mask; // discard where the destination mask bit is set
+uniform int u_true_color; // keep full colour precision instead of 15-bit
+uniform int u_dither;     // 15-bit output: apply the PS1 dither pattern
+uniform int u_filter;     // bilinear texture filtering
 
 noperspective in vec3 v_color;
 in vec2 v_uv;
 out vec4 o_color;
 
+const int kDither[16] = int[16](-4, 0, -3, 1, 2, -2, 3, -1,
+                                -3, 1, -4, 0, 3, -1, 2, -2);
+
 uint fetch(ivec2 p) {
     return texelFetch(u_vram, ivec2(p.x & 1023, p.y & 511), 0).r;
+}
+
+struct Texel {
+    vec3 rgb;  // 0..1, where 1 is 31/31
+    bool transparent;
+    bool semi;
+};
+
+// Texel at texture coordinate `uv`; `sub` is the position inside the texel
+// (used to pick the sample of an upscaled 15-bit texture).
+Texel decode(ivec2 uv, vec2 sub) {
+    uv &= 255;
+    uv = (uv & ~u_window.xy) | (u_window.zw & u_window.xy);
+    uint texel;
+    vec3 precise = vec3(-1.0);
+    if (u_depth == 0) {
+        uint word = fetch(u_tex_base + ivec2(uv.x >> 2, uv.y));
+        uint index = (word >> uint((uv.x & 3) * 4)) & 15u;
+        texel = fetch(u_clut + ivec2(int(index), 0));
+    } else if (u_depth == 1) {
+        uint word = fetch(u_tex_base + ivec2(uv.x >> 1, uv.y));
+        uint index = (word >> uint((uv.x & 1) * 8)) & 255u;
+        texel = fetch(u_clut + ivec2(int(index), 0));
+    } else {
+        // 15-bit texels come from the upscaled colour buffer so textures
+        // the game rendered itself (render-to-texture) stay sharp.
+        vec2 p = (vec2(u_tex_base + uv) + sub) * float(u_scale);
+        ivec2 size = textureSize(u_color_copy, 0);
+        ivec2 ip = ivec2(p);
+        ip = ivec2(ip.x % size.x, ip.y % size.y);
+        vec4 c = texelFetch(u_color_copy, ip, 0);
+        uvec3 c5 = uvec3(floor(c.rgb * 31.0 + 0.5));
+        texel = c5.r | (c5.g << 5) | (c5.b << 10) | (c.a > 0.5 ? 0x8000u : 0u);
+        precise = c.rgb;
+    }
+    Texel t;
+    t.transparent = texel == 0u;
+    t.semi = (texel & 0x8000u) != 0u;
+    t.rgb = (u_true_color != 0 && precise.x >= 0.0)
+        ? precise
+        : vec3(float(texel & 31u), float((texel >> 5) & 31u),
+               float((texel >> 10) & 31u)) / 31.0;
+    return t;
+}
+
+// Bilinear filter over the four nearest texels; transparent texels add no
+// colour, and the result is transparent when they dominate.
+Texel decode_filtered() {
+    vec2 st = v_uv - 0.5;
+    ivec2 base = ivec2(floor(st));
+    vec2 f = st - floor(st);
+    Texel t00 = decode(base, vec2(0.5));
+    Texel t10 = decode(base + ivec2(1, 0), vec2(0.5));
+    Texel t01 = decode(base + ivec2(0, 1), vec2(0.5));
+    Texel t11 = decode(base + ivec2(1, 1), vec2(0.5));
+    vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
+                  (1.0 - f.x) * f.y, f.x * f.y);
+    w *= vec4(t00.transparent ? 0.0 : 1.0, t10.transparent ? 0.0 : 1.0,
+              t01.transparent ? 0.0 : 1.0, t11.transparent ? 0.0 : 1.0);
+    float a = w.x + w.y + w.z + w.w;
+    Texel nearest = decode(ivec2(floor(v_uv)), fract(v_uv));
+    Texel t;
+    t.semi = nearest.semi;
+    t.transparent = a < 0.5;
+    t.rgb = a > 0.0
+        ? (t00.rgb * w.x + t10.rgb * w.y + t01.rgb * w.z + t11.rgb * w.w) / a
+        : vec3(0.0);
+    return t;
+}
+
+// 8-bit colour -> 15-bit as the PS1 writes it (optionally dithered).
+vec3 to_15bit(vec3 c8) {
+    if (u_dither != 0) {
+        ivec2 p = ivec2(gl_FragCoord.xy) / u_scale;
+        c8 = clamp(c8 + float(kDither[(p.y & 3) * 4 + (p.x & 3)]), 0.0, 255.0);
+    }
+    return floor(c8 / 8.0) / 31.0;
 }
 
 void main() {
@@ -146,47 +229,30 @@ void main() {
     vec3 rgb;
     float mask = 0.0;
     if (u_textured != 0) {
-        ivec2 uv = ivec2(floor(v_uv)) & 255;
-        uv = (uv & ~u_window.xy) | (u_window.zw & u_window.xy);
-        uint texel;
-        if (u_depth == 0) {
-            uint word = fetch(u_tex_base + ivec2(uv.x >> 2, uv.y));
-            uint index = (word >> uint((uv.x & 3) * 4)) & 15u;
-            texel = fetch(u_clut + ivec2(int(index), 0));
-        } else if (u_depth == 1) {
-            uint word = fetch(u_tex_base + ivec2(uv.x >> 1, uv.y));
-            uint index = (word >> uint((uv.x & 1) * 8)) & 255u;
-            texel = fetch(u_clut + ivec2(int(index), 0));
-        } else {
-            // 15-bit texels come from the upscaled colour buffer so textures
-            // the game rendered itself (render-to-texture) stay sharp. The
-            // fractional texel position picks the sub-texel sample.
-            vec2 p = (vec2(u_tex_base + uv) + fract(v_uv)) * float(u_scale);
-            ivec2 size = textureSize(u_color_copy, 0);
-            ivec2 ip = ivec2(p);
-            ip = ivec2(ip.x % size.x, ip.y % size.y);
-            vec4 c = texelFetch(u_color_copy, ip, 0);
-            uvec3 c5 = uvec3(floor(c.rgb * 31.0 + 0.5));
-            texel = c5.r | (c5.g << 5) | (c5.b << 10) | (c.a > 0.5 ? 0x8000u : 0u);
-        }
-        if (texel == 0u) {
-            discard; // fully transparent texel
-        }
-        bool semi_texel = (texel & 0x8000u) != 0u;
-        if ((u_pass == 1 && semi_texel) || (u_pass == 2 && !semi_texel)) {
+        Texel tx = u_filter != 0 ? decode_filtered()
+                                 : decode(ivec2(floor(v_uv)), fract(v_uv));
+        if (tx.transparent) {
             discard;
         }
-        vec3 t = vec3(float(texel & 31u), float((texel >> 5) & 31u),
-                      float((texel >> 10) & 31u));
-        if (u_raw == 0) {
-            // (texel5 * color8) >> 7, saturated, as the PS1 modulates.
-            vec3 c = floor(v_color * 255.0 + 0.5);
-            t = min(floor(t * c / 128.0), vec3(31.0));
+        if ((u_pass == 1 && tx.semi) || (u_pass == 2 && !tx.semi)) {
+            discard;
         }
-        rgb = t / 31.0;
-        mask = semi_texel ? 1.0 : 0.0;
+        if (u_raw != 0) {
+            rgb = tx.rgb;
+        } else {
+            // texel * color / 128, saturated, as the PS1 modulates.
+            vec3 c = floor(v_color * 255.0 + 0.5);
+            if (u_true_color != 0) {
+                rgb = min(tx.rgb * c / 128.0, vec3(1.0));
+            } else {
+                vec3 t5 = floor(tx.rgb * 31.0 + 0.5);
+                rgb = to_15bit(min(floor(t5 * c / 16.0), vec3(255.0)));
+            }
+        }
+        mask = tx.semi ? 1.0 : 0.0;
     } else {
-        rgb = v_color;
+        rgb = u_true_color != 0 ? v_color
+                                : to_15bit(floor(v_color * 255.0 + 0.5));
     }
     if (u_set_mask != 0) {
         mask = 1.0;
@@ -315,7 +381,8 @@ struct GpuHwRenderer::Gl {
   struct DrawUniforms {
     GLint vram = -1, textured = -1, raw = -1, depth = -1, tex_base = -1,
           clut = -1, window = -1, pass = -1, set_mask = -1, color_copy = -1,
-          scale = -1, check_mask = -1;
+          scale = -1, check_mask = -1, true_color = -1, dither = -1,
+          filter = -1;
   } draw_u;
   GLint copy_vram = -1;
   GLint copy_scale = -1;
@@ -525,6 +592,9 @@ bool GpuHwRenderer::init(int scale) {
   u.color_copy = gl->GetUniformLocation(p, "u_color_copy");
   u.scale = gl->GetUniformLocation(p, "u_scale");
   u.check_mask = gl->GetUniformLocation(p, "u_check_mask");
+  u.true_color = gl->GetUniformLocation(p, "u_true_color");
+  u.dither = gl->GetUniformLocation(p, "u_dither");
+  u.filter = gl->GetUniformLocation(p, "u_filter");
   gl->copy_vram = gl->GetUniformLocation(gl->copy_program, "u_vram");
   gl->copy_scale = gl->GetUniformLocation(gl->copy_program, "u_scale");
 
@@ -773,6 +843,10 @@ void GpuHwRenderer::draw_triangles(const GpuHwStream &stream,
   gl.Uniform1i(u.scale, scale_);
   gl.Uniform1i(u.color_copy, 1);
   gl.Uniform1i(u.check_mask, 0);
+  gl.Uniform1i(u.true_color, g_gpu_true_color ? 1 : 0);
+  gl.Uniform1i(u.dither, (cmd.flags & gpu_hw::kDither) ? 1 : 0);
+  gl.Uniform1i(u.filter,
+               g_gpu_texture_filter && !(cmd.flags & gpu_hw::kSprite) ? 1 : 0);
   gl.ActiveTexture(GL_TEXTURE0 + 1);
   glBindTexture(GL_TEXTURE_2D, gl.sample_texture);
   gl.ActiveTexture(GL_TEXTURE0);
