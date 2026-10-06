@@ -21,6 +21,7 @@ constexpr OpInfo kOps[] = {
     {"OR", "or", "ORs each hit byte with N: sets the bits in N."},
     {"Invert", "invert", "Flips every bit of each hit byte."},
     {"Set", "set", "Every hit byte becomes N."},
+    {"Pipe", "pipe", "Copies the byte at hit + offset over each hit byte (data onto data)."},
 };
 static_assert(sizeof(kOps) / sizeof(kOps[0]) == static_cast<size_t>(GrimByteOp::Count));
 
@@ -33,7 +34,7 @@ void seed_mt19937(std::mt19937 &rng, u64 seed) {
 }
 } // namespace
 
-u8 grim_byte_apply(const GrimByteEngine &e, u8 old, u32 random) {
+u8 grim_byte_apply(const GrimByteEngine &e, u8 old, u32 random, u8 piped) {
   const u32 n = e.value;
   const u32 s = n & 7u;
   switch (e.op) {
@@ -50,6 +51,7 @@ u8 grim_byte_apply(const GrimByteEngine &e, u8 old, u32 random) {
   case GrimByteOp::Or: return static_cast<u8>(old | n);
   case GrimByteOp::Invert: return static_cast<u8>(~old);
   case GrimByteOp::Set: return static_cast<u8>(n);
+  case GrimByteOp::Pipe: return piped;
   case GrimByteOp::Count: break;
   }
   return old;
@@ -68,7 +70,8 @@ size_t grim_byte_corrupt(u8 *data, size_t size, const GrimByteSweep &sweep, cons
   seed_mt19937(rng, seed);
   size_t changed = 0;
   const auto hit = [&](size_t i, u32 random) {
-    const u8 now = grim_byte_apply(engine, data[i], random);
+    const u8 piped = engine.op == GrimByteOp::Pipe ? data[grim_byte_pipe_source(i, engine.offset, size)] : 0;
+    const u8 now = grim_byte_apply(engine, data[i], random, piped);
     changed += now != data[i] ? 1u : 0u;
     data[i] = now;
   };
@@ -108,7 +111,16 @@ bool grim_byte_op_from_key(const std::string &key, GrimByteOp &out) {
   return false;
 }
 bool grim_byte_op_uses_value(GrimByteOp op) {
-  return op != GrimByteOp::Random && op != GrimByteOp::Invert;
+  return op != GrimByteOp::Random && op != GrimByteOp::Invert && op != GrimByteOp::Pipe;
+}
+bool grim_byte_op_uses_offset(GrimByteOp op) { return op == GrimByteOp::Pipe; }
+size_t grim_byte_pipe_source(size_t index, s32 offset, size_t size) {
+  if (size == 0) {
+    return 0;
+  }
+  const s64 n = static_cast<s64>(size);
+  s64 at = (static_cast<s64>(index) + offset) % n;
+  return static_cast<size_t>(at < 0 ? at + n : at);
 }
 bool grim_byte_op_is_shift(GrimByteOp op) {
   return op == GrimByteOp::ShiftLeft || op == GrimByteOp::ShiftRight || op == GrimByteOp::RotateLeft ||

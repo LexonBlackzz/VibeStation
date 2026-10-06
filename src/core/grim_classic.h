@@ -20,6 +20,7 @@ enum class GrimByteOp : u8 {
   Or,          // old | n
   Invert,      // ~old
   Set,         // n
+  Pipe,        // the byte `offset` bytes away (Vinesauce's pipe: data copied onto data)
   Count
 };
 
@@ -27,10 +28,12 @@ struct GrimByteEngine {
   GrimByteOp op = GrimByteOp::Random;
   u8 value = 1; // n: amount, mask, shift count (1-7) or the replacement byte
   u8 match = 0; // Replace only: the byte that gets replaced
+  s32 offset = 0x100; // Pipe only: the source is the hit position + offset (wraps)
 };
 
-// The new value of one hit byte. `random` supplies the Random engine's byte.
-u8 grim_byte_apply(const GrimByteEngine &engine, u8 old, u32 random);
+// The new value of one hit byte. `random` supplies the Random engine's byte and `piped`
+// the Pipe engine's (the caller reads it from hit + offset).
+u8 grim_byte_apply(const GrimByteEngine &engine, u8 old, u32 random, u8 piped = 0);
 
 // Where hits land inside [start, end] (inclusive byte offsets).
 struct GrimByteSweep {
@@ -55,3 +58,6 @@ bool grim_byte_op_from_key(const std::string &key, GrimByteOp &out);
 // Which parameters the op reads, for the UI.
 bool grim_byte_op_uses_value(GrimByteOp op);
 bool grim_byte_op_is_shift(GrimByteOp op); // value means 1-7 bits
+bool grim_byte_op_uses_offset(GrimByteOp op); // Pipe
+// Wraps `index + offset` into [0, size).
+size_t grim_byte_pipe_source(size_t index, s32 offset, size_t size);

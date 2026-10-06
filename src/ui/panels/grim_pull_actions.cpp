@@ -436,7 +436,35 @@ void App::stop_all_corruption() {
     disable_ram_reaper_mode();
     disable_gpu_reaper_mode();
     disable_sound_reaper_mode();
+    disc_reaper_enabled_ = false;
+    sync_disc_reaper_config();
+    grim_auto_armed_ = false;
     grim_pull_release();
+}
+
+void App::grim_auto_arm(int style) {
+    grim_auto_armed_ = grim_auto_enabled_;
+    grim_auto_style_ = style;
+    grim_auto_next_ = now_seconds() + std::max(2.0f, grim_auto_seconds_);
+}
+
+// Auto-corrupt: every N s the Classic BIOS reaper runs again with a fresh seed.
+void App::grim_auto_tick() {
+    if (!grim_auto_armed_ || !grim_auto_enabled_ || now_seconds() < grim_auto_next_ ||
+        !emu_runner_.is_running()) {
+        return;
+    }
+    const bool custom = grim_use_custom_seed_;
+    const bool batch_custom = grim_batch_use_custom_seeds_;
+    grim_use_custom_seed_ = false; // the same seed every time would not change anything
+    grim_batch_use_custom_seeds_ = false;
+    const int style = grim_auto_style_;
+    const bool ok = style == 1 ? reap_and_reboot_bios_batch() : reap_and_reboot_bios();
+    grim_use_custom_seed_ = custom;
+    grim_batch_use_custom_seeds_ = batch_custom;
+    if (ok) {
+        grim_auto_arm(style); // the reboot disarmed it (stop_all_corruption)
+    }
 }
 
 // Tears down the New Corruption machine (records how it ended, detaches the watch and

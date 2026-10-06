@@ -1,10 +1,12 @@
 #pragma once
+#include "grim_disc.h"
 #include "types.h"
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <deque>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,11 @@ public:
   void reset();
   // Grim Reaper "bad modchip": the controller fails Sony's software checks.
   void set_bad_modchip(bool on) { bad_modchip_.store(on, std::memory_order_release); }
+  // Grim Reaper disc corruption (any thread). Sectors are corrupted as they are read.
+  void set_disc_reaper(const GrimDiscReaperConfig &cfg);
+  // Name of the protected boot executable once the disc was scanned ("" before).
+  std::string disc_reaper_boot_name() const;
+  u64 disc_reaper_hits() const { return grim_disc_hits_.load(std::memory_order_relaxed); }
   bool bad_modchip() const { return bad_modchip_.load(std::memory_order_acquire); }
 
   bool load_bin_cue(const std::string &bin_path, const std::string &cue_path);
@@ -118,6 +125,13 @@ public:
 
 private:
   std::atomic<bool> bad_modchip_{false};
+  void grim_disc_apply(int psx_lba, std::vector<u8> &raw_sector, const CdTrack *track);
+  mutable std::mutex grim_disc_mutex_;
+  GrimDiscReaperConfig grim_disc_cfg_ = g_grim_disc_cli;
+  GrimDiscLayout grim_disc_layout_;
+  bool grim_disc_scanned_ = false;
+  bool grim_disc_scanning_ = false;
+  std::atomic<u64> grim_disc_hits_{0};
   System *sys_ = nullptr;
   bool disc_loaded_ = false;
 

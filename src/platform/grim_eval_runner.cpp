@@ -283,6 +283,7 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
   cfg.bios_path = bios;
   cfg.frames = static_cast<u32>(std::max(1, std::atoi(args[0].c_str())));
   const std::string out_path = args[1];
+  bool live_gates = false;
   for (size_t i = 2; i < args.size(); ++i) {
     const std::string &a = args[i];
     const bool has_value = i + 1 < args.size();
@@ -308,7 +309,7 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
       }
       cfg.use_genome = true;
     } else if (a == "--live-gates") {
-      cfg.liveness = grim_live_config(false); // the thresholds the GUI death watch uses
+      live_gates = true;
     } else if (a == "--disc" && has_value) {
       cfg.disc_cue = args[++i];
     } else if (a == "--dump-wav" && has_value) {
@@ -324,6 +325,9 @@ int run_grim_eval_cli(const std::vector<std::string> &raw_args) {
     }
   }
 
+  if (live_gates) {
+    cfg.liveness = grim_live_config(!cfg.disc_cue.empty()); // the GUI death watch's thresholds
+  }
   const GrimEvalResult r = run_grim_eval(cfg);
   if (r.end_reason == "rom_gene_mismatch") {
     std::printf("GRIM_EVAL_RESULT status=error reason=rom_gene_mismatch detail=%s\n",

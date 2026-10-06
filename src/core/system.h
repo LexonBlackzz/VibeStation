@@ -41,6 +41,9 @@ public:
     bool use_custom_seed = false;
     u64 seed = 1;
     GrimByteEngine engine; // what each hit byte becomes (Random = the original reaper)
+    u32 every = 0;         // 0: writes_per_frame random hits; N: every Nth byte (min 8)
+    u32 burst_frames = 0;  // 0/1: a pass every frame; N: one pass every N frames
+    u32 freeze_cells = 0;  // 0: off; N: the last N hit cells are held every frame
   };
 
   struct GpuReaperConfig {
@@ -886,6 +889,19 @@ private:
   bool ram_reaper_prev_enabled_ = false;
   bool ram_reaper_prev_use_custom_seed_ = false;
   u64 ram_reaper_prev_seed_ = 0;
+  std::atomic<u32> ram_reaper_engine_packed_{0};
+  std::atomic<s32> ram_reaper_engine_offset_{0x100};
+  std::atomic<u32> ram_reaper_every_{0};
+  std::atomic<u32> ram_reaper_burst_frames_{0};
+  std::atomic<u32> ram_reaper_freeze_cells_{0};
+  struct RamReaperFrozen {
+    u8 target; // 0 main RAM, 1 VRAM (word index), 2 sound RAM
+    u32 at;
+    u16 value;
+  };
+  std::vector<RamReaperFrozen> ram_reaper_frozen_;
+  u32 ram_reaper_freeze_next_ = 0;
+  u32 ram_reaper_pass_frame_ = 0;
   std::atomic<bool> gpu_reaper_enabled_{false};
   std::atomic<u32> gpu_reaper_writes_per_frame_{1};
   std::atomic<u32> gpu_reaper_intensity_x10_{1000};

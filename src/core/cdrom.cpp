@@ -542,6 +542,7 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
 
   resolved_disc_path_ = primary_fs.string();
   disc_loaded_ = true;
+  grim_disc_scanned_ = false; // a new disc gets its own file system scan
   track_map_valid_ = monotonic;
 
   reset();
@@ -651,6 +652,7 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   resolved_disc_path_ = primary_fs.string();
   bin_size_ = file_size_bytes(primary_fs.string());
   disc_loaded_ = true;
+  grim_disc_scanned_ = false; // a new disc gets its own file system scan
   track_map_valid_ = monotonic;
 
   // Keep controller configuration (notably IRQ enable) intact for hot-swap,
@@ -1066,6 +1068,7 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   }
   stream->read(reinterpret_cast<char *>(raw_sector.data()), sector_size);
   if (stream->gcount() == sector_size) {
+    grim_disc_apply(psx_lba, raw_sector, track);
     return true;
   }
 
@@ -1074,7 +1077,66 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
   if (static_cast<size_t>(got) < raw_sector.size()) {
     std::fill(raw_sector.begin() + got, raw_sector.end(), 0xFFu);
   }
+  grim_disc_apply(psx_lba, raw_sector, track);
   return true;
+}
+
+void CdRom::set_disc_reaper(const GrimDiscReaperConfig &cfg) {
+  std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+  grim_disc_cfg_ = cfg;
+}
+
+std::string CdRom::disc_reaper_boot_name() const {
+  std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+  return grim_disc_scanned_ ? grim_disc_layout_.boot_name : std::string();
+}
+
+// Grim Reaper disc corruption, applied to every sector read from the image (data, XA
+// and CD audio all come through read_raw_sector_for_lba). The file system is scanned
+// once per disc, the first time corruption is active, to keep it and the boot
+// executable intact.
+void CdRom::grim_disc_apply(int psx_lba, std::vector<u8> &raw_sector, const CdTrack *track) {
+  if (grim_disc_scanning_) {
+    return; // the scan itself reads clean sectors
+  }
+  GrimDiscReaperConfig cfg;
+  {
+    std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+    cfg = grim_disc_cfg_;
+  }
+  if (!cfg.enabled || (cfg.start_frame > 0 && sys_ != nullptr &&
+                       sys_->boot_diag().frame_counter < cfg.start_frame)) {
+    return;
+  }
+  if (!grim_disc_scanned_) {
+    grim_disc_scanning_ = true;
+    GrimDiscLayout layout = grim_disc_scan([this](int lba, u8 *user) {
+      std::vector<u8> raw;
+      const CdTrack *t = nullptr;
+      if (!read_raw_sector_for_lba(lba, raw, &t) || is_audio_track(t)) {
+        return false;
+      }
+      size_t at = 0;
+      if (raw.size() >= 2352u) {
+        at = raw[15] == 2 ? 24u : raw[15] == 1 ? 16u : 0u;
+        if (at == 0) {
+          return false;
+        }
+      } else if (raw.size() < 2048u) {
+        return false;
+      }
+      std::copy(raw.begin() + static_cast<std::ptrdiff_t>(at),
+                raw.begin() + static_cast<std::ptrdiff_t>(at + 2048u), user);
+      return true;
+    });
+    grim_disc_scanning_ = false;
+    std::lock_guard<std::mutex> lock(grim_disc_mutex_);
+    grim_disc_layout_ = std::move(layout);
+    grim_disc_scanned_ = true;
+  }
+  const size_t hits = grim_disc_corrupt_sector(raw_sector.data(), raw_sector.size(), is_audio_track(track),
+                                               psx_lba, cfg, grim_disc_layout_);
+  grim_disc_hits_.fetch_add(hits, std::memory_order_relaxed);
 }
 
 bool CdRom::cd_audio_muted() const { return cdda_cmd_muted_ || cdda_adp_muted_; }

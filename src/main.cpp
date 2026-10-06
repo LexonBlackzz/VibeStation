@@ -13,6 +13,7 @@
 #include "platform/grim_audibility_runner.h"
 #include "platform/grim_audibility_test.h"
 #include "platform/grim_pull_test.h"
+#include "core/grim_disc.h"
 #include "core/grim_genome.h"
 #include "platform/scheduler_self_test.h"
 #include "platform/sample_profiler.h"
@@ -4046,6 +4047,15 @@ int main(int argc, char *argv[]) {
         }
       }
       g_experimental_dma_command_sanitizer = true;
+      continue;
+    }
+    if (a == "--disc-reaper" && (i + 1) < args.size()) {
+      std::string disc_error;
+      if (!grim_disc_parse(args[i + 1], g_grim_disc_cli, disc_error)) {
+        fprintf(stderr, "ERROR: --disc-reaper: %s\n", disc_error.c_str());
+        return 1;
+      }
+      ++i;
       continue;
     }
     if (a == "--open-grim-reaper") {

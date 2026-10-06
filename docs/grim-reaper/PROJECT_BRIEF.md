@@ -382,3 +382,10 @@ Lexon's machine, so read it if you can.
 - Classic engines: `grim_byte_corrupt()` / `grim_byte_apply()` (`src/core/grim_classic.*`);
   `App::grim_engine_`, `grim_every_` (BIOS), `ram_reaper_engine_` -> `RamReaperConfig::engine`.
 - `--open-grim-reaper` (GUI): skips the intro and opens the page, for testing and screenshots.
+- Disc Reaper: `grim_disc_scan()` (ISO9660 -> protected sectors, boot exe) and
+  `grim_disc_corrupt_sector()` in `src/core/grim_disc.*`; `CdRom::grim_disc_apply()` runs both
+  from `read_raw_sector_for_lba` (scan once per disc, under `grim_disc_scanning_`). Config crosses
+  threads through `CdRom::set_disc_reaper` (mutex); `App::sync_disc_reaper_config` each frame.
+  `stop_all_corruption()` also switches it off and disarms Auto-corrupt.
+- RAM reaper extras: `RamReaperConfig::{every, burst_frames, freeze_cells}` and the engine are
+  stored as atomics in `System::set_ram_reaper_config`; any new field must be added there too.

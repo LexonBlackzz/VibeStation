@@ -3,6 +3,7 @@
 #include "core/bios.h"
 #include "core/grim_audibility.h"
 #include "core/grim_classic.h"
+#include "core/grim_disc.h"
 #include "core/grim_eval.h"
 #include "core/grim_genome.h"
 #include "core/grim_library.h"
@@ -269,6 +270,188 @@ void classic_tests() {
   check(same_spots, "classic_engines_stay_inside_the_range");
   check(grim_byte_corrupt(c.data(), c.size(), GrimByteSweep{9000, 9999, 0, 5}, x, 1) == 0,
         "classic_range_outside_data_is_a_no_op");
+}
+
+// Disc Reaper (BIOS-free): file system scan on a synthetic ISO9660 image, and the
+// per-sector rules (deterministic, headers and protected sectors untouched, targets).
+void disc_tests() {
+  std::map<int, std::vector<u8>> image;
+  const auto sector = [&](int lba) -> std::vector<u8> & {
+    auto &v = image[lba];
+    v.resize(2048, 0);
+    return v;
+  };
+  const auto put32 = [](std::vector<u8> &v, size_t at, u32 x) {
+    for (int i = 0; i < 4; ++i) v[at + i] = static_cast<u8>(x >> (8 * i));
+  };
+  const auto record = [&](std::vector<u8> &dir, size_t &pos, const std::string &name, u32 lba, u32 size,
+                          bool is_dir) {
+    const size_t len = 33 + name.size() + ((33 + name.size()) & 1u);
+    dir[pos] = static_cast<u8>(len);
+    put32(dir, pos + 2, lba);
+    put32(dir, pos + 10, size);
+    dir[pos + 25] = is_dir ? 2 : 0;
+    dir[pos + 32] = static_cast<u8>(name.size());
+    std::copy(name.begin(), name.end(), dir.begin() + static_cast<std::ptrdiff_t>(pos + 33));
+    pos += len;
+  };
+  {
+    auto &pvd = sector(16);
+    pvd[0] = 1;
+    std::copy_n("CD001", 5, pvd.begin() + 1);
+    put32(pvd, 132, 10);
+    put32(pvd, 140, 18);
+    pvd[148 + 3] = 19; // big-endian M path table at 19
+    pvd[156] = 34;
+    put32(pvd, 156 + 2, 20);
+    put32(pvd, 156 + 10, 2048);
+    pvd[156 + 25] = 2;
+    auto &term = sector(17);
+    term[0] = 255;
+    std::copy_n("CD001", 5, term.begin() + 1);
+    auto &root = sector(20);
+    size_t pos = 0;
+    record(root, pos, std::string(1, '\0'), 20, 2048, true);
+    record(root, pos, std::string(1, '\1'), 20, 2048, true);
+    record(root, pos, "DATA", 22, 2048, true);
+    record(root, pos, "SLUS_123.45;1", 40, 4096, false);
+    record(root, pos, "SYSTEM.CNF;1", 30, 40, false);
+    auto &data = sector(22);
+    pos = 0;
+    record(data, pos, std::string(1, '\0'), 22, 2048, true);
+    record(data, pos, std::string(1, '\1'), 20, 2048, true);
+    record(data, pos, "MOVIE.STR;1", 50, 2048, false);
+    const std::string cnf = "BOOT = cdrom:\\SLUS_123.45;1\r\nTCB = 4\r\n";
+    auto &c = sector(30);
+    std::copy(cnf.begin(), cnf.end(), c.begin());
+  }
+  const GrimDiscLayout layout = grim_disc_scan([&](int lba, u8 *user) {
+    const auto it = image.find(lba);
+    if (it == image.end()) {
+      std::fill(user, user + 2048, 0);
+    } else {
+      std::copy(it->second.begin(), it->second.end(), user);
+    }
+    return true;
+  });
+  bool system_ok = true;
+  for (int lba : {0, 15, 16, 17, 18, 19, 20, 22, 30}) system_ok = system_ok && layout.is_system(lba);
+  for (int lba : {40, 41, 50, 100}) system_ok = system_ok && !layout.is_system(lba);
+  check(layout.valid && layout.files == 3 && layout.boot_name == "SLUS_123.45" && layout.boot.first == 40 &&
+            layout.boot.second == 42 && system_ok,
+        "disc_scan_finds_file_system_and_boot_exe", layout.boot_name);
+
+  // A raw Mode 2 sector: sync, header, subheader, then data.
+  const auto raw_sector = [](u8 submode) {
+    std::vector<u8> r(2352);
+    for (size_t i = 0; i < r.size(); ++i) r[i] = static_cast<u8>(i * 7u + 3u);
+    r[15] = 2;
+    r[18] = r[22] = submode;
+    return r;
+  };
+  GrimDiscReaperConfig cfg;
+  cfg.enabled = true;
+  cfg.percent = 5.0f;
+  cfg.seed = 99;
+  cfg.skip_risky = false; // the test pattern itself looks packed
+  cfg.targets = kGrimDiscFiles;
+  const std::vector<u8> form1 = raw_sector(0x08), form2 = raw_sector(0x20);
+  auto a = form1, b = form1, c = form1;
+  const size_t na = grim_disc_corrupt_sector(a.data(), a.size(), false, 100, cfg, layout);
+  grim_disc_corrupt_sector(b.data(), b.size(), false, 100, cfg, layout);
+  grim_disc_corrupt_sector(c.data(), c.size(), false, 101, cfg, layout);
+  check(na > 0 && a == b && a != c && std::equal(a.begin(), a.begin() + 24, form1.begin()) &&
+            std::equal(a.begin() + 24 + 2048, a.end(), form1.begin() + 24 + 2048),
+        "disc_sector_hits_are_deterministic_and_stay_in_user_data", std::to_string(na));
+  auto sys = form1, boot = form1;
+  check(grim_disc_corrupt_sector(sys.data(), sys.size(), false, 20, cfg, layout) == 0 &&
+            grim_disc_corrupt_sector(boot.data(), boot.size(), false, 40, cfg, layout) == 0,
+        "disc_file_system_and_boot_exe_are_protected");
+  cfg.targets |= kGrimDiscBootCode;
+  check(grim_disc_corrupt_sector(boot.data(), boot.size(), false, 40, cfg, layout) > 0, "disc_boot_target_hits_exe");
+  cfg.targets = kGrimDiscFiles;
+  auto s2 = form2;
+  const bool no_stream = grim_disc_corrupt_sector(s2.data(), s2.size(), false, 200, cfg, layout) == 0;
+  cfg.targets = kGrimDiscMovies;
+  const bool stream = grim_disc_corrupt_sector(s2.data(), s2.size(), false, 200, cfg, layout) > 0;
+  auto audio = form1;
+  const bool no_audio = grim_disc_corrupt_sector(audio.data(), audio.size(), true, 300, cfg, layout) == 0;
+  check(no_stream && stream && no_audio && std::equal(s2.begin() + 24 + 2324, s2.end(), form2.begin() + 24 + 2324),
+        "disc_targets_select_files_streams_audio");
+  // XA audio (Form 2 + audio bit) and STR frames (header kept) are their own targets.
+  {
+    GrimDiscReaperConfig t = cfg;
+    t.targets = kGrimDiscXaAudio;
+    auto xa = raw_sector(0x24), mv = raw_sector(0x24);
+    const bool xa_hit = grim_disc_corrupt_sector(xa.data(), xa.size(), false, 210, t, layout) > 0;
+    t.targets = kGrimDiscMovies;
+    const bool xa_not_movie = grim_disc_corrupt_sector(mv.data(), mv.size(), false, 210, t, layout) == 0;
+    auto str = raw_sector(0x08);
+    const u8 header[4] = {0x60, 0x01, 0x01, 0x80};
+    std::copy(header, header + 4, str.begin() + 24);
+    const auto str_before = str;
+    const bool str_hit = grim_disc_corrupt_sector(str.data(), str.size(), false, 220, t, layout) > 0;
+    t.targets = kGrimDiscFiles;
+    auto str2 = str_before;
+    const bool str_not_file = grim_disc_corrupt_sector(str2.data(), str2.size(), false, 220, t, layout) == 0;
+    check(xa_hit && xa_not_movie && str_hit && str_not_file &&
+              std::equal(str.begin(), str.begin() + 24 + 32, str_before.begin()),
+          "disc_xa_and_str_frames_are_classified_and_headers_kept");
+  }
+  GrimDiscReaperConfig every;
+  every.enabled = true;
+  every.every = 512;
+  every.engine.op = GrimByteOp::Set;
+  every.engine.value = 0xEE;
+  every.skip_risky = false;
+  every.targets = kGrimDiscFiles;
+  auto e = raw_sector(0x08);
+  const size_t ne = grim_disc_corrupt_sector(e.data(), e.size(), false, 100, every, layout);
+  check(ne == 4 && e[24] == 0xEE && e[24 + 512] == 0xEE && e[25] != 0xEE, "disc_every_nth_uses_disc_offsets",
+        std::to_string(ne));
+  // The risky-sector heuristic: MIPS code and packed data are risky, plain data is not.
+  std::vector<u8> code(2048), packed(2048), plain(2048);
+  const u32 kCode[] = {0x27BDFFE8u, 0xAFBF0010u, 0x3C028001u, 0x8C421234u, 0x0C004000u, 0x24840001u,
+                       0x8FBF0010u, 0x03E00008u};
+  for (size_t i = 0; i < 512; ++i) {
+    const u32 w = kCode[i % 8];
+    std::memcpy(code.data() + i * 4, &w, 4);
+  }
+  GrimRng noise{5};
+  for (u8 &b : packed) b = static_cast<u8>(noise.next());
+  for (size_t i = 0; i < plain.size(); ++i) plain[i] = static_cast<u8>('A' + (i * 7) % 26); // text-like
+  check(grim_disc_sector_is_risky(code.data(), code.size()) && grim_disc_sector_is_risky(packed.data(), packed.size()) &&
+            !grim_disc_sector_is_risky(plain.data(), plain.size()),
+        "disc_risky_heuristic_spots_code_and_packed_data");
+  GrimDiscReaperConfig parsed;
+  std::string err;
+  check(grim_disc_parse("pct=0.5,targets=streams+audio,seed=7,engine=xor,value=FF,start=600", parsed, err) &&
+            parsed.enabled && parsed.percent == 0.5f && parsed.targets == (kGrimDiscMovies | kGrimDiscXaAudio | kGrimDiscCdAudio) &&
+            parsed.seed == 7 && parsed.engine.op == GrimByteOp::Xor && parsed.engine.value == 0xFF &&
+            parsed.start_frame == 600 && !grim_disc_parse("bogus=1", parsed, err),
+        "disc_cli_spec_parses", err);
+}
+
+// The RAM reaper's settings cross threads as atomics: every field must survive.
+void ram_reaper_config_tests() {
+  auto sys = std::make_unique<System>();
+  System::RamReaperConfig cfg;
+  cfg.enabled = true;
+  cfg.engine.op = GrimByteOp::Pipe;
+  cfg.engine.value = 0x5A;
+  cfg.engine.match = 0x11;
+  cfg.engine.offset = -4096;
+  cfg.every = 4096;
+  cfg.burst_frames = 30;
+  cfg.freeze_cells = 128;
+  sys->set_ram_reaper_config(cfg);
+  const System::RamReaperConfig back = sys->ram_reaper_config();
+  check(back.engine.op == cfg.engine.op && back.engine.value == 0x5A && back.engine.match == 0x11 &&
+            back.engine.offset == -4096 && back.every == 4096 && back.burst_frames == 30 && back.freeze_cells == 128,
+        "ram_reaper_config_keeps_engine_and_tricks");
+  cfg.every = 2; // below the floor that keeps a pass affordable
+  sys->set_ram_reaper_config(cfg);
+  check(sys->ram_reaper_config().every == 8, "ram_reaper_every_has_a_floor");
 }
 
 void share_tests(const GrimPullContext &ctx) {
@@ -1049,6 +1232,8 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
     library_tests(o.backend);
     share_tests(none);
     classic_tests();
+    disc_tests();
+    ram_reaper_config_tests();
     hardware_tests(none);
     std::printf("GRIM_PULL_TEST %s failures=%d backend=%s\n", failures == 0 ? "ALL_PASS" : "FAILED",
                 failures, o.backend.c_str());
@@ -1080,6 +1265,8 @@ int run_grim_pull_test(const std::vector<std::string> &args) {
   culprit_tests(o);
   share_tests(ctx);
   classic_tests();
+  disc_tests();
+  ram_reaper_config_tests();
   hardware_tests(ctx);
   dma_loop_test(o);
   live_tests(o, ctx, rom.words);

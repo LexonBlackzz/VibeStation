@@ -9,6 +9,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -16,21 +17,25 @@ namespace {
 
 using namespace definitive_ui;
 
-constexpr std::array<const char*, 5> kReaperStyleNames = {{
+constexpr std::array<const char*, 6> kReaperStyleNames = {{
     "BIOS Corruption",
     "Batch BIOS",
     "RAM Reaper",
     "GPU Reaper",
     "Sound Reaper",
+    "Disc Reaper",
 }};
 
-constexpr std::array<const char*, 5> kReaperStyleSubtitles = {{
+constexpr std::array<const char*, 6> kReaperStyleSubtitles = {{
     "Corrupt one BIOS region and reboot",
     "Corrupt multiple BIOS regions together",
     "Real-time RAM, VRAM and SPU RAM corruption",
     "Real-time geometry, texture and display corruption",
     "Real-time pitch, ADSR, reverb and mixer corruption",
+    "Corrupt game data as the CD drive reads it",
 }};
+
+constexpr int kDiscReaperStyle = 5;
 
 const char* short_bios_target_name(int index) {
     switch (index) {
@@ -755,6 +760,24 @@ void App::panel_definitive_grim_reaper() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    if (style == kDiscReaperStyle) {
+        draw_disc_reaper_tab();
+        ImGui::Spacing();
+        if (ImGui::Button(
+                has_started_emulation_
+                    ? "Close Panel"
+                    : "Back",
+                ImVec2(-1.0f, 34.0f))) {
+            play_close_sound();
+            close_definitive_grim_reaper();
+        }
+        ImGui::PopFont();
+        ImGui::End();
+        ImGui::PopStyleColor(15);
+        ImGui::PopStyleVar(6);
+        return;
+    }
+
     if (style <= 1) {
         draw_engine_controls(grim_engine_);
         ImGui::Spacing();
@@ -787,6 +810,18 @@ void App::panel_definitive_grim_reaper() {
             ImGui::TextWrapped("Hits byte start, start + %d, start + %d, ... up to the end.",
                 grim_every_, grim_every_ * 2);
             ImGui::PopStyleColor();
+        }
+    }
+
+    if (style <= 1) {
+        ImGui::Checkbox("Auto-corrupt", &grim_auto_enabled_);
+        if (grim_auto_enabled_) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderFloat("##auto_seconds", &grim_auto_seconds_, 2.0f, 120.0f, "every %.0f s");
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("After Corrupt & (Re)Start, corrupt again with a new seed and reboot on a timer.");
         }
     }
 
@@ -946,6 +981,8 @@ void App::panel_definitive_grim_reaper() {
             ram_reaper_enabled_) {
             sync_ram_reaper_config();
         }
+        ImGui::Spacing();
+        draw_ram_reaper_tricks();
     }
     else if (style == 3) {
         bool changed = false;
@@ -1072,6 +1109,9 @@ void App::panel_definitive_grim_reaper() {
         else if (style == 1) {
             success =
                 reap_and_reboot_bios_batch();
+        }
+        if (success && style <= 1) {
+            grim_auto_arm(style);
         }
         else {
             // Runtime Reapers are applied around a real emulator restart.
@@ -1710,3 +1750,161 @@ void App::panel_definitive_grim_reaper() {
     ImGui::PopStyleVar(6);
 }
 
+
+void App::draw_ram_reaper_tricks() {
+    bool changed = false;
+    ImGui::TextUnformatted("TRICKS");
+    bool every = ram_reaper_every_ > 0;
+    if (ImGui::RadioButton("Random writes##ram", !every)) {
+        ram_reaper_every_ = 0;
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Every Nth byte##ram", every)) {
+        ram_reaper_every_ = std::max<u32>(ram_reaper_every_, 4096u);
+        changed = true;
+    }
+    if (ram_reaper_every_ > 0) {
+        int n = static_cast<int>(ram_reaper_every_);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::InputInt("##ram_every", &n, 8, 1024)) {
+            ram_reaper_every_ = static_cast<u32>(std::clamp(n, 8, static_cast<int>(psx::RAM_SIZE)));
+            changed = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("Fixed positions; strength is the chance each one is hit per pass. VRAM counts pixels.");
+        ImGui::PopStyleColor();
+    }
+    int burst = static_cast<int>(ram_reaper_burst_frames_);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::SliderInt("##ram_burst", &burst, 0, 600,
+            burst <= 1 ? "a pass every frame" : "one pass every %d frames")) {
+        ram_reaper_burst_frames_ = static_cast<u32>(std::max(0, burst));
+        changed = true;
+    }
+    bool freeze = ram_reaper_freeze_cells_ > 0;
+    if (ImGui::Checkbox("Freeze hits", &freeze)) {
+        ram_reaper_freeze_cells_ = freeze ? 64u : 0u;
+        changed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Every corrupted cell is written again each frame, so the game cannot repair it.");
+    }
+    if (freeze) {
+        int cells = static_cast<int>(ram_reaper_freeze_cells_);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("##ram_freeze", &cells, 1, 4096, "hold the last %d hits")) {
+            ram_reaper_freeze_cells_ = static_cast<u32>(std::max(1, cells));
+            changed = true;
+        }
+    }
+    if (changed && ram_reaper_enabled_) {
+        sync_ram_reaper_config();
+    }
+}
+
+void App::draw_disc_reaper_tab() {
+    GrimDiscReaperConfig& d = disc_reaper_;
+    const bool disc = system_ != nullptr && system_->disc_loaded();
+
+    draw_engine_controls(d.engine);
+    ImGui::Spacing();
+
+    ImGui::TextUnformatted("STRENGTH");
+    const bool every = d.every > 0;
+    if (ImGui::RadioButton("Random strike##disc", !every)) {
+        d.every = 0;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Every Nth byte##disc", every)) {
+        d.every = std::max<u32>(d.every, 4096u);
+    }
+    if (d.every > 0) {
+        int n = static_cast<int>(d.every);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::InputInt("##disc_every", &n, 16, 1024)) {
+            d.every = static_cast<u32>(std::clamp(n, 1, 1 << 24));
+        }
+    }
+    else {
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##disc_pct", &d.percent, 0.001f, 5.0f, "%.3f%% of each sector",
+            ImGuiSliderFlags_Logarithmic);
+        ImGui::TextDisabled("About %.1f bytes per 2 KB sector.", d.percent / 100.0f * 2048.0f);
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("TARGETS");
+    ImGui::CheckboxFlags("Game files (risky: most games crash)", &d.targets, kGrimDiscFiles);
+    if ((d.targets & kGrimDiscFiles) != 0) {
+        ImGui::Indent();
+        ImGui::Checkbox("Skip code and packed data (much safer)", &d.skip_risky);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Sectors that look like program code or compressed data are left alone:\n"
+                              "one wrong byte there usually crashes the game.");
+        }
+        ImGui::Unindent();
+    }
+    ImGui::CheckboxFlags("Movies", &d.targets, kGrimDiscMovies);
+    ImGui::CheckboxFlags("XA audio (voices, music)", &d.targets, kGrimDiscXaAudio);
+    ImGui::CheckboxFlags("CD audio tracks", &d.targets, kGrimDiscCdAudio);
+    ImGui::CheckboxFlags("Boot program (usually kills the game)", &d.targets, kGrimDiscBootCode);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("The file system is never touched, so the game can always find its files.");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("START");
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::SliderFloat("##disc_start", &disc_reaper_start_seconds_, 0.0f, 120.0f,
+        disc_reaper_start_seconds_ < 0.5f ? "from the first read" : "after %.0f s");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("Reads before this stay clean: the game boots, later loads come out cursed.");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Corrupt the disc", &disc_reaper_enabled_)) {
+        sync_disc_reaper_config();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("On or off while playing: only sectors read from now on change.");
+    }
+    ImGui::Checkbox("Use custom seed##disc", &disc_reaper_use_custom_seed_);
+    if (disc_reaper_use_custom_seed_) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputScalar("##disc_seed", ImGuiDataType_U64, &d.seed);
+    }
+
+    if (!disc) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Corrupt & Restart Game", ImVec2(-1.0f, 42.0f))) {
+        play_open_sound();
+        if (!disc_reaper_use_custom_seed_) {
+            d.seed = (static_cast<u64>(std::random_device{}()) << 32) ^ std::random_device{}();
+        }
+        if (boot_disc_from_ui()) { // a menu boot is a clean machine; switch the reaper back on
+            disc_reaper_enabled_ = true;
+            sync_disc_reaper_config();
+            status_message_ = "Disc Reaper: game restarted (seed " + std::to_string(d.seed) + ")";
+        }
+    }
+    if (!disc) {
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("Load a game first.");
+    }
+
+    if (system_ != nullptr && disc) {
+        const std::string boot = system_->cdrom().disc_reaper_boot_name();
+        ImGui::TextDisabled("Seed: %llu  |  Bytes changed: %llu", static_cast<unsigned long long>(d.seed),
+            static_cast<unsigned long long>(system_->cdrom().disc_reaper_hits()));
+        if (!boot.empty()) {
+            ImGui::TextDisabled("Boot program: %s%s", boot.c_str(),
+                (d.targets & kGrimDiscBootCode) != 0 ? " (targeted)" : " (protected)");
+        }
+    }
+}

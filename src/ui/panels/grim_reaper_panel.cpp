@@ -44,6 +44,8 @@ namespace {
         // Byte engine (absent in older presets: the original random bytes).
         GrimByteEngine engine;
         u32 every = 0;
+        u32 burst_frames = 0;
+        u32 freeze_cells = 0;
         bool intro_enabled = false;
         bool charset_enabled = false;
         bool end_enabled = false;
@@ -162,6 +164,7 @@ namespace {
         out << "engine=" << grim_byte_op_key(engine.op) << "\n";
         out << "engine_value=" << static_cast<unsigned>(engine.value) << "\n";
         out << "engine_match=" << static_cast<unsigned>(engine.match) << "\n";
+        out << "engine_offset=" << engine.offset << "\n";
         if (every > 0) {
             out << "every=" << every << "\n";
         }
@@ -256,6 +259,19 @@ namespace {
                 }
                 else if (key == "every") {
                     parse_u32_value(value, parsed.every);
+                }
+                else if (key == "engine_offset") {
+                    char* end_ptr = nullptr;
+                    const long v = std::strtol(value.c_str(), &end_ptr, 10);
+                    if (end_ptr != value.c_str()) {
+                        parsed.engine.offset = static_cast<s32>(v);
+                    }
+                }
+                else if (key == "burst_frames") {
+                    parse_u32_value(value, parsed.burst_frames);
+                }
+                else if (key == "freeze_cells") {
+                    parse_u32_value(value, parsed.freeze_cells);
                 }
                 else if (key == "custom_end") {
                     parsed.custom_end_hex = value;
@@ -1054,7 +1070,9 @@ bool App::save_current_ram_preset() {
     out << std::fixed << std::setprecision(3);
     out << "type=ram_reaper\n";
     out << "name=" << stem << "\n";
-    write_engine(out, ram_reaper_engine_, 0);
+    write_engine(out, ram_reaper_engine_, static_cast<int>(ram_reaper_every_));
+    out << "burst_frames=" << ram_reaper_burst_frames_ << "\n";
+    out << "freeze_cells=" << ram_reaper_freeze_cells_ << "\n";
     out << "enabled=" << (ram_reaper_enabled_ ? 1 : 0) << "\n";
     out << "intensity=" << ram_reaper_intensity_percent_ << "\n";
     out << "writes_per_frame=" << ram_reaper_writes_per_frame_ << "\n";
@@ -1216,6 +1234,9 @@ bool App::load_corruption_preset(const std::filesystem::path& path) {
         ram_reaper_use_custom_seed_ = preset.ram_has_seed;
         ram_reaper_seed_ = preset.ram_seed;
         ram_reaper_engine_ = preset.engine;
+        ram_reaper_every_ = preset.every;
+        ram_reaper_burst_frames_ = preset.burst_frames;
+        ram_reaper_freeze_cells_ = preset.freeze_cells;
         sync_ram_reaper_config();
     }
     else if (preset.type == ParsedCorruptionPreset::Type::GpuReaper) {

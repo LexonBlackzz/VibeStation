@@ -252,6 +252,20 @@ private:
 	bool ram_reaper_use_custom_seed_ = false;
 	u64 ram_reaper_seed_ = 1u;
 	GrimByteEngine ram_reaper_engine_;
+	u32 ram_reaper_every_ = 0;        // 0 = random writes; N = every Nth byte
+	u32 ram_reaper_burst_frames_ = 0; // 0/1 = every frame; N = one pass every N frames
+	u32 ram_reaper_freeze_cells_ = 0; // 0 = off; N = hold the last N hits
+	// Disc Reaper (Classic): corrupts game data as the CD drive reads it.
+	GrimDiscReaperConfig disc_reaper_;
+	bool disc_reaper_enabled_ = false;
+	float disc_reaper_start_seconds_ = 0.0f;
+	bool disc_reaper_use_custom_seed_ = false;
+	// Auto-corrupt (Classic BIOS styles): re-corrupt with a new seed on a timer.
+	bool grim_auto_enabled_ = false;
+	float grim_auto_seconds_ = 15.0f;
+	bool grim_auto_armed_ = false;
+	int grim_auto_style_ = 0;
+	double grim_auto_next_ = 0.0;
 	u64 ram_reaper_active_seed_ = 0u;
 	u64 ram_reaper_total_mutations_ = 0;
 	bool gpu_reaper_enabled_ = false;
@@ -386,6 +400,11 @@ private:
 	// The Classic runtime reapers off and any New Corruption machine released: every
 	// path that boots, stops or swaps the BIOS goes back to an ordinary PlayStation.
 	void stop_all_corruption();
+	void sync_disc_reaper_config();
+	void grim_auto_arm(int style);
+	void grim_auto_tick();
+	void draw_disc_reaper_tab();
+	void draw_ram_reaper_tricks();
 
 	// Grim Reaper 2.0 live pulls (src/ui/panels/grim_pull_actions.cpp, panel in
 	// src/ui/definitive/definitive_grim_pull.cpp).

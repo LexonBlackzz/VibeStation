@@ -48,6 +48,52 @@ Second pass the same day (looked at on screen this time, via `--open-grim-reaper
   random strike draws exactly like the old reaper, so old seeds and presets reproduce. Presets save
   `engine`, `engine_value`, `engine_match`, `every`. The custom hex range is shown inline.
 
+Third pass: Classic tricks and the Disc Reaper.
+
+- **Bug fixed:** the RAM reaper's engine never reached the emulator thread (its settings
+  cross threads as atomics and the new field had none), so it always ran Random. Covered now by
+  `ram_reaper_config_keeps_engine_and_tricks`.
+- **Pipe engine** (all byte reapers): the hit byte becomes the byte `offset` bytes away.
+- **RAM reaper tricks:** every Nth byte (fixed positions, min 8; strength = chance per hit),
+  one pass every N frames (bursts), Freeze (the last N hit cells are rewritten every frame,
+  so the game cannot repair them; cleared on reset or when the reaper is switched off).
+- **Auto-corrupt** (BIOS styles): after Corrupt & (Re)Start, corrupt again with a fresh seed and
+  reboot every N seconds. Any other boot stops it.
+- **Disc Reaper** (Classic style 6, `src/core/grim_disc.*`, hooked in
+  `CdRom::read_raw_sector_for_lba`, the one function every data, XA and CD-audio read goes
+  through). Hits depend only on seed and sector, so a sector always comes back the same way, like
+  a damaged image. The ISO9660 file system (volume descriptors, path tables, every directory,
+  SYSTEM.CNF) is never touched; the boot executable named by SYSTEM.CNF is protected unless
+  targeted. Targets: game files (Form 1), movies and XA audio (Form 2), CD audio tracks, boot
+  program. Sync, header and subheader stay intact. "Start after N s" leaves early reads clean.
+  `--disc-reaper pct=..,targets=..,seed=..,engine=..` sets it from the command line (headless).
+- Targets after measuring: **Movies** (STR frames found by their 0x0160/0x8001 sector header, in
+  Form 1 or 2; the 32-byte sector header and the frame's 8-byte bitstream header are kept),
+  **XA audio** (Form 2 + audio bit), **CD audio**, **Game files** (Form 1, with "skip code and
+  packed data": >=45% of words are common MIPS opcodes, or entropy >7.6 bits/byte), **Boot
+  program**. Default: Movies + XA.
+
+Disc bootability (`--grim-eval ... --disc <cue> --live-gates`, 3600 frames, no input, 12 games;
+clean = 10/12 alive, R4 and THPS2 trip the inert gate on a long silent screen even clean, at the
+same frame in every run, so the ceiling is 10/12):
+
+| Setting | Alive |
+|---|---:|
+| Game files + Form 2, 0.05% (~1 byte/sector), no filter | 1/12 |
+| Game files + Form 2 + CD audio, 0.5% | 1/12 |
+| Game files only, 0.005% | 6/12 |
+| Game files, 0.05%, skip code/packed | 4/12 |
+| Game files, 0.5%, skip code/packed | 3/12 |
+| Movies only, 0.5% | 10/12 |
+| XA audio only, 0.5% | 10/12 |
+
+Game data on PS1 is mostly code overlays and compressed archives, so game-file corruption kills
+early (17-25 s, at the first loads); movies and XA are as safe as a clean disc. Movie corruption
+looks different per game: Bloody Roar's player keeps drawing blocky garbage; Silent Hill and
+Breath of Fire IV freeze on the first broken frame (the game stays alive). Open question: is that
+the games' decoders or our MDEC being stricter than hardware? Compare with another emulator.
+Clean runs give the same run_hash as before these changes (Crash, 1800 frames).
+
 Yield (`--grim-pull-yield`, 40 pulls per level, 900 frames, no disc, SCPH-1001, new map):
 
 | Families | Intensity | Alive | Dead | Survived+audible | Survived+inaudible |

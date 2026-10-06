@@ -188,6 +188,7 @@ set(VIBESTATION_SOURCES
     src/ui/definitive/definitive_grim_pull.cpp
     src/core/grim_share.cpp
     src/core/grim_classic.cpp
+    src/core/grim_disc.cpp
 )
 
 set(VIBESTATION_VERSION_STRING "v0.6.0")

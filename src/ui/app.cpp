@@ -945,6 +945,8 @@ void App::update() {
     sync_ram_reaper_config();
     sync_gpu_reaper_config();
     sync_sound_reaper_config();
+    sync_disc_reaper_config();
+    grim_auto_tick();
     if (g_cli_open_grim_reaper) {
         g_cli_open_grim_reaper = false;
         skip_definitive_startup();
