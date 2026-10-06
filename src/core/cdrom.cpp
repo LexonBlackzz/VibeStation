@@ -110,6 +110,7 @@ bool resolve_track_layout(std::vector<CdTrack> &tracks,
     const std::string key = normalize_path_key(track.filename);
     const int base_abs = file_base_abs[key];
     track.index01_abs_lba = base_abs + std::max(0, track.index01_file_lba);
+    track.file_bytes = file_bytes[key];
     track.index01_file_offset =
         static_cast<u64>(std::max(0, track.index01_file_lba)) *
         static_cast<u64>(std::max(1, track.sector_size));
@@ -478,6 +479,8 @@ bool CdRom::load_bin_cue(const std::string &bin_path,
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
   tracks_.clear();
   disc_loaded_ = false;
   track_map_valid_ = false;
@@ -578,6 +581,8 @@ bool CdRom::swap_disc_image(const std::string &bin_path,
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
 
   std::vector<CdTrack> parsed_tracks;
   std::filesystem::path cue_dir;
@@ -719,6 +724,8 @@ void CdRom::unload_disc() {
   if (bin_file_.is_open()) {
     bin_file_.close();
   }
+  extra_file_.close();
+  extra_file_path_.clear();
   tracks_.clear();
   disc_loaded_ = false;
   track_map_valid_ = false;
@@ -989,8 +996,10 @@ int CdRom::track_end_lba(const CdTrack *track) const {
   if (idx + 1u < tracks_.size()) {
     return tracks_[idx + 1u].index01_abs_lba - 151;
   }
-  const u64 file_bytes = !track->filename.empty() ? file_size_bytes(track->filename)
-                                                   : bin_size_;
+  // Runs for every sector read: use the size measured at load, not a host file query.
+  const u64 file_bytes = track->filename.empty() ? bin_size_
+                         : track->file_bytes != 0 ? track->file_bytes
+                                                  : file_size_bytes(track->filename);
   const int sectors =
       static_cast<int>(file_bytes / static_cast<u64>(std::max(1, track->sector_size)));
   const int rel_len = std::max(1, sectors - track->index01_file_lba);
@@ -1035,7 +1044,6 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     return synthesize_sector();
   }
 
-  std::ifstream alt_file;
   std::ifstream *stream = nullptr;
   u64 target_size = 0;
 
@@ -1047,12 +1055,22 @@ bool CdRom::read_raw_sector_for_lba(int psx_lba, std::vector<u8> &raw_sector,
     stream = &bin_file_;
     target_size = bin_size_;
   } else {
-    alt_file.open(std::filesystem::path(target_path), std::ios::binary);
-    if (!alt_file.is_open()) {
+    // Other track files (multi-file cues, e.g. one file per CD audio track) stay open:
+    // reopening and measuring the file for every sector cost a host file query each.
+    if (extra_file_path_ != target_path || !extra_file_.is_open()) {
+      extra_file_.close();
+      extra_file_.clear();
+      extra_file_.open(std::filesystem::path(target_path), std::ios::binary);
+      extra_file_path_ = target_path;
+    }
+    if (!extra_file_.is_open()) {
+      extra_file_path_.clear();
       return synthesize_sector();
     }
-    stream = &alt_file;
-    target_size = file_size_bytes(target_path);
+    stream = &extra_file_;
+    target_size = track->filename == target_path && track->file_bytes != 0
+                      ? track->file_bytes
+                      : file_size_bytes(target_path);
   }
 
   if (target_size > 0 &&

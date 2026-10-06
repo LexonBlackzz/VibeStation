@@ -26,6 +26,7 @@ struct CdTrack {
   int index01_file_lba = 0; // INDEX 01 position in current file (sectors)
   int index01_abs_lba = 150; // Absolute disc LBA for INDEX 01
   u64 index01_file_offset = 0; // Byte offset of INDEX 01 in current file
+  u64 file_bytes = 0; // size of `filename`, measured once at load (0 = unknown)
 };
 
 class CdRom {
@@ -137,6 +138,9 @@ private:
 
   // Disc image
   std::ifstream bin_file_;
+  // A track file other than the primary one (multi-file cues), kept open between reads.
+  std::ifstream extra_file_;
+  std::string extra_file_path_;
   std::vector<CdTrack> tracks_;
   std::string resolved_disc_path_;
   bool track_map_valid_ = false;
